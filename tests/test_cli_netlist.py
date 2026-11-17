@@ -1,0 +1,1394 @@
+"""Tests for netlist CLI commands."""
+
+import json
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import pytest
+
+from kicad_tools.cli import netlist_cmd
+from kicad_tools.operations.netlist import Netlist, NetlistComponent, NetlistNet, NetNode
+from kicad_tools.sexp import parse_string
+
+
+class TestNetNodeFromSexp:
+    """Tests for NetNode.from_sexp() parsing."""
+
+    def test_from_sexp_parses_reference_from_ref_node(self):
+        """Test that reference is correctly parsed from (ref ...) child node.
+
+        This tests the fix for issue #923 where NetNode.from_sexp() was
+        incorrectly trying to get the reference as a direct string value
+        instead of from the (ref ...) child node.
+        """
+        sexp = parse_string('(node (ref "R1") (pin "1"))')
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == "R1"
+        assert node.pin == "1"
+
+    def test_from_sexp_parses_all_fields(self):
+        """Test that all node fields are correctly parsed."""
+        sexp = parse_string('(node (ref "U1") (pin "3") (pinfunction "VCC") (pintype "power_in"))')
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == "U1"
+        assert node.pin == "3"
+        assert node.pin_function == "VCC"
+        assert node.pin_type == "power_in"
+
+    def test_from_sexp_handles_missing_optional_fields(self):
+        """Test parsing when optional fields are missing."""
+        sexp = parse_string('(node (ref "C1") (pin "2"))')
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == "C1"
+        assert node.pin == "2"
+        assert node.pin_function == ""
+        assert node.pin_type == ""
+
+    def test_from_sexp_handles_empty_node(self):
+        """Test parsing an empty node."""
+        sexp = parse_string("(node)")
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == ""
+        assert node.pin == ""
+
+
+class TestNetlistCmdHelpers:
+    """Tests for netlist_cmd helper functions."""
+
+    def test_find_single_pin_nets_empty(self):
+        """Find single pin nets in empty netlist."""
+        netlist = Mock(spec=Netlist)
+        netlist.nets = []
+        result = netlist_cmd.find_single_pin_nets(netlist)
+        assert result == []
+
+    def test_find_single_pin_nets_none(self):
+        """Find single pin nets when none exist."""
+        net = Mock(spec=NetlistNet)
+        net.connection_count = 2
+
+        netlist = Mock(spec=Netlist)
+        netlist.nets = [net]
+
+        result = netlist_cmd.find_single_pin_nets(netlist)
+        assert result == []
+
+    def test_find_single_pin_nets_found(self):
+        """Find single pin nets."""
+        single_net = Mock(spec=NetlistNet)
+        single_net.connection_count = 1
+
+        multi_net = Mock(spec=NetlistNet)
+        multi_net.connection_count = 3
+
+        netlist = Mock(spec=Netlist)
+        netlist.nets = [single_net, multi_net]
+
+        result = netlist_cmd.find_single_pin_nets(netlist)
+        assert len(result) == 1
+        assert result[0] == single_net
+
+    def test_find_similar_nets(self):
+        """Find nets with similar names."""
+        net1 = Mock(spec=NetlistNet)
+        net1.name = "VCC"
+
+        net2 = Mock(spec=NetlistNet)
+        net2.name = "VCC_3V3"
+
+        net3 = Mock(spec=NetlistNet)
+        net3.name = "GND"
+
+        netlist = Mock(spec=Netlist)
+        netlist.nets = [net1, net2, net3]
+
+        result = netlist_cmd.find_similar_nets(netlist, "vcc")
+        assert "VCC" in result
+        assert "VCC_3V3" in result
+        assert "GND" not in result
+
+
+class TestNetlistNetlistClass:
+    """Tests for Netlist class helper methods."""
+
+    def test_find_single_pin_nets_method(self):
+        """Test Netlist.find_single_pin_nets method."""
+        netlist = Netlist()
+
+        # Create nets with different connection counts
+        single_net = NetlistNet(code=1, name="Net1", nodes=[NetNode(reference="U1", pin="1")])
+        multi_net = NetlistNet(
+            code=2,
+            name="Net2",
+            nodes=[
+                NetNode(reference="U1", pin="2"),
+                NetNode(reference="R1", pin="1"),
+            ],
+        )
+
+        netlist.nets = [single_net, multi_net]
+
+        result = netlist.find_single_pin_nets()
+        assert len(result) == 1
+        assert result[0].name == "Net1"
+
+    def test_find_floating_pins_method(self):
+        """Test Netlist.find_floating_pins method."""
+        netlist = Netlist()
+
+        # Create nets with different connection counts
+        single_net = NetlistNet(code=1, name="Net1", nodes=[NetNode(reference="U1", pin="1")])
+        multi_net = NetlistNet(
+            code=2,
+            name="Net2",
+            nodes=[
+                NetNode(reference="U1", pin="2"),
+                NetNode(reference="R1", pin="1"),
+            ],
+        )
+
+        netlist.nets = [single_net, multi_net]
+
+        result = netlist.find_floating_pins()
+        assert len(result) == 1
+        assert result[0] == ("U1", "1", "Net1")
+
+
+class TestNetlistCmdPrinters:
+    """Tests for netlist_cmd output functions."""
+
+    def test_print_analyze_text(self, capsys):
+        """Test analyze text output."""
+        stats = {
+            "source_file": "/path/to/test.kicad_sch",
+            "tool": "KiCad 8.0",
+            "date": "2024-01-01",
+            "sheet_count": 1,
+            "component_count": 5,
+            "components_by_type": {"R": 2, "C": 3},
+            "net_count": 10,
+            "power_net_count": 2,
+            "signal_net_count": 8,
+            "single_pin_net_count": 1,
+        }
+
+        netlist = Mock(spec=Netlist)
+        netlist_cmd.print_analyze_text(stats, netlist)
+
+        captured = capsys.readouterr()
+        assert "NETLIST ANALYSIS" in captured.out
+        assert "Components: 5" in captured.out
+        assert "Nets: 10" in captured.out
+        assert "R: 2" in captured.out
+        assert "C: 3" in captured.out
+        assert "Single-pin nets: 1" in captured.out
+
+    def test_print_list_table_empty(self, capsys):
+        """Test list table output for empty netlist."""
+        netlist = Mock(spec=Netlist)
+        netlist.power_nets = []
+
+        netlist_cmd.print_list_table([], netlist)
+
+        captured = capsys.readouterr()
+        assert "No nets found" in captured.out
+
+    def test_print_list_table(self, capsys):
+        """Test list table output."""
+        node1 = Mock(spec=NetNode)
+        node1.reference = "U1"
+        node1.pin = "1"
+
+        node2 = Mock(spec=NetNode)
+        node2.reference = "R1"
+        node2.pin = "2"
+
+        net = Mock(spec=NetlistNet)
+        net.name = "VCC"
+        net.connection_count = 2
+        net.nodes = [node1, node2]
+
+        power_net = Mock(spec=NetlistNet)
+        power_net.name = "VCC"
+
+        netlist = Mock(spec=Netlist)
+        netlist.power_nets = [power_net]
+
+        netlist_cmd.print_list_table([net], netlist)
+
+        captured = capsys.readouterr()
+        assert "VCC" in captured.out
+        assert "power" in captured.out
+        assert "U1.1" in captured.out
+        assert "Total: 1 nets" in captured.out
+
+    def test_print_show_text(self, capsys):
+        """Test show text output."""
+        node = Mock(spec=NetNode)
+        node.reference = "U1"
+        node.pin = "1"
+        node.pin_function = "VCC"
+        node.pin_type = "power_in"
+
+        net = Mock(spec=NetlistNet)
+        net.name = "VCC"
+        net.code = 1
+        net.connection_count = 1
+        net.nodes = [node]
+
+        netlist = Mock(spec=Netlist)
+        netlist.power_nets = [net]
+
+        netlist_cmd.print_show_text(net, netlist)
+
+        captured = capsys.readouterr()
+        assert "Net: VCC" in captured.out
+        assert "U1.1" in captured.out
+        assert "(VCC)" in captured.out
+        assert "[power_in]" in captured.out
+
+    def test_print_check_text_no_issues(self, capsys):
+        """Test check text output with no issues."""
+        result = {
+            "total_nets": 10,
+            "power_nets": 2,
+            "single_pin_nets": 0,
+            "issues": [],
+        }
+
+        power_net = Mock(spec=NetlistNet)
+        power_net.name = "VCC"
+        power_net.connection_count = 5
+
+        netlist_cmd.print_check_text(result, [power_net])
+
+        captured = capsys.readouterr()
+        assert "No connectivity issues found" in captured.out
+        assert "VCC (5 connections)" in captured.out
+
+    def test_print_check_text_with_issues(self, capsys):
+        """Test check text output with issues."""
+        result = {
+            "total_nets": 10,
+            "power_nets": 2,
+            "single_pin_nets": 1,
+            "issues": [
+                {
+                    "severity": "warning",
+                    "message": "Net 'Net1' has only 1 connection",
+                }
+            ],
+        }
+
+        netlist_cmd.print_check_text(result, [])
+
+        captured = capsys.readouterr()
+        assert "Potential Issues (1)" in captured.out
+        assert "WARNING" in captured.out
+        assert "Single-pin nets: 1" in captured.out
+
+    def test_print_compare_text(self, capsys):
+        """Test compare text output."""
+        result = {
+            "old_file": "/path/to/old.kicad_sch",
+            "new_file": "/path/to/new.kicad_sch",
+            "components": {
+                "added": ["R3", "C4"],
+                "removed": ["R1"],
+                "added_count": 2,
+                "removed_count": 1,
+            },
+            "nets": {
+                "added": ["Net3"],
+                "removed": [],
+                "modified": [{"name": "VCC", "old": 5, "new": 7, "diff": "+2"}],
+                "added_count": 1,
+                "removed_count": 0,
+                "modified_count": 1,
+            },
+        }
+
+        netlist_cmd.print_compare_text(result)
+
+        captured = capsys.readouterr()
+        assert "NETLIST COMPARISON" in captured.out
+        assert "Added (2): R3, C4" in captured.out
+        assert "Removed (1): R1" in captured.out
+        assert "VCC: 5 → 7 (+2)" in captured.out
+
+
+class TestNetlistCmdCommands:
+    """Tests for netlist command handlers using mocked data."""
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_cmd_analyze_text(self, mock_export, capsys):
+        """Test analyze command with text output."""
+        # Create mock netlist
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.nets = []
+        mock_netlist.components = []
+        mock_netlist.power_nets = []
+        mock_netlist.summary.return_value = {
+            "source_file": "test.kicad_sch",
+            "tool": "KiCad",
+            "date": "2024-01-01",
+            "sheet_count": 1,
+            "component_count": 0,
+            "components_by_type": {},
+            "net_count": 0,
+            "power_net_count": 0,
+            "signal_net_count": 0,
+        }
+        mock_export.return_value = mock_netlist
+
+        result = netlist_cmd.cmd_analyze(Path("test.kicad_sch"), "text")
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "NETLIST ANALYSIS" in captured.out
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_cmd_analyze_json(self, mock_export, capsys):
+        """Test analyze command with JSON output."""
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.nets = []
+        mock_netlist.summary.return_value = {
+            "component_count": 5,
+            "net_count": 10,
+        }
+        mock_export.return_value = mock_netlist
+
+        result = netlist_cmd.cmd_analyze(Path("test.kicad_sch"), "json")
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["component_count"] == 5
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_cmd_list_table(self, mock_export, capsys):
+        """Test list command with table output."""
+        node = Mock(spec=NetNode)
+        node.reference = "U1"
+        node.pin = "1"
+
+        net = Mock(spec=NetlistNet)
+        net.name = "VCC"
+        net.connection_count = 1
+        net.nodes = [node]
+
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.nets = [net]
+        mock_netlist.power_nets = []
+        mock_export.return_value = mock_netlist
+
+        result = netlist_cmd.cmd_list(Path("test.kicad_sch"), "table", "connections")
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "VCC" in captured.out
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_cmd_show_found(self, mock_export, capsys):
+        """Test show command when net is found."""
+        node = Mock(spec=NetNode)
+        node.reference = "U1"
+        node.pin = "1"
+        node.pin_function = ""
+        node.pin_type = ""
+
+        net = Mock(spec=NetlistNet)
+        net.name = "VCC"
+        net.code = 1
+        net.connection_count = 1
+        net.nodes = [node]
+
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.get_net.return_value = net
+        mock_netlist.power_nets = []
+        mock_export.return_value = mock_netlist
+
+        result = netlist_cmd.cmd_show(Path("test.kicad_sch"), "VCC", "text")
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Net: VCC" in captured.out
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_cmd_show_not_found(self, mock_export, capsys):
+        """Test show command when net is not found."""
+        net = Mock(spec=NetlistNet)
+        net.name = "VCC"
+
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.get_net.return_value = None
+        mock_netlist.nets = [net]
+        mock_export.return_value = mock_netlist
+
+        result = netlist_cmd.cmd_show(Path("test.kicad_sch"), "UNKNOWN", "text")
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_cmd_check_no_issues(self, mock_export, capsys):
+        """Test check command with no issues."""
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.nets = []
+        mock_netlist.power_nets = []
+        mock_export.return_value = mock_netlist
+
+        result = netlist_cmd.cmd_check(Path("test.kicad_sch"), "text")
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "NETLIST CHECK RESULTS" in captured.out
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_cmd_compare(self, mock_export, capsys):
+        """Test compare command."""
+        comp1 = Mock(spec=NetlistComponent)
+        comp1.reference = "R1"
+
+        comp2 = Mock(spec=NetlistComponent)
+        comp2.reference = "R2"
+
+        net1 = Mock(spec=NetlistNet)
+        net1.name = "VCC"
+        net1.connection_count = 5
+
+        net2 = Mock(spec=NetlistNet)
+        net2.name = "VCC"
+        net2.connection_count = 7
+
+        old_netlist = Mock(spec=Netlist)
+        old_netlist.components = [comp1]
+        old_netlist.nets = [net1]
+
+        new_netlist = Mock(spec=Netlist)
+        new_netlist.components = [comp2]
+        new_netlist.nets = [net2]
+
+        mock_export.side_effect = [old_netlist, new_netlist]
+
+        result = netlist_cmd.cmd_compare(Path("old.kicad_sch"), Path("new.kicad_sch"), "text")
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "NETLIST COMPARISON" in captured.out
+
+
+class TestNetlistCmdMain:
+    """Tests for netlist_cmd main entry point."""
+
+    def test_main_no_command(self, capsys):
+        """Test main with no command shows help."""
+        result = netlist_cmd.main([])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Netlist analysis" in captured.out or "usage" in captured.out.lower()
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_main_analyze(self, mock_export, capsys):
+        """Test main with analyze command."""
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.nets = []
+        mock_netlist.summary.return_value = {
+            "sheet_count": 1,
+            "component_count": 0,
+            "net_count": 0,
+            "power_net_count": 0,
+            "signal_net_count": 0,
+        }
+        mock_export.return_value = mock_netlist
+
+        result = netlist_cmd.main(["analyze", "test.kicad_sch"])
+
+        assert result == 0
+
+    def test_main_file_not_found(self, capsys):
+        """Test main handles FileNotFoundError."""
+        result = netlist_cmd.main(["analyze", "/nonexistent/path.kicad_sch"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err
+
+
+class TestExportNetlistStaleCache:
+    """Tests for export_netlist stale cache prevention (issue #983)."""
+
+    def test_export_netlist_deletes_existing_file_before_export(self, tmp_path):
+        """Test that export_netlist deletes existing netlist to prevent stale data."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a minimal schematic
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        # Create a stale netlist file with old content
+        netlist_file = tmp_path / "test-netlist.kicad_net"
+        stale_content = "(export (version D) (components) (nets))"
+        netlist_file.write_text(stale_content)
+
+        # Mock find_kicad_cli so export_netlist proceeds to subprocess.run
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            # Mock subprocess to simulate kicad-cli not producing output (crash)
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+                # This should raise because kicad-cli crashed (exit 139), fallback disabled
+                with pytest.raises(RuntimeError, match="kicad-cli crashed"):
+                    export_netlist(sch_file, fallback=False)
+
+                # The stale file should have been deleted BEFORE running kicad-cli
+                # (verified by the fact that we got the crash error, not stale data)
+
+    def test_export_netlist_detects_sigsegv_crash(self, tmp_path):
+        """Test that exit code 139 (SIGSEGV) is detected with helpful message when fallback disabled."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+                with pytest.raises(RuntimeError) as exc_info:
+                    export_netlist(sch_file, fallback=False)
+
+                error_msg = str(exc_info.value)
+                assert "SIGSEGV" in error_msg
+                assert "problematic symbol" in error_msg
+                assert "kicad" in error_msg.lower()
+
+    def test_export_netlist_detects_other_nonzero_exit_codes(self, tmp_path):
+        """Test that other non-zero exit codes raise RuntimeError when fallback disabled."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=1, stderr="Some error message", stdout="")
+
+                with pytest.raises(RuntimeError, match="kicad-cli failed"):
+                    export_netlist(sch_file, fallback=False)
+
+    def test_export_netlist_succeeds_when_kicad_cli_works(self, tmp_path):
+        """Test successful export when kicad-cli works properly."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        netlist_file = tmp_path / "test-netlist.kicad_net"
+        valid_netlist = """(export
+          (version "E")
+          (design (source "test.kicad_sch") (tool "Eeschema"))
+          (components)
+          (nets)
+        )"""
+
+        def create_netlist(*args, **kwargs):
+            netlist_file.write_text(valid_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            with patch("subprocess.run", side_effect=create_netlist):
+                result = export_netlist(sch_file)
+
+                assert result is not None
+                assert result.source_file == "test.kicad_sch"
+
+    def test_export_netlist_removes_stale_before_fresh_export(self, tmp_path):
+        """Test stale netlist is removed even when fresh export succeeds."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        netlist_file = tmp_path / "test-netlist.kicad_net"
+        # Create stale netlist with old timestamp marker
+        netlist_file.write_text("(export (version D) (design (date OLD)))")
+
+        fresh_netlist = """(export
+          (version "E")
+          (design (source "test.kicad_sch") (tool "Eeschema") (date "FRESH"))
+          (components)
+          (nets)
+        )"""
+
+        call_count = [0]
+
+        def track_and_create(*args, **kwargs):
+            call_count[0] += 1
+            # Verify old file was deleted before subprocess runs
+            if call_count[0] == 1:
+                assert not netlist_file.exists(), "Stale file should be deleted before export"
+            netlist_file.write_text(fresh_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            with patch("subprocess.run", side_effect=track_and_create):
+                result = export_netlist(sch_file)
+
+                assert result is not None
+                assert "FRESH" in result.date or result.tool == "Eeschema"
+
+
+class TestExportNetlistPythonFallback:
+    """Tests for pure Python netlist extraction fallback (issue #988)."""
+
+    def test_fallback_used_when_kicad_cli_crashes(self, tmp_path):
+        """Test that Python fallback is used when kicad-cli crashes with SIGSEGV."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a valid schematic with a symbol
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0)) (in_bom yes) (on_board yes)
+                  (property "Reference" "R" (at 2.032 0 90))
+                  (property "Value" "R" (at 0 0 90))
+                  (property "Footprint" "" (at -1.778 0 90))
+                  (symbol "R_0_1"
+                    (rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none))))
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000010")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (property "Footprint" "Resistor_SMD:R_0805" (at 0 0 0) (show_name))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000012")))
+            )"""
+        )
+
+        with patch("subprocess.run") as mock_run:
+            # Simulate SIGSEGV crash
+            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+            # With fallback=True (default), should use Python extraction
+            result = export_netlist(sch_file, fallback=True)
+
+            # Should return a valid Netlist from Python extraction
+            assert result is not None
+            assert "Python fallback" in result.tool
+            assert len(result.components) == 1
+            assert result.components[0].reference == "R1"
+
+    def test_fallback_used_when_kicad_cli_not_found(self, tmp_path):
+        """Test that Python fallback is used when kicad-cli is not found."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a minimal schematic
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=None):
+            # With fallback=True, should use Python extraction instead of raising
+            result = export_netlist(sch_file, fallback=True)
+
+            assert result is not None
+            assert "Python fallback" in result.tool
+
+    def test_fallback_disabled_raises_on_crash(self, tmp_path):
+        """Test that fallback=False still raises RuntimeError on crash."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+                with pytest.raises(RuntimeError, match="SIGSEGV"):
+                    export_netlist(sch_file, fallback=False)
+
+    def test_fallback_disabled_raises_on_cli_not_found(self, tmp_path):
+        """Test that fallback=False raises FileNotFoundError when kicad-cli not found."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=None):
+            with pytest.raises(FileNotFoundError, match="kicad-cli not found"):
+                export_netlist(sch_file, fallback=False)
+
+    def test_fallback_used_when_kicad_cli_fails_with_error(self, tmp_path):
+        """Test that Python fallback is used when kicad-cli returns error."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("subprocess.run") as mock_run:
+            # Simulate generic error
+            mock_run.return_value = Mock(returncode=1, stderr="Some error", stdout="")
+
+            result = export_netlist(sch_file, fallback=True)
+
+            assert result is not None
+            assert "Python fallback" in result.tool
+
+
+class TestBuildNetlistFromSchematic:
+    """Tests for build_netlist_from_schematic() function."""
+
+    def test_build_netlist_from_simple_schematic(self, tmp_path):
+        """Test building netlist from a simple schematic."""
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+
+        # Create a schematic with a resistor
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0)) (in_bom yes) (on_board yes)
+                  (property "Reference" "R" (at 2.032 0 90))
+                  (property "Value" "R" (at 0 0 90))
+                  (property "Footprint" "" (at -1.778 0 90))
+                  (symbol "R_0_1"
+                    (rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none))))
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000010")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (property "Footprint" "Resistor_SMD:R_0805" (at 0 0 0) (show_name))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000012")))
+            )"""
+        )
+
+        result = build_netlist_from_schematic(sch_file)
+
+        assert result is not None
+        assert str(sch_file) in result.source_file
+        assert "Python fallback" in result.tool
+        assert len(result.components) == 1
+        assert result.components[0].reference == "R1"
+        assert result.components[0].value == "10k"
+        assert result.components[0].lib_id == "Device:R"
+
+    def test_build_netlist_from_schematic_not_found(self, tmp_path):
+        """Test that FileNotFoundError is raised for missing schematic."""
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+
+        sch_file = tmp_path / "nonexistent.kicad_sch"
+
+        with pytest.raises(FileNotFoundError, match="Schematic not found"):
+            build_netlist_from_schematic(sch_file)
+
+    def test_build_netlist_extracts_connectivity(self, tmp_path):
+        """Test that connectivity is extracted correctly."""
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+
+        # Create a schematic with two resistors connected by a labeled wire.
+        # Pin positions follow the CCW-positive rotate-then-negate-Y
+        # convention (#738/#2129): both resistors are rotated 180 degrees,
+        # so R1 pin 1 (library (0, 3.81)) lands at (100, 53.81) and R2
+        # pin 2 (library (0, -3.81)) lands at (100, 66.19) -- the two
+        # endpoints of the labeled wire.
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0)) (in_bom yes) (on_board yes)
+                  (property "Reference" "R" (at 2.032 0 90))
+                  (property "Value" "R" (at 0 0 90))
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 180) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000010")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000012")))
+              (symbol (lib_id "Device:R") (at 100 70 180) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000020")
+                (property "Reference" "R2" (at 101.6 68.26 0))
+                (property "Value" "20k" (at 101.6 70.8 0))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000021"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000022")))
+              (wire (pts (xy 100 53.81) (xy 100 66.19)))
+              (label "NODE_A" (at 100 60 0) (effects (font (size 1.27 1.27))))
+            )"""
+        )
+
+        result = build_netlist_from_schematic(sch_file)
+
+        # Should have 2 components
+        assert len(result.components) == 2
+        refs = {c.reference for c in result.components}
+        assert "R1" in refs
+        assert "R2" in refs
+
+        # Should have nets extracted (at least the NODE_A net connecting R1.2 to R2.1)
+        net_names = {n.name for n in result.nets}
+        assert "NODE_A" in net_names
+
+        # Check the NODE_A net has the correct pins
+        # Note: With the 180-degree rotations, the wire connects
+        # R1 pin 1 (at y=53.81) to R2 pin 2 (at y=66.19)
+        node_a_net = next(n for n in result.nets if n.name == "NODE_A")
+        pin_refs = {(node.reference, node.pin) for node in node_a_net.nodes}
+        assert ("R1", "1") in pin_refs
+        assert ("R2", "2") in pin_refs
+
+
+class TestExportNetlistIncompleteHierarchy:
+    """Tests for incomplete kicad-cli output detection (issue #2004).
+
+    When kicad-cli produces a netlist that covers fewer sheets than the
+    schematic hierarchy declares, export_netlist() should fall back to the
+    Python extractor automatically.
+    """
+
+    def test_fallback_triggered_when_sheets_missing(self, tmp_path):
+        """export_netlist falls back when kicad-cli output has fewer sheets than hierarchy."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a hierarchical schematic: root + sub_a
+        sub_file = tmp_path / "sub_a.kicad_sch"
+        sub_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "sub-a-uuid-0001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R"
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "sub-a-r2-uuid")
+                (property "Reference" "R2" (at 101.6 48.26 0))
+                (property "Value" "4.7k" (at 101.6 50.8 0))
+                (pin "1" (uuid "sub-a-r2-pin1"))
+                (pin "2" (uuid "sub-a-r2-pin2")))
+            )"""
+        )
+
+        sch_file = tmp_path / "root.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "root-uuid-0001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R"
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27)
+                      (name "~" (effects (font (size 1.27 1.27))))
+                      (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "root-r1-uuid")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (pin "1" (uuid "root-r1-pin1"))
+                (pin "2" (uuid "root-r1-pin2")))
+              (sheet (at 150 50) (size 30 20)
+                (uuid "sheet-sub-a-uuid")
+                (property "Sheetname" "SubA" (at 150 49 0))
+                (property "Sheetfile" "sub_a.kicad_sch" (at 150 71 0)))
+            )"""
+        )
+
+        # kicad-cli "succeeds" but produces a netlist with only 1 sheet
+        # (root) when the hierarchy has 2 (root + sub_a).
+        incomplete_netlist = """(export
+          (version "E")
+          (design
+            (source "root.kicad_sch")
+            (tool "Eeschema")
+            (sheet (number "1") (name "/") (tstamps "/")
+              (title_block (title ""))))
+          (components
+            (comp (ref "R1")
+              (value "10k")
+              (footprint "")
+              (libsource (lib "Device") (part "R"))))
+          (nets)
+        )"""
+
+        netlist_file = tmp_path / "root-netlist.kicad_net"
+
+        def create_incomplete(*args, **kwargs):
+            netlist_file.write_text(incomplete_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            return_value=Path("/usr/bin/kicad-cli"),
+        ):
+            with patch("subprocess.run", side_effect=create_incomplete):
+                result = export_netlist(sch_file, fallback=True)
+
+        # Should have fallen back to Python extraction and found both components
+        assert "Python fallback" in result.tool
+        refs = {c.reference for c in result.components}
+        assert "R1" in refs
+        assert "R2" in refs
+
+    def test_no_fallback_when_sheets_complete(self, tmp_path):
+        """export_netlist uses kicad-cli output when sheet count matches."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Flat schematic -- 1 sheet expected
+        sch_file = tmp_path / "flat.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "flat-uuid-0001")
+              (paper "A4")
+            )"""
+        )
+
+        complete_netlist = """(export
+          (version "E")
+          (design
+            (source "flat.kicad_sch")
+            (tool "Eeschema")
+            (sheet (number "1") (name "/") (tstamps "/")
+              (title_block (title ""))))
+          (components)
+          (nets)
+        )"""
+
+        netlist_file = tmp_path / "flat-netlist.kicad_net"
+
+        def create_complete(*args, **kwargs):
+            netlist_file.write_text(complete_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            return_value=Path("/usr/bin/kicad-cli"),
+        ):
+            with patch("subprocess.run", side_effect=create_complete):
+                result = export_netlist(sch_file, fallback=True)
+
+        # Should use kicad-cli output, not fallback
+        assert "Python fallback" not in (result.tool or "")
+        assert result.tool == "Eeschema"
+
+    def test_no_validation_when_fallback_disabled(self, tmp_path):
+        """Completeness validation is skipped when fallback=False."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create hierarchical schematic
+        sub_file = tmp_path / "sub.kicad_sch"
+        sub_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "sub-uuid-0001")
+              (paper "A4")
+            )"""
+        )
+
+        sch_file = tmp_path / "root.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "root-uuid-0001")
+              (paper "A4")
+              (sheet (at 150 50) (size 30 20)
+                (uuid "sheet-sub-uuid")
+                (property "Sheetname" "Sub" (at 150 49 0))
+                (property "Sheetfile" "sub.kicad_sch" (at 150 71 0)))
+            )"""
+        )
+
+        # Incomplete output -- only 1 of 2 sheets
+        incomplete_netlist = """(export
+          (version "E")
+          (design
+            (source "root.kicad_sch")
+            (tool "Eeschema")
+            (sheet (number "1") (name "/") (tstamps "/")
+              (title_block (title ""))))
+          (components)
+          (nets)
+        )"""
+
+        netlist_file = tmp_path / "root-netlist.kicad_net"
+
+        def create_incomplete(*args, **kwargs):
+            netlist_file.write_text(incomplete_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            return_value=Path("/usr/bin/kicad-cli"),
+        ):
+            with patch("subprocess.run", side_effect=create_incomplete):
+                # With fallback=False, incomplete output is returned as-is
+                result = export_netlist(sch_file, fallback=False)
+
+        assert result.tool == "Eeschema"
+
+
+class TestCmdExportFallbackHandling:
+    """Tests for cmd_export handling of Python fallback output (issue #2004)."""
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_kicad_format_writes_json_on_fallback(self, mock_export, tmp_path, capsys):
+        """When Python fallback was used, kicad format export writes JSON."""
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.tool = "kicad-tools (Python fallback)"
+        mock_netlist.to_json.return_value = '{"components": []}'
+        mock_export.return_value = mock_netlist
+
+        output_file = tmp_path / "output.kicad_net"
+        result = netlist_cmd.cmd_export(Path("test.kicad_sch"), output_file, "kicad")
+
+        assert result == 0
+        assert output_file.exists()
+        assert output_file.read_text() == '{"components": []}'
+        captured = capsys.readouterr()
+        assert "incomplete" in captured.out
+        assert "Python fallback" in captured.out
+
+    @patch("kicad_tools.cli.netlist_cmd.export_netlist")
+    def test_kicad_format_normal_path_unchanged(self, mock_export, tmp_path, capsys):
+        """When kicad-cli succeeded, kicad format export works as before."""
+        mock_netlist = Mock(spec=Netlist)
+        mock_netlist.tool = "Eeschema"
+        mock_export.return_value = mock_netlist
+
+        # Create the default output file that kicad-cli would have written
+        default_output = tmp_path / "test-netlist.kicad_net"
+        default_output.write_text("(export)")
+
+        output_file = tmp_path / "custom_output.kicad_net"
+        result = netlist_cmd.cmd_export(tmp_path / "test.kicad_sch", output_file, "kicad")
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "Exported KiCad netlist to:" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Netlist byproduct location (#4795)
+# ---------------------------------------------------------------------------
+
+MINIMAL_SCHEMATIC = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 100 100 0) (effects (hide yes)))
+  )
+  (symbol
+    (lib_id "Device:C")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (property "Reference" "C1" (at 120 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100n" (at 120 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402" (at 120 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# Minimal kicad-cli-shaped netlist matching MINIMAL_SCHEMATIC (R1 + C1).
+FAKE_EXPORTED_NETLIST = """(export (version "E")
+  (design (source "test.kicad_sch") (tool "Eeschema"))
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402"))
+    (comp (ref "C1") (value "100n") (footprint "Capacitor_SMD:C_0402")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1"))
+      (node (ref "C1") (pin "1")))))
+"""
+
+
+class TestNetlistByproductLocation:
+    """``kct netlist`` analysis subcommands must not litter the project dir (#4795).
+
+    ``export_netlist`` defaults ``output_path`` to
+    ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it, so a
+    bare call from ``cmd_analyze`` / ``cmd_list`` / ``cmd_show`` /
+    ``cmd_check`` / ``cmd_compare`` dropped an unrequested netlist file
+    beside the user's schematic on every invocation.  ``cmd_export`` is the
+    one call site where that file *is* the requested product -- it is
+    covered here too, to prove the fix did not sweep it into temp routing.
+    """
+
+    @pytest.fixture
+    def schematic(self, tmp_path: Path) -> Path:
+        """A schematic in its own 'project' directory."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        sch = proj / "design.kicad_sch"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        return sch
+
+    @pytest.fixture
+    def fake_kicad_cli(self, monkeypatch) -> list[Path]:
+        """Force the kicad-cli export path with a stubbed subprocess.
+
+        The stub writes a real netlist file to whatever ``--output`` path it
+        is handed, exactly like kicad-cli does -- so the byproduct lands
+        wherever ``export_netlist`` decided it should, which is the behavior
+        under test.  Returns the list of captured output paths.
+        """
+        import subprocess as _subprocess
+
+        captured_outputs: list[Path] = []
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            captured_outputs.append(out)
+            out.write_text(FAKE_EXPORTED_NETLIST)
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return captured_outputs
+
+    def test_kicad_cli_path_is_actually_exercised(self, schematic, fake_kicad_cli, capsys):
+        """Guard: the stub really runs, so the assertions below mean something."""
+        assert netlist_cmd.cmd_analyze(schematic, "json") == 0
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+
+    @pytest.mark.parametrize(
+        "invoke",
+        [
+            pytest.param(lambda sch: netlist_cmd.cmd_analyze(sch, "json"), id="analyze"),
+            pytest.param(lambda sch: netlist_cmd.cmd_list(sch, "json", "connections"), id="list"),
+            pytest.param(lambda sch: netlist_cmd.cmd_show(sch, "/N1", "json"), id="show"),
+            pytest.param(lambda sch: netlist_cmd.cmd_check(sch, "json"), id="check"),
+        ],
+    )
+    def test_no_byproduct_beside_schematic(self, schematic, fake_kicad_cli, capsys, invoke):
+        """No ``*-netlist.kicad_net`` is left in the schematic's directory."""
+        before = {p.name for p in schematic.parent.iterdir()}
+
+        assert invoke(schematic) == 0
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+        stray = sorted(p.name for p in schematic.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"subcommand left byproducts beside the schematic: {stray}"
+        assert {p.name for p in schematic.parent.iterdir()} == before
+
+    @pytest.mark.parametrize(
+        "invoke",
+        [
+            pytest.param(lambda sch: netlist_cmd.cmd_analyze(sch, "json"), id="analyze"),
+            pytest.param(lambda sch: netlist_cmd.cmd_list(sch, "json", "connections"), id="list"),
+            pytest.param(lambda sch: netlist_cmd.cmd_show(sch, "/N1", "json"), id="show"),
+            pytest.param(lambda sch: netlist_cmd.cmd_check(sch, "json"), id="check"),
+        ],
+    )
+    def test_temp_export_is_cleaned_up(self, schematic, fake_kicad_cli, capsys, invoke):
+        """The temp directory is torn down before the subcommand returns."""
+        assert invoke(schematic) == 0
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != schematic.parent, f"export wrote into the project dir: {out}"
+            assert not out.exists(), f"temp netlist survived the command: {out}"
+            assert not out.parent.exists(), f"temp dir survived the command: {out.parent}"
+
+    def test_compare_leaves_no_byproduct_in_either_dir(self, tmp_path, fake_kicad_cli, capsys):
+        """``cmd_compare`` must not litter *either* schematic's directory."""
+        old_dir = tmp_path / "old_project"
+        new_dir = tmp_path / "new_project"
+        old_dir.mkdir()
+        new_dir.mkdir()
+        old_path = old_dir / "rev_a.kicad_sch"
+        new_path = new_dir / "rev_b.kicad_sch"
+        old_path.write_text(MINIMAL_SCHEMATIC)
+        new_path.write_text(MINIMAL_SCHEMATIC)
+
+        before_old = {p.name for p in old_dir.iterdir()}
+        before_new = {p.name for p in new_dir.iterdir()}
+
+        assert netlist_cmd.cmd_compare(old_path, new_path, "json") == 0
+
+        assert len(fake_kicad_cli) == 2, "both schematics should have been exported"
+        assert not sorted(old_dir.glob("*-netlist.kicad_net")), "old dir gained a netlist file"
+        assert not sorted(new_dir.glob("*-netlist.kicad_net")), "new dir gained a netlist file"
+        assert {p.name for p in old_dir.iterdir()} == before_old
+        assert {p.name for p in new_dir.iterdir()} == before_new
+        for out in fake_kicad_cli:
+            assert not out.exists()
+
+    def test_compare_temp_paths_do_not_collide(self, tmp_path, fake_kicad_cli, capsys):
+        """Same-stem schematics in different dirs get distinct temp outputs."""
+        old_dir = tmp_path / "v1"
+        new_dir = tmp_path / "v2"
+        old_dir.mkdir()
+        new_dir.mkdir()
+        old_path = old_dir / "design.kicad_sch"
+        new_path = new_dir / "design.kicad_sch"
+        old_path.write_text(MINIMAL_SCHEMATIC)
+        new_path.write_text(MINIMAL_SCHEMATIC)
+
+        assert netlist_cmd.cmd_compare(old_path, new_path, "json") == 0
+
+        assert len(fake_kicad_cli) == 2
+        assert fake_kicad_cli[0] != fake_kicad_cli[1], "compare reused one temp output path"
+
+    def test_netlist_data_survives_temp_routing(self, schematic, fake_kicad_cli, capsys):
+        """The parsed netlist still reaches the command output."""
+        assert netlist_cmd.cmd_list(schematic, "json", "name") == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert [net["name"] for net in data] == ["/N1"]
+        assert data[0]["connections"] == 2
+
+    def test_export_still_writes_its_product_at_default_location(
+        self, schematic, fake_kicad_cli, capsys
+    ):
+        """``kct netlist export`` is the product site -- it must still litter."""
+        assert netlist_cmd.cmd_export(schematic, None, "kicad") == 0
+
+        product = schematic.parent / "design-netlist.kicad_net"
+        assert product.exists(), "export no longer writes the netlist the user asked for"
+        assert "Exported KiCad netlist to:" in capsys.readouterr().out
+
+    def test_export_still_writes_its_product_at_requested_location(
+        self, schematic, tmp_path, fake_kicad_cli, capsys
+    ):
+        """``kct netlist export -o`` still writes to the requested path."""
+        requested = tmp_path / "custom.net"
+
+        assert netlist_cmd.cmd_export(schematic, requested, "kicad") == 0
+
+        assert requested.exists(), "export -o no longer writes the requested file"
+        assert "Exported KiCad netlist to:" in capsys.readouterr().out

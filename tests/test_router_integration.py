@@ -1,0 +1,366 @@
+"""Real-world board routing integration tests.
+
+This module validates the autorouter's effectiveness on actual board layouts
+from the boards/ directory. These tests measure practical performance metrics
+and catch regressions in routing quality.
+
+Test boards (in order of complexity):
+1. voltage-divider: 4 components, 3 nets (2-layer, simplest)
+2. charlieplex-led: 14 components, 8 nets (2-layer, dense topology)
+3. usb-joystick: ~20 components, 13 nets (2-layer, mixed signals)
+
+Success criteria:
+- >= 80% net completion rate
+- Zero net-to-net shorts
+- Valid KiCad output (file loads without errors)
+- Routing completes within reasonable time (<5 minutes per board)
+
+These tests use pytest.mark.integration for separate execution from unit tests
+since they may be slower and depend on complete board fixtures.
+"""
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.router import DesignRules, load_pcb_for_routing
+from kicad_tools.router.io import merge_routes_into_pcb, validate_routes
+
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  These
+# tests route real boards (often via subprocess) and comfortably beat
+# 60s alone, but under full-suite xdist CPU contention the wall-clock
+# reaper killed them spuriously.  The marker overrides the CLI default
+# with a contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(600)
+
+
+# Coarser grid for integration tests — these validate output correctness,
+# not routing quality. 0.5mm grid is ~25x fewer cells than the 0.1mm default.
+INTEGRATION_RULES = DesignRules(grid_resolution=0.5)
+
+
+@pytest.fixture
+def boards_dir() -> Path:
+    """Return the path to the boards directory."""
+    repo_root = Path(__file__).parent.parent
+    return repo_root / "boards"
+
+
+@pytest.fixture
+def voltage_divider_pcb(boards_dir: Path) -> Path:
+    """Return path to the simplest test board (4 components, 3 nets)."""
+    return boards_dir / "01-voltage-divider" / "output" / "voltage_divider.kicad_pcb"
+
+
+@pytest.fixture
+def charlieplex_pcb() -> Path:
+    """Immutable 14-component algorithm witness; provenance lives beside it."""
+    return (
+        Path(__file__).parent
+        / "fixtures/historical_demo_boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
+    )
+
+
+@pytest.fixture
+def usb_joystick_pcb(boards_dir: Path) -> Path:
+    """Return path to complex test board (~20 components, 13 nets)."""
+    return boards_dir / "03-usb-joystick" / "output" / "usb_joystick.kicad_pcb"
+
+
+@pytest.mark.integration
+class TestRealBoardRouting:
+    """End-to-end routing tests on real board layouts."""
+
+    def test_voltage_divider_high_completion(self, voltage_divider_pcb: Path):
+        """Simplest board should achieve >= 80% routing completion."""
+        assert voltage_divider_pcb.exists(), f"Board fixture not found: {voltage_divider_pcb}"
+
+        # Load board
+        router, net_map = load_pcb_for_routing(
+            str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
+        assert router is not None
+        assert len(net_map) >= 3, "Expected at least 3 nets"
+
+        # Count routable signal nets (exclude net 0 and pour nets like GND/VCC)
+        # Issue #1295: Pour nets are now auto-skipped, so exclude them from denominator
+        total_nets = len([n for n in router.nets if n > 0 and not router._is_pour_net(n)])
+        if total_nets == 0:
+            # All three nets (VIN, VOUT, GND) are pour-classified since the
+            # pour-net coverage expansion -- the board is completed entirely
+            # by zone fill, so trace-completion is vacuous (issue #3436
+            # burn-down).  Keep the load assertions above as the regression
+            # guard and exit.
+            pytest.skip(
+                "all voltage-divider nets are pour nets (zone-filled); no signal nets to route"
+            )
+
+        # Route all nets
+        start_time = time.time()
+        router.route_all()
+        routing_time = time.time() - start_time
+
+        # Get statistics
+        stats = router.get_statistics()
+        routed_nets = stats["nets_routed"]
+        completion_rate = routed_nets / total_nets if total_nets > 0 else 0
+
+        # Assertions
+        assert completion_rate >= 0.80, (
+            f"Completion rate {completion_rate:.1%} below 80% threshold "
+            f"({routed_nets}/{total_nets} nets routed)"
+        )
+        assert routing_time < 300, f"Routing took {routing_time:.1f}s (>5 min)"
+
+        # Log metrics for benchmarking
+        print("\n=== voltage-divider routing metrics ===")
+        print(f"Nets: {routed_nets}/{total_nets} ({completion_rate:.1%})")
+        print(f"Time: {routing_time:.2f}s")
+        print(f"Segments: {stats.get('segments', 0)}")
+        print(f"Vias: {stats.get('vias', 0)}")
+        if hasattr(router, "routing_failures"):
+            print(f"Failures: {len(router.routing_failures)}")
+
+    def test_charlieplex_high_completion(self, charlieplex_pcb: Path):
+        """Dense topology board should achieve >= 80% routing completion.
+
+        Issue #3519: this test originally drove the board with bare
+        ``router.route_all()`` and asserted >= 80% completion.  On the
+        charlieplex/matrix topology that path tops out at 50-60% because
+        the simple net-by-net loop lacks the negotiation machinery needed
+        to resolve the inter-row corridor contention between the NODE_A..D
+        nets and the row-driver nets.  When NODE_A..D fail with
+        ``BLOCKED_BY_COMPONENT`` they are the *lowest*-priority nets on the
+        blocking LEDs, so ``route_all``'s one-shot
+        ``_attempt_blocked_component_ripup`` finds no lower-priority
+        siblings to displace and the failure stands (confirmed across the
+        full git history: this board never reliably cleared 80% via the
+        bare path).
+
+        The bare ``route_all()`` entry point is deprecated for dense
+        boards in favour of :meth:`Router.route_all_negotiated` -- the
+        same production path used by
+        ``tests/router/test_board02_manufacturable_baseline.py`` (which
+        routes this board fully) and recommended by ``route_all``'s own
+        no-timeout warning (Issue #2794).  PR #3214 (Issue #3207) already
+        migrated the board-02 demo recipe off bare ``route_all()`` for the
+        same reason; this test follows suit.  On the negotiated path the
+        board reaches 90% (9/10), comfortably clearing the 80% floor.
+        """
+        assert charlieplex_pcb.exists(), f"Board fixture not found: {charlieplex_pcb}"
+
+        # Load board
+        router, net_map = load_pcb_for_routing(
+            str(charlieplex_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
+        assert router is not None
+        assert len(net_map) >= 8, "Expected at least 8 nets"
+
+        # Count signal nets (exclude net 0)
+        total_nets = len([n for n in router.nets if n > 0])
+        assert total_nets > 0, "No signal nets to route"
+
+        # Route via the negotiated path (the production entry point).  The
+        # bare ``route_all()`` is deprecated for dense topologies -- see the
+        # docstring above and Issue #3519.
+        start_time = time.time()
+        router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0)
+        routing_time = time.time() - start_time
+
+        # Get statistics
+        stats = router.get_statistics()
+        routed_nets = stats["nets_routed"]
+        completion_rate = routed_nets / total_nets if total_nets > 0 else 0
+
+        # Assertions
+        assert completion_rate >= 0.80, (
+            f"Completion rate {completion_rate:.1%} below 80% threshold "
+            f"({routed_nets}/{total_nets} nets routed)"
+        )
+        assert routing_time < 300, f"Routing took {routing_time:.1f}s (>5 min)"
+
+        # Log metrics
+        print("\n=== charlieplex routing metrics ===")
+        print(f"Nets: {routed_nets}/{total_nets} ({completion_rate:.1%})")
+        print(f"Time: {routing_time:.2f}s")
+        print(f"Segments: {stats.get('segments', 0)}")
+        print(f"Vias: {stats.get('vias', 0)}")
+        if hasattr(router, "routing_failures"):
+            print(f"Failures: {len(router.routing_failures)}")
+
+    def test_usb_joystick_valid_output(self, usb_joystick_pcb: Path):
+        """Complex board should produce valid KiCad output."""
+        assert usb_joystick_pcb.exists(), f"Board fixture not found: {usb_joystick_pcb}"
+
+        # Load board
+        with open(usb_joystick_pcb) as f:
+            original_pcb_text = f.read()
+
+        router, net_map = load_pcb_for_routing(
+            str(usb_joystick_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
+        assert router is not None
+
+        # Count signal nets
+        total_nets = len([n for n in router.nets if n > 0])
+
+        # Route
+        router.route_all()
+
+        # Merge routes into PCB (validates output structure)
+        try:
+            merged_pcb = merge_routes_into_pcb(original_pcb_text, router.to_sexp())
+            assert merged_pcb is not None
+            assert len(merged_pcb) > len(original_pcb_text), "Output should contain routes"
+
+            # Verify it's valid s-expression format
+            assert merged_pcb.startswith("(kicad_pcb"), "Output should be valid KiCad PCB"
+            assert merged_pcb.count("(") == merged_pcb.count(")"), "S-expression balanced"
+
+        except Exception as e:
+            pytest.fail(f"Failed to merge routes into PCB: {e}")
+
+        # Get statistics
+        stats = router.get_statistics()
+        routed_nets = stats["nets_routed"]
+        completion_rate = routed_nets / total_nets if total_nets > 0 else 0
+
+        print("\n=== usb-joystick routing metrics ===")
+        print(f"Nets: {routed_nets}/{total_nets} ({completion_rate:.1%})")
+        print(f"Output size: {len(merged_pcb)} bytes")
+        print(f"Segments: {stats.get('segments', 0)}")
+        print(f"Vias: {stats.get('vias', 0)}")
+        if hasattr(router, "routing_failures"):
+            print(f"Failures: {len(router.routing_failures)}")
+
+        # Issue #2425: Assert minimum net completion rate.
+        # Before the boundary-clamping fix only ~4 nets routed;
+        # after clamping trace-width checks to grid bounds, at least
+        # 6 nets should succeed (periphery pads are now reachable).
+        assert routed_nets >= 6, (
+            f"Expected at least 6/{total_nets} nets routed but got {routed_nets}. "
+            f"Boundary-clamping fix may have regressed."
+        )
+
+    def test_no_shorts_in_output(self, voltage_divider_pcb: Path):
+        """Routed output must have zero net-to-net shorts."""
+        # Load and route board
+        router, net_map = load_pcb_for_routing(
+            str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
+
+        router.route_all()
+
+        # Check for shorts using validate_routes
+        violations = validate_routes(router)
+
+        # Filter for shorts (clearance violations between different nets)
+        shorts = [v for v in violations if v.get("type") == "short"]
+
+        assert len(shorts) == 0, f"Found {len(shorts)} net-to-net shorts:\n" + "\n".join(
+            f"  - {s}" for s in shorts[:5]
+        )
+
+        print("\n=== Short detection ===")
+        print(f"Shorts: {len(shorts)}")
+        print(f"Other violations: {len(violations) - len(shorts)}")
+
+    def test_routing_time_budget(self, voltage_divider_pcb: Path):
+        """Board routing should complete within 5 minutes."""
+        router, net_map = load_pcb_for_routing(
+            str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
+
+        total_nets = len([n for n in router.nets if n > 0])
+
+        start_time = time.time()
+        router.route_all()
+        routing_time = time.time() - start_time
+
+        assert routing_time < 300, f"Routing took {routing_time:.1f}s, exceeding 5-minute budget"
+
+        stats = router.get_statistics()
+
+        print("\n=== Performance ===")
+        print(f"Routing time: {routing_time:.2f}s")
+        print(f"Nets routed: {stats['nets_routed']}/{total_nets}")
+
+
+@pytest.mark.integration
+class TestRoutingBenchmark:
+    """Performance tracking and benchmarking tests."""
+
+    def test_benchmark_all_boards(
+        self,
+        voltage_divider_pcb: Path,
+        charlieplex_pcb: Path,
+        usb_joystick_pcb: Path,
+    ):
+        """Record routing metrics for all test boards for trend analysis."""
+        boards = [
+            ("voltage-divider", voltage_divider_pcb),
+            ("charlieplex-led", charlieplex_pcb),
+            ("usb-joystick", usb_joystick_pcb),
+        ]
+
+        results = []
+
+        for board_name, board_path in boards:
+            if not board_path.exists():
+                print(f"Skipping {board_name}: board file not found")
+                continue
+
+            # Load and route
+            router, net_map = load_pcb_for_routing(str(board_path))
+
+            nets_to_route = [
+                (net_name, pads)
+                for net_name, pads in net_map.items()
+                if net_name not in {"GND", "VCC", "+3V3", "+5V", "+12V"}
+            ]
+
+            total_nets = len(nets_to_route)
+
+            start_time = time.time()
+            router.route_all(nets_to_route)
+            routing_time = time.time() - start_time
+
+            routed_nets = len([r for r in router.routes if r])
+            completion_rate = routed_nets / total_nets if total_nets > 0 else 0
+
+            # Collect statistics
+            stats = router.get_statistics() if hasattr(router, "get_statistics") else {}
+
+            result = {
+                "board": board_name,
+                "total_nets": total_nets,
+                "routed_nets": routed_nets,
+                "completion_rate": completion_rate,
+                "routing_time": routing_time,
+                "failures": len(router.routing_failures),
+                "segments": stats.get("segments", 0),
+                "vias": stats.get("vias", 0),
+            }
+
+            results.append(result)
+
+            print(f"\n=== {board_name} ===")
+            print(f"Completion: {routed_nets}/{total_nets} ({completion_rate:.1%})")
+            print(f"Time: {routing_time:.2f}s")
+            print(f"Failures: {len(router.routing_failures)}")
+            print(f"Segments: {stats.get('segments', 0)}")
+            print(f"Vias: {stats.get('vias', 0)}")
+
+        # Write benchmark results to a local, intentionally UNTRACKED file
+        # (gitignored since #4684). It is rewritten with wall-clock timings on
+        # every run and has no reader — do not re-add it to git.
+        benchmark_file = Path(__file__).parent / "benchmark_results.json"
+        with open(benchmark_file, "w") as f:
+            json.dump(results, f, indent=2)
+
+        print(f"\nBenchmark results written to: {benchmark_file}")
+
+        # Verify at least one board was tested
+        assert len(results) > 0, "No boards were successfully tested"

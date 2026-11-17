@@ -1,0 +1,243 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-07-20T16:23:27",
+    "ignored_checks": [
+        {
+            "description": "Footprint has no courtyard defined",
+            "key": "missing_courtyard"
+        },
+        {
+            "description": "Track endpoint not centered on via",
+            "key": "track_not_centered_on_via"
+        },
+        {
+            "description": "Tuning profile track geometries",
+            "key": "tuning_profile_track_geometries"
+        },
+        {
+            "description": "Footprint doesn't match symbol's footprint filters",
+            "key": "footprint_filters_mismatch"
+        },
+        {
+            "description": "Footprint component type doesn't match footprint pads",
+            "key": "footprint_type_mismatch"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning"
+    ],
+    "kicad_version": "10.0.4",
+    "schematic_parity": [],
+    "source": "stale_nets.kicad_pcb",
+    "unconnected_items": [],
+    "violations": [
+        {
+            "description": "Items shorting two nets (nets Net-(C11-2) and Net-(R1-1))",
+            "items": [
+                {
+                    "description": "Track [Net-(C11-2)] on F.Cu, length 1.0000 mm",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "427e11ea-c496-4271-bc72-afa6be08644a"
+                },
+                {
+                    "description": "Pad 1 [Net-(R1-1)] of R1 on F.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "b8c34c4e-d355-408b-b6f3-5d2ac5ad2536"
+                }
+            ],
+            "severity": "error",
+            "type": "shorting_items"
+        },
+        {
+            "description": "Items shorting two nets (nets Net-(C11-2) and Net-(R1-1))",
+            "items": [
+                {
+                    "description": "Track [Net-(C11-2)] on F.Cu, length 8.0000 mm",
+                    "pos": {
+                        "x": 11.0,
+                        "y": 10.0
+                    },
+                    "uuid": "650768da-0cab-450a-9079-5736ca8c1c5d"
+                },
+                {
+                    "description": "Pad 1 [Net-(R1-1)] of R1 on F.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "b8c34c4e-d355-408b-b6f3-5d2ac5ad2536"
+                }
+            ],
+            "severity": "error",
+            "type": "shorting_items"
+        },
+        {
+            "description": "Clearance violation ( clearance 0.2000 mm; actual 0.0500 mm)",
+            "items": [
+                {
+                    "description": "Via [Net-(C11-2)] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 11.0
+                    },
+                    "uuid": "6543cf40-d9f5-4e20-be1b-0fe5f7c5ba6a"
+                },
+                {
+                    "description": "Pad 1 [Net-(R1-1)] of R1 on F.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "b8c34c4e-d355-408b-b6f3-5d2ac5ad2536"
+                }
+            ],
+            "severity": "error",
+            "type": "clearance"
+        },
+        {
+            "description": "Hole clearance violation (board setup constraints hole clearance 0.2500 mm; actual 0.2000 mm)",
+            "items": [
+                {
+                    "description": "Pad 1 [Net-(R1-1)] of R1 on F.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "b8c34c4e-d355-408b-b6f3-5d2ac5ad2536"
+                },
+                {
+                    "description": "Via [Net-(C11-2)] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 11.0
+                    },
+                    "uuid": "6543cf40-d9f5-4e20-be1b-0fe5f7c5ba6a"
+                }
+            ],
+            "severity": "error",
+            "type": "hole_clearance"
+        },
+        {
+            "description": "Front solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Track [Net-(C11-2)] on F.Cu, length 1.0000 mm",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "427e11ea-c496-4271-bc72-afa6be08644a"
+                },
+                {
+                    "description": "Pad 1 [Net-(R1-1)] of R1 on F.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "b8c34c4e-d355-408b-b6f3-5d2ac5ad2536"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Front solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Track [Net-(C11-2)] on F.Cu, length 8.0000 mm",
+                    "pos": {
+                        "x": 11.0,
+                        "y": 10.0
+                    },
+                    "uuid": "650768da-0cab-450a-9079-5736ca8c1c5d"
+                },
+                {
+                    "description": "Pad 2 [Net-(C11-Pad2)] of C11 on F.Cu",
+                    "pos": {
+                        "x": 11.0,
+                        "y": 10.0
+                    },
+                    "uuid": "5d6a09c1-8125-40f6-967f-6cfc6c0df3e6"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Front solder mask aperture bridges items with different nets",
+            "items": [
+                {
+                    "description": "Track [Net-(C11-2)] on F.Cu, length 8.0000 mm",
+                    "pos": {
+                        "x": 11.0,
+                        "y": 10.0
+                    },
+                    "uuid": "650768da-0cab-450a-9079-5736ca8c1c5d"
+                },
+                {
+                    "description": "Pad 1 [Net-(R1-1)] of R1 on F.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 10.0
+                    },
+                    "uuid": "b8c34c4e-d355-408b-b6f3-5d2ac5ad2536"
+                }
+            ],
+            "severity": "error",
+            "type": "solder_mask_bridge"
+        },
+        {
+            "description": "Via is not connected or connected on only one layer",
+            "items": [
+                {
+                    "description": "Via [Net-(C11-2)] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 19.0,
+                        "y": 11.0
+                    },
+                    "uuid": "6543cf40-d9f5-4e20-be1b-0fe5f7c5ba6a"
+                }
+            ],
+            "severity": "warning",
+            "type": "via_dangling"
+        },
+        {
+            "description": "Footprint 'C_0805_2012Metric' does not match copy in library 'Capacitor_SMD'",
+            "items": [
+                {
+                    "description": "Footprint C11",
+                    "pos": {
+                        "x": 10.0,
+                        "y": 10.0
+                    },
+                    "uuid": "2edd07c8-57d8-4edd-8346-6bb78a007f99"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_mismatch"
+        },
+        {
+            "description": "Footprint 'R_0805_2012Metric' does not match copy in library 'Resistor_SMD'",
+            "items": [
+                {
+                    "description": "Footprint R1",
+                    "pos": {
+                        "x": 20.0,
+                        "y": 10.0
+                    },
+                    "uuid": "89a547b9-a9a6-41e1-8b1b-667479a2c70b"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_mismatch"
+        }
+    ]
+}

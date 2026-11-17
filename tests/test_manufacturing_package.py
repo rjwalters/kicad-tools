@@ -1,0 +1,2570 @@
+"""Tests for the manufacturing package generator."""
+
+import json
+import logging
+import shutil
+import subprocess
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.export.manufacturing import (
+    ManufacturingConfig,
+    ManufacturingPackage,
+    ManufacturingResult,
+    _build_manifest,
+    _create_project_zip,
+    _sha256_file,
+    verify_manifest,
+)
+from kicad_tools.export.preflight import PreflightChecker, PreflightConfig, PreflightResult
+
+
+@pytest.fixture
+def local_symbol_project(tmp_path):
+    """A real schematic with a generated local symbol, independent of stock libraries."""
+    from kicad_tools.schematic.models.schematic import Schematic
+
+    project = tmp_path / "project"
+    project.mkdir()
+    pcb = project / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    sch = Schematic(title="Portable symbols")
+    sch.add_pwr_symbol("VMOTOR", x=100, y=100)
+    sch.write(project / "board.kicad_sch")
+    (project / "board.kicad_pro").write_text("{}")
+    return pcb
+
+
+class TestSha256File:
+    """Tests for _sha256_file helper."""
+
+    def test_known_content(self, tmp_path):
+        f = tmp_path / "hello.txt"
+        f.write_text("hello\n")
+        digest = _sha256_file(f)
+        # sha256("hello\n") is a well-known value
+        assert len(digest) == 64
+        assert digest == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+
+    def test_empty_file(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_bytes(b"")
+        digest = _sha256_file(f)
+        assert len(digest) == 64
+
+
+class TestCreateProjectZipInventory:
+    """Issue #8752: zip inventory matches readiness (own stem + sheet hierarchy)."""
+
+    @staticmethod
+    def _names(pcb, tmp_path, **kw):
+        out = tmp_path / "out"
+        out.mkdir(exist_ok=True)
+        with zipfile.ZipFile(_create_project_zip(pcb, out, **kw)) as zf:
+            return set(zf.namelist())
+
+    def test_sibling_variant_and_backup_excluded(self, tmp_path):
+        for stem in ("a", "b"):
+            (tmp_path / f"{stem}.kicad_pcb").write_text("(kicad_pcb)")
+            (tmp_path / f"{stem}.kicad_pro").write_text("{}")
+            (tmp_path / f"{stem}.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "a_backup_1.kicad_sch").write_text("(kicad_sch)")
+        names = self._names(tmp_path / "a.kicad_pcb", tmp_path)
+        assert {"a.kicad_pcb", "a.kicad_pro", "a.kicad_sch"} <= names
+        assert not any(n.startswith("b.") or "_backup_" in n for n in names)
+
+    def test_routed_pcb_and_subsheets(self, tmp_path):
+        (tmp_path / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+        (tmp_path / "board.kicad_sch").write_text(
+            '(kicad_sch (sheet (property "Sheetfile" "sub/power.kicad_sch")'
+            ' (property "Sheetfile" "../outside.kicad_sch")))'
+        )
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "power.kicad_sch").write_text(
+            '(kicad_sch (sheet (property "Sheetfile" "../board.kicad_sch")))'
+        )  # cycle
+        (tmp_path.parent / "outside.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "other.kicad_sch").write_text("(kicad_sch)")
+        names = self._names(tmp_path / "board_routed.kicad_pcb", tmp_path)
+        assert "board.kicad_sch" in names and "sub/power.kicad_sch" in names
+        assert "other.kicad_sch" not in names
+        assert not any("outside" in n for n in names)
+
+    def test_ambiguous_schematic_includes_none(self, tmp_path, caplog):
+        (tmp_path / "a.kicad_pcb").write_text("(kicad_pcb)")
+        (tmp_path / "x.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "y.kicad_sch").write_text("(kicad_sch)")
+        with caplog.at_level(logging.WARNING):
+            names = self._names(tmp_path / "a.kicad_pcb", tmp_path)
+        assert names == {"a.kicad_pcb"}
+        assert "no schematics" in caplog.text
+
+    def test_explicit_schematic_preferred(self, tmp_path):
+        (tmp_path / "a.kicad_pcb").write_text("(kicad_pcb)")
+        (tmp_path / "x.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "y.kicad_sch").write_text("(kicad_sch)")
+        names = self._names(
+            tmp_path / "a.kicad_pcb", tmp_path, schematic_path=tmp_path / "y.kicad_sch"
+        )
+        assert names == {"a.kicad_pcb", "y.kicad_sch"}
+
+
+class TestCreateProjectZip:
+    """Tests for _create_project_zip."""
+
+    def test_routed_rules_survive_relocation_and_are_hash_bound(self, tmp_path):
+        project = tmp_path / "source"
+        project.mkdir()
+        pcb = project / "board_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        pcb.with_suffix(".kicad_pro").write_text("{}")
+        rules = b'(version 1)\n(rule "Authored HV" (constraint clearance (min 2mm)))\n'
+        pcb.with_suffix(".kicad_dru").write_bytes(rules)
+        (project / "board.kicad_dru").write_text("unrouted rules")
+        (project / "other.kicad_dru").write_text("unrelated rules")
+        source_bytes = {p.name: p.read_bytes() for p in project.iterdir()}
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        archive = _create_project_zip(pcb, bundle)
+        result = ManufacturingResult(output_dir=bundle, project_zip_path=archive)
+        manifest = bundle / "manifest.json"
+        manifest.write_text(json.dumps(_build_manifest(result, pcb, "jlcpcb")))
+        assert {p.name: p.read_bytes() for p in project.iterdir()} == source_bytes
+
+        relocated = tmp_path / "recipient"
+        shutil.copytree(bundle, relocated)
+        shutil.rmtree(project)
+        shutil.rmtree(bundle)
+        with zipfile.ZipFile(relocated / archive.name) as zf:
+            members = {name: zf.read(name) for name in zf.namelist()}
+        assert members["board_routed.kicad_dru"] == rules
+        assert "board.kicad_dru" not in members
+        assert "other.kicad_dru" not in members
+        assert verify_manifest(relocated / manifest.name) == []
+
+        members["board_routed.kicad_dru"] = rules.replace(b"2mm", b"1mm")
+        with zipfile.ZipFile(relocated / archive.name, "w") as zf:
+            for name, contents in members.items():
+                zf.writestr(name, contents)
+        assert any(
+            "sha256 mismatch" in error for error in verify_manifest(relocated / manifest.name)
+        )
+
+    def test_creates_zip_with_kicad_files(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "board.kicad_pcb").write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        (project_dir / "board.kicad_pro").write_text("{}")
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+
+        zip_path = _create_project_zip(project_dir / "board.kicad_pcb", out_dir)
+
+        assert zip_path.exists()
+        assert zip_path.name == "kicad_project.zip"
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = set(zf.namelist())
+            assert "board.kicad_pcb" in names
+            assert "board.kicad_sch" in names
+            assert "board.kicad_pro" in names
+
+    def test_excludes_non_kicad_files(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "board.kicad_pcb").write_text("(kicad_pcb)")
+        (project_dir / "notes.txt").write_text("some notes")
+        (project_dir / "README.md").write_text("readme")
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+
+        zip_path = _create_project_zip(project_dir / "board.kicad_pcb", out_dir)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = set(zf.namelist())
+            assert "board.kicad_pcb" in names
+            assert "notes.txt" not in names
+            assert "README.md" not in names
+
+    def test_no_kicad_files_raises(self, tmp_path):
+        project_dir = tmp_path / "empty_project"
+        project_dir.mkdir()
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+
+        # Create a dummy .txt file only
+        (project_dir / "notes.txt").write_text("nope")
+
+        with pytest.raises(FileNotFoundError, match="No KiCad project files"):
+            _create_project_zip(project_dir / "fake.kicad_pcb", out_dir)
+
+    def test_custom_zip_name(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "board.kicad_pcb").write_text("(kicad_pcb)")
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+
+        zip_path = _create_project_zip(project_dir / "board.kicad_pcb", out_dir, "my_project.zip")
+        assert zip_path.name == "my_project.zip"
+
+    @pytest.mark.parametrize("prefix", ["", "${KIPRJMOD}/"])
+    def test_local_symbols_preserve_paths_and_deduplicate(
+        self, local_symbol_project, tmp_path, prefix
+    ):
+        pcb = local_symbol_project
+        project = pcb.parent
+        nested = project / "symbols" / "nested"
+        nested.mkdir(parents=True)
+        source = project / "kicad_tools_pwr.kicad_sym"
+        shutil.copyfile(source, nested / "power.kicad_sym")
+        table = project / "sym-lib-table"
+        table.write_text(
+            "(sym_lib_table (version 7)"
+            '(lib (name "direct") (type "KiCad") (uri "${KIPRJMOD}/kicad_tools_pwr.kicad_sym"))'
+            f'(lib (name "kicad_tools_pwr") (type "KiCad") (uri "{prefix}symbols/nested/power.kicad_sym"))'
+            f'(lib (name "alias") (type "KiCad") (uri "{prefix}symbols/nested/power.kicad_sym")))'
+        )
+        (project / "other.kicad_pcb").write_text("(kicad_pcb)")
+        (project / "board_backup_old.kicad_sch").write_text("(kicad_sch)")
+        archive = _create_project_zip(pcb, tmp_path)
+        with zipfile.ZipFile(archive) as zf:
+            assert set(zf.namelist()) == {
+                "board.kicad_pcb",
+                "board.kicad_sch",
+                "board.kicad_pro",
+                "sym-lib-table",
+                "kicad_tools_pwr.kicad_sym",
+                "symbols/nested/power.kicad_sym",
+            }
+            assert len(zf.namelist()) == len(set(zf.namelist()))
+            extracted = tmp_path / "extracted"
+            zf.extractall(extracted)
+        assert (extracted / "symbols/nested/power.kicad_sym").read_bytes() == source.read_bytes()
+        assert (extracted / "sym-lib-table").read_bytes() == table.read_bytes()
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "${KIPRJMOD}/missing.kicad_sym",
+            "../outside.kicad_sym",
+            "/tmp/outside.kicad_sym",
+            "C:/outside.kicad_sym",
+            "${KICAD10_SYMBOL_DIR}/Device.kicad_sym",
+            "https://example.com/a.kicad_sym",
+        ],
+    )
+    def test_missing_or_nonportable_library_fails_before_zip(
+        self, local_symbol_project, tmp_path, uri
+    ):
+        pcb = local_symbol_project
+        (pcb.parent / "sym-lib-table").write_text(
+            f'(sym_lib_table (lib (name "test") (type "KiCad") (uri "{uri}")))'
+        )
+        with pytest.raises((ValueError, FileNotFoundError), match="symbol library 'test'"):
+            _create_project_zip(pcb, tmp_path)
+        assert not (tmp_path / "kicad_project.zip").exists()
+
+    @pytest.mark.parametrize(
+        "table", ["(sym_lib_table", "(wrong)", '(sym_lib_table (lib (name "bad")))']
+    )
+    def test_malformed_table(self, local_symbol_project, tmp_path, table):
+        pcb = local_symbol_project
+        (pcb.parent / "sym-lib-table").write_text(table)
+        with pytest.raises(ValueError, match="sym-lib-table|symbol library"):
+            _create_project_zip(pcb, tmp_path)
+
+    def test_external_symlink_is_not_packaged(self, local_symbol_project, tmp_path):
+        pcb = local_symbol_project
+        library = pcb.parent / "kicad_tools_pwr.kicad_sym"
+        outside = tmp_path / "outside.kicad_sym"
+        library.rename(outside)
+        library.symlink_to(outside)
+        with pytest.raises(ValueError, match="resolves outside project"):
+            _create_project_zip(pcb, tmp_path)
+
+    def test_native_erc_library_resolution_survives_extraction(
+        self, local_symbol_project, tmp_path
+    ):
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        cli = find_kicad_cli()
+        if cli is None:
+            pytest.skip("kicad-cli not installed")
+        pcb = local_symbol_project
+        # Exercise a real nested dependency, not just ZIP member presence.
+        project = pcb.parent
+        (project / "symbols").mkdir()
+        (project / "kicad_tools_pwr.kicad_sym").rename(project / "symbols/power.kicad_sym")
+        table = project / "sym-lib-table"
+        table.write_text(
+            table.read_text().replace("/kicad_tools_pwr.kicad_sym", "/symbols/power.kicad_sym")
+        )
+
+        def library_findings(schematic, name):
+            report = tmp_path / f"{name}.json"
+            process = subprocess.run(
+                [
+                    str(cli),
+                    "sch",
+                    "erc",
+                    "--format",
+                    "json",
+                    "--severity-all",
+                    "--output",
+                    str(report),
+                    str(schematic),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert process.returncode == 0, process.stderr
+            data = json.loads(report.read_text())
+            return [
+                v
+                for sheet in data["sheets"]
+                for v in sheet["violations"]
+                if v["type"] == "lib_symbol_issues"
+            ]
+
+        assert library_findings(project / "board.kicad_sch", "original") == []
+        archive = _create_project_zip(pcb, tmp_path)
+        extracted = tmp_path / "extracted"
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(extracted)
+        assert library_findings(extracted / "board.kicad_sch", "extracted") == []
+        # Positive control: this native invocation detects the original omission.
+        (extracted / "sym-lib-table").unlink()
+        assert library_findings(extracted / "board.kicad_sch", "missing")
+
+
+class TestManufacturingConfig:
+    """Tests for ManufacturingConfig defaults."""
+
+    def test_defaults(self):
+        config = ManufacturingConfig()
+        assert config.include_report is True
+        assert config.include_project_zip is True
+        assert config.include_manifest is True
+        assert config.project_zip_name == "kicad_project.zip"
+        assert config.manifest_name == "manifest.json"
+
+    def test_inherits_assembly_config(self):
+        config = ManufacturingConfig()
+        # These come from AssemblyConfig
+        assert config.include_bom is True
+        assert config.include_pnp is True
+        assert config.include_gerbers is True
+
+    def test_override_flags(self):
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+        )
+        assert config.include_report is False
+        assert config.include_project_zip is False
+
+
+class TestManufacturingResult:
+    """Tests for ManufacturingResult dataclass."""
+
+    def test_success_when_no_errors(self, tmp_path):
+        result = ManufacturingResult(output_dir=tmp_path)
+        assert result.success is True
+
+    def test_failure_when_errors(self, tmp_path):
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            errors=["something broke"],
+        )
+        assert result.success is False
+
+    def test_all_files_empty_when_nothing_generated(self, tmp_path):
+        result = ManufacturingResult(output_dir=tmp_path)
+        assert result.all_files == []
+
+    def test_all_files_includes_everything(self, tmp_path):
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(
+                output_dir=tmp_path,
+                bom_path=tmp_path / "bom.csv",
+                pnp_path=tmp_path / "cpl.csv",
+                gerber_path=tmp_path / "gerbers.zip",
+            ),
+            report_path=tmp_path / "report.md",
+            project_zip_path=tmp_path / "project.zip",
+            readme_path=tmp_path / "README.txt",
+            manifest_path=tmp_path / "manifest.json",
+        )
+        files = result.all_files
+        assert len(files) == 7
+
+    def test_str_representation(self, tmp_path):
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            manifest_path=tmp_path / "manifest.json",
+        )
+        text = str(result)
+        assert "Manufacturing Package" in text
+        assert "Manifest" in text
+
+
+class TestBuildManifest:
+    """Tests for _build_manifest helper."""
+
+    def test_manifest_structure(self, tmp_path):
+        # Create some files
+        bom = tmp_path / "bom.csv"
+        bom.write_text("Comment,Designator\n")
+
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(
+                output_dir=tmp_path,
+                bom_path=bom,
+            ),
+        )
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert manifest["version"] == "1.0"
+        assert "kicad_tools_version" in manifest
+        assert "generated_at" in manifest
+        assert manifest["manufacturer"] == "jlcpcb"
+        assert "bom.csv" in manifest["files"]
+        assert "sha256" in manifest["files"]["bom.csv"]
+        assert "size" in manifest["files"]["bom.csv"]
+        assert manifest["board"]["name"] == "board"
+
+    def test_manifest_checksums_are_correct(self, tmp_path):
+        f = tmp_path / "test.csv"
+        f.write_text("data\n")
+
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(
+                output_dir=tmp_path,
+                bom_path=f,
+            ),
+        )
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        expected_sha = _sha256_file(f)
+        assert manifest["files"]["test.csv"]["sha256"] == expected_sha
+        assert manifest["files"]["test.csv"]["size"] == f.stat().st_size
+
+    def _bundle_with_subdirs(self, tmp_path):
+        """Build a result mirroring a real bundle: gerbers/ and images/."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        bom = tmp_path / "bom.csv"
+        bom.write_text("Comment,Designator\n")
+
+        gerber_dir = tmp_path / "gerbers"
+        gerber_dir.mkdir()
+        gerbers = gerber_dir / "gerbers.zip"
+        gerbers.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+        image_dir = tmp_path / "images"
+        image_dir.mkdir()
+        images = []
+        for name in ("assembly.png", "pcb_front.png"):
+            p = image_dir / name
+            p.write_bytes(b"\x89PNG\r\n\x1a\n")
+            images.append(p)
+
+        return ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(
+                output_dir=tmp_path,
+                bom_path=bom,
+                gerber_path=gerbers,
+            ),
+            image_paths=images,
+        )
+
+    def test_subdirectory_artifacts_keyed_by_relative_path(self, tmp_path):
+        """Artifacts in subdirectories are keyed by bundle-relative path (#4590)."""
+        result = self._bundle_with_subdirs(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert set(manifest["files"]) == {
+            "bom.csv",
+            "gerbers/gerbers.zip",
+            "images/assembly.png",
+            "images/pcb_front.png",
+        }
+        # The old basename keys must be gone.
+        assert "gerbers.zip" not in manifest["files"]
+        assert "assembly.png" not in manifest["files"]
+
+    def test_every_manifest_key_resolves_at_bundle_root(self, tmp_path):
+        """`bundle_dir / key` resolves every entry -- no rglob needed (#4590)."""
+        result = self._bundle_with_subdirs(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        unresolvable = [k for k in manifest["files"] if not (tmp_path / k).exists()]
+        assert unresolvable == []
+
+    def test_manifest_keys_use_posix_separators(self, tmp_path):
+        """Keys are POSIX-separated so the manifest is platform-stable (#3529)."""
+        result = self._bundle_with_subdirs(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert all("\\" not in key for key in manifest["files"])
+        assert "gerbers/gerbers.zip" in manifest["files"]
+
+    def test_relative_output_dir_still_resolves(self, tmp_path, monkeypatch):
+        """A relative output_dir (e.g. `-o ./out`) still yields relative keys."""
+        monkeypatch.chdir(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        result = self._bundle_with_subdirs(out)
+        result.output_dir = Path("./out")
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert "gerbers/gerbers.zip" in manifest["files"]
+        assert [k for k in manifest["files"] if not (out / k).exists()] == []
+
+    def test_artifact_outside_bundle_falls_back_to_basename(self, tmp_path):
+        """A path outside output_dir degrades to the basename, never raises."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        inside = bundle / "bom.csv"
+        inside.write_text("Comment,Designator\n")
+
+        outside = tmp_path / "stray.zip"
+        outside.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+        result = ManufacturingResult(
+            output_dir=bundle,
+            assembly_result=AssemblyPackageResult(
+                output_dir=bundle,
+                bom_path=inside,
+                gerber_path=outside,
+            ),
+        )
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert set(manifest["files"]) == {"bom.csv", "stray.zip"}
+        assert manifest["files"]["stray.zip"]["size"] == outside.stat().st_size
+
+
+class TestFabricationProcessBinding:
+    """Issue #5009: exported bundles bind the selected via-in-pad process.
+
+    ``_resolve_fabrication_process`` mirrors ``_write_drc_constraints``'s
+    profile/layer-config resolution, but looks up
+    ``DesignRules.via_in_pad_process_id`` in the shared
+    ``FABRICATION_PROCESSES`` registry.  The resulting dict (or ``None``)
+    should flow into both ``manifest.json`` (machine-readable) and
+    ``README.txt`` (human-readable ordering instructions).
+    """
+
+    def test_resolve_declared_process_for_eligible_layer_count(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb-tier1")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._detect_layer_config = lambda: (4, 1.0)
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is not None
+        assert result.fabrication_process["process_id"] == "jlcpcb-tier1-pofv-4l"
+        assert "ordering_instructions" in result.fabrication_process
+
+    def test_resolve_none_for_two_layer_jlcpcb_tier1(self, tmp_path):
+        """jlcpcb-tier1's 2-layer configs carry no via-in-pad process (#5009)."""
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb-tier1")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._detect_layer_config = lambda: (2, 1.0)
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is None
+
+    def test_resolve_none_for_manufacturer_without_via_in_pad(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is None
+
+    def test_resolve_swallows_unknown_manufacturer(self, tmp_path):
+        """An unresolvable profile must not raise -- resolution is best-effort."""
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="not-a-real-manufacturer")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is None
+
+    def test_build_manifest_includes_fabrication_process_when_present(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            fabrication_process={"process_id": "jlcpcb-tier1-pofv-4l", "name": "POFV"},
+        )
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb-tier1")
+
+        assert manifest["fabrication_process"] == {
+            "process_id": "jlcpcb-tier1-pofv-4l",
+            "name": "POFV",
+        }
+
+    def test_build_manifest_omits_fabrication_process_when_absent(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert "fabrication_process" not in manifest
+
+    def test_readme_surfaces_ordering_instructions_when_process_present(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb-tier1")
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            fabrication_process={
+                "process_id": "jlcpcb-tier1-pofv-4l",
+                "name": "JLCPCB Capability Plus -- POFV, 4+ layer",
+                "ordering_instructions": (
+                    "Order the JLCPCB Capability Plus -- POFV, 4+ layer process."
+                ),
+            },
+        )
+
+        pkg._generate_readme(tmp_path, result)
+
+        text = result.readme_path.read_text()
+        assert "Fabrication process requirements" in text
+        assert "Order the JLCPCB Capability Plus -- POFV, 4+ layer process." in text
+
+    def test_readme_omits_fabrication_section_when_absent(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._generate_readme(tmp_path, result)
+
+        text = result.readme_path.read_text()
+        assert "Fabrication process requirements" not in text
+
+
+class TestManufacturingPackageDryRun:
+    """Tests for ManufacturingPackage dry run mode."""
+
+    def test_dry_run_creates_no_files(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        out_dir = tmp_path / "output"
+
+        pkg = ManufacturingPackage(
+            pcb_path=pcb_path,
+            manufacturer="jlcpcb",
+        )
+        result = pkg.export(out_dir, dry_run=True)
+
+        # output dir should NOT have been created
+        assert not out_dir.exists()
+
+        # But result should list expected files
+        assert result.assembly_result is not None
+        assert result.assembly_result.bom_path is not None
+        assert result.assembly_result.pnp_path is not None
+        assert result.manifest_path is not None
+        assert result.project_zip_path is not None
+
+    def test_dry_run_respects_no_flags(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        config = ManufacturingConfig(
+            include_bom=False,
+            include_report=False,
+            include_project_zip=False,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=pcb_path,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "out", dry_run=True)
+
+        assert result.assembly_result.bom_path is None
+        assert result.report_path is None
+        assert result.project_zip_path is None
+
+
+class TestManufacturingPackageExport:
+    """Tests for ManufacturingPackage.export (integration-level).
+
+    These tests mock the assembly pipeline (which needs kicad-cli + real PCBs)
+    but exercise the project ZIP and manifest logic for real.
+    """
+
+    def test_project_zip_and_manifest(self, tmp_path, monkeypatch, local_symbol_project):
+        """Test that project ZIP and manifest are generated correctly."""
+        # Create a minimal project directory
+        pcb = local_symbol_project
+        custom_rule = '(rule "Authored HV" (constraint clearance (min 2mm)))'
+        pcb.with_suffix(".kicad_dru").write_text(f"(version 1)\n{custom_rule}\n")
+
+        out_dir = tmp_path / "output"
+
+        # Patch AssemblyPackage.export to avoid needing kicad-cli
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            return assembly.AssemblyPackageResult(
+                output_dir=od,
+                bom_path=bom_path,
+            )
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,  # skip report to avoid needing kicad-cli
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(out_dir)
+
+        # Should succeed
+        assert result.success, f"Errors: {result.errors}"
+
+        # BOM should exist
+        assert result.assembly_result is not None
+        assert result.assembly_result.bom_path is not None
+        assert result.assembly_result.bom_path.exists()
+
+        # Project ZIP should exist
+        assert result.project_zip_path is not None
+        assert result.project_zip_path.exists()
+        with zipfile.ZipFile(result.project_zip_path, "r") as zf:
+            assert "board.kicad_pcb" in zf.namelist()
+            assert "board.kicad_sch" in zf.namelist()
+            assert "board.kicad_pro" in zf.namelist()
+            packaged_rules = zf.read("board.kicad_dru")
+            assert custom_rule.encode() in packaged_rules
+            assert b"Silk" in packaged_rules
+            assert packaged_rules == pcb.with_suffix(".kicad_dru").read_bytes()
+            assert "sym-lib-table" in zf.namelist()
+            assert "kicad_tools_pwr.kicad_sym" in zf.namelist()
+
+        # Manifest should exist
+        assert result.manifest_path is not None
+        assert result.manifest_path.exists()
+
+        manifest = json.loads(result.manifest_path.read_text())
+        assert manifest["version"] == "1.0"
+        assert manifest["manufacturer"] == "jlcpcb"
+        assert "bom_jlcpcb.csv" in manifest["files"]
+        assert "kicad_project.zip" in manifest["files"]
+        # Manifest should not list itself (it's written after the manifest is built)
+        # Actually, since we call _build_manifest before writing manifest, the manifest
+        # file doesn't exist yet, so it won't be in the files dict -- but it IS added
+        # to result.manifest_path AFTER writing. So let's just verify checksums.
+        bom_sha = manifest["files"]["bom_jlcpcb.csv"]["sha256"]
+        assert bom_sha == _sha256_file(result.assembly_result.bom_path)
+        zip_info = manifest["files"]["kicad_project.zip"]
+        assert zip_info["sha256"] == _sha256_file(result.project_zip_path)
+        assert zip_info["size"] == result.project_zip_path.stat().st_size
+
+    def test_symbol_dependency_error_marks_export_failed(self, local_symbol_project, tmp_path):
+        pcb = local_symbol_project
+        (pcb.parent / "kicad_tools_pwr.kicad_sym").unlink()
+        package = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb")
+        result = ManufacturingResult(output_dir=tmp_path)
+        package._generate_project_zip(tmp_path, result)
+        assert not result.success
+        assert result.project_zip_path is None
+        assert "Missing project symbol library" in result.errors[0]
+
+    def test_no_report_flag(self, tmp_path, monkeypatch):
+        """Test that --no-report skips report generation."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "out")
+
+        assert result.report_path is None
+
+    def test_preflight_failure_proceeds_by_default(self, tmp_path, monkeypatch):
+        """Preflight FAIL should NOT block export when strict_preflight is False (default)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            return assembly.AssemblyPackageResult(
+                output_dir=od,
+                bom_path=bom_path,
+            )
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Mock preflight to return a FAIL result
+        fail_results = [
+            PreflightResult(name="board_outline", status="FAIL", message="No board outline found"),
+            PreflightResult(name="bom_pcb_match", status="OK", message="All BOM components placed"),
+        ]
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            # strict_preflight defaults to False
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "out")
+
+        # Export should have proceeded
+        assert assembly_called["value"], "Assembly generation should have been called"
+        assert result.assembly_result is not None
+        assert result.assembly_result.bom_path is not None
+
+        # Preflight failures should appear as warnings, not errors
+        assert len(result.warnings) == 1
+        assert "board_outline" in result.warnings[0]
+        assert result.success, f"Unexpected errors: {result.errors}"
+
+        # Preflight results should still be recorded
+        assert len(result.preflight_results) == 2
+
+    def test_strict_preflight_blocks_export(self, tmp_path, monkeypatch):
+        """Preflight FAIL should block export when strict_preflight is True."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Mock preflight to return a FAIL result
+        fail_results = [
+            PreflightResult(
+                name="board_outline",
+                status="FAIL",
+                message="No board outline found",
+                details="Expected Edge.Cuts layer",
+            ),
+        ]
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            strict_preflight=True,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        # Export should NOT have proceeded
+        assert not assembly_called["value"], "Assembly generation should NOT have been called"
+        assert not result.success
+        assert len(result.errors) == 1
+        assert "board_outline" in result.errors[0]
+        assert "Expected Edge.Cuts layer" in result.errors[0]
+
+        # Output directory should not exist
+        assert not out_dir.exists()
+
+    def test_unbuildable_bom_blocks_export_by_default(self, tmp_path, monkeypatch):
+        """A bom_pcb_match FAIL (schematic-only refs) blocks export even
+        when strict_preflight is False.
+
+        Issue #2729: an unbuildable BOM (BOM references parts with no PCB
+        footprint) is treated as a hard failure independently of
+        strict_preflight so the pipeline cannot accidentally ship a
+        manufacturing package the fab cannot build.
+        """
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Mock preflight: bom_pcb_match FAIL (sch refs missing on PCB)
+        fail_results = [
+            PreflightResult(
+                name="bom_pcb_match",
+                status="FAIL",
+                message="BOM/PCB reference mismatch",
+                details="36 in BOM but not on PCB: U1, U2, U3",
+            ),
+        ]
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
+
+        # strict_preflight defaults to False, but block_on_unbuildable_bom
+        # defaults to True
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        # Export should NOT have proceeded
+        assert not assembly_called["value"]
+        assert not result.success
+        assert len(result.errors) == 1
+        assert "bom_pcb_match" in result.errors[0]
+        # No bom_jlcpcb.csv written
+        assert not out_dir.exists() or not (out_dir / "bom_jlcpcb.csv").exists()
+
+    def test_unbuildable_bom_allowed_when_flag_disabled(self, tmp_path, monkeypatch):
+        """With block_on_unbuildable_bom=False (--allow-unbuildable-bom),
+        the export proceeds and the failure is recorded as a warning.
+        """
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        fail_results = [
+            PreflightResult(
+                name="bom_pcb_match",
+                status="FAIL",
+                message="BOM/PCB reference mismatch",
+                details="36 in BOM but not on PCB: U1, U2, U3",
+            ),
+        ]
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: fail_results)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            block_on_unbuildable_bom=False,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        # Export proceeds
+        assert assembly_called["value"]
+        # Failure recorded as warning, not error
+        assert any("bom_pcb_match" in w for w in result.warnings)
+        assert result.success
+
+
+class TestLatestReportOnly:
+    """Tests for the latest_report_only flattening feature."""
+
+    def _setup_project(self, tmp_path):
+        """Create a minimal project directory and return pcb path."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sch = project_dir / "board.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        return pcb
+
+    def _fake_report_generate(self, out_dir, version_num):
+        """Simulate report generation by creating a vN/ directory with report.md."""
+        version_dir = out_dir / f"v{version_num}"
+        version_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = version_dir / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "board_summary.json").write_text('{"layer_count": 2}')
+        (version_dir / "report.md").write_text(f"# Report v{version_num}\n")
+        (version_dir / "metadata.json").write_text('{"version": ' + str(version_num) + "}\n")
+        return version_dir / "report.md"
+
+    def test_flatten_latest_report(self, tmp_path, monkeypatch):
+        """With latest_report_only=True, report.md is promoted to package root."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Pre-create versioned directories to simulate prior exports
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._fake_report_generate(out_dir, 1)
+        self._fake_report_generate(out_dir, 2)
+
+        # Mock _generate_report to create v3 (the latest)
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 3)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # report.md should be promoted to the package root
+        assert (out_dir / "report.md").exists()
+        assert "v3" in (out_dir / "report.md").read_text()
+
+        # No report/ subdirectory should remain (artifacts discarded by default)
+        assert not (out_dir / "report").exists()
+
+        # No .build/ directory without keep_build_artifacts
+        assert not (out_dir / ".build").exists()
+
+        # No vN/ directories should remain
+        import re
+
+        for child in out_dir.iterdir():
+            if child.is_dir():
+                assert not re.fullmatch(r"v\d+", child.name), (
+                    f"Version directory {child.name} should have been removed"
+                )
+
+        # result.report_path should point to the root-level file
+        assert result.report_path == out_dir / "report.md"
+
+    def test_latest_only_false_preserves_version_dirs(self, tmp_path, monkeypatch):
+        """With latest_report_only=False (default), vN/ directories are preserved."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._fake_report_generate(out_dir, 1)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 2)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        pkg.export(out_dir)
+
+        # Version directories should remain
+        assert (out_dir / "v1").exists()
+        assert (out_dir / "v2").exists()
+
+        # No report/ directory should have been created
+        assert not (out_dir / "report").exists()
+
+    def test_latest_only_with_no_report(self, tmp_path, monkeypatch):
+        """latest_report_only=True with include_report=False should not fail."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # Should succeed without errors
+        assert result.success
+        # No report/ or vN/ directories
+        assert not (out_dir / "report").exists()
+
+    def test_latest_only_fresh_project_single_version(self, tmp_path, monkeypatch):
+        """On a fresh project, latest_report_only promotes v1/report.md to root."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        pkg.export(out_dir)
+
+        # report.md should be promoted to root with v1 content
+        assert (out_dir / "report.md").exists()
+        assert "v1" in (out_dir / "report.md").read_text()
+
+        # v1/ should be removed
+        assert not (out_dir / "v1").exists()
+
+        # No report/ subdirectory
+        assert not (out_dir / "report").exists()
+
+    def test_config_default_latest_report_only(self):
+        """latest_report_only defaults to True."""
+        config = ManufacturingConfig()
+        assert config.latest_report_only is True
+
+    def test_config_default_keep_build_artifacts(self):
+        """keep_build_artifacts defaults to False."""
+        config = ManufacturingConfig()
+        assert config.keep_build_artifacts is False
+
+    def test_keep_build_artifacts_preserves_intermediates(self, tmp_path, monkeypatch):
+        """With keep_build_artifacts=True, .build/report/ contains build files."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            keep_build_artifacts=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # report.md should be promoted to root
+        assert (out_dir / "report.md").exists()
+        assert result.report_path == out_dir / "report.md"
+
+        # .build/report/ should contain the build artifacts
+        build_report = out_dir / ".build" / "report"
+        assert build_report.exists()
+        assert (build_report / "report.md").exists()
+        assert (build_report / "data" / "board_summary.json").exists()
+        assert (build_report / "metadata.json").exists()
+
+        # No report/ or vN/ directories
+        assert not (out_dir / "report").exists()
+        assert not (out_dir / "v1").exists()
+
+    def test_pdf_promoted_over_md(self, tmp_path, monkeypatch):
+        """When report.pdf exists, it is promoted to root instead of report.md."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            # Create both MD and PDF in v1/
+            report_path = self._fake_report_generate(od, 1)
+            pdf_path = report_path.with_suffix(".pdf")
+            pdf_path.write_bytes(b"%PDF-1.4 fake pdf content")
+            result.report_path = pdf_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # PDF should be promoted to root
+        assert (out_dir / "report.pdf").exists()
+        assert result.report_path == out_dir / "report.pdf"
+
+        # Markdown source should also be preserved alongside PDF
+        assert (out_dir / "report.md").exists()
+        assert result.report_md_path == out_dir / "report.md"
+
+        # No report/ subdirectory
+        assert not (out_dir / "report").exists()
+
+    def test_no_report_no_build_dir(self, tmp_path, monkeypatch):
+        """With include_report=False, no report.pdf or .build/ directory is created."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            keep_build_artifacts=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        assert result.success
+        assert result.report_path is None
+        assert not (out_dir / "report.pdf").exists()
+        assert not (out_dir / "report.md").exists()
+        assert not (out_dir / ".build").exists()
+
+    def test_keep_versions_bypasses_artifact_cleanup(self, tmp_path, monkeypatch):
+        """With latest_report_only=False, no .build/ directory is created."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=False,
+            keep_build_artifacts=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        pkg.export(out_dir)
+
+        # vN/ directories preserved
+        assert (out_dir / "v1").exists()
+        # No .build/ directory (flattening was skipped)
+        assert not (out_dir / ".build").exists()
+        # No report at root (stays in vN/)
+        assert not (out_dir / "report.md").exists()
+
+    def test_manifest_checksums_report_at_root(self, tmp_path, monkeypatch):
+        """Manifest should checksum report.md at root, not report/report.md."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=True,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        pkg.export(out_dir)
+
+        # Parse manifest
+        import json
+
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+
+        # Manifest should have "report.md" key (at root), not "report/report.md"
+        assert "report.md" in manifest["files"]
+        assert "report/report.md" not in manifest.get("files", {})
+
+    def test_manifest_includes_both_pdf_and_md(self, tmp_path, monkeypatch):
+        """Manifest should include checksums for both report.pdf and report.md."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_generate_report(self_pkg, od, result):
+            # Create both MD and PDF in v1/
+            report_path = self._fake_report_generate(od, 1)
+            pdf_path = report_path.with_suffix(".pdf")
+            pdf_path.write_bytes(b"%PDF-1.4 fake pdf content")
+            result.report_path = pdf_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=True,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # Both files should exist at root
+        assert (out_dir / "report.pdf").exists()
+        assert (out_dir / "report.md").exists()
+
+        # result should track both paths
+        assert result.report_path == out_dir / "report.pdf"
+        assert result.report_md_path == out_dir / "report.md"
+
+        # Both should appear in all_files
+        all_file_names = [f.name for f in result.all_files]
+        assert "report.pdf" in all_file_names
+        assert "report.md" in all_file_names
+
+        # Parse manifest -- both should have checksums
+        import json
+
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        assert "report.pdf" in manifest["files"]
+        assert "report.md" in manifest["files"]
+
+    def test_cli_keep_build_artifacts_flag(self):
+        """CLI --keep-build-artifacts flag parses correctly."""
+        import argparse
+
+        # We just need to verify the argument parses without running the export
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--keep-build-artifacts", action="store_true")
+        args = parser.parse_args(["--keep-build-artifacts"])
+        assert args.keep_build_artifacts is True
+
+        args_default = parser.parse_args([])
+        assert args_default.keep_build_artifacts is False
+
+
+class TestGerberCleanup:
+    """Tests for gerber file cleanup after zip creation."""
+
+    def test_clean_after_zip_default(self):
+        """clean_after_zip defaults to True."""
+        from kicad_tools.export.gerber import GerberConfig
+
+        config = GerberConfig()
+        assert config.clean_after_zip is True
+
+    def test_clean_after_zip_removes_files(self, tmp_path):
+        """After creating zip, individual gerber files should be removed."""
+        from kicad_tools.export.gerber import GerberExporter
+
+        gerber_dir = tmp_path / "gerbers"
+        gerber_dir.mkdir()
+
+        # Create some fake gerber files
+        (gerber_dir / "F_Cu.gtl").write_text("gerber data")
+        (gerber_dir / "B_Cu.gbl").write_text("gerber data")
+        (gerber_dir / "board.drl").write_text("drill data")
+
+        # Create a zip manually
+        zip_path = gerber_dir / "gerbers.zip"
+        import zipfile
+
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for f in gerber_dir.iterdir():
+                if f.is_file() and f != zip_path:
+                    zf.write(f, f.name)
+
+        # Run cleanup
+        GerberExporter._clean_after_zip(gerber_dir, zip_path)
+
+        # Only the zip should remain
+        remaining = list(gerber_dir.iterdir())
+        assert len(remaining) == 1
+        assert remaining[0] == zip_path
+
+    def test_keep_gerber_files(self):
+        """clean_after_zip=False preserves individual files."""
+        from kicad_tools.export.gerber import GerberConfig
+
+        config = GerberConfig(clean_after_zip=False)
+        assert config.clean_after_zip is False
+
+
+class TestReadmeGeneration:
+    """Tests for README.txt generation in manufacturing packages."""
+
+    def test_readme_generated_by_default(self, tmp_path, monkeypatch):
+        """README.txt should be generated by default."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator\n")
+            return assembly.AssemblyPackageResult(
+                output_dir=od,
+                bom_path=bom_path,
+            )
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "output")
+
+        assert result.readme_path is not None
+        assert result.readme_path.exists()
+        assert result.readme_path.name == "README.txt"
+
+        content = result.readme_path.read_text()
+        assert "Manufacturing Package" in content
+        assert "jlcpcb" in content
+        assert "bom_jlcpcb.csv" in content
+
+    def test_include_readme_false(self):
+        """include_readme=False should skip README generation."""
+        config = ManufacturingConfig(include_readme=False)
+        assert config.include_readme is False
+
+    def test_config_default_include_readme(self):
+        """include_readme defaults to True."""
+        config = ManufacturingConfig()
+        assert config.include_readme is True
+
+
+class TestTHTHandSolderDocumentation:
+    """README/report documentation of the CPL's hand-solder THT set (issue #3539)."""
+
+    @staticmethod
+    def _tht_placements(refs_values_footprints):
+        from kicad_tools.export.pnp import PlacementData
+
+        return [
+            PlacementData(ref, value, footprint, 0.0, 0.0, 0.0, "F.Cu")
+            for ref, value, footprint in refs_values_footprints
+        ]
+
+    def _export(self, tmp_path, monkeypatch, tht_excluded):
+        """Run a ManufacturingPackage export with a faked assembly stage."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator\n")
+            pnp_path = od / "cpl_jlcpcb.csv"
+            pnp_path.write_text("Designator,Val\n")
+            return assembly.AssemblyPackageResult(
+                output_dir=od,
+                bom_path=bom_path,
+                pnp_path=pnp_path,
+                tht_excluded=tht_excluded,
+            )
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        return pkg.export(tmp_path / "output")
+
+    def test_readme_lists_hand_solder_refs(self, tmp_path, monkeypatch):
+        """README.txt's CPL entry must enumerate the excluded THT refs."""
+        tht = self._tht_placements(
+            [
+                ("J1", "Conn_01x04", "PinHeader_1x04"),
+                ("R6", "1k", "R_Axial"),
+                ("SW1", "SW_Push", "SW_PUSH_6mm"),
+            ]
+        )
+        result = self._export(tmp_path, monkeypatch, tht)
+
+        assert result.readme_path is not None
+        content = result.readme_path.read_text()
+        assert "cpl_jlcpcb.csv" in content
+        assert "3 through-hole component(s)" in content
+        assert "hand-soldered" in content
+        assert "J1, R6, SW1" in content
+
+    def test_readme_no_note_for_smd_only_board(self, tmp_path, monkeypatch):
+        """SMD-only boards must not get a spurious hand-solder note."""
+        result = self._export(tmp_path, monkeypatch, [])
+
+        content = result.readme_path.read_text()
+        assert "cpl_jlcpcb.csv" in content
+        assert "hand-soldered" not in content
+        assert "through-hole" not in content
+
+    def test_tht_component_groups_from_assembly_result(self, tmp_path):
+        """_tht_component_groups produces BOM-style rows for the report."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(
+                output_dir=tmp_path,
+                tht_excluded=self._tht_placements(
+                    [
+                        ("R20", "1k", "R_Axial"),
+                        ("R6", "1k", "R_Axial"),
+                        ("J1", "Conn_01x04", "PinHeader_1x04"),
+                    ]
+                ),
+            ),
+        )
+
+        rows = ManufacturingPackage._tht_component_groups(result)
+        assert rows == [
+            {"value": "Conn_01x04", "footprint": "PinHeader_1x04", "qty": 1, "refs": "J1"},
+            {"value": "1k", "footprint": "R_Axial", "qty": 2, "refs": "R6, R20"},
+        ]
+
+    def test_tht_component_groups_empty_cases(self, tmp_path):
+        """No assembly result or empty exclusion set -> no rows."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        no_assembly = ManufacturingResult(output_dir=tmp_path)
+        assert ManufacturingPackage._tht_component_groups(no_assembly) == []
+
+        empty = ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(output_dir=tmp_path),
+        )
+        assert ManufacturingPackage._tht_component_groups(empty) == []
+
+
+class TestDRCSafetyFloor:
+    """Tests for the connectivity safety floor (#3912).
+
+    Shipping a shorted board is never safe, so a pre-existing DRC report
+    containing SHORTING_ITEMS (or other connectivity errors) must block
+    export even when preflight is fully skipped (``skip_all=True``).
+    """
+
+    @staticmethod
+    def _write_shorting_drc_report(path: Path) -> None:
+        """Write a kct-check-format DRC report with one net short."""
+        report = {
+            "file": "board.kicad_pcb",
+            "manufacturer": "jlcpcb",
+            "summary": {"errors": 1, "warnings": 0, "passed": False},
+            "violations": [
+                {
+                    "rule_id": "shorting_items",
+                    "severity": "error",
+                    "message": "Two items share a net (net GND / net PHASE_A)",
+                    "items": ["Track [GND]", "Track [PHASE_A]"],
+                }
+            ],
+        }
+        path.write_text(json.dumps(report))
+
+    @staticmethod
+    def _write_clean_drc_report(path: Path) -> None:
+        """Write a kct-check-format DRC report with no errors."""
+        report = {
+            "file": "board.kicad_pcb",
+            "manufacturer": "jlcpcb",
+            "summary": {"errors": 0, "warnings": 0, "passed": True},
+            "violations": [],
+        }
+        path.write_text(json.dumps(report))
+
+    def _patch_assembly(self, monkeypatch):
+        from kicad_tools.export import assembly
+
+        called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            return assembly.AssemblyPackageResult(output_dir=od, bom_path=bom_path)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+        return called
+
+    def test_skip_preflight_does_not_suppress_shorts(self, tmp_path, monkeypatch):
+        """skip_all=True must NOT suppress the safety floor on net shorts."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        # Pre-existing DRC report next to the PCB, containing a short.
+        self._write_shorting_drc_report(project_dir / "drc_report.json")
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        # Export must fail and must not have written any assembly artifacts.
+        assert not result.success, "Safety floor should block export on shorts"
+        assert any("short" in e.lower() for e in result.errors), result.errors
+        assert not assembly_called["value"], "Assembly must not run when floor blocks"
+
+    def test_safety_floor_reads_explicit_report_path(self, tmp_path, monkeypatch):
+        """An explicit drc_report_path with shorts also blocks export."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        report_path = tmp_path / "custom_drc.json"
+        self._write_shorting_drc_report(report_path)
+
+        self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True, drc_report_path=str(report_path)),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        assert not result.success
+        assert any("short" in e.lower() for e in result.errors), result.errors
+
+    def test_safety_floor_warns_on_empty_report(self, tmp_path, monkeypatch, caplog):
+        """A zero-byte report (killed kicad-cli) warns instead of reading as clean (#6742)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        (project_dir / "drc_report.json").write_text("")
+
+        self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING):
+            pkg.export(tmp_path / "out")
+
+        assert any(
+            "is empty" in r.getMessage() and "killed" in r.getMessage() for r in caplog.records
+        )
+
+    def test_skip_drc_floor_overrides_safety_floor(self, tmp_path, monkeypatch, caplog):
+        """The explicit --skip-drc-floor escape hatch bypasses the floor -- loudly."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        self._write_shorting_drc_report(project_dir / "drc_report.json")
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True, skip_drc_floor=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
+
+        # With the escape hatch, the floor does not fire and assembly runs.
+        assert assembly_called["value"], "Assembly should run when floor is skipped"
+        assert result.success, f"Unexpected errors: {result.errors}"
+
+        # Bypassing the floor must leave a loud audit trail: both a logged
+        # warning and a result.warnings entry (surfaced in export output).
+        assert any(
+            "--skip-drc-floor" in rec.getMessage() and rec.levelno == logging.WARNING
+            for rec in caplog.records
+        ), "Expected a logger.warning when the floor is bypassed"
+        assert any("--skip-drc-floor" in w for w in result.warnings), (
+            f"Expected a result.warnings entry; got {result.warnings}"
+        )
+
+    def test_stale_drc_report_emits_warning(self, tmp_path, monkeypatch, caplog):
+        """A DRC report bound to other PCB content emits a stale warning.
+
+        Issue #7190: staleness is judged by the report's recorded
+        ``pcb_sha256`` (mtimes are meaningless after a git checkout), not by
+        mtime.  The floor still blocks on the stale FAIL (staleness in the
+        blocking direction is the safe side); the warning just explains it.
+        """
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        report = project_dir / "drc_report.json"
+        self._write_shorting_drc_report(report)
+        data = json.loads(report.read_text())
+        data["pcb_sha256"] = "0" * 64  # generated for some older PCB bytes
+        report.write_text(json.dumps(data))
+
+        self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
+
+        # Still blocks (stale FAIL is the safe side).
+        assert not result.success
+        # And warns that the verdict may be stale.
+        assert any(
+            "not bound to the PCB's current content (mismatch)" in rec.getMessage()
+            for rec in caplog.records
+        ), "Expected a stale-binding warning when the report hashes other PCB bytes"
+
+    def test_bound_drc_report_emits_no_stale_warning(self, tmp_path, monkeypatch, caplog):
+        """A report whose pcb_sha256 matches the PCB is not called stale,
+        whatever the files' mtimes (issue #7190)."""
+        import hashlib
+        import os
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        report = project_dir / "drc_report.json"
+        self._write_clean_drc_report(report)
+        data = json.loads(report.read_text())
+        data["pcb_sha256"] = hashlib.sha256(pcb.read_bytes()).hexdigest()
+        report.write_text(json.dumps(data))
+        pcb_mtime = pcb.stat().st_mtime
+        os.utime(report, (pcb_mtime - 100, pcb_mtime - 100))
+
+        self._patch_assembly(monkeypatch)
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result = pkg.export(tmp_path / "out")
+
+        assert result.success, result.errors
+        assert not any("not bound" in rec.getMessage() for rec in caplog.records)
+
+    def test_clean_drc_report_does_not_block(self, tmp_path, monkeypatch):
+        """A clean pre-existing DRC report must not block export (no regression)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        self._write_clean_drc_report(project_dir / "drc_report.json")
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        assert assembly_called["value"]
+        assert result.success, f"Unexpected errors: {result.errors}"
+
+    def test_no_drc_report_does_not_block(self, tmp_path, monkeypatch):
+        """With no DRC report on disk, the floor is a no-op (no false-positive)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        # No drc_report.json written.
+
+        assembly_called = self._patch_assembly(monkeypatch)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(tmp_path / "out")
+
+        assert assembly_called["value"]
+        assert result.success, f"Unexpected errors: {result.errors}"
+
+
+class TestDRCSafetyFloorOpensAndSource:
+    """Issue #7091: the floor reads opens and ignores another board's report.
+
+    Since #4498 KiCad's ``unconnected_items`` live outside
+    ``DRCReport.errors``; the floor must read them through
+    ``connectivity_items()``.  A report generated for a different PCB is not
+    evidence for this board, so it is treated like a missing report.
+    """
+
+    @staticmethod
+    def _write_kicad_cli_report(path: Path, source: str, open_severity: str | None = "error"):
+        unconnected = []
+        if open_severity is not None:
+            unconnected = [
+                {
+                    "type": "unconnected_items",
+                    "severity": open_severity,
+                    "description": "Missing connection between items",
+                    "items": [
+                        {"description": "Pad 1 [VCC] of C1", "pos": {"x": 1.0, "y": 1.0}},
+                        {"description": "Pad 1 [VCC] of C2", "pos": {"x": 2.0, "y": 1.0}},
+                    ],
+                }
+            ] * 36
+        path.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://schemas.kicad.org/drc.v1.json",
+                    "source": source,
+                    "kicad_version": "10.0.6",
+                    "coordinate_units": "mm",
+                    "violations": [],
+                    "unconnected_items": unconnected,
+                    "schematic_parity": [],
+                }
+            )
+        )
+
+    def _export(
+        self, tmp_path, monkeypatch, pcb_name="board.kicad_pcb", strict=False, skip_all=True, **pf
+    ):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        pcb = project_dir / pcb_name
+        pcb.write_text("(kicad_pcb)")
+        pcb.with_suffix(".kicad_sch").write_text("(kicad_sch)")
+        assembly_called = TestDRCSafetyFloor._patch_assembly(self, monkeypatch)
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            include_readme=False,
+            strict_preflight=strict,
+            preflight=PreflightConfig(skip_all=skip_all, **pf),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        return pkg.export(tmp_path / "out"), assembly_called
+
+    def test_unconnected_items_block_export(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(tmp_path / "project" / "drc_report.json", "board.kicad_pcb")
+        result, assembly_called = self._export(tmp_path, monkeypatch)
+        assert not result.success
+        assert not assembly_called["value"], "Nothing may be written when the floor blocks"
+        msg = " ".join(result.errors)
+        assert "36 connectivity error(s) (0 net short(s), 36 unconnected item(s))" in msg
+        assert "shorts/opens" in msg
+
+    def test_warning_severity_opens_do_not_block(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "board.kicad_pcb", open_severity="warning"
+        )
+        result, assembly_called = self._export(tmp_path, monkeypatch)
+        assert result.success, result.errors
+        assert assembly_called["value"]
+
+    def test_waived_opens_do_not_block(self, tmp_path, monkeypatch):
+        from kicad_tools.drc.report import DRCReport
+
+        (tmp_path / "project").mkdir()
+        report_path = tmp_path / "project" / "drc_report.json"
+        self._write_kicad_cli_report(report_path, "board.kicad_pcb")
+        real_load = DRCReport.load
+
+        def load_waived(path):
+            report = real_load(path)
+            for v in report.unconnected_items:
+                v.waived = True
+            return report
+
+        monkeypatch.setattr(DRCReport, "load", staticmethod(load_waived))
+        result, _ = self._export(tmp_path, monkeypatch)
+        assert result.success, result.errors
+
+    def test_skip_drc_floor_bypasses_opens(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(tmp_path / "project" / "drc_report.json", "board.kicad_pcb")
+        result, assembly_called = self._export(tmp_path, monkeypatch, skip_drc_floor=True)
+        assert result.success, result.errors
+        assert assembly_called["value"]
+
+    def test_report_for_other_board_is_not_evidence(self, tmp_path, monkeypatch, caplog):
+        """The ``*_routed`` sibling's report: warning only, never a block or a pass."""
+        (tmp_path / "project").mkdir()
+        # Even a FAILing report for another board must not block this one
+        # (it says nothing about this board): same policy as a missing report.
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.export.manufacturing"):
+            result, assembly_called = self._export(tmp_path, monkeypatch, pcb_name="x.kicad_pcb")
+        assert result.success, result.errors
+        assert assembly_called["value"]
+        assert any("is for x_routed.kicad_pcb, not x.kicad_pcb" in w for w in result.warnings), (
+            result.warnings
+        )
+        assert any("x_routed.kicad_pcb" in r.getMessage() for r in caplog.records)
+
+    def test_strict_blocks_auto_discovered_other_board_report(self, tmp_path, monkeypatch):
+        """--strict-preflight: a sibling report for another board blocks, nothing written."""
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path, monkeypatch, pcb_name="x.kicad_pcb", strict=True
+        )
+        assert not result.success
+        assert not assembly_called["value"]
+        assert not (tmp_path / "out").exists()
+        assert any("is for x_routed.kicad_pcb" in e for e in result.errors), result.errors
+
+    def test_strict_preflight_drc_check_fails_on_other_board_report(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path,
+            monkeypatch,
+            pcb_name="x.kicad_pcb",
+            strict=True,
+            skip_all=False,
+            skip_drc_floor=True,
+        )
+        assert not result.success
+        assert not assembly_called["value"]
+        assert not (tmp_path / "out").exists()
+        assert any("Preflight FAIL [drc]" in e for e in result.errors), result.errors
+
+    def test_non_strict_other_board_report_warns_and_exports(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(
+            tmp_path / "project" / "drc_report.json", "/abs/elsewhere/x_routed.kicad_pcb"
+        )
+        result, assembly_called = self._export(
+            tmp_path, monkeypatch, pcb_name="x.kicad_pcb", strict=False
+        )
+        assert result.success, result.errors
+        assert assembly_called["value"]
+        assert any("is for x_routed.kicad_pcb" in w for w in result.warnings)
+
+    def test_explicit_report_for_other_board_is_not_evidence(self, tmp_path, monkeypatch):
+        report_path = tmp_path / "custom.json"
+        self._write_kicad_cli_report(report_path, "other.kicad_pcb")
+        result, _ = self._export(tmp_path, monkeypatch, drc_report_path=str(report_path))
+        assert result.success, result.errors
+        assert any("is for other.kicad_pcb" in w for w in result.warnings)
+
+    def test_report_without_source_still_blocks(self, tmp_path, monkeypatch):
+        (tmp_path / "project").mkdir()
+        self._write_kicad_cli_report(tmp_path / "project" / "drc_report.json", "")
+        result, _ = self._export(tmp_path, monkeypatch)
+        assert not result.success
+
+
+class TestManufacturingPreflightSpecOverlay:
+    """Integration: preflight run by ManufacturingPackage must not falsely
+    warn about LCSC fields that the ``.kct`` spec overlay will populate
+    (issue #3926).
+
+    Preflight (Step 0) sees a raw BOM; the spec overlay is applied later in
+    the assembly pipeline (Step 1).  The manufacturing package must wire the
+    checker to the board directory so ``find_spec_file`` locates the spec and
+    the ``bom_fields`` check can distinguish spec-covered from truly-missing
+    LCSC.
+    """
+
+    def _make_bom_all_missing_lcsc(self, refs):
+        """Build a raw BOM (no LCSC set) for the given references."""
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        return BOM(
+            items=[
+                BOMItem(reference=r, value="100nF", footprint="C_0402", lib_id="Device:C", lcsc="")
+                for r in refs
+            ]
+        )
+
+    def _write_project(self, tmp_path, kct_body=None):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        if kct_body is not None:
+            (project_dir / "project.kct").write_text(kct_body)
+        return project_dir, pcb
+
+    def _bom_fields_result(self, pkg, monkeypatch, bom):
+        """Run only ``_check_bom_fields`` on a checker wired like the package.
+
+        The checker is constructed with the same paths the manufacturing
+        package would use (``pkg.pcb_path`` lives in the board directory), so
+        ``find_spec_file`` locates the sibling ``project.kct`` exactly as it
+        does in the real Step-0 preflight.  We mock only ``_load_bom`` to
+        supply a raw (pre-overlay) BOM without needing a parseable PCB.
+        """
+        checker = PreflightChecker(
+            pcb_path=pkg.pcb_path,
+            schematic_path=pkg.schematic_path,
+            manufacturer=pkg.manufacturer,
+            config=PreflightConfig(),
+            bom_source=pkg.config.bom_source,
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+        return checker._check_bom_fields()
+
+    def test_spec_covered_lcsc_no_false_warn(self, tmp_path, monkeypatch):
+        """Board with a spec covering all items => no bom_fields LCSC WARN."""
+        kct = (
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "T"\n'
+            '  revision: "A"\n'
+            "bom_entries:\n"
+            "  - ref: C1\n"
+            "    part: MPN1\n"
+            "    lcsc: C111\n"
+            "  - ref: C2\n"
+            "    part: MPN2\n"
+            "    lcsc: C222\n"
+        )
+        _, pcb = self._write_project(tmp_path, kct)
+        config = ManufacturingConfig(include_report=False)
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+
+        bom = self._make_bom_all_missing_lcsc(["C1", "C2"])
+        result = self._bom_fields_result(pkg, monkeypatch, bom)
+
+        assert result.status == "OK"
+        assert "missing LCSC" not in result.message
+        assert "missing LCSC" not in result.details
+
+    def test_no_spec_still_warns(self, tmp_path, monkeypatch):
+        """Board with no spec file => genuine missing-LCSC WARN still fires."""
+        _, pcb = self._write_project(tmp_path, kct_body=None)
+        config = ManufacturingConfig(include_report=False)
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+
+        bom = self._make_bom_all_missing_lcsc(["C1", "C2"])
+        result = self._bom_fields_result(pkg, monkeypatch, bom)
+
+        assert result.status == "WARN"
+        assert "2/2 active item(s) missing LCSC part number" in result.details
+
+
+class TestPreflightLCSCReconciliation:
+    """``bom_fields`` must reflect post-``--auto-lcsc`` state (issue #4591).
+
+    Preflight (Step 0) runs before any file is written -- deliberately, so
+    ``--strict-preflight`` can abort with nothing on disk.  It therefore
+    cannot know what ``enrich_bom_lcsc`` (Step 1) will resolve, since that
+    needs parts-API / cache I/O.  ``_reconcile_preflight_lcsc`` updates the
+    recorded result after enrichment and before the manifest is serialized.
+    """
+
+    def _write_project(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        return pcb
+
+    def _enrichment(self, *, auto=0, unmatched_refs=(), spec_unresolved_refs=()):
+        from kicad_tools.export.bom_enrich import EnrichmentEntry, EnrichmentReport
+
+        entries = [
+            EnrichmentEntry(
+                value="100nF",
+                footprint="C_0402",
+                references=[f"C{i}"],
+                lcsc_part=f"C{1000 + i}",
+                source="auto",
+            )
+            for i in range(auto)
+        ]
+        entries += [
+            EnrichmentEntry(
+                value="X",
+                footprint="F",
+                references=[ref],
+                lcsc_part="",
+                source="unmatched",
+            )
+            for ref in unmatched_refs
+        ]
+        entries += [
+            EnrichmentEntry(
+                value="Samtec TSW-102-07-G-S",
+                footprint="Connector:TSW",
+                references=[ref],
+                lcsc_part="",
+                source="spec_unresolved",
+                error="explicit MPN set via project spec/CSV with no LCSC",
+            )
+            for ref in spec_unresolved_refs
+        ]
+        return EnrichmentReport(entries=entries)
+
+    def _run_export(self, tmp_path, monkeypatch, preflight_results, enrichment):
+        """Run a full export with assembly mocked to report ``enrichment``."""
+        pcb = self._write_project(tmp_path)
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            res = assembly.AssemblyPackageResult(output_dir=od)
+            res.lcsc_enrichment = enrichment
+            return res
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+        monkeypatch.setattr(PreflightChecker, "run_all", lambda self: preflight_results)
+
+        config = ManufacturingConfig(include_report=False, include_project_zip=False)
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        entry = next(e for e in manifest["preflight"] if e["name"] == "bom_fields")
+        return result, entry
+
+    def test_fully_enriched_warn_becomes_ok(self, tmp_path, monkeypatch):
+        """Enrichment resolved everything => manifest records OK, not the WARN."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="88/88 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=88))
+        assert entry["status"] == "OK"
+        assert "missing LCSC part number" not in entry["message"]
+        assert "missing LCSC part number" not in entry.get("details", "")
+        assert "88 group(s) received LCSC from enrichment" in entry["details"]
+
+    def test_partial_enrichment_names_only_unmatched(self, tmp_path, monkeypatch):
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="10/10 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(
+            tmp_path,
+            monkeypatch,
+            preflight,
+            self._enrichment(auto=8, unmatched_refs=("U7", "U9")),
+        )
+        assert entry["status"] == "WARN"
+        assert "2 component group(s) still missing LCSC" in entry["details"]
+        assert "U7" in entry["details"]
+        assert "U9" in entry["details"]
+        assert "10/10" not in entry["details"]
+
+    def test_spec_unresolved_names_explicitly_sourced_parts(self, tmp_path, monkeypatch):
+        """Issue #4995: explicit MPN/supplier (no LCSC) items must surface as
+        WARN with a distinct 'explicitly sourced' clause -- not a silent OK,
+        and not the generic 'no match found' wording used for real misses.
+        """
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="3/3 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(
+            tmp_path,
+            monkeypatch,
+            preflight,
+            self._enrichment(auto=2, spec_unresolved_refs=("J1",)),
+        )
+        assert entry["status"] == "WARN"
+        assert "explicitly sourced outside LCSC" in entry["details"]
+        assert "J1" in entry["details"]
+        # Must not be conflated with the generic "still missing LCSC"
+        # (no-match) wording, which is reserved for entries actually sent
+        # through -- and rejected by -- the auto-matcher.
+        assert "still missing LCSC part number after enrichment" not in entry["details"]
+
+    def test_fail_is_never_downgraded(self, tmp_path, monkeypatch):
+        """A FAIL (missing footprint) survives reconciliation verbatim."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="FAIL",
+                message="BOM field issues: 2 problem(s)",
+                details=(
+                    "1 item(s) missing footprint: U1; 5/5 active item(s) missing LCSC part number"
+                ),
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=5))
+        assert entry["status"] == "FAIL"
+        assert entry["details"] == (
+            "1 item(s) missing footprint: U1; 5/5 active item(s) missing LCSC part number"
+        )
+
+    def test_non_lcsc_warn_clause_is_preserved(self, tmp_path, monkeypatch):
+        """A missing-value WARN keeps the entry at WARN after LCSC resolves."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 2 problem(s)",
+                details=(
+                    "1 item(s) missing value: R9; 4/4 active item(s) missing LCSC part number"
+                ),
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=4))
+        assert entry["status"] == "WARN"
+        assert "1 item(s) missing value: R9" in entry["details"]
+        assert "missing LCSC part number" not in entry["details"]
+
+    def test_no_enrichment_report_is_noop(self, tmp_path, monkeypatch):
+        """``--no-auto-lcsc`` (no report) must leave the entry untouched."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="3/3 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, None)
+        assert entry["status"] == "WARN"
+        assert entry["details"] == "3/3 active item(s) missing LCSC part number"
+
+    def test_ok_entry_without_lcsc_clause_untouched(self, tmp_path, monkeypatch):
+        """The #3926 spec-overlay note must not be rewritten."""
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="OK",
+                message="All 4 BOM items have required fields",
+                details="4 active item(s) will receive LCSC from spec overlay",
+            )
+        ]
+        _, entry = self._run_export(tmp_path, monkeypatch, preflight, self._enrichment(auto=0))
+        assert entry["status"] == "OK"
+        assert entry["message"] == "All 4 BOM items have required fields"
+        assert entry["details"] == "4 active item(s) will receive LCSC from spec overlay"
+
+    def test_skip_preflight_reconciliation_noop(self, tmp_path, monkeypatch):
+        """No preflight results => reconciliation is a no-op, not a crash."""
+        pcb = self._write_project(tmp_path)
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            res = assembly.AssemblyPackageResult(output_dir=od)
+            res.lcsc_enrichment = self_enrichment
+            return res
+
+        self_enrichment = self._enrichment(auto=2)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        assert result.preflight_results == []
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        assert "preflight" not in manifest

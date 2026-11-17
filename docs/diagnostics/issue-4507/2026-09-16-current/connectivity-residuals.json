@@ -1,0 +1,1482 @@
+{
+  "2": {
+    "summary": {
+      "total_nets": 99,
+      "complete": 96,
+      "incomplete": 3,
+      "unrouted": 0,
+      "total_unconnected_pads": 71
+    },
+    "incomplete_nets": [
+      {
+        "net_number": 1,
+        "net_name": "+3.3V",
+        "net_class": "",
+        "status": "incomplete",
+        "net_type": "plane",
+        "total_pads": 18,
+        "connected_count": 1,
+        "unconnected_count": 17,
+        "connection_percentage": 5.6,
+        "island_count": 18,
+        "total_connections": 17,
+        "routed_connections": 0,
+        "open_connections": 17,
+        "is_plane_net": true,
+        "has_filled_zone": true,
+        "is_advisory_incomplete": true,
+        "plane_layer": "In2.Cu",
+        "plane_layers": [
+          "In2.Cu"
+        ],
+        "has_routing": false,
+        "has_vias": false,
+        "suggested_fix": "kct stitch /private/tmp/4507-current-main-20260916/stage2/step2.kicad_pcb --net +3.3V (zones on In2.Cu)",
+        "connected_pads": [
+          {
+            "name": "C1.1",
+            "position": [
+              117.52,
+              32.0
+            ]
+          }
+        ],
+        "unconnected_pads": [
+          {
+            "name": "C10.1",
+            "position": [
+              41.525,
+              66.0
+            ]
+          },
+          {
+            "name": "C2.1",
+            "position": [
+              117.52,
+              38.0
+            ]
+          },
+          {
+            "name": "C4.1",
+            "position": [
+              117.05,
+              44.0
+            ]
+          },
+          {
+            "name": "J5.1",
+            "position": [
+              144.0,
+              30.0
+            ]
+          },
+          {
+            "name": "R10.1",
+            "position": [
+              123.0875,
+              44.0
+            ]
+          },
+          {
+            "name": "R22.1",
+            "position": [
+              31.0875,
+              78.0
+            ]
+          },
+          {
+            "name": "R24.1",
+            "position": [
+              39.0875,
+              70.0
+            ]
+          },
+          {
+            "name": "R28.2",
+            "position": [
+              110.9125,
+              36.0
+            ]
+          },
+          {
+            "name": "R5.1",
+            "position": [
+              79.0875,
+              8.0
+            ]
+          },
+          {
+            "name": "R54.1",
+            "position": [
+              45.0875,
+              70.0
+            ]
+          },
+          {
+            "name": "R64.1",
+            "position": [
+              98.0875,
+              80.0
+            ]
+          },
+          {
+            "name": "U1.4",
+            "position": [
+              121.825,
+              33.6
+            ]
+          },
+          {
+            "name": "U12.2",
+            "position": [
+              32.85,
+              62.0
+            ]
+          },
+          {
+            "name": "U12.2",
+            "position": [
+              39.15,
+              62.0
+            ]
+          },
+          {
+            "name": "U3.6",
+            "position": [
+              27.1375,
+              73.05
+            ]
+          },
+          {
+            "name": "U7.8",
+            "position": [
+              42.475,
+              76.095
+            ]
+          },
+          {
+            "name": "U8.5",
+            "position": [
+              93.1375,
+              10.05
+            ]
+          }
+        ]
+      },
+      {
+        "net_number": 19,
+        "net_name": "/FUSED_LINE",
+        "net_class": "",
+        "status": "incomplete",
+        "net_type": "signal",
+        "total_pads": 7,
+        "connected_count": 6,
+        "unconnected_count": 1,
+        "connection_percentage": 85.7,
+        "island_count": 2,
+        "total_connections": 6,
+        "routed_connections": 5,
+        "open_connections": 1,
+        "is_plane_net": false,
+        "has_filled_zone": false,
+        "is_advisory_incomplete": false,
+        "plane_layer": "",
+        "plane_layers": [],
+        "has_routing": true,
+        "has_vias": true,
+        "suggested_fix": "Route traces to connect 1 pads",
+        "connected_pads": [
+          {
+            "name": "J2.1",
+            "position": [
+              8.0,
+              56.0
+            ]
+          },
+          {
+            "name": "RV1.1",
+            "position": [
+              34.0,
+              32.0
+            ]
+          },
+          {
+            "name": "F1.2",
+            "position": [
+              20.0,
+              29.5
+            ]
+          },
+          {
+            "name": "F2.1",
+            "position": [
+              48.0,
+              32.0
+            ]
+          },
+          {
+            "name": "Q1B.2",
+            "position": [
+              70.54,
+              88.0
+            ]
+          },
+          {
+            "name": "R6.1",
+            "position": [
+              56.0,
+              42.0
+            ]
+          }
+        ],
+        "unconnected_pads": [
+          {
+            "name": "Q2B.2",
+            "position": [
+              122.54,
+              88.0
+            ]
+          }
+        ]
+      },
+      {
+        "net_number": 79,
+        "net_name": "GND",
+        "net_class": "",
+        "status": "incomplete",
+        "net_type": "plane",
+        "total_pads": 67,
+        "connected_count": 14,
+        "unconnected_count": 53,
+        "connection_percentage": 20.9,
+        "island_count": 53,
+        "total_connections": 66,
+        "routed_connections": 14,
+        "open_connections": 52,
+        "is_plane_net": true,
+        "has_filled_zone": true,
+        "is_advisory_incomplete": true,
+        "plane_layer": "In1.Cu",
+        "plane_layers": [
+          "In1.Cu"
+        ],
+        "has_routing": false,
+        "has_vias": false,
+        "suggested_fix": "kct stitch /private/tmp/4507-current-main-20260916/stage2/step2.kicad_pcb --net GND (zones on In1.Cu)",
+        "connected_pads": [
+          {
+            "name": "J5.3",
+            "position": [
+              149.08,
+              30.0
+            ]
+          },
+          {
+            "name": "J5.5",
+            "position": [
+              154.16,
+              30.0
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              144.86,
+              15.65
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              144.86,
+              16.75
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.41,
+              15.1
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.41,
+              16.2
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.41,
+              17.3
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.96,
+              15.65
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.96,
+              16.75
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              146.51,
+              15.1
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              146.51,
+              16.2
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              146.51,
+              17.3
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              147.06,
+              15.65
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              147.06,
+              16.75
+            ]
+          }
+        ],
+        "unconnected_pads": [
+          {
+            "name": "C1.2",
+            "position": [
+              118.48,
+              32.0
+            ]
+          },
+          {
+            "name": "C10.2",
+            "position": [
+              44.475,
+              66.0
+            ]
+          },
+          {
+            "name": "C13.2",
+            "position": [
+              26.48,
+              84.0
+            ]
+          },
+          {
+            "name": "C14.2",
+            "position": [
+              32.48,
+              68.0
+            ]
+          },
+          {
+            "name": "C15.2",
+            "position": [
+              64.48,
+              34.0
+            ]
+          },
+          {
+            "name": "C16.2",
+            "position": [
+              94.48,
+              78.0
+            ]
+          },
+          {
+            "name": "C2.2",
+            "position": [
+              118.48,
+              38.0
+            ]
+          },
+          {
+            "name": "C22.2",
+            "position": [
+              100.48,
+              58.0
+            ]
+          },
+          {
+            "name": "C4.2",
+            "position": [
+              118.95,
+              44.0
+            ]
+          },
+          {
+            "name": "C41.2",
+            "position": [
+              27.95,
+              62.0
+            ]
+          },
+          {
+            "name": "C42.2",
+            "position": [
+              114.775,
+              8.0
+            ]
+          },
+          {
+            "name": "C43.2",
+            "position": [
+              122.95,
+              26.0
+            ]
+          },
+          {
+            "name": "C44.2",
+            "position": [
+              127.48,
+              26.0
+            ]
+          },
+          {
+            "name": "C45.2",
+            "position": [
+              114.95,
+              14.0
+            ]
+          },
+          {
+            "name": "C47.2",
+            "position": [
+              121.475,
+              20.0
+            ]
+          },
+          {
+            "name": "C48.2",
+            "position": [
+              127.475,
+              20.0
+            ]
+          },
+          {
+            "name": "C5.2",
+            "position": [
+              130.48,
+              44.0
+            ]
+          },
+          {
+            "name": "C9.2",
+            "position": [
+              63.475,
+              20.0
+            ]
+          },
+          {
+            "name": "D2.1",
+            "position": [
+              139.0625,
+              52.0
+            ]
+          },
+          {
+            "name": "J6.2",
+            "position": [
+              108.0,
+              6.54
+            ]
+          },
+          {
+            "name": "PS1.3",
+            "position": [
+              53.08,
+              5.0
+            ]
+          },
+          {
+            "name": "Q13.2",
+            "position": [
+              95.0625,
+              20.95
+            ]
+          },
+          {
+            "name": "Q7.2",
+            "position": [
+              73.0625,
+              62.95
+            ]
+          },
+          {
+            "name": "Q8.2",
+            "position": [
+              117.0625,
+              62.95
+            ]
+          },
+          {
+            "name": "R11.2",
+            "position": [
+              148.9125,
+              38.0
+            ]
+          },
+          {
+            "name": "R2.2",
+            "position": [
+              86.9125,
+              14.0
+            ]
+          },
+          {
+            "name": "R23.2",
+            "position": [
+              32.9125,
+              84.0
+            ]
+          },
+          {
+            "name": "R26.2",
+            "position": [
+              104.9125,
+              36.0
+            ]
+          },
+          {
+            "name": "R29.2",
+            "position": [
+              92.9125,
+              20.0
+            ]
+          },
+          {
+            "name": "R48.2",
+            "position": [
+              94.9125,
+              58.0
+            ]
+          },
+          {
+            "name": "R49.2",
+            "position": [
+              94.9125,
+              62.0
+            ]
+          },
+          {
+            "name": "R50.2",
+            "position": [
+              80.9125,
+              62.0
+            ]
+          },
+          {
+            "name": "R51.2",
+            "position": [
+              124.9125,
+              62.0
+            ]
+          },
+          {
+            "name": "R52.2",
+            "position": [
+              88.9125,
+              66.0
+            ]
+          },
+          {
+            "name": "R53.2",
+            "position": [
+              138.9125,
+              66.0
+            ]
+          },
+          {
+            "name": "R56.2",
+            "position": [
+              46.9125,
+              82.0
+            ]
+          },
+          {
+            "name": "R58.2",
+            "position": [
+              10.825,
+              68.0
+            ]
+          },
+          {
+            "name": "R61.2",
+            "position": [
+              70.9125,
+              28.0
+            ]
+          },
+          {
+            "name": "R63.2",
+            "position": [
+              94.9125,
+              74.0
+            ]
+          },
+          {
+            "name": "R65.2",
+            "position": [
+              152.9125,
+              46.0
+            ]
+          },
+          {
+            "name": "R68.2",
+            "position": [
+              96.9125,
+              26.0
+            ]
+          },
+          {
+            "name": "R74.2",
+            "position": [
+              114.9125,
+              20.0
+            ]
+          },
+          {
+            "name": "TH1.2",
+            "position": [
+              99.9125,
+              92.0
+            ]
+          },
+          {
+            "name": "U1.5",
+            "position": [
+              121.825,
+              34.4
+            ]
+          },
+          {
+            "name": "U12.1",
+            "position": [
+              32.85,
+              59.7
+            ]
+          },
+          {
+            "name": "U13.4",
+            "position": [
+              121.1375,
+              8.95
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.96,
+              16.2
+            ]
+          },
+          {
+            "name": "U14.9",
+            "position": [
+              136.25,
+              22.0
+            ]
+          },
+          {
+            "name": "U2.4",
+            "position": [
+              79.62,
+              17.08
+            ]
+          },
+          {
+            "name": "U3.2",
+            "position": [
+              24.8625,
+              74.0
+            ]
+          },
+          {
+            "name": "U5.3",
+            "position": [
+              97.525,
+              66.635
+            ]
+          },
+          {
+            "name": "U7.4",
+            "position": [
+              37.525,
+              79.905
+            ]
+          },
+          {
+            "name": "U8.2",
+            "position": [
+              90.8625,
+              11.0
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "3": {
+    "summary": {
+      "total_nets": 99,
+      "complete": 96,
+      "incomplete": 3,
+      "unrouted": 0,
+      "total_unconnected_pads": 69
+    },
+    "incomplete_nets": [
+      {
+        "net_number": 1,
+        "net_name": "+3.3V",
+        "net_class": "",
+        "status": "incomplete",
+        "net_type": "plane",
+        "total_pads": 18,
+        "connected_count": 1,
+        "unconnected_count": 17,
+        "connection_percentage": 5.6,
+        "island_count": 18,
+        "total_connections": 17,
+        "routed_connections": 0,
+        "open_connections": 17,
+        "is_plane_net": true,
+        "has_filled_zone": true,
+        "is_advisory_incomplete": true,
+        "plane_layer": "In2.Cu",
+        "plane_layers": [
+          "In2.Cu"
+        ],
+        "has_routing": false,
+        "has_vias": false,
+        "suggested_fix": "kct stitch /private/tmp/4507-current-main-20260916/stage3/step3.kicad_pcb --net +3.3V (zones on In2.Cu)",
+        "connected_pads": [
+          {
+            "name": "C1.1",
+            "position": [
+              117.52,
+              32.0
+            ]
+          }
+        ],
+        "unconnected_pads": [
+          {
+            "name": "C10.1",
+            "position": [
+              41.525,
+              66.0
+            ]
+          },
+          {
+            "name": "C2.1",
+            "position": [
+              117.52,
+              38.0
+            ]
+          },
+          {
+            "name": "C4.1",
+            "position": [
+              117.05,
+              44.0
+            ]
+          },
+          {
+            "name": "J5.1",
+            "position": [
+              144.0,
+              30.0
+            ]
+          },
+          {
+            "name": "R10.1",
+            "position": [
+              123.0875,
+              44.0
+            ]
+          },
+          {
+            "name": "R22.1",
+            "position": [
+              31.0875,
+              78.0
+            ]
+          },
+          {
+            "name": "R24.1",
+            "position": [
+              39.0875,
+              70.0
+            ]
+          },
+          {
+            "name": "R28.2",
+            "position": [
+              110.9125,
+              36.0
+            ]
+          },
+          {
+            "name": "R5.1",
+            "position": [
+              79.0875,
+              8.0
+            ]
+          },
+          {
+            "name": "R54.1",
+            "position": [
+              45.0875,
+              70.0
+            ]
+          },
+          {
+            "name": "R64.1",
+            "position": [
+              98.0875,
+              80.0
+            ]
+          },
+          {
+            "name": "U1.4",
+            "position": [
+              121.825,
+              33.6
+            ]
+          },
+          {
+            "name": "U12.2",
+            "position": [
+              32.85,
+              62.0
+            ]
+          },
+          {
+            "name": "U12.2",
+            "position": [
+              39.15,
+              62.0
+            ]
+          },
+          {
+            "name": "U3.6",
+            "position": [
+              27.1375,
+              73.05
+            ]
+          },
+          {
+            "name": "U7.8",
+            "position": [
+              42.475,
+              76.095
+            ]
+          },
+          {
+            "name": "U8.5",
+            "position": [
+              93.1375,
+              10.05
+            ]
+          }
+        ]
+      },
+      {
+        "net_number": 19,
+        "net_name": "/FUSED_LINE",
+        "net_class": "",
+        "status": "incomplete",
+        "net_type": "signal",
+        "total_pads": 7,
+        "connected_count": 6,
+        "unconnected_count": 1,
+        "connection_percentage": 85.7,
+        "island_count": 2,
+        "total_connections": 6,
+        "routed_connections": 5,
+        "open_connections": 1,
+        "is_plane_net": false,
+        "has_filled_zone": false,
+        "is_advisory_incomplete": false,
+        "plane_layer": "",
+        "plane_layers": [],
+        "has_routing": true,
+        "has_vias": true,
+        "suggested_fix": "Route traces to connect 1 pads",
+        "connected_pads": [
+          {
+            "name": "J2.1",
+            "position": [
+              8.0,
+              56.0
+            ]
+          },
+          {
+            "name": "RV1.1",
+            "position": [
+              34.0,
+              32.0
+            ]
+          },
+          {
+            "name": "F1.2",
+            "position": [
+              20.0,
+              29.5
+            ]
+          },
+          {
+            "name": "F2.1",
+            "position": [
+              48.0,
+              32.0
+            ]
+          },
+          {
+            "name": "Q1B.2",
+            "position": [
+              70.54,
+              88.0
+            ]
+          },
+          {
+            "name": "R6.1",
+            "position": [
+              56.0,
+              42.0
+            ]
+          }
+        ],
+        "unconnected_pads": [
+          {
+            "name": "Q2B.2",
+            "position": [
+              122.54,
+              88.0
+            ]
+          }
+        ]
+      },
+      {
+        "net_number": 79,
+        "net_name": "GND",
+        "net_class": "",
+        "status": "incomplete",
+        "net_type": "plane",
+        "total_pads": 67,
+        "connected_count": 16,
+        "unconnected_count": 51,
+        "connection_percentage": 23.9,
+        "island_count": 52,
+        "total_connections": 66,
+        "routed_connections": 15,
+        "open_connections": 51,
+        "is_plane_net": true,
+        "has_filled_zone": true,
+        "is_advisory_incomplete": true,
+        "plane_layer": "In1.Cu",
+        "plane_layers": [
+          "In1.Cu"
+        ],
+        "has_routing": false,
+        "has_vias": false,
+        "suggested_fix": "kct stitch /private/tmp/4507-current-main-20260916/stage3/step3.kicad_pcb --net GND (zones on In1.Cu)",
+        "connected_pads": [
+          {
+            "name": "J6.2",
+            "position": [
+              108.0,
+              6.54
+            ]
+          },
+          {
+            "name": "J5.3",
+            "position": [
+              149.08,
+              30.0
+            ]
+          },
+          {
+            "name": "J5.5",
+            "position": [
+              154.16,
+              30.0
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              144.86,
+              15.65
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              144.86,
+              16.75
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.41,
+              15.1
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.41,
+              16.2
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.41,
+              17.3
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.96,
+              15.65
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.96,
+              16.75
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              146.51,
+              15.1
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              146.51,
+              16.2
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              146.51,
+              17.3
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              147.06,
+              15.65
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              147.06,
+              16.75
+            ]
+          },
+          {
+            "name": "PS1.3",
+            "position": [
+              53.08,
+              5.0
+            ]
+          }
+        ],
+        "unconnected_pads": [
+          {
+            "name": "C1.2",
+            "position": [
+              118.48,
+              32.0
+            ]
+          },
+          {
+            "name": "C10.2",
+            "position": [
+              44.475,
+              66.0
+            ]
+          },
+          {
+            "name": "C13.2",
+            "position": [
+              26.48,
+              84.0
+            ]
+          },
+          {
+            "name": "C14.2",
+            "position": [
+              32.48,
+              68.0
+            ]
+          },
+          {
+            "name": "C15.2",
+            "position": [
+              64.48,
+              34.0
+            ]
+          },
+          {
+            "name": "C16.2",
+            "position": [
+              94.48,
+              78.0
+            ]
+          },
+          {
+            "name": "C2.2",
+            "position": [
+              118.48,
+              38.0
+            ]
+          },
+          {
+            "name": "C22.2",
+            "position": [
+              100.48,
+              58.0
+            ]
+          },
+          {
+            "name": "C4.2",
+            "position": [
+              118.95,
+              44.0
+            ]
+          },
+          {
+            "name": "C41.2",
+            "position": [
+              27.95,
+              62.0
+            ]
+          },
+          {
+            "name": "C42.2",
+            "position": [
+              114.775,
+              8.0
+            ]
+          },
+          {
+            "name": "C43.2",
+            "position": [
+              122.95,
+              26.0
+            ]
+          },
+          {
+            "name": "C44.2",
+            "position": [
+              127.48,
+              26.0
+            ]
+          },
+          {
+            "name": "C45.2",
+            "position": [
+              114.95,
+              14.0
+            ]
+          },
+          {
+            "name": "C47.2",
+            "position": [
+              121.475,
+              20.0
+            ]
+          },
+          {
+            "name": "C48.2",
+            "position": [
+              127.475,
+              20.0
+            ]
+          },
+          {
+            "name": "C5.2",
+            "position": [
+              130.48,
+              44.0
+            ]
+          },
+          {
+            "name": "C9.2",
+            "position": [
+              63.475,
+              20.0
+            ]
+          },
+          {
+            "name": "D2.1",
+            "position": [
+              139.0625,
+              52.0
+            ]
+          },
+          {
+            "name": "Q13.2",
+            "position": [
+              95.0625,
+              20.95
+            ]
+          },
+          {
+            "name": "Q7.2",
+            "position": [
+              73.0625,
+              62.95
+            ]
+          },
+          {
+            "name": "Q8.2",
+            "position": [
+              117.0625,
+              62.95
+            ]
+          },
+          {
+            "name": "R11.2",
+            "position": [
+              148.9125,
+              38.0
+            ]
+          },
+          {
+            "name": "R2.2",
+            "position": [
+              86.9125,
+              14.0
+            ]
+          },
+          {
+            "name": "R23.2",
+            "position": [
+              32.9125,
+              84.0
+            ]
+          },
+          {
+            "name": "R26.2",
+            "position": [
+              104.9125,
+              36.0
+            ]
+          },
+          {
+            "name": "R29.2",
+            "position": [
+              92.9125,
+              20.0
+            ]
+          },
+          {
+            "name": "R48.2",
+            "position": [
+              94.9125,
+              58.0
+            ]
+          },
+          {
+            "name": "R49.2",
+            "position": [
+              94.9125,
+              62.0
+            ]
+          },
+          {
+            "name": "R50.2",
+            "position": [
+              80.9125,
+              62.0
+            ]
+          },
+          {
+            "name": "R51.2",
+            "position": [
+              124.9125,
+              62.0
+            ]
+          },
+          {
+            "name": "R52.2",
+            "position": [
+              88.9125,
+              66.0
+            ]
+          },
+          {
+            "name": "R53.2",
+            "position": [
+              138.9125,
+              66.0
+            ]
+          },
+          {
+            "name": "R56.2",
+            "position": [
+              46.9125,
+              82.0
+            ]
+          },
+          {
+            "name": "R58.2",
+            "position": [
+              10.825,
+              68.0
+            ]
+          },
+          {
+            "name": "R61.2",
+            "position": [
+              70.9125,
+              28.0
+            ]
+          },
+          {
+            "name": "R63.2",
+            "position": [
+              94.9125,
+              74.0
+            ]
+          },
+          {
+            "name": "R65.2",
+            "position": [
+              152.9125,
+              46.0
+            ]
+          },
+          {
+            "name": "R68.2",
+            "position": [
+              96.9125,
+              26.0
+            ]
+          },
+          {
+            "name": "R74.2",
+            "position": [
+              114.9125,
+              20.0
+            ]
+          },
+          {
+            "name": "TH1.2",
+            "position": [
+              99.9125,
+              92.0
+            ]
+          },
+          {
+            "name": "U1.5",
+            "position": [
+              121.825,
+              34.4
+            ]
+          },
+          {
+            "name": "U12.1",
+            "position": [
+              32.85,
+              59.7
+            ]
+          },
+          {
+            "name": "U13.4",
+            "position": [
+              121.1375,
+              8.95
+            ]
+          },
+          {
+            "name": "U14.19",
+            "position": [
+              145.96,
+              16.2
+            ]
+          },
+          {
+            "name": "U14.9",
+            "position": [
+              136.25,
+              22.0
+            ]
+          },
+          {
+            "name": "U2.4",
+            "position": [
+              79.62,
+              17.08
+            ]
+          },
+          {
+            "name": "U3.2",
+            "position": [
+              24.8625,
+              74.0
+            ]
+          },
+          {
+            "name": "U5.3",
+            "position": [
+              97.525,
+              66.635
+            ]
+          },
+          {
+            "name": "U7.4",
+            "position": [
+              37.525,
+              79.905
+            ]
+          },
+          {
+            "name": "U8.2",
+            "position": [
+              90.8625,
+              11.0
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

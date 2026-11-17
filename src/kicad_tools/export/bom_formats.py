@@ -1,0 +1,466 @@
+"""
+BOM export formats for different manufacturers.
+
+Provides formatters to convert BOM data to manufacturer-specific formats.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from kicad_tools.exceptions import ConfigurationError
+
+if TYPE_CHECKING:
+    from ..parts.cache import PartsCache
+    from ..schema.bom import BOMItem
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BOMExportConfig:
+    """Configuration for BOM export."""
+
+    include_dnp: bool = False
+    group_by_value: bool = True
+    include_lcsc: bool = True
+    include_mfr: bool = True
+
+
+class BOMFormatter(ABC):
+    """Abstract base class for BOM formatters."""
+
+    # Manufacturer identifier
+    manufacturer_id: str = ""
+    manufacturer_name: str = ""
+
+    def __init__(self, config: BOMExportConfig | None = None):
+        self.config = config or BOMExportConfig()
+
+    @abstractmethod
+    def format(self, items: list[BOMItem]) -> str:
+        """Format BOM items to manufacturer-specific format."""
+        pass
+
+    @abstractmethod
+    def get_headers(self) -> list[str]:
+        """Get column headers for this format."""
+        pass
+
+    def filter_items(self, items: list[BOMItem]) -> list[BOMItem]:
+        """Filter items based on config.
+
+        Always drops virtual items -- power symbols (``power:GND``,
+        ``kicad_tools_pwr:VIN`` synthesized rails, any library symbol
+        carrying KiCad's ``(power)`` flag, and any ``#`` reference such as
+        ``#PWR``/``#FLG``; see #7615) and explicit "exclude from BOM" symbols (``in_bom=
+        False``). These are schematic-only labels that don't represent
+        a placed footprint, so they must not appear in the BOM CSV or
+        the JLCPCB pre-flight will (correctly) flag a BOM/PCB mismatch.
+        Issue #3291 surfaced this when the voltage-divider's synthesized
+        ``VIN`` power symbol leaked into ``bom_jlcpcb.csv`` after the
+        schematic was rewritten to use ``VIN`` instead of stock ``+5V``.
+        """
+        filtered = [item for item in items if not getattr(item, "is_virtual", False)]
+        if self.config.include_dnp:
+            return filtered
+        return [item for item in filtered if not getattr(item, "dnp", False)]
+
+
+class JLCPCBBOMFormatter(BOMFormatter):
+    """BOM formatter for JLCPCB assembly service."""
+
+    manufacturer_id = "jlcpcb"
+    manufacturer_name = "JLCPCB"
+
+    def get_headers(self) -> list[str]:
+        """JLCPCB BOM column headers."""
+        return ["Comment", "Designator", "Footprint", "LCSC Part #"]
+
+    def format(self, items: list[BOMItem]) -> str:
+        """
+        Format BOM for JLCPCB.
+
+        JLCPCB expects:
+        - Comment: Component value
+        - Designator: Reference designator(s), comma-separated for groups
+        - Footprint: Footprint name
+        - LCSC Part #: LCSC part number (e.g., C123456)
+        """
+        filtered = self.filter_items(items)
+
+        if self.config.group_by_value:
+            grouped = self._group_items(filtered)
+        else:
+            grouped = {
+                (item.value, item.footprint, getattr(item, "lcsc", "")): [item] for item in filtered
+            }
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for key, group_items in sorted(grouped.items()):
+            value, footprint, lcsc = key
+            designators = ",".join(sorted(item.reference for item in group_items))
+            writer.writerow([value, designators, footprint, lcsc])
+
+        return output.getvalue()
+
+    def _group_items(self, items: list[BOMItem]) -> dict[tuple, list[BOMItem]]:
+        """Group items by value, footprint, and LCSC part."""
+        groups: dict[tuple, list[BOMItem]] = {}
+        for item in items:
+            lcsc = getattr(item, "lcsc", "")
+            key = (item.value, item.footprint, lcsc)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(item)
+        return groups
+
+
+class PCBWayBOMFormatter(BOMFormatter):
+    """BOM formatter for PCBWay assembly service."""
+
+    manufacturer_id = "pcbway"
+    manufacturer_name = "PCBWay"
+
+    def get_headers(self) -> list[str]:
+        """PCBWay BOM column headers."""
+        return [
+            "Item",
+            "Designator",
+            "Qty",
+            "Manufacturer",
+            "Mfr. Part #",
+            "Description/Value",
+            "Package/Footprint",
+        ]
+
+    def format(self, items: list[BOMItem]) -> str:
+        """
+        Format BOM for PCBWay.
+
+        PCBWay expects:
+        - Item: Row number
+        - Designator: Reference designator(s)
+        - Qty: Quantity
+        - Manufacturer: Component manufacturer
+        - Mfr. Part #: Manufacturer part number
+        - Description/Value: Component value/description
+        - Package/Footprint: Package size/footprint name
+        """
+        filtered = self.filter_items(items)
+
+        if self.config.group_by_value:
+            grouped = self._group_items(filtered)
+        else:
+            grouped = {(item.value, item.footprint): [item] for item in filtered}
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for idx, (key, group_items) in enumerate(sorted(grouped.items()), 1):
+            value, footprint = key
+            designators = ",".join(sorted(item.reference for item in group_items))
+            qty = len(group_items)
+            manufacturer = getattr(group_items[0], "manufacturer", "")
+            mfr_part = getattr(group_items[0], "mfr_part", "")
+            writer.writerow([idx, designators, qty, manufacturer, mfr_part, value, footprint])
+
+        return output.getvalue()
+
+    def _group_items(self, items: list[BOMItem]) -> dict[tuple, list[BOMItem]]:
+        """Group items by value and footprint."""
+        groups: dict[tuple, list[BOMItem]] = {}
+        for item in items:
+            key = (item.value, item.footprint)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(item)
+        return groups
+
+
+class SeeedBOMFormatter(BOMFormatter):
+    """BOM formatter for Seeed Fusion assembly service."""
+
+    manufacturer_id = "seeed"
+    manufacturer_name = "Seeed Fusion"
+
+    def get_headers(self) -> list[str]:
+        """Seeed BOM column headers."""
+        return ["Part/Designator", "Manufacturer Part Number/Seeed SKU", "Quantity"]
+
+    def format(self, items: list[BOMItem]) -> str:
+        """
+        Format BOM for Seeed Fusion.
+
+        Seeed expects:
+        - Part/Designator: Reference designator(s)
+        - Manufacturer Part Number/Seeed SKU: MPN or Seeed OPL SKU
+        - Quantity: Number of components
+        """
+        filtered = self.filter_items(items)
+
+        if self.config.group_by_value:
+            grouped = self._group_items(filtered)
+        else:
+            grouped = {item.reference: [item] for item in filtered}
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for _key, group_items in sorted(grouped.items()):
+            designators = ",".join(sorted(item.reference for item in group_items))
+            mpn = getattr(group_items[0], "mfr_part", "") or getattr(
+                group_items[0], "seeed_sku", ""
+            )
+            qty = len(group_items)
+            writer.writerow([designators, mpn, qty])
+
+        return output.getvalue()
+
+    def _group_items(self, items: list[BOMItem]) -> dict[str, list[BOMItem]]:
+        """Group items by MPN."""
+        groups: dict[str, list[BOMItem]] = {}
+        for item in items:
+            mpn = getattr(item, "mfr_part", "") or item.value
+            if mpn not in groups:
+                groups[mpn] = []
+            groups[mpn].append(item)
+        return groups
+
+
+class GenericBOMFormatter(BOMFormatter):
+    """Generic BOM formatter with all available fields."""
+
+    manufacturer_id = "generic"
+    manufacturer_name = "Generic"
+
+    def get_headers(self) -> list[str]:
+        """Generic BOM column headers."""
+        headers = ["Reference", "Value", "Footprint", "Quantity"]
+        if self.config.include_lcsc:
+            headers.append("LCSC")
+        if self.config.include_mfr:
+            headers.extend(["Manufacturer", "MPN"])
+        return headers
+
+    def format(self, items: list[BOMItem]) -> str:
+        """Format BOM with all available fields."""
+        filtered = self.filter_items(items)
+
+        if self.config.group_by_value:
+            grouped = self._group_items(filtered)
+        else:
+            grouped = {item.reference: [item] for item in filtered}
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for key, group_items in sorted(grouped.items()):
+            if isinstance(key, str):
+                refs = key
+            else:
+                refs = ",".join(sorted(item.reference for item in group_items))
+
+            item = group_items[0]
+            row = [refs, item.value, item.footprint, len(group_items)]
+
+            if self.config.include_lcsc:
+                row.append(getattr(item, "lcsc", ""))
+            if self.config.include_mfr:
+                row.extend(
+                    [
+                        getattr(item, "manufacturer", ""),
+                        getattr(item, "mfr_part", ""),
+                    ]
+                )
+
+            writer.writerow(row)
+
+        return output.getvalue()
+
+    def _group_items(self, items: list[BOMItem]) -> dict[tuple, list[BOMItem]]:
+        """Group items by value and footprint."""
+        groups: dict[tuple, list[BOMItem]] = {}
+        for item in items:
+            key = (item.value, item.footprint)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(item)
+        return groups
+
+
+# Registry of available formatters
+BOM_FORMATTERS: dict[str, type[BOMFormatter]] = {
+    "jlcpcb": JLCPCBBOMFormatter,
+    "pcbway": PCBWayBOMFormatter,
+    "seeed": SeeedBOMFormatter,
+    "generic": GenericBOMFormatter,
+}
+
+
+def get_bom_formatter(manufacturer: str, config: BOMExportConfig | None = None) -> BOMFormatter:
+    """
+    Get BOM formatter for a manufacturer.
+
+    Args:
+        manufacturer: Manufacturer ID (jlcpcb, pcbway, seeed, generic)
+        config: Export configuration
+
+    Returns:
+        BOMFormatter for the specified manufacturer
+
+    Raises:
+        ValueError: If manufacturer is not supported
+    """
+    formatter_class = BOM_FORMATTERS.get(manufacturer.lower())
+    if formatter_class is None:
+        available = list(BOM_FORMATTERS.keys())
+        raise ConfigurationError(
+            f"Unknown manufacturer: {manufacturer}",
+            context={"manufacturer": manufacturer, "available": available},
+            suggestions=[f"Use one of: {', '.join(available)}"],
+        )
+    return formatter_class(config)
+
+
+def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]:
+    """Read LCSC part numbers from an existing JLCPCB BOM CSV.
+
+    Parses the CSV and builds a lookup mapping ``(value, footprint)`` to
+    the LCSC part number found in that row.  Column names are matched
+    case-insensitively so the function works across minor format
+    variations.
+
+    Args:
+        csv_path: Path to an existing BOM CSV file.
+
+    Returns:
+        A dict mapping ``(value, footprint)`` to the LCSC part number
+        string.  Only rows with a non-empty LCSC value are included.
+    """
+    assignments: dict[tuple[str, str], str] = {}
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames is None:
+                return assignments
+
+            # Build a case-insensitive header map
+            header_map: dict[str, str] = {h.lower().strip(): h for h in reader.fieldnames}
+
+            # Identify the columns we need
+            value_col = header_map.get("comment") or header_map.get("value")
+            footprint_col = header_map.get("footprint") or header_map.get("package/footprint")
+            lcsc_col = header_map.get("lcsc part #") or header_map.get("lcsc")
+
+            if not (value_col and footprint_col and lcsc_col):
+                return assignments
+
+            for row in reader:
+                value = (row.get(value_col) or "").strip()
+                footprint = (row.get(footprint_col) or "").strip()
+                lcsc = (row.get(lcsc_col) or "").strip()
+                if value and footprint and lcsc:
+                    assignments[(value, footprint)] = lcsc
+    except (OSError, UnicodeDecodeError, csv.Error):
+        # If the file can't be read or parsed, return empty — the
+        # caller will simply regenerate without merging.
+        return {}
+    return assignments
+
+
+def apply_existing_lcsc_assignments(
+    items: list[BOMItem],
+    existing: dict[tuple[str, str], str],
+    parts_cache: PartsCache | None = None,
+) -> tuple[int, set[str]]:
+    """Apply LCSC assignments from an existing BOM CSV to fresh items.
+
+    Items that already have an LCSC number (schematic/spec priority) or
+    are DNP are skipped.  When ``parts_cache`` is provided, each
+    candidate assignment is validated against the part's known
+    parametric value and chip package; a clear mismatch is dropped with
+    a WARNING instead of being propagated (issue #3590: one bad cache
+    hit must not become sticky in the committed artifact via the
+    read-back merge; issue #3597: same for right-value/wrong-package
+    assignments like an 0402 part on 0805 footprints).
+
+    Args:
+        items: Fresh BOM items (modified in place).
+        existing: Mapping of ``(value, footprint)`` to LCSC part number,
+            as returned by :func:`read_existing_lcsc_assignments`.
+        parts_cache: Optional local parts cache used to validate the
+            read-back assignments.
+
+    Returns:
+        Tuple of (number of items that received an LCSC, set of
+        references that were assigned).
+    """
+    from .lcsc_value_check import check_lcsc_against_cache
+
+    merged_count = 0
+    merged_refs: set[str] = set()
+    rejected: set[tuple[str, str]] = set()
+
+    for item in items:
+        if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
+            continue
+        key = (item.value, item.footprint)
+        if key in rejected:
+            continue
+        lcsc = existing.get(key)
+        if not lcsc:
+            continue
+
+        mismatch = check_lcsc_against_cache(
+            parts_cache, lcsc, item.value, item.reference, footprint=item.footprint
+        )
+        if mismatch is not None:
+            rejected.add(key)
+            logger.warning(
+                "Dropping LCSC assignment %s read back from existing BOM "
+                "for %s [%s]: %s -- leaving row unassigned",
+                lcsc,
+                item.value,
+                item.footprint,
+                mismatch.describe(),
+            )
+            continue
+
+        item.lcsc = lcsc
+        merged_refs.add(item.reference)
+        merged_count += 1
+
+    return merged_count, merged_refs
+
+
+def export_bom(
+    items: list[BOMItem],
+    manufacturer: str = "generic",
+    config: BOMExportConfig | None = None,
+) -> str:
+    """
+    Export BOM to manufacturer-specific format.
+
+    Args:
+        items: List of BOM items
+        manufacturer: Manufacturer ID
+        config: Export configuration
+
+    Returns:
+        Formatted BOM as CSV string
+    """
+    formatter = get_bom_formatter(manufacturer, config)
+    return formatter.format(items)

@@ -1,0 +1,1704 @@
+"""C++/Python parity for the exact-geometry clearance kernel (Epic #5509, 1b).
+
+The kernel ships as two implementations -- ``router/cpp/src/clearance_kernel.cpp``
+and ``router/clearance_kernel.py`` -- and the Python one is a *port*, not an
+independent model.  This module is the standing proof that they have not
+drifted, and it is **mandatory for every future kernel edit**: a divergence is
+a bug on whichever side disagrees with kicad-cli, never a reason to widen the
+tolerance.
+
+What is asserted, per seed:
+
+* identical :func:`clear` verdicts on every non-boundary pair;
+* ``|gap_py - gap_cpp| <= 1e-7`` mm on **every** pair, boundary or not (it is a
+  pure-arithmetic bound, independent of any threshold);
+* ``copper_gap`` / ``hole_gap`` agree about *inapplicability* too -- one side
+  returning ``+inf`` while the other returns a number is a divergence.
+
+Two shape sources are driven through both ports:
+
+1. the Phase 1a corpus generator (``tests/conformance/generator.py``), whose
+   pairs are placed analytically at a known gap near the requirement; and
+2. a seeded raw-shape sampler, which deliberately produces crossing,
+   overlapping and coincident geometry the corpus never emits (negative gaps
+   and the proper-intersection early-out in ``segment_to_segment_distance``).
+
+Scope: Phase 1b is complete here -- all five shape classes (``KSegment``,
+``KVia``, ``KEdge``, ``KPad``, ``KZonePoly``) and all **fifteen** unordered
+pair kinds five shape classes admit.  (#5589's acceptance criteria call that
+"25 kinds", counting ordered pairs; the kernel's answer is order-independent by
+construction, so the unordered count is the one a coverage assertion can use --
+``test_every_pair_kind_is_covered`` checks 15 and the order-independence of
+every pair is asserted separately, on every pair, in ``_compare_shapes``.)
+
+Shaped after ``tests/router/test_pairwise_cpp_parity.py``: module-level
+``requires_cpp`` skipif, ``router_cpp`` imported lazily inside helpers, and a
+per-test ``random.Random(seed)`` rather than module-global RNG state (the CI
+bulk run is ``pytest -n auto``).
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import random
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.router import clearance_kernel as ck
+from kicad_tools.router.cpp_backend import is_cpp_available
+from tests.conformance.generator import (
+    BOUNDARY_BAND_MM,
+    PAD_SHAPES,
+    PadSpec,
+    generate_case,
+)
+
+requires_cpp = pytest.mark.skipif(
+    not is_cpp_available(),
+    reason="C++ router backend not available",
+)
+
+# Parity bound on the gap itself.  Pure arithmetic in float64 on both sides,
+# so the only expected difference is last-bit rounding from FMA contraction in
+# the optimised C++ build -- ~1e-16 relative, twelve orders below this bound.
+GAP_TOLERANCE_MM = 1e-7
+
+# Pairs whose gap sits inside +/-this of the requirement are excluded from
+# *verdict* comparison and counted separately: there, an identical gap can
+# still land on opposite sides of the threshold under any rounding at all, so
+# a verdict mismatch would measure the comparison, not the model.  Same band
+# the Phase 1a generator uses (10x CLEARANCE_EPSILON_MM).
+VERDICT_BOUNDARY_BAND_MM = BOUNDARY_BAND_MM
+
+# Copper layer name -> kernel layer index.  The kernel takes an opaque int;
+# vias and the board outline span every layer and carry no layer at all.
+_LAYER_INDEX = {"F.Cu": 0, "In1.Cu": 1, "In2.Cu": 2, "B.Cu": 3}
+
+# Every shape kind the kernel covers.
+PAIR_KINDS = ("segment", "via", "edge", "pad", "zone")
+
+
+# ---------------------------------------------------------------------------
+# Shape construction: one Python shape, one C++ shape, from the same numbers
+# ---------------------------------------------------------------------------
+
+
+def _cpp_segment(seg: ck.KSegment):
+    from kicad_tools.router import router_cpp
+
+    return router_cpp.KSegment(seg.x1, seg.y1, seg.x2, seg.y2, seg.width, seg.layer)
+
+
+def _cpp_via(via: ck.KVia):
+    from kicad_tools.router import router_cpp
+
+    return router_cpp.KVia(via.x, via.y, via.diameter, via.drill)
+
+
+def _cpp_edge(edge: ck.KEdge):
+    from kicad_tools.router import router_cpp
+
+    return router_cpp.KEdge([(x, y) for x, y in edge.points])
+
+
+def _cpp_pad(pad: ck.KPad):
+    """Twin the *already-built* Python pad, core vertices and all.
+
+    Deliberately not ``router_cpp.make_pad(...)`` from the same parameters:
+    passing the Python core across means a divergence in ``make_pad`` itself
+    cannot hide behind matching gaps.  ``make_pad`` parity is asserted
+    separately, and exactly, by ``test_make_pad_agrees_on_the_core``.
+    """
+    from kicad_tools.router import router_cpp
+
+    return router_cpp.KPad(
+        [(x, y) for x, y in pad.core],
+        pad.corner_radius,
+        pad.cx,
+        pad.cy,
+        pad.drill,
+        pad.layer,
+    )
+
+
+def _cpp_zone(zone: ck.KZonePoly):
+    from kicad_tools.router import router_cpp
+
+    return router_cpp.KZonePoly(
+        [[(x, y) for x, y in ring] for ring in zone.rings],
+        zone.layer,
+    )
+
+
+def _to_cpp(shape: ck.KShape):
+    """Build the C++ twin of a Python kernel shape."""
+    if isinstance(shape, ck.KSegment):
+        return _cpp_segment(shape)
+    if isinstance(shape, ck.KVia):
+        return _cpp_via(shape)
+    if isinstance(shape, ck.KEdge):
+        return _cpp_edge(shape)
+    if isinstance(shape, ck.KPad):
+        return _cpp_pad(shape)
+    return _cpp_zone(shape)
+
+
+def _kind(shape: ck.KShape) -> str:
+    if isinstance(shape, ck.KSegment):
+        return "segment"
+    if isinstance(shape, ck.KVia):
+        return "via"
+    if isinstance(shape, ck.KEdge):
+        return "edge"
+    if isinstance(shape, ck.KPad):
+        return "pad"
+    return "zone"
+
+
+# ---------------------------------------------------------------------------
+# Shape sources
+# ---------------------------------------------------------------------------
+
+
+def _corpus_pad(pad: PadSpec) -> ck.KPad:
+    """A corpus ``PadSpec`` as a kernel pad, through the ``_pad_polygon`` port.
+
+    The probe footprints are SMD (``drill`` 0), single-layer, and carry their
+    shape keyword / local size / roundrect ratio on ``PadSpec.shape``.  The
+    rotation is already absolute -- the generator's own ``local_x_axis`` uses
+    ``rotate_pad_offset(.., pad.rotation)`` for the same reason (#3902).
+    """
+    shape = pad.shape
+    return ck.make_pad(
+        shape.shape,
+        shape.size[0],
+        shape.size[1],
+        0.25 if shape.roundrect_rratio is None else shape.roundrect_rratio,
+        pad.rotation,
+        pad.x,
+        pad.y,
+        _LAYER_INDEX[pad.layer],
+        0.0,
+    )
+
+
+def _corpus_shapes(seed: int) -> tuple[list[ck.KShape], float]:
+    """Kernel shapes for one Phase 1a corpus case, plus its requirement.
+
+    Every copper object the case declares is converted: segments, vias, pads
+    (through :func:`_corpus_pad`) and the pour, plus the board outline as a
+    closed ``KEdge`` so copper-to-edge pairs are exercised on every seed.
+
+    The pour is modelled as its **declared boundary** -- one outer ring, no
+    interior rings.  The corpus writes zones *unfilled* (``ZoneSpec``: "only
+    meaningful after a refill"), so there is no committed ``filled_polygon`` to
+    read here and inventing a knockout would be fiction.  Rings *with* holes --
+    the structure ``KZonePoly`` exists for -- are covered by
+    :func:`_random_shapes` and pinned semantically by
+    ``test_zone_interior_rings_are_not_copper``.
+    """
+    case = generate_case(seed)
+    shapes: list[ck.KShape] = []
+
+    for seg in case.segments:
+        shapes.append(
+            ck.KSegment(
+                x1=seg.start[0],
+                y1=seg.start[1],
+                x2=seg.end[0],
+                y2=seg.end[1],
+                width=seg.width,
+                layer=_LAYER_INDEX[seg.layer],
+            )
+        )
+    for via in case.vias:
+        shapes.append(ck.KVia(x=via.x, y=via.y, diameter=via.diameter, drill=via.drill))
+    for pad in case.pads:
+        shapes.append(_corpus_pad(pad))
+    if case.zone is not None:
+        boundary = tuple(case.zone.boundary)
+        shapes.append(
+            ck.KZonePoly(
+                rings=((*boundary, boundary[0]),),
+                layer=_LAYER_INDEX[case.zone.layer],
+            )
+        )
+
+    w, h = case.width, case.height
+    shapes.append(ck.KEdge(points=((0.0, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, 0.0))))
+    return shapes, case.rules.project_clearance
+
+
+def _random_zone(rng: random.Random) -> ck.KZonePoly:
+    """A rectangular pour, half the time with a rectangular hole punched in it.
+
+    The hole is what makes ``KZonePoly`` more than a polygon: a point inside it
+    is *not* copper.  Sampling holed and un-holed pours in the same corpus is
+    what makes a containment bug on either side show up as a verdict mismatch
+    rather than as a quietly-agreed wrong answer.
+    """
+    cx = round(rng.uniform(-2.0, 2.0), 6)
+    cy = round(rng.uniform(-2.0, 2.0), 6)
+    half_w = round(rng.uniform(0.8, 2.0), 6)
+    half_h = round(rng.uniform(0.8, 2.0), 6)
+    outer = (
+        (cx - half_w, cy - half_h),
+        (cx + half_w, cy - half_h),
+        (cx + half_w, cy + half_h),
+        (cx - half_w, cy + half_h),
+    )
+    rings: list[tuple[tuple[float, float], ...]] = [(*outer, outer[0])]
+    if rng.random() < 0.5:
+        hw = round(half_w * rng.uniform(0.2, 0.6), 6)
+        hh = round(half_h * rng.uniform(0.2, 0.6), 6)
+        hole = (
+            (cx - hw, cy - hh),
+            (cx + hw, cy - hh),
+            (cx + hw, cy + hh),
+            (cx - hw, cy + hh),
+        )
+        rings.append((*hole, hole[0]))
+    return ck.KZonePoly(rings=tuple(rings), layer=rng.choice([0, 1, ck.ALL_LAYERS]))
+
+
+def _random_shapes(rng: random.Random, count: int) -> list[ck.KShape]:
+    """Adversarial raw shapes: crossing, overlapping and coincident geometry.
+
+    The corpus places every pair at a positive gap near the requirement, so on
+    its own it never reaches the negative-gap branch, the proper-intersection
+    early-out, or the "this shape is *inside* that pour" containment branch.
+    These do.
+    """
+    shapes: list[ck.KShape] = []
+    for _ in range(count):
+        pick = rng.random()
+        if pick < 0.30:
+            shapes.append(
+                ck.KSegment(
+                    x1=round(rng.uniform(-2.0, 2.0), 6),
+                    y1=round(rng.uniform(-2.0, 2.0), 6),
+                    x2=round(rng.uniform(-2.0, 2.0), 6),
+                    y2=round(rng.uniform(-2.0, 2.0), 6),
+                    width=round(rng.uniform(0.1, 0.5), 6),
+                    layer=rng.choice([0, 1, ck.ALL_LAYERS]),
+                )
+            )
+        elif pick < 0.55:
+            diameter = round(rng.uniform(0.3, 0.9), 6)
+            shapes.append(
+                ck.KVia(
+                    x=round(rng.uniform(-2.0, 2.0), 6),
+                    y=round(rng.uniform(-2.0, 2.0), 6),
+                    diameter=diameter,
+                    # 1-in-5 vias are hole-free, to exercise the
+                    # NO_INTERACTION branches of ``hole_gap``.
+                    drill=0.0 if rng.random() < 0.2 else round(diameter * 0.5, 6),
+                )
+            )
+        elif pick < 0.70:
+            n = rng.randint(1, 4)
+            shapes.append(
+                ck.KEdge(
+                    points=tuple(
+                        (round(rng.uniform(-3.0, 3.0), 6), round(rng.uniform(-3.0, 3.0), 6))
+                        for _ in range(n)
+                    )
+                )
+            )
+        elif pick < 0.88:
+            # Pads from the whole shape catalogue, including an unknown keyword
+            # so the ``rect`` fallback of ``_pad_polygon`` is exercised, and a
+            # 1-in-4 drilled (through-hole) pad for the hole branches.
+            catalogue = [(s.shape, s.size, s.roundrect_rratio) for s in PAD_SHAPES]
+            catalogue.append(("trapezoid", (1.1, 0.7), None))
+            shape_kw, (w, h), rratio = rng.choice(catalogue)
+            drilled = rng.random() < 0.25
+            shapes.append(
+                ck.make_pad(
+                    shape_kw,
+                    w,
+                    h,
+                    0.25 if rratio is None else rratio,
+                    round(rng.uniform(0.0, 360.0), 3),
+                    round(rng.uniform(-2.0, 2.0), 6),
+                    round(rng.uniform(-2.0, 2.0), 6),
+                    ck.ALL_LAYERS if drilled else rng.choice([0, 1]),
+                    round(min(w, h) * 0.4, 6) if drilled else 0.0,
+                )
+            )
+        else:
+            shapes.append(_random_zone(rng))
+    return shapes
+
+
+# ---------------------------------------------------------------------------
+# The comparison itself
+# ---------------------------------------------------------------------------
+
+
+def _compare_gap(label: str, py_gap: float, cpp_gap: float) -> float:
+    """Assert one gap pair agrees; return the absolute delta (0.0 for +inf)."""
+    py_inf = math.isinf(py_gap)
+    cpp_inf = math.isinf(cpp_gap)
+    assert py_inf == cpp_inf, (
+        f"{label}: inapplicability disagrees -- python={py_gap!r} cpp={cpp_gap!r}"
+    )
+    if py_inf:
+        return 0.0
+    delta = abs(py_gap - cpp_gap)
+    assert delta <= GAP_TOLERANCE_MM, (
+        f"{label}: gap delta {delta:.3e} mm exceeds {GAP_TOLERANCE_MM:.0e} mm "
+        f"(python={py_gap!r}, cpp={cpp_gap!r})"
+    )
+    return delta
+
+
+def _compare_shapes(shapes: list[ck.KShape], required: float) -> dict[str, float | int]:
+    """Drive every unordered pair of ``shapes`` through both ports.
+
+    Returns:
+        Counters for the test's own reporting: pairs compared, boundary pairs
+        excluded from verdict comparison, and the worst gap delta seen.
+    """
+    cpp_shapes = [_to_cpp(s) for s in shapes]
+    from kicad_tools.router import router_cpp
+
+    pairs = 0
+    boundary = 0
+    max_delta = 0.0
+    kinds_seen: set[tuple[str, str]] = set()
+
+    for i in range(len(shapes)):
+        for j in range(i + 1, len(shapes)):
+            a, b = shapes[i], shapes[j]
+            ca, cb = cpp_shapes[i], cpp_shapes[j]
+            label = f"{_kind(a)}[{i}] vs {_kind(b)}[{j}]"
+            kinds_seen.add(tuple(sorted((_kind(a), _kind(b)))))  # type: ignore[arg-type]
+            pairs += 1
+
+            py_copper = ck.copper_gap(a, b)
+            cpp_copper = router_cpp.copper_gap(ca, cb)
+            max_delta = max(max_delta, _compare_gap(f"{label} copper_gap", py_copper, cpp_copper))
+
+            py_hole = ck.hole_gap(a, b)
+            cpp_hole = router_cpp.hole_gap(ca, cb)
+            max_delta = max(max_delta, _compare_gap(f"{label} hole_gap", py_hole, cpp_hole))
+
+            # Argument order must not change the answer -- the kernel has no
+            # notion of "which existed first" (the #5398 defect, in miniature).
+            # Held to the same 1e-7 mm bound rather than bit-exactness: the two
+            # orders subtract the same two radii in the opposite sequence, so
+            # they can differ in the last ulp (~1e-16 mm, ten orders below
+            # KiCad's 1 nm coordinate grid) without any model disagreement.
+            _compare_gap(f"{label} copper_gap (swapped)", py_copper, router_cpp.copper_gap(cb, ca))
+            _compare_gap(f"{label} hole_gap (swapped)", py_hole, router_cpp.hole_gap(cb, ca))
+            _compare_gap(f"{label} copper_gap (python, swapped)", py_copper, ck.copper_gap(b, a))
+            _compare_gap(f"{label} hole_gap (python, swapped)", py_hole, ck.hole_gap(b, a))
+            assert (
+                ck.clear(b, a, required) == ck.clear(a, b, required)
+                or abs(py_copper - required) <= VERDICT_BOUNDARY_BAND_MM
+            ), f"{label}: python clear() is order-dependent"
+
+            py_clear = ck.clear(a, b, required)
+            cpp_clear = router_cpp.clear(ca, cb, required)
+            if not math.isinf(py_copper) and abs(py_copper - required) <= VERDICT_BOUNDARY_BAND_MM:
+                boundary += 1
+                continue
+            assert py_clear == cpp_clear, (
+                f"{label}: clear() verdict mismatch at required={required} mm "
+                f"(python={py_clear}, cpp={cpp_clear}, gap={py_copper!r})"
+            )
+
+    return {
+        "pairs": pairs,
+        "boundary": boundary,
+        "max_delta": max_delta,
+        "kinds": len(kinds_seen),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+#
+# 200 seeds, chunked into 8 parametrised cases so no single test function has
+# to fit the CI job's ``--timeout=60`` per-test budget.
+
+
+SEEDS_PER_CHUNK = 25
+SEED_BASES = tuple(range(0, 200, SEEDS_PER_CHUNK))
+
+
+@requires_cpp
+@pytest.mark.parametrize("seed_base", SEED_BASES)
+def test_corpus_parity(seed_base: int, record_property) -> None:
+    """Both ports agree on every pair of every Phase 1a corpus case."""
+    pairs = boundary = 0
+    max_delta = 0.0
+    for seed in range(seed_base, seed_base + SEEDS_PER_CHUNK):
+        shapes, required = _corpus_shapes(seed)
+        stats = _compare_shapes(shapes, required)
+        pairs += int(stats["pairs"])
+        boundary += int(stats["boundary"])
+        max_delta = max(max_delta, float(stats["max_delta"]))
+
+    assert pairs > 0, "corpus produced no pairs -- generator adapter is broken"
+    record_property("kernel_parity_pairs", pairs)
+    record_property("kernel_parity_boundary_excluded", boundary)
+    record_property("kernel_parity_max_gap_delta_mm", max_delta)
+    print(
+        f"[corpus seeds {seed_base}..{seed_base + SEEDS_PER_CHUNK - 1}] "
+        f"pairs={pairs} boundary_excluded={boundary} max_gap_delta={max_delta:.3e} mm"
+    )
+
+
+@requires_cpp
+@pytest.mark.parametrize("seed_base", SEED_BASES)
+def test_random_shape_parity(seed_base: int, record_property) -> None:
+    """Both ports agree on crossing / overlapping / hole-free raw shapes."""
+    pairs = boundary = 0
+    max_delta = 0.0
+    kinds: set[int] = set()
+    for seed in range(seed_base, seed_base + SEEDS_PER_CHUNK):
+        rng = random.Random(seed)
+        shapes = _random_shapes(rng, 10)
+        # A requirement inside the sampled gap range, so both verdicts occur.
+        required = round(rng.uniform(0.1, 0.4), 6)
+        stats = _compare_shapes(shapes, required)
+        pairs += int(stats["pairs"])
+        boundary += int(stats["boundary"])
+        max_delta = max(max_delta, float(stats["max_delta"]))
+        kinds.add(int(stats["kinds"]))
+
+    assert pairs > 0
+    record_property("kernel_random_pairs", pairs)
+    record_property("kernel_random_boundary_excluded", boundary)
+    record_property("kernel_random_max_gap_delta_mm", max_delta)
+    print(
+        f"[random seeds {seed_base}..{seed_base + SEEDS_PER_CHUNK - 1}] "
+        f"pairs={pairs} boundary_excluded={boundary} max_gap_delta={max_delta:.3e} mm"
+    )
+
+
+@requires_cpp
+def test_every_pair_kind_is_covered() -> None:
+    """All fifteen unordered pair kinds the kernel supports are exercised.
+
+    A silent gap in coverage is the failure mode that makes a parity suite
+    feel green while the interesting branch is never run.
+
+    Fifteen, not twenty-five: five shape classes admit 25 *ordered* pairs, and
+    #5589's acceptance criteria count them that way, but the kernel's answer is
+    order-independent by construction (that absence is the #5398 fix), so the
+    unordered count is what a coverage set can assert.  Order-independence is
+    checked separately on *every* pair in :func:`_compare_shapes`.
+    """
+    shapes: list[ck.KShape] = [
+        ck.KSegment(0.0, 0.0, 5.0, 0.0, 0.2, 0),
+        ck.KSegment(0.0, 1.0, 5.0, 1.0, 0.2, 0),
+        ck.KVia(2.0, 2.0, 0.6, 0.3),
+        ck.KVia(3.0, 2.0, 0.6, 0.3),
+        ck.KEdge(((-1.0, -1.0), (6.0, -1.0))),
+        ck.KEdge(((-1.0, 4.0), (6.0, 4.0))),
+        ck.make_pad("roundrect", 1.0, 1.0, 0.25, 30.0, 1.0, 2.5, 0, 0.0),
+        ck.make_pad("circle", 0.9, 0.9, 0.25, 0.0, 4.0, 2.5, ck.ALL_LAYERS, 0.4),
+        ck.KZonePoly(
+            rings=(((-2.0, 5.0), (7.0, 5.0), (7.0, 7.0), (-2.0, 7.0), (-2.0, 5.0)),),
+            layer=0,
+        ),
+        ck.KZonePoly(
+            rings=(
+                ((-2.0, 8.0), (7.0, 8.0), (7.0, 12.0), (-2.0, 12.0), (-2.0, 8.0)),
+                ((1.0, 9.0), (4.0, 9.0), (4.0, 11.0), (1.0, 11.0), (1.0, 9.0)),
+            ),
+            layer=0,
+        ),
+    ]
+    seen = {
+        tuple(sorted((_kind(a), _kind(b)))) for i, a in enumerate(shapes) for b in shapes[i + 1 :]
+    }
+    expected = {tuple(sorted((x, y))) for i, x in enumerate(PAIR_KINDS) for y in PAIR_KINDS[i:]}
+    assert len(expected) == 15
+    assert seen == expected, f"uncovered pair kinds: {sorted(expected - seen)}"
+
+    stats = _compare_shapes(shapes, 0.25)
+    assert int(stats["kinds"]) == len(expected)
+
+
+@requires_cpp
+def test_make_pad_agrees_on_the_core() -> None:
+    """``make_pad`` itself is a port, so its output is compared, not assumed.
+
+    :func:`_cpp_pad` deliberately twins the *Python* core rather than calling
+    the C++ ``make_pad``, so a divergence in the shape branches or the rotation
+    sign could not show up as a gap mismatch.  This is where it would.
+    """
+    from kicad_tools.router import router_cpp
+
+    catalogue = [(s.shape, s.size, s.roundrect_rratio) for s in PAD_SHAPES]
+    catalogue += [
+        ("trapezoid", (1.1, 0.7), None),
+        ("obround", (0.8, 0.8), None),
+        ("roundrect", (1.0, 1.0), 0.0),
+        ("roundrect", (1.0, 1.0), 0.5),
+        ("roundrect", (1.4, 0.8), 0.5),
+    ]
+    for shape_kw, (w, h), rratio in catalogue:
+        rr = 0.25 if rratio is None else rratio
+        for rotation in (0.0, 45.0, 90.0, 137.5, 270.0, -33.25):
+            py = ck.make_pad(shape_kw, w, h, rr, rotation, 3.0, -4.0, 1, 0.3)
+            cpp = router_cpp.make_pad(shape_kw, w, h, rr, rotation, 3.0, -4.0, 1, 0.3)
+            label = f"{shape_kw} @ {rotation} deg"
+            assert cpp.corner_radius == pytest.approx(py.corner_radius, abs=1e-15), label
+            assert len(cpp.core) == len(py.core), f"{label}: core vertex count differs"
+            for (pxv, pyv), (cxv, cyv) in zip(py.core, cpp.core, strict=True):
+                assert cxv == pytest.approx(pxv, abs=GAP_TOLERANCE_MM), label
+                assert cyv == pytest.approx(pyv, abs=GAP_TOLERANCE_MM), label
+            assert cpp.cx == pytest.approx(py.cx) and cpp.cy == pytest.approx(py.cy)
+            assert cpp.drill == pytest.approx(py.drill)
+            assert cpp.layer == py.layer
+
+
+@requires_cpp
+def test_pad_outline_agrees_vertex_for_vertex() -> None:
+    """Both ports tessellate a pad arc into the *same* vertex list.
+
+    The segment count per arc is derived from the chord-error rule rather than
+    chosen per side, so the lists must match in length as well as in position.
+    A length mismatch is the drift this assertion exists to catch.
+    """
+    from kicad_tools.router import router_cpp
+
+    catalogue = [(s.shape, s.size, s.roundrect_rratio) for s in PAD_SHAPES]
+    catalogue += [
+        ("trapezoid", (1.1, 0.7), None),
+        # rratio 0 -> a plain rectangle; 0.5 (KiCad's maximum) -> the inner box
+        # collapses to a point and the pad is a true disc.  Both are edge cases
+        # of the ``roundrect`` branch and both must still produce a valid ring.
+        ("roundrect", (1.0, 1.0), 0.0),
+        ("roundrect", (1.0, 1.0), 0.5),
+        ("roundrect", (1.4, 0.8), 0.5),
+    ]
+    for shape_kw, (w, h), rratio in catalogue:
+        rr = 0.25 if rratio is None else rratio
+        for rotation in (0.0, 45.0, 137.5):
+            py = ck.pad_outline(shape_kw, w, h, rr, rotation, 2.0, 1.0)
+            cpp = router_cpp.pad_outline(shape_kw, w, h, rr, rotation, 2.0, 1.0)
+            label = f"{shape_kw} @ {rotation} deg"
+            assert len(py) == len(cpp), f"{label}: {len(py)} vs {len(cpp)} vertices"
+            for (pxv, pyv), (cxv, cyv) in zip(py, cpp, strict=True):
+                assert cxv == pytest.approx(pxv, abs=GAP_TOLERANCE_MM), label
+                assert cyv == pytest.approx(pyv, abs=GAP_TOLERANCE_MM), label
+            # Closed ring, and every vertex on or inside the true outline: the
+            # tessellation is *inscribed*, so it may under-reach by at most the
+            # chord error and must never over-reach.
+            assert py[0] == py[-1], f"{label}: outline is not closed"
+            pad = ck.make_pad(shape_kw, w, h, rr, rotation, 2.0, 1.0)
+            for vx, vy in py:
+                reach = -ck.copper_gap(pad, ck.KVia(vx, vy, 0.0, 0.0))
+                assert reach >= -1e-12, f"{label}: vertex outside the pad copper"
+                assert reach <= ck.ARC_CHORD_ERROR_MM + 1e-12, (
+                    f"{label}: vertex {reach:.3e} mm inside the outline, over the chord budget"
+                )
+
+
+@requires_cpp
+def test_zone_interior_rings_are_not_copper() -> None:
+    """A hole in a pour is not copper -- on both sides, with the same numbers.
+
+    ``KZonePoly`` exists to carry interior rings; a port that ignored them
+    would still agree with itself on every *outer*-ring pair, which is exactly
+    why this is asserted directly rather than left to the random corpus.
+    """
+    from kicad_tools.router import router_cpp
+
+    outer = ((0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0))
+    hole = ((4.0, 4.0), (6.0, 4.0), (6.0, 6.0), (4.0, 6.0), (4.0, 4.0))
+    solid = ck.KZonePoly(rings=(outer,), layer=0)
+    holed = ck.KZonePoly(rings=(outer, hole), layer=0)
+
+    # A via at the hole's centre: buried in copper in the solid pour, 1.0 mm
+    # from the hole wall (minus its own radius) in the holed one.
+    via = ck.KVia(5.0, 5.0, 0.6, 0.3)
+    assert ck.copper_gap(solid, via) == pytest.approx(-0.3, abs=1e-12)
+    assert ck.copper_gap(holed, via) == pytest.approx(1.0 - 0.3, abs=1e-12)
+
+    for zone, expected in ((solid, -0.3), (holed, 0.7)):
+        assert router_cpp.copper_gap(_to_cpp(zone), _to_cpp(via)) == pytest.approx(
+            expected, abs=1e-12
+        )
+
+    # And the verdict flips with it at a 0.5 mm requirement.
+    assert ck.clear(solid, via, 0.5) is False
+    assert ck.clear(holed, via, 0.5) is True
+    assert router_cpp.clear(_to_cpp(solid), _to_cpp(via), 0.5) is False
+    assert router_cpp.clear(_to_cpp(holed), _to_cpp(via), 0.5) is True
+
+
+@requires_cpp
+def test_kernel_matches_reference_arithmetic() -> None:
+    """Sanity anchors: the kernel's numbers are the ones a human would write.
+
+    Parity alone cannot catch "both ports are wrong the same way", so a few
+    closed-form values are pinned independently of either implementation.
+    """
+    from kicad_tools.router import router_cpp
+
+    # Two parallel 0.15 mm tracks, centrelines 0.35 mm apart -> 0.20 mm gap.
+    a = ck.KSegment(0.0, 0.0, 10.0, 0.0, 0.15, 0)
+    b = ck.KSegment(0.0, 0.35, 10.0, 0.35, 0.15, 0)
+    assert ck.copper_gap(a, b) == pytest.approx(0.20, abs=1e-12)
+    assert router_cpp.copper_gap(_to_cpp(a), _to_cpp(b)) == pytest.approx(0.20, abs=1e-12)
+
+    # Different layers -> no interaction at all.
+    c = ck.KSegment(0.0, 0.35, 10.0, 0.35, 0.15, 1)
+    assert math.isinf(ck.copper_gap(a, c))
+    assert math.isinf(router_cpp.copper_gap(_to_cpp(a), _to_cpp(c)))
+
+    # Crossing tracks overlap: negative gap equal to minus the half-widths.
+    d = ck.KSegment(5.0, -1.0, 5.0, 1.0, 0.15, 0)
+    assert ck.copper_gap(a, d) == pytest.approx(-0.15, abs=1e-12)
+
+    # Via pair: centres 1.0 mm apart, 0.6 copper / 0.3 drill.
+    v1 = ck.KVia(0.0, 0.0, 0.6, 0.3)
+    v2 = ck.KVia(1.0, 0.0, 0.6, 0.3)
+    assert ck.copper_gap(v1, v2) == pytest.approx(0.4, abs=1e-12)
+    assert ck.hole_gap(v1, v2) == pytest.approx(0.7, abs=1e-12)
+
+    # A hole-free via has no hole query against a track.
+    assert math.isinf(ck.hole_gap(ck.KVia(0.0, 0.0, 0.6, 0.0), a))
+
+    # Board outline: track centreline 2.0 mm away, half width 0.075.
+    edge = ck.KEdge(((-5.0, 2.0), (15.0, 2.0)))
+    assert ck.copper_gap(a, edge) == pytest.approx(2.0 - 0.075, abs=1e-12)
+    assert math.isinf(ck.copper_gap(edge, ck.KEdge(((0.0, 0.0), (1.0, 0.0)))))
+
+    # A 1.0 mm circular pad is a disc: reach 0.5 mm in every direction, so a
+    # via 2.0 mm away with a 0.6 copper pad leaves 2.0 - 0.5 - 0.3.
+    disc = ck.make_pad("circle", 1.0, 1.0, 0.25, 0.0, 0.0, 5.0, 0, 0.5)
+    v3 = ck.KVia(2.0, 5.0, 0.6, 0.3)
+    assert ck.copper_gap(disc, v3) == pytest.approx(2.0 - 0.5 - 0.3, abs=1e-12)
+    assert router_cpp.copper_gap(_to_cpp(disc), _to_cpp(v3)) == pytest.approx(1.2, abs=1e-12)
+    # ... and its drill-to-drill reading uses the two drills, not the coppers.
+    assert ck.hole_gap(disc, v3) == pytest.approx(2.0 - 0.25 - 0.15, abs=1e-12)
+
+    # A 1.2 x 0.8 rect pad, unrotated: reach 0.6 along +X.
+    rect = ck.make_pad("rect", 1.2, 0.8, 0.25, 0.0, 0.0, 10.0, 0)
+    assert ck.copper_gap(rect, ck.KVia(2.0, 10.0, 0.6, 0.3)) == pytest.approx(
+        2.0 - 0.6 - 0.3, abs=1e-12
+    )
+    # An SMD pad has no hole at all.
+    assert math.isinf(ck.hole_gap(rect, ck.KVia(2.0, 10.0, 0.6, 0.0)))
+
+    # A roundrect at KiCad's maximum rratio 0.5 IS a disc -- the inner box
+    # collapses -- so it must read exactly like the circle above.
+    maxed = ck.make_pad("roundrect", 1.0, 1.0, 0.5, 33.0, 0.0, 5.0, 0)
+    assert len(maxed.core) == 1
+    assert maxed.corner_radius == pytest.approx(0.5, abs=1e-15)
+    assert ck.copper_gap(maxed, v3) == pytest.approx(1.2, abs=1e-12)
+    # rratio 0 is the opposite end: a plain 4-vertex rectangle, no rounding.
+    flat = ck.make_pad("roundrect", 1.0, 1.0, 0.0, 0.0, 0.0, 5.0, 0)
+    assert len(flat.core) == 4
+    assert flat.corner_radius == 0.0
+
+    # A 1.6 x 0.8 oval is a stadium: 0.8 along its long axis, 0.4 across.
+    oval = ck.make_pad("oval", 1.6, 0.8, 0.25, 0.0, 0.0, 15.0, 0)
+    assert ck.copper_gap(oval, ck.KVia(2.0, 15.0, 0.0, 0.0)) == pytest.approx(2.0 - 0.8, abs=1e-12)
+    assert ck.copper_gap(oval, ck.KVia(0.0, 17.0, 0.0, 0.0)) == pytest.approx(2.0 - 0.4, abs=1e-12)
+
+    # A pour is copper with no width of its own: a track whose centreline is
+    # 1.0 mm outside the fill edge leaves 1.0 - half width.
+    zone = ck.KZonePoly(
+        rings=(((0.0, 20.0), (10.0, 20.0), (10.0, 30.0), (0.0, 30.0), (0.0, 20.0)),),
+        layer=0,
+    )
+    track = ck.KSegment(-1.0, 20.0, -1.0, 30.0, 0.2, 0)
+    assert ck.copper_gap(zone, track) == pytest.approx(1.0 - 0.1, abs=1e-12)
+    # Different layer -> no interaction, pours included.
+    assert math.isinf(ck.copper_gap(zone, ck.KSegment(-1.0, 20.0, -1.0, 30.0, 0.2, 1)))
+    # A pour is never drilled.
+    assert math.isinf(ck.hole_gap(zone, track))
+
+
+@requires_cpp
+def test_clear_uses_the_same_epsilon_on_both_sides() -> None:
+    """``clear`` accepts exactly down to ``required - CLEARANCE_EPSILON_MM``."""
+    from kicad_tools.router import router_cpp
+
+    assert router_cpp.CLEARANCE_EPSILON_MM == ck.CLEARANCE_EPSILON_MM
+
+    required = 0.2
+    eps = ck.CLEARANCE_EPSILON_MM
+    for gap, expected in ((required, True), (required - eps, True), (required - 2 * eps, False)):
+        # Two parallel 0.2 mm tracks placed to realise ``gap`` exactly.
+        offset = gap + 0.2
+        a = ck.KSegment(0.0, 0.0, 10.0, 0.0, 0.2, 0)
+        b = ck.KSegment(0.0, offset, 10.0, offset, 0.2, 0)
+        assert ck.clear(a, b, required) is expected, f"python clear() wrong at gap={gap}"
+        assert router_cpp.clear(_to_cpp(a), _to_cpp(b), required) is expected, (
+            f"cpp clear() wrong at gap={gap}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Indexed-consumer primitives (Phase 3f)
+# ---------------------------------------------------------------------------
+
+
+def _random_ring(rng: random.Random) -> tuple[tuple[float, float], ...]:
+    """A closed, non-convex ring: a star polygon with jittered radii."""
+    cx, cy = rng.uniform(-5.0, 5.0), rng.uniform(-5.0, 5.0)
+    n = rng.randint(5, 14)
+    ring = [
+        (
+            cx + rng.uniform(1.0, 4.0) * math.cos(2.0 * math.pi * i / n),
+            cy + rng.uniform(1.0, 4.0) * math.sin(2.0 * math.pi * i / n),
+        )
+        for i in range(n)
+    ]
+    return (*ring, ring[0])
+
+
+def test_the_per_edge_steps_rebuild_copper_gap_exactly() -> None:
+    """The equivalence Phase 3f's indexed consumers rest on.
+
+    ``copper_gap_ring_edge`` and ``ring_edge_crosses_ray`` exist so a consumer
+    with a spatial index over a pour's edges (``Grid3D``'s 1 mm bins and their
+    Python twin) can ask the kernel per edge instead of per pour.  That is only
+    legitimate if the minimum over every edge, plus the parity over the same
+    edges, *is* ``copper_gap(seg, zone)``.  Asserted here on the kernel itself,
+    so a future kernel edit that broke it fails in the kernel's own suite and
+    not only in a consumer's.
+    """
+    rng = random.Random(90210)
+    for _ in range(200):
+        rings = (_random_ring(rng),)
+        if rng.random() < 0.3:
+            rings = (*rings, _random_ring(rng))
+        zone = ck.KZonePoly(rings=rings, layer=0)
+        seg = ck.KSegment(
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(0.05, 0.4),
+            0,
+        )
+
+        # The decomposition, walked by hand: parity over both endpoints (what
+        # ``_region_segment_distance`` tests) and the minimum over every edge.
+        at_start = at_end = False
+        best = math.inf
+        for ring in rings:
+            for i in range(1, len(ring)):
+                ax, ay = ring[i - 1]
+                bx, by = ring[i]
+                best = min(best, ck.copper_gap_ring_edge(seg, ax, ay, bx, by))
+                if ck.ring_edge_crosses_ray(seg.x1, seg.y1, ax, ay, bx, by):
+                    at_start = not at_start
+                if ck.ring_edge_crosses_ray(seg.x2, seg.y2, ax, ay, bx, by):
+                    at_end = not at_end
+
+        # A query with an endpoint inside the copper reads zero centreline
+        # distance, which is ``-half`` edge to edge.
+        decomposed = -seg.width / 2.0 if (at_start or at_end) else best
+        assert ck.copper_gap(zone, seg) == pytest.approx(decomposed, abs=1e-12)
+
+
+@requires_cpp
+def test_indexed_consumer_primitives_agree_across_the_ports() -> None:
+    """``copper_gap_ring_edge`` / ``ring_edge_crosses_ray``, py vs cpp.
+
+    New kernel API carries the same port contract as the rest of it: the C++
+    side is the model and the Python module is a line-for-line port, so both
+    are driven from the same numbers and compared at :data:`GAP_TOLERANCE_MM`.
+    """
+    from kicad_tools.router import router_cpp
+
+    rng = random.Random(4242)
+    for _ in range(500):
+        seg = ck.KSegment(
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(0.0, 0.5),
+            rng.choice([-1, 0, 1]),
+        )
+        ax, ay = rng.uniform(-9.0, 9.0), rng.uniform(-9.0, 9.0)
+        bx, by = rng.uniform(-9.0, 9.0), rng.uniform(-9.0, 9.0)
+
+        py_gap = ck.copper_gap_ring_edge(seg, ax, ay, bx, by)
+        cpp_gap = router_cpp.copper_gap_ring_edge(_to_cpp(seg), ax, ay, bx, by)
+        assert cpp_gap == pytest.approx(py_gap, abs=GAP_TOLERANCE_MM)
+
+        px, py_ = rng.uniform(-9.0, 9.0), rng.uniform(-9.0, 9.0)
+        assert ck.ring_edge_crosses_ray(px, py_, ax, ay, bx, by) == bool(
+            router_cpp.ring_edge_crosses_ray(px, py_, ax, ay, bx, by)
+        )
+
+
+def test_the_per_edge_gap_is_the_zone_reading_with_no_pour_width() -> None:
+    """A closed-form anchor, independent of either implementation.
+
+    A pour carries no width of its own, so the gap to one of its boundary
+    edges is the centreline distance less the *segment's* half width -- the
+    same reading ``copper_gap(KZonePoly, KSegment)`` gives.
+    """
+    seg = ck.KSegment(0.0, 0.0, 0.0, 10.0, 0.2, 0)
+    assert ck.copper_gap_ring_edge(seg, 1.0, 0.0, 1.0, 10.0) == pytest.approx(0.9, abs=1e-12)
+    # A ray that leaves the edge's y-span behind cannot cross it, whichever
+    # way round the edge is written.
+    assert ck.ring_edge_crosses_ray(0.0, 5.0, 1.0, 0.0, 1.0, 10.0) is True
+    assert ck.ring_edge_crosses_ray(0.0, 5.0, 1.0, 10.0, 1.0, 0.0) is True
+    assert ck.ring_edge_crosses_ray(0.0, 50.0, 1.0, 0.0, 1.0, 10.0) is False
+    assert ck.ring_edge_crosses_ray(2.0, 5.0, 1.0, 0.0, 1.0, 10.0) is False
+
+
+def test_cpp_kernel_present_in_ci() -> None:
+    """The parity suite above must never be silently skipped in CI.
+
+    The ``test`` job builds the native extension before running pytest, so a
+    missing backend there means that step regressed -- and every
+    ``requires_cpp`` test in this module would have skipped green.
+    """
+    if os.environ.get("CI") and not is_cpp_available():
+        pytest.fail("router_cpp not built in CI test job -- kernel parity silently skipped")
+
+
+MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
+    {
+        # Epic #5509 Phase 3a (#5660), consumer group 1: the Python grid's
+        # halo marking.  ``RoutingGrid._mark_segment`` / ``_mark_via`` (and the
+        # read-side ``_get_clearance_mask`` / ``_dilate_blocked``) walk
+        # ``halo_offsets``, whose membership is the kernel's own ``copper_gap``
+        # queried in grid-cell units, instead of a Chebyshev square.
+        "router/grid.py",
+        # Issue #6528: the Python own-path via check subtracts the kernel's
+        # shared ``CLEARANCE_EPSILON_MM`` constant so it agrees with the C++
+        # gate.  Constant only -- no kernel geometry is called (like grid.py).
+        "router/pathfinder.py",
+        # Epic #5509 Phase 3b (#5661), consumer group 4: the Python search-time
+        # route-halo refinement.  ``RouteHaloGeometry.clear`` builds a
+        # ``KSegment``/``KVia`` for the candidate and for each surviving
+        # neighbour and asks ``clearance_kernel.clear`` rather than
+        # subtracting both half-widths from a private shapely distance and
+        # separately widening a trace-vs-via requirement to
+        # ``max(required, rules.via_clearance)``.
+        "router/route_halo_geometry.py",
+        # Epic #5509 Phase 3c (#5662), consumer groups 7 and 8: the coupled
+        # diff-pair search path.  ``clearance_shapes.py`` is the one
+        # router-primitive -> kernel-shape translation every migrated Python
+        # consumer shares, so two of them cannot end up disagreeing about the
+        # copper rather than about the clearance; ``diffpair_routing.py``
+        # reaches the kernel through it and is listed because its docstrings
+        # cite the kernel by name (this check is a plain text scan).
+        "router/clearance_shapes.py",
+        "router/diffpair_routing.py",
+        # Epic #5509 Phase 3d (#5663), consumer group 9: the lattice engine.
+        # The adapter is the package's single import site on purpose -- the
+        # lattice is geometry-only in an integer net-id space and the kernel is
+        # net-agnostic, so one module owns the projection and every predicate
+        # in ``router/lattice/`` goes through it.
+        "router/lattice/kernel_adapter.py",
+        # Epic #5509 Phase 3f (#5665), consumer group 6: the fixed-copper
+        # predicate.  Same shape of migration -- one adapter module owns the
+        # projection (shapely fills -> kernel ring sets) and the spatial index
+        # the query path needs, and ``router/fixed_copper.py`` calls it.  Every
+        # other fixed-copper caller in the package (``pathfinder``'s
+        # ``_fixed_step_clear``, ``diffpair_routing``, ``pad_access``,
+        # ``cpp_backend``) delegates to ``FixedFillObstacles`` and composes no
+        # gap of its own, so it is switched without referencing the kernel.
+        "router/fixed_copper_kernel.py",
+        # Epic #5509 Phase 3e (#5664), consumer group 10: the mesh engine's
+        # per-leg obstacle consult.  Same shape again -- one adapter module
+        # owns the projection (keep-out rects / pour outlines -> kernel ring
+        # sets, foreign pads -> ``KPad``, the board outline -> ``KEdge``) and
+        # ``router/mesh/obstacles.py`` calls it.  ``mesh/pathfinder.py`` builds
+        # the model but composes no gap of its own, so it is switched without
+        # referencing the kernel.
+        "router/mesh/kernel_adapter.py",
+        # Epic #5509 Phase 4a (#5854), consumer group 15: the post-route trace
+        # optimizer's two ``CollisionChecker`` implementations.  Both narrow
+        # phases (segment, via) ask the kernel through ``clearance_shapes``,
+        # and the pad gate -- which used to be the raster alone -- becomes an
+        # exact ``copper_gap`` against the registered pad.  The first consumer
+        # whose migration is about a *post-route* pass rather than search:
+        # ``optimizer/trace.py``'s ``_path_is_clear`` reaches the model only
+        # through this module and composes no gap of its own, so it is
+        # switched without referencing the kernel (same shape as
+        # ``pathfinder``'s fixed-copper delegation in Phase 3f).
+        "router/optimizer/collision.py",
+        # Epic #5509 Phase 4b (#5855), consumer group 16: match-group
+        # length/phase tuning's post-insertion DRC self-check.
+        # ``_post_insertion_clearance_detail_group`` /
+        # ``_post_insertion_clearance_detail_pair_group`` reach the kernel
+        # through ``clearance_shapes.py`` (already listed above) and are
+        # added here because their own docstrings cite the kernel by name,
+        # same as ``diffpair_routing.py``.
+        "router/match_group_tuning.py",
+        # Epic #5509 Phase 4c (#5856), consumer group 17: the post-route
+        # DRC-nudge repair pass's destination gates.
+        # ``_post_nudge_introduces_foreign_via_violation`` asks
+        # ``shapes_clear``; ``_via_drill_overlaps_bbox`` asks ``hole_gap``
+        # (drill-to-copper) against the land as ``bbox_shape`` copper; and
+        # ``_via_edge_sweep_clear`` asks ``copper_gap`` for the pre-move barrel
+        # and for the swept capsule against each outline chord, which retired
+        # this module's two private ``router/geometry.py`` distance wrappers.
+        # Reached through ``clearance_shapes.py`` (already listed above); listed
+        # here because its docstrings cite the kernel by name, same as
+        # ``diffpair_routing.py`` and ``match_group_tuning.py``.
+        "router/drc_nudge.py",
+        # Epic #5509 Phase 4d (#5857), consumer group 18: ``kct check``'s
+        # clearance family.  ``validate/clearance_shapes.py`` is this side's
+        # one board-file-primitive -> kernel-shape translation (the sibling of
+        # ``router/clearance_shapes.py`` above, ported from this very
+        # consumer's own ``_pad_polygon`` reference model in Phase 1b, so the
+        # dedup is pure -- no pad model changed hands).  ``validate/rules/
+        # clearance.py`` (``_calculate_clearance``) is a production call site
+        # and cites the kernel by name in its own docstrings, so it is listed
+        # too.  ``validate/rules/edge.py`` (``EdgeClearanceRule``) also calls
+        # through this adapter, but -- like ``router/lattice/pathfinder.py``
+        # and ``router/mesh/pathfinder.py`` above -- composes no gap of its
+        # own and never names the kernel directly, so it needs no entry here.
+        "validate/clearance_shapes.py",
+        "validate/rules/clearance.py",
+        # Issue #6107 (epic #5509): ``kct route-auto``'s foreign-copper gate.
+        # ``foreign_copper.py`` asks ``copper_gap`` for the exact pad / arc /
+        # track distance to other nets' copper, the same kernel the post-route
+        # ``kct check`` clearance family uses, so the gate and the checker
+        # cannot disagree about a gap.
+        "router/foreign_copper.py",
+        # Issue #6243: authored per-net (netclass) clearance minima.
+        # ``authored_clearance.py`` is the one predicate search, commit and
+        # final validation ask for a project netclass stricter than
+        # ``Default``: the pair floor ``max(floor[a], floor[b])`` is its rule,
+        # the kernel's ``clear`` (through ``clearance_shapes``) its geometry.
+        # Its native twin is ``Grid3D::authored_*_clear`` in ``src/grid.cpp``
+        # (already listed below); ``test_authored_floor_parity_*`` holds the
+        # two to identical verdicts.
+        "router/authored_clearance.py",
+        # Issue #6164 (PR #6176): ``kct panel --cut vcut``'s copper-near-score
+        # warning.  ``panel/vscore.py`` builds a ``KSegment`` for each arc chord
+        # and asks the ``validate/clearance_shapes`` adapter for the exact
+        # copper-to-score-line gap, so the panel warning and ``kct check`` measure
+        # edge clearance with the same kernel.
+        "panel/vscore.py",
+        # Issue #6237: ``kct route --preserve-existing``'s kept-copper audit.
+        # ``io._kept_copper_violations`` (shorts in ``validate_routes``,
+        # near-misses in ``kept_copper_clearance_violations``) asks
+        # ``copper_gap`` through ``clearance_shapes.py`` for the gap between
+        # kept input copper and other nets' pads / kept copper, so the audit
+        # and kicad-cli agree on pad shapes.  A new audit of kept copper only:
+        # the routed-copper quadrants of ``validate_routes`` are unchanged.
+        "router/io.py",
+        # Issue #6434 (with #6431): ``kct fix-drc``'s clearance repairer.
+        # ``drc/repair_clearance.py`` builds ``KSegment`` / ``KVia`` / ``KPad``
+        # (``make_pad``) shapes for board copper and asks ``copper_gap`` to
+        # re-measure every pair before and after a nudge -- whether the move
+        # cleared the target, broke clearance to a third item, or severed a
+        # same-net joint -- so the repairer judges a gap with the same kernel
+        # ``kct check``'s clearance family reports it with, and cannot call a
+        # pair fixed that the checker still flags.  A new consumer, not a
+        # numbered epic group, so no ``MIGRATED_GROUPS`` row (same as
+        # ``router/foreign_copper.py`` and ``panel/vscore.py``).
+        "drc/repair_clearance.py",
+        # Issue #8545: ``kct repair-creepage``.  ``creepage/repair.py`` reuses
+        # ``ClearanceRepairer``'s move machinery and imports ``KVia`` /
+        # ``copper_gap`` to re-measure copper-to-copper gaps after a
+        # translation (collateral-damage and lost-contact gates), so a repair
+        # is judged with the same kernel ``kct check`` reports with.  A new
+        # consumer, not a numbered epic group, so no ``MIGRATED_GROUPS`` row
+        # (same as ``drc/repair_clearance.py``).
+        "creepage/repair.py",
+    }
+)
+"""Python modules allowed to reference the kernel, one entry per migration.
+
+Phases 2-4 switch consumers over **deliberately, one at a time**, each with
+its own before/after measurement.  This set is what keeps "deliberately"
+checkable: a module that starts calling the kernel without being added here
+fails :func:`test_only_migrated_consumers_reference_the_kernel`, and an entry
+added without a migration is dead weight a reviewer can see.
+
+Keep it in step with ``tests/conformance/report.MIGRATED_GROUPS``, which flips
+the same migration's conformance rows from report-only to gated.
+"""
+
+
+def test_only_migrated_consumers_reference_the_kernel() -> None:
+    """The kernel reaches a consumer only where a phase deliberately wired it.
+
+    Succeeds ``test_no_consumer_switched_to_the_kernel`` (Phase 1b, when the
+    right answer was "none at all").  The property is unchanged -- an
+    *accidental* import would destroy a consumer's before/after measurement --
+    but the expected set is now an enumerated allowlist rather than the empty
+    set, because Phases 3c and 3d really did switch three modules.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    src = repo_root / "src" / "kicad_tools"
+    hits: list[str] = []
+    for path in sorted(src.rglob("*.py")):
+        rel = path.relative_to(src).as_posix()
+        if rel == "router/clearance_kernel.py" or rel in MIGRATED_KERNEL_CALLERS:
+            continue
+        if "clearance_kernel" in path.read_text(encoding="utf-8"):
+            hits.append(rel)
+    assert hits == [], (
+        "clearance_kernel is referenced by a consumer that no epic phase has "
+        f"switched; add it to MIGRATED_KERNEL_CALLERS with its phase, or revert: {hits}"
+    )
+
+    stale = sorted(rel for rel in MIGRATED_KERNEL_CALLERS if not (src / rel).exists())
+    assert stale == [], f"MIGRATED_KERNEL_CALLERS names modules that no longer exist: {stale}"
+    silent = sorted(
+        rel
+        for rel in MIGRATED_KERNEL_CALLERS
+        if "clearance_kernel" not in (src / rel).read_text(encoding="utf-8")
+    )
+    assert silent == [], (
+        "MIGRATED_KERNEL_CALLERS names modules that do not reference the "
+        f"kernel at all -- the migration was reverted or never landed: {silent}"
+    )
+
+
+MIGRATED_CPP_KERNEL_CALLERS: frozenset[str] = frozenset(
+    {
+        # Epic #5509 Phase 3f (#5665), consumer group 6: the native half of the
+        # fixed-copper predicate.  ``Grid3D::fixed_fill_clear`` keeps its 1 mm
+        # bins -- they only *select* candidate edges, never judge one -- and
+        # takes every number from ``copper_gap_ring_edge`` /
+        # ``ring_edge_crosses_ray``.
+        "src/grid.cpp",
+        # Epic #5509 Phase 3a (#5660), consumer group 2, also lives in this
+        # translation unit: ``Grid3D::mark_segment`` / ``mark_via`` (and
+        # ``unmark_*`` and ``route_geometry_complete``'s coverage map) walk the
+        # same kernel-derived disc as group 1 rather than the Chebyshev square.
+        # Epic #5509 Phase 3b (#5661), consumer group 5, is the third
+        # migration in this same file: ``route_trace_geometry_clear`` /
+        # ``route_via_geometry_clear`` / ``trace_stored_vias_clear`` -- the
+        # search-time refinement the C++ A* calls through ``Pathfinder``'s
+        # ``trace_halo_cell_clear`` / ``via_route_geometry_clear`` wrappers --
+        # ask ``clearance::clear`` instead of subtracting both half-extents
+        # from their own centre distance, and the seg-via branch no longer
+        # widens its requirement to ``max(via_clearance, required(...))``.
+        # Epic #5509 Phase 3c (#5662), consumer group 7: the coupled rail gate.
+        # ``coupled_pathfinder.cpp``'s ``rail_clear`` measures a candidate rail
+        # step against the grid's stored route geometry with the kernel, which
+        # is what made committed copper visible to the coupled search again
+        # (#4507).  The header is listed too: it documents the migration at
+        # ``rail_clear``'s declaration, and this check is a text scan.
+        "src/coupled_pathfinder.cpp",
+        "include/coupled_pathfinder.hpp",
+    }
+)
+"""C++ translation units allowed to reference the kernel, one per migration.
+
+The native counterpart of :data:`MIGRATED_KERNEL_CALLERS`, kept for the same
+reason: a consumer that starts calling the kernel without a phase behind it
+destroys that consumer's own before/after measurement.
+"""
+
+
+def test_cpp_kernel_is_not_referenced_outside_its_own_translation_units() -> None:
+    """The C++ kernel reaches a consumer only where a phase deliberately wired it.
+
+    The native mirror of
+    :func:`test_only_migrated_consumers_reference_the_kernel`: everything
+    outside the kernel's own translation units and the enumerated migrations
+    must still be kernel-free.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    cpp = repo_root / "src" / "kicad_tools" / "router" / "cpp"
+    allowed = {
+        "include/clearance_kernel.hpp",
+        "src/clearance_kernel.cpp",
+        "src/bindings.cpp",
+    } | set(MIGRATED_CPP_KERNEL_CALLERS)
+    hits = [
+        p.relative_to(cpp).as_posix()
+        for p in sorted([*cpp.rglob("*.cpp"), *cpp.rglob("*.hpp")])
+        if "third_party" not in p.parts
+        and p.relative_to(cpp).as_posix() not in allowed
+        and ("clearance_kernel" in p.read_text(encoding="utf-8"))
+    ]
+    assert hits == [], f"C++ clearance kernel referenced by a consumer: {hits}"
+
+    silent = sorted(
+        rel
+        for rel in MIGRATED_CPP_KERNEL_CALLERS
+        if "clearance_kernel" not in (cpp / rel).read_text(encoding="utf-8")
+    )
+    assert silent == [], (
+        "MIGRATED_CPP_KERNEL_CALLERS names translation units that do not "
+        f"reference the kernel at all -- the migration was reverted: {silent}"
+    )
+
+
+def test_ripgrep_acceptance_criterion() -> None:
+    """The issue's ``rg`` acceptance criterion, run as a test.
+
+    The issue writes the command as ``rg "clearance_kernel" src/kicad_tools
+    --glob '!router/clearance_kernel.py' --glob '!router/cpp/**'``.  Run from
+    the repo root that excludes nothing: ripgrep anchors a glob containing a
+    ``/`` to the **working directory**, not to the search path, so those two
+    globs would have to read ``src/kicad_tools/router/...``.  Running from
+    ``src/kicad_tools`` instead keeps the globs exactly as the issue wrote
+    them and makes them mean what they say.
+
+    One glob per entry in :data:`MIGRATED_KERNEL_CALLERS` is appended, derived
+    rather than hand-listed so the ledger stays the single place a migration is
+    recorded.  Excluding a migrated consumer is not weakening the criterion:
+    since Phase 3c/3d the question the command asks is *"has anything reached
+    the kernel that no phase signed off"*, and a deliberate migration is not a
+    violation of it.
+
+    Skipped where ``rg`` is unavailable; the two structural tests above cover
+    the same property without depending on the binary.
+    """
+    src = Path(__file__).resolve().parents[2] / "src" / "kicad_tools"
+    migrated_globs: list[str] = []
+    for rel in sorted(MIGRATED_KERNEL_CALLERS):
+        migrated_globs += ["--glob", f"!{rel}"]
+    try:
+        proc = subprocess.run(
+            [
+                "rg",
+                "clearance_kernel",
+                ".",
+                "--glob",
+                "!router/clearance_kernel.py",
+                "--glob",
+                "!router/cpp/**",
+                *migrated_globs,
+            ],
+            cwd=src,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:  # pragma: no cover - environment dependent
+        pytest.skip("rg not installed")
+    assert proc.stdout.strip() == "", f"unexpected consumer references:\n{proc.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #6243: authored per-net (netclass) clearance minima
+# ---------------------------------------------------------------------------
+#
+# The kernel itself stays rule-free; the per-net minimum is a *rule* layered on
+# it -- ``max(floor[a], floor[b])`` for foreign copper -- by
+# ``router/authored_clearance.py`` (Python) and ``Grid3D::authored_*``
+# (native).  These cases drive both through their production entry points on
+# the same random scenes:
+#
+# * search: ``Grid3D::authored_segment_clear`` / ``authored_via_clear`` (what
+#   the native A* step / via gates call) vs ``Router``'s step / via gates;
+# * commit: ``Grid3D::validate_route`` (violation type 9) vs
+#   ``RoutingGrid.validate_segment_clearance`` / ``validate_via_clearance``;
+# * final validation: :func:`authored_clearance.authored_violations`.
+#
+# A query whose binding gap lies inside the verdict boundary band is counted
+# and skipped, exactly like the shape-parity cases above (the native side
+# stores route copper in float32).
+
+_AUTHORED_SHAPES = ("rect", "circle", "oval", "roundrect")
+
+
+def _authored_scene(seed: int):
+    """A random board: pads, committed routes, floors, and probe copper."""
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad, Route, Segment, Via
+    from kicad_tools.router.rules import DesignRules
+
+    rng = random.Random(seed)
+    layers = (Layer.F_CU, Layer.B_CU)
+    floors = {net: round(rng.uniform(0.15, 0.6), 4) for net in rng.sample(range(1, 7), 2)}
+    grid = RoutingGrid(
+        20, 20, DesignRules(trace_clearance=0.1, via_clearance=0.1, net_clearance_floors=floors)
+    )
+    for i in range(14):
+        through = rng.random() < 0.3
+        net = rng.choice([0, 0, *range(1, 7)])
+        grid.add_pad(
+            Pad(
+                round(rng.uniform(2, 18), 4),
+                round(rng.uniform(2, 18), 4),
+                round(rng.uniform(0.3, 1.8), 4),
+                round(rng.uniform(0.3, 1.8), 4),
+                net,
+                f"N{net}",
+                layer=rng.choice(layers),
+                ref=f"U{i}",
+                pin="1",
+                through_hole=through,
+                drill=0.3 if through else 0.0,
+                rotation=rng.choice([0.0, 0.0, 30.0, 45.0, 17.5]),
+                shape=rng.choice(_AUTHORED_SHAPES),
+                # A neutral pad sometimes keeps its own authored minimum.
+                authored_clearance=round(rng.uniform(0.2, 0.5), 4)
+                if net == 0 and rng.random() < 0.5
+                else 0.0,
+            )
+        )
+    for _ in range(10):
+        net = rng.randint(1, 6)
+        x, y = rng.uniform(2, 18), rng.uniform(2, 18)
+        seg = Segment(
+            x, y, x + rng.uniform(-4, 4), y + rng.uniform(-4, 4), 0.2, rng.choice(layers), net
+        )
+        vias = []
+        if rng.random() < 0.4:
+            vias.append(Via(seg.x2, seg.y2, 0.3, 0.6, layers, net))
+        grid.mark_route(Route(net, f"N{net}", segments=[seg], vias=vias))
+    probes = []
+    for _ in range(40):
+        net = rng.randint(1, 6)
+        x, y = rng.uniform(1, 19), rng.uniform(1, 19)
+        if rng.random() < 0.3:
+            probes.append(Via(x, y, 0.3, 0.6, layers, net))
+        else:
+            probes.append(
+                Segment(
+                    x,
+                    y,
+                    x + rng.uniform(-3, 3),
+                    y + rng.uniform(-3, 3),
+                    rng.choice([0.15, 0.2, 0.3]),
+                    rng.choice(layers),
+                    net,
+                )
+            )
+    return grid, probes
+
+
+def _authored_on_boundary(grid, probe) -> bool:
+    """True when the probe's tightest authored pair sits in the verdict band."""
+    from kicad_tools.router.authored_clearance import AuthoredCopperIndex
+    from kicad_tools.router.primitives import Via
+
+    index = AuthoredCopperIndex(grid.rules.net_clearance_floors, grid.pads, grid.routes)
+    from kicad_tools.router.clearance_shapes import segment_shape, via_shape
+
+    shape = via_shape(probe) if isinstance(probe, Via) else segment_shape(probe)
+    own = grid.rules.authored_floor(probe.net)
+    for bucket in index._all.values():
+        for item in bucket:
+            if item.net == probe.net:
+                continue
+            required = max(own, item.floor)
+            if required <= 0:
+                continue
+            gap = ck.copper_gap(shape, item.shape)
+            if not math.isinf(gap) and abs(gap - required) <= VERDICT_BOUNDARY_BAND_MM:
+                return True
+    return False
+
+
+@requires_cpp
+@pytest.mark.parametrize("seed_base", (0, 20, 40, 60))
+def test_authored_floor_parity_search_commit_validation(seed_base: int, record_property) -> None:
+    """Python and native authored gates agree in search, commit and validation."""
+    from kicad_tools.router import router_cpp
+    from kicad_tools.router.authored_clearance import authored_violations
+    from kicad_tools.router.cpp_backend import CppGrid, sync_stored_routes
+    from kicad_tools.router.primitives import Route, Via
+
+    compared = boundary = rejected = 0
+    for seed in range(seed_base, seed_base + 20):
+        grid, probes = _authored_scene(seed)
+        native = CppGrid.from_routing_grid(grid)
+        sync_stored_routes(native, grid)
+        impl = native._impl
+        assert impl.authored_active()
+        for probe in probes:
+            if _authored_on_boundary(grid, probe):
+                boundary += 1
+                continue
+            if isinstance(probe, Via):
+                search_py = grid.authored_violation(probe, probe.net) is None
+                search_cpp = impl.authored_via_clear(probe.x, probe.y, probe.diameter, probe.net)
+                commit_py = grid.validate_via_clearance(probe, probe.net)[0]
+                cv = router_cpp.Via()
+                cv.x, cv.y, cv.drill, cv.diameter, cv.net = (
+                    probe.x,
+                    probe.y,
+                    probe.drill,
+                    probe.diameter,
+                    probe.net,
+                )
+                cv.layer_from, cv.layer_to = 0, grid.num_layers - 1
+                result = impl.validate_route([], [cv], probe.net, [], 0.0, 0.0, 0.0)
+            else:
+                layer = grid.layer_to_index(probe.layer.value)
+                search_py = grid.authored_violation(probe, probe.net) is None
+                search_cpp = impl.authored_segment_clear(
+                    probe.x1, probe.y1, probe.x2, probe.y2, probe.width, layer, probe.net
+                )
+                commit_py = grid.validate_segment_clearance(probe, probe.net)[0]
+                cs = router_cpp.Segment()
+                cs.x1, cs.y1, cs.x2, cs.y2 = probe.x1, probe.y1, probe.x2, probe.y2
+                cs.width, cs.layer, cs.net = probe.width, layer, probe.net
+                result = impl.validate_route([cs], [], probe.net, [], 0.0, 0.0, 0.0)
+            census = not authored_violations(
+                grid.rules.net_clearance_floors,
+                grid.pads,
+                [*grid.routes, Route(probe.net, "probe", **_as_route_items(probe))],
+            ) or not _probe_flagged(grid, probe)
+            assert search_py == search_cpp, f"seed {seed}: search verdicts differ for {probe}"
+            native_commit = result.valid or result.violation_type != 9
+            assert native_commit == search_cpp, f"seed {seed}: native commit != search"
+            # The Python commit validators also apply the scalar base, so they
+            # may reject for other reasons -- but never accept an authored miss.
+            assert search_py or not commit_py, f"seed {seed}: commit accepted an authored miss"
+            assert census == search_py, f"seed {seed}: final census != search"
+            compared += 1
+            rejected += not search_py
+    assert compared > 0 and rejected > 0 and rejected < compared
+    record_property("authored_parity_compared", compared)
+    record_property("authored_parity_boundary_excluded", boundary)
+    print(f"[authored seeds {seed_base}..] compared={compared} rejected={rejected} band={boundary}")
+
+
+def _as_route_items(probe):
+    from kicad_tools.router.primitives import Via
+
+    return {"vias": [probe]} if isinstance(probe, Via) else {"segments": [probe]}
+
+
+def _probe_flagged(grid, probe) -> bool:
+    """Whether the census flags the PROBE itself (not pre-existing scene copper)."""
+    from kicad_tools.router.authored_clearance import AuthoredCopperIndex
+    from kicad_tools.router.primitives import Via
+
+    index = AuthoredCopperIndex(grid.rules.net_clearance_floors, grid.pads, grid.routes)
+    if isinstance(probe, Via):
+        return index.via_violation(probe, probe.net) is not None
+    return index.segment_violation(probe, probe.net) is not None
+
+
+@requires_cpp
+def test_authored_pair_floor_rule_parity() -> None:
+    """The rule half: both ports resolve ``max(floor[a], floor[b])`` identically."""
+    from kicad_tools.router.authored_clearance import pair_floor
+    from kicad_tools.router.cpp_backend import CppGrid
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.rules import DesignRules
+
+    rng = random.Random(6243)
+    for _ in range(25):
+        floors = {net: round(rng.uniform(0.1, 1.0), 4) for net in rng.sample(range(0, 9), 3)}
+        rules = DesignRules(net_clearance_floors=floors)
+        impl = CppGrid.from_routing_grid(RoutingGrid(5, 5, rules))._impl
+        for a in range(9):
+            for b in range(9):
+                assert impl.authored_pair_floor(a, b) == pytest.approx(pair_floor(floors, a, b))
+                assert rules.clearance_for_nets(a, b, 0.0) == pytest.approx(
+                    pair_floor(floors, a, b)
+                )
+
+
+# ---------------------------------------------------------------------------
+# Issue #6728: the native authored gate measures each roundrect's file ratio
+# ---------------------------------------------------------------------------
+#
+# ``_authored_scene`` never gives a roundrect a ``roundrect_rratio``, so
+# ``pad_kernel_params`` degrades every one to ``rect`` and the ratio argument
+# of ``set_pad_authored`` (#6718) is never exercised with a real value.  This
+# deterministic scene does: one 2 x 2 mm roundrect per file ratio (plus the
+# clamp above 0.5 and the ``None`` rectangle fallback), each probed at all
+# four corners along the diagonal.  A corner of radius R pulls the copper back
+# by R * (sqrt(2) - 1) along the diagonal, so a probe ``d`` mm from the sharp
+# corner sits ``d + R * (sqrt(2) - 1)`` from the rounded one -- the probe
+# distances below straddle the floor differently for every ratio.  A native
+# side that ignores, drops (0.0) or hardcodes (0.25) the ratio flips at least
+# one verdict and breaks parity.
+
+# (roundrect_rratio, effective ratio after pad_kernel_params); None -> rect.
+_RRATIO_CASES = ((0.0, 0.0), (0.1, 0.1), (0.25, 0.25), (0.5, 0.5), (0.7, 0.5), (None, 0.0))
+_RRATIO_PAD = 2.0
+_RRATIO_FLOOR = 0.3
+# Gaps to the *sharp* corner: each lands >= 0.03 mm from the floor for every
+# ratio above, far outside the float32 verdict band.
+_RRATIO_DISTANCES = (0.05, 0.15, 0.25)
+
+
+def _rratio_scene():
+    """Roundrect pads (net 1, floor 0.3) and corner probes (net 2, no floor)."""
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad, Segment, Via
+    from kicad_tools.router.rules import DesignRules
+
+    layers = (Layer.F_CU, Layer.B_CU)
+    grid = RoutingGrid(
+        6 * len(_RRATIO_CASES),
+        8,
+        DesignRules(
+            trace_clearance=0.1, via_clearance=0.1, net_clearance_floors={1: _RRATIO_FLOOR}
+        ),
+    )
+    half = _RRATIO_PAD / 2
+    root2 = math.sqrt(2.0)
+    probes = []  # (probe, rratio, expected_clear, label)
+    for i, (rratio, effective) in enumerate(_RRATIO_CASES):
+        cx, cy = 3.0 + 6.0 * i, 4.0
+        grid.add_pad(
+            Pad(
+                cx,
+                cy,
+                _RRATIO_PAD,
+                _RRATIO_PAD,
+                1,
+                "N1",
+                layer=Layer.F_CU,
+                ref=f"U{i}",
+                pin="1",
+                shape="roundrect",
+                roundrect_rratio=rratio,
+            )
+        )
+        pullback = effective * _RRATIO_PAD * (root2 - 1.0)
+        for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+            ux, uy = sx / root2, sy / root2  # outward diagonal
+            kx, ky = cx + sx * half, cy + sy * half  # the sharp corner
+            for d in _RRATIO_DISTANCES:
+                expected = d + pullback >= _RRATIO_FLOOR
+                label = f"rratio={rratio} corner=({sx},{sy}) d={d}"
+                # A 0.6 mm via whose rim is d from the sharp corner.
+                r = 0.3 + d
+                probes.append(
+                    (
+                        Via(kx + ux * r, ky + uy * r, 0.3, 0.6, layers, 2),
+                        rratio,
+                        expected,
+                        f"via {label}",
+                    )
+                )
+                # A short 0.2 mm trace across the diagonal, edge d from the corner.
+                r = 0.1 + d
+                px, py = kx + ux * r, ky + uy * r
+                tx, ty = -uy * 0.1, ux * 0.1
+                probes.append(
+                    (
+                        Segment(px - tx, py - ty, px + tx, py + ty, 0.2, Layer.F_CU, 2),
+                        rratio,
+                        expected,
+                        f"segment {label}",
+                    )
+                )
+    return grid, probes
+
+
+@requires_cpp
+def test_authored_gate_roundrect_rratio_parity() -> None:
+    """Both authored gates measure each roundrect with its file ratio (#6728)."""
+    from kicad_tools.router.cpp_backend import CppGrid
+    from kicad_tools.router.primitives import Via
+
+    grid, probes = _rratio_scene()
+    impl = CppGrid.from_routing_grid(grid)._impl
+    assert impl.authored_active()
+    verdicts: dict[float | None, set[bool]] = {}
+    for probe, rratio, expected, label in probes:
+        assert not _authored_on_boundary(grid, probe), f"{label}: inside the verdict band"
+        py_clear = grid.authored_violation(probe, probe.net) is None
+        if isinstance(probe, Via):
+            cpp_clear = impl.authored_via_clear(probe.x, probe.y, probe.diameter, probe.net)
+        else:
+            cpp_clear = impl.authored_segment_clear(
+                probe.x1,
+                probe.y1,
+                probe.x2,
+                probe.y2,
+                probe.width,
+                grid.layer_to_index(probe.layer.value),
+                probe.net,
+            )
+        assert py_clear == expected, f"{label}: Python gate says clear={py_clear}"
+        assert cpp_clear == py_clear, f"{label}: native clear={cpp_clear}, Python {py_clear}"
+        verdicts.setdefault(rratio, set()).add(py_clear)
+    # Non-vacuous: every ratio's probes split, except the extremes, which the
+    # distances pin to all-reject (sharp) and all-accept (fully rounded).
+    assert verdicts == {
+        0.0: {False},
+        0.1: {False, True},
+        0.25: {False, True},
+        0.5: {True},
+        0.7: {True},
+        None: {False},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Issue #6272: the trace/via floor is independent of insertion order
+# ---------------------------------------------------------------------------
+#
+# A trace and a foreign via are one unordered copper pair.  Before #6272 the
+# floor between them depended on which was committed first: a via placed
+# against an existing trace met ``via_clearance``, a trace placed against an
+# existing via met ``trace_clearance``.  Every gate now resolves
+# ``clearance_resolver.trace_via_clearance_mm`` (native twin
+# ``router::trace_via_clearance``) = ``max(trace, via)``.  The matrix below
+# drives both rule orderings (via > trace and trace > via), both insertion
+# orders, both backends (Python commit validators + Python pathfinder commit
+# gate; native ``validate_route`` + the native search predicates), and gaps a
+# hair either side of the floor -- plus the diff-pair-partner case, where the
+# barrel must keep the via floor.
+
+# (trace_clearance, via_clearance)
+_TRACE_VIA_RULES = ((0.15, 0.20), (0.20, 0.15), (0.25, 0.20), (0.10, 0.30))
+# Offsets from the floor; well outside float32 noise, inside one grid cell.
+_TRACE_VIA_OFFSETS = (-0.02, -0.005, 0.005, 0.02)
+
+
+def _trace_via_scene(trace: float, via_floor: float, gap: float):
+    """A 0.2 mm F.Cu trace (net 2) ``gap`` mm from a 0.6/0.3 through via (net 1)."""
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment, Via
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=trace,
+        via_clearance=via_floor,
+        via_diameter=0.6,
+        via_drill=0.3,
+        grid_resolution=0.05,
+    )
+    grid = RoutingGrid(10, 10, rules)
+    via = Via(5.0, 5.0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 1, "VIA")
+    y = 5.0 + 0.3 + 0.1 + gap
+    segment = Segment(4.0, y, 6.0, y, 0.2, Layer.F_CU, 2, "TRACE")
+    return (
+        rules,
+        grid,
+        via,
+        segment,
+        Route(1, "VIA", vias=[via]),
+        Route(2, "TRACE", segments=[segment]),
+    )
+
+
+def _python_verdicts(trace: float, via_floor: float, gap: float) -> dict[str, bool]:
+    """``{gate: legal}`` from every Python trace/via gate, in both orders."""
+    from kicad_tools.router.pathfinder import Router
+
+    _, grid, via, segment, via_route, trace_route = _trace_via_scene(trace, via_floor, gap)
+    router = Router(grid, grid.rules)
+    verdicts: dict[str, bool] = {}
+    # via committed first, trace is the candidate
+    grid.routes = [via_route]
+    verdicts["py_seg_validate"] = grid.validate_segment_clearance(segment, 2)[0]
+    verdicts["py_seg_validate_partner"] = grid.validate_segment_clearance(
+        segment, 2, partner_net=1, partner_clearance=0.05
+    )[0]
+    verdicts["py_router_trace_after_via"] = router._validate_route_clearance(trace_route, 2)
+    # trace committed first, via is the candidate
+    grid.routes = [trace_route]
+    verdicts["py_via_validate"] = grid.validate_via_clearance(via, 1)[0]
+    verdicts["py_via_deficit"] = grid.worst_via_segment_deficit(via, 1)[0] <= 0
+    verdicts["py_router_via_after_trace"] = router._validate_route_clearance(via_route, 1)
+    return verdicts
+
+
+def _native_verdicts(trace: float, via_floor: float, gap: float) -> dict[str, bool]:
+    """``{gate: legal}`` from every native trace/via gate, in both orders."""
+    from kicad_tools.router import router_cpp
+    from kicad_tools.router.cpp_backend import CppGrid
+
+    _, grid, via, segment, _, _ = _trace_via_scene(trace, via_floor, gap)
+    impl = CppGrid.from_routing_grid(grid)._impl
+    cs = router_cpp.Segment()
+    cs.x1, cs.y1, cs.x2, cs.y2 = segment.x1, segment.y1, segment.x2, segment.y2
+    cs.width, cs.layer, cs.net = segment.width, 0, segment.net
+    cv = router_cpp.Via()
+    cv.x, cv.y, cv.drill, cv.diameter, cv.net = via.x, via.y, via.drill, via.diameter, 1
+    cv.layer_from, cv.layer_to = 0, grid.num_layers - 1
+    floor = router_cpp.trace_via_clearance(trace, via_floor)
+    verdicts: dict[str, bool] = {}
+
+    # via committed first, trace is the candidate
+    impl.add_stored_via(via.x, via.y, via.drill, via.diameter, 1)
+    verdicts["cpp_commit_trace_after_via"] = impl.validate_route(
+        [cs], [], 2, [], trace, via_floor, 0.1
+    ).valid
+    verdicts["cpp_commit_trace_after_via_partner"] = impl.validate_route(
+        [cs], [], 2, [], trace, via_floor, 0.1, partner_net=1, intra_pair_clearance=0.05
+    ).valid
+    verdicts["cpp_search_trace_geometry"] = impl.route_trace_geometry_clear(
+        cs, trace, -1, -1.0, via_floor
+    )
+    verdicts["cpp_search_trace_geometry_partner"] = impl.route_trace_geometry_clear(
+        cs, trace, 1, 0.05, via_floor
+    )
+    verdicts["cpp_search_swept_edge"] = impl.trace_stored_vias_clear(cs, floor)
+    verdicts["cpp_search_swept_edge_partner"] = impl.trace_stored_vias_clear(cs, floor, 1, 0.05)
+
+    # trace committed first, via is the candidate
+    impl.clear_stored_routes()
+    impl.add_stored_segment(cs.x1, cs.y1, cs.x2, cs.y2, cs.width, 0, 2)
+    verdicts["cpp_commit_via_after_trace"] = impl.validate_route(
+        [], [cv], 1, [], trace, via_floor, 0.1
+    ).valid
+    verdicts["cpp_search_via_geometry"] = impl.route_via_geometry_clear(
+        cv, via_floor, 0.0, 0.0, trace
+    )
+    return verdicts
+
+
+@requires_cpp
+@pytest.mark.parametrize("trace,via_floor", _TRACE_VIA_RULES)
+@pytest.mark.parametrize("offset", _TRACE_VIA_OFFSETS)
+def test_trace_via_floor_is_insertion_order_and_backend_invariant(
+    trace: float, via_floor: float, offset: float
+) -> None:
+    """Issue #6272: one verdict per trace/via pair -- any order, any backend."""
+    from kicad_tools.router.clearance_resolver import trace_via_clearance_mm
+
+    floor = trace_via_clearance_mm(trace, via_floor)
+    gap = floor + offset
+    legal = offset > 0
+    verdicts = {
+        **_python_verdicts(trace, via_floor, gap),
+        **_native_verdicts(trace, via_floor, gap),
+    }
+    wrong = {gate: ok for gate, ok in verdicts.items() if ok is not legal}
+    assert not wrong, (
+        f"trace={trace} via={via_floor} gap={gap:.3f} (floor {floor}): expected "
+        f"{'legal' if legal else 'violation'} from every gate; disagreeing: {wrong}"
+    )
+
+
+@requires_cpp
+def test_trace_via_floor_rule_parity() -> None:
+    """The rule half: resolver, scalar helper and native helper agree."""
+    from kicad_tools.router import router_cpp
+    from kicad_tools.router.clearance_resolver import (
+        ClearanceResolver,
+        ClearanceRuleSet,
+        CopperKind,
+        trace_via_clearance_mm,
+    )
+    from kicad_tools.router.rules import DesignRules
+
+    rng = random.Random(6272)
+    for _ in range(200):
+        trace = round(rng.uniform(0.05, 0.5), 4)
+        via = round(rng.uniform(0.05, 0.5), 4)
+        expected = max(trace, via)
+        assert trace_via_clearance_mm(trace, via) == pytest.approx(expected)
+        assert router_cpp.trace_via_clearance(trace, via) == pytest.approx(expected, abs=1e-6)
+        resolver = ClearanceResolver(
+            ClearanceRuleSet.from_design_rules(
+                DesignRules(trace_clearance=trace, via_clearance=via)
+            )
+        )
+        for kinds in ((CopperKind.TRACE, CopperKind.VIA), (CopperKind.VIA, CopperKind.TRACE)):
+            assert resolver.required_mm("A", "B", *kinds) == pytest.approx(expected)
+    assert trace_via_clearance_mm(0.15, None) == pytest.approx(0.15)

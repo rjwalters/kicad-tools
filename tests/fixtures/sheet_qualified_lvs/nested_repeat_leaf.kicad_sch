@@ -1,0 +1,56 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "76160020-0000-4000-8000-000000007616")
+	(paper "A4")
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+	)
+	(hierarchical_label "SIG"
+		(shape input)
+		(at 20 35 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "76160021-0000-4000-8000-000000007616")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "76160022-0000-4000-8000-000000007616")
+		(property "Reference" "R1"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10k"
+			(at 102 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "76160023-0000-4000-8000-000000007616"))
+		(pin "2" (uuid "76160024-0000-4000-8000-000000007616"))
+		(instances
+			(project "nested_repeat_root"
+				(path "/76160001-0000-4000-8000-000000007616/76160002-0000-4000-8000-000000007616/76160011-0000-4000-8000-000000007616"
+					(reference "R1") (unit 1)
+				)
+				(path "/76160001-0000-4000-8000-000000007616/76160003-0000-4000-8000-000000007616/76160011-0000-4000-8000-000000007616"
+					(reference "R101") (unit 1)
+				)
+			)
+		)
+	)
+)

@@ -1,0 +1,578 @@
+{
+  "file": "output/usb_joystick_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "pcb_sha256": "94005ce497b8c968fd655d6c954de033bc6751c52248421c3e79cfc47a907e96",
+  "layers": 4,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 11,
+    "waived": 0,
+    "rules_checked": 76,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "diffpair_clearance_intra": 2,
+      "diffpair_length_skew": 2,
+      "diffpair_routing_continuity": 2,
+      "diffpair_uncoupled_length": 2,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
+    },
+    "passed": true,
+    "stale_waivers": 0,
+    "coverage_checked": 35,
+    "coverage_skipped": 5,
+    "coverage_unknown": [
+      "model_coverage",
+      "spec_conformance"
+    ],
+    "coverage_blocking_unknown": []
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
+      "location": [
+        123.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 7.4,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": "ev2:e7abda055e11c1a4"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:ac27d7b200a57786"
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Differential-pair chain USB_D+/USB_D- -> USB_MCU_D+/USB_MCU_D- end-to-end length-skew 0.362 mm chain skew (no chain limit declared)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.3617,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-",
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_length_skew||USB_D+,USB_D-,USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:7941f8a208f48b51"
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- propagation-delay skew 2.74 ps (length skew 0.224 mm) within budget 115.16 ps = 16.096 mm at the slowest layer [derived:-30 dB at knee 0.0874 GHz (USB2_FS 0.012 Gb/s, protocol max rate); [USB2] USB 2.0 full speed, 12 Mb/s; [USB2] \u00a77.1.2.1: FS rise/fall 4-20 ns]",
+      "location": null,
+      "layer": null,
+      "actual_value": 2.7446,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_length_skew||USB_D+,USB_D-|",
+      "evidence_hash": "ev2:515db704eeadde65"
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- propagation-delay skew 0.82 ps (length skew 0.137 mm) within budget 115.16 ps = 16.096 mm at the slowest layer [derived:-30 dB at knee 0.0874 GHz (USB2_FS 0.012 Gb/s, protocol max rate); [USB2] USB 2.0 full speed, 12 Mb/s; [USB2] \u00a77.1.2.1: FS rise/fall 4-20 ns]",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.8167,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_length_skew||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:efe2098b5a9b3e84"
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- routing continuity 32.7% below threshold 70.0% (info only; see diffpair_uncoupled_length)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.3265,
+      "required_value": 0.7,
+      "items": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_routing_continuity|USB_D+,USB_D-|USB_D+,USB_D-|",
+      "evidence_hash": "ev2:cd7cd7a9a153fb15"
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 100.0% of its length (>= 70.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 1.0,
+      "required_value": 0.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_routing_continuity||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:508e1b9a4dd64e81"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_D+/USB_D- uncoupled length 9.325 mm (P 9.325, N 9.325) within limit 19.050 mm = 6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 9.3249,
+      "required_value": 19.05,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
+      "evidence_hash": "ev2:4f292b3c09637870"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_D+/USB_D- worst per-terminal uncoupled length 1.696 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "location": null,
+      "layer": null,
+      "actual_value": 1.6964,
+      "required_value": 6.35,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
+      "evidence_hash": "ev2:2ba79ad66effea18"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- uncoupled length 0.955 mm (P 0.955, N 0.818) within limit 12.700 mm = 6.35 mm x 2 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.9553,
+      "required_value": 12.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:e6296cbc0be73095"
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- worst per-terminal uncoupled length 0.800 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.8004,
+      "required_value": 6.35,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:e413d48f90b604e8"
+    }
+  ],
+  "mask_copper_assessments": [],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "76 rules checked, 0 error(s), 0 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 129,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
+    },
+    "overall": "PASSED",
+    "schematic_missing": false
+  },
+  "routing_quality": {
+    "total_segments": 910,
+    "nets_with_copper": 27,
+    "segments_per_net": 33.7037037037037,
+    "zero_length_count": 0,
+    "median_length_mm": 0.799999999999983,
+    "fragment_count": 110,
+    "fragment_fraction": 0.12087912087912088,
+    "orthogonal_count": 468,
+    "diagonal_45_count": 442,
+    "off_axis_count": 0,
+    "staircase_step_count": 25,
+    "staircase_fraction": 0.027472527472527472
+  },
+  "fabrication_process": {
+    "process_id": "jlcpcb-tier1-pofv-4l",
+    "name": "JLCPCB Capability Plus -- Plated-Over Filled Via (POFV), 4+ layer",
+    "min_layer_count": 4,
+    "min_via_drill_mm": 0.2,
+    "max_via_drill_mm": 0.5,
+    "min_annular_ring_mm": 0.1,
+    "requires_filled_and_capped": true,
+    "min_component_hole_distance_mm": 0.5,
+    "source": "https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv",
+    "ordering_instructions": "Order the JLCPCB Capability Plus -- Plated-Over Filled Via (POFV), 4+ layer process (jlcpcb-tier1-pofv-4l): a >= 4-layer stackup with epoxy-filled and copper-capped (plated-over) vias, via drills between 0.2 and 0.5 mm, annular ring >= 0.1 mm, and in-pad vias kept >= 0.5 mm from any other component's drilled hole. Do not substitute ordinary open or merely tented vias. Source: https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv"
+  },
+  "coverage": {
+    "ampacity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "clearance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connectivity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connector_access": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "copper_sliver": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "courtyard_overlap": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dangling_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "diffpair_clearance_intra": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_routing_continuity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dimensions": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "doc_drift": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "edge": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "impedance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "isolated_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "mask_to_copper": {
+      "status": "skipped:opt_in:--mask-copper-config",
+      "state": "skipped",
+      "reason": "opt_in:--mask-copper-config",
+      "blocking": true
+    },
+    "match_group_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "model_coverage": {
+      "status": "unknown:host_library_refs (37 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (37 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
+    },
+    "netclass_clearance_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_floor": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netlist": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "pad_grid": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "path_ampacity": {
+      "status": "skipped:no_declared_current_paths",
+      "state": "skipped",
+      "reason": "no_declared_current_paths",
+      "blocking": true
+    },
+    "physical_copper_gap": {
+      "status": "skipped:opt_in:--physical-copper-gap",
+      "state": "skipped",
+      "reason": "opt_in:--physical-copper-gap",
+      "blocking": true
+    },
+    "pin1_marker": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
+    "sch_fields": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "segment_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "silkscreen": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "single_pad_net": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "solder_mask": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "spec_conformance": {
+      "status": "unknown:unread_spec_keys:requirements.electrical.signals,requirements.manufacturing.min_space",
+      "state": "unknown",
+      "reason": "unread_spec_keys:requirements.electrical.signals,requirements.manufacturing.min_space",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_under_body": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "width_consistency": {
+      "status": "skipped:opt_in:--only",
+      "state": "skipped",
+      "reason": "opt_in:--only",
+      "blocking": false
+    },
+    "zero_length_segment": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "zones": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    }
+  },
+  "verdict": "pass",
+  "exit_code": 0
+}

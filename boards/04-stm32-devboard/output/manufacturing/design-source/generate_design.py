@@ -1,0 +1,3192 @@
+#!/usr/bin/env python3
+"""
+STM32 Development Board - End-to-End Example
+
+This script demonstrates the complete PCB design workflow:
+1. Create project file
+2. Create schematic with power rails and components
+3. Run ERC validation
+4. Generate PCB with component placement
+5. Route PCB traces
+6. Run DRC validation
+
+The design includes:
+- LDO voltage regulator (5V to 3.3V)
+- STM32F103C8T6 MCU (LQFP-48) with full power, decoupling and reset wiring
+- 8MHz HSE crystal oscillator on PD0/PD1
+- SWD debug header (PA13/PA14/PB3/NRST)
+- User LED indicator on PB12 (active-low)
+
+Usage:
+    python generate_design.py [output_dir]
+
+If no output directory is specified, files are written to ./output/
+"""
+
+import json
+import math
+import os
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.core.schematic_uuids import UuidSequence
+from kicad_tools.dev import warn_if_stale
+from kicad_tools.lvs import write_lvs_report
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+from kicad_tools.pcb.center_sheet import centered_origin
+from kicad_tools.pcb.models3d import ensure_models
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
+from kicad_tools.recipes.precondition import require_spec
+from kicad_tools.schematic.blocks import (
+    DebugHeader,
+    create_crystal_with_loads,
+    create_gpio_pull_resistor,
+    create_mcu_decoupling_array,
+)
+from kicad_tools.schematic.models.schematic import Schematic
+
+# Warn if running source scripts with stale pipx install
+warn_if_stale()
+
+
+# J1 value shared by the schematic (DebugHeader emits ``SWD-<pins>``) and the
+# PCB footprint, so the two sides cannot drift (#7150).
+J1_VALUE = "SWD-6"
+
+# Deterministic PCB item UUIDs (Issue #6076): the n-th call in a build returns
+# the same uuid5 every run, so a fresh build is byte-reproducible.
+_PCB_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb")
+
+
+def generate_uuid() -> str:
+    """Next deterministic KiCad-format UUID (Issue #6076)."""
+    return _PCB_UUIDS()
+
+
+# F.CrtYd courtyard UUIDs come from their own sequence (Issue #7204) so adding
+# the courtyards does not shift any pre-existing item's UUID.
+_CRTYD_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb:courtyard")
+# F.Fab body UUIDs (Issue #7204) likewise get their own sequence.
+_FAB_UUIDS = UuidSequence("boards/04-stm32-devboard/stm32_devboard.kicad_pcb:fab")
+
+# Courtyard rule (Issue #7204): each footprint's ``F.CrtYd`` outline is the
+# union of the stock KiCad 10.0.6 library courtyard (translated into this
+# generator's pad frame) and the pad extents plus the 0.25 mm IPC-7351B
+# nominal courtyard excess, rounded outward to 0.01 mm.  Without it neither
+# ``kct check`` nor kicad-cli had an outline to test, so courtyard overlap was
+# never evaluated on this board.
+
+
+def courtyard_rect(x0: float, y0: float, x1: float, y1: float) -> str:
+    """An ``F.CrtYd`` rectangle in footprint-local coordinates (Issue #7204)."""
+    return (
+        f"    (fp_rect (start {x0:.2f} {y0:.2f}) (end {x1:.2f} {y1:.2f}) "
+        f'(stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") '
+        f'(uuid "{_CRTYD_UUIDS()}"))'
+    )
+
+
+def courtyard_poly(points: list[tuple[float, float]]) -> str:
+    """A closed ``F.CrtYd`` polygon in footprint-local coordinates (Issue #7204)."""
+    pts = " ".join(f"(xy {x:.2f} {y:.2f})" for x, y in points)
+    return (
+        f"    (fp_poly (pts {pts}) "
+        f'(stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") '
+        f'(uuid "{_CRTYD_UUIDS()}"))'
+    )
+
+
+def _round_out(v: float) -> float:
+    """Round away from zero to 0.01 mm (outward for a footprint-centred outline)."""
+    return math.copysign(math.ceil(abs(v) * 100 - 1e-9) / 100, v)
+
+
+def stadium_courtyard_points(
+    half_span: float, radius: float, steps: int = 8
+) -> list[tuple[float, float]]:
+    """Polygon circumscribing a stadium (two semicircles joined by straight sides).
+
+    The arcs are centred at ``(+-half_span, 0)`` with ``radius``.  Each arc is
+    replaced by ``steps`` tangent edges whose vertices sit at
+    ``radius / cos(pi / (2 * steps))``, so the polygon contains the stadium
+    everywhere (Issue #7204: kct resolves ``fp_rect``/``fp_poly``/closed
+    ``fp_line`` courtyards, not ``fp_arc``).
+    """
+    step = math.pi / steps
+    r_vertex = radius / math.cos(step / 2)
+    points: list[tuple[float, float]] = []
+    # Left arc: from the top (-90 deg, y-down) round through 180 deg to +90 deg.
+    # The first and last vertices lie on the straight sides (y = +-radius), so
+    # the sides need no vertices of their own.
+    for k in range(steps):
+        a = -math.pi / 2 - step / 2 - k * step
+        points.append((-half_span + r_vertex * math.cos(a), r_vertex * math.sin(a)))
+    # Right arc: from the bottom (+90 deg) round through 0 deg to -90 deg.
+    for k in range(steps):
+        a = math.pi / 2 - step / 2 - k * step
+        points.append((half_span + r_vertex * math.cos(a), r_vertex * math.sin(a)))
+    return [(_round_out(x), _round_out(y)) for x, y in points]
+
+
+# Stock ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` F.CrtYd (KiCad 10.0.6), copied
+# vertex for vertex: this footprint's pads are identical to the library's, so
+# no translation applies, and the stepped outline already equals pad extent
+# (4.9 mm) + 0.25 mm on every side.  A bounding rectangle would be more
+# conservative than the library and could invent overlaps with the decoupling
+# caps (Issue #7204).
+LQFP48_COURTYARD = [
+    (-3.15, -5.15),
+    (3.15, -5.15),
+    (3.15, -3.75),
+    (3.75, -3.75),
+    (3.75, -3.15),
+    (5.15, -3.15),
+    (5.15, 3.15),
+    (3.75, 3.15),
+    (3.75, 3.75),
+    (3.15, 3.75),
+    (3.15, 5.15),
+    (-3.15, 5.15),
+    (-3.15, 3.75),
+    (-3.75, 3.75),
+    (-3.75, 3.15),
+    (-5.15, 3.15),
+    (-5.15, -3.15),
+    (-3.75, -3.15),
+    (-3.75, -3.75),
+    (-3.15, -3.75),
+]
+
+
+def create_stm32_schematic(output_dir: Path) -> Path:
+    """
+    Create an STM32 development board schematic.
+
+    This demonstrates the workflow for creating a simple MCU board with:
+    - Power rails (5V, 3.3V, GND)
+    - LDO voltage regulator (manually added)
+    - 8MHz crystal oscillator (using CrystalOscillator block)
+    - SWD debug header (using DebugHeader block)
+    - User LED (manual R1/D1 placement, PCB-matched pad topology)
+
+    The schematic is organized with power on the left, peripherals in the center,
+    and debug interface on the right.
+    """
+    print("Creating STM32 Development Board schematic...")
+    print("=" * 60)
+
+    # Create schematic with title block
+    sch = Schematic(
+        title="STM32F103C8 Development Board",
+        date="2025-01",
+        revision="A",
+        company="kicad-tools Example",
+        comment1="End-to-end design example",
+        comment2="Demonstrates circuit blocks API",
+    )
+
+    # Define power rail Y coordinates for organized layout
+    # NOTE: With the MCU symbol added (LQFP-48 ~80mm tall), the schematic now
+    # spans a much wider Y range. The MCU is centered around y=120, with VDD/
+    # VBAT pins reaching up to y=80 and VSS/VSSA pins reaching down to y=160.
+    # Power rails are placed above and below the MCU body so pin stubs don't
+    # cross the rails.
+    RAIL_5V = 30  # 5V input power (top, used only by LDO input)
+    RAIL_3V3 = 70  # 3.3V regulated (above MCU body)
+    RAIL_GND = 200  # Ground (below MCU body)
+
+    # Schematic boundaries.  X_RIGHT terminates the +3.3V and GND rails at
+    # the SWD header J1's pin column (computed at runtime below to avoid
+    # dangling wire endpoints).  X_LEFT marks the +5V/GND power-symbol column.
+    X_LEFT = 25
+    # Position of the SWD header (used for rail termination too)
+    X_SWD = 290
+
+    # =========================================================================
+    # Section 1: Power Rails
+    # =========================================================================
+    print("\n1. Creating power rails...")
+
+    # Add power rails - endpoints should match actual component connection points
+    # to avoid floating wire endpoints. For T-connections, use add_segmented_rail()
+    # or ensure rail endpoints align with component tap points.
+    #
+    # Rail endpoints based on component positions:
+    # - 5V: Power symbol (25) to LDO VIN (~93)
+    # - 3.3V: LDO VOUT (~108) to debug header / MCU bypass caps / SWD header
+    # - GND: Power symbol (25) across the full width to MCU VSS pins / SWD header
+    # Rails extend from their leftmost power-symbol column to the SWD header
+    # column (X_SWD - 5.52mm = pin-1 column after the header symbol's internal
+    # offset).  Choosing the rail endpoint to coincide with an actual tap
+    # point keeps the validator from flagging dangling wire endpoints.
+    rail_3v3_xend = X_SWD - 5.52
+    rail_gnd_xend = X_SWD - 5.52
+    # The 3.3V rail uses the net label "+3.3V" to match the PCB's canonical
+    # 12-net NETS table (the layout source of truth) pad-for-pad, so
+    # compare_netlists(sch, routed_pcb) is clean.  KiCad's stock power
+    # symbol is "+3V3", which would publish a mismatched net; instead the
+    # rail is driven by a *synthesized* "+3.3V" power symbol (add_pwr_symbol
+    # below), which registers a proper lib_symbols entry and round-trips
+    # without the old ``lib_symbol_issues`` ERC warning the prior "+3V3"
+    # workaround was guarding against.  See issue #3765 (drift reconcile).
+    # The +5V rail's right end terminates at C1's tap column (x=64.77).
+    # U1's +5V pad (pad 1) is now bound via a global ``+5V`` label rather
+    # than a physical wire to this rail (see the LDO pad-labelling below
+    # for issue #3765), so the rail no longer needs to extend to the LDO
+    # VI column at x=93 -- ending it at the last physical +5V tap (C1)
+    # avoids a dangling wire endpoint.
+    #
+    # Power nets are named with *global* labels, never local ones: the power
+    # symbols below already publish these names globally, and KiCad 10.0.7
+    # ERC flags a local label sharing a name with a global one
+    # (``same_local_global_label``, issue #7063).
+    sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=64.77)
+    sch.add_global_label("+5V", X_LEFT, RAIL_5V, shape="passive")
+    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend)
+    sch.add_global_label("+3.3V", 80, RAIL_3V3, shape="passive")
+    sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=rail_gnd_xend)
+    sch.add_global_label("GND", X_LEFT, RAIL_GND, shape="passive")
+    print("   Added +5V, +3.3V, and GND rails")
+
+    # Add power symbols at the left ends of the rails, each wired down (or
+    # up, for GND) to its rail endpoint so the symbol pin meets a real wire
+    # endpoint (silences ``pin_not_connected``) AND so the symbol's global
+    # net publication unifies with the rail's labelled net.  Mirrors sister
+    # board 05's fix (PR #3004 -- the ``add_power`` / ``PWR_FLAG`` rail
+    # bridging in ``create_bldc_controller``,
+    # boards/05-bldc-motor-controller/design.py); see issue #3149.
+    #
+    # +5V: the +5V rail has no genuine ``power_output`` source -- the only
+    # consumer is the MCP1825S VI pin, which is a ``power_input``.  Without
+    # the bridging wire the +5V symbol floats (``pin_not_connected``); even
+    # once wired, the rail has no driver so U1.VI fires
+    # ``power_pin_not_driven``.  Add a PWR_FLAG on the +5V column to mark the
+    # rail as externally driven (it is fed by C1 / an off-board 5V supply).
+    sch.add_power("power:+5V", x=X_LEFT, y=RAIL_5V - 10, rotation=0)
+    sch.add_wire((X_LEFT, RAIL_5V - 10), (X_LEFT, RAIL_5V), warn_on_collision=False)
+    sch.add_pwr_flag(X_LEFT + 7, RAIL_5V - 10)
+    sch.add_wire((X_LEFT + 7, RAIL_5V - 10), (X_LEFT + 7, RAIL_5V), warn_on_collision=False)
+    sch.add_junction(X_LEFT + 7, RAIL_5V)
+
+    # The real MCP1825S drives +3.3V; input power and ground are external.
+    sch.add_pwr_symbol("+3.3V", x=80, y=RAIL_3V3 - 10, rotation=0)
+    sch.add_wire((80, RAIL_3V3 - 10), (80, RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(80, RAIL_3V3)
+    sch.add_power("power:GND", x=X_LEFT, y=RAIL_GND + 10, rotation=0)
+    sch.add_wire((X_LEFT, RAIL_GND + 10), (X_LEFT, RAIL_GND), warn_on_collision=False)
+    sch.add_junction(X_LEFT, RAIL_GND)
+    sch.add_pwr_flag(X_LEFT + 7, RAIL_GND + 10)
+    sch.add_wire((X_LEFT + 7, RAIL_GND + 10), (X_LEFT + 7, RAIL_GND), warn_on_collision=False)
+    sch.add_junction(X_LEFT + 7, RAIL_GND)
+    print("   Added power symbols; PWR_FLAG only on external +5V and GND")
+
+    # =========================================================================
+    # Section 2: LDO Voltage Regulator (Manual Component Placement)
+    # =========================================================================
+    print("\n2. Adding LDO voltage regulator...")
+
+    # Note: The LDOBlock requires specific symbol libraries. Here we
+    # demonstrate manual component placement as an alternative.
+
+    # Add LDO symbol (using a generic 3-terminal regulator)
+    ldo = sch.add_symbol(
+        "Regulator_Linear:MCP1825S",
+        x=100,
+        y=100,
+        ref="U1",
+        value="MCP1825S-3302E/DB",
+        properties={"Manufacturer": "Microchip", "MPN": "MCP1825S-3302E/DB", "LCSC": "C148031"},
+        footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+    )
+    print(f"   LDO: {ldo.reference}")
+
+    # Add input capacitor
+    c_in = sch.add_symbol(
+        "Device:C_Small",
+        x=65,
+        y=100,
+        ref="C1",
+        value="10uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    print(f"   Input cap: {c_in.reference} = 10uF")
+
+    # Add output capacitors
+    c_out1 = sch.add_symbol(
+        "Device:C_Small",
+        x=135,
+        y=100,
+        ref="C2",
+        value="10uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c_out2 = sch.add_symbol(
+        "Device:C_Small",
+        x=150,
+        y=100,
+        ref="C3",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    print(f"   Output caps: {c_out1.reference} = 10uF, {c_out2.reference} = 100nF")
+
+    # Microchip MCP1825S SOT-223: 1=VIN, 2/tab=GND, 3=VOUT.
+    # These are the manufacturer's fixed pin numbers, not a schematic remap.
+    def _label_ldo_pad(pad_number: str, net_name: str, dx: float, dy: float) -> None:
+        pos = ldo.pin_position(pad_number)
+        end = (pos[0] + dx, pos[1] + dy)
+        sch.add_wire(pos, end, warn_on_collision=False)
+        sch.add_global_label(net_name, end[0], end[1], shape="passive", rotation=0)
+
+    _label_ldo_pad("1", "+5V", -8.0, 0.0)
+    _label_ldo_pad("2", "GND", 0.0, 8.0)
+    _label_ldo_pad("3", "+3.3V", 8.0, 0.0)
+
+    # Wire decoupling capacitors
+    sch.wire_decoupling_cap(c_in, RAIL_5V, RAIL_GND)
+    sch.wire_decoupling_cap(c_out1, RAIL_3V3, RAIL_GND)
+    sch.wire_decoupling_cap(c_out2, RAIL_3V3, RAIL_GND)
+    print("   Wired LDO and decoupling caps to power rails")
+
+    # =========================================================================
+    # Section 3: STM32F103C8T6 MCU (LQFP-48)
+    # =========================================================================
+    print("\n3. Adding STM32F103C8T6 MCU...")
+
+    # MCU position - centered, with room for pin stubs and labels on all sides.
+    # The STM32F103CxTx symbol spans roughly x=±20mm and y=±42mm around its
+    # placement origin (after the 2.54mm pin lengths).  With MCU at (210, 120)
+    # the bounding box is approximately x=[190,230], y=[78,162], which fits
+    # between RAIL_3V3 (y=70) and RAIL_GND (y=200) with stub clearance.
+    MCU_X = 210
+    MCU_Y = 120
+
+    mcu = sch.add_symbol(
+        "MCU_ST_STM32F1:STM32F103C8Tx",
+        x=MCU_X,
+        y=MCU_Y,
+        ref="U2",
+        value="STM32F103C8T6",
+        footprint="Package_QFP:LQFP-48_7x7mm_P0.5mm",
+    )
+    print(f"   {mcu.reference}: STM32F103C8T6 (LQFP-48)")
+
+    # Wire MCU power pins to +3.3V rail.  STM32F103C8 has VDD on pins 24/36/48,
+    # VBAT on pin 1, and VDDA on pin 9 -- all tie to +3.3V on a single-supply
+    # design.  Each pin emerges from the top of the symbol so we route a short
+    # stub up to the +3.3V rail.
+    for pwr_pin in ("VDD", "VBAT", "VDDA"):
+        # The symbol has multiple pins named "VDD" (24, 36, 48); pin_position
+        # returns the first match.  Walk all pins by number to wire each one.
+        for p in mcu.symbol_def.pins:
+            if p.name == pwr_pin:
+                pos = mcu.pin_position(p.number)
+                sch.add_wire(pos, (pos[0], RAIL_3V3), warn_on_collision=False)
+                sch.add_junction(pos[0], RAIL_3V3)
+
+    # Wire MCU ground pins to GND rail.  VSS on pins 23/35/47 and VSSA on
+    # pin 8 emerge from the bottom of the symbol.
+    for gnd_pin in ("VSS", "VSSA"):
+        for p in mcu.symbol_def.pins:
+            if p.name == gnd_pin:
+                pos = mcu.pin_position(p.number)
+                sch.add_wire(pos, (pos[0], RAIL_GND), warn_on_collision=False)
+                sch.add_junction(pos[0], RAIL_GND)
+
+    print("   Wired MCU VDD/VBAT/VDDA to +3.3V and VSS/VSSA to GND")
+
+    # MCU decoupling caps (one per VDD/VBAT/VDDA pin, plus a bulk cap).
+    # Place between MCU and 3.3V rail, on the left side of the symbol.
+    # Keep the whole bypass bank left of the MCU body, including bulk C16.
+    mcu_decoupling = create_mcu_decoupling_array(
+        sch,
+        x=160,
+        y=85,
+        supply_pins=4,
+        ref_start=12,
+        spacing=7.5,
+        cap_symbol="Device:C_Small",
+        cap_footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    mcu_decoupling.connect_to_rails(RAIL_3V3, RAIL_GND)
+    print("   C12-C15 (100nF) + C16 (4.7uF) bypass caps")
+
+    # =========================================================================
+    # Section 4: Crystal Oscillator (8MHz) - connects to MCU PD0/PD1
+    # =========================================================================
+    print("\n4. Adding 8MHz crystal oscillator...")
+
+    # Place crystal to the LEFT of the MCU, where PD0 (pin 5, OSC_IN) and PD1
+    # (pin 6, OSC_OUT) emerge.  PD0 is at (MCU_X - 17.78, MCU_Y - 22.86) =
+    # (192.22, 97.14) and PD1 at (192.22, 99.68) in screen coords.  Place the
+    # crystal block well to the left so its IN/OUT labels align cleanly.
+    # y=150 keeps the crystal's horizontal OSC_IN/OSC_OUT stubs off the C2/C3
+    # row (y=100), which they previously crossed (Issue #8005).
+    xtal = create_crystal_with_loads(
+        sch,
+        x=140,
+        y=150,
+        frequency="8MHz",
+        load_pF=20,
+        cap_ref_start=10,
+        crystal_footprint="Crystal:Crystal_HC49-4H_Vertical",
+        cap_footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    print(f"   Crystal: {xtal.crystal.reference} with C10, C11")
+
+    # Connect crystal ground to GND rail.  The block's GND port is the
+    # MIDPOINT of the C10/C11 ground-bus horizontal wire, and
+    # ``connect_to_rails`` drops a vertical wire from that midpoint down to
+    # the rail, emitting junctions at both the rail end and the ground-bus
+    # midpoint (the latter added by PR #3467; previously this generator had
+    # to add it manually -- see issues #3149 AC #2 and #3468).
+    xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
+
+    # Wire crystal IN/OUT to OSC_IN / OSC_OUT labels (on stubs).  Labels at the
+    # MCU side are added below when we wire the MCU pins.
+    in_pos = xtal.port("IN")
+    out_pos = xtal.port("OUT")
+    sch.add_wire(in_pos, (in_pos[0] - 10, in_pos[1]))
+    sch.add_label("OSC_IN", in_pos[0] - 10, in_pos[1], rotation=0)
+    sch.add_wire(out_pos, (out_pos[0] + 10, out_pos[1]))
+    sch.add_label("OSC_OUT", out_pos[0] + 10, out_pos[1], rotation=0)
+    print("   Added OSC_IN and OSC_OUT labels at crystal")
+
+    # =========================================================================
+    # Section 5: Debug Header (SWD)
+    # =========================================================================
+    print("\n5. Adding SWD debug header...")
+
+    # 6-pin SWD header on the far right of the MCU.  The PCB's canonical
+    # 1x06 footprint (the routed-layout source of truth) assigns nets
+    # per PAD as: 1=+3.3V, 2=SWDIO, 3=SWCLK, 4=SWO, 5=NRST, 6=GND.  This
+    # is a SHIFTED layout vs the DebugHeader block's built-in SWD-6 pinout
+    # (1=VCC, 2=SWDIO, 3=GND, 4=SWCLK, 5=GND, 6=NRST), so we drive every
+    # pin explicitly to reconcile schematic<->PCB drift pad-for-pad (issue
+    # #3765).  Signal pins 2/3/4/5 carry their net labels via ``pin_nets``
+    # (each emits a label stub the MCU-side SWDIO/SWCLK/SWO/NRST labels
+    # unify with); the power/ground pins 1 and 6 are wired to the +3.3V
+    # and GND rails directly below (NOT via ``connect_to_rails``, which
+    # assumes the built-in pin-1-VCC / pin-3-GND positions).
+    debug = DebugHeader(
+        sch,
+        x=X_SWD,
+        y=100,
+        interface="swd",
+        pins=6,
+        series_resistors=False,
+        ref="J1",
+        header_footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+        pin_nets={
+            "2": "SWDIO",
+            "3": "SWCLK",
+            "4": "SWO",
+            "5": "NRST",
+        },
+    )
+    assert debug.header.value == J1_VALUE, (
+        f"DebugHeader value {debug.header.value!r} != J1_VALUE {J1_VALUE!r}"
+    )
+    print(f"   Debug header: {debug.header.reference} ({J1_VALUE})")
+
+    # Wire pin 1 (+3.3V) up to the 3.3V rail and pin 6 (GND) down to the
+    # GND rail so the header power pins unify with their rails.  Matches
+    # the PCB pad assignment (pad1=+3.3V, pad6=GND).
+    j1_p1 = debug.header.pin_position("1")
+    sch.add_wire(j1_p1, (j1_p1[0], RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(j1_p1[0], RAIL_3V3)
+    j1_p6 = debug.header.pin_position("6")
+    sch.add_wire(j1_p6, (j1_p6[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(j1_p6[0], RAIL_GND)
+
+    # =========================================================================
+    # Section 6: MCU peripheral wiring (SWD, oscillator, USER_LED)
+    # =========================================================================
+    print("\n6. Wiring MCU peripheral signals...")
+
+    # Helper: route a short stub from a left-side MCU pin out to a label.
+    # Left-side pins (PA0 family on the right, the rest on the left) emerge
+    # along x=MCU_X-17.78, so the stub goes -10mm to the left.
+    def _label_left_pin(pin_name: str, label_text: str, stub_len: float = -8) -> None:
+        pos = mcu.pin_position(pin_name)
+        sch.add_wire(pos, (pos[0] + stub_len, pos[1]), warn_on_collision=False)
+        sch.add_label(label_text, pos[0] + stub_len, pos[1], rotation=0)
+
+    def _label_right_pin(pin_name: str, label_text: str, stub_len: float = 8) -> None:
+        pos = mcu.pin_position(pin_name)
+        sch.add_wire(pos, (pos[0] + stub_len, pos[1]), warn_on_collision=False)
+        sch.add_label(label_text, pos[0] + stub_len, pos[1], rotation=0)
+
+    # Oscillator inputs (left side of symbol)
+    _label_left_pin("PD0", "OSC_IN")
+    _label_left_pin("PD1", "OSC_OUT")
+    print("   PD0 -> OSC_IN, PD1 -> OSC_OUT")
+
+    # Reset (left side)
+    _label_left_pin("NRST", "NRST")
+    print("   NRST -> NRST (reset header pin)")
+
+    # SWD signals (right side of symbol -- PA13, PA14; left side -- PB3)
+    _label_right_pin("PA13", "SWDIO")
+    _label_right_pin("PA14", "SWCLK")
+    _label_left_pin("PB3", "SWO")
+    print("   PA13 -> SWDIO, PA14 -> SWCLK, PB3 -> SWO")
+
+    # User LED on PB12 (left side, lower half).  Active-low: MCU sinks current.
+    _label_left_pin("PB12", "USER_LED")
+    print("   PB12 -> USER_LED")
+
+    # No-connect markers on every MCU pin we don't drive.  Without these the
+    # internal `Schematic.validate()` flags ~30 "pin not connected" errors and
+    # KiCad ERC may warn about unconnected bidirectional pins.
+    _connected_pin_names: set[str] = {
+        # Power
+        "VBAT",
+        "VDD",
+        "VDDA",
+        "VSS",
+        "VSSA",
+        # Signals we explicitly wire below
+        "NRST",
+        "BOOT0",
+        "PD0",
+        "PD1",
+        "PA13",
+        "PA14",
+        "PB3",
+        "PB12",
+    }
+    _nc_count = 0
+    for p in mcu.symbol_def.pins:
+        if p.name in _connected_pin_names:
+            continue
+        pos = mcu.pin_position(p.number)
+        sch.add_no_connect(pos[0], pos[1])
+        _nc_count += 1
+    print(f"   Added {_nc_count} no-connect markers on unused MCU pins")
+
+    # BOOT0 pull-down (left side, top half).  Tying BOOT0 low forces normal
+    # flash boot at reset; this is the typical configuration for development.
+    # Refactored to use create_gpio_pull_resistor (issue #2573); previously
+    # an inline 10k vertical pull-down with a manual GND stub.
+    boot0_pos = mcu.pin_position("BOOT0")
+    # Place the block left of BOOT0; the block's "BOOT0" port lands at
+    # (block_x, block_y + 5) for a pull-down (resistor below center).
+    block_x = boot0_pos[0] - 20
+    block_y = boot0_pos[1] - 5
+    boot_pull = create_gpio_pull_resistor(
+        sch,
+        x=block_x,
+        y=block_y,
+        pin_name="BOOT0",
+        rail="GND",
+        value="10k",
+        pull_type="down",
+        ref="R2",
+        footprint="Resistor_SMD:R_0805_2012Metric",
+    )
+    # Wire BOOT0 stub from MCU to the block's BOOT0 port (horizontal), and
+    # place an explicit ``BOOT0`` net label on the wire so the U2.44 <-> R2.1
+    # node carries the named net ``BOOT0`` (matching the PCB NETS table)
+    # instead of the KiCad auto-generated ``Net-(U2-44)`` / ``Net-(R2-1)``
+    # placeholders that previously left this net unreconciled (issue #3765).
+    sch.add_wire(boot0_pos, boot_pull.port("BOOT0"), warn_on_collision=False)
+    boot0_port = boot_pull.port("BOOT0")
+    sch.add_label("BOOT0", boot0_port[0], boot0_port[1], rotation=0)
+    # Drop the resistor's GND end down to the GND rail.
+    gnd_end = boot_pull.port("GND")
+    sch.add_wire(gnd_end, (gnd_end[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(gnd_end[0], RAIL_GND)
+    print("   R2 (10k) BOOT0 pull-down to GND (via create_gpio_pull_resistor)")
+
+    # =========================================================================
+    # Section 7: User LED (driven by MCU PB12, active-low)
+    # =========================================================================
+    print("\n7. Adding user LED (driven by MCU PB12)...")
+
+    # LED + current-limiting resistor, placed and wired manually (NOT via
+    # LEDIndicator) so the schematic matches the PCB's canonical pad-for-pad
+    # net model (the routed-layout source of truth) exactly (issue #3765):
+    #
+    #   +3.3V --[R1]-- LED_K --[D1]-- USER_LED --> MCU PB12 (active-low)
+    #
+    # PCB pad assignment we must reproduce:
+    #   R1.pad1 = +3.3V,  R1.pad2 = LED_K
+    #   D1.pad1 = LED_K,  D1.pad2 = USER_LED
+    # Note the ``Device:LED`` symbol numbers its pads pad1="K"(cathode),
+    # pad2="A"(anode) -- the inverse of the LED_SMD footprint's
+    # pad1=anode/pad2=cathode -- so we wire by PAD NUMBER (not anode/cathode
+    # name) to agree with the PCB.  ``LEDIndicator`` hardwires D1.K<->R1.1
+    # (a different intermediate-node topology), which would reintroduce the
+    # D1/R1 drift, so it is not used here.
+    # Both symbols are placed vertical (rotation=90) and spaced apart; every
+    # pad gets a short stub + global net label, so the per-pad net binding is
+    # independent of the exact pad geometry (no fragile cross-body diagonal
+    # wires).  The intermediate LED_K node is realized by labelling BOTH
+    # R1.pad2 and D1.pad1 ``LED_K`` -- KiCad unifies same-named global labels.
+    r1 = sch.add_symbol(
+        "Device:R",
+        x=265,
+        y=150,
+        ref="R1",
+        value="330R",
+        rotation=90,
+        footprint="Resistor_SMD:R_0805_2012Metric",
+    )
+    d1 = sch.add_symbol(
+        "Device:LED",
+        x=265,
+        y=170,
+        ref="D1",
+        # Match the PCB footprint's value label ("LED") so kct check's
+        # value-sync comparison is quiet for D1 (issue #3765).
+        value="LED",
+        rotation=90,
+        footprint="LED_SMD:LED_0805_2012Metric",
+    )
+    print(f"   LED: {d1.reference} with current-limiting resistor {r1.reference} (active-low)")
+
+    def _label_pad(sym, pad_number: str, net_name: str, dx: float, dy: float) -> None:
+        pos = sym.pin_position(pad_number)
+        end = (pos[0] + dx, pos[1] + dy)
+        sch.add_wire(pos, end, warn_on_collision=False)
+        if net_name == "+3.3V":  # power net: global label (issue #7063)
+            sch.add_global_label(net_name, end[0], end[1], shape="passive", rotation=0)
+        else:
+            sch.add_label(net_name, end[0], end[1], rotation=0)
+
+    # R1.pad1 -> +3.3V, R1.pad2 -> LED_K
+    _label_pad(r1, "1", "+3.3V", 0.0, -8.0)
+    _label_pad(r1, "2", "LED_K", 0.0, 8.0)
+    # D1.pad1 (K) -> LED_K, D1.pad2 (A) -> USER_LED.  Per the PCB footprint
+    # pad order (pad1=anode net LED_K, pad2=cathode net USER_LED), wired by
+    # pad number: the Device:LED symbol's pad1 is "K" / pad2 is "A".
+    _label_pad(d1, "1", "LED_K", 0.0, 8.0)
+    _label_pad(d1, "2", "USER_LED", 0.0, -8.0)
+    print("   R1/D1 wired: +3.3V -> R1 -> LED_K -> D1 -> USER_LED (MCU PB12)")
+
+    # =========================================================================
+    # Section 8: Design Notes
+    # =========================================================================
+    print("\n8. Adding design notes...")
+
+    sch.add_text(
+        "STM32F103C8T6 Pin Assignments:\n"
+        "  PA13 = SWDIO    (pin 34)\n"
+        "  PA14 = SWCLK    (pin 37)\n"
+        "  PB3  = SWO      (pin 39)\n"
+        "  NRST = Reset    (pin 7)\n"
+        "  PD0  = OSC_IN   (pin 5, HSE)\n"
+        "  PD1  = OSC_OUT  (pin 6, HSE)\n"
+        "  PB12 = USER_LED (pin 25, active-low)\n"
+        "  BOOT0 pulled low via R2 (10k) for flash boot\n"
+        "  HSE: 8MHz crystal Y1 with 20pF load caps C10/C11\n"
+        "  Decoupling: C12-C15 (100nF) per VDD pin, C16 (4.7uF) bulk",
+        x=X_LEFT,
+        y=230,
+    )
+
+    # =========================================================================
+    # Validate Schematic
+    # =========================================================================
+    print("\n9. Validating schematic...")
+
+    # Run validation
+    issues = sch.validate()
+    errors = [i for i in issues if i["severity"] == "error"]
+    warnings = [i for i in issues if i["severity"] == "warning"]
+
+    if errors:
+        print(f"   Found {len(errors)} errors:")
+        for err in errors[:5]:
+            print(f"      - {err['message']}")
+    else:
+        print("   No errors found")
+
+    if warnings:
+        print(f"   Found {len(warnings)} warnings (floating wires expected)")
+
+    # Get statistics
+    stats = sch.get_statistics()
+    print("\n   Schematic statistics:")
+    print(f"      Symbols: {stats['symbol_count']}")
+    print(f"      Power symbols: {stats['power_symbol_count']}")
+    print(f"      Wires: {stats['wire_count']}")
+    print(f"      Junctions: {stats['junction_count']}")
+    print(f"      Labels: {stats['label_count']}")
+
+    # =========================================================================
+    # Write Output Files
+    # =========================================================================
+    print("\n10. Writing output files...")
+
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write schematic
+    sch_path = output_dir / "stm32_devboard.kicad_sch"
+    sch.write(sch_path)
+    write_portable_symbols(sch_path)
+    print(f"   Schematic: {sch_path}")
+
+    return sch_path
+
+
+def write_portable_symbols(sch_path: Path) -> None:
+    """Bind generated power and reviewed capacitor symbols to local libraries.
+
+    KiCad 10.0.5 and 10.0.6 ship different Device:C_Small definitions. Preserve
+    the schematic's exact cached pins/graphics instead of depending on which
+    stock library a native ERC host has installed.
+    """
+    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
+
+    doc = parse_file(sch_path)
+    libraries = {
+        name: parse_string('(kicad_symbol_lib (version 20250114) (generator "kicad_tools"))')
+        for name in ("kicad_tools_pwr", "board04_symbols")
+    }
+    for symbol in doc.find_child("lib_symbols").find_children("symbol"):
+        lib_id = symbol.get_string(0)
+        if lib_id == "Device:C_Small":
+            lib_id = "board04_symbols:C_Small"
+            symbol.set_atom(0, lib_id)
+        namespace, name = lib_id.split(":", 1)
+        if namespace in libraries:
+            copy = parse_string(serialize_sexp(symbol))
+            copy.set_atom(0, name)
+            libraries[namespace].add(copy)
+    for symbol in doc.find_children("symbol"):
+        lib_id = symbol.find_child("lib_id")
+        if lib_id and lib_id.get_string(0) == "Device:C_Small":
+            lib_id.set_atom(0, "board04_symbols:C_Small")
+    sch_path.write_text(serialize_sexp(doc))
+    for name, library in libraries.items():
+        (sch_path.parent / f"{name}.kicad_sym").write_text(serialize_sexp(library))
+    entries = " ".join(
+        f'(lib (name "{name}") (type "KiCad") '
+        f'(uri "${{KIPRJMOD}}/{name}.kicad_sym") (options "") (descr "Portable board symbols"))'
+        for name in libraries
+    )
+    (sch_path.parent / "sym-lib-table").write_text(f"(sym_lib_table (version 7) {entries})\n")
+
+
+def create_project(output_dir: Path, project_name: str) -> Path:
+    """
+    Create a KiCad project file.
+
+    Returns the path to the generated project file.
+    """
+    print("\n" + "=" * 60)
+    print("Creating Project File...")
+    print("=" * 60)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{project_name}.kicad_pro"
+    project_data = create_minimal_project(filename)
+
+    project_path = output_dir / filename
+    save_project(project_data, project_path)
+    print(f"\n   Project: {project_path}")
+
+    return project_path
+
+
+def run_erc(sch_path: Path) -> bool:
+    """Run ERC on the schematic."""
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.cli.runner import run_erc as kicad_run_erc
+    from kicad_tools.erc import ERCReport
+
+    print("\n" + "=" * 60)
+    print("Running ERC...")
+    print("=" * 60)
+
+    kicad_cli = find_kicad_cli()
+    if not kicad_cli:
+        print("\n   WARNING: kicad-cli not found - skipping ERC")
+        return True
+
+    result = kicad_run_erc(sch_path)
+
+    if not result.success:
+        print(f"\n   Error running ERC: {result.stderr}")
+        return False
+
+    try:
+        report = ERCReport.load(result.output_path)
+    except Exception as e:
+        print(f"\n   Error parsing ERC report: {e}")
+        return False
+    finally:
+        if result.output_path:
+            result.output_path.unlink(missing_ok=True)
+
+    violations = [v for v in report.violations if not v.excluded]
+    error_count = sum(1 for v in violations if v.is_error)
+
+    if error_count > 0:
+        print(f"\n   Found {error_count} ERC errors:")
+        for v in [v for v in violations if v.is_error][:5]:
+            print(f"      - [{v.type_str}] {v.description}")
+        return False
+    else:
+        print("\n   No ERC errors found!")
+        return True
+
+
+def create_stm32_pcb(output_dir: Path) -> Path:
+    """
+    Create a PCB for the STM32 development board.
+
+    Returns the path to the generated PCB file.
+    """
+    _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
+    _CRTYD_UUIDS.reset()  # Issue #7204
+    _FAB_UUIDS.reset()  # Issue #7204
+    print("\n" + "=" * 60)
+    print("Creating STM32 Development Board PCB...")
+    print("=" * 60)
+
+    # Board dimensions (mm) -- expanded to fit the LQFP-48 MCU + decoupling caps
+    BOARD_WIDTH = 60.0
+    BOARD_HEIGHT = 40.0
+    # Sheet-center the outline: middle of the A4 sheet's usable drawing area
+    # (inside the 10 mm frame border, above the 35 mm title-block band).
+    # All placement below derives from BOARD_ORIGIN_*.
+    BOARD_ORIGIN_X, BOARD_ORIGIN_Y = centered_origin(BOARD_WIDTH, BOARD_HEIGHT)
+
+    # Net definitions - must match schematic nets
+    # LED_K is the intermediate node between D1 cathode and R1: gives the
+    # PCB generator a name to apply to those two pads so they are not
+    # left as net 0 (unconnected).
+    NETS = {
+        "": 0,
+        "+5V": 1,
+        "+3.3V": 2,
+        "GND": 3,
+        "OSC_IN": 4,
+        "OSC_OUT": 5,
+        "SWDIO": 6,
+        "SWCLK": 7,
+        "SWO": 8,
+        "NRST": 9,
+        "USER_LED": 10,
+        "LED_K": 11,
+        "BOOT0": 12,
+    }
+
+    # Component positions for a sensible layout on the 60x40mm board.
+    # All passive caps/resistors use 0805 SMD packages: pad span 2mm and pad
+    # size 1mm x 1.3mm, so neighbours need ~3mm centre-to-centre to keep
+    # 0.127mm minimum pad-pad clearance (JLCPCB rule).  The LQFP-48 MCU
+    # footprint spans 9.3mm tip-to-tip, so we leave at least 5mm on every
+    # side.
+    #
+    # Layout (x increases left-to-right, y increases top-to-bottom):
+    #   col 1  (x= 5..14): U1 LDO + LDO caps
+    #   col 2  (x=15..26): crystal Y1 + load caps C10/C11
+    #   col 3  (x=27..40): U2 STM32 MCU (centered around x=33)
+    #   col 4  (x=41..50): R1/D1 LED stack + R2 BOOT0 pull-down
+    #   col 5  (x=51..58): J1 SWD header
+    U1_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 10)  # LDO (SOT-223)
+    C1_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 18)  # LDO input cap (left of LDO)
+    C2_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 10)  # LDO output cap 1 (right of LDO)
+    C3_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 16)  # LDO output cap 2
+
+    # MCU center placement.  LQFP-48 footprint extends ~4.6mm in each
+    # direction from its origin, so we leave at least 5mm clearance from
+    # surrounding components.
+    U2_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 22)  # STM32F103C8T6
+
+    # Crystal section: above the MCU's top edge.  Y1 sits between the LDO
+    # and MCU horizontally, with OSC_IN/OSC_OUT load caps below it.
+    # OSC_IN/OSC_OUT escape through the open space above the MCU's left
+    # edge (PD0=pin 5, PD1=pin 6).
+    #
+    # Y1 sits at x=+23, not +22 (Issue #7204): the stock HC49-4H courtyard is
+    # a stadium reaching 6.03 mm either side of the footprint origin, and at
+    # x=+22 its west arc overlapped C2's courtyard by 1.46 mm^2.  C2 cannot
+    # move west instead (U1's courtyard leaves it only 0.07 mm of slack), so
+    # the crystal moves 1 mm east, leaving a 0.22 mm courtyard gap to C2.
+    Y1_POS = (BOARD_ORIGIN_X + 23, BOARD_ORIGIN_Y + 10)  # 8MHz crystal
+    C10_POS = (BOARD_ORIGIN_X + 19, BOARD_ORIGIN_Y + 16)  # OSC_IN load cap
+    C11_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 16)  # OSC_OUT load cap
+
+    # MCU decoupling caps (cluster below MCU footprint, near VSS/VDD pins)
+    # Spaced 4mm apart to keep pad-pad clearance well above 0.127mm.
+    C12_POS = (BOARD_ORIGIN_X + 26, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/1)
+    C13_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/24)
+    C14_POS = (BOARD_ORIGIN_X + 36, BOARD_ORIGIN_Y + 32)  # 100nF (VDD/48)
+    C15_POS = (BOARD_ORIGIN_X + 26, BOARD_ORIGIN_Y + 36)  # 100nF (VDDA/9)
+    C16_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 36)  # 4.7uF bulk
+
+    # Right column (x=46..50): user LED + BOOT0 pull-down
+    R1_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 8)  # LED current-limiting R (3.3V to LED_K)
+    D1_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 12)  # User LED (LED_K to USER_LED)
+    R2_POS = (BOARD_ORIGIN_X + 47, BOARD_ORIGIN_Y + 22)  # BOOT0 pull-down 10k
+
+    # SWD header at far right (uses 1x06 vertical pin header, 2.54mm pitch)
+    J1_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 22)
+
+    def generate_header() -> str:
+        """Generate the PCB file header."""
+        return """(kicad_pcb
+  (version 20240108)
+  (generator "kicad-tools-demo")
+  (generator_version "9.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (title_block
+    (title "STM32F103C8 Development Board")
+    (date "2025-01")
+    (rev "A")
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (32 "B.Adhes" user "B.Adhesive")
+    (33 "F.Adhes" user "F.Adhesive")
+    (34 "B.Paste" user)
+    (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user)
+    (39 "F.Mask" user)
+    (44 "Edge.Cuts" user)
+    (46 "B.CrtYd" user "B.Courtyard")
+    (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )"""
+
+    def generate_nets() -> str:
+        """Generate net definitions."""
+        lines = ['  (net 0 "")']
+        for name, num in NETS.items():
+            if num > 0:
+                lines.append(f'  (net {num} "{name}")')
+        return "\n".join(lines)
+
+    def generate_board_outline() -> str:
+        """Generate the board outline (Edge.Cuts)."""
+        x1 = BOARD_ORIGIN_X
+        y1 = BOARD_ORIGIN_Y
+        x2 = BOARD_ORIGIN_X + BOARD_WIDTH
+        y2 = BOARD_ORIGIN_Y + BOARD_HEIGHT
+        return f"""  (gr_rect (start {x1} {y1}) (end {x2} {y2})
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "{generate_uuid()}")
+  )"""
+
+    def generate_sot223(ref: str, pos: tuple, value: str) -> str:
+        """Generate SOT-223 footprint for LDO.
+
+        Silkscreen reproduces the stock ``Package_TO_SOT_SMD:SOT-223-3_TabPin2``
+        artwork (issue #5745): the body outline plus the filled pin-1 triangle
+        beside pad 1.  Two deliberate deviations from the library source:
+
+        * This board's pad order is **Y-mirrored** relative to the stock
+          footprint (pad 1 at ``y=+2.3`` here, ``y=-2.3`` in the library), so
+          the pin-1 triangle's Y coordinates are negated.  Copying the library
+          coordinates verbatim would put the mark beside pad 3.
+        * Strokes are 0.15mm, the ``jlcpcb-tier1`` silkscreen floor, not the
+          library's 0.12mm (which trips ``silkscreen_line_width``).
+
+        The reference designator moves to ``y=-4.8`` so its bounding box clears
+        the outline's lower edge (``silk_overlap``).
+        """
+        x, y = pos
+        return f"""  (footprint "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -4.8) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_line (start -1.85 -3.41) (end 1.91 -3.41)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.85 3.41) (end 1.91 3.41)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start 1.91 -3.41) (end 1.91 -2.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start 1.91 3.41) (end 1.91 2.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_poly (pts (xy -3.13 3.31) (xy -3.37 3.64) (xy -2.89 3.64))
+      (stroke (width 0.15) (type solid)) (fill yes) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+{courtyard_rect(-4.40, -3.60, 4.40, 3.60)}
+    (pad "1" smd rect (at -3.15 2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+5V"]} "+5V"))
+    (pad "2" smd rect (at -3.15 0) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+    (pad "3" smd rect (at -3.15 -2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
+    (pad "2" smd rect (at 3.15 0) (size 2 3.8) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+  )"""
+
+    def generate_cap_0805(ref: str, pos: tuple, value: str, net1: str, net2: str) -> str:
+        """Generate 0805 capacitor footprint."""
+        x, y = pos
+        net1_num = NETS.get(net1, 0)
+        net2_num = NETS.get(net2, 0)
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.70,
+        # y +-0.98, but these hand-made pads reach x +-1.5, so pad extent
+        # + 0.25 mm widens x to +-1.75 (y stays at the stock +-0.98).
+        courtyard = courtyard_rect(-1.75, -0.98, 1.75, 0.98)
+        return f"""  (footprint "Capacitor_SMD:C_0805_2012Metric"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+{courtyard}
+    (pad "1" smd roundrect (at -1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
+    (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
+  )"""
+
+    def generate_crystal_hc49(ref: str, pos: tuple, value: str) -> str:
+        """Generate HC49 crystal footprint."""
+        x, y = pos
+        # Courtyard (Issue #7204): the stock KiCad 10 F.CrtYd is a stadium,
+        # straight sides at y +-2.83 from x -0.76 to 5.64 closed by two
+        # radius-2.83 arcs (x -3.59..8.47), with pad 1 at x=0.  Pad 1 sits at
+        # x=-2.44 here, so the arc centres move to x +-3.20.  The stadium is
+        # emitted as a circumscribing polygon (kct does not resolve fp_arc
+        # courtyards); it already contains the pads plus 0.25 mm
+        # (x +-3.44, y +-1.00).
+        courtyard = courtyard_poly(stadium_courtyard_points(3.20, 2.83))
+        return f"""  (footprint "Crystal:Crystal_HC49-4H_Vertical"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+{courtyard}
+    (pad "1" thru_hole circle (at -2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["OSC_IN"]} "OSC_IN"))
+    (pad "2" thru_hole circle (at 2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["OSC_OUT"]} "OSC_OUT"))
+  )"""
+
+    def generate_led_0805(ref: str, pos: tuple, anode_net: str, cathode_net: str) -> str:
+        """Generate 0805 LED footprint with explicit anode/cathode nets.
+
+        Pad 1 is the anode, pad 2 is the cathode (KiCad LED_SMD convention).
+
+        Silkscreen reproduces the stock ``LED_SMD:LED_0805_2012Metric``
+        polarity bracket (issue #5745): a full-height vertical bar outside
+        pad 1 with top/bottom legs, left open on the pad-2 side.  Only the
+        vertical bar is closer to pad 1 than to pad 2, which is what makes it
+        a pin-1 identifier rather than a symmetric body outline.  Coordinates
+        are widened from the library's (pads at +/-0.9375) to this board's
+        pad pitch (+/-1.05) and strokes use the 0.15mm ``jlcpcb-tier1``
+        silkscreen floor; the reference designator moves to ``y=-2.0`` so its
+        bounding box clears the upper leg.
+        """
+        x, y = pos
+        a_num = NETS.get(anode_net, 0)
+        k_num = NETS.get(cathode_net, 0)
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.68,
+        # y +-0.95, but these pads reach x +-1.55, so pad extent + 0.25 mm
+        # widens x to +-1.80 (y stays at the stock +-0.95).
+        courtyard = courtyard_rect(-1.80, -0.95, 1.80, 0.95)
+        return f"""  (footprint "LED_SMD:LED_0805_2012Metric"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -2.0) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "LED" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_line (start -1.85 -1.15) (end -1.85 1.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.85 -1.15) (end 1.2 -1.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.85 1.15) (end 1.2 1.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+{courtyard}
+    (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {a_num} "{anode_net}"))
+    (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {k_num} "{cathode_net}"))
+  )"""
+
+    def generate_resistor_0805(ref: str, pos: tuple, value: str, net1: str, net2: str) -> str:
+        """Generate 0805 resistor footprint."""
+        x, y = pos
+        net1_num = NETS.get(net1, 0)
+        net2_num = NETS.get(net2, 0)
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.68,
+        # y +-0.95, but these hand-made pads reach x +-1.5, so pad extent
+        # + 0.25 mm widens x to +-1.75 (y stays at the stock +-0.95).
+        courtyard = courtyard_rect(-1.75, -0.95, 1.75, 0.95)
+        return f"""  (footprint "Resistor_SMD:R_0805_2012Metric"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+{courtyard}
+    (pad "1" smd roundrect (at -1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
+    (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
+  )"""
+
+    def generate_lqfp48(ref: str, pos: tuple, value: str, pin_nets: dict[int, str]) -> str:
+        """Generate LQFP-48 footprint (7x7mm, 0.5mm pitch) for STM32F103C8T6.
+
+        Pad layout (origin at footprint center, y-down):
+          - pads 1..12  on the left edge   (x=-4.1625, y=-2.75..+2.75)
+          - pads 13..24 on the bottom edge (y=+4.1625, x=-2.75..+2.75)
+          - pads 25..36 on the right edge  (x=+4.1625, y=+2.75..-2.75)
+          - pads 37..48 on the top edge    (y=-4.1625, x=+2.75..-2.75)
+
+        ``pin_nets`` maps each 1..48 pad number to a net name from ``NETS``;
+        missing entries default to net 0 (unconnected, which is correct for
+        unused GPIOs on this devboard).
+        """
+        x, y = pos
+        pad_layers = '(layers "F.Cu" "F.Paste" "F.Mask")'
+        pad_attrs = "(roundrect_rratio 0.25)"
+
+        # Pad coordinates (in footprint-local mm, relative to component origin)
+        # Left edge: pads 1..12, x=-4.1625, y from -2.75 step +0.5
+        # Bottom edge: pads 13..24, y=+4.1625, x from -2.75 step +0.5
+        # Right edge: pads 25..36, x=+4.1625, y from +2.75 step -0.5
+        # Top edge: pads 37..48, y=-4.1625, x from +2.75 step -0.5
+        pad_positions: list[tuple[int, float, float]] = []
+        for i in range(12):  # left
+            pad_positions.append((1 + i, -4.1625, -2.75 + 0.5 * i))
+        for i in range(12):  # bottom
+            pad_positions.append((13 + i, -2.75 + 0.5 * i, 4.1625))
+        for i in range(12):  # right
+            pad_positions.append((25 + i, 4.1625, 2.75 - 0.5 * i))
+        for i in range(12):  # top
+            pad_positions.append((37 + i, 2.75 - 0.5 * i, -4.1625))
+
+        # Build pad lines.  Pads on horizontal edges use rotated size.
+        # Pad dimensions (1.475x0.3 mm) come straight from the official
+        # Package_QFP:LQFP-48_7x7mm_P0.5mm KiCad footprint.
+        pad_lines: list[str] = []
+        for pad_num, px, py in pad_positions:
+            net_name = pin_nets.get(pad_num, "")
+            net_num = NETS.get(net_name, 0)
+            # Left and right edges: pad long axis along x.
+            # Top and bottom edges: pad long axis along y -- rotate 90.
+            if pad_num <= 12 or (25 <= pad_num <= 36):
+                size = "(size 1.475 0.3)"
+            else:
+                size = "(size 0.3 1.475)"
+            pad_lines.append(
+                f'    (pad "{pad_num}" smd roundrect '
+                f"(at {px} {py}) {size} {pad_layers} {pad_attrs} "
+                f'(net {net_num} "{net_name}"))'
+            )
+
+        pads_block = "\n".join(pad_lines)
+
+        # Silkscreen: the stock Package_QFP:LQFP-48_7x7mm_P0.5mm artwork
+        # (issue #5745) -- four corner brackets plus the filled pin-1 triangle
+        # beside pad 1.  The pad coordinates above are identical to the
+        # library footprint's, so the library geometry transfers verbatim with
+        # no mirroring; only the stroke width is raised from the library's
+        # 0.12mm to the 0.15mm jlcpcb-tier1 silkscreen floor.
+        silk_corners = [
+            ((-3.61, -3.61), (-3.16, -3.61)),
+            ((-3.61, -3.16), (-3.61, -3.61)),
+            ((-3.61, 3.61), (-3.61, 3.16)),
+            ((-3.16, 3.61), (-3.61, 3.61)),
+            ((3.16, -3.61), (3.61, -3.61)),
+            ((3.61, -3.61), (3.61, -3.16)),
+            ((3.61, 3.16), (3.61, 3.61)),
+            ((3.61, 3.61), (3.16, 3.61)),
+        ]
+        # The top-right bracket's horizontal arm crosses the drill of the
+        # via at (152.85, 85.8) (``silk_hole_overlap``, #8844; operator ruling
+        # on #8854: fix in the board source, no waiver).  It is dropped; its
+        # UUID is still consumed so no later item's UUID shifts.
+        silk_dropped = {((3.16, -3.61), (3.61, -3.61))}
+        silk_lines = [
+            f"    (fp_line (start {sx} {sy}) (end {ex} {ey})\n"
+            f'      (stroke (width 0.15) (type solid)) (layer "F.SilkS") '
+            f'(uuid "{uid}"))'
+            for ((sx, sy), (ex, ey)), uid in ((c, generate_uuid()) for c in silk_corners)
+            if ((sx, sy), (ex, ey)) not in silk_dropped
+        ]
+        silk_lines.append(
+            "    (fp_poly (pts (xy -4.25 -3.16) (xy -4.59 -3.63) (xy -3.91 -3.63))\n"
+            '      (stroke (width 0.15) (type solid)) (fill yes) (layer "F.SilkS") '
+            f'(uuid "{generate_uuid()}"))'
+        )
+        silk_block = "\n".join(silk_lines)
+
+        # Reference at y=-6.0 (issue #6269): the top pad row's outer edge is
+        # at y=-4.9, and at the old y=-5.5 the 1 mm text sat 0.07-0.145 mm from
+        # pads 41-44 (KiCad silk_over_copper, 0.15 mm jlcpcb-tier1 floor).
+        return f"""  (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -6.0) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 5.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+{silk_block}
+{courtyard_poly(LQFP48_COURTYARD)}
+{pads_block}
+  )"""
+
+    def generate_pin_header_6(ref: str, pos: tuple) -> str:
+        """Generate 6-pin header footprint for SWD debug.
+
+        Silkscreen reproduces the stock
+        ``Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical`` artwork
+        (issue #5745): an L-shaped corner mark beside pin 1 plus a closed body
+        rectangle over pins 2..6.  The library footprint puts its origin on
+        pin 1, whereas this one centers the strip, so every Y coordinate is
+        shifted by ``-2.5 * pitch`` (pin 1 sits at ``y=-6.35`` here).  No
+        mirroring is needed -- both number pins toward ``+y``.  Strokes use
+        the 0.15mm ``jlcpcb-tier1`` silkscreen floor rather than the library's
+        0.12mm, and the reference designator moves to ``y=-9.0`` so its
+        bounding box clears the L mark.
+        """
+        x, y = pos
+        pitch = 2.54
+        # Stock silk, expressed relative to pin 1 and shifted onto this
+        # footprint's centered origin (pin 1 at -2.5 * pitch).
+        pin1_y = -2.5 * pitch
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.77,
+        # y -1.77..14.47 with pin 1 at y=0; pin 1 sits at y=-6.35 here, so the
+        # stock box becomes y -8.12..8.12.  It already contains the pads plus
+        # 0.25 mm (x +-1.10, y +-7.45).
+        courtyard = courtyard_rect(-1.77, -8.12, 1.77, 8.12)
+        # F.Fab body (Issue #7204): the stock outline, x +-1.27 by
+        # y -1.27..13.97 with the pin-1 corner chamfered 0.635 mm, shifted by
+        # the same -6.35 mm.  Without it the pin-1 rule falls back to the
+        # courtyard as the "body", which swallows the L mark beside pin 1.
+        fab_body = (
+            "    (fp_poly (pts (xy -1.27 -6.985) (xy -0.635 -7.62) (xy 1.27 -7.62) "
+            "(xy 1.27 7.62) (xy -1.27 7.62)) "
+            '(stroke (width 0.1) (type solid)) (fill no) (layer "F.Fab") '
+            f'(uuid "{_FAB_UUIDS()}"))'
+        )
+        return f"""  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -9.0) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{J1_VALUE}" (at 0 8) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_line (start -1.38 {pin1_y - 1.38:.2f}) (end 0 {pin1_y - 1.38:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y:.2f}) (end -1.38 {pin1_y - 1.38:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y + 1.27:.2f}) (end -1.38 {pin1_y + 14.08:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y + 1.27:.2f}) (end 1.38 {pin1_y + 1.27:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y + 14.08:.2f}) (end 1.38 {pin1_y + 14.08:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start 1.38 {pin1_y + 1.27:.2f}) (end 1.38 {pin1_y + 14.08:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+{fab_body}
+{courtyard}
+    (pad "1" thru_hole rect (at 0 {-2.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["+3.3V"]} "+3.3V"))
+    (pad "2" thru_hole oval (at 0 {-1.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWDIO"]} "SWDIO"))
+    (pad "3" thru_hole oval (at 0 {-0.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWCLK"]} "SWCLK"))
+    (pad "4" thru_hole oval (at 0 {0.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWO"]} "SWO"))
+    (pad "5" thru_hole oval (at 0 {1.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["NRST"]} "NRST"))
+    (pad "6" thru_hole oval (at 0 {2.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["GND"]} "GND"))
+  )"""
+
+    # Build the PCB file
+    parts = [
+        generate_header(),
+        generate_nets(),
+        generate_board_outline(),
+    ]
+
+    print("\n1. Adding footprints...")
+
+    # U1: LDO voltage regulator
+    parts.append(generate_sot223("U1", U1_POS, "MCP1825S-3302E/DB"))
+    print(f"   U1 (LDO) at {U1_POS}")
+
+    # C1: Input capacitor (5V to GND)
+    parts.append(generate_cap_0805("C1", C1_POS, "10uF", "+5V", "GND"))
+    print(f"   C1 (10uF) at {C1_POS}")
+
+    # C2, C3: Output capacitors (3.3V to GND)
+    parts.append(generate_cap_0805("C2", C2_POS, "10uF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C3", C3_POS, "100nF", "+3.3V", "GND"))
+    print(f"   C2 (10uF) at {C2_POS}")
+    print(f"   C3 (100nF) at {C3_POS}")
+
+    # U2: STM32F103C8T6 MCU (LQFP-48)
+    # Full pinmap for the LQFP-48 package.  Connected pins drive nets
+    # the SWD header / crystal / LED expect; unused pins default to net 0
+    # (unconnected) by being absent from the dict.
+    mcu_pin_nets: dict[int, str] = {
+        # Power pins
+        1: "+3.3V",  # VBAT
+        9: "+3.3V",  # VDDA
+        24: "+3.3V",  # VDD
+        36: "+3.3V",  # VDD
+        48: "+3.3V",  # VDD
+        8: "GND",  # VSSA
+        23: "GND",  # VSS
+        35: "GND",  # VSS
+        47: "GND",  # VSS
+        # Signals
+        5: "OSC_IN",  # PD0
+        6: "OSC_OUT",  # PD1
+        7: "NRST",  # NRST
+        25: "USER_LED",  # PB12
+        34: "SWDIO",  # PA13
+        37: "SWCLK",  # PA14
+        39: "SWO",  # PB3
+        44: "BOOT0",  # BOOT0 (pulled low via R2)
+    }
+    parts.append(generate_lqfp48("U2", U2_POS, "STM32F103C8T6", mcu_pin_nets))
+    print(f"   U2 (STM32F103C8T6) at {U2_POS}")
+
+    # Y1: Crystal oscillator
+    parts.append(generate_crystal_hc49("Y1", Y1_POS, "8MHz"))
+    print(f"   Y1 (8MHz) at {Y1_POS}")
+
+    # C10, C11: Crystal load capacitors
+    parts.append(generate_cap_0805("C10", C10_POS, "20pF", "OSC_IN", "GND"))
+    parts.append(generate_cap_0805("C11", C11_POS, "20pF", "OSC_OUT", "GND"))
+    print(f"   C10, C11 (20pF) at {C10_POS}, {C11_POS}")
+
+    # C12-C15: MCU per-pin decoupling caps (100nF, 3.3V to GND)
+    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C13", C13_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+3.3V", "GND"))
+    print("   C12-C15 (100nF MCU bypass)")
+
+    # C16: Bulk decoupling cap (4.7uF)
+    parts.append(generate_cap_0805("C16", C16_POS, "4.7uF", "+3.3V", "GND"))
+    print(f"   C16 (4.7uF bulk decoupling) at {C16_POS}")
+
+    # R1: LED current-limiting resistor (3.3V -> LED_K).  D1 pulls LED_K
+    # toward USER_LED net; when MCU PB12 sinks current the LED illuminates.
+    parts.append(generate_resistor_0805("R1", R1_POS, "330R", "+3.3V", "LED_K"))
+    print(f"   R1 (330R) at {R1_POS}")
+
+    # D1: User LED -- anode = LED_K (after R1), cathode = USER_LED (MCU drain)
+    parts.append(generate_led_0805("D1", D1_POS, anode_net="LED_K", cathode_net="USER_LED"))
+    print(f"   D1 (LED) at {D1_POS}")
+
+    # R2: BOOT0 pull-down (10k) so the MCU boots from flash by default.
+    parts.append(generate_resistor_0805("R2", R2_POS, "10k", "BOOT0", "GND"))
+    print(f"   R2 (10k BOOT0 pull-down) at {R2_POS}")
+
+    # J1: SWD debug header
+    parts.append(generate_pin_header_6("J1", J1_POS))
+    print(f"   J1 (SWD header) at {J1_POS}")
+
+    parts.append(")")  # Close kicad_pcb
+
+    pcb_content = "\n".join(parts)
+
+    # Write PCB file
+    print("\n2. Writing PCB file...")
+    pcb_path = output_dir / "stm32_devboard.kicad_pcb"
+    pcb_path.write_text(pcb_content)
+    print(f"   PCB: {pcb_path}")
+
+    print(f"\n   Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
+    print(
+        "   Components: U1 LDO, U2 STM32F103C8T6, 10 caps, 1 crystal, 2 resistors, 1 LED, 1 header"
+    )
+    print(f"   Nets: {len([n for n in NETS.values() if n > 0])}")
+
+    return pcb_path
+
+
+# Declared supply currents from project.kct (A), mapped onto nets (Issue #7206).
+AMPACITY_TARGETS_A = {"+5V": 0.5, "+3.3V": 0.3}
+
+
+def declare_ampacity_targets(output_dir: Path) -> None:
+    """Declare the spec's supply currents as ``target_ampacity`` (Issue #7206).
+
+    project.kct declares these currents; kct never infers which net carries
+    them, so the net-class-map sidecar must map them or ``kct check`` reports
+    ``ampacity: unknown``.
+    """
+    import json
+
+    # Issue #7539: runs right after route_pcb, before anything else is
+    # guaranteed to have created output_dir (a stubbed or partial route never
+    # writes the routed PCB), so create it rather than masking the
+    # route_success fast-fail gate's message with an ENOENT.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sidecar = output_dir / "net_class_map.json"
+    data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    for net, amps in AMPACITY_TARGETS_A.items():
+        entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
+        entry["target_ampacity"] = amps
+    sidecar.write_text(json.dumps(data, indent=2))
+    print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecar}")
+
+
+def route_pcb(input_path: Path, output_path: Path) -> bool:
+    """Route the reviewed two-layer, paid mechanical-drilling construction.
+
+    Use an explicit grid to execute the dense-package escape pre-pass.
+    Keep the physical layer contract and the selected 0.15 mm through-drill
+    / 0.30 mm land instead of escalating to an unrelated four-layer POFV
+    process. The generic CLI profile does not encode this paid drilling
+    option: its DRC-only exit is accepted only after independent signal
+    connectivity and the selected process's DRC checks pass. The later
+    manufacturing step still validates all SMT-land gaps and order options.
+    """
+    print("\n" + "=" * 60)
+    print("Routing PCB (kct route)...")
+    print("=" * 60)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
+        str(input_path),
+        "--output",
+        str(output_path),
+        "--mfr",
+        "jlcpcb-tier1",
+        "--auto-fix",
+        "--no-auto-layers",
+        "--layers",
+        "2",
+        "--grid",
+        "0.05",
+        "--via-drill",
+        "0.15",
+        "--via-diameter",
+        "0.30",
+        # Issue #6401 / #6425: ``kct route`` reserves a via site per pour-net
+        # IC pin before signal routing (on by default; this recipe used to opt
+        # out with ``--no-plane-via-reservation``).  Since #6425 the oracle's
+        # DRC gate no longer bans this recipe's 0.30/0.15 welds for being
+        # below the stock via floors, so the pour welds land at the reserved
+        # sites and the escape repair (``manufacturing_process.MOVES``) was
+        # re-reviewed against that route.
+        "--placement-feedback",
+        "--no-cache",
+        # Issue #3039: pin --seed 42 so the routed PCB is byte-identical
+        # across runs and PR #3063 measurements are reproducible.
+        "--seed",
+        "42",
+        # Issue #3799: route under an ITERATION budget instead of the
+        # per-net WALL-CLOCK cutoff.  --seed only seeds Python's global
+        # random; it does NOT control the per-net A* deadline checked in
+        # the C++ loop.  On a loaded machine that wall-clock budget fires
+        # mid-search and the net lands less copper -- same seed, different
+        # copper (the observed 153/145/145-segment divergence).
+        # --deterministic-budget (#3538) disables the per-net wall-clock
+        # cutoff and pins a fixed node-expansion backstop, so the seed-42
+        # re-route is byte-identical (UUID-normalized) regardless of
+        # machine speed/load.  --timeout 600 below is then a SAFETY
+        # backstop only (the normalizer warns if it would bind).
+        "--deterministic-budget",
+        "--timeout",
+        "600",
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+
+    # Issue #3799: pin PYTHONHASHSEED for the route subprocess so any
+    # string-keyed dict/set iteration in the negotiated router is
+    # reproducible across runner environments.  Combined with --seed 42 +
+    # --deterministic-budget this makes the full pipeline deterministic,
+    # not just the A* loop.  Mirrors board-07's convention.
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = "42"
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if result.stdout:
+        # Echo router output (last ~80 lines is plenty for the summary)
+        for line in result.stdout.strip().split("\n"):
+            print(f"   {line}")
+    if result.returncode == 3 and paid_process_route_is_complete(output_path):
+        print("\n   SUCCESS: signal routing passes the selected paid drilling rules")
+        return True
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Router stderr:\n{result.stderr}")
+        print(f"\n   FAILED: kct route exited {result.returncode}")
+        return False
+
+    print("\n   SUCCESS: kct route completed")
+    return True
+
+
+def paid_process_route_is_complete(pcb_path: Path) -> bool:
+    """Verify a generic-profile DRC exit against this board's actual process."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    if not pcb_path.is_file():
+        return False
+    process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+    if process["physical_fingerprint"](pcb_path) != process["PHYSICAL_SHA256"]:
+        return False
+    pcb = PCB.load(pcb_path)
+    groups: dict[str, set[str]] = {}
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if pad.net_name:
+                groups.setdefault(pad.net_name, set()).add(f"{footprint.reference}.{pad.number}")
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # These three pours are deliberately stitched/filled after signal routing.
+    # They remain subject to the complete final copper-LVS and native gates.
+    for net, pads in groups.items():
+        if net not in {"GND", "+3.3V", "+5V"} and len(pads) > 1:
+            if partition.count(frozenset(pads)) != 1:
+                return False
+    checker = DRCChecker(pcb, "jlcpcb-tier1", layers=2, warn_on_inactive_skew_rules=False)
+    checker.design_rules = process["process_rules"]()
+    return not any(v.severity == "error" for v in checker.check_all().violations)
+
+
+# --- OSC_OUT escape-stub short fix (issue #3797) ---------------------------
+#
+# On the fresh deterministic route (post-#3800), OSC_OUT (net 5, U2.6 @
+# board origin + (26.8375, 21.750)) escapes to B.Cu through a via-in-pad at
+# the U2.6 pad centre, and its FIRST B.Cu hop runs straight north into the
+# U2.5 OSC_IN pad centre at origin + (26.8375, 21.250) — the two adjacent
+# 0.5 mm-pitch HSE crystal pins — before turning east.  That single hop
+# shorts OSC_IN <-> OSC_OUT (witnesses C10.1 / C11.1).  This is the #2834
+# escape-stub short that #3785 fixed BY HAND on the committed PCB; here it
+# is fixed PROGRAMMATICALLY so a fresh ``generate_design.py`` regen
+# reproduces a copper-LVS-clean board (the same class of recipe fix
+# board-02 #3783 uses).
+#
+# The fix is a deterministic post-route s-expression surgery (a sibling of
+# ``tie_power_pads``): re-aim that one B.Cu hop's endpoint off the U2.5 pad
+# column to origin + (27.450, 21.250) — east of the U2.5 pad column,
+# where the next hop already turns — and drop the now-degenerate follow-on
+# segment.  The
+# re-aimed escape clears the U2.5 pad while staying >= the jlcpcb-tier1 track
+# clearance from it (curator-proven: ``compare_copper_netlist`` -> shorts: []).
+#
+# Coordinates are deterministic (pad centres are fixed by the footprint
+# placement), so the surgery is exact-match and idempotent.  It asserts the
+# offending hop is present so a future router change that moves the escape
+# fails LOUDLY rather than silently leaving the short.
+#
+# The absolutes are DERIVED from the shared ``centered_origin`` helper (the
+# same call ``create_stm32_pcb`` uses for ``BOARD_ORIGIN_*``) so they can
+# never go stale against a sheet-position change again (PR #4015 judge
+# feedback: the old hardcoded (100, 100)-origin absolutes stranded the
+# exact-match assert after the boards were sheet-centered).  The offsets are
+# board-frame: U2 sits at origin + (31, 22); U2.6 = U2 + (-4.1625, -0.25),
+# U2.5 = U2 + (-4.1625, -0.75), and the re-aim point is U2 + (-3.55, -0.75).
+# The trace-radius inset (#5004) moves the follow-on leg east to this point
+# from the old pad-edge diagonal at origin + (26.6875, 21.100).
+_OSC_ORIGIN_X, _OSC_ORIGIN_Y = centered_origin(60.0, 40.0)  # == BOARD_ORIGIN_*
+_OSC_VIA = (
+    _OSC_ORIGIN_X + 26.8375,
+    _OSC_ORIGIN_Y + 21.75,
+)  # OSC_OUT (net 5) B.Cu escape via @ U2.6 centre
+_OSC_IN_PAD = (
+    _OSC_ORIGIN_X + 26.8375,
+    _OSC_ORIGIN_Y + 21.25,
+)  # U2.5 OSC_IN pad centre (the short target)
+_OSC_REAIM = (
+    _OSC_ORIGIN_X + 27.45,
+    _OSC_ORIGIN_Y + 21.25,
+)  # re-aimed first-hop endpoint, off the U2.5 column
+# Reviewed follow-on endpoints from the inset and historical routes. Select
+# only an exact existing leg; never infer a new escape from arbitrary copper.
+_OSC_REAIM_VARIANTS = (
+    _OSC_REAIM,
+    (_OSC_ORIGIN_X + 26.4, _OSC_ORIGIN_Y + 21.25),
+    (_OSC_ORIGIN_X + 26.6875, _OSC_ORIGIN_Y + 21.1),
+)
+
+
+def fix_osc_escape(routed_path: Path) -> bool:
+    """Re-aim the OSC_OUT B.Cu escape off the OSC_IN pad column (issue #3797).
+
+    The deterministic fresh route drops the OSC_OUT (net 5) escape straight
+    north from the U2.6 via-in-pad into the U2.5 OSC_IN pad centre, shorting
+    the two HSE crystal pins.  This deterministic post-route surgery (mirroring
+    the :func:`tie_power_pads` s-expression edit) re-aims that single B.Cu hop
+    to the reviewed follow-on endpoint off the U2.5 pad column, clearing
+    the short. Both eastbound and westbound route variants are supported;
+    an unknown or ambiguous follow-on fails before writing the board.
+    Routed copper for every other net is untouched.
+
+    The edit is exact-match on deterministic pad-centre coordinates, so it is
+    idempotent: a second pass finds no offending hop and no-ops.  It asserts the
+    offending hop is present unless already re-aimed or both oscillator
+    circuits are physically connected to exactly their expected terminals.
+    A lateral escape outside the pad can therefore pass unchanged; missing
+    connections and connections to foreign terminals still fail closed.
+
+    Returns True on success.
+    """
+    import re as _re
+
+    print("\n" + "=" * 60)
+    print("Fixing OSC_OUT escape-stub short (issue #3797)...")
+    print("=" * 60)
+
+    def _fmt(v: float) -> str:
+        # Match KiCad's minimal decimal formatting (e.g. 121.25 not 121.250,
+        # but 126.8375 must keep all 4 decimals — ``%g`` would round to 6
+        # significant figures, so format with full precision then trim).
+        return f"{v:.6f}".rstrip("0").rstrip(".")
+
+    via_x, via_y = _fmt(_OSC_VIA[0]), _fmt(_OSC_VIA[1])
+    pad_x, pad_y = _fmt(_OSC_IN_PAD[0]), _fmt(_OSC_IN_PAD[1])
+    text = routed_path.read_text()
+
+    # Idempotency: if the offending hop is already re-aimed, no-op.
+    offending_hop = f"(start {via_x} {via_y})\n\t\t(end {pad_x} {pad_y})"
+    variants = [(_fmt(x), _fmt(y)) for x, y in _OSC_REAIM_VARIANTS]
+    if offending_hop not in text and any(
+        f"(start {via_x} {via_y})\n\t\t(end {x} {y})" in text for x, y in variants
+    ):
+        print("   Escape already re-aimed (idempotent no-op)")
+        print("\n   SUCCESS: fix_osc_escape completed")
+        return True
+
+    count = text.count(offending_hop)
+    if count == 0:
+        # Process-aware routing may escape laterally to a via outside the
+        # SMT pad, so the historical in-pad short needs no surgery. Prove
+        # both complete oscillator circuits using physical copper, not net
+        # labels or the mere absence of the old offending hop. Exact pad
+        # sets also reject a connection to any foreign-net terminal. Power
+        # pours are still unfilled at this stage and are checked downstream.
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        expected = (
+            frozenset({"U2.5", "Y1.1", "C10.1"}),
+            frozenset({"U2.6", "Y1.2", "C11.1"}),
+        )
+        partition = ConnectivityValidator(routed_path).extract_pad_partition()
+        if all(partition.count(component) == 1 for component in expected):
+            print("   Both oscillator circuits already connected and isolated (no-op)")
+            print("\n   SUCCESS: fix_osc_escape completed")
+            return True
+
+    assert count == 1, (
+        f"fix_osc_escape: expected exactly 1 OSC_OUT escape hop "
+        f"({via_x},{via_y})->({pad_x},{pad_y}); found {count}. "
+        "The router escape geometry changed — re-derive the OSC_OUT B.Cu "
+        "escape and update _OSC_VIA / _OSC_IN_PAD / _OSC_REAIM (#3797)."
+    )
+
+    matches = [(x, y) for x, y in variants if f"(start {pad_x} {pad_y})\n\t\t(end {x} {y})" in text]
+    assert len(matches) == 1, (
+        "fix_osc_escape: expected exactly 1 reviewed follow-on segment; "
+        f"found {len(matches)} (#3797)."
+    )
+    new_x, new_y = matches[0]
+    reaimed_hop = f"(start {via_x} {via_y})\n\t\t(end {new_x} {new_y})"
+
+    # 1. Re-aim the first B.Cu hop's endpoint off the U2.5 pad column.
+    text = text.replace(offending_hop, reaimed_hop)
+
+    # 2. Drop the now-degenerate follow-on segment
+    #    (pad centre -> re-aim point); the re-aimed hop already lands there.
+    degenerate = (
+        rf"\t\(segment\n\t\t\(start {_re.escape(pad_x)} {_re.escape(pad_y)}\)\n"
+        rf"\t\t\(end {_re.escape(new_x)} {_re.escape(new_y)}\)\n"
+        r"(?:\t\t\([^\n]*\)\n)*?\t\)\n"
+    )
+    new_text, n = _re.subn(degenerate, "", text, count=1)
+    assert n == 1, (
+        f"fix_osc_escape: expected 1 follow-on segment "
+        f"({pad_x},{pad_y})->({new_x},{new_y}) to drop; found {n} (#3797)."
+    )
+    routed_path.write_text(new_text)
+
+    print(
+        f"   Re-aimed OSC_OUT escape: via ({via_x},{via_y}) first hop "
+        f"-> ({new_x},{new_y}) (off the U2.5 OSC_IN pad column)"
+    )
+    print("\n   SUCCESS: fix_osc_escape completed")
+    return True
+
+
+def quantize_escapes(routed_path: Path) -> bool:
+    """45-degree quantize the fresh deterministic escape copper (issue #3797).
+
+    The fresh deterministic route + the :func:`fix_osc_escape` re-aim ship a
+    handful of arbitrary-angle ``(segment ...)`` hops that fail the fleet
+    45-census gate (``tests/test_fleet_45_census.py``, issue #3532): the OSC_OUT
+    (net 5) B.Cu re-aim hop (~13 deg off) and two F.Cu net-3 escape hops
+    (~22 deg off).  Run the committed copper through the shared #3532 quantizer
+    (:func:`kicad_tools.router.quantize.quantize_pcb_file`), which replaces each
+    off-angle segment with an EXACT two-leg dogleg (45-degree leg + axis-aligned
+    leg) that preserves the original endpoints bit-for-bit — so connectivity
+    (copper-LVS) is unchanged.  Mirrors the board-07 (#3617) and softstart
+    quantize step.
+
+    The default (diagonal-first) dogleg variant is used for every segment.  For
+    the OSC re-aim hop this is load-bearing: the axis-first variant's midpoint
+    lands exactly on the U2.5 OSC_IN pad centre (``_OSC_IN_PAD``, board origin
+    + (26.8375, 21.25)) and would
+    re-introduce the OSC_IN<->OSC_OUT short, whereas the diagonal-first midpoint
+    (origin + (26.6875, 21.6)) keeps the escape clear of the pad column (copper-LVS
+    stays 0/0; verified).  The subsequent :func:`fill_zones` re-pour backs the
+    GND plane off any small dogleg bulge so DRC stays 0-blocking.
+
+    The quantizer is endpoint-preserving and emits deterministic uuid5 sibling
+    legs, so the step is byte-deterministic and idempotent (a second pass finds
+    no off-angle segment and no-ops).  Returns True on success.
+    """
+    from kicad_tools.router.quantize import quantize_pcb_file, segment_angle_census
+
+    print("\n" + "=" * 60)
+    print("45-degree quantizing escape copper (issue #3797 / #3532)...")
+    print("=" * 60)
+
+    replaced = quantize_pcb_file(routed_path)
+    if replaced:
+        print(f"   Quantized {len(replaced)} off-angle segment(s): {replaced}")
+    else:
+        print("   No off-angle segments: escape copper already 45-aligned")
+
+    # Hard guard: after quantization the committed copper must be 100% on the
+    # 0/45/90/135 grid (the fleet-census invariant).
+    total, bad = segment_angle_census(routed_path)
+    assert not bad, (
+        f"quantize_escapes: {len(bad)}/{total} segments remain off the "
+        f"0/45/90/135 angle set after quantization (#3797/#3532): "
+        f"{[(b['start'], b['end'], round(b['off_deg'], 2)) for b in bad]}"
+    )
+
+    print("\n   SUCCESS: quantize_escapes completed")
+    return True
+
+
+def stitch_pcb(routed_path: Path) -> bool:
+    """
+    Add GND stitching vias to connect plane-net pads (B.Cu GND plane).
+
+    `kct route` does not stitch plane nets, so after routing the GND pads
+    of every component are still floating with respect to the B.Cu pour.
+    `kct stitch --net GND --mfr jlcpcb-tier1` drops a via near each GND
+    pad to bond it to the plane, using jlcpcb-tier1-compliant via
+    dimensions (0.6mm diameter / 0.3mm drill) so the stitch vias do not
+    introduce dimension_via_* DRC violations against jlcpcb-tier1.
+
+    For LQFP-48 corner GND pads (U2.8 and U2.23 on this board) the
+    standard 0.6mm via cannot fit inside the dense 0.5mm-pitch escape
+    pattern -- it collides with neighbour signal traces.  ``--micro-via``
+    retries those failing pads with a 0.3mm/0.15mm drill via, which is
+    geometrically small enough to fit between adjacent escape traces.
+    jlcpcb-tier1 supports micro-vias as part of its Capability Plus
+    process (the same tier that already supplies the in-pad via support
+    used by the escape router), so the micro-vias produced here do not
+    introduce a separate manufacturer-tier dependency.  See issue #3033
+    for the U2.8 / U2.23 use case.
+
+    **Current state (per #3075 analysis, 2026-05-18):** with the
+    ``--micro-via`` retry, ``U2.23`` is now successfully stitched (17 of
+    18 GND pads connect to the plane).  ``U2.8`` remains stranded
+    because the ``OSC_OUT`` (net 5) escape passes through the U2.8 west
+    escape window on B.Cu: a 0.5mm-wide stub segment runs from board
+    origin + (26.8375, 21.75) -> origin + (26.8375, 22.4) directly north
+    of U2.8 at origin + (26.8375, 22.75).  Even the 0.3mm micro-via cannot
+    fit (gap=0.10mm vs jlcpcb-tier1 minimum 0.20mm clearance against
+    foreign-net copper).  This is the same root-cause cluster tracked
+    under #2834 (the OSC_OUT escape produces 4 additional
+    clearance_segment_via / clearance_pad_via violations at the U2 west
+    pads).
+
+    **Regression note (per #3267 analysis, 2026-06-06):** a *second*
+    LQFP-48 GND pad -- ``U2.35`` -- now also fails to stitch on fresh
+    routes from current main.  The router places the SWO (net 8) B.Cu
+    escape as a single long diagonal from U2.39 at ``(132.75, 117.84)``
+    up to ``(137.74, 122.61)``, which grazes the U2.35 pad centre at
+    only 0.21 mm (gap=-0.04 mm vs the 0.20 mm jlcpcb-tier1 trace-to-via
+    clearance).  This *only* happens on fresh builds; the committed
+    PCB at ``output/stm32_devboard_routed.kicad_pcb`` (PR #3128) routes
+    SWO via a southern detour ``(133.83, 117.07) -> (138.60, 121.84)``
+    that keeps 0.95 mm clear of U2.35 and stitches cleanly.  The U2.35
+    failure is a *downstream symptom* of the NRST routing regression
+    tracked under #3266 -- with NRST no longer competing for the
+    south-east channel, the router selects a more aggressive SWO
+    escape that intrudes on the U2.35 pad halo.  Once #3266 lands,
+    re-routing this board should restore the U2.35 stitch as a side
+    effect; see #3267 for the verification step.
+
+    **Design-intent justification:** the LQFP-48 STM32F103C8T6 has 4
+    VSS pads (U2.8, U2.23, U2.35, U2.47).  Even in the worst-case
+    fresh-build state (U2.8 + U2.35 stranded, 16/18 stitched), 2 of
+    the 4 VSS pads remain connected to the GND plane through
+    independent vias plus all 14 capacitor / connector / regulator GND
+    pads.  Per ST AN2586 the multi-VSS design tolerates a small
+    number of non-bonded VSS pads without functional degradation; the
+    package geometry itself electrically ties all VSS pads together
+    internally via the die paddle.  The connectivity violation is
+    therefore **advisory** (the validate.connectivity rule is in
+    ``DRCChecker.ADVISORY_RULE_IDS`` and is filtered from the CI gate
+    per #3074), and resolving it cleanly requires either the OSC_OUT
+    escape rework tracked under #2834, the NRST regression fix tracked
+    under #3266 (which is expected to auto-resolve U2.35 per #3267),
+    or extending PR #3079's surface-stub channel-fit necking from
+    strict-mode to the default-mode escape path (tracked under #3080)
+    -- all out of scope for this routing pipeline step.
+
+    Returns True if the stitch step ran (even if some pads were skipped).
+    """
+    print("\n" + "=" * 60)
+    print("Stitching GND plane (kct stitch)...")
+    print("=" * 60)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "stitch",
+        str(routed_path),
+        "--net",
+        "GND",
+        "--mfr",
+        "jlcpcb-tier1",
+        "--micro-via",
+        "--output",
+        str(routed_path),
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            print(f"   {line}")
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Stitch stderr:\n{result.stderr}")
+        print(f"\n   FAILED: kct stitch exited {result.returncode}")
+        return False
+
+    print("\n   SUCCESS: kct stitch completed")
+    return True
+
+
+# Leg B of issue #3794 — the four LQFP-48 VDD pads (+3.3V) and four LQFP-48
+# VSS pads (GND) that `stitch_pcb` cannot reach with a standard/micro stitch
+# via (the dense 0.5 mm-pitch escape leaves no clear via window, and the GND
+# pour is B.Cu-only while these pads are F.Cu-only).  ``tie_power_pads`` closes
+# them WITHOUT re-routing (the committed signal copper stays byte-identical):
+#
+#  * GND VSS pads (U2.8 / U2.23 / U2.35 / U2.47): a 0.3 / 0.15 micro-via placed
+#    INSIDE the pad copper (via-in-pad) ties the F.Cu pad straight down to the
+#    B.Cu GND pour.  Each location is hand-verified clear of foreign B.Cu copper
+#    (NRST / SWCLK escapes) at the jlcpcb-tier1 0.20 mm via clearance and sits
+#    on the pad's centre x-axis so the via-in-pad bond is unambiguous.  U2.47
+#    (the 4th VSS pad, #3797) is added so the fresh deterministic regen — which
+#    no longer reaches U2.47 through a stitch via — still bonds it to the plane.
+#  * +3.3V VDD pads (U2.9 / U2.24 / U2.36 / U2.48): the +3.3V pour is already
+#    on F.Cu (the pads' own layer) and the pads sit only 0.025-0.198 mm outside
+#    the moated fill.  Tightening the +3.3V (and GND) zone ``connect_pads``
+#    clearance + ``thermal_gap`` from 0.3 mm to 0.1 mm lets the subsequent
+#    ``fill_zones`` re-pour reach each same-net pad/via with a solid/thermal
+#    tie — no new trace or via, so no foreign-net clearance is consumed.
+#
+# This is a same-net-only change: the only copper added is 3 GND vias inside
+# GND pads, and the pours only grow to embrace their OWN pads/vias, so it
+# cannot introduce a short (verified: fleet copper-LVS + jlcpcb-tier1 DRC).
+# After this step ``fill_zones`` refreshes the pours and board-04 copper-LVS
+# is clean (0 shorts / 0 opens).
+
+# Board-frame (pre board-origin offset) micro-via-in-pad locations for the
+# three congested GND VSS pads.  Each is on the pad centre x-axis, offset
+# along the pad's long axis to a window clear of the neighbouring B.Cu escape.
+_GND_TIE_VIAS: tuple[tuple[float, float], ...] = (
+    (26.837, 22.75),  # U2.8  — pad centre (no foreign B.Cu copper overlaps it)
+    (33.25, 25.838),  # U2.23 — 0.325 mm south of centre, clears the NRST escape
+    (35.163, 19.75),  # U2.35 — pad centre, clears the SWCLK escape
+    (28.75, 17.838),  # U2.47 — pad centre (#3797); window clear of all copper
+)
+
+# Zone nets whose connect-pad clearance + thermal gap are tightened so the
+# re-poured fill bonds their own moated-out LQFP power pads / tie vias.
+_TIE_ZONE_NETS: tuple[str, ...] = ("GND", "+3.3V")
+_TIE_CONNECT_CLEARANCE = 0.1  # mm (was 0.3) — same-net pad/via thermal tie
+_TIE_THERMAL_GAP = 0.1  # mm (was 0.3)
+
+
+def _pad_has_offpad_bond(pcb, x: float, y: float, net: str) -> str | None:
+    """The pad under ``(x, y)`` when a same-net via OUTSIDE it already bonds it.
+
+    Issue #6425: with the plane-via reservation on, the oracle welds each LQFP
+    VSS pad at its reserved site -- a through via beside the pad plus a track
+    from the pad to it.  Such a pad needs no in-pad tie via (and the tie would
+    sit on whatever the reserved route now runs under the pad: on the
+    reserved route U2.23's tie shorts the NRST B.Cu track).  Returns the pad's
+    ``REF.PAD`` when it is bonded that way, else ``None``.
+    """
+    import math
+
+    from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
+
+    def inside(point, box) -> bool:
+        return (
+            box[0] - 1e-6 <= point[0] <= box[2] + 1e-6
+            and box[1] - 1e-6 <= point[1] <= box[3] + 1e-6
+        )
+
+    numbers = {num for num, n in pcb.nets.items() if n.name == net}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name != net:
+                continue
+            box = pad_absolute_bbox(pad, fp)
+            if not inside((x, y), box):
+                continue
+            # Issue #6683: the weld may be a multi-leg escape (pad -> dog-leg
+            # or extended-escape waypoints -> via), not one straight track.
+            # Follow same-net track endpoints out of the pad and accept any
+            # through via that copper reaches outside the pad.
+            segments = [(seg.start, seg.end) for seg in pcb.segments if seg.net_number in numbers]
+            reached = [p for a, b in segments for p in (a, b) if inside(p, box)]
+            frontier = list(reached)
+            while frontier:
+                point = frontier.pop()
+                for a, b in segments:
+                    for here, there in ((a, b), (b, a)):
+                        if math.dist(here, point) < 1e-3 and not any(
+                            math.dist(there, r) < 1e-3 for r in reached
+                        ):
+                            reached.append(there)
+                            frontier.append(there)
+            for via in pcb.vias:
+                if (
+                    via.net_number not in numbers
+                    or via.via_type == "micro"
+                    or inside(via.position, box)
+                ):
+                    continue
+                if any(math.dist(via.position, r) < 1e-3 for r in reached):
+                    return f"{fp.reference}.{pad.number}"
+            return None
+    return None
+
+
+def tie_power_pads(routed_path: Path) -> bool:
+    """
+    Tie the isolated LQFP-48 power pads into their pours (issue #3794, Leg B).
+
+    Adds three GND micro-via-in-pads (:data:`_GND_TIE_VIAS`) and tightens the
+    GND / +3.3V zone connect-pad clearance + thermal gap
+    (:data:`_TIE_ZONE_NETS`) so the following :func:`fill_zones` re-pour bonds
+    every same-net power pad.  Routed signal ``segment`` / ``via`` copper is
+    left byte-identical — only same-net GND tie vias are added and the pour
+    fill geometry changes — preserving the #3765/#3785/#3791 pinned-copper
+    rationale.  Returns True on success.
+    """
+    import re as _re
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import SExp
+
+    print("\n" + "=" * 60)
+    print("Tying LQFP power pads into pours (issue #3794, Leg B)...")
+    print("=" * 60)
+
+    # 1. Add GND micro-via-in-pads via the s-expression tree (mirrors
+    #    PCB.add_via's board-origin handling; add_via itself does not take a
+    #    via-type token, so the (via micro ...) node is built directly).
+    pcb = PCB.load(str(routed_path))
+    ox, oy = pcb._board_origin
+    gnd_net = pcb.add_net("GND").number
+    added = 0
+    for x, y in _GND_TIE_VIAS:
+        # Issue #6425: a pad the oracle already welded at its reserved site
+        # keeps that off-pad bond; an in-pad tie would only add a via-in-pad
+        # (unsupported by the selected process) under the reserved route.
+        bonded = _pad_has_offpad_bond(pcb, x, y, "GND")
+        if bonded is not None:
+            print(f"   {bonded}: already bonded by an off-pad weld; no tie via")
+            continue
+        added += 1
+        via_sexp = SExp.list("via", "micro")
+        via_sexp.append(SExp.list("at", x + ox, y + oy))
+        via_sexp.append(SExp.list("size", 0.3))
+        via_sexp.append(SExp.list("drill", 0.15))
+        via_sexp.append(SExp.list("layers", "F.Cu", "B.Cu"))
+        via_sexp.append(SExp.list("net", gnd_net))
+        # Content-keyed, collision-free against the routed board (Issue #6076).
+        via_sexp.append(SExp.list("uuid", pcb.mint_uuid("tie-via", x, y)))
+        pcb._sexp.append(via_sexp)
+    pcb.save(str(routed_path))
+    print(f"   Added {added} GND micro-via-in-pads")
+
+    # 2. Tighten the GND / +3.3V zone connect-pad clearance + thermal gap so
+    #    the re-pour reaches its own moated-out pads/vias.
+    text = routed_path.read_text()
+    for net in _TIE_ZONE_NETS:
+        pattern = r'(\(zone\s*\(net "' + _re.escape(net) + r'"\).*?)(\n\t\)\n)'
+        match = _re.search(pattern, text, _re.S)
+        if not match:
+            print(f"   WARNING: zone for net {net!r} not found — skipping tighten")
+            continue
+        block = match.group(1)
+        block = block.replace(
+            "(connect_pads (clearance 0.3)",
+            f"(connect_pads (clearance {_TIE_CONNECT_CLEARANCE})",
+        )
+        block = block.replace("(thermal_gap 0.3)", f"(thermal_gap {_TIE_THERMAL_GAP})")
+        text = text[: match.start(1)] + block + text[match.end(1) :]
+    routed_path.write_text(text)
+    print(
+        f"   Tightened connect_pads clearance/thermal_gap -> "
+        f"{_TIE_CONNECT_CLEARANCE}mm for {', '.join(_TIE_ZONE_NETS)}"
+    )
+
+    print("\n   SUCCESS: tie_power_pads completed")
+    return True
+
+
+def relocate_drill_clearance_step(routed_path: Path) -> bool:
+    """Relieve fine-pitch hole-to-hole via crowding (issue #4408).
+
+    The fresh deterministic route escapes three adjacent LQFP-48 west pins
+    (OSC_OUT / NRST / GND) through in-pad micro-vias stacked at the 0.5 mm pin
+    pitch.  Two of the resulting drill pairs measure 0.350 mm edge-to-edge --
+    below the ``jlcpcb-tier1`` 0.500 mm ``min_hole_to_hole_mm`` floor -- so a
+    fresh regen previously FAILED ``kct check --mfr jlcpcb-tier1`` with 2
+    ``hole_to_hole_clearance`` errors.  #4017 fixed this artifact-only (a hand
+    nudge of the middle NRST via that was deliberately NOT back-ported), so the
+    committed board diverged from the recipe and every regen reintroduced the
+    violation.
+
+    This step back-ports that fix as a **generic, ``--mfr``-driven** post-route
+    pass (:func:`kicad_tools.drc.relocate_drill_clearance.relocate_drill_clearance`):
+    it reads the active manufacturer profile's hole-to-hole floor, relocates the
+    offending via onto a clearance-safe location (preferring its own routed
+    escape node -- the #4017 pattern) validated against the shared clearance
+    engine, and re-bonds it with short connectivity stubs on every connected
+    layer.  It never mis-places a via into a fresh violation; a boxed-in via is
+    left in place and reported.
+
+    Because the pass is purely floor-driven, any fine-pitch QFP/QFN board routed
+    at a via-in-pad tier benefits -- board 04 passing is the evidence.  Runs
+    AFTER the via-adding steps (``stitch_pcb`` / ``tie_power_pads``) so it sees
+    the full via set, and BEFORE ``quantize_escapes`` / ``fill_zones`` so any
+    stub is 45-quantized and the re-pour backs off the relocated via.
+
+    Returns True on success (including a no-op when the route is already clear).
+    """
+    from kicad_tools.drc.relocate_drill_clearance import relocate_drill_clearance
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+
+    print("\n" + "=" * 60)
+    print("Relocating fine-pitch hole-to-hole vias (issue #4408)...")
+    print("=" * 60)
+
+    design_rules = get_profile("jlcpcb-tier1").get_design_rules()
+    pcb = PCB.load(str(routed_path))
+    result = relocate_drill_clearance(pcb, design_rules)
+
+    if result.changed:
+        pcb.save(str(routed_path))
+
+    print("   " + result.summary().replace("\n", "\n   "))
+    if result.unresolved:
+        print(
+            f"\n   WARNING: {len(result.unresolved)} via(s) left in place (boxed in) -- "
+            "the fresh regen may still carry a hole-to-hole error."
+        )
+    print("\n   SUCCESS: relocate_drill_clearance_step completed")
+    return True
+
+
+# Issue #8844 (operator ruling 2026-11-13): the ``redundant_copper_staircase``
+# rule (#8868) fires on board 04's post-route copper -- the stair steps the
+# ``kct stitch`` / ``tie_power_pads`` pad tails and the ``quantize_escapes``
+# doglegs leave behind.  The ruling is to remove them from the copper rather
+# than record them as ``known_issues``, so this deterministic post-copper pass
+# runs immediately before the final re-pour.
+#
+# It is driven entirely by the rule's own verdict: for each chain the rule
+# flags, it lays the very path the rule named as clear (and verified with the
+# rule's own clearance oracle), at the chain's widest width.  Nothing about
+# this board's geometry is hard-coded, so it holds for a fresh re-route as
+# well as the committed copper -- a hard-coded chain would hard-fail the
+# ``board-04-end-to-end`` regen job the moment the router moved a trace.
+#
+# ``kct optimize-traces`` is deliberately NOT used: its staircase pass cannot
+# collapse a chain whose legs change width (board 04's OSC_OUT B.Cu escape
+# steps through 0.127 / 0.15 / 0.2 mm), and the passes that would collapse it
+# also rewrite copper the reviewed escapes depend on.
+#: Rounds of flag-and-collapse before giving up (one is enough on this board;
+#: a second only runs if collapsing one chain exposes another).
+_STAIRCASE_MAX_ROUNDS = 6
+
+
+def _staircase_clear_path(
+    rule: Any, chain: list[Any], layer: str
+) -> tuple[list[tuple[float, float]] | None, float, int]:
+    """The replacement path for one flagged chain: ``(points, width, net)``.
+
+    Mirrors ``RedundantCopperRule._report_staircase``'s candidate order
+    (diagonal-first, then orthogonal-first) and re-validates the winner with
+    the rule's own ``_path_clear`` -- the same oracle that decided the finding
+    was reportable -- so the copper laid here is the copper the rule asked for.
+    ``points`` is None when no candidate is clear (the rule should then not
+    have reported the chain; the caller refuses rather than guessing).
+    """
+    pts = [chain[0][1], *[step[2] for step in chain]]
+    start, end = pts[0], pts[-1]
+    bends = rule._bend_count(pts)
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    diag = min(abs(dx), abs(dy))
+    mid_diagonal = (start[0] + math.copysign(diag, dx), start[1] + math.copysign(diag, dy))
+    mid_orthogonal = (end[0] - math.copysign(diag, dx), end[1] - math.copysign(diag, dy))
+    if diag < 1e-6 or math.dist(mid_diagonal, end) < 1e-6:
+        candidates = [[start, end]]
+    else:
+        candidates = [[start, mid_diagonal, end], [start, mid_orthogonal, end]]
+
+    net = chain[0][0].net_number
+    width = max(segment.width for segment, _from, _to in chain)
+    for candidate in candidates:
+        if rule._bend_count(candidate) >= bends:
+            continue
+        legs = list(zip(candidate, candidate[1:], strict=False))
+        if rule._path_clear(legs, net, layer, width):
+            return candidate, width, net
+    return None, width, net
+
+
+def compress_staircases(routed_path: Path) -> bool:
+    """Collapse every ``redundant_copper_staircase`` chain in the copper (#8844).
+
+    Must run AFTER the copper-mutating passes that *create* the staircases
+    (``fix_osc_escape`` / ``stitch_pcb`` / ``tie_power_pads`` /
+    ``relocate_drill_clearance_step`` / ``quantize_escapes``) and the #8399
+    ``cleanup_copper`` prune, and BEFORE :func:`fill_zones`, so the final
+    re-pour backs the GND plane off the newly placed copper.
+
+    Each collapse replaces an axis-aligned stair run with a 45 degree diagonal
+    plus an orthogonal leg, so the 100% 0/45/90/135 census ``quantize_escapes``
+    establishes is preserved by construction.  Returns False (fails the
+    recipe) if any chain the rule flags is still flagged at the end.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    class _FlaggedChains(RedundantCopperRule):
+        """The rule, plus the chains behind each staircase finding."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.flagged: list[tuple[list[Any], str, str]] = []
+
+        def _report_staircase(self, chain, label, layer, results):  # type: ignore[no-untyped-def]
+            before = len(results.violations)
+            super()._report_staircase(chain, label, layer, results)
+            if len(results.violations) > before:
+                self.flagged.append((chain, label, layer))
+
+    print("\n" + "=" * 60)
+    print("Compressing track staircases (issue #8844)...")
+    print("=" * 60)
+
+    collapsed = 0
+    for round_number in range(1, _STAIRCASE_MAX_ROUNDS + 1):
+        pcb = PCB.load(routed_path)
+        rule = _FlaggedChains()
+        rule.check(pcb, None)
+        if not rule.flagged:
+            print(f"   No staircase findings ({collapsed} chain(s) collapsed)")
+            return True
+
+        print(f"   Round {round_number}: {len(rule.flagged)} staircase chain(s)")
+        changed = False
+        for chain, label, layer in rule.flagged:
+            path, width, net = _staircase_clear_path(rule, chain, layer)
+            if path is None:
+                print(f"      [{label}] on {layer}: no clear replacement path")
+                continue
+            pcb.remove_segments([segment for segment, _from, _to in chain])
+            for point_a, point_b in zip(path, path[1:], strict=False):
+                pcb.add_trace(point_a, point_b, width=width, layer=layer, net=net)
+            print(
+                f"      [{label}] on {layer}: {len(chain)} -> {len(path) - 1} "
+                f"segments at {width} mm"
+            )
+            collapsed += 1
+            changed = True
+        if not changed:
+            break
+        pcb.save(routed_path)
+
+    print("\n   FAILED: staircase findings remain after compression")
+    return False
+
+
+#: How far (in segments) a ``sharp_trace_corner`` repair may walk along the
+#: leg it re-joins, and how many apply/re-check rounds it runs.
+_SHARP_CORNER_CHAIN_DEPTH = 8
+_SHARP_CORNER_MAX_ROUNDS = 4
+_SHARP_CORNER_TOL = 0.01  # mm, the rule's own junction tolerance
+
+
+def _netclass_clearance(routed_path: Path) -> Any:
+    """``net name -> clearance (mm)`` from the routed project's net classes.
+
+    A repair path must clear foreign copper by the larger of the two nets'
+    class clearances, the pairing the routed ``.kicad_dru``'s ``kct net class
+    clearance`` rules encode.  Unassigned nets take the ``Default`` class.
+    """
+    project = json.loads(routed_path.with_suffix(".kicad_pro").read_text())
+    settings = project["net_settings"]
+    by_class = {c["name"]: float(c.get("clearance") or 0.0) for c in settings["classes"]}
+    default = by_class.get("Default", 0.0)
+    assigned = settings.get("netclass_assignments") or {}
+
+    def clearance(net_name: str | None) -> float:
+        return by_class.get(assigned.get(net_name or "", ""), default)
+
+    return clearance
+
+
+def _two_leg_paths(
+    start: tuple[float, float], end: tuple[float, float]
+) -> list[list[tuple[float, float]]]:
+    """Straight, else diagonal-first and orthogonal-first 45 degree doglegs."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    diag = min(abs(dx), abs(dy))
+    mid_diagonal = (start[0] + math.copysign(diag, dx), start[1] + math.copysign(diag, dy))
+    mid_orthogonal = (end[0] - math.copysign(diag, dx), end[1] - math.copysign(diag, dy))
+    if diag < 1e-6 or math.dist(mid_diagonal, end) < 1e-6:
+        return [[start, end]]
+    return [[start, mid_diagonal, end], [start, mid_orthogonal, end]]
+
+
+def _sharp_corner_candidates(pcb: Any, finding: Any) -> list[tuple[list[Any], list]]:
+    """Replacement candidates for one two-segment ``sharp_trace_corner`` vertex.
+
+    Every fold-back the router leaves on this board (issue #8919: committed
+    NRST and SWCLK, fresh-regen USER_LED) has one leg ending at a terminal --
+    a pad centre or a via -- and the vertex has exactly two segments.  Keep
+    one leg's far end ``A`` and walk the other leg's chain while it stays a
+    plain degree-2 path; for each point ``C`` on it, propose the 45 degree
+    path ``A -> C`` in place of everything between them.  Returns
+    ``(removed segments, path points)``; junctions of three or
+    more segments yield nothing (they are not this repair's shape).
+    """
+    loc = finding.location
+    layer = finding.layer
+    net_name = finding.nets[0]
+    net = pcb.get_net_by_name(net_name)
+    if net is None:
+        return []
+    number = net.number
+    same = [s for s in pcb.segments if s.layer == layer and s.width > 0 and s.net_number == number]
+
+    def touching(pt: tuple[float, float]) -> list[Any]:
+        return [
+            s for s in same if min(math.dist(pt, s.start), math.dist(pt, s.end)) < _SHARP_CORNER_TOL
+        ]
+
+    def far_end(seg: Any, pt: tuple[float, float]) -> tuple[float, float]:
+        if math.dist(pt, seg.start) < _SHARP_CORNER_TOL:
+            return (float(seg.end[0]), float(seg.end[1]))
+        return (float(seg.start[0]), float(seg.start[1]))
+
+    terminals = [via.position for via in pcb.vias if via.net_name == net_name]
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name == net_name:
+                dx, dy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+                terminals.append((fp.position[0] + dx, fp.position[1] + dy))
+
+    def is_terminal(pt: tuple[float, float]) -> bool:
+        return any(math.dist(pt, t) < _SHARP_CORNER_TOL for t in terminals)
+
+    legs = touching(loc)
+    if len(legs) != 2:
+        return []
+    candidates: list[tuple[list[Any], list]] = []
+    for fixed, walked in ((legs[0], legs[1]), (legs[1], legs[0])):
+        anchor = far_end(fixed, loc)
+        chain, points, cur = [walked], [far_end(walked, loc)], walked
+        pt = points[0]
+        while len(chain) < _SHARP_CORNER_CHAIN_DEPTH and not is_terminal(pt):
+            onward = [s for s in touching(pt) if s is not cur]
+            if len(onward) != 1:
+                break
+            cur = onward[0]
+            pt = far_end(cur, pt)
+            chain.append(cur)
+            points.append(pt)
+        for k, target in enumerate(points):
+            for path in _two_leg_paths(anchor, target):
+                candidates.append(([fixed, *chain[: k + 1]], path))
+    return candidates
+
+
+def _joins_acutely(pcb: Any, path: list, removed: list[Any], layer: str, net_number: int) -> bool:
+    """True if ``path`` would meet kept same-net copper below 90 degrees.
+
+    Checked at both ends, even where the rule would call the joint
+    width-filled: a repair should not trade one acute joint for another.
+    """
+    gone = {id(s) for s in removed}
+    for end, inner in ((path[0], path[1]), (path[-1], path[-2])):
+        out = (inner[0] - end[0], inner[1] - end[1])
+        for seg in pcb.segments:
+            if id(seg) in gone or seg.layer != layer or seg.net_number != net_number:
+                continue
+            if math.dist(end, seg.start) < _SHARP_CORNER_TOL:
+                other = (seg.end[0] - end[0], seg.end[1] - end[1])
+            elif math.dist(end, seg.end) < _SHARP_CORNER_TOL:
+                other = (seg.start[0] - end[0], seg.start[1] - end[1])
+            else:
+                continue
+            norm = math.hypot(*out) * math.hypot(*other)
+            if norm < 1e-12:
+                continue
+            cos = max(-1.0, min(1.0, (out[0] * other[0] + out[1] * other[1]) / norm))
+            if math.degrees(math.acos(cos)) < 89.0:
+                return True
+    return False
+
+
+def repair_sharp_corners(routed_path: Path) -> bool:
+    """Remove every two-segment ``sharp_trace_corner`` fold-back (issue #8840).
+
+    ``sharp_trace_corner`` gates board 04's strict manufacturing check
+    (operator ruling on PR #8848), and the router's own #8919 fold-back pass
+    leaves the shapes it cannot express (it reports them as "NOT
+    repairable").  Driven by the rule's verdict, like
+    :func:`compress_staircases`: for each finding, every candidate from
+    :func:`_sharp_corner_candidates` is checked against foreign copper at the
+    routed net-class clearance (the larger of the two nets'), applied to a
+    scratch copy, and kept only if the rule then reports a strict subset of
+    the previous findings and no new ``redundant_copper_*`` finding appears.
+    The fewest resulting segments win, then the shortest copper.  No board
+    geometry is hard-coded, so a fresh re-route is repaired the same way.
+
+    Runs after every copper-mutating pass and before
+    :func:`compress_staircases` / :func:`fill_zones`, so a staircase it
+    leaves is compressed and the re-pour backs off the new copper.  New legs
+    are on the 0/45/90/135 grid by construction.  Returns False (fails the
+    recipe) if a finding remains.
+    """
+    import tempfile
+
+    from kicad_tools.router.quantize import segment_angle_census
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.clearance import CopperElement, _calculate_clearance
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+    from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
+
+    print("\n" + "=" * 60)
+    print("Repairing sharp trace corners (issue #8840)...")
+    print("=" * 60)
+
+    clearance_of = _netclass_clearance(routed_path)
+
+    def keys(pcb: Any) -> set[tuple]:
+        return {
+            (v.nets[0], v.layer, round(v.location[0], 3), round(v.location[1], 3))
+            for v in SharpTraceCornerRule().check(pcb, None).violations
+        }
+
+    def redundant(pcb: Any) -> set[tuple]:
+        return {
+            (v.rule_id, v.message)
+            for v in RedundantCopperRule().check(pcb, None).violations
+            if v.rule_id != "redundant_copper_staircase"
+        }
+
+    def off_angle(path: Path) -> set[tuple]:
+        return {(b["start"], b["end"]) for b in segment_angle_census(path)[1]}
+
+    def clear(pcb: Any, path: list, net: int, net_name: str, layer: str, width: float) -> bool:
+        oracle = RedundantCopperRule()
+        oracle._pcb = pcb
+        oracle._foreign_cache = {}
+
+        def name_of(number: int) -> str:
+            found = pcb.get_net(number)
+            return found.name if found else ""
+
+        own = clearance_of(net_name)
+        for a, b in zip(path, path[1:], strict=False):
+            cand = CopperElement(
+                element_type="segment",
+                layer=layer,
+                net_number=net,
+                geometry=(a[0], a[1], b[0], b[1], width),
+                reference="",
+            )
+            for other in oracle._foreign_elements(layer):
+                if other.net_number == net:
+                    continue
+                need = max(own, clearance_of(name_of(other.net_number)))
+                if _calculate_clearance(cand, other)[0] < need - 1e-9:
+                    return False
+        return True
+
+    repaired = 0
+    with tempfile.TemporaryDirectory() as scratch:
+        trial_path = Path(scratch) / routed_path.name
+        for round_number in range(1, _SHARP_CORNER_MAX_ROUNDS + 1):
+            pcb = PCB.load(routed_path)
+            findings = SharpTraceCornerRule().check(pcb, None).violations
+            if not findings:
+                print(f"   No sharp trace corners ({repaired} repaired)")
+                return True
+            print(f"   Round {round_number}: {len(findings)} sharp trace corner(s)")
+            before, before_redundant = keys(pcb), redundant(pcb)
+            before_off_angle = off_angle(routed_path)
+            changed = False
+            for finding in findings:
+                net_name, layer = finding.nets[0], finding.layer
+                best = None
+                for removed, path in _sharp_corner_candidates(pcb, finding):
+                    net = removed[0].net_number
+                    if _joins_acutely(pcb, path, removed, layer, net):
+                        continue
+                    for width in sorted({s.width for s in removed}, reverse=True):
+                        if not clear(pcb, path, net, net_name, layer, width):
+                            continue
+                        trial = PCB.load(routed_path)
+                        drop = {(s.start, s.end, s.width) for s in removed}
+                        trial.remove_segments(
+                            [
+                                s
+                                for s in trial.segments
+                                if s.layer == layer
+                                and s.net_number == net
+                                and (s.start, s.end, s.width) in drop
+                            ]
+                        )
+                        for a, b in zip(path, path[1:], strict=False):
+                            trial.add_trace(a, b, width=width, layer=layer, net=net_name)
+                        trial.save(trial_path)
+                        trial = PCB.load(trial_path)
+                        after = keys(trial)
+                        if not after < before:
+                            continue
+                        if not redundant(trial) <= before_redundant:
+                            continue
+                        # The writer keeps 6 significant digits, so a point
+                        # like 152.3875 lands off the 45 degree grid once
+                        # saved: judge the copper as written.
+                        if not off_angle(trial_path) <= before_off_angle:
+                            continue
+                        # Fewest segments, then least copper, for this net on
+                        # this layer: comparable across every candidate.
+                        mine = [
+                            s for s in trial.segments if s.layer == layer and s.net_number == net
+                        ]
+                        score = (len(mine), round(sum(math.dist(s.start, s.end) for s in mine), 6))
+                        if best is None or score < best[0]:
+                            best = (score, trial_path.read_text(), path, width)
+                        break
+                if best is None:
+                    print(f"      {net_name} {layer} {finding.location}: no clear repair")
+                    continue
+                routed_path.write_text(best[1])
+                repaired += 1
+                changed = True
+                print(
+                    f"      {net_name} {layer} {finding.location}: "
+                    f"{' -> '.join(f'({x:.4f},{y:.4f})' for x, y in best[2])} at {best[3]} mm"
+                )
+                # Re-derive candidates from the edited board.
+                break
+            if not changed:
+                break
+
+    remaining_findings = SharpTraceCornerRule().check(PCB.load(routed_path), None).violations
+    if not remaining_findings:
+        print(f"   No sharp trace corners ({repaired} repaired)")
+        return True
+    print("\n   FAILED: sharp trace corners remain after repair")
+    return False
+
+
+def fill_zones(routed_path: Path) -> bool:
+    """
+    Re-pour the copper zones (GND B.Cu plane) after stitching.
+
+    `kct route` and `kct stitch` modify copper without refreshing the GND
+    B.Cu pour, so the committed fill is stale relative to the final
+    routed/stitched copper.  In particular the ``OSC_OUT`` net-5 escape
+    carries a 45 west jog (PR #3790, the #3785 crystal-pin short fix)
+    that runs only ~0.2661 mm from the un-refreshed GND fill -- a
+    0.034 mm shortfall against this board's own 0.3 mm zone clearance
+    (``connect_pads (clearance 0.3)``).  KiCad's geometric
+    ``kicad-cli pcb drc`` flags this as 2 ``Zone [GND] on B.Cu`` vs
+    ``Track [OSC_OUT] on B.Cu`` clearance violations.  It is tier1-legal
+    (0.2661 mm clears the jlcpcb-tier1 0.127 mm fab rule, so
+    ``kct check --mfr jlcpcb-tier1`` stays 0-blocking), but the stale pour
+    is a cosmetic / self-consistency defect.
+
+    ``kct zones fill --net GND`` re-pours the zone so the GND fill backs
+    off the relocated OSC_OUT jog by the full 0.3 mm clearance
+    (min GND-fill-to-OSC_OUT 0.2661 mm -> 0.3005 mm; the 2 GND-zone DRC
+    violations drop to 0).  This is **fill-only**: every routed
+    ``segment`` and ``via`` is byte-identical before and after -- only the
+    zone ``filled_polygon`` points change.  Running it as a deterministic
+    final step (after ``stitch_pcb``, before ``run_drc``) keeps the
+    refreshed pour reproducible from the recipe rather than a one-off hand
+    run.  The ``--net GND`` filter is advisory (kicad-cli re-fills all
+    zones), which is fine here because GND is the only B.Cu pour.
+
+    See issue #3791.  Returns True if the fill step ran.
+    """
+    print("\n" + "=" * 60)
+    print("Re-pouring zones (kct zones fill --net GND)...")
+    print("=" * 60)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "zones",
+        "fill",
+        str(routed_path),
+        "--net",
+        "GND",
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            print(f"   {line}")
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Fill stderr:\n{result.stderr}")
+        print(f"\n   FAILED: kct zones fill exited {result.returncode}")
+        return False
+
+    print("\n   SUCCESS: kct zones fill completed")
+    return True
+
+
+def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
+    """Export the assembly bundle with the reviewed paid-drill native rules."""
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+    process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+    process["validate_process"](routed_path)
+
+    print("\n" + "=" * 60)
+    print("Generating manufacturing artifacts (reviewed paid drilling)...")
+    print("=" * 60)
+
+    mfr_dir = output_dir / "manufacturing"
+    # The stock tier1 export would overwrite the paid process's .15/.30/.075
+    # via floors before preflight and packaging. Preserve the validated native
+    # constraints throughout export, including the project ZIP and final gate.
+    package = ManufacturingPackage(
+        pcb_path=routed_path,
+        schematic_path=output_dir / "stm32_devboard.kicad_sch",
+        manufacturer="jlcpcb-tier1",
+        config=ManufacturingConfig(output_dir=mfr_dir, emit_drc_constraints=False),
+    )
+    result = package.export(mfr_dir)
+    for warning in result.warnings:
+        print(f"   Warning: {warning}")
+    if not result.success:
+        for error in result.errors:
+            print(f"   Export error: {error}")
+        return False
+
+    process["validate_process"](routed_path)
+
+    print(f"\n   SUCCESS: manufacturing artifacts written to {mfr_dir}")
+    return True
+
+
+# Issue #3839: board-04's main() success gate must reflect DRC.  The DRC
+# leg is allowlist-aware so it tolerates EXACTLY the same grandfathered
+# violations the CI gate tolerates -- no more.  Today that is:
+#
+#   * advisory ``connectivity`` (1 stranded GND-stitch pad; in
+#     ``DRCChecker.ADVISORY_RULE_IDS``, filtered from every CI gate).
+#
+# The 2 ``hole_to_hole_clearance`` errors that #3842 grandfathered at 2
+# (a 0.350mm hole-to-hole micro-via pair on the LQFP-48 west escape) were
+# re-spaced to >= 0.500mm edge-to-edge by Issue #4017 (artifact-only nudge:
+# the NRST in-pad via relocated 0.5mm east onto its B.Cu escape node and
+# bonded back to pad U2.7 with a short F.Cu stub).  With that fix the
+# drill-clearance allowance is now strict-0 and the CI tolerance entry is
+# removed -- ANY ``hole_to_hole_clearance`` error, or any other blocking
+# rule, fails the gate so a real DRC regression cannot ship 0.
+_ADVISORY_DRC_RULE_IDS: frozenset[str] = frozenset({"connectivity"})
+# Issue #4353: the emitted rule_id was renamed from
+# ``hole_to_hole_clearance`` to ``hole_to_hole_clearance`` so the report
+# label matches the "Hole-to-hole clearance ..." message text.  This gate
+# parses the raw JSON ``rule_id`` string, so it must track the new value.
+_DRILL_CLEARANCE_RULE_ID = "hole_to_hole_clearance"
+_DRILL_CLEARANCE_ALLOWANCE = 0  # strict-0 since #4017 re-spaced the drill pair
+
+
+def run_drc(pcb_path: Path) -> bool:
+    """Run DRC on the routed PCB and write ``drc_report.json`` beside it.
+
+    Issue #3765: capture the DRC result as ``output/drc_report.json`` so
+    the board-04 DRC leg in ``kct fleet ship-ready`` is a fresh artifact
+    that is consistent with the routed PCB it was measured against (the
+    report is written next to the routed PCB -- exactly where
+    ``fleet_cmd._detect_drc`` looks for it).  Mirrors board-03's #3764
+    ``run_drc`` (``--drc-only --output``).
+
+    Uses ``--drc-only`` so the gate reflects geometric DRC (clearance /
+    connectivity / via rules) rather than the copper-LVS sub-check, which
+    reports pour-served power-net pads (GND / rails) as "open" because the
+    router deliberately serves those nets via copper pours (the #3772
+    pour-extraction gap).  Schematic<->PCB netlist equivalence is asserted
+    separately and exactly by ``compare_netlists`` (issue #3765), so the
+    DRC leg here is correctly scoped to manufacturing geometry.
+
+    Issue #3208/#3150: ``--mfr jlcpcb-tier1`` aligns the summary with the
+    profile this board ships and is CI-gated against (the GND micro-via
+    stitching needs the Capability-Plus tier; see the manufacturers:
+    override in ``.github/routed-drc-tolerance.yml``).
+
+    Issue #3839: the return value now gates ``main()``'s exit code, so it
+    is **allowlist-aware** rather than a raw ``returncode == 0`` check.
+    ``kct check --drc-only`` exits 2 on the 2 grandfathered
+    ``hole_to_hole_clearance`` drills (#3842/#3847) and on the advisory
+    ``connectivity`` finding, neither of which should fail the recipe.
+    Instead of trusting the exit code we parse the emitted JSON and count
+    *blocking* violations the same way the CI gate
+    (``scripts/ci/check_routed_drc.py``) does: advisory rules are excluded,
+    and up to ``_DRILL_CLEARANCE_ALLOWANCE`` (=2) drill-clearance errors are
+    tolerated.  Returns ``True`` iff no other blocking error exists and the
+    drill count is within the allowance -- so a 3rd drill or any new rule
+    flips the recipe to a non-zero exit.
+    """
+    if (pcb_path.parent / "manufacturing-requirements.json").is_file():
+        from check_manufacturing import check
+
+        data = check(pcb_path, pcb_path.parent / "drc_report.json")
+        return data["summary"]["errors"] == 0 and data["summary"]["warnings"] == 0
+
+    print("\n" + "=" * 60)
+    print("Running DRC (via kct check --drc-only)...")
+    print("=" * 60)
+
+    report_path = pcb_path.parent / "drc_report.json"
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--mfr",
+                "jlcpcb-tier1",
+                "--drc-only",
+                "--errors-only",
+                "--format",
+                "json",
+                "--output",
+                str(report_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        if report_path.is_file():
+            print(f"\n   DRC report: {report_path}")
+
+        # The JSON payload is written to ``report_path`` via --output; parse
+        # it (preferred) and fall back to stdout if the file is absent.
+        payload: dict | None = None
+        if report_path.is_file():
+            try:
+                payload = json.loads(report_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                payload = None
+        if payload is None and result.stdout:
+            brace = result.stdout.find("{")
+            if brace >= 0:
+                try:
+                    payload = json.loads(result.stdout[brace:])
+                except json.JSONDecodeError:
+                    payload = None
+
+        if payload is None:
+            # No parseable verdict -> fail closed.
+            print("\n   Error: could not parse DRC JSON output")
+            if result.stderr:
+                print(f"   stderr: {result.stderr}")
+            return False
+
+        violations = payload.get("violations", [])
+        blocking_other = 0
+        drill_errors = 0
+        advisory = 0
+        for v in violations:
+            if not isinstance(v, dict) or v.get("severity") != "error":
+                continue
+            rule_id = v.get("rule_id", "")
+            if rule_id in _ADVISORY_DRC_RULE_IDS:
+                advisory += 1
+            elif rule_id == _DRILL_CLEARANCE_RULE_ID:
+                drill_errors += 1
+            else:
+                blocking_other += 1
+
+        print(
+            f"\n   DRC errors: {blocking_other} blocking (excl. drill+advisory), "
+            f"{drill_errors} {_DRILL_CLEARANCE_RULE_ID} (allow {_DRILL_CLEARANCE_ALLOWANCE}), "
+            f"{advisory} advisory (excluded)"
+        )
+
+        # PASS iff: no other-rule blocking error AND drill count within the
+        # grandfathered allowance.  Advisory rules never gate (#3074).
+        if blocking_other == 0 and drill_errors <= _DRILL_CLEARANCE_ALLOWANCE:
+            return True
+        print(
+            "\n   DRC FAIL: "
+            + (f"{blocking_other} non-allowlisted blocking error(s); " if blocking_other else "")
+            + (
+                f"{drill_errors} drill-clearance errors exceed allowance "
+                f"of {_DRILL_CLEARANCE_ALLOWANCE}"
+                if drill_errors > _DRILL_CLEARANCE_ALLOWANCE
+                else ""
+            )
+        )
+        return False
+
+    except Exception as e:
+        print(f"\n   Error running DRC: {e}")
+        return False
+
+
+def main() -> int:
+    """Main entry point."""
+    # Precondition (#4539): refuse to mutate a board that carries no captured
+    # intent.  Anchored on ``__file__`` -- NOT ``Path.cwd()`` and NOT the
+    # output dir -- because CI invokes this recipe from the repo root with an
+    # out-of-tree output dir, so a cwd-anchored search would find nothing and
+    # fire spuriously.  Advisory by default (L1: project.kct exists, is
+    # non-empty, and parses); ``KCT_REQUIRE_SPEC=1`` upgrades it to a hard L2
+    # gate that exits non-zero BEFORE any file is written.
+    require_spec(__file__)
+
+    # Determine output directory
+    if len(sys.argv) > 1:
+        output_dir = Path(sys.argv[1])
+    else:
+        output_dir = Path(__file__).parent / "output"
+
+    try:
+        # Step 1: Create project file
+        project_path = create_project(output_dir, "stm32_devboard")
+
+        # Step 2: Create schematic
+        sch_path = create_stm32_schematic(output_dir)
+
+        # Step 3: Run ERC
+        erc_success = run_erc(sch_path)
+
+        # Step 4: Create PCB
+        pcb_path = create_stm32_pcb(output_dir)
+
+        # Step 4.05: 3D bodies survive regeneration (issues #7684, #7685).
+        # Pure text insertion of existence-checked ``(model ...)`` refs, so the
+        # unrouted board carries the same bodies as the routed one.
+        ensure_models(pcb_path)
+
+        # Step 4.1: Copy schematic pin names/electrical types onto the pads
+        # (issue #5985), as KiCad's "Update PCB from Schematic" does.  The
+        # router merges tracks into this text, so the routed PCB inherits the
+        # ``(pintype ...)`` evidence ``kct detect-mistakes`` reads for rails.
+        annotation = annotate_pcb_file_pintypes(pcb_path, sch_path)
+        if annotation.missing_pads:  # Issue #6025: every pad maps to a pin
+            raise RuntimeError(f"pads without a schematic pin: {annotation.missing_pads}")
+        print(f"   Pad pin types annotated: {annotation.annotated}")
+
+        # Step 5: Route PCB
+        routed_path = output_dir / "stm32_devboard_routed.kicad_pcb"
+        route_success = route_pcb(pcb_path, routed_path)
+        declare_ampacity_targets(output_dir)
+
+        # Step 5.5a: route_success fast-fail gate (#4066, mirrors board 03's
+        # ``route_success`` gate after ``route_pcb`` in
+        # boards/03-usb-joystick/generate_design.py).  route_pcb
+        # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
+        # the load-independent per-net ``--deterministic-budget`` iteration
+        # cap, so on a loaded machine that outer deadline can fire before every
+        # signal net lands and ``route_pcb`` returns ``False``. Blocked paths
+        # and stagnation can also return False without reaching that deadline,
+        # as can failed post-route validation or another nonzero CLI exit.
+        # This gate must land HERE -- immediately after route_pcb and before the five
+        # copper-mutating steps below (fix_osc_escape / stitch_pcb /
+        # tie_power_pads / quantize_escapes / fill_zones) -- so none of them
+        # ever touch a partially-routed board and the downstream
+        # ``write_lvs_report(require_clean=True)`` never sees an unrouted signal
+        # net as a copper OPEN (which would raise ``BoardNetlistMismatch`` and
+        # misdirect the reviewer to the LVS subsystem when the true cause is
+        # upstream route truncation).  NOTE: the final exit gate below still
+        # ANDs ``route_success`` into its return (#3839) -- that term is left
+        # in place as defense-in-depth; this early raise makes it unreachable
+        # on the partial-route path but not redundant.  The "PARTIAL: Routed
+        # N/M signal nets" line is printed above when the router reports it.
+        if not route_success:
+            raise RuntimeError(
+                "route step did not pass. See the router exit code and "
+                "diagnostics above, including the 'PARTIAL: Routed N/M signal "
+                "nets' summary if reported. This result alone does not "
+                "establish incomplete connectivity or a timeout. The pipeline "
+                "stopped before copper repair and LVS. Investigate the "
+                "reported routing or validation failure before changing budgets."
+            )
+
+        # Step 5.5: Fix the OSC_OUT escape-stub short (#3797) -- the fresh
+        # deterministic route drops the OSC_OUT B.Cu escape straight into the
+        # U2.5 OSC_IN pad, shorting the two crystal pins.  This deterministic
+        # post-route surgery re-aims that single B.Cu hop off the OSC_IN pad
+        # column (the programmatic form of #3785's hand fix), so a fresh regen
+        # is copper-LVS clean.  Must run after route_pcb (which emits the
+        # escape) and before fill_zones (so the re-poured GND backs off the
+        # re-aimed jog).
+        osc_success = fix_osc_escape(routed_path)
+
+        # Step 6: Stitch GND plane (route -> stitch -> mfr pipeline)
+        stitch_success = stitch_pcb(routed_path)
+
+        # Step 6.25: Tie the isolated LQFP power pads into their pours (#3794,
+        # Leg B; U2.47 added #3797) -- add 4 GND micro-via-in-pads for the VSS
+        # pads `kct stitch` cannot reach and tighten the GND / +3.3V zone
+        # connect-pad clearance
+        # so the next fill bonds the moated-out +3.3V VDD pads.  Same-net only;
+        # routed signal copper stays byte-identical.  Must run after stitch_pcb
+        # (which adds the bulk of the GND vias) and before fill_zones (which
+        # re-pours so the new ties take effect).
+        tie_success = tie_power_pads(routed_path)
+
+        # Step 6.3: Relieve fine-pitch hole-to-hole via crowding (#4408) -- the
+        # fresh route stacks the OSC_OUT/NRST/GND LQFP-48 west escapes as in-pad
+        # micro-vias at the 0.5mm pin pitch, leaving two 0.350mm drill pairs
+        # below the jlcpcb-tier1 0.500mm hole-to-hole floor.  This generic,
+        # mfr-floor-driven pass relocates the offending (middle NRST) via onto a
+        # clearance-safe escape node and re-bonds it with connectivity stubs,
+        # back-porting the artifact-only #4017 nudge into the recipe so a fresh
+        # regen is tier1-clean by construction.  Must run AFTER stitch_pcb +
+        # tie_power_pads (so it sees every via) and BEFORE quantize_escapes (so
+        # any stub is 45-quantized) / fill_zones (so the re-pour backs off the
+        # relocated via).
+        drill_clearance_success = relocate_drill_clearance_step(routed_path)
+
+        # Step 6.4: 45-degree quantize the escape copper (#3797 / #3532) -- the
+        # fresh deterministic route + the fix_osc_escape re-aim + the kct stitch
+        # GND pad-tails ship a few arbitrary-angle hops (the OSC_OUT re-aim
+        # ~13 deg, two GND stitch-via tails ~22 deg) that fail the fleet
+        # 45-census gate.  Replace each with an EXACT endpoint-preserving dogleg
+        # so the committed artifact is 100% on the 0/45/90/135 grid.  Must run
+        # AFTER stitch_pcb + tie_power_pads (which emit the GND stitch tails) and
+        # BEFORE fill_zones (so the re-pour backs the GND plane off any dogleg
+        # bulge); copper-LVS stays 0/0.
+        quantize_success = quantize_escapes(routed_path)
+        # File-relative loading also works for importlib-based recipe callers.
+        process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+        process["repair"](routed_path)
+        process["apply_native_floors"](routed_path)
+
+        # Step 6.5: Re-pour zones (#3791) -- refresh the GND B.Cu fill so it
+        # backs off the relocated OSC_OUT 45 jog (#3790) by the full 0.3mm
+        # zone clearance.  Fill-only: routed copper is byte-identical, only
+        # the GND filled_polygon points change.  Must run after stitch_pcb
+        # (which adds copper) and before run_drc (so DRC measures the
+        # refreshed pour).
+        # Issue #8399: remove avoidable router copper (``redundant_copper_*``)
+        # with dedupe + DRC-verified prune, then re-pour over the edited copper.
+        from kicad_tools.pcb_prune import cleanup_copper
+
+        print(f"   Copper cleanup: {cleanup_copper(routed_path)}")
+
+        # Issue #8532: every board carries global fiducials and a board-ID
+        # silkscreen.  Added after the physical-design review (the reviewed
+        # fingerprint ignores fiducial footprints) and before the re-pour so
+        # the GND pour backs off the new copper.
+        from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+        from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+        if run_add_fiducials(routed_path, sides="populated") != 0:
+            raise RuntimeError("pcb add-fiducials failed")
+        if run_add_board_info(routed_path, auto=True) != 0:
+            raise RuntimeError("pcb add-board-info failed")
+
+        # Issue #8844 (operator ruling 2026-11-13): collapse the four
+        # ``redundant_copper_staircase`` chains the post-route copper passes
+        # leave behind, rather than recording them as ``known_issues``.  Runs
+        # after every copper-mutating pass and the #8399 prune, and before the
+        # re-pour below so the GND plane backs off the compressed copper.
+        # Issue #8840 (operator ruling on PR #8848): ``sharp_trace_corner``
+        # gates this board, and the router's #8919 fold-back pass leaves the
+        # shapes it cannot express.  Repair them here, before the staircase
+        # compression and the re-pour, so both see the final copper.
+        if not repair_sharp_corners(routed_path):
+            raise RuntimeError("repair_sharp_corners did not pass (#8840)")
+
+        staircase_success = compress_staircases(routed_path)
+        if not staircase_success:
+            raise RuntimeError("compress_staircases did not pass (#8844)")
+
+        fill_success = fill_zones(routed_path)
+
+        # Step 7: Run DRC.  Issue #3912: run_drc still runs for its
+        # side-effect -- it writes ``output/drc_report.json`` (the sidecar
+        # ``kct fleet ship-ready`` reads, #3765).  Its kct-check return no
+        # longer gates the recipe: the authoritative DRC verdict now comes
+        # from the shared gate's ``kicad-cli pcb drc --refill-zones`` leg
+        # below.
+        run_drc(routed_path)
+
+        # Step 7.5: LVS (advisory, #3780) -- board 04 is in
+        # ``ADVISORY_LVS_BOARDS``.  The real ``OSC_IN<->OSC_OUT`` B.Cu
+        # escape-stub short bridging the HSE crystal pins was CLEARED in #3785
+        # (localized OSC_OUT-only re-route; no segment now joins the U2.5/U2.6
+        # pad centers).
+        #
+        # Per #3794 (2026-06-18): the copper comparator now reports board 04
+        # **copper-LVS clean** (0 shorts / 0 opens).  The 20 residual same-net
+        # power-pad opens were closed by two changes: (Leg A) the label-free
+        # extractor now bonds a via / trace endpoint that lands inside a pour's
+        # solid region — board 04's GND pads reach the B.Cu-only GND pour
+        # through ``pad -> F.Cu trace -> stitch via -> B.Cu pour`` — and
+        # (Leg B, ``tie_power_pads``) the four +3.3V VDD pads + four GND VSS
+        # pads (U2.8/23/35/47) were tied into their pours.
+        #
+        # Per #3797 (2026-06-18): a FRESH deterministic regen is now copper-LVS
+        # clean too.  The two residual fresh-route defects — the OSC_IN<->OSC_OUT
+        # escape-stub short and the U2.47 GND open — are eliminated by
+        # ``fix_osc_escape`` (Step 5.5) and the 4th ``_GND_TIE_VIAS`` entry, so
+        # the recipe reproduces a clean board rather than only the committed
+        # artifact being clean.  ``require_clean=True`` therefore gates the
+        # recipe: ``write_lvs_report`` raises if the fresh copper-LVS is dirty,
+        # so a regression cannot ship silently.  ``run_label`` is off because
+        # the copper comparator is the meaningful leg.  Removing board-04 from
+        # ``ADVISORY_LVS_BOARDS`` + the CI end-to-end gate is the #3795 Slice 2
+        # follow-up (out of scope here).
+        # Issue #3839: capture the (copper_clean, label_clean) return so the
+        # exit gate ANDs the copper-LVS verdict explicitly.  require_clean=True
+        # already RAISES on a dirty copper comparator (so a short can't reach
+        # the gate at all), but ANDing copper_clean makes the gate's intent
+        # self-documenting and defends against a future require_clean=False.
+        copper_clean, _label_clean = write_lvs_report(
+            sch_path,
+            routed_path,
+            output_dir,
+            require_clean=True,
+            run_copper=True,
+            run_label=False,
+        )
+
+        # Step 8: Generate manufacturing artifacts (Gerbers, BOM, CPL)
+        mfr_success = generate_manufacturing(routed_path, output_dir)
+
+        # Issue #3912: board-04 is the REFERENCE migration to the shared
+        # recipe success gate (kicad_tools.recipes.gate).  The route / DRC /
+        # LVS legs -- previously three hand-rolled booleans (route_success,
+        # drc_success, copper_clean) ANDed by hand into the exit code -- are
+        # now folded into ONE PipelineGateResult that drives BOTH the
+        # SUMMARY lines below and the exit code, so they cannot diverge.
+        #
+        # The gate's DRC leg is authoritative: it runs
+        # ``kicad-cli pcb drc --refill-zones`` (run_geometric_drc) instead of
+        # the ``kct check --drc-only`` that ``run_drc`` uses (run_drc is still
+        # called above so ``output/drc_report.json`` -- the sidecar
+        # ``kct fleet ship-ready`` reads -- keeps being written).  The two
+        # legacy 0.350mm ``hole_clearance`` drills the fresh regen still
+        # routes (#3847 / CI ``--allow 2``) are tolerated via an explicit
+        # per-rule allowance; a 3rd drill or any new blocking rule fails the
+        # gate.  copper-LVS (``copper_clean``) is the LVS leg -- and
+        # ``write_lvs_report(require_clean=True)`` already RAISED above on a
+        # dirty comparator, so a short can't even reach here.
+        gate = evaluate_pipeline_gate(
+            routed_path,
+            route_ok=route_success,
+            route_allowance=0,
+            lvs_ok=copper_clean,
+            rule_allowances={},
+            export_ok=mfr_success,
+        )
+
+        # Summary
+        print("\n" + "=" * 60)
+        print("SUMMARY")
+        print("=" * 60)
+        print(f"\nOutput directory: {output_dir.absolute()}")
+        print("\nGenerated files:")
+        print(f"  1. Project: {project_path.name}")
+        print(f"  2. Schematic: {sch_path.name}")
+        print(f"  3. PCB (unrouted): {pcb_path.name}")
+        print(f"  4. PCB (routed): {routed_path.name}")
+        print(f"  5. Manufacturing: {(output_dir / 'manufacturing').name}/")
+        print("\nResults:")
+        print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
+        for line in gate.summary_lines():
+            print(line)
+        print(f"  OSC escape fix: {'SUCCESS' if osc_success else 'FAIL'}")
+        print(f"  45-quantize: {'SUCCESS' if quantize_success else 'FAIL'}")
+        print(f"  Stitch: {'SUCCESS' if stitch_success else 'FAIL'}")
+        print(f"  Power-pad tie: {'SUCCESS' if tie_success else 'FAIL'}")
+        print(f"  Hole-to-hole relocate: {'SUCCESS' if drill_clearance_success else 'FAIL'}")
+        print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
+        print("\nBoard description:")
+        print("  - U1: MCP1825S-3302E/DB LDO (5V to 3.3V)")
+        print("  - U2: STM32F103C8T6 MCU (LQFP-48, 0.5mm pitch)")
+        print("  - C1-C3: LDO decoupling capacitors")
+        print("  - Y1: 8MHz crystal oscillator (HSE on PD0/PD1)")
+        print("  - C10-C11: Crystal load capacitors (20pF)")
+        print("  - C12-C15: MCU bypass caps (100nF per VDD pin)")
+        print("  - C16: Bulk decoupling (4.7uF)")
+        print("  - R1, D1: User LED on PB12 (active-low)")
+        print("  - R2: BOOT0 pull-down (10k)")
+        print("  - J1: 6-pin SWD debug header")
+
+        # For this demo board, partial routing and partial GND stitching
+        # are acceptable.  Per #3075 (2026-05-18), U2.8 (LQFP-48 west-side
+        # VSS) is blocked by the OSC_OUT B.Cu escape stub that runs
+        # through its escape window.  Per #3267 (2026-06-06), the
+        # post-#3128 clearance-tightening cluster also strands U2.35.
+        # Per #3266 (2026-06-06), the same cluster strands NRST at J1.5
+        # (the prior 9/9 route exploited a ~0.125mm clearance corridor
+        # between U2.7 and U2.8 that is now correctly refused).  All
+        # three findings are advisory ``connectivity`` rule outputs (in
+        # DRCChecker.ADVISORY_RULE_IDS, filtered from the CI gate per
+        # #3074); the remaining VSS pads are still stitched so the MCU VSS
+        # rail is bonded to the plane through independent paths.  Success
+        # requires ERC pass, routing success, stitch step executed, and
+        # manufacturing artifacts produced.  Underlying recovery cluster:
+        # #2834 (manufacturing-ready).
+        #
+        # Per #3765 (2026-06-17): the schematic<->PCB net drift is now
+        # reconciled (compare_netlists clean, 12==12 nets, no drift). The
+        # committed routed PCB routes NRST cleanly (2/2) with 0 blocking
+        # errors; the single remaining ``connectivity`` advisory is the
+        # GND U2.23 corner-pad stitch residual (#2834/#3033).  The routed
+        # PCB is preserved (not re-routed) because fresh regen on current
+        # main hits a separate zone-fill regression (GND-vs-rail F.Cu pour
+        # shorts), tracked in #3773.  blocking_errors stays 0 and the
+        # board's ship-ready verdict stays ``passed: true``.
+        #
+        # Per #3785 (2026-06-17): the real ``OSC_IN<->OSC_OUT`` B.Cu
+        # escape-stub short (U2.6 dropping straight through the U2.5 pad
+        # center) was cleared by a localized OSC_OUT-only edit -- the two
+        # bridging B.Cu segments were deleted and replaced with an escape
+        # that jogs west of the OSC_IN pad column (via -> (26.6875, 21.55)
+        # -> (26.6875, 21.1) -> ... -> C11).  Only OSC_OUT copper changed;
+        # NRST/SWO and every other net stayed byte-identical, so the
+        # #3765/#3773 preserve-the-pinned-artifact rationale above still
+        # holds and the advisory GND-stitch residual is unchanged.
+        #
+        # Per #3791 (2026-06-17): a deterministic final ``fill_zones`` step
+        # re-pours the GND B.Cu plane after stitching so the fill backs off
+        # the relocated OSC_OUT jog by the full 0.3mm zone clearance,
+        # clearing the 2 geometric ``Zone [GND]``-vs-``Track [OSC_OUT]``
+        # clearance violations (min 0.2661mm -> 0.3005mm).  Fill-only: routed
+        # copper stays byte-identical, only GND ``filled_polygon`` points
+        # change, so the preserve-the-pinned-copper rationale above holds.
+        #
+        # Per #3794 (2026-06-18): a new ``tie_power_pads`` step (between
+        # ``stitch_pcb`` and ``fill_zones``) closes the residual same-net
+        # power-pad copper-LVS opens.  It adds three GND micro-via-in-pads for
+        # the LQFP-48 VSS pads ``kct stitch`` cannot reach (U2.8/U2.23/U2.35 —
+        # the dense 0.5mm escape leaves no clear standard/micro stitch window)
+        # and tightens the +3.3V / GND zone ``connect_pads`` clearance +
+        # ``thermal_gap`` (0.3 -> 0.1mm) so the ``fill_zones`` re-pour bonds the
+        # four +3.3V VDD pads (U2.9/U2.24/U2.36/U2.48) that sat 0.025-0.198mm
+        # outside their own F.Cu pour.  Same-net only: the only copper added is
+        # 3 GND vias inside GND pads and the pours grow only to embrace their
+        # OWN pads/vias, so no short is introduced (verified: fleet copper-LVS
+        # unchanged, jlcpcb-tier1 DRC 0-blocking).  All 182 routed segments stay
+        # byte-identical — NRST/SWO/OSC and every signal net are untouched — so
+        # the preserve-the-pinned-copper rationale above still holds.  After
+        # this step ``compare_copper_netlist`` is clean (0 shorts / 0 opens, was
+        # 0/20).  The advisory per-net ``connectivity`` DRC rule (a separate,
+        # pre-existing code path) still reports 1 stranded GND pad — improved
+        # from 3 — but it remains in ``ADVISORY_RULE_IDS`` and is filtered from
+        # the CI gate; ``blocking_errors`` stays 0.  This unblocks the #3795
+        # board-04 copper-LVS hard-gate graduation.
+        #
+        # Per #3839 (2026-06-21): the exit gate previously omitted
+        # ``drc_success`` (computed + printed but never gating) and discarded
+        # the ``write_lvs_report`` return -- so a board with a NEW blocking DRC
+        # error or a copper-LVS short could print SUCCESS and exit 0.  The gate
+        # now ANDs ``drc_success`` (allowlist-aware per ``run_drc``: tolerates
+        # the 2 grandfathered ``hole_to_hole_clearance`` drills (#3847) +
+        # advisory ``connectivity`` but fails on a 3rd drill or any new rule)
+        # and ``copper_clean`` (the copper-LVS verdict) so a real DRC/LVS
+        # regression exits non-zero.  The current committed board -- 2
+        # allowlisted drills, 1 advisory connectivity, copper-LVS clean --
+        # still exits 0.
+        # Issue #3912: route_success + drc_success + copper_clean are now
+        # subsumed by ``gate.passed`` (route / DRC / LVS legs), derived from
+        # the SAME PipelineGateResult the SUMMARY printed.  The board-04
+        # specific pipeline-step booleans stay ANDed in as before so a failed
+        # stitch / tie / fill / quantize / export still fails the recipe.
+        return (
+            0
+            if (
+                erc_success
+                and quantize_success
+                and stitch_success
+                and tie_success
+                and drill_clearance_success
+                and fill_success
+                and mfr_success
+                and gate.passed
+            )
+            else 1
+        )
+
+    except Exception as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

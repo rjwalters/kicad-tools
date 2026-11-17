@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# test-merge-pr-help.sh - Unit tests for the --help / -h flag on merge-pr.sh
+#
+# Verifies that merge-pr.sh prints usage and exits 0 when --help or -h is
+# passed, without any network or git side effects (no forge_detect, no
+# find_main_repo_root). Runs from /tmp to confirm early-exit before git
+# initialization.
+#
+# Usage:
+#   ./.loom/scripts/tests/test-merge-pr-help.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MERGE_PR="$(cd "$SCRIPT_DIR/.." && pwd)/merge-pr.sh"
+
+# #8191 slice: the help text is `loom-daemon merge-pr usage` now, so this
+# suite pins the binary built from this checkout (LOOM_DAEMON_SELF_BIN, the
+# seam merge-pr.sh's --help resolves first) and FAILS rather than skips
+# without one. Every assertion below is unchanged: they are the equivalence
+# proof for the port, beside tests/merge_pr_usage_differential.rs.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$(cd "$SCRIPT_DIR/.." && pwd)" "merge-pr usage"
+
+# Colors
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+
+
+if [[ ! -x "$MERGE_PR" ]]; then
+    echo "ERROR: $MERGE_PR is not executable" >&2
+    exit 1
+fi
+
+# --- Test: --help exits 0 with usage ---
+echo "Testing merge-pr.sh --help..."
+
+set +e
+HELP_OUTPUT=$("$MERGE_PR" --help 2>&1)
+HELP_EXIT=$?
+set -e
+
+assert_eq "0" "$HELP_EXIT" "--help exits 0"
+assert_contains "$HELP_OUTPUT" "Usage:" "--help output contains 'Usage:'"
+assert_contains "$HELP_OUTPUT" "--auto" "--help output mentions --auto"
+assert_contains "$HELP_OUTPUT" "--dry-run" "--help output mentions --dry-run"
+assert_contains "$HELP_OUTPUT" "--no-cleanup-worktree" "--help output mentions --no-cleanup-worktree"
+assert_contains "$HELP_OUTPUT" "-h, --help" "--help output documents -h/--help"
+# Issue #3364: --worktree-path override flag for non-Loom worktrees
+assert_contains "$HELP_OUTPUT" "--worktree-path" "--help output mentions --worktree-path (#3364)"
+assert_contains "$HELP_OUTPUT" "sentinel guard" "--help explains the sentinel-guard bypass semantics"
+assert_contains "$HELP_OUTPUT" "--worktree-path ../adhoc-wt" "--help shows a --worktree-path example"
+
+# --- Test: -h exits 0 with same usage ---
+echo ""
+echo "Testing merge-pr.sh -h..."
+
+set +e
+SHORT_OUTPUT=$("$MERGE_PR" -h 2>&1)
+SHORT_EXIT=$?
+set -e
+
+assert_eq "0" "$SHORT_EXIT" "-h exits 0"
+assert_eq "$HELP_OUTPUT" "$SHORT_OUTPUT" "-h produces identical output to --help"
+
+# --- Test: --help works outside a git repo (early exit before find_main_repo_root) ---
+echo ""
+echo "Testing merge-pr.sh --help from outside a git repo..."
+
+TMP_DIR=$(mktemp -d /tmp/loom-merge-pr-help-test.XXXXXX)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+set +e
+NONGIT_OUTPUT=$(cd "$TMP_DIR" && "$MERGE_PR" --help 2>&1)
+NONGIT_EXIT=$?
+set -e
+
+assert_eq "0" "$NONGIT_EXIT" "--help exits 0 outside a git repo"
+assert_contains "$NONGIT_OUTPUT" "Usage:" "--help works without git context"
+
+# --- Test: --help with extra args still exits 0 ---
+echo ""
+echo "Testing merge-pr.sh --help with extra args..."
+
+set +e
+EXTRA_OUTPUT=$("$MERGE_PR" --help 999 2>&1)
+EXTRA_EXIT=$?
+set -e
+
+assert_eq "0" "$EXTRA_EXIT" "--help with extra args exits 0"
+assert_contains "$EXTRA_OUTPUT" "Usage:" "--help with extra args prints usage"
+
+# --- Summary ---
+echo ""
+echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"
+
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    exit 1
+fi

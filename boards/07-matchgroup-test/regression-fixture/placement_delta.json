@@ -1,0 +1,53 @@
+{
+  "note": "Reviewed swap-group pad re-binding for the board-07 legacy fixture (issue #5537, Epic #5511 Phase 2b). Measured, not hand-authored: produced by classify_stuck_nets_from_pcb(matchgroup_test_routed.kicad_pcb, net_class_map=net_class_map.json) -> deltas_from_result(...), keeping the two reorder_pins deltas that carry a pad_map. Both describe the SAME U2 re-binding (DQ3 and DQ4 diagnose the same reversed DDR byte), so pad_map_overrides merges them. Promoted from the classifier's 'proposed' list into 'applied' by this reviewed commit -- that promotion IS the human review step; nothing replays 'proposed' automatically. Replay with: python generate_design.py <out> --placement-delta regression-fixture/placement_delta.json",
+  "applied": [
+    {
+      "net_name": "DQ3",
+      "target_ref": "U2",
+      "kind": "reorder_pins",
+      "dx": 0.0,
+      "dy": 0.0,
+      "rotation_delta": 0.0,
+      "source_action": "reorder_pins",
+      "rationale": "re-order pins to un-cross the byte",
+      "confidence": "medium",
+      "pad_map": {
+        "1": "DQ7",
+        "2": "DQ6",
+        "3": "DQ5",
+        "4": "DQ4",
+        "8": "DQ3",
+        "9": "DQ2",
+        "10": "DQ1",
+        "11": "DQ0"
+      },
+      "crossings_before": 28,
+      "crossings_after": 0
+    },
+    {
+      "net_name": "DQ4",
+      "target_ref": "U2",
+      "kind": "reorder_pins",
+      "dx": 0.0,
+      "dy": 0.0,
+      "rotation_delta": 0.0,
+      "source_action": "reorder_pins",
+      "rationale": "re-order pins to un-cross the byte",
+      "confidence": "medium",
+      "pad_map": {
+        "1": "DQ7",
+        "2": "DQ6",
+        "3": "DQ5",
+        "4": "DQ4",
+        "8": "DQ3",
+        "9": "DQ2",
+        "10": "DQ1",
+        "11": "DQ0"
+      },
+      "crossings_before": 28,
+      "crossings_after": 0
+    }
+  ],
+  "proposed": [],
+  "reverted": []
+}

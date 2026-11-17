@@ -1,0 +1,96 @@
+name: Label external issues
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  label_external:
+    if: ${{ github.event_name == 'issues' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if author is a collaborator
+        id: check
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const author = context.payload.issue?.user;
+            if (!author || typeof author.login !== 'string' || author.login.length === 0) {
+              throw new Error('Issue author metadata is missing');
+            }
+            const username = author.login;
+
+            // Verified Loom fleet GitHub App accounts (writer app ID 4486636,
+            // owned by rjwalters; reader Apps documented in
+            // .loom/docs/github-authentication.md, forge.identities).
+            // App installation actors do not pass the user collaborator API.
+            // Pin the immutable account ID as well as login/type: other bots
+            // and similarly named accounts still require collaborator checks.
+            // Do NOT use a wildcard like 'loom-fleet-*[bot]': App slugs are
+            // globally registered by anyone, so only explicit ids are safe.
+            const trustedApps = [
+              { id: 313063438, login: 'loom-fleet-dispatch[bot]' },
+              { id: 334699997, login: 'loom-fleet-reader-1[bot]' },
+              { id: 334704706, login: 'loom-fleet-reader-2[bot]' },
+            ];
+            if (author.type === 'Bot' &&
+                trustedApps.some(a => a.id === author.id && a.login === author.login)) {
+              console.log(`${username} is trusted Loom automation`);
+              return { isCollaborator: true };
+            }
+
+            try {
+              await github.rest.repos.checkCollaborator({
+                owner,
+                repo,
+                username
+              });
+              console.log(`${username} is a collaborator`);
+              return { isCollaborator: true };
+            } catch (error) {
+              // Only 404 means "not a collaborator". Authentication, rate
+              // limits, server and network errors must fail without labeling.
+              if (error.status !== 404) {
+                throw error;
+              }
+              console.log(`${username} is NOT a collaborator`);
+              return { isCollaborator: false };
+            }
+
+      - name: Add 'external' label if not a collaborator
+        if: fromJSON(steps.check.outputs.result).isCollaborator == false
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['external']
+            });
+
+      - name: Post welcome comment on external issues
+        if: fromJSON(steps.check.outputs.result).isCollaborator == false
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const body = [
+              'Thank you for submitting an issue! 🙏',
+              '',
+              'This issue has been automatically labeled as `external` and will be reviewed by the maintainers.',
+              '',
+              '**Note**: External issues require manual triage before being assigned. We appreciate your patience while we review your submission.',
+              '',
+              'For questions or discussions, please use [GitHub Discussions](https://github.com/rjwalters/kicad-tools/discussions).',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });

@@ -1,0 +1,188 @@
+"""Configuration and statistics for trace optimization."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class OptimizationConfig:
+    """Configuration for trace optimization."""
+
+    merge_collinear: bool = True
+    """Merge adjacent segments with the same direction."""
+
+    eliminate_zigzags: bool = True
+    """Remove unnecessary back-and-forth patterns."""
+
+    convert_45_corners: bool = True
+    """Convert 90-degree corners to 45-degree chamfers."""
+
+    compress_staircase: bool = True
+    """Compress staircase patterns (alternating horizontal/diagonal) into optimal paths."""
+
+    pull_tight: bool = True
+    """Enable PullTight post-processing: translate interior segments perpendicular
+    to their direction to shorten total chain length."""
+
+    shorten_detours: bool = True
+    """Replace a whole chain (>= 3 segments) with a shorter straight or
+    single-bend 45-degree path between its endpoints when the path is clear."""
+
+    remove_jogs: bool = True
+    """Remove lateral jogs: slide a short sideways step between two parallel
+    runs to the next corner, where it merges into a segment parallel to it."""
+
+    max_jog_length: float = 1.0
+    """Longest sideways step (mm) the jog-removal pass will slide."""
+
+    pull_tight_max_iterations: int = 10
+    """Maximum number of PullTight iterations before stopping."""
+
+    minimize_vias: bool = True
+    """Enable post-routing via minimization."""
+
+    min_staircase_segments: int = 3
+    """Minimum number of segments to consider as a staircase pattern."""
+
+    min_segment_length: float = 0.05
+    """Minimum segment length to keep (mm). Shorter segments may be merged."""
+
+    corner_chamfer_size: float = 0.5
+    """Size of 45-degree chamfer at corners (mm)."""
+
+    via_max_detour_factor: float = 1.5
+    """Maximum detour length as factor of direct distance for via removal."""
+
+    via_pair_threshold: float = 2.0
+    """Maximum distance between vias to consider as a removable pair (mm)."""
+
+    tolerance: float = 1e-4
+    """Tolerance for floating-point comparisons (mm)."""
+
+    drc_aware: bool = False
+    """Enable DRC-aware mode: roll back per-net optimizations that increase violations."""
+
+    drc_manufacturer: str | None = None
+    """Manufacturer ID for DRC rules (e.g., 'jlcpcb'). Required when drc_aware=True."""
+
+    drc_layers: int = 2
+    """Number of PCB copper layers for DRC checks."""
+
+    drc_copper_oz: float = 1.0
+    """Copper weight in oz for DRC checks."""
+
+    drc_clearance_mm: float | None = None
+    """Clearance the board's own DRC enforces (Issue #8367).
+
+    Overrides the manufacturer preset's minimum clearance in the in-process
+    referee so keep/reject agrees with kicad-cli under the project rules.
+    ``None`` keeps the preset."""
+
+    drc_project_path: Path | None = None
+    """Board (or ``--project``) whose sibling ``.kicad_pro`` holds the net-class
+    clearances (Issue #8813).  When set, the in-process referee also counts
+    ``netclass_clearance_copper`` errors, matching ``kct check``."""
+
+    drc_arbiter: Callable[[str], int | None] | None = None
+    """External clearance checker used when the in-process referee rejects
+    every changed net (Issue #8367).  Takes board text, returns the checker's
+    clearance error count or ``None`` if unavailable.  Set only when a project
+    ``.kicad_dru`` exists, which the in-process referee cannot read."""
+
+    output_verifiers: dict[str, Callable[[str], dict[str, int] | None]] = field(
+        default_factory=dict
+    )
+    """Whole-board output verifiers (Issue #8632).  Each maps board text to
+    ``{problem key: count}`` (e.g. net name -> unconnected items, or a creepage
+    pair key -> 1), or ``None`` when the checker cannot run.  After the DRC
+    phase, any key whose count exceeds the input board's is attributed to the
+    changed nets and those nets are rolled back."""
+
+
+@dataclass
+class NetOptimizationStats:
+    """Per-net before/after statistics (Issue #7065)."""
+
+    net: str
+    segments_before: int = 0
+    segments_after: int = 0
+    length_before: float = 0.0
+    length_after: float = 0.0
+    rolled_back: bool = False
+    # Issue #8207: rule id -> violations this net's rewrite introduced (only
+    # populated for nets the per-net rollback loop reverted).
+    new_violations: dict[str, int] = field(default_factory=dict)
+    # Issue #8299: the net's final geometry differs from the input.
+    changed: bool = False
+
+
+@dataclass
+class OptimizationStats:
+    """Statistics from trace optimization."""
+
+    segments_before: int = 0
+    segments_after: int = 0
+    corners_before: int = 0
+    corners_after: int = 0
+    length_before: float = 0.0
+    length_after: float = 0.0
+    nets_optimized: int = 0
+    vias_before: int = 0
+    vias_after: int = 0
+    nets_rolled_back: int = 0
+    drc_errors_before: int = 0
+    drc_errors_after: int = 0
+    # Issue #8052: DRC-aware rollback could not reach baseline; all changed
+    # nets were reverted.
+    drc_failsafe_reverted: bool = False
+    # Issue #8207: nets whose rewritten geometry differs from the input and
+    # survived rollback (``nets_optimized`` counts every net attempted).
+    nets_kept: int = 0
+    # Issue #8207: rule id -> count still above baseline when the failsafe fired.
+    drc_failsafe_rules: dict[str, int] = field(default_factory=dict)
+    # Issue #6889: Kelvin-branch rewrites kept at their original geometry.
+    kelvin_vetoes: int = 0
+    # Issue #8271: exact-duplicate segments dropped from optimizer output.
+    duplicates_removed: int = 0
+    # Issue #8250: nets whose rewrite was discarded because it split a pad
+    # group that was connected in the input.
+    nets_connectivity_discarded: int = 0
+    connectivity_discarded_nets: list[str] = field(default_factory=list)
+    # Issue #8300: candidate edits rejected by the --voltage-map pairwise
+    # requirement, keyed by (net_a, net_b) (order-independent, sorted).
+    creepage_skips: dict[tuple[str, str], int] = field(default_factory=dict)
+    # Issue #8298: nets whose whole rewrite failed the connectivity check but
+    # where some independent changed regions were safe and kept.
+    nets_connectivity_partial: int = 0
+    connectivity_partial_nets: list[str] = field(default_factory=list)
+    # Issue #8632: verifier name -> nets rolled back because the whole-board
+    # check (opens / creepage) regressed.
+    output_verify_rolled_back: dict[str, list[str]] = field(default_factory=dict)
+    # Issue #8632: verifier name -> "ran" | "unchanged" | "unavailable".
+    output_checks: dict[str, str] = field(default_factory=dict)
+    # Issue #7065: one row per optimized net, built after any DRC rollback.
+    per_net: list[NetOptimizationStats] = field(default_factory=list)
+
+    @property
+    def segment_reduction(self) -> float:
+        """Percentage reduction in segment count."""
+        if self.segments_before == 0:
+            return 0.0
+        return (1 - self.segments_after / self.segments_before) * 100
+
+    @property
+    def length_reduction(self) -> float:
+        """Percentage reduction in total length."""
+        if self.length_before == 0:
+            return 0.0
+        return (1 - self.length_after / self.length_before) * 100
+
+    @property
+    def via_reduction(self) -> float:
+        """Percentage reduction in via count."""
+        if self.vias_before == 0:
+            return 0.0
+        return (1 - self.vias_after / self.vias_before) * 100

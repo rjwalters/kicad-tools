@@ -1,0 +1,64 @@
+"""
+Zone generation module for KiCad PCB copper pours.
+
+Provides high-level API for generating copper pour zones on PCBs:
+- Ground planes (GND)
+- Power planes (+3.3V, +5V, VCC, etc.)
+- Custom zones with arbitrary nets
+
+Example::
+
+    from kicad_tools.zones import ZoneGenerator
+
+    gen = ZoneGenerator.from_pcb("board.kicad_pcb")
+
+    # Add ground plane on bottom layer
+    gen.add_zone(
+        net="GND",
+        layer="B.Cu",
+        priority=1,
+        thermal_relief=True,
+    )
+
+    # Add power plane on top layer
+    gen.add_zone(
+        net="+3.3V",
+        layer="F.Cu",
+        priority=0,
+    )
+
+    # Save changes
+    gen.save("board_with_zones.kicad_pcb")
+"""
+
+from .generator import (
+    ZoneConfig,
+    ZoneGenerator,
+    ZoneOverlapWarning,
+    ZonePartitionError,
+    assign_batch_zone_priorities_and_outlines,
+    auto_create_zones_for_pour_nets,
+    parse_power_nets,
+)
+from .hv_keepout import (
+    HvKeepoutPlan,
+    HvVoid,
+    build_hv_keepout_plan,
+    default_plane_layers,
+    hv_pour_layers,
+)
+
+__all__ = [
+    "HvKeepoutPlan",
+    "HvVoid",
+    "ZoneConfig",
+    "ZoneGenerator",
+    "ZoneOverlapWarning",
+    "ZonePartitionError",
+    "assign_batch_zone_priorities_and_outlines",
+    "auto_create_zones_for_pour_nets",
+    "build_hv_keepout_plan",
+    "default_plane_layers",
+    "hv_pour_layers",
+    "parse_power_nets",
+]

@@ -1,0 +1,157 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# Simple LED Indicator - End-to-End Workflow Example
+# =============================================================================
+#
+# This example demonstrates the complete workflow from .kct specification
+# to a manufacturable PCB design using kicad-tools.
+
+kct_version: "1.0"
+
+project:
+  name: "LED Indicator"
+  revision: "A"
+  created: 2025-01-18
+  author: "kicad-tools"
+  description: |
+    A simple LED indicator circuit demonstrating the complete kicad-tools
+    workflow from project specification to manufacturing outputs.
+
+    The design includes:
+    - Input power connector
+    - Current limiting resistor
+    - Status LED
+    - Ground connection
+  artifacts:
+    schematic: "output/led_indicator.kicad_sch"
+    pcb: "output/led_indicator.kicad_pcb"
+
+intent:
+  summary: |
+    A minimal LED indicator circuit that demonstrates the complete
+    kicad-tools workflow. When 5V is applied to the input connector,
+    the LED illuminates. Simple enough for a tutorial, complete enough
+    to exercise all major features.
+
+  use_cases:
+    - Complete workflow demonstration
+    - AI agent PCB generation example
+    - Schematic-to-manufacturing tutorial
+    - kicad-tools feature showcase
+
+  interfaces:
+    - name: VIN
+      type: power_rail
+      description: "5V input power"
+      voltage: "5V"
+      pins: ["J1.1"]
+
+    - name: LED
+      type: indicator
+      description: "Visual status indicator"
+      pins: ["D1"]
+
+    - name: GND
+      type: power_rail
+      description: "Common ground"
+      pins: ["J1.2"]
+
+  constraints:
+    - "Must route on 2-layer PCB"
+    - "All nets must complete successfully"
+    - "DRC must pass with JLCPCB rules"
+    - "Manufacturing files must be JLCPCB-compatible"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "5V"
+        max: "6V"
+    led_current:
+      nominal: "10mA"
+      max: "20mA"
+
+  mechanical:
+    dimensions:
+      width: "25mm"
+      height: "20mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 2
+    min_trace: "0.3mm"
+    min_space: "0.2mm"
+    assembly: smt
+
+  compliance:
+    rohs: true
+
+suggestions:
+  components:
+    resistor:
+      preferred: ["330R 0805"]
+      rationale: "Standard value for 5V LED, 0805 for easy handling"
+    led:
+      preferred: ["Green 0805"]
+      rationale: "Common color, SMD for automated assembly"
+    connector:
+      preferred: ["2.54mm pitch pin header"]
+      rationale: "Breadboard-compatible for prototyping"
+
+  layout:
+    - "J1 on left edge for input"
+    - "LED on right side for visibility"
+    - "R1 between power input and LED"
+    - "Short, direct traces"
+
+  notes:
+    - "This is a complete workflow example"
+    - "Run generate_design.py to create schematic and PCB"
+    - "Run export_manufacturing.py to generate Gerbers and BOM"
+    - "Or use 'kct build .' for automated pipeline"
+
+decisions:
+  - date: 2025-01-18
+    phase: concept
+    topic: "LED Current"
+    choice: "10mA nominal"
+    rationale: "Sufficient brightness while staying within safe limits"
+    alternatives: ["5mA (dimmer)", "20mA (brighter but more power)"]
+
+  - date: 2025-01-18
+    phase: concept
+    topic: "Resistor Value"
+    choice: "330 ohm"
+    rationale: "R = (5V - 2V) / 10mA = 300 ohm, using nearest E24 value"
+    alternatives: ["220 ohm (15mA)", "470 ohm (6mA)"]
+
+progress:
+  phase: layout
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define LED current requirements"
+        - "[x] Calculate resistor value"
+        - "[x] Select component packages"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] Input connector"
+        - "[x] Current limiting resistor"
+        - "[x] LED with polarity"
+        - "[x] Power rail connections"
+    layout:
+      status: in_progress
+      checklist:
+        - "[ ] Component placement"
+        - "[ ] Autorouting"
+        - "[ ] DRC verification"
+    validation:
+      status: pending
+      checklist:
+        - "[ ] All nets routed"
+        - "[ ] DRC clean"
+        - "[ ] Manufacturing files generated"

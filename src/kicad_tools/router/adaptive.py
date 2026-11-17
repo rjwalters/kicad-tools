@@ -1,0 +1,441 @@
+"""Adaptive layer autorouter.
+
+This module provides an autorouter that automatically increases layer count
+if routing fails, trying 2 → 4 → 6 layers until convergence.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import Autorouter, RoutingFailure
+    from .rule_area_resolve import RuleAreaSpec
+
+from .layers import Layer, LayerStack
+from .primitives import Route
+from .reporting import RoutingPlacementReport
+from .rules import DesignRules
+
+
+@dataclass
+class RoutingResult:
+    """Result of a routing attempt with convergence metrics."""
+
+    routes: list[Route]
+    layer_count: int
+    layer_stack: LayerStack
+    nets_requested: int
+    nets_routed: int
+    overflow: int
+    converged: bool
+    iterations_used: int
+    statistics: dict
+    routing_failures: list[RoutingFailure] = field(default_factory=list)
+    single_pad_count: int = 0
+    placement_report: RoutingPlacementReport | None = None
+    # Issue #6875: ``Autorouter.grid_report()`` of the attempt -- the pitch
+    # actually routed on, with ``coarsened`` / ``coarsened_reason`` when the
+    # #972 adaptive cap replaced ``rules.grid_resolution``.
+    grid: dict | None = None
+
+    @property
+    def grid_warning(self) -> str | None:
+        """A one-line warning when the routing pitch was coarsened, else None."""
+        if not self.grid or not self.grid.get("coarsened"):
+            return None
+        return (
+            f"Routed on a {self.grid['used_mm']:.4g}mm grid, not the requested "
+            f"{self.grid['requested_mm']:.4g}mm: {self.grid['coarsened_reason']} (Issue #6875)"
+        )
+
+    def __post_init__(self) -> None:
+        if self.placement_report is not None:
+            self.nets_requested = len(self.placement_report.disposition.requested_nets)
+            self.nets_routed = len(self.placement_report.completed_nets)
+            self.converged = self.converged and self.placement_report.meets_completion()
+
+    @property
+    def nets_eligible(self) -> int:
+        if self.placement_report is None:
+            return self.nets_requested
+        return len(self.placement_report.disposition.eligible_nets)
+
+    @property
+    def nets_placement_blocked(self) -> int:
+        if self.placement_report is None:
+            return 0
+        return len(self.placement_report.disposition.requested_invalid_nets)
+
+    @property
+    def success_rate(self) -> float:
+        """Fraction of nets successfully routed."""
+        if self.nets_requested == 0:
+            return 1.0
+        return self.nets_routed / self.nets_requested
+
+    def __str__(self) -> str:
+        status = "CONVERGED" if self.converged else "NOT CONVERGED"
+        return (
+            f"RoutingResult({self.layer_count}L, {status}, "
+            f"{self.nets_routed}/{self.nets_requested} nets, "
+            f"overflow={self.overflow})"
+        )
+
+
+class AdaptiveAutorouter:
+    """Autorouter that automatically increases layer count if routing fails.
+
+    Tries routing with 2 layers first, then 4, then 6 if needed.
+    This provides automatic complexity discovery - simpler boards stay cheap
+    while complex boards get more routing resources.
+
+    Example:
+        adaptive = AdaptiveAutorouter(
+            width=65, height=56,
+            components=components,
+            net_map=net_map,
+            skip_nets=['GND', 'VCC'],
+        )
+        result = adaptive.route()
+        print(f"Routed with {result.layer_count} layers")
+        sexp = adaptive.to_sexp()
+    """
+
+    # Layer stack progression: 2 → 4 → 6
+    LAYER_STACKS = [
+        LayerStack.two_layer(),
+        LayerStack.four_layer_sig_gnd_pwr_sig(),
+        LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
+    ]
+
+    def __init__(
+        self,
+        width: float,
+        height: float,
+        components: list[dict],
+        net_map: dict[str, int],
+        rules: DesignRules | None = None,
+        origin_x: float = 0,
+        origin_y: float = 0,
+        skip_nets: list[str] | None = None,
+        max_layers: int = 6,
+        verbose: bool = True,
+        rule_area_specs: Sequence[RuleAreaSpec] | None = None,
+        board_layer_stack: LayerStack | None = None,
+        adaptive_grid: bool = True,
+    ):
+        """Initialize adaptive autorouter.
+
+        Args:
+            width, height: Board dimensions in mm
+            components: List of component dicts (ref, x, y, rotation, pads)
+            net_map: Net name to number mapping
+            rules: Design rules (optional)
+            origin_x, origin_y: Board origin
+            skip_nets: Nets to skip (e.g., power planes)
+            max_layers: Maximum layers to try.  The built-in ladder is 2, 4
+                and 6; a larger value only adds a rung when
+                ``board_layer_stack`` supplies one (Issue #6099).
+            verbose: Print progress
+            rule_area_specs: Board keepout rule areas (Issue #6059), in the
+                same frame as ``components``.  Their layer specs are resolved
+                against each layer stack this router tries, and the result is
+                handed to the inner :class:`Autorouter`, which enforces it on
+                its grid (#6008).  ``None`` means the board declares none.
+            board_layer_stack: The board's own copper stack (Issue #6099).
+                When its layer count has no preset in :attr:`LAYER_STACKS`
+                (8+ layers) and fits under ``max_layers``, it is tried as the
+                last rung, so an 8-layer board can escalate to all 8 layers
+                instead of stopping at the 6-layer preset.  Ignored for 2-,
+                4- and 6-layer boards, whose ladder is unchanged.
+            adaptive_grid: Issue #6875.  Forwarded to each inner
+                :class:`Autorouter`.  True (default) keeps the #972 adaptive
+                cell cap, which may coarsen ``rules.grid_resolution`` on a
+                large board -- reported in :attr:`RoutingResult.grid` and
+                :attr:`RoutingResult.grid_warning`; False routes on exactly
+                the requested pitch.
+        """
+        self.width = width
+        self.height = height
+        from kicad_tools.schema.physical_identity import component_keys
+
+        self.components = [
+            {**comp, "component_id": key}
+            for comp, key in zip(components, component_keys(components), strict=True)
+        ]
+        self.net_map = net_map.copy()
+        self.rules = rules or DesignRules()
+        self.origin_x = origin_x
+        self.origin_y = origin_y
+        self.skip_nets = skip_nets or []
+        self.max_layers = max_layers
+        self.verbose = verbose
+        self.rule_area_specs = list(rule_area_specs) if rule_area_specs else None
+        self.board_layer_stack = board_layer_stack
+        self.adaptive_grid = bool(adaptive_grid)
+
+        # Result after routing
+        self.result: RoutingResult | None = None
+        self._autorouter: Autorouter | None = None
+
+    def _create_autorouter(self, layer_stack: LayerStack) -> Autorouter:
+        """Create an Autorouter instance with the given layer stack."""
+        # Import here to avoid circular dependency
+        from .core import Autorouter
+
+        # Construct via the real __init__ (which has accepted
+        # ``layer_stack`` since #972-era refactors).  This used to be an
+        # ``Autorouter.__new__`` bypass with a hand-maintained attribute
+        # list that silently rotted every time __init__ gained a new
+        # attribute -- e.g. ``_use_waypoint_injection`` (#2330/#3441) and
+        # ``_matrix_conflict_nets``, whose absence crashed
+        # ``route_all_negotiated`` with AttributeError once the CI Test
+        # job started gating (issue #3436).
+        autorouter = Autorouter(
+            width=self.width,
+            height=self.height,
+            origin_x=self.origin_x,
+            origin_y=self.origin_y,
+            rules=self.rules,
+            layer_stack=layer_stack,
+            physics_enabled=False,
+            adaptive_grid=self.adaptive_grid,
+        )
+
+        # Issue #6059: this Autorouter has no source board file, so its own
+        # ``_keepout_rule_areas()`` lookup finds nothing.  Hand it the areas
+        # through the payload a parallel worker uses (``_rule_area_keepout_areas``
+        # prefers it), resolved against THIS stack: ``*.Cu`` and ``F&B.Cu``
+        # cover different indices on a 2-, 4- and 6-layer stack.
+        if self.rule_area_specs:
+            from .rule_area_resolve import keepout_areas_for_stack
+
+            autorouter._rule_area_keepouts_payload = keepout_areas_for_stack(
+                self.rule_area_specs, layer_stack
+            )
+
+        # Add components
+        for comp in self.components:
+            self._add_component_to_router(autorouter, comp)
+
+        return autorouter
+
+    def _add_component_to_router(self, router: Autorouter, comp: dict):
+        """Add a component to the router with proper coordinate transformation."""
+        ref = comp["ref"]
+        cx, cy = comp["x"], comp["y"]
+        rotation = comp.get("rotation", 0)
+
+        # Transform pad positions.  KiCad applies the footprint orientation as a
+        # NEGATED angle vs standard CCW math (verified vs pcbnew 10.0.1, #3739).
+        # Matches PCB.get_pad_position / core.geometry.rotate_pad_offset.
+        rot_rad = math.radians(-rotation)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        pads: list[dict] = []
+        for pad in comp.get("pads", []):
+            # Rotate pad position around component center
+            px, py = pad["x"], pad["y"]
+            rx = px * cos_r - py * sin_r
+            ry = px * sin_r + py * cos_r
+
+            net_name = pad.get("net", "")
+            if net_name in self.skip_nets:
+                continue
+
+            net_num = self.net_map.get(net_name, 0)
+            if net_num == 0 and net_name:
+                net_num = len(self.net_map) + 1
+                self.net_map[net_name] = net_num
+
+            is_pth = pad.get("through_hole", False)
+            pads.append(
+                {
+                    "number": pad["number"],
+                    "x": cx + rx,
+                    "y": cy + ry,
+                    "width": pad.get("width", 0.5),
+                    "shape": pad.get("shape", "rect"),
+                    "roundrect_rratio": pad.get("roundrect_rratio"),
+                    "height": pad.get("height", 0.5),
+                    "net": net_num,
+                    "net_name": net_name,
+                    "layer": Layer.F_CU,
+                    "through_hole": is_pth,
+                    "drill": pad.get("drill", 1.0 if is_pth else 0.0),
+                }
+            )
+
+        if pads:
+            router.add_component(
+                ref,
+                pads,
+                component_id=comp.get("component_id"),
+                duplicate_pad_numbers_are_jumpers=comp.get(
+                    "duplicate_pad_numbers_are_jumpers", False
+                ),
+            )
+
+    def _check_convergence(self, router: Autorouter, overflow: int) -> bool:
+        """Check if routing has converged.
+
+        Convergence criteria:
+        1. All multi-pad nets routed (nets_routed == nets_requested)
+        2. No overflow (no resource conflicts)
+
+        Single-pad nets are excluded because they have no endpoints to
+        connect and can never produce routes.
+        """
+        nets_requested = len([n for n, pads in router.nets.items() if n != 0 and len(pads) >= 2])
+        nets_routed = len({r.net for r in router.routes if r.net != 0})
+
+        return nets_routed >= nets_requested and overflow == 0
+
+    def _stacks_to_try(self) -> list[LayerStack]:
+        """The escalation ladder: presets up to ``max_layers``, then the board's own stack.
+
+        Issue #6099: the presets stop at 6 layers.  A board stack with a
+        layer count no preset covers is appended as the final rung when it
+        fits under ``max_layers``.
+        """
+        stacks = [s for s in self.LAYER_STACKS if s.num_layers <= self.max_layers]
+        board = self.board_layer_stack
+        if (
+            board is not None
+            and board.num_layers <= self.max_layers
+            and board.num_layers not in {s.num_layers for s in self.LAYER_STACKS}
+        ):
+            stacks.append(board)
+        return stacks
+
+    def route(self, method: str = "negotiated", max_iterations: int = 10) -> RoutingResult:
+        """Route the board, increasing layers as needed.
+
+        Args:
+            method: 'simple' or 'negotiated'
+            max_iterations: Max iterations for negotiated routing
+
+        Returns:
+            RoutingResult with convergence information
+        """
+        # Determine which layer stacks to try
+        stacks_to_try = self._stacks_to_try()
+
+        for stack in stacks_to_try:
+            if self.verbose:
+                print(f"\n{'=' * 60}")
+                print(f"TRYING {stack.num_layers}-LAYER ROUTING ({stack.name})")
+                print(f"{'=' * 60}")
+
+            # Create fresh autorouter with this layer stack
+            router = self._create_autorouter(stack)
+
+            # Count nets to route (exclude single-pad nets that can never be routed)
+            all_nonzero = [n for n in router.nets if n != 0]
+            single_pad_nets = [n for n in all_nonzero if len(router.nets.get(n, [])) < 2]
+            nets_requested = len(all_nonzero) - len(single_pad_nets)
+            single_pad_count = len(single_pad_nets)
+
+            if self.verbose:
+                print(f"  Nets to route: {nets_requested}")
+                if single_pad_count:
+                    print(f"  Single-pad nets excluded: {single_pad_count}")
+                print(f"  Routable layers: {stack.get_routable_indices()}")
+
+            # Attempt routing
+            if method == "negotiated":
+                routes = router.route_all_negotiated(max_iterations=max_iterations)
+                overflow = router.grid.get_total_overflow()
+                iterations = max_iterations  # TODO: track actual iterations used
+            else:
+                routes = router.route_all()
+                overflow = 0  # Simple routing doesn't track overflow
+                iterations = 1
+
+            # Check convergence
+            nets_routed = len({r.net for r in routes if r.net != 0})
+            converged = self._check_convergence(router, overflow)
+
+            placement_report = None
+            if router.placement_disposition is not None:
+                from .output import get_routing_diagnostics_json
+
+                diagnostic = get_routing_diagnostics_json(router, self.net_map, nets_requested)
+                placement_report = RoutingPlacementReport(
+                    router.placement_disposition,
+                    frozenset(item["net_name"] for item in diagnostic["successful_routes"]),
+                )
+                # Placement-aware diagnostics validate the whole original
+                # population, including trivial and retained-copper completion.
+                converged = overflow == 0 and placement_report.meets_completion()
+
+            # Build result
+            self.result = RoutingResult(
+                routes=routes,
+                layer_count=stack.num_layers,
+                layer_stack=stack,
+                nets_requested=nets_requested,
+                nets_routed=nets_routed,
+                overflow=overflow,
+                converged=converged,
+                iterations_used=iterations,
+                statistics=router.get_statistics(),
+                routing_failures=getattr(router, "routing_failures", []),
+                single_pad_count=single_pad_count,
+                placement_report=placement_report,
+                grid=router.grid_report(),
+            )
+            self._autorouter = router
+
+            if self.verbose:
+                print(f"\n  Result: {self.result}")
+
+            if converged:
+                if self.verbose:
+                    print(f"\n✓ Routing CONVERGED with {stack.num_layers} layers!")
+                return self.result
+
+            if self.verbose:
+                print(f"\n✗ {stack.num_layers}-layer routing did not converge")
+                if stack.num_layers < self.max_layers:
+                    print("  → Trying more layers...")
+
+        # Return best result (even if not converged)
+        if self.verbose:
+            print(f"\n{'=' * 60}")
+            print("ADAPTIVE ROUTING COMPLETE")
+            print(f"{'=' * 60}")
+            if self.result:
+                print(f"  Final: {self.result}")
+                if not self.result.converged:
+                    print(
+                        f"  Warning: Routing did not fully converge even with "
+                        f"{self.result.layer_count} layers"
+                    )
+
+        # Should always have a result at this point
+        assert self.result is not None
+        return self.result
+
+    def to_sexp(self) -> str:
+        """Generate KiCad S-expression for the routes."""
+        if self._autorouter is None:
+            raise ValueError("No routing result. Call route() first.")
+        return self._autorouter.to_sexp()
+
+    def get_routes(self) -> list[Route]:
+        """Get the list of routes."""
+        if self.result is None:
+            raise ValueError("No routing result. Call route() first.")
+        return self.result.routes
+
+    @property
+    def layer_count(self) -> int:
+        """Get the number of layers used."""
+        if self.result is None:
+            return 0
+        return self.result.layer_count

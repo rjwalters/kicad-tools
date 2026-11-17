@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# check-onidle-status.sh - Verify autonomous.roleRunner.onIdle is actually
+# firing for a registered workspace, not just configured.
+#
+# `autonomous.roleRunner.onIdle` is a distinct opt-in from the interval
+# `roles` list (see loom-daemon/src/role_runner.rs -> resolve_on_idle_roles):
+# a repo can have onIdle roles *configured* in .loom/config.json while the
+# daemon never actually fires them (work finder disabled, per-root
+# roleRunner.enabled false, or simply never idle). This script closes that
+# configured-vs-dormant gap by cross-checking the config against the daemon's
+# own log for the "idle edge ... firing idle-triggered <role> run" line
+# (#4364) that only appears when a real tick fired.
+#
+# Usage:
+#   ./check-onidle-status.sh [--root PATH] [--daemon-log PATH] [--json]
+#
+# Options:
+#   --root PATH        Workspace root to check (default: repo root containing
+#                       this script, resolved the same way check-ci-status.sh
+#                       does).
+#   --daemon-log PATH  Daemon log file to scan (default: $LOOM_DAEMON_LOG, or
+#                       $HOME/.loom/daemon.log — the same precedence
+#                       loom-daemon's own resolve_log_path() uses).
+#   --json              Output machine-readable JSON instead of prose.
+#   --help              Show this help message.
+#
+# Exit codes:
+#   0 - no onIdle roles configured (nothing to verify), or every configured
+#       role has at least one confirmed fire in the log
+#   1 - bad usage / missing dependency (jq)
+#   2 - onIdle roles are configured but the daemon log is missing/unreadable
+#       (cannot verify either way)
+#   3 - onIdle roles are configured but at least one has never fired
+#       according to the log — configured-but-dormant, the exact failure
+#       mode this script exists to catch
+#
+# This is a read-only diagnostic — it never mutates config or logs.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+[[ ! -t 1 ]] && RED="" && GREEN="" && YELLOW="" && BLUE="" && NC=""
+
+ROOT=""
+DAEMON_LOG="${LOOM_DAEMON_LOG:-$HOME/.loom/daemon.log}"
+JSON_OUTPUT=false
+
+# A concise operator usage block, held in the script rather than recovered by
+# reading "$0" at runtime (#7794). The header comment above keeps the rationale
+# -- what the configured-vs-dormant gap is, which role_runner.rs log line this
+# cross-checks, why each exit code exists -- and is never printed: that text is
+# for someone reading the source, not for someone who typed `--help` and wants
+# the flags. Printing it was also the reason this script read its own file,
+# which a same-path truncate+rewrite landing mid-read can tear into a torn,
+# incomplete banner with no I/O error to catch (#7201, PR #7768). Nothing here
+# touches the filesystem.
+#
+# Keep in sync with the argument parser below: every flag it accepts must
+# appear here.
+show_help() {
+    cat <<'EOF'
+Usage: check-onidle-status.sh [--root PATH] [--daemon-log PATH] [--json]
+
+Verify that autonomous.roleRunner.onIdle roles are actually FIRING for a
+workspace, not merely configured -- cross-checks .loom/config.json against the
+daemon log's "firing idle-triggered <role> run" lines. Read-only: never mutates
+config or logs.
+
+Options:
+  --root PATH        workspace root to check   [default: this script's repo root]
+  --daemon-log PATH  daemon log to scan        [LOOM_DAEMON_LOG,
+                                                else ~/.loom/daemon.log]
+  --json             machine-readable JSON instead of prose
+  -h, --help         show this help
+
+Exit codes:
+  0  nothing to verify (no onIdle roles configured), or every configured role
+     has at least one confirmed fire in the log
+  1  bad usage / missing dependency (jq)
+  2  onIdle roles configured but the daemon log is missing or unreadable
+     (cannot verify either way)
+  3  onIdle roles configured but at least one has never fired -- the
+     configured-but-dormant failure this script exists to catch
+
+Requires jq. Rationale and the matched log line: see this script's header.
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --root)
+            ROOT="$2"
+            shift 2
+            ;;
+        --daemon-log)
+            DAEMON_LOG="$2"
+            shift 2
+            ;;
+        --json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Run with --help for usage" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if ! command -v jq &>/dev/null; then
+    echo "Error: jq is required but not installed" >&2
+    exit 1
+fi
+
+if [[ -z "$ROOT" ]]; then
+    ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
+ROOT="$(cd "$ROOT" && pwd)"
+
+CONFIG_FILE="$ROOT/.loom/config.json"
+
+# --- Resolve configured onIdle roles ---
+ON_IDLE_ROLES=()
+if [[ -f "$CONFIG_FILE" ]]; then
+    while IFS= read -r role; do
+        [[ -n "$role" ]] && ON_IDLE_ROLES+=("$role")
+    done < <(jq -r '.autonomous.roleRunner.onIdle // [] | .[]' "$CONFIG_FILE" 2>/dev/null || true)
+fi
+
+if [[ ${#ON_IDLE_ROLES[@]} -eq 0 ]]; then
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        jq -n --arg root "$ROOT" '{root: $root, configured: [], verified: [], dormant: [], status: "not_configured"}'
+    else
+        echo -e "${YELLOW}No autonomous.roleRunner.onIdle roles configured for $ROOT — nothing to verify.${NC}"
+    fi
+    exit 0
+fi
+
+if [[ ! -r "$DAEMON_LOG" ]]; then
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        jq -n --arg root "$ROOT" --argjson configured "$(printf '%s\n' "${ON_IDLE_ROLES[@]}" | jq -R . | jq -s .)" \
+            '{root: $root, configured: $configured, verified: [], dormant: [], status: "log_unavailable"}'
+    else
+        echo -e "${RED}Cannot verify — daemon log not readable: $DAEMON_LOG${NC}" >&2
+    fi
+    exit 2
+fi
+
+# --- Cross-check each configured role against the daemon log ---
+# Matches loom-daemon/src/role_runner.rs's plan_idle_runs log line:
+#   "role_runner: idle edge for <root> — firing idle-triggered <role> run (#4364)"
+VERIFIED=()
+DORMANT=()
+# LAST_FIRED / FIRE_COUNT are INDEXED arrays parallel to ON_IDLE_ROLES, not
+# `declare -A` (bash 4+; macOS ships 3.2 -- #7751). Both the producer loop below
+# and the reporting loop further down iterate `"${ON_IDLE_ROLES[@]}"` literally,
+# in the same order, so position is an exact stand-in for the role key.
+#
+# That parallel-index invariant is the one thing to preserve if either loop is
+# ever changed: they must iterate the same array the same way. Both increment
+# `idx` as their last statement to keep that obvious.
+LAST_FIRED=()
+FIRE_COUNT=()
+
+idx=0
+for role in "${ON_IDLE_ROLES[@]}"; do
+    pattern="idle edge for ${ROOT} — firing idle-triggered ${role} run"
+    matches="$(grep -F "$pattern" "$DAEMON_LOG" 2>/dev/null || true)"
+    count="$(printf '%s\n' "$matches" | grep -cF "$pattern" 2>/dev/null || echo 0)"
+    if [[ -n "$matches" && "$count" -gt 0 ]]; then
+        VERIFIED+=("$role")
+        FIRE_COUNT[$idx]="$count"
+        LAST_FIRED[$idx]="$(printf '%s\n' "$matches" | tail -1 | grep -oE '^\[[0-9T:.+-]+\]' | tr -d '[]')"
+    else
+        DORMANT+=("$role")
+        FIRE_COUNT[$idx]=0
+    fi
+    idx=$((idx + 1))
+done
+
+STATUS="verified"
+[[ ${#DORMANT[@]} -gt 0 ]] && STATUS="dormant"
+
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+    jq -n \
+        --arg root "$ROOT" \
+        --arg status "$STATUS" \
+        --argjson configured "$(printf '%s\n' "${ON_IDLE_ROLES[@]}" | jq -R . | jq -s .)" \
+        --argjson verified "$(printf '%s\n' "${VERIFIED[@]:-}" | jq -R 'select(length > 0)' | jq -s .)" \
+        --argjson dormant "$(printf '%s\n' "${DORMANT[@]:-}" | jq -R 'select(length > 0)' | jq -s .)" \
+        '{root: $root, configured: $configured, verified: $verified, dormant: $dormant, status: $status}'
+else
+    echo -e "${BLUE}onIdle status for $ROOT${NC}"
+    echo "─────────────────────────────────"
+    idx=0
+    for role in "${ON_IDLE_ROLES[@]}"; do
+        if [[ "${FIRE_COUNT[$idx]}" -gt 0 ]]; then
+            echo -e "  ${GREEN}$role${NC}: fired ${FIRE_COUNT[$idx]}x (last: ${LAST_FIRED[$idx]:-unknown})"
+        else
+            echo -e "  ${RED}$role${NC}: configured but never observed firing in $DAEMON_LOG"
+        fi
+        idx=$((idx + 1))
+    done
+    echo ""
+fi
+
+[[ ${#DORMANT[@]} -gt 0 ]] && exit 3
+exit 0

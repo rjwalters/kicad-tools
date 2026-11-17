@@ -1,0 +1,489 @@
+{
+  "rows": [
+    {
+      "board": "03",
+      "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6312/boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+      "rule": {
+        "anchor_min_pads": 3,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 5.0
+      },
+      "footprints": 38,
+      "pad_count_histogram": {
+        "2": 27,
+        "4": 6,
+        "6": 2,
+        "7": 1,
+        "20": 1,
+        "44": 1
+      },
+      "anchors": 11,
+      "small_parts": 27,
+      "small_parts_near_an_anchor": 27,
+      "small_parts_near_and_sharing_a_net": 23,
+      "multi_part_clusters": 8,
+      "cluster_sizes": [
+        12,
+        4,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2
+      ],
+      "footprints_in_multi_part_clusters": 31,
+      "clusters": [
+        {
+          "anchor": "U1",
+          "anchor_pads": 44,
+          "satellites": {
+            "R3": [
+              "USB_MCU_D-"
+            ],
+            "R4": [
+              "USB_MCU_D+"
+            ],
+            "R5": [
+              "RESET",
+              "VCC"
+            ],
+            "R6": [
+              "GND",
+              "HWB"
+            ],
+            "C1": [
+              "GND",
+              "VCC"
+            ],
+            "C2": [
+              "GND",
+              "VCC"
+            ],
+            "C3": [
+              "GND",
+              "VCC"
+            ],
+            "C4": [
+              "GND",
+              "VCC"
+            ],
+            "C5": [
+              "GND",
+              "VCC"
+            ],
+            "C6": [
+              "GND",
+              "UCAP"
+            ],
+            "C7": [
+              "AREF",
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "J1",
+          "anchor_pads": 20,
+          "satellites": {
+            "R1": [
+              "GND",
+              "USB_CC1"
+            ],
+            "R2": [
+              "GND",
+              "USB_CC2"
+            ]
+          }
+        },
+        {
+          "anchor": "U2",
+          "anchor_pads": 6,
+          "satellites": {
+            "C13": [
+              "GND",
+              "VBUS"
+            ]
+          }
+        },
+        {
+          "anchor": "Y1",
+          "anchor_pads": 4,
+          "satellites": {
+            "C8": [
+              "GND",
+              "XTAL1"
+            ],
+            "C9": [
+              "GND",
+              "XTAL2"
+            ],
+            "C10": [
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "J2",
+          "anchor_pads": 7,
+          "satellites": {
+            "R11": [
+              "JOY_Y_RAW"
+            ],
+            "C11": [
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "J3",
+          "anchor_pads": 6,
+          "satellites": {
+            "F1": [
+              "VCC"
+            ],
+            "C12": [
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "SW1",
+          "anchor_pads": 4,
+          "satellites": {
+            "R12": [
+              "BTN1"
+            ]
+          }
+        },
+        {
+          "anchor": "SW3",
+          "anchor_pads": 4,
+          "satellites": {
+            "R14": [
+              "BTN3"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "board": "05",
+      "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6312/boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
+      "rule": {
+        "anchor_min_pads": 3,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 5.0
+      },
+      "footprints": 42,
+      "pad_count_histogram": {
+        "2": 35,
+        "3": 2,
+        "6": 2,
+        "18": 1,
+        "32": 1,
+        "59": 1
+      },
+      "anchors": 7,
+      "small_parts": 35,
+      "small_parts_near_an_anchor": 17,
+      "small_parts_near_and_sharing_a_net": 17,
+      "multi_part_clusters": 5,
+      "cluster_sizes": [
+        6,
+        5,
+        5,
+        4,
+        2
+      ],
+      "footprints_in_multi_part_clusters": 22,
+      "clusters": [
+        {
+          "anchor": "U1",
+          "anchor_pads": 32,
+          "satellites": {
+            "C9": [
+              "+5V",
+              "GND"
+            ],
+            "C10": [
+              "+5V",
+              "GND"
+            ],
+            "C11": [
+              "+5V",
+              "GND"
+            ],
+            "C12": [
+              "AREF",
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "U2",
+          "anchor_pads": 59,
+          "satellites": {
+            "C2": [
+              "GND",
+              "VM"
+            ],
+            "C3": [
+              "GND",
+              "VM"
+            ],
+            "C4": [
+              "CPH",
+              "CPL"
+            ],
+            "C5": [
+              "VCP",
+              "VM"
+            ],
+            "C6": [
+              "GND",
+              "V3P3"
+            ]
+          }
+        },
+        {
+          "anchor": "U3",
+          "anchor_pads": 18,
+          "satellites": {
+            "C7": [
+              "GND",
+              "VM"
+            ],
+            "C8": [
+              "+5V",
+              "GND"
+            ],
+            "C13": [
+              "GND",
+              "PG_DELAY"
+            ]
+          }
+        },
+        {
+          "anchor": "J3",
+          "anchor_pads": 6,
+          "satellites": {
+            "C16": [
+              "+5V",
+              "GND"
+            ],
+            "R10": [
+              "+5V",
+              "HALL_A"
+            ],
+            "R11": [
+              "+5V",
+              "HALL_B"
+            ],
+            "R12": [
+              "+5V",
+              "HALL_C"
+            ]
+          }
+        },
+        {
+          "anchor": "J4",
+          "anchor_pads": 6,
+          "satellites": {
+            "C14": [
+              "GND"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "board": "chorus",
+      "input": "/Users/rwalters/GitHub/chorus/hardware/chorus-test-revA/kicad/chorus-test-revA_v21_stripped.kicad_pcb",
+      "rule": {
+        "anchor_min_pads": 3,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 5.0
+      },
+      "footprints": 90,
+      "pad_count_histogram": {
+        "2": 76,
+        "3": 1,
+        "4": 2,
+        "5": 8,
+        "20": 1,
+        "28": 1,
+        "40": 1
+      },
+      "anchors": 14,
+      "small_parts": 76,
+      "small_parts_near_an_anchor": 57,
+      "small_parts_near_and_sharing_a_net": 25,
+      "multi_part_clusters": 11,
+      "cluster_sizes": [
+        5,
+        5,
+        4,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2
+      ],
+      "footprints_in_multi_part_clusters": 36,
+      "clusters": [
+        {
+          "anchor": "U3",
+          "anchor_pads": 5,
+          "satellites": {
+            "D1": [
+              "+3.3V"
+            ],
+            "C38": [
+              "+3.3V",
+              "GNDD"
+            ]
+          }
+        },
+        {
+          "anchor": "U8",
+          "anchor_pads": 20,
+          "satellites": {
+            "LED6": [
+              "MCU/DBG_LED2"
+            ]
+          }
+        },
+        {
+          "anchor": "J2",
+          "anchor_pads": 40,
+          "satellites": {
+            "C1": [
+              "+5V",
+              "GNDD"
+            ],
+            "C4": [
+              "+5V"
+            ],
+            "FB1": [
+              "GNDD"
+            ]
+          }
+        },
+        {
+          "anchor": "U7",
+          "anchor_pads": 5,
+          "satellites": {
+            "C29": [
+              "+3.3V",
+              "GNDD"
+            ],
+            "R16": [
+              "GNDD"
+            ]
+          }
+        },
+        {
+          "anchor": "U5",
+          "anchor_pads": 28,
+          "satellites": {
+            "R10": [
+              "+3.3V"
+            ],
+            "C5": [
+              "+3.3VA",
+              "GNDA"
+            ]
+          }
+        },
+        {
+          "anchor": "Y2",
+          "anchor_pads": 4,
+          "satellites": {
+            "C31": [
+              "+3.3V",
+              "GNDD"
+            ]
+          }
+        },
+        {
+          "anchor": "J5",
+          "anchor_pads": 3,
+          "satellites": {
+            "R6": [
+              "GNDD"
+            ],
+            "C14": [
+              "GNDD"
+            ],
+            "C2": [
+              "GNDD"
+            ],
+            "C51": [
+              "GNDD"
+            ]
+          }
+        },
+        {
+          "anchor": "J3",
+          "anchor_pads": 5,
+          "satellites": {
+            "C43": [
+              "GNDA"
+            ],
+            "C48": [
+              "GNDA"
+            ]
+          }
+        },
+        {
+          "anchor": "U2",
+          "anchor_pads": 5,
+          "satellites": {
+            "C6": [
+              "+3.3VA",
+              "GNDA"
+            ],
+            "C46": [
+              "GNDA"
+            ]
+          }
+        },
+        {
+          "anchor": "U1",
+          "anchor_pads": 5,
+          "satellites": {
+            "R4": [
+              "GNDD"
+            ],
+            "C13": [
+              "+3.3V",
+              "GNDD"
+            ]
+          }
+        },
+        {
+          "anchor": "J6",
+          "anchor_pads": 4,
+          "satellites": {
+            "C36": [
+              "GNDD"
+            ],
+            "D3": [
+              "GNDD"
+            ],
+            "R22": [
+              "+3.3V"
+            ],
+            "C37": [
+              "GNDD"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

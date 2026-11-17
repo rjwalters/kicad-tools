@@ -1,0 +1,26 @@
+{
+  "by_flavour": {
+    "edge_violation": {
+      "mean_pred": 0.01903002112331246,
+      "n": 10
+    },
+    "extreme_jitter": {
+      "mean_pred": 0.08078670576073443,
+      "n": 10
+    },
+    "overlap_pile": {
+      "mean_pred": 0.09327791346034592,
+      "n": 10
+    }
+  },
+  "corpus_negative_mean_pred": 0.04221402804473758,
+  "corpus_positive_mean_pred": 0.9653536648880103,
+  "n_corpus": 134,
+  "n_negatives": 30,
+  "negatives_below_0p3_pct": 93.33333333333333,
+  "negatives_below_0p5_pct": 100.0,
+  "negatives_mean_pred": 0.06436488011479762,
+  "negatives_median_pred": 0.017057779279246107,
+  "verdict": "PASS",
+  "verdict_explanation": "Negatives score systematically lower than positive corpus -- the model is detecting badness, not the perturbation procedure."
+}

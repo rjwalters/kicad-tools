@@ -1,0 +1,1063 @@
+"""Pytest fixtures for kicad-tools tests."""
+
+import ctypes
+import gc
+import hashlib
+import importlib
+import os
+import shutil
+import subprocess
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.native_concurrency import install_from_environment
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
+
+# Issue #5501: install the native-subprocess concurrency gate in every xdist
+# worker before collection, so a test that launches ``kicad-cli`` directly is
+# bounded even if it never imports ``kicad_tools``. No-op unless
+# ``KCT_NATIVE_MAX_CONCURRENCY`` is set; idempotent with the package import.
+install_from_environment()
+
+# Issue #5240: each test ``kicad-cli pcb drc`` loads only the footprint
+# libraries its board names, not all 155 in the pinned table (~5 CPU-s a
+# launch). Same lookups, same report; see tests/kicad_fp_table_subset.py.
+# KCT_TEST_FULL_FP_LIB_TABLE=1 turns it off.
+from tests.kicad_fp_table_subset import install as _install_fp_table_subset  # noqa: E402
+
+_install_fp_table_subset()
+
+
+@contextmanager
+def preserved_cpp_import_state():
+    """Restore both import caches without reinitializing nanobind's types."""
+    package = importlib.import_module("kicad_tools.router")
+    missing = object()
+    snapshots = {
+        name: (
+            sys.modules.get(f"kicad_tools.router.{name}", missing),
+            getattr(package, name, missing),
+        )
+        for name in ("cpp_backend", "router_cpp")
+    }
+    # Python reload mutates the existing module's dictionary in place.
+    # Keep its original class/function objects as well as the module reference.
+    backend = snapshots["cpp_backend"][0]
+    namespace = vars(backend).copy() if backend is not missing and backend is not None else None
+    try:
+        yield
+    finally:
+        if namespace is not None:
+            vars(backend).clear()
+            vars(backend).update(namespace)
+        for name, (module, attribute) in snapshots.items():
+            qualified_name = f"kicad_tools.router.{name}"
+            if module is missing:
+                sys.modules.pop(qualified_name, None)
+            else:
+                sys.modules[qualified_name] = module
+            if attribute is missing:
+                if hasattr(package, name):
+                    delattr(package, name)
+            else:
+                setattr(package, name, attribute)
+
+
+@pytest.fixture
+def preserve_cpp_import_state():
+    with preserved_cpp_import_state():
+        yield
+
+
+def resolve_external_boards_dir(start_dir: Path | None = None) -> Path:
+    """Resolve ``boards/external/`` in a worktree-depth-safe way (#4925).
+
+    ``boards/external/*`` entries (e.g. ``softstart``, ``chorus-test-revA``)
+    are local-only *relative* symlinks into sibling checkouts of external
+    hardware-fixture repos, e.g. ``../../../softstart/hardware/kicad``. That
+    fixed hop count is calibrated for exactly one layout: the *primary*
+    checkout sitting directly under the same parent directory as the sibling
+    fixture repo.
+
+    A linked git worktree (Loom's own ``.loom/worktrees/issue-N/``, or this
+    repo's daemon-managed ``.claude/worktrees/agent-<id>/``) nests the
+    worktree root *inside* the primary checkout, so the exact same relative
+    symlink resolves to a location that does not exist -- not because the
+    fixture is genuinely absent, but because the worktree is deeper than the
+    layout the ``../`` hops assume. Every consumer that just gated on
+    ``Path.exists()`` against its own checkout's ``boards/external/`` was
+    silently skipping from every worktree, which was repeatedly mistaken for
+    "fixture not provisioned on this host" (see #4925, PRs #4908/#4911).
+
+    Resolution order:
+
+    1. The ``KICAD_TOOLS_EXTERNAL_BOARDS_DIR`` environment variable, if set --
+       an explicit override naming the directory that holds the fixture
+       symlinks (or the fixture data directly), for hosts/layouts this
+       heuristic cannot infer.
+    2. The *primary* checkout's own ``boards/external/`` directory, located
+       via ``git rev-parse --git-common-dir``. All worktrees of one repo
+       share a single ``.git`` (or, for a linked worktree, a ``.git`` file
+       pointing back at it), so this is stable regardless of how deep the
+       calling worktree is nested -- unlike deriving the path from
+       ``__file__`` alone.
+    3. ``start_dir / "boards" / "external"`` -- the fallback when git is
+       unavailable or the common-dir lookup fails. Only correct when
+       ``start_dir`` IS the primary checkout (identical to (2) in that case).
+
+    Args:
+        start_dir: Directory to resolve from. Defaults to this repo's own
+            root (``REPO_ROOT``) so callers don't have to pass it explicitly;
+            overridable so the resolution logic itself can be unit-tested
+            against a scratch git repo without a real fixture checkout.
+    """
+    env_override = os.environ.get(EXTERNAL_BOARDS_ENV_VAR)
+    if env_override:
+        return Path(env_override)
+
+    if start_dir is None:
+        start_dir = REPO_ROOT
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=start_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return start_dir / "boards" / "external"
+
+    git_common_dir = Path(result.stdout.strip())
+    if not git_common_dir.is_absolute():
+        git_common_dir = (start_dir / git_common_dir).resolve()
+
+    # Standard (non-bare) layout: <primary-checkout>/.git is the common dir
+    # shared by every worktree of the repo, so its parent is the primary
+    # checkout root regardless of how deep `start_dir` itself is nested.
+    primary_checkout_root = git_common_dir.parent
+    return primary_checkout_root / "boards" / "external"
+
+
+def isolate_pcb_from_sidecars(pcb_path: Path, dest_dir: Path) -> Path:
+    """Copy a routed PCB into ``dest_dir`` WITHOUT any sidecar files.
+
+    Issue #3948 made ``kct check`` auto-discover a committed
+    ``net_class_map.json`` next to the PCB (see
+    ``check_cmd._discover_net_class_map_sidecar``, which probes
+    ``<pcb_dir>/net_class_map.json``, ``<pcb_dir>/output/net_class_map.json``
+    and ``<pcb_dir>/../output/net_class_map.json``).  A "bare" ``kct check``
+    against a committed board artifact is therefore no longer actually
+    bare -- the sidecar auto-loads and the no-op / graceful-degradation
+    contract for external-router boards can no longer be observed.
+
+    This helper copies ONLY the PCB into a fresh, otherwise-empty
+    ``dest_dir`` so none of the auto-probe candidate paths resolve
+    (no sibling ``net_class_map.json``, no ``output/`` subtree, no
+    ``../output/`` sibling).  The returned path can be handed to a
+    subprocess ``kct check`` invocation with the guarantee that no
+    sidecar is discoverable.
+
+    Reuse this instead of re-deriving the tmp-dir-copy pattern whenever a
+    board that commits a ``net_class_map.json`` sidecar needs a genuinely
+    sidecar-less ``kct check`` run (Issue #4009).
+
+    Args:
+        pcb_path: The committed routed PCB to isolate.
+        dest_dir: A directory (typically a pytest tmp dir) to copy into.
+            Must not already contain sidecar files; a freshly created
+            ``tmp_path`` / ``tmp_path_factory.mktemp(...)`` dir is ideal.
+
+    Returns:
+        The path to the isolated PCB copy inside ``dest_dir``.
+    """
+    isolated = dest_dir / pcb_path.name
+    shutil.copy2(pcb_path, isolated)
+    return isolated
+
+
+def _committed_board_output_files() -> list[str]:
+    """Return git-tracked files under any ``boards/**/output/`` directory.
+
+    Returns an empty list when git is unavailable (e.g. running from an
+    sdist) so the guard degrades to a no-op instead of erroring.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "boards"],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    paths = proc.stdout.decode("utf-8", errors="replace").split("\0")
+    return [p for p in paths if p and "/output/" in p]
+
+
+def _snapshot_hashes(rel_paths: list[str]) -> dict[str, str | None]:
+    """Map each tracked path to its content SHA-256 (None if missing)."""
+    snap: dict[str, str | None] = {}
+    for rel in rel_paths:
+        f = REPO_ROOT / rel
+        try:
+            snap[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError:
+            snap[rel] = None
+    return snap
+
+
+def pytest_report_header(config):
+    """Show which kicad-cli the session uses (#8779)."""
+    from tests.kicad_docker_session import report_header
+
+    return report_header()
+
+
+# Issue #9089: each native router / coupled-search replay leaks its nanobind
+# wrapper objects into cyclic garbage (nanobind itself reports "leaked type
+# CenterlineRouteResult ... leaked 383 functions"), and the automatic
+# generational GC does not fire often enough between tests to reclaim them.
+# On top of that, glibc keeps freed pages in its malloc arenas. An xdist
+# worker's RSS therefore ratchets toward multi-GB across the bulk suite
+# (measured: 4.4 GB after one 37-test Board07 replay file) until the
+# runner's OOM killer kills the worker mid-test -- the "worker 'gw0'
+# crashed while running ..." flake. After every test, when RSS grew since
+# the previous teardown, a full gc.collect() reclaims the cyclic garbage
+# (measured: it alone returned 140 MB of one replay) and glibc's
+# malloc_trim(0) returns the freed pages to the OS (measured: this bounds
+# the same file at a 523 MB peak instead of a 4.4 GB ratchet). No-op when
+# glibc's malloc_trim is unavailable.
+try:
+    _malloc_trim = ctypes.CDLL("libc.so.6").malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _malloc_trim = None
+
+# Issue #9154: /proc/self/statm reports RSS in pages, not bytes. Use the
+# kernel's real page size instead of a hard-coded 4096 so a 16K/64K-page
+# runner (aarch64, some container hosts) does not silently under-report
+# RSS 4x/16x, which would raise the effective trigger below just as
+# silently. The fallback keeps conftest importable where os.sysconf or
+# the name is unavailable.
+try:
+    _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+except (AttributeError, OSError, ValueError):
+    _PAGE_SIZE = 4096
+
+_rss_floor_mb = 0.0
+_RSS_GROWTH_TRIGGER_MB = 32.0
+
+
+def _statm_rss_mb():
+    """Return this process's RSS in MB, or None when statm is unreadable.
+
+    Issue #9154: /proc can be unmounted in stripped containers; an OSError
+    here must leave the hook inert rather than erroring every teardown.
+    """
+    try:
+        with open("/proc/self/statm") as fh:
+            return int(fh.read().split()[1]) * _PAGE_SIZE / 1048576
+    except OSError:
+        return None
+
+
+def pytest_runtest_teardown(item, nextitem):
+    global _rss_floor_mb
+    if _malloc_trim is None or sys.platform != "linux":
+        return
+    rss_mb = _statm_rss_mb()
+    if rss_mb is None:
+        return
+    if rss_mb - _rss_floor_mb < _RSS_GROWTH_TRIGGER_MB:
+        return
+    gc.collect()
+    _malloc_trim(0)
+    rss_mb = _statm_rss_mb()
+    if rss_mb is not None:
+        _rss_floor_mb = rss_mb
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _pinned_kicad_toolchain():
+    """Under ``KCT_KICAD_DOCKER=1`` run the whole session on the pinned image (#8779).
+
+    No-op when the variable is unset.  If docker is missing or the version is
+    not ``PINNED_KICAD_VERSION`` the session exits with the reason instead of
+    quietly using the host's kicad-cli.
+    """
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+    from tests.kicad_docker_session import pinned_session
+
+    try:
+        with pinned_session() as toolchain:
+            yield toolchain
+    except KiCadEnvironmentError as exc:
+        pytest.exit(f"KCT_KICAD_DOCKER=1 but the pinned kicad-cli is unusable: {exc}", returncode=2)
+
+
+@pytest.fixture(autouse=True)
+def _clear_find_kicad_cli_cache():
+    """Reset the ``find_kicad_cli`` memoization around every test (#5903).
+
+    ``find_kicad_cli`` is ``lru_cache``d for the process lifetime, so a test
+    that mocks ``shutil.which`` / ``Path.exists`` would otherwise leak its
+    result into (or inherit a stale result from) neighbouring tests.
+    """
+    from kicad_tools.cli.runner import _kicad_drc_supports_refill, find_kicad_cli
+
+    # Issue #6724: the ``--refill-zones`` probe is memoised per kicad-cli path
+    # too; a test that stubs ``subprocess.run`` would otherwise cache "no
+    # refill support" for a real kicad-cli path and leak it to later tests.
+    find_kicad_cli.cache_clear()
+    _kicad_drc_supports_refill.cache_clear()
+    yield
+    find_kicad_cli.cache_clear()
+    _kicad_drc_supports_refill.cache_clear()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def committed_board_artifacts_guard():
+    """Fail loudly if the test session modifies committed board artifacts.
+
+    Issue #3580: tests that exercised route demos / board recipes used to
+    rewrite committed artifacts under ``boards/*/output/`` IN PLACE
+    (e.g. ``charlieplex_3x3_routed.kicad_pcb``), racing parallel xdist
+    workers that READ those files (``tests/test_fleet_45_census.py``
+    failed with "census matched no segments" on PR #3575) and silently
+    clobbering committed artifacts in the working tree (the board-03
+    incident on PR #3589).
+
+    This guard snapshots SHA-256 hashes of every git-tracked file under
+    ``boards/**/output/`` at session start and asserts they are
+    unchanged at session end, naming the offending files.  Any test that
+    needs to route / regenerate a board must copy the inputs to a temp
+    dir first (pattern: ``tests/router/test_board03_routing_baseline.py``).
+
+    Notes:
+    - Under ``pytest -n auto`` each xdist worker runs its own session
+      and therefore its own snapshot/verify pair; a writer fails its own
+      worker's teardown (and typically every later-finishing worker's).
+    - The full snapshot is ~10 MB / ~115 files, so the two hashing
+      passes cost well under a second.
+    - Deliberate artifact refreshes are normal DEVELOPMENT actions
+      (run the board recipe directly, then commit); they should never
+      happen as a side effect of running the test suite.
+    """
+    tracked = _committed_board_output_files()
+    before = _snapshot_hashes(tracked)
+    yield
+    after = _snapshot_hashes(tracked)
+    changed = sorted(rel for rel in before if before[rel] != after[rel])
+    if changed:
+        listing = "\n".join(f"  - {rel}" for rel in changed)
+        raise AssertionError(
+            "Issue #3580 guard: the test session MODIFIED committed board "
+            "artifacts in place:\n"
+            f"{listing}\n"
+            "Tests must never write into boards/*/output/ — route or "
+            "regenerate into a temp directory instead (see "
+            "tests/router/test_board03_routing_baseline.py for the "
+            "pattern).  In-place writes race parallel xdist readers of "
+            "the committed artifacts and clobber the working tree.\n"
+            "Restore the files with: git checkout -- " + " ".join(changed)
+        )
+
+
+@pytest.fixture
+def fixtures_dir() -> Path:
+    """Return the path to the test fixtures directory."""
+    return Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def simple_rc_schematic(fixtures_dir: Path) -> Path:
+    """Return the path to the simple RC circuit schematic."""
+    return fixtures_dir / "simple_rc.kicad_sch"
+
+
+# Minimal KiCad schematic for testing
+MINIMAL_SCHEMATIC = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (wire
+    (pts (xy 90 100) (xy 100 100))
+    (stroke (width 0) (type default))
+    (uuid "00000000-0000-0000-0000-000000000005")
+  )
+  (label "NET1"
+    (at 90 100 0)
+    (effects (font (size 1.27 1.27)))
+    (uuid "00000000-0000-0000-0000-000000000006")
+  )
+)
+"""
+
+# Minimal KiCad PCB for testing
+MINIMAL_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (32 "B.Adhes" user "B.Adhesive")
+    (33 "F.Adhes" user "F.Adhesive")
+    (34 "B.Paste" user)
+    (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user)
+    (39 "F.Mask" user)
+    (40 "Dwgs.User" user "User.Drawings")
+    (41 "Cmts.User" user "User.Comments")
+    (42 "Eco1.User" user "User.Eco1")
+    (43 "Eco2.User" user "User.Eco2")
+    (44 "Edge.Cuts" user)
+    (45 "Margin" user)
+    (46 "B.CrtYd" user "B.Courtyard")
+    (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+    (50 "User.1" user)
+    (51 "User.2" user)
+    (52 "User.3" user)
+    (53 "User.4" user)
+    (54 "User.5" user)
+    (55 "User.6" user)
+    (56 "User.7" user)
+    (57 "User.8" user)
+    (58 "User.9" user)
+  )
+  (setup
+    (stackup
+      (layer "F.SilkS" (type "Top Silk Screen"))
+      (layer "F.Paste" (type "Top Solder Paste"))
+      (layer "F.Mask" (type "Top Solder Mask") (thickness 0.01))
+      (layer "F.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 1" (type "core") (thickness 1.51) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
+      (layer "B.Cu" (type "copper") (thickness 0.035))
+      (layer "B.Mask" (type "Bottom Solder Mask") (thickness 0.01))
+      (layer "B.Paste" (type "Bottom Solder Paste"))
+      (layer "B.SilkS" (type "Bottom Silk Screen"))
+      (copper_finish "None")
+      (dielectric_constraints no)
+    )
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-000000000011"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000012"))
+    (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 0 0 0) (layer "F.Fab") (hide yes) (uuid "00000000-0000-0000-0000-000000000013"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "00000000-0000-0000-0000-000000000020"))
+)
+"""
+
+
+@pytest.fixture
+def minimal_schematic(tmp_path: Path) -> Path:
+    """Create a minimal schematic file for testing."""
+    sch_file = tmp_path / "test.kicad_sch"
+    sch_file.write_text(MINIMAL_SCHEMATIC)
+    return sch_file
+
+
+@pytest.fixture
+def minimal_pcb(tmp_path: Path) -> Path:
+    """Create a minimal PCB file for testing."""
+    pcb_file = tmp_path / "test.kicad_pcb"
+    pcb_file.write_text(MINIMAL_PCB)
+    return pcb_file
+
+
+# PCB that passes all DRC checks - for testing kct check command
+# This fixture is specifically designed to have no DRC violations:
+# - Board outline with adequate edge clearance
+# - Traces with proper clearance from pads
+# - Silkscreen text with adequate height (1.0mm >= JLCPCB 0.8mm minimum)
+# - Every track end lands on copper: the GND trace runs from R1 pad 1 to
+#   the TP1 test-point pad (issue #4680).  Before ``track_dangling``
+#   detection existed the trace floated in free space at (122,125)-(115,125)
+#   with both ends touching nothing, which made the "clean" contract
+#   untrue -- the ``--strict`` tests that read this fixture assert that
+#   *no* warning is raised, so the copper here must genuinely terminate.
+#   TP1 exists so the far end lands on a pad while GND stays fully routed
+#   (a second GND pad with no copper to it would trip ``connectivity``).
+DRC_CLEAN_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (47 "F.CrtYd" user "F.Courtyard")
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 125 125)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000011"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000012"))
+    (fp_rect (start -0.93 -0.47) (end 0.93 0.47) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+    (model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.step"
+      (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))
+  )
+  (footprint "TestPoint:TestPoint_Pad_1.0x1.0mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (at 115 125)
+    (property "Reference" "TP1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000031"))
+    (property "Value" "GND" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000032"))
+    (fp_rect (start -0.75 -0.75) (end 0.75 0.75) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+    (pad "1" smd roundrect (at 0 0) (size 1.0 1.0)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (segment (start 124.49 125) (end 115 125) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000020"))
+)
+"""
+
+
+def make_assembly_ready(pcb_file: Path) -> Path:
+    """Add a title block, global fiducials and a board ID to ``pcb_file``.
+
+    Satisfies the ``fiducials_missing`` / ``board_id_missing`` assembly-prep
+    rules (Issue #8532) so a fixture meant to be "clean" stays clean under
+    ``kct check --strict``.
+    """
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    text = pcb_file.read_text()
+    if "(title_block" not in text:
+        text = text.replace(
+            '(paper "A4")',
+            '(paper "A4")\n  (title_block (title "fixture") (date "2026-11-07") (rev "A"))',
+            1,
+        )
+        pcb_file.write_text(text)
+    assert run_add_fiducials(pcb_file, sides="populated") == 0
+    assert run_add_board_info(pcb_file, auto=True) == 0
+    return pcb_file
+
+
+@pytest.fixture
+def drc_clean_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file that passes all DRC checks."""
+    pcb_file = tmp_path / "drc_clean.kicad_pcb"
+    pcb_file.write_text(DRC_CLEAN_PCB)
+    return make_assembly_ready(pcb_file)
+
+
+# 4-layer PCB for testing layer auto-detection
+# Has F.Cu, In1.Cu, In2.Cu, B.Cu as copper layers
+FOUR_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" power)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 125 125)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000011"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000012"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (segment (start 122 125) (end 115 125) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000020"))
+)
+"""
+
+
+@pytest.fixture
+def four_layer_pcb(tmp_path: Path) -> Path:
+    """Create a 4-layer PCB file for testing layer auto-detection."""
+    pcb_file = tmp_path / "four_layer.kicad_pcb"
+    pcb_file.write_text(FOUR_LAYER_PCB)
+    return pcb_file
+
+
+# 6-layer PCB for testing layer auto-detection
+# Has F.Cu, In1.Cu, In2.Cu, In3.Cu, In4.Cu, B.Cu as copper layers
+SIX_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" power)
+    (3 "In3.Cu" power)
+    (4 "In4.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 125 125)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000011"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000012"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (segment (start 122 125) (end 115 125) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000020"))
+)
+"""
+
+
+@pytest.fixture
+def six_layer_pcb(tmp_path: Path) -> Path:
+    """Create a 6-layer PCB file for testing layer auto-detection."""
+    pcb_file = tmp_path / "six_layer.kicad_pcb"
+    pcb_file.write_text(SIX_LAYER_PCB)
+    return pcb_file
+
+
+# PCB with edge cuts and multiple components for routing tests
+ROUTING_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "GND")
+  (net 3 "+3.3V")
+  (gr_rect (start 100 100) (end 150 140)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 115 115)
+    (fp_text reference "U1" (at 0 -3.5) (layer "F.SilkS"))
+    (pad "1" smd rect (at -2.7 -1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd rect (at -2.7 -0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+    (pad "3" smd rect (at -2.7 0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+    (pad "4" smd rect (at -2.7 1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "+3.3V"))
+    (pad "5" smd rect (at 2.7 1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "+3.3V"))
+    (pad "6" smd rect (at 2.7 0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+    (pad "7" smd rect (at 2.7 -0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "8" smd rect (at 2.7 -1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "+3.3V"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000200")
+    (at 135 115)
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000300")
+    (at 125 130)
+    (fp_text reference "J1" (at 0 -2.5) (layer "F.SilkS"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 3 "+3.3V"))
+    (pad "2" thru_hole oval (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 2 "GND"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def routing_test_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with components for routing tests."""
+    pcb_file = tmp_path / "routing_test.kicad_pcb"
+    pcb_file.write_text(ROUTING_TEST_PCB)
+    return pcb_file
+
+
+# PCB with zones for testing zone parsing
+ZONE_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 110 110)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (uuid "zone-uuid-1")
+    (name "GND_Zone")
+    (hatch edge 0.5)
+    (priority 1)
+    (connect_pads (clearance 0.25))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.4) (thermal_bridge_width 0.35))
+    (polygon
+      (pts
+        (xy 100 100)
+        (xy 130 100)
+        (xy 130 120)
+        (xy 100 120)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 100.1 100.1)
+        (xy 129.9 100.1)
+        (xy 129.9 119.9)
+        (xy 100.1 119.9)
+      )
+    )
+  )
+  (zone
+    (net 2)
+    (net_name "+3.3V")
+    (layer "B.Cu")
+    (uuid "zone-uuid-2")
+    (hatch edge 0.5)
+    (priority 0)
+    (connect_pads yes (clearance 0.2))
+    (min_thickness 0.2)
+    (fill no (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon
+      (pts
+        (xy 100 100)
+        (xy 120 100)
+        (xy 120 115)
+        (xy 100 115)
+      )
+    )
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "B.Cu")
+    (uuid "zone-uuid-3")
+    (hatch edge 0.5)
+    (connect_pads no)
+    (min_thickness 0.2)
+    (fill yes)
+    (polygon
+      (pts
+        (xy 140 100)
+        (xy 160 100)
+        (xy 160 120)
+        (xy 155 125)
+        (xy 145 125)
+        (xy 140 120)
+      )
+    )
+  )
+)
+"""
+
+
+@pytest.fixture
+def zone_test_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with zones for testing zone parsing."""
+    pcb_file = tmp_path / "zone_test.kicad_pcb"
+    pcb_file.write_text(ZONE_TEST_PCB)
+    return pcb_file
+
+
+# Minimal KiCad footprint (KiCad 6+ format)
+MINIMAL_FOOTPRINT = """(footprint "R_0402_1005Metric"
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (layer "F.Cu")
+  (descr "Resistor SMD 0402 (1005 Metric)")
+  (tags "resistor 0402")
+  (property "Reference" "REF**" (at 0 -1.1 0) (layer "F.SilkS") (uuid "ref-uuid"))
+  (property "Value" "R_0402_1005Metric" (at 0 1.1 0) (layer "F.Fab") (uuid "val-uuid"))
+  (fp_line (start -0.153641 -0.38) (end 0.153641 -0.38) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
+  (fp_line (start -0.153641 0.38) (end 0.153641 0.38) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
+  (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  (model "${KICAD8_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.wrl"
+    (offset (xyz 0 0 0))
+    (scale (xyz 1 1 1))
+    (rotate (xyz 0 0 0))
+  )
+)
+"""
+
+# Minimal KiCad footprint (KiCad 5 format with "module" tag)
+MINIMAL_FOOTPRINT_KICAD5 = """(module "R_0402_1005Metric"
+  (layer "F.Cu")
+  (descr "Resistor SMD 0402 (1005 Metric)")
+  (tags "resistor 0402")
+  (fp_text reference "REF**" (at 0 -1.1) (layer "F.SilkS"))
+  (fp_text value "R_0402_1005Metric" (at 0 1.1) (layer "F.Fab"))
+  (pad 1 smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  (pad 2 smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+)
+"""
+
+# Minimal KiCad design rules file
+MINIMAL_DESIGN_RULES = """(version 1)
+(rule "Trace Width"
+  (constraint track_width (min 0.127mm)))
+(rule "Clearance"
+  (constraint clearance (min 0.127mm)))
+(rule "Via Drill"
+  (constraint hole_size (min 0.3mm)))
+(rule "Via Diameter"
+  (constraint via_diameter (min 0.6mm)))
+(rule "Annular Ring"
+  (constraint annular_width (min 0.15mm)))
+(rule "Copper to Edge"
+  (constraint edge_clearance (min 0.3mm)))
+"""
+
+
+@pytest.fixture
+def minimal_footprint(tmp_path: Path) -> Path:
+    """Create a minimal footprint file for testing (KiCad 6+ format)."""
+    mod_file = tmp_path / "R_0402_1005Metric.kicad_mod"
+    mod_file.write_text(MINIMAL_FOOTPRINT)
+    return mod_file
+
+
+@pytest.fixture
+def minimal_footprint_kicad5(tmp_path: Path) -> Path:
+    """Create a minimal footprint file for testing (KiCad 5 format)."""
+    mod_file = tmp_path / "R_0402_1005Metric_v5.kicad_mod"
+    mod_file.write_text(MINIMAL_FOOTPRINT_KICAD5)
+    return mod_file
+
+
+@pytest.fixture
+def footprint_library_dir(tmp_path: Path) -> Path:
+    """Create a .pretty directory with multiple footprints for testing."""
+    pretty_dir = tmp_path / "TestLib.pretty"
+    pretty_dir.mkdir()
+
+    # Add a couple of footprints
+    (pretty_dir / "R_0402_1005Metric.kicad_mod").write_text(MINIMAL_FOOTPRINT)
+    (pretty_dir / "C_0402_1005Metric.kicad_mod").write_text(
+        MINIMAL_FOOTPRINT.replace("R_0402", "C_0402").replace("Resistor", "Capacitor")
+    )
+
+    return pretty_dir
+
+
+@pytest.fixture
+def minimal_design_rules(tmp_path: Path) -> Path:
+    """Create a minimal design rules file for testing."""
+    dru_file = tmp_path / "test.kicad_dru"
+    dru_file.write_text(MINIMAL_DESIGN_RULES)
+    return dru_file
+
+
+# Minimal KiCad symbol library for testing
+MINIMAL_SYMBOL_LIBRARY = """(kicad_symbol_lib
+  (version "20231120")
+  (generator "test")
+  (symbol "Device:R"
+    (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 0 0 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 0 0 0) (effects (hide yes)))
+    (symbol "Device:R_0_1"
+      (pin passive line (at -2.54 0 0) (length 2.54) (name "1") (number "1"))
+      (pin passive line (at 2.54 0 180) (length 2.54) (name "2") (number "2"))
+    )
+  )
+  (symbol "Device:C"
+    (property "Reference" "C" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "C" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "Device:C_0_1"
+      (pin passive line (at -2.54 0 0) (length 2.54) (name "1") (number "1"))
+      (pin passive line (at 2.54 0 180) (length 2.54) (name "2") (number "2"))
+    )
+  )
+)
+"""
+
+
+@pytest.fixture
+def minimal_symbol_library(tmp_path: Path) -> Path:
+    """Create a minimal symbol library file for testing."""
+    lib_file = tmp_path / "test.kicad_sym"
+    lib_file.write_text(MINIMAL_SYMBOL_LIBRARY)
+    return lib_file
+
+
+@pytest.fixture
+def hierarchical_schematic(fixtures_dir: Path) -> Path:
+    """Return the path to the hierarchical test schematic."""
+    return fixtures_dir / "projects" / "hierarchical_main.kicad_sch"
+
+
+# Issue #6013: the slow tail of the bulk pool runs in "Test (extended)", not
+# in "Test", so "Test" fits a GitHub-hosted runner on every PR. The list is
+# generated from measured times by scripts/ci/update_ci_extended.py; matching
+# is on the exact node id, so a renamed test simply drops back into "Test".
+_CI_EXTENDED_LIST = Path(__file__).with_name("ci_extended.txt")
+
+
+def _ci_extended_ids() -> frozenset[str]:
+    if not _CI_EXTENDED_LIST.is_file():
+        return frozenset()
+    return frozenset(
+        line.strip()
+        for line in _CI_EXTENDED_LIST.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    # Issue #6102: a `pr_required` test is a merge gate and must run in the PR
+    # "Test" job, so it is never marked ci_extended even if it is listed.
+    ids = _ci_extended_ids()
+    if not ids:
+        return
+    marker = pytest.mark.ci_extended
+    for item in items:
+        if item.nodeid in ids and item.get_closest_marker("pr_required") is None:
+            item.add_marker(marker)

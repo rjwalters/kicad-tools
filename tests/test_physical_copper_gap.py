@@ -1,0 +1,1118 @@
+"""Physical gap controls: connected copper is not primitive clearance."""
+
+import pytest
+
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp import parse_string
+from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap
+
+
+def board(*items):
+    return PCB(
+        parse_string(
+            """(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+      (net 0 "") (net 1 "GND") (net 2 "VCC")
+    """
+            + "\n".join(items)
+            + ")"
+        )
+    )
+
+
+def track(a, b, identity, net=1, width=0.2):
+    return f'''(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]})
+        (width {width}) (layer "F.Cu") (net {net}) (uuid "{identity}"))'''
+
+
+def gaps(pcb, minimum=0.25):
+    return [
+        v
+        for v in check_physical_copper_gap(pcb, minimum).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+
+
+@pytest.mark.parametrize("net", [1, 2])
+def test_parallel_gap_and_net_independence(net):
+    result = gaps(board(track((0, 0), (4, 0), "a"), track((0, 0.3), (4, 0.3), "b", net)))
+    assert result
+    assert result[0].actual_value == pytest.approx(0.1, abs=0.001)
+    assert result[0].items == ("Trace@F.Cu:w0.2:0/0.3~4/0.3", "Trace@F.Cu:w0.2:0/0~4/0")
+    assert result[0].layer == "F.Cu"
+    assert result[0].nets == (("GND",) if net == 1 else ("GND", "VCC"))
+
+
+@pytest.mark.parametrize("join_x", [0, 4])
+def test_hairpin_connected_elsewhere_retains_slit(join_x):
+    assert gaps(
+        board(
+            track((0, 0), (4, 0), "a"),
+            track((0, 0.3), (4, 0.3), "b"),
+            track((join_x, 0), (join_x, 0.3), "join"),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        [((0, 0), (2, 0)), ((2, 0), (2, 2))],
+        [((0, 0), (3, 0)), ((1, 0), (4, 0))],
+        [((0, 0), (4, 0)), ((0, 0), (4, 0))],
+    ],
+)
+def test_valid_copper_unions_are_not_zero_gap_defects(segments):
+    assert not gaps(board(*(track(a, b, str(i)) for i, (a, b) in enumerate(segments))))
+
+
+def test_filled_third_primitive_hides_internal_boundaries():
+    assert not gaps(
+        board(
+            track((0, 0), (4, 0), "a"),
+            track((0, 0.3), (4, 0.3), "b"),
+            track((0, 0.15), (4, 0.15), "fill", width=0.5),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "gap,expected", [(0.2495, False), (0.25, False), (0.251, False), (0.245, True)]
+)
+def test_exact_limit_tolerance(gap, expected):
+    assert (
+        bool(
+            gaps(
+                board(track((0, 0), (4, 0), "a"), track((0, 0.2 + gap), (4, 0.2 + gap), "b", net=2))
+            )
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("angle", [0, 15, 30, 45, 90])
+def test_roundrect_pad_escape_and_rotation(angle):
+    pad = f"""(footprint "test" (layer "F.Cu") (at 0 0)
+      (property "Reference" "U1")
+      (pad "1" smd roundrect (at 0 0 {angle}) (size 2 1) (layers "F.Cu")
+      (roundrect_rratio .25) (net 1 "GND") (uuid "pad")))"""
+    assert not gaps(board(pad, track((0, 0), (3, 0), "escape")))
+    # A separate track beside the rotated pad has a narrow true copper gap.
+    if angle == 45:
+        assert gaps(board(pad, track((1.15, -2), (1.15, 2), "near")))
+
+
+def test_arc_and_zone_provenance():
+    arc = """(arc (start 0 0) (mid 1 1) (end 2 0) (width .2)
+        (layer "F.Cu") (net 1) (uuid "arc"))"""
+    result = gaps(board(arc, track((0, 1.3), (2, 1.3), "track")))
+    assert result and "Arc@F.Cu:w0.2:0/0~1/1~2/0" in result[0].items
+    zone = """(zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone")
+      (polygon (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 0 1)))
+      (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 0 1))))"""
+    result = gaps(board(zone, track((0, 1.2), (4, 1.2), "track")))
+    assert result and result[0].items == ("Trace@F.Cu:w0.2:0/1.2~4/1.2", "zone")
+
+
+def test_unknown_geometry_does_not_claim_complete():
+    pcb = board('(gr_circle (center 0 0) (end 1 0) (width .2) (layer "F.Cu"))')
+    assert (
+        check_physical_copper_gap(pcb, 0.25).violations[0].rule_id
+        == "physical_copper_gap_incomplete"
+    )
+
+
+@pytest.mark.parametrize("minimum", [0, -1, float("nan"), float("inf")])
+def test_invalid_minimum(minimum):
+    with pytest.raises(ValueError):
+        gaps(board(), minimum)
+
+
+def test_single_filled_zone_hairpin_and_other_layer():
+    points = "(xy 0 0) (xy 4 0) (xy 4 .6) (xy 0 .6) (xy 0 .4) (xy 3.8 .4) (xy 3.8 .2) (xy 0 .2)"
+    zone = f"""(zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "hairpin")
+      (polygon (pts {points})) (filled_polygon (layer "F.Cu") (pts {points})))"""
+    result = gaps(board(zone))
+    assert result and result[0].items == ("hairpin",)
+    assert result[0].actual_value == pytest.approx(0.2)
+    assert not gaps(
+        board(
+            track((0, 0), (4, 0), "a"), track((0, 0.3), (4, 0.3), "b").replace('"F.Cu"', '"B.Cu"')
+        )
+    )
+
+
+def test_cli_and_checker_opt_in(tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.3), (4, 0.3), "b"))
+    assert not DRCChecker(pcb).check_physical_copper_gap().violations
+    path = tmp_path / "gap.kicad_pcb"
+    original = serialize_sexp(pcb._sexp)
+    path.write_text(original)
+    assert (
+        main(
+            [
+                "check",
+                str(path),
+                "--drc-only",
+                "--only",
+                "physical_copper_gap",
+                "--physical-copper-gap",
+                ".25",
+                "--format",
+                "json",
+            ]
+        )
+        == 2
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["violations"][0]["rule_id"] == "physical_copper_gap"
+    assert len(result["violations"][0]["closest_locations"]) == 2
+    assert path.read_text() == original
+
+
+def test_via_gap_and_unfilled_zone():
+    via = """(via (at 2 .5) (size .6) (drill .3) (layers "F.Cu" "B.Cu")
+      (net 1) (uuid "via"))"""
+    result = gaps(board(via, track((0, 0), (4, 0), "track")))
+    assert result and result[0].items == (
+        "Trace@F.Cu:w0.2:0/0~4/0",
+        "Via@2/0.5:F.Cu-B.Cu:d0.3/s0.6",
+    )
+    zone = """(zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone")
+      (polygon (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 0 1))))"""
+    assert (
+        check_physical_copper_gap(board(zone), 0.25).violations[0].rule_id
+        == "physical_copper_gap_incomplete"
+    )
+
+
+@pytest.mark.parametrize(
+    "field,replacement",
+    [("width", "banana"), ("width", "0"), ("start", "banana 0"), ("end", "0 banana")],
+)
+def test_malformed_track_geometry_is_incomplete_not_clean(field, replacement):
+    text = track((0, 0), (4, 0), "bad")
+    import re
+
+    text = re.sub(r"\(" + field + r" [^)]*\)", "(" + field + " " + replacement + ")", text)
+    result = check_physical_copper_gap(board(text), 0.25)
+    assert any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+@pytest.mark.parametrize(
+    "modifier",
+    ["(chamfer_ratio 0.3) (chamfer top_left)", "(roundrect_rratio banana)", "(at banana 0)"],
+)
+def test_unsupported_or_recovered_pad_geometry_is_incomplete(modifier):
+    pad_at = "" if modifier.startswith("(at") else "(at 0 0)"
+    pcb = board(f"""(footprint "X" (layer "F.Cu") (at 0 0)
+      (property "Reference" "U1")
+      (pad "1" smd roundrect {pad_at} (size 1 1) (layers "F.Cu") (net 1 "GND") {modifier}))""")
+    result = check_physical_copper_gap(pcb, 0.25)
+    assert any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+def test_malformed_via_position_is_incomplete():
+    pcb = board('(via (at banana 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))')
+    result = check_physical_copper_gap(pcb, 0.25)
+    assert any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+@pytest.mark.parametrize("angle", [-60, -30, 0, 30, 60, 90, 120, 150])
+@pytest.mark.parametrize("gap", [-0.1, 0.2, 0.3])
+def test_rotated_parallel_rect_pads_measure_physical_air(angle, gap):
+    """KiCad positive angles rotate the long pad axis toward negative Y."""
+    import math
+
+    radians = math.radians(angle)
+    pads = []
+    for index in (0, 1):
+        # Translate along the physical minor-axis normal. The 0.4 mm
+        # combined half-heights leave exactly `gap` of air between pads.
+        x = 10 + index * (0.4 + gap) * math.sin(radians)
+        y = 10 + index * (0.4 + gap) * math.cos(radians)
+        pads.append(f"""(footprint "X" (layer "F.Cu") (at {x} {y})
+          (property "Reference" "U{index}")
+          (pad "1" smd rect (at 0 0 {angle}) (size 4 .4) (layers "F.Cu")
+            (net 1 "GND") (uuid "pad{index}")))""")
+    result = check_physical_copper_gap(board(*pads), 0.25)
+    assert not any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    findings = [v for v in result.violations if v.rule_id == "physical_copper_gap"]
+    if gap == 0.2:
+        assert len(findings) == 1
+        assert findings[0].actual_value == pytest.approx(gap, abs=0.001)
+        assert findings[0].items == ("pad0", "pad1")
+    else:
+        assert not findings  # Overlapping copper and a wide air gap are valid.
+
+
+@pytest.mark.parametrize("kind", ["pad", "via"])
+def test_layer_specific_padstack_is_incomplete_through_cli(kind, tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+    from kicad_tools.validate.checker import DRCChecker
+
+    if kind == "pad":
+        item = """(footprint "Stack" (layer "F.Cu") (at 10 10)
+          (property "Reference" "U1")
+          (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill .4)
+            (layers "*.Cu" "*.Mask")
+            (padstack (mode custom)
+              (layer "F.Cu" (shape circle) (size 1 1))
+              (layer "B.Cu" (shape rect) (size 3 1)))
+            (net 1 "GND") (uuid "pad")))"""
+    else:
+        item = """(via (at 10 10) (size 1) (drill .4)
+          (layers "F.Cu" "B.Cu") (net 1) (uuid "via")
+          (padstack (mode custom) (layer "B.Cu" (size 3))))"""
+    near = track((11.7, 8), (11.7, 12), "near").replace('"F.Cu"', '"B.Cu"')
+    pcb = board(item, near)
+    result = DRCChecker(pcb, physical_copper_gap_mm=0.25).check_physical_copper_gap()
+    assert result.violations
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    assert any(f"unsupported {kind} padstack" in v.message for v in result.violations)
+
+    path = tmp_path / "padstack.kicad_pcb"
+    original = serialize_sexp(pcb._sexp)
+    path.write_text(original)
+    assert (
+        main(
+            [
+                "check",
+                str(path),
+                "--drc-only",
+                "--only",
+                "physical_copper_gap",
+                "--physical-copper-gap",
+                ".25",
+                "--format",
+                "json",
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert any(v["rule_id"] == "physical_copper_gap_incomplete" for v in payload["violations"])
+    assert path.read_text() == original
+
+
+def test_ordinary_rear_rectangle_reports_padstack_witness_gap():
+    pad = """(footprint "Stack" (layer "F.Cu") (at 10 10)
+      (property "Reference" "U1")
+      (pad "1" thru_hole rect (at 0 0) (size 3 1) (drill .4)
+       (layers "*.Cu" "*.Mask") (net 1 "GND") (uuid "pad")))"""
+    near = track((11.7, 8), (11.7, 12), "near").replace('"F.Cu"', '"B.Cu"')
+    result = check_physical_copper_gap(board(pad, near), 0.25)
+    assert not any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    assert any(
+        v.layer == "B.Cu" and v.actual_value == pytest.approx(0.1) for v in result.violations
+    )
+
+
+@pytest.mark.parametrize(
+    "kind", ["gr_text", "gr_text_box", "gr_curve", "fp_text", "fp_text_box", "fp_curve", "property"]
+)
+@pytest.mark.parametrize("layer", ["F.Cu", "B.Cu", "F.SilkS"])
+def test_raw_graphic_inventory_api_and_cli(kind, layer, tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+
+    content = (
+        'user "label"'
+        if kind == "fp_text"
+        else '"Reference" "U1"'
+        if kind == "property"
+        else '"label"'
+        if "text" in kind
+        else ""
+    )
+    item = f'({kind} {content} (at 1 1) (start 1 1) (end 3 3) (pts (xy 1 1) (xy 2 2) (xy 3 2) (xy 4 1)) (layer "{layer}") (stroke (width .2) (type default)) (effects (font (size 1 1) (thickness .15))))'
+    if kind.startswith("fp_") or kind == "property":
+        item = f'(footprint "test" (layer "F.Cu") (at 0 0) {item})'
+    pcb = board(item)
+    result = check_physical_copper_gap(pcb, 0.25)
+    expected = layer.endswith(".Cu")
+    assert bool(result.violations) is expected
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    path = tmp_path / "graphic.kicad_pcb"
+    original = serialize_sexp(pcb._sexp)
+    path.write_text(original)
+    status = main(
+        [
+            "check",
+            str(path),
+            "--drc-only",
+            "--only",
+            "physical_copper_gap",
+            "--physical-copper-gap",
+            ".25",
+            "--format",
+            "json",
+        ]
+    )
+    assert status == (2 if expected else 0)
+    data = json.loads(capsys.readouterr().out)
+    assert bool(data["violations"]) is expected
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("kind", ["gr_text", "fp_text", "property", "gr_text_box", "fp_text_box"])
+@pytest.mark.parametrize(
+    "hide", ["hide", "(hide yes)", "(effects (hide yes))", "(effects hide)", "(hide no)"]
+)
+def test_hidden_copper_text_inventory(kind, hide):
+    content = (
+        'user "label"'
+        if kind == "fp_text"
+        else '"Reference" "U1"'
+        if kind == "property"
+        else '"label"'
+    )
+    item = f'({kind} {content} (at 1 1) (start 1 1) (end 3 3) (layer "F.Cu") {hide})'
+    if kind.startswith("fp_") or kind == "property":
+        item = f'(footprint "test" (layer "F.Cu") (at 0 0) {item})'
+    result = check_physical_copper_gap(board(item), 0.25)
+    assert bool(result.violations) is (hide == "(hide no)")
+
+
+def test_unrecognized_raw_copper_object_is_incomplete():
+    pcb = board('(gr_future_shape (layer "F.Cu") (at 1 1))')
+    assert any(
+        v.rule_id == "physical_copper_gap_incomplete"
+        for v in check_physical_copper_gap(pcb, 0.25).violations
+    )
+
+
+@pytest.mark.parametrize("kind", ["gr_text", "fp_text", "property", "gr_text_box", "fp_text_box"])
+def test_visible_literal_hide_is_not_a_visibility_marker(kind):
+    content = (
+        'user "hide"'
+        if kind == "fp_text"
+        else '"Reference" "hide"'
+        if kind == "property"
+        else '"hide"'
+    )
+    item = f'({kind} {content} (at 1 1) (start 1 1) (end 3 3) (layer "F.Cu"))'
+    if kind.startswith("fp_") or kind == "property":
+        item = f'(footprint "test" (layer "F.Cu") (at 0 0) {item})'
+    assert check_physical_copper_gap(board(item), 0.25).violations
+
+
+# --- Footprint copper polygons (fp_poly), Issue #5817 ----------------------
+#
+# A standard ``NetTie-2_SMD_Pad0.5mm`` joins its two pads with a filled
+# ``F.Cu`` ``fp_poly``.  Before #5817 that primitive was inventoried as
+# "unsupported copper graphic" and the whole assessment came back
+# incomplete.
+
+# Verbatim reduced fixture from Issue #5817 (one net tie plus a board
+# outline; no routing, no zone fill).
+NET_TIE_FIXTURE = """(kicad_pcb (version 20260115) (generator "pcbnew")
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal)
+        (44 "Edge.Cuts" user)) (setup (pad_to_mask_clearance 0))
+      (gr_rect (start 100 70) (end 190 160)
+        (stroke (width 0.05) (type default)) (fill none)
+        (layer "Edge.Cuts") (uuid "e4af335a-9b4d-5c17-90e3-7320110fa3bc"))
+      (footprint "NetTie-2_SMD_Pad0.5mm"
+        (layer "F.Cu")
+        (uuid "80f92f63-7d6e-418b-978d-20000011cde0")
+        (at 140.852007 85.488825 -90)
+        (descr "Net tie, 2 pin, 0.5mm square SMD pads")
+        (tags "net tie")
+        (property "Reference" "NT3" (at 0 -1.2 0) (layer "F.SilkS") (hide yes)
+          (uuid "ed86465d-16b2-4087-88d6-25aa25885dfd")
+          (effects (font (size 1 1) (thickness 0.15))))
+        (property "Value" "BOOT0_TIE" (at 0 1.2 0) (layer "F.Fab") (hide yes)
+          (uuid "55decc6c-ccba-49a9-9c58-e53b55d22ed2")
+          (effects (font (size 1 1) (thickness 0.15))))
+        (attr exclude_from_pos_files exclude_from_bom allow_missing_courtyard)
+        (net_tie_pad_groups "1, 2")
+        (duplicate_pad_numbers_are_jumpers no)
+        (fp_poly (pts (xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25))
+          (stroke (width 0) (type solid)) (fill yes) (layer "F.Cu")
+          (uuid "4c587801-35de-4fc4-895b-9942aca7f89f"))
+        (pad "1" smd circle (at -0.5 0 270) (size 0.5 0.5) (layers "F.Cu")
+          (net "SWCLK") (uuid "1745e8e7-cb05-4e0c-be57-60ff31465fb9"))
+        (pad "2" smd circle (at 0.5 0 270) (size 0.5 0.5) (layers "F.Cu")
+          (net "BOOT0") (uuid "b531e0f4-5d47-4a72-8a54-a3eaafb85b86"))
+        (embedded_fonts no)))"""
+
+
+def poly_footprint(
+    identity="tie",
+    at="10 10 0",
+    layer="F.Cu",
+    fill="yes",
+    stroke="0",
+    pts="(xy -0.5 -0.4) (xy 0.5 -0.4) (xy 0.5 0.4) (xy -0.5 0.4)",
+    reference="NT1",
+    pads="",
+    uuid=True,
+):
+    """A footprint whose only copper is one ``fp_poly`` (plus optional pads)."""
+    tag = f'(uuid "{identity}")' if uuid else ""
+    return f'''(footprint "NetTie-2_SMD_Pad0.5mm" (layer "{layer}") (at {at})
+      (property "Reference" "{reference}")
+      (fp_poly (pts {pts}) (stroke (width {stroke}) (type solid))
+        (fill {fill}) (layer "{layer}") {tag})
+      {pads})'''
+
+
+def tie_pads(layer="F.Cu", prefix="tie"):
+    return f'''(pad "1" smd circle (at -0.5 0 270) (size .5 .5) (layers "{layer}")
+        (net 1 "GND") (uuid "{prefix}-p1"))
+      (pad "2" smd circle (at 0.5 0 270) (size .5 .5) (layers "{layer}")
+        (net 2 "VCC") (uuid "{prefix}-p2"))'''
+
+
+def test_net_tie_filled_polygon_is_modeled_not_incomplete():
+    """The issue's own fixture: complete coverage and no phantom slit."""
+    pcb = PCB(parse_string(NET_TIE_FIXTURE))
+    result = check_physical_copper_gap(pcb, 0.1)
+    assert result.violations == []
+
+
+@pytest.mark.parametrize("minimum", [0.1, 0.25, 0.6])
+def test_net_tie_joined_copper_is_never_a_zero_width_slit(minimum):
+    """Pad-to-pad copper is an intentional join, not facing boundaries."""
+    item = poly_footprint(
+        pts="(xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25)",
+        pads=tie_pads(),
+    )
+    assert check_physical_copper_gap(board(item), minimum).violations == []
+
+
+@pytest.mark.parametrize(
+    "near,expected_layer",
+    [
+        (((10.6, 9), (10.6, 11)), "F.Cu"),  # vertical neighbour, x gap 0.1
+        (((9, 10.7), (11, 10.7)), "F.Cu"),  # horizontal neighbour, y gap 0.1
+    ],
+)
+def test_rotated_polygon_gap_to_separate_boundary(near, expected_layer):
+    """A -90 deg footprint turns the 1.0 x 0.8 local rect on its side.
+
+    Board extent becomes x 9.6..10.4 / y 9.5..10.5, so BOTH neighbours sit
+    0.1 mm off the copper.  An untransformed polygon would put the vertical
+    neighbour inside the copper and the horizontal one 0.2 mm away, so the
+    measured value discriminates the rotation in each axis.
+    """
+    result = gaps(board(poly_footprint(at="10 10 -90"), track(*near, "near")))
+    assert len(result) == 1
+    assert result[0].actual_value == pytest.approx(0.1, abs=0.001)
+    assert result[0].layer == expected_layer
+    assert "tie" in result[0].items
+    # Footprint copper carries no net of its own; the finding is geometric.
+    assert result[0].nets == ("", "GND")
+
+
+def test_polygon_provenance_falls_back_to_reference_when_uuid_absent():
+    result = gaps(
+        board(poly_footprint(at="10 10 -90", uuid=False), track((10.6, 9), (10.6, 11), "near"))
+    )
+    assert result and "NT1:fp_poly:0" in result[0].items
+
+
+def test_polygon_connected_elsewhere_still_reports_the_slit():
+    """A track leaving pad 1 and doubling back over the tie is a hairpin."""
+    item = poly_footprint(
+        pts="(xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25)",
+        pads=tie_pads(),
+    )
+    result = gaps(
+        board(
+            item,
+            track((9.5, 10), (9.5, 10.45), "riser"),
+            track((9.5, 10.45), (11.5, 10.45), "return"),
+        )
+    )
+    assert result
+    assert min(v.actual_value or 0 for v in result) == pytest.approx(0.1, abs=0.001)
+    assert any("tie" in v.items for v in result)
+
+
+def test_unfilled_polygon_is_a_stroked_ring_not_solid_copper():
+    """``(fill no)`` prints only the outline, so the interior stays air."""
+    item = poly_footprint(
+        fill="no",
+        stroke="0.2",
+        pts="(xy -0.6 -0.35) (xy 0.6 -0.35) (xy 0.6 0.35) (xy -0.6 0.35)",
+    )
+    assert not gaps(board(item), 0.25)
+    interior = gaps(board(item), 0.6)
+    assert interior
+    assert interior[0].items == ("tie",)
+    assert interior[0].actual_value == pytest.approx(0.5, abs=0.001)
+
+
+def test_filled_polygon_is_dilated_by_its_stroke_width():
+    item = poly_footprint(
+        stroke="0.2", pts="(xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25)"
+    )
+    result = gaps(board(item, track((9, 10.55), (11, 10.55), "near")))
+    assert result and result[0].actual_value == pytest.approx(0.1, abs=0.001)
+
+
+def test_back_side_polygon_stays_on_the_back_layer():
+    item = poly_footprint(layer="B.Cu", at="10 10 -90")
+    back = track((10.6, 9), (10.6, 11), "near").replace('"F.Cu"', '"B.Cu"')
+    result = gaps(board(item, back))
+    assert len(result) == 1
+    assert result[0].layer == "B.Cu"
+    assert "tie" in result[0].items
+    assert not gaps(board(item, track((10.6, 9), (10.6, 11), "near")))
+
+
+def test_non_copper_polygon_is_out_of_scope():
+    item = poly_footprint(layer="F.SilkS")
+    assert check_physical_copper_gap(board(item), 0.25).violations == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"pts": "(xy banana 0) (xy 1 0) (xy 1 1)"},
+        {"pts": "(xy 0 0) (xy 1 0)"},
+        {"pts": "(xy 0 0 0) (xy 1 0) (xy 1 1)"},
+        {"stroke": "banana"},
+        {"stroke": "-0.2"},
+        {"fill": "no", "stroke": "0"},
+        {"layer": "In1.Cu"},
+    ],
+)
+def test_invalid_polygon_geometry_is_incomplete_not_clean(kwargs):
+    pcb = board(poly_footprint(**kwargs))
+    result = check_physical_copper_gap(pcb, 0.25)
+    assert result.violations
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+def test_missing_polygon_points_is_incomplete_not_clean():
+    item = """(footprint "NT" (layer "F.Cu") (at 10 10)
+      (property "Reference" "NT1")
+      (fp_poly (stroke (width 0) (type solid)) (fill yes) (layer "F.Cu")
+        (uuid "tie")))"""
+    result = check_physical_copper_gap(board(item), 0.25)
+    assert result.violations
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+# ---- Issue #8843: fab-view tiers, mask bridge, jlcpcb default -------------
+
+
+def _tiered(pcb):
+    return [
+        v
+        for v in check_physical_copper_gap(pcb, 0.15, error_below_mm=0.10).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+
+
+@pytest.mark.parametrize(("gap", "severity"), [(0.08, "error"), (0.12, "warning"), (0.20, None)])
+def test_tiered_severity(gap, severity):
+    # Tracks 0.2 wide: centre offset = width + gap.
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.2 + gap), (4, 0.2 + gap), "b", net=2))
+    )
+    if severity is None:
+        assert not found
+    else:
+        assert [v.severity for v in found] == [severity]
+
+
+def test_same_net_near_parallel_copper_is_listed():
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a", net=1), track((0, 0.28), (4, 0.28), "b", net=1))
+    )
+    assert found and found[0].actual_value == pytest.approx(0.08, abs=0.002)
+    # Issue #8938: the fab cannot see nets and fails the board on a sub-danger
+    # slit regardless, so a same-net gap below the danger edge is an error.
+    # The old "same-net is always a warning" downgrade is gone; the class is
+    # labelled (same_net) so a project can waive it deliberately instead.
+    assert [v.severity for v in found] == ["error"]
+    assert [v.same_net for v in found] == [True]
+
+
+def test_same_net_between_danger_and_warning_is_listed_warning():
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a", net=1), track((0, 0.32), (4, 0.32), "b", net=1))
+    )
+    assert found and found[0].actual_value == pytest.approx(0.12, abs=0.002)
+    # Listed, non-blocking: the warning band survives for same-net pairs at
+    # fab-warning distances (issue #8938 keeps the two-tier shape, minus the
+    # same-net downgrade below the danger edge).
+    assert [v.severity for v in found] == ["warning"]
+    assert [v.same_net for v in found] == [True]
+
+
+def test_different_net_finding_carries_same_net_false():
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a", net=1), track((0, 0.28), (4, 0.28), "b", net=2))
+    )
+    assert found and [v.same_net for v in found] == [False]
+
+
+def _pad(ref, x, y, uuid, net=1):
+    return f"""(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net {net} "GND") (uuid "{uuid}")))"""
+
+
+@pytest.mark.parametrize(("gap", "expected"), [(0.18, 1), (0.22, 0)])
+def test_mask_bridge_2oz(gap, expected):
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board(_pad("U1", 0, 0, "p0"), _pad("U2", 1 + gap, 0, "p1", net=2))
+    found = check_pad_mask_bridge(pcb, 2.0).violations
+    assert len(found) == expected
+
+
+def test_mask_bridge_unknown_weight_fails_closed():
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board(_pad("U1", 0, 0, "p0"), _pad("U2", 5, 0, "p1"))
+    found = check_pad_mask_bridge(pcb, None).violations
+    assert [v.rule_id for v in found] == ["physical_copper_gap_incomplete"]
+    assert not check_pad_mask_bridge(pcb, 1.0).violations  # known, not 2 oz: not judged here
+
+
+def board4(*items):
+    """A 4-layer stackup; ``board()`` above declares F.Cu/B.Cu only."""
+    return PCB(
+        parse_string(
+            """(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
+              (31 "B.Cu" signal))
+      (net 0 "") (net 1 "GND") (net 2 "VCC")
+    """
+            + "\n".join(items)
+            + ")"
+        )
+    )
+
+
+def _tht_pad(ref, x, y, uuid, net=1):
+    """A through-hole pad: copper on every layer, mask on the outer two."""
+    return f'''(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5)
+           (layers "*.Cu" "*.Mask") (net {net} "GND") (uuid "{uuid}")))'''
+
+
+def _inner_pad(ref, x, y, uuid, net=1, layer="In1.Cu"):
+    """An SMD pad on an inner layer only -- copper, but no solder mask."""
+    return f'''(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "{layer}")
+           (net {net} "GND") (uuid "{uuid}")))'''
+
+
+def test_mask_bridge_tht_outer_layers_only():
+    """A THT pad pair is a mask bridge on the outer sides only (Issue #8913).
+
+    ``_collect`` expands a ``*.Cu`` pad onto every copper layer for the copper-gap
+    pass; inner layers have no solder mask, so they must not be reported here.
+    """
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board4(_tht_pad("U1", 0, 0, "p0"), _tht_pad("U2", 1.19, 0, "p1", net=2))
+    found = check_pad_mask_bridge(pcb, 2.0).violations
+    # Assert the layer SET, not just the count: a count-only assertion would
+    # pass if the two findings had landed on In1.Cu and In2.Cu instead.
+    assert {v.layer for v in found} == {"F.Cu", "B.Cu"}
+    assert len(found) == 2
+    assert all(v.rule_id == "physical_copper_gap" and v.severity == "error" for v in found)
+
+
+def test_mask_bridge_tht_above_threshold_still_clean():
+    """The outer-only filter must not move the threshold."""
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board4(_tht_pad("U1", 0, 0, "p0"), _tht_pad("U2", 1.22, 0, "p1", net=2))
+    assert not check_pad_mask_bridge(pcb, 2.0).violations
+
+
+def test_inner_only_pads_are_copper_gap_not_mask_bridge():
+    """The two passes must not be narrowed together (Issue #8913).
+
+    An inner-layer-only pad pair has no mask to bridge, but its inner copper gap
+    is real and ``check_physical_copper_gap`` must still report it.
+    """
+    from kicad_tools.validate.rules.physical_gap import (
+        check_pad_mask_bridge,
+        check_physical_copper_gap,
+    )
+
+    pcb = board4(
+        _inner_pad("U1", 0, 0, "p0"),
+        _inner_pad("U2", 1.19, 0, "p1", net=2),
+    )
+    assert not check_pad_mask_bridge(pcb, 2.0).violations
+    copper = [
+        v
+        for v in check_physical_copper_gap(pcb, 0.25).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    assert copper and {v.layer for v in copper} == {"In1.Cu"}
+
+
+def test_checker_default_on_only_under_fab_view():
+    from kicad_tools.validate.checker import DRCChecker
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
+
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    assert not DRCChecker(pcb).check_physical_copper_gap().violations
+    # Issue #8938: the fab-view bands come from the resolved stackup's DFM
+    # threshold entry, passed in as a policy -- no hardcoded module constants.
+    policy = FabGapPolicy(trace=GapBand(0.10, 0.15), pad=GapBand(0.15, 0.13))
+    on = DRCChecker(
+        pcb, fab_view=True, fab_view_copper_oz=1.0, fab_view_gap_policy=policy
+    ).check_physical_copper_gap()
+    assert [v.severity for v in on.violations] == ["error"]
+    # An explicit threshold wins over the fab-view default (single tier, all errors).
+    explicit = DRCChecker(
+        pcb, fab_view=True, fab_view_copper_oz=1.0, physical_copper_gap_mm=0.3
+    ).check_physical_copper_gap()
+    assert explicit.violations and explicit.violations[0].required_value == 0.3
+
+
+def test_checker_fab_view_without_resolved_bands_fails_closed():
+    """No policy (no DFM entry for the stackup): no tiered pass, not a guess.
+
+    Issue #8938 AC: a stackup whose bands are unknown must not silently fall
+    back to hardcoded constants -- the historical 0.10/0.15 fallback could
+    severity-grade gaps the fab never judged.
+    """
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    on = DRCChecker(pcb, fab_view=True, fab_view_copper_oz=1.0).check_physical_copper_gap()
+    assert [v.rule_id for v in on.violations] == ["physical_copper_gap_incomplete"]
+    assert all(v.severity == "info" for v in on.violations)
+
+
+def test_cli_jlcpcb_default_on_and_other_mfr_unchanged(tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    path = tmp_path / "gap.kicad_pcb"
+    path.write_text(serialize_sexp(pcb._sexp))
+
+    def run(mfr):
+        main(["check", str(path), "--drc-only", "--mfr", mfr, "--format", "json"])
+        return json.loads(capsys.readouterr().out)
+
+    jlc = run("jlcpcb")
+    assert any(
+        v["rule_id"] == "physical_copper_gap" and v["severity"] == "error"
+        for v in jlc["violations"]
+    )
+    other = run("pcbway")
+    assert not any(v["rule_id"] == "physical_copper_gap" for v in other["violations"])
+
+
+# ---- Issue #8938: fab-view bands from the DFM threshold table --------------
+
+
+def _via(x, y, uuid, net=1):
+    return (
+        f'(via (at {x} {y}) (size .6) (drill .3) (layers "F.Cu" "B.Cu") '
+        f'(net {net}) (uuid "{uuid}"))'
+    )
+
+
+def _zone(uuid, net=1):
+    return f'''(zone (net {net}) (net_name "GND") (layer "F.Cu") (uuid "{uuid}")
+      (polygon (pts (xy 0 0) (xy 4 0) (xy 4 2) (xy 0 2)))
+      (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 4 0) (xy 4 2) (xy 0 2))))'''
+
+
+def _fab(pcb, policy):
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap_fab_view
+
+    return [
+        v
+        for v in check_physical_copper_gap_fab_view(pcb, policy).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+
+
+def _one_oz():
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
+
+    return FabGapPolicy(
+        trace=GapBand(0.1016, None), pad=GapBand(0.15, None), stackup_key="4layer_1oz"
+    )
+
+
+def test_fab_view_same_net_via_at_pad_edge_is_error():
+    """The #8938 board's measured danger geometry: a via 0.08 mm from a
+    same-net pad edge.  The fab flags it (it cannot see nets); kct must too."""
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1))
+    found = _fab(pcb, _one_oz())
+    assert found and [v.severity for v in found] == ["error"]
+    assert found[0].same_net is True
+
+
+def test_fab_view_pour_to_pad_is_advisory_not_error():
+    """1,516 of the #8938 board's warnings were pour-to-pad gaps at
+    0.10-0.13 mm that JLCDFM does not flag at all.  They must not become
+    errors (the "pour-to-pad collision"): in fab view they report at info."""
+    pcb = board(_zone("z1"), _pad("U1", 2, 2.62, "p1"))  # pad edge 0.12 mm off the fill
+    found = _fab(pcb, _one_oz())
+    assert found and found[0].actual_value == pytest.approx(0.12, abs=0.002)
+    assert found[0].severity == "info"
+    assert "zone" in found[0].message.lower()
+
+
+def test_fab_view_trace_gap_above_danger_edge_without_warning_band_not_reported():
+    """A stackup whose warning_mm is absent has NO warning band: gaps at or
+    above the danger edge are not fab findings (JLCDFM trace_spacing recorded
+    0 danger / 0 warning on the #8938 board).  Explicit, not defaulted."""
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.32), (4, 0.32), "b", net=2))
+    assert not _fab(pcb, _one_oz())  # 0.12 mm >= 0.1016 danger edge
+
+
+def test_fab_view_trace_gap_below_danger_edge_is_error():
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    found = _fab(pcb, _one_oz())
+    assert found and [v.severity for v in found] == ["error"]
+    assert found[0].same_net is False
+
+
+def test_fab_view_sets_fab_band_per_population():
+    """Issue #8972: the band a finding was graded against is carried on the
+    finding (``DRCViolation.fab_band``) so parity attribution can tell the
+    trace and pad populations apart without splitting the rule id.
+
+    ``"trace"`` for no-pad/no-zone gaps, ``"pad"`` for pad-adjacent and
+    mask-bridge gaps, ``None`` for the bandless emit sites (the zone-fill
+    ``info`` branch and the legacy opt-in pass).
+    """
+    from kicad_tools.validate.rules.physical_gap import (
+        check_pad_mask_bridge,
+        check_physical_copper_gap,
+    )
+
+    trace = _fab(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2)), _one_oz()
+    )
+    assert [v.fab_band for v in trace] == ["trace"]
+    pad = _fab(board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1)), _one_oz())
+    assert [v.fab_band for v in pad] == ["pad"]
+    pour = _fab(board(_zone("z1"), _pad("U1", 2, 2.62, "p1")), _one_oz())
+    assert [v.severity for v in pour] == ["info"]
+    assert [v.fab_band for v in pour] == [None]
+    bridge = [
+        v
+        for v in check_pad_mask_bridge(
+            board(_pad("U1", 0, 0, "p0"), _pad("U2", 1.18, 0, "p1", net=2)), 2.0
+        ).violations
+        if v.severity != "info"
+    ]
+    assert bridge and [v.fab_band for v in bridge] == ["pad"]
+    legacy = check_physical_copper_gap(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2)), 0.1016
+    ).violations
+    assert legacy and [v.fab_band for v in legacy] == [None]
+
+
+def _two_oz_pad_policy():
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
+
+    # The verified correction: 4layer_2oz pad_spacing records warning_mm 0.13
+    # BELOW danger_mm 0.15 -- band logic must not assume an ordering.
+    return FabGapPolicy(trace=GapBand(0.10, 0.15), pad=GapBand(0.15, 0.13))
+
+
+def test_inverted_band_error_below_tighter_edge():
+    """warning_mm (0.13) < danger_mm (0.15): the tighter edge is the error
+    edge, so a 0.08 mm pad gap is an error (the fab's 8 danger on 2 oz)."""
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1))
+    found = _fab(pcb, _two_oz_pad_policy())
+    assert found and [v.severity for v in found] == ["error"]
+
+
+def test_inverted_band_warning_between_tighter_and_looser_edge():
+    """A 0.14 mm pad gap: below the 0.15 danger entry but above the observed
+    0.13 warning edge -- the fab recorded 2 warnings in exactly this band."""
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.94, 0, "v1", net=1))
+    found = _fab(pcb, _two_oz_pad_policy())
+    assert found and [v.severity for v in found] == ["warning"]
+
+
+def test_inverted_band_above_looser_edge_not_reported():
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(1.04, 0, "v1", net=1))  # gap 0.24
+    assert not _fab(pcb, _two_oz_pad_policy())
+
+
+def test_recorded_8938_danger_geometry_yields_errors_from_live_table():
+    """The acceptance bite: bands resolved from the REAL jlcpcb table for the
+    recorded board's stackup (4layer_1oz) must make the fab-danger same-net
+    pad-edge geometry an error.  If the same-net downgrade or the table wiring
+    regresses, kct reports zero errors here and this fails."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.checker import DRCChecker
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    profile = get_profile("jlcpcb")
+    entry = profile.get_dfm_entry(4, 1.0, 0.5)
+    assert entry is not None and entry.key == "4layer_1oz"
+    policy = fab_gap_policy_from_entry(entry)
+    assert policy.pad.error_edge_mm == pytest.approx(0.15)
+    assert policy.trace.error_edge_mm == pytest.approx(0.1016)
+    # No warning band is recorded for 4layer_1oz: None, not danger, not 0.
+    assert policy.pad.warning_mm is None and policy.trace.warning_mm is None
+
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1))
+    found = DRCChecker(
+        pcb, fab_view=True, fab_view_copper_oz=1.0, fab_view_gap_policy=policy
+    ).check_physical_copper_gap()
+    errors = [v for v in found.violations if v.rule_id == "physical_copper_gap"]
+    assert errors, "fab-danger geometry produced no findings"
+    assert all(v.severity == "error" for v in errors)
+
+
+def test_output_names_waived_same_net_findings_and_counts_them(capsys):
+    """Issue #8938 AC: a waived same-net finding is listed with its reason and
+    issue, and the output states how many same-net findings are waived."""
+    from pathlib import Path
+
+    from kicad_tools.cli.check_cmd import output_table
+    from kicad_tools.validate import DRCResults, DRCViolation
+
+    violations = [
+        DRCViolation(
+            "physical_copper_gap",
+            "error",
+            "Physical copper gap 0.0800mm < 0.1500mm",
+            nets=("GND",),
+            same_net=True,
+            waived=True,
+            waiver_reason="deliberate same-net slit, reviewed",
+            waiver_issue="8938",
+        ),
+        DRCViolation(
+            "physical_copper_gap",
+            "error",
+            "Physical copper gap 0.0700mm < 0.1500mm",
+            nets=("VCC",),
+            same_net=True,
+            waived=True,
+            waiver_reason="second deliberate slit",
+            waiver_issue="8938",
+        ),
+    ]
+    results = DRCResults()
+    for v in violations:
+        results.add(v)
+    output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 4, False)
+    out = capsys.readouterr().out
+    assert "Same-net findings waived: 2" in out
+    assert "Waiver reason: deliberate same-net slit, reviewed" in out
+    assert "Waiver issue: 8938" in out
+
+
+def test_output_tags_same_net_finding_headers(capsys):
+    """Issue #8938 AC: the same-net class is identifiable in the text output
+    without re-deriving it from the net names."""
+    from pathlib import Path
+
+    from kicad_tools.cli.check_cmd import output_table
+    from kicad_tools.validate import DRCResults, DRCViolation
+
+    violations = [
+        DRCViolation(
+            "physical_copper_gap",
+            "error",
+            "Physical copper gap 0.0800mm < 0.1500mm",
+            nets=("GND",),
+            same_net=True,
+        ),
+    ]
+    results = DRCResults()
+    for v in violations:
+        results.add(v)
+    output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 4, False)
+    out = capsys.readouterr().out
+    assert "physical_copper_gap (same-net)" in out
+    assert "1 same-net" in out  # BY RULE relationship breakdown
+
+
+# ---- Issue #9034: pad_spacing band semantics pinned on a committed fixture --
+
+
+def test_pad_spacing_cases_fixture_pins_severities():
+    """Issue #9034: the committed five-case fixture
+    (``pad_spacing_cases.kicad_pcb``) pins each pad-band case's severity
+    against the recorded ``4layer_1oz`` bands (pad danger 0.15 mm, no
+    warning band):
+
+    * pad<->track different-net 0.10 mm -> error (net-blind, pad band);
+    * pad<->track same-net 0.10 mm -> error (deliberate since #8938);
+    * pad<->pad gap nominally at the 0.15 mm danger edge -> not reported
+      (suppression here is the scan tolerance dead-band alone: the
+      measured 0.14999999999999858 mm sits strictly below the edge, so
+      band semantics alone would call it an error -- only the exact
+      edge value is outside the error tier, pinned directly by
+      ``test_pad_band_edge_severity_boundaries``; a future TOLERANCE
+      change would flip this case to error);
+    * pad<->pad 0.14 mm, just below the edge -> error;
+    * pad+zone mix 0.10 mm -> info (zone-fill is never tiered, #8938);
+    * pad<->pad 0.16 mm, above the detection edge -> not reported.
+
+    Counting granularity, measured on this fixture: kct emits at most one
+    finding per copper-source pair per layer (findings are keyed by
+    (ids, nets) and the closest measurement wins), never one per
+    facing-edge pair -- so a kct-over-fab surplus cannot come from per-edge
+    inflation within a pair.
+    """
+    from pathlib import Path
+
+    pcb = PCB.load(
+        str(Path(__file__).parent / "fixtures" / "fab_dfm_parity" / "pad_spacing_cases.kicad_pcb")
+    )
+    found = _fab(pcb, _one_oz())
+    pin = sorted((v.severity, round(v.actual_value, 3), v.same_net, v.fab_band) for v in found)
+    assert pin == [
+        # Case 1: pad<->track, different nets, 0.10 mm.
+        ("error", 0.1, False, "pad"),
+        # Case 2: pad<->track, same net, 0.10 mm.
+        ("error", 0.1, True, "pad"),
+        # Case 4: pad<->pad 0.14 mm, just below the danger edge.
+        ("error", 0.14, False, "pad"),
+        # Case 5: pad+zone mix 0.10 mm -- advisory, bandless (fab_band None).
+        ("info", 0.1, False, None),
+    ]
+    # Cases 3 (exactly 0.15 mm) and 6 (0.16 mm) produce nothing: the four
+    # pinned findings above are the fixture's complete output.
+
+
+def test_pad_band_edge_severity_boundaries():
+    """Unit pin of the recorded 1 oz pad band edges (issue #9034): strictly
+    below the 0.15 mm danger edge is an error; the edge itself and anything
+    above it is not a fab finding -- 4layer_1oz records no warning band, and
+    an absent warning band is not defaulted to the danger edge."""
+    from kicad_tools.validate.rules.physical_gap import GapBand
+
+    band = GapBand(0.15, None)
+    assert band.severity_for(0.149) == "error"
+    assert band.severity_for(0.15) is None
+    assert band.severity_for(0.151) is None
+    assert band.error_edge_mm == band.detection_edge_mm == pytest.approx(0.15)

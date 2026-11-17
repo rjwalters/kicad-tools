@@ -1,0 +1,3856 @@
+#!/usr/bin/env python3
+"""
+Run all validation checks on a KiCad schematic.
+
+Combines ERC, unconnected pin detection, and other checks into one command.
+
+Usage:
+    python3 sch-validate.py <schematic.kicad_sch> [options]
+
+Options:
+    --format {text,json}   Output format (default: text)
+    --lib-path <path>      Path to symbol libraries (for pin checking)
+    --strict               Exit 1 on any warning (errors and checks not run
+                           already exit 1)
+    --quiet                Only show errors, not warnings
+
+Exit codes: 0 pass, 1 errors / a check not run / warnings with --strict.
+--format json carries the same answer as top-level "verdict"
+(pass|fail|incomplete) and "exit_code" (Issue #7230).
+
+Examples:
+    python3 sch-validate.py project.kicad_sch
+    python3 sch-validate.py project.kicad_sch --lib-path lib/symbols/
+    python3 sch-validate.py project.kicad_sch --strict
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from kicad_tools.cli._gate import gate_exit_code
+from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.cli.sch_footprint_common import iter_missing_footprint_symbols
+from kicad_tools.erc.cross_sheet import (
+    reattribute_symbol_violations,
+    reattribute_wire_dangling_violations,
+)
+from kicad_tools.schema import Schematic
+from kicad_tools.schema.hierarchy import build_hierarchy
+from kicad_tools.schematic.blocks.interface.debug import DebugHeader
+
+
+@dataclass
+class ValidationIssue:
+    """A single validation issue."""
+
+    severity: str  # "error", "warning", "info"
+    category: str  # "erc", "unconnected", "footprint", "hierarchy"
+    message: str
+    location: str = ""  # Sheet or reference
+    items: list[str] = field(default_factory=list)  # Contextual items (label/net names)
+
+
+class CheckNotRun(Exception):  # noqa: N818 -- an outcome, not an error
+    """Raised by a check that could not run (e.g. kicad-cli missing).
+
+    ``validate_schematic`` records the check under
+    ``ValidationResult.checks_not_run`` instead of ``checks_run`` and the
+    result can no longer pass (Issue #7094).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass
+class ValidationResult:
+    """Complete validation results."""
+
+    schematic: str
+    issues: list[ValidationIssue] = field(default_factory=list)
+    checks_run: list[str] = field(default_factory=list)
+    # Checks that were requested (not ``--skip``-ped) but did not run, as
+    # ``{"check": name, "reason": why}`` records (Issue #7094).
+    checks_not_run: list[dict[str, str]] = field(default_factory=list)
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for i in self.issues if i.severity == "error")
+
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for i in self.issues if i.severity == "warning")
+
+    @property
+    def passed(self) -> bool:
+        # A check that did not run did not check anything: INCOMPLETE is not
+        # a pass (mirrors ``kct check``'s NOT RUN convention, Issue #7094).
+        return self.error_count == 0 and not self.checks_not_run
+
+
+# Violation types whose messages benefit from label/net name enrichment.
+_LABEL_TYPES: frozenset[str] = frozenset(
+    {
+        "isolated_pin_label",
+        "single_global_label",
+        "label_dangling",
+        "global_label_dangling",
+        "similar_labels",
+        "multiple_net_names",
+        "hier_label_mismatch",
+    }
+)
+
+
+def run_erc(schematic_path: str) -> list[ValidationIssue]:
+    """Run KiCad ERC check.
+
+    Raises:
+        CheckNotRun: when ERC did not actually check the schematic --
+            kicad-cli missing, timed out, killed, wrote no report, or any
+            other failure (Issue #7094).  Use ``--skip erc`` to opt out.
+    """
+    issues = []
+
+    # Find kicad-cli using the shared lookup that checks PATH
+    # and platform-specific installation locations (e.g. macOS app bundle)
+    kicad_cli_path = find_kicad_cli()
+    if kicad_cli_path is None:
+        raise CheckNotRun("kicad-cli not found")
+
+    try:
+        kicad_cli = str(kicad_cli_path)
+
+        # Run ERC
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            output_file = f.name
+
+        try:
+            proc = subprocess.run(
+                [
+                    kicad_cli,
+                    "sch",
+                    "erc",
+                    "--format",
+                    "json",
+                    "--severity-all",
+                    "--output",
+                    output_file,
+                    schematic_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            # Issue #6724: the output file is pre-created empty, which used to
+            # read as "no ERC findings".  A kicad-cli killed by a signal or one
+            # that wrote nothing did not check the schematic.
+            if proc.returncode < 0 or Path(output_file).stat().st_size == 0:
+                from kicad_tools.drc.geometric import describe_returncode
+
+                raise RuntimeError(
+                    describe_returncode(proc.returncode)
+                    if proc.returncode < 0
+                    else f"kicad-cli wrote no ERC report (exit {proc.returncode})"
+                )
+
+            # Parse results
+            if Path(output_file).exists():
+                import json as json_mod
+
+                with open(output_file) as f:
+                    content = f.read()
+                    if content.strip():
+                        data = json_mod.loads(content)
+
+                        # Collect raw violation dicts so we can filter
+                        # cross-sheet false positives before converting.
+                        raw_violations: list[dict] = []
+                        for sheet in data.get("sheets", []):
+                            for violation in sheet.get("violations", []):
+                                violation["_sheet_path"] = sheet.get("path", "")
+                                raw_violations.append(violation)
+
+                        # No cross-sheet suppression of isolated_pin_label /
+                        # single_global_label / power_pin_not_driven: KiCad 10
+                        # aggregates both across the hierarchy, and the old
+                        # name-count heuristics only dropped true positives
+                        # (Issue #7161).  Connectivity is checked separately
+                        # by the orphan_label rule.
+
+                        # Re-attribute wire_dangling / endpoint_off_grid
+                        # violations from root sheet to the correct child
+                        # sheet based on position coordinates.
+                        raw_violations = reattribute_wire_dangling_violations(
+                            raw_violations, schematic_path
+                        )
+
+                        # Re-attribute symbol-based and label-based
+                        # violations from root sheet to the correct child
+                        # sheet based on component UUID / reference lookup.
+                        raw_violations = reattribute_symbol_violations(
+                            raw_violations, schematic_path
+                        )
+
+                        # No phantom wire_dangling filter: the one added for
+                        # #2205 keyed on a top-level ``pos`` KiCad 10 never
+                        # emits, so it was dead, and wiring it to the per-item
+                        # ``pos`` would drop real floating wires (Issue #7170).
+
+                        for violation in raw_violations:
+                            item_descs = [
+                                i.get("description", "")
+                                for i in violation.get("items", [])
+                                if i.get("description", "")
+                            ]
+
+                            desc = violation.get("description", "Unknown ERC issue")
+                            vtype = violation.get("type", "")
+
+                            # Enrich the message with item context for
+                            # label-relevant violation types, but only if the
+                            # description does not already contain the item
+                            # text (some KiCad versions inline it).
+                            if vtype in _LABEL_TYPES and item_descs:
+                                new_parts = [d for d in item_descs if d not in desc]
+                                if new_parts:
+                                    desc = f"{desc} [{'; '.join(new_parts)}]"
+
+                            issues.append(
+                                ValidationIssue(
+                                    severity=violation.get("severity", "warning"),
+                                    category="erc",
+                                    message=desc,
+                                    location=violation.get("_sheet_path", ""),
+                                    items=item_descs,
+                                )
+                            )
+        finally:
+            Path(output_file).unlink(missing_ok=True)
+
+    except subprocess.TimeoutExpired as e:
+        raise CheckNotRun(f"ERC check timed out after {e.timeout:g}s") from e
+    except Exception as e:
+        raise CheckNotRun(f"ERC check failed: {e}") from e
+
+    return issues
+
+
+def check_missing_footprints(schematic_path: str) -> list[ValidationIssue]:
+    """Check for symbols missing footprints.
+
+    Delegates symbol selection to the shared
+    :func:`iter_missing_footprint_symbols` predicate so this preflight
+    path and the assign-footprints / export-preflight paths can never
+    drift on their skip rules (power, ``kicad_tools_pwr:``, ``#PWR``,
+    DNP — see #3866). This is the single source of truth.
+
+    A footprint-less symbol is a HARD error (severity ``error``), not a
+    warning: the component cannot be placed on the PCB, so its nets can
+    never route and it silently drops out of the manufactured board
+    (issue #3866). The message names the actionable fix.
+    """
+    issues = []
+
+    def _on_sheet_error(node: object, exc: Exception) -> None:
+        location = node.get_path_string()  # type: ignore[attr-defined]
+        issues.append(
+            ValidationIssue(
+                severity="info",
+                category="footprint",
+                message=f"Skipped sheet {location}: {exc}",
+                location=location,
+            )
+        )
+
+    try:
+        for node, sym, _sch in iter_missing_footprint_symbols(
+            schematic_path, on_sheet_error=_on_sheet_error
+        ):
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="footprint",
+                    message=(
+                        f"Missing footprint: {sym.reference} ({sym.value}) "
+                        "-- run `kct sch assign-footprints "
+                        "<schematic> --assign-missing` to auto-assign"
+                    ),
+                    location=node.get_path_string(),
+                )
+            )
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="footprint",
+                message=f"Footprint check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_missing_values(schematic_path: str) -> list[ValidationIssue]:
+    """Check for symbols missing values."""
+    issues = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Check for missing value
+                    if not sym.value or sym.value in ("~", "?"):
+                        issues.append(
+                            ValidationIssue(
+                                severity="warning",
+                                category="value",
+                                message=f"Missing value: {sym.reference}",
+                                location=node.get_path_string(),
+                            )
+                        )
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="value",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="value",
+                message=f"Value check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_hierarchy(schematic_path: str) -> list[ValidationIssue]:
+    """Check hierarchy for issues."""
+    issues = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Check for unmatched hierarchical labels
+        label_map = {}  # label_name -> list of locations
+
+        for node in hierarchy.all_nodes():
+            # Labels in this sheet
+            for label in node.hierarchical_labels:
+                if label not in label_map:
+                    label_map[label] = []
+                label_map[label].append(("label", node.name))
+
+            # Pins on sheets
+            for sheet in node.sheets:
+                for pin in sheet.pins:
+                    if pin.name not in label_map:
+                        label_map[pin.name] = []
+                    label_map[pin.name].append(("pin", sheet.name))
+
+        # Check for labels without matching pins
+        for name, locations in label_map.items():
+            types = [loc[0] for loc in locations]
+            if types.count("label") > 0 and types.count("pin") == 0:
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="hierarchy",
+                        message=f"Hierarchical label '{name}' has no matching sheet pin",
+                        location=", ".join(loc[1] for loc in locations if loc[0] == "label"),
+                    )
+                )
+
+            # Check for pins without matching labels
+            if types.count("pin") > 0 and types.count("label") == 0:
+                sheet_names = [loc[1] for loc in locations if loc[0] == "pin"]
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="hierarchy",
+                        message=f"Sheet pin '{name}' has no matching hierarchical label in sub-schematic",
+                        location=", ".join(sheet_names),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="hierarchy",
+                message=f"Hierarchy check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_no_connect_on_input_pins(schematic_path: str) -> list[ValidationIssue]:
+    """Flag no-connect markers placed on pins typed 'input' in the library.
+
+    Input pins typically require a defined logic state.  Placing a no-connect
+    flag on one silences the unconnected-pin check but may hide a real design
+    issue (e.g. an active-low control left floating instead of being tied to a
+    pull resistor).
+
+    Only ``input`` pins are flagged -- ``passive``, ``no_connect``, and other
+    types are intentionally excluded because no-connect markers on those are
+    standard practice.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.schematic.models import Schematic as OpSchematic
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = OpSchematic.load(node.path)
+
+                nc_points = {(round(nc.x, 2), round(nc.y, 2)) for nc in sch.no_connects}
+                if not nc_points:
+                    continue
+
+                for sym in sch.symbols:
+                    # Skip power symbols -- their pins are always power_in/power_out
+                    if sym.symbol_def.lib_id.startswith("power:"):
+                        continue
+
+                    for pin in sym.symbol_def.pins:
+                        if pin.pin_type != "input":
+                            continue
+
+                        pos = sym.pin_position(pin.number)
+                        pos_r = (round(pos[0], 2), round(pos[1], 2))
+
+                        if pos_r in nc_points:
+                            display = pin.name if pin.name and pin.name != "~" else pin.number
+                            issues.append(
+                                ValidationIssue(
+                                    severity="info",
+                                    category="no_connect",
+                                    message=(
+                                        f"No-connect on input pin {display} "
+                                        f"(pin {pin.number}) of {sym.reference} "
+                                        f"({sym.value}) -- verify this pin does "
+                                        f"not need a defined state"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="no_connect",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="no_connect",
+                message=f"No-connect input pin check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
+    """Check global label driver/receiver direction mismatches.
+
+    Groups global labels by net name across all sheets and checks that each
+    net has at least one driver and at least one receiver.
+
+    Direction semantics:
+      - ``output`` / ``tri_state``: driver only
+      - ``input``: receiver only
+      - ``bidirectional`` / ``passive``: counts as both driver and receiver
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Collect global labels across all sheets: net_name -> list of (shape, sheet_path)
+        label_map: dict[str, list[tuple[str, str]]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                sheet_path = node.get_path_string()
+                for gl in sch.global_labels:
+                    if gl.text not in label_map:
+                        label_map[gl.text] = []
+                    label_map[gl.text].append((gl.shape, sheet_path))
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="global_label",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Shapes that count as driver (can source a signal)
+        driver_shapes = {"output", "tri_state", "bidirectional", "passive"}
+        # Shapes that count as receiver (can sink a signal)
+        receiver_shapes = {"input", "bidirectional", "passive"}
+
+        for net_name, entries in sorted(label_map.items()):
+            shapes = {shape for shape, _ in entries}
+            sheets = sorted({sheet for _, sheet in entries})
+            has_driver = bool(shapes & driver_shapes)
+            has_receiver = bool(shapes & receiver_shapes)
+
+            if not has_driver:
+                # All instances are input -- no driver exists
+                shapes_str = ", ".join(sorted(shapes))
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="global_label",
+                        message=(f"Global label '{net_name}' has no driver (shapes: {shapes_str})"),
+                        location=", ".join(sheets),
+                    )
+                )
+            elif not has_receiver:
+                # All instances are output/tri_state -- no receiver exists
+                shapes_str = ", ".join(sorted(shapes))
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="global_label",
+                        message=(
+                            f"Global label '{net_name}' has no receiver (shapes: {shapes_str})"
+                        ),
+                        location=", ".join(sheets),
+                    )
+                )
+
+            # Semantic shape-combination checks (only warn on real problems)
+            if len(shapes) > 1:
+                exclusive_drivers = shapes & {"output", "tri_state"}
+                # Multiple exclusive drivers on the same net is a potential
+                # driver conflict (e.g. output + tri_state, or the code could
+                # be extended to count instances).  Complementary pairs like
+                # output+input or tri_state+input are valid by design.
+                if len(exclusive_drivers) > 1:
+                    shape_locations: dict[str, list[str]] = {}
+                    for shape, sheet in entries:
+                        if shape not in shape_locations:
+                            shape_locations[shape] = []
+                        shape_locations[shape].append(sheet)
+                    detail = "; ".join(
+                        f"{s} on {', '.join(sorted(set(locs)))}"
+                        for s, locs in sorted(shape_locations.items())
+                    )
+                    issues.append(
+                        ValidationIssue(
+                            severity="warning",
+                            category="global_label",
+                            message=(
+                                f"Global label '{net_name}' has conflicting driver shapes: {detail}"
+                            ),
+                            location=", ".join(sheets),
+                        )
+                    )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="global_label",
+                message=f"Global label direction check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Connector pinout verification against known interface standards
+# ---------------------------------------------------------------------------
+
+# Interface standard catalog: each entry maps a standard name to its
+# identifier signals (used for matching) and expected pin-to-signal map.
+# The catalog is data-driven so new standards can be added without
+# changing check logic.
+
+_INTERFACE_CATALOG: list[dict] = [
+    {
+        "name": "ARM SWD 6-pin",
+        "identifier_signals": {"SWDIO", "SWCLK"},
+        "pin_count": 6,
+        "pinout": DebugHeader.SWD_6PIN_PINOUT,
+    },
+    {
+        "name": "ARM SWD 10-pin",
+        "identifier_signals": {"SWDIO", "SWCLK"},
+        "pin_count": 10,
+        "pinout": DebugHeader.SWD_10PIN_PINOUT,
+    },
+    {
+        "name": "ARM JTAG 20-pin",
+        "identifier_signals": {"TDI", "TDO", "TMS", "TCK"},
+        "pin_count": 20,
+        "pinout": DebugHeader.JTAG_20PIN_PINOUT,
+    },
+]
+
+# Power-rail net names that should be normalised to generic labels when
+# comparing against the standard pinout.  For example, "+3.3V" on a VCC
+# pin is correct, not a mismatch.
+_POWER_ALIASES: dict[str, str] = {
+    "+3.3V": "VCC",
+    "+3V3": "VCC",
+    "+5V": "VCC",
+    "+1.8V": "VCC",
+    "VBUS": "VCC",
+    "VDD": "VCC",
+    "VREF": "VCC",
+}
+
+
+def _normalise_signal(net_name: str | None) -> str | None:
+    """Normalise a net name for comparison against standard pinouts.
+
+    Strips common power-rail prefixes to their generic form so that
+    ``+3.3V`` matches the ``VCC`` entry in the standard pinout.
+    """
+    if net_name is None:
+        return None
+    return _POWER_ALIASES.get(net_name, net_name)
+
+
+def _match_interface(signal_set: set[str], pin_count: int) -> dict | None:
+    """Find the best matching interface standard for a set of signals.
+
+    Returns the catalog entry or ``None`` if no standard matches.
+    Matching requires all identifier signals to be present and the
+    connector pin count to equal the standard's expected count.
+    """
+    for entry in _INTERFACE_CATALOG:
+        if entry["pin_count"] != pin_count:
+            continue
+        if entry["identifier_signals"].issubset(signal_set):
+            return entry
+    return None
+
+
+def check_connector_pinout(schematic_path: str) -> list[ValidationIssue]:
+    """Verify connector pinouts against known interface standards.
+
+    For each generic connector symbol, builds a pin-to-net map using
+    the wire-graph flood-fill from ``sch_pin_map``, then checks whether
+    the net assignment matches a known standard (SWD, JTAG, etc.).
+
+    Only connectors whose signals match a known interface are checked;
+    connectors with arbitrary nets are silently skipped.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    # Only check generic connectors and pin headers
+                    if not (
+                        lib_id.startswith("Connector_Generic:")
+                        or lib_id.startswith("Connector_PinHeader_")
+                        or lib_id.startswith("Connector:")
+                    ):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+                    pin_count = len(pins_data)
+
+                    # Build {pin_number: normalised_net_name}
+                    actual_pinout: dict[str, str | None] = {}
+                    signal_set: set[str] = set()
+                    for pin_num, pin_info in pins_data.items():
+                        raw_net = pin_info.get("net")
+                        norm = _normalise_signal(raw_net)
+                        actual_pinout[pin_num] = norm
+                        if norm is not None:
+                            signal_set.add(norm)
+
+                    # Try to match against a known interface
+                    matched = _match_interface(signal_set, pin_count)
+                    if matched is None:
+                        continue
+
+                    standard_name = matched["name"]
+                    expected_pinout = matched["pinout"]
+
+                    # Compare each pin
+                    for pin_num, expected_signal in expected_pinout.items():
+                        # Skip non-functional pins (NC, KEY)
+                        if expected_signal in ("NC", "KEY"):
+                            continue
+
+                        actual_signal = actual_pinout.get(pin_num)
+                        expected_norm = _normalise_signal(expected_signal)
+
+                        if actual_signal is None:
+                            # Unconnected pin where a signal is expected
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="connector_pinout",
+                                    message=(
+                                        f"{ref} pin {pin_num}: expected "
+                                        f"{expected_signal}, got unconnected "
+                                        f"({standard_name})"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+                        elif actual_signal != expected_norm:
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="connector_pinout",
+                                    message=(
+                                        f"{ref} pin {pin_num}: expected "
+                                        f"{expected_signal}, got {actual_signal} "
+                                        f"({standard_name})"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="connector_pinout",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="connector_pinout",
+                message=f"Connector pinout check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue]:
+    """Check for symbols with missing or malformed ``(instances ...)`` blocks.
+
+    In KiCad 8+, every placed symbol must have an ``(instances ...)`` child
+    node that registers it to the **current project**.  Three failure modes
+    are possible, and ``kicad-cli sch export netlist`` silently drops the
+    symbol from the netlist in all three:
+
+    1. **Missing** — no ``(instances ...)`` block at all.  Reported as a
+       ``warning`` (legacy behaviour; affects hand-built fixtures most).
+    2. **Wrong project** — ``(instances ...)`` exists but only names a
+       different project (e.g. the sub-sheet's old standalone-project name,
+       not the current root project).  Reported as an ``error``.
+    3. **Loose project blocks** — ``(project ...)`` forms appear at
+       symbol-child indent (siblings of ``(instances)`` rather than children
+       of it).  Reported as an ``error``.
+
+    All three are mechanically fixable via ``kct sch repair-instances``.
+
+    The check skips:
+    - Power symbols (``lib_id`` starting with ``power:``) **for the
+      missing-instances case only** — power symbols with wrong-project or
+      loose-project blocks are still flagged because they too need repair.
+    - Symbols with both ``in_bom=no`` and ``on_board=no`` (graphical-only).
+
+    Detection reuses :func:`_extract_symbols_with_instance_info` from
+    ``sch_repair_instances`` so the validator and the repair tool share a
+    single structural-scan implementation (see issue #2664).
+    """
+    # Imports are local to avoid a top-level cycle: sch_repair_instances
+    # transitively imports from this file's package on some test paths.
+    from kicad_tools.cli.sch_re_annotate import _detect_project_info
+    from kicad_tools.cli.sch_repair_instances import (
+        _extract_symbols_with_instance_info,
+    )
+    from kicad_tools.cli.sch_wire_common import _collect_schematic_files
+
+    issues: list[ValidationIssue] = []
+
+    try:
+        root = Path(schematic_path)
+        all_files = _collect_schematic_files(root)
+        project_name, _root_uuid, _paths = _detect_project_info(root, all_files)
+
+        # Deduplicate multi-unit ICs per-sheet, mirroring the legacy
+        # implementation's (reference, lib_id) dedup.
+        # ``_extract_symbols_with_instance_info`` returns one entry per
+        # ``(symbol ...)`` block, i.e. one entry per *unit*, so a two-unit
+        # IC produces two entries that share (reference, lib_id) — we want
+        # one issue per logical component.
+        for sch_file in all_files:
+            try:
+                text = sch_file.read_text(encoding="utf-8")
+            except OSError as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="project_instances",
+                        message=(f"Skipped sheet {sch_file.name}: {e}"),
+                        location=sch_file.name,
+                    )
+                )
+                continue
+
+            try:
+                syms = _extract_symbols_with_instance_info(text, project_name)
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="project_instances",
+                        message=(f"Skipped sheet {sch_file.name}: {e}"),
+                        location=sch_file.name,
+                    )
+                )
+                continue
+
+            try:
+                loc = str(sch_file.relative_to(root.parent))
+            except ValueError:
+                loc = sch_file.name
+
+            seen: set[tuple[str, str]] = set()
+            for sym in syms:
+                ref = sym["reference"] or "?"
+                lib_id = sym["lib_id"]
+                value = sym.get("value") or "?"
+
+                # Skip graphical-only symbols (in_bom=no AND on_board=no).
+                # Note: _extract_symbols_with_instance_info already skips
+                # power symbols for the missing-instances case, but does
+                # *not* apply the graphical-only filter — we do it here so
+                # the filter is consistent across all three variants.
+                if not sym.get("in_bom", True) and not sym.get("on_board", True):
+                    continue
+
+                dedup_key = (ref, lib_id)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                fix_hint = f"Fix with: kct sch repair-instances {root.name}"
+
+                if sym.get("has_loose_project_blocks"):
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="project_instances",
+                            message=(
+                                f"Loose (project) blocks outside "
+                                f"(instances): {ref} ({value}) - netlist "
+                                f"export will silently drop this symbol. "
+                                f"{fix_hint}"
+                            ),
+                            location=loc,
+                        )
+                    )
+                elif sym.get("has_wrong_project"):
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="project_instances",
+                            message=(
+                                f"Wrong project name in (instances): "
+                                f"{ref} ({value}) - this entry names a "
+                                f"different project; netlist export will "
+                                f"drop pins. {fix_hint}"
+                            ),
+                            location=loc,
+                        )
+                    )
+                elif not sym.get("has_project_instance"):
+                    # Missing-instances case: preserve legacy behaviour by
+                    # skipping power symbols entirely.  (Power symbols with
+                    # wrong_project / loose_project_blocks are already
+                    # surfaced by _extract_symbols_with_instance_info and
+                    # handled by the branches above.)
+                    if lib_id.startswith("power:"):
+                        continue
+                    issues.append(
+                        ValidationIssue(
+                            severity="warning",
+                            category="project_instances",
+                            message=(
+                                f"Missing project instances block: "
+                                f"{ref} ({value}) - will be absent from "
+                                f"netlist and BOM. {fix_hint}"
+                            ),
+                            location=loc,
+                        )
+                    )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="project_instances",
+                message=f"Project instances check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
+    """Detect duplicate reference designators across hierarchical sheets.
+
+    Collects all component references across the full sheet hierarchy and
+    flags any reference that appears on multiple sheets with different
+    component UUIDs.  Multi-unit symbols (e.g. U1 unit 1 and U1 unit 2)
+    are expected to share the same reference and ``lib_id`` but occupy
+    different unit slots -- these are **not** flagged as duplicates.
+
+    A conflict is reported when a reference appears more than once with
+    either:
+    - a different ``lib_id`` (definitively different components), or
+    - the same ``lib_id`` but duplicate ``unit`` numbers (same unit placed
+      on two sheets -- not a multi-unit split).
+
+    Each placement of a repeated sheet is checked with its own designators:
+    a symbol's reference is the one its ``(instances (path ...))`` entry
+    records for that placement's :attr:`HierarchyNode.instance_path`
+    (issue #7616), so ``R1`` on ``/MCU_A`` and ``R101`` on ``/MCU_B`` do not
+    clash, while two placements that both resolve to ``R1`` do. A symbol
+    with no entry for the placement falls back to its single ``Reference``
+    property and is then counted once per file, not once per placement:
+    without per-placement data there is no evidence of a clash between
+    placements of the same symbol.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # ref -> list of (uuid, lib_id, value, unit, sheet_path)
+        ref_map: dict[str, list[tuple[str, str, str, int, str]]] = {}
+        # (file, symbol index) already counted via the property fallback.
+        # The index, not the UUID, so UUID-less symbols are not merged.
+        fallback_seen: set[tuple[str, int]] = set()
+        loaded: dict[str, Schematic] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = loaded.get(node.path)
+                if sch is None:
+                    sch = Schematic.load(node.path)
+                    loaded[node.path] = sch
+                sheet_path = node.get_path_string()
+                for sym_index, sym in enumerate(sch.symbols):
+                    # Skip power symbols -- they reuse refs like #PWR01
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    ref = sym.instance_reference(node.instance_path)
+                    if ref is None:
+                        seen_key = (node.path, sym_index)
+                        if seen_key in fallback_seen:
+                            continue
+                        fallback_seen.add(seen_key)
+                        ref = sym.reference
+                    if not ref or ref == "?" or ref.startswith("#"):
+                        continue
+
+                    if ref not in ref_map:
+                        ref_map[ref] = []
+                    ref_map[ref].append((sym.uuid, sym.lib_id, sym.value, sym.unit, sheet_path))
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="duplicate_reference",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        for ref, entries in sorted(ref_map.items()):
+            if len(entries) < 2:
+                continue
+
+            # Check whether all entries share the same lib_id
+            lib_ids = {lib_id for _, lib_id, _, _, _ in entries}
+
+            if len(lib_ids) > 1:
+                # Different components with same reference -- always a conflict
+                sheets = sorted({sp for _, _, _, _, sp in entries})
+                values = sorted({v for _, _, v, _, _ in entries if v})
+                val_str = f" (values: {', '.join(values)})" if values else ""
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="duplicate_reference",
+                        message=(f"Duplicate reference {ref} across sheets{val_str}"),
+                        location=", ".join(sheets),
+                    )
+                )
+            else:
+                # Same lib_id -- check for duplicate unit numbers which
+                # would indicate distinct components rather than a
+                # multi-unit split.
+                unit_counts: dict[int, list[str]] = {}
+                for _, _, _, unit, sheet_path in entries:
+                    if unit not in unit_counts:
+                        unit_counts[unit] = []
+                    unit_counts[unit].append(sheet_path)
+
+                dup_units = {u: sheets for u, sheets in unit_counts.items() if len(sheets) > 1}
+                if dup_units:
+                    all_sheets = sorted({s for sheets in dup_units.values() for s in sheets})
+                    value = entries[0][2]
+                    val_str = f" ({value})" if value else ""
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="duplicate_reference",
+                            message=(
+                                f"Duplicate reference {ref}{val_str} "
+                                f"-- same unit on multiple sheets"
+                            ),
+                            location=", ".join(all_sheets),
+                        )
+                    )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="duplicate_reference",
+                message=f"Duplicate reference check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Pin-net semantic mismatch detection
+# ---------------------------------------------------------------------------
+
+# Power-positive keywords (case-insensitive matching)
+_POWER_POSITIVE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "VCC",
+        "VDD",
+        "VBUS",
+        "3V3",
+        "5V",
+        "AVCC",
+        "DVCC",
+        "AVDD",
+        "DVDD",
+        "PVDD",
+        "IOVDD",
+    }
+)
+
+# Power-negative keywords
+_POWER_NEGATIVE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "GND",
+        "VSS",
+        "AGND",
+        "DGND",
+        "PGND",
+        "GNDA",
+        "GNDD",
+    }
+)
+
+# Bus protocol keyword groups: protocol -> set of signal keywords
+_BUS_PROTOCOLS: dict[str, set[str]] = {
+    "I2C": {"SDA", "SCL"},
+    "SPI": {"MOSI", "MISO", "SCK", "SCLK", "CS", "SS", "NSS"},
+    "I2S": {"BCLK", "LRCLK", "DIN", "DOUT", "SDIN", "SDOUT", "WS", "MCK"},
+    "UART": {"TX", "RX", "TXD", "RXD"},
+}
+
+# All bus signal keywords (flattened)
+_ALL_BUS_KEYWORDS: set[str] = set()
+for _proto_signals in _BUS_PROTOCOLS.values():
+    _ALL_BUS_KEYWORDS.update(_proto_signals)
+
+# Map each keyword back to its protocol
+_KEYWORD_TO_PROTOCOL: dict[str, str] = {}
+for _proto, _signals in _BUS_PROTOCOLS.items():
+    for _sig in _signals:
+        _KEYWORD_TO_PROTOCOL[_sig] = _proto
+
+
+def _tokenize_name(name: str) -> set[str]:
+    """Tokenize a pin or net name into uppercase keyword tokens.
+
+    Splits on ``_``, ``/``, ``-`` separators and camelCase boundaries
+    (lowercase-to-uppercase).  Does NOT split within uppercase+digit
+    sequences like ``I2S``, ``SPI0``, ``I2C1`` -- these are kept as
+    single tokens since they represent common protocol abbreviations.
+
+    Returns the set of uppercase tokens.
+    """
+    if not name or name == "~":
+        return set()
+    # Replace common separators with space
+    s = name.replace("/", " ").replace("_", " ").replace("-", " ")
+    # Insert spaces at camelCase boundaries (lowercase followed by uppercase)
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    return {t.upper() for t in s.split() if t}
+
+
+def _find_protocol(tokens: set[str]) -> str | None:
+    """Return the bus protocol name if any token matches a bus keyword."""
+    for token in tokens:
+        if token in _KEYWORD_TO_PROTOCOL:
+            return _KEYWORD_TO_PROTOCOL[token]
+    return None
+
+
+def _is_generic_pin_name(name: str) -> bool:
+    """Return True if a pin name is generic (numeric only, tilde, empty)."""
+    if not name or name == "~":
+        return True
+    # Purely numeric pin names like "1", "2"
+    stripped = name.strip()
+    if stripped.isdigit():
+        return True
+    # Names like "P1", "P2" on generic connectors
+    if re.match(r"^[Pp]\d+$", stripped):
+        return True
+    return False
+
+
+def _is_mcu_gpio_pin(pin_name: str) -> bool:
+    """Return True if *pin_name* matches common MCU GPIO naming patterns.
+
+    Recognised patterns:
+    - STM32-style: ``PA5``, ``PB3``, ``PC10`` (``P[A-K]\\d+``)
+    - Generic GPIO: ``GPIO5``, ``GPIO_25``
+    - ESP-style IO: ``IO5``, ``IO25``
+
+    These pin names represent the physical port identifier of an MCU
+    rather than the signal function.  The actual function is determined
+    by the MCU alternate-function table, so connecting ``PA5`` to
+    ``SPI_SCK`` is perfectly normal and should not trigger a warning.
+    """
+    if not pin_name:
+        return False
+    stripped = pin_name.strip().upper()
+    # STM32-style: PA0, PB12, PC3, PD10, etc.  Port letters A-K.
+    if re.match(r"^P[A-K]\d+$", stripped):
+        return True
+    # Generic GPIO: GPIO5, GPIO_25, GPIO25
+    if re.match(r"^GPIO[_]?\d+$", stripped):
+        return True
+    # ESP-style IO: IO5, IO25
+    if re.match(r"^IO\d+$", stripped):
+        return True
+    return False
+
+
+def _is_passive_component(lib_id: str) -> bool:
+    """Return True for passive component lib_ids (R, C, L, etc.)."""
+    # Common passive library prefixes
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    passive_prefixes = ("R", "C", "L", "D", "FB", "Ferrite")
+    # Match R, R_Small, C, C_Polarized, L, etc.
+    return any(part == prefix or part.startswith(prefix + "_") for prefix in passive_prefixes)
+
+
+def _is_resistor(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to a resistor symbol (R, R_Small, etc.)."""
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    return part == "R" or part.startswith("R_")
+
+
+def _is_capacitor(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to a capacitor symbol (C, C_Small, C_Polarized, etc.)."""
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    return part == "C" or part.startswith("C_")
+
+
+def _is_mcu(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to any MCU symbol.
+
+    Matches the ``MCU_`` prefix used by the standard KiCad symbol
+    libraries for MCUs across all vendors (ST, Microchip, Espressif,
+    Raspberry Pi, etc.).  Also accepts custom lib_ids that start with
+    common MCU family names.
+    """
+    upper = lib_id.upper()
+    # KiCad standard library MCU categories: MCU_ST, MCU_Microchip,
+    # MCU_NXP, MCU_Nordic, MCU_RaspberryPi, etc.
+    if "MCU_" in upper:
+        return True
+    # Custom libraries that use family names directly
+    for prefix in (
+        "STM32",
+        "ESP32",
+        "ESP8266",
+        "RP2040",
+        "RP2350",
+        "ATSAM",
+        "NRF52",
+        "NRF53",
+        "PIC",
+        "ATMEGA",
+        "ATTINY",
+    ):
+        if prefix in upper:
+            return True
+    return False
+
+
+def _is_stm32(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to an STM32 MCU symbol.
+
+    Matches the ``MCU_ST_STM32`` prefix used by the standard KiCad
+    symbol libraries for all STM32 families (F0/F1/F4/G0/H7/etc.).
+    """
+    return "MCU_ST_STM32" in lib_id
+
+
+def _is_nrst_pin(pin_name: str) -> bool:
+    """Return True if *pin_name* represents an NRST (reset) pin.
+
+    Handles common notations: ``NRST``, ``~{NRST}``, ``nRST``.
+    """
+    # Strip KiCad active-low markup: ~{NRST} -> NRST
+    cleaned = re.sub(r"~\{([^}]+)\}", r"\1", pin_name)
+    return cleaned.upper() == "NRST"
+
+
+def _parse_capacitance(value: str) -> float | None:
+    """Parse a capacitor value string to farads.
+
+    Handles common notations like ``100n``, ``100nF``, ``1u``, ``0.1uF``.
+    Returns ``None`` if the value cannot be parsed.
+    """
+    multipliers = {
+        "p": 1e-12,
+        "n": 1e-9,
+        "u": 1e-6,
+        "\u00b5": 1e-6,  # µ
+        "m": 1e-3,
+    }
+
+    value = value.strip()
+    if not value:
+        return None
+
+    # Remove farad unit suffix
+    for unit in ["F", "f"]:
+        value = value.rstrip(unit)
+
+    value = value.strip()
+    if not value:
+        return None
+
+    # Check for multiplier suffix
+    multiplier = 1.0
+    if value and value[-1] in multipliers:
+        multiplier = multipliers[value[-1]]
+        value = value[:-1]
+
+    value = value.strip()
+    if not value:
+        return None
+
+    try:
+        return float(value) * multiplier
+    except ValueError:
+        return None
+
+
+def _is_i2c_net(net_name: str) -> bool:
+    """Return True if *net_name* represents an I2C signal (SDA or SCL).
+
+    Uses ``_tokenize_name`` to split the name into tokens and checks for
+    I2C bus keywords.  This avoids false positives on names like ``PRESCALER``
+    because the tokenizer splits on separators and camelCase boundaries, so
+    ``PRESCALER`` tokenizes to ``{PRESCALER}`` which does not match ``SCL``.
+
+    Trailing digits are stripped from tokens to handle common variants like
+    ``SCL0``, ``SDA1`` where a bus instance number is appended directly.
+    """
+    tokens = _tokenize_name(net_name)
+    i2c_keywords = _BUS_PROTOCOLS["I2C"]  # {"SDA", "SCL"}
+    if tokens & i2c_keywords:
+        return True
+    # Also check tokens with trailing digits stripped (SCL0 -> SCL)
+    stripped_tokens = {re.sub(r"\d+$", "", t) for t in tokens}
+    return bool(stripped_tokens & i2c_keywords)
+
+
+def check_i2c_pullups(schematic_path: str) -> list[ValidationIssue]:
+    """Warn when I2C nets (SCL / SDA) lack pull-up resistors.
+
+    I2C is an open-drain bus -- without pull-up resistors the bus cannot
+    transition to logic high.  This check walks every sheet, identifies I2C
+    nets, and verifies that at least one resistor connects each I2C net to a
+    power-positive rail.
+
+    A pull-up is considered present when a component whose ``lib_id``
+    indicates a resistor (via ``_is_resistor``) has one pin on the I2C net
+    and another pin on a net whose name tokenizes to a power-positive keyword
+    (using ``_POWER_POSITIVE_KEYWORDS``).
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Global maps accumulated across all sheets:
+        #   i2c_nets: set of net names identified as I2C
+        #   net_to_sheets: net_name -> set of sheet paths where the net appears
+        #   resistor_nets: ref -> list of net names the resistor's pins connect to
+        i2c_nets: set[str] = set()
+        net_to_sheets: dict[str, set[str]] = {}
+        # ref -> [net_name, ...]  (one entry per pin)
+        resistor_pin_nets: dict[str, list[str]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        if net_name is None:
+                            continue
+
+                        # Track which sheets each net appears on
+                        net_to_sheets.setdefault(net_name, set()).add(sheet_path)
+
+                        # Identify I2C nets
+                        if _is_i2c_net(net_name):
+                            i2c_nets.add(net_name)
+
+                    # Track resistor pin-to-net connections
+                    if _is_resistor(lib_id):
+                        nets_for_ref: list[str] = []
+                        for pin_num, pin_info in pins_data.items():
+                            n = pin_info.get("net")
+                            if n is not None:
+                                nets_for_ref.append(n)
+                        # Accumulate across sheets (same ref may appear on
+                        # different sheets in hierarchical designs, but
+                        # typically a resistor only appears once).
+                        if ref not in resistor_pin_nets:
+                            resistor_pin_nets[ref] = nets_for_ref
+                        else:
+                            resistor_pin_nets[ref].extend(nets_for_ref)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="i2c_pullups",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Determine which I2C nets have a valid pull-up resistor.
+        # A valid pull-up: resistor has one pin on the I2C net AND another
+        # pin on a power-positive net.
+        def _is_power_positive_net(net_name: str) -> bool:
+            # Tokenize as-is first
+            tokens = _tokenize_name(net_name)
+            if tokens & _POWER_POSITIVE_KEYWORDS:
+                return True
+            # Strip leading +/- (common in power net names like +3V3, +5V)
+            stripped = net_name.lstrip("+-")
+            if stripped != net_name:
+                tokens2 = _tokenize_name(stripped)
+                if tokens2 & _POWER_POSITIVE_KEYWORDS:
+                    return True
+            # Match common voltage patterns: +3.3V, +5V, +1.8V, etc.
+            if re.match(r"^\+?\d+(\.\d+)?V$", net_name):
+                return True
+            return False
+
+        i2c_nets_with_pullup: set[str] = set()
+        for _ref, pin_net_list in resistor_pin_nets.items():
+            net_set = set(pin_net_list)
+            i2c_on_resistor = net_set & i2c_nets
+            power_on_resistor = {n for n in net_set if _is_power_positive_net(n)}
+            if i2c_on_resistor and power_on_resistor:
+                i2c_nets_with_pullup.update(i2c_on_resistor)
+
+        # Emit warnings for I2C nets missing pull-ups
+        for net_name in sorted(i2c_nets - i2c_nets_with_pullup):
+            sheets = sorted(net_to_sheets.get(net_name, set()))
+            sheet_str = ", ".join(sheets) if sheets else "unknown"
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="i2c_pullups",
+                    message=(f"I2C net '{net_name}' has no pull-up resistor to a power rail"),
+                    location=sheet_str,
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="i2c_pullups",
+                message=f"I2C pull-up check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# BOOT0 pull-down detection helpers and check
+# ---------------------------------------------------------------------------
+
+# SWD / debug signal keywords used to detect unrelated signal contamination
+_SWD_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "SWCLK",
+        "SWDIO",
+        "SWO",
+        "JTAG",
+        "TDI",
+        "TDO",
+        "TMS",
+        "TCK",
+        "NRST",
+        "NTRST",
+        "TRACECLK",
+        "TRACEDATA",
+    }
+)
+
+# Combined set of all bus + debug keywords for signal contamination checks
+_SIGNAL_CONTAMINATION_KEYWORDS: frozenset[str] = _ALL_BUS_KEYWORDS | _SWD_KEYWORDS
+
+
+def _is_stm32_symbol(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to an STM32 MCU symbol.
+
+    Checks for ``STM32`` as a case-insensitive substring in the library
+    identifier, which matches patterns like ``MCU_ST_STM32:STM32C011F6Px``
+    or ``STM32:STM32F401``.
+    """
+    return "STM32" in lib_id.upper()
+
+
+def _is_boot0_pin(pin_name: str) -> bool:
+    """Return True if *pin_name* represents a BOOT0 pin.
+
+    Uses ``_tokenize_name`` to extract tokens and checks for ``BOOT0``
+    as a discrete token.
+    """
+    tokens = _tokenize_name(pin_name)
+    return "BOOT0" in tokens
+
+
+def _is_switch_or_button(lib_id: str) -> bool:
+    """Return True if *lib_id* refers to a switch or button symbol."""
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    switch_prefixes = ("SW", "BTN", "Button", "Key")
+    return any(part == prefix or part.startswith(prefix + "_") for prefix in switch_prefixes)
+
+
+def check_boot0_pulldown(schematic_path: str) -> list[ValidationIssue]:
+    """Detect missing BOOT0 pull-down resistors on STM32 MCUs.
+
+    STM32 microcontrollers require the BOOT0 pin to be pulled low via a
+    resistor to GND for normal flash boot.  Without this pull-down, the
+    MCU may enter bootloader mode or behave unpredictably on power-up.
+
+    This check also flags BOOT0 pins that are tied to unrelated signal
+    nets (e.g. SWCLK, SPI_MOSI) which indicates a wiring error.
+
+    The detection strategy mirrors ``check_i2c_pullups``:
+
+    1. Walk all sheets and resolve pin maps.
+    2. Find STM32 symbols (``lib_id`` contains ``STM32``).
+    3. For each BOOT0 pin, collect the net name.
+    4. Verify a resistor bridges the net to a GND-family rail.
+    5. Check for unrelated signal contamination on the net.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Accumulated state across all sheets
+        boot0_nets: set[str] = set()
+        boot0_net_to_refs: dict[str, list[str]] = {}  # net -> [MCU refs]
+        net_to_sheets: dict[str, set[str]] = {}
+        resistor_pin_nets: dict[str, list[str]] = {}
+        # net -> set of (ref, lib_id, pin_name) for all connected pins
+        net_connections: dict[str, list[tuple[str, str, str]]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        if net_name is None:
+                            continue
+                        pin_name = pin_info.get("name", "")
+
+                        # Track which sheets each net appears on
+                        net_to_sheets.setdefault(net_name, set()).add(sheet_path)
+
+                        # Track all connections per net
+                        net_connections.setdefault(net_name, []).append((ref, lib_id, pin_name))
+
+                        # Identify BOOT0 nets on STM32 symbols
+                        if _is_stm32_symbol(lib_id) and _is_boot0_pin(pin_name):
+                            boot0_nets.add(net_name)
+                            boot0_net_to_refs.setdefault(net_name, []).append(ref)
+
+                    # Track resistor pin-to-net connections
+                    if _is_resistor(lib_id):
+                        nets_for_ref: list[str] = []
+                        for pin_num2, pin_info2 in pins_data.items():
+                            n = pin_info2.get("net")
+                            if n is not None:
+                                nets_for_ref.append(n)
+                        if ref not in resistor_pin_nets:
+                            resistor_pin_nets[ref] = nets_for_ref
+                        else:
+                            resistor_pin_nets[ref].extend(nets_for_ref)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="boot0_pulldown",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Check 1: Verify pull-down resistor to GND exists for each BOOT0 net
+        boot0_nets_with_pulldown: set[str] = set()
+        for _ref, pin_net_list in resistor_pin_nets.items():
+            net_set = set(pin_net_list)
+            boot0_on_resistor = net_set & boot0_nets
+            gnd_on_resistor = {n for n in net_set if _is_power_negative_net(n)}
+            if boot0_on_resistor and gnd_on_resistor:
+                boot0_nets_with_pulldown.update(boot0_on_resistor)
+
+        for net_name in sorted(boot0_nets - boot0_nets_with_pulldown):
+            sheets = sorted(net_to_sheets.get(net_name, set()))
+            sheet_str = ", ".join(sheets) if sheets else "unknown"
+            mcu_refs = boot0_net_to_refs.get(net_name, [])
+            ref_str = ", ".join(sorted(set(mcu_refs)))
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="boot0_pulldown",
+                    message=(
+                        f"STM32 BOOT0 net '{net_name}' on {ref_str} has no "
+                        f"pull-down resistor to GND"
+                    ),
+                    location=sheet_str,
+                )
+            )
+
+        # Check 2: Detect signal contamination on BOOT0 nets
+        for net_name in sorted(boot0_nets):
+            connections = net_connections.get(net_name, [])
+            for conn_ref, conn_lib_id, conn_pin_name in connections:
+                # Skip the MCU itself
+                if _is_stm32_symbol(conn_lib_id):
+                    continue
+                # Skip resistors (pull-down or current-limiting)
+                if _is_resistor(conn_lib_id):
+                    continue
+                # Skip passive components (capacitors, inductors, etc.)
+                if _is_passive_component(conn_lib_id):
+                    continue
+                # Skip switches/buttons (legitimate for entering bootloader)
+                if _is_switch_or_button(conn_lib_id):
+                    continue
+                # Skip power symbols
+                if conn_lib_id.startswith("power:"):
+                    continue
+                # Skip pins that are themselves BOOT0-named
+                if _is_boot0_pin(conn_pin_name):
+                    continue
+
+                # Check if the pin name contains signal keywords
+                pin_tokens = _tokenize_name(conn_pin_name)
+                signal_match = pin_tokens & _SIGNAL_CONTAMINATION_KEYWORDS
+                if signal_match:
+                    sheets = sorted(net_to_sheets.get(net_name, set()))
+                    sheet_str = ", ".join(sheets) if sheets else "unknown"
+                    mcu_refs = boot0_net_to_refs.get(net_name, [])
+                    ref_str = ", ".join(sorted(set(mcu_refs)))
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="boot0_pulldown",
+                            message=(
+                                f"STM32 BOOT0 net '{net_name}' on {ref_str} is "
+                                f"tied to signal pin {conn_ref}/{conn_pin_name} "
+                                f"(contains {', '.join(sorted(signal_match))})"
+                            ),
+                            location=sheet_str,
+                        )
+                    )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="boot0_pulldown",
+                message=f"BOOT0 pull-down check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_pin_net_semantic_mismatch(schematic_path: str) -> list[ValidationIssue]:
+    """Flag pins where the connected net name has no semantic overlap with the pin name.
+
+    For each non-power, non-passive symbol, resolves pin-to-net assignments
+    and compares signal-type keywords between pin names and net names.
+    Also detects systematic N-pin offset patterns within a single symbol.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    # Skip power symbols
+                    if lib_id.startswith("power:"):
+                        continue
+
+                    # Skip passive components
+                    if _is_passive_component(lib_id):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    # Collect mismatches for offset detection
+                    # List of (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                    mismatches: list[tuple[int, str, str, str | None, str | None]] = []
+
+                    for pin_num, pin_info in pins_data.items():
+                        pin_name = pin_info.get("name", "")
+                        net_name = pin_info.get("net")
+                        pin_type = pin_info.get("type", "")
+
+                        # Skip unconnected pins
+                        if net_name is None:
+                            continue
+
+                        # Skip generic pin names
+                        if _is_generic_pin_name(pin_name):
+                            continue
+
+                        # Skip power pins (they are checked by power_short)
+                        if pin_type in ("power_in", "power_out"):
+                            continue
+
+                        pin_tokens = _tokenize_name(pin_name)
+                        net_tokens = _tokenize_name(net_name)
+
+                        if not pin_tokens or not net_tokens:
+                            continue
+
+                        pin_protocol = _find_protocol(pin_tokens)
+                        net_protocol = _find_protocol(net_tokens)
+
+                        # Check for protocol mismatch
+                        if pin_protocol and net_protocol and pin_protocol != net_protocol:
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+                            continue
+
+                        # Check for bus keyword mismatch
+                        pin_bus = pin_tokens & _ALL_BUS_KEYWORDS
+                        net_bus = net_tokens & _ALL_BUS_KEYWORDS
+
+                        if pin_bus and net_bus and not (pin_bus & net_bus):
+                            # Both have bus keywords but no overlap
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+                        elif net_bus and not pin_bus and net_protocol:
+                            # Net has bus keywords but pin does not -- the net
+                            # is likely on the wrong pin (e.g., I2S_DIN on a
+                            # MODE pin).  However, MCU GPIO pins (PA5, PB3,
+                            # GPIO25, IO5, etc.) are named after their physical
+                            # port, not their signal function.  Connecting
+                            # SPI_SCK to PA5 is normal via the alternate-
+                            # function table, so suppress for MCU components.
+                            if _is_mcu(lib_id) and _is_mcu_gpio_pin(pin_name):
+                                continue
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+                        elif pin_bus and not net_bus and pin_protocol:
+                            # Pin has bus keywords but net does not -- a bus
+                            # pin connected to a non-bus net
+                            pin_num_int = int(pin_num) if pin_num.isdigit() else -1
+                            mismatches.append(
+                                (pin_num_int, pin_name, net_name, pin_protocol, net_protocol)
+                            )
+
+                    if not mismatches:
+                        continue
+
+                    # Check for systematic offset pattern
+                    offset_detected = _detect_systematic_offset(
+                        mismatches, pins_data, ref, node.get_path_string(), issues
+                    )
+
+                    if not offset_detected:
+                        # Emit individual warnings for each mismatch
+                        for _, pin_name, net_name, pin_proto, net_proto in mismatches:
+                            proto_info = ""
+                            if pin_proto and net_proto and pin_proto != net_proto:
+                                proto_info = f" (pin expects {pin_proto}, net is {net_proto})"
+                            issues.append(
+                                ValidationIssue(
+                                    severity="warning",
+                                    category="pin_assignment",
+                                    message=(
+                                        f"{ref}: pin '{pin_name}' connected to "
+                                        f"net '{net_name}'{proto_info}"
+                                    ),
+                                    location=node.get_path_string(),
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="pin_assignment",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="pin_assignment",
+                message=f"Pin assignment check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def _detect_systematic_offset(
+    mismatches: list[tuple[int, str, str, str | None, str | None]],
+    pins_data: dict[str, dict],
+    ref: str,
+    location: str,
+    issues: list[ValidationIssue],
+) -> bool:
+    """Detect if mismatches form a systematic offset pattern.
+
+    If 3 or more mismatches all share the same offset between the pin
+    they are on and the pin whose name matches the net, emit a single
+    high-severity diagnostic.
+
+    Returns True if a systematic offset was detected and reported.
+    """
+    if len(mismatches) < 3:
+        return False
+
+    # Build pin_name -> pin_number map for the symbol
+    name_to_num: dict[str, int] = {}
+    for pnum, pinfo in pins_data.items():
+        pname = pinfo.get("name", "")
+        if pname and pname != "~" and pnum.isdigit():
+            name_to_num[pname.upper()] = int(pnum)
+
+    # For each mismatch, figure out the offset: which pin number has a name
+    # matching the net's bus keywords?
+    offsets: list[int] = []
+    for pin_num_int, pin_name, net_name, _, _ in mismatches:
+        if pin_num_int < 0:
+            continue
+
+        net_tokens = _tokenize_name(net_name)
+        net_bus = net_tokens & _ALL_BUS_KEYWORDS
+
+        if not net_bus:
+            continue
+
+        # Find which pin on this symbol has a name matching the net's keyword
+        for keyword in net_bus:
+            if keyword in name_to_num:
+                expected_pin = name_to_num[keyword]
+                offset = pin_num_int - expected_pin
+                if offset != 0:
+                    offsets.append(offset)
+                break
+
+    if len(offsets) < 3:
+        return False
+
+    # Check if most offsets are the same
+    from collections import Counter
+
+    offset_counts = Counter(offsets)
+    most_common_offset, count = offset_counts.most_common(1)[0]
+
+    if count >= 3:
+        issues.append(
+            ValidationIssue(
+                severity="error",
+                category="pin_assignment",
+                message=(
+                    f"{ref}: systematic wiring offset detected -- "
+                    f"{count} pins are shifted by {most_common_offset:+d} positions"
+                ),
+                location=location,
+            )
+        )
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# SWD debug pin routing check
+# ---------------------------------------------------------------------------
+
+# Known SWD/JTAG dedicated pins on STM32 MCUs.
+# Maps alternate-function pin name -> expected net keyword.
+_ARM_DEBUG_PINS: dict[str, str] = {
+    "PA13": "SWDIO",
+    "PA14": "SWCLK",
+    # Extended JTAG pins on STM32F4/F7/H7 families:
+    "PA15": "JTDI",
+    "PB3": "JTDO",
+    "PB4": "JTRST",
+}
+
+# The core SWD pair that is universal across all STM32 families.
+_SWD_CORE_PINS: frozenset[str] = frozenset({"PA13", "PA14"})
+
+
+def _is_stm32_mcu(lib_id: str) -> bool:
+    """Return True if *lib_id* identifies an STM32 MCU symbol."""
+    # KiCad standard library uses "MCU_ST_STM32*" or "MCU_ST:STM32*".
+    # Normalise to uppercase for comparison.
+    upper = lib_id.upper()
+    # Match both "MCU_ST:STM32..." and "MCU_ST_STM32..." prefixes.
+    if "MCU_ST" in upper and "STM32" in upper:
+        return True
+    # Also accept lib_id that starts directly with "STM32" (custom libs).
+    if upper.startswith("STM32"):
+        return True
+    return False
+
+
+def _swd_net_ok(net_name: str, expected_keyword: str) -> bool:
+    """Return True if *net_name* is a valid SWD/JTAG net for *expected_keyword*.
+
+    Matches if:
+    - Any token in the net name equals the expected keyword (e.g. "SWDIO")
+    - The net name contains "SWD" and the keyword starts with "SWD"
+    - The net name contains "JTAG" or "JT" and the keyword starts with "JT"
+    """
+    tokens = _tokenize_name(net_name)
+    if expected_keyword in tokens:
+        return True
+    # Accept broader SWD/JTAG net names (e.g. "SWD_IO", "JTAG_TDI")
+    if expected_keyword.startswith("SWD") and "SWD" in tokens:
+        return True
+    if expected_keyword.startswith("JT") and ("JTAG" in tokens or "JT" in tokens):
+        return True
+    # Accept "SWDIO" inside a compound name like "MCU_SWDIO"
+    upper = net_name.upper()
+    if expected_keyword in upper:
+        return True
+    return False
+
+
+def _swd_override_present(net_name: str) -> bool:
+    """Return True if the net name indicates explicit GPIO reuse."""
+    tokens = _tokenize_name(net_name)
+    if "GPIO" in tokens:
+        return True
+    # Also match "GPIO13" etc. where the tokenizer keeps it as one token.
+    return any(t.startswith("GPIO") for t in tokens)
+
+
+def check_swd_pin_routing(schematic_path: str) -> list[ValidationIssue]:
+    """Check that SWD debug pins on STM32 MCUs are routed to SWD nets.
+
+    For each STM32 MCU symbol (identified by ``lib_id``), resolves pin-to-net
+    assignments via ``resolve_pin_map``.  For each known SWD debug pin
+    (PA13 = SWDIO, PA14 = SWCLK), verifies that the connected net name
+    contains the expected SWD keyword.
+
+    Unconnected SWD pins emit a warning (debug port unusable).  Mis-routed
+    SWD pins (connected to a non-SWD net) emit an error.
+
+    The check is suppressed for a pin when the net name contains "GPIO"
+    (explicit reuse acknowledgment).
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    if not _is_stm32_mcu(lib_id):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    # Build pin_name -> (pin_num, pin_info) lookup
+                    name_to_pin: dict[str, tuple[str, dict]] = {}
+                    for pin_num, pin_info in pins_data.items():
+                        pname = pin_info.get("name", "")
+                        if pname:
+                            name_to_pin[pname.upper()] = (pin_num, pin_info)
+
+                    for debug_pin, expected_kw in _ARM_DEBUG_PINS.items():
+                        pin_entry = name_to_pin.get(debug_pin.upper())
+                        if pin_entry is None:
+                            # Pin not present on this MCU variant -- skip
+                            continue
+
+                        _pin_num, pin_info = pin_entry
+                        net_name = pin_info.get("net")
+
+                        if net_name is None:
+                            # Only warn about unconnected *core* SWD pins
+                            # (PA13/PA14).  Extended JTAG pins (PA15, PB3,
+                            # PB4) are commonly left unconnected in
+                            # SWD-only designs.
+                            if debug_pin.upper() not in _SWD_CORE_PINS:
+                                continue
+                            issues.append(
+                                ValidationIssue(
+                                    severity="warning",
+                                    category="swd_routing",
+                                    message=(
+                                        f"{ref}: SWD pin {debug_pin} is "
+                                        f"unconnected (expected {expected_kw} "
+                                        f"net) -- debug port unusable"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+                            continue
+
+                        # Check for explicit GPIO override
+                        if _swd_override_present(net_name):
+                            continue
+
+                        # Verify net matches expected SWD keyword
+                        if not _swd_net_ok(net_name, expected_kw):
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="swd_routing",
+                                    message=(
+                                        f"{ref}: SWD pin {debug_pin} "
+                                        f"connected to net '{net_name}' "
+                                        f"(expected {expected_kw})"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="swd_routing",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="swd_routing",
+                message=f"SWD pin routing check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Power net short detection (VCC-to-GND)
+# ---------------------------------------------------------------------------
+
+
+def check_power_net_shorts(schematic_path: str) -> list[ValidationIssue]:
+    """Detect nets that connect both VCC-type and GND-type power pins.
+
+    Builds a net-to-pin-types map from ``resolve_pin_map()`` across all
+    sheets.  For each net, flags an error if it contains both power-positive
+    and power-negative pins.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # net_name -> {"positive_pins": [...], "negative_pins": [...], "sheets": set}
+        net_power_map: dict[str, dict] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        if net_name is None:
+                            continue
+
+                        pin_name = pin_info.get("name", "")
+                        pin_type = pin_info.get("type", "")
+
+                        # Only consider power pins
+                        if pin_type not in ("power_in", "power_out"):
+                            continue
+
+                        pin_tokens = _tokenize_name(pin_name)
+                        is_positive = bool(pin_tokens & _POWER_POSITIVE_KEYWORDS)
+                        is_negative = bool(pin_tokens & _POWER_NEGATIVE_KEYWORDS)
+
+                        if not is_positive and not is_negative:
+                            continue
+
+                        if net_name not in net_power_map:
+                            net_power_map[net_name] = {
+                                "positive_pins": [],
+                                "negative_pins": [],
+                                "sheets": set(),
+                            }
+
+                        entry_data = net_power_map[net_name]
+                        pin_desc = f"{ref}.{pin_name} (pin {pin_num})"
+                        if is_positive:
+                            entry_data["positive_pins"].append(pin_desc)
+                        if is_negative:
+                            entry_data["negative_pins"].append(pin_desc)
+                        entry_data["sheets"].add(sheet_path)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="power_short",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Check for nets with both positive and negative power pins
+        for net_name, data in sorted(net_power_map.items()):
+            if data["positive_pins"] and data["negative_pins"]:
+                pos_str = ", ".join(data["positive_pins"][:3])
+                neg_str = ", ".join(data["negative_pins"][:3])
+                sheets = ", ".join(sorted(data["sheets"]))
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="power_short",
+                        message=(
+                            f"Net '{net_name}' connects power and ground: "
+                            f"positive [{pos_str}], negative [{neg_str}]"
+                        ),
+                        location=sheets,
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="power_short",
+                message=f"Power short check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Power pin polarity error detection (VDD on GND net, GND on VCC net)
+# ---------------------------------------------------------------------------
+
+
+def _is_power_positive_net(net_name: str) -> bool:
+    """Return True if *net_name* represents a positive power rail.
+
+    Checks tokenized keywords against ``_POWER_POSITIVE_KEYWORDS`` and
+    common voltage patterns like ``+3.3V``, ``+5V``, ``3V3``, etc.
+    """
+    tokens = _tokenize_name(net_name)
+    if tokens & _POWER_POSITIVE_KEYWORDS:
+        return True
+    # Strip leading +/- (common in power net names like +3V3, +5V)
+    stripped = net_name.lstrip("+-")
+    if stripped != net_name:
+        tokens2 = _tokenize_name(stripped)
+        if tokens2 & _POWER_POSITIVE_KEYWORDS:
+            return True
+    # Match common voltage patterns: +3.3V, +5V, +1.8V, etc.
+    if re.match(r"^\+?\d+(\.\d+)?V$", net_name):
+        return True
+    return False
+
+
+def _is_power_negative_net(net_name: str) -> bool:
+    """Return True if *net_name* represents a ground/negative rail.
+
+    Checks tokenized keywords against ``_POWER_NEGATIVE_KEYWORDS``.
+    """
+    tokens = _tokenize_name(net_name)
+    if tokens & _POWER_NEGATIVE_KEYWORDS:
+        return True
+    # Strip leading +/- just in case
+    stripped = net_name.lstrip("+-")
+    if stripped != net_name:
+        tokens2 = _tokenize_name(stripped)
+        if tokens2 & _POWER_NEGATIVE_KEYWORDS:
+            return True
+    return False
+
+
+def check_power_pin_polarity(schematic_path: str) -> list[ValidationIssue]:
+    """Detect power pins connected to nets of opposite polarity.
+
+    For example, a VDD pin connected to a GND net, or a GND pin connected
+    to a +3.3V net.  This is different from the ``power_short`` check which
+    detects VCC and GND pins on the *same* net -- polarity errors involve a
+    single pin on a net whose polarity contradicts the pin name.
+
+    Power symbols (``lib_id`` starting with ``power:``) are skipped since
+    they define nets rather than consume them.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+
+                    # Skip power symbols -- they define nets, not consume them
+                    if lib_id.startswith("power:"):
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    for pin_num, pin_info in pins_data.items():
+                        net_name = pin_info.get("net")
+                        pin_name = pin_info.get("name", "")
+                        pin_type = pin_info.get("type", "")
+
+                        if net_name is None:
+                            # Warn when a recognized power pin has no
+                            # resolved net -- silently skipping could
+                            # hide reversed wiring.
+                            if pin_type in ("power_in", "power_out"):
+                                _pin_tokens = _tokenize_name(pin_name)
+                                if _pin_tokens & (
+                                    _POWER_POSITIVE_KEYWORDS | _POWER_NEGATIVE_KEYWORDS
+                                ):
+                                    issues.append(
+                                        ValidationIssue(
+                                            severity="warning",
+                                            category="power_polarity",
+                                            message=(
+                                                f"Power pin {ref}.{pin_name} "
+                                                f"(pin {pin_num}) has no "
+                                                f"resolved net -- polarity "
+                                                f"cannot be verified"
+                                            ),
+                                            location=sheet_path,
+                                        )
+                                    )
+                            continue
+
+                        # Only consider power pins
+                        if pin_type not in ("power_in", "power_out"):
+                            continue
+
+                        pin_tokens = _tokenize_name(pin_name)
+                        pin_is_positive = bool(pin_tokens & _POWER_POSITIVE_KEYWORDS)
+                        pin_is_negative = bool(pin_tokens & _POWER_NEGATIVE_KEYWORDS)
+
+                        # Skip ambiguous or unrecognized pin names
+                        if not pin_is_positive and not pin_is_negative:
+                            continue
+
+                        net_is_positive = _is_power_positive_net(net_name)
+                        net_is_negative = _is_power_negative_net(net_name)
+
+                        # Skip nets that don't match any power classification
+                        if not net_is_positive and not net_is_negative:
+                            continue
+
+                        # Detect polarity mismatch
+                        if pin_is_positive and net_is_negative:
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="power_polarity",
+                                    message=(
+                                        f"Power pin polarity error: {ref}.{pin_name} "
+                                        f"(pin {pin_num}) is a positive supply pin "
+                                        f"but connected to negative net '{net_name}'"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+                        elif pin_is_negative and net_is_positive:
+                            issues.append(
+                                ValidationIssue(
+                                    severity="error",
+                                    category="power_polarity",
+                                    message=(
+                                        f"Power pin polarity error: {ref}.{pin_name} "
+                                        f"(pin {pin_num}) is a ground pin "
+                                        f"but connected to positive net '{net_name}'"
+                                    ),
+                                    location=sheet_path,
+                                )
+                            )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="power_polarity",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="power_polarity",
+                message=f"Power polarity check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIssue]:
+    """Detect components where every pin is floating (no wire, label, or no-connect).
+
+    A fully unconnected component is one where ``resolve_pin_map()`` reports
+    ``net=None`` for every pin **and** no no-connect marker is placed at any
+    of its pin positions.  Such components are almost always placement errors.
+
+    Exclusions (to avoid false positives):
+    - Power symbols (``lib_id`` starts with ``power:``) -- already skipped by
+      ``resolve_pin_map``
+    - DNP symbols
+    - Graphical-only symbols (``in_bom=no`` and ``on_board=no``)
+    - Symbols whose library pins are all typed ``no_connect``
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import (
+            _snap_coord,
+            _to_coord,
+            resolve_pin_map,
+        )
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                # Collect wire endpoints (plus junctions and label positions)
+                # for connectivity proximity checks and near-miss reporting.
+                wire_endpoints: set[tuple[int, int]] = set()
+                for wire in sch.wires:
+                    wire_endpoints.add(_to_coord(*wire.start))
+                    wire_endpoints.add(_to_coord(*wire.end))
+                for junc_sexp in sch.sexp.find_children("junction"):
+                    jat = junc_sexp.find("at")
+                    if jat:
+                        jx = jat.get_float(0)
+                        jy = jat.get_float(1)
+                        if jx is not None and jy is not None:
+                            wire_endpoints.add(_to_coord(jx, jy))
+                for lbl_sexp in sch.sexp.find_children("label"):
+                    lat = lbl_sexp.find("at")
+                    if lat:
+                        lx = lat.get_float(0)
+                        ly = lat.get_float(1)
+                        if lx is not None and ly is not None:
+                            wire_endpoints.add(_to_coord(lx, ly))
+
+                # Collect no-connect marker positions from the raw S-expression.
+                nc_points: set[tuple[float, float]] = set()
+                for nc_sexp in sch.sexp.find_children("no_connect"):
+                    at = nc_sexp.find("at")
+                    if at:
+                        x = at.get_float(0)
+                        y = at.get_float(1)
+                        if x is not None and y is not None:
+                            nc_points.add((round(x, 2), round(y, 2)))
+
+                # Build a set of DNP / graphical-only references for exclusion.
+                # Also collect per-reference metadata for the error message.
+                skip_refs: set[str] = set()
+                ref_values: dict[str, str] = {}
+                for sym in sch.symbols:
+                    ref = sym.reference
+                    if not ref:
+                        continue
+                    ref_values[ref] = sym.value or "?"
+
+                    if sym.lib_id.startswith("power:"):
+                        skip_refs.add(ref)
+                    if sym.dnp:
+                        skip_refs.add(ref)
+                    if not sym.in_bom and not sym.on_board:
+                        skip_refs.add(ref)
+
+                for ref, entry in pin_map.items():
+                    if ref in skip_refs:
+                        continue
+
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+                    if not pins_data:
+                        continue
+
+                    # Check if all library pin types are "no_connect"
+                    pin_types = {p.get("type", "") for p in pins_data.values()}
+                    if pin_types and pin_types <= {"no_connect"}:
+                        continue
+
+                    # Check connectivity: any pin with a net means connected
+                    has_any_connection = False
+                    has_any_nc_marker = False
+
+                    for pin_num, pin_info in pins_data.items():
+                        if pin_info.get("net") is not None:
+                            has_any_connection = True
+                            break
+
+                        # Check for no-connect marker at this pin position
+                        pos = pin_info.get("position")
+                        if pos:
+                            pos_r = (round(pos[0], 2), round(pos[1], 2))
+                            if pos_r in nc_points:
+                                has_any_nc_marker = True
+
+                    if has_any_connection:
+                        continue
+                    if has_any_nc_marker:
+                        continue
+
+                    # Secondary check: BFS reported net=None for every pin,
+                    # but a wire endpoint (or junction/label) may still
+                    # physically touch the pin.  This happens when all paths
+                    # from the pin to a named net pass through another
+                    # component's pin (barrier-pin blocking in the BFS).
+                    # If *any* pin has a wire at or within snap tolerance,
+                    # the component is wired and should not be flagged.
+                    if wire_endpoints:
+                        has_wire_at_pin = False
+                        for _pn, _pi in pins_data.items():
+                            _pos = _pi.get("position")
+                            if not _pos:
+                                continue
+                            pc = _to_coord(_pos[0], _pos[1])
+                            if pc in wire_endpoints:
+                                has_wire_at_pin = True
+                                break
+                            snapped = _snap_coord(pc, wire_endpoints)
+                            if snapped != pc:
+                                has_wire_at_pin = True
+                                break
+                        if has_wire_at_pin:
+                            continue
+
+                    # All pins are floating with no no-connect markers.
+                    # Compute near-miss distances for diagnostics.
+                    value = ref_values.get(ref, entry.get("lib_id", "?"))
+                    near_miss_parts: list[str] = []
+                    if wire_endpoints:
+                        for pin_num, pin_info in pins_data.items():
+                            pos = pin_info.get("position")
+                            if not pos:
+                                continue
+                            pc = _to_coord(pos[0], pos[1])
+                            min_dist = min(
+                                abs(pc[0] - wp[0]) + abs(pc[1] - wp[1]) for wp in wire_endpoints
+                            )
+                            # Convert integer units (0.1mm) to mm
+                            dist_mm = min_dist * 0.1
+                            coord_str = f"at ({pos[0]:.2f}, {pos[1]:.2f})"
+                            if dist_mm <= 5.0:
+                                near_miss_parts.append(
+                                    f"pin {pin_num} {coord_str}: {dist_mm:.1f}mm"
+                                )
+                            else:
+                                near_miss_parts.append(
+                                    f"pin {pin_num} {coord_str}: no wire within 5mm"
+                                )
+
+                    msg = f"Fully unconnected component: {ref} ({value}) -- all pins are floating"
+                    if near_miss_parts:
+                        msg += f" (nearest wire: {', '.join(near_miss_parts)})"
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            category="unconnected_component",
+                            message=msg,
+                            location=sheet_path,
+                        )
+                    )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="unconnected_component",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="unconnected_component",
+                message=f"Unconnected component check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_nrst_filter_cap(schematic_path: str) -> list[ValidationIssue]:
+    """Warn when an STM32 MCU's NRST pin lacks a filter capacitor to GND.
+
+    ST hardware design guidelines (AN2586, AN4488) require a 100 nF capacitor
+    from NRST to GND for noise filtering on all STM32 families.  Without it
+    the MCU can suffer spurious resets from conducted or radiated noise.
+
+    The check walks every sheet, identifies STM32 symbols, locates the NRST
+    net, and verifies that at least one capacitor connects the NRST net to a
+    ground rail.  If the capacitor value can be parsed, it also warns when the
+    value falls outside the recommended 10 nF - 1 uF range.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Accumulated across all sheets:
+        #   nrst_nets: mapping from net_name -> (ref, sheet_path) of the STM32
+        #   cap_pin_nets: ref -> list of (net_name, value) per pin
+        nrst_nets: dict[str, tuple[str, str]] = {}
+        # ref -> [(net_name, ...), ...]
+        cap_pin_nets: dict[str, list[str]] = {}
+        cap_values: dict[str, str] = {}  # ref -> value string
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+                sheet_path = node.get_path_string()
+
+                # Build a map of ref -> value from schematic symbols for
+                # capacitor value lookups.
+                ref_to_value: dict[str, str] = {}
+                for sym in sch.symbols:
+                    r = sym.reference
+                    if r:
+                        ref_to_value[r] = sym.value or ""
+
+                for ref, entry in pin_map.items():
+                    lib_id: str = entry.get("lib_id", "")
+                    pins_data: dict[str, dict] = entry.get("pins", {})
+
+                    # Identify STM32 MCUs and find their NRST net
+                    if _is_stm32(lib_id):
+                        for pin_num, pin_info in pins_data.items():
+                            pin_name = pin_info.get("name", "")
+                            net_name = pin_info.get("net")
+                            if net_name is not None and _is_nrst_pin(pin_name):
+                                nrst_nets[net_name] = (ref, sheet_path)
+
+                    # Track capacitor pin-to-net connections
+                    if _is_capacitor(lib_id):
+                        nets_for_ref: list[str] = []
+                        for pin_num, pin_info in pins_data.items():
+                            n = pin_info.get("net")
+                            if n is not None:
+                                nets_for_ref.append(n)
+                        if ref not in cap_pin_nets:
+                            cap_pin_nets[ref] = nets_for_ref
+                        else:
+                            cap_pin_nets[ref].extend(nets_for_ref)
+                        # Store value for range checking
+                        if ref not in cap_values:
+                            cap_values[ref] = ref_to_value.get(ref, "")
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="nrst_filter",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Check each NRST net for a capacitor to GND.
+        for net_name, (mcu_ref, sheet_path) in nrst_nets.items():
+            found_cap = False
+            out_of_range_cap: str | None = None
+
+            for cap_ref, pin_net_list in cap_pin_nets.items():
+                net_set = set(pin_net_list)
+                if net_name not in net_set:
+                    continue
+                # Check if the other pin(s) connect to a GND net
+                other_nets = net_set - {net_name}
+                gnd_on_cap = {n for n in other_nets if _is_power_negative_net(n)}
+                if not gnd_on_cap:
+                    continue
+
+                # Capacitor connects NRST to GND -- check value range
+                val_str = cap_values.get(cap_ref, "")
+                if val_str:
+                    farads = _parse_capacitance(val_str)
+                    if farads is not None and (farads < 10e-9 or farads > 1e-6):
+                        out_of_range_cap = (
+                            f"NRST filter capacitor {cap_ref} ({val_str}) on "
+                            f"net '{net_name}' is outside the recommended "
+                            f"10nF-1uF range for {mcu_ref}"
+                        )
+                        # Still counts as present even if out of range
+                    found_cap = True
+                else:
+                    # No parseable value but capacitor is present
+                    found_cap = True
+
+            if not found_cap:
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="nrst_filter",
+                        message=(
+                            f"STM32 MCU {mcu_ref} NRST net '{net_name}' has no "
+                            f"filter capacitor to GND (ST recommends 100nF)"
+                        ),
+                        location=sheet_path,
+                    )
+                )
+            elif out_of_range_cap:
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="nrst_filter",
+                        message=out_of_range_cap,
+                        location=sheet_path,
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="nrst_filter",
+                message=f"NRST filter cap check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_symbol_footprint_pin_mismatch(
+    schematic_path: str, lib_manager=None
+) -> list[ValidationIssue]:
+    """Check that each symbol's pin count matches its assigned footprint's pad count.
+
+    Compares the number of pins in the embedded ``lib_symbols`` entry against
+    the number of pads in the assigned footprint (from ``COMMON_FOOTPRINTS``,
+    on-disk ``.kicad_mod`` files, or a name-based heuristic).
+
+    Power symbols and DNP components are skipped.  A 1-pad surplus on the
+    footprint side is treated as a likely thermal/exposed pad and reported at
+    *info* severity rather than *warning*.
+    """
+    from kicad_tools.pcb.footprints import get_pad_count
+    from kicad_tools.schema.library import LibrarySymbol
+
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+
+                # Build a cache of lib_id -> LibrarySymbol for this sheet
+                lib_sym_cache: dict[str, LibrarySymbol] = {}
+                if sch.lib_symbols is not None:
+                    for sym_sexp in sch.lib_symbols.find_all("symbol"):
+                        ls = LibrarySymbol.from_sexp(sym_sexp)
+                        lib_sym_cache[ls.name] = ls
+
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Skip DNP
+                    if sym.dnp:
+                        continue
+
+                    # Need both a footprint and a lib_symbols entry
+                    fp = sym.footprint
+                    if not fp or fp == "~":
+                        continue
+
+                    lib_sym = lib_sym_cache.get(sym.lib_id)
+                    if lib_sym is None and lib_manager is not None:
+                        lib_sym = lib_manager.get_symbol(sym.lib_id)
+                    if lib_sym is None:
+                        continue
+
+                    symbol_pins = lib_sym.pin_count
+                    if symbol_pins == 0:
+                        continue
+
+                    fp_pads = get_pad_count(fp)
+                    if fp_pads is None:
+                        continue
+
+                    if symbol_pins == fp_pads:
+                        continue
+
+                    # Thermal/exposed pad tolerance: if footprint has exactly
+                    # one more pad than the symbol has pins, it is likely an
+                    # exposed thermal pad.
+                    if fp_pads - symbol_pins == 1:
+                        issues.append(
+                            ValidationIssue(
+                                severity="info",
+                                category="pin_footprint_mismatch",
+                                message=(
+                                    f"{sym.reference}: footprint '{fp}' has {fp_pads} pads "
+                                    f"but symbol has {symbol_pins} pins "
+                                    f"(+1 pad may be thermal/exposed)"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+                    else:
+                        issues.append(
+                            ValidationIssue(
+                                severity="warning",
+                                category="pin_footprint_mismatch",
+                                message=(
+                                    f"{sym.reference}: footprint '{fp}' has {fp_pads} pads "
+                                    f"but symbol has {symbol_pins} pins"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="pin_footprint_mismatch",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="pin_footprint_mismatch",
+                message=f"Pin-footprint mismatch check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# lib_symbols definition mismatch detection
+# ---------------------------------------------------------------------------
+
+
+def check_lib_symbols_mismatch(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
+    """Check that every placed symbol's ``lib_id`` has a matching ``lib_symbols`` entry.
+
+    The ``lib_symbols`` section of a ``.kicad_sch`` file contains embedded
+    copies of library symbol definitions.  When a placed symbol's ``lib_id``
+    (e.g. ``Regulator_Linear:AP2112K-3.3``) has no matching entry in
+    ``lib_symbols``, downstream consumers such as ERC, pin-map, and other
+    validate checks silently fail because ``get_lib_symbol()`` returns ``None``.
+
+    Power symbols (``lib_id`` starting with ``power:``) are skipped because
+    KiCad handles them separately.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+
+                # Collect the set of lib_id names defined in lib_symbols
+                defined_lib_ids: set[str] = set()
+                if sch.lib_symbols is not None:
+                    for sym_sexp in sch.lib_symbols.find_all("symbol"):
+                        name = sym_sexp.get_string(0)
+                        if name:
+                            defined_lib_ids.add(name)
+
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    if sym.lib_id and sym.lib_id not in defined_lib_ids:
+                        hint = ""
+                        if lib_manager is not None and lib_manager.get_symbol(sym.lib_id):
+                            hint = " (resolvable from --lib-path)"
+                        issues.append(
+                            ValidationIssue(
+                                severity="error",
+                                category="lib_symbols_mismatch",
+                                message=(
+                                    f"{sym.reference}: placed symbol references "
+                                    f"lib_id '{sym.lib_id}' which has no matching "
+                                    f"entry in lib_symbols{hint}"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="lib_symbols_mismatch",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="lib_symbols_mismatch",
+                message=f"lib_symbols mismatch check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Matched channel symmetry detection
+# ---------------------------------------------------------------------------
+
+# Suffix pairs that indicate matched output channels.  Each tuple is
+# (suffix_a, suffix_b, pair_type) where pair_type controls severity:
+#   "stereo"       -> warning
+#   "differential" -> error
+_CHANNEL_SUFFIX_PAIRS: list[tuple[str, str, str]] = [
+    ("_L", "_R", "stereo"),
+    ("_P", "_N", "differential"),
+    ("_A", "_B", "stereo"),
+    ("+", "-", "differential"),
+]
+
+
+def _find_matched_pairs(
+    net_names: set[str],
+) -> list[tuple[str, str, str, str]]:
+    """Identify matched net pairs from a set of net names.
+
+    Returns a deduplicated list of (net_a, net_b, base_name, pair_type).
+    """
+    pairs: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for net in sorted(net_names):
+        for suffix_a, suffix_b, pair_type in _CHANNEL_SUFFIX_PAIRS:
+            if net.endswith(suffix_a):
+                base = net[: -len(suffix_a)]
+                partner = base + suffix_b
+                if partner in net_names:
+                    key = (min(net, partner), max(net, partner))
+                    if key not in seen:
+                        seen.add(key)
+                        pairs.append((net, partner, base, pair_type))
+    return pairs
+
+
+def _classify_passive(lib_id: str) -> str | None:
+    """Return a passive type tag or None if not a passive component.
+
+    Recognized types: "R", "C", "L", "FB" (ferrite bead).
+    """
+    part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    for prefix in ("R", "C", "L", "FB", "Ferrite"):
+        if part == prefix or part.startswith(prefix + "_"):
+            # Normalize ferrite variants to "FB"
+            if prefix in ("FB", "Ferrite"):
+                return "FB"
+            return prefix
+    return None
+
+
+_BYPASS_CAP_THRESHOLD_FARADS = 1e-6  # 1uF -- caps >= this are bypass/decoupling
+
+
+def _parse_capacitance_farads(value: str) -> float | None:
+    """Parse a capacitance value string to Farads.
+
+    Returns None if the value cannot be parsed.
+    """
+    if not value:
+        return None
+    value = value.strip().upper()
+    # Normalize unicode micro
+    value = value.replace("\u039c", "U").replace("\u00b5", "U").replace("\u03bc", "U")
+    multipliers = {
+        "F": 1.0,
+        "MF": 1e-3,
+        "UF": 1e-6,
+        "NF": 1e-9,
+        "PF": 1e-12,
+    }
+    m = re.match(r"^([\d.]+)\s*([A-Z]+)?$", value)
+    if m:
+        try:
+            number = float(m.group(1))
+        except ValueError:
+            return None
+        unit = m.group(2) or "F"
+        if unit in multipliers:
+            return number * multipliers[unit]
+    return None
+
+
+def _is_bypass_cap(value: str) -> bool:
+    """Return True if *value* represents a bypass/decoupling cap (>= 1uF)."""
+    farads = _parse_capacitance_farads(value)
+    if farads is None:
+        return False
+    return farads >= _BYPASS_CAP_THRESHOLD_FARADS
+
+
+@dataclass
+class _ChannelFilterSignature:
+    """Describes the passive filtering topology attached to a net."""
+
+    shunt_caps: int = 0
+    bypass_caps: int = 0
+    shunt_resistors: int = 0
+    series_components: list[str] = field(default_factory=list)
+    shunt_values: list[str] = field(default_factory=list)
+    series_values: list[str] = field(default_factory=list)
+
+    @property
+    def total_passives(self) -> int:
+        return (
+            self.shunt_caps + self.bypass_caps + self.shunt_resistors + len(self.series_components)
+        )
+
+    def describe_diff(self, other: "_ChannelFilterSignature") -> str | None:
+        """Return a human-readable description of differences, or None if equal."""
+        diffs: list[str] = []
+        if self.shunt_caps != other.shunt_caps:
+            diffs.append(f"shunt caps: {self.shunt_caps} vs {other.shunt_caps}")
+        if self.bypass_caps != other.bypass_caps:
+            diffs.append(f"bypass caps: {self.bypass_caps} vs {other.bypass_caps}")
+        if self.shunt_resistors != other.shunt_resistors:
+            diffs.append(f"shunt resistors: {self.shunt_resistors} vs {other.shunt_resistors}")
+        self_series_types = sorted(self.series_components)
+        other_series_types = sorted(other.series_components)
+        if self_series_types != other_series_types:
+            diffs.append(f"series components: {self_series_types} vs {other_series_types}")
+        if not diffs:
+            return None
+        return "; ".join(diffs)
+
+
+def _build_filter_signature(
+    net_name: str,
+    pin_map_all: dict[str, dict],
+    all_net_names: set[str],
+) -> _ChannelFilterSignature:
+    """Build a filter signature for a single net.
+
+    Walks one hop through passive components attached to *net_name*:
+    - A shunt component has one pin on *net_name* and the other on a
+      ground/power net (not another signal net in the matched set).
+    - A series component has one pin on *net_name* and the other on
+      another signal-path net (not ground/power).
+    """
+    sig = _ChannelFilterSignature()
+
+    for ref, entry in pin_map_all.items():
+        lib_id: str = entry.get("lib_id", "")
+        ptype = _classify_passive(lib_id)
+        if ptype is None:
+            continue
+
+        pins_data: dict[str, dict] = entry.get("pins", {})
+        pin_nets: list[str | None] = [p.get("net") for p in pins_data.values()]
+
+        # Component must have at least one pin on our target net
+        if net_name not in pin_nets:
+            continue
+
+        # Determine the "other" nets (pins not on our target net).
+        # Keep None entries: a cap with one pin on the signal net and the
+        # other pin unresolved is likely a DC-blocking / AC-coupling cap
+        # (series component) rather than a shunt.
+        other_nets_raw = [n for n in pin_nets if n != net_name]
+
+        if not other_nets_raw:
+            # Both pins on same net -- skip
+            continue
+
+        # Get value for reporting
+        value = entry.get("value", "")
+
+        for other_net in other_nets_raw:
+            if other_net is None:
+                # Unresolved far-side pin -- treat as series (DC-blocking)
+                sig.series_components.append(ptype)
+                if value:
+                    sig.series_values.append(value)
+            elif _is_power_negative_net(other_net):
+                # Shunt to ground
+                if ptype == "C":
+                    if _is_bypass_cap(value):
+                        sig.bypass_caps += 1
+                    else:
+                        sig.shunt_caps += 1
+                    if value:
+                        sig.shunt_values.append(value)
+                elif ptype == "R":
+                    sig.shunt_resistors += 1
+                    if value:
+                        sig.shunt_values.append(value)
+            elif _is_power_positive_net(other_net):
+                # Pull-up or shunt to power -- treat as shunt
+                if ptype == "R":
+                    sig.shunt_resistors += 1
+                    if value:
+                        sig.shunt_values.append(value)
+            else:
+                # Series component to another signal net
+                sig.series_components.append(ptype)
+                if value:
+                    sig.series_values.append(value)
+
+    return sig
+
+
+def check_matched_channel_symmetry(schematic_path: str) -> list[ValidationIssue]:
+    """Detect asymmetric filtering across matched output channels.
+
+    Identifies matched net pairs (e.g. AUDIO_L/AUDIO_R, USB_D_P/USB_D_N)
+    and compares the passive component topology attached to each channel.
+    Flags warnings (stereo) or errors (differential) when the filter
+    signatures differ.
+
+    Only pairs where at least one channel has passive components are
+    compared, to avoid false positives on nets that happen to share
+    matched naming but are not filtered outputs.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.cli.sch_pin_map import resolve_pin_map
+
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Accumulate a combined pin_map and net name set across all sheets.
+        combined_pin_map: dict[str, dict] = {}
+        all_net_names: set[str] = set()
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                pin_map = resolve_pin_map(sch)
+
+                for ref, entry in pin_map.items():
+                    # Merge (first occurrence wins for multi-sheet)
+                    if ref not in combined_pin_map:
+                        combined_pin_map[ref] = entry
+                    else:
+                        combined_pin_map[ref]["pins"].update(entry.get("pins", {}))
+
+                    for pin_info in entry.get("pins", {}).values():
+                        net = pin_info.get("net")
+                        if net is not None:
+                            all_net_names.add(net)
+
+            except Exception as e:
+                issues.append(
+                    ValidationIssue(
+                        severity="info",
+                        category="matched_channel_symmetry",
+                        message=f"Skipped sheet {node.get_path_string()}: {e}",
+                        location=node.get_path_string(),
+                    )
+                )
+
+        # Find matched pairs
+        pairs = _find_matched_pairs(all_net_names)
+
+        for net_a, net_b, base_name, pair_type in pairs:
+            sig_a = _build_filter_signature(net_a, combined_pin_map, all_net_names)
+            sig_b = _build_filter_signature(net_b, combined_pin_map, all_net_names)
+
+            # Only compare if at least one channel has passive components
+            if sig_a.total_passives == 0 and sig_b.total_passives == 0:
+                continue
+
+            diff = sig_a.describe_diff(sig_b)
+            if diff is None:
+                continue
+
+            severity = "error" if pair_type == "differential" else "warning"
+            issues.append(
+                ValidationIssue(
+                    severity=severity,
+                    category="matched_channel_symmetry",
+                    message=(f"Asymmetric filtering on matched pair {net_a}/{net_b}: {diff}"),
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="matched_channel_symmetry",
+                message=f"Matched channel symmetry check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_bom_variety(schematic_path: str) -> list[ValidationIssue]:
+    """Flag same-value passives that use multiple distinct footprints.
+
+    Groups passive components (R, C, L, etc.) by (component_type, value) and
+    emits a warning when any group uses more than one footprint.  Components
+    whose value includes voltage/wattage qualifiers (e.g. "100nF 25V" vs
+    "100nF 50V") naturally form separate groups because the full value string
+    is used as the grouping key.
+
+    Skips power symbols, DNP symbols, and symbols missing footprint or value.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Mapping: (component_type, value) -> {footprint: [references]}
+        groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Skip DNP
+                    if sym.dnp:
+                        continue
+
+                    # Must be a passive
+                    if not _is_passive_component(sym.lib_id):
+                        continue
+
+                    # Must have both value and footprint
+                    if not sym.value or sym.value in ("~", "?"):
+                        continue
+                    if not sym.footprint or sym.footprint == "~":
+                        continue
+
+                    # Determine component type from reference prefix
+                    ref = sym.reference or ""
+                    comp_type = ""
+                    for ch in ref:
+                        if ch.isalpha():
+                            comp_type += ch
+                        else:
+                            break
+                    if not comp_type:
+                        continue
+
+                    # Extract just the footprint name (strip library prefix)
+                    fp = sym.footprint
+                    fp_name = fp.split(":")[-1] if ":" in fp else fp
+
+                    key = (comp_type, sym.value)
+                    if key not in groups:
+                        groups[key] = {}
+                    if fp_name not in groups[key]:
+                        groups[key][fp_name] = []
+                    groups[key][fp_name].append(ref)
+
+            except Exception:
+                pass  # Skip sheets that fail to load
+
+        # Emit warnings for groups with multiple footprints
+        for (comp_type, value), fp_map in sorted(groups.items()):
+            if len(fp_map) <= 1:
+                continue
+
+            # Build descriptive message listing footprints and their references
+            parts = []
+            for fp_name, refs in sorted(fp_map.items()):
+                sorted_refs = sorted(
+                    refs,
+                    key=lambda r: (
+                        r.rstrip("0123456789"),
+                        int("".join(c for c in r if c.isdigit()) or "0"),
+                    ),
+                )
+                parts.append(f"{fp_name} ({', '.join(sorted_refs)})")
+            detail = ", ".join(parts)
+
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="bom_variety",
+                    message=f"BOM variety: {value} uses multiple footprints - {detail} -- consider consolidating",
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="bom_variety",
+                message=f"BOM variety check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Value consistency check (mixed voltage-rating formatting in capacitors)
+# ---------------------------------------------------------------------------
+
+_VALUE_VOLTAGE_RE = re.compile(
+    r"^(\d+(?:\.\d+)?\s*(?:p|n|u|\xb5|m)?F)\s+(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _split_cap_value(value: str) -> tuple[str, str | None]:
+    """Return (base_value, voltage_qualifier_or_None).
+
+    Examples:
+        "100nF 25V" -> ("100nF", "25V")
+        "10uF 16V"  -> ("10uF", "16V")
+        "100nF"     -> ("100nF", None)
+    """
+    m = _VALUE_VOLTAGE_RE.match(value.strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return value.strip(), None
+
+
+def check_value_consistency(schematic_path: str) -> list[ValidationIssue]:
+    """Detect capacitors with the same base value but mixed voltage-rating formatting.
+
+    Groups capacitors by their base capacitance value (e.g. "100nF") and flags
+    groups where some components include a voltage qualifier (e.g. "100nF 25V")
+    and others do not.  This catches inconsistent BOM formatting that
+    check_bom_variety() cannot detect because it groups by full value string.
+
+    Only flags groups with a mix of qualified and unqualified values.  Groups
+    where ALL values include voltage qualifiers (even different ones) are not
+    flagged.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+
+        # Mapping: base_value -> {"with_voltage": [(ref, full_value)], "without_voltage": [ref]}
+        groups: dict[str, dict[str, list]] = {}
+
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+                for sym in sch.symbols:
+                    # Skip power symbols
+                    if sym.lib_id.startswith("power:"):
+                        continue
+
+                    # Skip DNP
+                    if sym.dnp:
+                        continue
+
+                    # Only capacitors (ref prefix C)
+                    if not _is_capacitor(sym.lib_id):
+                        continue
+
+                    # Must have a value
+                    if not sym.value or sym.value in ("~", "?"):
+                        continue
+
+                    # Must have a footprint (to be a real placed component)
+                    if not sym.footprint or sym.footprint == "~":
+                        continue
+
+                    ref = sym.reference or ""
+                    if not ref:
+                        continue
+
+                    base_value, voltage = _split_cap_value(sym.value)
+
+                    if base_value not in groups:
+                        groups[base_value] = {"with_voltage": [], "without_voltage": []}
+
+                    if voltage is not None:
+                        groups[base_value]["with_voltage"].append((ref, sym.value))
+                    else:
+                        groups[base_value]["without_voltage"].append(ref)
+
+            except Exception:
+                pass  # Skip sheets that fail to load
+
+        # Emit warnings for groups with mixed formatting
+        for base_value, subsets in sorted(groups.items()):
+            with_v = subsets["with_voltage"]
+            without_v = subsets["without_voltage"]
+
+            if not with_v or not without_v:
+                continue  # All consistent (all have or all lack voltage)
+
+            # Sort references for stable output
+            with_parts = sorted(with_v, key=lambda t: t[0])
+            without_parts = sorted(without_v)
+
+            with_str = ", ".join(f"{ref} ({val})" for ref, val in with_parts)
+            without_str = ", ".join(without_parts)
+
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="value_consistency",
+                    message=(
+                        f"Value consistency: capacitors with base value '{base_value}' "
+                        f"have mixed voltage-rating formatting -- "
+                        f"with voltage: {with_str}; "
+                        f"without voltage: {without_str} "
+                        f"-- consider standardizing all to include voltage or "
+                        f"moving voltage to a separate property"
+                    ),
+                )
+            )
+
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="value_consistency",
+                message=f"Value consistency check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def build_lib_manager(lib_paths: list[str] | None):
+    """Build a :class:`LibraryManager` from ``--lib-path`` directories (#7065).
+
+    Follows the loading pattern of ``sch_check_connections``: every
+    ``*.kicad_sym`` directly under each path is loaded, and the path is also
+    registered as a search path.  Missing or unreadable locations warn on
+    stderr and are skipped.  Returns ``None`` when ``lib_paths`` is empty.
+
+    The manager deliberately does *not* include the schematic's embedded
+    symbols: embedded ``lib_symbols`` stay authoritative and this manager is
+    only consulted as a fallback on a miss.
+    """
+    if not lib_paths:
+        return None
+    from kicad_tools.schema.library import LibraryManager
+
+    manager = LibraryManager()
+    for path in lib_paths:
+        p = Path(path)
+        if not p.is_dir():
+            print(f"Warning: --lib-path is not a directory: {path}", file=sys.stderr)
+            continue
+        manager.add_search_path(str(p))
+        for lib_file in sorted(p.glob("*.kicad_sym")):
+            try:
+                manager.load_library(str(lib_file))
+            except Exception as e:
+                print(f"Warning: Could not load {lib_file}: {e}", file=sys.stderr)
+    return manager
+
+
+def _resolve_lib_symbols_for_design(
+    schematic_path: str,
+    lib_manager=None,
+) -> tuple[list[tuple[str, Schematic]], dict[str, object]]:
+    """Build the (sheets, lib_symbols) inputs used by the new ERC rules.
+
+    Walks the schematic hierarchy starting at ``schematic_path``,
+    loads every sheet, and resolves every ``lib_id`` used to a
+    :class:`LibrarySymbol` via the schematic's embedded
+    ``lib_symbols`` section.  When ``lib_manager`` is given (``--lib-path``),
+    it is consulted only for ids the embedded section cannot resolve.
+
+    Returns:
+        Tuple ``(sheets, lib_symbols)`` where ``sheets`` is a list of
+        ``(sheet_path_string, Schematic)`` pairs and ``lib_symbols``
+        maps each placed ``lib_id`` to its resolved
+        :class:`LibrarySymbol`.  Returns empty values if the
+        hierarchy cannot be loaded.
+    """
+    sheets: list[tuple[str, Schematic]] = []
+    lib_symbols: dict[str, object] = {}
+
+    try:
+        hierarchy = build_hierarchy(schematic_path)
+        for node in hierarchy.all_nodes():
+            try:
+                sch = Schematic.load(node.path)
+            except Exception:
+                continue
+            sheets.append((str(node.path), sch))
+            for sym in sch.symbols:
+                if sym.lib_id and sym.lib_id not in lib_symbols:
+                    resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is None and lib_manager is not None:
+                        resolved = lib_manager.get_symbol(sym.lib_id)
+                    if resolved is not None:
+                        lib_symbols[sym.lib_id] = resolved
+    except Exception:
+        # Fall back to single-sheet loading.
+        try:
+            sch = Schematic.load(schematic_path)
+            sheets = [(schematic_path, sch)]
+            for sym in sch.symbols:
+                if sym.lib_id and sym.lib_id not in lib_symbols:
+                    resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is None and lib_manager is not None:
+                        resolved = lib_manager.get_symbol(sym.lib_id)
+                    if resolved is not None:
+                        lib_symbols[sym.lib_id] = resolved
+        except Exception:
+            return [], {}
+
+    return sheets, lib_symbols
+
+
+def check_orphan_labels(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
+    """Detect labels asserting a named signal that only reach one pin.
+
+    A label with a meaningful name (e.g., ``UART_TX``) syntactically
+    implies a multi-endpoint net.  When a global or local label is
+    attached to exactly one pin and no other pin or sheet asserts the
+    same name, the implied counterpart connection is missing -- a
+    real schematic defect that KiCad's built-in ERC does NOT catch.
+
+    See :mod:`kicad_tools.validate.sch_orphan_label` for the
+    underlying algorithm and the chorus-test-revA forensic context
+    (issue #2613).
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.validate.sch_orphan_label import find_orphan_labels
+
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path, lib_manager)
+        if not sheets:
+            return issues
+        findings = find_orphan_labels(sheets, lib_symbols)
+        for f in findings:
+            issues.append(
+                ValidationIssue(
+                    severity=f.kind,
+                    category="orphan_label",
+                    message=(
+                        f"Label '{f.label_name}' asserts a named net but only "
+                        f"reaches one pin ({f.pin_ref}); the implied "
+                        f"counterpart connection is missing"
+                    ),
+                    location=f"{Path(f.sheet).name} @ "
+                    f"({f.position_mm[0]:.2f}, {f.position_mm[1]:.2f}) mm",
+                    items=[f.label_name, f.pin_ref],
+                )
+            )
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="orphan_label",
+                message=f"Orphan-label check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def check_wire_stubs(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
+    """Detect wires whose free endpoint is short of a pin by N grid units.
+
+    Catches the "off-by-one-grid" defect class found in the
+    chorus-test-revA schematic (issue #2613): wires drawn on a
+    2.54 mm grid that terminate one or more grid steps short of the
+    intended pin (e.g. seven wires in ``connectors.kicad_sch``
+    terminating at ``x=81.28`` while J2 pins are at ``x=83.82``).
+
+    See :mod:`kicad_tools.validate.sch_wire_stub` for the underlying
+    algorithm.
+    """
+    issues: list[ValidationIssue] = []
+
+    try:
+        from kicad_tools.validate.sch_wire_stub import find_wire_stubs
+
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path, lib_manager)
+        if not sheets:
+            return issues
+        findings = find_wire_stubs(sheets, lib_symbols)
+        for f in findings:
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="wire_stub",
+                    message=(
+                        f"Wire endpoint at ({f.dangling_endpoint[0]:.2f}, "
+                        f"{f.dangling_endpoint[1]:.2f}) mm is "
+                        f"{f.grid_steps_short} grid step(s) short of pin "
+                        f"{f.candidate_pin_ref} at "
+                        f"({f.candidate_pin_position[0]:.2f}, "
+                        f"{f.candidate_pin_position[1]:.2f}) mm "
+                        f"-- extend the wire by {f.grid_steps_short * 2.54:.2f} "
+                        f"mm along {f.axis} to land on the pin"
+                    ),
+                    location=f"{Path(f.sheet).name} @ "
+                    f"({f.dangling_endpoint[0]:.2f}, "
+                    f"{f.dangling_endpoint[1]:.2f}) mm",
+                    items=[f.candidate_pin_ref],
+                )
+            )
+    except Exception as e:
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="wire_stub",
+                message=f"Wire-stub check failed: {e}",
+            )
+        )
+
+    return issues
+
+
+def require_loadable_root(schematic_path: str) -> None:
+    """Raise if the root schematic cannot be loaded (#7028).
+
+    Each check below degrades a load failure into a warning, so without this
+    an empty or unparseable root would "pass" with a handful of warnings.
+    """
+    Schematic.load(schematic_path)
+
+
+def validate_schematic(
+    schematic_path: str,
+    lib_paths: list[str] | None = None,
+    skip_checks: set[str] | None = None,
+) -> ValidationResult:
+    """Run all validation checks.
+
+    Args:
+        schematic_path: Path to the root ``.kicad_sch`` file.
+        lib_paths: Optional directories of ``.kicad_sym`` files used as a
+            fallback when a placed symbol is absent from the embedded
+            ``lib_symbols`` (embedded symbols stay authoritative).
+        skip_checks: Set of check category names to skip (e.g.
+            ``{"swd_routing", "i2c_pullups"}``).
+    """
+    require_loadable_root(schematic_path)
+    result = ValidationResult(schematic=schematic_path)
+    _skip: set[str] = skip_checks or set()
+
+    lib_manager = build_lib_manager(lib_paths)
+
+    def _run(category: str, fn, *, with_libs: bool = False):
+        if category in _skip:
+            return
+        try:
+            if with_libs and lib_manager is not None:
+                issues = fn(schematic_path, lib_manager)
+            else:
+                issues = fn(schematic_path)
+        except CheckNotRun as e:
+            result.checks_not_run.append({"check": category, "reason": e.reason})
+            return
+        # Only a check that actually completed is listed as run (#7094).
+        result.checks_run.append(category)
+        result.issues.extend(issues)
+
+    # ERC
+    _run("erc", run_erc)
+
+    # Missing footprints
+    _run("footprints", check_missing_footprints)
+
+    # Missing values
+    _run("values", check_missing_values)
+
+    # BOM variety (same-value passives with different footprints)
+    _run("bom_variety", check_bom_variety)
+
+    # Value consistency (mixed voltage-rating formatting in capacitors)
+    _run("value_consistency", check_value_consistency)
+
+    # Hierarchy
+    _run("hierarchy", check_hierarchy)
+
+    # No-connect on input pins
+    _run("no_connect_input", check_no_connect_on_input_pins)
+
+    # Global label directions
+    _run("global_label_directions", check_global_label_directions)
+
+    # Connector pinout verification
+    _run("connector_pinout", check_connector_pinout)
+
+    # Missing project instances
+    _run("project_instances", check_missing_project_instances)
+
+    # Duplicate references across sheets
+    _run("duplicate_references", check_duplicate_references)
+
+    # Pin-net semantic mismatch (pin assignment audit)
+    _run("pin_assignment", check_pin_net_semantic_mismatch)
+
+    # SWD debug pin routing verification
+    _run("swd_routing", check_swd_pin_routing)
+
+    # Power net short detection (VCC-to-GND)
+    _run("power_short", check_power_net_shorts)
+
+    # Power pin polarity error detection (VDD on GND net, etc.)
+    _run("power_polarity", check_power_pin_polarity)
+
+    # I2C pull-up resistor detection
+    _run("i2c_pullups", check_i2c_pullups)
+
+    # BOOT0 pull-down resistor detection (STM32 MCUs)
+    _run("boot0_pulldown", check_boot0_pulldown)
+
+    # Fully unconnected component detection
+    _run("unconnected_component", check_fully_unconnected_components)
+
+    # STM32 NRST filter capacitor detection
+    _run("nrst_filter", check_nrst_filter_cap)
+
+    # Symbol-to-footprint pin/pad count mismatch
+    _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch, with_libs=True)
+
+    # lib_symbols definition mismatch (placed lib_id missing from lib_symbols)
+    _run("lib_symbols_mismatch", check_lib_symbols_mismatch, with_libs=True)
+
+    # Matched channel symmetry detection
+    _run("matched_channel_symmetry", check_matched_channel_symmetry)
+
+    # Orphan-label detection (label asserts named signal but only
+    # reaches one pin in the design -- issue #2613).
+    _run("orphan_label", check_orphan_labels, with_libs=True)
+
+    # Wire-stub detection (wire endpoint misses a pin by an integer
+    # multiple of the schematic grid -- issue #2613).
+    _run("wire_stub", check_wire_stubs, with_libs=True)
+
+    return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Validate a KiCad schematic",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("schematic", help="Path to .kicad_sch file")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Path to symbol libraries"
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 on any warning (errors and checks not run already exit 1)",
+    )
+    parser.add_argument("--quiet", "-q", action="store_true", help="Only show errors")
+    parser.add_argument(
+        "--skip",
+        action="append",
+        dest="skip_checks",
+        metavar="CHECK",
+        help="Skip a validation check category (e.g. swd_routing, i2c_pullups). May be repeated.",
+    )
+
+    args = parser.parse_args(argv)
+
+    if not Path(args.schematic).exists():
+        print(f"Error: File not found: {args.schematic}", file=sys.stderr)
+        sys.exit(1)
+
+    skip_set: set[str] = set(args.skip_checks) if args.skip_checks else set()
+    try:
+        result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
+    except Exception as e:
+        print(f"Error loading schematic: {args.schematic}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Exit code, decided before output so ``--format json`` can carry it
+    # (Issue #7230).  INCOMPLETE (a check not run) is non-zero, like
+    # ``kct check``'s NOT RUN (#7094).
+    exit_code, verdict = gate_exit_code(
+        result.error_count,
+        result.warning_count,
+        incomplete=bool(result.checks_not_run),
+        strict=args.strict,
+        style="sch",
+    )
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "schematic": result.schematic,
+                    "passed": result.passed,
+                    "error_count": result.error_count,
+                    "warning_count": result.warning_count,
+                    "checks_run": result.checks_run,
+                    "checks_not_run": result.checks_not_run,
+                    "issues": [
+                        {
+                            "severity": i.severity,
+                            "category": i.category,
+                            "message": i.message,
+                            "location": i.location,
+                            "items": i.items,
+                        }
+                        for i in result.issues
+                        if not args.quiet or i.severity == "error"
+                    ],
+                    "verdict": verdict,
+                    "exit_code": exit_code,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print_result(result, args.quiet)
+
+    if exit_code:
+        sys.exit(exit_code)
+
+
+def print_result(result: ValidationResult, quiet: bool = False):
+    """Print validation results."""
+    print(f"Validation: {Path(result.schematic).name}")
+    print("=" * 60)
+
+    for not_run in result.checks_not_run:
+        print(f"INCOMPLETE: {not_run['check']} not run ({not_run['reason']})")
+
+    if result.passed and result.warning_count == 0:
+        print("✅ All checks passed!")
+    elif result.passed:
+        print(f"⚠️  Passed with {result.warning_count} warnings")
+    elif result.error_count > 0 or not result.checks_not_run:
+        print(f"❌ Failed: {result.error_count} errors, {result.warning_count} warnings")
+    else:
+        print(f"❌ Incomplete: {result.error_count} errors, {result.warning_count} warnings")
+
+    print(f"\nChecks run: {', '.join(result.checks_run)}")
+    if result.checks_not_run:
+        print(f"Checks not run: {', '.join(c['check'] for c in result.checks_not_run)}")
+
+    # Group issues by category
+    by_category = {}
+    for issue in result.issues:
+        if quiet and issue.severity != "error":
+            continue
+        if issue.category not in by_category:
+            by_category[issue.category] = []
+        by_category[issue.category].append(issue)
+
+    if by_category:
+        print("\nIssues:")
+        for category, issues in sorted(by_category.items()):
+            print(f"\n[{category.upper()}]")
+            for issue in issues[:10]:  # Limit to 10 per category
+                if issue.severity == "error":
+                    icon = "❌"
+                elif issue.severity == "info":
+                    icon = "ℹ️"
+                else:
+                    icon = "⚠️"
+                loc = f" ({issue.location})" if issue.location else ""
+                print(f"  {icon} {issue.message}{loc}")
+                for item in issue.items:
+                    print(f"       {item}")
+            if len(issues) > 10:
+                print(f"  ... and {len(issues) - 10} more")
+
+
+if __name__ == "__main__":
+    main()

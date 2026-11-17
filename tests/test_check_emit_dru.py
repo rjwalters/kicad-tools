@@ -1,0 +1,551 @@
+"""Tests for ``kct check --emit-dru`` / ``--emit-drc-constraints`` (issue #4375).
+
+``kicad-cli pcb drc`` reasons over a board's *embedded* Board Setup while
+``kct check --mfr <tier>`` reasons over the *manufacturer fab floors*.  On a
+board whose embedded setup is looser than the tier the two engines disagree
+silently (0-vs-63 on the repro board).  These flags make the two engines
+agree **by construction**: after the pure-Python check resolves its
+``DesignRules`` (layer count + copper weights + net-class map), it emits the
+sidecars ``kicad-cli`` auto-loads (``<board>.kicad_dru`` and, for the full
+flag, ``<board>.kicad_pro``) from that SAME resolved rules object -- so there
+is no separately-resolved profile that could drift.
+
+The load-bearing contracts pinned here:
+
+1. **Parity by construction** -- the emitted ``.kicad_dru`` managed block is
+   byte-identical to ``generate_dru(checker.design_rules, ...)`` (wrapped via
+   ``merge_dru_floors``, #4600) for the resolved tier / layer / copper, so
+   the two engines cannot silently diverge.
+2. **DRU-only vs both** -- ``--emit-dru`` writes only the ``.kicad_dru``;
+   ``--emit-drc-constraints`` also writes the ``.kicad_pro`` whose applied
+   Default netclass clearance is required for kicad-cli clearance parity
+   (#4097).
+3. **Pure side effect** -- the ``.kicad_pcb`` is byte-identical afterward and
+   the exit code is unchanged versus the same invocation without the flag.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.check_cmd import _emit_drc_sidecars, main
+from kicad_tools.manufacturers import get_profile
+from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+from kicad_tools.manufacturers.project_generator import generate_project_dru
+from kicad_tools.manufacturers.zone_clearance_dru import zone_clearance_targets
+from kicad_tools.router.rules import NetClassRouting
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate import DRCChecker
+from tests._board03_check_cost import board03_check_timeout
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BOARD_03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+
+
+@pytest.fixture
+def board_copy(tmp_path: Path) -> Path:
+    """A writable copy of board 03 whose sidecars land in ``tmp_path``."""
+    dst = tmp_path / "board.kicad_pcb"
+    dst.write_text(BOARD_03.read_text(encoding="utf-8"), encoding="utf-8")
+    return dst
+
+
+def _resolved_layers(pcb_path: Path) -> int:
+    """Layer count as ``kct check`` auto-detects it (no explicit --layers)."""
+    detected = len(PCB.load(pcb_path).copper_layers)
+    return detected if detected > 0 else 2
+
+
+# ---------------------------------------------------------------------------
+# Parity by construction: emitted .kicad_dru == generate_dru(design_rules)
+# ---------------------------------------------------------------------------
+
+
+@board03_check_timeout  # Issue #8901
+@pytest.mark.parametrize(
+    ("mfr", "layers", "copper"),
+    [
+        ("jlcpcb", 2, 1.0),
+        ("jlcpcb", 4, 2.0),
+    ],
+)
+def test_emit_dru_matches_checker_resolved_rules(
+    board_copy: Path, mfr: str, layers: int, copper: float
+) -> None:
+    """The emitted ``.kicad_dru`` equals the rules the check actually used.
+
+    This is the whole point of wiring emission into ``kct check`` rather than
+    re-resolving a fresh profile: the sidecar is emitted from
+    ``checker.design_rules``, so a mismatched ``--layers`` / ``--copper`` can
+    never make the two engines disagree.
+    """
+    rc = main(
+        [
+            str(board_copy),
+            "--mfr",
+            mfr,
+            "--layers",
+            str(layers),
+            "--copper",
+            str(copper),
+            "--emit-dru",
+            "--allow-incomplete",
+        ]
+    )
+    assert rc in (0, 2)  # verdict, not a tool error
+
+    dru_path = board_copy.with_suffix(".kicad_dru")
+    assert dru_path.exists()
+
+    # Reconstruct the checker with the SAME explicit inputs the CLI resolved
+    # and confirm the emitted text is byte-identical to what its resolved
+    # design_rules produce -- parity by construction.
+    pcb = PCB.load(board_copy)
+    checker = DRCChecker(
+        pcb,
+        manufacturer=mfr,
+        layers=layers,
+        copper_oz=copper,
+        copper_oz_outer=copper,
+    )
+    # The rules land inside the managed fab-floors block (#4600); a fresh
+    # file is byte-identical to the merged generate_project_dru output,
+    # zone arm included (Issue #8937: the board's zone ``connect_pads``
+    # clearances are restored above the fab floor).
+    expected = merge_dru_floors(
+        None,
+        generate_project_dru(
+            checker.design_rules,
+            {},
+            manufacturer_id=mfr,
+            zone_clearances=zone_clearance_targets(board_copy),
+        ),
+    )
+    assert dru_path.read_text(encoding="utf-8") == expected
+
+    # And the emitted floors track the profile minimums for that tier.
+    rules = checker.design_rules
+    assert f"(min {rules.min_trace_width_mm}mm)" in dru_path.read_text(encoding="utf-8")
+    assert f"(min {rules.min_clearance_mm}mm)" in dru_path.read_text(encoding="utf-8")
+
+
+@board03_check_timeout  # Issue #8901
+def test_emit_dru_micro_via_exemption_present(board_copy: Path) -> None:
+    """The emitted DRU keeps the micro-via exemption (#3118/#3734).
+
+    ``validate/rules/dimensions.py`` exempts micro vias from the standard
+    via floors; the DRU must mirror that or parity silently regresses.
+    """
+    main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
+    dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert "A.Via_Type != 'Micro'" in dru
+
+
+# ---------------------------------------------------------------------------
+# Ampacity dedup: one rule pair per CLASS, not per NET (#4375 Judge feedback)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_dedups_shared_ampacity_class_to_one_rule_pair(board_copy: Path) -> None:
+    """A class spanning several nets emits ONE ampacity rule pair, not N.
+
+    ``_emit_drc_sidecars`` receives the resolved ``net_class_map`` -- keyed by
+    board-net name, with the SAME ampacity class attached to every net in that
+    class.  A ``--net-class-map`` sidecar deserializes a *distinct-but-same-*
+    ``name`` object per net, so identity-based dedup (``dict.fromkeys``) cannot
+    collapse them.  Feeding ``list(net_class_map.values())`` straight to
+    ``generate_dru`` therefore emitted one ``Ampacity Min Width`` rule pair per
+    NET (3 nets -> 6 rules) instead of per CLASS, bloating the DRU and risking
+    KiCad duplicate-rule-name warnings -- contradicting "clean by construction".
+
+    This drives the REAL emission shape (multiple net keys -> distinct objects
+    sharing ``name`` + ``target_ampacity``) and asserts each ampacity rule name
+    appears exactly once.
+    """
+    pcb = PCB.load(board_copy)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=2.0, copper_oz_outer=2.0)
+
+    # Distinct objects, same name -- exactly what a sidecar deserialization
+    # produces for three nets sharing one POWER class.
+    net_class_map = {
+        "VBUS": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "+5V": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "GND": NetClassRouting(name="POWER", target_ampacity=15.0),
+    }
+
+    _emit_drc_sidecars(
+        board_copy,
+        checker,
+        manufacturer_id="jlcpcb",
+        layers=4,
+        copper_oz=2.0,
+        net_class_map=net_class_map,
+        emit_both=False,
+    )
+
+    dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert dru.count("Ampacity Min Width (POWER 15A, external)") == 1
+    assert dru.count("Ampacity Min Width (POWER 15A, internal)") == 1
+    # Byte-identical to a SINGLE deduplicated class -- the DRU carries no
+    # per-net redundancy.  The board's zone ``connect_pads`` clearances are
+    # part of the emitted block (Issue #8937), so the expectation is built
+    # with the same zone arm the writer uses.
+    expected = merge_dru_floors(
+        None,
+        generate_project_dru(
+            checker.design_rules,
+            {},
+            manufacturer_id="jlcpcb",
+            net_classes=[
+                NetClassRouting(
+                    name="POWER", target_ampacity=15.0, net_scope=("VBUS", "+5V", "GND")
+                )
+            ],
+            zone_clearances=zone_clearance_targets(board_copy),
+        ),
+    )
+    assert dru == expected
+
+
+def test_emit_preserves_distinct_ampacity_classes(board_copy: Path) -> None:
+    """Dedup collapses only same-name classes -- distinct classes both survive.
+
+    Guards against an over-eager dedup that would drop a second, genuinely
+    different ampacity class (e.g. POWER + MOTOR spanning different nets).
+    """
+    pcb = PCB.load(board_copy)
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=2.0, copper_oz_outer=2.0)
+
+    net_class_map = {
+        "VBUS": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "+5V": NetClassRouting(name="POWER", target_ampacity=15.0),
+        "PHASE_A": NetClassRouting(name="MOTOR", target_ampacity=8.0),
+        "PHASE_B": NetClassRouting(name="MOTOR", target_ampacity=8.0),
+    }
+
+    _emit_drc_sidecars(
+        board_copy,
+        checker,
+        manufacturer_id="jlcpcb",
+        layers=4,
+        copper_oz=2.0,
+        net_class_map=net_class_map,
+        emit_both=False,
+    )
+
+    dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert dru.count("Ampacity Min Width (POWER 15A, external)") == 1
+    assert dru.count("Ampacity Min Width (POWER 15A, internal)") == 1
+    assert dru.count("Ampacity Min Width (MOTOR 8A, external)") == 1
+    assert dru.count("Ampacity Min Width (MOTOR 8A, internal)") == 1
+
+
+# ---------------------------------------------------------------------------
+# DRU-only vs both sidecars
+# ---------------------------------------------------------------------------
+
+
+@board03_check_timeout  # Issue #8901
+def test_emit_dru_writes_only_dru(board_copy: Path) -> None:
+    """``--emit-dru`` writes the ``.kicad_dru`` and NOT the ``.kicad_pro``."""
+    main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
+    assert board_copy.with_suffix(".kicad_dru").exists()
+    assert not board_copy.with_suffix(".kicad_pro").exists()
+
+
+@board03_check_timeout  # Issue #8901
+def test_emit_drc_constraints_writes_both(board_copy: Path) -> None:
+    """``--emit-drc-constraints`` writes both sidecars, and the ``.kicad_pro``
+    Default netclass clearance is relaxed to the tier floor (#4097 parity)."""
+    import json
+
+    main([str(board_copy), "--mfr", "jlcpcb", "--emit-drc-constraints", "--allow-incomplete"])
+    pro_path = board_copy.with_suffix(".kicad_pro")
+    assert board_copy.with_suffix(".kicad_dru").exists()
+    assert pro_path.exists()
+
+    layers = _resolved_layers(board_copy)
+    rules = get_profile("jlcpcb").get_design_rules(layers=layers, copper_oz=1.0)
+    project = json.loads(pro_path.read_text(encoding="utf-8"))
+    classes = project["net_settings"]["classes"]
+    default_cls = next(c for c in classes if c.get("name") == "Default")
+    # kicad-cli's clearance test reads the APPLIED Default netclass clearance,
+    # not min_clearance -- this write is what makes clearance agree (#4097).
+    assert default_cls["clearance"] == rules.min_clearance_mm
+
+
+# ---------------------------------------------------------------------------
+# Pure side effect: pcb untouched, exit code unchanged
+# ---------------------------------------------------------------------------
+
+
+@board03_check_timeout  # Issue #8901
+def test_emit_leaves_pcb_byte_identical(board_copy: Path) -> None:
+    """Emission never mutates the ``.kicad_pcb`` (sidecars only)."""
+    before = board_copy.read_bytes()
+    main([str(board_copy), "--mfr", "jlcpcb", "--emit-drc-constraints", "--allow-incomplete"])
+    assert board_copy.read_bytes() == before
+
+
+@board03_check_timeout  # Issue #8901
+def test_emit_does_not_change_exit_code(board_copy: Path, tmp_path: Path) -> None:
+    """The verdict/exit code is identical with and without the flag."""
+    plain = tmp_path / "plain.kicad_pcb"
+    plain.write_text(board_copy.read_text(encoding="utf-8"), encoding="utf-8")
+
+    rc_plain = main([str(plain), "--mfr", "jlcpcb", "--allow-incomplete"])
+    rc_emit = main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
+    assert rc_plain == rc_emit
+
+
+@board03_check_timeout  # Issue #8901
+def test_emit_degrades_on_unwritable_dir(board_copy: Path, capsys, monkeypatch) -> None:
+    """A sidecar write failure warns without failing the check (#4375).
+
+    The failure is injected by monkeypatching the ``.kicad_dru`` write to
+    raise ``OSError`` directly, which exercises the production
+    ``except OSError`` degrade path independent of the process euid.  An
+    earlier version relied on ``os.chmod(parent, read-only)``, but CI runs
+    pytest as root and root bypasses directory permission bits, so the write
+    succeeded and the warning never fired.
+    """
+    plain_rc = main([str(board_copy), "--mfr", "jlcpcb", "--allow-incomplete"])
+    capsys.readouterr()
+
+    real_write_text = Path.write_text
+
+    def failing_write_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self.suffix == ".kicad_dru":
+            raise OSError("injected write failure")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    rc = main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
+
+    captured = capsys.readouterr()
+    # Verdict unchanged despite the failed sidecar write, and a warning fired.
+    assert rc == plain_rc
+    assert "could not emit" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Bare check writes NOTHING beside the board (#4600 regression)
+# ---------------------------------------------------------------------------
+
+
+@board03_check_timeout  # Issue #8901
+def test_bare_check_leaves_board_directory_clean(board_copy: Path) -> None:
+    """``kct check --mfr <tier>`` without ``--emit-*`` writes no sidecars.
+
+    Issue #4600 locks in the current clean behavior: check-path sidecar
+    emission is opt-in (#4386), so a bare check must leave the board's
+    directory byte-for-byte unchanged -- no untracked ``.kicad_dru`` /
+    ``.kicad_pro`` for a later ``kicad-cli pcb drc`` to silently consume.
+    """
+    before = sorted(p.name for p in board_copy.parent.iterdir())
+    rc = main([str(board_copy), "--mfr", "jlcpcb-tier1", "--allow-incomplete"])
+    assert rc in (0, 2)  # a verdict, not a tool error
+
+    after = sorted(p.name for p in board_copy.parent.iterdir())
+    assert after == before
+    assert not board_copy.with_suffix(".kicad_dru").exists()
+    assert not board_copy.with_suffix(".kicad_pro").exists()
+
+
+# ---------------------------------------------------------------------------
+# Emit merges the managed block -- pre-existing DRU content survives (#4600)
+# ---------------------------------------------------------------------------
+
+
+@board03_check_timeout  # Issue #8901
+def test_emit_dru_preserves_existing_creepage_and_user_rules(board_copy: Path) -> None:
+    """``--emit-dru`` merges into the managed block instead of clobbering.
+
+    A pre-existing ``.kicad_dru`` holding the ``kct creepage export-rules``
+    managed block (#4508) plus a hand-written rule must survive the emit
+    with both intact -- the old blanket ``write_text`` silently deleted
+    them.
+    """
+    from kicad_tools.creepage.export_rules import DRU_BLOCK_BEGIN, merge_dru_block
+    from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
+    creepage_body = '(rule "kct creepage"\n  (constraint clearance (min 1.5mm)))'
+    hand_rule = '(rule "Hand Rule"\n  (constraint clearance (min 2mm)))'
+    dru_path = board_copy.with_suffix(".kicad_dru")
+    dru_path.write_text(
+        merge_dru_block(f"(version 1)\n{hand_rule}\n", creepage_body),
+        encoding="utf-8",
+    )
+
+    main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
+
+    merged = dru_path.read_text(encoding="utf-8")
+    assert creepage_body in merged
+    assert hand_rule in merged
+    assert DRU_BLOCK_BEGIN in merged
+    assert DRU_FLOORS_BLOCK_BEGIN in merged
+    assert '(rule "Trace Width - jlcpcb"' in merged
+    assert merged.count("(version 1)") == 1
+
+
+def test_emit_dru_preserves_reviewed_project_without_mutating_it(tmp_path: Path):
+    """DRU-only emission cannot bypass reviewed native floors (#5023)."""
+    import json
+    from types import SimpleNamespace
+
+    from kicad_tools.manufacturers import write_drc_constraints
+
+    board = tmp_path / "reviewed.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    pro = board.with_suffix(".kicad_pro")
+    pro.write_text(
+        json.dumps(
+            {
+                "text_variables": {"KCT_PRESERVE_BOARD_RULES": "1"},
+                "board": {"design_settings": {"rules": {"min_clearance": 0.15}}},
+                "net_settings": {"classes": [{"name": "Default", "clearance": 0.15}]},
+            }
+        )
+    )
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=6)
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=6)
+    before_pro = pro.read_bytes()
+    before_dru = board.with_suffix(".kicad_dru").read_bytes()
+    _emit_drc_sidecars(
+        board,
+        SimpleNamespace(design_rules=rules),
+        manufacturer_id="jlcpcb-tier1",
+        layers=6,
+        copper_oz=1,
+        net_class_map=None,
+        emit_both=False,
+    )
+    assert pro.read_bytes() == before_pro
+    assert board.with_suffix(".kicad_dru").read_bytes() == before_dru
+
+
+# ---------------------------------------------------------------------------
+# Issue #8039: refuse rules files KiCad silently drops
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "; a comment\n",
+        '(rule "x"\n  (condition "A.NetName =~ /^AC$/")\n  (constraint clearance (min 1mm)))\n',
+        '(rule "x") ; trailing\n',
+    ],
+)
+def test_merge_dru_floors_rejects_unloadable_constructs(extra: str) -> None:
+    from kicad_tools.manufacturers.dru_generator import DRUUnloadableError
+
+    with pytest.raises(DRUUnloadableError, match=r"line \d+"):
+        merge_dru_floors("(version 1)\n" + extra, '(version 1)\n(rule "a")\n', path="b.kicad_dru")
+
+
+def test_merge_dru_floors_rejects_with_crlf_and_replace_branch() -> None:
+    from kicad_tools.manufacturers.dru_generator import (
+        DRU_FLOORS_BLOCK_BEGIN,
+        DRU_FLOORS_BLOCK_END,
+        DRUUnloadableError,
+    )
+
+    existing = (
+        f"(version 1)\r\n; bad\r\n{DRU_FLOORS_BLOCK_BEGIN}\r\nold\r\n{DRU_FLOORS_BLOCK_END}\r\n"
+    )
+    with pytest.raises(DRUUnloadableError):
+        merge_dru_floors(existing, '(version 1)\n(rule "a")\n')
+
+
+def test_merge_dru_floors_accepts_hash_comments_and_quoted_semicolon() -> None:
+    existing = '(version 1)\n# fine\n(rule "a;b"\n  (constraint clearance (min 1mm)))\n'
+    out = merge_dru_floors(existing, '(version 1)\n(rule "c")\n')
+    assert "# fine" in out
+    assert merge_dru_floors(out, '(version 1)\n(rule "c")\n') == out
+
+
+def test_netclass_only_attribution() -> None:
+    from kicad_tools.drc.report import netclass_only_attribution, parse_text_report
+
+    nc = "[clearance]: Clearance violation (netclass 'Default')\n    Rule: netclass 'Default'; error\n    @(1 mm, 1 mm): Track\n"
+    ru = "[clearance]: Clearance violation\n    Rule: Reviewed clearance - X; error\n    @(1 mm, 1 mm): Track\n"
+    assert netclass_only_attribution(parse_text_report(nc)) == (1, 0)
+    assert netclass_only_attribution(parse_text_report(nc + ru)) == (1, 1)
+    assert netclass_only_attribution(parse_text_report("")) == (0, 0)
+
+
+# Descriptions captured from a live ``kicad-cli 10.0.6 pcb drc --format json``
+# run on boards/03-usb-joystick with a sidecar that loaded vs. one dropped for
+# a ``;`` comment.  Real items carry only type/severity/description/items --
+# there is no ``rule`` key -- and a dropped file leaves an EMPTY source.
+_LOADED = "Clearance violation (rule 'Strict clr' clearance 0.5000 mm; actual 0.3200 mm)"
+_DROPPED = "Clearance violation ( clearance 0.2000 mm; actual 0.1657 mm)"
+_WIDTH = "Track width (board setup constraints min width 0.2000 mm; actual 0.1500 mm)"
+
+
+def _kicad_json(*descriptions: str) -> dict:
+    return {
+        "kicad_version": "10.0.6",
+        "source": "b.kicad_pcb",
+        "unconnected_items": [],
+        "schematic_parity": [],
+        "violations": [
+            {"type": "clearance", "severity": "error", "description": d, "items": []}
+            for d in descriptions
+        ],
+    }
+
+
+def _gate(tmp_path: Path, descriptions: tuple[str, ...], *, dru: bool = True, raw: bool = True):
+    import json
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.readiness_cmd import _gate_dru_loaded
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    if dru:
+        pcb.with_suffix(".kicad_dru").write_text("(version 1)\n")
+    if raw:
+        (tmp_path / "native-drc-raw.json").write_text(json.dumps(_kicad_json(*descriptions)))
+    options = SimpleNamespace(pcb=pcb, evidence_dir=tmp_path)
+    return _gate_dru_loaded(options, {"ran": True})
+
+
+def test_netclass_only_attribution_on_real_kicad_json(tmp_path: Path) -> None:
+    import json
+
+    from kicad_tools.drc.report import DRCReport, netclass_only_attribution
+
+    def attr(*descs: str) -> tuple[int, int]:
+        p = tmp_path / "r.json"
+        p.write_text(json.dumps(_kicad_json(*descs)))
+        return netclass_only_attribution(DRCReport.load(p))
+
+    assert attr(_LOADED, _WIDTH) == (0, 1)
+    assert attr(_DROPPED, _WIDTH) == (1, 0)
+    assert attr(_DROPPED, _LOADED) == (1, 1)
+
+
+def test_gate_dru_loaded_fails_when_sidecar_dropped(tmp_path: Path) -> None:
+    outcome = _gate(tmp_path, (_DROPPED, _WIDTH))
+    assert outcome is not None
+    assert outcome.name == "dru_loaded"
+    assert outcome.status == "failed"
+    assert outcome.blockers
+
+
+def test_gate_dru_loaded_passes_when_rule_attributed(tmp_path: Path) -> None:
+    assert _gate(tmp_path, (_LOADED, _DROPPED)) is None
+
+
+def test_gate_dru_loaded_skips_without_sidecar_or_raw_or_findings(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    assert _gate(tmp_path / "a", (_DROPPED,), dru=False) is None
+    (tmp_path / "b").mkdir()
+    assert _gate(tmp_path / "b", (_DROPPED,), raw=False) is None
+    (tmp_path / "c").mkdir()
+    assert _gate(tmp_path / "c", ()) is None

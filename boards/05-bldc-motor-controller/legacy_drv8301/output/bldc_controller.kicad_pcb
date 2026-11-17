@@ -1,0 +1,3680 @@
+(kicad_pcb
+	(version 20260206)
+	(generator "kicad-tools-demo")
+	(generator_version "10.0")
+	(general
+		(thickness 1.6)
+		(legacy_teardrops no)
+	)
+	(paper "A4")
+	(layers
+		(0 "F.Cu" signal)
+		(31 "B.Cu" signal)
+		(32 "B.Adhes" user "B.Adhesive")
+		(33 "F.Adhes" user "F.Adhesive")
+		(34 "B.Paste" user)
+		(35 "F.Paste" user)
+		(36 "B.SilkS" user "B.Silkscreen")
+		(37 "F.SilkS" user "F.Silkscreen")
+		(38 "B.Mask" user)
+		(39 "F.Mask" user)
+		(44 "Edge.Cuts" user)
+		(46 "B.CrtYd" user "B.Courtyard")
+		(47 "F.CrtYd" user "F.Courtyard")
+		(48 "B.Fab" user)
+		(49 "F.Fab" user)
+	)
+	(setup
+		(pad_to_mask_clearance 0)
+	)
+	(net 0 "")
+	(net 1 "+24V")
+	(net 2 "+5V")
+	(net 3 "+3V3")
+	(net 4 "GND")
+	(net 5 "PHASE_A")
+	(net 6 "PHASE_B")
+	(net 7 "PHASE_C")
+	(net 8 "GATE_AH")
+	(net 9 "GATE_AL")
+	(net 10 "GATE_BH")
+	(net 11 "GATE_BL")
+	(net 12 "GATE_CH")
+	(net 13 "GATE_CL")
+	(net 14 "ISENSE_A+")
+	(net 15 "ISENSE_A-")
+	(net 16 "ISENSE_B+")
+	(net 17 "ISENSE_B-")
+	(net 18 "ISENSE_C+")
+	(net 19 "ISENSE_C-")
+	(net 20 "HALL_A")
+	(net 21 "HALL_B")
+	(net 22 "HALL_C")
+	(net 23 "SWDIO")
+	(net 24 "SWCLK")
+	(net 25 "SWO")
+	(net 26 "NRST")
+	(net 27 "OSC_IN")
+	(net 28 "OSC_OUT")
+	(net 29 "PWR_LED")
+	(net 30 "STATUS_LED")
+	(net 31 "SW_OUT")
+	(net 32 "GATE_DRV_AH")
+	(net 33 "GATE_DRV_BH")
+	(net 34 "GATE_DRV_CH")
+	(net 35 "PWM_AH")
+	(net 36 "PWM_AL")
+	(net 37 "PWM_BH")
+	(net 38 "PWM_BL")
+	(net 39 "PWM_CH")
+	(net 40 "PWM_CL")
+	(net 41 "VIN")
+	(net 42 "BST_A")
+	(net 43 "BST_B")
+	(net 44 "BST_C")
+	(net 45 "unconnected-(U10-PA3-Pad8)")
+	(net 46 "unconnected-(U10-PA4-Pad9)")
+	(net 47 "unconnected-(U10-PA5-Pad10)")
+	(net 48 "unconnected-(U10-PA11-Pad21)")
+	(net 49 "unconnected-(U10-PA12-Pad22)")
+	(net 50 "unconnected-(U10-PA15-Pad25)")
+	(net 51 "unconnected-(U10-PB4-Pad27)")
+	(net 52 "unconnected-(U10-PB5-Pad28)")
+	(gr_rect
+		(start 108.5 37.5)
+		(end 188.5 137.5)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(fill none)
+		(layer "Edge.Cuts")
+		(uuid "afca9902-caef-452a-93a9-7662a9fdc640")
+	)
+	(footprint "MountingHole:MountingHole_3.2mm_M3"
+		(layer "F.Cu")
+		(uuid "335da6f4-a56d-42e9-b828-01c8f0c321b1")
+		(at 111.5 40.5)
+		(fp_text reference "MH1"
+			(at 0 -3)
+			(layer "F.SilkS")
+			(uuid "d5eefaf7-eb66-491e-9861-cca4243d934b")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "MountingHole"
+			(at 0 3)
+			(layer "F.Fab")
+			(uuid "95d40098-feef-4671-ac95-fb900bd34def")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(attr exclude_from_pos_files exclude_from_bom)
+		(pad "" np_thru_hole circle
+			(at 0 0)
+			(size 3.2 3.2)
+			(drill 3.2)
+			(layers "*.Cu" "*.Mask")
+		)
+	)
+	(footprint "MountingHole:MountingHole_3.2mm_M3"
+		(layer "F.Cu")
+		(uuid "f42a353b-517d-4309-b7f0-ad17f4fa275f")
+		(at 185.5 40.5)
+		(fp_text reference "MH2"
+			(at 0 -3)
+			(layer "F.SilkS")
+			(uuid "dd87e357-e4d8-4413-93b8-a6b4ad711620")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "MountingHole"
+			(at 0 3)
+			(layer "F.Fab")
+			(uuid "08e8b4b0-25eb-4507-8a95-b7be21fae5c6")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(attr exclude_from_pos_files exclude_from_bom)
+		(pad "" np_thru_hole circle
+			(at 0 0)
+			(size 3.2 3.2)
+			(drill 3.2)
+			(layers "*.Cu" "*.Mask")
+		)
+	)
+	(footprint "MountingHole:MountingHole_3.2mm_M3"
+		(layer "F.Cu")
+		(uuid "214b517c-7217-4a4b-a31d-2e87774cd30d")
+		(at 111.5 134.5)
+		(fp_text reference "MH3"
+			(at 0 -3)
+			(layer "F.SilkS")
+			(uuid "7465c55e-935e-4a15-b863-7ed243098d5f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "MountingHole"
+			(at 0 3)
+			(layer "F.Fab")
+			(uuid "3e0a73f2-caff-46e4-95d6-a3ba1593db26")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(attr exclude_from_pos_files exclude_from_bom)
+		(pad "" np_thru_hole circle
+			(at 0 0)
+			(size 3.2 3.2)
+			(drill 3.2)
+			(layers "*.Cu" "*.Mask")
+		)
+	)
+	(footprint "MountingHole:MountingHole_3.2mm_M3"
+		(layer "F.Cu")
+		(uuid "597f62da-31a2-4f6d-8167-5eb746b77d17")
+		(at 185.5 134.5)
+		(fp_text reference "MH4"
+			(at 0 -3)
+			(layer "F.SilkS")
+			(uuid "7165a32c-3961-4ffa-97fa-8d6e37723a71")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "MountingHole"
+			(at 0 3)
+			(layer "F.Fab")
+			(uuid "5351ff9c-bbc4-4a1c-aca5-2b08736de7aa")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(attr exclude_from_pos_files exclude_from_bom)
+		(pad "" np_thru_hole circle
+			(at 0 0)
+			(size 3.2 3.2)
+			(drill 3.2)
+			(layers "*.Cu" "*.Mask")
+		)
+	)
+	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+		(layer "F.Cu")
+		(uuid "411fdc43-95be-4c93-bd5f-abd2197bc56f")
+		(at 113.5 45.5)
+		(fp_text reference "J1"
+			(at 0 -3.5)
+			(layer "F.SilkS")
+			(uuid "dfea9127-e34c-47ad-809d-e7fd2f3d897e")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "Power Input"
+			(at 0 3.5)
+			(layer "F.Fab")
+			(uuid "44ab63f4-d020-402e-a2f1-3fb5349815f4")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at 0 -1.27)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 41 "VIN")
+		)
+		(pad "2" thru_hole oval
+			(at 0 1.27)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
+			(offset
+				(xyz 0 1.27 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Fuse:Fuse_1206_3216Metric"
+		(layer "F.Cu")
+		(uuid "ede09c9c-d40d-4014-9bc8-9656f962e9b6")
+		(at 122.5 45.5)
+		(fp_text reference "F1"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "ec917e78-1a44-4242-863c-6ec88f687694")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "15A"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "cdf0c5c2-c89a-4ab9-8e50-17a271dcd2ce")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1.5 0)
+			(size 1.2 1.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 41 "VIN")
+		)
+		(pad "2" smd roundrect
+			(at 1.5 0)
+			(size 1.2 1.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Fuse.3dshapes/Fuse_1206_3216Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Diode_SMD:D_SMA"
+		(layer "F.Cu")
+		(uuid "83a50036-a9f6-4199-8d92-b9f22228e807")
+		(at 130.5 45.5)
+		(fp_text reference "D1"
+			(at 0 -2)
+			(layer "F.SilkS")
+			(uuid "26abf95f-69cd-469c-85db-49752514704f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "SMBJ24A"
+			(at 0 2)
+			(layer "F.Fab")
+			(uuid "5cbb1974-6623-42e3-99cb-f70ef83571c5")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -2 0)
+			(size 1.5 1.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "2" smd roundrect
+			(at 2 0)
+			(size 1.5 1.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Diode_SMD.3dshapes/D_SMA.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "87aae2b9-8d45-4128-af85-39d764f0f329")
+		(at 138.5 45.5)
+		(fp_text reference "C1"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "527c2e37-563c-4d76-9809-3e2afffa35d6")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "470uF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "7bf0e19b-3791-4b64-9d59-ade2a446739e")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "19158730-943d-4224-8035-e0d5d893706e")
+		(at 138.5 51.5)
+		(fp_text reference "C2"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "c60f3630-beeb-450f-a041-200fa483d426")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "100nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "1df3b269-4de3-4275-8ae6-b7ff1d5b9c0d")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_SMD:TO-263-5_TabPin3"
+		(layer "F.Cu")
+		(uuid "825bce08-27c8-4652-9de7-bd49d00185a9")
+		(at 120.5 59.5)
+		(fp_text reference "U1"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "f1ea68ca-06a2-433f-b503-eeaa1a08d2eb")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "LM2596-5.0"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "5589cc65-c267-4a66-9859-ba843fe4652e")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd rect
+			(at -3.4 3.3)
+			(size 3 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 1 "+24V")
+		)
+		(pad "2" smd rect
+			(at -3.4 1.1)
+			(size 3 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 31 "SW_OUT")
+		)
+		(pad "3" smd rect
+			(at -3.4 -1.1)
+			(size 3 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 4 "GND")
+		)
+		(pad "4" smd rect
+			(at -3.4 -3.3)
+			(size 3 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 2 "+5V")
+		)
+		(pad "5" smd rect
+			(at 3.4 0)
+			(size 3 8)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/TO-263-5_TabPin3.step"
+			(offset
+				(xyz 1.035 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Inductor_SMD:L_1210_3225Metric"
+		(layer "F.Cu")
+		(uuid "f19f0e11-38ba-4061-917d-a734ce7ff44d")
+		(at 134.5 59.5)
+		(fp_text reference "L1"
+			(at 0 -2)
+			(layer "F.SilkS")
+			(uuid "282cff03-699c-4358-8de4-af420a298cdc")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "33uH"
+			(at 0 2)
+			(layer "F.Fab")
+			(uuid "9e766635-9f68-4cdc-883d-f8927e439bca")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1.5 0)
+			(size 1.2 2.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 31 "SW_OUT")
+		)
+		(pad "2" smd roundrect
+			(at 1.5 0)
+			(size 1.2 2.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Inductor_SMD.3dshapes/L_1210_3225Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Diode_SMD:D_SMA"
+		(layer "F.Cu")
+		(uuid "85d30abd-f297-4430-ad82-00618aa4605b")
+		(at 127.5 67.5)
+		(fp_text reference "D2"
+			(at 0 -2)
+			(layer "F.SilkS")
+			(uuid "7a4ed8a8-5ee4-4e7f-b580-a9d0f17ec698")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "SS34"
+			(at 0 2)
+			(layer "F.Fab")
+			(uuid "1cc2df79-cfcc-411f-9b23-befe5eb16c64")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -2 0)
+			(size 1.5 1.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 31 "SW_OUT")
+		)
+		(pad "2" smd roundrect
+			(at 2 0)
+			(size 1.5 1.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Diode_SMD.3dshapes/D_SMA.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "772979ca-c7d3-4fe6-ac84-057c448de3d9")
+		(at 114.5 67.5)
+		(fp_text reference "C3"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "d4865132-70d6-431e-a91b-48e6e4c620af")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "220uF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "6406cb56-2212-4eb3-8c06-3baf7cf1cb10")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "c0ffbd39-341d-44d9-a1ea-a7351b750f71")
+		(at 138.5 67.5)
+		(fp_text reference "C4"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "ee830462-7991-461e-9b8e-2aa541be2221")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "220uF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "daddbe0a-7a43-4ebf-a1d9-d9b1cc9157c6")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
+		(layer "F.Cu")
+		(uuid "3e51da5b-fdcd-4349-9733-381cf6b7a907")
+		(at 152.5 59.5)
+		(fp_text reference "U2"
+			(at 0 -4)
+			(layer "F.SilkS")
+			(uuid "57c8253c-facb-4706-a312-152af37ada01")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "AMS1117-3.3"
+			(at 0 4)
+			(layer "F.Fab")
+			(uuid "830d9df0-baf8-43c0-a35d-d931dc7d17c7")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd rect
+			(at -3.15 2.3)
+			(size 2 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 4 "GND")
+		)
+		(pad "2" smd rect
+			(at -3.15 0)
+			(size 2 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 3 "+3V3")
+		)
+		(pad "3" smd rect
+			(at -3.15 -2.3)
+			(size 2 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 2 "+5V")
+		)
+		(pad "2" smd rect
+			(at 3.15 0)
+			(size 2 3.8)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 3 "+3V3")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/SOT-223.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "63633375-f8e9-43d6-9391-5e8eab5afd22")
+		(at 146.5 67.5)
+		(fp_text reference "C5"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "656651fa-5c94-45cb-953d-0952e7488e07")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10uF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "473735c6-2c39-41fa-a40c-98990281036c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "d2056bc8-509b-45ac-8dba-e642063df0a9")
+		(at 158.5 67.5)
+		(fp_text reference "C6"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "3672f5dd-5f60-4bcc-9140-9dd9f122b832")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10uF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "0cf7765a-4b1c-4981-b227-dd31a284822f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "b54eb7aa-6d73-4af8-88bb-c215c2e880b0")
+		(at 139.5 70)
+		(fp_text reference "C7"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "57809208-8aff-4fd6-ae26-0c3d42038586")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "100nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "305b2df9-331a-48c8-87c2-ee99ea142ffc")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "1fbe5eea-20d2-49bf-8845-063cf7ef171e")
+		(at 145.5 70)
+		(fp_text reference "C8"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "1a69e146-f4fe-4e45-8d3a-0585435f4e32")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "100nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "361bece0-da2e-47e1-8f1c-4e064509001b")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "c789b639-8ec2-48fc-9e94-df0bcaa729be")
+		(at 151.5 70)
+		(fp_text reference "C9"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "66863a6f-12a1-46b3-adf1-8fe87387c26f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "4.7uF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "627da17d-4c56-4492-925d-2877be6eacea")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Crystal:Crystal_HC49-4H_Vertical"
+		(layer "F.Cu")
+		(uuid "1c5761e3-f2d9-471a-96aa-9a8d3b9a61c5")
+		(at 160.5 74.5)
+		(fp_text reference "Y1"
+			(at 0 -3)
+			(layer "F.SilkS")
+			(uuid "5402213e-e515-4b61-b420-b4d22a294119")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "8MHz"
+			(at 0 3)
+			(layer "F.Fab")
+			(uuid "900939f3-610d-4398-8a58-fff5a252ca8b")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole circle
+			(at -2.44 0)
+			(size 1.5 1.5)
+			(drill 0.8)
+			(layers "*.Cu" "*.Mask")
+			(net 27 "OSC_IN")
+		)
+		(pad "2" thru_hole circle
+			(at 2.44 0)
+			(size 1.5 1.5)
+			(drill 0.8)
+			(layers "*.Cu" "*.Mask")
+			(net 28 "OSC_OUT")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Crystal.3dshapes/Crystal_HC49-4H_Vertical.step"
+			(offset
+				(xyz -2.44 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "60f92b3c-3b45-46d7-bd9d-7c6d665d0b21")
+		(at 168.5 74.5)
+		(fp_text reference "C10"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "3aa20cf5-9dc9-46b0-a6b0-1b90dd448f4c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "20pF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "2312915a-baa2-44d9-8a92-06bd468776e1")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 27 "OSC_IN")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "b4a5ca81-65f5-4cb0-9f81-95100da07420")
+		(at 168.5 80.5)
+		(fp_text reference "C11"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "178983be-a394-4aeb-afe2-70dddf2d2b6a")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "20pF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "3f8f4eaa-2b2b-4dd6-9924-62fd5c085dfd")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 28 "OSC_OUT")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm"
+		(layer "F.Cu")
+		(uuid "8a5a9367-0be7-4c59-a39d-1c14d418e317")
+		(at 132.5 87.5)
+		(fp_text reference "U3"
+			(at 0 -6)
+			(layer "F.SilkS")
+			(uuid "583f76fc-f9e0-49ea-a12e-2987e2226300")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "DRV8301"
+			(at 0 6)
+			(layer "F.Fab")
+			(uuid "d76324da-6716-4b0c-b1cc-14ea718f98f0")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at 6.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "2" smd roundrect
+			(at 6.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "3" smd roundrect
+			(at 5.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "4" smd roundrect
+			(at 5.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "5" smd roundrect
+			(at 4.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "6" smd roundrect
+			(at 4.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "7" smd roundrect
+			(at 3.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "8" smd roundrect
+			(at 3.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "9" smd roundrect
+			(at 2.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "10" smd roundrect
+			(at 2.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "11" smd roundrect
+			(at 1.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "12" smd roundrect
+			(at 1.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "13" smd roundrect
+			(at 0.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "14" smd roundrect
+			(at 0.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "15" smd roundrect
+			(at -0.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "16" smd roundrect
+			(at -0.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "17" smd roundrect
+			(at -1.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 35 "PWM_AH")
+		)
+		(pad "18" smd roundrect
+			(at -1.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 36 "PWM_AL")
+		)
+		(pad "19" smd roundrect
+			(at -2.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 37 "PWM_BH")
+		)
+		(pad "20" smd roundrect
+			(at -2.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 38 "PWM_BL")
+		)
+		(pad "21" smd roundrect
+			(at -3.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 39 "PWM_CH")
+		)
+		(pad "22" smd roundrect
+			(at -3.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 40 "PWM_CL")
+		)
+		(pad "23" smd roundrect
+			(at -4.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "24" smd roundrect
+			(at -4.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "25" smd roundrect
+			(at -5.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 14 "ISENSE_A+")
+		)
+		(pad "26" smd roundrect
+			(at -5.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 16 "ISENSE_B+")
+		)
+		(pad "27" smd roundrect
+			(at -6.2500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "28" smd roundrect
+			(at -6.7500 -3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "29" smd roundrect
+			(at -6.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "30" smd roundrect
+			(at -6.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 16 "ISENSE_B+")
+		)
+		(pad "31" smd roundrect
+			(at -5.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 17 "ISENSE_B-")
+		)
+		(pad "32" smd roundrect
+			(at -5.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 14 "ISENSE_A+")
+		)
+		(pad "33" smd roundrect
+			(at -4.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 15 "ISENSE_A-")
+		)
+		(pad "34" smd roundrect
+			(at -4.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 19 "ISENSE_C-")
+		)
+		(pad "35" smd roundrect
+			(at -3.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 13 "GATE_CL")
+		)
+		(pad "36" smd roundrect
+			(at -3.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 7 "PHASE_C")
+		)
+		(pad "37" smd roundrect
+			(at -2.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 34 "GATE_DRV_CH")
+		)
+		(pad "38" smd roundrect
+			(at -2.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 44 "BST_C")
+		)
+		(pad "39" smd roundrect
+			(at -1.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 17 "ISENSE_B-")
+		)
+		(pad "40" smd roundrect
+			(at -1.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 11 "GATE_BL")
+		)
+		(pad "41" smd roundrect
+			(at -0.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 6 "PHASE_B")
+		)
+		(pad "42" smd roundrect
+			(at -0.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 33 "GATE_DRV_BH")
+		)
+		(pad "43" smd roundrect
+			(at 0.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 43 "BST_B")
+		)
+		(pad "44" smd roundrect
+			(at 0.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 15 "ISENSE_A-")
+		)
+		(pad "45" smd roundrect
+			(at 1.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 9 "GATE_AL")
+		)
+		(pad "46" smd roundrect
+			(at 1.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 5 "PHASE_A")
+		)
+		(pad "47" smd roundrect
+			(at 2.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 32 "GATE_DRV_AH")
+		)
+		(pad "48" smd roundrect
+			(at 2.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 42 "BST_A")
+		)
+		(pad "49" smd roundrect
+			(at 3.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "50" smd roundrect
+			(at 3.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 31 "SW_OUT")
+		)
+		(pad "51" smd roundrect
+			(at 4.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 31 "SW_OUT")
+		)
+		(pad "52" smd roundrect
+			(at 4.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "53" smd roundrect
+			(at 5.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "54" smd roundrect
+			(at 5.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 1 "+24V")
+		)
+		(pad "55" smd roundrect
+			(at 6.2500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "56" smd roundrect
+			(at 6.7500 3.7500)
+			(size 0.3 1.55)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "57" smd rect
+			(at 0 0)
+			(size 6.35 3.61)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_SO.3dshapes/HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "5d9efc62-ea7f-4bdf-91ea-c4f1e01f3625")
+		(at 112.5 84.5)
+		(fp_text reference "C12"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "4a202bfd-a897-4344-826f-d3612afe6d2f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "100nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "36abc38c-76b6-4614-b8be-587267a87ac9")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 44 "BST_C")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 7 "PHASE_C")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "f4ce0b40-462f-4047-ad42-b9992632dfc2")
+		(at 112.5 90.5)
+		(fp_text reference "C13"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "23473b80-0c29-45f3-80d8-70686520bbc4")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "100nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "22453a58-7e86-48f3-8c29-1fad7a8cb57c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 43 "BST_B")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 6 "PHASE_B")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "a43896ff-4709-4ea4-b97b-80e21ae8f732")
+		(at 112.5 96.5)
+		(fp_text reference "C14"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "5e44540c-bcdc-491e-95a8-c597f4882a84")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "100nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "8d6fe469-9077-4d53-8da4-0a849249fd42")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 42 "BST_A")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 5 "PHASE_A")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "7969fb79-a75b-4cca-ac18-f6b88b804e48")
+		(at 120.5 84.5)
+		(fp_text reference "C15"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "14c0993c-cbd5-48b0-8a49-d0356012a99c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "100nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "95db3e76-ee34-4c6b-b29d-26383cc7a3c5")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "e49261e0-b6a9-4691-8111-d4ebc3afed9b")
+		(at 120.5 90.5)
+		(fp_text reference "C16"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "bf897f69-b179-484f-80f4-81d9b3392911")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10uF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "bec11ce4-2dee-42f7-b6f1-ec424ed9e26f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 2 "+5V")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_QFP:LQFP-32_7x7mm_P0.8mm"
+		(layer "F.Cu")
+		(uuid "48da0af6-6582-4940-b084-fb54574412fb")
+		(at 145.5 77)
+		(fp_text reference "U10"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "9874669a-777d-4e2b-ba54-3cfc1139e1ed")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "STM32G431K8Tx"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "1e0418f6-c674-4225-8f21-a185d741f68a")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -4.1750 -2.8000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at -4.1750 -2.0000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 27 "OSC_IN")
+		)
+		(pad "3" smd roundrect
+			(at -4.1750 -1.2000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 28 "OSC_OUT")
+		)
+		(pad "4" smd roundrect
+			(at -4.1750 -0.4000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 26 "NRST")
+		)
+		(pad "5" smd roundrect
+			(at -4.1750 0.4000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 15 "ISENSE_A-")
+		)
+		(pad "6" smd roundrect
+			(at -4.1750 1.2000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 17 "ISENSE_B-")
+		)
+		(pad "7" smd roundrect
+			(at -4.1750 2.0000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 19 "ISENSE_C-")
+		)
+		(pad "8" smd roundrect
+			(at -4.1750 2.8000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 45 "unconnected-(U10-PA3-Pad8)")
+		)
+		(pad "9" smd roundrect
+			(at -2.8000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 46 "unconnected-(U10-PA4-Pad9)")
+		)
+		(pad "10" smd roundrect
+			(at -2.0000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 47 "unconnected-(U10-PA5-Pad10)")
+		)
+		(pad "11" smd roundrect
+			(at -1.2000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 20 "HALL_A")
+		)
+		(pad "12" smd roundrect
+			(at -0.4000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 21 "HALL_B")
+		)
+		(pad "13" smd roundrect
+			(at 0.4000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 22 "HALL_C")
+		)
+		(pad "14" smd roundrect
+			(at 1.2000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "15" smd roundrect
+			(at 2.0000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "16" smd roundrect
+			(at 2.8000 4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(pad "17" smd roundrect
+			(at 4.1750 2.8000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "18" smd roundrect
+			(at 4.1750 2.0000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 35 "PWM_AH")
+		)
+		(pad "19" smd roundrect
+			(at 4.1750 1.2000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 37 "PWM_BH")
+		)
+		(pad "20" smd roundrect
+			(at 4.1750 0.4000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 39 "PWM_CH")
+		)
+		(pad "21" smd roundrect
+			(at 4.1750 -0.4000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 48 "unconnected-(U10-PA11-Pad21)")
+		)
+		(pad "22" smd roundrect
+			(at 4.1750 -1.2000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 49 "unconnected-(U10-PA12-Pad22)")
+		)
+		(pad "23" smd roundrect
+			(at 4.1750 -2.0000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 23 "SWDIO")
+		)
+		(pad "24" smd roundrect
+			(at 4.1750 -2.8000)
+			(size 1.5 0.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 24 "SWCLK")
+		)
+		(pad "25" smd roundrect
+			(at 2.8000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 50 "unconnected-(U10-PA15-Pad25)")
+		)
+		(pad "26" smd roundrect
+			(at 2.0000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 25 "SWO")
+		)
+		(pad "27" smd roundrect
+			(at 1.2000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 51 "unconnected-(U10-PB4-Pad27)")
+		)
+		(pad "28" smd roundrect
+			(at 0.4000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 52 "unconnected-(U10-PB5-Pad28)")
+		)
+		(pad "29" smd roundrect
+			(at -0.4000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 36 "PWM_AL")
+		)
+		(pad "30" smd roundrect
+			(at -1.2000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 38 "PWM_BL")
+		)
+		(pad "31" smd roundrect
+			(at -2.0000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 40 "PWM_CL")
+		)
+		(pad "32" smd roundrect
+			(at -2.8000 -4.1750)
+			(size 0.5 1.5)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_QFP.3dshapes/LQFP-32_7x7mm_P0.8mm.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
+		(layer "F.Cu")
+		(uuid "e8a25bb4-fb89-40f5-9d34-b23dc97b2357")
+		(at 116.5 105.5)
+		(fp_text reference "Q1"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "f2e180c4-a222-403f-9ea9-1d88fec13759")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "IRLZ44N"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "98f05e30-e6bf-40d1-9d7b-553d3d651fae")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at -2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 12 "GATE_CH")
+		)
+		(pad "2" thru_hole oval
+			(at 0 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 1 "+24V")
+		)
+		(pad "3" thru_hole oval
+			(at 2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 7 "PHASE_C")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
+			(offset
+				(xyz -2.54 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
+		(layer "F.Cu")
+		(uuid "2e332acc-2a45-442f-a0e3-d3294123ba9b")
+		(at 116.5 113.5)
+		(fp_text reference "Q2"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "3eee78cf-da3f-4a40-b5fe-a21489117106")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "IRLZ44N"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "f62d4542-5466-432c-9a2b-7f1addc31bae")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at -2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 13 "GATE_CL")
+		)
+		(pad "2" thru_hole oval
+			(at 0 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 7 "PHASE_C")
+		)
+		(pad "3" thru_hole oval
+			(at 2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 18 "ISENSE_C+")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
+			(offset
+				(xyz -2.54 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
+		(layer "F.Cu")
+		(uuid "3e0b26a7-630c-47c4-b466-508897a71757")
+		(at 132.5 105.5)
+		(fp_text reference "Q3"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "62ed006b-bcaa-4076-b047-7d74df2f62f7")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "IRLZ44N"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "80ea35e2-528a-49a4-a1dd-ba6672039825")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at -2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 10 "GATE_BH")
+		)
+		(pad "2" thru_hole oval
+			(at 0 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 1 "+24V")
+		)
+		(pad "3" thru_hole oval
+			(at 2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 6 "PHASE_B")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
+			(offset
+				(xyz -2.54 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
+		(layer "F.Cu")
+		(uuid "1a21d7aa-a097-4032-a48c-d8e595207449")
+		(at 132.5 113.5)
+		(fp_text reference "Q4"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "9022c6e9-d97b-4977-a814-84f45dd448a3")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "IRLZ44N"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "17de1422-4494-450b-9330-e608af2eff95")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at -2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 11 "GATE_BL")
+		)
+		(pad "2" thru_hole oval
+			(at 0 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 6 "PHASE_B")
+		)
+		(pad "3" thru_hole oval
+			(at 2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 16 "ISENSE_B+")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
+			(offset
+				(xyz -2.54 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
+		(layer "F.Cu")
+		(uuid "d8571927-7820-4bba-89ec-080beb7f85ac")
+		(at 148.5 105.5)
+		(fp_text reference "Q5"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "b448a38d-fda8-4b82-b304-39b19511cc86")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "IRLZ44N"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "f801d9ec-0282-44c7-8a12-e2a4fcd36c59")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at -2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 8 "GATE_AH")
+		)
+		(pad "2" thru_hole oval
+			(at 0 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 1 "+24V")
+		)
+		(pad "3" thru_hole oval
+			(at 2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 5 "PHASE_A")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
+			(offset
+				(xyz -2.54 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
+		(layer "F.Cu")
+		(uuid "3fd9d9c1-4797-432a-b345-86e34257f393")
+		(at 148.5 113.5)
+		(fp_text reference "Q6"
+			(at 0 -5)
+			(layer "F.SilkS")
+			(uuid "529ff2d3-d2fc-4b36-9533-6a78faabfc0c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "IRLZ44N"
+			(at 0 5)
+			(layer "F.Fab")
+			(uuid "ee208ed6-84b4-4a81-a649-d37cf8f06c44")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at -2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 9 "GATE_AL")
+		)
+		(pad "2" thru_hole oval
+			(at 0 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 5 "PHASE_A")
+		)
+		(pad "3" thru_hole oval
+			(at 2.54 0)
+			(size 1.8 1.8)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 14 "ISENSE_A+")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_THT.3dshapes/TO-220-3_Vertical.step"
+			(offset
+				(xyz -2.54 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_2512_6332Metric"
+		(layer "F.Cu")
+		(uuid "4762c13e-452c-4307-99fd-f36614e02440")
+		(at 116.5 121.5)
+		(fp_text reference "R10"
+			(at 0 -2)
+			(layer "F.SilkS")
+			(uuid "60294c5f-6564-48f7-9313-5417ba7b1255")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "5mR"
+			(at 0 2)
+			(layer "F.Fab")
+			(uuid "48e5272c-4ce7-4b73-ac45-1daff1defe6f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -3.1 0)
+			(size 1.6 2.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 18 "ISENSE_C+")
+		)
+		(pad "2" smd roundrect
+			(at 3.1 0)
+			(size 1.6 2.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 19 "ISENSE_C-")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_2512_6332Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_2512_6332Metric"
+		(layer "F.Cu")
+		(uuid "4614ae07-71ce-4b98-bb4d-cdea36dd98d7")
+		(at 132.5 121.5)
+		(fp_text reference "R11"
+			(at 0 -2)
+			(layer "F.SilkS")
+			(uuid "906980b9-dd7f-4154-baa3-955f7ae46db5")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "5mR"
+			(at 0 2)
+			(layer "F.Fab")
+			(uuid "9970238c-b353-47f5-9a7f-f167825a0625")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -3.1 0)
+			(size 1.6 2.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 16 "ISENSE_B+")
+		)
+		(pad "2" smd roundrect
+			(at 3.1 0)
+			(size 1.6 2.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 17 "ISENSE_B-")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_2512_6332Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_2512_6332Metric"
+		(layer "F.Cu")
+		(uuid "dbc76794-0ece-4bbc-bd1b-7ba97317a54d")
+		(at 148.5 121.5)
+		(fp_text reference "R12"
+			(at 0 -2)
+			(layer "F.SilkS")
+			(uuid "5f2fe9c6-f882-4245-93a8-f337266755a1")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "5mR"
+			(at 0 2)
+			(layer "F.Fab")
+			(uuid "6ac80e5c-28f7-45d8-b814-6c5a76a61f8f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -3.1 0)
+			(size 1.6 2.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 14 "ISENSE_A+")
+		)
+		(pad "2" smd roundrect
+			(at 3.1 0)
+			(size 1.6 2.7)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 15 "ISENSE_A-")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_2512_6332Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "67a500d0-10f4-4ad2-a3e5-340f04238987")
+		(at 116.5 99.5)
+		(fp_text reference "R20"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "10b002a6-c59f-4eb8-bac8-39dde2aa0483")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "22"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "99e5845a-70b5-48cb-8cdf-dc786e8214a6")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 34 "GATE_DRV_CH")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 12 "GATE_CH")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "6f547544-9095-4c0d-a35f-8b2b2ac08eef")
+		(at 132.5 99.5)
+		(fp_text reference "R21"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "bea00d99-46d3-409d-9039-a7ed76fb63fa")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "22"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "c54c9405-d7d8-46d1-8925-9199c04f4a3c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 33 "GATE_DRV_BH")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 10 "GATE_BH")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "7b62a244-9ec2-4cf0-a4a5-a41b7916f1d3")
+		(at 148.5 99.5)
+		(fp_text reference "R22"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "012c0a45-f4b2-4f2d-b765-1e823d8a6120")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "22"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "09a255e3-8555-4457-abad-c73f86e341d2")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 32 "GATE_DRV_AH")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 8 "GATE_AH")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical"
+		(layer "F.Cu")
+		(uuid "fb5dce7b-5ae6-403c-805b-3ea63b330a98")
+		(at 173.5 113.5)
+		(fp_text reference "J2"
+			(at 0 -4.8)
+			(layer "F.SilkS")
+			(uuid "f1903f98-bb14-4444-8a78-0f2e8193cc07")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "Motor Output"
+			(at 0 4.8)
+			(layer "F.Fab")
+			(uuid "b8e6f2a4-4c6f-48c1-aa39-9584a437f6d2")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at 0 -2.54)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 7 "PHASE_C")
+		)
+		(pad "2" thru_hole oval
+			(at 0 0.00)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 6 "PHASE_B")
+		)
+		(pad "3" thru_hole oval
+			(at 0 2.54)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 5 "PHASE_A")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x03_P2.54mm_Vertical.step"
+			(offset
+				(xyz 0 2.54 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical"
+		(layer "F.Cu")
+		(uuid "db0df3df-d2a2-4ef3-b287-57695e14fc3b")
+		(at 173.5 95.5)
+		(fp_text reference "J3"
+			(at 0 -7.3)
+			(layer "F.SilkS")
+			(uuid "5b7fd736-6d68-4487-b38c-4ddb0b5b4d4b")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "Hall Sensors"
+			(at 0 7.3)
+			(layer "F.Fab")
+			(uuid "479b90fa-8c5a-436d-9ba6-a7f692adada4")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at 0 -5.08)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 20 "HALL_A")
+		)
+		(pad "2" thru_hole oval
+			(at 0 -2.54)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 21 "HALL_B")
+		)
+		(pad "3" thru_hole oval
+			(at 0 0.00)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 22 "HALL_C")
+		)
+		(pad "4" thru_hole oval
+			(at 0 2.54)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 3 "+3V3")
+		)
+		(pad "5" thru_hole oval
+			(at 0 5.08)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x05_P2.54mm_Vertical.step"
+			(offset
+				(xyz 0 5.08 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
+		(layer "F.Cu")
+		(uuid "0c931c0c-2a62-4e66-a9be-f814da2cece8")
+		(at 173.5 59.5)
+		(fp_text reference "J4"
+			(at 0 -8.6)
+			(layer "F.SilkS")
+			(uuid "88a08041-145b-4ef5-925f-49403fbed4af")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "SWD-6"
+			(at 0 8.6)
+			(layer "F.Fab")
+			(uuid "e1061e2c-c8ba-4e76-8760-a26758adafd3")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" thru_hole rect
+			(at 0 -6.35)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 3 "+3V3")
+		)
+		(pad "2" thru_hole oval
+			(at 0 -3.81)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 23 "SWDIO")
+		)
+		(pad "3" thru_hole oval
+			(at 0 -1.27)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 24 "SWCLK")
+		)
+		(pad "4" thru_hole oval
+			(at 0 1.27)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 25 "SWO")
+		)
+		(pad "5" thru_hole oval
+			(at 0 3.81)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 26 "NRST")
+		)
+		(pad "6" thru_hole oval
+			(at 0 6.35)
+			(size 1.7 1.7)
+			(drill 1.0)
+			(layers "*.Cu" "*.Mask")
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x06_P2.54mm_Vertical.step"
+			(offset
+				(xyz 0 6.35 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "e9ee66a7-c50d-43be-b738-1dba61c20503")
+		(at 164.5 50.5)
+		(fp_text reference "R3"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "5a264399-e5d7-48f6-894d-23126db5211d")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "1k"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "bb25f08e-c1dd-491e-b736-a44cd89ade74")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 29 "PWR_LED")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "LED_SMD:LED_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "659969b7-4952-4d61-95dc-e79d88e115ee")
+		(at 164.5 45.5)
+		(fp_text reference "D3"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "6b93e438-85d6-4b01-8071-02bc65c24e57")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "PWR"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "d02f4031-ccae-4418-9991-456d9bf120b0")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1.05 0)
+			(size 1.0 1.2)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 29 "PWR_LED")
+		)
+		(pad "2" smd roundrect
+			(at 1.05 0)
+			(size 1.0 1.2)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/LED_SMD.3dshapes/LED_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "7b90de97-f2ad-472e-be6a-83d1d026c213")
+		(at 170.5 50.5)
+		(fp_text reference "R4"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "4660a306-83f8-49d6-8c61-09ef9a133a1a")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "1k"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "f5430e4a-362e-4ad7-9255-069c7fd58589")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 30 "STATUS_LED")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "LED_SMD:LED_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "88e34b69-bbf3-4e94-ba1b-6b35ce7ea338")
+		(at 170.5 45.5)
+		(fp_text reference "D4"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "6d53c965-40c3-4571-a90f-59cdc524cd1d")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "STATUS"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "bdce914f-ad9a-461c-a989-f3ccc6f092b4")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1.05 0)
+			(size 1.0 1.2)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 30 "STATUS_LED")
+		)
+		(pad "2" smd roundrect
+			(at 1.05 0)
+			(size 1.0 1.2)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/LED_SMD.3dshapes/LED_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "d5372b09-aae5-47b2-934b-a5bc5a675034")
+		(at 157.5 94.5)
+		(fp_text reference "R30"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "fd595661-dbe8-463d-8cd3-3629b9061411")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10k"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "4b2b0a5b-1cd6-4c63-9593-b3f75b6ac25f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 20 "HALL_A")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "be3beb0a-0549-4669-a465-601d9d741fb1")
+		(at 163.5 94.5)
+		(fp_text reference "R31"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "257ba4ff-bd13-4e2f-aa5a-ad5e0fbdcde2")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10k"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "8bd36f70-51a9-47b5-bd2d-e22533388a94")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 21 "HALL_B")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Resistor_SMD:R_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "138c4f1e-8fb9-4901-b4df-dde0aa8649a5")
+		(at 169.5 94.5)
+		(fp_text reference "R32"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "f90f93af-4878-4b17-80e0-8f59746608d5")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10k"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "1e29c603-3605-4f68-bec1-c3319ec51ee0")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 3 "+3V3")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 22 "HALL_C")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "7bfb62d7-0586-4350-b49c-07512363a6ae")
+		(at 157.5 98.5)
+		(fp_text reference "C30"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "3d9946f5-33cb-4362-9ccf-2273beada075")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "eb836c72-a2aa-4550-a42c-6d8d5dd02394")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 20 "HALL_A")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "d46e1fe7-7afc-4218-9711-b0631307486c")
+		(at 163.5 98.5)
+		(fp_text reference "C31"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "58190cb4-6e14-443d-bb7d-9056c4c5b37d")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "00fe1d36-8dc3-4eb6-95c2-d268fdf6d1d7")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 21 "HALL_B")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(footprint "Capacitor_SMD:C_0805_2012Metric"
+		(layer "F.Cu")
+		(uuid "7569c7af-2ef3-46a3-b75b-b1741bde5999")
+		(at 169.5 98.5)
+		(fp_text reference "C32"
+			(at 0 -1.5)
+			(layer "F.SilkS")
+			(uuid "d7aa0688-bf04-4601-a4f0-0aa7148af2b8")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text value "10nF"
+			(at 0 1.5)
+			(layer "F.Fab")
+			(uuid "09beac8f-1667-4fdc-a3ae-702fbac69673")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(pad "1" smd roundrect
+			(at -1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 22 "HALL_C")
+		)
+		(pad "2" smd roundrect
+			(at 1 0)
+			(size 1.0 1.3)
+			(layers "F.Cu" "F.Paste" "F.Mask")
+			(roundrect_rratio 0.25)
+			(net 4 "GND")
+		)
+		(model "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
+	)
+	(zone
+		(net 4)
+		(net_name "GND")
+		(layer "B.Cu")
+		(uuid "4b9ea9f1-3cab-436c-965f-54a5011f4a4a")
+		(hatch edge 0.5)
+		(priority 1)
+		(connect_pads (clearance 0.3)
+		)
+		(min_thickness 0.25)
+		(filled_areas_thickness no)
+		(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
+		)
+		(polygon (pts (xy 108.8 37.8) (xy 188.2 37.8) (xy 188.2 137.2) (xy 108.8 137.2))
+		)
+	)
+	(zone
+		(net 1)
+		(net_name "+24V")
+		(layer "F.Cu")
+		(uuid "81f8f2f5-8aa5-4c04-8b7e-1457e5e512a3")
+		(hatch edge 0.5)
+		(priority 5)
+		(connect_pads (clearance 0.3)
+		)
+		(min_thickness 0.25)
+		(filled_areas_thickness no)
+		(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
+		)
+		(polygon (pts (xy 113.2 45.2) (xy 148.8 45.2) (xy 148.8 105.8) (xy 113.2 105.8))
+		)
+	)
+	(zone
+		(net 2)
+		(net_name "+5V")
+		(layer "F.Cu")
+		(uuid "d1b4df19-ed57-44d8-9636-ecee2e1c7a6a")
+		(hatch edge 0.5)
+		(priority 4)
+		(connect_pads (clearance 0.3)
+		)
+		(min_thickness 0.25)
+		(filled_areas_thickness no)
+		(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
+		)
+		(polygon (pts (xy 116.8 55.9) (xy 149.65 55.9) (xy 149.65 90.8) (xy 116.8 90.8))
+		)
+	)
+	(zone
+		(net 3)
+		(net_name "+3V3")
+		(layer "F.Cu")
+		(uuid "e590eb90-8e9b-41fe-aeb1-ef61dffd0803")
+		(hatch edge 0.5)
+		(priority 3)
+		(connect_pads (clearance 0.3)
+		)
+		(min_thickness 0.25)
+		(filled_areas_thickness no)
+		(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
+		)
+		(polygon (pts (xy 127.45 45.2) (xy 173.8 45.2) (xy 173.8 98.34) (xy 127.45 98.34))
+		)
+	)
+	(zone
+		(net 41)
+		(net_name "VIN")
+		(layer "F.Cu")
+		(uuid "25955169-1cb9-404c-bedc-6a150fea1a02")
+		(hatch edge 0.5)
+		(priority 1)
+		(connect_pads (clearance 0.3)
+		)
+		(min_thickness 0.25)
+		(filled_areas_thickness no)
+		(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
+		)
+		(polygon (pts (xy 112 42.73) (xy 122.5 42.73) (xy 122.5 47) (xy 112 47))
+		)
+	)
+)

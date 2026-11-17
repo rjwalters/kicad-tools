@@ -1,0 +1,15 @@
+{
+  "name": "PR Fixer",
+  "description": "Addresses review feedback on PRs labeled loom:changes-requested",
+  "suggestedModel": "sonnet",
+  "suggestedWorkerType": "claude",
+  "runtimeRequirements": [
+    "worktreeIsolation",
+    "loomControl"
+  ],
+  "toolPolicy": {
+    "allowedCapabilities": [
+      "*"
+    ]
+  }
+}

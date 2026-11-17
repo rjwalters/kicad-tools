@@ -1,0 +1,1445 @@
+/*
+ * Router C++ Core - Coupled differential-pair A* pathfinder (Issue #4065)
+ *
+ * Implementation of the joint-state A* search declared in
+ * coupled_pathfinder.hpp.  This is a faithful C++ port of the pure-Python
+ * ``CoupledPathfinder.route_coupled`` / ``_get_coupled_neighbors`` /
+ * ``_heuristic`` hot loop; line-number references below point at the Python
+ * source (``src/kicad_tools/router/diffpair_routing.py``) each block mirrors.
+ */
+
+#include "coupled_pathfinder.hpp"
+
+#include "clearance_kernel.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace router {
+
+namespace {
+
+// Pack (x, y) into a single 64-bit key for the corridor / bucket maps.
+inline uint64_t xy_key(int x, int y) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) |
+           static_cast<uint32_t>(y);
+}
+
+// Pack (x, y, layer) into a 64-bit key for the visited-cell sets.  Layers
+// are tiny (<16) so 8 bits is plenty; x/y fit in 28 bits each (grids are far
+// below 2^28 cells on a side).
+inline uint64_t xyl_key(int x, int y, int layer) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 36) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(y)) << 8) |
+           static_cast<uint64_t>(static_cast<uint32_t>(layer) & 0xFF);
+}
+
+}  // namespace
+
+CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
+                                     const DesignRules& rules,
+                                     int target_spacing_cells,
+                                     int min_spacing_cells,
+                                     int trace_half_width_cells,
+                                     int via_extra_cells,
+                                     int via_drill_cells,
+                                     double spacing_penalty_factor,
+                                     double heuristic_weight)
+    : grid_(grid),
+      rules_(rules),
+      target_spacing_cells_(target_spacing_cells),
+      min_spacing_cells_(std::max(0, min_spacing_cells)),
+      trace_half_width_cells_(trace_half_width_cells),
+      via_extra_cells_(std::max(1, via_extra_cells)),
+      via_drill_cells_(std::max(0, via_drill_cells)),
+      spacing_penalty_factor_(std::clamp(spacing_penalty_factor, 0.0, 1.0)),
+      heuristic_weight_(std::max(1.0, heuristic_weight)),
+      cols_(grid.cols()),
+      rows_(grid.rows()),
+      num_layers_(grid.layers()) {}
+
+// Issue #5410: physical clearance of the swept trace step, mirroring
+// ``Pathfinder::trace_halo_cell_clear``.
+//
+// The candidate is built at the net's EFFECTIVE trace width and re-measured
+// against its EFFECTIVE clearance -- ``set_halo_net_dimensions`` carries the
+// net-class values the Python ``RouteHaloRefiner`` reads off ``nc``, and the
+// global ``DesignRules`` scalars are the fallback for a net with no class.
+// Measuring a class-bearing net with the global scalar would waive clearance
+// the raster halo (dilated with the net-class value) had enforced; see the
+// rationale on ``set_halo_net_dimensions``.  This mirrors the single-ended
+// ``Pathfinder``'s ``search_trace_half_width_mm_`` /
+// ``search_fill_trace_clearance_`` threading.
+bool CoupledPathfinder::trace_halo_cell_clear(int cx, int cy, int layer,
+                                              int from_x, int from_y,
+                                              int to_x, int to_y, int net) const {
+    if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
+    const HaloNetDims* dims = halo_dims_for(net);
+    const auto [ax, ay] = grid_.grid_to_world(from_x, from_y);
+    const auto [bx, by] = grid_.grid_to_world(to_x, to_y);
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = static_cast<float>(dims ? dims->trace_width : rules_.trace_width);
+    segment.layer = layer; segment.net = net;
+    const float clearance =
+        static_cast<float>(dims ? dims->trace_clearance : rules_.trace_clearance);
+    // Issue #5711: the diff-pair intra-pair waiver, mirroring
+    // ``RouteHaloRefiner.trace_clear``'s ``partner_net=`` /
+    // ``partner_clearance=`` arguments to ``RouteHaloGeometry.clear``.  Both
+    // are installed together by ``set_halo_net_dimensions``; a net with no
+    // resolvable ``diffpair_partner`` installs (-1, -1) and keeps the
+    // ordinary class clearance against every foreign net, exactly as the
+    // Python ``partner is None`` branch does.
+    const int partner_net = dims ? dims->partner_net : -1;
+    const float partner_clearance =
+        dims ? static_cast<float>(dims->partner_clearance) : -1.0f;
+    return grid_.route_trace_geometry_clear(segment, clearance,
+                                            partner_net, partner_clearance,
+                                            rules_.via_clearance);
+}
+
+// Issue #5410: physical clearance of a through via, mirroring
+// ``Pathfinder::via_route_geometry_clear``.  The barrel takes the net class's
+// ``via_size`` when one is installed (``RouteHaloRefiner.via_clear`` builds
+// its candidate the same way); the drill and the via clearance scalar are
+// global on both sides.
+bool CoupledPathfinder::via_route_geometry_clear(int x, int y, int net) const {
+    const HaloNetDims* dims = halo_dims_for(net);
+    const auto [wx, wy] = grid_.grid_to_world(x, y);
+    Via via;
+    via.x = wx; via.y = wy; via.net = net;
+    via.drill = rules_.via_drill;
+    via.diameter = static_cast<float>(dims ? dims->via_diameter : rules_.via_diameter);
+    via.layer_from = 0; via.layer_to = grid_.layers() - 1;
+    // Issue #6272: a via candidate against stored traces takes the
+    // trace/via floor, as ``Pathfinder::via_route_geometry_clear`` does.
+    return grid_.route_via_geometry_clear(via, rules_.via_clearance,
+                                          rules_.min_hole_to_hole,
+                                          rules_.min_drill_clearance,
+                                          rules_.trace_clearance);
+}
+
+bool CoupledPathfinder::is_trace_blocked(int gx, int gy, int layer, int net,
+                                         int from_x, int from_y) const {
+    if (!is_cell_blocked(gx, gy, layer, net)) {
+        // Issue #6008: net-filtered keepout rule areas (Python
+        // ``DiffPairRouter._is_trace_blocked`` mirror).
+        return grid_.has_rule_area_keepouts() &&
+               grid_.rule_area_trace_blocked(gx, gy, layer, net, trace_half_width_cells_);
+    }
+    return !trace_halo_cell_clear(gx, gy, layer,
+                                  from_x >= 0 ? from_x : gx,
+                                  from_y >= 0 ? from_y : gy,
+                                  gx, gy, net);
+}
+
+// Issue #6840: see the header.  Same arithmetic as ``Pathfinder``'s
+// ``!rules_.allow_smd_vias`` sweep.
+bool CoupledPathfinder::via_drill_in_smd_pad(int gx, int gy) const {
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const float drill_radius = rules_.via_drill / 2.0f;
+    for (const auto& pad : grid_.pads()) {
+        if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+        float local_x = static_cast<float>(wx) - pad.x;
+        float local_y = static_cast<float>(wy) - pad.y;
+        if (pad.rotation != 0.0f) {
+            // Invert KiCad's clockwise residual rotation, as in grid.cpp.
+            const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+            const float c = std::cos(angle), s = std::sin(angle);
+            const float rotated_x = c * local_x - s * local_y;
+            local_y = s * local_x + c * local_y;
+            local_x = rotated_x;
+        }
+        const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+        const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+        if (dx * dx + dy * dy < drill_radius * drill_radius) return true;
+    }
+    return false;
+}
+
+// Issue #7296: the drill clears the pad copper but sits inside the mask-dam
+// zone (``rules_.min_via_pad_edge_gap``).  Same arithmetic as Python
+// ``via_in_pad_eligibility.via_drill_at_pad_edge``.
+bool CoupledPathfinder::via_drill_at_smd_pad_edge(int gx, int gy) const {
+    const float floor_mm = rules_.min_via_pad_edge_gap;
+    if (floor_mm <= 0.0f) return false;
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const float radius = rules_.via_drill / 2.0f;
+    for (const auto& pad : grid_.pads()) {
+        if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+        float local_x = static_cast<float>(wx) - pad.x;
+        float local_y = static_cast<float>(wy) - pad.y;
+        if (pad.rotation != 0.0f) {
+            const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+            const float c = std::cos(angle), s = std::sin(angle);
+            const float rotated_x = c * local_x - s * local_y;
+            local_y = s * local_x + c * local_y;
+            local_x = rotated_x;
+        }
+        const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+        const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+        const float dist = std::sqrt(dx * dx + dy * dy);
+        if (dist >= radius && dist < radius + floor_mm) return true;
+    }
+    return false;
+}
+
+// Issue #8994: the same-net pad slit band, coupled twin of the single-ended
+// block in ``Pathfinder::is_via_blocked_diag`` -- a rail via's ANNULUS must
+// union with its own net's SMD pad or clear the stackup-resolved detection
+// edge; the open band in between is a fab-view slit.  Own net only, SMD only,
+// OFF when no edge was resolved.  The annulus takes the net class's via
+// diameter when one is installed, exactly as ``via_route_geometry_clear``
+// builds its candidate.  Same arithmetic as Python
+// ``via_clearance.same_net_pad_gap_acceptable`` (types.hpp's
+// ``same_net_pad_gap_in_band`` holds the single shared copy).
+bool CoupledPathfinder::same_net_pad_gap_in_band(int gx, int gy, int net) const {
+    const float edge_mm = rules_.same_net_pad_gap_band_edge_mm;
+    if (edge_mm <= 0.0f || net <= 0) return false;
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const HaloNetDims* dims = halo_dims_for(net);
+    const double half =
+        static_cast<double>(dims ? dims->via_diameter : rules_.via_diameter) / 2.0;
+    for (const auto& pad : grid_.pads()) {
+        if (pad.net != net || pad.layer_idx < 0) continue;  // Own net, SMD only.
+        if (router::same_net_pad_gap_in_band(static_cast<double>(wx),
+                                             static_cast<double>(wy), half, pad,
+                                             edge_mm))
+            return true;
+    }
+    return false;
+}
+
+// Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
+bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
+    // Issue #6008: via-blocking keepout rule areas (Python
+    // ``DiffPairRouter._is_via_blocked`` mirror).
+    if (grid_.has_rule_area_keepouts()) {
+        const int via_half_cells = search_radius_cells(
+            rules_.via_diameter / 2.0, rules_.via_clearance, grid_.resolution());
+        if (grid_.rule_area_via_blocked(gx, gy, net, via_half_cells)) return true;
+    }
+    // Issue #5410: the physical verdict for a THROUGH via is identical on
+    // every layer -- compute it at most once per candidate.
+    int physical_clear = -1;
+    for (int layer = 0; layer < num_layers_; ++layer) {
+        bool any_blocked = false;
+        for (int dy = -via_extra_cells_; dy <= via_extra_cells_; ++dy) {
+            for (int dx = -via_extra_cells_; dx <= via_extra_cells_; ++dx) {
+                if (!is_cell_blocked(gx + dx, gy + dy, layer, net)) continue;
+                any_blocked = true;
+                // One hard or unverifiable cell in the envelope keeps the
+                // rejection; only a fully verified dynamic-halo envelope is
+                // eligible for the geometric re-measurement below.
+                if (!grid_.route_cell_has_geometry(gx + dx, gy + dy, layer)) return true;
+            }
+        }
+        if (any_blocked) {
+            if (physical_clear < 0)
+                physical_clear = via_route_geometry_clear(gx, gy, net) ? 1 : 0;
+            if (physical_clear == 0) return true;
+        }
+        // Issue #3508: no via-in-pad regardless of net ownership.
+        for (int dy = -via_drill_cells_; dy <= via_drill_cells_; ++dy) {
+            for (int dx = -via_drill_cells_; dx <= via_drill_cells_; ++dx) {
+                int cgx = gx + dx, cgy = gy + dy;
+                if (cgx < 0 || cgx >= cols_ || cgy < 0 || cgy >= rows_) return true;
+                if (grid_.at(cgx, cgy, layer).pad_blocked) return true;
+            }
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Epic #5509 Phase 3c (#5662): the kernel-backed rail clearance gate.
+// ---------------------------------------------------------------------------
+//
+// Before this phase the gate was an inline lambda inside ``route()`` that
+// consulted ``Grid3D::fixed_fill_clear`` and nothing else.  Combined with the
+// blocked-cell plane, that made **stored route geometry invisible to the
+// coupled search by construction**: ``add_stored_segment`` /
+// ``add_stored_via`` register a committed route's exact copper for clearance
+// purposes, but the C++ blocked plane is only refreshed when the Python grid
+// is re-marshalled -- so copper routed earlier in the same session could sit
+// inside a candidate rail's clearance envelope and the search would happily
+// route through it (#4507).
+//
+// ``stored_route_clear`` closes that by measuring the candidate rail against
+// every nearby stored segment and via with the SHARED exact-geometry kernel
+// (``clearance_kernel.hpp``) rather than with a private predicate.  The
+// broad phase is ``Grid3D::route_geometry_candidates`` -- the same 2 mm bin
+// index the single-ended refinement path uses -- so only copper whose
+// bounding box can reach the rail is ever shaped.
+bool CoupledPathfinder::stored_route_clear(double ax, double ay,
+                                           double bx, double by,
+                                           int layer, int net, int partner_net,
+                                           double half, double gap,
+                                           bool is_via) const {
+    namespace ck = clearance;
+
+    const auto& segments = grid_.stored_segments();
+    const auto& vias = grid_.stored_vias();
+    if (segments.empty() && vias.empty()) return true;
+
+    // The candidate rail as a kernel shape.  A via candidate is copper on
+    // every layer (``ALL_LAYERS``), which is exactly how the old lambda
+    // treated it -- it looped every layer of ``fixed_fill_clear``.
+    ck::KShape candidate;
+    if (is_via) {
+        ck::KVia v;
+        v.x = ax; v.y = ay;
+        v.diameter = 2.0 * half;
+        v.drill = rules_.via_drill;
+        candidate = v;
+    } else {
+        ck::KSegment s;
+        s.x1 = ax; s.y1 = ay; s.x2 = bx; s.y2 = by;
+        s.width = 2.0 * half;
+        s.layer = layer;
+        candidate = s;
+    }
+
+    const double margin = half + gap;
+    const auto near = grid_.route_geometry_candidates(
+        std::min(ax, bx) - margin, std::min(ay, by) - margin,
+        std::max(ax, bx) + margin, std::max(ay, by) + margin);
+
+    for (size_t i : near.first) {
+        const auto& other = segments[i];
+        // Own copper is never an obstacle, and the partner rail's copper is
+        // governed by the search's own spacing constraint plus the
+        // commit-time intra-pair gate -- not by this foreign-copper check.
+        if (other.net == net || (partner_net >= 0 && other.net == partner_net)) continue;
+        ck::KSegment o;
+        o.x1 = other.x1; o.y1 = other.y1; o.x2 = other.x2; o.y2 = other.y2;
+        o.width = other.width;
+        o.layer = other.layer_idx;
+        if (!ck::clear(candidate, o, gap)) return false;
+    }
+    for (size_t i : near.second) {
+        const auto& other = vias[i];
+        if (other.net == net || (partner_net >= 0 && other.net == partner_net)) continue;
+        // A trace candidate only meets a barrel on a layer the barrel spans
+        // (mirrors ``Grid3D::trace_stored_vias_clear``); a via candidate
+        // spans every layer, so it always can.
+        if (!is_via && (layer < other.layer_from || layer > other.layer_to)) continue;
+        ck::KVia o;
+        o.x = other.x; o.y = other.y;
+        o.diameter = other.diameter;
+        o.drill = other.drill;
+        if (!ck::clear(candidate, o, gap)) return false;
+    }
+    return true;
+}
+
+bool CoupledPathfinder::rail_clear(int ax, int ay, int bx, int by, int layer,
+                                   int net, int partner_net, double rail_half,
+                                   double rail_gap, bool is_via) const {
+    const auto [wx, wy] = grid_.grid_to_world(ax, ay);
+    const auto [vx, vy] = grid_.grid_to_world(bx, by);
+    return rail_clear_world(wx, wy, vx, vy, layer, net, partner_net,
+                            rail_half, rail_gap, is_via);
+}
+
+bool CoupledPathfinder::rail_clear_world(double wx, double wy,
+                                         double vx, double vy, int layer,
+                                         int net, int partner_net,
+                                         double rail_half, double rail_gap,
+                                         bool is_via) const {
+    const double half = is_via
+        ? rules_.via_diameter / 2.0
+        : (rail_half >= 0 ? rail_half : rules_.trace_width / 2.0);
+    const double gap = is_via
+        ? rules_.via_clearance
+        : (rail_gap >= 0 ? rail_gap : rules_.trace_clearance);
+
+    if (grid_.has_fixed_fills()) {
+        if (is_via) {
+            for (int l = 0; l < num_layers_; ++l) {
+                if (!grid_.fixed_fill_clear(wx, wy, vx, vy, l, half, half + gap)) return false;
+            }
+        } else if (!grid_.fixed_fill_clear(wx, wy, vx, vy, layer, half, half + gap)) {
+            return false;
+        }
+    }
+
+    // Issue #6243: the authored per-net minimum against pads and stored
+    // route copper (partner copper included -- a stricter netclass binds the
+    // pair's own nets too), through the grid's kernel-backed gate.
+    if (grid_.authored_active()) {
+        if (is_via ? !grid_.authored_via_clear(wx, wy, 2.0 * half, net)
+                   : !grid_.authored_segment_clear(wx, wy, vx, vy, 2.0 * half, layer, net))
+            return false;
+    }
+
+    return stored_route_clear(wx, wy, vx, vy, layer, net, partner_net, half, gap, is_via);
+}
+
+// Mirror of Python ``_heuristic`` partner_aware branch
+// (diffpair_routing.py:1393-1458).  Only ``partner_aware`` is ported; the
+// Python wrapper routes ``manhattan_sum`` callers to the Python fallback.
+double CoupledPathfinder::heuristic(int p_x, int p_y, int p_layer,
+                                    int n_x, int n_y, int n_layer,
+                                    int p_goal_x, int p_goal_y, int p_goal_layer,
+                                    int n_goal_x, int n_goal_y, int n_goal_layer) const {
+    int p_dist = std::abs(p_x - p_goal_x) + std::abs(p_y - p_goal_y);
+    int n_dist = std::abs(n_x - n_goal_x) + std::abs(n_y - n_goal_y);
+    double layer_cost = 0.0;
+    if (p_layer != p_goal_layer) layer_cost += rules_.cost_via;
+    if (n_layer != n_goal_layer) layer_cost += rules_.cost_via;
+
+    int max_dist = std::max(p_dist, n_dist);
+    double spacing_dx = static_cast<double>(p_x - n_x);
+    double spacing_dy = static_cast<double>(p_y - n_y);
+    double current_spacing = std::sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy);
+    double spacing_divergence = std::abs(current_spacing - target_spacing_cells_);
+    double spacing_penalty =
+        spacing_divergence * rules_.cost_straight * spacing_penalty_factor_;
+    return max_dist * rules_.cost_straight + spacing_penalty + layer_cost;
+}
+
+CoupledRouteResult CoupledPathfinder::route(
+    int p_start_x, int p_start_y,
+    int n_start_x, int n_start_y,
+    int start_layer,
+    int p_goal_x, int p_goal_y,
+    int n_goal_x, int n_goal_y,
+    int end_layer,
+    int p_net, int n_net,
+    int effective_target_spacing,
+    int effective_approach_radius,
+    int effective_departure_radius,
+    const std::vector<int>& routable_layers,
+    const std::vector<uint8_t>& corridor_bitset,
+    int max_iterations_budget,
+    double timeout_seconds,
+    bool p_goal_any_layer,
+    bool n_goal_any_layer) {
+
+    CoupledRouteResult result;
+
+    const bool have_corridor = !corridor_bitset.empty();
+    // Corridor-exempt endpoint (x,y) cells (diffpair_routing.py:1630-1637).
+    std::unordered_set<uint64_t> corridor_exempt;
+    corridor_exempt.reserve(4);
+    corridor_exempt.insert(xy_key(p_start_x, p_start_y));
+    corridor_exempt.insert(xy_key(p_goal_x, p_goal_y));
+    corridor_exempt.insert(xy_key(n_start_x, n_start_y));
+    corridor_exempt.insert(xy_key(n_goal_x, n_goal_y));
+
+    auto in_corridor = [&](int x, int y) -> bool {
+        if (!have_corridor) return true;
+        if (x < 0 || x >= cols_ || y < 0 || y >= rows_) {
+            return corridor_exempt.count(xy_key(x, y)) != 0;
+        }
+        if (corridor_bitset[static_cast<size_t>(y) * cols_ + x]) return true;
+        return corridor_exempt.count(xy_key(x, y)) != 0;
+    };
+
+    // Issue #6826: per-end spacing tolerance inside the relaxed endpoint
+    // zones.  The zone RADIUS stays ``2*delta + 4`` (the pair needs that much
+    // room to converge one cell per step), but the TOLERANCE used to be the
+    // radius as well -- so on Board07 TMDS_D1 (pitch 8/10 vs target 3) every
+    // joint midpoint admitted ~900-1,400 near-equal-f P-to-N offsets and the
+    // joint A* flooded them (402k iterations against a 20k budget).  Bound
+    // each end's tolerance by its own pad-pitch delta plus one cell instead:
+    // the pads themselves (spacing == pitch) stay legal.  That covers every
+    // ordinary geometry probed (in-line, perpendicular, 45/30 degrees,
+    // rotated, pitch below target, detour-forcing obstacles), but it is not
+    // a guarantee: when a foreign obstacle overlaps the N pad's own copper
+    // the converging path can need 1-4 cells more, the search then fails and
+    // the pair falls back to independent routing (Issue #6835).  Never
+    // looser than the radius-based value it replaces.  Mirrors ``_endpoint_zone_tolerance`` in diffpair_routing.py
+    // (round-half-up via floor(x + 0.5) on both sides for exact parity).
+    auto endpoint_zone_tolerance = [&](int ax, int ay, int bx, int by, int radius) -> int {
+        double pdx = ax - bx, pdy = ay - by;
+        double pitch = std::sqrt(pdx * pdx + pdy * pdy);
+        int delta = static_cast<int>(
+            std::floor(std::abs(pitch - effective_target_spacing) + 0.5));
+        int tol = std::max(1, delta) + 1;
+        return std::min(tol, radius);
+    };
+    const int departure_tolerance = endpoint_zone_tolerance(
+        p_start_x, p_start_y, n_start_x, n_start_y, effective_departure_radius);
+    const int approach_tolerance = endpoint_zone_tolerance(
+        p_goal_x, p_goal_y, n_goal_x, n_goal_y, effective_approach_radius);
+
+    // Node pool (contiguous) + index-based parent chain.
+    std::vector<CoupledAStarNode> pool;
+    pool.reserve(4096);
+
+    // Priority queue over pool INDICES, ordered by a copy of the node's keys.
+    // We store the node itself in the heap so the comparator is self-contained
+    // (the pool may reallocate; storing indices + comparator-by-lookup would
+    // be invalidated).  Heap entries are small PODs.
+    std::priority_queue<CoupledAStarNode, std::vector<CoupledAStarNode>,
+                        CoupledNodeGreater>
+        open_set;
+
+    // closed_set / g_scores keyed by the joint (p_pos, n_pos) IGNORING
+    // direction, exactly as the Python loop keys ``(current.state.p_pos,
+    // current.state.n_pos)`` (diffpair_routing.py:1746, 1873).  The key packs
+    // both heads' (x,y,layer) into 128 bits via a pair of 64-bit keys.
+    struct JointKey {
+        uint64_t p, n;
+        bool operator==(const JointKey& o) const { return p == o.p && n == o.n; }
+    };
+    struct JointKeyHash {
+        size_t operator()(const JointKey& k) const {
+            // 64-bit mix (splitmix64-ish) of the two halves.
+            uint64_t h = k.p * 0x9E3779B97F4A7C15ULL ^ (k.n + 0x9E3779B97F4A7C15ULL +
+                                                        (k.p << 6) + (k.p >> 2));
+            return static_cast<size_t>(h);
+        }
+    };
+    std::unordered_set<JointKey, JointKeyHash> closed_set;
+    std::unordered_map<JointKey, float, JointKeyHash> g_scores;
+
+    auto joint_key = [](int px, int py, int pl, int nx, int ny, int nl) -> JointKey {
+        return JointKey{xyl_key(px, py, pl), xyl_key(nx, ny, nl)};
+    };
+
+    const int directions[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+    uint64_t seq_counter = 0;
+
+    // Root node.
+    double start_h = heuristic_weight_ *
+                     heuristic(p_start_x, p_start_y, start_layer,
+                               n_start_x, n_start_y, start_layer,
+                               p_goal_x, p_goal_y, end_layer,
+                               n_goal_x, n_goal_y, end_layer);
+    CoupledAStarNode root;
+    root.p_x = p_start_x; root.p_y = p_start_y; root.p_layer = start_layer;
+    root.n_x = n_start_x; root.n_y = n_start_y; root.n_layer = start_layer;
+    root.dir_dx = 0; root.dir_dy = 0;
+    root.f_score = static_cast<float>(start_h);
+    root.g_score = 0.0f;
+    root.parent_idx = -1;
+    root.via_from_parent = false;
+    root.seq = seq_counter++;
+    // The heap holds a copy; the pool records nodes as they are POPPED and
+    // become the parent of expanded neighbors (mirrors the single-ended
+    // pathfinder, whose closed set is the parent store).
+    open_set.push(root);
+    g_scores[joint_key(p_start_x, p_start_y, start_layer,
+                       n_start_x, n_start_y, start_layer)] = 0.0f;
+
+    const long max_iterations = static_cast<long>(cols_) * rows_ * 4;
+    long iterations = 0;
+
+    using clock = std::chrono::steady_clock;
+    const bool have_deadline = timeout_seconds > 0.0;
+    auto deadline = clock::now() +
+                    std::chrono::duration_cast<clock::duration>(
+                        std::chrono::duration<double>(timeout_seconds));
+    const bool have_iter_budget = max_iterations_budget > 0;
+
+    double best_progress = -1.0;  // -1 sentinel = "nothing popped yet".
+
+    // Issue #4459: per-reason move-rejection histogram.  Counts which guard
+    // pruned each candidate so a 0/9 budget-exit can be triaged (which
+    // constraint dominates the frontier).  Keys mirror the pure-Python
+    // ``last_rejections`` vocabulary (diffpair_routing.py) so the two backends
+    // report the same taxonomy; the via-guard keys are the C++ path's superset
+    // (the Python via move does not currently count rejections).
+    std::unordered_map<std::string, int64_t> rejections;
+    auto rej = [&rejections](const char* reason) { ++rejections[reason]; };
+
+    // Issue #6473: via cells of the popped node's joint path, rebuilt on
+    // every pop by the parent-chain walk below.
+    std::vector<std::pair<int, int>> own_vias;
+    // Issue #6840: the same via cells split per rail, for the via-aware
+    // partner clearance guard (``set_partner_via_clearance``).
+    std::vector<std::pair<int, int>> p_vias, n_vias;
+    const bool partner_via_guard =
+        min_spacing_cells_ > 0 &&
+        (pv_p_trace_sq_ > 0.0 || pv_n_trace_sq_ > 0.0 || pv_via_via_sq_ > 0.0);
+
+    // Endpoint (x,y,layer) cells stripped from the trail sets, mirroring the
+    // Python discard at diffpair_routing.py:1829-1838.
+    const uint64_t p_start_cell = xyl_key(p_start_x, p_start_y, start_layer);
+    const uint64_t p_goal_cell = xyl_key(p_goal_x, p_goal_y, end_layer);
+    const uint64_t n_start_cell = xyl_key(n_start_x, n_start_y, start_layer);
+    const uint64_t n_goal_cell = xyl_key(n_goal_x, n_goal_y, end_layer);
+
+    const int prox_r = min_spacing_cells_;
+    const int prox_bucket = std::max(1, prox_r);
+    const double prox_r_sq = static_cast<double>(prox_r) * prox_r;
+
+    // Issue #4065: trail-history containers hoisted OUT of the loop and
+    // ``.clear()``-reused every pop.  Rebuilding fresh ``unordered_set`` /
+    // ``unordered_map`` objects per iteration (the naive port) dominated a
+    // short converging run's wall-clock -- clearing retained buckets keeps
+    // the allocated capacity across pops so only the growth beyond the
+    // previous high-water mark allocates.  This is the per-pop-allocation
+    // half of the curator's O(depth^2) caveat; the walk itself stays O(depth).
+    std::unordered_set<uint64_t> p_visited, n_visited;
+    std::unordered_map<uint64_t, std::vector<uint64_t>> p_prox, n_prox;
+
+    while (!open_set.empty() && iterations < max_iterations) {
+        ++iterations;
+
+        // Iteration-budget classifier (diffpair_routing.py:1707-1721).
+        if (have_iter_budget && iterations >= max_iterations_budget) {
+            result.success = false;
+            result.iterations = static_cast<int>(iterations);
+            result.best_progress = best_progress;
+            result.timeout_exceeded = true;
+            result.iteration_limited = true;  // #3921: iteration budget bound.
+            result.rejections = std::move(rejections);  // #4459
+            return result;
+        }
+        // Wall-clock check every 64 iters (diffpair_routing.py:1728-1743).
+        if (have_deadline && (iterations & 63) == 0 && clock::now() >= deadline) {
+            result.success = false;
+            result.iterations = static_cast<int>(iterations);
+            result.best_progress = best_progress;
+            result.timeout_exceeded = true;
+            result.iteration_limited = false;  // wall-clock bound.
+            result.rejections = std::move(rejections);  // #4459
+            return result;
+        }
+
+        CoupledAStarNode current = open_set.top();
+        open_set.pop();
+
+        JointKey ckey = joint_key(current.p_x, current.p_y, current.p_layer,
+                                  current.n_x, current.n_y, current.n_layer);
+        if (closed_set.count(ckey)) continue;
+        closed_set.insert(ckey);
+
+        // Record this node in the pool so its children can reference it.
+        int current_idx = static_cast<int>(pool.size());
+        pool.push_back(current);
+
+        // Goal check (diffpair_routing.py:1762-1771).
+        // Issue #6499: an SMD goal pad is only reached on its own layer; a
+        // through-hole goal pad (``*_goal_any_layer``) is reached on any.
+        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y &&
+                          (p_goal_any_layer || current.p_layer == end_layer));
+        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y &&
+                          (n_goal_any_layer || current.n_layer == end_layer));
+        if (p_at_goal && n_at_goal) {
+            // Reconstruct root->goal path from the pool parent chain.
+            std::vector<CoupledPathNode> rev;
+            int idx = current_idx;
+            while (idx >= 0) {
+                const CoupledAStarNode& nd = pool[static_cast<size_t>(idx)];
+                CoupledPathNode pn;
+                pn.p_x = nd.p_x; pn.p_y = nd.p_y; pn.p_layer = nd.p_layer;
+                pn.n_x = nd.n_x; pn.n_y = nd.n_y; pn.n_layer = nd.n_layer;
+                pn.via_from_parent = nd.via_from_parent;
+                rev.push_back(pn);
+                idx = nd.parent_idx;
+            }
+            std::reverse(rev.begin(), rev.end());
+            result.path = std::move(rev);
+            result.success = true;
+            result.iterations = static_cast<int>(iterations);
+            result.best_progress = best_progress;
+            result.rejections = std::move(rejections);  // #4459
+            return result;
+        }
+
+        // Progress diagnostics (diffpair_routing.py:1780-1789).
+        int progress = std::max(
+            std::abs(current.p_x - p_goal_x) + std::abs(current.p_y - p_goal_y),
+            std::abs(current.n_x - n_goal_x) + std::abs(current.n_y - n_goal_y));
+        if (best_progress < 0.0 || progress < best_progress) {
+            best_progress = progress;
+        }
+
+        // ------------------------------------------------------------------
+        // Build path-history sets + proximity buckets by walking the parent
+        // chain (diffpair_routing.py:1791-1840).
+        //
+        // NOTE (Issue #4065, curator's O(depth^2) caveat): this walk is the
+        // second hot function.  In v1 we walk the contiguous ``pool`` parent
+        // chain by index -- a tight pointer-chase, 10-100x faster than the
+        // Python object-attribute walk, but still O(depth) per pop.  The
+        // fully-incremental restructure (append-only per-node trail carried
+        // forward) is deferred; the C++ walk keeps behavioral parity with
+        // Python while removing the interpreter overhead that dominated the
+        // #4052 profile.  This is the honest v1 boundary called out on the
+        // issue.
+        // ------------------------------------------------------------------
+        p_visited.clear();
+        n_visited.clear();
+        // ``.clear()`` on the bucket maps keeps the bucket vectors' capacity;
+        // clear each retained vector too so membership from a prior pop's
+        // longer chain does not leak into this one.
+        for (auto& kv : p_prox) kv.second.clear();
+        for (auto& kv : n_prox) kv.second.clear();
+        // Issue #6473: the via cells already on this joint path (both rails;
+        // a via move is taken in place, so a ``via_from_parent`` node sits on
+        // its own two drills).  Mirror of the Python ``own_vias`` list.
+        own_vias.clear();
+        p_vias.clear();
+        n_vias.clear();
+        {
+            int walk = current_idx;
+            while (walk >= 0) {
+                const CoupledAStarNode& nd = pool[static_cast<size_t>(walk)];
+                if (nd.via_from_parent) {
+                    own_vias.emplace_back(nd.p_x, nd.p_y);
+                    own_vias.emplace_back(nd.n_x, nd.n_y);
+                    p_vias.emplace_back(nd.p_x, nd.p_y);
+                    n_vias.emplace_back(nd.n_x, nd.n_y);
+                }
+                uint64_t pc = xyl_key(nd.p_x, nd.p_y, nd.p_layer);
+                uint64_t nc = xyl_key(nd.n_x, nd.n_y, nd.n_layer);
+                p_visited.insert(pc);
+                n_visited.insert(nc);
+                if (prox_r > 1) {
+                    p_prox[xy_key(nd.p_x / prox_bucket, nd.p_y / prox_bucket)].push_back(pc);
+                    n_prox[xy_key(nd.n_x / prox_bucket, nd.n_y / prox_bucket)].push_back(nc);
+                }
+                walk = nd.parent_idx;
+            }
+        }
+        // Strip endpoint pad cells (diffpair_routing.py:1829-1838).
+        p_visited.erase(p_start_cell);
+        p_visited.erase(p_goal_cell);
+        n_visited.erase(n_start_cell);
+        n_visited.erase(n_goal_cell);
+
+        // Proximity guard, mirror of ``_too_close_to_trail``
+        // (diffpair_routing.py:937-954).  ``buckets`` selects which trail's
+        // spatial buckets to probe.
+        auto too_close = [&](int cx, int cy, int clayer,
+                             const std::unordered_map<uint64_t, std::vector<uint64_t>>& prox)
+            -> bool {
+            if (prox.empty() || prox_r <= 1) return false;
+            int bx = cx / prox_bucket, by = cy / prox_bucket;
+            for (int dbx = -1; dbx <= 1; ++dbx) {
+                for (int dby = -1; dby <= 1; ++dby) {
+                    auto it = prox.find(xy_key(bx + dbx, by + dby));
+                    if (it == prox.end()) continue;
+                    for (uint64_t packed : it->second) {
+                        int tlayer = static_cast<int>(packed & 0xFF);
+                        if (tlayer != clayer) continue;
+                        int tx = static_cast<int>((packed >> 36) & 0xFFFFFFF);
+                        int ty = static_cast<int>((packed >> 8) & 0xFFFFFFF);
+                        // xyl_key stored x in bits 36+, y in bits 8..35.
+                        double dx = static_cast<double>(tx - cx);
+                        double dy = static_cast<double>(ty - cy);
+                        if (dx * dx + dy * dy < prox_r_sq - 1e-9) return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        // Issue #6473: mirror of Python ``_coupled_own_vias_clear``.  KiCad's
+        // ``hole_to_hole`` rule exempts neither a same-net pair (#5673) nor
+        // the two rails of a diff pair, so a new P/N via pair must keep
+        // ``max(min_drill_clearance, min_hole_to_hole)`` drill edge to drill
+        // edge from each other and from every via already on the joint path.
+        // A candidate on the cell of an earlier via is that same drill (a
+        // via stack F -> In1 -> B).  Same predicate and epsilon as
+        // ``Pathfinder::own_path_vias_clear``.
+        auto own_vias_clear = [&](int px, int py, int nx, int ny) -> bool {
+            const double res = static_cast<double>(grid_.resolution());
+            const double drill = static_cast<double>(rules_.via_drill);
+            const double floor_mm = static_cast<double>(
+                std::max(rules_.min_drill_clearance, rules_.min_hole_to_hole));
+            auto under = [&](int ax, int ay, int bx, int by) -> bool {
+                if (ax == bx && ay == by) return false;
+                const double gap =
+                    std::hypot(static_cast<double>(ax - bx), static_cast<double>(ay - by)) * res -
+                    drill;
+                return gap < floor_mm - clearance::CLEARANCE_EPSILON_MM;
+            };
+            if (under(px, py, nx, ny)) return false;
+            for (const auto& v : own_vias) {
+                if (under(px, py, v.first, v.second)) return false;
+                if (under(nx, ny, v.first, v.second)) return false;
+            }
+            return true;
+        };
+
+        // Issue #6840: is (cx, cy) closer than ``sqrt(r_sq)`` cells to any of
+        // ``pts`` (layer-blind: a via barrel is copper on every layer)?  Same
+        // epsilon as ``too_close``.  Mirror of Python ``_near_cells``.
+        auto near_cells = [](int cx, int cy, const std::vector<std::pair<int, int>>& pts,
+                             double r_sq) -> bool {
+            if (r_sq <= 0.0) return false;
+            for (const auto& v : pts) {
+                const double dx = static_cast<double>(v.first - cx);
+                const double dy = static_cast<double>(v.second - cy);
+                if (dx * dx + dy * dy < r_sq - 1e-9) return true;
+            }
+            return false;
+        };
+        // Issue #6840: the same question against a rail's whole trail, on
+        // every layer (the candidate is a new via).  ``trail`` is the
+        // endpoint-stripped visited set, so the partner's own pad cells --
+        // pad metal the via gate already measures -- are not counted twice.
+        auto near_trail = [](int cx, int cy, const std::unordered_set<uint64_t>& trail,
+                             double r_sq) -> bool {
+            if (r_sq <= 0.0) return false;
+            for (uint64_t packed : trail) {
+                const int tx = static_cast<int>((packed >> 36) & 0xFFFFFFF);
+                const int ty = static_cast<int>((packed >> 8) & 0xFFFFFFF);
+                const double dx = static_cast<double>(tx - cx);
+                const double dy = static_cast<double>(ty - cy);
+                if (dx * dx + dy * dy < r_sq - 1e-9) return true;
+            }
+            return false;
+        };
+        // Issue #6840: may both rails drop a via where they stand without
+        // their barrels crowding the partner's copper?  New P via vs N's
+        // trail (N's width) and vs N's vias -- including the N via of this
+        // same move -- and the reverse.  Mirror of Python
+        // ``_coupled_partner_vias_clear``.
+        auto partner_vias_clear = [&](int px, int py, int nx, int ny) -> bool {
+            if (!partner_via_guard) return true;
+            if (pv_via_via_sq_ > 0.0) {
+                const double dx = static_cast<double>(px - nx);
+                const double dy = static_cast<double>(py - ny);
+                if (dx * dx + dy * dy < pv_via_via_sq_ - 1e-9) return false;
+                if (near_cells(px, py, n_vias, pv_via_via_sq_)) return false;
+                if (near_cells(nx, ny, p_vias, pv_via_via_sq_)) return false;
+            }
+            if (near_trail(px, py, n_visited, pv_n_trace_sq_)) return false;
+            if (near_trail(nx, ny, p_visited, pv_p_trace_sq_)) return false;
+            return true;
+        };
+
+        // Self-intersection guard, mirror of ``_self_intersects``
+        // (diffpair_routing.py:956-1005).
+        auto self_intersects = [&](int np_x, int np_y, int np_l,
+                                   int nn_x, int nn_y, int nn_l,
+                                   bool p_adv, bool n_adv,
+                                   bool p_ep, bool n_ep) -> bool {
+            if (p_visited.empty() && n_visited.empty()) return false;
+            uint64_t pk = xyl_key(np_x, np_y, np_l);
+            uint64_t nk = xyl_key(nn_x, nn_y, nn_l);
+            if (p_adv && !p_ep && n_visited.count(pk)) return true;
+            if (n_adv && !n_ep && p_visited.count(nk)) return true;
+            if (p_adv && !p_ep && too_close(np_x, np_y, np_l, n_prox)) return true;
+            if (n_adv && !n_ep && too_close(nn_x, nn_y, nn_l, p_prox)) return true;
+            // Issue #6840: an advancing rail keeps via clearance from every
+            // partner via, on every layer.
+            if (partner_via_guard) {
+                if (p_adv && !p_ep && near_cells(np_x, np_y, n_vias, pv_p_trace_sq_)) return true;
+                if (n_adv && !n_ep && near_cells(nn_x, nn_y, p_vias, pv_n_trace_sq_)) return true;
+            }
+            if (p_adv && !p_ep && p_visited.count(pk)) return true;
+            if (n_adv && !n_ep && n_visited.count(nk)) return true;
+            return false;
+        };
+
+        // ------------------------------------------------------------------
+        // Neighbor generation (diffpair_routing.py:840-1391).
+        // ------------------------------------------------------------------
+        int target_spacing = effective_target_spacing;
+
+        // Approach / departure relaxation (diffpair_routing.py:1009-1069).
+        bool approach_relaxed = false;
+        {
+            int p_dist_to_goal = std::abs(current.p_x - p_goal_x) + std::abs(current.p_y - p_goal_y);
+            int n_dist_to_goal = std::abs(current.n_x - n_goal_x) + std::abs(current.n_y - n_goal_y);
+            int approach_radius = effective_approach_radius;
+            if (p_dist_to_goal <= approach_radius && n_dist_to_goal <= approach_radius) {
+                approach_relaxed = true;
+            }
+        }
+        bool departure_relaxed = false;
+        {
+            int p_dist_from_start =
+                std::abs(current.p_x - p_start_x) + std::abs(current.p_y - p_start_y);
+            int n_dist_from_start =
+                std::abs(current.n_x - n_start_x) + std::abs(current.n_y - n_start_y);
+            int departure_radius = effective_departure_radius;
+            if (p_dist_from_start <= departure_radius && n_dist_from_start <= departure_radius) {
+                departure_relaxed = true;
+            }
+        }
+        bool spacing_relaxed = approach_relaxed || departure_relaxed;
+        int relaxed_tolerance = std::max(1, target_spacing);
+        if (approach_relaxed) relaxed_tolerance = std::max(relaxed_tolerance, approach_tolerance);
+        if (departure_relaxed) relaxed_tolerance = std::max(relaxed_tolerance, departure_tolerance);
+
+        // Collected neighbors: (px,py,pl, nx,ny,nl, dir_dx,dir_dy, cost, is_via).
+        struct Cand {
+            int px, py, pl, nx, ny, nl, ddx, ddy;
+            double cost;
+            bool is_via;
+        };
+        std::vector<Cand> neighbors;
+        neighbors.reserve(16);
+
+        // Symmetric moves (diffpair_routing.py:1071-1153).
+        for (auto& d : directions) {
+            int dx = d[0], dy = d[1];
+            int np_x = current.p_x + dx, np_y = current.p_y + dy, np_l = current.p_layer;
+            int nn_x = current.n_x + dx, nn_y = current.n_y + dy, nn_l = current.n_layer;
+
+            bool p_ep = at_goal(np_x, np_y, p_goal_x, p_goal_y) ||
+                        at_goal(np_x, np_y, p_start_x, p_start_y);
+            bool n_ep = at_goal(nn_x, nn_y, n_goal_x, n_goal_y) ||
+                        at_goal(nn_x, nn_y, n_start_x, n_start_y);
+            if (!p_ep && is_trace_blocked(np_x, np_y, np_l, p_net,
+                                          current.p_x, current.p_y)) { rej("sym_blocked_p"); continue; }
+            if (!n_ep && is_trace_blocked(nn_x, nn_y, nn_l, n_net,
+                                          current.n_x, current.n_y)) { rej("sym_blocked_n"); continue; }
+
+            double sdx = np_x - nn_x, sdy = np_y - nn_y;
+            double new_spacing = std::sqrt(sdx * sdx + sdy * sdy);
+            int tolerance = spacing_relaxed ? relaxed_tolerance : 1;
+            if (std::abs(new_spacing - target_spacing) > tolerance) { rej("sym_spacing"); continue; }
+
+            if (min_spacing_cells_ > 0 && !(p_ep && n_ep)) {
+                if (new_spacing + 1e-9 < min_spacing_cells_) { rej("sym_floor"); continue; }
+            }
+            if (self_intersects(np_x, np_y, np_l, nn_x, nn_y, nn_l,
+                                true, true, p_ep, n_ep)) { rej("sym_trail"); continue; }
+
+            double cost = rules_.cost_straight;
+            bool dir_changed = !(current.dir_dx == 0 && current.dir_dy == 0) &&
+                               !(current.dir_dx == dx && current.dir_dy == dy);
+            if (dir_changed) cost += rules_.cost_turn;
+            // Issue #4080: corridor attractor for the coupled joint-state
+            // loop.  A symmetric move advances BOTH nets, so query each
+            // landing cell against its own net (mirrors the single-ended
+            // attractor in ``pathfinder.cpp``).  Clamped at 0 so the joint
+            // step cost stays non-negative and A* admissibility holds.
+            double attractor_bonus =
+                grid_.corridor_attractor_bonus(np_x, np_y, np_l, p_net,
+                                               rules_.cost_corridor_attractor) +
+                grid_.corridor_attractor_bonus(nn_x, nn_y, nn_l, n_net,
+                                               rules_.cost_corridor_attractor);
+            if (attractor_bonus > 0.0) cost = std::max(0.0, cost - attractor_bonus);
+            neighbors.push_back({np_x, np_y, np_l, nn_x, nn_y, nn_l, dx, dy, cost, false});
+        }
+
+        // Asymmetric converge moves (diffpair_routing.py:1186-1305).
+        {
+            int asym_tolerance = spacing_relaxed ? relaxed_tolerance : 1;
+            for (auto& d : directions) {
+                int dx = d[0], dy = d[1];
+
+                // P advances, N holds.
+                {
+                    int cp_x = current.p_x + dx, cp_y = current.p_y + dy, cp_l = current.p_layer;
+                    int cn_x = current.n_x, cn_y = current.n_y, cn_l = current.n_layer;
+                    bool p_ep = at_goal(cp_x, cp_y, p_goal_x, p_goal_y) ||
+                                at_goal(cp_x, cp_y, p_start_x, p_start_y);
+                    bool blocked = !(p_ep || !is_trace_blocked(cp_x, cp_y, cp_l, p_net,
+                                                               current.p_x, current.p_y));
+                    if (blocked) rej("asym_blocked_p");  // #4459
+                    if (!blocked) {
+                        double sdx = cp_x - cn_x, sdy = cp_y - cn_y;
+                        double new_spacing = std::sqrt(sdx * sdx + sdy * sdy);
+                        if (std::abs(new_spacing - target_spacing) > asym_tolerance) {
+                            rej("asym_spacing_p");  // #4459
+                        } else {
+                            bool n_ep = at_goal(cn_x, cn_y, n_goal_x, n_goal_y) ||
+                                        at_goal(cn_x, cn_y, n_start_x, n_start_y);
+                            bool bypass_floor = p_ep && n_ep;
+                            bool floor_ok =
+                                !(min_spacing_cells_ > 0 && !bypass_floor &&
+                                  new_spacing + 1e-9 < min_spacing_cells_);
+                            if (!floor_ok) {
+                                rej("asym_floor_p");  // #4459
+                            } else if (self_intersects(cp_x, cp_y, cp_l, cn_x, cn_y, cn_l,
+                                                       true, false, p_ep, n_ep)) {
+                                rej("asym_trail_p");  // #4459
+                            } else {
+                                double cost = rules_.cost_straight;
+                                bool dir_changed =
+                                    !(current.dir_dx == 0 && current.dir_dy == 0) &&
+                                    !(current.dir_dx == dx && current.dir_dy == dy);
+                                if (dir_changed) cost += rules_.cost_turn;
+                                // Issue #4080: corridor attractor (per-net)
+                                // for the asymmetric P-advance move.  See the
+                                // symmetric-move comment above.
+                                double attractor_bonus =
+                                    grid_.corridor_attractor_bonus(
+                                        cp_x, cp_y, cp_l, p_net,
+                                        rules_.cost_corridor_attractor) +
+                                    grid_.corridor_attractor_bonus(
+                                        cn_x, cn_y, cn_l, n_net,
+                                        rules_.cost_corridor_attractor);
+                                if (attractor_bonus > 0.0)
+                                    cost = std::max(0.0, cost - attractor_bonus);
+                                neighbors.push_back(
+                                    {cp_x, cp_y, cp_l, cn_x, cn_y, cn_l, dx, dy, cost, false});
+                            }
+                        }
+                    }
+                }
+
+                // N advances, P holds.
+                {
+                    int cp_x = current.p_x, cp_y = current.p_y, cp_l = current.p_layer;
+                    int cn_x = current.n_x + dx, cn_y = current.n_y + dy, cn_l = current.n_layer;
+                    bool n_ep = at_goal(cn_x, cn_y, n_goal_x, n_goal_y) ||
+                                at_goal(cn_x, cn_y, n_start_x, n_start_y);
+                    if (!(n_ep || !is_trace_blocked(cn_x, cn_y, cn_l, n_net,
+                                                    current.n_x, current.n_y))) {
+                        rej("asym_blocked_n");  // #4459
+                    } else {
+                        double sdx = cp_x - cn_x, sdy = cp_y - cn_y;
+                        double new_spacing = std::sqrt(sdx * sdx + sdy * sdy);
+                        if (std::abs(new_spacing - target_spacing) > asym_tolerance) {
+                            rej("asym_spacing_n");  // #4459
+                        } else {
+                            bool p_ep = at_goal(cp_x, cp_y, p_goal_x, p_goal_y) ||
+                                        at_goal(cp_x, cp_y, p_start_x, p_start_y);
+                            bool bypass_floor = p_ep && n_ep;
+                            bool floor_ok =
+                                !(min_spacing_cells_ > 0 && !bypass_floor &&
+                                  new_spacing + 1e-9 < min_spacing_cells_);
+                            if (!floor_ok) {
+                                rej("asym_floor_n");  // #4459
+                            } else if (self_intersects(cp_x, cp_y, cp_l, cn_x, cn_y, cn_l,
+                                                       false, true, p_ep, n_ep)) {
+                                rej("asym_trail_n");  // #4459
+                            } else {
+                                double cost = rules_.cost_straight;
+                                bool dir_changed =
+                                    !(current.dir_dx == 0 && current.dir_dy == 0) &&
+                                    !(current.dir_dx == dx && current.dir_dy == dy);
+                                if (dir_changed) cost += rules_.cost_turn;
+                                // Issue #4080: corridor attractor (per-net)
+                                // for the asymmetric N-advance move.  See the
+                                // symmetric-move comment above.
+                                double attractor_bonus =
+                                    grid_.corridor_attractor_bonus(
+                                        cp_x, cp_y, cp_l, p_net,
+                                        rules_.cost_corridor_attractor) +
+                                    grid_.corridor_attractor_bonus(
+                                        cn_x, cn_y, cn_l, n_net,
+                                        rules_.cost_corridor_attractor);
+                                if (attractor_bonus > 0.0)
+                                    cost = std::max(0.0, cost - attractor_bonus);
+                                neighbors.push_back(
+                                    {cp_x, cp_y, cp_l, cn_x, cn_y, cn_l, dx, dy, cost, false});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Layer-change (via) moves (diffpair_routing.py:1307-1350).
+        {
+            bool p_at_ep = at_goal(current.p_x, current.p_y, p_goal_x, p_goal_y) ||
+                           at_goal(current.p_x, current.p_y, p_start_x, p_start_y);
+            bool n_at_ep = at_goal(current.n_x, current.n_y, n_goal_x, n_goal_y) ||
+                           at_goal(current.n_x, current.n_y, n_start_x, n_start_y);
+            // Issue #6473: hole-to-hole floor among the pair's OWN vias --
+            // P-vs-N of this move, and either against every earlier via of
+            // either rail.  ``via_route_geometry_clear`` only sees stored
+            // copper.  Applied at endpoint pads too: that exemption is about
+            // pad metal, not drills.  Layer-independent, so evaluated once
+            // (and only when there is a layer to change to).
+            int own_h2h_clear = -1;
+            // Issue #6840: partner-copper clearance of the two new barrels;
+            // layer-independent too, so evaluated once.
+            int partner_via_ok = -1;
+            int smd_vias_ok = -1;
+            for (int new_layer : routable_layers) {
+                if (new_layer == current.p_layer) continue;
+                if (own_h2h_clear < 0) {
+                    own_h2h_clear = own_vias_clear(current.p_x, current.p_y,
+                                                   current.n_x, current.n_y) ? 1 : 0;
+                }
+                if (own_h2h_clear == 0) { rej("via_own_h2h"); continue; }
+                if (partner_via_ok < 0) {
+                    partner_via_ok = partner_vias_clear(current.p_x, current.p_y,
+                                                        current.n_x, current.n_y) ? 1 : 0;
+                }
+                if (partner_via_ok == 0) { rej("via_partner_clear"); continue; }
+                // Issue #6840: the fab's via-in-pad process, at the endpoint
+                // pads too (where ``is_via_blocked`` is waived).
+                if (smd_vias_ok < 0) {
+                    // Issue #7296: plus the mask-dam floor, which applies
+                    // even where via-in-pad is allowed.
+                    // Issue #8994: plus the same-net pad slit band, per rail
+                    // (each rail's annulus against its OWN net's SMD pads).
+                    smd_vias_ok = ((rules_.allow_smd_vias ||
+                                    (!via_drill_in_smd_pad(current.p_x, current.p_y) &&
+                                     !via_drill_in_smd_pad(current.n_x, current.n_y))) &&
+                                   !via_drill_at_smd_pad_edge(current.p_x, current.p_y) &&
+                                   !via_drill_at_smd_pad_edge(current.n_x, current.n_y) &&
+                                   !same_net_pad_gap_in_band(current.p_x, current.p_y, p_net) &&
+                                   !same_net_pad_gap_in_band(current.n_x, current.n_y, n_net)) ? 1 : 0;
+                }
+                if (smd_vias_ok == 0) { rej("via_in_pad"); continue; }
+                if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
+                if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
+                if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }
+                if (!n_at_ep && is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) { rej("via_trace_blocked_n"); continue; }
+                double cost = rules_.cost_via * 2.0;
+                // Issue #4080: corridor attractor on the via-drop
+                // destination cells -- the reservation is what makes the
+                // coupled router prefer to actually via-hop INTO the
+                // reserved channel (mirrors the single-ended via-drop
+                // attractor in ``pathfinder.cpp``).  Per-net query,
+                // clamped at 0.
+                double attractor_bonus =
+                    grid_.corridor_attractor_bonus(current.p_x, current.p_y, new_layer,
+                                                   p_net, rules_.cost_corridor_attractor) +
+                    grid_.corridor_attractor_bonus(current.n_x, current.n_y, new_layer,
+                                                   n_net, rules_.cost_corridor_attractor);
+                if (attractor_bonus > 0.0) cost = std::max(0.0, cost - attractor_bonus);
+                neighbors.push_back({current.p_x, current.p_y, new_layer,
+                                     current.n_x, current.n_y, new_layer,
+                                     current.dir_dx, current.dir_dy, cost, true});
+            }
+        }
+
+        // Expand neighbors into the open set (diffpair_routing.py:1842-1890).
+        for (const Cand& c : neighbors) {
+            // Epic #5509 Phase 3c (#5662): one kernel-backed gate, always
+            // consulted.  The old ``has_fixed_fills()`` guard around the
+            // whole block is gone on purpose: it made the gate a no-op on
+            // every board with no copper pour, which is precisely how
+            // stored-route copper stayed invisible to this search (#4507).
+            // ``rail_clear`` still short-circuits internally when there is
+            // neither a fixed fill nor any stored route to measure against.
+            if (!rail_clear(current.p_x, current.p_y, c.px, c.py, c.pl, p_net, n_net,
+                            p_fill_half_, p_fill_gap_, c.is_via)) {
+                rej("rail_clear_p");  // #4459
+                continue;
+            }
+            if (!rail_clear(current.n_x, current.n_y, c.nx, c.ny, c.nl, n_net, p_net,
+                            n_fill_half_, n_fill_gap_, c.is_via)) {
+                rej("rail_clear_n");  // #4459
+                continue;
+            }
+            // Corridor pruning (diffpair_routing.py:1864-1871).
+            if (have_corridor) {
+                if (!in_corridor(c.px, c.py) || !in_corridor(c.nx, c.ny)) {
+                    rej("corridor");  // #4459
+                    continue;
+                }
+            }
+            JointKey nkey = joint_key(c.px, c.py, c.pl, c.nx, c.ny, c.nl);
+            if (closed_set.count(nkey)) continue;
+
+            float new_g = current.g_score + static_cast<float>(c.cost);
+            auto git = g_scores.find(nkey);
+            if (git == g_scores.end() || new_g < git->second) {
+                g_scores[nkey] = new_g;
+                double h = heuristic(c.px, c.py, c.pl, c.nx, c.ny, c.nl,
+                                     p_goal_x, p_goal_y, end_layer,
+                                     n_goal_x, n_goal_y, end_layer);
+                float f = new_g + static_cast<float>(heuristic_weight_ * h);
+                CoupledAStarNode node;
+                node.p_x = c.px; node.p_y = c.py; node.p_layer = c.pl;
+                node.n_x = c.nx; node.n_y = c.ny; node.n_layer = c.nl;
+                node.dir_dx = c.ddx; node.dir_dy = c.ddy;
+                node.f_score = f;
+                node.g_score = new_g;
+                node.parent_idx = current_idx;
+                node.via_from_parent = c.is_via;
+                node.seq = seq_counter++;
+                open_set.push(node);
+            }
+        }
+    }
+
+    // No path found (open set exhausted or memory backstop hit).
+    result.success = false;
+    result.iterations = static_cast<int>(iterations);
+    result.best_progress = best_progress;
+    result.rejections = std::move(rejections);  // #4459
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #5786 (Epic #5784 Phase 2): pose-based centerline search
+// ---------------------------------------------------------------------------
+//
+// Design follows KiCadRoutingTools' documented approach (one centerline over
+// (x, y, theta, layer), 45-degree headings, Dubins-length heuristic; P and N
+// derived as offsets) -- see docs/research/kicad-routing-tools-comparison.md,
+// section 3.  The search itself is a reimplementation over OUR grid and OUR
+// clearance kernel, not a port; only ``dubins.hpp`` is ported code.
+namespace {
+
+constexpr int kHeadingDx[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+constexpr int kHeadingDy[8] = {0, 1, 1, 1, 0, -1, -1, -1};
+constexpr double kPoseInvSqrt2 = 0.70710678118654752440;
+constexpr double kPosePi = 3.14159265358979323846;
+
+inline uint64_t pose_key(int x, int y, int heading, int layer) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 36) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(y)) << 8) |
+           (static_cast<uint64_t>(layer & 0x1F) << 3) |
+           static_cast<uint64_t>(heading & 7);
+}
+
+struct PoseNode {
+    int x, y, heading, layer;
+    float g;
+    float f;
+    int parent;
+    int start_index;
+    bool terminal;
+    uint64_t seq;
+};
+
+struct PoseNodeGreater {
+    bool operator()(const PoseNode& a, const PoseNode& b) const {
+        if (a.f != b.f) return a.f > b.f;
+        return a.seq < b.seq;  // LIFO on ties, as the joint-state loop does.
+    }
+};
+
+}  // namespace
+
+// One rail segment: raster gate on the cells it crosses (pads, keepouts,
+// static halos) plus the exact-geometry kernel.  A rail is offset off-lattice
+// (half a 5-cell pair pitch is 2.5 cells, i.e. every rail point sits on a
+// cell-rounding TIE), so the cells it crosses are not the cells the
+// centerline visits, and which side of a tie a point falls on must not depend
+// on float noise.  Cells are therefore taken with a small upward tolerance, and
+// the search and the finished-copper verification share this one function so
+// they cannot disagree.
+bool CoupledPathfinder::rail_segment_clear(double sx, double sy, double ex, double ey,
+                                           int layer, int net, int partner_net,
+                                           double half, double gap) const {
+    const auto [ox_f, oy_f] = grid_.grid_to_world(0, 0);
+    const double ox = ox_f, oy = oy_f;
+    const double res = static_cast<double>(grid_.resolution());
+    auto cell_of = [&](double x, double y) {
+        const int cx = static_cast<int>(std::floor((x - ox) / res + 0.5 + 1e-4));
+        const int cy = static_cast<int>(std::floor((y - oy) / res + 0.5 + 1e-4));
+        return std::pair<int, int>{std::clamp(cx, 0, cols_ - 1), std::clamp(cy, 0, rows_ - 1)};
+    };
+    const double len_cells = std::hypot(ex - sx, ey - sy) / res;
+    const int samples = std::max(1, static_cast<int>(std::ceil(len_cells * 4.0)));
+    auto [prev_cx, prev_cy] = cell_of(sx, sy);
+    for (int k = 1; k <= samples; ++k) {
+        const double f = static_cast<double>(k) / samples;
+        const auto [cx, cy] = cell_of(sx + (ex - sx) * f, sy + (ey - sy) * f);
+        if (cx == prev_cx && cy == prev_cy) continue;
+        if (is_trace_blocked(cx, cy, layer, net, prev_cx, prev_cy)) return false;
+        prev_cx = cx; prev_cy = cy;
+    }
+    // Issue #7491 (#7401): the raster halo sees a pad only to ~0.05 mm past
+    // its edge, and ``rail_clear_world`` measures stored route copper, not
+    // pads -- so a rail threading a sub-pitch gap between two of the
+    // PARTNER's pads passed this gate and was then refused by the
+    // finished-copper check (``derived-rails-blocked``).  Measure the
+    // partner's pads exactly here so the search and verification agree.
+    if (partner_net > 0 &&
+        !grid_.pad_geometry_clear(static_cast<float>(sx), static_cast<float>(sy),
+                                  static_cast<float>(ex), static_cast<float>(ey),
+                                  layer, net, static_cast<float>(half), 0.0f,
+                                  partner_net)) {
+        return false;
+    }
+    return rail_clear_world(sx, sy, ex, ey, layer, net, partner_net, half, gap, false);
+}
+
+bool CoupledPathfinder::centerline_step_clear(
+    int ax, int ay, int prev_heading, int bx, int by, int heading, int layer,
+    int p_net, int n_net, double half_pitch, int p_side,
+    double p_half, double p_gap, double n_half, double n_gap) const {
+    const auto [wax, way] = grid_.grid_to_world(ax, ay);
+    const auto [wbx, wby] = grid_.grid_to_world(bx, by);
+    auto normal = [](int h) {
+        const double dx = kHeadingDx[h & 7], dy = kHeadingDy[h & 7];
+        const double len = std::sqrt(dx * dx + dy * dy);
+        return std::pair<double, double>{-dy / len, dx / len};
+    };
+    const auto [nx, ny] = normal(heading);
+
+    for (int rail = 0; rail < 2; ++rail) {
+        const bool is_p = (rail == 0);
+        const double off = (is_p ? p_side : -p_side) * half_pitch;
+        const int net = is_p ? p_net : n_net;
+        const int partner = is_p ? n_net : p_net;
+        const double half = is_p ? p_half : n_half;
+        const double gap = is_p ? p_gap : n_gap;
+
+        const double rax = wax + off * nx, ray = way + off * ny;
+        const double rbx = wbx + off * nx, rby = wby + off * ny;
+
+        auto seg_ok = [&](double sx, double sy, double ex, double ey) {
+            return rail_segment_clear(sx, sy, ex, ey, layer, net, partner, half, gap);
+        };
+
+        if (!seg_ok(rax, ray, rbx, rby)) return false;
+
+        if (prev_heading >= 0 && prev_heading != heading) {
+            // The derived rail turns through the MITER point, not through
+            // the two plain offset points, so check the corner as built:
+            // previous-heading offset point -> miter point -> new-heading
+            // offset point.
+            const auto [pnx, pny] = normal(prev_heading);
+            const double dot = pnx * nx + pny * ny;
+            const double k = (1.0 + dot) > 1e-6 ? off / (1.0 + dot) : off;
+            const double mx = wax + k * (pnx + nx), my = way + k * (pny + ny);
+            if (!seg_ok(wax + off * pnx, way + off * pny, mx, my)) return false;
+            if (!seg_ok(mx, my, rax, ray)) return false;
+        }
+    }
+    return true;
+}
+
+CenterlineRouteResult CoupledPathfinder::route_centerline(
+    const std::vector<CenterlineEndpoint>& starts,
+    const std::vector<CenterlineEndpoint>& goals,
+    int p_net, int n_net, double half_pitch, int p_side,
+    double p_half, double p_gap, double n_half, double n_gap,
+    double min_radius_cells, double turn_penalty, double heuristic_weight,
+    int max_iterations_budget, double timeout_seconds) const {
+    CenterlineRouteResult result;
+    std::unordered_map<std::string, int64_t> rejections;
+    auto rej = [&rejections](const char* k) { ++rejections[k]; };
+
+    if (starts.empty() || goals.empty()) {
+        result.rejections = std::move(rejections);
+        return result;
+    }
+
+    const DubinsCalculator dubins(min_radius_cells);
+    std::unordered_map<uint64_t, int> goal_index;
+    for (size_t i = 0; i < goals.size(); ++i) {
+        const auto& g = goals[i].pose;
+        goal_index.emplace(pose_key(g.x, g.y, g.heading, g.layer), static_cast<int>(i));
+    }
+
+    auto heuristic = [&](int x, int y, int heading) {
+        double best = std::numeric_limits<double>::max();
+        for (const auto& g : goals) {
+            const double d = dubins.path_length_f(
+                x, y, heading * kPosePi / 4.0,
+                g.pose.x, g.pose.y, g.pose.heading * kPosePi / 4.0) + g.cost;
+            best = std::min(best, d);
+        }
+        return best;
+    };
+
+    std::vector<PoseNode> pool;
+    pool.reserve(4096);
+    std::priority_queue<PoseNode, std::vector<PoseNode>, PoseNodeGreater> open;
+    std::unordered_map<uint64_t, float> g_scores;
+    uint64_t seq = 0;
+    double best_h = std::numeric_limits<double>::max();
+
+    for (size_t i = 0; i < starts.size(); ++i) {
+        const auto& s = starts[i];
+        const uint64_t key = pose_key(s.pose.x, s.pose.y, s.pose.heading, s.pose.layer);
+        const float g = static_cast<float>(s.cost);
+        auto it = g_scores.find(key);
+        if (it != g_scores.end() && it->second <= g) continue;
+        g_scores[key] = g;
+        PoseNode n{s.pose.x, s.pose.y, s.pose.heading, s.pose.layer, g,
+                   g + static_cast<float>(heuristic_weight * heuristic(s.pose.x, s.pose.y, s.pose.heading)),
+                   -1, static_cast<int>(i), false, seq++};
+        open.push(n);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const int64_t hard_cap = static_cast<int64_t>(cols_) * rows_ * 8;
+    int64_t iterations = 0;
+
+    while (!open.empty()) {
+        PoseNode cur = open.top();
+        open.pop();
+
+        pool.push_back(cur);
+        const int cur_idx = static_cast<int>(pool.size()) - 1;
+
+        if (cur.terminal) {
+            result.success = true;
+            std::vector<CenterlinePose> rev;
+            for (int idx = pool[cur_idx].parent; idx >= 0; idx = pool[idx].parent) {
+                rev.push_back({pool[idx].x, pool[idx].y, pool[idx].heading, pool[idx].layer});
+            }
+            result.path.assign(rev.rbegin(), rev.rend());
+            result.start_index = cur.start_index;
+            const auto& last = result.path.back();
+            auto it = goal_index.find(pose_key(last.x, last.y, last.heading, last.layer));
+            result.goal_index = it == goal_index.end() ? -1 : it->second;
+            result.iterations = static_cast<int>(iterations);
+            result.best_progress = best_h;
+            result.rejections = std::move(rejections);
+            return result;
+        }
+
+        const uint64_t ckey = pose_key(cur.x, cur.y, cur.heading, cur.layer);
+        auto gcur = g_scores.find(ckey);
+        if (gcur != g_scores.end() && cur.g > gcur->second) continue;  // stale
+
+        ++iterations;
+        if (iterations > hard_cap) { result.iteration_limited = true; break; }
+        if (max_iterations_budget > 0 && iterations >= max_iterations_budget) {
+            result.timeout_exceeded = true;
+            result.iteration_limited = true;
+            break;
+        }
+        if (timeout_seconds > 0.0 && (iterations & 0x3FF) == 0) {
+            const double el = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (el > timeout_seconds) { result.timeout_exceeded = true; break; }
+        }
+
+        const double h_here = heuristic(cur.x, cur.y, cur.heading);
+        best_h = std::min(best_h, h_here);
+
+        // Goal: reaching a goal pose ends the search (after paying its exit cost).
+        auto gi = goal_index.find(ckey);
+        if (gi != goal_index.end()) {
+            PoseNode t = cur;
+            t.g = cur.g + static_cast<float>(goals[gi->second].cost);
+            t.f = t.g;
+            t.parent = cur_idx;
+            t.terminal = true;
+            t.seq = seq++;
+            open.push(t);
+            continue;
+        }
+
+        // A start pose is where the end legs hand over to the trunk, so its
+        // first step must keep the pose's own heading: the legs were built
+        // against that heading's rail offsets, and a turn on the very first
+        // step would kink the join.
+        const bool is_start = cur.parent < 0;
+        for (int dth = is_start ? 0 : -1; dth <= (is_start ? 0 : 1); ++dth) {
+            const int nh = (cur.heading + dth + 8) & 7;
+            const int dx = kHeadingDx[nh], dy = kHeadingDy[nh];
+            const int nx = cur.x + dx, ny = cur.y + dy;
+            if (nx < 0 || nx >= cols_ || ny < 0 || ny >= rows_) { rej("bounds"); continue; }
+            if (!centerline_step_clear(cur.x, cur.y, dth == 0 ? -1 : cur.heading,
+                                       nx, ny, nh, cur.layer, p_net, n_net,
+                                       half_pitch, p_side, p_half, p_gap, n_half, n_gap)) {
+                rej("rail_clear");
+                continue;
+            }
+            const double step = (dx != 0 && dy != 0) ? 1.0 / kPoseInvSqrt2 : 1.0;
+            const float ng = cur.g + static_cast<float>(step + (dth != 0 ? turn_penalty : 0.0));
+            const uint64_t nkey = pose_key(nx, ny, nh, cur.layer);
+            auto it = g_scores.find(nkey);
+            if (it != g_scores.end() && it->second <= ng) continue;
+            g_scores[nkey] = ng;
+            PoseNode n{nx, ny, nh, cur.layer, ng,
+                       ng + static_cast<float>(heuristic_weight * heuristic(nx, ny, nh)),
+                       cur_idx, cur.start_index, false, seq++};
+            open.push(n);
+        }
+    }
+
+    result.iterations = static_cast<int>(iterations);
+    result.best_progress = best_h == std::numeric_limits<double>::max() ? -1.0 : best_h;
+    result.rejections = std::move(rejections);
+    return result;
+}
+
+}  // namespace router

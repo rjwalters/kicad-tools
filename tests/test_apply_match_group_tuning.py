@@ -1,0 +1,869 @@
+"""Tests for ``Autorouter.apply_match_group_tuning`` (Epic #2661 Phase 3H).
+
+Issue #2723.  This module covers the orchestrator wrapper around
+:func:`kicad_tools.router.match_group_tuning.tune_match_group_v2`:
+
+1. **Triple-gate** -- the call chain Autorouter -> tune_match_group_v2 ->
+   serpentine insert actually fires for each detected group.
+2. **Pair-aware dispatch (AC6)** -- a :class:`MatchGroup` with
+   ``pair_ids`` populated is routed to the Phase 2F symmetric path
+   (no ``AssertionError`` from the historical entry guard).
+3. **Cascade-budget exhaustion** -- a synthetic short-segment group
+   exhausts the per-member budget without breaking the pipeline.
+4. **Signature drift-prevention (AC8)** -- the public method's return
+   type and parameter names are asserted byte-for-byte so a future
+   refactor cannot silently break the CLI consumer.
+5. **Net-class resolution helper** -- ``_resolve_net_class_for_group``
+   prefers the explicit reference net, then scalar members, then pair
+   members, before falling back to ``None``.
+"""
+
+from __future__ import annotations
+
+import inspect
+from unittest.mock import patch
+
+import pytest
+
+from kicad_tools.router.core import Autorouter
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
+from kicad_tools.router.match_group_tuning import TuneResult
+from kicad_tools.router.primitives import Route, Segment, Via
+from kicad_tools.router.rules import NetClassRouting
+
+# =============================================================================
+# Test helpers
+# =============================================================================
+
+
+def _straight_route(net_id: int, name: str, length_mm: float, y: float = 0.0) -> Route:
+    """Single horizontal segment along +x at y=``y``."""
+    return Route(
+        net=net_id,
+        net_name=name,
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=y,
+                x2=length_mm,
+                y2=y,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=net_id,
+                net_name=name,
+            )
+        ],
+    )
+
+
+def _make_autorouter_with_4_net_group() -> tuple[Autorouter, MatchGroup]:
+    """Build an autorouter with a 4-net DDR-style mismatched group.
+
+    Lengths: 22mm, 20mm, 18mm, 18mm.  Reference = longest = net 1 (22mm).
+    Net 2 needs +2mm, nets 3 & 4 need +4mm to reach tolerance.  Routes are
+    spaced apart in y so they have ample room for outer-normal bulges
+    without immediately tripping intra-group clearance.
+    """
+    ar = Autorouter(width=80.0, height=80.0)
+    ar.net_names = {1: "DQ0", 2: "DQ1", 3: "DQ2", 4: "DQ3"}
+    ar.routes = [
+        _straight_route(1, "DQ0", 22.0, y=0.0),
+        _straight_route(2, "DQ1", 20.0, y=10.0),
+        _straight_route(3, "DQ2", 18.0, y=20.0),
+        _straight_route(4, "DQ3", 18.0, y=30.0),
+    ]
+    group = MatchGroup(
+        name="DDR_DATA_BYTE_0",
+        net_ids=[1, 2, 3, 4],
+        tolerance=0.1,
+        reference_net_id=1,
+        source=MatchGroupSource.LEGACY_API,
+    )
+    return ar, group
+
+
+# =============================================================================
+# 1. Triple-gate: orchestrator invokes tuner for each detected group
+# =============================================================================
+
+
+class TestTripleGate:
+    """The full call chain Autorouter -> tune_match_group_v2 -> serpentine."""
+
+    def test_orchestrator_invokes_tuner_for_each_group(self):
+        from kicad_tools.router import match_group_tuning as mgt_module
+
+        ar, group = _make_autorouter_with_4_net_group()
+        # Two groups so the spy must fire exactly twice.
+        group2 = MatchGroup(
+            name="DDR_DATA_BYTE_1",
+            net_ids=[1, 2, 3, 4],
+            tolerance=0.5,
+            reference_net_id=1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        detected = [group, group2]
+
+        call_count = {"n": 0}
+        real_tune = mgt_module.tune_match_group_v2
+
+        def spy(*args, **kwargs):
+            call_count["n"] += 1
+            return real_tune(*args, **kwargs)
+
+        with patch.object(mgt_module, "tune_match_group_v2", spy):
+            results = ar.apply_match_group_tuning(
+                detected_groups=detected,
+                verbose=False,
+            )
+
+        assert call_count["n"] == 2, (
+            f"Expected exactly 2 tune_match_group_v2 calls (one per detected "
+            f"group), got {call_count['n']}"
+        )
+        # Each group must appear in the result keyed by name (AC8 shape).
+        assert "DDR_DATA_BYTE_0" in results
+        assert "DDR_DATA_BYTE_1" in results
+
+    def test_verbose_summary_reports_before_after_skew(self, capsys):
+        """Issue #3924 AC2: the verbose per-group summary prints an achieved
+        ``skew: <before>mm -> <after>mm`` line alongside the reason buckets."""
+        ar, group = _make_autorouter_with_4_net_group()
+        ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=True,
+        )
+        out = capsys.readouterr().out
+        # The reason-bucket line is still present ...
+        assert "DDR_DATA_BYTE_0" in out
+        assert "members" in out
+        # ... and now the achieved-skew line accompanies it.
+        assert "skew:" in out
+        assert "mm ->" in out
+
+    def test_returns_per_member_tune_results_keyed_by_net_id(self):
+        ar, group = _make_autorouter_with_4_net_group()
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=False,
+        )
+
+        # Outer key = group name, inner key = net_id, value = (Route, TuneResult).
+        assert "DDR_DATA_BYTE_0" in results
+        per_member = results["DDR_DATA_BYTE_0"]
+        assert set(per_member.keys()) == {1, 2, 3, 4}
+        for net_id, (route, result) in per_member.items():
+            assert isinstance(route, Route)
+            assert isinstance(result, TuneResult)
+            assert route.net == net_id
+
+    def test_reference_net_returned_unchanged(self):
+        """The pace-car (reference net) is never modified; same Route reference."""
+        ar, group = _make_autorouter_with_4_net_group()
+        original_ref_route = ar.routes[0]  # net 1 is reference
+        original_ref_segments = original_ref_route.segments
+
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=False,
+        )
+
+        ref_route, ref_result = results["DDR_DATA_BYTE_0"][1]
+        assert ref_result.reason == "reference"
+        # By-reference rollback contract.
+        assert ref_route is original_ref_route
+        assert ref_route.segments is original_ref_segments
+
+    def test_match_group_tracker_updated_with_post_tuning_lengths(self):
+        """The pre/post bracket: tracker reflects final geometry."""
+        ar, group = _make_autorouter_with_4_net_group()
+        ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=False,
+        )
+        # The tracker must have at least one length recorded for each
+        # member (it was updated both before and after the tuning loop).
+        for net_id in group.net_ids:
+            assert net_id in ar.match_group_tracker.lengths
+
+
+# =============================================================================
+# 2. AC6: pair-aware dispatch (Phase 2F symmetric serpentine path)
+# =============================================================================
+
+
+class TestPairAwareDispatch:
+    """A MatchGroup with ``pair_ids`` populated runs through the Phase 2F path.
+
+    The original Phase 2E entry guard at ``match_group_tuning.py`` was
+    ``assert not group.pair_ids`` which would raise ``AssertionError``
+    when pair_ids was non-empty.  Phase 2F (#2701, integrated by PR #2717)
+    replaced that guard with an internal dispatcher; this test asserts
+    the orchestrator does NOT trip the legacy guard and produces results
+    keyed on each half's net id.
+    """
+
+    def test_pair_aware_dispatch(self):
+        """A group with two diff-pair members reaches the symmetric path."""
+        ar = Autorouter(width=80.0, height=80.0)
+        # MIPI lane group: two pairs (LANE0_P/N, LANE1_P/N), no scalar
+        # members.  Reference net id is unset so the longest member's
+        # lane-length wins by the legacy default.
+        ar.net_names = {
+            10: "MIPI_DAT0_P",
+            11: "MIPI_DAT0_N",
+            20: "MIPI_DAT1_P",
+            21: "MIPI_DAT1_N",
+        }
+        ar.routes = [
+            _straight_route(10, "MIPI_DAT0_P", 18.0, y=0.0),
+            _straight_route(11, "MIPI_DAT0_N", 18.0, y=2.0),
+            _straight_route(20, "MIPI_DAT1_P", 14.0, y=10.0),
+            _straight_route(21, "MIPI_DAT1_N", 14.0, y=12.0),
+        ]
+        group = MatchGroup(
+            name="MIPI_LANES",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        # Must NOT raise AssertionError -- the historical Phase 2E guard
+        # would fire here; the Phase 2F dispatcher must take over.
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=False,
+        )
+
+        assert "MIPI_LANES" in results
+        per_member = results["MIPI_LANES"]
+        # Both halves of both pairs should appear in the result.
+        assert set(per_member.keys()) == {10, 11, 20, 21}
+        # No member's reason should be the legacy entry-guard sentinel.
+        for net_id, (_route, result) in per_member.items():
+            assert result.reason != "AssertionError", (
+                f"net {net_id} reason={result.reason!r} -- the orchestrator "
+                "should never expose the legacy Phase 2E entry-guard reason"
+            )
+
+    def test_pair_aware_dispatch_passes_intra_pair_clearance(self):
+        """The orchestrator passes ``intra_pair_clearance_mm`` unconditionally.
+
+        Phase 2F (#2701) requires this kwarg when ``pair_ids`` is non-empty;
+        omitting it raises ``ValueError`` at the dispatcher.  This test
+        asserts the orchestrator never triggers that ValueError.
+        """
+        from kicad_tools.router import match_group_tuning as mgt_module
+
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {10: "P0", 11: "N0", 20: "P1", 21: "N1"}
+        ar.routes = [
+            _straight_route(10, "P0", 12.0, y=0.0),
+            _straight_route(11, "N0", 12.0, y=2.0),
+            _straight_route(20, "P1", 10.0, y=10.0),
+            _straight_route(21, "N1", 10.0, y=12.0),
+        ]
+        group = MatchGroup(
+            name="PAIR_GROUP",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        observed_kwargs: dict[str, object] = {}
+        real_tune = mgt_module.tune_match_group_v2
+
+        def spy(*args, **kwargs):
+            observed_kwargs.update(kwargs)
+            return real_tune(*args, **kwargs)
+
+        with patch.object(mgt_module, "tune_match_group_v2", spy):
+            ar.apply_match_group_tuning(
+                detected_groups=[group],
+                verbose=False,
+            )
+
+        assert "intra_pair_clearance_mm" in observed_kwargs, (
+            "apply_match_group_tuning must pass intra_pair_clearance_mm to "
+            "tune_match_group_v2 unconditionally; Phase 2F requires it."
+        )
+        # Default should fall through to rules.trace_clearance.
+        assert observed_kwargs["intra_pair_clearance_mm"] == ar.rules.trace_clearance
+
+
+# =============================================================================
+# 3. Cascade-budget exhaustion (graceful, no crash)
+# =============================================================================
+
+
+class TestCascadeBudgetExhaustion:
+    """A short-segment group cannot fit serpentines and exhausts the budget.
+
+    The exact reason returned depends on the per-member geometry: it may
+    be ``"no_suitable_segment"`` (segment too short for any amplitude) or
+    ``"exceeded_max_inserts"`` (budget burned without reaching tolerance).
+    Both are valid graceful failures.  The point is that the orchestrator
+    does NOT crash and returns a TuneResult for every member.
+    """
+
+    def test_no_crash_when_budget_exhausted(self):
+        ar = Autorouter(width=80.0, height=80.0)
+        # Three nets, very short routes -- no room for any serpentine.
+        # The reference is net 1 at 5mm; nets 2 and 3 are 0.5mm each --
+        # 4.5mm short of the reference, far more than any single bulge can
+        # add at the segment's tiny length.
+        ar.net_names = {1: "S0", 2: "S1", 3: "S2"}
+        ar.routes = [
+            _straight_route(1, "S0", 5.0, y=0.0),
+            _straight_route(2, "S1", 0.5, y=10.0),
+            _straight_route(3, "S2", 0.5, y=20.0),
+        ]
+        group = MatchGroup(
+            name="SHORT_BUS",
+            net_ids=[1, 2, 3],
+            tolerance=0.05,
+            reference_net_id=1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=False,
+        )
+
+        # Every member must appear in the result.
+        per_member = results["SHORT_BUS"]
+        assert set(per_member.keys()) == {1, 2, 3}
+        # Net 1 is the reference, never tuned.
+        assert per_member[1][1].reason == "reference"
+        # Nets 2 & 3 are too short -- one of the graceful-failure reasons.
+        graceful_failure_reasons = {
+            "no_suitable_segment",
+            "exceeded_max_inserts",
+            "cascade_budget_exhausted",
+            "post_insertion_drc_violation",
+            "tuned",  # if the tuner happens to find a way
+            "already_within_tolerance",  # tolerance might be wide enough
+        }
+        for nid in (2, 3):
+            assert per_member[nid][1].reason in graceful_failure_reasons, (
+                f"net {nid} returned unexpected reason {per_member[nid][1].reason!r}"
+            )
+
+
+# =============================================================================
+# 4. AC8: signature drift-prevention
+# =============================================================================
+
+
+class TestSignatureDriftPrevention:
+    """The public method's signature is asserted byte-for-byte.
+
+    A future refactor that drops or renames a parameter, or changes the
+    return-type annotation, must update this test in the same commit so
+    the CLI consumer (``--length-match-groups``) cannot silently break.
+    """
+
+    def test_apply_match_group_tuning_signature(self):
+        sig = inspect.signature(Autorouter.apply_match_group_tuning)
+        param_names = [name for name in sig.parameters if name != "self"]
+        # AC8: parameter names asserted exactly.
+        assert param_names == ["detected_groups", "verbose", "engage"], (
+            f"apply_match_group_tuning signature drift: {param_names}"
+        )
+        # `verbose` must default to True (mirrors the diff-pair sibling).
+        assert sig.parameters["verbose"].default is True
+        # Issue #6674: the default keeps the --length-match-groups policy.
+        assert sig.parameters["engage"].default == "length_critical"
+        # `detected_groups` is positional-or-keyword with no default.
+        assert sig.parameters["detected_groups"].default is inspect.Parameter.empty
+
+    def test_apply_match_group_tuning_returns_dict_of_dict_of_tuple(self):
+        """The return type at runtime is dict[str, dict[int, tuple[Route, TuneResult]]]."""
+        ar, group = _make_autorouter_with_4_net_group()
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=False,
+        )
+
+        assert isinstance(results, dict)
+        # Outer key: group name (string).
+        for outer_key in results:
+            assert isinstance(outer_key, str)
+        # Inner: dict[int, tuple[Route, TuneResult]].
+        for outer_key, inner in results.items():
+            assert isinstance(inner, dict)
+            for inner_key, value in inner.items():
+                assert isinstance(inner_key, int)
+                assert isinstance(value, tuple)
+                assert len(value) == 2
+                route, result = value
+                assert isinstance(route, Route)
+                assert isinstance(result, TuneResult)
+
+
+# =============================================================================
+# 5. Net-class resolution helper
+# =============================================================================
+
+
+class TestResolveNetClassForGroup:
+    """``_resolve_net_class_for_group`` priority: ref-net > scalar > pair > None."""
+
+    def test_returns_none_when_no_class_map(self):
+        ar = Autorouter(width=10.0, height=10.0)
+        ar.net_class_map = {}  # type: ignore[assignment]
+        ar.net_names = {1: "FOO", 2: "BAR"}
+        group = MatchGroup(name="G", net_ids=[1, 2])
+        assert ar._resolve_net_class_for_group(group) is None
+
+    def test_returns_class_keyed_by_reference_net(self):
+        ar = Autorouter(width=10.0, height=10.0)
+        ar.net_names = {1: "FOO", 2: "BAR"}
+        nc = NetClassRouting(name="HIGH_SPEED", length_critical=True)
+        ar.net_class_map = {"BAR": nc}
+        group = MatchGroup(name="G", net_ids=[1, 2], reference_net_id=2)
+        # Reference net is BAR -- its class wins.
+        assert ar._resolve_net_class_for_group(group) is nc
+
+    def test_falls_back_to_scalar_member_when_no_reference(self):
+        ar = Autorouter(width=10.0, height=10.0)
+        ar.net_names = {1: "FOO", 2: "BAR"}
+        nc = NetClassRouting(name="HIGH_SPEED", length_critical=True)
+        ar.net_class_map = {"FOO": nc}
+        group = MatchGroup(name="G", net_ids=[1, 2], reference_net_id=None)
+        # First scalar member (FOO) wins.
+        assert ar._resolve_net_class_for_group(group) is nc
+
+    def test_falls_back_to_pair_member_when_no_scalar(self):
+        ar = Autorouter(width=10.0, height=10.0)
+        ar.net_names = {10: "P0", 11: "N0"}
+        nc = NetClassRouting(name="HIGH_SPEED", length_critical=True)
+        ar.net_class_map = {"P0": nc}
+        group = MatchGroup(name="G", net_ids=[], pair_ids=[(10, 11)])
+        # First pair's positive half (P0) wins.
+        assert ar._resolve_net_class_for_group(group) is nc
+
+    def test_returns_none_when_no_member_in_class_map(self):
+        ar = Autorouter(width=10.0, height=10.0)
+        ar.net_names = {1: "FOO", 2: "BAR"}
+        ar.net_class_map = {"OTHER": NetClassRouting(name="X")}
+        group = MatchGroup(name="G", net_ids=[1, 2])
+        assert ar._resolve_net_class_for_group(group) is None
+
+
+# =============================================================================
+# 6. Empty / edge-case inputs
+# =============================================================================
+
+
+class TestEdgeCases:
+    """Empty / edge-case inputs do not crash."""
+
+    def test_empty_detected_groups_returns_empty_dict(self):
+        ar = Autorouter(width=10.0, height=10.0)
+        ar.routes = []
+        results = ar.apply_match_group_tuning(detected_groups=[], verbose=False)
+        assert results == {}
+
+    def test_group_with_unrouted_member_does_not_crash(self):
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "A", 2: "B", 3: "C"}
+        # Only nets 1 and 2 are routed; net 3 is in the group but unrouted.
+        ar.routes = [
+            _straight_route(1, "A", 10.0, y=0.0),
+            _straight_route(2, "B", 8.0, y=10.0),
+        ]
+        group = MatchGroup(
+            name="MIXED",
+            net_ids=[1, 2, 3],
+            tolerance=0.1,
+            reference_net_id=1,
+        )
+        # Must not raise.
+        results = ar.apply_match_group_tuning(
+            detected_groups=[group],
+            verbose=False,
+        )
+        assert "MIXED" in results
+        # Net 3 is unrouted -> reason="unrouted".
+        per_member = results["MIXED"]
+        assert per_member[3][1].reason == "unrouted"
+
+
+# =============================================================================
+# Issue #3440: per-group summary line counts EVERY reason bucket
+# =============================================================================
+
+
+class TestVerboseSummaryCountsAllBuckets:
+    """The per-group verbose line must account for every member.
+
+    Issue #3440 root cause: the legacy five-bucket line counted only
+    tuned/clean/rolled-back/budget/skipped, so a group whose members all
+    landed in ``reference`` / ``longer_than_reference`` / ``unrouted``
+    printed all-zeros while 15.4mm of skew went untouched.
+    """
+
+    def test_reference_and_unrouted_members_appear_in_summary(self, capsys):
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "A0", 2: "A1", 3: "A2"}
+        # Net 1 is the (longest) explicit reference; net 2 within
+        # tolerance; net 3 unrouted.
+        ar.routes = [
+            _straight_route(1, "A0", 12.0, y=0.0),
+            _straight_route(2, "A1", 11.95, y=10.0),
+        ]
+        group = MatchGroup(
+            name="ADDR_BUS",
+            net_ids=[1, 2, 3],
+            tolerance=0.5,
+            reference_net_id=1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=True)
+        out = capsys.readouterr().out
+
+        assert "1 reference" in out, f"reference bucket missing from: {out!r}"
+        assert "1 unrouted" in out, f"unrouted bucket missing from: {out!r}"
+        # Every member accounted: 1 reference + 1 clean + 1 unrouted.
+        assert "1 clean" in out
+
+    def test_rollback_diagnostic_line_names_member(self, capsys):
+        """When a member rolls back, the verbose output carries a
+        per-member diagnostic line with the reason and message."""
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "A0", 2: "A1", 50: "NOISE"}
+        # Net 2 needs +2mm but a non-group neighbor hugs its outer
+        # corridor so every ladder amplitude fails the self-check.
+        ar.routes = [
+            _straight_route(1, "A0", 12.0, y=10.0),
+            _straight_route(2, "A1", 10.0, y=0.0),
+            _straight_route(50, "NOISE", 30.0, y=-0.3),
+        ]
+        group = MatchGroup(
+            name="ADDR_BUS",
+            net_ids=[1, 2],
+            tolerance=0.1,
+            reference_net_id=1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=True)
+        out = capsys.readouterr().out
+
+        assert "A1: post_insertion_drc_violation" in out, out
+        assert "NOISE" in out, out
+
+
+# =============================================================================
+# Issue #3440: tuned meanders must reach self.routes (the saved PCB)
+# =============================================================================
+
+
+class TestTunedRoutesReachSelfRoutes:
+    """The orchestrator's commit-back must publish tuned routes into
+    ``self.routes``.
+
+    Issue #3440 regression: the tuner publishes committed meanders into
+    ``routes_by_net`` in place (so later members' DRC self-checks see
+    them), which made the legacy identity guard
+    (``new_route is not routes_by_net[net_id]``) False for every tuned
+    member -- ALL meanders were silently dropped from ``self.routes``
+    and never reached the saved PCB.
+    """
+
+    def test_meander_is_committed_to_self_routes(self):
+        from kicad_tools.router.length import LengthTracker
+
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "D0", 2: "D1"}
+        ar.routes = [
+            _straight_route(1, "D0", 10.0, y=0.0),
+            _straight_route(2, "D1", 12.0, y=10.0),
+        ]
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["G"][1][1].reason == "tuned"
+
+        committed = next(r for r in ar.routes if r.net == 1)
+        committed_length = LengthTracker.calculate_route_length(committed)
+        assert abs(committed_length - 12.0) <= 0.1, (
+            f"tuned meander did not reach self.routes: committed length "
+            f"{committed_length:.3f}mm, expected ~12.0mm"
+        )
+        # And the committed object IS the tuner's returned route.
+        assert committed is results["G"][1][0]
+
+
+# =============================================================================
+# Via-inclusive stackup threading (Issue #3931)
+# =============================================================================
+
+
+class TestViaInclusiveStackupThreading:
+    """Issue #3931: ``apply_match_group_tuning`` threads the manufacturer
+    ``board_thickness_mm`` and the copper-layer count into
+    ``tune_match_group_v2`` so the tuner targets VIA-INCLUSIVE skew.
+
+    The board-07 ADDR_BUS defect was that the tuner measured planar-only
+    copper length (via-blind) while the DRC rule measured via-inclusive
+    skew: the tuner therefore never compensated the ~1.6 mm of drilled
+    length that pushed the group over tolerance.  These tests pin the
+    orchestrator's threading so the two stay in lock-step.
+    """
+
+    def test_board_thickness_and_layers_threaded_into_tuner(self):
+        """The tuner call receives ``board_thickness_mm`` + ``num_copper_layers``."""
+        from kicad_tools.router import match_group_tuning as mgt_module
+
+        ar, group = _make_autorouter_with_4_net_group()
+
+        captured: dict[str, object] = {}
+        real_tune = mgt_module.tune_match_group_v2
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return real_tune(*args, **kwargs)
+
+        with patch.object(mgt_module, "tune_match_group_v2", spy):
+            ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        # The manufacturer profile's board thickness (default 1.6 mm for the
+        # synthesized adapter) must reach the tuner so via drilled length is
+        # compensable.
+        # Issue #6725: the tuner measures through the shared kicad-cli-exact
+        # model (board stackup + pad copper), not a thickness figure.
+        model = captured["length_model"]
+        assert model.stackup.span("F.Cu", "B.Cu") == pytest.approx(1.58)
+        # The copper-layer count must match the tracker's (bare autorouter
+        # with no layer_stack defaults to 2).
+        assert captured["num_copper_layers"] == 2
+
+    def test_via_carrying_member_becomes_reference_end_to_end(self):
+        """A via-imbalanced group is corrected through the orchestrator.
+
+        End-to-end analog of board 07's ADDR_BUS: one member escapes on a
+        through-via (adding drilled length) while the other routes flat.
+        After ``apply_match_group_tuning`` the via-free member has been
+        lengthened so the via-inclusive skew is within tolerance.
+        """
+        from kicad_tools.router.length import LengthTracker
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+        from kicad_tools.router.primitives import Via
+
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "A0", 2: "A4"}
+        # A0: 30 mm copper, no via.  A4: 30 mm copper + F.Cu->B.Cu via.
+        r0 = _straight_route(1, "A0", 30.0, y=0.0)
+        r4 = _straight_route(2, "A4", 30.0, y=10.0)
+        r4.vias.append(
+            Via(
+                x=30.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=2,
+                net_name="A4",
+            )
+        )
+        ar.routes = [r0, r4]
+        group = MatchGroup(
+            name="ADDR_BUS",
+            net_ids=[1, 2],
+            tolerance=0.5,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        # Pull the (possibly meandered) A0 back out of self.routes.
+        tuned_a0 = next(r for r in ar.routes if r.net == 1)
+        tuned_a4 = next(r for r in ar.routes if r.net == 2)
+        # Bare autorouter -> num_copper_layers defaults to 2; the via spans
+        # the full 2-layer stack -> 1.6 mm drilled length.
+        a0_total = MatchGroupTracker._measure_route_total(tuned_a0, 1.6, 2)
+        a4_total = MatchGroupTracker._measure_route_total(tuned_a4, 1.6, 2)
+        assert abs(a0_total - a4_total) <= 0.5, (
+            f"via-inclusive skew should be within tolerance after tuning: "
+            f"A0={a0_total:.4f}mm vs A4={a4_total:.4f}mm"
+        )
+        # A0 gained real copper meander (~1.6 mm), it has no via of its own.
+        assert LengthTracker.calculate_route_length(tuned_a0) > 31.0
+
+
+# =============================================================================
+# Issue #6968: preserved copper counts toward each member's length
+# =============================================================================
+
+
+def _seg(net_id: int, name: str, x1: float, x2: float, y: float) -> Segment:
+    return Segment(x1=x1, y1=y, x2=x2, y2=y, width=0.2, layer=Layer.F_CU, net=net_id, net_name=name)
+
+
+def _preserved_router(*, stub_net: bool) -> tuple[Autorouter, MatchGroup, Route]:
+    """DQ0 routed 22mm; DQ1 routed 10mm plus an 8mm preserved escape stub.
+
+    ``stub_net=True`` registers DQ1 as a stub net (``_stub_terminals``, #4170),
+    so the writer re-emits its preserved stub next to the fresh route --
+    exactly board 07's input SDRAM escapes under ``--preserve-existing``.
+    """
+    ar = Autorouter(width=80.0, height=80.0)
+    ar.net_names = {1: "DQ0", 2: "DQ1"}
+    ar.routes = [
+        _straight_route(1, "DQ0", 22.0, y=0.0),
+        Route(net=2, net_name="DQ1", segments=[_seg(2, "DQ1", 8.0, 18.0, 20.0)]),
+    ]
+    stub = Route(net=2, net_name="DQ1", segments=[_seg(2, "DQ1", 0.0, 8.0, 20.0)])
+    ar.existing_routes = [stub]
+    if stub_net:
+        ar._stub_terminals = {2: object()}
+    nc = NetClassRouting(
+        name="DDR",
+        length_critical=True,
+        length_match_group="DDR",
+        length_match_tolerance_mm=0.5,
+    )
+    ar.net_class_map = {"DQ0": nc, "DQ1": nc}
+    group = MatchGroup(
+        name="DDR", net_ids=[1, 2], tolerance=0.5, source=MatchGroupSource.LEGACY_API
+    )
+    return ar, group, stub
+
+
+class TestPreservedCopperMeasured:
+    def test_stub_counts_toward_member_length(self):
+        ar, group, _stub = _preserved_router(stub_net=True)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        _route, res = results["DDR"][2]
+        # 10mm routed + 8mm preserved stub, not the routed 10mm alone.
+        assert res.length_before_mm == pytest.approx(18.0, abs=0.05)
+
+    def test_stub_is_never_edited_or_republished(self):
+        ar, group, stub = _preserved_router(stub_net=True)
+        stub_seg = stub.segments[0]
+        before = (stub_seg.x1, stub_seg.y1, stub_seg.x2, stub_seg.y2)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["DDR"][2][1].reason == "tuned"
+        assert ar.existing_routes == [stub]
+        assert stub.segments == [stub_seg]
+        assert (stub_seg.x1, stub_seg.y1, stub_seg.x2, stub_seg.y2) == before
+        published = [s for r in ar.routes for s in r.segments]
+        assert all(s is not stub_seg for s in published)
+        assert all(r is not stub for r in ar.routes)
+
+    def test_rerouted_net_drops_preserved_copper_like_the_writer(self):
+        """A freshly routed non-stub net does not re-emit its preserved copper
+        (``_finalize_routes``), so the tuner must not count it either."""
+        ar, group, _stub = _preserved_router(stub_net=False)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["DDR"][2][1].length_before_mm == pytest.approx(10.0, abs=0.05)
+
+    def test_wholly_preserved_member_is_measured_not_unrouted(self):
+        ar, group, _stub = _preserved_router(stub_net=True)
+        full = _straight_route(1, "DQ0", 22.0, y=0.0)
+        ar.routes = [r for r in ar.routes if r.net != 1]
+        ar.existing_routes.append(full)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["DDR"][1][1].reason != "unrouted"
+        assert results["DDR"][2][1].length_before_mm == pytest.approx(18.0, abs=0.05)
+        assert all(r.net != 1 for r in ar.routes)
+        assert full.segments[0].x2 == 22.0
+
+
+# =============================================================================
+# Issue #7159: foreign preserved copper is a clearance obstacle
+# =============================================================================
+
+
+def _foreign_via_router(*, via_y: float | None) -> tuple[Autorouter, MatchGroup, Route | None]:
+    """DQ0 22mm, DQ1 10mm at y=20 (needs ~12mm of meander); optional foreign
+    preserved via (net 3, not in the group) beside DQ1's host segment."""
+    ar = Autorouter(width=80.0, height=80.0)
+    ar.net_names = {1: "DQ0", 2: "DQ1", 3: "GND"}
+    ar.routes = [
+        _straight_route(1, "DQ0", 22.0, y=0.0),
+        Route(net=2, net_name="DQ1", segments=[_seg(2, "DQ1", 0.0, 10.0, 20.0)]),
+    ]
+    foreign = None
+    if via_y is not None:
+        foreign = Route(
+            net=3,
+            net_name="GND",
+            vias=[
+                Via(
+                    x=5.0,
+                    y=via_y,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=3,
+                    net_name="GND",
+                )
+            ],
+        )
+        ar.existing_routes = [foreign]
+    nc = NetClassRouting(
+        name="DDR",
+        length_critical=True,
+        length_match_group="DDR",
+        length_match_tolerance_mm=0.5,
+    )
+    ar.net_class_map = {"DQ0": nc, "DQ1": nc}
+    group = MatchGroup(
+        name="DDR", net_ids=[1, 2], tolerance=0.5, source=MatchGroupSource.LEGACY_API
+    )
+    return ar, group, foreign
+
+
+def _min_gap_to_via(ar: Autorouter, via: Via) -> float:
+    from kicad_tools.router.clearance_kernel import copper_gap
+    from kicad_tools.router.clearance_shapes import segment_shape, via_shape
+
+    return min(
+        copper_gap(segment_shape(s), via_shape(via))
+        for r in ar.routes
+        if r.net == 2
+        for s in r.segments
+    )
+
+
+class TestForeignPreservedCopperClearance:
+    def test_meander_keeps_clearance_from_foreign_preserved_via(self):
+        # Control: with no obstacle the meander happily passes within the
+        # via clearance of (5.0, 20.8), so the test below is not vacuous.
+        probe_ar, group, _ = _foreign_via_router(via_y=None)
+        probe_ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        probe_via = Via(
+            x=5.0,
+            y=20.8,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=3,
+        )
+        floor = probe_ar.rules.via_clearance
+        assert _min_gap_to_via(probe_ar, probe_via) < floor
+
+        ar, group, foreign = _foreign_via_router(via_y=20.8)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        via = foreign.vias[0]
+        assert _min_gap_to_via(ar, via) + 1e-9 >= floor
+        # The fixed foreign copper is never edited or republished.
+        assert ar.existing_routes == [foreign]
+        assert all(r.net != 3 for r in ar.routes)
+        assert 3 not in results["DDR"]

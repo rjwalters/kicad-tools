@@ -1,0 +1,734 @@
+"""
+Basic data structures for PCB routing.
+
+This module provides:
+- Point: 3D coordinate in routing space
+- GridCell: Cell in the routing grid with congestion tracking
+- Via: Layer transition point
+- Segment: Trace segment between two points
+- Route: Complete path with segments and vias
+- Pad: Component pad to connect
+- Obstacle: Area to avoid during routing
+"""
+
+import contextlib
+import dataclasses
+import math
+import random
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from .layers import Layer
+
+if TYPE_CHECKING:
+    from .tuning_pattern import TuningPattern
+
+# Issue #3272: Deterministic UUID mode.  When :func:`enable_deterministic_uuids`
+# is called the per-element UUID emitted by :meth:`Segment.to_sexp` and
+# :meth:`Via.to_sexp` is derived from the seeded global ``random`` module
+# instead of ``os.urandom`` (which ``uuid.uuid4`` consults).  This makes the
+# routed ``.kicad_pcb`` byte-identical across runs that share a routing seed
+# -- the smoke harness at ``scripts/ci/board06_determinism_smoke.sh`` and the
+# regression test at ``tests/router/test_board06_determinism.py`` rely on
+# this property.  ``route_all_negotiated`` and ``route_all_with_diffpairs``
+# turn this on whenever ``seed is not None``; callers that need
+# stochastic UUIDs (e.g. unit tests asserting uniqueness across calls)
+# can leave the toggle off (the default).
+_DETERMINISTIC_UUIDS: bool = False
+
+
+def enable_deterministic_uuids(enabled: bool = True) -> None:
+    """Toggle deterministic UUID emission for :class:`Segment` and :class:`Via`.
+
+    Issue #3272.  When ``enabled`` is True, ``to_sexp()`` derives each
+    UUID from ``random.getrandbits(128)`` (seeded by the caller via
+    ``random.seed(seed)``) instead of ``uuid.uuid4()`` (which reads
+    ``os.urandom`` and is therefore non-deterministic).  The resulting
+    UUID still has the canonical xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    shape so KiCad and downstream tools see the same format.
+
+    This is a module-level toggle rather than a per-instance argument
+    because the emit sites live deep in router internals and threading
+    a flag through every call site would touch every place that
+    instantiates a Segment/Via.  The toggle is meant to be flipped on at
+    the top of a deterministic route session and flipped off again at
+    the end.  See :func:`reset_deterministic_uuids`.
+    """
+    global _DETERMINISTIC_UUIDS
+    _DETERMINISTIC_UUIDS = bool(enabled)
+
+
+def reset_deterministic_uuids() -> None:
+    """Restore default (non-deterministic) UUID emission.  Issue #3272."""
+    global _DETERMINISTIC_UUIDS
+    _DETERMINISTIC_UUIDS = False
+
+
+# Issue #3907: by-construction 45-degree enforcement at the serialization
+# choke point.  ``Segment.to_sexp`` is the single point every
+# router-emitted segment flows through (``Route.to_sexp`` /
+# ``Autorouter.to_sexp`` fan into it), so verifying 45-legality here makes
+# it IMPOSSIBLE to silently serialize off-angle copper -- the leak the
+# #3532 emit-then-repair architecture kept springing.  Enforcement is ON
+# by default; the toggle exists only as an escape hatch for a legacy path
+# that must serialize a documented residual (none in the fleet today) and
+# for tests that deliberately construct off-angle geometry.
+_ENFORCE_SEGMENT_45: bool = True
+
+
+def enable_segment_45_enforcement(enabled: bool = True) -> None:
+    """Toggle by-construction 45-degree enforcement in :meth:`Segment.to_sexp`.
+
+    Issue #3907.  When enabled (the default), serializing a segment whose
+    4-decimal displacement is off the {0, 45, 90, 135} set raises
+    :class:`kicad_tools.router.quantize.OffAngleSegmentError` instead of
+    writing arbitrary-angle copper.  Emitters must dogleg off-axis tails
+    (via :func:`kicad_tools.router.quantize.dogleg_points`) BEFORE
+    constructing the :class:`Segment`.
+
+    This is a module-level toggle (mirroring the deterministic-UUID one)
+    so a legacy path can opt out without threading a flag through every
+    router call site.  Prefer :func:`segment_45_enforcement_disabled` for
+    scoped, exception-safe opt-out.
+    """
+    global _ENFORCE_SEGMENT_45
+    _ENFORCE_SEGMENT_45 = bool(enabled)
+
+
+def is_segment_45_enforcement_enabled() -> bool:
+    """Return the current :func:`enable_segment_45_enforcement` state."""
+    return _ENFORCE_SEGMENT_45
+
+
+@contextlib.contextmanager
+def segment_45_enforcement_disabled() -> Iterator[None]:
+    """Temporarily disable 45-degree serialization enforcement (issue #3907).
+
+    Restores the prior state on exit even if the body raises.  Intended
+    for the narrow set of callers that must serialize a knowingly
+    off-angle documented residual, and for tests that construct off-angle
+    geometry on purpose.
+    """
+    global _ENFORCE_SEGMENT_45
+    prior = _ENFORCE_SEGMENT_45
+    _ENFORCE_SEGMENT_45 = False
+    try:
+        yield
+    finally:
+        _ENFORCE_SEGMENT_45 = prior
+
+
+def is_deterministic_uuids_enabled() -> bool:
+    """Return the current :func:`enable_deterministic_uuids` state.
+
+    Exposed for tests and diagnostics that need to assert / branch on
+    the deterministic-UUID mode without reaching into module privates.
+    """
+    return _DETERMINISTIC_UUIDS
+
+
+def _make_uuid() -> str:
+    """Generate a UUID string honoring the :func:`enable_deterministic_uuids` toggle.
+
+    When deterministic mode is active the UUID is derived from
+    ``random.getrandbits(128)`` so it tracks the seeded global RNG.
+    Otherwise we fall through to ``uuid.uuid4()`` which is what the
+    pre-#3272 code emitted.
+    """
+    if _DETERMINISTIC_UUIDS:
+        return str(uuid.UUID(int=random.getrandbits(128), version=4))
+    return str(uuid.uuid4())
+
+
+def _fmt(val: float) -> int | float:
+    """Format float with 4 decimal precision for PCB output.
+
+    Rounds to 4 decimal places (0.1 micron precision in mm).
+    Returns int if no fractional part for cleaner output.
+    """
+    rounded = round(val, 4)
+    if rounded == int(rounded):
+        return int(rounded)
+    return rounded
+
+
+@dataclass
+class Point:
+    """A point in 3D routing space (x, y, layer)."""
+
+    x: float
+    y: float
+    layer: Layer = Layer.F_CU
+
+    def __hash__(self) -> int:
+        return hash((round(self.x, 4), round(self.y, 4), self.layer))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Point):
+            return NotImplemented
+        return (
+            round(self.x, 4) == round(other.x, 4)
+            and round(self.y, 4) == round(other.y, 4)
+            and self.layer == other.layer
+        )
+
+    def grid_key(self, resolution: float) -> tuple[int, int, int]:
+        """Get grid cell key."""
+        return (
+            round(self.x / resolution),
+            round(self.y / resolution),
+            self.layer.value,
+        )
+
+    def distance_to(self, other: "Point") -> float:
+        """Manhattan distance (same layer) or Euclidean."""
+        if self.layer == other.layer:
+            return abs(self.x - other.x) + abs(self.y - other.y)
+        else:
+            # Include via cost estimate.  Deliberately ``value``, not
+            # ``stack_order`` (Issue #6099): this is a rough via-cost term and
+            # switching would change the F.Cu<->B.Cu cost on every 2/4/6-layer
+            # board; for In5.Cu+ it is merely a looser estimate.
+            return (
+                abs(self.x - other.x)
+                + abs(self.y - other.y)
+                + abs(self.layer.value - other.layer.value) * 0.5
+            )
+
+
+@dataclass
+class GridCell:
+    """A cell in the routing grid with negotiated congestion support."""
+
+    x: int
+    y: int
+    layer: int
+    blocked: bool = False
+    net: int = 0  # 0 = empty, >0 = assigned to net
+    cost: float = 1.0  # Routing cost multiplier
+    # Negotiated congestion fields
+    usage_count: int = 0  # How many nets currently use this cell
+    history_cost: float = 0.0  # Accumulated congestion from previous iterations
+    is_obstacle: bool = False  # True for pads/keepouts (never allow sharing)
+    # Zone fields for copper pour support
+    is_zone: bool = False  # True if cell is part of a copper pour zone
+    zone_id: str | None = None  # UUID of the zone (for multi-zone layers)
+    # Pad ownership tracking (prevents route rip-up from corrupting pad cells)
+    pad_blocked: bool = False  # True if blocked by a pad (not a route)
+    original_net: int = 0  # Net that first claimed this cell (for restoration)
+
+
+@dataclass
+class Via:
+    """A via connecting layers."""
+
+    x: float
+    y: float
+    drill: float
+    diameter: float
+    layers: tuple[Layer, Layer]
+    net: int = 0
+    net_name: str = ""
+    # Issue #2605: in-pad escape via marker.  When True, this via was
+    # placed dead-centre on a fine-pitch SMD pad as part of escape routing.
+    # The pad's own copper provides the annular ring, so segment-to-pad
+    # clearance checks against the parent pad must be exempted.  KiCad's
+    # board file does not need a separate fill/plating attribute -- the
+    # manufacturer reads via-in-pad from the order options / DRU.
+    in_pad: bool = False
+    # Issue #3124 (folds in #3118 prerequisite): micro-via marker.  When
+    # True, this via is serialized as ``(via micro ...)`` so KiCad and
+    # board manufacturers know to treat it as a laser-drilled micro-via
+    # rather than a standard through-hole via.  Matches
+    # :func:`kicad_tools.sexp.builders.via_node`'s ``via_type="micro"``
+    # output exactly.  The router's in-pad escape (#3118) is the primary
+    # producer of micro vias from inside the routing pipeline.
+    is_micro: bool = False
+    # Issue #6662: KiCad's ``blind`` / ``buried`` type keyword, or ``None``.
+    # The router never *creates* a blind or buried via (it has no such
+    # process), but it does import them: ``--preserve-existing`` copper, the
+    # lattice's fixed copper and the connectivity verifier all build router
+    # vias from a board file.  KiCad drills a ``(via blind ...)`` /
+    # ``(via buried ...)`` only through its declared ``layers`` span, so the
+    # keyword has to survive into the model -- without it
+    # :attr:`drilled_layers` widened an imported In1/In2 buried via to a full
+    # F.Cu..B.Cu barrel and :meth:`to_sexp` re-wrote it as a through via.
+    span_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.span_type not in (None, "blind", "buried"):
+            raise ValueError(
+                f"Via.span_type must be 'blind', 'buried' or None, got {self.span_type!r}"
+            )
+
+    def refresh_span_type(self) -> None:
+        """Re-derive :attr:`span_type` after :attr:`layers` was widened (issue #6677).
+
+        Only an imported blind/buried via carries a keyword to keep honest; a
+        router-created through via (``span_type`` None) is never turned into a
+        blind one.  A span touching both outer layers drops the keyword, one
+        outer layer is ``blind``, none is ``buried``.
+        """
+        if self.span_type is None:
+            return
+        outer = sum(1 for lyr in set(self.layers) if lyr in (Layer.F_CU, Layer.B_CU))
+        self.span_type = None if outer >= 2 else ("blind" if outer == 1 else "buried")
+
+    @property
+    def drilled_layers(self) -> tuple[Layer, Layer]:
+        """The layer pair this via is physically drilled between (issue #6485).
+
+        A micro via (:attr:`is_micro`) is laser-drilled over the span it
+        carries, and an imported KiCad ``blind`` / ``buried`` via
+        (:attr:`span_type`, issue #6662) is drilled only through its declared
+        span, exactly as KiCad builds it.  Every other via is an ordinary
+        mechanically drilled *through* via: the router has no blind or buried
+        process of its own, so its barrel runs from ``F.Cu`` to ``B.Cu``
+        whatever logical layer transition :attr:`layers` happens to record.
+
+        :attr:`layers` already given as the outer pair is returned as held
+        (either order), so a through via serialises byte-for-byte as before.
+        """
+        if (
+            self.is_micro
+            or self.span_type is not None
+            or {self.layers[0], self.layers[1]} == {Layer.F_CU, Layer.B_CU}
+        ):
+            return self.layers
+        return (Layer.F_CU, Layer.B_CU)
+
+    def to_sexp(self, name_only: bool = False) -> str:
+        """Generate KiCad S-expression.
+
+        Emits ``(via micro ...)`` when :attr:`is_micro` is True so the
+        micro-via token survives the route -> finalize -> file
+        round-trip (issue #3124), and ``(via blind ...)`` /
+        ``(via buried ...)`` for an imported :attr:`span_type` via (issue
+        #6662).  Otherwise emits a plain ``(via ...)``.
+
+        Issue #6485: a plain ``(via ...)`` is ALWAYS written on the outer
+        ``F.Cu``/``B.Cu`` pair (see :attr:`drilled_layers`).  KiCad reads a
+        via with no type keyword as a through via whatever its ``layers``
+        say -- it rewrites the pair to ``F.Cu``/``B.Cu`` on save and drills
+        the hole in the through-hole file -- so a keyword-less
+        ``(layers "F.Cu" "In1.Cu")`` told every reader of the file that the
+        barrel stopped at In1 while the fabricated board shorted In2 and
+        B.Cu to it.  This is the single serialisation point for router
+        vias, which makes that node unwritable from the router whatever a
+        producer put in :attr:`layers`.
+
+        Issue #4416: when ``name_only`` is True and :attr:`net_name` is
+        known, the net reference is emitted as ``(net "name")`` to match a
+        KiCad-10 name-based board's dialect; otherwise the numeric
+        ``(net N)`` form is used (preserving behavior for numeric boards).
+        """
+        drilled_start, drilled_end = self.drilled_layers
+        layer_start = drilled_start.kicad_name
+        layer_end = drilled_end.kicad_name
+        if self.is_micro:
+            type_token = " micro"
+        elif self.span_type is not None:
+            type_token = f" {self.span_type}"
+        else:
+            type_token = ""
+        net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
+        # Issue #3925: field order matches KiCad's canonical writer
+        # (uuid BEFORE net).  Emitting net before uuid caused every via to
+        # churn on the first KiCad open/save round-trip, producing a diff
+        # proportional to via count even when no geometry changed.
+        return f"""(via{type_token}
+\t\t(at {self.x:.4f} {self.y:.4f})
+\t\t(size {_fmt(self.diameter)})
+\t\t(drill {_fmt(self.drill)})
+\t\t(layers "{layer_start}" "{layer_end}")
+\t\t(uuid "{_make_uuid()}")
+\t\t(net {net_ref})
+\t)"""
+
+
+@dataclass
+class Segment:
+    """A trace segment."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    width: float
+    layer: Layer
+    net: int = 0
+    net_name: str = ""
+    # Issue #7521: the KiCad tuning pattern (skew-compensation bump) that owns
+    # this segment, if any.  :meth:`Route.to_sexp` writes one ``(generated
+    # ...)`` block per pattern naming its segments.  Not part of equality.
+    tuning_pattern: "TuningPattern | None" = field(default=None, compare=False, repr=False)
+
+    @property
+    def start(self) -> tuple[float, float]:
+        """Return the start point as a tuple (x1, y1)."""
+        return (self.x1, self.y1)
+
+    @property
+    def end(self) -> tuple[float, float]:
+        """Return the end point as a tuple (x2, y2)."""
+        return (self.x2, self.y2)
+
+    def to_sexp(self, name_only: bool = False, *, uuid: str | None = None) -> str:
+        """Generate KiCad S-expression.
+
+        Issue #7521: ``uuid`` pins the emitted uuid (a tuning pattern names
+        its member segments by uuid); ``None`` mints a fresh one.
+
+        Issue #4416: when ``name_only`` is True and :attr:`net_name` is
+        known, the net reference is emitted as ``(net "name")`` to match a
+        KiCad-10 name-based board's dialect; otherwise the numeric
+        ``(net N)`` form is used.
+
+        Issue #3925: field order matches KiCad's canonical writer (uuid
+        BEFORE net).  Emitting net before uuid caused every segment to
+        churn on the first KiCad open/save round-trip, producing a diff
+        proportional to segment count even when no geometry changed.
+
+        Issue #3907: this is the single serialization choke point every
+        router-emitted segment flows through (``Route.to_sexp`` /
+        ``Autorouter.to_sexp`` fan into it).  Unless enforcement is
+        explicitly disabled (see
+        :func:`segment_45_enforcement_disabled`), a segment whose
+        4-decimal displacement is off the {0, 45, 90, 135} set is checked
+        by :func:`~kicad_tools.router.quantize.verify_segment_45`.
+
+        The check DEGRADES GRACEFULLY by default: an off-angle segment from
+        an un-migrated emission path emits an
+        :class:`~kicad_tools.router.quantize.OffAngleSegmentWarning` (naming
+        the net/layer) and still serializes, so a recipe's legacy
+        ``quantize_pcb_file`` repair pass can dogleg it afterward -- the
+        fallback a hard raise would otherwise preempt.  CI opts individual
+        boards into STRICT mode
+        (:data:`~kicad_tools.router.quantize.SEGMENT_45_STRICT_ENV`) as
+        their emitters migrate, where the same off-angle copper raises
+        :class:`~kicad_tools.router.quantize.OffAngleSegmentError`.  The
+        fleet census stays the ratchet throughout.
+        """
+        if _ENFORCE_SEGMENT_45:
+            from .quantize import verify_segment_45
+
+            verify_segment_45(
+                self.x1,
+                self.y1,
+                self.x2,
+                self.y2,
+                context=(f"net {self.net_name or self.net} on {self.layer.kicad_name}"),
+            )
+        net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
+        return f"""(segment
+\t\t(start {self.x1:.4f} {self.y1:.4f})
+\t\t(end {self.x2:.4f} {self.y2:.4f})
+\t\t(width {_fmt(self.width)})
+\t\t(layer "{self.layer.kicad_name}")
+\t\t(uuid "{uuid or _make_uuid()}")
+\t\t(net {net_ref})
+\t)"""
+
+
+@dataclass
+class Route:
+    """A complete route between two points."""
+
+    net: int
+    net_name: str
+    segments: list[Segment] = field(default_factory=list)
+    vias: list[Via] = field(default_factory=list)
+    # Issue #3441: True for sub-grid escape stubs (#1603) emitted by the
+    # pre-pass.  An escape stub only connects an off-grid pad to its
+    # nearest grid point -- it is NOT a full net route, so the negotiated
+    # loop's pre-routed-net filter (#2464) must not treat nets that have
+    # only escape stubs as already routed (doing so left board 07's six
+    # TMDS nets permanently at 1/2 pads connected when the pre-pass was
+    # re-enabled under the C++ backend).
+    is_escape: bool = False
+    # Issue #6243: the copper's own authored electrical minimum (mm) when its
+    # routing net id has been neutralised to 0 (placement-preserved copper of
+    # a strict netclass).  ``0.0`` defers to ``DesignRules.net_clearance_floors``.
+    authored_clearance: float = 0.0
+
+    def to_sexp(self, name_only: bool = False) -> str:
+        """Generate all S-expressions for this route.
+
+        Issue #4416: ``name_only`` is threaded to every segment/via emitter
+        so a route appended to a KiCad-10 name-based board keeps that
+        board's ``(net "name")`` dialect.
+
+        Issue #7521: segments tagged with a tuning pattern
+        (``Segment.tuning_pattern``) are followed by one KiCad ``(generated
+        ...)`` tuning-pattern block per pattern, whose ``members`` are the
+        uuids just written for exactly those segments.
+        """
+        parts = []
+        patterns: dict[int, tuple[TuningPattern, list[str]]] = {}
+        for seg in self.segments:
+            pattern = seg.tuning_pattern
+            if pattern is None:
+                parts.append(seg.to_sexp(name_only=name_only))
+                continue
+            seg_uuid = _make_uuid()
+            parts.append(seg.to_sexp(name_only=name_only, uuid=seg_uuid))
+            patterns.setdefault(id(pattern), (pattern, []))[1].append(seg_uuid)
+        for via in self.vias:
+            parts.append(via.to_sexp(name_only=name_only))
+        for pattern, members in patterns.values():
+            parts.append(pattern.to_sexp(members, _make_uuid()))
+        return "\n\t".join(parts)
+
+    def copy_geometry(self) -> "Route":
+        """Return a geometric snapshot of this route (Issue #3507).
+
+        Produces a new :class:`Route` whose :class:`Segment` and
+        :class:`Via` objects are field-level copies of this route's, so
+        the snapshot's geometry survives in-place mutation of the
+        original (the ``drc_verify_and_nudge`` pass nudges segment
+        coordinates and merges vias directly on the live objects).
+        Used by :meth:`RoutingGrid.resync_route_occupancy` to unmark the
+        PRE-mutation copper from the routing grid after a post-route
+        pass mutates route geometry.
+        """
+        return Route(
+            net=self.net,
+            net_name=self.net_name,
+            segments=[dataclasses.replace(seg) for seg in self.segments],
+            vias=[dataclasses.replace(via) for via in self.vias],
+            is_escape=self.is_escape,
+        )
+
+    def validate_layer_transitions(
+        self,
+        via_drill: float = 0.35,
+        via_diameter: float = 0.7,
+    ) -> int:
+        """Ensure all layer transitions have corresponding vias.
+
+        When consecutive segments are on different layers, there must be a via
+        at the transition point. This method detects missing vias and inserts
+        them to ensure electrically valid routes.
+
+        Args:
+            via_drill: Drill diameter for inserted vias (mm)
+            via_diameter: Total diameter for inserted vias (mm)
+
+        Returns:
+            Number of vias inserted
+        """
+        if len(self.segments) < 2:
+            return 0
+
+        vias_inserted = 0
+
+        for i in range(len(self.segments) - 1):
+            seg1 = self.segments[i]
+            seg2 = self.segments[i + 1]
+
+            if seg1.layer != seg2.layer:
+                # Layer transition - check for via at connection point
+                # Segments connect at seg1.end == seg2.start
+                transition_x = seg1.x2
+                transition_y = seg1.y2
+
+                # Check if via already exists at this point
+                has_via = any(
+                    abs(via.x - transition_x) < 0.01 and abs(via.y - transition_y) < 0.01
+                    for via in self.vias
+                )
+
+                if not has_via:
+                    # Issue #5013: a missing-via insertion here is always a
+                    # defensive, ordinary through-hole (no blind/buried
+                    # process selection exists in this codepath) -- mirror
+                    # the same-issue fix in ``CppPathfinder._convert_result_to_route``
+                    # and ``Router._convert_path_to_route`` and normalize
+                    # the physical span to the full copper stack instead
+                    # of the bare logical ``seg1.layer``/``seg2.layer``
+                    # transition, which would under-report the drilled
+                    # extent on a 4+ layer board.
+                    new_via = Via(
+                        x=transition_x,
+                        y=transition_y,
+                        drill=via_drill,
+                        diameter=via_diameter,
+                        layers=(Layer.F_CU, Layer.B_CU),
+                        net=self.net,
+                        net_name=self.net_name,
+                    )
+                    self.vias.append(new_via)
+                    vias_inserted += 1
+
+        return vias_inserted
+
+
+@dataclass
+class Pad:
+    """A pad to connect."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+    net: int
+    net_name: str
+    layer: Layer = Layer.F_CU
+    ref: str = ""  # Component reference
+    pin: str = ""  # Pin number/name
+    through_hole: bool = False  # PTH pads block both layers
+    drill: float = 0.0  # Drill diameter for PTH pads (0 = use pad size)
+    steiner_point: bool = False  # True for virtual Steiner tree branch points
+    layer_agnostic: bool = (
+        False  # Issue #6634: goal on ANY routable layer until first arrival pins it
+    )
+    footprint_name: str = ""  # Library footprint name, e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm"
+    rotation: float = 0.0
+    """Residual board-space rotation in degrees (issue #4910).
+
+    ``width``/``height`` are already axis-swapped by the ``io.py`` parsers
+    for a pad rotated within 1 degree of 90/270 (so a "vertical" SMD pad's
+    long axis lines up with the Y grid axis as before this field existed).
+    ``rotation`` carries only what that swap does NOT already absorb -- the
+    angle a true board-space AABB still needs to account for. Concretely it
+    is ``total_rot - 90`` / ``total_rot - 270`` immediately after a swap
+    (a small residual, since the swap only fires near those angles),
+    ``total_rot - 180`` near a half-turn (no swap needed -- an AABB is
+    invariant under a half-turn) or ``total_rot`` unchanged otherwise
+    (covers every non-cardinal angle, e.g. 30 or 45 degrees, where the raw
+    width/height are exactly the pre-rotation local dimensions).  A
+    construction site that never applies the cardinal swap (e.g. the MCP /
+    placement pad-dict builders, which read ``pad.size`` straight off the
+    schema) simply passes the pad's full ABSOLUTE board angle -- that is
+    the ``no swap fired`` case and is equally correct.  The default ``0.0``
+    means "no
+    rotation info available" and is always safe: every AABB consumer must
+    fall back to the plain ``(width/2, height/2)`` box in that case, which
+    is the pre-#4910 behavior byte-for-byte.  See
+    :func:`pad_half_extents` for the one true consumer of this
+    convention -- callers computing a keep-out/AABB box from a ``Pad``
+    should use that helper rather than reading ``width``/``height``
+    directly, so a non-cardinal rotation is never silently dropped again.
+    """
+
+    shape: str = "rect"
+    """Authored shape; absent programmatic metadata uses a conservative rectangle.
+
+    The clearance kernel (:func:`~kicad_tools.router.clearance_shapes.pad_shape`)
+    measures circles as discs and ovals as stadiums -- both are fully
+    determined by ``width``/``height``. A roundrect's corner radius is
+    ``roundrect_rratio * min(width, height)``, so it is measured exactly only
+    when :attr:`roundrect_rratio` carries the file's ratio; without one it is
+    measured as its enclosing rotated rectangle (never an assumed ratio, which
+    would over-round a small-ratio pad's corners and hide a real near-miss --
+    issue #6718). Grid/AABB consumers still use the enclosing rectangle.
+    Custom/trapezoid nominal dimensions do not bound their copper and are
+    rejected explicitly.
+    """
+
+    roundrect_rratio: float | None = None
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    ``None`` means "unknown": the clearance kernel then treats the roundrect as
+    its rectangle, which can only over-report a corner near-miss. Ignored for
+    every other shape.
+    """
+
+    # Physical drill metadata, independent of the copper's residual rotation.
+    drill_size: tuple[float, float] | None = None
+    drill_rotation: float = 0.0
+    component_id: str = ""
+    escape_terminal: bool = False  # Metal bounds must stay within committed escape copper
+    terminal_id: str = ""
+    """Internal physical land identity; ``pin`` keeps its authored display name."""
+
+    authored_clearance: float = 0.0
+    """The pad's own authored electrical minimum (Issue #6243), in mm.
+
+    Set by the routing loader for a pad whose **authored** net's netclass is
+    stricter than the project ``Default`` when that net's routing id has been
+    neutralised (skipped plane nets, placement-excluded or unsupported-geometry
+    nets all become net ``0``).  The authored minimum belongs to the copper, not
+    to the routing target, so it survives the neutralisation.  ``0.0`` -- the
+    default -- defers entirely to ``DesignRules.net_clearance_floors``.
+    """
+
+    side: Layer | None = None
+    """Copper layer of the owning footprint's side (issue #6780).
+
+    ``Layer.F_CU`` for a front footprint, ``Layer.B_CU`` for a back one;
+    ``None`` when the constructor did not know (programmatic pads), in which
+    case consumers fall back to :attr:`layer`.  A through-hole pad's
+    :attr:`layer` is always ``F.Cu`` (the loaders do not record per-layer
+    copper for ``*.Cu`` pads), so only this field tells a back-side
+    footprint's through-hole pad apart.  Only the kicad-cli length model
+    (:func:`~kicad_tools.router.kicad_length.router_pad`) reads it: kicad-cli
+    connects a via inside a through-hole pad on the footprint's side only.
+    Routing, clearance and grid code ignore it.
+    """
+
+    @property
+    def component_key(self) -> str:
+        """Physical component key used for grouping and geometric exemptions."""
+        return self.component_id or self.ref
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """Internal terminal key; ``ref`` remains the authored display label."""
+        return (self.component_key, self.terminal_id or self.pin)
+
+    def __post_init__(self) -> None:
+        if self.shape not in {"circle", "rect", "oval", "roundrect"}:
+            raise ValueError(
+                f"Unsupported routing pad shape {self.shape!r} for {self.ref}.{self.pin}"
+            )
+
+
+def pad_half_extents(pad: "Pad") -> tuple[float, float]:
+    """Board-space ``(half_width, half_height)`` AABB extent of ``pad``.
+
+    Issue #4910: ``pad.width``/``pad.height`` alone under-estimate the true
+    board-space bounding box for a pad rotated at a non-cardinal angle --
+    ``pad.rotation`` (see its docstring for the exact residual-angle
+    convention) supplies the correction via the same trigonometric AABB
+    formula :func:`kicad_tools.router.pairwise_clearance.build_attach_zones`
+    already uses for the post-route audit side::
+
+        half_w = |cos(rotation)| * width / 2 + |sin(rotation)| * height / 2
+        half_h = |sin(rotation)| * width / 2 + |cos(rotation)| * height / 2
+
+    (Projecting all four rectangle corners onto the board axes.  The angle's
+    SIGN is immaterial here -- ``|cos(-t)| == |cos(t)|`` -- which is why this
+    matches the audit side even though that one negates the angle for KiCad's
+    clockwise convention.)
+
+    ``rotation == 0.0`` (the default -- unknown/axis-aligned) short-circuits
+    to the plain ``(width / 2, height / 2)`` box with no trig call, so every
+    pre-#4910 caller that never threaded rotation through construction sees
+    byte-identical results.  Prefer this helper over reading ``pad.width`` /
+    ``pad.height`` directly wherever a keep-out / clearance AABB is built.
+    """
+    if pad.shape == "circle":
+        radius = max(pad.width, pad.height) / 2.0
+        return radius, radius
+    if pad.rotation == 0.0:
+        return pad.width / 2.0, pad.height / 2.0
+    theta = math.radians(pad.rotation)
+    cos_t, sin_t = abs(math.cos(theta)), abs(math.sin(theta))
+    half_w = cos_t * pad.width / 2.0 + sin_t * pad.height / 2.0
+    half_h = sin_t * pad.width / 2.0 + cos_t * pad.height / 2.0
+    return half_w, half_h
+
+
+@dataclass
+class Obstacle:
+    """An obstacle to avoid."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+    layer: Layer
+    clearance: float = 0.0

@@ -1,0 +1,9 @@
+{
+  "name": "Issue Curator",
+  "description": "Enhances approved issues and prepares them for implementation",
+  "suggestedModel": "sonnet",
+  "suggestedWorkerType": "claude",
+  "toolPolicy": {
+    "allowedCapabilities": []
+  }
+}

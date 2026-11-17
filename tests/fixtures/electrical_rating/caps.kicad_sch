@@ -1,0 +1,196 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(uuid "00000000-0000-0000-0000-000000000051")
+	(paper "A4")
+	(lib_symbols
+		(symbol "Device:R"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+			)
+		)
+		(symbol "Device:LED"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "LED_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "K") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "A") (number "2"))
+			)
+		)
+		(symbol "Device:C"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "C_1_1"
+				(pin passive line (at 0 3.81 270) (length 2.794) (name "~") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 2.794) (name "~") (number "2"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000031")
+		(property "Reference" "C1"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100nF"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Voltage_Rating" "16V"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000032"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000033"))
+	)
+	(label "+12V"
+		(at 100 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000034")
+	)
+	(label "GND"
+		(at 100 53.81 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000035")
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 120 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000036")
+		(property "Reference" "C2"
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100nF"
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Voltage_Rating" "10V"
+			(at 122 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000037"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000038"))
+	)
+	(label "+12V"
+		(at 120 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000039")
+	)
+	(label "GND"
+		(at 120 53.81 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000040")
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 140 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000041")
+		(property "Reference" "C3"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100nF"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Voltage_Rating" "25V"
+			(at 142 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000042"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000043"))
+	)
+	(label "VCC"
+		(at 140 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000044")
+	)
+	(label "GND"
+		(at 140 53.81 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000045")
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 160 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000046")
+		(property "Reference" "C4"
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100nF"
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "~"
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Voltage_Rating" "junk"
+			(at 162 50 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000047"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000048"))
+	)
+	(label "+12V"
+		(at 160 46.19 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000049")
+	)
+	(label "GND"
+		(at 160 53.81 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000050")
+	)
+)

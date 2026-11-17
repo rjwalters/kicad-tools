@@ -1,0 +1,2827 @@
+# CLI Reference
+
+Complete reference for the `kct` (kicad-tools) command-line interface.
+
+---
+
+## Global Options
+
+```bash
+kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--help`, `-h` | Show help message |
+| `--version` | Show version number |
+| `--verbose` | Show full stack traces on errors |
+| `--quiet`, `-q` | Suppress progress output (for scripting) |
+| `--units {mm,mils}` | Unit system for output; overrides config and env var |
+
+---
+
+## Commands Overview
+
+| Category | Command | Description |
+|----------|---------|-------------|
+| **Analysis** | `symbols` | List and query schematic symbols |
+| | `nets` | Trace and analyze nets |
+| | `netlist` | Netlist analysis and comparison tools |
+| | `sch` | Schematic analysis tools |
+| | `pcb` | PCB query tools |
+| **Validation** | `erc` | ERC validation and analysis |
+| | `drc` | Parse DRC reports with manufacturer rules |
+| | `check` | Pure Python DRC (no kicad-cli) |
+| | `creepage` | HV creepage/clearance census (surface-path distance) |
+| | `creepage-export-rules` | Export voltage-domain netclasses + pairwise HV clearance rules so kicad-cli DRC enforces creepage |
+| | `validate` | Validation tools (schematic-to-PCB sync) |
+| | `validate-footprints` | Validate footprints for pad spacing issues |
+| | `net-status` | Report net connectivity status for a PCB |
+| | `constraints` | Constraint conflict detection and management |
+| | `detect-mistakes` | Detect common PCB design mistakes |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
+| | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
+| | `fix-vias` | Fix vias to meet manufacturer specifications |
+| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
+| | `place-silk-refs` | Move readable reference designators to clear silk/pad/drill/edge collisions; `--over-holes` moves only those over a drilled hole |
+| | `fix-footprints` | Fix footprint pad spacing issues |
+| | `repair-clearance` | Repair clearance violations by nudging traces |
+| | `pipeline` | End-to-end repair pipeline for existing PCBs |
+| | `sync` | Reconcile schematic and PCB references |
+| **Manufacturing** | `bom` | Generate bill of materials |
+| | `mfr` | Manufacturer tools and rules |
+| | `audit` | Manufacturing readiness audit (ERC, DRC, connectivity) |
+| | `export` | Generate a complete manufacturing package (BOM, CPL, Gerbers) |
+| | `panel` | Create manufacturing panels from board PCBs |
+| | `estimate` | Manufacturing cost estimation |
+| | `impedance` | Transmission line impedance calculations |
+| | `ipc` | Interact with a running KiCad instance via IPC API (KiCad 9.0+) |
+| | `fleet` | Fleet-wide PCB status and operations |
+| | `readiness` | Run the manufacturing-readiness gates and write hash-bound `output/readiness.json` |
+| | `stitch` | Add via stitching to power planes |
+| | `build` | Build from spec to manufacturable design |
+| | `create-pcb` | Create a PCB from a KiCad schematic |
+| | `init` | Initialize a project with manufacturer design rules |
+| | `spec` | Project specification (`.kct`) management — incl. `spec decide`, the append-only **human** design-decision log |
+| | `clean` | Clean up old/orphaned files from KiCad projects |
+| **Libraries** | `lib` | Symbol and footprint library tools |
+| | `footprint` | Footprint generation and tools |
+| | `parts` | LCSC parts lookup and search |
+| | `datasheet` | Datasheet search and PDF parsing |
+| **PCB Operations** | `route` | Autoroute a PCB |
+| | `route-auto` | Route a net with smart strategy selection |
+| | `retune-lengths` | Length-tune selected match groups / diff pairs on an already-routed PCB |
+| | `zones` | Add copper pour zones |
+| | `placement` | Detect and fix placement conflicts |
+| | `optimize-placement` | CMA-ES placement optimizer (anchor-aware) |
+| | `optimize-traces` | Optimize PCB traces |
+| | `optim` | Placement / routing figure-of-merit tools |
+| **AI Integration** | `reason` | LLM-driven PCB layout reasoning |
+| | `mcp` | MCP server for AI agent integration |
+| | `decisions` | Query **machine**-recorded placement/routing rationale (read-only; distinct from `spec decide`) |
+| | `explain` | Explain design rules and DRC violations |
+| | `suggest` | Part suggestions and recommendations |
+| **Advanced Analysis** | `analyze` | PCB analysis (congestion, thermal, signal integrity) |
+| | `board-metrics` | Emit a normalized `board.json` per board |
+| | `benchmark` | Run routing benchmarks and regression tests |
+| | `bench` | Run external DeepPCB-comparable board benchmarks (`bench external`; report schema in [benchmark-external-report-schema.md](../benchmark-external-report-schema.md)) |
+| | `calibrate` | Calibrate routing performance settings |
+| **Reporting** | `render` | Render per-board 2D SVGs + 3D PNGs |
+| | `screenshot` | Capture a PNG of a KiCad board or schematic |
+| | `board-view` | Board images for a routing question: net highlight, ratsnest, mm axes |
+| | `report` | Generate a Markdown design report |
+| **Utilities** | `config` | View/manage configuration |
+| | `interactive` | Launch interactive REPL mode |
+| | `run` | Run a Python script with the kicad-tools interpreter |
+| | `build-native` | Build the C++ router backend (10-100x faster routing) |
+| | `doctor` | Diagnose kicad-tools installation health (version-record drift + environment preflight) |
+| | `ecosystem` | Where kicad-tools sits among related projects (verdicts, license reuse rights, our evaluation notes) |
+| | `skills` | Install the packaged `kct` agent skills into a project or user skills directory |
+| | `agent-guide` | Print the harness-neutral primer for agents using `kct` (workflow, JSON contract, sign-off, harness setup, pitfalls) |
+
+---
+
+## Analysis Commands
+
+### `symbols`
+
+List and query schematic symbols.
+
+```bash
+kct symbols <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,csv}` | Output format (default: table) |
+| `--filter PATTERN` | Filter by reference pattern (e.g., "R*") |
+| `--lib LIB_ID` | Filter by library ID |
+| `--verbose`, `-v` | Show additional details |
+
+**Examples:**
+```bash
+kct symbols project.kicad_sch
+kct symbols project.kicad_sch --format json
+kct symbols project.kicad_sch --filter "C*"  # All capacitors
+```
+
+---
+
+### `nets`
+
+Trace and analyze nets in a schematic.
+
+```bash
+kct nets <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format (default: table) |
+| `--net NAME` | Show only specified net |
+| `--stats` | Show net statistics |
+
+**Examples:**
+```bash
+kct nets project.kicad_sch
+kct nets project.kicad_sch --net VCC
+kct nets project.kicad_sch --stats --format json
+```
+
+---
+
+### `sch`
+
+Schematic analysis subcommands.
+
+```bash
+kct sch <subcommand> <schematic> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `summary` | Show schematic summary |
+| `info` | Show symbol details |
+| `labels` | List all labels |
+| `wires` | List wire segments |
+| `hierarchy` | Show sheet hierarchy |
+| `validate` | Validate schematic structure |
+| `pins` | Show symbol pin positions |
+| `connections` | Check pin connections using library positions |
+| `unconnected` | Find unconnected pins and issues |
+| `tidy` | Autoplace Reference/Value fields (headless; `--refs`, `--threshold`, `--dry-run`, cosmetic-only) |
+
+**Examples:**
+```bash
+kct sch summary project.kicad_sch
+kct sch hierarchy project.kicad_sch --format json
+kct sch unconnected project.kicad_sch
+```
+
+#### `sch validate`
+
+```bash
+kct sch validate <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format` | Output format (`text` or `json`) |
+| `--lib-path` | Directory of `.kicad_sym` files used as a fallback for symbols missing from the schematic's embedded `lib_symbols` (embedded symbols stay authoritative); repeatable |
+| `--strict` | Exit 1 on any warning (errors and checks not run already exit 1) |
+| `--quiet`, `-q` | Only show errors |
+| `--skip` | Skip a validation check category (e.g. `swd_routing`, `i2c_pullups`); repeatable |
+
+Exit codes: `0` pass; `1` errors, a requested check that did not run, warnings
+with `--strict`, or the tool could not run. `--format json` carries top-level
+`verdict` (`pass`|`fail`|`incomplete`) and `exit_code` (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
+
+---
+
+### `pcb`
+
+PCB query subcommands.
+
+```bash
+kct pcb <subcommand> <pcb_file> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `summary`, `footprints`, `nets`, `traces`, `stackup`, `zones` | Query the board (run `kct pcb --help` for the full subcommand list) |
+| `move-footprint`, `remove-footprint` | Modify footprints by reference designator |
+| `move-via` | Move one via (`--at X Y` / `--net` / `--uuid`, then `--to` / `--by`) and drag attached trace endpoints; `--check` refuses a move that adds a clearance violation |
+| `add-zone` | Add a copper pour zone |
+| `add-3d-models` | Patch missing `(model ...)` refs; `--refresh` rewrites existing refs through the current tier chain (see [LCSC 3D models guide](../guides/lcsc-3d-models.md)) |
+| `model-audit` | Classify every footprint's 3D model coverage (`resolved`, `embedded`, `dangling`, `no_ref`, `unresolved_var`, `hidden_only`, `lcsc_cache_miss`, `lcsc_content_changed`, `placeholder`, `exempt`); `--env host\|pinned`, `--model-dir DIR`, `--format json`. A report: exits 0 regardless of coverage (see [3D model coverage](../guides/lcsc-3d-models.md#3d-model-coverage-audit)) |
+| `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
+| `reinforce` | Place same-net PTH buttress-wire anchors on a routed net: by default two per single-layer wire leg, at its ends (see below) |
+
+**`add-zone` output-path behavior:** `-o`/`--output` is optional and
+**defaults to overwriting the input in place** — consistent with `zones add`,
+`zones fill`, and `optimize-placement`. Because each in-place `add-zone` reads
+its own prior output, chaining `pcb add-zone` calls against one file
+accumulates zones instead of silently discarding earlier ones. Pass an
+explicit `-o <path>` to write a side file and leave the input untouched.
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output PATH` | Output PCB (default: overwrite input) |
+
+**Examples:**
+```bash
+kct pcb footprints board.kicad_pcb
+kct pcb traces board.kicad_pcb --layer F.Cu
+kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu     # modifies board.kicad_pcb in place
+kct pcb add-zone board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
+kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
+```
+
+#### `kct pcb diff OLD NEW`
+
+Compares two boards item by item: segments, arcs, vias, footprints, pads
+(keyed `<ref>/<pad>`), zone outlines, zone fills (one item per zone) and
+board graphics. It answers "which nets and layers did this route change?".
+
+```bash
+kct pcb diff origin/main:boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb \
+    boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb
+kct pcb diff old.kicad_pcb new.kicad_pcb --net GND --layer B.Cu --format json
+kct pcb diff old.kicad_pcb new.kicad_pcb --svg diff.svg
+```
+
+Footprints and pads pair **by reference** (`R1`, `R1/2`): a reference is
+stable and meaningful, so same-reference items are `changed` when anything
+about them differs, a vanished reference is `removed` and a new one `added`.
+Two identical parts that trade places therefore report both as `changed`
+rather than pairing with each other. A reference that repeats (shield pads
+`J1/SH`, NPTH pads `J1/`, footprints sharing `REF**`) carries no more than
+"one of these", so inside that group equal-content items pair first as
+`unchanged`, the rest pair in file order as `changed`, and the surplus is
+`removed`/`added`: reordering duplicates reports nothing, and deleting one
+reports exactly that one. Copper, zones and graphics carry only
+uuids, and those match in three passes:
+
+1. **Content.** Items with identical normalised content are `unchanged`,
+   whatever their uuids. Nets are compared by name, coordinates are
+   rounded to 1 nm and zone outlines ignore their start vertex and winding
+   direction, so regenerated uuids, re-indentation and float reformatting
+   report nothing. Among identical duplicates, a same-uuid partner is
+   preferred, so deleting one of two duplicate segments names the uuid that
+   actually disappeared.
+2. **Identity.** Leftovers with the same uuid, kind and net are `changed`.
+   The net guard matters because seeded routes number uuids by position.
+3. **Remainder.** The rest is `removed` or `added`. An item that both moved
+   and got a new uuid reports as one removed plus one added.
+
+A moved pad marks only that pad as changed, not its footprint.
+
+| Option | Description |
+|--------|-------------|
+| `OLD`, `NEW` | A `.kicad_pcb` path, or `REV:path` (same loader as `kct check --diff`) |
+| `--format text\|json` | Text summary (default) or key-sorted JSON on stdout |
+| `--net NAME` | Report only this net (repeatable) |
+| `--layer LAYER` | Report only items touching this layer (repeatable; a via matches every layer in its span) |
+| `--svg OUT.svg` | Write an overlay: removed red (old geometry of a changed item dashed), added green, changed amber, everything else dimmed |
+
+Filters apply after matching, so they never change how items pair; `--net`
+and `--layer` combine with AND. The JSON document has `old`, `new`,
+`filters`, `summary`, `by_kind`, `by_net`, `by_layer` (each a
+`{removed, added, changed, unchanged}` count) and `items`: the non-unchanged
+entries with `status`, `kind`, `key`, `net`, `layer`, `before` and `after`
+(`before` is null for added items, `after` for removed ones).
+
+Exit codes: `0` nothing differs (after filters), `2` something does, `1` a side
+could not be resolved or loaded. A CI step can therefore assert "this PR must
+not touch board X's copper".
+
+#### `kct pcb reinforce BOARD --net NET`
+
+Post-route buttress-wire reinforcement (#4218, #8741). The intended build: a
+hand-bent solid-core wire (default 16 AWG) is laid along a high-current trace
+and soldered to that trace along its whole length, held by **exactly two
+anchor holes, one at each end of the wire**. One wire stays on one copper
+layer, so a path that changes layer is two wires.
+
+```bash
+kct pcb reinforce board.kicad_pcb --net VBUS                        # ends mode (default)
+kct pcb reinforce board.kicad_pcb --net VBUS --current-paths current_paths.json
+kct pcb reinforce board.kicad_pcb --net VBUS --end-offset 2.0 --dry-run --format json
+kct pcb reinforce board.kicad_pcb --net VBUS --anchor-mode spaced --spacing 15
+kct pcb reinforce board.kicad_pcb --net VBUS --min-wire-length 0   # no 15 mm minimum
+kct pcb reinforce board.kicad_pcb --net VBUS --strategy auto        # copy short legs, wire long ones
+```
+
+Two placement modes:
+
+- **`--anchor-mode ends`** (default, #8742) splits the net's copper into
+  *legs*: a run on one copper layer with no junction inside it, one wire each.
+  Every anchored leg gets exactly two anchors, one near each end, none in
+  between. Each anchor's pad edge sits at least `--end-offset` mm (default
+  1.0) clear, in straight-line distance, of the same-net copper the leg ends
+  on: a component pad (its real shape and rotation) or via that the end of
+  its track overlaps, even when the track centreline stops just short of it,
+  or, for a branch, the whole trunk (every trunk segment, not just the piece at
+  the junction). If the leg bends soon after leaving that copper, the
+  anchor moves further inward until the clearance holds. A free end measures
+  from the track end. Both anchors are decided together: a leg with no room
+  for two (too short, or folding back so the two would overlap) is reported
+  `too_short` and gets none, never one or three. A Y
+  junction becomes a `trunk` (the longest through-path, two end anchors) and
+  a `branch` (one anchor at its free end, one beside the trunk); loops and
+  higher-degree junctions are reported `unhandled`, not guessed.
+  With `--current-paths`, every leg of every resolved, reinforcement-eligible
+  path is anchored, on whichever copper layers the path uses (one leg per
+  layer). Without it, one layer is processed per call (`--layer`, else the
+  layer with the most routed length), only the longest leg unless
+  `--all-runs`, and copper on other layers is reported as unhandled.
+  A refused end anchor is nudged inward along the leg only, by at most
+  2 mm, and never past the other anchor; otherwise it is listed under
+  `refused` with the rule that refused it (including `hole_to_hole` /
+  `anchor_spacing` against another leg's anchor) and the leg is
+  `partial` (one anchor, the other rule-refused) or `unanchored`. One
+  anchor can't hold a two-ended wire, so treat `partial` as a placement to
+  fix.
+- **`--anchor-mode spaced`** keeps the pre-#8742 row of anchors at both run
+  ends and every `--spacing` mm (default 15) along the run. `--spacing` is
+  ignored, with a warning, in `ends` mode.
+
+**Minimum wire length (#8915).** `--min-wire-length MM` defaults to **15.0** in
+`ends` mode: a wire needs a through-hole at each end, and each hole needs both
+outer layers and the inner planes clear, so the two rarely fit on a shorter
+link. A leg below the minimum is reported `unanchored`, with a reason naming
+the minimum, and gets no anchors, no solder-mask opening and no wire-list
+entry. `--min-wire-length 0` restores the pre-#8915 behaviour (every leg is a
+candidate). `--min-run-length` is an accepted alias for the same value; when
+both are given the larger wins. `--anchor-mode spaced` has **no** default
+minimum, so its output is unchanged, but a value given on either flag still
+applies to it. `--format json` reports `min_wire_length_mm` (what was asked
+for, null when neither flag was given) and `min_wire_length_effective_mm`
+(what was enforced for this mode).
+
+Where a path declared `reinforcement_eligible` has only a leg below the
+minimum, it now carries no wire, so `kct check`'s `reinforcement_incomplete`
+rule reports that net's `a` (no anchor holes) and `b` (no continuous mask
+opening) sub-checks as **warnings**. Drop the declaration for a link too short
+to carry a wire, or pass `--min-wire-length 0`.
+
+**Strategy (#8916).** `--strategy {wire,parallel,auto}` chooses how each leg
+is reinforced; `wire` (the buttress wire above) is the default and unchanged.
+`parallel` gives every selected leg a same-net, same-width copy of its
+polyline, vertex for vertex, on the opposite outer layer (`F.Cu` <-> `B.Cu`),
+with no anchors and no mask opening. The copy is tied to the leg at both ends
+-- by the plated through-hole pad or through via the leg ends on, else by a
+stitching via (at the vertex of a free end or junction, or just past an SMD
+pad, never in it; the copy then starts at that via) -- and by stitching vias
+at a nominal 5 mm pitch, never closer than `kct stitch`'s same-net via
+spacing. The vias are the board's default via from the design rules (minimum
+drill, larger of minimum diameter and drill plus two annular rings). Every
+copy track is checked against other-net copper on the copy layer (class
+floors, `.kicad_dru` rules, `--voltage-map` creepage) and against other nets'
+holes (KiCad's 0.25 mm hole-to-copper clearance), and every via like an
+anchor (hole-to-hole included). A copy that does not fit whole is refused --
+the leg is `unanchored`, `refused_copies` names the obstacle net, the rule and
+where -- and nothing is written for it. A leg on an inner layer is refused
+(`copy_geometry`). The minimum wire length does not filter `parallel` legs.
+`auto` gives `parallel` to a leg shorter than the minimum wire length (15 mm
+by default; `--min-wire-length 0` makes every leg a wire) and `wire` to the
+rest. `parallel` and `auto` need `--anchor-mode ends`: with `spaced` they exit
+1 with an error, since spaced mode has no legs and no default minimum for
+`auto` to compare against. Each leg reports its `strategy` (text and
+`--format json`, which also adds `strategy`, `copies`, `copies_placed` and
+`refused_copies`, and per leg `copy_status`, `copy_reason` and `copy`). A re-run
+adds no copper: the copy is found as the leg's coincident twin (status
+`copy`). `path_ampacity` credits the pair as a parallel group on its summed
+cross-section; a stitching via that pins the two branches mid-run is not
+judged as a layer change there (nor by `reinforcement_incomplete`'s `d`), while
+a tie via where the copy starts still is -- it carries the copy's share of the
+current.
+
+**Wire list sidecar (#8744).** Each non-dry-run `ends` pass writes or updates
+`<board>.reinforcement.json` (next to the `-o` output when given), `version: 1`,
+one entry per leg: `net`, `layer`, `kind`, `path` (first declared current path,
+else null; `paths` lists all), `leg_start`/`leg_end`, `anchors` (two `{x,y}`,
+sheet-absolute), `length_mm` (along the leg), `straight_line_mm` (between the
+anchors), `wire_gauge_awg`, `bare_diameter_mm`, `mask_opening` (null until
+#8743) and `status` (legs that are `too_short`/`unhandled` are listed with no
+anchors; a leg skipped by `--min-wire-length` is **omitted entirely** — the
+owner wants no wire there, so it is not on the cut list, #8915). A leg
+reinforced by `--strategy parallel` is recorded whatever its length, with
+`strategy: "parallel"`, `copy_status`, `copy_layer`, `polyline`,
+`copy_segments`, `stitch_vias` and the via size; a record without `strategy`
+is a wire, so older sidecars read unchanged. `--clear` / `--replace` remove
+exactly the recorded copy tracks and stitching vias (under the same
+connectivity guard as anchors) and the record, and `reinforcement_incomplete`
+does not ask such a leg -- nor its copy -- for anchors or a mask opening, once
+it finds every recorded copy segment on the board. Re-running replaces a wire with the same net + layer + leg ends,
+keeps other nets' wires and never duplicates; output is sorted and has no
+timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
+embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
+[--format json]` prints it read-only from the sidecar.
+
+Declared current paths that do not resolve (moved/removed pad, ambiguous
+loop) are listed under `unresolved_paths` and warned about on stderr; they
+get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
+`end_offset_mm`, `min_wire_length_mm`, `min_wire_length_effective_mm`,
+`unresolved_paths` and `legs` (`net`, `layer`, `kind`,
+`length_mm`, `width_mm`, `anchors`, `status` in
+`full|partial|unanchored|too_short|unhandled` (`parallel|copy` under
+`--strategy`, #8916), `reason`, `paths`,
+`polyline`) to the existing keys; coordinates are sheet-absolute.
+
+**Solder-mask opening (#8743).** In `ends` mode (default; `--no-mask-opening`
+disables it, `--mask-opening` enables it in `spaced` mode) every fully
+anchored leg gets a solder-mask opening along the run from anchor to anchor:
+one board-level `gr_line` per straight piece on the leg's own side's mask
+layer (`F.Cu` leg -> `F.Mask`, `B.Cu` leg -> `B.Mask`), as wide as the trace
+or `--mask-width MM` (e.g. `1.3` for a 16 AWG wire). The anchors are written
+with per-via tenting off (`tenting front/back no`), so both rings are mask-open
+whatever the board-level via tenting is. Re-running does not duplicate
+openings (deduped on layer + endpoints). Legs that are not fully anchored, or
+on an inner layer, get no opening. With `--voltage-map` the exposed run is
+modelled as copper of half-width `max(opening width, wire diameter)/2`; if it
+would sit closer to other-net copper than `max(class floor, creepage @ |dV|)`
+the opening is refused (rule `mask_opening_voltage_map_pairwise`, or
+`mask_opening_clearance` when a class/DRU floor governs), reported, and no
+graphic is written for that leg. `--dry-run` writes nothing. `--format json`
+adds `mask_opening`, `mask_width_mm`, `openings` (`layer`, `start`, `end`,
+`width_mm`, `existing`), `refused_openings` and per-leg `mask_status` /
+`mask_reason`. Refill zone pours afterwards
+(`kicad-cli pcb drc --refill-zones`).
+
+---
+
+## Validation Commands
+
+### `erc`
+
+Run ERC on a schematic (via kicad-cli) or parse an existing ERC report.
+
+```bash
+kct erc <schematic.kicad_sch | report.json | report.rpt> [options]
+```
+
+Every violation kicad-cli reports (minus KiCad exclusions) counts toward the
+exit code; the only suppression is an explicit `--filter-config`, which is
+disclosed as `Filtered:` / `summary.filtered` (Issue #7161).
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,summary}` | Output format (default: table) |
+| `--errors-only` | Show only errors, not warnings (view only) |
+| `--strict` | Exit 2 when only warnings are found |
+| `--type`, `-t TYPE` | Filter by error type (view only) |
+| `--sheet SHEET` | Filter by sheet name (view only) |
+| `--by-sheet` | Group violations by sheet |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--filter-config FILE` | TOML `[[erc.filters]]` rules to suppress or reclassify violations |
+| `--output`, `-o FILE` | Save the kicad-cli ERC report to this path |
+| `--keep-report` | Keep the temporary ERC report |
+| `--list-types` | List known ERC violation types and exit |
+
+Exit codes: `0` no errors, `1` errors (or failure), `2` warnings with `--strict`.
+`--format json` carries top-level `verdict` (`pass`|`fail`) and `exit_code`
+(the process exit code, #7230). See [Sign-off exit codes](#sign-off-exit-codes).
+
+**Examples:**
+```bash
+kct erc project.erc
+kct erc project.erc --errors-only --format json
+kct erc project.erc --type "unconnected"
+```
+
+---
+
+### `drc`
+
+Run DRC on a PCB or parse a DRC report, with optional manufacturer rule comparison.
+
+```bash
+kct drc <report|board.kicad_pcb> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,summary}` | Output format (default: table) |
+| `--errors-only` | Show only errors (view only; the exit code reflects all findings, #7230) |
+| `--strict` | Exit 2 when warnings are present (exit-code contract, #6898) |
+| `--allow-incomplete` | Exit 0 instead of 2 when schematic parity did NOT RUN (#7077); same meaning as `kct check --allow-incomplete` |
+| `--type TYPE`, `-t` | Filter by violation type (partial match; view only, the exit code reflects all findings) |
+| `--net NET` | Filter by net name (view only; the exit code reflects all findings) |
+| `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category (view only; the exit code reflects all findings) |
+| `--mfr`, `-m {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
+| `--layers N`, `-l` | Number of layers (default: 2) |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--suggest`, `-s` | Show fix suggestions for each violation |
+| `--filter-config PATH` | TOML file with `[[drc.filters]]` rules to suppress or reclassify violations |
+| `--keep-report` | Keep the DRC report file after running a PCB |
+| `--output PATH`, `-o` | Save the DRC report to this path |
+| `--waivers PATH` | Path to a `.kct_waivers.json` sidecar (schema v2 — the same file `kct check --waivers` reads) waiving cross-gate findings by KiCad rule type + component-ref set (#4691). Auto-discovered next to the input when omitted. Not applied in `--mfr` mode |
+
+The standalone `kicad-drc` also has `--rules` and `--compare`; they are
+deprecated (a stderr pointer is printed) in favour of `kct mfr rules` and
+`kct mfr compare`, and are intentionally not on `kct drc` (#6898).
+
+**Schematic parity (#7077)**
+
+`kct drc board.kicad_pcb` runs kicad-cli with `--schematic-parity` and prints
+one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
+
+- `Schematic parity: PASSED` — parity ran and found nothing unwaived.
+- `Schematic parity: FAILED (N issue(s))` — findings listed in a
+  `SCHEMATIC PARITY` section, kept out of the geometric violation counts.
+- `Schematic parity: NOT RUN (<reason>)` — kicad-cli could not fetch the
+  schematic netlist (no schematic next to the board, or one that is not fully
+  annotated), or a `.json`/`.rpt` report has no parity findings: an empty
+  `schematic_parity` array cannot tell "clean" from "never ran".
+
+Exit codes: error-severity parity findings exit 1; warning-severity ones exit
+2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
+`DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
+`--mfr` uses the same exit gate (#7170, see below). `--format json` (plain
+and `--mfr`) carries top-level `verdict` (`pass`|`fail`|`incomplete`) and
+`exit_code` (the process exit code, #7230); under `--allow-incomplete` a NOT
+RUN parity is `verdict: "incomplete"` with `exit_code: 0`. It also adds a
+`schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
+`warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
+`parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
+findings the same way they match DRC findings.
+
+**Manufacturer check (`--mfr`, #7170)**
+
+`--mfr <fab>` gives every kicad-cli violation exactly one verdict:
+
+- **compatible** — the fab's limit is met (e.g. a board rule stricter than the
+  fab's); the kicad-cli finding is cleared.
+- **incompatible** — the measured value breaches the fab's limit
+  (`clearance`, `track_width`, `copper_edge_clearance`, `annular_width`,
+  `via_diameter`, `hole_to_hole`, `drill_out_of_range` min *and* max,
+  `solder_mask_bridge`; `shorting_items` always fails). Blocking whatever
+  kicad-cli's severity was.
+- **not checked** — kct has no fab-limit check for the type (`hole_clearance`,
+  `via_dangling`, `courtyards_overlap`, `silk_*`, …). Listed in a
+  `NOT CHECKED against <fab> limits: N (errors E, warnings W)` section with a
+  per-type breakdown; kicad-cli's severity stands.
+
+The summary line reads `Compatible: a, Incompatible: b, Not checked: c`
+(`a + b + c` = every violation). Exit codes are the plain-mode ones: 1 when any
+incompatible or not-checked error (or parity error) remains; 2 for warnings
+under `--strict`, or when schematic parity did NOT RUN without
+`--allow-incomplete` (so `kct drc report.json --mfr X` exits 2 unless
+`--allow-incomplete`, like plain `kct drc report.json`); else 0.
+`--mfr --format json` prints `{manufacturer, layers, source, summary: {total,
+checked, compatible, incompatible, not_checked, not_checked_errors,
+not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
+checks: [{type_str, severity, result, rule_name, message, violation_message,
+manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
+verdict, exit_code}`; `checked + not_checked == total`. Other `--format` values print
+the table.
+
+**Waivers (`--waivers`, #4691)**
+
+The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
+`kct check`, so one file carries every documented exception for a board:
+
+- `rule` matches KiCad's own violation type string verbatim
+  (`courtyards_overlap`, `clearance`, …) — no translation table, so
+  clearance-family entries keyed to kct rule ids (`clearance_pad_pad`) simply
+  read as unused on this side.
+- `items` matches the violation's **component-ref set**, normalized from the
+  kicad-cli item descriptions (`"Footprint C52"` → `C52`,
+  `"Pad 6 [<no net>] of U3 on F.Cu"` → `U3`). Matching is exact-set and
+  order-insensitive: a 2-item entry never waives a 3-item finding. Findings
+  with no refs at all (track/via-only) are waivable via `nets` instead.
+- **Caveat — findings that are only *partly* ref-less (#4765).** The ref set is
+  normalized from the item descriptions, and a track/via item contributes
+  nothing to it (`"Track [GND] on F.Cu"` yields no ref). So a finding whose
+  items are `["Pad 1 of U3", "Track [GND] on F.Cu"]` normalizes to `{U3}` and
+  *is* matched exactly by a one-item `"items": ["U3"]` entry — the entry waives
+  a whole class of `U3` findings, not just the one that was reviewed. This is
+  intentional (narrowing it would retroactively un-waive existing sidecars);
+  when any item in a finding carries no reference designator, additionally
+  constrain the entry with `"nets": [...]` so it stays specific to the finding
+  you actually reviewed.
+- Auto-discovery is anchored at the input path: the board directory for
+  `.kicad_pcb` input, and for `.json`/`.rpt` report input the report's own
+  directory plus its `output/` siblings — falling back to the report
+  directory's parent, so `kct drc boards/NN/output/drc.json` still finds
+  `boards/NN/.kct_waivers.json` (#4765).
+- Matched findings render in a dedicated `WAIVED` section with their own count
+  bucket (never as warnings) and are excluded from the exit gate — exit is
+  nonzero iff **unwaived** errors remain. `--format json` keeps the underlying
+  `"severity": "error"` and adds `"status": "waived"`, so the severity-keyed
+  `kct audit` manufacturing gate stays blocking by default.
+- Entries matching nothing print as non-gating `UNUSED WAIVERS` advisories
+  (and appear under `unused_waivers` in JSON), so stale waivers stay visible.
+- Explicit path wins and a missing/malformed explicit file is a hard error; a
+  malformed auto-discovered sidecar degrades to zero waivers with a warning.
+
+**Examples:**
+```bash
+kct drc board.drc
+kct drc board.kicad_pcb --mfr jlcpcb              # exit 1 on any fab breach or not-checked error
+kct drc board-drc.json --mfr jlcpcb --format json --allow-incomplete
+kct drc board-drc.json --waivers .kct_waivers.json --allow-incomplete   # 0 unwaived errors gate
+kct mfr compare  # Show all manufacturer rules side by side
+```
+
+---
+
+### `check`
+
+Pure Python DRC (no kicad-cli required).
+
+```bash
+kct check <pcb_file> [options]
+```
+
+`kct check --format json` carries top-level `verdict` (`pass`|`fail`|`incomplete`)
+and `exit_code` (the process exit code). `summary.passed` is DRC-only: it can be
+`true` while `verdict` is `incomplete` (#7230). `meta_checks.incomplete_categories`
+lists every category whose check did not complete on this run (`mask_to_copper`,
+`dfm_table`, `fab_dfm_parity`), agreeing with `coverage.*.state` — it can be
+non-empty while `verdict` is `fail` (#9062). `mask_to_copper` is keyed on
+`assessment.coverage`, never `assessment.passed`: a mask check that completed and
+found a real violation is a checked row and is not named. One deliberate exception
+to full agreement (#8949): an *explicitly requested* mask check that cannot run is
+FAILED, so `coverage.mask_to_copper` is `unknown` (and in
+`summary.coverage_blocking_unknown`) while the list does not name it — the list is
+exhaustive only for default-applied checks. `fab_dfm_parity.incomplete_categories`
+is table-only (static JLCDFM parity coverage, run-independent).
+
+Exit codes: `0` pass (or `incomplete` with `--allow-incomplete`); `2` the check
+ran and the board fails (DRC errors, warnings with `--strict`, an ERC/LVS/manifest
+sub-check FAILED) or is incomplete (a sub-check NOT RUN); `1` the tool could not
+run (file not found, parse error, usage error). `--drc-only` has no incomplete
+state. See [Sign-off exit codes](#sign-off-exit-codes).
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,summary}` | Output format |
+| `--mfr {jlcpcb,oshpark,pcbway}` | Manufacturer rules |
+| `--refill-zones` | Refill zone fills in-place via `kicad-cli pcb drc --refill-zones --save-board` before checking (mutates the board file; kills stale-fill clearance false positives, #4113) |
+| `--waivers PATH` | Path to a general `.kct_waivers.json` sidecar (schema v2) waiving findings for any rule (#4417). Auto-discovered next to the board when omitted |
+| `--courtyard-waivers PATH` | Path to a `.courtyard_waivers.json` sidecar waiving specific courtyard-overlap pairs (#4137). Auto-discovered next to the board when omitted |
+| `--require-routing-policy` | Opt-in gate for the `routing_policy` category (#6044): every sensitive net class in the net-class map (`length_critical`, `noise_sensitive`, `length_match_group` or `diffpair_partner` set; pour nets exempt) whose routed nets declare neither `max_vias_per_net` nor `length_constraint.max_length` is an error. Needs a net-class map; without one, or with `routing_policy` deselected, the command exits 1 with a usage error. See [Routing policies](../guides/drc-and-validation.md#cli-routing-policies-routing_policy) |
+| `--max-fragment-fraction F` | Opt-in routing-quality gate (#4651): fail (exit 2) when the share of copper segments shorter than 0.25 mm exceeds `F` (0.0–1.0; equal passes). Default: unset (advisory metrics only) |
+| `--max-staircase-fraction F` | Opt-in routing-quality gate (#4651): fail (exit 2) when the share of short H/V staircase steps exceeds `F` (0.0–1.0; equal passes). Default: unset (advisory metrics only) |
+
+**Examples:**
+```bash
+kct check board.kicad_pcb
+kct check board.kicad_pcb --mfr jlcpcb --format json
+```
+
+---
+
+### `validate`
+
+Validate schematic-to-PCB synchronization.
+
+```bash
+kct validate --sync <schematic> <pcb>
+```
+
+`--errors-only` is a view filter: the exit code (1 on errors, 2 on warnings
+with `--strict`) reflects all findings, and the hidden counts are reported in
+`summary.hidden_by_view_filter` (#7230).
+
+Exit codes: `0` in sync (warnings allowed without `--strict`), `1` errors (or
+the tool could not run), `2` warnings with `--strict`. `--format json` carries
+top-level `verdict` (`pass`|`fail`) and `exit_code` (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
+
+**Examples:**
+```bash
+kct validate --sync project.kicad_sch board.kicad_pcb
+```
+
+---
+
+### `audit`
+
+Manufacturing readiness audit: ERC, DRC (internal engine plus kicad-cli
+geometric DRC), schematic-PCB sync, connectivity, manufacturer compatibility,
+HV isolation and a cost estimate, rolled up into one verdict.
+
+```bash
+kct audit <project.kicad_pro | board.kicad_pcb> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,summary}` | Output format (default: table) |
+| `--mfr`, `-m MFR` | Target manufacturer (default: the board's `project.kct` `target_fab`, else `jlcpcb`) |
+| `--layers N`, `-l` | Layer count (auto-detected by default) |
+| `--copper OZ`, `-c` | Copper weight in oz (default: 1.0) |
+| `--quantity N`, `-q` | Quantity for the cost estimate (default: 5) |
+| `--skip-erc` | Skip ERC (PCB-only audits) |
+| `--pcb PATH` | Override the auto-detected PCB path |
+| `--strict` | Exit 2 on a `warning` verdict |
+| `--net-class-map PATH` | Net-class sidecar (enables the diff-pair DRC rules) |
+| `--hv-*` | HV isolation (creepage/clearance) audit; see `kct audit --help` |
+
+The verdict is `ready`, `warning` (review recommended, including a gate that
+could not verify) or `not_ready`. Exit codes: `0` `ready` (or `warning` without
+`--strict`); `2` `not_ready`, or `warning` with `--strict`; `1` the tool could
+not run (file not found, wrong file type, audit crash). `--format json` keeps
+the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
+(`pass`|`fail`) and `exit_code`, the process exit code (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
+
+---
+
+## Manufacturing Commands
+
+### `bom`
+
+Generate bill of materials.
+
+```bash
+kct bom <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,csv}` | Output format (default: table) |
+| `--group` | Group identical components |
+| `--exclude PATTERN` | Exclude by reference (can repeat) |
+| `--include-dnp` | Include DNP (Do Not Place) parts |
+| `--sort {reference,value,footprint}` | Sort order |
+| `--output`, `-o` | Output file |
+| `--check-availability` | Check stock availability from LCSC/JLCPCB |
+| `--no-cache` | With `--check-availability`, bypass the parts cache and fetch live |
+| `--validate` | Validate BOM against the JLCPCB/LCSC parts library for assembly |
+| `--quantity N` | Number of boards (for availability check or validation; default: 1) |
+
+**Examples:**
+```bash
+kct bom project.kicad_sch
+kct bom project.kicad_sch --format csv --group -o bom.csv
+kct bom project.kicad_sch --exclude "TP*" --exclude "H*"
+kct bom project.kicad_sch --check-availability --quantity 5
+kct bom project.kicad_sch --validate
+```
+
+---
+
+### `mfr`
+
+Manufacturer tools and design rules.
+
+```bash
+kct mfr <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List available manufacturers |
+| `info` | Show manufacturer details |
+| `rules` | Show manufacturer design rules |
+| `compare` | Compare all manufacturers side by side |
+| `apply-rules` | Apply manufacturer design rules to project/PCB |
+| `validate` | Validate PCB against manufacturer rules with the kct DRC engine (no kicad-cli; `kct drc --mfr` is the kicad-cli path) |
+| `export-dru` | Export manufacturer rules as a KiCad DRU file |
+| `import-dru` | Parse and display a KiCad design rules file |
+
+**Examples:**
+```bash
+kct mfr rules jlcpcb
+kct mfr compare --layers 4
+kct mfr export-dru jlcpcb -o jlcpcb.dru
+```
+
+---
+
+### `fleet status`
+
+Survey routing and manufacturing readiness across every board in the repo.
+Implemented in [`src/kicad_tools/cli/fleet_cmd.py`](../../src/kicad_tools/cli/fleet_cmd.py).
+
+```text
+usage: kicad-tools fleet status [-h] [--boards-dir FLEET_BOARDS_DIR]
+                                [--format {table,json}] [--ship-only]
+                                [--include-stale] [--pattern FLEET_PATTERN]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--boards-dir DIR` | Root containing per-board subdirs (default: `boards`) |
+| `--format {table,json}` | Output format (default: `table`) |
+| `--ship-only` | Show only ship-ready boards in table output |
+| `--include-stale` | (Reserved) treat stale artifacts as not shippable |
+| `--pattern GLOB` | Glob to identify the routed PCB inside `output/` (default: `*_routed.kicad_pcb`) |
+
+Each board is scored on net completion, DRC status, presence of the
+required manufacturing artifacts (gerbers, BOM, CPL), and open known defects
+recorded in `output/readiness.json` (a `known defect #N` blocker; ready boards
+with only disclosed exceptions/advisories show `YES*` / `known: #N`). A board
+is "ship-ready" when every gate is green; otherwise the row lists the first blocker. The
+table view summarises one board per line; `--format json` emits the full
+per-board breakdown for downstream tooling.
+
+**Examples:**
+```bash
+# Quick "what's shippable?" overview across the fleet
+kct fleet status
+
+# CI-friendly machine output
+kct fleet status --format json > fleet.json
+
+# Restrict to a custom layout (boards live under hardware/v2/...)
+kct fleet status --boards-dir hardware/v2 --pattern '*-final.kicad_pcb'
+
+# Only show what is ready to ship
+kct fleet status --ship-only
+```
+
+See also: [Manufacturing Export → ship-ready check](../guides/manufacturing-export.md#are-we-ship-ready-kct-fleet-status).
+
+---
+
+### `readiness`
+
+Run the full manufacturing-readiness / tapeout sign-off for one board and write
+the hash-bound `output/readiness.json` evidence the demo gallery validates.
+Implemented in
+[`src/kicad_tools/cli/readiness_cmd.py`](../../src/kicad_tools/cli/readiness_cmd.py).
+
+`kct fleet status` *reads* stored readiness reports; `kct readiness` is the
+command that *produces* one. It orchestrates the engines that already exist —
+`kct check`, `kicad-cli pcb drc --refill-zones`, `kct export` and
+`kicad-cli sch|pcb export pdf` — and is the scripted equivalent of the
+`/kct:manufacturing-readiness` and `/kct:tapeout` skills.
+
+```bash
+kct readiness <board-dir|board.kicad_pcb> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--mfr TIER`, `-m TIER` | Fabrication tier (default: discovered from the board's recipe/manifest; never guessed) |
+| `--verify` | Verify a finished package without changing shipped files (default) |
+| `--generate` | (Re)generate a generic package transactionally; refuses to replace a recipe-finalized package |
+| `--assembly` | Full assembly package incl. BOM/CPL procurement identities (default) |
+| `--pcb-only` | Bare-board package; makes no component procurement or assembly claim |
+| `--output DIR`, `-o DIR` | Manufacturing bundle directory (default: `<pcb-dir>/manufacturing/`) |
+| `--sch PATH` | Path to the `.kicad_sch` (auto-detected by default) |
+| `--project-root DIR` | Ancestor of the board directory that bounds where out-of-directory dependencies (a schematic hierarchy, sibling `symbols/` libraries referenced as `${KIPRJMOD}/../...`) may be collected from. Only referenced files are staged, hashed (`external_inputs` in `readiness.json`) and archived, root-relative, in `kicad_project.zip`; anything outside it, missing, symlink-escaping or a whole ancestor directory is refused. |
+| `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
+| `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
+| `--known-issue N:SUMMARY:KIND` | Record an open issue (repeatable; KIND `defect`, `exception` or `advisory`, optional `:rule@pad,...` warning-identity allowance, e.g. `:via_at_pad_edge@R3-2`; `!rule@x/y` names one `kct check` error (rule + location in mm, recorded as `{rule, at: [x, y]}` rounded to 0.01) an `exception` accounts for, and the report's errors must match the listed identities exactly, Issue #7355). An open defect makes the board `blocked`; recorded issues carry forward (Issue #7261) |
+| `--resolve-known-issue N` | Drop a recorded known issue (repeatable) |
+| `--include-tht` | Accept through-hole parts in the CPL (excluded by default only for SMT-only fabs; JLCPCB includes them) |
+| `--no-archive` | Skip building `output/manufacturing.zip` |
+| `--hv-net-class NAME` | Net-class name identifying high-voltage nets (default: `HV`) |
+| `--hv-min MM` | Manual required creepage distance in mm (phase-1; stricter of this and `--hv-standard` governs) |
+| `--hv-standard {iec60664,iec62368}` | Derive required creepage AND clearance from an IEC table; requires `--hv-working-voltage`/`--hv-pollution-degree` |
+| `--hv-working-voltage V` | RMS working voltage in volts (required with `--hv-standard`) |
+| `--hv-pollution-degree {1,2,3}` | IEC pollution degree (required with `--hv-standard`) |
+| `--hv-material-group {I,II,IIIa,IIIb}` | Insulation material group by CTI (default: `IIIa`) |
+| `--fill-tolerance MM2` | Per-layer filled-copper tolerance for the saved-vs-refilled equivalence check |
+| `--format {text,json}` | Output format (default: `text`) |
+
+Gate order is load-bearing: the copper pours are refilled and **saved to the
+canonical PCB before both** the native cross-gate and the export, so the bytes
+the checkers judged are the bytes the Gerbers come from. Every gate is judged
+on the engine's actual findings, never on a subprocess exit code — `kicad-cli
+pcb drc` exits 0 with error-severity violations, and a "ran" flag is not a pass.
+
+`ready` is emitted only when every applicable gate passed; otherwise the report
+is `blocked` (a gate failed) or `unverified` (a gate could not run), always with
+named `blockers`. **The command exits non-zero for anything other than `ready`
+and has no flag that produces `ready` on a partial run** — a gate that cannot
+run is a blocker, not a waiver.
+
+Exit codes: `0` `ready`; `1` `blocked` or `unverified`; `2` the command could
+not run at all (bad arguments, or the KiCad environment was refused and no
+evidence was written). See [Sign-off exit codes](#sign-off-exit-codes).
+
+`--verify` and `--generate` are mutually exclusive; `--verify` is the default.
+**A bare `kct readiness <board>` verifies an already-generated package — it
+never writes gerbers, BOM/CPL or the manifest.** Pass `--generate` explicitly
+the first time you produce a package for a board, or whenever the checked
+sources have changed and the bundle needs to be rebuilt. `--generate` refuses
+to replace a package that a manufacturing recipe has already finalized (use
+`--verify` and regenerate through that recipe instead) — see
+`_verify_finished_artifacts`/`_gate_artifacts` in
+[`readiness_cmd.py`](../../src/kicad_tools/cli/readiness_cmd.py) for the exact
+guard.
+
+The conditional `hv_isolation` gate (when the `--net-class-map` sidecar
+declares an `HV` net class) runs the same measured creepage/clearance audit
+`kct audit --hv-standard`/`--hv-min` uses
+(`kicad_tools.audit.check_isolation`) against the checked PCB — a description
+of the requirement is recorded in the report but can never by itself produce
+`passed`; only a thresholded census bound to that PCB and net-class-map can.
+
+**Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /
+`--hv-standard`, the required clearance is
+`max(Table F.2[U_imp], Table F.8[V_rms x sqrt(2)], pollution-degree floor)`
+for basic insulation, case A, altitude <= 2000 m. `U_imp` is the Table F.1
+rated impulse withstand voltage for the working voltage (taken as the
+line-to-neutral rated voltage, stepped up to the 50/100/150/300/600/1000 V
+row) and the overvoltage category, set with
+`kct creepage --overvoltage-category {I,II,III,IV}` or
+`kct audit --hv-overvoltage-category {I,II,III,IV}` (default `II`, equipment
+fed from the fixed mains installation). For example 230 V at OVC II gives
+`U_imp` = 2500 V and 1.5 mm with basic insulation; OVC I 0.5 mm, III 3.0 mm,
+IV 5.5 mm. The `kct readiness` HV gate always uses the default `II`. Creepage
+is IEC 60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+
+**Insulation type (issue #7082).** `kct creepage --insulation
+{basic,supplementary,reinforced}` / `kct audit --hv-insulation ...` select the
+insulation the barrier must provide; the **default is `basic`** (unchanged
+behaviour); reinforced is an explicit opt-in for the mains-to-SELV case.
+Reinforced clearance steps `U_imp` up one value of the
+Table F.1 preferred series (330, 500, 800, 1500, 2500, 4000, 6000, 8000,
+12000 V) before the Table F.2 lookup (clause 5.2.5), so 230 V at OVC II needs
+`U_imp` = 4000 V and **3.0 mm**; reinforced creepage is twice the basic
+Table F.5 value (clause 6.2). Supplementary insulation uses the basic values.
+A `U_imp` already at 12000 V has no next step and fails loud. Both CLIs print
+the insulation type they assumed, and provenance records it with the rule
+applied (the reinforced rules are marked UNVERIFIED against a controlled copy
+of the standard). The `kct readiness` HV gate uses the default `basic`.
+
+**Examples:**
+```bash
+# Generate the assembly package at the tier recorded in the board's own recipe
+kct readiness boards/00-demo --generate
+
+# Re-verify a package already on disk without touching shipped files (default)
+kct readiness boards/00-demo
+
+# Bare-board order — no BOM/CPL, no procurement claim
+kct readiness boards/04-demo --generate --pcb-only --mfr jlcpcb
+
+# CI use: machine output, non-zero exit unless the verdict is `ready`
+kct readiness boards/01-demo --format json > readiness.json
+
+# Accept reviewed silkscreen warnings as an explicit, recorded risk
+kct readiness boards/05-demo --generate --ack-warnings silk_over_copper,silk_overlap
+```
+
+See also: [`docs/board-json-schema.md`](../board-json-schema.md) for the
+`readiness.json` schema and the engine-fingerprint fields this command records.
+
+---
+
+### `stitch`
+
+Add via stitching to power-plane nets. Implemented in
+[`src/kicad_tools/cli/stitch_cmd.py`](../../src/kicad_tools/cli/stitch_cmd.py).
+
+```bash
+kct stitch <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--net NET`, `-n` | Net to stitch (repeatable). Default: auto-detect power-plane nets from zones |
+| `--via-size MM` | Via pad diameter in mm (default: 0.45) |
+| `--drill MM` | Via drill in mm (default: 0.2) |
+| `--clearance MM` | Minimum clearance from existing copper (default: 0.2) |
+| `--offset MM` | Max distance from pad center for via placement (default: 0.5) |
+| `--target-layer LAYER`, `-t` | Target plane layer (e.g. `In1.Cu`). Default: auto |
+| `--trace-width MM` | Width of pad-to-via trace segments (default: 0.2) |
+| `--escape-distance MM` | Max escape trace length for dense IC pads (default: 3.0) |
+| `--blanket`, `-b` | Place vias on a grid across zone polygons |
+| `--spacing MM` | Grid spacing for blanket stitching (default: 3.0) |
+| `--mfr NAME`, `--manufacturer NAME` | Manufacturer profile (e.g. `jlcpcb`, `jlcpcb-tier1`) — overrides `--via-size`/`--drill` |
+| `--copper OZ` | Outer copper weight in oz (default: 1.0); selects the correct row from the manufacturer YAML |
+| `--dry-run`, `-d` | Show changes without applying |
+| `-o`, `--output PATH` | Output file (default: modify in place) |
+| `--drc` | Run DRC after stitching (fills zones via `kicad-cli`) |
+
+**Manufacturer-driven via dimensions.** When `--mfr` is set the stitch via
+size and drill are resolved from the manufacturer YAML using the board's
+actual copper layer count, **overriding** `--via-size` and `--drill`. This
+keeps stitching dimensions consistent with the rules the router and DRC are
+already enforcing. Use `--copper` to pick the right stackup row (1.0 oz vs.
+2.0 oz).
+
+**Examples:**
+```bash
+# Auto-detect power nets and stitch with default 0.45/0.2 vias
+kct stitch board.kicad_pcb
+
+# Use the JLCPCB tier-1 profile (smaller vias, fine-pitch friendly)
+kct stitch board.kicad_pcb --mfr jlcpcb-tier1 --copper 1.0
+
+# Blanket-stitch a specific net on a 3mm grid
+kct stitch board.kicad_pcb --net GND --blanket --spacing 3.0
+```
+
+---
+
+### `build`
+
+One-shot pipeline that runs schematic generation, sync, PCB layout, routing,
+stitching, manufacturing artefacts and verification in order. Implemented in
+[`src/kicad_tools/cli/build_cmd.py`](../../src/kicad_tools/cli/build_cmd.py).
+
+```bash
+kct build [SPEC] [--step STEP] [options]
+```
+
+`SPEC` is a positional argument (`.kct` file or project directory). Defaults
+to the current working directory if omitted.
+
+| Step (`--step`) | Purpose |
+|-----------------|---------|
+| `schematic` | Generate `.kicad_sch` from the design spec |
+| `erc` | Run ERC against the schematic |
+| `pcb` | Generate a fresh `.kicad_pcb` skeleton |
+| `sync` | Sync footprints/nets from schematic into the PCB |
+| `outline` / `placement` / `zones` / `silkscreen` | Layout-stage passes |
+| `route` | Autoroute |
+| `stitch` | Add power-plane via stitching |
+| `preflight-routing` | **Routing-completeness gate** before manufacturing |
+| `verify` | Final connectivity + DRC validation |
+| `export` | Emit gerbers / BOM / CPL |
+| `all` (default) | Run the whole sequence |
+
+The `preflight-routing` step runs between `stitch` and `verify` in the
+default `all` sequence. It re-uses `kct net-status` semantics in-process and
+**blocks the build** if any nets are incomplete. Override with
+`--allow-incomplete` (advertised; CI-greppable) or the global `--force`. See
+[Routing Completeness Preflight](../guides/manufacturing-export.md#routing-completeness-preflight)
+for the full semantics.
+
+The outer `kct build` parser is kept in lockstep with the authoritative
+inner parser at
+[`src/kicad_tools/cli/build_cmd.py`](../../src/kicad_tools/cli/build_cmd.py)
+by [`tests/test_build_parser_parity.py`](../../tests/test_build_parser_parity.py),
+which fails if a new flag or `--step` choice is added to the inner parser
+without also being surfaced on the outer CLI.
+
+**Examples:**
+```bash
+# Full pipeline driven by the project spec. `SPEC` is positional.
+kct build boards/05-bldc-motor-controller/project.kct
+
+# Skip the routing-completeness gate (WIP escape hatch).
+kct build boards/05-bldc-motor-controller/project.kct --allow-incomplete
+
+# Run a single stage.
+kct build boards/05-bldc-motor-controller/project.kct \
+    --step preflight-routing
+```
+
+---
+
+### `spec`
+
+Project specification (`.kct`) management — design intent, requirements,
+progress, and the per-board **design-decision log**. Implemented in
+[`src/kicad_tools/cli/commands/spec.py`](../../src/kicad_tools/cli/commands/spec.py).
+
+```bash
+kct spec <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `init NAME [--template T] [-o FILE] [--force]` | Scaffold a new `.kct` (`minimal`, `power_supply`, `sensor_board`, `mcu_breakout`) |
+| `validate FILE` | Validate a `.kct`; reports unrecognized keys as **warnings** |
+| `status FILE` | Show phase, checklist completion, and progress |
+| `decide FILE --topic T --choice C --rationale R [--alternatives A,B]` | **Append** a design decision to the log |
+| `check FILE ITEM` | Mark a checklist item complete |
+
+#### `kct spec decide` — the design-decision log
+
+Records a durable design decision in the `decisions:` list of a `.kct` file:
+the topic, the option chosen, the reasoning, and optionally the alternatives
+considered. The current design phase and today's date are filled in
+automatically.
+
+```bash
+kct spec decide boards/00-simple-led/project.kct \
+    --topic "Resistor value" \
+    --choice "330 ohm" \
+    --rationale "Standard E24 value closest to (5V - 2V) / 10mA" \
+    --alternatives "300 ohm,360 ohm"
+```
+
+**The write is append-only.** The new entry is spliced into the existing
+`decisions:` sequence; every other byte of the file — comments, quoting style,
+blank-line structure, and any key the `.kct` schema does not define — is left
+exactly as it was, and decisions already recorded are never reordered or
+rewritten. `.kct` files are therefore safe to hand-edit and safe for an agent to
+write to unattended.
+
+`kct spec validate` reports keys it does not recognize as warnings (exit code
+still `0` when the spec is otherwise valid). Those keys are **preserved** on
+every write — the warning exists so schema drift and typos stay visible, not
+because anything is at risk:
+
+```console
+$ kct spec validate boards/00-simple-led/project.kct
+Valid: boards/00-simple-led/project.kct
+Warnings: 8 unrecognized key(s)
+  - Unrecognized key (preserved on write): progress.checklist
+  - Unrecognized key (preserved on write): requirements.components
+  ...
+```
+
+> **Not the same as [`kct decisions`](#decisions).** `kct spec decide` **writes**
+> the *human* design-decision log inside `project.kct`. `kct decisions` **reads**
+> the *machine* placement/routing rationale the optimizer and autorouter record
+> next to the board. Different authors, different storage, different lifetimes —
+> there is deliberately no `kct decisions add`.
+
+---
+
+## Library Commands
+
+### `lib`
+
+Symbol library tools.
+
+```bash
+kct lib <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List available KiCad libraries |
+| `symbols` | List symbols in a `.kicad_sym` library |
+| `footprints` | List footprints in a `.pretty` library directory |
+| `footprint` | Show details of a footprint file (`.kicad_mod`) |
+| `symbol-info` | Show details of a symbol by name |
+| `footprint-info` | Show details of a footprint by name |
+| `create-symbol-lib` | Create a new empty `.kicad_sym` library |
+| `create-footprint-lib` | Create a new empty `.pretty` library directory |
+| `generate-footprint` | Generate a parametric footprint into a `.pretty` library |
+| `export` | Export library to JSON |
+| `purge` | List unused symbols/footprints in project-local libraries |
+
+**Examples:**
+```bash
+kct lib symbols Device.kicad_sym
+kct lib symbol-info Device.kicad_sym R
+
+kct lib create-symbol-lib MyParts.kicad_sym
+kct lib create-footprint-lib MyParts.pretty
+kct lib generate-footprint MyParts.pretty soic --pins 8
+kct lib generate-footprint MyParts.pretty chip --size 0402 --prefix R --format json
+```
+
+**Authoring commands** (`create-symbol-lib`, `create-footprint-lib`,
+`generate-footprint`) all accept `--format text|json` (JSON: one document with
+`command`, `implemented`, `success` plus `path` and either `symbol_count`,
+`footprint_count`, or `name`/`pad_count`/`parameters`). Exit codes: `0`
+success, `1` runtime/validation failure (target exists without `--force`,
+unwritable path, missing/invalid parameters), `2` usage error.
+
+| Subcommand | Behaviour |
+|------------|-----------|
+| `create-symbol-lib <path> [--force]` | Appends `.kicad_sym` if no suffix; refuses an existing file without `--force`. |
+| `create-footprint-lib <path> [--force]` | Appends `.pretty`; an empty existing directory is fine; a non-empty one is refused. `--force` only permits reusing a directory that already holds `.kicad_mod` files and never deletes anything. |
+| `generate-footprint <lib> <type> [options] [--name N] [--force]` | `type` is `soic`, `qfp`, `qfn`, `chip` or `sot`; creates the `.pretty` directory if missing and writes `<lib>/<name>.kicad_mod`. Options: `--pins`, `--pitch`, `--body-width`, `--body-length`, `--body-size`, `--exposed-pad`, `--size`, `--variant`, `--prefix`. Uses the same generator function as `kct footprint generate`. Refuses to overwrite a footprint of the same name without `--force`. |
+
+---
+
+### `footprint`
+
+Footprint generation tools.
+
+```bash
+kct footprint <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `generate` | Generate parametric footprints |
+
+Pad-spacing validation and repair live in the top-level
+`kct validate-footprints` and `kct fix-footprints` commands.
+
+```bash
+kct footprint generate <type> [options]
+```
+
+| Type | Description |
+|------|-------------|
+| `soic` | SOIC packages |
+| `qfp` | QFP packages |
+| `qfn` | QFN packages |
+| `chip` | Chip resistors/capacitors |
+| `sot` | SOT packages |
+| `dip` | DIP packages |
+| `pin-header` | Pin headers |
+| `rpi-hat` | Raspberry Pi HAT: 2x20 header + four mounting holes |
+
+**Examples:**
+```bash
+kct footprint generate soic --pins 8 --pitch 1.27
+kct footprint generate qfn --pins 24 --body-size 4
+kct footprint generate --list
+```
+
+---
+
+### `parts`
+
+LCSC parts database lookup.
+
+```bash
+kct parts <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `search` | Search for parts |
+| `lookup` | Get part details by LCSC number |
+| `availability` | Check BOM part availability on LCSC for a schematic |
+| `import` | Import a part's symbol/footprint from its datasheet into a library |
+| `suggest` | Suggest LCSC part numbers for components without them |
+| `alternatives` | Suggest in-stock Basic/Preferred JLCPCB substitutes for an LCSC part from the offline jlcparts catalog (`--limit N`, default 5) |
+| `cache` | Cache management (`stats`, `clear`, `clear-expired`) |
+| `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
+
+**Examples:**
+```bash
+kct parts search "STM32F103"
+kct parts lookup C8734
+kct parts alternatives C123456 --limit 3
+kct parts availability project.kicad_sch --quantity 100
+kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
+```
+
+#### `parts import`
+
+| Option | Description |
+|--------|-------------|
+| `--library`, `-l` | Output symbol library (`.kicad_sym`); required |
+| `--symbol-lib` | Alias for `--library` |
+| `--footprint-lib` | Project footprint library (`.pretty` directory) |
+| `--package`, `-p` | Specific package variant (e.g. `LQFP48`) |
+| `--layout` | Pin layout style: `functional` (default), `physical` or `simple` |
+| `--dry-run` | Preview what would be imported without making changes |
+| `--interactive`, `-i` | Deprecated: not implemented; ignored |
+| `--overwrite` | Overwrite existing symbols |
+| `--format` | Output format (`text` or `json`) |
+
+---
+
+### `datasheet`
+
+Datasheet tools.
+
+```bash
+kct datasheet <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `search` | Search for datasheets |
+| `download` | Download a datasheet |
+| `convert` | Convert PDF to markdown |
+| `extract-images`, `extract-tables` | Extract images / tables from a PDF |
+
+**Examples:**
+```bash
+kct datasheet search "ATmega328P"
+kct datasheet download "ATmega328P" -o atmega328p.pdf
+kct datasheet convert atmega328p.pdf -o atmega328p.md
+```
+
+---
+
+## PCB Operation Commands
+
+### `route`
+
+Autoroute a PCB. See [Routing Guide](../guides/routing.md) for strategy
+choices and worked examples. Implemented in
+[`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_cmd.py).
+
+```bash
+kct route <pcb_file> [options]
+```
+
+Common flags (the full surface lives in `kct route --help`):
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output PATH` | Output file (default: `<input>_routed.kicad_pcb`) |
+| `--strategy {basic,negotiated,monte-carlo,evolutionary}` | Routing strategy (default: `negotiated`) |
+| `--differential-pairs` | Route differential pairs coupled. **Deprecated on the grid engine (#6448)** — warns and is removed one release later; use `--route-engine lattice --strategy basic --differential-pairs` |
+| `--trace-width MM` / `--clearance MM` | Trace + clearance overrides |
+| `--via-diameter MM` / `--via-drill MM` | Via geometry |
+| `--manufacturer NAME` (`--mfr`) | Manufacturer profile for DRC and adaptive rules |
+| `--layers {auto,2,4,4-sig,4-all,6}` | Layer stack configuration (default: `auto`) |
+| `--min-completion FLOAT` | Minimum completion ratio for success (default: 0.95) |
+| `--timeout SEC` / `--per-net-timeout SEC` | Hard total invocation / per-net wall-clock caps |
+| `--search-timeout SEC` | Per-search-stage allocation inside `--timeout` (default: `--timeout`) |
+| `--seed N` | Seed Python `random` for reproducible routing (#2589). No effect on `--route-engine lattice` copper, which is deterministic; only UUIDs change (#7580) |
+| `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
+| `--skip-drc` | Skip post-route DRC validation |
+| `--no-routing-plan` | Skip the report-only routing-plan stage (on by default; see [`routing-plan.md`](routing-plan.md)) |
+| `--plan-gate` | Refuse to start detailed routing (exit 9) when the routing plan reports overflow, printing the per-edge overflow report and its computed relief first. Off by default. Overridden by `--force` |
+| `--force` | Route even when the grid resolution exceeds clearance — **and** override `--plan-gate`. Also disables grid/DRC validation, so to simply not gate, omit `--plan-gate` rather than adding `--force` |
+| `--diagnose-unrouted-budget SEC` | Time budget for classifying each unrouted connection as `congested` or `blocked` in `--format json` output (default: 20; `0` disables). Also on `route-auto` (Issue #6001). See [Why a connection is unrouted](#why-a-connection-is-unrouted) |
+
+#### Post-route sidecars
+
+Besides the routed `.kicad_pcb`, a successful `kct route` writes several
+derived sidecars next to the output board. All of them degrade to a warning
+(the route still exits 0) if the output directory is not writable.
+
+| Sidecar | Contents |
+|---------|----------|
+| `<stem>.net_class_map.json` | The resolved per-net routing classes, for `kct check` auto-discovery |
+| `current_paths.json` | The declared branch current-path intent this route validated against |
+| `<stem>.routing_plan.json` | The report-only capacity plan — see [`routing-plan.md`](routing-plan.md) |
+| `<stem>.access_witness.json` | The ordered commit journal — every copper commit and rip-up, in order, tagged with the pass and iteration that produced it ([`commit-journal.md`](commit-journal.md)) — plus, when the run stranded anything, the replayed per-pad access witness ([`../diagnostics/access-witness.md`](../diagnostics/access-witness.md)) |
+| `<stem>.fab_profile.json`, `.kicad_pro`, `.kicad_dru` | The resolved manufacturer tier and its constraint exports |
+
+Every sidecar is keyed to the `--output` stem, so several boards can share one
+directory without colliding (Issue #8156). `kct route` no longer writes the bare
+`fab_profile.json` / `net_class_map.json`; `kct check` still reads an existing
+bare file, but a stem-keyed one wins.
+
+Files `kct route` may create beside `--output`: the routed `.kicad_pcb`;
+`<stem>.kicad_pro` / `.kicad_dru` / `.route.json`; the sidecars above
+(`<stem>.net_class_map.json`, `<stem>.fab_profile.json`, `<stem>.routing_plan.json`,
+`<stem>.access_witness.json`, `current_paths.json`); `<stem>_placement_delta.json`;
+and `<stem>_{checkpoint,completed,timeout}_unverified_*` sets. The
+`*_unverified_*` sets preserve copper a later checkpoint would overwrite, so they
+are never deleted; when a route exits non-zero they are listed on stderr.
+
+The commit journal has no flag: it is always written, because recording is one
+list append plus one shallow geometry copy per grid mutation and changes no
+copper. It is what lets a later `kct net-status --why` explain a stranded pad
+from a *saved* board, where the live router (and with it the commit order) is
+long gone.
+
+The sidecar's `witness` block is written only when the run left something
+unrouted — a board that routes cleanly gets the journal alone. The block is
+produced by replaying the journal against the live grid at the end of the
+route, because the clearance resolver that decided each access set is gone
+once the router is. `kct route --format json` reports the same block under
+`access_witness`.
+
+#### Why a connection is unrouted
+
+When `kct route --format json` leaves connections unrouted, the document adds an
+`unrouted` array with one entry per unrouted pad-to-pad connection, plus an
+`unrouted_diagnosis` summary (counts, `elapsed_s`, `budget_s`,
+`budget_exhausted`). Each entry's `cause` tells you which kind of fix applies
+(Issue #5944):
+
+| `cause` | Meaning | Extra key |
+|---------|---------|-----------|
+| `congested` | The connection routes once every other signal trace is removed, so other nets' copper is in the way. Try rip-up, net reordering, more layers or re-placement. | `contenders`: the nets whose copper lies on that solo path, most-overlapping first. These are the rip-up candidates. |
+| `blocked` | There is no path even with all other signal copper removed. Only a placement, keepout, rule or footprint change can fix it. | `blockers`: the objects that close off the endpoint the search could not leave, such as a `pad` (with `ref`/`pin`), a `keepout` (with `bbox`), the `board_edge`, a `pour`, or remaining fixed `copper`. `frontier` names that endpoint. |
+| `unclassified` | The budget ran out before this connection, or its solo search hit its time cap. | `note` |
+
+```json
+{"net_name": "B", "source_pad": {"ref": "J3", "pin": "1"},
+ "target_pad": {"ref": "J4", "pin": "1"}, "cause": "congested",
+ "contenders": [{"net_id": 1, "net_name": "A", "cells": 3}],
+ "solo_path": {"length_mm": 8.0, "vias": 0}, "search_s": 0.001}
+```
+
+The classifier lifts all committed routes off the routing grid and then runs
+the router's own A* once per connection. Pads, keepouts, pours and the
+board-edge keepout stay in place. Afterwards it re-adds the routes and copies
+back the occupancy planes it snapshotted before the lift, so the routing grid
+ends bit-identical and the routed board is unaffected. Only nets the JSON
+report would list as unrouted are searched: with a placement disposition, just
+its eligible nets, and copper retained by `--preserve-existing` counts as
+connecting. The pass has a total time limit
+(`--diagnose-unrouted-budget`) and a per-connection search cap of 5 s. It shows
+up as its own `unrouted-diagnosis` stage in the route deadline supervisor and
+in `scripts/research/route_phase_profile.py`. A one-line summary goes to
+stderr. Both keys are absent when everything routed, when the output is text,
+or when the budget is `0`.
+
+`kct route-auto --format json` reports the same entries per net (Issue #6001):
+a partial or failed `nets[]` entry carries its own `unrouted` array and
+`unrouted_diagnosis` summary, with the same `--diagnose-unrouted-budget` flag.
+The connections are the pad islands the strategy left apart (pads already
+joined by the net's existing copper count as one island). route-auto's
+strategies route on different grids, so the pass runs on the board loaded the
+way `kct route` loads it — every pad, existing track and via, the board-edge
+keepout and the keepout rule areas — at the design rules' fine grid
+resolution, the one the `hierarchical` strategy searches. When no strategy that ran searched a fine grid (for
+example `--strategy global`, whose copper comes from the coarse corridor
+planner), each connection is `unclassified` with a `note` that says so.
+
+route-auto never writes copper that shorts another net, violates the
+clearance to it or crowds a drilled hole (Issues #6001, #6107, #6122, #6139):
+
+- The `hierarchical` strategy routes on the board as `kct route --nets` loads
+  it: every other net's pads (with their real shapes), tracks, vias and arcs
+  are obstacles on its grid, so it routes around them. On a schema PCB with no
+  board file (library use), it falls back to a grid holding only the net's own
+  pads.
+- The corridor strategies (`global`, `escape`, `subgrid`, `via_resolution`,
+  `multi_resolution`, `full_pipeline`) cannot plan around copper. They warn
+  once, like they do for keepout rule areas (#6059).
+- Every strategy's output is checked against every other net's pads, tracks,
+  arcs (true arc geometry) and vias, and against every drilled hole. Copper
+  that touches one, or comes closer than the clearance KiCad requires for
+  that pair, is refused and not written. The net fails, and
+  the error names the nets and items in the way, for example
+  `shorts net(s) '/A' already on the board (e.g. pad R5.1 at (115.000, 108.000) of '/A')`
+  or `comes within 0.050 mm of net(s) '/A' (closest: track ...), below the
+  board's 0.200 mm clearance`. The diagnosis reports the net in the way as a
+  `congested` contender. Under `--strategy auto`, a refused corridor is retried
+  with `hierarchical`.
+
+The clearance is the one KiCad's DRC measures, resolved **per item pair**
+the way KiCad resolves it (Issue #6122). The last matching `.kicad_dru` rule
+wins, overriding the netclass and the board minimum in both directions. If no
+rule matches, the requirement is the larger of the two nets' netclass
+clearances (from `netclass_assignments` / `netclass_patterns` in the
+`.kicad_pro`), floored by the board minimum. Without a project, it is KiCad's
+default of 0.2 mm. A rule condition can test `NetName`, `NetClass`, `Type`, `Pad_Type`,
+`hasNetclass()` and `isPlated()`, and it can carry a `(layer ...)` clause.
+A condition the gate cannot evaluate, such as `insideArea()` or
+`intersectsArea()`, is taken conservatively: the gate uses the larger of the
+rule's value and the value it would get otherwise, so it can refuse copper
+that KiCad would accept, but never the reverse. The `hierarchical` strategy
+routes each net at the largest pair clearance it needs from any net on the
+board.
+
+Every drilled hole counts too (Issue #6139): NPTH holes and slots, plated pad
+drills and via drills. New copper is kept at the board's `hole_clearance` from
+each hole's real outline, round or oval. `.kicad_pro` `min_hole_clearance`
+sets it (KiCad's default is 0.25 mm), and `.kicad_dru` `hole_clearance` rules
+override it. A non-plated slot is board edge to KiCad, so new copper must also
+keep `edge_clearance` from it: `min_copper_edge_clearance` (default 0.5 mm) or
+`.kicad_dru` `edge_clearance` rules. A new via's own drill is checked against
+other nets' copper at `hole_clearance`. Holes of the routed net's own pads and
+vias are exempt. Unassigned (net-0) tracks, vias, arcs and zones are not
+checked (floating copper is reassigned by connectivity, and a zone refill
+clears around the new copper). Net-0 pads, such as no-connect pins and plated
+mounting holes, are checked, and so are bare NPTH holes, as holes.
+
+#### Routing around invalid placement
+
+By default, routing excludes each whole net incident to a placement-invalid
+footprint, including that net's on-board terminals and coupled partners. Other
+requested nets are routed normally. Excluded footprints, pad/net identities and
+existing copper remain fixed obstacles; the input file stays unchanged when
+writing a separate output file.
+
+A useful partial board is saved before a nonzero exit when requested nets remain
+placement-blocked. `--min-completion` cannot turn that result into success.
+`--nets` and `--skip-nets` control which invalid nets are requested; selecting
+only valid nets can proceed while retaining the excluded-net diagnostics.
+All-invalid requests stop before routing. Warning-only courtyard overhangs do
+not exclude nets. `--allow-offboard` explicitly bypasses placement exclusions.
+
+For boards with placement-invalid nets, `--format json` includes
+`placement_disposition` in the final attempt summary.
+`--complete-report PATH` also records this metadata for these boards,
+including ordinary routing and early exits. `--export-failed-nets PATH` marks
+blocked nets as `placement-invalid, not attempted`, separately from congestion.
+See [fixed-copper preservation](../routing-fixed-copper.md) for native refill and
+repair behavior.
+
+#### Declared branch current paths (`--current-paths`)
+
+A net's copper is not always electrically homogeneous. `/AC_NEUTRAL` can
+carry a 15 A force trunk *and* a zero-cross / INA181 sense tap; a
+four-terminal shunt's force and sense pads sit on the **same** net. A single
+net-class `target_ampacity` / `trace_width` cannot represent both: sized for
+the trunk it obstructs the sense-pad escape, sized for the tap it declares
+the power path safe when it is not.
+
+`--current-paths` accepts a JSON sidecar declaring each physical branch by
+stable `RefDes.pad` endpoints, with its own continuous current and
+reinforcement eligibility (issue #4980):
+
+```json
+{
+  "paths": [
+    {"name": "AC_NEUTRAL_TRUNK", "net": "/AC_NEUTRAL",
+     "source": {"ref": "J1", "pad": "2"}, "sink": {"ref": "J2", "pad": "2"},
+     "continuous_a": 15.0, "reinforcement_eligible": true},
+    {"name": "AC_NEUTRAL_ZC_SENSE", "net": "/AC_NEUTRAL",
+     "source": {"ref": "J1", "pad": "2"}, "sink": {"ref": "U3", "pad": "3"},
+     "continuous_a": 0.01, "reinforcement_eligible": false}
+  ]
+}
+```
+
+##### Pulsed and duty-cycled branches
+
+A branch that carries a repetitive pulse (switching ripple, capacitor
+inrush, a strobed LED) can declare `pulsed_a` with an optional `duty_cycle`
+and `pulse_duration_s`:
+
+```json
+{"name": "VOUT_INRUSH", "net": "/VOUT_PRE",
+ "source": {"ref": "L1", "pad": "2"}, "sink": {"ref": "RSH1", "pad": "1"},
+ "continuous_a": 3.0, "pulsed_a": 18.0, "duty_cycle": 0.08,
+ "pulse_duration_s": 0.002, "reinforcement_eligible": true}
+```
+
+Two independent checks follow, because a pulse can destroy copper two ways:
+
+| Field | What it buys |
+|-------|--------------|
+| `pulsed_a` alone | The peak is sized **as if continuous** (conservative). An `info` finding says so, so a pessimistic width requirement is never mistaken for a duty-cycle-aware one. |
+| `+ duty_cycle` | The IPC-2221 width check runs at the waveform's **RMS** current (`sqrt(D*peak² + (1-D)*continuous²)`) — the correct equivalent for I² heating. 18 A at 8 % duty over 3 A heats like 5.85 A, not 18 A and not its 4.2 A average. |
+| `+ pulse_duration_s` | Each segment is additionally checked against its **Onderdonk adiabatic fusing current**. A trace comfortable on RMS heating can still be melted by one inrush pulse; that is an `error`. Without this field the fusing mode is reported as explicitly **unchecked** (a `warning`), never silently passed. |
+
+Declaring `duty_cycle` or `pulse_duration_s` without `pulsed_a`, or a
+`pulsed_a` below `continuous_a`, is rejected when the sidecar loads — a
+half-declared waveform reads like modeled intent while leaving the checker
+to guess. Omitting all three leaves a purely continuous declaration whose
+results are unchanged.
+
+| Option | Description |
+|--------|-------------|
+| `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
+| `--no-current-paths` | Suppress auto-discovery; `path_ampacity` stays inactive. Cannot be combined with `--current-paths`. |
+
+The same flags exist on `kct check` and `kct pcb reinforce`, so one sidecar
+drives all three consumers:
+
+- **`kct route`** runs the `path_ampacity` rule in the post-route DRC against
+  each declared branch's *own* current, then re-emits the declarations as
+  `current_paths.json` next to the routed board — so a later bare `kct check`
+  auto-discovers identical intent instead of silently passing.
+- **`kct check`** is the independent final-copper audit: it re-derives each
+  branch from the finished copper, so it is authoritative regardless of which
+  edges the router chose.
+- **`kct pcb reinforce --current-paths`** treats the declarations as an
+  *allow-list*: only copper covered by a resolved, reinforcement-eligible path
+  may be anchored, so a Kelvin sense tap is never bridged to its force path.
+
+Resolution **fails closed**. A declared pad that was moved, removed, or no
+longer resolves onto its declared net is reported as `unresolved`, and a net
+whose copper contains a loop reachable from the endpoints is reported as
+`ambiguous` — never as a silent fallback to whole-net ampacity. Copper on a
+declared net that no path covers is reported as uncovered rather than waived.
+Endpoints bind by the pad's real copper extent, not by an exact pad-center
+hit, so a trace terminating anywhere inside the pad attaches (and several
+stubs landing on one pad are shorted by it, as they are in reality).
+
+A same-net routed **arc** or a non-keepout same-net **zone/pour** is real
+copper the declared-path graph never builds from `Segment` tracks alone —
+either can form a parallel return path around a declared branch (a plane is
+the archetypal case), so a declared path on such a net resolves `ambiguous`
+too, naming the unmodeled copper in the reason (endpoint-resolution failures
+still take precedence and stay `unresolved`). `kct pcb current-paths-audit`
+surfaces the same inventory as an `unmodeled` block (kind, layer,
+representative location per object) in both JSON and text output, and
+`path_ampacity` emits a `warning` per object found — separate from the
+`ambiguous` status's own `error`. Keepout rule areas carry no copper and are
+excluded.
+
+A bounded endpoint via array is recognized only when parallel straight stubs
+land on the actual pad, real outer-layer barrels join one straight receiving
+trunk, and each exit leads through acyclic copper to real pad terminals.
+Dangling branches, unmodeled local contacts, and other cycles remain ambiguous.
+Stub length and via spread must fit within the endpoint pad diagonal. Every
+original array segment remains in the evidence and is checked at the full
+declared current; this does not assume equal current sharing or qualify the
+array by summed widths. Unsupported same-net arcs and custom pad stacks prevent
+array recognition.
+
+#### `reinforcement_incomplete` (`kct check`, #8746)
+
+Verifies that a buttress-wire-reinforced run (`kct pcb reinforce`) is
+buildable. Category `reinforcement_incomplete` (`--only` / `--skip`); it is
+**active only when the current-paths file declares a
+`reinforcement_eligible` path** (otherwise reported `skipped`). The legs are
+re-derived from the board's eligible copper and checked against board geometry
+(vias, through-hole pads, `F.Mask`/`B.Mask` `gr_line`s), never against the
+`<board>.reinforcement.json` sidecar's own anchor list; the sidecar only supplies
+the wire gauge (`anchor_drill_for_awg`; 16 AWG when absent). Per single-layer leg:
+
+| Sub-check | Fails when |
+|---|---|
+| `a` | the leg does not have exactly two anchors (holes of the anchor drill on the leg), one within the end window of each leg end (distance to the edge of the end copper + end offset 1.0 mm + 2.0 mm nudge + anchor radius) |
+| `b` | the leg between the anchors is not covered by a continuous mask opening on its side (collinear pieces are unioned; 0.05 mm tolerance) |
+| `c` | an anchor via is tented on either side |
+| `d` | the path changes layer through a via whose drill is smaller than the anchor drill (layer-change record of `current-paths-audit`) |
+| `stray` | an anchor-sized via on the net is at no leg end |
+
+Inner-layer legs have no solder mask, so `b`/`c` are skipped for them. Each
+finding names the net, layer, leg and sub-check, with sheet-absolute coordinates.
+
+**Severity / waiver rule.** A finding is an **error** when its net carries an
+`ampacity` or `path_ampacity` waiver in `.kct_waivers.json` whose `reason`
+matches the case-insensitive regex `reinforc|buttress|wire` (the waiver claims a
+wire carries the current, so the wire must be buildable; for a keyed entry the
+net is taken from the key); otherwise it is a **warning**. The rule's own findings are
+waivable like any other (`rule: "reinforcement_incomplete"`); a waived finding keeps
+its severity and does not clear the manufacturing gate by default.
+
+**Locating the wire (#8886).** A path that resolves is checked from its
+resolved segments. A declared-eligible path that is `ambiguous` (parallel or
+loop return copper: a second-layer copy of the route, stitching vias, a tap
+closing a loop) or `unresolved` with both endpoint pads present is still
+checked: the wire is located from board geometry, not from the current split,
+as the same-net segments a `F.Mask`/`B.Mask` strip lies along, plus the anchor
+holes. With no mask strip and no anchor hole on the net there is no wire, and
+the rule emits one `no_wire` finding (and `wire_run_courtyard_overlap` stays
+silent). A path whose endpoint pad is missing, or whose wire cannot be located,
+is still reported `[skipped]`, located at the path's source pad in sheet
+coordinates (rounded to 3 dp).
+
+**What `reinforcement_eligible` changes.** (1) `path_ampacity` reports an
+undersized path as an error instead of a warning; (2) `kct pcb reinforce` may
+only touch copper of paths with the flag; (3) `reinforcement_incomplete` and
+`wire_run_courtyard_overlap` run only for flagged paths. To declare a path as
+intentionally doubled copper rather than wire, leave `reinforcement_eligible`
+`false`: no wire is then expected and these rules stay silent on it.
+
+Route-time width selection itself stays governed by the net-class
+`trace_width` (the same declarative/checked-post-route split
+`NetClassRouting.target_ampacity` already uses); see the
+`kicad_tools.router.current_paths` module docstring for that decision's
+rationale. `kct pcb current-paths-audit` runs the audit standalone.
+
+A positive `--timeout` supervises the whole route in a separate process, including
+conflict processing, Python fallback, conversion, optimization, nudge, native
+validation and output work. Its monotonic deadline is also passed to the existing
+routing budget helpers. Zero or a negative value retains unbounded behavior.
+Both `kct route` and `python -m kicad_tools.cli.route_cmd` use this supervision.
+
+#### Staging search budgets inside the total deadline (`--search-timeout`, #5266)
+
+Because `--timeout` is a **hard total**, it cannot also serve as the per-stage
+budget: a recipe that wants "600 s for the initial search, then two 600 s
+placement-delta probes, then postprocessing" used to have no way to say so —
+raising `--timeout` just let the initial pass swallow the enlarged budget, and
+leaving it at 600 s meant the supervisor terminated the run during the first
+probe.
+
+`--search-timeout SECONDS` is the separate, explicitly-configurable allocation
+for an **individual** search stage: the initial routing pass, each layer/rule
+escalation attempt, and each placement-feedback iteration are capped at this
+value. `--timeout` keeps hard-capping the invocation as a whole, and every
+stage is still clamped to whatever the total deadline has left — a
+`--search-timeout` (or a `--placement-delta-feedback-timeout` probe allocation)
+larger than the remaining total can never escape it. Size the total as
+`search stage + probes x probe allocation + postprocessing reserve`; see
+`boards/07-matchgroup-test/generate_design.py` (`_route_total_timeout_s`) for a
+worked example.
+
+When the deadline does fire, `<output>.timeout.json` names the stage that was
+running. Best-so-far checkpoint writes restore the stage they interrupted, so a
+mid-search timeout is reported as `routing` (or `placement-delta-feedback`)
+rather than a stale `serialization` left behind by the last checkpoint.
+
+On timeout, routing stops and up to **five additional seconds** are allowed to
+serialize a raw `<output>_partial.kicad_pcb`. The process group is then terminated
+and the worker reaped, even if native code ignores the graceful request. Exit
+status is **124**, and `<output>.timeout.json` records `status: partial`, the last
+stage, the interrupted Python function when available, and whether a snapshot
+finished. A stalled native call or slow serialization may leave **no snapshot**;
+this is reported explicitly. Partial snapshots are atomically published and have
+not passed final cleanup/DRC, so they are not manufacturing-ready.
+
+Timed runs reject aliases between the input (including its project/rule sidecars)
+and every reserved derived output: canonical/partial PCB, temporary saves, timeout
+report, project/rule sidecars and escalation/placement artifacts. Symlinks and
+existing hardlinks are checked before launching. If a canonical output exists
+when timeout occurs (including an older successful result), it is preserved under
+an `_timeout_unverified_` name recorded in the report. It cannot be mistaken for
+this run's canonical output. The input remains untouched. Sidecar generation and
+validation still use the normal route pipeline; supervision does not bypass them.
+
+#### Targeted completion mode (`--complete`)
+
+`--complete` is a completion pass rather than a full route (epic #4465): it
+auto-detects the currently-unconnected signal nets and routes **only** those
+links, treating every other net's copper as a fixed obstacle. It implies
+`--preserve-existing`, never deletes existing copper, and is a safe no-op on a
+board with nothing left to connect. Unless you override `--route-engine`, it
+selects the lattice engine with `--strategy basic` (a negotiated strategy is
+coerced to `basic` with a printed notice). It is mutually exclusive with
+`--nets` / `--skip-nets` — `--complete` chooses the net set itself.
+
+| Option | Description |
+|--------|-------------|
+| `--complete` | Route only the unconnected links; all other copper is a fixed obstacle |
+| `--complete-exclude-nets NAMES` | Comma-separated nets `--complete` must not route even when reported unconnected — for pour/plane-carried nets (`GND`, `+3V3`, phase nets) whose connectivity comes from a filled zone. Ignored without `--complete`. |
+| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, elapsed vs the per-link deadline, blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
+| `--via-in-pad-last-resort` | On the lattice engine, stage a same-net via-in-pad attach as a last resort instead of an opportunistic one: the search first tries an in-layer route or an off-pad via layer change, and only retries with the pad-site via admitted when no such route exists (and only on a fab tier that supports via-in-pad). |
+
+Each link gets a bounded per-link deadline, so a single pathological net cannot
+consume the whole `--timeout`; links that exhaust it are reported as unroutable
+with their blocking copper rather than silently dropped.
+
+```bash
+# Finish a partially routed board without touching existing copper
+kct route board.kicad_pcb --complete \
+  --complete-exclude-nets 'GND,+3V3' \
+  --complete-report unroutable.json \
+  -o board_complete.kicad_pcb
+```
+
+#### Placement-delta feedback
+
+`--placement-delta-feedback` closes the loop between routing and placement.
+After the initial routing pass, if any nets remain unrouted, it classifies the
+routed board, translates each `PLACEMENT_BOUND` / `CONGESTION_SATURATED`
+diagnosis into a concrete placement delta (a translate, a rotation, a `mirror`
+layer flip, or a declared swap group's pin permutation), applies the top
+applyable one, re-routes, and keeps the change **only** on a strict routed-net
+increase **with no clearance, pairwise-creepage or keepout regression**.
+Connectors (`J*`, `P*`) and locked footprints are auto-anchored, every move is
+capped by `--placement-feedback-max-movement`, and the applied deltas are
+written to `<output>_placement_delta.json`.
+
+**Default: auto (Issue #5890, Epic #5511 Phase 3).** With neither flag given,
+the loop runs only when the report-only routing plan (Epic #5510) says the board
+is **infeasible** — `overflow_report.feasible: false` — *and* nets remain
+unrouted. A feasible plan, or no plan verdict at all (`--no-routing-plan`, a
+routing-cache hit), leaves the run exactly as it was before #5890. Pass
+`--no-placement-delta-feedback` to opt out of the auto arm entirely, or
+`--placement-delta-feedback` to force the loop on whatever the plan says.
+
+Because the routing cache stores routes **without** placement, a run whose loop
+actually moved a footprint is never cached (an entry would pair post-move copper
+with the pre-move placement).
+
+| Option | Description |
+|--------|-------------|
+| `--placement-delta-feedback` / `--no-placement-delta-feedback` | Force the loop on / off. Default (neither): **auto** — on only for an infeasible routing plan with unrouted nets. |
+| `--placement-delta-feedback-budget N` | Maximum apply/keep-or-revert iterations (default: 3) |
+| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes. Independent of the per-stage `--search-timeout` (an exhausted initial search stage no longer starves the probes), but clamped to — never an escape from — the hard total `--timeout`. Default: share whatever remains of `--timeout`. |
+
+#### Feasibility / coupling flags (v0.15.0, all default off)
+
+| Option | Description |
+|--------|-------------|
+| `--monotone-certificate-order` | Certify bundle escape feasibility (monotone-routability) and route bundle nets in the derived constructive order (#4089/#4103) |
+| `--cross-package-pair-corridor` | Reserve a soft corridor between the two legs of a cross-package differential pair at escape time (#4090) |
+| `--slack-corridor-widening` | Widen pair-continuation corridors by an estimated skew budget so length matching has room by construction (#4092) |
+
+#### Strategy escalation flags
+
+| Option | Description |
+|--------|-------------|
+| `--auto-layers` / `--no-auto-layers` | Escalate layer count on routing failure. **Default: enabled.** Tries 2 → 4 → 6 until success or `--max-layers` is reached. Pass `--no-auto-layers` to opt out. |
+| `--max-layers {2,4,...,32}` | Upper bound for `--auto-layers` (default: 6). Above 6, the last rung is the board's own auto-detected stack (Issue #6099) |
+| `--auto-mfr-tier` | Escalate to a tighter manufacturer tier when geometry blocks routing (e.g. `jlcpcb` → `jlcpcb-tier1` to gain via-in-pad). Default: disabled. |
+| `--mfr-tier-ladder LIST` | Explicit comma-separated tier ladder, e.g. `'jlcpcb,jlcpcb-tier1'`. Overrides the default ladder registered for `--mfr`. |
+| `--adaptive-rules` | Progressively relax trace width / clearance until routing succeeds or manufacturer limits are reached. |
+| `--min-trace MM` / `--min-clearance-floor MM` | Floors for `--adaptive-rules` |
+
+See [Routing Guide → Strategy Escalation](../guides/routing.md#strategy-escalation).
+
+#### Long-running routes
+
+| Option | Description |
+|--------|-------------|
+| `--checkpoint-interval SEC` | Interval between best-so-far checkpoint writes to `--output`. Default: 30. Pass `0` to disable. |
+| `--checkpoint PATH` | Write the best result so far to `PATH` (`.kicad_pcb`) on **every** improvement (nets complete, then clearance/DRC count, overflow, wirelength, vias), plus `PATH`-stem `.checkpoint.json` with the score and pass number. A worse pass never overwrites it. Also on `route-auto` (Issue #5945). |
+| `--resume PATH` | Seed routing with a checkpoint's copper: nets it already completed are kept verbatim and locked, only the rest are routed (implies `--preserve-existing`; with `--nets`, `--complete` or `--region` the lock does not apply and a warning is printed). Refused (exit 2) if the checkpoint's footprints/nets differ from the input. Also on `route-auto`, where completed nets are skipped and `-o` is seeded from the checkpoint (Issue #5945). |
+| `--no-rollback` | `route-auto` only. Keep a net pass even when it lowers the number of complete nets. By default a multi-net `--nets ... -o` run (or any `--checkpoint`/`--resume` run) undoes such a pass, reports the net as failed (`success: false`, `rolled_back: true` in `--format json`; a `rollback:` line on stderr) and exits 1 (Issue #5945). |
+| `--lint-gate` | Lint the input board before routing and the routed board after it (`kct check` + `kct detect-mistakes`, paired by stable finding key exactly as `kct check --diff` pairs them). If routing introduced a new **error** finding, `--output` is restored to its pre-run bytes (removed if it did not exist; for an in-place route the input is restored), the routed board is kept as `<output-stem>.lint-rejected.kicad_pcb`, the introduced keys and a ready-to-run `--waive` command are printed on stderr, and the command exits **3**. Waived findings never count. Findings already on the input board (including error-level ones, on which `kct check` exits 2 and `kct detect-mistakes` exits 1) are the baseline, not a blocker. **Copper waivers carry over when the routed geometry is the same**: copper finding keys are built from the quantised geometry of the offending copper rather than track/via UUIDs, so a waiver still applies on a re-run that routes the same copper, regardless of `--seed`; any change to the routed copper invalidates it (Issue #6088). Footprint- and `mistake.*`-keyed waivers are unaffected. A routed board that cannot be linted (the linter produced no parseable report) is rolled back too (exit 3); an input that cannot be linted aborts before routing (exit 1; under `--format json` a `lint_gate` document with status `error`). Routing writes a staging file in a hidden `.<output-name>.lint-gate-*` directory next to `--output`, and only a board that passed the gate is moved onto `--output` (atomically), so an unjudged board never sits at `--output`. If routing or the candidate lint is interrupted (Ctrl+C, SIGTERM from `timeout` or a CI job cancellation, deadline), the unjudged board is moved to `<output-stem>.lint-rejected.kicad_pcb`, `--output` keeps its pre-run bytes (or stays absent), and SIGTERM exits 143. After SIGKILL `--output` is likewise untouched; the unjudged work is left in the staging directory, which is safe to delete. `--checkpoint` must not name the `--output` path (checkpoints are written unjudged) (Issue #6090). Covers every `kct route` path (direct, escalation, `--auto-fix`, `--complete`, `--resume`) and `route-auto` (whole run, needs `-o`). `--checkpoint` files and `_partial` snapshots are not gated. Under `--format json` the document gains a `lint_gate` object (Issue #6054). |
+| `--lint-gate-waivers PATH` | Waivers sidecar for both `--lint-gate` lint runs. Default: the one `kct check` discovers for the **input** board (`<board>.kct-waivers.json`, then `.kct_waivers.json`); the net-class-map / current-paths sidecars are likewise pinned from the input board so both sides are judged under the same rules. |
+| `--lint-gate-strict` | With `--lint-gate`, new **warning** findings also roll back. `kct route --strict` implies it. |
+| `--export-failed-nets PATH` | Write failed-net names (one per line) for follow-up. |
+| `--strict` | Exit non-zero if the written PCB has any disconnected net. |
+
+`--output` writes are atomic; combined with `--checkpoint-interval` this means
+a long route can be safely interrupted (SIGINT) and the partial result on
+disk remains valid for inspection or resume. See
+[Routing Guide → Long-Running Routes](../guides/routing.md#long-running-routes-checkpointing).
+
+#### Auto-fix and exit codes
+
+`--auto-fix` runs the DRC repair pass after routing. If repair cannot be
+applied cleanly the partial output is **rolled back** so the file on disk
+matches what the router actually produced (issue #2852, #2853, #2861). The
+rollback path is wired through all four routing code paths
+(`Autorouter`, `RoutingOrchestrator`, MCP, reasoning agent) and surfaces as
+exit code 3. See the [Exit Codes](#exit-codes) table.
+
+**Examples:**
+```bash
+# Default escalation: 2L → 4L → 6L, atomic checkpoint every 30s
+kct route board.kicad_pcb -o routed.kicad_pcb
+
+# Stay at 2L (e.g. for cost) but allow manufacturer-tier escalation for fine-pitch QFP
+kct route board.kicad_pcb --no-auto-layers --auto-mfr-tier --mfr jlcpcb
+
+# Explicit ladder; long timeout; auto-fix DRC; reproducible
+kct route board.kicad_pcb \
+  --auto-mfr-tier --mfr-tier-ladder 'jlcpcb,jlcpcb-tier1' \
+  --timeout 1500 --auto-fix --seed 42 -o routed.kicad_pcb
+
+# CI-friendly checkpointing every 10s
+kct route board.kicad_pcb --checkpoint-interval 10 -o routed.kicad_pcb
+
+# Keep the best-so-far board on disk; pick up where a killed run stopped
+kct route board.kicad_pcb --checkpoint best.kicad_pcb -o routed.kicad_pcb
+kct route board.kicad_pcb --resume best.kicad_pcb --checkpoint best.kicad_pcb -o routed.kicad_pcb
+
+# Refuse a route that introduces new kct check / detect-mistakes errors (exit 3).
+# Copper waivers recorded against the rejected board still match on a re-run
+# that routes the same copper (keys are geometry-based, not UUID-based).
+kct route board.kicad_pcb --lint-gate --seed 7 -o routed.kicad_pcb
+```
+
+---
+
+### `retune-lengths`
+
+Apply the existing match-group and diff-pair skew tuners to **named** groups of
+a board that is already routed, keeping the reviewed and hand-made copper
+around them (Issue #6885). It is an adapter over `tune_match_group_v2` /
+`tune_diff_pair_skew`, not a router: the board is never rerouted.
+
+```bash
+kct retune-lengths board.kicad_pcb -o board.retuned.kicad_pcb \
+    --net-class-map output/net_class_map.json \
+    --group ADDR_BUS --diffpair USB_D+ USB_D- [--timeout 300] [--provenance p.json]
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-o, --output` | Required. Must differ from the input and must not exist (it is never overwritten) |
+| `--net-class-map` | Required. The sidecar `kct check` reads; groups, pairs and tolerances come only from here |
+| `--group NAME` | Declared `length_match_group` to tune; repeatable |
+| `--diffpair POS NEG` | Detected diff pair, as its two net names; repeatable |
+| `--timeout SEC` | Wall-clock budget for the tuning step (default 300) |
+| `--provenance PATH` | Provenance JSON (default `<output>.retune.json`); must not exist |
+
+At least one `--group` or `--diffpair` is required; there is no whole-board
+fallback.
+
+**Supported input.** A routed `.kicad_pcb` with copper layers, a
+`(general (thickness ..))` or `(setup (stackup ..))`, straight `(segment ..)`
+copper on the selected nets (a selected net carrying `(arc ..)` copper is
+refused), and a net-class map that declares the selected groups or pairs.
+
+**Limits.** Each target is tuned to exactly the limit `kct check` enforces
+(`resolve_group_tolerance_mm` for groups, `resolve_pair_thresholds` for pairs);
+nothing is inferred or loosened. A diff pair reports its gate (`tolerance_mm`)
+and its tighter stretch target (`stretch_target_mm`) as two separate numbers.
+
+**Guarantees.**
+
+- The input is only read. The output is written atomically, and only after
+  every selected target is **re-measured on the written board** with the
+  checker's own functions and found within its limit; tuner success alone is
+  never trusted.
+- Only `(segment ..)`/`(via ..)` blocks of the selected nets change. Unchanged
+  selected blocks keep their original text (uuid, `locked`). Unselected nets are
+  fixed obstacles the meanders must clear. With the selected nets' copper
+  removed, the output must equal the input byte for byte, otherwise the run
+  fails with `scope_violation`.
+- New copper uses seeded uuids, so the same input and settings give identical
+  output bytes.
+- A provenance record holds input/output SHA-256, selected groups, tool
+  version, settings, per-net before/after lengths and the changed-net list.
+
+**Failure modes** (exit 1, no output file, input unchanged; `--format json` adds
+a `code`): `no_selection`, `unknown_group`, `unknown_diffpair`,
+`ambiguous_group`, `missing_rules`, `missing_stackup`, `unsupported_pcb`,
+`no_geometry`, `unmeasurable`, `output_is_input`, `output_exists`, `timeout`,
+`unattainable` (a target stayed outside its limit), `scope_violation`. A
+selection already within its limits succeeds as `already_satisfied` with an
+output identical to the input.
+
+A successful run is **not** a board sign-off: still run `kct check`,
+`kicad-cli pcb drc --refill-zones` and the LVS/manufacturing gates on the output.
+
+### `zones`
+
+Add copper pour zones.
+
+```bash
+kct zones <subcommand> <pcb_file> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `add` | Add a copper zone |
+| `list` | List existing zones |
+| `batch` | Add multiple zones from a `NET:LAYER,...` spec |
+| `fill` | Fill all zones in a PCB (via `kicad-cli`) |
+
+**Output-path behavior:** for the mutating subcommands (`add`, `batch`,
+`fill`), `-o`/`--output` is optional and **defaults to overwriting the input
+in place** — consistent with `optimize-placement`. Because each in-place `add`
+reads its own prior output, chaining `zones add` calls against one file
+accumulates zones instead of silently discarding earlier ones. Pass an
+explicit `-o <path>` to write a side file and leave the input untouched.
+
+**`batch` auto-prioritization (issue #4167):** when two or more of the
+`--power-nets` entries land on the **same layer**, `zones batch` no longer
+emits full-board zones that all overlap at equal priority (which silently gave
+the lower-priority zones zero copper). Instead, within each user-specified
+layer group it (1) auto-assigns fill **priority by ascending pad-cluster bbox
+area** — the smallest net gets the highest priority, the KiCad idiom where a
+small/nested zone must fill on top of the larger zones it sits inside (equal
+areas break deterministically, alphabetical by net name) — and (2) **carves the
+per-net outlines** to each net's own pad cluster minus any higher-priority
+sibling, so the zones are geometrically disjoint and every net receives real
+copper. Nets that are **sole on their layer are unaffected**: they keep the
+full board outline and their prior priority (1 for GND-named nets, else 0). If
+carving genuinely cannot produce disjoint copper for some net (fully-coincident
+pad clusters), the command exits non-zero with an actionable error rather than
+writing zero-copper zones. The final summary reports how many zones still cede
+copper via an overlap warning.
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output PATH` | Output PCB (default: overwrite input) |
+
+**Examples:**
+```bash
+kct zones add board.kicad_pcb --net GND --layer B.Cu     # modifies board.kicad_pcb in place
+kct zones add board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
+kct zones batch board.kicad_pcb --power-nets GND:B.Cu,+3.3V:F.Cu
+kct zones fill board.kicad_pcb                           # fills all zones in place
+kct zones add board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
+kct zones list board.kicad_pcb
+```
+
+---
+
+### `placement`
+
+Detect and fix placement conflicts.
+
+```bash
+kct placement <subcommand> <pcb_file> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `check` | Check for placement conflicts |
+| `optimize` | Optimize component placement |
+| `suggest` | Generate placement suggestions with rationale |
+
+**Examples:**
+```bash
+kct placement check board.kicad_pcb
+kct placement optimize board.kicad_pcb -o optimized.kicad_pcb
+kct placement suggest board.kicad_pcb --format json
+```
+
+---
+
+### `optimize-placement`
+
+CMA-ES placement optimizer. Distinct from `kct placement optimize` (physics
+/ evolutionary): this command runs a CMA-ES loop with explicit anchor and
+feasibility semantics. Implemented in
+[`src/kicad_tools/cli/optimize_placement_cmd.py`](../../src/kicad_tools/cli/optimize_placement_cmd.py).
+
+```bash
+kct optimize-placement <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--strategy {cmaes}` | Optimization strategy (default: `cmaes`) |
+| `--max-iterations N` | Maximum optimizer iterations (default: 1000) |
+| `-o`, `--output PATH` | Output PCB (default: overwrite input) |
+| `--seed {force-directed,random,current}` | Seed placement method. `current` warm-starts from the board's own footprint positions; its slide-off passes only move parts that overlap or break the 0.2 mm clearance rule, on a 0.05 mm grid (Issue #6250) |
+| `--weights JSON` | Custom cost weights: `overlap`, `drc`, `boundary`, `wirelength`, `area`, `creepage`, `cohesion`, `decoupling` (default 2.0; `{"decoupling": 0}` turns off the decoupling-cap affinity term and its snap pass) |
+| `--dry-run` | Evaluate current placement without optimizing |
+| `--progress N` | Print score every N iterations (0 disables) |
+| `--checkpoint DIR` | Directory for checkpoint save/resume |
+| `--no-slide-off` | Disable slide-off overlap resolution (pre-pass on the seed and post-pass on the result) |
+| `--anchor-weight FLOAT` | Per-net HPWL multiplier boost for nets that touch `(locked)` footprints. Scales each qualifying net's HPWL by `1 + anchor_weight * (anchored_pins / total_pins)`. **Default 0.0**. |
+| `--pad-anchored-wirelength` | Measure the wirelength term between transformed **pad** coordinates instead of footprint centres (issue #4831 M1). **Default off** — the objective is unchanged unless you pass it. |
+| `--time-budget SEC` | Wall-clock budget (bounds the feasibility-gated convergence loop) |
+| `--allow-infeasible` | Exit 0 even when overlap/DRC/boundary violations remain |
+| `--route-check` | Confirm the result with bounded real routes before writing it; keep the board as read if it routes worse (issue #6234). **Default off.** |
+| `--route-check-budget N` | Per-net A* node-expansion cap of each `--route-check` route (default 100,000) |
+| `-v` / `-q` | Verbose / quiet |
+
+**Anchor-weight discrepancy to know about.** The `--help` text recommends
+`2.0 .. 5.0` as a starting range. The validated recipe in
+[Placement Optimization → Anchoring Perimeter Footprints](../guides/placement-optimization.md#anchoring-perimeter-footprints)
+uses `--anchor-weight 1.0` — the help-text range is the conservative knob
+designers would reach for; `1.0` is the value that actually lifted board-05
+BLDC from 40% → 60% routing completion in practice. Treat help text as the
+ceiling and the guide as the proven floor.
+
+**Pad-anchored wirelength (`--pad-anchored-wirelength`, issue #4831 M1).**
+By default every net's HPWL is measured between footprint *centres*, so the
+term is blind to where a pad actually sits — and blind to rotation entirely,
+since rotating a part leaves its centre unchanged. The flag measures each pin
+at its own transformed pad instead (pads are already computed for every
+candidate and thrown away today, so the added cost is one dict build per
+evaluation). Per-pin fallback: a pin with no pad in the map is still measured
+at its component centre, so partial pad data degrades rather than dropping the
+net. On this repo's own placement fixtures the two estimators differ by 0.2 %
+to 40 % on the *same* layout, so expect different — not merely rescaled —
+optimizer trajectories. See
+[`docs/placement-pad-anchoring-audit.md`](../placement-pad-anchoring-audit.md).
+
+**Decoupling caps (issue #6020, #6253).** Each decoupling capacitor (one pad
+on a supply rail, the other on ground) is pulled onto the IC supply pin it
+serves by a `decoupling` affinity term (weight 2.0, on by default), and a snap
+pass after the optimizer moves each cap to the nearest free spot beside its
+pin. The MCP `optimize_placement` tool runs the same code (same weights keys,
+same defaults, same snap), so the two produce the same placement for the same
+board and seed; its result carries a `decoupling` list and the snap moves.
+
+**Route check (`--route-check`, issue #6234).** No pre-route score reliably
+predicts which of two placements routes better (#5948: HPWL agrees with the
+routed outcome on 0.749 of pairs, RUDY is at chance). `--route-check` measures
+instead. The board as read is the incumbent. The optimizer result (after
+slide-off) and then the decoupling snap each replace it only if a bounded
+`kct route` reaches at least the incumbent's completion (routed / requested
+nets) with no more post-route DRC errors. Otherwise the incumbent is kept, and
+a kept board is written unchanged. The checks run once, after optimization,
+never inside the loop: **at most 3 routes per run** (incumbent, optimizer
+result, snap). A stage that changes nothing is skipped. Each route is bounded
+by `--route-check-budget` node expansions per net
+(`--deterministic-budget --per-net-iterations N --deterministic-rescue
+--seed`), so the verdict is the same on any machine. The router does not move
+parts (`--no-placement-feedback`), and each candidate is routed from a private
+temporary copy with its old traces stripped. The text report prints each
+stage's incumbent and candidate numbers and its verdict; `--format json` adds
+a `route_check` object. The MCP `optimize_placement` tool takes the same
+`route_check` / `route_check_budget` options. Cost: a check route takes a few
+seconds on board 01 (four parts) and several minutes on board 02, where
+negotiated rip-up rounds, not the per-net cap, dominate.
+
+**Feasibility gate.** By default the optimizer exits **1** with
+`FATAL: optimizer exited with infeasible placement (...)` on stderr if the
+final placement still has overlap/DRC/boundary violations (issue #2821). Use
+`--allow-infeasible` to override (recommended only when the next step is a
+router that can absorb residual boundary violations). Use `--time-budget` to
+bound the "keep going past plateau while infeasible" loop.
+
+**Examples:**
+```bash
+# Anchored optimization — perimeter parts already marked locked=true
+kct optimize-placement board.kicad_pcb \
+  --anchor-weight 1.0 --max-iterations 400 --time-budget 120 \
+  --allow-infeasible -o optim.kicad_pcb
+
+# Evaluate the seed placement without moving anything
+kct optimize-placement board.kicad_pcb --dry-run -v
+
+# Resume from a checkpoint dir
+kct optimize-placement board.kicad_pcb --checkpoint .optim_state/
+```
+
+See [Placement Optimization Guide](../guides/placement-optimization.md).
+
+---
+
+### `optimize-traces`
+
+Optimize PCB traces.
+
+```bash
+kct optimize-traces <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--output`, `-o` | Output file (default: modify in place) |
+| `--net` | Only optimize the net with exactly this name (case-sensitive; `GND` does not match `PGND`). Use `--net-pattern` for globs |
+| `--net-pattern` | Only optimize nets whose name matches this case-sensitive glob (fnmatch), e.g. `'*GND*'`. Mutually exclusive with `--net` |
+| `--no-merge` | Disable collinear merging |
+| `--no-zigzag` | Disable zigzag elimination |
+| `--no-45` | Disable 45-degree corners |
+| `--no-jogs` | Disable lateral jog removal (sliding short sideways steps to the next corner) |
+| `--no-staircase` | Disable staircase compression |
+| `--no-pull-tight` | Disable PullTight (shortening chains by sliding interior segments) |
+| `--no-detour` | Disable detour shortening (replacing a chain with a shorter direct path) |
+| `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
+| `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
+| `--dry-run` | Show results without writing |
+| `--quiet`, `-q` | Suppress progress output |
+| `--drc-aware` | Roll back per-net optimizations that increase DRC violations (requires `--mfr`) |
+| `--mfr` | Target manufacturer for DRC rules (e.g. `jlcpcb`, `oshpark`); required with `--drc-aware` |
+| `--project` | Project (`.kicad_pro`, with its sibling `.kicad_dru`) whose rules DRC verification uses (default: the files beside the board) |
+| `--allow-default-rules` | Verify against KiCad default rules when no project rules are found (otherwise that is an error) |
+| `--layers` | Number of copper layers for DRC checks (default: 2) |
+| `--copper` | Copper weight in oz for DRC checks (default: 1.0) |
+| `--voltage-map` | Per-net voltage JSON (as for `kct route`); rejects individual edits that would bring a net pair below its pairwise creepage requirement. The summary lists skipped edits by net pair (`creepage_skipped` in JSON) |
+| `--creepage-standard` | Creepage standard for `--voltage-map` (`iec60664` or `iec62368`, default `iec60664`) |
+| `--pollution-degree` | IEC pollution degree for `--voltage-map` (1-3, default: 2) |
+| `--material-group` | Insulation material group for `--voltage-map` (default: `IIIa`) |
+| `--hv-threshold` | Minimum net-pair \|ΔV\| that triggers creepage widening (default: 30.0) |
+| `--format` | Output format (`text` or `json`); JSON shape in [machine-output.md](machine-output.md) |
+
+---
+
+## AI Integration Commands
+
+### `reason`
+
+LLM-driven PCB layout reasoning.
+
+```bash
+kct reason <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--interactive` | Interactive mode |
+| `--export-state` | Export state for external LLM |
+| `--auto-route` | Auto-route priority nets |
+| `--output`, `-o` | Output file |
+
+**Examples:**
+```bash
+kct reason board.kicad_pcb --interactive
+kct reason board.kicad_pcb --export-state > state.json
+kct reason board.kicad_pcb --auto-route -o routed.kicad_pcb
+```
+
+---
+
+### `mcp`
+
+MCP server for AI agent integration.
+
+```bash
+kct mcp serve [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--transport {stdio,http}`, `-t` | Transport mode (default: stdio) |
+| `--host HOST` | Host address for HTTP mode (default: localhost) |
+| `--port PORT`, `-p` | HTTP port (default: 8080) |
+
+**Examples:**
+```bash
+# Start stdio server (for Claude Desktop)
+kct mcp serve
+
+# Start HTTP server
+kct mcp serve --transport http --port 8080
+```
+
+See [MCP Documentation](../mcp/README.md) for configuration details.
+
+---
+
+### `decisions`
+
+Query the **machine-recorded** placement/routing rationale that the placement
+optimizer and autorouter write next to a board (`<board>.kicad_pcb.decisions.json`,
+emitted when they run with `record_decisions=True`). Implemented in
+[`src/kicad_tools/cli/decisions_cmd.py`](../../src/kicad_tools/cli/decisions_cmd.py).
+
+```bash
+kct decisions <subcommand> [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `show` | Show decisions matching filters |
+| `list` | List a summary of all recorded decisions |
+| `explain-placement` | Explain why a component is placed where it is |
+| `explain-route` | Explain why a net was routed the way it was |
+
+**Examples:**
+```bash
+kct decisions list board.kicad_pcb
+kct decisions explain-placement board.kicad_pcb U1
+kct decisions explain-route board.kicad_pcb VBUS
+```
+
+> **Not the same as [`kct spec decide`](#spec).** This store is written by the
+> *tools*, is regenerated whenever the board is re-placed or re-routed, and is
+> read-only from the CLI. Durable *human* design decisions ("why this
+> topology?", "why this fab tier?") belong in the `decisions:` list of
+> `project.kct` and are written with `kct spec decide`. There is deliberately no
+> `kct decisions add` — adding one would collide with this differently-scoped
+> command.
+
+---
+
+## Advanced Analysis Commands
+
+### `analyze congestion`
+
+Detect routing congestion hotspots.
+
+```bash
+kct analyze congestion <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--threshold FLOAT` | Congestion threshold (0-1) |
+
+---
+
+### `analyze trace-lengths`
+
+Analyze timing-critical trace lengths.
+
+```bash
+kct analyze trace-lengths <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--net NET` | Analyze specific net |
+| `--diff-pairs` | Show differential pair skew |
+
+---
+
+### `analyze thermal`
+
+Detect thermal hotspots and heat sources.
+
+```bash
+kct analyze thermal <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `analyze signal-integrity`
+
+Analyze crosstalk risk and impedance discontinuities.
+
+```bash
+kct analyze signal-integrity <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `erc explain`
+
+ERC root cause analysis with fix suggestions.
+
+```bash
+kct erc explain <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `constraints check`
+
+Detect constraint conflicts (keepout/grouping/region).
+
+```bash
+kct constraints check <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `net-status`
+
+Validate net connectivity (unrouted, islands, isolated pads). The
+`preflight-routing` step of `kct build` and the readiness check inside
+`kct fleet status` both delegate to this analyzer in-process.
+
+```bash
+kct net-status <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--net NET` | Check a specific net (scopes the summary/banner and `--why` diagnoses to it; the normal-path exit code stays board-wide) |
+| `--incomplete` | Show only incomplete / unrouted nets |
+| `--by-class` | Group output by net class |
+| `--legacy-proximity` | Use the pre-v0.20 endpoint-proximity model (default is strict real-copper geometry; mutually exclusive with `--strict`) |
+| `--why` | Explain each incomplete net (composes with the strict model and with `--net`) |
+| `-v`, `--verbose` | Per-segment / per-pad detail |
+
+Exit code semantics are reused by the `preflight-routing` step in
+`kct build` and by `kct fleet status` to decide "ship-ready vs. not".
+Note the normal status path exits 2 when **any** net on the board is
+incomplete, even under `--net` with a complete selected net (kept for
+script compatibility, #4682); `--net X --why` scopes its exit code to the
+selected net (0 when X is not stuck, 2 when it is).
+
+**Examples:**
+```bash
+kct net-status board.kicad_pcb --incomplete --format json
+kct net-status board.kicad_pcb --by-class
+kct net-status board.kicad_pcb --net DAC_CLK --why   # only DAC_CLK's diagnosis
+```
+
+#### `--why`: the access witness
+
+`--why` classifies each incomplete net into the `ESCAPE_BLOCKED` /
+`CONGESTION_SATURATED` / `BUDGET_STARVED` / `PLACEMENT_BOUND` /
+`POUR_DISCONTINUOUS` taxonomy, and reports the `blocking nets` its
+line-of-sight scan finds near the stranded pads.
+
+When a [`<stem>.access_witness.json`](#post-route-sidecars) sidecar sits next
+to the board — `kct route` writes one — each diagnosis additionally carries an
+**access witness**: the per-pad verdict replayed from the order copper actually
+landed in, rather than inferred from the finished board. No flag enables it;
+the sidecar is auto-discovered from the board's own directory, and output is
+byte-identical to a run without one when it is absent.
+
+| Field | Meaning |
+|-------|---------|
+| `access at escape end` | Whether the pad still had a legal first move when the escape pre-phase finished (`non-empty` / `empty` / `not-evaluated`). `empty` here means the pad was walled in by *placement*, before the search committed anything |
+| `access now` | The same, evaluated after the last journal record |
+| `first closed at` | `pass[iteration]` of the commit that emptied the access set, plus its journal record index and kind (`commit` / `rip` / `restore` / `rollback`). `never` when no commit closed it |
+| `closing nets` | Net names of the copper that rejected every remaining candidate |
+| `closing copper` | Those items as `ref.pin` labels |
+| `closing copper class` | Phase 1a's classification of them — `foreign_pad`, `route_segment`, `route_via`, `fixed_fill`, `keepout`, `board_edge`, … |
+| `resolver clearances` | The `trace_width` / `trace_clearance` / `via_clearance` / `min_hole_to_hole` values the verdict was decided with |
+
+A pad reported as `access now: non-empty` with `first closed at: never` is the
+important negative result: **nothing the router committed took this pad's way
+out**. The pad was reachable and the search declined to reach it, which is a
+different defect from a stranding and must not be reported as one.
+
+In `--format json` the same data appears under each net's `access_witness`
+key, with `pads[]` carrying `access_at_escape_end`, `final_access`,
+`first_closed_at`, `first_closed_index`, `first_closed_kind`, `closing_nets`,
+`closing_refs`, `closing_copper_class`, `closing_markings` and `reopened`. The
+key is **absent** (not null) when no sidecar was found. Full format reference:
+[`../diagnostics/access-witness.md`](../diagnostics/access-witness.md).
+
+#### `--why`: the routing plan (issue #5521)
+
+A [`<stem>.routing_plan.json`](#post-route-sidecars) sidecar beside the board
+is auto-discovered the same way — again with no flag, and again with
+byte-identical output when it is absent. For each stuck net that crosses an
+**overflowed corridor** in the plan, `--why` prints the corridor and its
+measured relief immediately before the `recommendation:` line:
+
+```
+  routing plan:     corridor U2 -> U3 (tiles 17-18, layer 0): demand 14.0 tracks, capacity 9, overflow 5
+                    relief: move U3 +2.0/+0.0 mm -> total overflow 0
+```
+
+The access witness and the classification are *copper* evidence; the routing
+plan is a *capacity measurement* taken before anything was routed. The plan
+never reclassifies a net — the `[PLACEMENT_BOUND]` header and the counts are
+unchanged — it is a second, independent witness printed alongside.
+
+In `--format json` a sidecar adds exactly two keys: a top-level
+`routing_plan` block (`path`, `schema_version`, `total_overflow`,
+`overflowed_edges`, `feasible`) and an `overflow_edge` on each crossing
+diagnosis. Both are **absent** (not null) without a sidecar. A sidecar built
+for a different board, or older than the PCB, is reported on stderr and
+ignored rather than guessed from. Full reference:
+[`routing-plan.md`](routing-plan.md).
+
+### `board-view`
+
+Draw a routed or partly routed board to answer a routing question. Where
+`kct screenshot` plots layers through `kicad-cli`, this reads the board model
+and draws what that plot lacks: mm axes, reference designators, pad net
+labels, one net outlined in white, and the connections still missing as
+magenta dashed ratsnest lines. Needs matplotlib
+(`pip install 'kicad-tools[visualization]'`), not `kicad-cli`.
+Implemented in [`src/kicad_tools/boardview/`](../../src/kicad_tools/boardview/).
+
+```bash
+kct board-view overview <pcb_file>                    # whole board, every missing link
+kct board-view net <pcb_file> <net>                   # crop round one net, net highlighted
+kct board-view layers <pcb_file> <net>                # that crop, one panel per copper layer
+kct board-view crop <pcb_file> x0 y0 x1 y1 [--net N]  # an explicit window, in mm
+kct board-view list <pcb_file>                        # missing pad pairs as JSON, no image
+```
+
+| Option | Views | Meaning |
+|---|---|---|
+| `-o, --output PATH` | image views | PNG path (default `<pcb>-<view>[-<net>].png` beside the board) |
+| `--absolute` | all | Sheet-absolute coordinates instead of board-relative |
+| `--max-size PX` | image views | Longest image side (default 1568) |
+| `--margin MM` | `net`, `layers` | Margin round the net (default 4) |
+| `--format text\|json` | all | `list` defaults to `json`; the others to `text` |
+
+**Coordinate frame.** Axes are board-relative by default: (0, 0) is the
+`Edge.Cuts` minimum corner. That is the frame of `kct net-status` and
+`kct pcb move-footprint --to`, so a position read off the image can be passed
+straight to them. `kct check` reports violation locations sheet-absolute,
+which is the axis value plus the board origin; `--absolute` draws in that
+frame, so a `crop` window can be taken from a `kct check` location. The image
+title and the JSON both name the frame and give the origin.
+
+**Missing links.** They come from the connectivity model behind `kct check`
+(`NetStatusAnalyzer`, which traces zone fill), one link per open connection,
+drawn between the closest pads of two copper islands. A pour net that
+`kct check` treats as advisory (it owns filled copper that misses a pad) gets
+no link and is listed under `pour_advisory`. Zone pours themselves are not
+drawn, so a pad with no track into it may still be connected.
+
+**Reading the image.** Good for: why a net is stuck, where a via could go,
+whether the placement is sensible, whether one layer carries everything. Not
+for clearances, widths, connectivity or counts, which `kct check`,
+`kct net-status` and `kicad-cli pcb drc` compute exactly. A reading is a
+hypothesis; confirm it with those tools before acting on it.
+
+Pad net labels appear only when the scale reaches 40 px/mm (a window of about
+35 mm or less); the highlighted net's pads are labelled `pad:net`.
+
+---
+
+## Cost Commands
+
+### `estimate cost`
+
+Estimate manufacturing cost.
+
+```bash
+kct estimate cost <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--mfr {jlcpcb,pcbway,oshpark,seeed}` | Manufacturer |
+| `--quantity N` | Board quantity |
+| `--bom FILE` | Component BOM: a `.csv` (columns such as `Reference`/`Designator`, `Value`/`Comment`, `Footprint`/`Package`, `LCSC`, `MPN`) or a `.kicad_sch` schematic. An unreadable or empty CSV exits 1; notices go to stderr so `--format json` stdout stays one document. |
+
+---
+
+### `parts availability`
+
+Check LCSC stock availability.
+
+```bash
+kct parts availability <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--quantity N` | Required quantity |
+
+---
+
+### `suggest alternatives`
+
+Suggest alternative parts for unavailable components.
+
+```bash
+kct suggest alternatives <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+## Utility Commands
+
+### `config`
+
+View and manage configuration.
+
+```bash
+kct config [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--show` | Show current configuration |
+| `--set KEY VALUE` | Set a configuration value |
+| `--reset` | Reset to defaults |
+
+---
+
+### `interactive`
+
+Launch interactive REPL mode.
+
+```bash
+kct interactive [pcb_file]
+```
+
+Provides an interactive shell for exploring and modifying PCB files.
+
+---
+
+## Output Formats
+
+Most commands support multiple output formats:
+
+| Format | Description |
+|--------|-------------|
+| `table` | Human-readable table (default) |
+| `json` | Machine-readable JSON |
+| `csv` | Comma-separated values |
+
+Use `--format` to specify:
+```bash
+kct symbols project.kicad_sch --format json
+```
+
+### Machine output: `--format json` is canonical
+
+**`--format json` is the canonical machine-output spelling for every `kct`
+subcommand.** A few older commands (`placement refine`, `calibrate`, the
+`footprint generate` shape subcommands) also carry a boolean `--json` flag;
+it is a permanently supported **legacy alias** for `--format json` — the two
+spellings are equivalent, and either one requesting JSON wins. New commands
+must use `--format` with a `json` choice, never a new `--json` flag.
+
+See [Machine output](machine-output.md) for the full design note: the audited
+per-subcommand inventory, the exemption list, and the rules for adding
+machine output to new commands.
+
+---
+
+## Exit Codes
+
+### Default (non-sign-off commands)
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Error (invalid input, file not found, etc.) |
+| 2 | Invalid arguments (argparse usage error; true for every command) |
+| 130 | Interrupted (Ctrl+C) |
+
+Sign-off commands also use `2` (and some `1`) for findings, so the default
+table does not apply to them; see the next section.
+
+### Sign-off exit codes
+
+The commands that judge a board keep **two numbering ladders** (operator
+decision on #7230, option 1): the `drc` family returns `1` for "board has
+errors", while `check`/`audit` return `2` and keep `1` for "the tool could not
+run". View and format flags (`--net`, `--type`, `--category`, `--sheet`,
+`--errors-only`, `--format`) never change the exit code (#7230). Rather than
+mapping numbers per command, pipelines should read the top-level JSON
+`verdict` (`pass`|`fail`|`incomplete`; `gate_verdict` for `kct audit`, whose
+`verdict` is its own `ready`|`warning`|`not_ready`) and `exit_code`, which
+come from the same call that decides the process exit.
+
+The ladders live in `EXIT_LADDERS` in
+[`src/kicad_tools/cli/_gate.py`](../../src/kicad_tools/cli/_gate.py)
+(`gate_exit_code`); `tests/test_gate_exit_code_7230.py` checks this table
+against it.
+
+| Command | Ladder | Errors | Warnings with `--strict` | Check not run | Tool could not run |
+|---------|--------|--------|--------------------------|---------------|--------------------|
+| `kct drc` (plain and `--mfr`) | `drc` | 1 | 2 | 2 (schematic parity NOT RUN; 0 with `--allow-incomplete`) | 1 |
+| `kct erc` | `drc` | 1 | 2 | — | 1 |
+| `kct validate --sync` | `drc` | 1 | 2 | — | 1 |
+| `kct sch validate` | `sch` | 1 | 1 | 1 (a requested check did not run) | 1 |
+| `kct check` (meta rollup and `--drc-only`) | `check` | 2 | 2 | 2 (a sub-check NOT RUN; 0 with `--allow-incomplete`; none under `--drc-only`) | 1 |
+| `kct audit` | `check` | 2 | 2 | — (a could-not-verify gate reads as `warning`: 0, or 2 with `--strict`) | 1 |
+| `kct readiness` | — | 1 (`blocked`) | — | 1 (`unverified`) | 2 |
+| `kct fleet status` | — | 2 (any board not ship-ready, or no boards found) | — | — | — |
+
+Errors take precedence over warnings, and warnings under `--strict` over a
+check that did not run. Warnings without `--strict` always exit 0. `readiness`
+and `fleet` are not on `gate_exit_code` and keep their own numbering.
+
+### `kct route` ladder
+
+The router exposes a finer-grained ladder so CI can tell partial routing
+apart from clean routing with DRC issues. Source of truth: the `exit codes:`
+epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools/cli/route_exit_codes_help.py)
+(the epilog of `route_cmd._route_parser`, the only `kct route` parser, so
+`kct route --help` prints it), expanded by the
+`# Exit codes:` comment block in `route_cmd.py`'s `_main_impl`
+(`main` is a thin wrapper around it).
+
+| Code | Meaning |
+|------|---------|
+| 0 | All nets routed (or meets `--min-completion`), DRC clean |
+| 1 | Fatal failure — no nets routed |
+| 2 | Partial routing — below `--min-completion`, or requested nets are placement-blocked |
+| 3 | Post-route validation or processing failed: DRC violations remain; `--auto-fix` rolled back on a connectivity regression (issue #2852); the `--voltage-map` HV pairwise audit found violations (issue #4588); selective zone filling failed, including unavailable native capability; or staged repair could not verify preservation of fixed copper and net membership. This code alone does not establish routing completion or a clearance violation. |
+| 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
+| 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
+| 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
+| 9 | A pre-route gate fired — **detailed routing was not started**. Two opt-in gates share this code and the stderr prefix says which: `[crosstail-gate]` — `--census-advisory-gate`'s replayed crossing-tail census (`--census-advisory <report.json>`) predicts an inert crossover lattice, refused before any router or component loading, so nothing at all was spent (issue #4799; see [crosstail-census-report](crosstail-census-report.md#turning-the-prediction-into-a-gate)); `[plan-gate]` — `--plan-gate` found `overflow_report.feasible` false, refused after the report-only plan stage (board loaded, plan under 5 s) but before any detailed routing, and overridable with `--force` (issue #5510 Phase 1c; see [`routing-plan.md`](routing-plan.md)). For both, the fix layer is placement / escape planning / stackup, not the router. Neither is ever returned without its flag. |
+| 10 | **UNVERIFIED** — the run would have exited 0 (completion threshold met, no failure found), but the post-route DRC and/or the stranded-pour check (issue #5785) did not complete: the hard `--timeout` could not cover it, or kicad-cli crashed, was killed or hit its per-call DRC timeout (issue #6724). The board is saved but **not verified**: run `kct check <board> --mfr <manufacturer>` before manufacturing. Only ever replaces exit 0 — a run with a known failure keeps its own code. A stranded-pour check skipped under `--allow-stranded-pour-pads` does not count. `--format json` reports `summary.verdict` as `"unverified"` (issue #6273). |
+
+> **Consumer note (issues #4588 / #4607).** `kct build` and `kct pipeline`
+> forward `--voltage-map` (plus `--creepage-standard`, `--pollution-degree`,
+> `--material-group`, `--hv-threshold`) to their underlying `kct route`
+> invocation. The exit-3/4 handling then splits on voltage-map presence,
+> because the exit code alone cannot distinguish which of the shared meanings
+> fired:
+>
+> - **Without a voltage map** (byte-identical to the historical behaviour):
+>   exits 2-5 are non-fatal warnings and the build/pipeline continues to
+>   verification, which surfaces any remaining DRC violations.
+> - **With a voltage map**: exits 3 and 4 are **fatal** — the clearance-dirty
+>   copper may be an HV pairwise-clearance (creepage) failure, and such a
+>   board must not flow on to verification and manufacturing export as
+>   "completed with warnings". Exits 2 and 5 keep their soft handling.
+>
+> Because the audit only runs inside the `kct route` subprocess, both
+> consumers also **refuse loudly** (instead of silently dropping the audit)
+> when a voltage map is set but the route step would not reach `kct route`:
+> `kct build` fails fast when the board routes via a route recipe/script
+> (Tier 1–3 — those build their own router invocation and cannot carry the HV
+> flags), and `kct pipeline` fails fast instead of skipping the route step on
+> an already-routed board. In both cases the message points at
+> `kct creepage <board> --voltage-map …` for a non-destructive audit of the
+> existing copper.
+
+### `kct optimize-placement`
+
+| Code | Meaning |
+|------|---------|
+| 0 | Optimizer converged to a feasible placement (or `--allow-infeasible` was set) |
+| 1 | Final placement infeasible — overlap / DRC / boundary violations remain (issue #2821). Override with `--allow-infeasible`. |
+| 2 | Invalid arguments |
+| 130 | Interrupted (Ctrl+C) |
+
+### `kct fleet status`
+
+Source of truth: the `Exit Codes:` section of the module docstring in
+[`src/kicad_tools/cli/fleet_cmd.py`](../../src/kicad_tools/cli/fleet_cmd.py).
+
+| Code | Meaning |
+|------|---------|
+| 0 | All surveyed boards are ship-ready |
+| 1 | Argparse / IO error |
+| 2 | One or more boards are not ship-ready (also returned when no boards are found, since "no ship-ready boards" is treated as not-ship-ready). Matches `kct net-status` semantics. |
+
+---
+
+### `skills`
+
+Install the `kct` agent skills that ship inside the kicad-tools wheel
+(`kicad_tools/agent_skills/kct/*.md`). `kct skills install` renders their
+harness-neutral placeholders for one agent harness and writes them where that
+harness looks. Files outside the `kct` namespace are never touched.
+
+Implemented in
+[`src/kicad_tools/cli/commands/skills.py`](../../src/kicad_tools/cli/commands/skills.py)
+and [`src/kicad_tools/agent_skills/__init__.py`](../../src/kicad_tools/agent_skills/__init__.py).
+
+```bash
+kct skills install                         # .claude/commands/kct/*.md
+kct skills install --user                  # ~/.claude/commands/kct/*.md
+kct skills install --target /tmp/x         # /tmp/x/kct/*.md
+kct skills install --harness codex         # .agents/skills/kct-<name>/SKILL.md
+kct skills install --harness opencode      # .opencode/commands/kct/*.md (/kct/<name>)
+kct skills install --harness opencode --user  # ~/.config/opencode/commands/kct/*.md
+kct skills install --list --format json    # packaged skills + install state
+kct skills install --check                 # exit 1 on missing/changed/stale files
+kct skills install --prune --dry-run       # preview removal of retired skills
+```
+
+| Option | Description |
+|--------|-------------|
+| `--harness` | `claude-code` (default), `codex` or `opencode` |
+| `--target DIR` | Skills root to write under (default: the harness's project dir) |
+| `--user` | Use the user-level dir (`~/.claude/commands`, `~/.agents/skills`, or opencode's `commands/` under `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`) |
+| `--list` | List packaged skills and their state at the target; writes nothing |
+| `--check` | Compare the installed copy with the packaged one; exit 1 on drift |
+| `--dry-run` | Show what would be written |
+| `--prune` | Delete `kct` skill files the package no longer ships |
+| `--format` | `text` (default) or `json` |
+
+---
+
+### `agent-guide`
+
+Print the agent primer that ships inside the kicad-tools wheel
+(`kicad_tools/agent_skills/AGENT_GUIDE.md`, issue #5960). It is a one-to-two
+screen Markdown orientation for an agent in any harness: the core workflow
+(schematic, ERC, PCB, place, route, zone fill, two DRC engines, LVS/sync,
+export), the `--format json` stdout contract, the two-engine sign-off rule,
+how to wire up a harness, and common pitfalls.
+
+Implemented in
+[`src/kicad_tools/cli/commands/agent_guide.py`](../../src/kicad_tools/cli/commands/agent_guide.py)
+and [`src/kicad_tools/agent_skills/guide.py`](../../src/kicad_tools/agent_skills/guide.py).
+
+```bash
+kct agent-guide                            # the primer, examples for every harness
+kct agent-guide --harness codex            # skill examples in Codex syntax only
+kct agent-guide --format json              # {"version", "harness", "sections": [{"title", "body"}]}
+```
+
+| Option | Description |
+|--------|-------------|
+| `--harness` | `claude-code` or `codex`: show only that harness's skill invocation examples, rendered by `kicad_tools.agent_surfaces.render()`. opencode is added when its renderer lands (#5951) |
+| `--format` | `text` (default, the Markdown) or `json` |
+
+---
+
+### `ecosystem`
+
+Query the packaged ecosystem registry: which projects produce the files we
+consume, which overlap our surface, whose license forbids code reuse, and what
+we concluded when we evaluated them. Answers "have we already looked at X?"
+without grepping `docs/`.
+
+Implemented in
+[`src/kicad_tools/cli/commands/ecosystem.py`](../../src/kicad_tools/cli/commands/ecosystem.py);
+the data is the packaged
+[`src/kicad_tools/ecosystem/data/projects.toml`](../../src/kicad_tools/ecosystem/data/projects.toml).
+Narrative: [`docs/ecosystem.md`](../ecosystem.md).
+
+```bash
+# Everything we track, grouped by category
+kct ecosystem list
+
+# Narrow by any combination of the four controlled vocabularies
+kct ecosystem list --relation upstream
+kct ecosystem list --category autorouter --verdict benchmarked
+kct ecosystem list --license-compat copyleft-ideas-only
+
+# One project in full, with our verdict and the notes behind it
+kct ecosystem show kicadroutingtools
+
+# Our invariants, non-goals and the neighbour map
+kct ecosystem where-we-sit
+
+# Every sub-action supports machine output
+kct ecosystem list --format json
+```
+
+| Filter | Values |
+|--------|--------|
+| `--category` | `autorouter`, `design-as-code`, `agent-interface`, `fabrication`, `bindings`, `benchmark` |
+| `--relation` | `upstream` (produces files we consume), `peer` (overlaps our surface), `downstream` (consumes our output), `reference` (studied only) |
+| `--verdict` | `complementary`, `benchmarked`, `ideas-adopted`, `evaluated-not-adopted`, `watch` |
+| `--license-compat` | `mit-clean`, `permissive-ideas-only`, `copyleft-ideas-only`, `unlicensed`, `cloud-service` |
+
+`--license-compat` is the load-bearing one: anything other than `mit-clean`
+means upstream code must not be copied into this MIT repo, in either
+direction. `kct ecosystem show` states that per project as
+`code reuse: NOT permitted -- ideas only`.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Query succeeded |
+| 1 | No sub-action given, unknown project id, a filter value outside its vocabulary, or a registry that failed to load |
+
+With `--format json`, an error is still a single valid JSON document
+(`{"error": "..."}`) on stdout, per
+[machine-output.md](machine-output.md).
+
+Agents can reach the same data through the `ecosystem_list` and
+`ecosystem_show` MCP tools.
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `KICAD_TOOLS_CONFIG` | Config file path |
+| `KICAD_CLI_PATH` | Path to kicad-cli binary |
+| `LCSC_API_KEY` | LCSC API key for parts lookup |
+| `JLCPCB_ACCESS_KEY` / `JLCPCB_SECRET_KEY` | BYO-key official JLCPCB open-platform API — when both are set, becomes the preferred parts-lookup tier (#4119); see README "Using your own JLCPCB API key" |
+| `JLCPCB_APP_ID` | Optional app id for the official JLCPCB API |
+
+## Export / BOM Notes
+
+`kct export` enriches the BOM with LCSC part numbers by default (`--auto-lcsc`,
+on by default for JLCPCB exports). If the `parts` extra is missing, the export
+**fails loudly** with an install hint instead of silently shipping an empty
+LCSC column (#4116); pass `--no-auto-lcsc` to export without enrichment.
+`kct mfr apply-rules` writes a sibling `.kicad_pro` (rules + Default netclass)
+so `kicad-cli pcb drc` uses the applied constraints instead of factory
+defaults (#4109).
+
+See [KiCad lock-marker advisories](kicad-lock-policy.md) for the covered write
+paths and `KCT_KICAD_LOCK_POLICY=warn|error|ignore` configuration.
+
+
+### Reference placement safety
+
+`kct place-silk-refs board.kicad_pcb --dry-run --render review.svg` previews
+reference moves without writing the board. Text envelopes must fit inside closed
+polygonal board material, outside cutouts and component courtyards, with the
+requested clearances. Line, rectangle, and polygon Edge.Cuts are supported;
+missing, malformed, curved, or footprint-local outlines produce explicit
+unplaceable results and leave those references unchanged. The SVG uses approximate
+text envelopes; review it and use native DRC before relying on the placement.
+
+Footprint references must be unique, including hidden references. Duplicate
+references are rejected before planning; assign unique references first.
+
+Search spacing must be finite and positive, distances finite and nonnegative,
+and the search is limited to 4096 rings. An explicit `--output` is written even
+when no reference needs to move. `--verify-drc` prints the native result (also
+included in JSON) and returns nonzero for remaining silk findings, unavailable
+KiCad, or failed verification. It runs after applying the move plan.

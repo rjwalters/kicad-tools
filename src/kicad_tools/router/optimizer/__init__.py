@@ -1,0 +1,96 @@
+"""Trace optimizer for post-routing cleanup.
+
+Provides algorithms to optimize routed traces:
+- Collinear segment merging (combine same-direction segments)
+- Zigzag elimination (remove unnecessary back-and-forth)
+- Staircase compression (compress alternating horizontal/diagonal patterns)
+- 45-degree corner conversion (smooth 90-degree turns)
+- Via minimization (remove unnecessary layer transitions)
+
+Collision detection is supported to prevent optimizations that would
+create DRC violations (shorts, track crossings).
+
+Example::
+
+    from kicad_tools.router import TraceOptimizer, OptimizationConfig
+
+    # Optimize a route in memory (no collision checking)
+    optimizer = TraceOptimizer()
+    optimized_route = optimizer.optimize_route(route)
+
+    # Optimize with collision checking (auto-selects best checker)
+    from kicad_tools.router.optimizer import make_collision_checker
+    checker = make_collision_checker(grid)
+    optimizer = TraceOptimizer(collision_checker=checker)
+    optimized_route = optimizer.optimize_route(route)
+
+    # Optimize traces in a PCB file
+    stats = optimizer.optimize_pcb("board.kicad_pcb", output="optimized.kicad_pcb")
+    print(f"Reduced segments from {stats['before']} to {stats['after']}")
+    print(f"Reduced vias from {stats['vias_before']} to {stats['vias_after']}")
+"""
+
+from .collision import (
+    CollisionChecker,
+    GridCollisionChecker,
+    VectorCollisionChecker,
+    make_collision_checker,
+)
+from .config import OptimizationConfig, OptimizationStats
+from .consolidate import (
+    ConsolidationStats,
+    consolidate_net_routes,
+    consolidate_routes_grid_synced,
+    consolidate_segments,
+)
+from .serpentine import (
+    SerpentineConfig,
+    SerpentineGenerator,
+    SerpentineResult,
+    SerpentineStyle,
+    add_serpentine,
+    tune_match_group,
+)
+from .trace import (
+    PairwiseRouteGate,
+    TraceOptimizer,
+    apply_route_transform_grid_synced,
+    optimize_routes_grid_synced,
+    pairwise_route_gate,
+)
+from .via_optimizer import (
+    LayerConnectivityError,
+    ViaOptimizationConfig,
+    ViaOptimizationStats,
+    ViaOptimizer,
+    optimize_route_vias,
+)
+
+__all__ = [
+    "CollisionChecker",
+    "ConsolidationStats",
+    "GridCollisionChecker",
+    "VectorCollisionChecker",
+    "make_collision_checker",
+    "LayerConnectivityError",
+    "OptimizationConfig",
+    "OptimizationStats",
+    "PairwiseRouteGate",
+    "SerpentineConfig",
+    "SerpentineGenerator",
+    "SerpentineResult",
+    "SerpentineStyle",
+    "TraceOptimizer",
+    "ViaOptimizationConfig",
+    "ViaOptimizationStats",
+    "ViaOptimizer",
+    "add_serpentine",
+    "apply_route_transform_grid_synced",
+    "consolidate_net_routes",
+    "consolidate_routes_grid_synced",
+    "consolidate_segments",
+    "optimize_route_vias",
+    "optimize_routes_grid_synced",
+    "pairwise_route_gate",
+    "tune_match_group",
+]

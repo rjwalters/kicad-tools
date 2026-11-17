@@ -1,0 +1,1841 @@
+"""Analyze command for PCB analysis tools.
+
+Provides analysis subcommands:
+- `analyze complexity`: Pre-routing complexity estimation and layer prediction
+- `analyze congestion`: Routing congestion analysis
+- `analyze trace-lengths`: Trace length analysis for timing-critical nets
+- `analyze signal-integrity`: Signal integrity analysis (crosstalk and impedance)
+- `analyze thermal`: Thermal analysis and hotspot detection
+- `analyze component-stress`: MOSFET VDS/VGS stress per declared operating state
+
+Usage:
+    kicad-tools analyze complexity board.kicad_pcb
+    kicad-tools analyze complexity board.kicad_pcb --format json
+    kicad-tools analyze congestion board.kicad_pcb
+    kicad-tools analyze congestion board.kicad_pcb --format json
+    kicad-tools analyze trace-lengths board.kicad_pcb
+    kicad-tools analyze trace-lengths board.kicad_pcb --net CLK
+    kicad-tools analyze signal-integrity board.kicad_pcb
+    kicad-tools analyze signal-integrity board.kicad_pcb --format json
+    kicad-tools analyze thermal board.kicad_pcb
+    kicad-tools analyze thermal board.kicad_pcb --format json
+    kicad-tools analyze component-stress design.kicad_sch --states states.yaml
+    kicad-tools analyze component-stress design.kicad_sch --states states.yaml --format json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from rich.console import Console
+from rich.table import Table
+
+from kicad_tools.analysis import (
+    ComplexityAnalyzer,
+    ComplexityRating,
+    CongestionAnalyzer,
+    RiskLevel,
+    Severity,
+    ThermalAnalyzer,
+    ThermalSeverity,
+    TraceIntegrityAnalyzer,
+    TraceLengthAnalyzer,
+)
+from kicad_tools.schema.pcb import PCB
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for analyze command."""
+    parser = argparse.ArgumentParser(
+        prog="kicad-tools analyze",
+        description="PCB analysis tools",
+    )
+
+    subparsers = parser.add_subparsers(dest="subcommand", help="Analysis type")
+
+    # Congestion subcommand
+    congestion_parser = subparsers.add_parser(
+        "congestion",
+        help="Analyze routing congestion",
+        description="Identify congested areas and suggest solutions",
+    )
+    congestion_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    congestion_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    congestion_parser.add_argument(
+        "--grid-size",
+        type=float,
+        default=2.0,
+        help="Grid cell size in mm (default: 2.0)",
+    )
+    congestion_parser.add_argument(
+        "--min-severity",
+        choices=["low", "medium", "high", "critical"],
+        default="low",
+        help="Minimum severity to report (default: low)",
+    )
+    congestion_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    # Trace-lengths subcommand
+    trace_parser = subparsers.add_parser(
+        "trace-lengths",
+        help="Analyze trace lengths for timing-critical nets",
+        description="Calculate trace lengths, identify differential pairs, and check skew",
+    )
+    trace_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    trace_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    trace_parser.add_argument(
+        "--net",
+        "-n",
+        action="append",
+        dest="nets",
+        help="Specific net(s) to analyze (can be used multiple times)",
+    )
+    trace_parser.add_argument(
+        "--all",
+        "-a",
+        action="store_true",
+        help="Analyze all nets, not just timing-critical ones",
+    )
+    trace_parser.add_argument(
+        "--diff-pairs",
+        "-d",
+        action="store_true",
+        default=True,
+        help="Include differential pair analysis (default: True)",
+    )
+    trace_parser.add_argument(
+        "--no-diff-pairs",
+        action="store_false",
+        dest="diff_pairs",
+        help="Disable differential pair analysis",
+    )
+    trace_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    # Signal-integrity subcommand
+    si_parser = subparsers.add_parser(
+        "signal-integrity",
+        help="Analyze signal integrity (crosstalk and impedance)",
+        description="Identify crosstalk risks and impedance discontinuities",
+    )
+    si_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    si_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    si_parser.add_argument(
+        "--min-risk",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help="Minimum risk level to report for crosstalk (default: medium)",
+    )
+    si_parser.add_argument(
+        "--crosstalk-only",
+        action="store_true",
+        help="Only analyze crosstalk, skip impedance analysis",
+    )
+    si_parser.add_argument(
+        "--impedance-only",
+        action="store_true",
+        help="Only analyze impedance, skip crosstalk analysis",
+    )
+    si_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    # Thermal subcommand
+    thermal_parser = subparsers.add_parser(
+        "thermal",
+        help="Analyze thermal characteristics and hotspots",
+        description="Identify heat sources, estimate power dissipation, and suggest thermal improvements",
+    )
+    thermal_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    thermal_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    thermal_parser.add_argument(
+        "--cluster-radius",
+        type=float,
+        default=10.0,
+        help="Radius for clustering heat sources in mm (default: 10.0)",
+    )
+    thermal_parser.add_argument(
+        "--min-power",
+        type=float,
+        default=0.05,
+        help="Minimum power threshold in Watts (default: 0.05)",
+    )
+    thermal_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    # Complexity subcommand
+    complexity_parser = subparsers.add_parser(
+        "complexity",
+        help="Analyze routing complexity and predict layer requirements",
+        description="Estimate routing complexity, predict layer count, and identify bottlenecks",
+    )
+    complexity_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    complexity_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    complexity_parser.add_argument(
+        "--grid-size",
+        type=float,
+        default=5.0,
+        help="Grid cell size for density analysis in mm (default: 5.0)",
+    )
+    complexity_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    # Current-sense subcommand
+    current_sense_parser = subparsers.add_parser(
+        "current-sense",
+        help="Analyze sense-net vs. high-current-net parallel coupling",
+        description=(
+            "Flag sense/analog nets that run parallel and close to "
+            "high-current/switching nets on the same layer (advisory)"
+        ),
+    )
+    current_sense_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    current_sense_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    current_sense_parser.add_argument(
+        "--sense-net",
+        action="append",
+        dest="sense_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a sense net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--hicur-net",
+        action="append",
+        dest="hicur_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a high-current net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--max-parallel",
+        type=float,
+        default=10.0,
+        help="Parallel-run FAIL threshold in mm (default: 10.0)",
+    )
+    current_sense_parser.add_argument(
+        "--min-gap",
+        type=float,
+        default=0.5,
+        help="Edge-to-edge gap FAIL threshold in mm (default: 0.5)",
+    )
+    current_sense_parser.add_argument(
+        "--max-loop-area",
+        type=float,
+        default=10.0,
+        help=(
+            "Enclosed copper sense-loop area FAIL threshold in mm^2 (default: 10.0; EE-confirmable)"
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-pair",
+        action="append",
+        nargs=2,
+        dest="sense_pairs",
+        default=[],
+        metavar=("SENSE", "RETURN"),
+        help=(
+            "Kelvin loop pairing: close SENSE's loop with RETURN conductor "
+            "(repeatable). Nets ending _P/_N, +/-, _H/_L auto-pair."
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-return",
+        dest="sense_return",
+        default=None,
+        metavar="NAME",
+        help="Shared return conductor (e.g. Kelvin ground) to close sense loops",
+    )
+    current_sense_parser.add_argument(
+        "--kelvin-tol",
+        dest="kelvin_tol",
+        type=float,
+        default=0.05,
+        help="Kelvin-tap coincidence tolerance in mm (default: 0.05)",
+    )
+    current_sense_parser.add_argument(
+        "--kelvin-pair",
+        action="append",
+        dest="kelvin_pairs",
+        default=[],
+        metavar="SENSE:FORCE",
+        help=(
+            "Kelvin force pairing: check SENSE taps FORCE at a pad "
+            "(repeatable). Nets ending _SENSE/_FORCE, SNS/FRC auto-pair."
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    # Electrical-rating subcommand (operates on a schematic, not a PCB)
+    elec_parser = subparsers.add_parser(
+        "electrical-rating",
+        help="Check LED overcurrent and capacitor voltage derating (advisory)",
+        description=(
+            "Read Vf/If_max/Voltage_Rating symbol fields from a schematic and "
+            "flag over-driven LEDs (I=(V_rail-Vf)/R_series > If_max) and "
+            "under-rated capacitors (rated_V < V_rail*(1+margin)). Parts "
+            "missing a rating field, or on an unknown rail, are skipped "
+            "(census-counted), never failed."
+        ),
+    )
+    elec_parser.add_argument(
+        "schematic",
+        help="Schematic file to analyze (.kicad_sch)",
+    )
+    elec_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    elec_parser.add_argument(
+        "--derate-margin",
+        type=float,
+        default=0.2,
+        help=(
+            "Capacitor voltage headroom fraction (default: 0.2; a cap on a "
+            "12V rail must be rated >= 14.4V)"
+        ),
+    )
+    elec_parser.add_argument(
+        "--led-default-vf",
+        type=float,
+        default=None,
+        metavar="VOLTS",
+        help=(
+            "Fallback LED forward voltage (V) for parts with If_max but no Vf "
+            "field. Default: skip such parts (zero false positives). When set, "
+            "the assumption is surfaced in the finding."
+        ),
+    )
+    elec_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    # Component-stress subcommand (operates on a schematic, not a PCB)
+    stress_parser = subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument(
+        "schematic",
+        help="Schematic file to analyze (.kicad_sch)",
+    )
+    stress_parser.add_argument(
+        "--states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
+    if argv is None:
+        argv = sys.argv[1:]
+
+    args = parser.parse_args(argv)
+
+    if not args.subcommand:
+        parser.print_help()
+        return 1
+
+    if args.subcommand == "congestion":
+        return _run_congestion_analysis(args)
+
+    if args.subcommand == "trace-lengths":
+        return _run_trace_lengths_analysis(args)
+
+    if args.subcommand == "signal-integrity":
+        return _run_signal_integrity_analysis(args)
+
+    if args.subcommand == "thermal":
+        return _run_thermal_analysis(args)
+
+    if args.subcommand == "complexity":
+        return _run_complexity_analysis(args)
+
+    if args.subcommand == "current-sense":
+        return _run_current_sense_analysis(args)
+
+    if args.subcommand == "electrical-rating":
+        return _run_electrical_rating_analysis(args)
+
+    if args.subcommand == "component-stress":
+        return _run_component_stress_analysis(args)
+
+    return 0
+
+
+def _run_congestion_analysis(args: argparse.Namespace) -> int:
+    """Run congestion analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = CongestionAnalyzer(grid_size=args.grid_size)
+    reports = analyzer.analyze(pcb)
+
+    # Filter by minimum severity
+    severity_order = {
+        "low": 0,
+        "medium": 1,
+        "high": 2,
+        "critical": 3,
+    }
+    min_severity = severity_order[args.min_severity]
+    reports = [r for r in reports if severity_order[r.severity.value] >= min_severity]
+
+    # Output results
+    if args.format == "json":
+        _output_json(reports)
+    else:
+        _output_text(reports, pcb_path.name, quiet=args.quiet)
+
+    # Return non-zero if critical issues found
+    has_critical = any(r.severity == Severity.CRITICAL for r in reports)
+    has_high = any(r.severity == Severity.HIGH for r in reports)
+
+    if has_critical:
+        return 2
+    elif has_high:
+        return 1
+    return 0
+
+
+def _output_json(reports: list) -> None:
+    """Output reports as JSON."""
+    output = {
+        "reports": [r.to_dict() for r in reports],
+        "summary": {
+            "total": len(reports),
+            "critical": sum(1 for r in reports if r.severity == Severity.CRITICAL),
+            "high": sum(1 for r in reports if r.severity == Severity.HIGH),
+            "medium": sum(1 for r in reports if r.severity == Severity.MEDIUM),
+            "low": sum(1 for r in reports if r.severity == Severity.LOW),
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_text(reports: list, filename: str, quiet: bool = False) -> None:
+    """Output reports as formatted text."""
+    console = Console()
+
+    if not reports:
+        if not quiet:
+            console.print(f"[green]No congestion issues found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Congestion Analysis: {filename}[/bold]\n")
+
+    # Summary table
+    summary_table = Table(title="Summary", show_header=False)
+    summary_table.add_column("Metric", style="dim")
+    summary_table.add_column("Value")
+
+    critical = sum(1 for r in reports if r.severity == Severity.CRITICAL)
+    high = sum(1 for r in reports if r.severity == Severity.HIGH)
+    medium = sum(1 for r in reports if r.severity == Severity.MEDIUM)
+    low = sum(1 for r in reports if r.severity == Severity.LOW)
+
+    summary_table.add_row("Total areas", str(len(reports)))
+    if critical > 0:
+        summary_table.add_row("Critical", f"[red]{critical}[/red]")
+    if high > 0:
+        summary_table.add_row("High", f"[yellow]{high}[/yellow]")
+    if medium > 0:
+        summary_table.add_row("Medium", f"[blue]{medium}[/blue]")
+    if low > 0:
+        summary_table.add_row("Low", str(low))
+
+    console.print(summary_table)
+    console.print()
+
+    # Detail for each report
+    for i, report in enumerate(reports, 1):
+        _print_report(console, report, i)
+
+
+def _print_report(console: Console, report, index: int) -> None:
+    """Print a single congestion report."""
+    # Severity color
+    severity_colors = {
+        Severity.CRITICAL: "red",
+        Severity.HIGH: "yellow",
+        Severity.MEDIUM: "blue",
+        Severity.LOW: "dim",
+    }
+    color = severity_colors[report.severity]
+
+    # Header
+    x, y = report.center
+    console.print(
+        f"[{color}][bold]{report.severity.value.upper()}[/bold][/{color}]: "
+        f"Area around ({x:.1f}, {y:.1f})"
+    )
+
+    # Metrics
+    console.print(f"  Track density: {report.track_density:.2f} mm/mm²")
+    console.print(f"  Vias: {report.via_count}")
+    if report.unrouted_connections > 0:
+        console.print(f"  Unrouted: {report.unrouted_connections} connection(s)")
+
+    # Components
+    if report.components:
+        comp_str = ", ".join(report.components[:5])
+        if len(report.components) > 5:
+            comp_str += f" (+{len(report.components) - 5} more)"
+        console.print(f"  Components: {comp_str}")
+
+    # Nets
+    if report.nets:
+        net_str = ", ".join(report.nets[:5])
+        if len(report.nets) > 5:
+            net_str += f" (+{len(report.nets) - 5} more)"
+        console.print(f"  Nets: {net_str}")
+
+    # Suggestions
+    if report.suggestions:
+        console.print("  [dim]Suggestions:[/dim]")
+        for suggestion in report.suggestions:
+            console.print(f"    • {suggestion}")
+
+    console.print()
+
+
+# ============================================================================
+# Trace Length Analysis
+# ============================================================================
+
+
+def _run_trace_lengths_analysis(args: argparse.Namespace) -> int:
+    """Run trace length analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = TraceLengthAnalyzer()
+
+    if args.nets:
+        # Analyze specific nets
+        reports = [analyzer.analyze_net(pcb, net) for net in args.nets]
+    elif args.all:
+        # Analyze all nets
+        reports = []
+        for net in pcb.nets.values():
+            if net.name:  # Skip unnamed nets
+                report = analyzer.analyze_net(pcb, net.name)
+                if report.total_length_mm > 0:  # Skip unrouted nets
+                    reports.append(report)
+        reports.sort(key=lambda r: r.net_name)
+    else:
+        # Analyze timing-critical nets (default)
+        reports = analyzer.analyze_all_critical(pcb, include_diff_pairs=args.diff_pairs)
+
+    # Find differential pairs for summary
+    diff_pairs = []
+    if args.diff_pairs and not args.nets:
+        diff_pairs = analyzer.find_differential_pairs(pcb)
+
+    # Output results
+    if args.format == "json":
+        _output_trace_lengths_json(reports, diff_pairs)
+    else:
+        _output_trace_lengths_text(reports, diff_pairs, pcb_path.name, quiet=args.quiet)
+
+    return 0
+
+
+def _output_trace_lengths_json(reports: list, diff_pairs: list[tuple[str, str]]) -> None:
+    """Output trace length reports as JSON."""
+    output = {
+        "nets": [r.to_dict() for r in reports],
+        "differential_pairs": [{"positive": p, "negative": n} for p, n in diff_pairs],
+        "summary": {
+            "total_nets": len(reports),
+            "differential_pairs": len(diff_pairs),
+            "total_length_mm": round(sum(r.total_length_mm for r in reports), 3),
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_trace_lengths_text(
+    reports: list,
+    diff_pairs: list[tuple[str, str]],
+    filename: str,
+    quiet: bool = False,
+) -> None:
+    """Output trace length reports as formatted text."""
+    console = Console()
+
+    if not reports:
+        if not quiet:
+            console.print(f"[dim]No timing-critical nets found in {filename}[/dim]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Trace Length Report: {filename}[/bold]\n")
+
+    # Main trace length table
+    table = Table(title="Trace Lengths")
+    table.add_column("Net", style="cyan")
+    table.add_column("Length", justify="right")
+    table.add_column("Vias", justify="right")
+    table.add_column("Layers", style="dim")
+    table.add_column("Target", justify="right", style="dim")
+    table.add_column("Delta", justify="right")
+
+    for report in reports:
+        # Format length
+        length_str = f"{report.total_length_mm:.2f}mm"
+
+        # Format layers
+        layers_str = ", ".join(sorted(report.layers_used)) if report.layers_used else "-"
+
+        # Format target and delta
+        target_str = "-"
+        delta_str = "-"
+
+        if report.target_length_mm is not None:
+            target_str = f"{report.target_length_mm:.2f}mm"
+            delta = report.length_delta_mm or 0
+            if report.within_tolerance:
+                delta_str = f"[green]{delta:+.2f}mm ✓[/green]"
+            else:
+                delta_str = f"[red]{delta:+.2f}mm ✗[/red]"
+
+        table.add_row(
+            report.net_name,
+            length_str,
+            str(report.via_count),
+            layers_str,
+            target_str,
+            delta_str,
+        )
+
+    console.print(table)
+
+    # Differential pairs table
+    pair_reports = [r for r in reports if r.pair_net]
+    if pair_reports:
+        console.print()
+
+        # Group pairs (only show each pair once)
+        shown_pairs: set[tuple[str, str]] = set()
+        pair_table = Table(title="Differential Pairs")
+        pair_table.add_column("Pair", style="cyan")
+        pair_table.add_column("P Length", justify="right")
+        pair_table.add_column("N Length", justify="right")
+        pair_table.add_column("Skew", justify="right")
+        pair_table.add_column("Status")
+
+        for report in pair_reports:
+            pair_key = tuple(sorted([report.net_name, report.pair_net or ""]))
+            if pair_key in shown_pairs:
+                continue
+            shown_pairs.add(pair_key)
+
+            # Find the partner report
+            partner = next((r for r in reports if r.net_name == report.pair_net), None)
+            if not partner:
+                continue
+
+            # Determine which is P and which is N
+            if report.net_name < (report.pair_net or ""):
+                p_report, n_report = report, partner
+            else:
+                p_report, n_report = partner, report
+
+            pair_name = f"{p_report.net_name} / {n_report.net_name}"
+            skew = report.skew_mm or 0
+
+            # Default skew tolerance of 2mm for USB (typical)
+            if skew < 2.0:
+                skew_str = f"[green]{skew:.2f}mm ✓[/green]"
+            elif skew < 5.0:
+                skew_str = f"[yellow]{skew:.2f}mm[/yellow]"
+            else:
+                skew_str = f"[red]{skew:.2f}mm ✗[/red]"
+
+            pair_table.add_row(
+                pair_name,
+                f"{p_report.total_length_mm:.2f}mm",
+                f"{n_report.total_length_mm:.2f}mm",
+                skew_str,
+                "Matched" if skew < 2.0 else "Check skew",
+            )
+
+        console.print(pair_table)
+
+    # Summary
+    console.print()
+    total_length = sum(r.total_length_mm for r in reports)
+    console.print(f"[dim]Total: {len(reports)} nets, {total_length:.2f}mm total trace length[/dim]")
+
+
+# ============================================================================
+# Signal Integrity Analysis
+# ============================================================================
+
+
+def _run_signal_integrity_analysis(args: argparse.Namespace) -> int:
+    """Run signal integrity analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = TraceIntegrityAnalyzer()
+
+    crosstalk_risks = []
+    impedance_discs = []
+
+    if not args.impedance_only:
+        crosstalk_risks = analyzer.analyze_crosstalk(pcb)
+
+        # Filter by minimum risk level
+        risk_order = {"low": 0, "medium": 1, "high": 2}
+        min_risk = risk_order[args.min_risk]
+        crosstalk_risks = [r for r in crosstalk_risks if risk_order[r.risk_level.value] >= min_risk]
+
+    if not args.crosstalk_only:
+        impedance_discs = analyzer.analyze_impedance(pcb)
+
+    # Output results
+    if args.format == "json":
+        _output_signal_integrity_json(crosstalk_risks, impedance_discs)
+    else:
+        _output_signal_integrity_text(
+            crosstalk_risks, impedance_discs, pcb_path.name, quiet=args.quiet
+        )
+
+    # Return non-zero if high-risk issues found
+    has_high_crosstalk = any(r.risk_level == RiskLevel.HIGH for r in crosstalk_risks)
+    has_severe_mismatch = any(d.mismatch_percent >= 25 for d in impedance_discs)
+
+    if has_high_crosstalk or has_severe_mismatch:
+        return 1
+    return 0
+
+
+def _output_signal_integrity_json(crosstalk_risks: list, impedance_discs: list) -> None:
+    """Output signal integrity reports as JSON."""
+    output = {
+        "crosstalk_risks": [r.to_dict() for r in crosstalk_risks],
+        "impedance_discontinuities": [d.to_dict() for d in impedance_discs],
+        "summary": {
+            "crosstalk": {
+                "total": len(crosstalk_risks),
+                "high": sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.HIGH),
+                "medium": sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.MEDIUM),
+                "low": sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.LOW),
+            },
+            "impedance": {
+                "total": len(impedance_discs),
+                "width_changes": sum(1 for d in impedance_discs if d.cause == "width_change"),
+                "vias": sum(1 for d in impedance_discs if d.cause == "via"),
+            },
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_signal_integrity_text(
+    crosstalk_risks: list,
+    impedance_discs: list,
+    filename: str,
+    quiet: bool = False,
+) -> None:
+    """Output signal integrity reports as formatted text."""
+    console = Console()
+
+    if not crosstalk_risks and not impedance_discs:
+        if not quiet:
+            console.print(f"[green]No signal integrity issues found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Signal Integrity Analysis: {filename}[/bold]\n")
+
+    # Crosstalk risks table
+    if crosstalk_risks:
+        _print_crosstalk_section(console, crosstalk_risks)
+
+    # Impedance discontinuities table
+    if impedance_discs:
+        if crosstalk_risks:
+            console.print()  # Spacing between sections
+        _print_impedance_section(console, impedance_discs)
+
+    # Summary
+    console.print()
+    console.print("[dim]Summary:[/dim]")
+    if crosstalk_risks:
+        high = sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.HIGH)
+        medium = sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.MEDIUM)
+        console.print(f"  Crosstalk: {len(crosstalk_risks)} risks ({high} high, {medium} medium)")
+    if impedance_discs:
+        severe = sum(1 for d in impedance_discs if d.mismatch_percent >= 25)
+        console.print(f"  Impedance: {len(impedance_discs)} discontinuities ({severe} severe)")
+
+
+def _print_crosstalk_section(console: Console, risks: list) -> None:
+    """Print crosstalk risks section."""
+    console.print("[bold]Crosstalk Risks:[/bold]\n")
+
+    for risk in risks:
+        # Color based on risk level
+        colors = {
+            RiskLevel.HIGH: "red",
+            RiskLevel.MEDIUM: "yellow",
+            RiskLevel.LOW: "dim",
+        }
+        color = colors[risk.risk_level]
+
+        console.print(
+            f"  [{color}][bold]{risk.risk_level.value.upper()}[/bold][/{color}]: "
+            f"{risk.aggressor_net} ↔ {risk.victim_net}"
+        )
+        console.print(
+            f"    Parallel: {risk.parallel_length_mm:.1f}mm at "
+            f"{risk.spacing_mm:.2f}mm spacing on {risk.layer}"
+        )
+        console.print(f"    Coupling: {risk.coupling_coefficient:.2f}")
+        if risk.suggestion:
+            console.print(f"    → {risk.suggestion}")
+        console.print()
+
+
+def _print_impedance_section(console: Console, discontinuities: list) -> None:
+    """Print impedance discontinuities section."""
+    console.print("[bold]Impedance Discontinuities:[/bold]\n")
+
+    for disc in discontinuities:
+        # Color based on severity
+        if disc.mismatch_percent >= 25:
+            color = "red"
+            severity = "SEVERE"
+        elif disc.mismatch_percent >= 15:
+            color = "yellow"
+            severity = "WARNING"
+        else:
+            color = "dim"
+            severity = "MINOR"
+
+        x, y = disc.position
+        console.print(
+            f"  [{color}][bold]{severity}[/bold][/{color}]: {disc.net} at ({x:.1f}, {y:.1f})"
+        )
+        console.print(
+            f"    {disc.impedance_before:.0f}Ω → {disc.impedance_after:.0f}Ω "
+            f"({disc.mismatch_percent:+.0f}% mismatch)"
+        )
+        console.print(f"    Cause: {disc.cause.replace('_', ' ')}")
+        console.print(f"    → {disc.suggestion}")
+        console.print()
+
+
+# ============================================================================
+# Thermal Analysis
+# ============================================================================
+
+
+def _run_thermal_analysis(args: argparse.Namespace) -> int:
+    """Run thermal analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = ThermalAnalyzer(
+        cluster_radius=args.cluster_radius,
+        min_power_w=args.min_power,
+    )
+    hotspots = analyzer.analyze(pcb)
+
+    # Output results
+    if args.format == "json":
+        _output_thermal_json(hotspots)
+    else:
+        _output_thermal_text(hotspots, pcb_path.name, quiet=args.quiet)
+
+    # Return non-zero if critical/hot issues found
+    has_critical = any(h.severity == ThermalSeverity.CRITICAL for h in hotspots)
+    has_hot = any(h.severity == ThermalSeverity.HOT for h in hotspots)
+
+    if has_critical:
+        return 2
+    elif has_hot:
+        return 1
+    return 0
+
+
+def _output_thermal_json(hotspots: list) -> None:
+    """Output thermal hotspots as JSON."""
+    output = {
+        "hotspots": [h.to_dict() for h in hotspots],
+        "summary": {
+            "total": len(hotspots),
+            "critical": sum(1 for h in hotspots if h.severity == ThermalSeverity.CRITICAL),
+            "hot": sum(1 for h in hotspots if h.severity == ThermalSeverity.HOT),
+            "warm": sum(1 for h in hotspots if h.severity == ThermalSeverity.WARM),
+            "ok": sum(1 for h in hotspots if h.severity == ThermalSeverity.OK),
+            "total_power_w": round(sum(h.total_power_w for h in hotspots), 3),
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_thermal_text(hotspots: list, filename: str, quiet: bool = False) -> None:
+    """Output thermal hotspots as formatted text."""
+    console = Console()
+
+    if not hotspots:
+        if not quiet:
+            console.print(f"[green]No thermal concerns found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Thermal Analysis: {filename}[/bold]\n")
+
+    # Summary table
+    summary_table = Table(title="Summary", show_header=False)
+    summary_table.add_column("Metric", style="dim")
+    summary_table.add_column("Value")
+
+    critical = sum(1 for h in hotspots if h.severity == ThermalSeverity.CRITICAL)
+    hot = sum(1 for h in hotspots if h.severity == ThermalSeverity.HOT)
+    warm = sum(1 for h in hotspots if h.severity == ThermalSeverity.WARM)
+    ok = sum(1 for h in hotspots if h.severity == ThermalSeverity.OK)
+    total_power = sum(h.total_power_w for h in hotspots)
+
+    summary_table.add_row("Total hotspots", str(len(hotspots)))
+    summary_table.add_row("Total power", f"{total_power:.2f}W")
+    if critical > 0:
+        summary_table.add_row("Critical", f"[red]{critical}[/red]")
+    if hot > 0:
+        summary_table.add_row("Hot", f"[yellow]{hot}[/yellow]")
+    if warm > 0:
+        summary_table.add_row("Warm", f"[blue]{warm}[/blue]")
+    if ok > 0:
+        summary_table.add_row("OK", str(ok))
+
+    console.print(summary_table)
+    console.print()
+
+    # Detail for each hotspot
+    for i, hotspot in enumerate(hotspots, 1):
+        _print_thermal_hotspot(console, hotspot, i)
+
+
+def _print_thermal_hotspot(console: Console, hotspot, index: int) -> None:
+    """Print a single thermal hotspot."""
+    # Severity color
+    severity_colors = {
+        ThermalSeverity.CRITICAL: "red",
+        ThermalSeverity.HOT: "yellow",
+        ThermalSeverity.WARM: "blue",
+        ThermalSeverity.OK: "green",
+    }
+    color = severity_colors[hotspot.severity]
+
+    # Header
+    x, y = hotspot.position
+    console.print(
+        f"[{color}][bold]{hotspot.severity.value.upper()}[/bold][/{color}]: "
+        f"Hotspot at ({x:.1f}, {y:.1f})"
+    )
+
+    # Power and temperature
+    console.print(f"  Total power: {hotspot.total_power_w:.2f}W")
+    console.print(f"  Est. temp rise: +{hotspot.max_temp_rise_c:.0f}°C")
+
+    # Heat sources
+    if hotspot.sources:
+        sources_str = ", ".join(f"{s.reference} ({s.power_w:.2f}W)" for s in hotspot.sources[:3])
+        if len(hotspot.sources) > 3:
+            sources_str += f" (+{len(hotspot.sources) - 3} more)"
+        console.print(f"  Sources: {sources_str}")
+
+    # Thermal relief
+    console.print(f"  Copper area: {hotspot.copper_area_mm2:.0f}mm²")
+    console.print(f"  Vias: {hotspot.via_count} (thermal: {hotspot.thermal_vias})")
+
+    # Suggestions
+    if hotspot.suggestions:
+        console.print("  [dim]Suggestions:[/dim]")
+        for suggestion in hotspot.suggestions:
+            console.print(f"    • {suggestion}")
+
+    console.print()
+
+
+# ============================================================================
+# Complexity Analysis
+# ============================================================================
+
+
+def _run_complexity_analysis(args: argparse.Namespace) -> int:
+    """Run complexity analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = ComplexityAnalyzer(grid_size=args.grid_size)
+    report = analyzer.analyze(pcb)
+
+    # Output results
+    if args.format == "json":
+        _output_complexity_json(report)
+    else:
+        _output_complexity_text(report, pcb_path.name, quiet=args.quiet)
+
+    # Return based on complexity
+    if report.complexity_rating in (ComplexityRating.EXTREME, ComplexityRating.COMPLEX):
+        return 1
+    return 0
+
+
+def _output_complexity_json(report) -> None:
+    """Output complexity report as JSON."""
+    print(json.dumps(report.to_dict(), indent=2))
+
+
+def _output_complexity_text(report, filename: str, quiet: bool = False) -> None:
+    """Output complexity report as formatted text."""
+    console = Console()
+
+    if not quiet:
+        console.print(f"\n[bold]Pre-Routing Complexity Analysis: {filename}[/bold]\n")
+
+    # Header with board info
+    console.print("=" * 60)
+    console.print("[bold]Board Information[/bold]")
+    console.print("=" * 60)
+    console.print(
+        f"Size: {report.board_width_mm:.1f}mm x {report.board_height_mm:.1f}mm "
+        f"({report.board_area_mm2:.0f} mm²)"
+    )
+    console.print()
+
+    # Metrics table
+    metrics_table = Table(title="Metrics", show_header=False)
+    metrics_table.add_column("Metric", style="dim")
+    metrics_table.add_column("Value")
+
+    metrics_table.add_row("Total pads", str(report.total_pads))
+    metrics_table.add_row("Total nets", str(report.total_nets))
+    pad_density = report.total_pads / report.board_area_mm2 if report.board_area_mm2 > 0 else 0
+    metrics_table.add_row("Pad density", f"{pad_density:.3f} pads/mm²")
+    metrics_table.add_row("Max region density", f"{report.max_pin_density:.3f} pads/mm²")
+    metrics_table.add_row("Estimated crossings", str(report.crossing_number))
+    if report.differential_pair_count > 0:
+        metrics_table.add_row("Differential pairs", str(report.differential_pair_count))
+    if report.high_speed_net_count > 0:
+        metrics_table.add_row("High-speed nets", str(report.high_speed_net_count))
+
+    console.print(metrics_table)
+    console.print()
+
+    # Complexity scores
+    console.print("=" * 60)
+    console.print("[bold]Complexity Scores[/bold]")
+    console.print("=" * 60)
+
+    def score_bar(score: float) -> str:
+        """Create a visual score bar."""
+        filled = int(score / 5)
+        return "#" * filled + "-" * (20 - filled)
+
+    score_colors = {
+        (0, 30): "green",
+        (30, 60): "yellow",
+        (60, 80): "red",
+        (80, 101): "red bold",
+    }
+
+    def get_color(score: float) -> str:
+        for (low, high), color in score_colors.items():
+            if low <= score < high:
+                return color
+        return "white"
+
+    console.print(
+        f"  Density:   [{get_color(report.density_score)}]"
+        f"[{score_bar(report.density_score)}][/{get_color(report.density_score)}] "
+        f"{report.density_score:.0f}/100"
+    )
+    console.print(
+        f"  Crossings: [{get_color(report.crossing_score)}]"
+        f"[{score_bar(report.crossing_score)}][/{get_color(report.crossing_score)}] "
+        f"{report.crossing_score:.0f}/100"
+    )
+    console.print(
+        f"  Channels:  [{get_color(100 - report.channel_score)}]"
+        f"[{score_bar(100 - report.channel_score)}][/{get_color(100 - report.channel_score)}] "
+        f"{100 - report.channel_score:.0f}/100"
+    )
+    console.print()
+
+    # Overall rating
+    rating_colors = {
+        ComplexityRating.TRIVIAL: "green",
+        ComplexityRating.SIMPLE: "green",
+        ComplexityRating.MODERATE: "yellow",
+        ComplexityRating.COMPLEX: "red",
+        ComplexityRating.EXTREME: "red bold",
+    }
+    rating_color = rating_colors[report.complexity_rating]
+    console.print(
+        f"  Overall:   [{rating_color}]{report.overall_score:.0f}/100 - "
+        f"{report.complexity_rating.value.upper()}[/{rating_color}]"
+    )
+    console.print()
+
+    # Layer predictions table
+    console.print("=" * 60)
+    console.print("[bold]Layer Predictions[/bold]")
+    console.print("=" * 60)
+
+    pred_table = Table()
+    pred_table.add_column("Layers", justify="center")
+    pred_table.add_column("Probability", justify="center")
+    pred_table.add_column("Recommended", justify="center")
+    pred_table.add_column("Notes", style="dim")
+
+    for pred in report.layer_predictions:
+        prob_pct = pred.success_probability * 100
+        if prob_pct >= 70:
+            prob_style = "green"
+        elif prob_pct >= 40:
+            prob_style = "yellow"
+        else:
+            prob_style = "red"
+
+        rec_str = "[green]Yes[/green]" if pred.recommended else "No"
+        pred_table.add_row(
+            str(pred.layer_count),
+            f"[{prob_style}]{prob_pct:.0f}%[/{prob_style}]",
+            rec_str,
+            pred.notes,
+        )
+
+    console.print(pred_table)
+    console.print()
+
+    console.print(
+        f"[bold]Recommendation: Start with {report.min_layers_predicted} layers"
+        + (" or use --auto-layers" if report.min_layers_predicted > 2 else "")
+        + "[/bold]"
+    )
+    console.print()
+
+    # Bottlenecks
+    if report.bottlenecks:
+        console.print("=" * 60)
+        console.print("[bold]Bottlenecks Identified[/bold]")
+        console.print("=" * 60)
+
+        for i, bottleneck in enumerate(report.bottlenecks[:5], 1):
+            x, y = bottleneck.position
+            console.print(f"  {i}. [cyan]{bottleneck.component_ref}[/cyan] at ({x:.1f}, {y:.1f})")
+            console.print(f"     {bottleneck.description}")
+            console.print(
+                f"     Pins: {bottleneck.pin_count}, "
+                f"Density: {bottleneck.pin_density:.2f} pins/mm², "
+                f"Channels: {bottleneck.available_channels}"
+            )
+
+        console.print()
+
+    # Recommendations
+    if report.recommendations and not quiet:
+        console.print("=" * 60)
+        console.print("[bold]Recommendations[/bold]")
+        console.print("=" * 60)
+
+        for rec in report.recommendations:
+            console.print(f"  • {rec}")
+
+        console.print()
+
+
+# ============================================================================
+# Current-Sense Analysis
+# ============================================================================
+
+
+def _run_current_sense_analysis(args: argparse.Namespace) -> int:
+    """Run current-sense / analog layout lint on a PCB.
+
+    Advisory: returns non-zero only when at least one sense net is FAIL, so
+    it can gate CI. File-not-found / load errors return 1.
+    """
+    from kicad_tools.analysis.current_sense import CurrentSenseAnalyzer
+
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    analyzer = CurrentSenseAnalyzer(
+        max_parallel_mm=args.max_parallel,
+        min_gap_mm=args.min_gap,
+        sense_nets=list(getattr(args, "sense_nets", []) or []),
+        hicur_nets=list(getattr(args, "hicur_nets", []) or []),
+        max_loop_area_mm2=getattr(args, "max_loop_area", 10.0),
+        sense_pairs=list(getattr(args, "sense_pairs", []) or []),
+        sense_return=getattr(args, "sense_return", None),
+        kelvin_tol_mm=getattr(args, "kelvin_tol", 0.05),
+        kelvin_pairs=list(getattr(args, "kelvin_pairs", []) or []),
+    )
+    results = analyzer.analyze(pcb)
+
+    if args.format == "json":
+        _output_current_sense_json(
+            results,
+            args.max_parallel,
+            args.min_gap,
+            getattr(args, "max_loop_area", 10.0),
+            getattr(args, "kelvin_tol", 0.05),
+        )
+    else:
+        _output_current_sense_text(
+            results,
+            pcb_path.name,
+            args.max_parallel,
+            args.min_gap,
+            getattr(args, "max_loop_area", 10.0),
+            getattr(args, "kelvin_tol", 0.05),
+            quiet=args.quiet,
+        )
+
+    # Non-zero exit when any Phase-1 parallel/gap FAIL, any loop-area FAIL, OR
+    # any Kelvin-tap FAIL is present (all three are CI-gateable). A null verdict
+    # (loop_status / kelvin_status None) does not gate.
+    if any(
+        r.status == "FAIL" or r.loop_status == "FAIL" or r.kelvin_status == "FAIL" for r in results
+    ):
+        return 1
+    return 0
+
+
+def _output_current_sense_json(
+    results: list,
+    max_parallel_mm: float,
+    min_gap_mm: float,
+    max_loop_area_mm2: float,
+    kelvin_tol_mm: float = 0.05,
+) -> None:
+    """Output current-sense census as JSON (mirrors signal-integrity JSON)."""
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    loop_fail_count = sum(1 for r in results if r.loop_status == "FAIL")
+    kelvin_fail_count = sum(1 for r in results if r.kelvin_status == "FAIL")
+    output = {
+        "census": [r.to_dict() for r in results],
+        "thresholds": {
+            "max_parallel_mm": max_parallel_mm,
+            "min_gap_mm": min_gap_mm,
+            "max_loop_area_mm2": max_loop_area_mm2,
+            "kelvin_tol_mm": kelvin_tol_mm,
+        },
+        "summary": {
+            "total": len(results),
+            "fail": fail_count,
+            "pass": len(results) - fail_count,
+            "loop_fail": loop_fail_count,
+            "kelvin_fail": kelvin_fail_count,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_current_sense_text(
+    results: list,
+    filename: str,
+    max_parallel_mm: float,
+    min_gap_mm: float,
+    max_loop_area_mm2: float,
+    kelvin_tol_mm: float = 0.05,
+    quiet: bool = False,
+) -> None:
+    """Output current-sense census as a formatted table."""
+    console = Console()
+
+    if not results:
+        if not quiet:
+            console.print(f"[green]No sense nets found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Current-Sense Layout Lint: {filename}[/bold]")
+        console.print(
+            f"[dim]FAIL when parallel-run >= {max_parallel_mm:.2f}mm AND "
+            f"gap <= {min_gap_mm:.2f}mm (same layer); "
+            f"loop FAIL when enclosed area > {max_loop_area_mm2:.2f}mm^2; "
+            f"Kelvin FAIL when tap is mid-trace (>{kelvin_tol_mm:.2f}mm from a "
+            f"force pad)[/dim]\n"
+        )
+
+    table = Table(show_header=True)
+    # Phase-1 columns (order preserved); loop_area_mm2 is appended (Phase 2);
+    # kelvin_status / kelvin_force_net are appended after that (Phase 3).
+    table.add_column("sense_net", style="cyan")
+    table.add_column("nearest_hicur_net")
+    table.add_column("layer")
+    table.add_column("max_parallel_mm", justify="right")
+    table.add_column("min_gap_mm", justify="right")
+    table.add_column("status", justify="center")
+    table.add_column("loop_area_mm2", justify="right")
+    table.add_column("kelvin_status", justify="center")
+    table.add_column("kelvin_force_net")
+
+    for r in results:
+        status_style = "red bold" if r.status == "FAIL" else "green"
+        nearest = r.nearest_hicur_net if r.nearest_hicur_net is not None else "-"
+        layer = r.layer if r.layer is not None else "-"
+        gap_str = "-" if r.min_gap_mm is None else f"{r.min_gap_mm:.3f}"
+        if r.loop_area_mm2 is None:
+            loop_str = "-"
+        else:
+            loop_style = "red bold" if r.loop_status == "FAIL" else "green"
+            loop_str = f"[{loop_style}]{r.loop_area_mm2:.3f}[/{loop_style}]"
+        if r.kelvin_status is None:
+            kelvin_str = "-"
+        else:
+            kelvin_style = "red bold" if r.kelvin_status == "FAIL" else "green"
+            kelvin_str = f"[{kelvin_style}]{r.kelvin_status}[/{kelvin_style}]"
+        kelvin_net = r.kelvin_force_net if r.kelvin_force_net is not None else "-"
+        table.add_row(
+            r.sense_net,
+            nearest,
+            layer,
+            f"{r.max_parallel_mm:.3f}",
+            gap_str,
+            f"[{status_style}]{r.status}[/{status_style}]",
+            loop_str,
+            kelvin_str,
+            kelvin_net,
+        )
+
+    console.print(table)
+
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    loop_fail_count = sum(1 for r in results if r.loop_status == "FAIL")
+    kelvin_fail_count = sum(1 for r in results if r.kelvin_status == "FAIL")
+    console.print()
+    summary_style = "red bold" if (fail_count or loop_fail_count or kelvin_fail_count) else "green"
+    console.print(
+        f"[{summary_style}]Total: {len(results)} sense nets, "
+        f"{fail_count} FAIL, {len(results) - fail_count} PASS "
+        f"({loop_fail_count} loop-area FAIL, {kelvin_fail_count} Kelvin FAIL)[/{summary_style}]"
+    )
+
+
+# ============================================================================
+# Electrical-Rating Analysis
+# ============================================================================
+
+
+def _run_electrical_rating_analysis(args: argparse.Namespace) -> int:
+    """Run LED-overcurrent + capacitor-derating lint on a schematic.
+
+    Advisory: returns non-zero only when at least one check is FAIL (so it can
+    gate CI). SKIP rows (missing field / unknown rail) never gate. File-not-
+    found / bad-suffix errors return 1.
+    """
+    from kicad_tools.analysis.electrical_rating import ElectricalRatingAnalyzer
+
+    sch_path = Path(args.schematic)
+
+    if not sch_path.exists():
+        print(f"Error: File not found: {sch_path}", file=sys.stderr)
+        return 1
+
+    if sch_path.suffix != ".kicad_sch":
+        print(f"Error: Expected .kicad_sch file, got: {sch_path.suffix}", file=sys.stderr)
+        return 1
+
+    analyzer = ElectricalRatingAnalyzer(
+        derate_margin=args.derate_margin,
+        led_default_vf=args.led_default_vf,
+    )
+    results = analyzer.analyze(sch_path)
+
+    if args.format == "json":
+        _output_electrical_rating_json(results, args.derate_margin)
+    else:
+        _output_electrical_rating_text(results, sch_path.name, args.derate_margin, quiet=args.quiet)
+
+    if any(r.status == "FAIL" for r in results):
+        return 1
+    return 0
+
+
+def _output_electrical_rating_json(results: list, derate_margin: float) -> None:
+    """Output electrical-rating census as JSON (mirrors sibling analyzers)."""
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    skip_count = sum(1 for r in results if r.status == "SKIP")
+    pass_count = sum(1 for r in results if r.status == "PASS")
+    output = {
+        "census": [r.to_dict() for r in results],
+        "parameters": {"derate_margin": derate_margin},
+        "summary": {
+            "total": len(results),
+            "checked": pass_count + fail_count,
+            "pass": pass_count,
+            "fail": fail_count,
+            "skipped": skip_count,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_electrical_rating_text(
+    results: list,
+    filename: str,
+    derate_margin: float,
+    quiet: bool = False,
+) -> None:
+    """Output electrical-rating census as a formatted table + summary line."""
+    console = Console()
+
+    if not results:
+        if not quiet:
+            console.print(f"[green]No LEDs or capacitors with ratings found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Electrical-Rating Lint: {filename}[/bold]")
+        console.print(
+            "[dim]LED FAIL when I=(V_rail-Vf)/R_series > If_max; "
+            f"cap FAIL when rated_V < V_rail*(1+{derate_margin:.2f}). "
+            "SKIP = missing rating field or unknown rail (never a FAIL).[/dim]\n"
+        )
+
+    table = Table(show_header=True)
+    table.add_column("ref", style="cyan")
+    table.add_column("check")
+    table.add_column("rail")
+    table.add_column("V_rail", justify="right")
+    table.add_column("detail")
+    table.add_column("status", justify="center")
+
+    for r in results:
+        if r.status == "FAIL":
+            status_style = "red bold"
+        elif r.status == "PASS":
+            status_style = "green"
+        else:
+            status_style = "yellow"
+        rail = r.rail_net if r.rail_net is not None else "-"
+        vrail = "-" if r.rail_voltage_v is None else f"{r.rail_voltage_v:.2f}"
+
+        if r.check == "led_overcurrent":
+            if r.current_a is not None:
+                detail = f"I={r.current_a * 1000:.2f}mA vs If_max={r.if_max_a * 1000:.2f}mA"
+            else:
+                detail = r.reason or "-"
+        else:
+            if r.rated_voltage_v is not None and r.required_voltage_v is not None:
+                detail = f"rated={r.rated_voltage_v:.1f}V vs need>={r.required_voltage_v:.2f}V"
+            else:
+                detail = r.reason or "-"
+
+        table.add_row(
+            r.reference,
+            r.check,
+            rail,
+            vrail,
+            detail,
+            f"[{status_style}]{r.status}[/{status_style}]",
+        )
+
+    console.print(table)
+
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    skip_count = sum(1 for r in results if r.status == "SKIP")
+    checked = len(results) - skip_count
+    console.print()
+    summary_style = "red bold" if fail_count else "green"
+    console.print(
+        f"[{summary_style}]checked={checked}  fail={fail_count}  "
+        f"skipped={skip_count} (no rating field / unknown rail)[/{summary_style}]"
+    )
+
+
+def _run_component_stress_analysis(args: argparse.Namespace) -> int:
+    """Run the operating-state MOSFET VDS/VGS stress gate on a schematic.
+
+    Returns non-zero when any row FAILs, and (by default) when any row is
+    UNRESOLVED -- an unknown state or an unsourced rating is a visible release
+    blocker, not a quiet pass. ``--allow-unresolved`` downgrades the latter.
+    File-not-found / bad-suffix / malformed-manifest errors return 1.
+    """
+    from kicad_tools.analysis.component_stress import (
+        ComponentStressAnalyzer,
+        OperatingStateManifest,
+    )
+
+    sch_path = Path(args.schematic)
+
+    if not sch_path.exists():
+        print(f"Error: File not found: {sch_path}", file=sys.stderr)
+        return 1
+
+    if sch_path.suffix != ".kicad_sch":
+        print(f"Error: Expected .kicad_sch file, got: {sch_path.suffix}", file=sys.stderr)
+        return 1
+
+    try:
+        manifest = OperatingStateManifest.load(args.states)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Error: invalid operating-state manifest: {exc}", file=sys.stderr)
+        return 1
+
+    analyzer = ComponentStressAnalyzer(
+        manifest,
+        require_rating_source=not args.allow_uncited_ratings,
+    )
+    results = analyzer.analyze(sch_path)
+
+    if args.format == "json":
+        _output_component_stress_json(results, manifest)
+    else:
+        _output_component_stress_text(results, sch_path.name, manifest, quiet=args.quiet)
+
+    # A failed analysis is not a user-waivable gap in declared operating data.
+    if any(r.check == "analysis" for r in results):
+        return 1
+    if any(r.status == "FAIL" for r in results):
+        return 1
+    if not args.allow_unresolved and any(r.status == "UNRESOLVED" for r in results):
+        return 1
+    return 0
+
+
+def _output_component_stress_json(results: list, manifest) -> None:
+    """Output the component-stress census as JSON (mirrors sibling analyzers)."""
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    unresolved_count = sum(1 for r in results if r.status == "UNRESOLVED")
+    pass_count = sum(1 for r in results if r.status == "PASS")
+    output = {
+        "census": [r.to_dict() for r in results],
+        "parameters": {
+            "states_manifest": manifest.source_path,
+            "declared_states": sorted(manifest.states),
+            "required_states": list(manifest.required_states),
+            "missing_states": [s for s in manifest.required_states if s not in manifest.states],
+        },
+        "summary": {
+            "total": len(results),
+            "checked": pass_count + fail_count,
+            "pass": pass_count,
+            "fail": fail_count,
+            "unresolved": unresolved_count,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_component_stress_text(
+    results: list,
+    filename: str,
+    manifest,
+    quiet: bool = False,
+) -> None:
+    """Output the component-stress census as a formatted table + summary line."""
+    console = Console()
+
+    if not results:
+        if not quiet:
+            console.print(f"[green]No MOSFETs with stress data found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Operating-State Component Stress: {filename}[/bold]")
+        console.print(
+            "[dim]VDS=V(D)-V(S) and VGS=V(G)-V(S) are evaluated per declared state; "
+            "FAIL when |stress| > the sourced absolute-maximum rating. UNRESOLVED = "
+            "undeclared state, unresolved pin role, unbound terminal or missing "
+            "source-backed rating (never a pass).[/dim]\n"
+        )
+
+    table = Table(show_header=True)
+    table.add_column("ref", style="cyan")
+    table.add_column("mpn")
+    table.add_column("state")
+    table.add_column("check")
+    table.add_column("nets (high - low)")
+    table.add_column("stress", justify="right")
+    table.add_column("rated", justify="right")
+    table.add_column("margin", justify="right")
+    table.add_column("status", justify="center")
+
+    for r in results:
+        if r.status == "FAIL":
+            status_style = "red bold"
+        elif r.status == "PASS":
+            status_style = "green"
+        else:
+            status_style = "yellow"
+
+        if r.high_net and r.low_net:
+            terminals = f"{r.high_net} - {r.low_net}"
+        else:
+            terminals = f"{r.high_terminal} - {r.low_terminal}"
+        stress = "-" if r.stress_v is None else f"{r.stress_v:.2f}V"
+        rated = "-" if r.rated_v is None else f"{r.rated_v:.1f}V"
+        margin = "-" if r.margin_v is None else f"{r.margin_v:.2f}V"
+
+        table.add_row(
+            r.reference,
+            r.mpn or "-",
+            r.state,
+            r.check,
+            terminals,
+            stress,
+            rated,
+            margin,
+            f"[{status_style}]{r.status}[/{status_style}]",
+        )
+
+    console.print(table)
+
+    unresolved = [r for r in results if r.status == "UNRESOLVED"]
+    if unresolved and not quiet:
+        console.print("\n[yellow]Unresolved rows (each is a release blocker):[/yellow]")
+        grouped: dict[tuple[str, str], int] = {}
+        for r in unresolved:
+            key = (r.reference, r.reason or "unresolved")
+            grouped[key] = grouped.get(key, 0) + 1
+        for (ref, reason), count in grouped.items():
+            suffix = f" ({count} rows)" if count > 1 else ""
+            console.print(f"[dim]  {ref}: {reason}{suffix}[/dim]")
+
+    missing = [s for s in manifest.required_states if s not in manifest.states]
+    if missing and not quiet:
+        console.print(
+            f"\n[yellow]Coverage gap: required state(s) not declared: {', '.join(missing)}[/yellow]"
+        )
+
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    unresolved_count = len(unresolved)
+    checked = len(results) - unresolved_count
+    console.print()
+    summary_style = "red bold" if (fail_count or unresolved_count) else "green"
+    console.print(
+        f"[{summary_style}]checked={checked}  fail={fail_count}  "
+        f"unresolved={unresolved_count} (undeclared state / pin role / "
+        f"unsourced rating)[/{summary_style}]"
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

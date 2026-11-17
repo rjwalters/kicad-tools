@@ -1,0 +1,518 @@
+"""
+BOM enrichment with LCSC part numbers.
+
+Populates missing LCSC part numbers in BOM items by searching the
+LCSC/JLCPCB parts catalog using component values and footprints.
+
+Uses the existing ``PartSuggester`` engine which handles:
+- Value + footprint search term construction
+- Package-size filtering
+- Basic > Preferred > Extended part ranking
+- Confidence scoring
+- LCSC API rate limiting and caching
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from ..cost.suggest import PartSuggester
+from ..parts.cache import PartsCache
+from ..parts.lcsc import LCSCDependencyMissingError, LCSCForbiddenError
+from .lcsc_value_check import (
+    check_lcsc_against_cache,
+    find_package_mismatch,
+    find_value_mismatch,
+)
+
+if TYPE_CHECKING:
+    from ..schema.bom import BOMItem
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EnrichmentEntry:
+    """Record of an LCSC enrichment for a single BOM group."""
+
+    value: str
+    footprint: str
+    references: list[str]
+    lcsc_part: str  # The assigned LCSC part number (empty if unmatched)
+    source: str  # "schematic" | "spec" | "auto" | "cache" | "unmatched" | "spec_unresolved"
+    confidence: float = 0.0
+    part_type: str = ""  # "Basic" | "Pref" | "Ext" | ""
+    error: str = ""
+    inventory: dict = field(default_factory=dict)
+
+
+@dataclass
+class EnrichmentReport:
+    """Summary of BOM enrichment results."""
+
+    entries: list[EnrichmentEntry] = field(default_factory=list)
+
+    @property
+    def total_groups(self) -> int:
+        """Total number of component groups processed."""
+        return len(self.entries)
+
+    @property
+    def already_populated(self) -> int:
+        """Groups that already had LCSC numbers from the schematic."""
+        return len([e for e in self.entries if e.source == "schematic"])
+
+    @property
+    def spec_populated(self) -> int:
+        """Groups that already had LCSC numbers from the project spec."""
+        return len([e for e in self.entries if e.source == "spec"])
+
+    @property
+    def auto_matched(self) -> int:
+        """Groups that were auto-matched via LCSC search."""
+        return len([e for e in self.entries if e.source == "auto"])
+
+    @property
+    def cache_matched(self) -> int:
+        """Groups matched from stale cache when API was unavailable."""
+        return len([e for e in self.entries if e.source == "cache"])
+
+    @property
+    def unmatched(self) -> int:
+        """Groups that could not be matched."""
+        return len([e for e in self.entries if e.source == "unmatched"])
+
+    @property
+    def unmatched_entries(self) -> list[EnrichmentEntry]:
+        """Get the entries that could not be matched."""
+        return [e for e in self.entries if e.source == "unmatched"]
+
+    @property
+    def spec_unresolved(self) -> int:
+        """Groups with an explicit spec/CSV-assigned MPN but no LCSC.
+
+        Distinct from :attr:`unmatched`: these were never sent to the
+        generic (value, footprint) auto-matcher at all -- the explicit
+        supplier/MPN sourcing intent from the project spec (or a preserved
+        CSV assignment) was honored by leaving the LCSC field unresolved
+        instead of guessing (issue #4995).
+        """
+        return len([e for e in self.entries if e.source == "spec_unresolved"])
+
+    @property
+    def spec_unresolved_entries(self) -> list[EnrichmentEntry]:
+        """Get entries with an explicit MPN/supplier but no LCSC assigned."""
+        return [e for e in self.entries if e.source == "spec_unresolved"]
+
+    def summary_lines(self) -> list[str]:
+        """Return human-readable summary lines."""
+        parts = [f"{self.auto_matched} auto-matched"]
+        if self.cache_matched:
+            parts.append(f"{self.cache_matched} from cache")
+        if self.spec_populated:
+            parts.append(f"{self.spec_populated} from spec")
+        if self.spec_unresolved:
+            parts.append(f"{self.spec_unresolved} explicitly sourced (no LCSC)")
+        parts.append(f"{self.already_populated} from schematic")
+        parts.append(f"{self.unmatched} unmatched")
+        lines = [f"LCSC enrichment: {', '.join(parts)}"]
+        if any(
+            e.source in ("auto", "cache") and not e.inventory.get("stock_verified", False)
+            for e in self.entries
+        ):
+            lines.append(
+                "Stock unverified for identity matches; refresh live inventory before ordering."
+            )
+        if self.unmatched_entries:
+            lines.append("Unmatched parts:")
+            for entry in self.unmatched_entries:
+                refs = ", ".join(entry.references)
+                reason = f" ({entry.error})" if entry.error else ""
+                lines.append(f"  {entry.value} [{entry.footprint}] ({refs}){reason}")
+        if self.spec_unresolved_entries:
+            lines.append("Explicitly-sourced parts left unresolved (no LCSC):")
+            for entry in self.spec_unresolved_entries:
+                refs = ", ".join(entry.references)
+                lines.append(f"  {entry.value} [{entry.footprint}] ({refs})")
+        return lines
+
+
+def enrich_bom_lcsc(
+    items: list[BOMItem],
+    *,
+    prefer_basic: bool = True,
+    min_stock: int = 100,
+    spec_refs: set[str] | None = None,
+    exempt_refs: set[str] | None = None,
+) -> EnrichmentReport:
+    """
+    Populate missing LCSC part numbers on BOM items in-place.
+
+    For each unique (value, footprint) group that lacks an LCSC number,
+    searches the LCSC catalog using :class:`PartSuggester` and writes
+    the best match back onto every ``BOMItem`` in that group.
+
+    Items that already have an ``lcsc`` value are left untouched.
+
+    Degraded-mode determinism contract (issue #3935)
+    ------------------------------------------------
+    When the JLCPCB API is unavailable it responds with 403 Forbidden.
+    On the first such response this function trips a circuit breaker
+    (``api_forbidden``) and resolves every remaining group from the
+    enrichment cache via :func:`_try_cache_fallback`.  This degraded path
+    is **deterministic for a fixed input and a fixed cache state**: two
+    successive calls with the same ``items`` and the same enrichment
+    cache produce byte-identical :class:`EnrichmentReport` outputs (same
+    entries, sources, ``lcsc_part`` values, and order).  This holds
+    because the fallback only performs pure SQLite reads
+    (``get_enrichment_match(..., ignore_expiry=True)``) and never mutates
+    the cache in the API-forbidden path.
+
+    The *observed* nondeterminism reported in issue #3935 (match counts
+    drifting 8 -> 9 -> 10 across "identical" runs) is not a property of a
+    single call: it arises because the cache **accumulates** matches
+    across runs when the live API is sporadically reachable.  A run that
+    reaches the API writes new ``enrichment_matches`` rows
+    (``source="auto"``); a later API-forbidden run then serves those rows
+    as ``source="cache"``.  The determinism guaranteed here is therefore
+    conditional on the cache state being held constant -- pin the LCSC
+    mapping in the project spec (or a committed lockfile) if you need
+    reproducibility that is independent of local cache warmth.
+
+    Args:
+        items: List of BOM items to enrich (modified in place).
+        prefer_basic: Prefer JLCPCB Basic parts (no extra assembly fee).
+        min_stock: Minimum stock level to consider a part viable.
+        spec_refs: Set of reference designators the project spec overlay
+            (or a preserved CSV assignment) explicitly resolved -- either
+            by populating ``lcsc`` directly (reported with
+            ``source="spec"`` instead of ``"schematic"``), or by setting an
+            explicit ``mpn`` with no ``lcsc`` (an explicit non-LCSC
+            supplier selection). For the latter case, membership in
+            ``spec_refs`` also **skips** the generic (value, footprint)
+            auto-match entirely -- those references are reported with
+            ``source="spec_unresolved"`` instead of being sent to
+            :class:`~kicad_tools.cost.suggest.PartSuggester` (issue #4995:
+            a generic auto-match must never silently override an
+            explicitly-declared, non-LCSC manufacturer part).
+
+    Returns:
+        EnrichmentReport summarising what was matched.
+    """
+    report = EnrichmentReport()
+
+    # Group items by (value, footprint) to avoid duplicate searches
+    groups: dict[tuple[str, str], list[BOMItem]] = {}
+    for item in items:
+        if getattr(item, "dnp", False):
+            continue
+        if getattr(item, "is_virtual", False):
+            continue
+        key = (item.value, item.footprint)
+        groups.setdefault(key, []).append(item)
+
+    api_forbidden = False
+    forbidden_error = "JLCPCB API unavailable (403)"
+
+    def _try_cache_fallback(
+        cache: PartsCache | None,
+        value: str,
+        footprint: str,
+        refs: list[str],
+        group_items: list[BOMItem],
+    ) -> EnrichmentEntry:
+        """Attempt to resolve a part from the enrichment cache.
+
+        Returns an ``EnrichmentEntry`` with ``source="cache"`` on hit,
+        or ``source="unmatched"`` on miss.
+        """
+        if cache is not None:
+            match = cache.get_enrichment_match(value, footprint, ignore_expiry=True)
+            if match is not None:
+                lcsc = match["lcsc_part"]
+
+                # Validate the cached part's known parametric value and
+                # package against the requested BOM row before trusting
+                # a stale entry (issue #3590: C1525/100nF assigned to a
+                # 16nF row; issue #3597: C1525/0402 assigned to 0805
+                # footprints -- both from poisoned cache entries).
+                first_ref = refs[0] if refs else ""
+                mismatch = check_lcsc_against_cache(
+                    cache, lcsc, value, first_ref, footprint=footprint
+                )
+                if mismatch is not None:
+                    cache.delete_enrichment_match(value, footprint)
+                    logger.warning(
+                        "Rejecting cached LCSC match %s for %s [%s]: %s "
+                        "-- evicted poisoned cache entry",
+                        lcsc,
+                        value,
+                        footprint,
+                        mismatch.describe(),
+                    )
+                    return EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part="",
+                        source="unmatched",
+                        error=(f"cached match {lcsc} rejected: {mismatch.describe()}"),
+                    )
+
+                for it in group_items:
+                    it.lcsc = lcsc
+                # WARNING, not INFO: ignore_expiry=True is a degraded
+                # mode that explicitly accepts stale data.
+                logger.warning(
+                    "Cache fallback %s [%s] -> %s "
+                    "(stale cache; API unavailable -- verify before fab)",
+                    value,
+                    footprint,
+                    lcsc,
+                )
+                cached_part = cache.get(lcsc, ignore_expiry=True)
+                return EnrichmentEntry(
+                    inventory=cached_part.inventory_provenance() if cached_part is not None else {},
+                    value=value,
+                    footprint=footprint,
+                    references=refs,
+                    lcsc_part=lcsc,
+                    source="cache",
+                    confidence=match["confidence"],
+                    part_type=match["part_type"],
+                )
+        return EnrichmentEntry(
+            value=value,
+            footprint=footprint,
+            references=refs,
+            lcsc_part="",
+            source="unmatched",
+            error=forbidden_error,
+        )
+
+    with PartSuggester(
+        prefer_basic=prefer_basic,
+        min_stock=min_stock,
+    ) as suggester:
+        # Obtain the parts cache from the underlying LCSC client so we
+        # can store and retrieve enrichment matches.
+        cache: PartsCache | None = None
+        client = suggester._get_client()
+        if client is not None:
+            cache = client.cache
+
+        for (value, footprint), group_items in groups.items():
+            refs = [it.reference for it in group_items]
+
+            # Separate explicit non-LCSC selections before any existing-part,
+            # generic search, or cache propagation. Protection belongs to the
+            # selected references, not every item sharing value/footprint.
+            explicit_refs = spec_refs or set()
+
+            # Refs the spec declares ``exempt`` (consigned / non-LCSC) must
+            # never receive a number via sibling propagation or a catalog
+            # match (#8282); split them out before either can run.
+            exempt = [it for it in group_items if exempt_refs and it.reference in exempt_refs]
+            if exempt:
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=[it.reference for it in exempt],
+                        lcsc_part="",
+                        source="spec_exempt",
+                    )
+                )
+                group_items = [it for it in group_items if it not in exempt]
+                refs = [it.reference for it in group_items]
+                if not group_items:
+                    continue
+
+            protected = [
+                it for it in group_items if it.reference in explicit_refs and it.mpn and not it.lcsc
+            ]
+            if protected:
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=[it.reference for it in protected],
+                        lcsc_part="",
+                        source="spec_unresolved",
+                        error=(
+                            "explicit MPN set via project spec/CSV with no "
+                            "LCSC -- left unresolved to preserve declared supplier"
+                        ),
+                    )
+                )
+                group_items = [it for it in group_items if it not in protected]
+                refs = [it.reference for it in group_items]
+                if not group_items:
+                    continue
+
+            existing_lcsc = next((it.lcsc for it in group_items if it.lcsc), "")
+            if existing_lcsc:
+                for it in group_items:
+                    if not it.lcsc:
+                        it.lcsc = existing_lcsc
+
+                # A shared value/footprint does not confer spec provenance.
+                # Also preserve/report different already-assigned LCSC IDs.
+                assignments: dict[tuple[str, str], list[str]] = {}
+                for it in group_items:
+                    source = "spec" if it.reference in explicit_refs else "schematic"
+                    assignments.setdefault((it.lcsc, source), []).append(it.reference)
+                for (lcsc, source), assigned_refs in assignments.items():
+                    report.entries.append(
+                        EnrichmentEntry(
+                            value=value,
+                            footprint=footprint,
+                            references=assigned_refs,
+                            lcsc_part=lcsc,
+                            source=source,
+                        )
+                    )
+                continue
+
+            # If the API is known to be forbidden, try the cache before
+            # marking as unmatched.
+            if api_forbidden:
+                report.entries.append(
+                    _try_cache_fallback(cache, value, footprint, refs, group_items)
+                )
+                continue
+
+            # Use the first reference for type hinting (R1 -> resistor, etc.)
+            first_ref = refs[0] if refs else ""
+
+            try:
+                suggestion = suggester.suggest_for_component(
+                    reference=first_ref,
+                    value=value,
+                    footprint=footprint,
+                    existing_lcsc=None,
+                )
+            except LCSCDependencyMissingError:
+                # The optional ``parts`` extra (``requests``) is absent, so
+                # the LCSC matcher cannot run for ANY group.  Short-circuit
+                # on the first occurrence and re-raise instead of recording
+                # a full pass of misleadingly-worded "no LCSC match" entries
+                # with an empty ``LCSC Part #`` column.  Callers surface this
+                # as a hard, actionable failure with the install hint
+                # (issue #4104).  Distinct from LCSCForbiddenError, which is
+                # a transient/global API state that legitimately falls back
+                # to the offline cache.
+                raise
+            except LCSCForbiddenError:
+                # API is globally unavailable -- emit a single warning and
+                # fall back to cache for this and all remaining groups.
+                api_forbidden = True
+                logger.warning(
+                    "JLCPCB API returned 403 Forbidden -- "
+                    "falling back to enrichment cache for remaining groups. "
+                    "Use --no-auto-lcsc to suppress."
+                )
+                report.entries.append(
+                    _try_cache_fallback(cache, value, footprint, refs, group_items)
+                )
+                continue
+
+            if suggestion.has_suggestion:
+                best = suggestion.best_suggestion
+                assert best is not None  # guarded by has_suggestion
+                lcsc = best.lcsc_part
+
+                # Validate the suggested part's value and package
+                # against the BOM row before applying/caching (issue
+                # #3590: a wrong API match cached without validation
+                # poisons every later offline export; issue #3597: a
+                # right-value/wrong-package match is just as fatal).
+                mismatch = find_value_mismatch(value, first_ref, part_description=best.description)
+                if mismatch is None:
+                    mismatch = find_package_mismatch(
+                        footprint,
+                        first_ref,
+                        part_package=best.package,
+                        part_description=best.description,
+                        part_mfr=best.mfr_part,
+                    )
+                if mismatch is None:
+                    mismatch = check_lcsc_against_cache(
+                        cache, lcsc, value, first_ref, footprint=footprint
+                    )
+                if mismatch is not None:
+                    logger.warning(
+                        "Rejecting LCSC auto-match %s for %s [%s]: %s",
+                        lcsc,
+                        value,
+                        footprint,
+                        mismatch.describe(),
+                    )
+                    report.entries.append(
+                        EnrichmentEntry(
+                            value=value,
+                            footprint=footprint,
+                            references=refs,
+                            lcsc_part="",
+                            source="unmatched",
+                            error=(f"auto-match {lcsc} rejected: {mismatch.describe()}"),
+                        )
+                    )
+                    continue
+
+                # Write back to all items in the group
+                for it in group_items:
+                    it.lcsc = lcsc
+
+                # Store the match in the enrichment cache for offline use
+                if cache is not None:
+                    cache.put_enrichment_match(
+                        value,
+                        footprint,
+                        lcsc,
+                        confidence=best.confidence,
+                        part_type=best.type_str,
+                    )
+
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part=lcsc,
+                        source="auto",
+                        confidence=best.confidence,
+                        part_type=best.type_str,
+                        inventory=best.inventory,
+                    )
+                )
+                logger.info(
+                    "Auto-matched %s [%s] -> %s (%s, confidence=%.2f)",
+                    value,
+                    footprint,
+                    lcsc,
+                    best.type_str,
+                    best.confidence,
+                )
+            else:
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part="",
+                        source="unmatched",
+                        error=suggestion.error or "no matching parts found",
+                    )
+                )
+                logger.warning(
+                    "No LCSC match for %s [%s] (%s): %s",
+                    value,
+                    footprint,
+                    ", ".join(refs),
+                    suggestion.error or "no matching parts found",
+                )
+
+    return report

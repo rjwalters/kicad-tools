@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# test-sync-labels-check.sh - Unit tests for sync-labels.sh's --check flag
+# (#6716).
+#
+# Why --check exists: nothing previously re-verified that a fleet repo's LIVE
+# forge label set still matched .github/labels.yml after install --
+# kicad-tools drifted 3 loom:operator* labels missing, silently corrupting a
+# downstream operator census tool's bucketing (#6716). sync-labels.sh already
+# had the additive, non-destructive create/update machinery; --check adds a
+# read-only report mode resync-installed.sh can call to detect the drift
+# before deciding whether to invoke the (already-existing, unchanged) mutating
+# path to fix it.
+#
+# This is a black-box test: sync-labels.sh is a full CLI script, so we stub
+# `gh` on PATH (the same stub shape as test-sync-labels-repo-flag.sh, plus a
+# `label list --json name,color,description` case --check depends on), run
+# the real script as a subprocess, and assert on exit codes, stdout/stderr,
+# and the recorded `gh` argv log.
+#
+# The load-bearing assertions:
+#   1. Fully in sync -> exit 0, no gh mutation call, reports "all in sync".
+#   2. A declared label missing on the live repo -> exit 3, reported as
+#      MISSING, no gh label create/edit/delete call (report-only).
+#   3. A declared label present but with a stale color/description -> exit 3,
+#      reported as STALE, still no mutation.
+#   4. An unrecognized loom:-prefixed label present live but undeclared ->
+#      exit 3, reported as an UNKNOWN EXTRA -- and never deleted.
+#   5. A non-loom:-prefixed extra (e.g. a repo's own custom label) is not
+#      reported at all -- --check only cares about the loom:* surface.
+#   6. --check composes with --repo (retargets the read, same as the mutating
+#      path already does).
+#   7. --check is entirely read-only: exactly one `gh label list` call, zero
+#      `gh label create/edit/delete` calls, in every scenario above.
+#   8. A forge lookup failure (`gh label list` itself fails) is a loud error,
+#      exit 1 -- distinct from the "drift found" exit 3.
+#   9. --help documents --check.
+#
+# Usage:
+#   ./defaults/scripts/tests/test-sync-labels-check.sh
+
+set -uo pipefail
+
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
+SLS="$SCRIPTS_DIR/sync-labels.sh"
+
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+
+
+if [[ ! -x "$SLS" ]]; then
+    echo -e "${RED}FATAL${NC}: $SLS not found or not executable" >&2
+    exit 2
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP" 2>/dev/null || true' EXIT
+
+STUB_DIR="$TMP/stub"
+mkdir -p "$STUB_DIR"
+
+# --- Stub gh on PATH ---------------------------------------------------------
+# Appends every invocation's argv to $LOOM_TEST_GH_LOG (one line per call).
+#
+#   gh repo view <NWO> ...        -> the --repo preflight (unused by --check,
+#                                     which never mutates, but exercised here
+#                                     to prove --check skips it too)
+#   gh repo view ... (no target)  -> NWO resolution (no-flag path)
+#   gh label list --json name --jq '.[].name' ...
+#                                  -> the legacy "does this ONE label exist"
+#                                     probe used by the mutating sync path
+#   gh label list --json name,color,description --jq ... --limit ...
+#                                  -> the --check snapshot: echoes
+#                                     $LOOM_TEST_GH_LABELS verbatim (already
+#                                     TSV: name<TAB>color<TAB>description, one
+#                                     per line), or fails when
+#                                     LOOM_TEST_GH_LABELS_FAIL=1
+#   gh label create|edit|delete   -> exit 0 (should never be called by
+#                                     --check; asserted against directly)
+cat > "$STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${LOOM_TEST_GH_LOG:?stub gh: LOOM_TEST_GH_LOG not set}"
+
+case "$1" in
+  repo)
+    if [[ "${2:-}" == "view" && -n "${3:-}" && "$3" != -* ]]; then
+      printf 'ADMIN\n'
+      exit 0
+    fi
+    if [[ -z "${LOOM_TEST_GH_NWO:-}" ]]; then
+      echo "stub gh: no remote configured" >&2
+      exit 1
+    fi
+    printf '%s\n' "$LOOM_TEST_GH_NWO"
+    exit 0
+    ;;
+  label)
+    case "$2" in
+      list)
+        if printf '%s\n' "$*" | grep -q -- '--json name,color,description'; then
+          if [[ "${LOOM_TEST_GH_LABELS_FAIL:-0}" == "1" ]]; then
+            echo "stub gh: simulated forge failure listing labels" >&2
+            exit 1
+          fi
+          printf '%s\n' "${LOOM_TEST_GH_LABELS:-}"
+          exit 0
+        fi
+        exit 0
+        ;;
+      create|edit|delete) exit 0 ;;
+    esac
+    echo "stub gh: unhandled label args: $*" >&2
+    exit 3
+    ;;
+  api)
+    exit 0
+    ;;
+esac
+echo "stub gh: unhandled args: $*" >&2
+exit 3
+STUB
+chmod +x "$STUB_DIR/gh"
+
+# --- Scratch source tree -----------------------------------------------------
+SRC="$TMP/src"
+mkdir -p "$SRC/.github"
+cat > "$SRC/.github/labels.yml" <<'EOF'
+# BEGIN LOOM LABELS
+- name: loom:issue
+  description: "Approved and ready for a Builder"
+  color: "3B82F6"
+- name: loom:pr
+  description: "Approved pull request"
+  color: "10B981"
+- name: loom:operator-mechanical
+  description: "Parked pending a mechanical human action"
+  color: "F59E0B"
+# END LOOM LABELS
+EOF
+
+GH_LOG="$TMP/gh.log"
+
+# run_sls [--nwo NWO] [--labels TSV] [--labels-fail] [--daemon-bin PATH] -- <script args...>
+#
+#   --labels        the stub's `gh label list --json name,color,description`
+#                    response: name<TAB>color<TAB>description per line
+#   --labels-fail    make that same call fail (simulated forge error)
+#   --daemon-bin     pins LOOM_DAEMON_SELF_BIN so the `label-duplicates`
+#                    diagnostic (#8875) resolves to a named fixture instead of
+#                    whatever loom-daemon happens to be ambiently resolvable
+#                    (a checkout-local build, PATH, or $HOME/.local/bin) --
+#                    see the DAEMON_FIXTURE block below. Empty (the default)
+#                    behaves exactly as before this flag existed: sync-labels.sh
+#                    falls through to ambient resolution, which every scenario
+#                    except the duplicate-name one is indifferent to since none
+#                    of their scratch labels.yml files contain a duplicate.
+#
+# Sets: RC, OUT (merged stdout+stderr), LOG (recorded gh argv lines).
+RC=0
+OUT=""
+LOG=""
+run_sls() {
+    local nwo="" labels="" labels_fail="0" daemon_bin=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --nwo) nwo="$2"; shift 2 ;;
+            --labels) labels="$2"; shift 2 ;;
+            --labels-fail) labels_fail="1"; shift ;;
+            --daemon-bin) daemon_bin="$2"; shift 2 ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
+    : > "$GH_LOG"
+    OUT="$(
+        cd "$SRC" || exit 99
+        PATH="$STUB_DIR:$PATH" \
+        LOOM_TEST_GH_LOG="$GH_LOG" \
+        LOOM_TEST_GH_NWO="$nwo" \
+        LOOM_TEST_GH_LABELS="$labels" \
+        LOOM_TEST_GH_LABELS_FAIL="$labels_fail" \
+        LOOM_CONFIG_DEFAULTS_FILE="" \
+        LOOM_DAEMON_SELF_BIN="$daemon_bin" \
+        bash "$SLS" "$@" 2>&1
+    )"
+    RC=$?
+    LOG="$(cat "$GH_LOG")"
+}
+
+# A fully-in-sync live snapshot for the three declared labels above.
+IN_SYNC_TSV=$'loom:issue\t3b82f6\tApproved and ready for a Builder\nloom:pr\t10b981\tApproved pull request\nloom:operator-mechanical\tf59e0b\tParked pending a mechanical human action'
+
+echo ""
+echo "=== --check: fully in sync ==="
+
+run_sls --nwo owner/repo --labels "$IN_SYNC_TSV" -- --check
+assert_eq "0" "$RC" "--check exits 0 when the live set fully matches"
+assert_contains "$OUT" "all in sync" "--check reports the in-sync verdict"
+assert_not_contains "$OUT" "MISSING" "in-sync run reports no MISSING labels"
+assert_not_contains "$OUT" "STALE" "in-sync run reports no STALE labels"
+assert_not_contains "$OUT" "UNKNOWN EXTRA" "in-sync run reports no unknown extras"
+assert_not_contains "$LOG" "label create" "--check never creates a label"
+assert_not_contains "$LOG" "label edit" "--check never edits a label"
+assert_not_contains "$LOG" "label delete" "--check never deletes a label"
+assert_eq "1" "$(printf '%s\n' "$LOG" | grep -c '^label list' || true)" \
+    "--check makes exactly one 'gh label list' call"
+
+echo ""
+echo "=== --check: a declared label is missing on the live repo ==="
+
+MISSING_TSV=$'loom:issue\t3b82f6\tApproved and ready for a Builder\nloom:operator-mechanical\tf59e0b\tParked pending a mechanical human action'
+run_sls --nwo owner/repo --labels "$MISSING_TSV" -- --check
+assert_eq "3" "$RC" "--check exits 3 when a declared label is missing"
+assert_contains "$OUT" "MISSING       loom:pr" "the missing label is named"
+assert_contains "$OUT" "1 missing" "the summary counts exactly one missing label"
+assert_not_contains "$LOG" "label create" \
+    "a missing label is reported, never auto-created by --check itself"
+
+echo ""
+echo "=== --check: a declared label is present but stale (color/description) ==="
+
+STALE_TSV=$'loom:issue\tFF0000\tSomething else entirely\nloom:pr\t10b981\tApproved pull request\nloom:operator-mechanical\tf59e0b\tParked pending a mechanical human action'
+run_sls --nwo owner/repo --labels "$STALE_TSV" -- --check
+assert_eq "3" "$RC" "--check exits 3 when a declared label has drifted color/description"
+assert_contains "$OUT" "STALE         loom:issue" "the stale label is named"
+assert_contains "$OUT" "live=ff0000 vs declared=3b82f6" \
+    "the stale report shows both the live and declared color, normalized to lowercase"
+assert_contains "$OUT" "Something else entirely" \
+    "the stale report shows the live description"
+assert_not_contains "$LOG" "label edit" \
+    "a stale label is reported, never auto-updated by --check itself"
+
+echo ""
+echo "=== --check: an unrecognized loom:-prefixed label is an unknown extra ==="
+
+EXTRA_TSV=$'loom:issue\t3b82f6\tApproved and ready for a Builder\nloom:pr\t10b981\tApproved pull request\nloom:operator-mechanical\tf59e0b\tParked pending a mechanical human action\nloom:mystery\tabcdef\tNot declared anywhere'
+run_sls --nwo owner/repo --labels "$EXTRA_TSV" -- --check
+assert_eq "3" "$RC" "--check exits 3 when an undeclared loom:-prefixed label exists live"
+assert_contains "$OUT" "UNKNOWN EXTRA loom:mystery" "the unknown extra is named"
+assert_contains "$OUT" "never deleted automatically" \
+    "the unknown-extra report states it is never auto-deleted"
+assert_not_contains "$LOG" "label delete" \
+    "an unknown extra is reported, never deleted by --check"
+
+echo ""
+echo "=== --check: a non-loom:-prefixed extra is ignored entirely ==="
+
+NONLOOM_EXTRA_TSV=$'loom:issue\t3b82f6\tApproved and ready for a Builder\nloom:pr\t10b981\tApproved pull request\nloom:operator-mechanical\tf59e0b\tParked pending a mechanical human action\nbug\tD73A4A\tSomething is broken'
+run_sls --nwo owner/repo --labels "$NONLOOM_EXTRA_TSV" -- --check
+assert_eq "0" "$RC" "a non-loom:-prefixed extra alone does not count as drift"
+assert_not_contains "$OUT" "UNKNOWN EXTRA" \
+    "a non-loom:-prefixed label (e.g. GitHub's own 'bug') is never flagged"
+
+echo ""
+echo "=== --check composes with --repo ==="
+
+run_sls --labels "$IN_SYNC_TSV" -- --repo octocat/hello-world --check
+assert_eq "0" "$RC" "--check --repo exits 0 when in sync"
+assert_contains "$LOG" "label list -R octocat/hello-world" \
+    "--check --repo targets the override NWO"
+assert_not_contains "$LOG" "repo view octocat/hello-world --json nameWithOwner,viewerPermission" \
+    "--check skips the (mutation-only) --repo preflight"
+
+echo ""
+echo "=== --check: a duplicate declared name is its own diagnostic (#8875) ==="
+
+# The duplicate diagnostic shells out to `loom-daemon label-duplicates`
+# (sync-labels.sh's print_label_check_report, per the shell language policy).
+# Relying on whatever loom-daemon happens to be ambiently resolvable (a
+# checkout-local build, PATH, or $HOME/.local/bin) passed locally -- where a
+# built daemon is normally present -- but failed in the hermetic CI job,
+# which has no Rust toolchain to build one and so silently resolved nothing
+# (#8887). Pin LOOM_DAEMON_SELF_BIN (via --daemon-bin) at a fixture that
+# reimplements exactly loom-daemon/src/cli/label_duplicates.rs's declared-name
+# scan and report lines, so this assertion no longer depends on the runner's
+# ambient state.
+DAEMON_FIXTURE="$TMP/fixture-loom-daemon"
+cat > "$DAEMON_FIXTURE" <<'STUB'
+#!/usr/bin/env bash
+# Targets bash 3.2+ (see .shellcheckrc) even though the hermetic CI job that
+# runs this fixture is ubuntu-only (modern bash) -- no bash 4+ constructs
+# (mapfile, associative arrays) needed here, so there is no reason to require
+# them. The `${arr[@]+"${arr[@]}"}` guard mirrors sync-labels.sh's own
+# empty-array-under-`set -u` idiom.
+set -uo pipefail
+if [[ "${1:-}" != "label-duplicates" ]]; then
+    echo "fixture loom-daemon: unsupported subcommand: $*" >&2
+    exit 3
+fi
+labels_file="$2"
+names=()
+while IFS= read -r line; do
+    names+=("$line")
+done < <(grep '^- name: ' "$labels_file" | sed 's/^- name: //')
+
+dup_count=0
+seen=$'\n'
+for name in ${names[@]+"${names[@]}"}; do
+    case "$seen" in
+        *$'\n'"$name"$'\n'*) continue ;;
+    esac
+    occurrences=0
+    for n in ${names[@]+"${names[@]}"}; do
+        [[ "$n" == "$name" ]] && occurrences=$((occurrences + 1))
+    done
+    if [[ "$occurrences" -gt 1 ]]; then
+        seen="$seen$name"$'\n'
+        dup_count=$((dup_count + 1))
+        echo "  DUPLICATE     $name (declared more than once in $labels_file — structural drift in the file itself, independent of forge state; likely a pre-#4187-upgrade artifact, see #8875)" >&2
+    fi
+done
+if [[ "$dup_count" -gt 0 ]]; then
+    echo "$labels_file declares one or more labels more than once — de-duplicate the file by hand (or reinstall Loom, which now absorbs pre-#4187 duplicates automatically) before --check can converge." >&2
+fi
+echo "$dup_count"
+STUB
+chmod +x "$DAEMON_FIXTURE"
+
+# Simulate a pre-#4187 upgrade that left a legacy, unmarked copy of
+# `loom:issue` sitting outside the managed block alongside the current one --
+# labels.yml itself is structurally broken here independent of what the live
+# forge state is, so this must be flagged even when the live set otherwise
+# fully matches every declared entry (by construction, using the *first*
+# declared copy, since read_declared_labels/diff_declared_against_live_tsv
+# compare in file order and later entries win ties by simply re-matching).
+cat > "$SRC/.github/labels.yml" <<'EOF'
+- name: loom:issue
+  description: "legacy pre-#4187 copy"
+  color: "1D76DB"
+
+# BEGIN LOOM LABELS
+- name: loom:issue
+  description: "Approved and ready for a Builder"
+  color: "3B82F6"
+- name: loom:pr
+  description: "Approved pull request"
+  color: "10B981"
+- name: loom:operator-mechanical
+  description: "Parked pending a mechanical human action"
+  color: "F59E0B"
+# END LOOM LABELS
+EOF
+DUP_TSV=$'loom:issue\t1d76db\tlegacy pre-#4187 copy\nloom:pr\t10b981\tApproved pull request\nloom:operator-mechanical\tf59e0b\tParked pending a mechanical human action'
+run_sls --nwo owner/repo --labels "$DUP_TSV" --daemon-bin "$DAEMON_FIXTURE" -- --check
+assert_eq "3" "$RC" "--check exits 3 when labels.yml declares a name more than once"
+assert_contains "$OUT" "DUPLICATE     loom:issue" "the duplicated name is called out by name"
+assert_contains "$OUT" "1 duplicate name(s)" "the summary counts exactly one duplicate name"
+assert_contains "$OUT" "de-duplicate the file" \
+    "the duplicate diagnostic explains what to do about it"
+assert_not_contains "$LOG" "label create" "a duplicate name performs no mutation"
+assert_not_contains "$LOG" "label edit" "a duplicate name performs no mutation"
+
+# Restore the shared fixture for any tests that might be added below this one.
+cat > "$SRC/.github/labels.yml" <<'EOF'
+# BEGIN LOOM LABELS
+- name: loom:issue
+  description: "Approved and ready for a Builder"
+  color: "3B82F6"
+- name: loom:pr
+  description: "Approved pull request"
+  color: "10B981"
+- name: loom:operator-mechanical
+  description: "Parked pending a mechanical human action"
+  color: "F59E0B"
+# END LOOM LABELS
+EOF
+
+echo ""
+echo "=== --check: a forge lookup failure is a loud, distinct error ==="
+
+# #7745: an unreachable forge exits 4, NOT 1. The two used to share exit 1,
+# which left every caller unable to tell "I could not reach the forge"
+# (benign) from "this script is broken" (a defect). resync-installed.sh's
+# catch-all absorbed both as a skip and still exited 0, which is how a
+# crashing checker went unnoticed on macOS for weeks. 1 now means only the
+# unexpected case.
+run_sls --nwo owner/repo --labels-fail -- --check
+assert_eq "4" "$RC" "an unreachable forge exits 4 (distinct from drift's 3 and from a defect's 1)"
+assert_contains "$OUT" "Could not list labels" "the lookup failure is reported"
+assert_not_contains "$LOG" "label create" "a lookup failure performs no mutation"
+
+echo ""
+echo "=== --help documents --check ==="
+
+run_sls -- --help
+assert_eq "0" "$RC" "--help exits 0"
+assert_contains "$OUT" "--check" "--help documents --check"
+assert_contains "$OUT" "Report-only drift check" "--help explains what --check does"
+
+echo ""
+echo "────────────────────────────────"
+echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    exit 1
+fi
+exit 0

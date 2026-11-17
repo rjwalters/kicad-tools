@@ -1,0 +1,1017 @@
+"""Board 03 (usb-joystick) routing baseline regression guard.
+
+Historical capability tests use the SHA-pinned 32-pad snapshot in
+``regression-fixture/``. Production DRC below still checks revision B in
+``output/``. CLI runs retain temporary PCB/log artifacts on timeout (900s
+process cap; the route itself is iteration-bounded, with no wall-clock
+``--timeout`` -- issue #5752), and never regenerate or overwrite inputs.
+The June recipe described below is frozen, not the current hardware recipe.
+
+This test pins the **measured routing reach** of
+``boards/03-usb-joystick/`` against the ``kct route`` CLI as of
+June 2026.
+
+June 9 2026 RE-BASELINE (issue #3410):
+    Board 03 was overhauled to close the reach gap to 13/13 + 0 DRC:
+    the stale 60x40mm committed board (written by generate_design.py's
+    since-removed internal PCB copy) was replaced by the canonical
+    ``generate_pcb.py`` 80x60mm layout; J1's USB-C footprint was
+    re-spun so same-signal SMT tails exit in the same column (killing
+    the structural D+/D- X-crossover); the MST now starts intra-IC
+    tie groups from the externally-facing pad; column-aligned USB-C
+    connectors skip the escape via-fanout; and auto-pour no longer
+    deletes hand-tuned zones (double origin-subtraction bug).  The
+    production recipe is ``kct route --seed 42 --manufacturer
+    jlcpcb-tier1 --backend cpp --timeout 600`` and measures
+    **13/13 nets, 0 DRC errors** at jlcpcb-tier1.  The historical
+    notes below document the pre-#3410 state for archaeology.
+
+June 11 2026 (issues #3507/#3454): ``--raw`` dropped from the recipe.
+    The optimizer's grid-staleness defect (collision checking against
+    pre-optimization copper) was fixed by the grid-transactional
+    optimize pass (``optimize_routes_grid_synced``), which retires the
+    deterministic XTAL1/XTAL2 ``clearance_segment_via`` merge
+    violation that made ``--raw`` load-bearing.  13/13 + 0 DRC holds
+    with the TraceOptimizer ON.
+
+Baseline measurement at pre-#3410 HEAD (with ``kct route --backend cpp
+--seed 42 --auto-fix --auto-fix-passes 2 --manufacturer jlcpcb-tier1``):
+
+- **Routed: 11/13 nets (85%)** post-#3278 (PR #3300) and post-#3304
+  (this ratchet).  USB_D+ and USB_D- remain partial.
+- **Layer count: 4** (the 4-layer attempt produces the best result)
+- USB_D+ / USB_D- partial due to escape-geometry interactions with J1's
+  USB-C connector pad layout.  USB_CC2 recovered from 1/2 -> 2/2 pads
+  via the #3304 C++ backend layer-index fix (B.Cu was being mismapped
+  to In1.Cu on 4L stacks because of a ``layer.value % num_layers``
+  shortcut in ``_route_impl``).
+- The committed unrouted PCB has 16 nets total: 13 are routed, 3 are
+  power/pour nets (VCC, VBUS, GND) that are skipped by the router and
+  served by auto-pour zones instead.
+
+Context (the "1/16" myth):
+    The pre-test ``kct fleet status`` output for board 03 reads
+    ``incomplete routing (1/16 nets)`` because it queries the stale
+    committed ``output/usb_joystick_routed.kicad_pcb`` snapshot.  Live
+    routing produces 10/13.  The stale-fleet-status reporting gap is
+    tracked separately in #3280.
+
+June 7 2026 re-measurement (issue #3293):
+    Re-measured after #3278 landed via PR #3300.  The fix was the
+    primary blocker we expected to recover the 11/13 (or better)
+    floor, but it initially produced 10/13: the structural
+    per-pad escape width fix corrected USB_D+/D- escape geometry,
+    but a long-latent C++ backend layer-index mismapping caused
+    USB_CC2 to regress from 2/2 -> 1/2 pads.  Issue #3304
+    diagnosed the mismapping (B.Cu mapped to In1.Cu on 4L stacks
+    via ``layer.value % num_layers``) and the fix recovered the
+    11/13 floor.  The committed routed PCB
+    (``output/usb_joystick_routed.kicad_pcb``, last updated by PR
+    #3195 on June 4) is still STRICTLY BETTER at 12/13 with 4 DRC
+    errors on jlcpcb-tier1.  The route_demo.py vs ``kct route``
+    reach divergence is tracked in issue #3308.
+
+Manufacturability verdict (June 7 2026, post-#3304):
+    Board 03 is NOT JLCPCB-tier1 ship-ready.  After #3304's
+    C++ backend layer-index fix, a fresh route at HEAD produces
+    11/13 nets (USB_D+, USB_D- partial).  The committed routed
+    PCB (the strictly better artifact we ship today) carries
+    4 DRC errors on jlcpcb-tier1:
+      - 1 USB_D+ stranded pad
+      - 1 diffpair_clearance_intra (USB_D+/USB_D-)
+      - 1 clearance_segment_via
+      - 1 clearance_pad_via
+    Recovering ship-ready will require closing out the remaining
+    USB_D+/USB_D- partial routes (escape-geometry interactions
+    with J1's USB-C row -- separate work; #3308 for the
+    route_demo divergence in the meantime).
+
+June 8 2026 refresh attempt (issue #3335):
+    Attempted to refresh the committed artifacts using the canonical
+    ``generate_design.py:route_pcb()`` recipe (per PR #3327's
+    consolidation).  The fresh route landed at 11/13 with 3 DRC
+    errors (USB_CC1 + USB_D- partial; USB_D+ now routes fully).
+    This is a DIFFERENT failure mode from the committed PCB --
+    the committed PCB has USB_D+ partial (DRC=4); the fresh PCB
+    has USB_CC1 and USB_D- partial (DRC=3).
+
+    Per-net comparison:
+      | Net      | Committed (12/13)     | Fresh (11/13)        |
+      | -------- | --------------------- | -------------------- |
+      | USB_D+   | partial (2/3 pads)    | COMPLETE             |
+      | USB_D-   | COMPLETE              | partial (2/3 pads)   |
+      | USB_CC1  | COMPLETE              | partial (1/2 pads)   |
+      | USB_CC2  | COMPLETE              | COMPLETE             |
+      | VBUS     | COMPLETE              | COMPLETE             |
+
+    The fresh route trades USB_D+ partial (committed) for USB_CC1 +
+    USB_D- partial (refresh).  Net count regresses 12 -> 11, so the
+    committed PCB remains strictly better in routing reach.  The
+    refresh was NOT shipped (per PR #3273 lesson: do not ship
+    artifacts that regress committed reach).
+
+    Schematic drift is structural and unaffected by refresh:
+    the schematic represents the USB connector with a simplified
+    4-pin USB_PIN_MAP (VCC/USB_D-/USB_D+/GND) while the PCB
+    places a full 16-pin USB Type-C connector with VBUS/USB_CC1/
+    USB_CC2 net assignments.  ``kct fleet status`` reports the
+    drift as "13 nets in schematic, 16 in PCB" (3 added: VBUS,
+    USB_CC1, USB_CC2).  Clearing the drift requires either:
+      (a) adding VBUS/USB_CC1/USB_CC2 global_label calls to the
+          schematic generator in ``create_usb_joystick_schematic``
+          (out of scope for the refresh-only ticket; tracked
+          separately under "schematic gap" follow-ups), or
+      (b) the unlabeled-local-net headroom being raised from 2
+          to >= 3 in ``_DRIFT_ADDED_ONLY_TOLERANCE`` (a fleet-side
+          fix; would mask drift more broadly).
+
+Known follow-on issues that prevent a higher baseline:
+    - **#3278** (closed by PR #3300): Escape generator used
+      ``pads[0].net_name``'s net-class trace width for the whole
+      row, pulling Power-class 0.5mm width into USB_D+/USB_D-
+      HighSpeed escapes.  Fixed by per-pad ``escape_width``.
+    - **#3304** (THIS RATCHET): The C++ backend's ``_route_impl``
+      computed search-time goal layer as
+      ``end.layer.value % num_layers``.  For ``B.Cu`` (value=5)
+      on a 4L stack (num_layers=4), this gave index 1 (In1.Cu)
+      instead of 3 (B.Cu).  The narrower post-#3278 escape stub
+      stopped blocking the main router's path so the A* found
+      the wrong-layer goal cell.  Replaced with the canonical
+      ``self._grid.layer_to_index`` lookup that
+      ``Router.route`` in ``pathfinder.py`` already used.
+    - **#3279**: 2-layer boards with GND pour on B.Cu have no
+      pipeline step to stitch F.Cu SMD GND pads to the pour, so
+      ``kct check`` reports ``Net 'GND' is partially routed: 26 of 29
+      pads stranded``.  Routing itself is fine; it's a pipeline gap.
+      Partially closed by PR #3290 (cross-layer stitch detection); 5
+      stranded GND pads remain due to stitch-clearance refusals.
+    - **#3308**: ``kct route`` (and ``route_demo.py``) on board 03
+      regressed between June 4 and June 7 — USB_D+ went from 2/3
+      connected to 1/3, USB_D- went from fully routed to 1/3, and
+      USB_CC1/CC2 are now partial.  Bisection between PRs #3197 and
+      #3290 is needed.
+
+Acceptance criteria pinned by this test:
+
+1. **Reach floor**: ``kct route`` produces >= 11 routed signal nets
+   (out of 13).  Drops to 10 or fewer indicate a routing-quality
+   regression on USB-C-class pad-density boards.  The floor was
+   temporarily relaxed from 11 to 10 by PR #3300 then ratcheted
+   back to 11 by the PR that closes #3304 (C++ backend layer-
+   index mismapping fix).
+2. **Deterministic across seeds**: seeds 1 / 42 / 99 all produce the
+   same routed-net count, so a single-seed run is a reliable
+   indicator of overall quality.
+3. **The 1/16 myth stays dead**: if the test ever measures <= 1 net
+   routed, somebody re-broke board 03 in a non-trivial way.
+4. **Committed-PCB ship quality**: the committed
+   ``usb_joystick_routed.kicad_pcb`` must not silently degrade past
+   the 4-error / 12-net-connected ceiling without the change being
+   acknowledged in this docstring.  See ``test_committed_pcb_drc_state``.
+
+References:
+    - Parent tracking issue: #3259
+    - June 7 refresh tracking issue: #3293
+    - June 8 refresh attempt tracking issue: #3335
+    - Stale fleet-status reporting: #3280
+    - Escape clearance bug (fixed): #3278 (PR #3300)
+    - Main-router USB_CC2 regression follow-up: #3304
+    - 2-layer pour stitching gap: #3279 (PR #3290 partial fix)
+    - route_demo regression: #3308 (closed by PR #3327 recipe consolidation)
+    - Existing board-03 demo-path test: tests/test_board_03_regression.py
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from tests._board03_check_cost import board03_check_timeout
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BOARD_DIR = REPO_ROOT / "boards" / "03-usb-joystick"
+UNROUTED_PCB = BOARD_DIR / "regression-fixture" / "usb_joystick.kicad_pcb"
+HISTORICAL_SHA256 = "6c4292a95345a7670ebc3879262d192edf40c90335ba6bee83c3c88441d18c98"
+ROUTE_TIMEOUT = 900
+COMMITTED_ROUTED_PCB = BOARD_DIR / "output" / "usb_joystick_routed.kicad_pcb"
+
+# Acceptance criteria for the June 2026 baseline.
+#
+# 13 signal nets total (USB_CC1, USB_CC2, USB_D+, USB_D-, XTAL1, XTAL2,
+# JOY_X, JOY_Y, JOY_BTN, BTN1, BTN2, BTN3, BTN4).  The 3 pour/power
+# nets (VCC, VBUS, GND) are auto-skipped and served by zones; they do
+# NOT appear in the ``Nets routed: N/M`` line.
+#
+# Post-#3278 escape contract correction (landed via PR #3300): the
+# per-pad ``escape_width`` fix corrected fine-pitch HighSpeed escapes
+# (USB_D+ improved 1/3 -> 2/3 pads), but the main router's A* path-finder
+# initially saw a different B.Cu channel topology around J1 and regressed
+# USB_CC2 from 2/2 -> 1/2 pads (10/13 fresh-route reach).
+#
+# Issue #3304 (THIS RATCHET): the regression was traced to a layer-
+# index mismapping in the C++ backend's ``_route_impl`` -- when a
+# destination virtual-pad sat on ``B.Cu`` (the inner-escape-layer
+# fallback the 4L SIG-GND-PWR-SIG stack picks when no inner SIGNAL
+# layer exists), the C++ A* used ``layer.value % num_layers`` to
+# compute the goal layer.  For B.Cu (enum value=5) on a 4L stack
+# (num_layers=4), the modulo gave index 1 (In1.Cu) instead of the
+# correct index 3 (B.Cu).  The A* then terminated on In1.Cu, the
+# escape stub laid down on B.Cu, and the union-find connectivity
+# check saw the pad as disconnected.  Replacing the modulo with
+# the canonical ``self._grid.layer_to_index`` lookup restores
+# USB_CC2 to 2/2 pads and lifts board 03 to 11/13.  USB_D+ /
+# USB_D- still defer to the main router due to escape-geometry
+# interactions with J1's USB-C row (separate work).
+# Issue #3410 (June 9 2026): the re-spun J1 footprint + MST tie-group
+# representative fix + escape-defer for column-aligned USB-C lifted the
+# fresh-route reach to 13/13.  The floor is the FULL net population --
+# any regression below 100% on this board is a reach regression.
+REQUIRED_NETS_ROUTED = 13
+EXPECTED_TOTAL_NETS = 13
+
+# Committed-PCB ceiling pinned by the June 7 2026 measurement.  The
+# committed ``usb_joystick_routed.kicad_pcb`` (last updated by PR
+# #3195 on June 4) is strictly better than a fresh route at HEAD
+# (12/13 with 4 DRC errors vs a fresh canonical-recipe route of
+# 11/13 with 3 DRC errors — see #3304 for USB_CC2 main-router
+# regression and #3308 for the now-resolved route_demo divergence).
+# Re-confirmed June 8 2026 (#3335 refresh attempt): the fresh route
+# routes USB_D+ but strands USB_CC1 and USB_D-, a different failure
+# mode but same net-count regression.  We assert that the committed
+# file cannot silently degrade past this ceiling without somebody
+# re-running the recipe AND updating these numbers in the same commit.
+# Issue #3410 (June 9 2026): the committed routed PCB is regenerated by
+# the production recipe and is DRC-CLEAN at jlcpcb-tier1 (0 errors).
+# The only BY-RULE entries are silkscreen_text_height WARNINGS (0402
+# value text on the demo passives); the breakdown parser below sees
+# warnings too, so the rule allowlist names it explicitly.
+# Issue #3527 (June 11 2026): the new ``clearance_segment_zone`` rule
+# (segments vs foreign-net zone *fill* copper) surfaced 4 pre-existing
+# stale-fill shorts in the committed artifact (BTN3 vs the GND B.Cu
+# fill).  These were always in the copper -- the gate simply could not
+# see them before the rule existed.
+# Issue #3551 (June 11 2026): ``kct zones fill`` regenerated the pours
+# against the final trace set (refill-only -- segment/via copper is
+# byte-identical to the pre-fix artifact), clearing all 4 shorts.  The
+# ceiling is back at 0 and the rule is dropped from the allowlist set.
+# Issue #3556 (June 13 2026): the new ``clearance_pad_zone`` rule (pad
+# copper vs foreign-net zone *fill* copper -- the pad sibling of #3527's
+# segment-vs-fill rule) surfaces 14 pre-existing findings on the
+# committed artifact: foreign-net pads (GND/JOY_*/XTAL1/XTAL2/VCC vs the
+# VCC F.Cu and GND B.Cu pours) overlapping the opposite-net fill by
+# 0.003-0.008mm at the dense MCU/connector cluster.  These are GENUINE
+# stale-pour-carve shorts (the fill was not re-carved after the final
+# pad geometry settled), the same legitimate class grandfathered for
+# boards 04-07 in ``.github/routed-drc-tolerance.yml`` -- NOT false
+# positives (the rule correctly skips same-net fills).  They were
+# invisible before #3556 because no gate compared pad copper to zone
+# fill.  Ceiling raised 0 -> 14 and the rule added to the allowlist set;
+# burn-down (re-fill the VCC/GND pours against the final pads, sibling of
+# #3549-#3553) drops it back to 0.
+# Issue #3730 (June 15 2026): the burn-down landed.  ``kct zones fill``
+# regenerated the VCC/GND pours against the final pad set (applying the
+# merged #3728 solid-thermal + #3725 island-removal logic, refill-only --
+# no copper re-route), clearing all 14 ``clearance_pad_zone`` findings and
+# the 11 ``starved_thermal`` findings.  Connectivity preserved (kicad-cli
+# ``unconnected_items`` 15 -> 14, 0 ``isolated_copper``).  Fresh
+# measurement: 0 errors under both ``kicad-cli pcb drc`` and ``kct check
+# --mfr jlcpcb-tier1``.  Ceiling tightened 14 -> 0 and ``clearance_pad_zone``
+# dropped from the allowlist set; the board-03 entry is removed from
+# ``.github/routed-drc-tolerance.yml`` (absence = strict 0 gate).  The only
+# BY-RULE entries remaining are ``silkscreen_text_height`` WARNINGS.
+# Issue #5744 (Sep 28 2026): restoring the footprint silkscreen the replay had
+# been deleting changes the WARNING mix (not the 0-error ceiling) -- as measured
+# on the committed artifact it is now ``silk_edge_clearance`` 2 warnings +
+# ``connector_edge_distance`` 2 infos, and
+# ``pin1_marker_missing`` 5 is GONE.  See the per-entry notes below.
+MAX_COMMITTED_DRC_ERRORS = 0
+EXPECTED_COMMITTED_DRC_RULES = {
+    "silkscreen_text_height",
+    # Issue #8255 / #8229: the new advisory ``redundant_copper_detour`` and
+    # ``redundant_copper_duplicate`` rules flag redundant copper on the
+    # committed routing.  WARNING severity, so they do NOT raise the 0-error
+    # ceiling (MAX_COMMITTED_DRC_ERRORS); they only appear in the BY-RULE
+    # breakdown.  Tool-side rule addition, not a board regression.
+    "redundant_copper_detour",
+    "redundant_copper_duplicate",
+    # Issue #8665 / #8736: the new advisory ``redundant_copper_covered`` rule
+    # flags segments covered by a longer collinear segment (52 warnings on the
+    # committed routing).  WARNING severity, so the 0-error ceiling
+    # (MAX_COMMITTED_DRC_ERRORS) is unchanged.  Tool-side rule addition, not a
+    # board regression; cleanup is via ``kct pcb prune``.
+    "redundant_copper_covered",
+    # Issue #8831: advisory ``redundant_copper_staircase`` (warning only)
+    # flags short-jog staircases on the committed routing; tool-side rule
+    # addition, not a board regression.
+    "redundant_copper_staircase",
+    # Issue #8532 (commit d7bf1fe0b, 2026-11-07), surfaced here by #8901: the
+    # new ``fiducials_missing`` and ``board_id_missing`` rules each report 1
+    # WARNING on the committed routing.  Verified on the artifact itself --
+    # it carries zero fiducial footprints and no board-ID / revision silk
+    # text, and no commit in the window changed the artifact -- so these are
+    # the new rules reporting a pre-existing absence, not a board regression;
+    # the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) is unchanged, and ``kct
+    # readiness --generate`` is the documented way to add both.  Whether this
+    # board SHOULD carry fiducials and a board ID is a separate question,
+    # deliberately not settled here (the rules are warning-only).  They were
+    # invisible until #8901 gave this test timeout headroom: before that it
+    # died on the global 60 s cap in ``Test (extended)`` and never reached
+    # this assertion.
+    "fiducials_missing",
+    "board_id_missing",
+    # Issue #8435 (PR #8444) / #8503: the new advisory ``pour_slot`` rule flags
+    # parallel different-net tracks too close for the zone fill between them
+    # (39 distinct pairs on the committed routing once duplicate segment copies
+    # are collapsed).  WARNING severity and listed in NON_GATING_RULE_PREFIXES,
+    # so it does NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS); it
+    # only appears in the BY-RULE breakdown.  Tool-side rule addition, not a
+    # board regression; pour-aware spacing cleanup is #8440.
+    "pour_slot",
+    # Issue #3844: the new geometric silk_over_copper rule flags reference
+    # designators printed over a neighbor's pad mask aperture on this board
+    # (a real defect kicad-cli also reports).  It is WARNING severity, so it
+    # does not raise the 0-error ceiling above; it just appears in the rule
+    # breakdown.
+    "silk_over_copper",
+    # Issue #3843/#3830 (June 20 2026): the new geometric copper_sliver rule
+    # (per-layer morphological open) flags a few ~0.04mm residual copper
+    # ribbons on the committed fill.  These arise from the
+    # committed-fill-vs-kicad-cli-refill divergence (the committed pour was
+    # not re-carved to byte-identical kicad-cli output), so they show up as
+    # WARNINGs here but vanish on a fresh refill.  It is WARNING severity, so
+    # it does NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) above;
+    # it only appears in the BY-RULE breakdown.  Tracked behavior, not errors.
+    "copper_sliver",
+    # Issue #4613: the new Tier-B connector edge-access inventory rule reports
+    # the board-03 USB-C receptacle (J1) sitting 0.50mm from the board edge.
+    # It is INFO severity (advisory inventory, not a violation), so it does
+    # NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) above; it only
+    # appears in the BY-RULE breakdown.  Tool-side rule addition, not a board
+    # regression.
+    "connector_edge_distance",
+    # Issue #5762: ``silkscreen_line_width`` is deliberately NOT listed -- board
+    # 03's footprint silk is widened to the jlcpcb-tier1 0.15mm floor at
+    # placement (silk_repair.widen_silk_strokes), allowance withdrawn.
+    # Issue #5744: 2 WARNINGS on J1's (USB-C receptacle) outline silk running
+    # inside the board-edge clearance.  Same provenance as the entry above --
+    # J1 sits 0.50mm from the edge (see ``connector_edge_distance``), so its
+    # library outline silk was always within the floor; restoring the silk is
+    # what made it measurable.  WARNING severity; ceiling unchanged.
+    "silk_edge_clearance",
+    # ``pin1_marker_missing`` is deliberately NOT listed.  It used to fire 5
+    # WARNINGS (U1 TQFP-44, U2 SOT-23-6, Y1, J2, J3 -- "no silkscreen graphics
+    # at all, so nothing marks pin 1"), which was a direct symptom of #5744:
+    # the replay had deleted every pin-1 marker on the board.  With the silk
+    # restored the rule is clean, so the allowance is withdrawn on purpose --
+    # if this rule ever reappears in the breakdown, the pin-1 markers have gone
+    # missing again and this test SHOULD fail.
+}
+
+
+def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
+    """Extract the final ``Nets routed: N/M`` count from kct route output.
+
+    The expected summary block contains a line of the form::
+
+        Nets routed:     11/13
+
+    (Multiple matches may exist in escalation mode; we return the LAST
+    one since that reflects the final state the router landed on.)
+
+    Returns ``(routed, total)`` or ``None`` if no such line was found.
+    """
+    pattern = re.compile(r"Nets routed:\s+(\d+)/(\d+)")
+    matches = pattern.findall(stdout)
+    if not matches:
+        return None
+    routed, total = matches[-1]
+    return int(routed), int(total)
+
+
+def _parse_per_net_status(stdout: str) -> dict[str, str]:
+    """Extract per-net routing status from ``kct route`` ROUTING PREVIEW output.
+
+    Issue #3308 AC #4: the existing baseline test only asserts on the
+    aggregate ``Nets routed: N/M`` headline.  Per-net assertions for
+    USB_D+/USB_D-/USB_CC1/USB_CC2 guard against a future regression
+    where the headline holds but the specific high-value nets quietly
+    flip from routed to unrouted.
+
+    ``kct route`` emits a per-net block under the ``ROUTING PREVIEW``
+    header of the form::
+
+        Net: USB_D+
+          Layers:   F.Cu -> B.Cu
+          Length:   12.34mm
+          Segments: 7, 1 via(s)
+          Status:   <check>  Routed
+
+    or (for unrouted nets)::
+
+        Net: USB_CC1
+          Status:   <x>  No path found
+
+    We parse the ``Net:`` lines and the corresponding ``Status:`` lines
+    into a ``{net_name: status}`` dict where status is one of
+    ``"routed"`` or ``"unrouted"``.  Nets with neither a Routed nor a
+    No-path status block are omitted (e.g. skipped power-pour nets).
+
+    The escalation mode can emit multiple ROUTING PREVIEW blocks; we
+    take the LAST occurrence of each net (the final state the router
+    landed on, matching the convention in ``_parse_routed_net_count``).
+    """
+    result: dict[str, str] = {}
+    # Iterate through ``Net: NAME`` lines and look at the next few lines
+    # for a Status: line.  Use re.finditer to get the position of each
+    # Net: header so we can scan forward a bounded distance.
+    net_header_pattern = re.compile(r"^Net:\s+(\S+)\s*$", re.MULTILINE)
+    status_routed = re.compile(r"Status:\s+\S+\s+Routed", re.MULTILINE)
+    status_unrouted = re.compile(r"Status:\s+\S+\s+No path found", re.MULTILINE)
+
+    headers = list(net_header_pattern.finditer(stdout))
+    for idx, header in enumerate(headers):
+        net_name = header.group(1)
+        # Scan from this header to the next (or end of stdout) for a
+        # Status: line.  Bound the window so we don't accidentally pull
+        # in a status line from a later net.
+        start = header.end()
+        end = headers[idx + 1].start() if idx + 1 < len(headers) else len(stdout)
+        window = stdout[start:end]
+        if status_routed.search(window):
+            result[net_name] = "routed"
+        elif status_unrouted.search(window):
+            result[net_name] = "unrouted"
+        # else: skipped or absent -- don't pollute the result dict
+    return result
+
+
+def _write_diffpair_sidecar(dest_dir: Path) -> Path:
+    """Write the board 03 net-class sidecar into ``dest_dir``.
+
+    Replays the historical June recipe: annotate the USB
+    D+/D- pair with ``diffpair_partner`` and a 0.15mm
+    ``intra_pair_clearance`` (#3095) so the ``--net-class-map`` flag can
+    hand the CoupledPathfinder the coupled-routing metadata.  Returns the
+    path to the written ``net_class_map.json`` (Issue #3922).
+    """
+    import json as _json
+    from dataclasses import replace as _dc_replace
+
+    from kicad_tools.router import create_net_class_map
+    from kicad_tools.router.rules import net_class_map_to_dict
+
+    net_class_map = create_net_class_map(
+        power_nets=["VCC", "VBUS", "GND"],
+        high_speed_nets=["USB_D+", "USB_D-"],
+        clock_nets=["XTAL1", "XTAL2"],
+    )
+    if "USB_D+" in net_class_map and "USB_D-" in net_class_map:
+        net_class_map["USB_D+"] = _dc_replace(
+            net_class_map["USB_D+"],
+            diffpair_partner="USB_D-",
+            intra_pair_clearance=0.15,
+        )
+        net_class_map["USB_D-"] = _dc_replace(
+            net_class_map["USB_D-"],
+            diffpair_partner="USB_D+",
+            intra_pair_clearance=0.15,
+        )
+    sidecar_path = dest_dir / "net_class_map.json"
+    sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
+    return sidecar_path
+
+
+@pytest.fixture(scope="module")
+def unrouted_pcb_path() -> Path:
+    """Require the frozen synthetic fixture; never regenerate with revision B."""
+    assert UNROUTED_PCB.is_file(), "Historical board03 fixture missing; restore it from git"
+    assert hashlib.sha256(UNROUTED_PCB.read_bytes()).hexdigest() == HISTORICAL_SHA256
+    return UNROUTED_PCB
+
+
+def _run_kct_route(unrouted: Path, seed: int, artifacts: Path) -> str:
+    """Run ``kct route --backend cpp --seed N --auto-fix`` and capture stdout.
+
+    Replays the historical June recipe independently of the revision-B
+    hardware replay. Inputs and any partial output remain in pytest artifacts.
+    """
+    artifacts.mkdir(parents=True, exist_ok=True)
+    pcb_copy = artifacts / "usb_joystick.kicad_pcb"
+    shutil.copy2(unrouted, pcb_copy)
+    output_path = artifacts / "usb_joystick_routed.kicad_pcb"
+    # Issue #3922: preserve the historical net-class sidecar so
+    # ``--net-class-map`` (below) reads the same USB D+/D-
+    # diffpair_partner / intra_pair_clearance metadata the recipe
+    # writes.  Frozen with the historical June recipe.
+    sidecar_path = _write_diffpair_sidecar(output_path.parent)
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
+        str(pcb_copy),
+        "--output",
+        str(output_path),
+        "--seed",
+        str(seed),
+        "--manufacturer",
+        "jlcpcb-tier1",
+        "--backend",
+        "cpp",
+        # Issue #3799: frozen from the historical recipe in
+        # ``generate_design.py:route_pcb()`` -- --deterministic-budget
+        # (#3538) routes under a fixed iteration backstop instead of the
+        # per-net wall-clock cutoff, so the seed-42 re-route is
+        # byte-identical (UUID-normalized) across machines.
+        "--deterministic-budget",
+        # Issue #5752: NO ``--timeout``.  The historical recipe also passed
+        # ``--timeout 600``, but under ``--auto-layers`` escalation that is
+        # not just a safety backstop: ``_per_attempt_budgeted_timeout``
+        # hands the first (2L) attempt a wall-clock fair slice of
+        # 600 / len(layer_configs) = 75s.  The route needs ~10s on an idle
+        # machine, so under enough CPU contention (a long serial run beside
+        # parallel builders) the 2L detailed pass is cut mid-reroute and
+        # the run lands e.g. 9/13 + 4 partial -- exactly the "both reach
+        # tests fail, the 1/16 and Phase-A tests pass" signature.
+        # Reproduced with a time-dilation shim (16x slowdown -> 9/13).
+        # Without --timeout the per-net iteration caps are the only bound:
+        # the routed copper is identical to the --timeout 600 run on an
+        # idle machine, and stays 13/13 with identical copper up to a
+        # 100x simulated slowdown.  ROUTE_TIMEOUT (subprocess) remains
+        # the hang guard and fails loudly and attributably.
+        # Issue #3922: --differential-pairs was silently dropped in the
+        # #3308/#3410 recipe consolidation, so USB_D+/USB_D- routed
+        # through the plain per-net A* loop and the CoupledPathfinder
+        # (Phase A) was never invoked.  Restored here in lock-step with
+        # the June recipe.  --net-class-map forwards the
+        # sidecar so the router reads the diff-pair metadata.
+        "--differential-pairs",
+        "--net-class-map",
+        str(sidecar_path),
+        # Issue #3922: --auto-layers is kept (the default) so the escape
+        # pre-phase board 03's fine-pitch USB-C needs still runs (13/13 +
+        # 0 native DRC).  On this board --differential-pairs is inert at
+        # routing time because route_cmd's escape / escalation dispatch
+        # does not consult it (tracked in #3952); forcing the diff-pair
+        # path with --no-auto-layers would reintroduce a DRC clearance
+        # violation.  Frozen with the historical June recipe.
+        # Issues #3507/#3454: ``--raw`` removed in lock-step with the
+        # production recipe in ``generate_design.py:route_pcb()`` --
+        # the grid-transactional optimize pass retired the
+        # deterministic clearance_segment_via merge violation that
+        # made it load-bearing.  Keep these historical flags pinned.
+    ]
+    # Issue #3799: retain the historical hash seed independently of the
+    # current real-hardware routing replay.
+    _route_env = os.environ.copy()
+    _route_env["PYTHONHASHSEED"] = "42"
+    _route_env["PYTHONUNBUFFERED"] = "1"
+    stdout_path, stderr_path = artifacts / "stdout.log", artifacts / "stderr.log"
+    with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                timeout=ROUTE_TIMEOUT,
+                check=False,
+                env=_route_env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                f"Historical board03 seed {seed} exceeded {ROUTE_TIMEOUT}s; "
+                f"partial PCB, stdout and stderr retained in {artifacts}"
+            )
+    proc.stdout = stdout_path.read_text()
+    proc.stderr = stderr_path.read_text()
+    # Exit codes from cli/route_cmd.py:
+    #   0 = full route + DRC clean
+    #   2 = partial routing below --min-completion
+    #   3 = >= min-completion but DRC violations remain
+    # Board 03 lands at 2 or 3 (partial + DRC).  Codes 1 and 5 are
+    # fatal (crash / SIGINT).
+    if proc.returncode in (1, 5):
+        pytest.fail(
+            f"kct route returned fatal exit code {proc.returncode}\n"
+            f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
+            f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+        )
+    return proc.stdout
+
+
+@pytest.fixture(scope="module")
+def route_stdout(unrouted_pcb_path: Path, tmp_path_factory) -> str:
+    """Run the frozen historical ``kct route`` invocation once per module."""
+    return _run_kct_route(
+        unrouted_pcb_path, seed=42, artifacts=tmp_path_factory.mktemp("board03-seed42")
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.xdist_group("board03_routing_baseline")
+@pytest.mark.timeout(960)
+class TestBoard03RoutingBaseline:
+    """Pin the June 2026 routing reach baseline for board 03.
+
+    The full CLI subprocess takes ~30 s wall-clock on an idle machine
+    (iteration-bounded, no ``--timeout``; ``ROUTE_TIMEOUT`` caps the
+    subprocess -- issue #5752), so the class is marked
+    ``@pytest.mark.slow``.  The nightly slow-tests workflow picks it up;
+    PR-time CI skips it by default.
+    """
+
+    def test_reach_meets_floor(self, route_stdout: str) -> None:
+        """``kct route --backend cpp`` produces 13/13 nets routed (issue #3410).
+
+        This is the post-#3278 / post-#3304 baseline (PR #3300 corrected
+        the per-pad escape width; #3304 fixed the C++ backend layer-
+        index mismapping that prevented USB_CC2 from re-connecting).
+        USB_D+/USB_D- still defer to the main router due to escape
+        geometry on J1.  A regression below 11 means the router lost
+        ground on a USB-C-class board -- bisect against escape /
+        diff-pair / negotiated-loop changes and the layer_to_index
+        invariant in ``tests/router/test_cpp_backend_layer_mapping.py``.
+        """
+        parsed = _parse_routed_net_count(route_stdout)
+        assert parsed is not None, (
+            "Could not find 'Nets routed: N/M' line in kct route stdout.  "
+            "This typically means the router crashed before producing a "
+            "summary.\n"
+            f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+        )
+        routed, total = parsed
+        assert total == EXPECTED_TOTAL_NETS, (
+            f"Board 03 routable-net count changed from {EXPECTED_TOTAL_NETS} "
+            f"to {total}.  The schematic/PCB generator may have added or "
+            "removed nets; update EXPECTED_TOTAL_NETS and REQUIRED_NETS_"
+            "ROUTED to match the new topology after re-baselining."
+        )
+        assert routed >= REQUIRED_NETS_ROUTED, (
+            f"Board 03 routing reach regressed: routed {routed}/{total}, "
+            f"expected >= {REQUIRED_NETS_ROUTED}/{EXPECTED_TOTAL_NETS} "
+            "(post-#3278 / post-#3304 baseline).  Common regression "
+            "sources to bisect:\n"
+            "  - escape clearance / lateral_offset changes for USB-C "
+            "(escape contract is post-#3278)\n"
+            "  - C++ backend layer-index mapping in ``_route_impl`` "
+            "(post-#3304; should use ``layer_to_index`` not modulo)\n"
+            "  - negotiated-loop rip-up policy on BLOCKED_BY_COMPONENT\n"
+            "  - per-pad channel budget for J1's 12 SMT signal pads\n"
+            "  - any change to ``_create_intra_ic_routes`` that affects "
+            "diff-pair partner consolidation on the same package."
+        )
+
+    def test_per_net_reach_usb_signals(self, route_stdout: str) -> None:
+        """Zero partially-connected nets -- the per-net USB contract.
+
+        Issue #3308 AC #4 wanted per-net reach pins for the four USB-C
+        signals.  The original implementation parsed ``Net:``/``Status:``
+        blocks from a "ROUTING PREVIEW" section -- but ``kct route``
+        only emits that section under the INTERACTIVE ``--preview``
+        flag, so the parser never saw any per-net lines and the test
+        failed on every nightly run (silently: the slow-tests workflow
+        does not gate on the pytest exit code).
+
+        Issue #3410 replaces the broken stdout contract with the
+        summary the CLI actually prints::
+
+            Nets routed:     13/13
+            Partial routes:  0/13 -- have segments, not all pads connected
+            Unrouted:        0/13 -- no segments at all
+
+        At the post-#3410 baseline the reach floor is the FULL net
+        population (13/13, ``test_reach_meets_floor``), so the per-net
+        USB contract collapses to "zero partial + zero unrouted":
+        any USB net regression (the historical failure modes were
+        USB_D+/USB_D-/USB_CC1/USB_CC2 stranding in every combination)
+        necessarily surfaces as a non-zero partial/unrouted count.  When a
+        regression fires, the ``Partially connected nets:`` block in
+        the same output names the exact nets.
+        """
+        partial = re.search(r"Partial routes:\s+(\d+)/(\d+)", route_stdout)
+        assert partial is not None, (
+            "Could not find 'Partial routes: N/M' summary line in kct "
+            "route stdout -- the CLI summary format changed; update "
+            "this parser alongside _parse_routed_net_count.\n"
+            f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+        )
+        partial_count = int(partial.group(1))
+
+        unrouted = re.search(r"Unrouted:\s+(\d+)/(\d+)", route_stdout)
+        unrouted_count = int(unrouted.group(1)) if unrouted else 0
+
+        # Name the offenders when the contract breaks.
+        offenders = re.findall(r"^\s{4}(\S+): \d+/\d+ pads connected", route_stdout, re.M)
+
+        assert partial_count == 0 and unrouted_count == 0, (
+            f"Board 03 has {partial_count} partial + {unrouted_count} "
+            f"unrouted net(s) at HEAD (post-#3410 contract is 0/0; the "
+            f"historical offenders were the USB-C signals).  Offending "
+            f"net(s): {offenders or 'see stdout'}.  Bisect against:\n"
+            "  - reduce_pads_after_intra_ic (tie-group representative, "
+            "#3410)\n"
+            "  - _escape_usb_c_connector column-aligned defer (#3410)\n"
+            "  - auto_pour _detect_uninset_zones (zone preservation, "
+            "#3410)\n"
+            "  - the C++ layer_to_index invariant (#3304)."
+        )
+
+    def test_the_1_of_16_myth_stays_dead(self, route_stdout: str) -> None:
+        """If routing reach ever drops to 1 or fewer, somebody broke it badly.
+
+        The pre-test ``kct fleet status`` reported board 03 as
+        ``1/16 nets routed`` based on a stale committed routed PCB
+        snapshot.  Live routing produces 10/13.  This test guards against
+        accidentally re-introducing a catastrophic regression: anything
+        that drops the live count to 1 or below is a hard fail.
+
+        See #3280 for the fleet-status staleness gap that gave rise to
+        the original "1/16" report.
+        """
+        parsed = _parse_routed_net_count(route_stdout)
+        assert parsed is not None, "Could not parse routed net count; see test_reach_meets_floor"
+        routed, _total = parsed
+        assert routed > 1, (
+            f"Board 03 live routing produced {routed} routed nets — "
+            "the catastrophic baseline that #3259 was opened to prevent.  "
+            "Either a router fix landed that regressed J1's escape "
+            "geometry catastrophically, or the unrouted PCB is missing "
+            "the destination MCU U1 (in which case generate_pcb.py "
+            "needs to be regenerated)."
+        )
+
+    def test_coupled_pathfinder_phase_a_invoked(self, route_stdout: str) -> None:
+        """The diff-pair pre-pass (Phase A) actually runs under the recipe.
+
+        Issue #3952 (LANDED): ``route_with_escape_and_diffpairs`` now composes
+        the escape pre-phase with the CoupledPathfinder diff-pair pre-pass, and
+        all four escape/escalation dispatch sites in ``route_cmd.py`` are gated
+        on ``args.differential_pairs`` to call it.  On board 03 the fine-pitch
+        USB-C still forces the escape dispatch, but the composed path now runs
+        Phase A: the ``=== Differential Pair Routing ===`` banner appears and
+        the USB D+/D- pair is detected.  This test was previously ``xfail`` on
+        #3952 and now hard-pins the behavior -- if it regresses to no banner,
+        the diff-pair dispatch was re-bypassed on the escape path.
+
+        (The pair still budget-exits the coupled A* and falls through to the
+        escape main pass on board 03 -- routing it *coupled* at 0 DRC needs
+        #3921 -- but Phase A running is exactly what this gate asserts.)
+        """
+        assert "=== Differential Pair Routing ===" in route_stdout, (
+            "The diff-pair pre-pass (Phase A / route_all_with_diffpairs) did "
+            "not run -- see #3952.\n"
+            f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+        )
+        assert "Detected 1 differential pairs" in route_stdout, (
+            "Phase A ran but did not detect the USB D+/D- pair.  Check that "
+            "--net-class-map still forwards the diffpair_partner metadata "
+            "(Issue #3922).\n"
+            f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+        )
+
+
+def test_historical_route_timeout_retains_partial_diagnostics(monkeypatch, tmp_path):
+    """A terminated subprocess must leave its output and partial board inspectable."""
+
+    def timeout(cmd, **kwargs):
+        assert "--differential-pairs" in cmd and "--net-class-map" in cmd
+        assert kwargs["timeout"] == ROUTE_TIMEOUT
+        assert Path(cmd[cmd.index("--output") + 1]).parent == tmp_path
+        kwargs["stdout"].write("partial net USB_D+\n")
+        kwargs["stderr"].write("routing deadline\n")
+        Path(cmd[cmd.index("--output") + 1]).write_text("partial copper")
+        raise subprocess.TimeoutExpired(cmd, ROUTE_TIMEOUT)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    before = UNROUTED_PCB.read_bytes()
+    with pytest.raises(pytest.fail.Exception, match="partial PCB, stdout and stderr retained"):
+        _run_kct_route(UNROUTED_PCB, 42, tmp_path)
+    assert (tmp_path / "stdout.log").read_text() == "partial net USB_D+\n"
+    assert (tmp_path / "stderr.log").read_text() == "routing deadline\n"
+    assert (tmp_path / "usb_joystick_routed.kicad_pcb").read_text() == "partial copper"
+    assert UNROUTED_PCB.read_bytes() == before
+
+
+def test_historical_recipe_is_wall_clock_independent(monkeypatch, tmp_path):
+    """The reach recipe must not carry a wall-clock ``kct route`` budget (#5752).
+
+    ``--timeout`` under ``--auto-layers`` escalation gives the 2L attempt a
+    fair slice of ``timeout / len(layer_configs)`` seconds, so a loaded host
+    cut the detailed pass short and the reach tests failed only in long
+    serial runs.  The recipe must stay iteration-bounded
+    (``--deterministic-budget``) with no ``--timeout`` / ``--search-timeout``
+    / ``--per-net-timeout`` so its outcome cannot depend on machine speed.
+    """
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        kwargs["stdout"].write("Nets routed:     13/13\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _run_kct_route(UNROUTED_PCB, 42, tmp_path)
+    (cmd,) = captured
+    assert "--deterministic-budget" in cmd
+    for flag in ("--timeout", "--search-timeout", "--per-net-timeout"):
+        assert flag not in cmd, f"{flag} reintroduces wall-clock dependence (issue #5752)"
+
+
+def test_historical_geometry_is_32_pad_and_release_is_separate(unrouted_pcb_path):
+    from kicad_tools.schema import PCB
+
+    board = PCB.load(unrouted_pcb_path)
+    u1 = next(fp for fp in board.footprints if fp.reference == "U1")
+    assert len(u1.pads) == 32
+    assert COMMITTED_ROUTED_PCB.parent == BOARD_DIR / "output"
+    assert REQUIRED_NETS_ROUTED == EXPECTED_TOTAL_NETS == 13
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(2800)
+def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_path: Path) -> None:
+    """The same reach (13/13 post-#3410) is produced for seeds 1, 42, and 99.
+
+    The negotiated A* router uses the global seed for tie-breaks during
+    A* and for the rip-up selection in BLOCKED_BY_COMPONENT.  For a
+    USB-C-class board where the bottleneck is escape geometry (not A*
+    tie-breaks), the reach should be stable across seeds.  If a future
+    change introduces seed sensitivity, that's a determinism regression
+    worth investigating.
+
+    Marked slow because it runs ``kct route`` THREE times (~7.5 minutes
+    wall-clock).
+    """
+    counts = {}
+    for seed in (1, 42, 99):
+        stdout = _run_kct_route(unrouted_pcb_path, seed=seed, artifacts=tmp_path / f"seed-{seed}")
+        parsed = _parse_routed_net_count(stdout)
+        assert parsed is not None, (
+            f"Could not parse routed net count for seed {seed}; "
+            f"stdout (last 4000 chars):\n{stdout[-4000:]}"
+        )
+        counts[seed] = parsed[0]
+    unique_counts = set(counts.values())
+    assert len(unique_counts) == 1, (
+        f"Board 03 routing reach is NOT seed-stable: got {counts!r}.  "
+        "Variance across seeds indicates the A* tie-break or the "
+        "BLOCKED_BY_COMPONENT rip-up order is now load-bearing for the "
+        "USB_D+/USB_D- failure mode.  Either the escape geometry is "
+        "fragile in a new way, or the negotiated loop's stall detection "
+        "introduced seed-dependence.  Investigate before relaxing this "
+        "assertion."
+    )
+    # And the seed-stable count must be at the floor.
+    routed = next(iter(unique_counts))
+    assert routed >= REQUIRED_NETS_ROUTED, (
+        f"Seed-stable count {routed} is below the floor of "
+        f"{REQUIRED_NETS_ROUTED}; see test_reach_meets_floor for "
+        "bisection guidance."
+    )
+
+
+#: Router Power-class violations in the committed board-03 copper, exposed by
+#: #6390.  #6394 re-derived the plan from a class-clean lattice route and
+#: removed the ``.github/routed-drc-tolerance.yml`` entry: 13 -> 0.
+BOARD03_KNOWN_NETCLASS_VIOLATIONS = 0
+
+
+@board03_check_timeout  # Issue #8901
+def test_committed_pcb_drc_state() -> None:
+    """The shipped routed PCB does not silently degrade past its June 7 ceiling.
+
+    Background: the committed ``output/usb_joystick_routed.kicad_pcb``
+    was last updated by PR #3195 on June 4 2026.  A fresh ``kct
+    route`` invocation against the same unrouted PCB on June 7
+    produces a STRICTLY WORSE result (10/13 vs 12/13; USB_D+/USB_D-
+    both partial vs only USB_D+; USB_CC2 partial vs OK — the
+    USB_CC2 regression is tracked under #3304 as a follow-on to
+    #3278/PR #3300, and the route_demo divergence under #3308).
+    Until those are bisected and fixed, the committed file is the
+    canonical "best known" routed PCB for board 03 and we MUST guard
+    against its quality silently degrading.
+
+    This test runs the pure-Python DRC pass with the jlcpcb-tier1
+    profile and asserts:
+
+    - <= 4 errors (matches the June 7 measurement: 1 connectivity,
+      1 diffpair_clearance_intra, 1 clearance_segment_via,
+      1 clearance_pad_via).
+    - The rule mix is bounded: any NEW rule appearing in the error
+      breakdown that isn't in the expected set is a regression
+      (e.g. a fresh ``via_in_pad`` error would indicate the PCB
+      slipped past tier-1 capabilities).
+
+    This is a FAST test (no routing) — it just parses an existing
+    artifact, so it runs in PR CI, not slow.
+
+    See issues #3293 (refresh tracking), #3304 (USB_CC2 main-router
+    regression), and #3308 (route_demo regression) for the full
+    context.
+    """
+    if not COMMITTED_ROUTED_PCB.exists():
+        pytest.skip(
+            f"Committed routed PCB not found at {COMMITTED_ROUTED_PCB!s}; "
+            "this test guards the shipped artifact's DRC state."
+        )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "check",
+        str(COMMITTED_ROUTED_PCB),
+        "--mfr",
+        "jlcpcb-tier1",
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    stdout = proc.stdout
+
+    # Parse the error count from the "Errors:     N" line.
+    err_match = re.search(r"Errors:\s+(\d+)", stdout)
+    assert err_match is not None, (
+        "Could not parse error count from 'kct check' output.  Did the "
+        "CLI output format change?\n"
+        f"stdout (last 2000 chars):\n{stdout[-2000:]}"
+    )
+    err_count = int(err_match.group(1))
+    # Issue #6390 declared the router's own net classes in the routed
+    # sidecars, exposing the committed copper's Power-class violations.  They
+    # are tracked (nets, locations, gaps) in #6394 and counted separately here
+    # so this ceiling keeps guarding everything else.
+    netclass_match = re.search(r"\bnetclass_clearance_copper:\s+(\d+)", stdout)
+    netclass_count = int(netclass_match.group(1)) if netclass_match else 0
+    assert netclass_count <= BOARD03_KNOWN_NETCLASS_VIOLATIONS, (
+        f"{netclass_count} netclass_clearance_copper errors; #6394 tracks "
+        f"{BOARD03_KNOWN_NETCLASS_VIOLATIONS}"
+    )
+    err_count -= netclass_count
+    assert err_count <= MAX_COMMITTED_DRC_ERRORS, (
+        f"Committed routed PCB has {err_count} DRC errors on "
+        f"jlcpcb-tier1; ceiling is {MAX_COMMITTED_DRC_ERRORS} "
+        "(June 7 2026 baseline, issue #3293).  Either:\n"
+        "  - a router fix that landed regressed the committed PCB "
+        "without regenerating it (regenerate the routed PCB), OR\n"
+        "  - the route_demo regression in #3308 leaked into the "
+        "committed file (revert the committed PCB), OR\n"
+        "  - the manufacturer profile tightened (legitimate ceiling "
+        "bump — update MAX_COMMITTED_DRC_ERRORS in the same commit).\n"
+        f"Full stdout (last 4000 chars):\n{stdout[-4000:]}"
+    )
+
+    # Parse the "BY RULE:" breakdown and assert the rule set is bounded.
+    by_rule_match = re.search(
+        r"BY RULE:\s*\n((?:\s+\w[\w_]*: \d+ \w+\s*\n)+)",
+        stdout,
+    )
+    if by_rule_match:
+        rules_seen = set(re.findall(r"\b([a-z][a-z_]+):\s+\d+\b", by_rule_match.group(1)))
+        # All rules seen must be in our expected set; new rules indicate
+        # a new failure mode worth investigating.
+        unexpected = rules_seen - EXPECTED_COMMITTED_DRC_RULES - {"netclass_clearance_copper"}
+        assert not unexpected, (
+            f"Committed routed PCB has NEW DRC rules failing on "
+            f"jlcpcb-tier1: {sorted(unexpected)}.  The June 7 2026 "
+            f"baseline only had {sorted(EXPECTED_COMMITTED_DRC_RULES)}.  "
+            "A new failure mode means the PCB drifted off the known "
+            "tier-1 ceiling — investigate the new rule(s) before "
+            "expanding EXPECTED_COMMITTED_DRC_RULES.\n"
+            f"stdout (last 4000 chars):\n{stdout[-4000:]}"
+        )
+
+
+def test_committed_pcb_has_no_thermal_asymmetry() -> None:
+    """Issue #7275: board 03 ships with no ``thermal_asymmetry`` finding at all.
+
+    The six pads #7270 once allowed (C10-2, C11-2, J1 A1/A12/B1/B12) now carry
+    explicit thermal reliefs from the recipe (``BOARD03_PAD_THERMALS`` in
+    ``generate_design.py``).  Any finding -- on those pads or any other -- fails.
+    """
+    assert "thermal_asymmetry" not in EXPECTED_COMMITTED_DRC_RULES
+    if not COMMITTED_ROUTED_PCB.exists():
+        pytest.skip(f"Committed routed PCB not found at {COMMITTED_ROUTED_PCB!s}")
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.checker import DRCChecker
+
+    violations = (
+        DRCChecker(PCB.load(str(COMMITTED_ROUTED_PCB)), manufacturer="jlcpcb-tier1", layers=4)
+        .check_thermal_asymmetry()
+        .violations
+    )
+    assert violations == [], "thermal_asymmetry findings on board 03:\n" + "\n".join(
+        f"  {v.items}: {v.message}" for v in violations
+    )

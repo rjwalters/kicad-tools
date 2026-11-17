@@ -1,0 +1,3 @@
+AVR GCC7.3.0:866 text bytes,24 data bytes,1 BSS byte. Warnings treated as errors.
+Host C commutation test passed:6 states,6 valid phase pairs,one-bit Hall transitions,one-leg commutation transitions,reject Hall0/7.
+Physical motor operation and thermal performance remain untested.

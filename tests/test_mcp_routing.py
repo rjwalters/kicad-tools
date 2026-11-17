@@ -1,0 +1,1254 @@
+"""Tests for kicad_tools.mcp.tools.routing module."""
+
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("pydantic")
+
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.exceptions import ParseError
+from kicad_tools.mcp.tools.routing import _resolve_output_path, get_unrouted_nets, route_net
+from kicad_tools.mcp.types import (
+    NetRoutingStatus,
+    RouteNetResult,
+    UnroutedNetsResult,
+)
+
+# Simple 2-layer PCB with unrouted nets
+UNROUTED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG1")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SIG1"))
+  )
+
+  (footprint "C_0603"
+    (layer "F.Cu")
+    (at 20 10)
+    (attr smd)
+    (property "Reference" "C1")
+    (property "Value" "100nF")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "4.7k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+)
+"""
+
+# PCB with partially routed net
+PARTIAL_ROUTED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG1")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SIG1"))
+  )
+
+  (footprint "C_0603"
+    (layer "F.Cu")
+    (at 20 10)
+    (attr smd)
+    (property "Reference" "C1")
+    (property "Value" "100nF")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "4.7k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (segment (start 10.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 3))
+)
+"""
+
+# PCB with fully routed nets
+FULLY_ROUTED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG1")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SIG1"))
+  )
+
+  (footprint "C_0603"
+    (layer "F.Cu")
+    (at 20 10)
+    (attr smd)
+    (property "Reference" "C1")
+    (property "Value" "100nF")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (segment (start 10.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 3))
+  (segment (start 9.5 10) (end 9.5 20) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 20.5 10) (end 20.5 20) (width 0.25) (layer "F.Cu") (net 2))
+)
+"""
+
+
+class TestGetUnroutedNets:
+    """Tests for get_unrouted_nets function."""
+
+    def test_unrouted_pcb(self, tmp_path: Path) -> None:
+        """Test detection of unrouted nets."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = get_unrouted_nets(str(pcb_file))
+
+        assert isinstance(result, UnroutedNetsResult)
+        assert result.total_nets == 3  # VCC, GND, SIG1
+        # All nets have 2 pads but no routing, so they're incomplete/unrouted
+        assert result.unrouted_count + result.partial_count >= 2
+        assert result.complete_count == 0  # No nets fully routed
+
+    def test_partial_routed_pcb(self, tmp_path: Path) -> None:
+        """Test detection of partially routed nets."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PARTIAL_ROUTED_PCB)
+
+        result = get_unrouted_nets(str(pcb_file))
+
+        assert isinstance(result, UnroutedNetsResult)
+        # SIG1 should be complete (2 pads connected)
+        assert result.complete_count >= 1
+
+    def test_include_partial_false(self, tmp_path: Path) -> None:
+        """Test excluding partial nets from results."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PARTIAL_ROUTED_PCB)
+
+        result = get_unrouted_nets(str(pcb_file), include_partial=False)
+
+        # Should not include any partial nets
+        for net in result.nets:
+            assert net.status != "partial"
+
+    def test_result_to_dict(self, tmp_path: Path) -> None:
+        """Test serialization of result."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = get_unrouted_nets(str(pcb_file))
+        result_dict = result.to_dict()
+
+        assert "total_nets" in result_dict
+        assert "unrouted_count" in result_dict
+        assert "partial_count" in result_dict
+        assert "complete_count" in result_dict
+        assert "nets" in result_dict
+        assert isinstance(result_dict["nets"], list)
+
+    def test_net_status_fields(self, tmp_path: Path) -> None:
+        """Test NetRoutingStatus fields are populated."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = get_unrouted_nets(str(pcb_file))
+
+        for net in result.nets:
+            assert isinstance(net, NetRoutingStatus)
+            assert net.name != ""
+            # Status from NetStatusAnalyzer uses "incomplete" not "partial"
+            assert net.status in ["unrouted", "incomplete", "complete"]
+            assert net.pins >= 0
+            assert net.difficulty in ["easy", "medium", "hard"]
+
+    def test_file_not_found(self) -> None:
+        """Test error handling for missing file."""
+        with pytest.raises(KiCadFileNotFoundError):
+            get_unrouted_nets("/nonexistent/path/board.kicad_pcb")
+
+    def test_invalid_extension(self, tmp_path: Path) -> None:
+        """Test error handling for invalid file extension."""
+        pcb_file = tmp_path / "test.txt"
+        pcb_file.write_text("not a pcb file")
+
+        with pytest.raises(ParseError):
+            get_unrouted_nets(str(pcb_file))
+
+    def test_invalid_content(self, tmp_path: Path) -> None:
+        """Test error handling for invalid PCB content."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text("not valid sexp content")
+
+        with pytest.raises(ParseError):
+            get_unrouted_nets(str(pcb_file))
+
+
+class TestRouteNet:
+    """Tests for route_net function."""
+
+    def test_route_simple_net(self, tmp_path: Path) -> None:
+        """Test routing a simple 2-pin net."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        output_file = tmp_path / "routed.kicad_pcb"
+
+        result = route_net(
+            str(pcb_file),
+            net_name="SIG1",
+            output_path=str(output_file),
+        )
+
+        assert isinstance(result, RouteNetResult)
+        assert result.net_name == "SIG1"
+        # Routing may or may not succeed depending on router
+        # but the result structure should be valid
+        assert result.total_connections >= 0
+
+    def test_default_output_leaves_input_untouched(self, tmp_path: Path) -> None:
+        """Omitting output_path must not modify the input (Issue #7111)."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        before = pcb_file.read_bytes()
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert pcb_file.read_bytes() == before
+        expected = tmp_path / "test_routed.kicad_pcb"
+        # Issue #7114: the save step used to raise a TypeError, so this test
+        # silently skipped the success branch.  It must now really succeed.
+        assert result.success is True, result.error_message
+        assert result.output_path == str(expected)
+        assert expected.exists()
+
+    def test_routed_net_is_saved_end_to_end(self, tmp_path: Path) -> None:
+        """A routed 2-pad net is merged and written to disk (Issue #7114).
+
+        ``route_net`` used to call ``merge_routes_into_pcb`` with a signature
+        that never existed (``TypeError`` on ``net_map``) and so could never
+        save.  Route SIG1 on the unrouted fixture and check the output file.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        before = pcb_file.read_bytes()
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert result.success is True, result.error_message
+        assert result.error_message is None
+        assert result.routed_connections >= 1
+        assert result.trace_length_mm > 0
+        out = tmp_path / "test_routed.kicad_pcb"
+        assert result.output_path == str(out)
+        assert pcb_file.read_bytes() == before
+
+        routed = PCB.load(str(out))
+        sig1 = next(num for num, net in routed.nets.items() if net.name == "SIG1")
+        sig1_segments = [s for s in routed.segments if s.net_number == sig1]
+        assert sig1_segments, "no SIG1 copper in the saved board"
+        assert not [s for s in routed.segments if s.net_number != sig1]
+        # Width comes from the design rules the router actually used.
+        from kicad_tools.router.io import parse_pcb_design_rules
+
+        expected_width = parse_pcb_design_rules(UNROUTED_PCB).to_design_rules().trace_width
+        assert all(s.width == pytest.approx(expected_width) for s in sig1_segments)
+
+    def test_grid_step_run_is_merged_into_one_segment(self) -> None:
+        """90 collinear grid-step segments collapse to one (Issue #7120)."""
+        from kicad_tools.mcp.tools.routing import _merge_collinear_segments
+        from kicad_tools.router import Autorouter, DesignRules
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Route, Segment
+
+        def pad(x: float, n: str) -> dict:
+            return {
+                "number": n, "x": x, "y": 10.0, "width": 0.6, "height": 0.6, "net": 1,
+                "net_name": "S", "layer": Layer.F_CU, "through_hole": False,
+            }  # fmt: skip
+
+        router = Autorouter(
+            30, 20, rules=DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.2)
+        )
+        router.add_component("R1", [pad(5.0, "1")])
+        router.add_component("R2", [pad(14.0, "1")])
+        segs = [
+            Segment(
+                x1=5 + i * 0.1, y1=10.0, x2=5 + (i + 1) * 0.1, y2=10.0,
+                width=0.2, layer=Layer.F_CU, net=1, net_name="S",
+            )
+            for i in range(90)
+        ]  # fmt: skip
+        route = Route(net=1, net_name="S", segments=segs, vias=[])
+        router._mark_route(route)
+        router.routes.append(route)
+
+        merged = _merge_collinear_segments(router, 1, [route])
+
+        out = [s for r in merged for s in r.segments]
+        assert len(out) == 1
+        assert out[0].x1 == pytest.approx(5.0)
+        assert out[0].x2 == pytest.approx(14.0)
+
+    def test_optimizer_failure_falls_back_to_raw_routes(self, tmp_path: Path, monkeypatch) -> None:
+        """An optimizer exception must not fail routing (Issue #7120)."""
+        import kicad_tools.router.optimizer as opt
+
+        def boom(*a, **k):
+            raise RuntimeError("optimizer exploded")
+
+        monkeypatch.setattr(opt, "optimize_routes_grid_synced", boom)
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+        assert result.success is True, result.error_message
+        assert result.trace_length_mm > 0
+
+    def test_routed_output_loads_in_kicad_cli(self, tmp_path: Path) -> None:
+        """kicad-cli parses the saved board without errors (Issue #7114)."""
+        import shutil
+        import subprocess
+
+        kicad_cli = shutil.which("kicad-cli")
+        mac_cli = Path("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
+        if kicad_cli is None and mac_cli.exists():
+            kicad_cli = str(mac_cli)
+        if kicad_cli is None:
+            pytest.skip("kicad-cli not available")
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        result = route_net(str(pcb_file), net_name="SIG1")
+        assert result.success is True, result.error_message
+
+        report = tmp_path / "drc.json"
+        proc = subprocess.run(
+            [
+                kicad_cli,
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--output",
+                str(report),
+                result.output_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert report.exists()
+
+    def test_save_failure_reports_error(self, tmp_path: Path) -> None:
+        """A write failure still returns success=False with a message."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+        bad = tmp_path / "missing_dir" / "out.kicad_pcb"
+
+        result = route_net(str(pcb_file), net_name="SIG1", output_path=str(bad))
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "Failed to save routed PCB" in result.error_message
+
+    def test_explicit_same_output_path_is_reported(self, tmp_path: Path) -> None:
+        """Passing output_path == pcb_path is the explicit overwrite opt-in."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PARTIAL_ROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1", output_path=str(pcb_file))
+
+        # Already-routed early return writes nothing, so no output_path is reported.
+        assert result.output_path is None
+
+    def test_route_already_routed_net(self, tmp_path: Path) -> None:
+        """Test routing a net that's already fully routed."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PARTIAL_ROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+
+        assert isinstance(result, RouteNetResult)
+        # SIG1 is connected in PARTIAL_ROUTED_PCB
+        assert result.success is True
+        assert result.net_name == "SIG1"
+
+    def test_net_not_found(self, tmp_path: Path) -> None:
+        """Test error for non-existent net."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        with pytest.raises(ValueError, match="not found"):
+            route_net(str(pcb_file), net_name="NONEXISTENT_NET")
+
+    def test_result_to_dict(self, tmp_path: Path) -> None:
+        """Test serialization of route result."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = route_net(str(pcb_file), net_name="SIG1")
+        result_dict = result.to_dict()
+
+        assert "success" in result_dict
+        assert "net_name" in result_dict
+        assert "routed_connections" in result_dict
+        assert "total_connections" in result_dict
+        assert "trace_length_mm" in result_dict
+        assert "vias_used" in result_dict
+        assert "layers_used" in result_dict
+
+    def test_route_strategies(self, tmp_path: Path) -> None:
+        """Test different routing strategies."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        # Test auto strategy
+        result_auto = route_net(
+            str(pcb_file),
+            net_name="SIG1",
+            strategy="auto",
+        )
+        assert result_auto.net_name == "SIG1"
+
+        # Test shortest strategy
+        result_shortest = route_net(
+            str(pcb_file),
+            net_name="SIG1",
+            strategy="shortest",
+        )
+        assert result_shortest.net_name == "SIG1"
+
+        # Test avoid_vias strategy
+        result_no_vias = route_net(
+            str(pcb_file),
+            net_name="SIG1",
+            strategy="avoid_vias",
+        )
+        assert result_no_vias.net_name == "SIG1"
+
+    def test_layer_preference(self, tmp_path: Path) -> None:
+        """Test layer preference parameter."""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        result = route_net(
+            str(pcb_file),
+            net_name="SIG1",
+            layer_preference="F.Cu",
+        )
+
+        assert result.net_name == "SIG1"
+        # If routing succeeded and used layers, check preference was respected
+        if result.success and result.layers_used:
+            # F.Cu should be in the layers used (unless routing failed)
+            pass  # Can't guarantee F.Cu is used as it depends on routing
+
+    def test_file_not_found(self) -> None:
+        """Test error handling for missing file."""
+        with pytest.raises(KiCadFileNotFoundError):
+            route_net("/nonexistent/path/board.kicad_pcb", net_name="SIG1")
+
+    def test_invalid_extension(self, tmp_path: Path) -> None:
+        """Test error handling for invalid file extension."""
+        pcb_file = tmp_path / "test.txt"
+        pcb_file.write_text("not a pcb file")
+
+        with pytest.raises(ParseError):
+            route_net(str(pcb_file), net_name="SIG1")
+
+
+class TestMCPServerIntegration:
+    """Integration tests for MCP server routing tools."""
+
+    def test_server_has_routing_tools(self) -> None:
+        """Test that MCP server includes routing tools."""
+        from kicad_tools.mcp.server import MCPServer
+
+        server = MCPServer()
+
+        assert "get_unrouted_nets" in server.tools
+        assert "route_net" in server.tools
+
+    def test_server_tool_definitions(self) -> None:
+        """Test routing tool definitions in MCP server."""
+        from kicad_tools.mcp.server import MCPServer
+
+        server = MCPServer()
+
+        # Check get_unrouted_nets
+        unrouted_tool = server.tools["get_unrouted_nets"]
+        assert unrouted_tool.name == "get_unrouted_nets"
+        assert "pcb_path" in unrouted_tool.parameters["properties"]
+
+        # Check route_net
+        route_tool = server.tools["route_net"]
+        assert route_tool.name == "route_net"
+        assert "pcb_path" in route_tool.parameters["properties"]
+        assert "net_name" in route_tool.parameters["properties"]
+
+    def test_server_call_get_unrouted_nets(self, tmp_path: Path) -> None:
+        """Test calling get_unrouted_nets through MCP server."""
+        from kicad_tools.mcp.server import MCPServer
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        server = MCPServer()
+        result = server.call_tool(
+            "get_unrouted_nets",
+            {"pcb_path": str(pcb_file)},
+        )
+
+        assert "total_nets" in result
+        assert "nets" in result
+
+    def test_server_call_route_net(self, tmp_path: Path) -> None:
+        """Test calling route_net through MCP server."""
+        from kicad_tools.mcp.server import MCPServer
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(UNROUTED_PCB)
+
+        server = MCPServer()
+        result = server.call_tool(
+            "route_net",
+            {"pcb_path": str(pcb_file), "net_name": "SIG1"},
+        )
+
+        assert "success" in result
+        assert "net_name" in result
+        assert result["net_name"] == "SIG1"
+
+
+class TestNetRoutingStatusType:
+    """Tests for NetRoutingStatus dataclass."""
+
+    def test_to_dict(self) -> None:
+        """Test serialization of NetRoutingStatus."""
+        status = NetRoutingStatus(
+            name="TEST_NET",
+            status="unrouted",
+            pins=4,
+            routed_connections=0,
+            total_connections=3,
+            estimated_length_mm=25.5,
+            difficulty="medium",
+            reason="Long routing distance",
+        )
+
+        result = status.to_dict()
+
+        assert result["name"] == "TEST_NET"
+        assert result["status"] == "unrouted"
+        assert result["pins"] == 4
+        assert result["routed_connections"] == 0
+        assert result["total_connections"] == 3
+        assert result["estimated_length_mm"] == 25.5
+        assert result["difficulty"] == "medium"
+        assert result["reason"] == "Long routing distance"
+
+
+class TestRouteNetResultType:
+    """Tests for RouteNetResult dataclass."""
+
+    def test_success_result_to_dict(self) -> None:
+        """Test serialization of successful routing result."""
+        result = RouteNetResult(
+            success=True,
+            net_name="SIG1",
+            routed_connections=2,
+            total_connections=2,
+            trace_length_mm=15.5,
+            vias_used=0,
+            layers_used=["F.Cu"],
+            output_path="/path/to/output.kicad_pcb",
+        )
+
+        result_dict = result.to_dict()
+
+        assert result_dict["success"] is True
+        assert result_dict["net_name"] == "SIG1"
+        assert result_dict["routed_connections"] == 2
+        assert result_dict["trace_length_mm"] == 15.5
+        assert result_dict["vias_used"] == 0
+        assert result_dict["layers_used"] == ["F.Cu"]
+
+    def test_failure_result_to_dict(self) -> None:
+        """Test serialization of failed routing result."""
+        result = RouteNetResult(
+            success=False,
+            net_name="GND",
+            total_connections=5,
+            error_message="Routing blocked by obstacles",
+            suggestions=["Check placement", "Try different layer"],
+        )
+
+        result_dict = result.to_dict()
+
+        assert result_dict["success"] is False
+        assert result_dict["net_name"] == "GND"
+        assert result_dict["error_message"] == "Routing blocked by obstacles"
+        assert "Check placement" in result_dict["suggestions"]
+
+
+class TestRouteNetAuto:
+    """Tests for route_net_auto function (issue #1268 regression)."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "routing-diagnostic.kicad_pcb"
+
+    def test_no_attribute_error_on_fixture(self) -> None:
+        """route_net_auto must not raise AttributeError on a real PCB file.
+
+        Regression test for GH-1268: the old code assigned to the read-only
+        PCB.path property, causing ``AttributeError: can't set attribute 'path'``
+        on every real board.
+
+        The guard here is specifically "no exception, well-formed result." On
+        this fixture NET1 is a 3-pad net whose two most-distant pads sit on the
+        emitted two-terminal corridor while the middle pad P1=(7.05, 8.45) is
+        genuinely stranded, so the honest completion check (#4165) reports a
+        2/3 partial rather than success. That is the *correct* result — this
+        test therefore tolerates the honest partial and only asserts the call
+        did not raise and returned a well-formed dict.
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        # The fixture has NET1 with pads on three footprints (R1, U1, J1).
+        result = route_net_auto(
+            pcb_path=str(self.FIXTURE),
+            net_name="NET1",
+        )
+        # The call must return a dict (not raise) — this is the GH-1268 guard.
+        assert isinstance(result, dict)
+        assert "success" in result
+        assert result["net_name"] == "NET1"
+        # The result must be well-formed regardless of completion: success is a
+        # bool, and if it is not a full success it must be an honest partial
+        # (NOT an AttributeError crash and NOT the old "Insufficient pads" guard
+        # failing before the orchestrator even runs).
+        assert isinstance(result["success"], bool)
+        assert "Insufficient pads" not in (result.get("error_message") or "")
+        if not result["success"]:
+            # NET1 is genuinely partial on this fixture (2/3 pads), and that is
+            # the corrected #4165 behavior — assert the honest partial signal
+            # rather than the old false success.
+            assert result.get("partial") is True
+            assert result.get("pads_total") == 3
+            assert result.get("pads_connected", 0) < result["pads_total"]
+
+    def test_route_net_auto_routes_multi_pad_net(self) -> None:
+        """A multi-pad net feeds pads to the orchestrator and reports honestly.
+
+        Regression test for GH-1282: route_net_auto() was not passing pad
+        positions to the orchestrator, so every strategy guard returned
+        'Insufficient pads for global routing' even for nets with many pads.
+        The guard is that the pads DO reach the orchestrator (a strategy is
+        selected and applied) — NOT that every fixture net completes.
+
+        Post-#4165 the first strategy's two-terminal corridor joins the two
+        most-distant pads but strands the middle pad P1=(7.05, 8.45), so it is
+        demoted to a 2/3 partial and auto mode retries ``hierarchical``.  Since
+        #6107 that retry routes on the real board (every pad on its grid) and
+        completes the net, so the final result is a success *on the retry*.
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        # NET1 has 3 pads: R1:1, U1:1, J1:1
+        result = route_net_auto(
+            pcb_path=str(self.FIXTURE),
+            net_name="NET1",
+        )
+
+        assert isinstance(result, dict)
+        assert result["net_name"] == "NET1"
+        # GH-1282 guard: pads reached the orchestrator and a strategy ran —
+        # this must NOT be the pre-orchestrator "Insufficient pads" failure.
+        assert "Insufficient pads" not in (result.get("error_message") or "")
+        assert "strategy_used" in result
+        assert result["strategy_used"] != "unknown"
+        # #4165: the corridor alone is a 2/3 partial, so it is not what
+        # succeeded -- the hierarchical retry completed the net (#6107).
+        assert result["success"] is True, result.get("error_message")
+        assert result["strategy_used"] == "HIERARCHICAL_DIFF_PAIR"
+        assert result.get("pads_total") == 3
+        assert result.get("pads_connected") == 3
+        assert any("Succeeded on retry" in w for w in result.get("warnings", []))
+
+    def test_route_net_auto_single_pad_net_graceful_failure(self, tmp_path: Path) -> None:
+        """A net with only 1 pad should fail gracefully, not crash."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SOLO")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SOLO"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+        pcb_file = tmp_path / "single_pad.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        result = route_net_auto(pcb_path=str(pcb_file), net_name="SOLO")
+        assert isinstance(result, dict)
+        assert "success" in result
+        # Should fail gracefully (not enough pads to route) but not crash
+        assert result["success"] is False
+        assert "Insufficient pads" in (result.get("error_message") or "")
+
+    def test_pcb_path_property_not_overwritten(self) -> None:
+        """PCB.path should remain the value set by PCB.load(), not be monkey-patched."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(self.FIXTURE))
+        original_path = pcb.path
+
+        # Importing route_net_auto and calling it should not change pcb.path
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        route_net_auto(pcb_path=str(self.FIXTURE), net_name="NET1")
+
+        # Reload to verify path is still correct
+        pcb2 = PCB.load(str(self.FIXTURE))
+        assert pcb2.path == original_path
+
+    def test_no_attribute_error_missing_outline(self, tmp_path: Path) -> None:
+        """route_net_auto falls back to default dimensions when outline is absent."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        # A minimal PCB without Edge.Cuts outline
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+  )
+)
+"""
+        pcb_file = tmp_path / "no_outline.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        result = route_net_auto(pcb_path=str(pcb_file), net_name="VCC")
+        assert isinstance(result, dict)
+        assert "success" in result
+
+
+class TestRouteAutoParserVerbose:
+    """Tests for the --verbose flag on route-auto subcommand (issue #1268)."""
+
+    def test_route_auto_parser_has_verbose_flag(self) -> None:
+        """kct route-auto --help should include -v/--verbose."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        # Parse a minimal route-auto invocation with --verbose
+        args = parser.parse_args(["route-auto", "board.kicad_pcb", "--net", "GND", "--verbose"])
+        assert args.verbose is True
+
+    def test_route_auto_parser_verbose_default_false(self) -> None:
+        """--verbose defaults to False when omitted."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route-auto", "board.kicad_pcb", "--net", "GND"])
+        assert args.verbose is False
+
+    def test_route_auto_parser_short_verbose_flag(self) -> None:
+        """-v should work as shorthand for --verbose."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route-auto", "board.kicad_pcb", "--net", "GND", "-v"])
+        assert args.verbose is True
+
+
+class TestRouteAutoCommandErrorHandling:
+    """Tests for error handling in run_route_auto_command (issue #1268)."""
+
+    def test_verbose_shows_traceback(self, capsys) -> None:
+        """With --verbose, the bare except handler should print a traceback."""
+        import types
+
+        from kicad_tools.cli.commands.routing import run_route_auto_command
+
+        # Build a fake args namespace that will trigger an error
+        args = types.SimpleNamespace(
+            pcb="/nonexistent/path/board.kicad_pcb",
+            net="GND",
+            output=None,
+            strategy="auto",
+            no_repair=False,
+            no_via_resolution=False,
+            dry_run=False,
+            verbose=True,
+        )
+
+        ret = run_route_auto_command(args)
+        assert ret == 1
+
+        captured = capsys.readouterr()
+        # The error message should be on stderr
+        assert "Error:" in captured.err
+        # With verbose, a traceback should also appear on stderr
+        assert "Traceback" in captured.err
+
+    def test_no_verbose_hides_traceback(self, capsys) -> None:
+        """Without --verbose, only the concise error line should appear."""
+        import types
+
+        from kicad_tools.cli.commands.routing import run_route_auto_command
+
+        args = types.SimpleNamespace(
+            pcb="/nonexistent/path/board.kicad_pcb",
+            net="GND",
+            output=None,
+            strategy="auto",
+            no_repair=False,
+            no_via_resolution=False,
+            dry_run=False,
+            verbose=False,
+        )
+
+        ret = run_route_auto_command(args)
+        assert ret == 1
+
+        captured = capsys.readouterr()
+        assert "Error:" in captured.err
+        # Without verbose, no traceback should appear
+        assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Tests: route_net_auto via-geometry override + board-derived aggregation (#4247)
+# ---------------------------------------------------------------------------
+
+
+def _two_pad_pcb_text(extra_net_classes: str = "") -> str:
+    """A minimal 2-pad net PCB that reaches the RoutingOrchestrator.
+
+    ``extra_net_classes`` is injected verbatim so a test can add net-class
+    blocks that drive ``parse_pcb_design_rules`` via-geometry aggregation.
+    """
+    return f"""\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+{extra_net_classes}
+  (net 0 "")
+  (net 1 "NET1")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "NET1"))
+  )
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "NET1"))
+  )
+)
+"""
+
+
+class _FakeVia:
+    """Stand-in orchestrator via carrying the design-rule via geometry."""
+
+    def __init__(self, x: float, y: float, diameter: float, drill: float) -> None:
+        self.x = x
+        self.y = y
+        self.diameter = diameter
+        self.drill = drill
+        self.layers = None  # persist path falls back to ("F.Cu", "B.Cu")
+
+
+class _FakeResult:
+    """Minimal RoutingResult stand-in that emits a single via from the rules."""
+
+    def __init__(self, diameter: float, drill: float) -> None:
+        self.success = True
+        self.partial = False
+        self.strategy_used = "global"
+        self.segments: list = []
+        self.vias = [_FakeVia(20.0, 10.0, diameter, drill)]
+
+    def to_dict(self) -> dict:
+        return {
+            "success": True,
+            "strategy_used": self.strategy_used,
+            "metrics": {"via_count": 1},
+            "repair_actions": [],
+            "warnings": [],
+            "performance": {},
+        }
+
+
+def _install_capturing_orchestrator(monkeypatch):
+    """Patch RoutingOrchestrator to record the rules it receives.
+
+    The fake emits one via whose geometry mirrors the (possibly overridden)
+    ``rules`` so we can verify both the plumbing and that the geometry lands
+    on the persisted via.
+    """
+    captured: dict = {}
+
+    class _FakeOrchestrator:
+        max_strategy_retries = 3
+
+        def __init__(self, pcb, rules, **kwargs):
+            captured["rules"] = rules
+            self._select_strategy = None
+
+        def route_net(self, net, pads):
+            return _FakeResult(captured["rules"].via_diameter, captured["rules"].via_drill)
+
+    import kicad_tools.router.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "RoutingOrchestrator", _FakeOrchestrator)
+    return captured
+
+
+class TestRouteNetAutoViaOverride:
+    """route_net_auto via-drill/diameter override + max()-aggregation (#4247)."""
+
+    def test_explicit_override_reaches_orchestrator_and_via(self, tmp_path, monkeypatch):
+        """Explicit via_drill/via_diameter override board-derived geometry."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        captured = _install_capturing_orchestrator(monkeypatch)
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(_two_pad_pcb_text())
+        out_file = tmp_path / "out.kicad_pcb"
+
+        result = route_net_auto(
+            pcb_path=str(pcb_file),
+            net_name="NET1",
+            output_path=str(out_file),
+            via_drill=0.4,
+            via_diameter=0.8,
+        )
+
+        # Plumbing: the override reached the DesignRules handed to the orchestrator.
+        assert captured["rules"].via_drill == 0.4
+        assert captured["rules"].via_diameter == 0.8
+
+        # Landed on a persisted via.
+        assert result["success"] is True
+        assert result.get("vias_written", 0) == 1
+        saved = out_file.read_text()
+        assert "(size 0.8)" in saved
+        assert "(drill 0.4)" in saved
+
+    def test_partial_override_only_touches_given_field(self, tmp_path, monkeypatch):
+        """Passing only via_drill leaves the diameter board-derived."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        captured = _install_capturing_orchestrator(monkeypatch)
+
+        # Board Default net class => via_dia 0.6 / via_drill 0.3.
+        nc = '  (net_class "Default" (via_dia 0.6) (via_drill 0.3))\n'
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(_two_pad_pcb_text(extra_net_classes=nc))
+
+        route_net_auto(
+            pcb_path=str(pcb_file),
+            net_name="NET1",
+            via_drill=0.35,  # only drill overridden
+        )
+
+        assert captured["rules"].via_drill == 0.35
+        # Diameter still derives from the board's Default net class.
+        assert captured["rules"].via_diameter == 0.6
+
+    def test_board_derived_via_uses_max_aggregation(self, tmp_path, monkeypatch):
+        """With no override, a small-via class does not shrink the derived via (#4247)."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        captured = _install_capturing_orchestrator(monkeypatch)
+
+        nc = (
+            '  (net_class "Default" (via_dia 0.6) (via_drill 0.3))\n'
+            '  (net_class "Micro" (via_dia 0.45) (via_drill 0.2))\n'
+        )
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(_two_pad_pcb_text(extra_net_classes=nc))
+
+        route_net_auto(pcb_path=str(pcb_file), net_name="NET1")
+
+        # max() aggregation: the larger (spec-compliant) geometry wins, not the
+        # 0.45/0.20 that reproduced the original board-wide DRC violation.
+        assert captured["rules"].via_diameter == 0.6
+        assert captured["rules"].via_drill == 0.3
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_pads_for_net forward-rotation sign convention (issue #2788)
+# ---------------------------------------------------------------------------
+
+
+def _rotated_pcb_text(rotation_deg: float) -> str:
+    """Build a minimal 1-footprint, 1-net PCB with a known pad offset and
+    rotation.  The pad's local position has nonzero, distinct x/y so the
+    canonical and buggy (negated) rotation produce DIFFERENT world
+    coordinates at 45°/90°/270° — pure 0°/180° fixtures pass under both
+    sign conventions because cos is even and sin terms vanish, so this
+    fixture is intentionally asymmetric.
+
+    Board origin is implicitly (0, 0) (no setup block), isolating
+    rotation from origin-offset effects.
+    """
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG1")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "Custom"
+    (layer "F.Cu")
+    (at 20 15 {rotation_deg})
+    (attr smd)
+    (property "Reference" "U1")
+    (property "Value" "ASYM")
+    (pad "1" smd rect (at 3.0 1.0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+  )
+)
+"""
+
+
+class TestBuildPadsForNetRotationSignConvention:
+    """Verify that _build_pads_for_net agrees with ``PCB.get_pad_position``
+    when projecting pad-local offsets into world coordinates.
+
+    Both use KiCad's negated-angle convention (verified vs pcbnew 10.0.1,
+    issue #3739, which overturned the standard-CCW form of #2788/#738).
+    This test asserts the two implementations agree with each other to
+    within 1e-9 mm; the dedicated pcbnew-oracle check lives in
+    ``tests/test_rotation_convention.py``.
+
+    Pure 0°/180° rotations pass under BOTH sign conventions, so the
+    parametrization MUST include {45°, 90°, 270°} to catch a divergence.
+    """
+
+    @pytest.mark.parametrize("rotation", [45.0, 90.0, 270.0])
+    def test_pad_world_position_matches_get_pad_position(
+        self, tmp_path: Path, rotation: float
+    ) -> None:
+        from kicad_tools.mcp.tools.routing import _build_pads_for_net
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "rotated.kicad_pcb"
+        pcb_file.write_text(_rotated_pcb_text(rotation))
+
+        pcb = PCB.load(str(pcb_file))
+
+        # Canonical reference: PCB.get_pad_position uses KiCad's negated-angle
+        # forward rotation (core.geometry.rotate_pad_offset, #3739).
+        expected = pcb.get_pad_position("U1", "1")
+        assert expected is not None, (
+            f"Reference get_pad_position returned None for rotation={rotation}°"
+        )
+
+        pads = _build_pads_for_net(pcb, net_number=1, net_name="SIG1")
+        assert len(pads) == 1, (
+            f"rotation={rotation}°: expected exactly 1 pad on SIG1, got {len(pads)}"
+        )
+
+        actual = (pads[0].x, pads[0].y)
+        assert abs(actual[0] - expected[0]) < 1e-9, (
+            f"rotation={rotation}°: pad world x={actual[0]} differs from "
+            f"canonical {expected[0]} — sign convention regression."
+        )
+        assert abs(actual[1] - expected[1]) < 1e-9, (
+            f"rotation={rotation}°: pad world y={actual[1]} differs from "
+            f"canonical {expected[1]} — sign convention regression."
+        )
+
+    def test_negative_control_buggy_vs_canonical_differ(self) -> None:
+        """Sanity check: at each chosen rotation the canonical (CCW) and
+        buggy (negated) transforms produce noticeably different world
+        positions, so the parametrized test above can actually
+        distinguish a correct fix from the bug.
+
+        (If the fixture coordinates were symmetric — e.g., pad_local =
+        (0, 0) or (x, 0) at 180° — both sign conventions would yield the
+        same result and the test would silently pass against buggy code.)
+        """
+        import math
+
+        fp_pos = (20.0, 15.0)
+        pad_local = (3.0, 1.0)
+        for rot in (45.0, 90.0, 270.0):
+            rot_rad = math.radians(rot)
+            cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+            canonical = (
+                fp_pos[0] + pad_local[0] * cos_r - pad_local[1] * sin_r,
+                fp_pos[1] + pad_local[0] * sin_r + pad_local[1] * cos_r,
+            )
+            # Buggy negated-rotation: cos same, sin flipped sign.
+            buggy = (
+                fp_pos[0] + pad_local[0] * cos_r + pad_local[1] * sin_r,
+                fp_pos[1] - pad_local[0] * sin_r + pad_local[1] * cos_r,
+            )
+            dx = abs(canonical[0] - buggy[0])
+            dy = abs(canonical[1] - buggy[1])
+            assert max(dx, dy) > 0.5, (
+                f"rotation={rot}°: fixture too symmetric — canonical="
+                f"{canonical}, buggy={buggy}; fixture pad_local must have "
+                f"nonzero, distinct x/y components."
+            )
+
+
+class TestResolveOutputPath:
+    """Direct tests of the route_net output path default (Issue #7111)."""
+
+    def test_default_is_routed_sibling(self) -> None:
+        assert _resolve_output_path("/a/b/board.kicad_pcb", None) == "/a/b/board_routed.kicad_pcb"
+
+    def test_empty_string_is_default(self) -> None:
+        assert _resolve_output_path("/a/b/board.kicad_pcb", "") == "/a/b/board_routed.kicad_pcb"
+
+    def test_explicit_path_wins(self) -> None:
+        assert (
+            _resolve_output_path("/a/b/board.kicad_pcb", "/x/out.kicad_pcb") == "/x/out.kicad_pcb"
+        )
+
+    def test_same_as_input_overwrites(self) -> None:
+        p = "/a/b/board.kicad_pcb"
+        assert _resolve_output_path(p, p) == p

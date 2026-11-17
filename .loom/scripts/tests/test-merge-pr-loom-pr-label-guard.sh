@@ -1,0 +1,501 @@
+#!/usr/bin/env bash
+# test-merge-pr-loom-pr-label-guard.sh - Unit tests for the PRE-merge
+# loom:pr review-signal guard in merge-pr.sh (#7419).
+#
+# Before either the auto-merge or synchronous-merge path attempts the actual
+# merge API call, merge-pr.sh now runs a guard that refuses to merge a PR
+# whose current head does not carry the `loom:pr` label — the only
+# forge-visible signal that Judge reviewed that head. By default the guard
+# HARD-BLOCKS the merge (error, exit 1), printing the current label set and
+# head SHA. `--allow-unapproved` bypasses the block (records a warning and,
+# on a real run, a best-effort PR comment). `--dry-run` reports the would-be
+# block but never exits 1. When `loom:pr` IS present, the guard also WARNS
+# (never hard-blocks) if a `<!-- champion:hold-state head=<sha> -->` marker
+# in the PR's comments names a SHA different from the current head.
+#
+# Strategy (mirrors test-merge-pr-merge-ordering-guard.sh): the functions
+# under test (_check_loom_pr_label, _check_champion_hold_state_staleness)
+# depend on globals (PR_NUMBER, REPO_NWO, PR_LABELS, PR_HEAD_SHA, DRY_RUN,
+# ALLOW_UNAPPROVED) plus _trusted_pr_comments() and forge_gh_comment_rl_safe()
+# (both stubbed as shell functions here, not real forge-helpers.sh — this test
+# does not source that file). We extract the function definitions from
+# merge-pr.sh and source them, stub their forge calls, then assert on exit
+# code + emitted message. Because the block path calls `error` (which
+# `exit 1`s), the guard is invoked inside a command-substitution subshell so
+# the exit does not tear down the test. Extracting from source (rather than
+# replicating) keeps the test in lockstep with the script.
+#
+# As of #8191 (a slice of the merge-pr port), the label/override/block
+# DECISION inside _check_loom_pr_label is `loom-daemon merge-pr loom-pr-guard`
+# (Rust, loom-daemon/src/merge_pr/loom_pr_guard.rs) — this suite now also
+# pins a real built binary (see require-daemon-bin.sh below), same as
+# test-merge-pr-verdict-label-guard.sh already does for its sibling guard.
+#
+# A later #8191 slice moved _check_champion_hold_state_staleness's
+# marker-extraction and staleness comparison to `loom-daemon merge-pr
+# hold-state` as well; the comment read stays in the shell too, routed
+# through _trusted_pr_comments() (#9548: trusted authors only), so the stub
+# below still drives both. T6-T8 pass unchanged against
+# that port, and T8a/T8b are new assertions for the two ways the retired
+# `grep | tail -1 | sed` pipeline lost the warning silently (an empty
+# `[0-9a-f]*` capture from a quoted template winning `tail -1`, and a bare
+# substring anywhere counting as recorded state).
+#
+# Usage:
+#   ./.loom/scripts/tests/test-merge-pr-loom-pr-label-guard.sh
+
+# SC2034: several globals (PR_NUMBER, REPO_NWO, PR_LABELS, PR_HEAD_SHA,
+# DRY_RUN, ALLOW_UNAPPROVED) are read only by the functions extracted+sourced
+# from merge-pr.sh, which shellcheck cannot see — every such assignment looks
+# "unused" to the linter.
+# shellcheck disable=SC2034
+
+set -euo pipefail
+
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPERS_DIR="$(cd "$TEST_DIR/.." && pwd)"
+MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
+
+# Colors
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+
+# --- Minimal logging/error shims the extracted functions call ---
+# `error` must exit non-zero to faithfully model the real script's hard block;
+# the guard is always invoked in a subshell (see run_guard) so this exit only
+# tears down that subshell, not the test.
+info()    { echo "INFO: $*"; }
+success() { echo "OK: $*"; }
+warning() { echo "WARN: $*" >&2; }
+error()   { echo "ERROR: $*" >&2; exit 1; }
+
+# --- Stub the two forge calls the extracted functions depend on ---
+# Overridable per-test via the FAKE_* globals below.
+#
+# run_guard (below) invokes the guard inside a `$( ... )` command-substitution
+# subshell (needed so the block path's `error`/exit does not tear down the
+# test). A subshell cannot mutate the parent shell's variables, so tracking
+# "was the comment posted, and with what body" via a plain variable would
+# silently always read as "never called" — this must go through a FILE
+# instead, which is visible from both sides.
+COMMENT_POST_LOG="$(mktemp)"
+FAKE_PR_COMMENTS=""
+FAKE_COMMENT_POST_RC=0
+_trusted_pr_comments() { printf '%s' "$FAKE_PR_COMMENTS"; }
+forge_gh_comment_rl_safe() {
+    printf '%s' "$3" >> "$COMMENT_POST_LOG"
+    printf '\n---CALL-BOUNDARY---\n' >> "$COMMENT_POST_LOG"
+    return "$FAKE_COMMENT_POST_RC"
+}
+comment_post_call_count() {
+    [[ -s "$COMMENT_POST_LOG" ]] || { echo 0; return; }
+    grep -c '^---CALL-BOUNDARY---$' "$COMMENT_POST_LOG"
+}
+reset_comment_post_log() { : > "$COMMENT_POST_LOG"; }
+last_posted_comment() {
+    # Everything before the LAST call-boundary marker's preceding boundary
+    # (or start of file for a single call) — for these tests only ever one
+    # call is made per reset, so the whole (trimmed) file is that one body.
+    sed '/^---CALL-BOUNDARY---$/d' "$COMMENT_POST_LOG"
+}
+
+# The label/override/block decision inside _check_loom_pr_label is now
+# `loom-daemon merge-pr loom-pr-guard` (#8191). Pin the binary this suite
+# tests against and verify it knows the subcommand family — FATAL, never a
+# skip: a suite that skipped itself when no binary resolved would report
+# green while testing nothing (same rationale as
+# test-merge-pr-verdict-label-guard.sh, which pins the same subcommand family
+# for its sibling guard).
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
+
+# --- Extract the functions under test from merge-pr.sh and source them ---
+# From `_check_champion_hold_state_staleness() {` up to (not including) the
+# `# Invoke the guard before either merge path attempts the actual merge API`
+# invocation comment that follows _check_loom_pr_label's definition.
+# Extracting from source keeps the test in lockstep with the script.
+FUNCS_FILE="$(mktemp)"
+trap 'rm -f "$FUNCS_FILE" "$COMMENT_POST_LOG" 2>/dev/null || true' EXIT
+awk '
+  /^_check_champion_hold_state_staleness\(\) \{/ { capture=1 }
+  /^# Invoke the guard before either merge path attempts the actual merge API$/ { capture=0 }
+  capture { print }
+' "$MERGE_PR_SRC" > "$FUNCS_FILE"
+
+if ! grep -q '_check_champion_hold_state_staleness()' "$FUNCS_FILE"; then
+    echo -e "${RED}FATAL${NC}: could not extract _check_champion_hold_state_staleness from $MERGE_PR_SRC" >&2
+    exit 2
+fi
+if ! grep -q '_check_loom_pr_label()' "$FUNCS_FILE"; then
+    echo -e "${RED}FATAL${NC}: could not extract _check_loom_pr_label from $MERGE_PR_SRC" >&2
+    exit 2
+fi
+# shellcheck disable=SC1090
+source "$FUNCS_FILE"
+
+# --- Shared globals the functions read (see the file-level SC2034 disable). ---
+PR_NUMBER="999"
+REPO_NWO="owner/repo"
+PR_LABELS=""
+PR_HEAD_SHA="abc1234"
+DRY_RUN=false
+ALLOW_UNAPPROVED=false
+
+# Run the guard in a subshell (its block path calls `error`, which exit 1's),
+# capturing combined stdout+stderr in LAST_OUT and the exit code in LAST_RC.
+LAST_OUT=""
+LAST_RC=0
+run_guard() {
+    set +e
+    LAST_OUT="$( _check_loom_pr_label 2>&1 )"
+    LAST_RC=$?
+    set -e
+}
+
+echo "Testing _check_loom_pr_label behavior..."
+
+# T1: loom:pr absent -> hard block (exit 1) naming the label set and head SHA.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:review-requested\nloom:operator'
+PR_HEAD_SHA="deadbeef"
+run_guard
+assert_eq "1" "$LAST_RC" "loom:pr absent -> merge hard-blocked (exit 1)"
+assert_contains "$LAST_OUT" "Merge blocked" "loom:pr absent -> block message emitted"
+assert_contains "$LAST_OUT" "loom:review-requested" "Block message prints the current label set"
+assert_contains "$LAST_OUT" "deadbeef" "Block message prints the current head SHA"
+assert_contains "$LAST_OUT" "--allow-unapproved" "Block message mentions the --allow-unapproved override"
+
+# T2: loom:pr absent + --dry-run -> warning printed, exits 0, no hard block.
+DRY_RUN=true; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:review-requested'
+PR_HEAD_SHA="deadbeef"
+run_guard
+assert_eq "0" "$LAST_RC" "--dry-run + loom:pr absent -> guard does NOT exit 1 (dry-run contract)"
+assert_contains "$LAST_OUT" "[dry-run] Would BLOCK" "--dry-run -> reports the would-be block"
+DRY_RUN=false
+
+# T3: loom:pr absent + --allow-unapproved -> merge proceeds (rc 0); warning
+# emitted and the override is recorded via a PR comment (real run, not dry-run).
+DRY_RUN=false; ALLOW_UNAPPROVED=true
+PR_LABELS=$'loom:review-requested\nloom:operator'
+PR_HEAD_SHA="deadbeef"
+reset_comment_post_log
+run_guard
+assert_eq "0" "$LAST_RC" "--allow-unapproved + loom:pr absent -> guard proceeds (exit 0)"
+assert_not_contains "$LAST_OUT" "Merge blocked" "--allow-unapproved -> no hard block"
+assert_contains "$LAST_OUT" "--allow-unapproved set" "--allow-unapproved -> override warning emitted"
+assert_eq "1" "$(comment_post_call_count)" "--allow-unapproved (real run) -> override recorded via a PR comment"
+assert_contains "$(last_posted_comment)" "deadbeef" "Override comment records the head SHA"
+assert_contains "$(last_posted_comment)" "loom:review-requested" "Override comment records the label set"
+ALLOW_UNAPPROVED=false
+
+# T4: loom:pr absent + --allow-unapproved + --dry-run -> proceeds (rc 0), but
+# NO PR comment is posted (a dry-run must have zero forge side effects).
+DRY_RUN=true; ALLOW_UNAPPROVED=true
+PR_LABELS=$'loom:review-requested'
+PR_HEAD_SHA="deadbeef"
+reset_comment_post_log
+run_guard
+assert_eq "0" "$LAST_RC" "--allow-unapproved + --dry-run -> guard proceeds (exit 0)"
+assert_eq "0" "$(comment_post_call_count)" "--allow-unapproved + --dry-run -> no PR comment posted (no side effects)"
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+
+# T5: loom:pr present -> guard is a no-op (matches today's behavior exactly),
+# no comment posted either.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:review-requested\nloom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS=""
+reset_comment_post_log
+run_guard
+assert_eq "0" "$LAST_RC" "loom:pr present -> guard passes (exit 0)"
+assert_not_contains "$LAST_OUT" "Merge blocked" "loom:pr present -> no block message"
+assert_not_contains "$LAST_OUT" "--allow-unapproved set" "loom:pr present -> no override warning (not needed)"
+assert_eq "0" "$(comment_post_call_count)" "loom:pr present -> no PR comment posted"
+
+# T6: loom:pr present + a champion:hold-state marker whose SHA differs from
+# PR_HEAD_SHA -> WARNING printed, guard still passes (exit 0) — a stale hold
+# head does not itself hard-block when loom:pr is present.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS='<!-- champion:hold-state head=abc1234 -->
+Some other hold-state prose.'
+run_guard
+assert_eq "0" "$LAST_RC" "loom:pr present + stale hold-state -> guard still passes (exit 0)"
+assert_contains "$LAST_OUT" "champion:hold-state marker recorded head=abc1234" "Stale hold-state -> warning names the recorded (stale) head"
+assert_contains "$LAST_OUT" "deadbeef" "Stale hold-state warning names the current head too"
+
+# T7: loom:pr present + a champion:hold-state marker whose SHA MATCHES the
+# current head -> no warning (the common case for a held-then-released PR).
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS='<!-- champion:hold-state head=deadbeef -->
+Held pending merge-risk review.'
+run_guard
+assert_eq "0" "$LAST_RC" "loom:pr present + matching hold-state -> guard passes (exit 0)"
+assert_not_contains "$LAST_OUT" "champion:hold-state marker recorded" "Matching hold-state head -> no staleness warning"
+FAKE_PR_COMMENTS=""
+
+# T8: loom:pr present + no champion:hold-state marker at all (never held) ->
+# no warning, no crash on empty/absent comments.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS='Just a regular Judge approval comment, no marker here.'
+run_guard
+assert_eq "0" "$LAST_RC" "loom:pr present + no hold-state marker -> guard passes (exit 0)"
+assert_not_contains "$LAST_OUT" "champion:hold-state marker recorded" "No hold-state marker -> no staleness warning"
+FAKE_PR_COMMENTS=""
+
+# T8a (#8191 slice): a later comment QUOTING champion-pr-merge.md's own
+# template must not erase a real hold. The retired shell's capture class was
+# `[0-9a-f]*`, which also matches the empty string, so the documentation line
+# `head=<sha>` was a match whose SHA was empty — and `tail -1` handed that
+# empty capture to the caller, silently disabling the staleness check for the
+# whole PR. One quoted example was enough. The port requires `[0-9a-f]+` and
+# takes the last match that actually carries a SHA.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS='<!-- champion:hold-state head=abc1234 -->
+Holding for human merge.
+For reference, the hold records <!-- champion:hold-state head=<sha> --> in its notice.'
+run_guard
+assert_eq "0" "$LAST_RC" "placeholder-quoting comment -> guard still passes (exit 0)"
+assert_contains "$LAST_OUT" "champion:hold-state marker recorded head=abc1234" "A quoted head=<sha> template does NOT erase the real recorded head (#8191)"
+FAKE_PR_COMMENTS=""
+
+# T8b (#8191 slice): a PROSE mention of the marker is not recorded state.
+# The retired shell matched the marker text anywhere it appeared, so a comment
+# merely describing the mechanism outranked the genuine hold notice — the same
+# hazard Champion's own reader answered with `startswith` on the sibling
+# `<!-- champion:merge-risk-hold -->` marker (#5371). The port counts a marker
+# only inside an HTML comment that opens and closes on one line, which is
+# exactly the shape champion-pr-merge.md writes.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS='<!-- champion:hold-state head=abc1234 -->
+Holding for human merge.
+Note: champion:hold-state head=ffff9999 is the shape of that marker.'
+run_guard
+assert_eq "0" "$LAST_RC" "prose mention of the marker -> guard still passes (exit 0)"
+assert_contains "$LAST_OUT" "champion:hold-state marker recorded head=abc1234" "A prose mention does NOT outrank the real recorded head (#8191)"
+assert_not_contains "$LAST_OUT" "ffff9999" "The prose-mentioned SHA is never reported as recorded state (#8191)"
+FAKE_PR_COMMENTS=""
+
+# T9: loom:pr absent + empty label array (edge case: a PR with NO labels at
+# all) -> still hard-blocks, and the "<none>" placeholder is used instead of
+# an empty string in the message.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=""
+PR_HEAD_SHA="deadbeef"
+run_guard
+assert_eq "1" "$LAST_RC" "Empty label array -> merge hard-blocked (exit 1)"
+assert_contains "$LAST_OUT" "<none>" "Empty label array -> message uses <none> placeholder, not a blank line"
+
+# --- FAILS CLOSED when the implementation behind the guard cannot run ---
+#
+# Moving the label/override/block decision from a sourced shell function into
+# a SUBPROCESS (#8191) introduces a failure mode the original could not have:
+# the binary can be missing, or be an older install that does not know this
+# subcommand. Same rationale as test-merge-pr-verdict-label-guard.sh's
+# identically-named section for its sibling guard: every outcome that is not
+# a recognized CLEAN/override/block shape must refuse the merge, because a
+# caller that only checks the exit code cannot tell "reviewed and clean" (or
+# "override accepted") from "never ran".
+echo ""
+echo "Testing fail-closed behavior when loom-daemon cannot answer..."
+
+_SAVED_BIN="${LOOM_DAEMON_BIN:-}"
+
+# T-FC1: no binary at all.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:review-requested'
+PR_HEAD_SHA="deadbeef"
+LOOM_DAEMON_BIN="/nonexistent/loom-daemon"
+run_guard
+assert_eq "1" "$LAST_RC" "an absent loom-daemon BLOCKS the merge (never silently proceeds)"
+assert_contains "$LAST_OUT" "Merge blocked" "the refusal is stated as a block"
+assert_contains "$LAST_OUT" "could not run" "the message distinguishes 'never ran' from 'reviewed'"
+
+# T-FC2: a binary that EXISTS and exits ZERO but never emits the clean
+# sentinel or an override-shaped message — e.g. an older loom-daemon, or
+# anything substituted onto the path. /bin/echo exits 0 and prints its
+# arguments, so a contract that inferred "clean" from a zero exit alone would
+# wave this straight through.
+LOOM_DAEMON_BIN="/bin/echo"
+run_guard
+assert_eq "1" "$LAST_RC" "a zero-exit binary without a recognized verdict still BLOCKS"
+assert_contains "$LAST_OUT" "could not run" "its stdout is not mistaken for a verdict"
+
+# T-FC3: silent success. /bin/true exits 0 and prints nothing.
+LOOM_DAEMON_BIN="/usr/bin/true"
+run_guard
+assert_eq "1" "$LAST_RC" "a silently-succeeding binary BLOCKS (silence is not consent)"
+
+# T-FC4: silent failure. /usr/bin/false exits 1 with no output, unlike a real
+# block (which exits 1 WITH a 'Merge blocked:'-prefixed message) — exit 1
+# alone must never be read as the real refusal.
+LOOM_DAEMON_BIN="/usr/bin/false"
+run_guard
+assert_eq "1" "$LAST_RC" "a binary exiting 1 with no message still BLOCKS via the fail-closed message"
+assert_contains "$LAST_OUT" "could not run" "an empty exit-1 is not mistaken for the real refusal text"
+
+# T-FC5: the fail-closed path still honours --dry-run's no-side-effects
+# contract — it reports the would-be block without exiting 1.
+DRY_RUN=true
+run_guard
+assert_eq "0" "$LAST_RC" "--dry-run reports the fail-closed block without exiting 1"
+assert_contains "$LAST_OUT" "dry-run" "the dry-run marker is present"
+DRY_RUN=false
+LOOM_DAEMON_BIN="$_SAVED_BIN"
+
+# --- Regression tests for #7678 (real `set -e` semantics) ---
+#
+# T8 above ("no hold-state marker at all") already exercises the right
+# inputs, but `run_guard()` wraps the call in `set +e; ...; set -e` — which
+# disables `-e` for the ENTIRE call, including the subshell that command
+# substitution forks to run it. That is exactly the condition under which the
+# #7678 bug (a pipefail-tripped `hold_head=` assignment with no `|| true`,
+# unlike its sibling two lines above) does NOT reproduce, so T8 stayed green
+# throughout the incident despite the bug being live and reproducible
+# directly against the real script (see PR #7678 / issue #7678).
+#
+# The real script invokes `_check_loom_pr_label` as a bare top-level
+# statement under its own `set -euo pipefail` (merge-pr.sh line ~105) — no
+# enclosing `if`/`&&`/`||` and no prior `set +e`. Both of those constructs
+# suppress `-e` propagation into a command-substitution subshell for the
+# command they guard (a documented bash behavior, not specific to this
+# guard), so simply swapping `run_guard`'s `set +e ... set -e` wrapper for an
+# `if var=$(...)` wrapper does NOT fix the gap either — it reproduces the
+# identical false-negative for a different reason.
+#
+# `run_guard_strict` below instead runs the guard in a genuinely separate
+# background `bash -c '...'` process that itself sets `set -euo pipefail`
+# from a clean slate (mirroring the real script's own top-level options
+# exactly), then reads that child's real exit status via `wait` — `set +e` is
+# only toggled around the `wait` call itself, AFTER the child has already run
+# to completion under real `-e` semantics, so it cannot mask the very
+# behavior under test.
+run_guard_strict() {
+    local outfile
+    outfile="$(mktemp)"
+    export PR_NUMBER REPO_NWO PR_LABELS PR_HEAD_SHA DRY_RUN ALLOW_UNAPPROVED \
+        FAKE_PR_COMMENTS FAKE_COMMENT_POST_RC COMMENT_POST_LOG
+    export -f _check_loom_pr_label _check_champion_hold_state_staleness \
+        info success warning error _trusted_pr_comments forge_gh_comment_rl_safe
+    bash -c 'set -euo pipefail; _check_loom_pr_label' >"$outfile" 2>&1 &
+    local pid=$!
+    set +e
+    wait "$pid"
+    LAST_RC=$?
+    set -e
+    LAST_OUT="$(cat "$outfile")"
+    rm -f "$outfile"
+}
+
+echo ""
+echo "Testing _check_loom_pr_label under REAL set -e semantics (regression for #7678)..."
+
+# T10: loom:pr present + comments exist but carry NO champion:hold-state
+# marker anywhere — the overwhelmingly common case (comments present, e.g. an
+# ordinary Judge-approval comment, but no Champion hold history ever
+# recorded). Before the #7678 fix, this trips the pipefail'd `hold_head=`
+# assignment and silently aborts the whole guard (and, in the real script,
+# the whole merge) with no diagnostic at all.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS='Just a regular Judge approval comment, no marker here.'
+run_guard_strict
+assert_eq "0" "$LAST_RC" "REGRESSION (#7678): loom:pr present + comments with no hold-state marker -> guard does NOT abort under real set -e semantics"
+assert_not_contains "$LAST_OUT" "champion:hold-state marker recorded" "No hold-state marker -> no staleness warning (strict mode)"
+FAKE_PR_COMMENTS=""
+
+# T11: same "no marker" family, but with comments EMPTY entirely rather than
+# marker-free prose. `[[ -n "$comments" ]] || return 0` at the top of
+# _check_champion_hold_state_staleness already short-circuits before the
+# vulnerable pipeline, so this path never regressed — kept as a companion
+# strict-mode assertion so both flavors of "no marker" are covered under real
+# set -e semantics, not just the one that happens to trip the bug.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS=""
+run_guard_strict
+assert_eq "0" "$LAST_RC" "loom:pr present + empty comments -> guard does NOT abort under real set -e semantics"
+
+# T12: loom:pr present + a STALE champion:hold-state marker, invoked under
+# real set -e semantics — confirms the #7678 fix does not regress the
+# existing staleness-WARNING behavior (issue #7678 AC #3 / this file's T6).
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:pr'
+PR_HEAD_SHA="deadbeef"
+FAKE_PR_COMMENTS='<!-- champion:hold-state head=abc1234 -->
+Some other hold-state prose.'
+run_guard_strict
+assert_eq "0" "$LAST_RC" "loom:pr present + stale hold-state -> guard passes (exit 0) under real set -e semantics"
+assert_contains "$LAST_OUT" "champion:hold-state marker recorded head=abc1234" "Stale hold-state -> warning still emitted under real set -e semantics"
+FAKE_PR_COMMENTS=""
+
+# --- Source-contains guards (fail if a refactor drops the key behavior) ---
+echo ""
+echo "Testing merge-pr.sh source guards..."
+src="$(cat "$MERGE_PR_SRC")"
+assert_contains "$src" "_check_loom_pr_label" \
+  "merge-pr.sh defines and invokes _check_loom_pr_label"
+assert_contains "$src" "ALLOW_UNAPPROVED" \
+  "merge-pr.sh threads the --allow-unapproved override into the guard"
+assert_contains "$src" "--allow-unapproved) ALLOW_UNAPPROVED=true" \
+  "merge-pr.sh parses the --allow-unapproved flag alongside the other options"
+assert_contains "$src" "_check_champion_hold_state_staleness" \
+  "merge-pr.sh defines the champion:hold-state staleness check"
+assert_contains "$src" 'PR_LABELS=$(echo "$PR_JSON" | jq -r' \
+  "merge-pr.sh extracts PR_LABELS from the already-fetched PR_JSON (no extra API call)"
+assert_contains "$src" "merge-pr loom-pr-guard" \
+  "merge-pr.sh delegates the label/override/block decision to loom-daemon (#8191)"
+assert_contains "$src" "merge-pr hold-state" \
+  "merge-pr.sh delegates the champion:hold-state marker extraction to loom-daemon (#8191)"
+
+# #9461 regression ratchet: the loom-pr-guard call site must expand the flags
+# array with the empty-safe `${flags[@]+"${flags[@]}"}` idiom (as every other
+# daemon call site in this file does). Under `set -u` on stock macOS bash 3.2,
+# a bare `"${flags[@]}"` on an empty array aborts the expansion
+# ("flags[@]: unbound variable") BEFORE loom-daemon runs, so the guard faults
+# and the merge fails closed on an approved PR. A behavioral repro needs a
+# real bash 3.2 binary, so pin the source shape instead. The pattern anchors
+# on leading whitespace because the idiom itself CONTAINS the literal
+# `"${flags[@]}"` (as its inner expansion, preceded by `+`) — an unanchored
+# grep would flag every correct call site.
+bare_flags_count="$(grep -cE '[[:space:]]"\$\{flags\[@\]\}"' <<<"$src" || true)"
+assert_eq "0" "$bare_flags_count" \
+  "merge-pr.sh has no whitespace-preceded bare \"\${flags[@]}\" expansion (empty-array abort under bash 3.2 + set -u, #9461)"
+guard_call_line="$(grep 'merge-pr loom-pr-guard' "$MERGE_PR_SRC")"
+assert_contains "$guard_call_line" '${flags[@]+"${flags[@]}"}' \
+  "the loom-pr-guard call site expands flags with the empty-safe idiom (#9461)"
+
+# Assert the guard is invoked BEFORE the auto-merge path (line ordering): the
+# _check_loom_pr_label invocation must precede `# Handle auto-merge mode`.
+guard_line="$(grep -n '^_check_loom_pr_label$' "$MERGE_PR_SRC" | head -1 | cut -d: -f1)"
+automerge_line="$(grep -n '^# Handle auto-merge mode' "$MERGE_PR_SRC" | head -1 | cut -d: -f1)"
+if [[ -n "$guard_line" && -n "$automerge_line" && "$guard_line" -lt "$automerge_line" ]]; then
+    ordered="yes"
+else
+    ordered="no (guard=$guard_line automerge=$automerge_line)"
+fi
+assert_eq "yes" "$ordered" \
+  "guard is invoked before both merge paths (before '# Handle auto-merge mode')"
+
+# --- Summary ---
+echo ""
+echo "────────────────────────────────"
+echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    exit 1
+fi
+exit 0

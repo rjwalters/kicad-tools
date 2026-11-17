@@ -1,0 +1,14 @@
+{
+  "nextAgentNumber": 3,
+  "autonomous": {
+    "workFinder": {
+      "enabled": true,
+      "intervalSecs": 60
+    },
+    "exampleTierProbe": 2
+  },
+  "guards": {
+    "sqlDdl": true
+  },
+  "legacyOnly": "legacy-value"
+}

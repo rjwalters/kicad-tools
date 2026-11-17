@@ -1,0 +1,77 @@
+{
+ "_note": "SYNTHETIC page state, not a recorded JLC page: proves abort/gate logic only.",
+ "elements": {
+  "[data-kct=cart-link]": {
+   "value": "https://cart.jlcpcb.com/shoppingCart/abc123"
+  },
+  "[data-kct=lead-time]": {
+   "text": "5 days"
+  },
+  "[data-kct=match-ready]": {},
+  "[data-kct=pcba-toggle]": {},
+  "[data-kct=quote-total]": {
+   "text": "$42.10"
+  },
+  "[data-kct=save-to-cart]": {},
+  "input[type=file][data-kct=bom]": {},
+  "input[type=file][data-kct=cpl]": {},
+  "input[type=file][data-kct=gerber]": {},
+  "select[data-kct=assembly-side]": {
+   "options": [
+    "Top Side",
+    "Bottom Side",
+    "Both Sides"
+   ],
+   "value": ""
+  },
+  "select[data-kct=inner-copper]": {
+   "options": [
+    "1 oz",
+    "2 oz"
+   ],
+   "value": ""
+  },
+  "select[data-kct=layers]": {
+   "options": [
+    "1",
+    "2",
+    "4",
+    "6"
+   ],
+   "value": ""
+  },
+  "select[data-kct=outer-copper]": {
+   "options": [
+    "1 oz",
+    "2 oz"
+   ],
+   "value": ""
+  },
+  "select[data-kct=pcba-type]": {
+   "options": [
+    "Economic",
+    "Standard"
+   ],
+   "value": ""
+  },
+  "select[data-kct=quantity]": {
+   "options": [
+    "5",
+    "10",
+    "15"
+   ],
+   "value": ""
+  },
+  "select[data-kct=thickness]": {
+   "options": [
+    "0.8",
+    "1.0",
+    "1.2",
+    "1.6",
+    "2.0"
+   ],
+   "value": ""
+  }
+ },
+ "url": "https://jlcpcb.com/quote"
+}

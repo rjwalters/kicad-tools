@@ -1,0 +1,164 @@
+"""
+Manufacturing export tools.
+
+Generate complete manufacturing packages for PCB assembly services:
+- Gerber files (with manufacturer presets)
+- BOM in manufacturer-specific formats
+- Pick-and-place (CPL) files
+
+Example::
+
+    from kicad_tools.export import AssemblyPackage
+
+    # Quick export for JLCPCB
+    pkg = AssemblyPackage.create(
+        pcb="board.kicad_pcb",
+        schematic="board.kicad_sch",
+        manufacturer="jlcpcb",
+    )
+    result = pkg.export("output/")
+    print(result)
+
+    # Or use individual exporters
+    from kicad_tools.export import GerberExporter, export_bom, export_pnp
+
+    exporter = GerberExporter("board.kicad_pcb")
+    exporter.export_for_manufacturer("jlcpcb", "gerbers/")
+
+Supported manufacturers:
+- jlcpcb: JLCPCB/LCSC
+- pcbway: PCBWay
+- oshpark: OSH Park
+- seeed: Seeed Fusion
+- generic: Generic formats
+"""
+
+from .assembly import (
+    AssemblyConfig,
+    AssemblyPackage,
+    AssemblyPackageResult,
+    create_assembly_package,
+)
+from .bom_enrich import (
+    EnrichmentEntry,
+    EnrichmentReport,
+    enrich_bom_lcsc,
+)
+from .bom_formats import (
+    BOM_FORMATTERS,
+    BOMExportConfig,
+    BOMFormatter,
+    GenericBOMFormatter,
+    JLCPCBBOMFormatter,
+    PCBWayBOMFormatter,
+    SeeedBOMFormatter,
+    export_bom,
+    get_bom_formatter,
+)
+from .bom_spec_overlay import (
+    SpecOverlayEntry,
+    SpecOverlayReport,
+    apply_spec_overlay,
+    expand_ref_range,
+    find_spec_file,
+    resolved_refs,
+)
+from .gerber import (
+    MANUFACTURER_PRESETS,
+    GerberConfig,
+    GerberExporter,
+    GerberManufacturerPreset,
+    export_gerbers,
+    find_kicad_cli,
+)
+
+# Backward-compatible alias
+ManufacturerPreset = GerberManufacturerPreset
+from .manufacturing import (
+    ManufacturingConfig,
+    ManufacturingPackage,
+    ManufacturingResult,
+    verify_manifest,
+)
+from .pnp import (
+    PNP_FORMATTERS,
+    GenericPnPFormatter,
+    JLCPCBPnPFormatter,
+    PCBWayPnPFormatter,
+    PlacementData,
+    PnPExportConfig,
+    PnPFormatter,
+    SeeedPnPFormatter,
+    export_pnp,
+    extract_placements,
+    extract_tht_exclusions,
+    get_aux_origin,
+    get_pnp_formatter,
+    group_tht_exclusions,
+)
+from .preflight import (
+    PreflightChecker,
+    PreflightConfig,
+    PreflightResult,
+)
+
+__all__ = [
+    # Assembly package
+    "AssemblyPackage",
+    "AssemblyConfig",
+    "AssemblyPackageResult",
+    "create_assembly_package",
+    # BOM enrichment
+    "enrich_bom_lcsc",
+    "EnrichmentReport",
+    "EnrichmentEntry",
+    # BOM spec overlay
+    "apply_spec_overlay",
+    "SpecOverlayReport",
+    "SpecOverlayEntry",
+    "expand_ref_range",
+    "find_spec_file",
+    "resolved_refs",
+    # Manufacturing package
+    "ManufacturingPackage",
+    "ManufacturingConfig",
+    "ManufacturingResult",
+    "verify_manifest",
+    # Pre-flight validation
+    "PreflightChecker",
+    "PreflightConfig",
+    "PreflightResult",
+    # BOM
+    "BOMFormatter",
+    "BOMExportConfig",
+    "JLCPCBBOMFormatter",
+    "PCBWayBOMFormatter",
+    "SeeedBOMFormatter",
+    "GenericBOMFormatter",
+    "BOM_FORMATTERS",
+    "export_bom",
+    "get_bom_formatter",
+    # Gerber
+    "GerberExporter",
+    "GerberConfig",
+    "GerberManufacturerPreset",
+    "ManufacturerPreset",  # backward-compatible alias
+    "MANUFACTURER_PRESETS",
+    "export_gerbers",
+    "find_kicad_cli",
+    # Pick-and-place
+    "PnPFormatter",
+    "PnPExportConfig",
+    "PlacementData",
+    "JLCPCBPnPFormatter",
+    "PCBWayPnPFormatter",
+    "SeeedPnPFormatter",
+    "GenericPnPFormatter",
+    "PNP_FORMATTERS",
+    "export_pnp",
+    "extract_placements",
+    "extract_tht_exclusions",
+    "get_aux_origin",
+    "get_pnp_formatter",
+    "group_tht_exclusions",
+]

@@ -1,0 +1,1112 @@
+"""Placement conflict resolution for KiCad PCBs.
+
+Suggests and applies fixes for placement conflicts:
+- Calculate minimum displacement to resolve conflicts
+- Support constraint-based fixing (anchor components)
+- Preview changes before applying
+- Verify fixes don't create new conflicts
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+import time
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+
+from .analyzer import DesignRules, PlacementAnalyzer
+from .conflict import (
+    Conflict,
+    ConflictType,
+    PlacementFix,
+    Point,
+)
+
+
+class FixStrategy(Enum):
+    """Strategy for resolving placement conflicts."""
+
+    SPREAD = "spread"  # Move components apart minimally
+    COMPACT = "compact"  # Minimize board area while fixing
+    ANCHOR = "anchor"  # Keep specified components fixed
+
+
+@dataclass
+class FixResult:
+    """Result of applying placement fixes."""
+
+    success: bool
+    fixes_applied: int
+    new_conflicts: int
+    message: str
+
+
+@dataclass
+class PassResult:
+    """Result of a single fix pass."""
+
+    pass_number: int
+    conflicts_before: int
+    conflicts_after: int
+    fixes_applied: int
+    escalation_factor: float
+
+
+@dataclass
+class IterativeFixResult:
+    """Result of iterative fix resolution."""
+
+    success: bool
+    total_passes: int
+    initial_conflicts: int
+    remaining_conflicts: int
+    total_fixes_applied: int
+    pass_results: list[PassResult]
+    message: str
+
+    @property
+    def made_progress(self) -> bool:
+        """Whether any passes reduced conflict count."""
+        return self.remaining_conflicts < self.initial_conflicts
+
+
+class PlacementFixer:
+    """Suggests and applies fixes for placement conflicts.
+
+    Usage:
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts)
+
+        # Preview changes
+        for fix in fixes:
+            print(fix)
+
+        # Apply fixes
+        result = fixer.apply_fixes("board.kicad_pcb", fixes, "board-fixed.kicad_pcb")
+    """
+
+    def __init__(
+        self,
+        strategy: FixStrategy = FixStrategy.SPREAD,
+        anchored: set[str] | None = None,
+        verbose: bool = False,
+    ):
+        """Initialize fixer.
+
+        Args:
+            strategy: Strategy for resolving conflicts
+            anchored: Set of component references to keep fixed
+            verbose: Print progress messages
+        """
+        self.strategy = strategy
+        self.anchored = anchored or set()
+        self.verbose = verbose
+
+    def suggest_fixes(
+        self,
+        conflicts: list[Conflict],
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> list[PlacementFix]:
+        """Suggest fixes for a list of conflicts.
+
+        Args:
+            conflicts: List of conflicts to fix
+            analyzer: PlacementAnalyzer with component data (optional, for verification)
+
+        Returns:
+            List of suggested fixes
+        """
+        fixes: list[PlacementFix] = []
+
+        for conflict in conflicts:
+            fix = self._suggest_fix_for_conflict(conflict, analyzer)
+            if fix:
+                fixes.append(fix)
+
+        # Sort fixes by confidence (highest first)
+        fixes.sort(key=lambda f: -f.confidence)
+
+        # Check for conflicting fixes (same component moved differently)
+        fixes = self._deduplicate_fixes(fixes)
+
+        return fixes
+
+    def _suggest_fix_for_conflict(
+        self,
+        conflict: Conflict,
+        analyzer: PlacementAnalyzer | None,
+    ) -> PlacementFix | None:
+        """Suggest a fix for a single conflict."""
+        # Determine which component to move
+        component_to_move = self._choose_component_to_move(conflict)
+        if not component_to_move:
+            return None
+
+        # Calculate move vector based on conflict type
+        move_vector = self._calculate_move_vector(conflict, component_to_move, analyzer)
+        if not move_vector:
+            return None
+
+        # Calculate confidence based on conflict type and move
+        confidence = self._calculate_confidence(conflict, move_vector)
+
+        # Get current position if analyzer is available
+        new_position = None
+        if analyzer:
+            for comp in analyzer.get_components():
+                if comp.reference == component_to_move:
+                    new_position = Point(
+                        comp.position.x + move_vector.x,
+                        comp.position.y + move_vector.y,
+                    )
+                    break
+
+        return PlacementFix(
+            conflict=conflict,
+            component=component_to_move,
+            move_vector=move_vector,
+            confidence=confidence,
+            new_position=new_position,
+        )
+
+    def _choose_component_to_move(self, conflict: Conflict) -> str | None:
+        """Choose which component to move to resolve conflict."""
+        c1, c2 = conflict.component1, conflict.component2
+
+        # Edge conflicts: only c1 is a real component (c2 is a board-edge sentinel
+        # like "left_edge"; see analyzer.py:533-542). If c1 is anchored, we cannot
+        # resolve this conflict by moving — return None to skip it.
+        if conflict.type == ConflictType.EDGE_CLEARANCE:
+            if c1 in self.anchored:
+                return None
+            return c1
+
+        # If one is anchored, move the other
+        if c1 in self.anchored and c2 not in self.anchored:
+            return c2
+        if c2 in self.anchored and c1 not in self.anchored:
+            return c1
+        if c1 in self.anchored and c2 in self.anchored:
+            return None  # Can't fix - both anchored
+
+        # By default, move the "smaller" component (alphabetically later)
+        # This is a heuristic - ICs tend to have lower reference numbers
+        return c2 if c2 > c1 else c1
+
+    def _calculate_move_vector(
+        self,
+        conflict: Conflict,
+        component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> Point | None:
+        """Calculate the move vector to resolve a conflict."""
+        if conflict.type == ConflictType.COURTYARD_OVERLAP:
+            return self._calc_courtyard_fix(conflict, component_to_move, analyzer)
+        elif conflict.type == ConflictType.PAD_CLEARANCE:
+            return self._calc_pad_clearance_fix(conflict, component_to_move, analyzer)
+        elif conflict.type == ConflictType.HOLE_TO_HOLE:
+            return self._calc_hole_fix(conflict, component_to_move, analyzer)
+        elif conflict.type == ConflictType.EDGE_CLEARANCE:
+            return self._calc_edge_fix(conflict)
+        else:
+            return None
+
+    def _get_component_position(
+        self,
+        reference: str,
+        analyzer: PlacementAnalyzer | None,
+    ) -> Point | None:
+        """Get the position of a component by reference.
+
+        Args:
+            reference: Component reference designator (e.g., "R1")
+            analyzer: PlacementAnalyzer with component data
+
+        Returns:
+            Component center position, or None if not found
+        """
+        if not analyzer:
+            return None
+        for comp in analyzer.get_components():
+            if comp.reference == reference:
+                return comp.position
+        return None
+
+    def _get_direction_vector(
+        self,
+        from_pos: Point,
+        to_pos: Point,
+    ) -> tuple[float, float] | None:
+        """Calculate unit direction vector from one point to another.
+
+        Args:
+            from_pos: Starting point
+            to_pos: Target point
+
+        Returns:
+            Tuple of (dx, dy) normalized to unit length, or None if points coincide
+        """
+        dx = to_pos.x - from_pos.x
+        dy = to_pos.y - from_pos.y
+        dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist < 1e-6:
+            return None
+
+        return (dx / dist, dy / dist)
+
+    def _calc_courtyard_fix(
+        self,
+        conflict: Conflict,
+        component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> Point | None:
+        """Calculate move to fix courtyard overlap.
+
+        Uses 2D displacement when component positions are available,
+        calculating the optimal direction based on component centroids.
+        Falls back to X-only movement when geometry data is unavailable.
+        """
+        if not conflict.overlap_amount:
+            return None
+
+        overlap = conflict.overlap_amount
+        margin = 0.1  # Add small margin
+        move_dist = overlap + margin
+
+        # Determine direction sign based on which component we're moving
+        sign = 1 if component_to_move == conflict.component2 else -1
+
+        # Try to calculate 2D direction using component positions
+        if analyzer:
+            pos1 = self._get_component_position(conflict.component1, analyzer)
+            pos2 = self._get_component_position(conflict.component2, analyzer)
+
+            if pos1 and pos2:
+                # Calculate direction from comp1 to comp2
+                direction = self._get_direction_vector(pos1, pos2)
+                if direction:
+                    dx, dy = direction
+                    # Move along the line connecting centroids
+                    return Point(sign * move_dist * dx, sign * move_dist * dy)
+
+        # Fallback: X-only movement (backward compatible)
+        if self.strategy == FixStrategy.SPREAD:
+            return Point(sign * move_dist, 0)
+
+        return Point(move_dist, 0)
+
+    def _calc_pad_clearance_fix(
+        self,
+        conflict: Conflict,
+        component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> Point | None:
+        """Calculate move to fix pad clearance violation.
+
+        Uses 2D displacement when component positions are available,
+        moving away from the conflict location along the vector to component center.
+        Falls back to X-only movement when geometry data is unavailable.
+        """
+        if conflict.actual_clearance is None or conflict.required_clearance is None:
+            return None
+
+        # Gap needed
+        gap = conflict.required_clearance - conflict.actual_clearance
+        margin = 0.05  # Small margin
+        move_dist = gap + margin
+
+        # Determine direction sign based on which component we're moving
+        sign = 1 if component_to_move == conflict.component2 else -1
+
+        # Try to calculate 2D direction from conflict location to component center
+        if analyzer:
+            comp_pos = self._get_component_position(component_to_move, analyzer)
+            if comp_pos:
+                # Calculate direction from conflict location to component
+                direction = self._get_direction_vector(conflict.location, comp_pos)
+                if direction:
+                    dx, dy = direction
+                    # Move component away from conflict (along the direction to its center)
+                    return Point(move_dist * dx, move_dist * dy)
+
+        # Fallback: X-only movement (backward compatible)
+        return Point(sign * move_dist, 0)
+
+    def _calc_hole_fix(
+        self,
+        conflict: Conflict,
+        component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> Point | None:
+        """Calculate move to fix hole-to-hole violation.
+
+        Uses 2D displacement when component positions are available,
+        moving away from the conflict location along the vector to component center.
+        Falls back to X-only movement when geometry data is unavailable.
+        """
+        if conflict.actual_clearance is None or conflict.required_clearance is None:
+            return None
+
+        # Gap needed
+        gap = conflict.required_clearance - conflict.actual_clearance
+        margin = 0.1  # Margin for holes
+        move_dist = gap + margin
+
+        # Determine direction sign based on which component we're moving
+        sign = 1 if component_to_move == conflict.component2 else -1
+
+        # Try to calculate 2D direction from conflict location to component center
+        if analyzer:
+            comp_pos = self._get_component_position(component_to_move, analyzer)
+            if comp_pos:
+                # Calculate direction from conflict location to component
+                direction = self._get_direction_vector(conflict.location, comp_pos)
+                if direction:
+                    dx, dy = direction
+                    # Move component away from conflict (along the direction to its center)
+                    return Point(move_dist * dx, move_dist * dy)
+
+        # Fallback: X-only movement (backward compatible)
+        return Point(sign * move_dist, 0)
+
+    def _calc_edge_fix(self, conflict: Conflict) -> Point | None:
+        """Calculate move to fix edge clearance violation."""
+        if conflict.actual_clearance is None or conflict.required_clearance is None:
+            return None
+
+        gap = conflict.required_clearance - conflict.actual_clearance
+        margin = 0.1
+
+        move = gap + margin
+
+        # Determine direction based on which edge
+        edge_type = conflict.component2  # e.g., "left_edge"
+
+        if "left" in edge_type:
+            return Point(move, 0)  # Move right
+        elif "right" in edge_type:
+            return Point(-move, 0)  # Move left
+        elif "top" in edge_type:
+            return Point(0, move)  # Move down
+        elif "bottom" in edge_type:
+            return Point(0, -move)  # Move up
+
+        return None
+
+    def _calculate_confidence(self, conflict: Conflict, move: Point) -> float:
+        """Calculate confidence score for a fix (0-1)."""
+        # Base confidence by conflict type
+        base = {
+            ConflictType.EDGE_CLEARANCE: 0.9,  # High confidence
+            ConflictType.COURTYARD_OVERLAP: 0.7,
+            ConflictType.PAD_CLEARANCE: 0.6,
+            ConflictType.HOLE_TO_HOLE: 0.5,
+            ConflictType.SILKSCREEN_PAD: 0.4,
+        }.get(conflict.type, 0.3)
+
+        # Reduce confidence for large moves
+        move_dist = math.sqrt(move.x**2 + move.y**2)
+        if move_dist > 5.0:
+            base *= 0.5
+        elif move_dist > 2.0:
+            base *= 0.8
+
+        return min(base, 1.0)
+
+    def _deduplicate_fixes(self, fixes: list[PlacementFix]) -> list[PlacementFix]:
+        """Remove duplicate/conflicting fixes for the same component."""
+        # Group by component
+        by_component: dict[str, list[PlacementFix]] = {}
+        for fix in fixes:
+            if fix.component not in by_component:
+                by_component[fix.component] = []
+            by_component[fix.component].append(fix)
+
+        # For each component, keep only the highest confidence fix
+        # or combine moves if they're compatible
+        result: list[PlacementFix] = []
+        for _component, comp_fixes in by_component.items():
+            if len(comp_fixes) == 1:
+                result.append(comp_fixes[0])
+            else:
+                # Combine compatible fixes or take the best one
+                combined = self._combine_fixes(comp_fixes)
+                result.append(combined)
+
+        return result
+
+    def _combine_fixes(self, fixes: list[PlacementFix]) -> PlacementFix:
+        """Combine multiple fixes for the same component."""
+        # Sum the move vectors
+        total_x = sum(f.move_vector.x for f in fixes)
+        total_y = sum(f.move_vector.y for f in fixes)
+
+        # Use the first conflict as reference
+        best = max(fixes, key=lambda f: f.confidence)
+
+        return PlacementFix(
+            conflict=best.conflict,
+            component=best.component,
+            move_vector=Point(total_x, total_y),
+            confidence=min(f.confidence for f in fixes) * 0.9,  # Reduce for combined
+            new_position=None,  # Need to recalculate
+            creates_new_conflicts=True,  # Mark as potentially problematic
+        )
+
+    def apply_fixes(
+        self,
+        pcb_path: str | Path,
+        fixes: list[PlacementFix],
+        output_path: str | Path | None = None,
+        dry_run: bool = False,
+    ) -> FixResult:
+        """Apply fixes to a PCB file.
+
+        Args:
+            pcb_path: Path to input .kicad_pcb file
+            fixes: List of fixes to apply
+            output_path: Output path (None = modify in place)
+            dry_run: If True, don't write changes
+
+        Returns:
+            FixResult with success status and details
+        """
+        if not fixes:
+            return FixResult(
+                success=True,
+                fixes_applied=0,
+                new_conflicts=0,
+                message="No fixes to apply",
+            )
+
+        pcb_path = Path(pcb_path)
+        if output_path is None:
+            output_path = pcb_path
+
+        # Read PCB content
+        content = pcb_path.read_text()
+
+        # Apply each fix
+        applied = 0
+        for fix in fixes:
+            new_content = self._apply_fix_to_content(content, fix)
+            if new_content != content:
+                content = new_content
+                applied += 1
+
+        if dry_run:
+            return FixResult(
+                success=True,
+                fixes_applied=applied,
+                new_conflicts=0,
+                message=f"Would apply {applied} fixes (dry run)",
+            )
+
+        # Write output
+        Path(output_path).write_text(content)
+
+        # Verify - check for new conflicts
+        analyzer = PlacementAnalyzer()
+        new_conflicts = analyzer.find_conflicts(output_path)
+
+        return FixResult(
+            success=len(new_conflicts) == 0,
+            fixes_applied=applied,
+            new_conflicts=len(new_conflicts),
+            message=f"Applied {applied} fixes, {len(new_conflicts)} conflicts remaining",
+        )
+
+    def nudge_pad_clearance(
+        self,
+        pcb_path: str | Path,
+        rules: DesignRules | None = None,
+        output_path: str | Path | None = None,
+        dry_run: bool = False,
+        max_passes: int = 3,
+    ) -> FixResult:
+        """Fast targeted pad clearance violation repair.
+
+        Detects pad clearance violations only and nudges the smaller component
+        in each pair the minimum distance to resolve the overlap.  Preserves
+        the existing directional relationship (e.g. if R13 is to the right of
+        U8, it moves further right).  After applying fixes, verifies that no
+        new courtyard or pad clearance conflicts were introduced.
+
+        Uses up to *max_passes* quick passes to converge (each pass re-detects
+        remaining pad clearance violations and nudges again).  This handles
+        cases where a single nudge doesn't fully resolve all pad pairs between
+        two components.  Designed to complete in under 5 seconds for typical
+        boards.
+
+        Args:
+            pcb_path: Path to input .kicad_pcb file.
+            rules: Design rules for conflict detection.
+            output_path: Output path (None = modify in place).
+            dry_run: If True, return what would happen without writing.
+            max_passes: Maximum number of nudge passes (default: 3).
+
+        Returns:
+            FixResult with success status and details.
+        """
+        import tempfile
+
+        pcb_path = Path(pcb_path)
+        if output_path is None:
+            output_path = pcb_path
+
+        # Detect initial conflicts
+        analyzer = PlacementAnalyzer(verbose=self.verbose)
+        all_conflicts = analyzer.find_conflicts(pcb_path, rules)
+
+        # Filter to pad clearance only
+        pad_conflicts = [c for c in all_conflicts if c.type == ConflictType.PAD_CLEARANCE]
+
+        if not pad_conflicts:
+            return FixResult(
+                success=True,
+                fixes_applied=0,
+                new_conflicts=0,
+                message="No pad clearance violations found",
+            )
+
+        # For dry run, just report what we'd do on the first pass
+        if dry_run:
+            fixes = self.suggest_fixes(pad_conflicts, analyzer)
+            return FixResult(
+                success=True,
+                fixes_applied=len(fixes),
+                new_conflicts=0,
+                message=(
+                    f"Would apply {len(fixes)} nudge(s) to resolve "
+                    f"{len(pad_conflicts)} pad clearance violation(s) (dry run)"
+                ),
+            )
+
+        # Multi-pass nudge: iterate until pad clearance violations are
+        # resolved or no further progress is made.
+        content = pcb_path.read_text()
+        total_applied = 0
+        initial_pad_count = len(pad_conflicts)
+
+        # Record original conflict fingerprints for new-conflict detection
+        original_pairs = {(c.component1, c.component2, c.type) for c in all_conflicts}
+
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(content)
+
+        try:
+            for pass_num in range(max_passes):
+                # Re-detect pad clearance violations
+                tmp_path.write_text(content)
+                current_conflicts = analyzer.find_conflicts(tmp_path, rules)
+                current_pad = [c for c in current_conflicts if c.type == ConflictType.PAD_CLEARANCE]
+
+                if not current_pad:
+                    break
+
+                # Suggest fixes for remaining violations
+                fixes = self.suggest_fixes(current_pad, analyzer)
+                if not fixes:
+                    break
+
+                # Apply fixes to content
+                applied_this_pass = 0
+                for fix in fixes:
+                    new_content = self._apply_fix_to_content(content, fix)
+                    if new_content != content:
+                        content = new_content
+                        applied_this_pass += 1
+
+                if applied_this_pass == 0:
+                    break
+
+                total_applied += applied_this_pass
+
+                if self.verbose:
+                    print(
+                        f"  Nudge pass {pass_num + 1}: applied {applied_this_pass} fix(es), "
+                        f"{len(current_pad)} pad violations before"
+                    )
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        # Write final output
+        Path(output_path).write_text(content)
+
+        # Final verification
+        final_conflicts = analyzer.find_conflicts(output_path, rules)
+        newly_introduced = [
+            c for c in final_conflicts if (c.component1, c.component2, c.type) not in original_pairs
+        ]
+        remaining_pad = [c for c in final_conflicts if c.type == ConflictType.PAD_CLEARANCE]
+
+        if remaining_pad:
+            msg = (
+                f"Applied {total_applied} nudge(s), "
+                f"{len(remaining_pad)} pad clearance violation(s) remain"
+            )
+        else:
+            msg = (
+                f"Applied {total_applied} nudge(s), all {initial_pad_count} "
+                f"pad clearance violation(s) resolved"
+            )
+
+        if newly_introduced:
+            msg += f" (WARNING: {len(newly_introduced)} new conflict(s) introduced)"
+
+        return FixResult(
+            success=len(remaining_pad) == 0 and len(newly_introduced) == 0,
+            fixes_applied=total_applied,
+            new_conflicts=len(newly_introduced),
+            message=msg,
+        )
+
+    def iterative_fix(
+        self,
+        pcb_path: str | Path,
+        rules: DesignRules | None = None,
+        output_path: str | Path | None = None,
+        max_passes: int = 10,
+        escalation_factor: float = 1.5,
+        dry_run: bool = False,
+        timeout: float | None = None,
+    ) -> IterativeFixResult:
+        """Run iterative multi-pass conflict resolution.
+
+        Repeatedly detects conflicts, suggests fixes, applies them, and
+        re-checks until conflicts are resolved or no further progress is
+        made.  When a pass fails to reduce the conflict count, move
+        magnitudes are escalated by *escalation_factor* and previously
+        attempted fix directions for a component are avoided.
+
+        Uses in-memory conflict detection to avoid repeated file I/O
+        and S-expression re-parsing on each pass.
+
+        Args:
+            pcb_path: Path to input .kicad_pcb file.
+            rules: Design rules for conflict detection.
+            output_path: Output path (None = modify in place).
+            max_passes: Maximum number of fix passes.
+            escalation_factor: Multiplier applied to move magnitudes when
+                a pass does not reduce the conflict count.
+            dry_run: If True, return what *would* happen without writing.
+            timeout: Maximum wall-clock seconds to spend. When exceeded
+                the best result found so far is returned.
+
+        Returns:
+            IterativeFixResult with per-pass diagnostics.
+        """
+        from kicad_tools.schema import PCB
+
+        pcb_path = Path(pcb_path)
+        if output_path is None:
+            output_path = pcb_path
+        if rules is None:
+            rules = DesignRules()
+
+        start_time = time.monotonic()
+        timed_out = False
+
+        # Load PCB once into memory
+        pcb = PCB.load(str(pcb_path))
+
+        # Also keep textual content for final output (apply_fix_to_content
+        # modifies the S-expression text to produce the output file).
+        content = pcb_path.read_text()
+
+        analyzer = PlacementAnalyzer(verbose=self.verbose)
+        pass_results: list[PassResult] = []
+        total_fixes = 0
+        current_escalation = 1.0
+
+        # Track previous fix keys (component, direction_bucket) to avoid
+        # re-suggesting the same move on consecutive stalled passes.
+        previous_fix_keys: set[tuple[str, int, int]] = set()
+
+        # Cumulative position deltas per footprint reference so we can
+        # replay all moves onto the text content at the end in one shot.
+        cumulative_moves: dict[str, Point] = {}
+
+        # Initial conflict detection -- fully in memory
+        analyzer._load_pcb_from_instance(pcb, rules.courtyard_margin)
+        initial_conflicts = analyzer._find_conflicts_internal(rules)
+        initial_count = len(initial_conflicts)
+
+        _progress(
+            f"Found {initial_count} placement conflicts",
+            verbose=self.verbose,
+        )
+
+        if initial_count == 0:
+            return IterativeFixResult(
+                success=True,
+                total_passes=0,
+                initial_conflicts=0,
+                remaining_conflicts=0,
+                total_fixes_applied=0,
+                pass_results=[],
+                message="No placement conflicts found",
+            )
+
+        prev_conflict_count = initial_count
+
+        for pass_num in range(1, max_passes + 1):
+            # Check timeout
+            if timeout is not None:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout:
+                    timed_out = True
+                    _progress(
+                        f"Timeout after {elapsed:.1f}s -- returning best result",
+                        verbose=self.verbose,
+                    )
+                    break
+
+            # Detect conflicts in memory
+            analyzer._load_pcb_from_instance(pcb, rules.courtyard_margin)
+            conflicts = analyzer._find_conflicts_internal(rules)
+            conflict_count = len(conflicts)
+
+            if conflict_count == 0:
+                pass_results.append(
+                    PassResult(
+                        pass_number=pass_num,
+                        conflicts_before=prev_conflict_count,
+                        conflicts_after=0,
+                        fixes_applied=0,
+                        escalation_factor=current_escalation,
+                    )
+                )
+                break
+
+            # Suggest fixes
+            fixes = self.suggest_fixes(conflicts, analyzer)
+
+            if not fixes:
+                pass_results.append(
+                    PassResult(
+                        pass_number=pass_num,
+                        conflicts_before=conflict_count,
+                        conflicts_after=conflict_count,
+                        fixes_applied=0,
+                        escalation_factor=current_escalation,
+                    )
+                )
+                break
+
+            # Filter out previously-stalled fix directions
+            if previous_fix_keys:
+                filtered: list[PlacementFix] = []
+                for fix in fixes:
+                    key = _fix_direction_key(fix)
+                    if key not in previous_fix_keys:
+                        filtered.append(fix)
+                if filtered:
+                    fixes = filtered
+                # If all fixes are duplicates, keep them but escalate
+                # to break out of the stall
+
+            # Apply escalation to move magnitudes
+            if current_escalation > 1.0:
+                fixes = _escalate_fixes(fixes, current_escalation)
+
+            # Apply fixes by updating footprint positions in the PCB object
+            applied = 0
+            for fix in fixes:
+                fp = pcb.get_footprint(fix.component)
+                if fp is not None:
+                    old_x, old_y = fp.position
+                    fp.position = (
+                        old_x + fix.move_vector.x,
+                        old_y + fix.move_vector.y,
+                    )
+                    # Accumulate moves for text-based output later
+                    if fix.component in cumulative_moves:
+                        prev = cumulative_moves[fix.component]
+                        cumulative_moves[fix.component] = Point(
+                            prev.x + fix.move_vector.x,
+                            prev.y + fix.move_vector.y,
+                        )
+                    else:
+                        cumulative_moves[fix.component] = Point(
+                            fix.move_vector.x,
+                            fix.move_vector.y,
+                        )
+                    applied += 1
+
+            total_fixes += applied
+
+            # Re-check conflicts after this pass (in memory)
+            analyzer._load_pcb_from_instance(pcb, rules.courtyard_margin)
+            new_conflicts = analyzer._find_conflicts_internal(rules)
+            new_count = len(new_conflicts)
+
+            pass_results.append(
+                PassResult(
+                    pass_number=pass_num,
+                    conflicts_before=conflict_count,
+                    conflicts_after=new_count,
+                    fixes_applied=applied,
+                    escalation_factor=current_escalation,
+                )
+            )
+
+            elapsed = time.monotonic() - start_time
+            _progress(
+                f"Pass {pass_num}/{max_passes}: "
+                f"{conflict_count} -> {new_count} conflicts "
+                f"({conflict_count - new_count:+d}), "
+                f"{elapsed:.1f}s elapsed",
+                verbose=self.verbose,
+            )
+
+            if new_count == 0:
+                break
+
+            # Detect stall: no progress
+            if new_count >= conflict_count:
+                # Record current fix directions as stalled
+                for fix in fixes:
+                    previous_fix_keys.add(_fix_direction_key(fix))
+                # Escalate move magnitude for next pass
+                current_escalation *= escalation_factor
+            else:
+                # Progress made, reset stall tracking
+                previous_fix_keys.clear()
+                current_escalation = 1.0
+
+            prev_conflict_count = new_count
+
+        # Determine final conflict count
+        remaining = pass_results[-1].conflicts_after if pass_results else initial_count
+
+        # Apply cumulative moves to text content for file output
+        if cumulative_moves and not dry_run:
+            for ref, move in cumulative_moves.items():
+                synthetic_fix = PlacementFix(
+                    conflict=initial_conflicts[0],  # placeholder
+                    component=ref,
+                    move_vector=move,
+                )
+                content = self._apply_fix_to_content(content, synthetic_fix)
+            Path(output_path).write_text(content)
+
+        # Build summary message
+        elapsed_total = time.monotonic() - start_time
+        if remaining == 0:
+            msg = (
+                f"All conflicts resolved in {len(pass_results)} passes "
+                f"({total_fixes} fixes applied, {elapsed_total:.1f}s)"
+            )
+        elif remaining < initial_count:
+            msg = (
+                f"Reduced conflicts from {initial_count} to {remaining} "
+                f"in {len(pass_results)} passes "
+                f"({total_fixes} fixes applied, {elapsed_total:.1f}s)"
+            )
+        else:
+            msg = (
+                f"Could not reduce conflicts below {remaining} "
+                f"after {len(pass_results)} passes "
+                f"({total_fixes} fixes applied, {elapsed_total:.1f}s)"
+            )
+
+        if timed_out:
+            msg += " (timed out)"
+        if dry_run:
+            msg += " (dry run)"
+
+        return IterativeFixResult(
+            success=remaining == 0,
+            total_passes=len(pass_results),
+            initial_conflicts=initial_count,
+            remaining_conflicts=remaining,
+            total_fixes_applied=total_fixes,
+            pass_results=pass_results,
+            message=msg,
+        )
+
+    def _apply_fix_to_content(self, content: str, fix: PlacementFix) -> str:
+        """Apply a single fix to PCB content.
+
+        Modifies the (at x y) position of the component's footprint.
+
+        Uses a two-step approach to avoid cross-footprint regex matching:
+        1. Find the footprint block containing the target reference.
+        2. Update the first (at X Y) within that block.
+        """
+        import re
+
+        ref = fix.component
+
+        # Step 1: Find all footprint blocks and locate the one with our reference.
+        # KiCad PCB files have two reference formats:
+        # 1. KiCad 8 property format: (property "Reference" "REF" ...)
+        # 2. Legacy fp_text format: (fp_text reference "REF" ...)
+        ref_pattern = re.compile(
+            rf'(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
+        )
+
+        # Find start of each footprint block, ignoring ``(footprint`` inside
+        # quoted strings such as a descr (Issue #6873).
+        from kicad_tools.sexp.scan import iter_unquoted
+
+        # The lookahead keeps the match (a non-empty library id) ending
+        # outside the id string, as ``iter_unquoted`` requires.
+        fp_starts = [m.start() for m in iter_unquoted(content, r'\(footprint\s+(?="[^"])')]
+
+        for i, fp_start in enumerate(fp_starts):
+            # Determine the end of this footprint block
+            # (next footprint start, or end of content)
+            fp_end = fp_starts[i + 1] if i + 1 < len(fp_starts) else len(content)
+            fp_block = content[fp_start:fp_end]
+
+            # Check if this footprint contains our reference
+            if not ref_pattern.search(fp_block):
+                continue
+
+            # Step 2: Find and update the first (at X Y [R]) in this footprint
+            at_pattern = re.compile(r"(\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\))")
+            at_match = at_pattern.search(fp_block)
+            if not at_match:
+                continue
+
+            old_x = float(at_match.group(2))
+            old_y = float(at_match.group(3))
+            rotation = at_match.group(4) or ""
+
+            new_x = old_x + fix.move_vector.x
+            new_y = old_y + fix.move_vector.y
+
+            # Build the replacement for the (at ...) portion
+            new_at = f"{at_match.group(1)}{new_x:.4f} {new_y:.4f}{rotation}{at_match.group(5)}"
+
+            # Replace within the content at the exact position
+            abs_start = fp_start + at_match.start()
+            abs_end = fp_start + at_match.end()
+            content = content[:abs_start] + new_at + content[abs_end:]
+
+            # Zones embedded in the footprint (antenna keepouts) are stored
+            # in board coordinates and must move with it (Issue #6119).
+            from .writeback import translate_embedded_zones_in_text
+
+            return translate_embedded_zones_in_text(content, fp_start, new_x - old_x, new_y - old_y)
+
+        return content
+
+    def verify_fixes(
+        self,
+        pcb_path: str | Path,
+        fixes: list[PlacementFix],
+        rules: DesignRules | None = None,
+    ) -> list[Conflict]:
+        """Verify fixes won't create new conflicts.
+
+        Applies fixes to a temporary copy and checks for new conflicts.
+
+        Args:
+            pcb_path: Path to .kicad_pcb file
+            fixes: Fixes to verify
+            rules: Design rules for checking
+
+        Returns:
+            List of conflicts that would be created by these fixes
+        """
+        import shutil
+        import tempfile
+
+        pcb_path = Path(pcb_path)
+
+        # Create temp copy
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            shutil.copy(pcb_path, tmp_path)
+
+        try:
+            # Apply fixes
+            self.apply_fixes(tmp_path, fixes, tmp_path)
+
+            # Check for conflicts
+            analyzer = PlacementAnalyzer()
+            return analyzer.find_conflicts(tmp_path, rules)
+        finally:
+            # Clean up
+            tmp_path.unlink()
+
+    def preview_fixes(self, fixes: list[PlacementFix]) -> str:
+        """Generate human-readable preview of fixes.
+
+        Returns:
+            Multi-line string describing fixes
+        """
+        if not fixes:
+            return "No fixes suggested"
+
+        lines = ["Suggested fixes:", ""]
+
+        for i, fix in enumerate(fixes, 1):
+            lines.append(f"{i}. {fix}")
+            if fix.new_position:
+                lines.append(
+                    f"   New position: ({fix.new_position.x:.3f}, {fix.new_position.y:.3f})"
+                )
+            if fix.creates_new_conflicts:
+                lines.append("   Warning: May create new conflicts")
+            lines.append("")
+
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for iterative fix
+# ---------------------------------------------------------------------------
+
+
+def _progress(message: str, *, verbose: bool = False) -> None:
+    """Print a progress line to stderr.
+
+    Always prints when *verbose* is True. Otherwise prints a compact
+    single-line update to stderr so that callers (including agent
+    pipelines) can see that the fixer is making forward progress.
+    """
+    if verbose:
+        print(f"  {message}", file=sys.stderr)
+    else:
+        print(f"  {message}", file=sys.stderr)
+
+
+def _fix_direction_key(fix: PlacementFix) -> tuple[str, int, int]:
+    """Return a hashable key representing (component, direction_bucket).
+
+    The direction is bucketed into sign-based octants so that
+    near-identical moves are treated as duplicates.
+    """
+    dx_sign = 1 if fix.move_vector.x >= 0 else -1
+    dy_sign = 1 if fix.move_vector.y >= 0 else -1
+    return (fix.component, dx_sign, dy_sign)
+
+
+def _escalate_fixes(
+    fixes: list[PlacementFix],
+    factor: float,
+) -> list[PlacementFix]:
+    """Return a copy of *fixes* with move magnitudes multiplied by *factor*."""
+    escalated: list[PlacementFix] = []
+    for fix in fixes:
+        new_vector = Point(fix.move_vector.x * factor, fix.move_vector.y * factor)
+        escalated.append(
+            PlacementFix(
+                conflict=fix.conflict,
+                component=fix.component,
+                move_vector=new_vector,
+                confidence=fix.confidence,
+                new_position=None,
+                creates_new_conflicts=fix.creates_new_conflicts,
+            )
+        )
+    return escalated

@@ -1,0 +1,68 @@
+name: Assert no Bot-authored issue carries 'external'
+
+# Issue #5310: `external` is a hard-exclusion label -- see
+# .loom/scripts/hard-exclusion-labels.sh -- that stops the Loom daemon from
+# ever dispatching a sweep for an issue that carries it. label-external-issues.yml
+# applies that label to any issue whose author fails `repos.checkCollaborator`,
+# but a GitHub App installation actor is never a collaborator by that API. So
+# before PR #5233 (merged 2026-09-11), every issue filed by the fleet's own
+# app (`loom-fleet-dispatch[bot]`, account id 313063438) got mislabeled
+# `external` and silently stalled the pipeline until a human or agent noticed.
+# #5233 pinned that account as trusted going forward; #5310 did the one-time
+# cleanup of the issues already mislabeled before it merged.
+#
+# This is the standing guard against the same regression class recurring --
+# e.g. a future Loom automation account, or the trusted id/login/type pin in
+# label-external-issues.yml drifting out of sync with reality. It does not
+# touch any label itself; it only asserts that no currently-open issue
+# labeled `external` has a Bot-type author, and fails loudly (rather than
+# being discovered only when a stalled sweep is investigated) if that
+# invariant is ever violated again.
+
+on:
+  schedule:
+    # 06:30 UTC daily.
+    - cron: "30 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  issues: read
+
+jobs:
+  assert-no-bot-external:
+    name: No open 'external' issue has a Bot author
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enumerate open 'external' issues and fail on any Bot author
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const offenders = [];
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              labels: "external",
+              per_page: 100,
+            });
+
+            for (const issue of issues) {
+              if (issue.user?.type === "Bot") {
+                offenders.push(`#${issue.number} (author: ${issue.user.login})`);
+              }
+            }
+
+            if (offenders.length > 0) {
+              core.setFailed(
+                `Found ${offenders.length} open issue(s) labeled 'external' with a ` +
+                `Bot author: ${offenders.join(", ")}. 'external' is a hard-exclusion ` +
+                `label that blocks Loom dispatch (see .loom/scripts/hard-exclusion-labels.sh) ` +
+                `-- a Bot-authored issue should never carry it (this is the regression ` +
+                `class from #5310 / #5233). Remove the label from the listed issue(s) and ` +
+                `check whether label-external-issues.yml's trusted-app allowlist needs updating.`
+              );
+            } else {
+              console.log("OK: no open 'external'-labeled issue has a Bot author.");
+            }

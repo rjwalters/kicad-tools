@@ -1,0 +1,189 @@
+"""Shared utility helpers for report generation.
+
+Provides schematic file discovery logic used by both the data collector
+and the report CLI command.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import logging
+import re
+from collections.abc import Callable
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+#: Suffixes stripped from a PCB stem when looking for a sibling schematic.
+#: Exposed at module scope so error reporters (e.g. AssemblyPackage) can
+#: surface the exact candidates that were tried.
+SCHEMATIC_STRIP_SUFFIXES: tuple[str, ...] = ("_routed", "_fixed", "_v2", "_final")
+
+
+def find_schematic(pcb_path: Path) -> Path | None:
+    """Locate the root .kicad_sch file for a given .kicad_pcb.
+
+    Resolution order:
+
+    1. **Direct stem match** -- ``<pcb_stem>.kicad_sch`` in the same directory.
+    2. **Project file lookup** -- read ``*.kicad_pro`` to derive the project
+       stem, then check ``<project_stem>.kicad_sch``.
+    3. **Single-glob fallback** -- if exactly one ``*.kicad_sch`` exists in
+       the same directory, return it.  When multiple are found the result is
+       ambiguous and ``None`` is returned with a warning.
+    4. **None** -- all candidates exhausted; the caller should warn and
+       suggest ``--sch``.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file.
+
+    Returns:
+        Resolved :class:`~pathlib.Path` to the schematic, or ``None`` when
+        no unambiguous candidate is found.
+    """
+    directory = pcb_path.parent
+
+    # Step 1: direct stem match
+    candidate = pcb_path.with_suffix(".kicad_sch")
+    if candidate.exists():
+        return candidate
+
+    # Step 1.5: strip known suffixes (_routed, _fixed, etc.) from the PCB stem
+    stem = pcb_path.stem
+    for suffix in SCHEMATIC_STRIP_SUFFIXES:
+        if stem.endswith(suffix):
+            stripped = directory / (stem[: -len(suffix)] + ".kicad_sch")
+            if stripped.exists():
+                return stripped
+            break  # only strip one suffix
+
+    # Step 2: project file lookup
+    pro_files = list(directory.glob("*.kicad_pro"))
+    for pro in pro_files:
+        # Try to read meta.filename from the project JSON to derive the stem.
+        # Fall back to the project file's own stem if the JSON is unreadable.
+        project_stem = _project_stem(pro)
+        pro_candidate = directory / (project_stem + ".kicad_sch")
+        if pro_candidate.exists():
+            return pro_candidate
+
+    # Step 3: single-file glob
+    sch_files = list(directory.glob("*.kicad_sch"))
+    if len(sch_files) == 1:
+        return sch_files[0]
+    if len(sch_files) > 1:
+        logger.warning(
+            "Multiple .kicad_sch files found in %s; "
+            "cannot determine which is the root schematic. "
+            "Use --sch to specify explicitly.",
+            directory,
+        )
+        return None
+
+    # Step 4: no candidates at all
+    return None
+
+
+def schematic_candidate_paths(pcb_path: Path) -> list[Path]:
+    """Enumerate the schematic paths considered by :func:`find_schematic`.
+
+    Returns the list of concrete candidate paths (not just suffixes) that
+    auto-discovery checks for a given PCB.  Useful for error messages when
+    discovery fails -- the caller can show the user every path that was
+    probed, so they can diagnose why none matched.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file.
+
+    Returns:
+        Ordered list of :class:`~pathlib.Path` objects in the same order
+        :func:`find_schematic` consults them.  Includes the direct stem
+        match, each ``_routed`` / ``_fixed`` / ``_v2`` / ``_final``
+        suffix-stripped candidate, and any project-file-derived candidates.
+    """
+    directory = pcb_path.parent
+    candidates: list[Path] = [pcb_path.with_suffix(".kicad_sch")]
+
+    stem = pcb_path.stem
+    for suffix in SCHEMATIC_STRIP_SUFFIXES:
+        if stem.endswith(suffix):
+            candidates.append(directory / (stem[: -len(suffix)] + ".kicad_sch"))
+            break
+
+    for pro in sorted(directory.glob("*.kicad_pro")):
+        project_stem = _project_stem(pro)
+        candidates.append(directory / (project_stem + ".kicad_sch"))
+
+    # De-duplicate while preserving order
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
+def _project_stem(pro_path: Path) -> str:
+    """Derive the project stem from a ``.kicad_pro`` file.
+
+    Attempts to read the ``meta.filename`` key from the JSON content.
+    Falls back to the file's own stem on any error.
+    """
+    try:
+        with open(pro_path, encoding="utf-8") as f:
+            data = json.load(f)
+        filename = data.get("meta", {}).get("filename", "")
+        if filename:
+            return Path(filename).stem
+    except Exception:
+        pass
+    return pro_path.stem
+
+
+@dataclasses.dataclass
+class SchematicHierarchy:
+    """Result of :func:`walk_schematic_hierarchy`."""
+
+    #: The root schematic plus every reachable sub-sheet that was accepted.
+    sheets: list[Path]
+    #: Referenced sheets the caller's containment predicate rejected.
+    outside: list[Path]
+    #: Referenced sheets that are accepted but do not exist on disk.
+    missing: list[Path]
+
+
+def walk_schematic_hierarchy(
+    schematic: Path, contains: Callable[[Path], bool] | None = None
+) -> SchematicHierarchy:
+    """Follow ``(property "Sheetfile" ...)`` / ``(file ...)`` references.
+
+    The single sheet walker shared by ``kct readiness`` and the manufacturing
+    exporter (Issue #8752).  Containment stays the caller's choice: sheets for
+    which *contains* is false are reported in ``outside`` and not read
+    (readiness raises on them; the exporter skips them).  Cycles terminate.
+    """
+    found: dict[Path, None] = {}
+    outside: list[Path] = []
+    missing: list[Path] = []
+    pending = [schematic.resolve()]
+    seen: set[Path] = set()
+    while pending:
+        sheet = pending.pop()
+        if sheet in seen:
+            continue
+        seen.add(sheet)
+        if contains is not None and not contains(sheet):
+            outside.append(sheet)
+            continue
+        if not sheet.is_file():
+            missing.append(sheet)
+            continue
+        found[sheet] = None
+        text = sheet.read_text(errors="replace")
+        for name in re.findall(r'\(property\s+"Sheet(?:file|name)"\s+"([^"\n]+\.kicad_sch)"', text):
+            pending.append((sheet.parent / name).resolve())
+        for name in re.findall(r'\(file\s+"([^"\n]+\.kicad_sch)"\)', text):
+            pending.append((sheet.parent / name).resolve())
+    return SchematicHierarchy(sorted(found), outside, missing)

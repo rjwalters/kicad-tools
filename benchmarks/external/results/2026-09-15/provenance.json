@@ -1,0 +1,54 @@
+{
+  "implementation_commit": "0e8a9a9da0809e6c69620eff1541ff6e94ed58a0",
+  "tracked_status": "",
+  "board_commit": "3f99c08de7d81991f95eb2c23f30798a129ffdcf",
+  "board_repository": "https://git.beagleboard.org/beagleconnect/freedom",
+  "board_path": "hw/KICAD/BeagleConnect Freedom C7.kicad_pcb",
+  "build_command": "uv run --frozen --extra dev kct build-native --force --verbose",
+  "benchmark_command": "uv run --frozen --extra dev kct bench external --board beagleconnect_freedom --skip-fetch --output-dir /tmp/5348-beagle-0e8a9a9d -v",
+  "artifacts": {
+    "source": {
+      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/.cache/kct-benchmarks/external/beagleconnect_freedom/BeagleConnect Freedom C7.kicad_pcb",
+      "sha256": "2783997982826648c60f83042c0dde423db467ff65175b0203505af31c2689a9"
+    },
+    "normalized": {
+      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/.cache/kct-benchmarks/external/normalized/beagleconnect_freedom.kicad_pcb",
+      "sha256": "9747958c13a5c625ddd15df7afb3a5a100b6877c134e63c861a2a4c351312d9d"
+    },
+    "build_log": {
+      "path": "/tmp/5348-native-build.log",
+      "sha256": "482b7e260c6c253e2826fe2887ef5acdf3f51918baf03d87a661e54640d2ed89"
+    },
+    "router_extension": {
+      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/src/kicad_tools/router/router_cpp.cpython-312-darwin.so",
+      "sha256": "1ae5da1b9b9375a97abf8620a0b76a069a168d38a867bcf25906f6f3db8289a4"
+    },
+    "placement_extension": {
+      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/src/kicad_tools/placement/placement_cpp.cpython-312-darwin.so",
+      "sha256": "6cdb84fc4c820e6e8ec0815b494f3cc3a17de5b417db3dc1d1a6b4c1776bc953"
+    },
+    "drc_extension": {
+      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/src/kicad_tools/drc/drc_cpp.cpython-312-darwin.so",
+      "sha256": "db06ef4b285a3678a351b7d961727116f38eefbeecd5347cfcea0e50192fbff4"
+    },
+    "beagleconnect_freedom.zero-touch.json": {
+      "path": "/tmp/5348-beagle-0e8a9a9d/beagleconnect_freedom.zero-touch.json",
+      "sha256": "7ed834cde4651f59ee371e623e63262c6686e551ee2f0258740025d5252bfacc"
+    },
+    "report.zero-touch.md": {
+      "path": "/tmp/5348-beagle-0e8a9a9d/report.zero-touch.md",
+      "sha256": "1069b7c69a3d7fe60c44249849b0bc62b39b8f7eacbf36e9c67732d32a650ede"
+    },
+    "routed/beagleconnect_freedom.zero-touch.kicad_pcb": {
+      "path": "/tmp/5348-beagle-0e8a9a9d/routed/beagleconnect_freedom.zero-touch.kicad_pcb",
+      "sha256": "174a307de2299b741959b4885aeb5d53a702a2f899301f38598a10d7d289cbae"
+    }
+  },
+  "status": "terminal; benchmark report generation exited 0; routing partial exit 2",
+  "native_source_note": "Native sources and CMakeLists.txt unchanged from fresh verified build df762472; same imported binary.",
+  "started_at": "2026-09-15T04:52:59.351027+00:00",
+  "observation_cap_seconds": 2700,
+  "terminal_observed_at": "2026-09-15T05:30:05.709826+00:00",
+  "benchmark_exit_code": 0,
+  "route_exit_code": 2
+}

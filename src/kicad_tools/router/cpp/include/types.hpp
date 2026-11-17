@@ -1,0 +1,979 @@
+/*
+ * Router C++ Core - Common Types
+ * Part of kicad-tools router performance optimization (Phase 4)
+ */
+
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <vector>
+#include <tuple>
+#include <optional>
+#include <string>
+#include <unordered_map>
+
+namespace router {
+
+// Build version for the C++ binding surface (Issue #2501).
+//
+// Bump this constant in any PR that changes the bindings.cpp surface
+// (added/removed/renamed symbols, struct fields, function signatures).
+// The Python side mirrors this as ``_REQUIRED_CPP_BUILD_VERSION`` in
+// ``cpp_backend.py``; on import the two are compared and a mismatch
+// disables the C++ backend with a clear "kct build-native" error,
+// preventing silent ``AttributeError`` failures from a stale .so.
+//
+// Bump to 6 for Issue #3144 (A* tie-break determinism fix).  The
+// public binding surface is unchanged, but AStarNode gained a ``seq``
+// monotonic-insertion-counter field used for deterministic ordering
+// of equal-f_score nodes.  Existing .so files lack this field, so
+// stale builds running against the post-#3144 Python side would
+// produce a confusing ABI mismatch.  Bumping the version forces a
+// rebuild via ``kct build-native``.
+//
+// Bump to 7 for Issue #3143 (per-pad channel budget).  Adds a new
+// ``PadChannelBudget`` struct in this header, exposes it through the
+// nanobind layer, and threads a ``std::vector<PadChannelBudget>``
+// parameter into ``Pathfinder::route()`` / ``route_resumable()``.  Old
+// .so files lack the new struct definition and would mismatch the
+// Python-side caller; the build-version bump forces a rebuild via
+// ``kct build-native``.
+//
+// Bump to 8 for Issue #3199 (A* tie-break greedy-on-g_score).  The
+// public binding surface is unchanged, but ``AStarNode::operator>``
+// gained a ``g_score`` tertiary key between ``f_score`` and ``seq``.
+// Existing .so files use the pre-#3199 (f_score, seq) comparison
+// which regressed softstart unaided routing reach from 6/10 -> 5/10;
+// the post-#3199 (f_score, g_score, seq) comparison restores 6/10.
+// Bumping the version forces a rebuild so the regression fix takes
+// effect.
+//
+// Bump to 9 for Issue #3224 (foreign-pad-metal A* rejection).
+// ``Grid3D::mark_blocked`` gained an optional trailing ``pad_blocked``
+// parameter so the Python sync (``cpp_backend.py::from_routing_grid``
+// and ``grid.py::_sync_pad_to_cpp_grid``) can forward the
+// ``_pad_blocked[metal_slice] = True`` bit set by
+// ``RoutingGrid._add_pad_unsafe``.  Without the rebuild, ``cell.pad_blocked``
+// remains ``false`` for every cell, and the ``is_clearance_only =
+// !cell.pad_blocked`` check at ``pathfinder.cpp:680`` / ``pathfinder.cpp:1173``
+// always reports "clearance halo", allowing the A* pad-exit branch to
+// step trace centerlines through foreign pad metal -- the 16
+// ``clearance_pad_segment`` errors on board 05 with --backend cpp.
+// Bumping the build version forces ``kct build-native`` so the fix takes
+// effect.
+//
+// Bump to 10 for Issue #3309 (A* flat-array g_score / closed-set storage).
+// The resumable A* hot loop replaced ``std::unordered_map<tuple<int,int,int>,
+// float>`` / ``std::unordered_set<tuple<int,int,int>>`` member tables with
+// generation-stamped flat ``std::vector<float>`` / ``std::vector<uint32_t>``
+// arrays indexed by ``layer * rows * cols + y * cols + x``.  The public
+// binding surface is unchanged; the Pathfinder ABI gained new member
+// vectors and an ``ensure_search_arrays_sized()`` helper.  Pre-#3309 .so
+// files would still link but exercise the slower hashmap path -- bumping
+// the version forces a rebuild so the post-#3309 performance fix takes
+// effect and the regression test (``tests/test_router_cpp_astar_flat_arrays_3309.py``)
+// passes its build-version guard.
+// Bump to 11 for Issue #3545 (static-blockage survival across rip-up).
+// ``GridCell`` gained a ``static_blocked`` flag set by ``mark_blocked``
+// (static obstacle sync) and consulted by ``unmark_segment`` /
+// ``unmark_via``: ripping up a route whose clearance envelope overlapped
+// a STATIC pad clearance halo must RESTORE the halo (blocked=true,
+// net=original_net) instead of erasing it.  Pre-#3545 .so files erase
+// the halo, letting foreign nets route through a pad's clearance band
+// and ship sub-clearance copper (routing-diagnostic fixture: NET3
+// through J1-1's halo at 0.127mm actual vs 0.200mm required).
+// ``mark_blocked`` also began recording ``original_net`` for ALL static
+// cells (previously pad-metal only) so the restore has the owner net.
+//
+// Bump to 12 (Issue #3490): the same-component validator carve-out in
+// ``validate_route`` now silences NEGATIVE pad clearance for net=0
+// (unconnected / NC) same-component pads, restoring routability to a
+// signal pad whose metal overlaps an adjacent net=0 pad (the #1764
+// reachability guarantee). Foreign signal pads keep the strict >= 0
+// guard (#2933).
+//
+// Version 13 (Issue #3456): standard-mode own-net-obstacle parity with
+// the Python pathfinder (Issue #864 semantics: same-net cells are
+// passable regardless of the obstacle flag).  Fixed in BOTH
+// ``is_trace_blocked`` (fast + slow paths) and ``is_diagonal_blocked``;
+// both are exposed on the binding surface for the parity regression
+// tests (tests/test_router_cpp_fallback_warning_3456.py).  The
+// ``is_trace_blocked`` divergence was the operative bug: a trace
+// centerline within trace-half-width of the net's OWN ``is_obstacle``
+// pad copper was rejected, sealing dense connector pad pockets (board
+// 03's J1 USB-C at 0.05mm grid -- C++ open set exhausted within ~800
+// iterations on the J1->U1 USB edges, and JOY/BTN nets burned up to
+// 6M iterations before FAILURE_NO_PATH) and silently handing those
+// nets to the 10-100x-slower Python fallback.  Post-fix, board 03's
+// canonical recipe routes with ZERO Python fallbacks.
+// ``is_via_blocked`` standard mode intentionally keeps the strict
+// own-net-obstacle reject pinned by
+// tests/test_cpp_pathfinder_own_net_obstacle.py (verified NOT needed
+// for the board-03 fallbacks).
+//
+// Version 14 (Issue #3622): complete the standard-mode own-net-obstacle
+// parity family by aligning the THIRD sibling predicate,
+// ``Pathfinder::is_via_blocked`` (both the cached fast path and the
+// per-net-radius slow path), with the Python ``_is_via_blocked``
+// standard branch (Issue #864: "same-net passable, different nets
+// block"; it does NOT consult ``is_obstacle``).  Pre-#3622 the standard
+// arm rejected a via candidate whose Euclidean disc touched the routing
+// net's OWN ``is_obstacle`` pad copper (``cell.is_obstacle ||
+// cell.net != net``); a board that routes a via through its own
+// destination pad in the Python fallback but not in C++ is another
+// silent-fallback seed of the #3456 class.  Both backends now read
+// ``if (cell.net != net) return true;`` for the standard via predicate.
+// The single-layer (``allowed_layers``) invariant is preserved by a
+// Python-side routable-layer guard in
+// ``cpp_backend.py::CppPathfinder._apply_allowed_layers_to_routable``
+// (a via needs >= 2 routable layers), and fine-pitch neck-down survives
+// via the #1018 post-processing #3456/PR #3623 added to
+// ``cpp_backend.py::_convert_result_to_route``.
+// Version 15 (Issue #4065): C++ port of the CoupledPathfinder joint-state
+// A* loop (Board 07 Phase 2b).  Adds a new ``CoupledPathfinder`` C++ class
+// (``coupled_pathfinder.hpp`` / ``coupled_pathfinder.cpp``) exposed through
+// the nanobind layer, plus two new binding-surface structs in this header:
+// ``CoupledAStarNode`` (the joint ``(p, n, direction)`` search node with the
+// #3508 LIFO-seq tie-break -- distinct from ``AStarNode``'s FIFO convention)
+// and ``CoupledRouteResult`` (the two-trace path plus the #4052 diagnostic
+// vocabulary: iterations, best_progress, timeout/iteration-limited flags).
+// The single-ended ``Pathfinder`` surface is unchanged; the coupled search
+// is a NEW consumer of the SAME ``Grid3D``.  Old .so files lack the coupled
+// class/structs and would mismatch the post-#4065 Python caller
+// (``cpp_backend.py::CppCoupledPathfinder``); the build-version bump forces a
+// rebuild via ``kct build-native``.  The pure-Python ``route_coupled`` is
+// preserved as the fallback for the ``allow_swap_via`` /
+// ``manhattan_sum`` code paths the v1 port intentionally defers.
+// Version 16 (Issue #4071): port the Python ``_reserved_for_nets`` soft
+// corridor-reservation contract (Issue #2677 / PR #2686, previously
+// Python-grid-only per the #2709 deliberate-omission comment) into the
+// C++ grid.  ``GridCell`` gains a small fixed-capacity owner-set
+// (``reserved_nets`` / ``reserved_count``, K=RESERVED_NETS_CAP), and
+// ``Grid3D::mark_via`` now honours the per-cell keep-out skip so a
+// foreign-net through-hole via cannot colonise a reserved continuation
+// corridor -- matching Python ``RoutingGrid._mark_via`` exactly.
+// ``DesignRules`` gains ``cost_corridor_attractor`` (Python default
+// 3.0) and ``pathfinder.cpp``'s neighbour/via cost loops subtract the
+// attractor bonus for cells reserved for the querying net (clamped at 0,
+// A* admissibility preserved), mirroring
+// ``pathfinder.py::get_corridor_attractor_bonus``.  This activates
+// #2983's UNCONDITIONAL inner-corner lane reservations and #4053/PR #4070's
+// bundle-river via-hop reservations on the production C++ backend for the
+// first time.  Old .so files lack the ``reserved_*`` GridCell fields and
+// the ``cost_corridor_attractor`` DesignRules field; the version bump
+// forces a rebuild via ``kct build-native``.
+// Version 17 (Issue #4079): per-reservation HARD vs SOFT keep-out.
+// ``GridCell`` gains a ``reserved_soft`` flag and ``reserve_cell`` gains a
+// ``soft`` parameter (bindings-surface change -> version bump).  A HARD
+// reservation (default, e.g. #2677 pair-continuation) fences foreign vias
+// AND foreign lateral traces out of the corridor
+// (``is_reserved_excluding`` true -> ``mark_via`` / ``mark_segment`` /
+// ``is_trace_blocked`` skip/block).  A SOFT reservation (the #2983
+// inner-corner / #4053 bundle-river byte-lane helpers) keeps ONLY the A*
+// attractor bonus for the owning net -- it does NOT fence foreign traces.
+// This is required for board 07's fully-reversed DDR byte, whose crossing
+// conflict graph is COMPLETE: a hard lateral fence forces the crossing
+// foreign nets to route AROUND the corridor, colliding elsewhere (copper
+// shorts) or failing (extra opens).  The soft attractor pulls the owning
+// crossing net onto its inner-layer channel while leaving the mandatory
+// crossings legal.  Old .so files lack ``reserved_soft`` and the new
+// ``reserve_cell`` signature; the version bump forces a rebuild.
+// Version 18 (Issue #4510, Phase 2a of epic #4431): pairwise (HV-isolation)
+// domain clearance in ``Grid3D::validate_route``.  ``Grid3D`` gains two
+// dormant-by-default setters -- ``set_pairwise_domains(net_to_domain, matrix)``
+// (a per-net domain-id array plus a dense domain-pair -> required-clearance
+// matrix in mm) and ``set_attach_zones(zones)`` (the net-id-translated
+// rated-footprint necking regions from #4506) -- plus the new ``AttachZone``
+// struct below.  When the setters are never called the validator behaves
+// byte-identically to version 17.  Old .so files lack both bindings, so the
+// Python plumbing in ``cpp_backend.py`` would silently no-op against a stale
+// build; the version bump forces a rebuild via ``kct build-native``.
+//
+// Version 19 (Issue #4507, Phase 2 of epic #4431): the attach-zone exemption
+// becomes LAYER-SCOPED.  ``AttachZone`` gains a ``net_layers`` map and
+// ``Grid3D::attach_zone_exempts`` gains a trailing ``layer`` argument, so the
+// C++ search and ``validate_route`` waive the pairwise widening on exactly the
+// layers the layer-scoped Python acceptance check (#4699 /
+// ``route_pairwise_violation``) waives it on.  A zone with an empty
+// ``net_layers`` map keeps the layer-agnostic version-18 verdict, so old
+// callers are unaffected -- but the struct field and the defaulted argument
+// are both new binding surface, hence the bump.
+//
+// Version 20 (Issue #4848): the soft pairwise avoidance gradient
+// (``Pathfinder::pairwise_avoidance_cost``) prices the NEAREST qualifying
+// cross-domain cell in the band instead of the first one in row-major scan
+// order.  Version 19's two-level break stopped at the topmost band cell, so a
+// candidate with foreign copper 18 cells below (the binding side) and 24 cells
+// above priced 1/8 instead of 7/8 -- a 7x under-price of the real proximity,
+// contradicting the documented "strongest just outside the hard radius" decay.
+// The kernel now walks a distance-sorted band-offset table (built once per
+// ``(hard_r, band)``), so the early exit survives with exact nearest-in-band
+// semantics.  No binding-surface change, but the ROUTE OUTPUT on HV boards
+// changes and the Python mirror (``Router._pairwise_avoidance_cost``) was
+// updated in lockstep: a stale .so would price a different gradient than the
+// fallback, so the version bump forces a rebuild via ``kct build-native``.
+//
+// Version 21 (Issue #4507): cross-domain (HV) rip-up diagnostics.  The
+// search-time pairwise kernels (``cross_domain_trace_blocked`` /
+// ``cross_domain_via_blocked``) now record the foreign net whose copper
+// refused the candidate, and a drained-open-set failure with such an
+// observation is reported as the new ``FAILURE_PAIRWISE_BLOCKED`` with the
+// blocker in ``RouteResult::blocking_via_net``.  Before this the HV widening
+// was the one refusal path that produced NO diagnostic at all, so the
+// negotiated strategy fell through to blanket retry (the thrash Phase 2
+// exists to end).  New module constant + four ``Pathfinder`` accessors =
+// binding-surface change; route output is unchanged (diagnostics only).
+// v22: residual pad rotation and candidate via-pad acceptance/policy refresh.
+// v23: explicit pad shape for segment/via clearance (Issue #5229).
+// v24: combined pad-shape and allow_smd_vias process-policy bindings (#5216).
+// v25: ``validate_route`` gains a second, CLAMPING same-component exclusion
+// set (``clamp_ref_hashes``, Issue #5166).  Refs in the original
+// ``exclude_ref_hashes`` keep the full-skip carve-out (the #2452 corridor
+// relief, whose floor is the search's own ``trace_width / 2`` blocked-cell
+// construction); refs in the new set reach the carve-out only because a
+// CONFIGURED override resolved smaller than the default clearance, and
+// enforce that resolved value as a hard floor instead of skipping.
+// v26: reject foreign physical copper when seeding source-pad cells in
+// both one-shot and resumable A*. Clearance halos remain valid exits.
+// v27 (Issue #5410): dynamic-route geometry coverage/refinement, the
+// cross-net drill floor, and exact mark-coordinate preservation across the
+// native geometry sync.  This work was developed in parallel with v26 and
+// originally carried its own "v26" bump on the branch; both are real,
+// DISTINCT binding-surface changes, so the rebase resolves to a single v27
+// that is the first build carrying BOTH.  The bump is what forces
+// ``kct build-native`` to discard a stale ``.so`` compiled from either prior
+// v26 state (main's source-pad seeding build, or the branch's own).
+// v28: trace-halo refinement preserves the separate via clearance floor.
+// v29: indexed physical component-hole clearance during via search.
+// v30: final route validation accepts the separate physical component-hole floor.
+// v32: combine physical halo/component-hole refinement with the static
+// differential partner-pad guard (#5482). Version 31 is already used by
+// separate held stored-via/coupled-routing builds; do not accept their binaries.
+// v33: add swept-edge rejection of foreign stored-via copper, retaining
+// the v32 partner-pad and physical halo/component-hole safeguards.
+// v35: combine v33 with the v34 known-geometry via veto for partial coverage.
+// v36: track current counted route occupancy through rip-up.
+// v37: coalesce obsolete XYZ frontier entries without changing useful ordering.
+// v38: integrate the stored-via guard with current occupancy and indexed frontier.
+// v40: add the Epic #5509 Phase 1b clearance-kernel bindings (KSegment/KVia/
+// KEdge, copper_gap, hole_gap, clear) -- a new bindings.cpp symbol surface, so
+// a v39 .so must be rejected rather than AttributeError inside the parity test.
+// v41: complete the clearance kernel with KPad / KZonePoly, make_pad and
+// pad_outline -- again new bindings.cpp symbols, so a v40 .so must be rejected.
+// v42: RouteResult gains goal_gx / goal_gy / goal_layer (Issue #5599 -- the
+// accepted goal node, so the Python resume loop rejects the right cell).  New
+// struct fields, so a v41 .so must be rejected rather than AttributeError deep
+// in the resume loop.
+// v45 (Issue #5711, part of #5410): ``CoupledPathfinder::HaloNetDims`` gained
+// ``partner_net`` / ``partner_clearance`` and
+// ``set_halo_net_dimensions`` gained the two matching trailing arguments, so
+// the coupled halo refinement applies the same diff-pair intra-pair waiver
+// ``RouteHaloRefiner.trace_clear`` applies.  A v44 .so silently drops the
+// waiver (over-blocking), so it must be rejected rather than used.
+// v46 (Issue #5786, Epic #5784 Phase 2): ``CoupledPathfinder::route_centerline``
+// / ``rail_segment_clear`` / ``centerline_step_clear``, the ``CenterlinePose``
+// / ``CenterlineEndpoint`` / ``CenterlineRouteResult`` types and the
+// ``dubins_path_length`` functions.  A v45 .so lacks them and the pose rescue
+// would raise ``AttributeError``, so it must be rejected.
+// v47 (Issue #6008): ``Grid3D.add_rule_area_keepout`` /
+// ``clear_rule_area_keepouts`` / ``rule_area_*_blocked`` -- keepout rule areas
+// the grid engine now enforces.  A v46 .so would route straight through
+// via-blocking and net-filtered areas, so it must be rejected.
+// v48 (Issue #6243): authored per-net clearance minima -- project netclasses
+// stricter than ``Default`` -- enforced through the shared clearance kernel:
+// ``Grid3D.set_net_clearance_floors`` / ``set_pad_authored`` /
+// ``rebuild_authored_index`` / ``authored_segment_clear`` /
+// ``authored_via_clear``, the ``authored_floor`` argument of
+// ``add_stored_segment`` / ``add_stored_via``, the A* step / via gates in
+// ``Pathfinder`` and ``CoupledPathfinder::rail_clear``, and
+// ``validate_route``'s violation type 9.  A v47 .so would search straight
+// through a stricter netclass's clearance, so it must be rejected.
+// v49 (Issue #6272): every trace-vs-via gate -- ``validate_route`` in both
+// insertion orders, ``trace_stored_vias_clear``, the via branches of
+// ``route_trace_geometry_clear`` / ``route_via_geometry_clear`` and the A*
+// swept-edge guard -- resolves ``trace_via_clearance(trace, via)``, and a
+// diff-pair partner no longer relaxes a barrel's floor.
+// ``route_via_geometry_clear`` gained a trailing ``trace_clearance`` argument.
+// A v48 .so would let a trace land inside the via floor of an earlier via,
+// so it must be rejected.
+// v50 (Issue #6315): ``GridCell`` gained ``pad_cell`` / ``shared_pad_halo``,
+// ``Grid3D::mark_blocked`` gained the matching trailing ``pad_source`` /
+// ``shared_pad_halo`` arguments, and ``Grid3D::pad_geometry_clear`` resolves
+// pad-derived cells with the exact segment-vs-pad test.  A v49 .so would
+// reject the new ``mark_blocked`` arguments, so it must be rejected.
+// v51 (Issue #6375): ``Pathfinder::set_search_own_pad_gate`` /
+// ``own_pad_step_clear`` and ``Grid3D::segment_pads_clear`` are bound, and
+// the A* holds steps on the routing net's own pad cells to the validator's
+// seg-vs-pad verdict.  The Python side calls the new setter on every search,
+// so a v50 .so must be rejected.
+// v52 (Issue #6368): ``PadBounds`` gained ``centre_gx`` / ``centre_gy`` /
+// ``long_axis`` / ``lane_half_cells`` / ``tip_lo`` / ``tip_hi`` and both A*
+// loops charge an off-centreline pad landing.  The Python side sets the new fields on every
+// pad bound, so a v51 .so (which lacks them) must be rejected.
+// v53 (Issue #6464): ``AStarNode`` gained ``via_anc``; both A* loops hold a
+// via to the fab hole-to-hole floor against the route's OWN earlier vias, and
+// ``Grid3D::validate_route`` checks the route's vias pairwise and holds the
+// same-net stored-via drill check to ``min_hole_clearance``.  A v52 .so would
+// commit two same-route vias below the fab floor, so it must be rejected.
+// v54 (Issue #6473): ``CoupledPathfinder::route`` holds a layer change to the
+// fab hole-to-hole floor against the pair's OWN earlier vias (both rails) and
+// between the P and N via of the move itself.  A v53 .so returns coupled
+// routes with via pairs below the floor, and diverges from the Python coupled
+// loop, which applies the same check.
+// v56 (Issue #6718): ``Grid3D::set_pad_authored`` gained a trailing ``rratio``
+// so the authored gate measures a roundrect with the file's corner ratio (or
+// as a rect when unknown) instead of a hardcoded 0.25.  The Python side passes
+// it on every pad, so a v55 .so must be rejected.
+// v58 (Issue #6826): ``CoupledPathfinder::route`` bounds the relaxed endpoint
+// zones' spacing tolerance by each end's own pad-pitch delta + 1 instead of the
+// zone radius.  A v57 .so searches a much larger joint state space than the
+// Python mirror, so coupled parity (and the Board07 replay) diverge.
+// v59 (Issue #6840): ``CoupledPathfinder::set_partner_via_clearance`` -- the
+// joint search keeps each rail via-clearance from the partner's vias on every
+// layer, and a layer change keeps both new barrels clear of the partner's
+// trail and vias.  The Python side calls the new setter, so a v58 .so must be
+// rejected.
+// v60 (Issue #6994): every native A* search radius (constructor trace / via
+// radii, pairwise widening, coupled rule-area via radius) goes through
+// ``search_radius_cells`` -- the guarded exact ceiling shared with Python --
+// instead of a bare float32 ``ceil`` that added a phantom cell on float-noise
+// inputs.  Routing output changes, and the Python parity test calls the new
+// ``router_cpp.search_radius_cells`` binding, so a v59 .so must be rejected.
+// v61: ``DesignRules::min_via_pad_edge_gap`` + coupled pad-edge refusal (#7296).
+// v62: the same floor in the single-ended A*'s via check (#7296).
+// v63 (Issue #7491): the coupled pose search's rail gate
+// (``CoupledPathfinder::rail_segment_clear``) measures the partner net's pads
+// exactly (``Grid3D::pad_geometry_clear``'s new ``only_net``).  Coupled
+// routing output changes, so a v62 .so must be rejected.
+// v64 (Issue #7569): Grid3D.set_pad_class_clearances + PadInfo::class_clearance
+// -- the exact pad test holds each pad to its own net-class clearance.  A v63
+// .so keeps the board-wide largest-class floor, so it must be rejected.
+// v65 (Issue #7887): the own-pad step gate names the foreign-domain pad when
+// the pairwise (HV) floor alone refuses a step, so an HV pad walled in by LV
+// pads drains as FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH
+// (``Grid3D::segment_pads_pairwise_blocker`` is new).  A v64 .so cannot emit
+// that attribution, so it must be rejected.
+// v66 (Issue #8994): ``DesignRules::same_net_pad_gap_band_edge_mm`` + the
+// same-net pad slit-band refusal in both A* via checks.  A v65 .so seats
+// via annuli in the (0, edge) slit band beside their own SMD pads.
+// v67 (Issue #8999): ``GridCell::airwire_cost`` + ``Grid3D::clear_airwire_costs``
+// / ``set_airwire_cells`` -- the prospective airwire-separation term summed
+// inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated cells
+// without the term (and lacks the two verbs), so Python/C++ cost parity
+// breaks silently; it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 67;
+
+
+// Issue #4071: fixed-capacity owner-set size for per-cell corridor
+// reservations.  Observed owner sets in practice are tiny: 1 for the
+// single-net #2983 inner-corner / #4053 bundle-river corridors, 2 for a
+// diff-pair continuation corridor (#2677).  K=4 comfortably covers every
+// current caller (and the Epic #2661 Phase 2 group-of-pairs path up to a
+// quad).  A dense-grid GridCell array (cols*rows*layers cells) cannot
+// afford a ``std::set``/``std::vector`` per cell, so the owner set is a
+// flat fixed array + count -- absent-cell fast path is ``reserved_count
+// == 0`` (byte-identical to the pre-#4071 behaviour on boards with no
+// active reservations).  Owner sets larger than K are truncated to the
+// first K nets (documented ceiling; no current caller exceeds 2).
+constexpr int RESERVED_NETS_CAP = 4;
+
+// Grid cell state
+struct GridCell {
+    bool blocked = false;
+    int32_t net = 0;
+    int16_t usage_count = 0;
+    float history_cost = 0.0f;
+    float avoidance_cost = 0.0f;
+    // Issue #8999: prospective airwire-separation cost (already weighted by
+    // the flag-supplied scalar on the Python side; 0.0 when the flag is
+    // off, so the negotiated cost is unchanged).  Mirrors the Python
+    // ``RoutingGrid._airwire_cost`` crossing-count plane.
+    float airwire_cost = 0.0f;
+    bool is_obstacle = false;
+    bool is_zone = false;
+    bool pad_blocked = false;
+    int32_t original_net = 0;
+    // Issue #3545: true for cells blocked by STATIC board geometry
+    // (pad metal, pad clearance halos, keepouts) registered via
+    // ``mark_blocked``.  Route marking never sets this; rip-up uses it
+    // to restore static blockage instead of freeing the cell.
+    bool static_blocked = false;
+    // True only when this route cell contributes to coarse congestion.
+    // Imported/static cells were never counted and must not decrement it.
+    bool congestion_counted = false;
+    // Issue #4071: corridor-reservation owner set (mirrors the Python
+    // ``RoutingGrid._reserved_for_nets`` per-cell ``frozenset[int]``).
+    // ``reserved_count == 0`` means "not reserved" (fast path).  A
+    // non-empty set makes this cell a keep-out for foreign-net vias in
+    // ``mark_via`` and a soft attractor (cost discount) for the owning
+    // net(s) in the A* cost loop.  Overlapping reservations REPLACE
+    // (last-writer-wins), matching Python ``reserve_corridor_cells``.
+    int8_t reserved_count = 0;
+    int32_t reserved_nets[RESERVED_NETS_CAP] = {0, 0, 0, 0};
+    // Issue #4079: HARD (false, default) vs SOFT (true) reservation.  A
+    // HARD reservation fences foreign vias AND lateral traces out of the
+    // cell (``is_reserved_excluding`` returns true for a foreign net).  A
+    // SOFT reservation keeps ONLY the A* attractor bonus (``is_reserved_for``
+    // for the owning net) -- ``is_reserved_excluding`` returns false, so
+    // foreign traces may still cross.  Meaningful only when
+    // ``reserved_count > 0``.  See ``ROUTER_CPP_BUILD_VERSION`` note.
+    bool reserved_soft = false;
+    // Issue #6315: true while this cell's static blockage comes ONLY from
+    // pad copper plus pad clearance (metal, #3233 band, clearance halo),
+    // as pushed by the Python pad sync (``mark_blocked(..., pad_source)``).
+    // Any other static marking of the cell clears it for good.  The A*
+    // resolves such cells with the exact segment-vs-pad test
+    // (``Grid3D::pad_geometry_clear``) instead of treating a foreign-owned
+    // clearance cell as copper.
+    bool pad_cell = false;
+    // Issue #6315: a ``pad_cell`` in the clearance halo of pads on two
+    // different signal nets.  It belongs to neither net alone, so even its
+    // recorded owner must pass the clearance check to step on it.
+    bool shared_pad_halo = false;
+};
+
+// A* node for priority queue
+struct AStarNode {
+    float f_score;
+    float g_score;
+    int x;
+    int y;
+    int layer;
+    int parent_idx;  // Index in closed set, -1 if no parent
+    bool via_from_parent;
+    int dx;  // Direction from parent
+    int dy;
+    // Issue #3144: monotonic insertion counter for deterministic
+    // tie-breaking when ``f_score`` is equal between nodes.  Without
+    // this secondary key, ``std::priority_queue`` falls through to
+    // implementation-defined pop order for f_score-equal nodes; on a
+    // CI runner under load this manifests as run-to-run drift in the
+    // explored A* path, which propagates downstream into different
+    // diff-pair budget-classification outcomes and ultimately
+    // different DRC error counts.  ``seq`` is assigned at push-time
+    // from a search-local counter so older-pushed nodes (lower seq)
+    // pop first on f_score ties.  Comparison cost is one extra
+    // ``int`` compare per heap operation; negligible vs the
+    // surrounding heap reshuffle.
+    uint64_t seq = 0;
+
+    // Issue #6464: closed-list index of the nearest ancestor-or-self node
+    // reached by a layer change (i.e. the most recent via on this node's
+    // path), or -1 when the path holds no via yet.  Assigned when the node
+    // is moved to the closed list, so walking ``via_anc`` ->
+    // ``closed[closed[via_anc].parent_idx].via_anc`` visits exactly the
+    // path's earlier vias (a handful) instead of every path node.  Lets the
+    // via expansion hold a new via to the fab hole-to-hole floor against
+    // the vias the SAME route already placed -- those are not stored copper
+    // yet, so ``Grid3D::route_via_geometry_clear`` never sees them.
+    int via_anc = -1;
+
+    // Comparison for min-heap.  Issue #3144 / #3199:
+    //   Primary:   lower f_score first.
+    //   Secondary: HIGHER g_score first on f_score ties.  This is the
+    //              standard "greedy on ties" A* tie-break -- when two
+    //              nodes have the same projected total cost, prefer the
+    //              one with more g (= lower h = closer to the goal).
+    //              This pushes the search toward the goal frontier faster
+    //              and avoids exploring symmetric equal-cost detours.
+    //              Empirically (issue #3199) the post-#3144 FIFO-on-seq
+    //              tie-break (without the g_score key) regressed softstart
+    //              unaided routing reach from 6/10 -> 5/10 on dense
+    //              packages; adding the g_score tertiary key restores
+    //              the 6/10 baseline while keeping the run-to-run
+    //              determinism property #3144 required (board 06 / #3144
+    //              + board 07 / #3146 determinism tests still pass).
+    //   Tertiary:  lower seq (FIFO insertion) so pop order is
+    //              deterministic even when both f_score and g_score are
+    //              equal.  Determinism is the binding invariant for the
+    //              board 06 / board 07 byte-identical-route tests.
+    bool operator>(const AStarNode& other) const {
+        if (f_score != other.f_score) {
+            return f_score > other.f_score;
+        }
+        if (g_score != other.g_score) {
+            // HIGHER g_score wins (= pops first), so this node pops
+            // later iff its g_score is LOWER.
+            return g_score < other.g_score;
+        }
+        return seq > other.seq;
+    }
+};
+
+// Route segment
+struct Segment {
+    float x1, y1, x2, y2;
+    float width;
+    int layer;
+    int net;
+};
+
+// Via
+struct Via {
+    float x, y;
+    float drill;
+    float diameter;
+    int layer_from;
+    int layer_to;
+    int net;
+};
+
+// Failure reason codes for RouteResult (Issue #2476).
+//
+// When ``success == false`` the search was unable to produce a route.  The
+// numbering mirrors ``ValidationResult::violation_type`` so Python callers
+// can dispatch on the same vocabulary across both search-time failures and
+// post-route validator violations. Validation-only code 8 is via-pad;
+// code 7 remains reserved for the search PAIRWISE_BLOCKED reason.
+//
+// FAILURE_VIA_VIA_BLOCKED is set when every via candidate considered during
+// the A* expansion was refused by the geometric via-vs-via clearance check
+// in ``Pathfinder::is_via_blocked`` (the path-side mirror of the validator's
+// type-5 violation).  When set, ``RouteResult::blocking_via_net`` carries
+// the net id of the most recently observed offending stored via, and
+// ``RouteResult::failure_x``/``failure_y`` carry the world-coordinate
+// location of the candidate via that was rejected.  The negotiated strategy
+// uses these fields to target rip-up at the specific net whose stored via
+// blocked progress, rather than blanket retry.
+//
+// FAILURE_PAIRWISE_BLOCKED (Issue #4507, epic #4431 Phase 2) is the
+// cross-domain sibling: the A* open set drained while at least one expansion
+// was refused by the search-time pairwise (HV-isolation) widening
+// (``Pathfinder::cross_domain_trace_blocked`` / ``cross_domain_via_blocked``).
+// ``RouteResult::blocking_via_net`` then carries the net id of the most
+// recently observed foreign-domain copper and ``failure_x``/``failure_y`` the
+// world location of the refused candidate, so the negotiated strategy can rip
+// up THAT net rather than blanket retry.  It is strictly weaker than
+// FAILURE_VIA_VIA_BLOCKED (which wins when both were observed) and, unlike it,
+// never overrides TIMEOUT / ITERATION_LIMIT: those are budget artifacts, and a
+// widened HV keepout is only the actionable explanation when the search truly
+// ran out of candidates.  Value 7 skips 6, which the mirrored
+// ``violation_type`` vocabulary uses for drill spacing.
+enum FailureReason : int {
+    FAILURE_NONE = 0,
+    FAILURE_NO_PATH = 1,            // Open set exhausted, no candidates remained.
+    FAILURE_ITERATION_LIMIT = 2,    // Reached max_iterations cap (memory backstop).
+    FAILURE_TIMEOUT = 3,            // Per-net wall-clock deadline exceeded (Issue #2610).
+    FAILURE_VIA_VIA_BLOCKED = 5,    // All via candidates refused by stored-via geometry.
+    FAILURE_PAIRWISE_BLOCKED = 7,   // Expansions refused by cross-domain (HV) widening.
+};
+
+// Complete route result
+struct RouteResult {
+    std::vector<Segment> segments;
+    std::vector<Via> vias;
+    int net = 0;
+    bool success = false;
+
+    // Issue #2476: Structured failure diagnostics.
+    //
+    // Populated when ``success == false`` so the negotiated strategy can
+    // dispatch retry/rip-up intelligently (e.g. rip up the specific net
+    // whose stored via blocked our path, rather than a blanket retry).
+    int failure_reason = FAILURE_NONE;
+    int blocking_via_net = 0;       // Net of the offending stored via (if any).
+    float failure_x = 0.0f;         // World-coord of last rejected candidate.
+    float failure_y = 0.0f;
+
+    // Issue #5599: the goal node the A* actually ACCEPTED (grid coords +
+    // layer).  ``reconstruct_path`` always appends a final segment from the
+    // last path node to the END PAD CENTER (``search_end_x_/y_``), so a
+    // Python consumer cannot derive the accepted goal cell from the last
+    // segment's endpoint -- it would compute the pad-center cell for EVERY
+    // candidate, which made the reject-goal-cell resume mechanism (#2447) a
+    // no-op after its first rejection (every subsequent resume re-rejected
+    // the same center cell while the search kept accepting neighboring goal
+    // nodes whose forced center-bound final segment violated the same
+    // neighbor-pad clearance).  Populated on success; (-1, -1, -1)
+    // otherwise.
+    int goal_gx = -1;
+    int goal_gy = -1;
+    int goal_layer = -1;
+};
+
+// One joint-state node on the reconstructed coupled path (Issue #4065).
+//
+// The coupled A* returns its winning path as a flat vector of these, in
+// ROOT->GOAL order.  The Python wrapper unpacks them into the exact same
+// ``p_path`` / ``n_path`` ``(world_x, world_y, layer, via_from_parent)``
+// lists that ``CoupledPathfinder._reconstruct_coupled_routes`` builds from
+// the parent chain, then feeds them to the UNCHANGED Python
+// ``_build_route_from_path`` -- so C++ and Python produce byte-identical
+// :class:`Route` objects for the same joint path, and the curator's
+// "do NOT port _reconstruct_coupled_routes" guidance is honored.
+struct CoupledPathNode {
+    int p_x, p_y, p_layer;
+    int n_x, n_y, n_layer;
+    bool via_from_parent;
+};
+
+// Coupled diff-pair A* result (Issue #4065).
+//
+// Mirrors the pure-Python ``CoupledPathfinder.route_coupled`` return value
+// PLUS the #3089/#3473/#3508/#3921 diagnostic attributes the Python caller
+// reads off the pathfinder instance after each call.
+//
+// The diagnostic fields are load-bearing: the epic acceptance criteria and
+// the whole #4052 budget-exit vocabulary depend on them surviving the port.
+//   iterations           -- A* iterations consumed (``last_iterations``).
+//   best_progress        -- smallest joint remaining Manhattan distance any
+//                           popped state achieved, max over the two heads
+//                           (``last_best_progress``; -1 means "never popped").
+//   timeout_exceeded     -- iteration OR wall-clock budget fired
+//                           (``last_timeout_exceeded``).
+//   iteration_limited    -- when ``timeout_exceeded``, TRUE iff the ITERATION
+//                           budget was the binding constraint (else the
+//                           wall-clock budget); mirrors ``last_iteration_limited``.
+//   rejections           -- Issue #4459: per-reason move-rejection histogram
+//                           (which guard pruned the frontier), keyed by the
+//                           SAME reason vocabulary the pure-Python coupled
+//                           loop uses (``last_rejections``): sym/asym x
+//                           blocked/spacing/floor/trail, the via guards, and
+//                           corridor pruning.  Lets a 0/9 budget-exit be
+//                           triaged (plateau vs no-progress vs off-angle vs
+//                           infeasible-gap) instead of reading the old
+//                           categorically-empty dict on the C++ path.
+struct CoupledRouteResult {
+    std::vector<CoupledPathNode> path;  // root->goal; empty when !success.
+    bool success = false;
+    // Diagnostics (always populated, success or not).
+    int iterations = 0;
+    double best_progress = -1.0;
+    bool timeout_exceeded = false;
+    bool iteration_limited = false;
+    // Issue #4459: rejection histogram (reason -> count).  Empty only when the
+    // search popped no neighbours at all (e.g. the start state is the goal).
+    std::unordered_map<std::string, int64_t> rejections;
+};
+
+// Neighbor direction: dx, dy, dlayer, cost_multiplier
+struct Neighbor {
+    int dx;
+    int dy;
+    int dlayer;
+    float cost_mult;
+};
+
+// Pad bounds in grid coordinates for metal area and approach zone
+struct PadBounds {
+    int metal_gx1 = 0;
+    int metal_gy1 = 0;
+    int metal_gx2 = 0;
+    int metal_gy2 = 0;
+    int approach_gx1 = 0;
+    int approach_gy1 = 0;
+    int approach_gx2 = 0;
+    int approach_gy2 = 0;
+    // Issue #6368: pad centre in fractional grid units, the board axis the
+    // pad is long along (0 = x, 1 = y, -1 = none: square, rotated off a
+    // cardinal angle, virtual, or not in a fine-pitch row -- the scope is
+    // decided by ``pad_landing.pad_landing_geometry``), the half-width in cells of the lane a run
+    // off the pad tip occupies (one pad short side) and the cell range along
+    // the long axis whose centres lie on the pad copper (its tip lines are
+    // the range ends).  ``long_axis = -1`` (the default) disables the centreline
+    // landing cost, so callers that never set the fields are unchanged.
+    float centre_gx = 0.0f;
+    float centre_gy = 0.0f;
+    int long_axis = -1;
+    float lane_half_cells = 0.0f;
+    int tip_lo = 0;
+    int tip_hi = 0;
+};
+
+// Per-pad lateral-channel budget (Issue #3143).
+//
+// Tags a rectangular "lateral channel" region adjacent to a dense-package
+// pad with a soft per-cell penalty proportional to how many distinct nets
+// are already routing through it.  The penalty is consulted on every A*
+// neighbor-expansion inside the cell box; nets that share the channel with
+// fewer prior occupants see a smaller cost, while nets that would push the
+// channel past ``capacity`` see ``overflow_penalty`` accumulated on each
+// cell.  This nudges the A* search toward a less-contested escape path,
+// without hard-blocking any route -- the budget is a *cost shaping* term,
+// not a barrier.
+//
+// Why this is needed:
+//   Dense packages like softstart's U1 (TSSOP-20, 0.65mm pitch) generate
+//   escape stubs that all terminate in the same narrow lateral channel
+//   adjacent to the package edge.  The standard A* cost function treats
+//   every cell equally, so the first net to enter the channel "wins" it
+//   for free; subsequent nets that COULD reach the goal via a slightly
+//   longer detour instead pile onto the same channel until the negotiated
+//   rip-up loop runs out of options.  The per-pad channel budget makes
+//   the contested channel proportionally more expensive as more nets
+//   claim it, so the search naturally redistributes onto adjacent
+//   channels.
+//
+// Fields:
+//   gx1/gy1/gx2/gy2 -- inclusive grid-coordinate bounding box of the
+//     channel cells (only cells inside this rect are penalised).
+//   layer -- routing layer this channel applies to.  -1 means "any layer".
+//   capacity -- soft capacity (number of distinct nets allowed to share
+//     this channel before overflow_penalty fires).  0 means the channel
+//     is unmetered; the budget is inert.
+//   overflow_penalty -- per-cell cost added to each cell expansion for
+//     nets that would push the channel beyond ``capacity``.  Tuned to
+//     be roughly equivalent to a few extra cells of detour -- large
+//     enough to redirect when a near-by alternative exists, small enough
+//     that no alternative path is preferred over a 2x-longer detour.
+//   origin_pad_ref_hash -- FNV-1a hash of the originating component's
+//     refdes (e.g. "U1").  Reserved for future per-package-aware budgets;
+//     not consumed by the current cost calculation.
+//
+// Used by:
+//   Pathfinder::run_astar_loop / Pathfinder::route (the per-cell cost
+//   helper ``get_pad_channel_cost`` consults a pre-built lookup table).
+// Issue #6761: ``PadChannelBudget.layer`` value marking a hard *via* fence.
+// A via fence never prices a trace step; the via-expansion branches refuse a
+// layer change at any of its cells.  A budget with an infinite
+// ``overflow_penalty`` on a real layer (>= 0) is a hard *trace* fence: the
+// search never steps onto (or drops a via onto) its cells.
+constexpr int PAD_VIA_FENCE_LAYER = -2;
+
+struct PadChannelBudget {
+    int gx1 = 0;
+    int gy1 = 0;
+    int gx2 = 0;
+    int gy2 = 0;
+    int layer = -1;        // -1 = applies to all routing layers; -2 = via fence (#6761)
+    int capacity = 0;      // 0 = inert (no penalty enforced)
+    float overflow_penalty = 0.0f;
+    uint32_t origin_pad_ref_hash = 0;  // Reserved for future per-package use.
+    // Source net of the originating escape pad.  When > 0, the cost
+    // shaping is "soft against this net" -- i.e. the penalty fires only
+    // on nets DIFFERENT from ``source_net``.  This is the per-pad-aware
+    // semantics that lets the budget gate cross-net contention without
+    // penalising the originating net's own A* expansion out of its
+    // escape endpoint.  The Python adapter filters by net before the
+    // C++ call (see ``cpp_backend.py::_route_impl``), so the C++ side
+    // does not need to inspect ``source_net`` directly -- it stays in
+    // the struct for diagnostics and so the Python side can round-trip
+    // the field without losing it.
+    int source_net = 0;
+};
+
+// Design rules (simplified for C++ core)
+struct DesignRules {
+    float trace_width = 0.127f;
+    float trace_clearance = 0.127f;
+    bool allow_smd_vias = true;
+    float via_drill = 0.3f;
+    float via_diameter = 0.6f;
+    float via_clearance = 0.127f;
+    float grid_resolution = 0.127f;
+    float cost_straight = 1.0f;
+    float cost_turn = 1.5f;
+    float cost_via = 10.0f;
+    float cost_congestion = 5.0f;
+    float congestion_threshold = 0.5f;
+    float min_drill_clearance = 0.102f;
+    float min_hole_to_hole = 0.5f;
+    // Issue #7296: mask-dam floor, drill edge to SMD pad copper edge, for a
+    // via that does not overlap the pad (Python
+    // ``DesignRules.min_via_pad_edge_gap``).  0 disables.
+    float min_via_pad_edge_gap = 0.0f;
+    // Issue #8994: the fab-view same-net pad slit band's detection edge in
+    // mm (Python ``DesignRules.same_net_pad_gap_band_edge_mm``, the
+    // caller-resolved ``pad_spacing`` dfm entry's
+    // ``GapBand.detection_edge_mm``).  A via ANNULUS whose copper gap to a
+    // same-net SMD pad lands strictly inside ``(0, edge)`` is refused --
+    // the two acceptable regions (unioned copper at ``gap <= 0``, or clear
+    // at ``gap >= edge``) mirror Python
+    // ``via_clearance.same_net_pad_gap_acceptable``.  0 (Python ``None``)
+    // disables: never guess a literal edge (#8974 AC-3).
+    float same_net_pad_gap_band_edge_mm = 0.0f;
+    // Issue #4071: soft corridor-attractor bonus (mirrors Python
+    // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
+    // from a cell's positive step cost when the cell is reserved for the
+    // querying net, clamped at 0 so g_scores stay non-negative (A*
+    // admissibility preserved).  ``0.0`` disables the attractor.
+    float cost_corridor_attractor = 3.0f;
+};
+
+// Issue #6272: the trace-vs-via copper floor, ``max(trace, via)``.  Native
+// mirror of ``clearance_resolver.trace_via_clearance_mm`` (the resolver's
+// trace/via symmetry term in scalar form): a trace and a foreign via are one
+// unordered pair, so neither insertion order nor a diff-pair partner's
+// intra-pair gap may change the floor between them.  Every native trace/via
+// gate calls this instead of picking ``trace_clearance`` or ``via_clearance``
+// by which object it happens to be validating.
+inline float trace_via_clearance(float trace_clearance, float via_clearance) {
+    return std::max(trace_clearance, via_clearance);
+}
+
+// Epic #5509 / Issue #6994: A* search radius in cells -- the native mirror of
+// Python ``search_radius.search_radius_cells`` (the Issue #864 guarded rule):
+// the exact ceiling of ``x = (half_mm + clearance_mm) / resolution``, at
+// least 1.  Computes in double; snaps ``x`` to the nearest integer when within
+// 1e-4 cells, because float32 rule/resolution inputs carry ~1e-7 relative
+// noise that Python's ``round(x, 6)`` is too tight to absorb (e.g. trace
+// 0.8/0.3 @ 0.025 mm: x32 = 28.0000x, and via 0.6/0.2 @ 0.1 mm:
+// x32 = 5.0000000745).  With rule values quantized to 0.001 mm on the
+// supported grids a non-integer ``x`` is never closer than ~1/127 to an
+// integer, so the snap never swallows a real fractional cell
+// (``tests/router/test_search_radius_cells.py`` pins Python/C++ parity).
+inline int search_radius_cells(double half_mm, double clearance_mm, double resolution) {
+    const double x = (half_mm + clearance_mm) / resolution;
+    const double nearest = std::round(x);
+    const double cells = (std::abs(x - nearest) <= 1e-4) ? nearest : std::ceil(x);
+    return std::max(1, static_cast<int>(cells));
+}
+
+// Pad info for geometric validation (Issue #2439)
+// Stores pad geometry needed for clearance checking without Python callbacks.
+struct PadInfo {
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+    int net = 0;
+    int layer_idx = -1;         // -1 means through-hole (all layers)
+    uint32_t ref_hash = 0;      // FNV-1a hash of component reference
+    float clearance_override = 0.0f;  // Pre-computed clearance for this pad's component
+    // Issue #2908: True when the pad's net carries plane (power/ground)
+    // topology, regardless of whether the net id is 0 (skipped-pour
+    // convention) or a real net number (e.g. board 04 routes ``+3.3V``
+    // and ``GND`` as real nets so the GND zone can stitch up after
+    // routing).  Set from ``cpp_backend.py::CppGrid.from_routing_grid``
+    // by classifying ``pad.net_name`` (the C++ side has no string
+    // table, so the boolean is computed in Python and passed in).
+    bool is_plane_net = false;
+    float rotation = 0.0f;  // Residual KiCad board-space degrees (#5182)
+    float via_clearance_override = 0.0f; // Component trace floor (Python backstop)
+    bool via_carveout_eligible = false;
+    bool is_circular = false;  // Explicit circle shape; other pads use rectangles (#5229)
+    // Issue #7569: the pad's own net-class clearance (0 = no class; the board
+    // clearance governs).  The pair rule is max(own class, pad's class), so
+    // the exact pad test (``pad_geometry_clear``) holds a step to this value
+    // instead of the board-wide largest class.
+    float class_clearance = 0.0f;
+};
+
+// Issue #8994: half extents of the AABB the Python pad model gives a pad --
+// ``cli.stitch_cmd.find_all_pad_bboxes`` / ``_rotated_rect_half_extents``:
+// cardinal rotations swap or keep the dimensions exactly, any other angle
+// takes the conservative AABB of the rotated rect, and a ``circle`` pad uses
+// its exact bounding square (rotation-invariant, no inflation).  This is the
+// model ``via_clearance.same_net_pad_gap_acceptable`` measures against, NOT
+// the exact rotated rect of the #7296 blocks above -- the exact-rect model is
+// less conservative, so using it here would let the A* accept a seat the
+// fab-view checker rejects on a non-cardinally-rotated pad.
+inline void same_net_pad_aabb_half_extents(const PadInfo& pad, float& half_w,
+                                           float& half_h) {
+    if (pad.is_circular) {
+        const float half = std::max(pad.width, pad.height) / 2.0f;
+        half_w = half;
+        half_h = half;
+        return;
+    }
+    const float rot = std::fmod(std::fabs(pad.rotation), 360.0f);
+    if (std::fabs(rot - 90.0f) < 0.001f || std::fabs(rot - 270.0f) < 0.001f) {
+        half_w = pad.height / 2.0f;
+        half_h = pad.width / 2.0f;
+        return;
+    }
+    if (rot < 0.001f || std::fabs(rot - 180.0f) < 0.001f) {
+        half_w = pad.width / 2.0f;
+        half_h = pad.height / 2.0f;
+        return;
+    }
+    const float rad = pad.rotation * 3.14159265358979323846f / 180.0f;
+    const float abs_cos = std::fabs(std::cos(rad));
+    const float abs_sin = std::fabs(std::sin(rad));
+    half_w = (pad.width * abs_cos + pad.height * abs_sin) / 2.0f;
+    half_h = (pad.width * abs_sin + pad.height * abs_cos) / 2.0f;
+}
+
+// Issue #8994: the same-net pad slit-band verdict, the faithful C++ mirror of
+// Python ``via_clearance.same_net_pad_gap_acceptable`` for a via ANNULUS of
+// radius ``annulus_half_mm`` at world ``(wx, wy)`` against one same-net SMD
+// pad.  Two acceptable regions, not a floor: ``gap <= 0`` (annulus unions
+// with its own pad -- one copper body, no slit) and ``gap >= edge_mm`` are
+// both ACCEPTED; only the open band ``(0, edge_mm)`` in between is rejected.
+// The 1e-9 slack on both band edges mirrors the Python predicate's
+// float-noise tolerance for a gap computed as exactly 0 or exactly the edge.
+// Computed in double: Python measures in float64, and a float32 gap could
+// flip the 1e-9-band-edge verdicts the slack exists to keep stable.
+inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_mm,
+                                     const PadInfo& pad, double edge_mm) {
+    float half_w = 0.0f, half_h = 0.0f;
+    same_net_pad_aabb_half_extents(pad, half_w, half_h);
+    const double dx = std::max(
+        {static_cast<double>(pad.x - half_w) - wx,
+         wx - static_cast<double>(pad.x + half_w), 0.0});
+    const double dy = std::max(
+        {static_cast<double>(pad.y - half_h) - wy,
+         wy - static_cast<double>(pad.y + half_h), 0.0});
+    const double gap = std::hypot(dx, dy) - annulus_half_mm;
+    return 1e-9 < gap && gap < edge_mm - 1e-9;
+}
+
+// Stored segment for validation (Issue #2439)
+// Segments from completed routes, used for clearance checking.
+struct StoredSegment {
+    float x1, y1, x2, y2;
+    float width;
+    int layer_idx;
+    int net;
+    // Issue #6243: the copper's own authored minimum when its net id was
+    // neutralised (0.0 = defer to the grid's per-net floors).
+    float authored_floor = 0.0f;
+};
+
+// Stored via for validation (Issue #2439)
+// Vias from completed routes, used for clearance checking.
+struct StoredVia {
+    float x, y;
+    float drill;
+    float diameter;
+    int net;
+    int layer_from = 0;
+    int layer_to = std::numeric_limits<int>::max();
+    float authored_floor = 0.0f;  // Issue #6243, see StoredSegment
+};
+
+// Rated-footprint attach zone for pairwise clearance (Issue #4510 / #4506).
+//
+// Axis-aligned bounding box plus the set of net ids that terminate on the
+// rated footprint.  Mirrors the frozen ``AttachZone`` dataclass in
+// ``src/kicad_tools/router/pairwise_clearance.py``, except the net *names* of
+// the Python shape are translated to integer net ids by ``cpp_backend.py``
+// before crossing the boundary (``Grid3D`` has no string table).  A zone may
+// legitimately span more than two nets (a 3-pad rated connector), so
+// membership is tested per-candidate-pair: BOTH nets of the pair must be
+// members for the widening to be waived.
+//
+// Issue #4507 (epic #4431 Phase 2): the exemption is also LAYER-SCOPED, in
+// exact mirror of the #4699 Python narrowing.  ``net_layers`` maps a net id to
+// the grid layer indices on which that net has PAD copper on this footprint;
+// a pair is waived on a layer only when BOTH nets reach it.  Two escape
+// hatches preserve the old verdict where it is still correct:
+//
+//   * a net ABSENT from the map is unrestricted -- that is how a through-hole
+//     pad (``*.Cu``) keeps waiving on every layer, as the barrel requires;
+//   * an EMPTY map makes the whole zone layer-agnostic, i.e. byte-identical to
+//     the pre-#4507 (version 18) verdict, which is what hand-built zones and
+//     callers that never supply a layer map produce.
+struct AttachZone {
+    float min_x = 0.0f;
+    float min_y = 0.0f;
+    float max_x = 0.0f;
+    float max_y = 0.0f;
+    std::vector<int> net_ids;
+    std::unordered_map<int, std::vector<int>> net_layers;
+};
+
+// Validation result (Issue #2439)
+// Returned by validate_route() with pass/fail and violation location.
+struct ValidationResult {
+    bool valid = true;
+    float min_clearance = std::numeric_limits<float>::infinity();
+    float violation_x = 0.0f;
+    float violation_y = 0.0f;
+    int violation_type = 0;  // 0=none, 1=seg-pad, 2=seg-seg, 3=seg-via, 4=via-seg, 5=via-via, 6=drill, 7=reserved, 8=via-pad, 9=authored-floor (#6243)
+};
+
+}  // namespace router

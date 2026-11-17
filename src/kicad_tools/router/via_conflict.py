@@ -1,0 +1,1072 @@
+"""Via conflict management for routing.
+
+When routing fails due to existing vias blocking pad access, this module
+provides strategies to resolve the conflicts:
+
+- **Relocate**: Move the blocking via to a nearby position that maintains
+  connectivity but doesn't block the pad.
+- **Rip-reroute**: Remove the blocking via and its route, route the blocked
+  net first, then re-route the affected net with new via positions.
+
+The manager integrates with the existing failure analysis system to detect
+via-related blocking and applies resolution strategies before retrying.
+
+Example::
+
+    from kicad_tools.router.via_conflict import (
+        ViaConflictManager,
+        ViaConflictStrategy,
+    )
+
+    manager = ViaConflictManager(grid, rules)
+    conflicts = manager.find_blocking_vias(pad, net_id)
+
+    for conflict in conflicts:
+        resolved = manager.resolve(conflict, strategy=ViaConflictStrategy.RELOCATE)
+        if resolved:
+            print(f"Relocated via from {conflict.via_position} to {resolved.new_position}")
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .grid import RoutingGrid
+    from .rules import DesignRules
+
+from .primitives import Pad, Route, Segment, Via
+
+
+def _trace_rip_reroute_enabled_default() -> bool:
+    """Return the default enablement for the trace rip-reroute branch.
+
+    Issue #2872 (this PR, round 2): the transactional wrapper around
+    the trace rip-reroute window (``_TraceResolverTransaction`` in
+    ``core.py``) is correct for the snapshot/rollback machinery and
+    the per-route ``validate_segment_clearance`` /
+    ``validate_via_clearance`` primitives -- but those primitives do
+    not catch every regression the trace branch can introduce on real
+    boards.  Specifically (Judge round-2 feedback, PR #2876):
+
+    - **Diff-pair clearance intra-pair** (rule_id
+      ``diffpair_clearance_intra``, Issue #2560): per-route
+      ``validate_segment_clearance`` walks segments individually with
+      ``exclude_net=route.net`` and so cannot see violations that are
+      only meaningful at the *pair* level (the pair members share a
+      diff-pair group but have different net IDs).  Boards 06/07's
+      USB3 / DDR routing produces these violations after a trace rip
+      that the wrapper signs off as clean.
+    - **Match-group length skew** (rule_id
+      ``match_group_length_skew``, Issue #2649): post-route DRC.
+      Committing a single net successfully says nothing about
+      whether the *group's* skew now exceeds tolerance.
+
+    CI evidence (PR #2876 run 25838032565 vs main run 25832879571):
+
+    | Board | Main (flag off) | PR (flag on) | Delta |
+    |-------|----------------|--------------|-------|
+    | 06    | 31 errors PASS | 37 errors FAIL | +6   |
+    | 07    | 70 errors PASS | 79 errors FAIL | +9   |
+
+    The transactional wrapper still ships as foundation work --
+    snapshot/rollback covers all required state per the issue spec
+    -- but the flag stays at ``False`` until the validation step is
+    extended to detect the violation categories the per-route
+    clearance primitives cannot see.  Tracking issue: extend
+    ``_TraceResolverTransaction.validate_committed_geometry`` to
+    cover diff-pair and match-group rules (Phase 1.5 / Phase 2).
+
+    The environment kill switch
+    (``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED``) is preserved as a
+    runtime override -- set it to ``1``/``true``/``yes``/``on`` to
+    force-enable the trace branch (e.g., for A/B comparison or to
+    test the wrapper end-to-end).  Any other value (including
+    unset) preserves the default.
+    """
+    raw = os.environ.get("KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return False
+
+
+# Feature flag (Issue #2872): trace rip-reroute branch DISABLED by
+# default pending validator extension to detect diff-pair and
+# match-group rule violations the per-route clearance primitives
+# cannot see (see PR #2876 Judge round-2 feedback).  The
+# transactional wrapper is foundation work and ships in this PR;
+# enabling the flag is deferred to a follow-up that completes the
+# validation step.  Set ``KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1``
+# to force-enable for testing.
+# See :func:`_trace_rip_reroute_enabled_default`.
+TRACE_RIP_REROUTE_ENABLED: bool = _trace_rip_reroute_enabled_default()
+
+
+class ViaConflictStrategy(Enum):
+    """Strategy for resolving via conflicts."""
+
+    RELOCATE = auto()
+    """Move the blocking via to a nearby non-conflicting position."""
+
+    RIP_REROUTE = auto()
+    """Remove blocking via's route and re-route after the blocked net."""
+
+    NONE = auto()
+    """Do not attempt to resolve via conflicts."""
+
+
+@dataclass
+class ViaConflict:
+    """A detected conflict between a via and a pad.
+
+    Attributes:
+        via: The via that is blocking pad access.
+        via_route: The route that the via belongs to.
+        via_position: World coordinates of the via (x, y).
+        blocked_pad: The pad whose access is blocked.
+        blocked_net: Net ID of the pad that cannot be routed.
+        blocking_net: Net ID of the net the via belongs to.
+        blocking_net_name: Human-readable name of the blocking net.
+        distance: Distance from the via to the blocked pad in mm.
+        clearance_needed: Clearance required to resolve the conflict in mm.
+    """
+
+    via: Via
+    via_route: Route | None
+    via_position: tuple[float, float]
+    blocked_pad: Pad
+    blocked_net: int
+    blocking_net: int
+    blocking_net_name: str
+    distance: float
+    clearance_needed: float
+
+
+@dataclass
+class TraceConflict:
+    """A detected conflict between a trace segment and a pad.
+
+    Issue #2859: ``ViaConflictManager`` originally only handled via-vs-via
+    conflicts.  This dataclass models the trace-vs-pad case: when an
+    existing route's trace segment passes within the pad-access clearance
+    envelope required to drop a via at the failing pad, that segment is a
+    trace blocker.  Mirrors :class:`ViaConflict` so the resolver can hold
+    either type in the same internal pipeline.
+
+    Attributes:
+        segment: The trace segment that is blocking pad access.
+        segment_route: The route that the segment belongs to.
+        segment_position: World coordinates of the closest point on the
+            segment to the blocked pad center (x, y).
+        blocked_pad: The pad whose access is blocked.
+        blocked_net: Net ID of the pad that cannot be routed.
+        blocking_net: Net ID of the net the segment belongs to.
+        blocking_net_name: Human-readable name of the blocking net.
+        distance: Perpendicular distance from the segment to the pad
+            center in mm (clamped to segment endpoints).
+        clearance_needed: Clearance required to resolve the conflict in mm.
+    """
+
+    segment: Segment
+    segment_route: Route | None
+    segment_position: tuple[float, float]
+    blocked_pad: Pad
+    blocked_net: int
+    blocking_net: int
+    blocking_net_name: str
+    distance: float
+    clearance_needed: float
+
+
+@dataclass
+class ViaRelocation:
+    """Result of a via relocation attempt.
+
+    Attributes:
+        original_via: The original via that was relocated.
+        new_position: New world coordinates (x, y) for the via.
+        new_via: The via object at the new position.
+        affected_route: The route that was modified.
+        modified_segments: Segments that were updated to connect to the new via position.
+        success: Whether the relocation was successful.
+    """
+
+    original_via: Via
+    new_position: tuple[float, float]
+    new_via: Via | None = None
+    affected_route: Route | None = None
+    modified_segments: list[Segment] = field(default_factory=list)
+    success: bool = False
+
+
+@dataclass
+class RipRerouteResult:
+    """Result of a rip-up and reroute attempt.
+
+    Attributes:
+        ripped_route: The route that was removed.
+        ripped_net: Net ID of the route that was removed.
+        blocked_net_routed: Whether the blocked net was successfully routed after rip-up.
+        ripped_net_rerouted: Whether the ripped net was successfully re-routed.
+        new_blocked_routes: New routes for the previously blocked net.
+        new_ripped_routes: New routes for the re-routed net.
+        success: Whether the full rip-reroute succeeded.
+    """
+
+    ripped_route: Route | None = None
+    ripped_net: int = 0
+    blocked_net_routed: bool = False
+    ripped_net_rerouted: bool = False
+    new_blocked_routes: list[Route] = field(default_factory=list)
+    new_ripped_routes: list[Route] = field(default_factory=list)
+    success: bool = False
+
+
+@dataclass
+class ViaConflictStats:
+    """Statistics from via conflict resolution.
+
+    Attributes:
+        conflicts_found: Number of via conflicts detected.
+        relocations_attempted: Number of relocation attempts made.
+        relocations_succeeded: Number of successful relocations.
+        rip_reroutes_attempted: Number of rip-reroute attempts made.
+        rip_reroutes_succeeded: Number of successful rip-reroutes.
+        nets_unblocked: Number of nets that were unblocked by conflict resolution.
+        trace_conflicts_found: Number of trace-vs-pad conflicts detected
+            (Issue #2859).  Counts a *trace segment* blocker that lies
+            inside a failing pad's via-clearance envelope -- a separate
+            channel from ``conflicts_found`` which only counts via
+            blockers.
+        trace_rip_reroutes_attempted: Number of trace rip-reroute attempts.
+        trace_rip_reroutes_succeeded: Number of successful trace
+            rip-reroutes.  The canonical Issue #2859 acceptance counter
+            (``>= 1`` on a deterministic synthetic fixture proves the
+            trace branch actually fired).
+    """
+
+    conflicts_found: int = 0
+    relocations_attempted: int = 0
+    relocations_succeeded: int = 0
+    rip_reroutes_attempted: int = 0
+    rip_reroutes_succeeded: int = 0
+    nets_unblocked: int = 0
+    trace_conflicts_found: int = 0
+    trace_rip_reroutes_attempted: int = 0
+    trace_rip_reroutes_succeeded: int = 0
+
+    @property
+    def total_resolved(self) -> int:
+        """Total conflicts successfully resolved (via + trace)."""
+        return (
+            self.relocations_succeeded
+            + self.rip_reroutes_succeeded
+            + self.trace_rip_reroutes_succeeded
+        )
+
+
+class ViaConflictManager:
+    """Manages via conflicts during routing.
+
+    Detects when existing vias block pad access and applies strategies
+    to resolve the conflicts, improving routing completion rate.
+
+    Example::
+
+        manager = ViaConflictManager(grid, rules)
+
+        # Find vias blocking a specific pad
+        conflicts = manager.find_blocking_vias(pad, net_id)
+
+        # Try to relocate each blocking via
+        for conflict in conflicts:
+            result = manager.try_relocate(conflict)
+            if result.success:
+                print(f"Via relocated to {result.new_position}")
+
+        # Or use rip-and-reroute for stubborn conflicts
+        for conflict in conflicts:
+            result = manager.try_rip_reroute(conflict, route_net_fn)
+            if result.success:
+                print(f"Net {conflict.blocking_net} rerouted")
+    """
+
+    # Search radius multiplier for finding candidate relocation positions
+    RELOCATION_SEARCH_RADIUS = 3.0
+
+    # Maximum relocation distance as multiple of via diameter
+    MAX_RELOCATION_DISTANCE = 5.0
+
+    # Number of candidate positions to evaluate around the blocking via
+    RELOCATION_CANDIDATES = 16
+
+    def __init__(
+        self,
+        grid: RoutingGrid,
+        rules: DesignRules,
+    ):
+        """Initialize the via conflict manager.
+
+        Args:
+            grid: The routing grid to work with.
+            rules: Design rules for clearances and dimensions.
+        """
+        self.grid = grid
+        self.rules = rules
+        self._stats = ViaConflictStats()
+
+    @property
+    def stats(self) -> ViaConflictStats:
+        """Get conflict resolution statistics."""
+        return self._stats
+
+    def reset_stats(self) -> None:
+        """Reset conflict resolution statistics."""
+        self._stats = ViaConflictStats()
+
+    def find_blocking_vias(
+        self,
+        pad: Pad,
+        pad_net: int,
+        search_radius: float | None = None,
+        net_names: dict[int, str] | None = None,
+    ) -> list[ViaConflict]:
+        """Find vias that block access to a pad.
+
+        Searches the area around a pad to find vias from other nets whose
+        clearance zones prevent routing to the pad.
+
+        Args:
+            pad: The pad whose access may be blocked.
+            pad_net: Net ID of the pad.
+            search_radius: Search radius in mm (defaults to calculated from rules).
+            net_names: Optional mapping of net ID to net name.
+
+        Returns:
+            List of ViaConflict objects sorted by distance (closest first).
+        """
+        net_names = net_names or {}
+
+        if search_radius is None:
+            # Search radius covers via clearance + trace routing space
+            search_radius = (
+                self.rules.via_diameter / 2
+                + self.rules.via_clearance
+                + self.rules.trace_width
+                + self.rules.trace_clearance
+            ) * self.RELOCATION_SEARCH_RADIUS
+
+        conflicts: list[ViaConflict] = []
+        seen_vias: set[tuple[float, float]] = set()
+
+        # Search through all routes on the grid for vias near this pad
+        for route in self.grid.routes:
+            if route.net == pad_net:
+                continue  # Skip same-net vias
+
+            for via in route.vias:
+                via_key = (round(via.x, 4), round(via.y, 4))
+                if via_key in seen_vias:
+                    continue
+                seen_vias.add(via_key)
+
+                # Calculate distance from via to pad
+                distance = math.sqrt((via.x - pad.x) ** 2 + (via.y - pad.y) ** 2)
+
+                if distance > search_radius:
+                    continue
+
+                # Check if via's clearance zone actually blocks the pad
+                min_clearance = via.diameter / 2 + self.rules.via_clearance
+
+                if distance < min_clearance + self.rules.trace_width:
+                    conflict = ViaConflict(
+                        via=via,
+                        via_route=route,
+                        via_position=(via.x, via.y),
+                        blocked_pad=pad,
+                        blocked_net=pad_net,
+                        blocking_net=via.net,
+                        blocking_net_name=net_names.get(via.net, f"Net_{via.net}"),
+                        distance=distance,
+                        clearance_needed=min_clearance + self.rules.trace_width - distance,
+                    )
+                    conflicts.append(conflict)
+                    self._stats.conflicts_found += 1
+
+        # Sort by distance (closest first - most impactful)
+        conflicts.sort(key=lambda c: c.distance)
+        return conflicts
+
+    def find_all_via_conflicts(
+        self,
+        failed_nets: dict[int, list[Pad]],
+        net_names: dict[int, str] | None = None,
+    ) -> dict[int, list[ViaConflict]]:
+        """Find via conflicts for all nets that failed to route.
+
+        Args:
+            failed_nets: Mapping of net ID to list of pads that failed to route.
+            net_names: Optional mapping of net ID to net name.
+
+        Returns:
+            Mapping of net ID to list of ViaConflict objects.
+        """
+        all_conflicts: dict[int, list[ViaConflict]] = {}
+
+        for net_id, pads in failed_nets.items():
+            net_conflicts: list[ViaConflict] = []
+            for pad in pads:
+                conflicts = self.find_blocking_vias(
+                    pad=pad,
+                    pad_net=net_id,
+                    net_names=net_names,
+                )
+                net_conflicts.extend(conflicts)
+
+            if net_conflicts:
+                # Deduplicate by via position
+                seen: set[tuple[float, float]] = set()
+                unique_conflicts: list[ViaConflict] = []
+                for conflict in net_conflicts:
+                    key = (round(conflict.via.x, 4), round(conflict.via.y, 4))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_conflicts.append(conflict)
+                all_conflicts[net_id] = unique_conflicts
+
+        return all_conflicts
+
+    def find_blocking_traces(
+        self,
+        pad: Pad,
+        pad_net: int,
+        search_radius: float | None = None,
+        net_names: dict[int, str] | None = None,
+    ) -> list[TraceConflict]:
+        """Find trace segments that block access to a pad.
+
+        Issue #2859: This is the trace-blocker sibling of
+        :meth:`find_blocking_vias`.  It inspects ``route.segments`` (the
+        branch the original via-only resolver never visited) using
+        point-to-line-segment perpendicular distance math, and returns
+        conflicts where a segment from another net lies inside the
+        via-clearance envelope the failing net needs to drop its access
+        via at ``pad``.
+
+        Geometry: the "blocking envelope" is the area within
+        ``via_diameter / 2 + via_clearance + trace_width / 2 +
+        trace_clearance`` of the pad center.  A trace segment from
+        another net whose perpendicular distance to the pad center is
+        less than this radius prevents the failing net from placing its
+        access via without violating clearance.
+
+        Args:
+            pad: The pad whose access may be blocked.
+            pad_net: Net ID of the pad.
+            search_radius: Search radius in mm (defaults to a calculated
+                envelope from rules).  Used as a coarse pre-filter on
+                segment-endpoint distance before the more expensive
+                perpendicular-distance computation.
+            net_names: Optional mapping of net ID to net name.
+
+        Returns:
+            List of :class:`TraceConflict` objects sorted by ascending
+            perpendicular distance (closest first).  Deduped per
+            ``(route_id, segment endpoints)`` so the same segment is
+            never reported twice for one pad.
+        """
+        net_names = net_names or {}
+
+        # Blocking envelope around the pad's required via position.  A
+        # via at the pad center needs at least
+        # ``via_radius + via_clearance`` of empty space; a trace from
+        # another net must keep ``trace_half_width + trace_clearance``
+        # away from that envelope.  The union is the radius below.
+        via_radius = self.rules.via_diameter / 2
+        envelope_radius = (
+            via_radius
+            + self.rules.via_clearance
+            + self.rules.trace_width / 2
+            + self.rules.trace_clearance
+        )
+
+        if search_radius is None:
+            # Bounding-box pre-filter radius: a segment can only intrude
+            # into the envelope if its expanded bounding box contains
+            # the pad.  We use ``envelope_radius`` directly here -- the
+            # bounding-box check below already accounts for segment
+            # length (it doesn't assume the pad is near an endpoint).
+            search_radius = envelope_radius
+
+        conflicts: list[TraceConflict] = []
+        # Dedup key: (route id, segment endpoint tuple) so the same
+        # segment is never reported twice even if iterated from multiple
+        # angles.
+        seen_segments: set[tuple[int, tuple[float, float, float, float]]] = set()
+
+        for route in self.grid.routes:
+            if route.net == pad_net:
+                continue  # Skip same-net segments
+            route_key = id(route)
+
+            for segment in route.segments:
+                seg_key = (
+                    route_key,
+                    (
+                        round(segment.x1, 4),
+                        round(segment.y1, 4),
+                        round(segment.x2, 4),
+                        round(segment.y2, 4),
+                    ),
+                )
+                if seg_key in seen_segments:
+                    continue
+
+                # Coarse bounding-box pre-filter: expand the segment's
+                # bbox by ``search_radius`` and skip if the pad falls
+                # outside.  This is the right pre-filter for long
+                # segments (an endpoint-distance check would
+                # over-prune).  The perpendicular-distance computation
+                # below is the actual filter.
+                seg_xmin = min(segment.x1, segment.x2) - search_radius
+                seg_xmax = max(segment.x1, segment.x2) + search_radius
+                seg_ymin = min(segment.y1, segment.y2) - search_radius
+                seg_ymax = max(segment.y1, segment.y2) + search_radius
+                if not (seg_xmin <= pad.x <= seg_xmax and seg_ymin <= pad.y <= seg_ymax):
+                    continue
+
+                # Point-to-line-segment perpendicular distance, clamped
+                # to the segment endpoints.  Standard formula: project
+                # the pad-to-start vector onto the segment direction,
+                # clamp the projection parameter ``t`` to ``[0, 1]``,
+                # and compute the distance from the clamped point.
+                seg_dx = segment.x2 - segment.x1
+                seg_dy = segment.y2 - segment.y1
+                seg_length_sq = seg_dx * seg_dx + seg_dy * seg_dy
+                if seg_length_sq < 1e-9:
+                    # Degenerate (zero-length) segment -- treat as a
+                    # point and compute distance from the endpoint.
+                    closest_x, closest_y = segment.x1, segment.y1
+                    perp_distance = math.sqrt((closest_x - pad.x) ** 2 + (closest_y - pad.y) ** 2)
+                else:
+                    t = (
+                        (pad.x - segment.x1) * seg_dx + (pad.y - segment.y1) * seg_dy
+                    ) / seg_length_sq
+                    t = max(0.0, min(1.0, t))
+                    closest_x = segment.x1 + t * seg_dx
+                    closest_y = segment.y1 + t * seg_dy
+                    perp_distance = math.sqrt((closest_x - pad.x) ** 2 + (closest_y - pad.y) ** 2)
+
+                if perp_distance >= envelope_radius:
+                    continue
+
+                seen_segments.add(seg_key)
+                conflict = TraceConflict(
+                    segment=segment,
+                    segment_route=route,
+                    segment_position=(closest_x, closest_y),
+                    blocked_pad=pad,
+                    blocked_net=pad_net,
+                    blocking_net=segment.net,
+                    blocking_net_name=net_names.get(segment.net, f"Net_{segment.net}"),
+                    distance=perp_distance,
+                    clearance_needed=envelope_radius - perp_distance,
+                )
+                conflicts.append(conflict)
+                self._stats.trace_conflicts_found += 1
+
+        # Sort by distance (closest first - most impactful)
+        conflicts.sort(key=lambda c: c.distance)
+        return conflicts
+
+    def try_trace_rip_reroute(
+        self,
+        conflict: TraceConflict,
+        route_net_fn: RouteNetFunction | None = None,
+    ) -> RipRerouteResult:
+        """Try to rip up a blocking trace's route and re-route after the blocked net.
+
+        Issue #2859: The trace-blocker sibling of :meth:`try_rip_reroute`.
+        Mirrors the via rip-and-reroute pattern at
+        ``via_conflict.py:try_rip_reroute`` exactly:
+
+        1. Rip the offending route off the grid (``unmark_route``).
+        2. Route the blocked net (which should now succeed because the
+           via clearance envelope is clear).
+        3. Re-route the ripped net so it detours around the blocked net's
+           newly placed access via.
+
+        On Step 3 failure the original route is restored
+        (``mark_route``) and the blocked net's routes are undone, so the
+        grid is returned to its pre-call state -- the standard
+        restore-on-failure pattern.
+
+        Note: Unlike vias, traces have no ``try_trace_relocate`` sibling.
+        A trace is a multi-segment path, not a point, so "relocate"
+        doesn't have a meaningful definition.  Rip-and-reroute is the
+        only resolution strategy.
+
+        Args:
+            conflict: The trace conflict to resolve.
+            route_net_fn: Function to route a net.  Signature
+                ``(net_id) -> list[Route]``.  If ``None``, only the
+                rip-up is performed.
+
+        Returns:
+            :class:`RipRerouteResult` (check ``.success`` for outcome).
+        """
+        self._stats.trace_rip_reroutes_attempted += 1
+        result = RipRerouteResult()
+
+        route = conflict.segment_route
+        if route is None:
+            return result
+
+        # Step 1: Rip up the blocking route
+        self.grid.unmark_route(route)
+        result.ripped_route = route
+        result.ripped_net = conflict.blocking_net
+
+        if route_net_fn is None:
+            # Just the rip-up, no re-routing
+            return result
+
+        # Step 2: Route the blocked net
+        blocked_routes = route_net_fn(conflict.blocked_net)
+        if blocked_routes:
+            result.blocked_net_routed = True
+            result.new_blocked_routes = blocked_routes
+
+        # Step 3: Re-route the ripped net
+        ripped_routes = route_net_fn(conflict.blocking_net)
+        if ripped_routes:
+            result.ripped_net_rerouted = True
+            result.new_ripped_routes = ripped_routes
+        else:
+            # Failed to re-route - restore original route
+            self.grid.mark_route(route)
+            # Also undo the blocked net routes
+            for r in blocked_routes:
+                self.grid.unmark_route(r)
+            result.blocked_net_routed = False
+            result.new_blocked_routes = []
+            return result
+
+        # Issue #2872: the inline post-emit DRC safety check that lived
+        # here in PR #2864 (a 10 mm bbox envelope filter calling
+        # ``_validate_new_routes_drc``) has been removed.  The
+        # transactional wrapper in
+        # :meth:`Autorouter._resolve_via_conflicts_for_net` now
+        # snapshots the full grid + routes + failures state before the
+        # trace branch is dispatched and validates the union of every
+        # newly committed segment / via (both this helper's emit AND
+        # the post-success ``route_net`` retry's emit) without an
+        # envelope filter.  Any clearance regression triggers a single
+        # atomic rollback at the call site.  Keeping the inline check
+        # here would be redundant work and would also not see the
+        # post-success retry's geometry, which was the primary hole in
+        # the PR #2864 design.
+        result.success = result.blocked_net_routed and result.ripped_net_rerouted
+        if result.success:
+            self._stats.trace_rip_reroutes_succeeded += 1
+            self._stats.nets_unblocked += 1
+
+        return result
+
+    def try_relocate(
+        self,
+        conflict: ViaConflict,
+    ) -> ViaRelocation:
+        """Try to relocate a blocking via to a nearby non-conflicting position.
+
+        Searches candidate positions around the via and finds one that:
+        1. Does not block the target pad
+        2. Does not violate DRC clearances
+        3. Maintains connectivity for the via's net
+
+        Args:
+            conflict: The via conflict to resolve.
+
+        Returns:
+            ViaRelocation result (check .success for outcome).
+        """
+        self._stats.relocations_attempted += 1
+        via = conflict.via
+        pad = conflict.blocked_pad
+        route = conflict.via_route
+
+        if route is None:
+            return ViaRelocation(original_via=via, new_position=conflict.via_position)
+
+        # Generate candidate positions around the via
+        max_dist = via.diameter * self.MAX_RELOCATION_DISTANCE
+        candidates = self._generate_relocation_candidates(
+            via_x=via.x,
+            via_y=via.y,
+            pad_x=pad.x,
+            pad_y=pad.y,
+            max_distance=max_dist,
+            num_candidates=self.RELOCATION_CANDIDATES,
+        )
+
+        # Evaluate candidates
+        best_pos: tuple[float, float] | None = None
+        best_score = float("inf")
+
+        for candidate_x, candidate_y in candidates:
+            # Check that candidate doesn't block the pad
+            pad_dist = math.sqrt((candidate_x - pad.x) ** 2 + (candidate_y - pad.y) ** 2)
+            min_clearance = via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width
+            if pad_dist < min_clearance:
+                continue
+
+            # Check that candidate position is within grid bounds
+            gx, gy = self.grid.world_to_grid(candidate_x, candidate_y)
+            if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+                continue
+
+            # Check that candidate position doesn't conflict with other obstacles
+            if self._position_is_blocked(candidate_x, candidate_y, via.net):
+                continue
+
+            # Score the candidate: prefer closer to original position, farther from pad
+            orig_dist = math.sqrt((candidate_x - via.x) ** 2 + (candidate_y - via.y) ** 2)
+            score = orig_dist - pad_dist * 0.5  # Prefer staying close but moving away from pad
+
+            if score < best_score:
+                best_score = score
+                best_pos = (candidate_x, candidate_y)
+
+        if best_pos is None:
+            return ViaRelocation(original_via=via, new_position=conflict.via_position)
+
+        # Apply relocation
+        new_via = Via(
+            x=best_pos[0],
+            y=best_pos[1],
+            drill=via.drill,
+            diameter=via.diameter,
+            layers=via.layers,
+            net=via.net,
+            net_name=via.net_name,
+            # Issue #3118: preserve in-pad and micro-via markers when
+            # the conflict resolver relocates a via.  The relocation
+            # is a position change only -- the via's geometric tier
+            # (standard vs. micro) and in-pad status are unchanged
+            # and must not silently disappear during a rip-up.
+            in_pad=via.in_pad,
+            is_micro=via.is_micro,
+            span_type=via.span_type,
+        )
+
+        # Update the route's via and connected segments
+        modified_segments = self._update_route_via_position(
+            route=route,
+            old_via=via,
+            new_via=new_via,
+        )
+
+        self._stats.relocations_succeeded += 1
+
+        return ViaRelocation(
+            original_via=via,
+            new_position=best_pos,
+            new_via=new_via,
+            affected_route=route,
+            modified_segments=modified_segments,
+            success=True,
+        )
+
+    def try_rip_reroute(
+        self,
+        conflict: ViaConflict,
+        route_net_fn: RouteNetFunction | None = None,
+    ) -> RipRerouteResult:
+        """Try to rip up the blocking route and re-route after the blocked net.
+
+        This is the more aggressive strategy:
+        1. Remove the blocking via's entire route from the grid
+        2. Route the blocked net (which should now succeed)
+        3. Re-route the ripped-up net (which may find a different path)
+
+        Args:
+            conflict: The via conflict to resolve.
+            route_net_fn: Function to route a net. Signature: (net_id) -> list[Route].
+                If None, only the rip-up is performed.
+
+        Returns:
+            RipRerouteResult (check .success for outcome).
+        """
+        self._stats.rip_reroutes_attempted += 1
+        result = RipRerouteResult()
+
+        route = conflict.via_route
+        if route is None:
+            return result
+
+        # Step 1: Rip up the blocking route
+        self.grid.unmark_route(route)
+        result.ripped_route = route
+        result.ripped_net = conflict.blocking_net
+
+        if route_net_fn is None:
+            # Just the rip-up, no re-routing
+            return result
+
+        # Step 2: Route the blocked net
+        blocked_routes = route_net_fn(conflict.blocked_net)
+        if blocked_routes:
+            result.blocked_net_routed = True
+            result.new_blocked_routes = blocked_routes
+
+        # Step 3: Re-route the ripped net
+        ripped_routes = route_net_fn(conflict.blocking_net)
+        if ripped_routes:
+            result.ripped_net_rerouted = True
+            result.new_ripped_routes = ripped_routes
+        else:
+            # Failed to re-route - restore original route
+            self.grid.mark_route(route)
+            # Also undo the blocked net routes
+            for r in blocked_routes:
+                self.grid.unmark_route(r)
+            result.blocked_net_routed = False
+            result.new_blocked_routes = []
+            return result
+
+        result.success = result.blocked_net_routed and result.ripped_net_rerouted
+        if result.success:
+            self._stats.rip_reroutes_succeeded += 1
+            self._stats.nets_unblocked += 1
+
+        return result
+
+    def resolve_conflicts(
+        self,
+        conflicts: list[ViaConflict],
+        strategy: ViaConflictStrategy = ViaConflictStrategy.RELOCATE,
+        route_net_fn: RouteNetFunction | None = None,
+    ) -> list[ViaRelocation | RipRerouteResult]:
+        """Resolve a list of via conflicts using the specified strategy.
+
+        Tries each conflict in order. For RELOCATE strategy, falls back
+        to RIP_REROUTE if relocation fails (when route_net_fn is provided).
+
+        Args:
+            conflicts: List of via conflicts to resolve.
+            strategy: Resolution strategy to use.
+            route_net_fn: Function to route a net (required for RIP_REROUTE).
+
+        Returns:
+            List of resolution results.
+        """
+        results: list[ViaRelocation | RipRerouteResult] = []
+
+        for conflict in conflicts:
+            if strategy == ViaConflictStrategy.NONE:
+                continue
+
+            if strategy == ViaConflictStrategy.RELOCATE:
+                relocation = self.try_relocate(conflict)
+                if relocation.success:
+                    results.append(relocation)
+                    continue
+
+                # Fall back to rip-reroute if relocation failed
+                if route_net_fn is not None:
+                    rip_result = self.try_rip_reroute(conflict, route_net_fn)
+                    results.append(rip_result)
+
+            elif strategy == ViaConflictStrategy.RIP_REROUTE:
+                if route_net_fn is not None:
+                    rip_result = self.try_rip_reroute(conflict, route_net_fn)
+                    results.append(rip_result)
+
+        return results
+
+    def _generate_relocation_candidates(
+        self,
+        via_x: float,
+        via_y: float,
+        pad_x: float,
+        pad_y: float,
+        max_distance: float,
+        num_candidates: int = 16,
+    ) -> list[tuple[float, float]]:
+        """Generate candidate positions for via relocation.
+
+        Candidates are placed in a ring around the original via position,
+        biased away from the blocked pad.
+
+        Args:
+            via_x, via_y: Original via position.
+            pad_x, pad_y: Blocked pad position.
+            max_distance: Maximum relocation distance.
+            num_candidates: Number of candidates to generate.
+
+        Returns:
+            List of (x, y) candidate positions.
+        """
+        candidates: list[tuple[float, float]] = []
+
+        # Direction from pad to via (move via further from pad)
+        dx = via_x - pad_x
+        dy = via_y - pad_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist > 0:
+            dx /= dist
+            dy /= dist
+        else:
+            dx, dy = 1.0, 0.0  # Default direction
+
+        # Generate candidates at multiple distances and angles
+        distances = [
+            max_distance * 0.3,
+            max_distance * 0.5,
+            max_distance * 0.7,
+            max_distance * 1.0,
+        ]
+
+        for d in distances:
+            for i in range(num_candidates):
+                angle = 2 * math.pi * i / num_candidates
+                # Bias toward the direction away from the pad
+                biased_angle = angle
+                cx = via_x + d * math.cos(biased_angle)
+                cy = via_y + d * math.sin(biased_angle)
+
+                # Snap to grid
+                gx, gy = self.grid.world_to_grid(cx, cy)
+                snapped_x, snapped_y = self.grid.grid_to_world(gx, gy)
+                candidates.append((snapped_x, snapped_y))
+
+        # Deduplicate (grid snapping may merge candidates)
+        seen: set[tuple[float, float]] = set()
+        unique: list[tuple[float, float]] = []
+        for pos in candidates:
+            key = (round(pos[0], 4), round(pos[1], 4))
+            if key not in seen:
+                seen.add(key)
+                unique.append(pos)
+
+        return unique
+
+    def _position_is_blocked(
+        self,
+        x: float,
+        y: float,
+        exclude_net: int,
+    ) -> bool:
+        """Check if a position is blocked by obstacles (excluding the given net).
+
+        Args:
+            x, y: World coordinates to check.
+            exclude_net: Net ID to exclude from blocking check.
+
+        Returns:
+            True if the position is blocked by another net or obstacle.
+        """
+        gx, gy = self.grid.world_to_grid(x, y)
+        radius = int(
+            (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution
+        )
+
+        for layer_idx in range(self.grid.num_layers):
+            for dy_offset in range(-radius, radius + 1):
+                for dx_offset in range(-radius, radius + 1):
+                    nx, ny = gx + dx_offset, gy + dy_offset
+                    if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
+                        continue
+                    cell = self.grid.cell_at(layer_idx, ny, nx)
+                    if cell.blocked and cell.net != exclude_net and cell.net != 0:
+                        return True
+                    # Issue #2963: Post-PR #2928, pad-metal cells are
+                    # marked ``is_obstacle=True`` on first touch.  Without
+                    # an own-net filter, this rejects via-repair candidates
+                    # that sit inside the via's own destination pad
+                    # (e.g. NRST/BOOT0 endpoints on board 04).  Only treat
+                    # an obstacle cell as blocking when it belongs to a
+                    # different net.
+                    if cell.is_obstacle and cell.net != exclude_net:
+                        return True
+
+        return False
+
+    def _update_route_via_position(
+        self,
+        route: Route,
+        old_via: Via,
+        new_via: Via,
+    ) -> list[Segment]:
+        """Update a route to use a new via position.
+
+        Finds segments connected to the old via and updates their
+        endpoints to connect to the new via position.
+
+        Args:
+            route: The route to modify.
+            old_via: The original via being replaced.
+            new_via: The new via with updated position.
+
+        Returns:
+            List of segments that were modified.
+        """
+        tol = 1e-4
+        modified: list[Segment] = []
+
+        # First, unmark the old route from the grid
+        self.grid.unmark_route(route)
+
+        # Replace the via in the route
+        for i, via in enumerate(route.vias):
+            if abs(via.x - old_via.x) < tol and abs(via.y - old_via.y) < tol:
+                route.vias[i] = new_via
+                break
+
+        # Update connected segments
+        for seg in route.segments:
+            updated = False
+
+            # Check if segment ends at old via position (on 'from' layer)
+            if (
+                abs(seg.x2 - old_via.x) < tol
+                and abs(seg.y2 - old_via.y) < tol
+                and seg.layer == old_via.layers[0]
+            ):
+                seg.x2 = new_via.x
+                seg.y2 = new_via.y
+                updated = True
+
+            # Check if segment starts at old via position (on 'to' layer)
+            if (
+                abs(seg.x1 - old_via.x) < tol
+                and abs(seg.y1 - old_via.y) < tol
+                and seg.layer == old_via.layers[1]
+            ):
+                seg.x1 = new_via.x
+                seg.y1 = new_via.y
+                updated = True
+
+            if updated:
+                modified.append(seg)
+
+        # Re-mark the updated route on the grid
+        self.grid.mark_route(route)
+
+        return modified
+
+
+# Type alias for the route function callback
+RouteNetFunction = type(None)  # Placeholder - actual type is Callable[[int], list[Route]]
+
+try:
+    from typing import Callable
+
+    RouteNetFunction = Callable[[int], list[Route]]  # type: ignore[misc]
+except ImportError:
+    pass

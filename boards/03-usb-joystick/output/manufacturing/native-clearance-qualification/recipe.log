@@ -1,0 +1,148 @@
+
+============================================================
+Creating Project File...
+============================================================
+
+   Project: /tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick.kicad_pro
+
+============================================================
+Creating USB Joystick Schematic (delegates to generate_schematic.py)...
+============================================================
+/tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick.kicad_sch
+   Schematic: /tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick.kicad_sch
+
+============================================================
+Running ERC...
+============================================================
+
+   ERC report: /tmp/5380-native-rule/final-bd992dc-recipe/erc_report.json
+
+   No ERC errors found!
+
+============================================================
+Creating USB Joystick PCB (delegates to generate_pcb.py)...
+============================================================
+   PCB: /tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick.kicad_pcb
+
+   Board size: 80.0mm x 60.0mm
+
+============================================================
+Verifying copper-pour zones...
+============================================================
+
+   4 zone(s) present (GND/VCC pours OK; VBUS is explicitly routed)
+
+============================================================
+Applying reviewed routing plan...
+============================================================
+   Wrote net-class-map sidecar: /tmp/5380-native-rule/final-bd992dc-recipe/net_class_map.json
+   Wrote fabrication-overrides sidecar: /tmp/5380-native-rule/final-bd992dc-recipe/fabrication_overrides.json
+
+============================================================
+Adding GND stitching vias (F.Cu<->B.Cu)...
+============================================================
+
+   No single-layer USB-C GND pads found -- no stitch vias needed.
+
+============================================================
+Applying jlcpcb-tier1 design-rule floors (pre-fill)...
+============================================================
+   [INFO] applied fabrication-overrides sidecar /tmp/5380-native-rule/final-bd992dc-recipe/fabrication_overrides.json (min_hole_to_hole_mm)
+   DRC-constraint sidecars: /tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick_routed.kicad_pro, /tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick_routed.kicad_dru
+
+============================================================
+Filling copper zones...
+============================================================
+
+1. Filling zones in: /tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick_routed.kicad_pcb
+
+2. Zones present: 0
+
+============================================================
+Running DRC (via kct check --drc-only)...
+============================================================
+   ============================================================
+   PURE PYTHON DRC CHECK
+   ============================================================
+   File: usb_joystick_routed.kicad_pcb
+   Manufacturer: JLCPCB-TIER1
+   Layers: 4
+   Rules checked: 52
+   
+   Results:
+     Errors:     0
+     Warnings:   0
+     Infos:      6
+   
+   ------------------------------------------------------------
+   CATEGORY SUMMARY (fabrication-blocking vs advisory -- Issue #3803):
+     Manufacturing DRC: 0 blocking  (copper/clearance/hole/edge/mask/drill)
+         0 errors, 0 warnings, 0 infos  [none]
+     Advisory/quality:  6 advisory  (connectivity, diff-pair, copper_sliver, ampacity, silk)
+         0 errors, 0 warnings, 6 infos  [connector_edge_distance, diffpair_length_skew, diffpair_routing_continuity]
+   
+   ------------------------------------------------------------
+   MEASUREMENT SUMMARY (length-match / continuity):
+     Group/Pair             Metric        Measured   Tolerance  Status
+     USB_D+/USB_D-          skew             0.166       0.500  pass
+     USB_MCU_D+/USB_MCU_D-  skew             0.000       0.500  pass
+     USB_D+/USB_D-          continuity       0.343       0.250  pass
+     USB_MCU_D+/USB_MCU_D-  continuity       0.730       0.700  pass
+   
+   ------------------------------------------------------------
+   BY RULE:
+     connector_edge_distance: 2 infos
+   
+   ------------------------------------------------------------
+   INFOS (advisory only):
+   
+     [i] connector_edge_distance
+         J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge
+   
+     [i] connector_edge_distance
+         J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge
+   
+   ============================================================
+   DRC PASSED - Advisory infos only
+
+   DRC report: /tmp/5380-native-rule/final-bd992dc-recipe/drc_report.json
+
+============================================================
+Running LVS (schematic <-> PCB netlist match)...
+============================================================
+
+   label-LVS PASS: 0 mismatches (lvs.json)
+   copper-LVS PASS: 0 shorts / 0 opens (129 bound pad(s))
+   Saved-copper native connectivity: PASS (0 unconnected items)
+
+============================================================
+Exporting manufacturing bundle...
+============================================================
+
+   Manifest: /tmp/5380-native-rule/final-bd992dc-recipe/manufacturing/manifest.json
+
+============================================================
+SUMMARY
+============================================================
+
+Output directory: /tmp/5380-native-rule/final-bd992dc-recipe
+
+Generated files:
+  1. Project: usb_joystick.kicad_pro
+  2. Schematic: usb_joystick.kicad_sch
+  3. PCB (unrouted): usb_joystick.kicad_pcb
+  4. PCB (routed): usb_joystick_routed.kicad_pcb
+
+Results:
+  ERC: PASS
+  Routing: SUCCESS
+  DRC:     PASS
+  LVS:     PASS
+  Overall: PASS
+  MFG bundle: WRITTEN
+
+Board description:
+  - USB game controller with analog joystick
+  - ATmega32U4-AU TQFP-44 MCU
+  - USB Type-C connector
+  - 4 tactile buttons

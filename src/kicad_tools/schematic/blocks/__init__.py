@@ -1,0 +1,269 @@
+"""
+KiCad Circuit Blocks
+
+Reusable circuit block abstractions for common schematic patterns.
+Each block encapsulates component placement, wiring, and port definitions.
+
+Usage:
+    from kicad_tools.schematic.blocks import LDOBlock, LEDIndicator, DecouplingCaps
+
+    # Create an LDO power supply section
+    ldo = LDOBlock(
+        sch, x=100, y=80,
+        ref_prefix="U1",
+        input_voltage=5.0,
+        output_voltage=3.3,
+        input_cap="10uF",
+        output_caps=["10uF", "100nF"]
+    )
+
+    # Connect to rails
+    sch.add_wire(ldo.ports["VIN"], (100, RAIL_5V))
+    sch.add_wire(ldo.ports["VOUT"], (100, RAIL_3V3))
+
+    # Add LED indicator
+    led = LEDIndicator(sch, x=150, y=80, ref_prefix="D1", label="PWR")
+    led.connect_to_rails(RAIL_3V3, RAIL_GND)
+"""
+
+# Base classes
+# Analog blocks
+from .analog import (
+    ADCInputFilterBlock,
+    HallSensorInput,
+    OpAmpBlock,
+    OvercurrentComparator,
+    ThermistorSense,
+    VoltageDividerSense,
+    create_adc_filter,
+    create_hall_sensor_input,
+    create_opamp_buffer,
+    create_opamp_gain,
+    create_temperature_sense,
+    create_voltage_sense,
+)
+from .base import CircuitBlock, ComposedCircuitBlock, Port
+
+# Indicator blocks
+from .indicators import (
+    CharlieplexMatrix,
+    LEDIndicator,
+    charlieplex_pairs_for_grid,
+    create_charlieplex_matrix,
+    create_power_led,
+    create_status_led,
+)
+
+# Interface blocks (organized by protocol type)
+from .interface import (
+    AnalogJoystickBlock,
+    CANTransceiver,
+    DebugHeader,
+    I2CPullups,
+    USBConnector,
+    create_analog_joystick,
+    create_can_transceiver_mcp2551,
+    create_can_transceiver_sn65hvd230,
+    create_can_transceiver_tja1050,
+    create_i2c_pullups,
+    create_jtag_header,
+    create_swd_header,
+    create_tag_connect_header,
+    create_usb_micro_b,
+    create_usb_type_c,
+)
+
+# Typed port interfaces
+from .interfaces import DataPort, PowerPort
+
+# MCU blocks
+from .mcu import (
+    BootModeSelector,
+    MCUBlock,
+    ResetButton,
+    create_esp32_boot,
+    create_generic_boot,
+    create_gpio_pull_resistor,
+    create_reset_button,
+    create_stm32_boot,
+)
+
+# Motor control blocks
+from .motor import (
+    BackToBackFETPair,
+    BootstrapCapacitorArray,
+    CurrentSenseShunt,
+    GateDriverBlock,
+    GateDriveResistorArray,
+    HalfBridge,
+    ThreePhaseInverter,
+    UCC27211GateDriver,
+    create_3phase_inverter,
+    create_bootstrap_capacitor_array,
+    create_current_sense,
+    create_gate_drive_resistor_array,
+    create_half_bridge,
+)
+
+# Power blocks
+from .power import (
+    BarrelJackInput,
+    BatteryInput,
+    BuckConverter,
+    DecouplingCaps,
+    DualSupplyCascade,
+    LDOBlock,
+    PrechargeSubsystem,
+    USBPowerInput,
+    VoltageDivider,
+    create_3v3_buck,
+    create_3v3_ldo,
+    create_5v_buck,
+    create_12v_barrel_jack,
+    create_12v_buck,
+    create_dual_supply_cascade,
+    create_lipo_battery,
+    create_mcu_decoupling_array,
+    create_usb_power,
+    create_voltage_divider,
+)
+
+# Protection blocks
+from .protection import (
+    ESDProtectionBlock,
+    FuseBlock,
+    OvervoltageClampBlock,
+    PTCResetBlock,
+    ReversePolarityBlock,
+    ThermalCutoffBlock,
+    create_esd_protection,
+    create_fuse,
+    create_overvoltage_clamp,
+    create_ptc_fuse,
+    create_reverse_polarity_diode,
+    create_reverse_polarity_pfet,
+    create_thermal_cutoff,
+)
+
+# Timing blocks
+from .timing import (
+    CrystalOscillator,
+    OscillatorBlock,
+    create_crystal_with_loads,
+    create_mclk_oscillator,
+)
+
+# Connection validation and port matching
+from .validator import ConnectionValidator, ConnectionWarning, WarningSeverity, match_ports
+
+__all__ = [
+    # Base classes
+    "Port",
+    "CircuitBlock",
+    "ComposedCircuitBlock",
+    # Typed ports and validation
+    "PowerPort",
+    "DataPort",
+    "ConnectionValidator",
+    "ConnectionWarning",
+    "WarningSeverity",
+    "match_ports",
+    # Indicators
+    "LEDIndicator",
+    "CharlieplexMatrix",
+    "create_power_led",
+    "create_status_led",
+    "create_charlieplex_matrix",
+    "charlieplex_pairs_for_grid",
+    # Power
+    "DecouplingCaps",
+    "LDOBlock",
+    "BuckConverter",
+    "DualSupplyCascade",
+    "BarrelJackInput",
+    "USBPowerInput",
+    "BatteryInput",
+    "VoltageDivider",
+    "PrechargeSubsystem",
+    "create_3v3_ldo",
+    "create_3v3_buck",
+    "create_5v_buck",
+    "create_12v_buck",
+    "create_dual_supply_cascade",
+    "create_12v_barrel_jack",
+    "create_usb_power",
+    "create_lipo_battery",
+    "create_mcu_decoupling_array",
+    "create_voltage_divider",
+    # Timing
+    "OscillatorBlock",
+    "CrystalOscillator",
+    "create_crystal_with_loads",
+    "create_mclk_oscillator",
+    # Interface
+    "CANTransceiver",
+    "DebugHeader",
+    "USBConnector",
+    "I2CPullups",
+    "AnalogJoystickBlock",
+    "create_can_transceiver_mcp2551",
+    "create_can_transceiver_sn65hvd230",
+    "create_can_transceiver_tja1050",
+    "create_swd_header",
+    "create_jtag_header",
+    "create_tag_connect_header",
+    "create_usb_type_c",
+    "create_usb_micro_b",
+    "create_i2c_pullups",
+    "create_analog_joystick",
+    # MCU
+    "BootModeSelector",
+    "MCUBlock",
+    "ResetButton",
+    "create_esp32_boot",
+    "create_generic_boot",
+    "create_gpio_pull_resistor",
+    "create_reset_button",
+    "create_stm32_boot",
+    # Motor control
+    "HalfBridge",
+    "ThreePhaseInverter",
+    "CurrentSenseShunt",
+    "GateDriverBlock",
+    "GateDriveResistorArray",
+    "BootstrapCapacitorArray",
+    "BackToBackFETPair",
+    "UCC27211GateDriver",
+    "create_half_bridge",
+    "create_3phase_inverter",
+    "create_current_sense",
+    "create_gate_drive_resistor_array",
+    "create_bootstrap_capacitor_array",
+    # Analog
+    "ADCInputFilterBlock",
+    "HallSensorInput",
+    "OpAmpBlock",
+    "OvercurrentComparator",
+    "ThermistorSense",
+    "VoltageDividerSense",
+    "create_adc_filter",
+    "create_hall_sensor_input",
+    "create_opamp_buffer",
+    "create_opamp_gain",
+    "create_temperature_sense",
+    "create_voltage_sense",
+    # Protection
+    "ESDProtectionBlock",
+    "FuseBlock",
+    "OvervoltageClampBlock",
+    "PTCResetBlock",
+    "ReversePolarityBlock",
+    "ThermalCutoffBlock",
+    "create_esd_protection",
+    "create_fuse",
+    "create_overvoltage_clamp",
+    "create_ptc_fuse",
+    "create_reverse_polarity_diode",
+    "create_reverse_polarity_pfet",
+    "create_thermal_cutoff",
+]

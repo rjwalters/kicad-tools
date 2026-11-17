@@ -1,0 +1,1002 @@
+# Tutorial: Running DRC with Manufacturer Rules
+
+This tutorial shows how to run Design Rule Checks (DRC) against specific manufacturer capabilities, ensuring your PCB can be fabricated without issues.
+
+## Overview
+
+Different PCB manufacturers have different capabilities:
+- **Minimum trace width** - How thin traces can be
+- **Minimum clearance** - Spacing between copper features
+- **Minimum via size** - Smallest drill diameter
+- **Layer count support** - 2, 4, 6+ layer boards
+
+kicad-tools includes profiles for popular manufacturers and can validate your design against their limits.
+
+## Three gates, not one
+
+A board that is ready to fabricate has to clear **three independent gates**.
+Passing one says nothing about the others, and none of them is a substitute
+for another:
+
+| Gate | Run by | Answers |
+|------|--------|---------|
+| **Native DRC** | `kicad-cli pcb drc` (reads `.kicad_pro` + `.kicad_dru`) | Does the geometry satisfy the constraints KiCad's own engine evaluates? |
+| **`kct check --mfr`** | kicad-tools' own checker | Does the geometry satisfy the manufacturer floors, including the ones KiCad's rule language cannot express? |
+| **Factory DFM** | The fab, after upload | Will *this* supplier, on *this* process and panel, accept the job? |
+
+Two consequences are worth stating plainly:
+
+- **Native DRC is not factory DFM.** A clean `kicad-cli pcb drc` run means the
+  constraints in the sidecars were satisfied. It is not supplier approval:
+  the fab applies its own DFM review, tooling limits, panel utilisation and
+  process-specific allowances, and can reject or silently modify a board that
+  passes every rule here. Conversely, a factory DFM report is not a DRC
+  substitute — it is generated against a specific uploaded revision and is
+  not re-derivable from the board alone (see
+  [Submission Preparation](submission-preparation.md) for how a raster DFM
+  report is bound to the exact upload it audited).
+- **`kct check --mfr` and native DRC are not redundant.** Some manufacturer
+  floors have no native custom-rule equivalent (a numeric solder-mask web
+  floor, for example) and stay Python-side. The different-net
+  SMD-pad-to-SMD-pad floor *is* emitted natively — scoped by
+  `A.Reference != B.Reference`, using KiCad's documented rule that footprint
+  children (pads) carry their parent footprint's reference designator, so
+  package-internal pairs compare equal and stay exempt — but the two engines
+  still disagree on one measured shape: pads under footprints with **blank or
+  duplicated** references compare equal natively and are not discriminated,
+  while `kct check` scopes by footprint *identity* and still catches them.
+  Other floors need the native engine because only it sees the filled/plotted
+  geometry. Run both.
+
+### Emitted constraints are not effective constraints
+
+It is tempting to check a manufacturer profile by reading the numbers it
+writes into `.kicad_pro` / `.kicad_dru`. That only proves kicad-tools
+serialised what it meant to; it cannot detect a constraint the native engine
+declines to apply to the pair you care about. A constraint is only real if a
+board whose geometry sits *below* it produces a finding.
+
+A measured example, which is why this repository tests effective behaviour
+against deliberately below-limit geometry
+(`tests/test_effective_silk_clearance_5059.py`, issue #5059):
+
+On KiCad CLI **10.0.1**, a minimal board with a 0.085 mm gap between a
+silkscreen line and an SMD pad's mask aperture reported **no** silk finding
+from `board.design_settings.rules.min_silk_clearance` alone — not at the
+0.15 mm factory floor, and not with that key raised to 2.0 mm. The same
+project block *was* being read: raising `min_clearance` on the same fixture
+produced `board minimum clearance 0.5000 mm; actual 0.1200 mm`. Adding an
+explicit rule on byte-identical geometry:
+
+```lisp
+(rule "Silk to Pad"
+  (condition "A.Type == 'Pad' || B.Type == 'Pad'")
+  (constraint silk_clearance (min 0.15mm)))
+```
+
+reported `silk_over_copper` with `clearance 0.1500 mm; actual 0.0850 mm`.
+KiCad's built-in silk check does fire with no `min_silk_clearance` key
+present at all, once the silk genuinely *overlaps* the aperture — and reports
+no numeric clearance/actual pair, consistent with an overlap test rather than
+a gap threshold. This is a behavioural characterisation, not a claim about
+KiCad's implementation; the upstream cause has not been established here.
+
+The practical rule that follows: **cross-layer silk clearance needs an
+explicit rule in the `.kicad_dru`.** kicad-tools emits one for the profiles
+that publish a silkscreen-to-pad floor. Do not assume the project key covers
+it, and do not verify a profile change by diffing emitted values alone.
+
+> Care is needed in the other direction too. A blanket same-net
+> `physical_clearance` over every copper object is *not* the way to get
+> net-independent gap checks: on a real board that experiment produced 499
+> warnings, including intentional track joins. Net-independent checks need
+> geometry-aware treatment, not a broader rule.
+
+## Prerequisites
+
+```bash
+pip install kicad-tools
+```
+
+For full DRC functionality, you'll also need KiCad 8+ installed (for `kicad-cli`).
+
+## Supported Manufacturers
+
+kicad-tools includes profiles for these PCB fabs:
+
+| Manufacturer | ID | Layers | Features |
+|--------------|-----|--------|----------|
+| JLCPCB | `jlcpcb` | 2, 4, 6 | Low cost, LCSC parts, assembly service |
+| PCBWay | `pcbway` | 2, 4, 6 | Flexible options, global shipping |
+| OSHPark | `oshpark` | 2, 4 | US-based, purple boards, per-sq-inch pricing |
+| Seeed Fusion | `seeed` | 2, 4, 6 | OPL parts library, assembly service |
+
+## CLI: Basic DRC
+
+Run DRC using KiCad's built-in checker:
+
+```bash
+kct drc board.kicad_pcb
+```
+
+Output:
+```
+DRC Report for board.kicad_pcb
+==============================
+Errors: 0
+Warnings: 2
+
+Warnings:
+  [W001] Silkscreen clipped by solder mask at (45.2, 32.1)
+  [W002] Silkscreen clipped by solder mask at (67.8, 45.3)
+
+Result: PASS (with warnings)
+```
+
+## CLI: Check Against Manufacturer Rules
+
+Validate your design against a specific manufacturer's capabilities:
+
+```bash
+# Check against 2-layer rules (default for most hobbyist boards)
+kct check board.kicad_pcb --mfr jlcpcb --layers 2
+
+# Check against 4-layer rules
+kct check board.kicad_pcb --mfr jlcpcb --layers 4
+
+# Check with 2oz copper weight (requires wider traces)
+kct check board.kicad_pcb --mfr jlcpcb --layers 2 --copper 2.0
+```
+
+A scalar `--copper` applies to **both** outer and inner layers. On a
+multi-layer board use the keyed form (`--copper outer=2,inner=0.5`) or omit the
+flag when the board declares a stackup. The effective weights and their source
+(`flag` / `stackup` / `profile`) are printed in the header and stored as
+`copper_weights` in the JSON report; a stale ampacity waiver caused by a
+`--copper` that contradicts the stackup reports
+`stale_waiver_cause: copper_flag_overrides_stackup`.
+
+Output:
+```
+============================================================
+PURE PYTHON DRC CHECK
+============================================================
+File: board.kicad_pcb
+Manufacturer: JLCPCB
+Layers: 2
+Rules checked: 12
+
+Results:
+  Errors:     0
+  Warnings:   2
+
+============================================================
+DRC PASSED - No violations found
+```
+
+## CLI: Diff-Pair and Match-Group Rules (`--net-class-map`)
+
+Four DRC rule families need per-net routing metadata that a `.kicad_pcb`
+file does **not** persist on its own (length-match-group membership,
+`coupled_routing` flags, skew tolerances):
+
+- `diffpair_length_skew` — intra-pair length mismatch
+- `diffpair_routing_continuity` — coupled fraction of a diff pair (info only
+  since #6443)
+- `diffpair_uncoupled_length` — uncoupled length and via count of a diff pair
+  (guide 08 of `diff-pairs/`)
+- `match_group_length_skew` — length skew across a declared match group
+
+These rules re-derive their working state from a **net-class map** and
+**no-op when no map is supplied**. This is an intentional
+graceful-degradation contract: a bare `kct check` on a board routed by an
+external tool (e.g. Freerouting) will not fire diff-pair / match-group rules
+it cannot meaningfully evaluate. Consequently, on a routed board with
+engaged diff pairs you will see *fewer* errors from a bare `kct check` than
+from the in-pipeline DRC that `generate_design.py` runs.
+
+To enable these rules, pass a net-class-map **sidecar** — a JSON file
+mapping net names to their routing class — via `--net-class-map`:
+
+```bash
+# Bare check: diff-pair / match-group rules no-op (external-router contract)
+kct check board_routed.kicad_pcb --mfr jlcpcb
+
+# With the sidecar: the three gated families fire
+kct check board_routed.kicad_pcb --mfr jlcpcb \
+    --net-class-map output/net_class_map.json
+```
+
+**Sidecar convention.** Boards that exercise these rules emit the sidecar
+next to their routed PCB as `output/net_class_map.json` (see board 07's
+`generate_design.py`, which writes it and then runs `kct check` with the
+flag — that is the entire difference between its in-pipeline error count and
+a bare CLI run). The sidecar is produced from the board's
+`build_net_class_map()` via `net_class_map_to_dict` and consumed via
+`net_class_map_from_path` (`kicad_tools.router.rules`), the canonical
+loader every consumer shares (#4683). The loader pairs "parse the sidecar"
+with "resolve the board's layer stack", so a sidecar accepted by one
+consumer is accepted by all of them. Stack-resolution precedence: an
+explicit `layer_stack` argument, else `pcb_text` (raw board contents), else
+`pcb_path` (read best-effort), else the map is parsed with
+`layer_stack=None` — stack-independent tokens like `F.Cu` / `In<k>.Cu`
+still resolve, while `B.Cu` (whose index depends on the copper count) fails
+loud rather than guessing. A well-formed copper-layer name absent from the
+*active* stack (e.g. an inner layer named in `avoid_layers` during a
+`--layers 2` pass) is treated as a vacuously satisfied constraint and
+dropped rather than rejecting the sidecar — silently for `avoid_layers`,
+with a one-line warning for `preferred_layers` (#4685, #4709). Malformed
+tokens (`Bogus.Cu`) remain fatal.
+
+**Plane-layer opt-in (`allow_plane_layers`).** `kct route
+--reserve-plane-layers` (on by default) keeps every class off the stack's
+PLANE layers. A class can opt in to named reserved planes with
+`"allow_plane_layers": ["In2.Cu"]` (names or grid indices, normalized and
+dropped-when-absent exactly like `avoid_layers`). The opt-in is honoured by
+every engine (grid, C++, lattice, mesh) and by the diff-pair coupled search
+and tie step, where **both** nets of the pair must opt in. Other classes stay
+off the plane. Hard `avoid_layers` still wins, and naming a layer that is not
+reserved does nothing. The post-route "signal copper on a reference plane"
+warning skips the opted-in `(net, layer)` pairs only. Pair it with
+`preferred_layers` when you also want to steer the route there: board 03's
+`USB_D+`/`USB_D-` set both to In2.Cu (#6876).
+
+**Auto-discovery.** When `--net-class-map` is omitted, `kct check` probes for a
+sidecar next to the board. Two filename conventions are accepted — the
+stem-keyed `<board-stem>.net_class_map.json` (hand-maintained trees that keep
+several board revisions side by side) and the bare `net_class_map.json` written
+by `kct route` — searched in this order:
+
+```
+<board-dir>/<board-stem>.net_class_map.json
+<board-dir>/net_class_map.json
+<board-dir>/output/<board-stem>.net_class_map.json
+<board-dir>/output/net_class_map.json
+<board-dir>/../output/<board-stem>.net_class_map.json
+<board-dir>/../output/net_class_map.json
+```
+
+The first existing file wins: within a directory the stem-keyed name beats the
+bare one, and nearer directories beat farther ones. When a sidecar is picked up
+this way, `kct check` says so on stderr:
+
+```
+[INFO] auto-loaded net-class-map sidecar: /path/to/board_v24.net_class_map.json
+```
+
+The stem must match **exactly** — no globbing, no un-suffixing. A directory
+holding both `board_v23.net_class_map.json` and `board_v24.net_class_map.json`
+never applies v23's constraints to `board_v24.kicad_pcb`, and a board routed to
+`board_routed.kicad_pcb` looks for `board_routed.net_class_map.json`, *not*
+`board.net_class_map.json`. An explicit `--net-class-map` always wins and
+short-circuits the probe entirely. An auto-discovered sidecar that fails to
+parse degrades gracefully (`WARNING: ignoring malformed net-class-map sidecar
+…`, then continue with no map); an explicit one that fails is a hard error.
+
+**The probe order is shared, not a `kct check` feature.** The accepted
+filenames and their in-directory precedence live in one place —
+`kicad_tools/sidecars.py` — and all four sidecar consumers use it: `kct check`,
+the routed-DRC CI gate (`scripts/ci/check_routed_drc.py` via
+`net_class_map_resolver.py`), the match-group CI gate
+(`scripts/ci/check_matchgroup_coverage.py`) and the `kct export` report surface
+(`kicad_tools/report/net_class_map.py`). A directory holding both filename
+forms therefore resolves to the *same* file everywhere, so a board cannot be
+checked against one rule set locally and a different one by the gate that
+guards merge.
+
+What is **not** shared is how many directories each consumer searches, and that
+is deliberate. `kct check` walks the three directories listed above; the two CI
+gates and the report surface each search exactly one (`<pcb-dir>` for the
+routed-DRC gate and the report, `<board-dir>/output` for the match-group gate).
+Widening any of them would change which sidecar a board resolves.
+
+Pass `--no-net-class-map` to suppress auto-discovery and restore the
+historical no-sidecar behaviour — useful when a stale sidecar sits beside the
+board. Combining it with `--net-class-map` is a usage error. When no sidecar is
+found (or discovery is disabled), the "rules are INACTIVE" warning names the
+exact paths that were probed, or says that discovery was turned off.
+
+**CI resolves the map automatically.** The strict routed-PCB DRC gate
+(`scripts/ci/check_routed_drc.py`) is net-class-map-aware: it prefers a
+committed sidecar next to the routed PCB — accepting **both** filename forms in
+the same order `kct check` uses, stem-keyed
+`<board-stem>.net_class_map.json` first and bare `net_class_map.json` second —
+and, for boards that don't commit one (e.g. board 06), derives it in-process
+from the board's `build_net_class_map()`. The match-group gate
+(`scripts/ci/check_matchgroup_coverage.py`) accepts the same two names in
+`<board-dir>/output`. This keeps the CI gates' error counts in parity with the
+in-pipeline DRC while leaving the standalone `kct check` no-op contract
+unchanged.
+
+## CLI: Routing Policies (`routing_policy`)
+
+Issue #6044.  The `routing_policy` category holds a net to the routing limits
+its own net-class-map entry declares.  It reads the same sidecar as the
+diff-pair and match-group rules (auto-discovered or `--net-class-map`); there
+is no separate policy file.  Two `NetClassRouting` fields are policies, for
+single-ended nets as well as pair members:
+
+| Field | Unit | Enforced as |
+|-------|------|-------------|
+| `max_vias_per_net` | integer count | the net's via count must not exceed it |
+| `length_constraint.max_length` | mm | the net's total routed length must not exceed it (+1e-6 mm slack) |
+
+```json
+{
+  "/CLK": {"name": "Clock", "length_critical": true, "max_vias_per_net": 2},
+  "/FB": {
+    "name": "Analog",
+    "noise_sensitive": true,
+    "length_constraint": {"net_id": 0, "max_length": 25.0}
+  }
+}
+```
+
+- **Membership is the map key.**  Each entry is one net, keyed by net name and
+  resolved onto board names the same way as ampacity targets, so a net can
+  never match two policies.  Reports name the entry's class `name` as the
+  group.  `length_constraint` still requires its `net_id` field to load, but
+  `routing_policy` ignores the value: the key identifies the net.
+- **Vias:** every via on the net counts (through, blind/buried, micro).  A
+  KiCad via carries one net, so a via is never charged to two nets.
+- **Length:** the total routed copper of the net as
+  `kicad_tools.router.kicad_length.measure_pcb_net` reports it (the measure the
+  skew checks and tuners use), with every branch of a multi-pin net summed.
+  This is **total** length, not pin-to-pin length.
+- **Track arcs:** that measure reads straight segments only.  A net with a
+  length limit and any track arc gets a `warning`, "length unmeasured (track
+  arcs)", instead of a pass.
+- **Diff pairs:** a pair net whose pair limits carry a via cap is already held
+  to it by `diffpair_uncoupled_length`, so `routing_policy` does not report its
+  vias a second time (unless that category is deselected with `--only`/`--skip`).
+- **Severity:** a limit violation is an `error`.  A malformed value (negative,
+  fractional or non-numeric `max_vias_per_net`; zero, negative or non-numeric
+  `max_length`) is an `error` naming the net, never a crash.  Findings set
+  `items` and `nets` to the net, so a `.kct_waivers.json` entry
+  (`"rule": "routing_policy", "items": ["/CLK"]`) waives one.
+- **Never a silent pass:** a policy whose key matches no board net, or whose
+  net has no copper, or whose category is deselected, prints a stderr warning,
+  as undeclared ampacity targets do.
+
+Limits apply only where an entry declares them, so a map without these fields
+changes nothing.
+
+**Requiring a policy (opt-in).**  `kct check --require-routing-policy` also
+fails every *sensitive* class — an entry with `length_critical`,
+`noise_sensitive`, `length_match_group` or `diffpair_partner` set, and with
+routed copper — that declares neither field.  Pour nets (`is_pour_net`) are
+exempt.  One `error` is reported per class `name`, listing its nets.  The flag
+needs a net-class map: without one (or with `--no-net-class-map`, or with
+`routing_policy` deselected) the command exits 1 with a usage error rather
+than passing.
+
+## CLI: Waivers, Revision Diffs and Coverage (Issue #5946)
+
+### Evidence-bound waivers
+
+Every `kct check` finding in `--format json` carries two handles:
+
+- `key` names *what* the finding is about: `rule_id|items|nets|layer`, sorted
+  and independent of location or wording. For example,
+  `courtyards_overlap|C52,U10||F.Cu`. Tracks, arcs and vias are named by
+  their geometry, not their UUID, so a re-route that lays down the same
+  copper (seeded or not) keeps the same keys:
+  `Trace@<layer>:w<width>:<x1>/<y1>~<x2>/<y2>`,
+  `Arc@<layer>:w<width>:<start>~<mid>~<end>` and
+  `Via@<x>/<y>:<top>-<bottom>:d<drill>/s<size>`, in sheet coordinates
+  rounded to 1 µm with the end points in a fixed order. For example,
+  `clearance_segment_via|Trace@F.Cu:w0.25:24.2/15~24.7/15.5,Via@25.2/14.9:F.Cu-B.Cu:d0.3/s0.6|GND,NET1|F.Cu`.
+  Copper that moves by more than 1 µm gets a new key, so its waiver stops
+  matching (Issue #6088).
+- `evidence_hash` is a hash of the *local evidence*: the finding's location and
+  measured values, the placement and pads of the footprints it names, and the
+  pad membership of the nets it names. For a finding with a location, a net's
+  membership is limited to the pads near the finding: pads whose copper
+  outline (rotation and shape included, so a rectangle's corners count) comes
+  within 3 mm for clearance, width and dimension rules (for example
+  `clearance`, `clearance_*`, `dimensions`, `dimension_*`,
+  `width_consistency`, `mask_to_copper`), 5 mm otherwise, in board
+  coordinates.
+  Adding a `GND` pad across the board therefore leaves a `GND` clearance
+  waiver alone, while adding, removing or moving a nearby pad still makes it
+  stale. Whole-net rules (`connectivity`, `single_pad_net`, `ampacity`,
+  `path_ampacity`, the diff-pair and match-group skew rules and similar) and
+  findings without a location keep the full membership.
+
+To record a reviewed acknowledgment, waive the key:
+
+```bash
+kct check board.kicad_pcb --waive 'courtyards_overlap|C52,U10||F.Cu' \
+    --waive-reason "EE-mandated tight decoupling" --waive-reviewer rjwalters
+```
+
+The command writes a keyed entry, bound to the current hash, to
+`<board>.kct-waivers.json` next to the board. If a waivers file was given with
+`--waivers` or auto-discovered, it writes there instead.
+
+```json
+{
+  "version": 3,
+  "waivers": [
+    {
+      "key": "courtyards_overlap|C52,U10||F.Cu",
+      "evidence_hash": "ev3:3f0c9a1d2b7e4c55",
+      "reason": "EE-mandated tight decoupling",
+      "reviewer": "rjwalters",
+      "date": "2026-10-06"
+    }
+  ]
+}
+```
+
+When the copper or nets under the finding change, the waiver goes **stale**:
+
+- The finding is active again, and its JSON carries `"waiver_status": "stale"`.
+- A `waiver_stale` warning names the entry.
+- `summary.stale_waivers` counts the stale findings.
+
+Re-review the finding, and re-run `--waive` only if it is still intentional.
+
+The hash prefix (`ev3:`) names the evidence recipe. When an upgrade changes
+the recipe, every waiver recorded with an older prefix goes stale once, even
+on an unchanged board. Those are reported as `STALE waiver (outdated evidence
+version)`, and the finding's JSON carries
+`"stale_waiver_cause": "outdated_evidence_version"` instead of
+`"evidence_changed"`. Re-waive them once after upgrading.
+Re-running `--waive` replaces the old entry. Legacy
+`rule`/`items`/`nets` entries (schema 2) still work, and a schema-3 legacy entry
+may add its own `evidence_hash`. Keyed entries apply to `kct check` and
+`kct detect-mistakes`; `kct drc` ignores them.
+
+### Waiving `kct detect-mistakes` findings
+
+`kct detect-mistakes --format json` findings carry the same `key` and
+`evidence_hash`, and take the same keyed waivers in the same sidecar:
+
+```bash
+kct detect-mistakes board.kicad_pcb --waive 'mistake.bypass_cap_distance|C1,U1||' \
+    --waive-reason "C1 is a bulk cap, not a bypass cap" --waive-reviewer rjwalters
+```
+
+A mistake's rule id is `mistake.` plus its check name
+(`mistake.bypass_cap_distance`, `mistake.power_trace_width`, ...). Its
+`components` are split into the key's items, nets (names that are nets on the
+board) and layer (`F.Cu`). The evidence is the `kct check` recipe plus the
+check's structured `measurements` (also in the JSON finding), rounded to the
+precision the explanation quotes: `distance_mm` for bypass caps and crystals,
+`min_width_mm` and `segment_count` for power traces, the two lengths and
+`skew_mm` for differential pairs, `angle_deg` for acid traps, `via_count` for
+thermal pads and the pad sizes for tombstoning. A trace widened from 0.25 mm
+to 0.28 mm, still too narrow, makes a waiver stale. Rewording the explanation
+does not, and neither does tuning a policy threshold (the 3 mm bypass limit,
+the 0.3 mm power-trace minimum): thresholds are not hashed, because a waiver
+records that someone accepted *this* measurement.
+
+Mistake hashes carry their own compound prefix, `ev3.m1:`: the `kct check`
+evidence version plus the measurement recipe version. An upgrade that changes
+either part reports existing mistake waivers as `outdated_evidence_version`;
+an upgrade that changes only the measurement recipe leaves `kct check`
+waivers alone.
+
+Each command applies only its own entries. `kct check` ignores `mistake.*`
+entries, and `kct detect-mistakes` ignores everything else, so neither reports
+the other's waivers as unused. Waived mistakes are listed with
+`"status": "waived"` and never counted in `summary.errors` / `warnings`. Stale
+and unused waivers are reported in a separate `waiver_findings` list, and a
+stale waiver's `waiver_stale` warning fails `--strict`.
+
+### SARIF output for CI
+
+`kct check`, `kct check --diff` and `kct detect-mistakes` accept
+`--format sarif`, a SARIF 2.1.0 log for code-scanning tools:
+
+```bash
+kct check board.kicad_pcb --format sarif > kct-check.sarif
+kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb --format sarif > kct-diff.sarif
+```
+
+- **Level.** `error` stays `error`, `warning` stays `warning`, `info` becomes
+  `note`. A waived finding keeps its level and gets an accepted suppression
+  with the waiver's reason. A stale waiver does not suppress.
+- **Fingerprints.** The finding `key` is `partialFingerprints["kctFindingKey/v1"]`,
+  so one alert is tracked across commits. The `evidence_hash` is
+  `fingerprints["kctEvidence/<version>"]`, where `<version>` is the hash's
+  prefix (`ev3` for `kct check`, `ev3.m1` for `kct detect-mistakes`), so the
+  name follows the evidence version.
+- **Locations.** Each result points at the board file, at the line of the first
+  footprint (or else net) the finding names. The finding's position, in mm in
+  the KiCad file's (sheet) coordinates, and its layer are in the location's
+  `properties.boardLocation` (`"frame": "sheet"`). Closest points are
+  `relatedLocations`.
+- **`--diff`.** Introduced findings have `baselineState: "new"`, changed ones
+  `"updated"`, and resolved ones `"absent"`. Absent results carry no line
+  region, since the finding is gone from the new board file. The diff log
+  leaves out unchanged findings, so it is **not** a full analysis: do not
+  upload it to GitHub code scanning (or similar) as the run for a branch, or
+  every unchanged alert will be closed. Upload the plain
+  `kct check --format sarif` log for that.
+
+### `kct check --diff OLD NEW`
+
+```bash
+kct check --diff old/board.kicad_pcb board.kicad_pcb
+kct check --diff HEAD~3:boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb \
+    boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb --format json
+```
+
+Both sides are checked with the same flags, and their findings are paired by
+`key`:
+
+- **introduced**: new in NEW.
+- **resolved**: gone from OLD.
+- **changed**: same key, but the evidence moved.
+- **unchanged**: same key and same evidence.
+
+Waived findings are excluded. A `REV:path` side exports the board's directory
+at that git revision, so sidecars next to the board come along. The diff also
+lists coverage changes. It exits 2 when NEW introduces error findings, or
+warnings under `--strict`.
+
+### Coverage: unknown is not pass
+
+The JSON report has a `coverage` map with one entry per check category. Each
+entry gives a `status` of `checked`, `skipped:<reason>` or `unknown:<reason>`,
+plus `blocking`. A `summary.coverage_blocking_unknown` list rolls them up.
+
+`unknown` means the check should have had something to say but could not
+evaluate the board. Examples:
+
+- `segment_zone` / `via_zone` with `zone_fills_absent`: the zones have no
+  committed fill, so there was nothing to measure.
+- Diff-pair skew or continuity with `needs_input:net_class_map` on a board
+  with diff-pair-named nets.
+- `netclass_floor` or `netclass_clearance_copper` with an unreadable `.kicad_pro`.
+- `courtyard_overlap` with `no_courtyard_geometry (N of M footprints)`: N
+  footprints have no `F.CrtYd`/`B.CrtYd` outline (each also gets a
+  `courtyard_missing` warning) or one that does not resolve to a polygon, so
+  their overlaps were never tested. Add the courtyards, or set
+  `(attr ... allow_missing_courtyard)` on a part with no body. Footprints with
+  no pads, `board_only` footprints and the `MountingHole:`, `Fiducial:` and
+  `NetTie:` libraries are exempt (Issue #7204).
+
+`skipped` means the check did not apply, for example because nothing was
+declared to verify or it was deselected. The table output prints every
+`unknown` category under a `Coverage:` line. The `kct check` exit code does not
+change. Sign-off (`kct readiness`, `/kct:tapeout`) refuses while any
+**blocking** check is `unknown` or any waiver is stale.
+
+## Project rules: missing or stock-default `.kicad_pro` (Issue #8643)
+
+`kicad-cli pcb drc` silently uses KiCad's default rules when no
+`<stem>.kicad_pro` / `.kicad_dru` sits beside the board. Worse,
+`pcbnew.SaveBoard` writes a **stock default** `.kicad_pro` next to its output
+when none exists, so a script that saves a work copy produces a project that
+looks real but carries none of the board's rules. Scripts that save copies must
+call `kicad_tools.sidecars.copy_project_sidecars(src, dst)` (#8366) first.
+
+`kct check` now prints a `project_missing` / `project_default` warning to stderr
+and lists it in the top-level `project_rules` array of `--format json` (always
+present, empty when clean). Findings are warnings: they do not change the exit
+code. `kct readiness` records `project_default` under `warnings`.
+
+## CLI: Compare Manufacturer Rules
+
+See how different fabs compare:
+
+```bash
+# Compare 2-layer rules (most common)
+kct mfr compare --layers 2
+
+# Compare 4-layer rules
+kct mfr compare --layers 4
+```
+
+Output for 2-layer:
+```
+======================================================================
+MANUFACTURER COMPARISON - 2-LAYER 1.0oz
+======================================================================
+Constraint                      JLCPCB      OSHPARK       PCBWAY       SEEED
+----------------------------------------------------------------------
+Trace width (mil)                  5.0         6.0          5.0         6.0
+Clearance (mil)                    5.0         6.0          5.0         6.0
+Via drill (mm)                    0.30        0.25         0.20        0.30
+Via diameter (mm)                 0.60        0.51         0.40        0.60
+Annular ring (mm)                 0.15        0.13         0.10        0.15
+Copper-to-edge (mm)               0.30        0.38         0.25        0.50
+----------------------------------------------------------------------
+Assembly                           Yes          No          Yes         Yes
+Parts Library                     LCSC        None       Global   Seeed OPL
+
+======================================================================
+```
+
+Note: 2-layer boards typically have slightly relaxed via constraints compared to 4-layer, but may have stricter trace width requirements when using 2oz copper.
+
+## Python API: Get Manufacturer Rules
+
+```python
+from kicad_tools.manufacturers import get_profile, list_manufacturers
+
+# Get JLCPCB profile
+jlc = get_profile("jlcpcb")
+
+# Get design rules for 2-layer board (most common for hobbyist projects)
+rules_2l = jlc.get_design_rules(layers=2, copper_oz=1.0)
+
+print(f"JLCPCB 2-layer 1oz rules:")
+print(f"  Min trace width: {rules_2l.min_trace_width_mm}mm")  # 0.127mm (5 mil)
+print(f"  Min clearance: {rules_2l.min_clearance_mm}mm")
+print(f"  Min via drill: {rules_2l.min_via_drill_mm}mm")
+
+# Get design rules for 4-layer board
+rules_4l = jlc.get_design_rules(layers=4, copper_oz=1.0)
+
+print(f"\nJLCPCB 4-layer rules:")
+print(f"  Min trace width: {rules_4l.min_trace_width_mm}mm")  # 0.1016mm (4 mil)
+print(f"  Min clearance: {rules_4l.min_clearance_mm}mm")
+print(f"  Min via drill: {rules_4l.min_via_drill_mm}mm")
+
+# 2oz copper has wider minimum trace requirements
+rules_2oz = jlc.get_design_rules(layers=2, copper_oz=2.0)
+print(f"\nJLCPCB 2-layer 2oz rules:")
+print(f"  Min trace width: {rules_2oz.min_trace_width_mm}mm")  # 0.1524mm (6 mil)
+```
+
+## Python API: Compare All Manufacturers
+
+```python
+from kicad_tools.manufacturers import compare_design_rules
+
+# Get rules for all manufacturers
+rules = compare_design_rules(layers=4, copper_oz=1.0)
+
+print("Manufacturer Comparison (4-layer):")
+print("-" * 50)
+
+for mfr_id, dr in rules.items():
+    print(f"\n{mfr_id.upper()}:")
+    print(f"  Trace: {dr.min_trace_width_mm}mm")
+    print(f"  Clearance: {dr.min_clearance_mm}mm")
+    print(f"  Via drill: {dr.min_via_drill_mm}mm")
+```
+
+## Python API: Find Compatible Manufacturers
+
+Check which fabs can build your design:
+
+```python
+from kicad_tools.manufacturers import find_compatible_manufacturers
+
+# Your design constraints
+compatible = find_compatible_manufacturers(
+    trace_width_mm=0.15,  # Your minimum trace
+    clearance_mm=0.15,  # Your minimum clearance
+    via_drill_mm=0.3,  # Your minimum via drill
+    layers=4,
+    needs_assembly=True,  # Need PCBA service
+)
+
+print("Compatible manufacturers for your design:")
+for mfr in compatible:
+    print(f"  - {mfr.name} ({mfr.website})")
+```
+
+## Python API: Parse DRC Reports
+
+If you've already run KiCad's DRC, parse the report file:
+
+```python
+from kicad_tools.drc import DRCReport
+
+# Parse a DRC report
+report = DRCReport.load("board-drc.rpt")
+
+print(f"DRC Results:")
+print(f"  Errors: {report.error_count}")
+print(f"  Warnings: {report.warning_count}")
+
+# List all violations
+for violation in report.errors:
+    print(f"  ERROR [{violation.type}]: {violation.message}")
+    if violation.location:
+        print(f"    at ({violation.location.x}, {violation.location.y})")
+
+for violation in report.warnings:
+    print(f"  WARN [{violation.type}]: {violation.message}")
+```
+
+## Python API: Custom Rule Checking
+
+Check specific rules against your design:
+
+```python
+from kicad_tools import PCB
+from kicad_tools.drc import check_manufacturer_rules
+
+# Load PCB
+pcb = PCB.load("board.kicad_pcb")
+
+# Check against JLCPCB rules
+result = check_manufacturer_rules(pcb, "jlcpcb")
+
+if result.passed:
+    print("Design passes JLCPCB rules!")
+else:
+    print("Design violates JLCPCB rules:")
+    for violation in result.violations:
+        print(f"  - {violation}")
+```
+
+## Default-on under `--mfr jlcpcb`: Mask-to-Copper (Issue #8842)
+
+`kct check <board> --mfr jlcpcb` runs the native `mask_to_copper` check with an
+interim policy (error below 0.09 mm, warning at <=0.15 mm) and no extra config.
+Without native KiCad 10.0.5 it reports `incomplete`, never a silent pass; use
+`--skip mask_to_copper` to opt out. Details: [mask-to-copper](mask-to-copper.md).
+
+## Advisory: Trace Width Consistency (`width_consistency`)
+
+A board can pass DRC and still be full of width steps that nobody chose,
+such as a short 0.4 mm stub in the middle of a 0.2 mm track, or a power
+trace necked down to signal width where nothing nearby requires it. The
+`width_consistency` category is a geometric heuristic for triaging these.
+It does not check ampacity or impedance; use `ampacity` / `impedance` for
+electrical intent.
+
+```bash
+kct check board.kicad_pcb --only width_consistency --format json
+```
+
+On each copper layer and net, tracks are split into **chains** between
+pads, vias and branch points, and each chain is split into constant-width
+**runs**. The check reports two things:
+
+- **`width_island`** (warning): a run inside a chain that has narrower
+  copper on both sides and is shorter than `max_island_length_mm`
+  (default 3 mm).
+- **`width_transition`** (warning): a width change on a two-terminal
+  (pad/via to pad/via, no branches) chain where the neck-down is **not
+  justified**. A neck-down is justified if widening the whole narrow run
+  to the wide width would come within the clearance of other-net
+  tracks/pads/vias on the same layer, or if the narrow run enters a pad
+  narrower than the wide width. The message gives the nearest other-net
+  obstacle and the gap before and after widening.
+
+Foreign-net zone fills never justify a neck-down, because a pour re-flows
+around a widened track on refill. Board edges, keepouts and T-junctions
+that land in the middle of a track are not modelled.
+
+The check is **opt-in**. A plain `kct check` and `DRCChecker.check_all()`
+don't run it, so enabling it never changes an existing board's verdict.
+Request it with `--only width_consistency` (it can be combined with other
+categories), call `DRCChecker.check_width_consistency()`, or set
+`checker.width_consistency_options = {}` (or a dict of rule options) to
+include it in `check_all()`. Findings are
+in the advisory-quality bucket, so they only fail the run under
+`--strict`, and they can be waived per net or per track UUID in
+`.kct_waivers.json`. To tune the check, construct the rule directly:
+
+```python
+from kicad_tools.validate.rules import WidthConsistencyRule
+
+rule = WidthConsistencyRule(
+    max_island_length_mm=2.0,
+    clearance_mm=0.15,  # default: design_rules.min_clearance_mm
+    report_justified=True,  # also emit justified neck-downs as info
+    severity="warning",
+)
+results = rule.check(pcb, design_rules)
+```
+
+## Common DRC Issues and Fixes
+
+### Trace Width Too Small
+
+**Error:** `Trace width (0.1mm) below minimum (0.127mm)`
+
+**Fix:** Increase trace width in KiCad:
+1. Edit → Board Setup → Design Rules
+2. Set minimum track width to manufacturer's limit
+
+### Clearance Too Small
+
+**Error:** `Clearance (0.1mm) below minimum (0.127mm)`
+
+**Fix:** Adjust clearance rules:
+1. Edit → Board Setup → Design Rules
+2. Set minimum clearance to manufacturer's limit
+
+### Via Drill Too Small
+
+**Error:** `Via drill (0.2mm) below minimum (0.3mm)`
+
+**Fix:** Update via settings:
+1. Edit → Board Setup → Design Rules → Predefined Sizes
+2. Add via sizes that meet manufacturer limits
+
+### Annular Ring Too Small
+
+**Error:** `Via annular ring (0.1mm) below minimum (0.13mm)`
+
+**Fix:** Via annular ring = (via diameter - drill diameter) / 2
+
+Increase via pad size or use larger drill.
+
+### PTH Annular Ring and Hole-to-Edge Rules
+
+The generated `.kicad_dru` file carries two rules that are easy to confuse
+with the via annular-ring and copper-to-edge rules above. Both are written by
+`src/kicad_tools/manufacturers/dru_generator.py`.
+
+- **PTH annular ring is its own rule.** `Annular Ring` is the via ring
+  (`A.Via_Type != 'Micro'`, ~line 465). `PTH Annular Ring` is a separate
+  `annular_width` rule scoped to `A.Type == 'pad'` (~line 471), so a plated
+  component pad can be held to a wider ring than a via.
+- **It is emitted only when the profile sets it.** The rule is skipped when
+  `min_pth_annular_ring_mm` is `None` (the default in
+  `manufacturers/base.py`), in which case pads fall back to the shared ring
+  behaviour and no `PTH Annular Ring` finding can appear. The JLCPCB profiles
+  set it (e.g. 0.18 mm in `data/jlcpcb_tier1.yaml`).
+- **`Hole to Edge` measures against the board edge only.** The rule applies
+  to `A.Type == 'via' || 'pad'` against `B.Layer == 'Edge.Cuts'` using
+  `physical_hole_clearance` with `min_hole_to_edge_mm` (~line 484). A pad next
+  to a neighbouring pad's hole, ten millimetres from the edge, is therefore
+  not held to the board-edge floor.
+- **Hole-to-hole spacing is a different knob** (`min_hole_to_hole_mm`) and is
+  not covered by these two rules.
+
+Both behaviours are exercised against native `kicad-cli pcb drc` by
+`tests/test_native_pth_rules.py` (skipped when `kicad-cli` is not installed):
+the 0.7 mm pad / 0.4 mm drill probe (0.15 mm ring) violates the 2-layer
+profile's floor but not the 4-layer one, and `Hole to Edge` fires only when the
+pads sit within 1 mm of the edge. The line numbers above are as of this writing; the rule
+names in the generated file are the stable handle.
+
+### Via Type Not Supported by the Fab
+
+**Error:** `via_type_unsupported` — `Blind via at (105.000, 100.000) on F.Cu-In1.Cu (net 'SIG'): the current manufacturer profile does not support blind/buried vias (blind_buried_vias_supported=False). ...`
+
+KiCad decides what a fab must drill from a via's type keyword: `(via blind ...)`
+and `(via buried ...)` need sequential lamination or controlled-depth drilling,
+and `(via micro ...)` needs laser drilling. A keyword-less via is a through via
+whatever its layer pair says. The `via_type` category errors on every typed via
+whose capability the `--mfr` profile lacks (`blind_buried_vias_supported`,
+`micro_vias_supported`). Both default to `false`, and no shipped profile claims
+either yet, so the check fails closed until a fab's published capability is
+sourced into its profile YAML.
+
+**Fix:** replace the via with a through via, or skip the category
+(`--skip via_type`) when your order includes the HDI process.
+
+### Via Under Package Body
+
+**Warning:** `via_under_body` — `Via@112.5/80.25:F.Cu-B.Cu:d0.3/s0.6 (net 'SDA') ... is under the package body of U3 (Package_DFN_QFN:QFN-24-1EP_4x4mm...)`
+
+KiCad's DRC accepts a via hidden under a QFN/DFN/SON/LGA body as long as it
+clears the pads, but after assembly it can't be probed, inspected or
+reworked, and an untented via under a bottom-terminated part can short to
+the exposed body. The body outline is the footprint's `F.Fab`/`B.Fab`
+outline, falling back to the courtyard when the footprint has no Fab
+outline. Thermal vias inside the part's own exposed pad, on that pad's
+net, are allowed.
+
+**Fix:** Move the via outside the package outline, or waive it in
+`.kct_waivers.json` with `"items": ["Via@112.5/80.25:F.Cu-B.Cu:d0.3/s0.6", "U3"]`
+(the via is named by its position, layer span, drill and size). The rule is
+advisory (warning severity), so it only fails `kct check` under `--strict`.
+It is on by default, so a board that passed `--strict` (or any gate that
+counts warnings) before upgrading can newly fail on it. To opt out of the
+whole category, run `kct check --strict --skip via_under_body`. Prefer
+waivers when only a few vias are affected, because they keep the check
+active for the rest of the board.
+From the Python API, `ViaUnderBodyRule` takes `footprint_pattern` (default
+`QFN|DFN|SON|LGA`; QFP and BGA are opt-in), `include_references`,
+`exclude_references`, `allow_thermal_pad_vias`, `fallback_to_courtyard`
+and `severity`.
+
+### Missing or Hidden Pin-1 Marker
+
+**Warning:** `pin1_marker_missing` — `U2 (Package_QFP:LQFP-48_7x7mm_P0.5mm) has no silkscreen pin-1 / polarity marker within 2.5mm of pad 1`
+(or `pin1_marker_obscured` when the only mark is under the package body or on pad copper)
+
+ICs, diodes, LEDs, polarized capacitors and connectors (any footprint with
+3+ copper pads including pad `1`/`A1`, plus `Diode_*`, `LED_*` and `CP_*`
+parts) need a silkscreen element next to pad 1 that points at it: closer to
+pad 1 than to any other pad, and at least partly outside the Fab body
+outline and pad copper. Touching silk lines are also judged as one shape, so
+an L-shaped corner (as on KiCad's stock crystal footprints) counts when its
+centroid is closer to pad 1 than to any other pad. A symmetric body outline
+doesn't count, and neither does a mark drawn only on `F.Fab`. Passives, test points, mounting holes,
+switches and keyed USB-C / coax connectors are skipped.
+
+**Fix:** Add a dot, triangle or bar on `F.SilkS`/`B.SilkS` beside pad 1 and
+outside the body. Alternatively, waive it in `.kct_waivers.json` with
+`"items": ["U2"]`. The rule is advisory (warning severity), so it only fails
+`kct check` under `--strict`. It is on by default, so a board that passed
+`--strict` (or any gate that counts warnings) before upgrading can newly
+fail on it. To opt out of the whole category, run
+`kct check --strict --skip pin1_marker`. To skip both new categories at
+once, use `--skip via_under_body,pin1_marker`. Prefer per-reference waivers
+when only a few parts are affected. From the Python API, `Pin1MarkerRule` takes
+`min_pads`, `polarized_pattern`, `exclude_pattern`, `include_references`,
+`exclude_references`, `search_radius_mm`, `require_asymmetry`,
+`include_board_silk` and `severity`.
+
+## Complete Example: Pre-Fab Validation
+
+```python
+#!/usr/bin/env python3
+"""Validate PCB design against manufacturer rules before ordering."""
+
+from kicad_tools import PCB
+from kicad_tools.manufacturers import get_profile, find_compatible_manufacturers
+from kicad_tools.drc import DRCReport, check_manufacturer_rules
+
+
+def validate_for_manufacturing(
+    pcb_path: str,
+    manufacturer: str = "jlcpcb",
+    layers: int = 2,
+    copper_oz: float = 1.0,
+):
+    """Run comprehensive manufacturing validation."""
+
+    print(f"Validating: {pcb_path}")
+    print(f"Target manufacturer: {manufacturer.upper()}")
+    print(f"Configuration: {layers}-layer, {copper_oz}oz copper")
+    print("=" * 50)
+
+    # Load PCB
+    pcb = PCB.load(pcb_path)
+
+    # Get manufacturer profile with layer-specific rules
+    mfr = get_profile(manufacturer)
+    rules = mfr.get_design_rules(layers=layers, copper_oz=copper_oz)
+
+    print(f"\n{mfr.name} {layers}-layer {copper_oz}oz Design Rules:")
+    print(f"  Min trace: {rules.min_trace_width_mm}mm ({rules.min_trace_width_mil:.1f} mil)")
+    print(f"  Min clearance: {rules.min_clearance_mm}mm")
+    print(f"  Min via drill: {rules.min_via_drill_mm}mm")
+
+    # Check against rules
+    result = check_manufacturer_rules(pcb, manufacturer, layers=layers)
+
+    print(f"\nDesign Check:")
+    if result.passed:
+        print("  ✓ All checks passed!")
+    else:
+        print("  ✗ Violations found:")
+        for v in result.violations:
+            print(f"    - {v}")
+
+    # Find all compatible manufacturers for 2-layer boards
+    print(f"\nCompatible Manufacturers ({layers}-layer):")
+    compatible = find_compatible_manufacturers(
+        trace_width_mm=0.15,
+        clearance_mm=0.15,
+        via_drill_mm=0.3,
+        layers=layers,
+        needs_assembly=True,
+    )
+
+    for m in compatible:
+        marker = "→" if m.id == manufacturer else " "
+        print(f"  {marker} {m.name}")
+
+    return result.passed
+
+
+if __name__ == "__main__":
+    import sys
+
+    pcb_file = sys.argv[1] if len(sys.argv) > 1 else "board.kicad_pcb"
+    mfr = sys.argv[2] if len(sys.argv) > 2 else "jlcpcb"
+    layers = int(sys.argv[3]) if len(sys.argv) > 3 else 2  # Default to 2-layer
+    validate_for_manufacturing(pcb_file, mfr, layers=layers)
+```
+
+## Next Steps
+
+- **[Manufacturing Export](manufacturing-export.md)** - Generate Gerbers and assembly files
+- **[Query API](query-api.md)** - Advanced PCB analysis

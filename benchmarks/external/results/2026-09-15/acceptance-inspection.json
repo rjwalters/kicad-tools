@@ -1,0 +1,86 @@
+{
+  "observed_at": "2026-09-15T05:30:29.404700+00:00",
+  "checks": {
+    "normalized_hash_matches": true,
+    "source_hash_unchanged": true,
+    "protected_snapshot_exact": true,
+    "native_backend": true,
+    "zero_touch": true,
+    "commit_matches": true,
+    "actual_router_output": true,
+    "nonzero_route_exit": true,
+    "new_valid_copper": true,
+    "no_new_invalid_segments": true,
+    "no_clean_success": true,
+    "blocked_population_matches": true,
+    "invalid_not_completed": true,
+    "measured_progress": true
+  },
+  "all_checks_pass": true,
+  "output_sha256": "174a307de2299b741959b4885aeb5d53a702a2f899301f38598a10d7d289cbae",
+  "source_sha256": "9747958c13a5c625ddd15df7afb3a5a100b6877c134e63c861a2a4c351312d9d",
+  "invalid_references": [
+    "SH1"
+  ],
+  "invalid_nets": [
+    "GND"
+  ],
+  "route_outcome": {
+    "outcome": "partial",
+    "artifact_source": "router_output",
+    "exit_code": 2,
+    "reason": "the router exited 2 (non-zero) but wrote an output file for this attempt -- measuring the partial progress it made, not treating this as success"
+  },
+  "completion": {
+    "connections_routed": 197,
+    "connections_total": 460,
+    "completion_pct": 42.83,
+    "nets_total": 161,
+    "nets_complete": 54,
+    "nets_incomplete": 107,
+    "nets_unrouted": 0,
+    "nets_blocking_incomplete": 98
+  },
+  "newly_routed_connections": 79,
+  "copper": {
+    "via_count": 1,
+    "wirelength_mm": 193.06,
+    "segment_count": 497,
+    "arc_count": 0,
+    "wirelength_by_layer_mm": {
+      "B.Cu": 104.88,
+      "F.Cu": 88.18
+    }
+  },
+  "timing": {
+    "wall_clock_s": 2175.907,
+    "valid": true,
+    "refusal_reason": null,
+    "measured_phase": "partial"
+  },
+  "kct_check": {
+    "ran": false,
+    "passed": null,
+    "error_count": null,
+    "warning_count": null,
+    "errors_by_rule": {},
+    "note": "kct check failed: ValueError: Unsupported routing geometry 'custom' for pad U6.9; use circle, rect, oval, or roundrect pads without a padstack, or route this board with a router supporting its full copper geometry."
+  },
+  "kicad_cli_drc": {
+    "ran": true,
+    "violation_count": 383,
+    "by_type": {
+      "clearance": 17,
+      "copper_edge_clearance": 31,
+      "courtyards_overlap": 3,
+      "hole_clearance": 55,
+      "invalid_outline": 199,
+      "npth_inside_courtyard": 6,
+      "solder_mask_bridge": 16,
+      "starved_thermal": 55,
+      "zones_intersect": 1
+    },
+    "note": null
+  },
+  "scope": "Preservation and useful-partial-result checks; does not attest to manufacturing or whole-board DRC acceptance."
+}

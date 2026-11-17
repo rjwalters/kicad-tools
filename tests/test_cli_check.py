@@ -1,0 +1,2130 @@
+"""Tests for kct check CLI command (pure Python DRC)."""
+
+import json
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BOARD_00_DIR = REPO_ROOT / "boards" / "00-simple-led" / "output"
+BOARD_00_SCH = BOARD_00_DIR / "simple_led.kicad_sch"
+BOARD_00_PCB = BOARD_00_DIR / "simple_led_routed.kicad_pcb"
+BOARD_00_MANIFEST = BOARD_00_DIR / "manufacturing" / "manifest.json"
+
+
+class TestCheckCommand:
+    """Tests for the check CLI command."""
+
+    def test_check_file_not_found(self, capsys):
+        """Test check command with missing file."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main(["nonexistent.kicad_pcb"])
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower() or "Error" in captured.err
+
+    def test_check_wrong_extension(self, capsys, tmp_path: Path):
+        """Test check command with wrong file extension."""
+        from kicad_tools.cli.check_cmd import main
+
+        wrong_file = tmp_path / "test.txt"
+        wrong_file.write_text("not a pcb")
+
+        result = main([str(wrong_file)])
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert ".kicad_pcb" in captured.err
+
+    def test_check_basic_table_output(self, drc_clean_pcb: Path, capsys):
+        """Test check command with table output format.
+
+        Note (issue #3750): tmp PCBs have no sibling schematic / manifest,
+        so the meta-check rollup is INCOMPLETE.  Pass ``--allow-incomplete``
+        to assert the legacy "DRC clean -> exit 0" contract under the new
+        default where INCOMPLETE exits non-zero.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "PURE PYTHON DRC CHECK" in captured.out
+        assert "DRC PASSED" in captured.out or "Results:" in captured.out
+
+    def test_check_json_output(self, drc_clean_pcb: Path, capsys):
+        """Test check command with JSON output format."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--format", "json", "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Verify JSON structure
+        assert "file" in data
+        assert "manufacturer" in data
+        assert "layers" in data
+        assert "summary" in data
+        assert "violations" in data
+        assert "passed" in data["summary"]
+        assert data["summary"]["passed"] is True  # No violations with clean PCB
+
+    def test_check_summary_output(self, drc_clean_pcb: Path, capsys):
+        """Test check command with summary output format."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--format", "summary", "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "DRC" in captured.out
+
+    def test_check_manufacturer_option(self, drc_clean_pcb: Path, capsys):
+        """Test check command with manufacturer option."""
+        from kicad_tools.cli.check_cmd import main
+
+        # Test with different manufacturers
+        for mfr in ["jlcpcb", "seeed", "pcbway", "oshpark"]:
+            result = main([str(drc_clean_pcb), "--mfr", mfr, "--allow-incomplete"])
+            assert result == 0, f"Failed for manufacturer {mfr}"
+
+    def test_check_layers_option(self, drc_clean_pcb: Path, capsys):
+        """Test check command with layers option."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--layers", "4", "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "4" in captured.out  # Layer count should appear in output
+
+    def test_check_only_filter(self, drc_clean_pcb: Path, capsys):
+        """Test check command with --only filter."""
+        from kicad_tools.cli.check_cmd import main
+
+        # Run only clearance checks
+        result = main([str(drc_clean_pcb), "--only", "clearance", "--allow-incomplete"])
+        assert result == 0
+
+        # Run multiple categories
+        result = main([str(drc_clean_pcb), "--only", "clearance,dimensions", "--allow-incomplete"])
+        assert result == 0
+
+    def test_check_skip_filter(self, drc_clean_pcb: Path, capsys):
+        """Test check command with --skip filter."""
+        from kicad_tools.cli.check_cmd import main
+
+        # Skip silkscreen checks
+        result = main([str(drc_clean_pcb), "--skip", "silkscreen", "--allow-incomplete"])
+        assert result == 0
+
+        # Skip multiple categories
+        result = main([str(drc_clean_pcb), "--skip", "silkscreen,edge", "--allow-incomplete"])
+        assert result == 0
+
+    def test_check_invalid_filter_category(self, minimal_pcb: Path, capsys):
+        """Test check command with invalid filter category."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(minimal_pcb), "--only", "invalid_category"])
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Unknown check category" in captured.err
+
+    def test_check_errors_only_flag(self, drc_clean_pcb: Path, capsys):
+        """Test check command with --errors-only flag."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--errors-only", "--allow-incomplete"])
+        assert result == 0  # No errors with clean PCB
+
+    def test_check_verbose_flag(self, drc_clean_pcb: Path, capsys):
+        """Test check command with --verbose flag."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--verbose", "--allow-incomplete"])
+        assert result == 0
+
+    def test_check_copper_weight_option(self, drc_clean_pcb: Path, capsys):
+        """Test check command with copper weight option."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--copper", "2.0", "--allow-incomplete"])
+        assert result == 0
+
+    def test_check_help_text(self, capsys):
+        """Test check command help text."""
+        from kicad_tools.cli.check_cmd import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "Pure Python DRC" in captured.out or "kct check" in captured.out
+
+
+class TestCheckOutputFlag:
+    """Tests for the --output flag that writes JSON report to file."""
+
+    def test_output_writes_json_file(self, drc_clean_pcb: Path, tmp_path: Path):
+        """Test that --output writes a valid JSON report file."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "drc_report.json"
+        result = main([str(drc_clean_pcb), "--output", str(output_file), "--allow-incomplete"])
+        assert result == 0
+
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert "file" in data
+        assert "summary" in data
+        assert "violations" in data
+        assert data["summary"]["passed"] is True
+
+    def test_output_with_table_format(self, drc_clean_pcb: Path, tmp_path: Path, capsys):
+        """Test that --output writes JSON file even with table format (default)."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "drc_report.json"
+        result = main([str(drc_clean_pcb), "--output", str(output_file), "--allow-incomplete"])
+        assert result == 0
+
+        # Table output should still go to stdout
+        captured = capsys.readouterr()
+        assert "PURE PYTHON DRC CHECK" in captured.out
+
+        # JSON file should also be written
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert data["summary"]["passed"] is True
+
+    def test_output_creates_parent_directories(self, drc_clean_pcb: Path, tmp_path: Path):
+        """Test that --output creates parent directories if needed."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "subdir" / "nested" / "drc_report.json"
+        result = main([str(drc_clean_pcb), "--output", str(output_file), "--allow-incomplete"])
+        assert result == 0
+
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert "summary" in data
+
+    def test_output_without_flag_no_file(self, drc_clean_pcb: Path, tmp_path: Path, capsys):
+        """Test that no file is written when --output is not specified."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+
+        # No drc_report.json should exist in the PCB directory
+        report = drc_clean_pcb.parent / "drc_report.json"
+        assert not report.exists()
+
+    def test_output_with_violations(self, minimal_pcb: Path, tmp_path: Path):
+        """Test that --output captures violations in the report file."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "drc_report.json"
+        result = main([str(minimal_pcb), "--output", str(output_file)])
+        assert result == 2  # Violations found
+
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert data["summary"]["passed"] is False
+        assert data["summary"]["errors"] > 0
+        assert len(data["violations"]) > 0
+
+
+class TestCheckCommandIntegration:
+    """Integration tests for check command via main CLI."""
+
+    def test_check_via_main_cli(self, drc_clean_pcb: Path, capsys):
+        """Test check command through the main CLI dispatcher."""
+        from kicad_tools.cli import main
+
+        result = main(["check", str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "DRC" in captured.out
+
+    def test_check_via_main_cli_with_options(self, drc_clean_pcb: Path, capsys):
+        """Test check command through main CLI with options."""
+        from kicad_tools.cli import main
+
+        result = main(
+            [
+                "check",
+                str(drc_clean_pcb),
+                "--mfr",
+                "seeed",
+                "--layers",
+                "4",
+                "--format",
+                "json",
+                "--allow-incomplete",
+            ]
+        )
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["manufacturer"] == "seeed"
+        assert data["layers"] == 4
+
+
+class TestCheckExitCodes:
+    """Tests for check command exit codes."""
+
+    def test_exit_code_0_no_violations(self, drc_clean_pcb: Path):
+        """Test exit code 0 when no violations found (with --allow-incomplete).
+
+        Issue #3750: tmp PCBs have no sibling schematic / manifest, so
+        the meta rollup is INCOMPLETE.  The opt-in flag preserves the
+        "DRC clean -> 0" semantics for this test.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+
+    def test_exit_code_0_warnings_only_no_strict(self, drc_clean_pcb: Path):
+        """Test exit code 0 with warnings when not in strict mode."""
+        from kicad_tools.cli.check_cmd import main
+
+        # With clean PCB, no warnings to test
+        # But this confirms the code path works
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+
+    def test_exit_code_with_strict_flag(self, drc_clean_pcb: Path):
+        """Test that --strict flag is preserved under --drc-only.
+
+        Note (issue #3750): in the default meta-check mode, ``--strict``
+        also rolls ``NOT RUN`` sub-checks up to ``FAILED`` (so a fresh
+        in-tmp PCB with no sibling schematic exits 2 under ``--strict``).
+        The legacy "warnings only matter under --strict, no errors -> 0"
+        contract now lives behind ``--drc-only``.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        # With clean PCB returning no violations and DRC-only mode,
+        # --strict has no effect (no warnings to escalate).
+        result = main([str(drc_clean_pcb), "--strict", "--drc-only"])
+        assert result == 0
+
+    def test_exit_code_2_with_violations(self, minimal_pcb: Path):
+        """Test exit code 2 when DRC violations are found.
+
+        Exit code 2 means the check ran successfully but found errors.
+        Exit code 1 is reserved for tool-level failures (file not found, etc.).
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        # minimal_pcb has a trace overlapping a pad, causing a clearance violation
+        result = main([str(minimal_pcb)])
+        assert result == 2  # Errors found (tool ran OK, board has issues)
+
+    def test_exit_code_1_for_tool_error(self, capsys):
+        """Test exit code 1 for tool-level errors (file not found)."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main(["nonexistent_board.kicad_pcb"])
+        assert result == 1  # Tool error
+
+
+class TestCheckJsonSchema:
+    """Tests for check command JSON output schema."""
+
+    def test_json_schema_complete(self, drc_clean_pcb: Path, capsys):
+        """Test that JSON output contains all required fields."""
+        from kicad_tools.cli.check_cmd import main
+
+        main([str(drc_clean_pcb), "--format", "json"])
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Required top-level fields
+        assert "file" in data
+        assert "manufacturer" in data
+        assert "layers" in data
+        assert "summary" in data
+        assert "violations" in data
+
+        # Required summary fields
+        assert "errors" in data["summary"]
+        assert "warnings" in data["summary"]
+        assert "rules_checked" in data["summary"]
+        assert "passed" in data["summary"]
+
+        # violations should be a list
+        assert isinstance(data["violations"], list)
+
+    def test_json_output_is_ci_friendly(self, drc_clean_pcb: Path, capsys):
+        """Test that JSON output can be parsed by CI tools."""
+        from kicad_tools.cli.check_cmd import main
+
+        main([str(drc_clean_pcb), "--format", "json"])
+        captured = capsys.readouterr()
+
+        # Should be parseable without errors
+        data = json.loads(captured.out)
+
+        # CI-friendly check: summary.passed is a boolean
+        assert isinstance(data["summary"]["passed"], bool)
+
+        # CI-friendly check: counts are integers
+        assert isinstance(data["summary"]["errors"], int)
+        assert isinstance(data["summary"]["warnings"], int)
+
+
+class TestCheckLayerAutoDetection:
+    """Tests for automatic copper layer count detection."""
+
+    def test_auto_detect_2_layer_board(self, drc_clean_pcb: Path, capsys):
+        """Test that a 2-layer board auto-detects 2 layers (no regression)."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--format", "json", "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 2
+
+    def test_auto_detect_4_layer_board(self, four_layer_pcb: Path, capsys):
+        """Test that a 4-layer board auto-detects 4 layers without --layers flag."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(four_layer_pcb), "--format", "json", "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 4
+
+    def test_auto_detect_6_layer_board(self, six_layer_pcb: Path, capsys):
+        """Test that a 6-layer board auto-detects 6 layers."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(six_layer_pcb), "--format", "json", "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 6
+
+    def test_explicit_layers_overrides_detection(self, four_layer_pcb: Path, capsys):
+        """Test that --layers flag overrides auto-detection."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main(
+            [str(four_layer_pcb), "--layers", "2", "--format", "json", "--allow-incomplete"]
+        )
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 2
+
+    def test_auto_detect_4_layer_table_output(self, four_layer_pcb: Path, capsys):
+        """Test that table output shows auto-detected layer count."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(four_layer_pcb), "--allow-incomplete"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Layers: 4" in captured.out
+
+    def test_help_text_mentions_auto_detection(self, capsys):
+        """Test that --layers help text indicates auto-detection."""
+        from kicad_tools.cli.check_cmd import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "auto-detect" in captured.out.lower()
+
+
+def _swap_d1_pad_nets_in_pcb(src_pcb: Path, dest_pcb: Path) -> Path:
+    """Copy ``src_pcb`` to ``dest_pcb`` with D1's pad nets swapped.
+
+    Mirrors the helper in ``tests/test_board_00_lvs.py`` so the LVS
+    sub-check can be exercised against a deliberately mismatched PCB
+    without re-running the router.
+    """
+    from kicad_tools.lvs import _ref_of
+    from kicad_tools.sexp import SExp, parse_file
+
+    doc = parse_file(src_pcb)
+    for fp in doc.find_all("footprint"):
+        if _ref_of(fp) != "D1":
+            continue
+        pad1 = pad2 = None
+        for pad in fp.find_all("pad"):
+            num = pad.get_string(0)
+            if num == "1":
+                pad1 = pad
+            elif num == "2":
+                pad2 = pad
+        assert pad1 is not None and pad2 is not None
+        net1 = pad1.find("net")
+        net2 = pad2.find("net")
+        assert net1 is not None and net2 is not None
+        new_net_for_1 = SExp.list("net", net2.get_int(0), net2.get_string(1) or "")
+        new_net_for_2 = SExp.list("net", net1.get_int(0), net1.get_string(1) or "")
+        for pad, old_net, new_net in (
+            (pad1, net1, new_net_for_1),
+            (pad2, net2, new_net_for_2),
+        ):
+            for i, child in enumerate(pad.children):
+                if child is old_net:
+                    pad.children[i] = new_net
+                    break
+        break
+    dest_pcb.write_text(doc.to_string() + "\n")
+    return dest_pcb
+
+
+def _stage_board00_copy(dest_dir: Path, with_manifest: bool = True) -> tuple[Path, Path]:
+    """Copy board 00's committed PCB + schematic into a tmp workspace.
+
+    Mirrors the on-disk layout the meta sub-checks expect
+    (``<dir>/<pcb>``, ``<dir>/<basename>.kicad_sch``,
+    ``<dir>/manufacturing/manifest.json``) so the helpers can be driven
+    without touching the real board fixture.  Returns
+    ``(pcb_path, manifest_path)``; ``manifest_path`` is the destination
+    even when ``with_manifest`` is False so callers can still introspect.
+    """
+    if not BOARD_00_SCH.exists() or not BOARD_00_PCB.exists():
+        pytest.skip("board 00 artifacts missing; run generate_design.py")
+
+    pcb_dest = dest_dir / "simple_led_routed.kicad_pcb"
+    sch_dest = dest_dir / "simple_led.kicad_sch"
+    manifest_dest = dest_dir / "manufacturing" / "manifest.json"
+
+    shutil.copy(BOARD_00_PCB, pcb_dest)
+    shutil.copy(BOARD_00_SCH, sch_dest)
+
+    if with_manifest:
+        shutil.copytree(BOARD_00_MANIFEST.parent, manifest_dest.parent)
+
+    return pcb_dest, manifest_dest
+
+
+class TestCheckMetaCheck:
+    """Per-sub-check meta output for the default ``kct check`` path (#3750).
+
+    The default (no ``--drc-only``) invocation must print one status line
+    for each of DRC / ERC / LVS / Manifest, plus an ``Overall:`` rollup,
+    and fold the rollup into the exit code per the spec.
+    """
+
+    def test_meta_check_all_passed_board_00(self, tmp_path: Path, capsys):
+        """Board 00 with fresh manifest should report all PASSED + exit 0."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        result = main([str(pcb)])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "DRC:" in captured.out and "PASSED" in captured.out
+        assert "ERC:" in captured.out
+        assert "LVS:" in captured.out
+        assert "Manifest:" in captured.out
+        assert "Overall:" in captured.out
+        # Overall must be PASSED.  Grab the Overall line specifically so a
+        # PASSED token elsewhere doesn't false-pass the assertion.
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "PASSED" in overall_line
+
+    def test_meta_check_no_schematic_marks_erc_lvs_not_run(self, drc_clean_pcb: Path, capsys):
+        """Tmp PCB with no sibling schematic -> ERC/LVS NOT RUN, Overall INCOMPLETE -> exit 2.
+
+        Issue #3750 AC #3: exit code is 0 only when every sub-check is
+        PASSED.  A board that cannot be fully verified (no schematic =
+        no ERC, no LVS) must exit non-zero so CI consumers that read
+        the exit code do not silently accept a partially verified board.
+        Boards that legitimately lack a sub-check input can opt in to
+        ``--allow-incomplete`` to flip the exit back to 0.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb)])
+        # Default mode (no --allow-incomplete): INCOMPLETE -> exit 2.
+        assert result == 2
+        captured = capsys.readouterr()
+        assert "ERC:" in captured.out and "NOT RUN" in captured.out
+        assert "LVS:" in captured.out
+        # Manifest is also NOT RUN (no manufacturing/ sibling in tmp_path).
+        assert "Manifest:" in captured.out
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "INCOMPLETE" in overall_line
+
+    def test_meta_check_kicad_cli_absent_is_incomplete_not_passed(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """kicad-cli absent -> ERC NOT RUN, Overall INCOMPLETE, exit 2 (issue #6913).
+
+        The board has a sibling schematic and a fresh manifest, so ERC is
+        the only sub-check that needs kicad-cli.  An unrunnable ERC must
+        never be rendered as PASSED nor allowed to roll up to PASSED.
+        """
+        from kicad_tools.cli import runner
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: None)
+
+        result = main([str(pcb)])
+        assert result == 2
+        out = capsys.readouterr().out
+        erc_line = next(line for line in out.splitlines() if line.startswith("ERC:"))
+        assert "NOT RUN" in erc_line and "PASSED" not in erc_line
+        assert "kicad-cli not found" in erc_line
+        overall_line = next(line for line in out.splitlines() if line.startswith("Overall:"))
+        assert "INCOMPLETE" in overall_line and "PASSED" not in overall_line
+
+    def test_meta_check_allow_incomplete_passes(self, drc_clean_pcb: Path, capsys):
+        """--allow-incomplete lets NOT RUN sub-checks exit 0 (issue #3750).
+
+        Counterpart to ``test_meta_check_no_schematic_marks_erc_lvs_not_run``:
+        a board with no schematic still rolls up to ``Overall: INCOMPLETE``,
+        but the opt-in flag suppresses the non-zero exit code so recipes
+        that legitimately lack a sub-check input can keep passing.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+        captured = capsys.readouterr()
+        # The human stanza still reports the truthful INCOMPLETE rollup --
+        # only the exit code changes.
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "INCOMPLETE" in overall_line
+
+    def test_meta_check_strict_does_not_rescue_incomplete(self, drc_clean_pcb: Path, capsys):
+        """--strict does not affect the NOT RUN -> INCOMPLETE rollup.
+
+        ``--strict`` only escalates DRC / ERC warnings.  NOT RUN rollup is
+        controlled by ``--allow-incomplete`` (default: exit 2).  Verify
+        that running --strict on a tmp PCB with no schematic still exits
+        2 (the new default already exits 2 on INCOMPLETE; --strict simply
+        does not rescue or differ here).
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--strict"])
+        assert result == 2
+        captured = capsys.readouterr()
+        # Rollup should still report the truthful INCOMPLETE -- --strict
+        # no longer collapses NOT RUN into FAILED at the rollup level.
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "INCOMPLETE" in overall_line
+
+    def test_meta_check_lvs_mismatch_fails_overall(self, tmp_path: Path, capsys):
+        """A swapped-pad PCB triggers LVS FAILED -> Overall FAILED -> exit 2."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        _swap_d1_pad_nets_in_pcb(pcb, pcb)
+
+        result = main([str(pcb)])
+        assert result == 2
+        captured = capsys.readouterr()
+        # LVS row must say FAILED; Overall must say FAILED.
+        lvs_line = next(line for line in captured.out.splitlines() if line.startswith("LVS:"))
+        assert "FAILED" in lvs_line
+        assert "D1" in lvs_line  # the mismatch detail should name the offending ref
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "FAILED" in overall_line
+
+    def test_meta_check_stale_manifest_fails_overall(self, tmp_path: Path, capsys):
+        """Changed PCB content is stale even with identical checkout timestamps."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, manifest = _stage_board00_copy(tmp_path)
+        pcb.write_text(pcb.read_text() + "\n")
+        # Simulate a checkout writing both files at exactly the same time.
+        os.utime(pcb, ns=(manifest.stat().st_atime_ns, manifest.stat().st_mtime_ns))
+
+        result = main([str(pcb)])
+        assert result == 2
+        captured = capsys.readouterr()
+        manifest_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Manifest:")
+        )
+        assert "STALE" in manifest_line
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "FAILED" in overall_line
+
+    def test_drc_only_preserves_legacy_output(self, drc_clean_pcb: Path, capsys):
+        """--drc-only must skip the meta stanza and use the legacy exit rule."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--drc-only"])
+        assert result == 0
+        captured = capsys.readouterr()
+        # The meta stanza is suppressed: no Overall:, no DRC: status line,
+        # no ERC: or LVS: lines.  (The DRC table heading is fine -- it's
+        # the legacy "PURE PYTHON DRC CHECK" banner.)
+        assert "Overall:" not in captured.out
+        assert "ERC:" not in captured.out
+        assert "LVS:" not in captured.out
+        assert "Manifest:" not in captured.out
+
+    def test_meta_check_json_envelope(self, tmp_path: Path, capsys):
+        """JSON output gains meta_checks field; legacy fields are unchanged."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        result = main([str(pcb), "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        # Strip any leading warning lines that go to stderr; stdout is JSON.
+        data = json.loads(captured.out)
+
+        # Legacy fields must still be present and untouched.
+        assert "summary" in data
+        assert "passed" in data["summary"]
+        assert "errors" in data["summary"]
+        assert "rules_checked" in data["summary"]
+        assert isinstance(data["violations"], list)
+
+        # New: meta_checks envelope.
+        assert "meta_checks" in data
+        meta = data["meta_checks"]
+        assert set(meta.keys()) == {
+            "drc",
+            "erc",
+            "lvs",
+            "manifest",
+            "overall",
+            "schematic_missing",
+            "incomplete_categories",
+        }
+        for name in ("drc", "erc", "lvs", "manifest"):
+            assert "status" in meta[name]
+            assert "detail" in meta[name]
+        assert meta["overall"] == "PASSED"
+        # Schematic was present in this fixture, so the LVS gate was not skipped.
+        assert meta["schematic_missing"] is False
+        # A clean run names no incomplete category (issue #9062).
+        assert meta["incomplete_categories"] == []
+
+    def test_meta_checks_omitted_under_drc_only_in_json(self, drc_clean_pcb: Path, capsys):
+        """--drc-only must NOT add meta_checks to the JSON envelope."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--format", "json", "--drc-only"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Legacy fields unchanged...
+        assert data["summary"]["passed"] is True
+        # ...and meta_checks omitted (OMIT-when-absent convention).
+        assert "meta_checks" not in data
+
+
+# ---------------------------------------------------------------------------
+# Issue #8949: the ``Overall:`` line must agree with the exit code when a
+# blocking category cannot run, name the category, and the stdout mask
+# stanza must collapse repeated reasons and print a remediation line.
+# ---------------------------------------------------------------------------
+
+
+def _patch_mask_assessment(monkeypatch, **kwargs):
+    """Make the checker's native mask call return a controlled assessment.
+
+    Same mechanics as ``tests/test_mask_copper.py::_patch_assessment``:
+    ``check_mask_to_copper`` is imported inside
+    :meth:`DRCChecker.check_mask_to_copper`, so patching the module
+    attribute takes effect at call time.
+    """
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    def fake(path, policy=None, intents=(), **native_options):
+        return MaskCopperAssessment(policy=policy, **kwargs)
+
+    monkeypatch.setattr("kicad_tools.validate.mask_copper.check_mask_to_copper", fake)
+
+
+def _overall_line(out: str) -> str:
+    return next(line for line in out.splitlines() if line.startswith("Overall:"))
+
+
+def _stage_board00_for_mask(tmp_path: Path) -> Path:
+    """Board 00 copy with schematic + manifest, so the meta sub-checks pass.
+
+    With every sub-check PASSED the baseline exit code is 0, so any
+    incompleteness a test then asserts must come from the (patched) mask
+    assessment -- not from missing schematic inputs.
+    """
+    if not BOARD_00_SCH.exists() or not BOARD_00_PCB.exists():
+        pytest.skip("board 00 artifacts missing; run generate_design.py")
+    pcb, _manifest = _stage_board00_copy(tmp_path)
+    return pcb
+
+
+class TestOverallMatchesExitCode:
+    """``Overall:`` line <-> exit-code pairing (issue #8949).
+
+    Each test asserts the *pairing* directly -- the printed verdict and
+    the process exit code must come from one source -- rather than
+    asserting each half separately.  ``--drc-only`` is excluded by
+    construction: it prints no ``Overall:`` line at all, so there is
+    nothing to pair (verified by ``test_drc_only_preserves_legacy_output``).
+    """
+
+    def test_incomplete_mask_names_the_category_and_exits_2(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """Default-applied incomplete mask check -> Overall INCOMPLETE, exit 2."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        _patch_mask_assessment(
+            monkeypatch,
+            coverage="incomplete",
+            reasons=["F.Mask: unattributed native mask region"],
+        )
+
+        result = main([str(pcb), "--mfr", "jlcpcb"])
+        assert result == 2
+        line = _overall_line(capsys.readouterr().out)
+        assert "PASSED" not in line
+        assert "INCOMPLETE" in line
+        # AC 1: the line names the blocking category.
+        assert "mask_to_copper" in line
+
+    def test_allow_incomplete_exits_0_but_the_line_stays_honest(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """--allow-incomplete flips the exit code, never the honesty of the line."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        _patch_mask_assessment(
+            monkeypatch,
+            coverage="incomplete",
+            reasons=["F.Mask: unattributed native mask region"],
+        )
+
+        result = main([str(pcb), "--mfr", "jlcpcb", "--allow-incomplete"])
+        assert result == 0
+        line = _overall_line(capsys.readouterr().out)
+        assert "PASSED" not in line
+        assert "INCOMPLETE" in line
+        assert "mask_to_copper" in line
+
+    def test_failed_mask_still_reads_failed(self, tmp_path: Path, capsys, monkeypatch):
+        """A real mask violation keeps Overall FAILED; incompleteness never masks it."""
+        from kicad_tools.cli.check_cmd import main
+        from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        violation = MaskCopperMeasurement(
+            opening_uuids=("00000000-0000-0000-0000-000000000001",),
+            conductor_uuid="00000000-0000-0000-0000-000000000002",
+            mask_side="F.Mask",
+            copper_layer="F.Cu",
+            location_mm=(1.0, 2.0),
+            clearance_mm=0.01,
+            exposed_area_mm2=0.5,
+            relation="overlap",
+            disposition="violation",
+            uncertainty_mm=0.0,
+            opening_kind="pad:rect",
+            mask_defined=False,
+            margin_provenance="native",
+        )
+        _patch_mask_assessment(monkeypatch, coverage="complete", measurements=[violation])
+
+        result = main([str(pcb), "--mfr", "jlcpcb"])
+        assert result == 2
+        line = _overall_line(capsys.readouterr().out)
+        assert "FAILED" in line
+        assert "INCOMPLETE" not in line
+
+    def test_json_report_schema_is_unchanged(self, tmp_path: Path, capsys, monkeypatch):
+        """No new keys in ``meta_checks`` or the v1 mask assessment dict.
+
+        The ``overall`` *value* becomes honest (INCOMPLETE) -- that is the
+        fix -- but the structure machine consumers parse is byte-compatible:
+        no new keys, no schema bump.  The remediation hint deliberately
+        never enters ``MaskCopperAssessment.to_dict()``.  (Issue #9062
+        later added the additive ``incomplete_categories`` key; every other
+        key is unchanged.)
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        _patch_mask_assessment(
+            monkeypatch,
+            coverage="incomplete",
+            reasons=["F.Mask: unattributed native mask region"],
+        )
+
+        result = main([str(pcb), "--mfr", "jlcpcb", "--format", "json"])
+        assert result == 2
+        data = json.loads(capsys.readouterr().out)
+
+        meta = data["meta_checks"]
+        assert set(meta.keys()) == {
+            "drc",
+            "erc",
+            "lvs",
+            "manifest",
+            "overall",
+            "schematic_missing",
+            "incomplete_categories",
+        }
+        assert meta["overall"] == "INCOMPLETE"
+        assert meta["incomplete_categories"] == ["mask_to_copper"]
+
+        assessment = data["mask_copper_assessments"][0]
+        assert set(assessment.keys()) == {
+            "schema",
+            "coverage",
+            "passed",
+            "reasons",
+            "policy",
+            "binding",
+            "measurements",
+            "intent_audit",
+            "geometry_provenance",
+            "evaluated_pairs",
+        }
+        assert assessment["schema"] == "kct.mask-copper-assessment.v1"
+        # The verdict / exit code pair machine consumers read stays coherent.
+        assert data["verdict"] == "incomplete"
+        assert data["exit_code"] == 2
+
+
+class TestMetaCheckResultCoverageIncomplete:
+    """The rollup flag mechanics (issue #8949): one flag, consulted by compute_overall."""
+
+    @staticmethod
+    def _result(**kwargs):
+        from kicad_tools.cli.check_cmd import MetaCheckResult, SubCheckResult
+
+        passed = SubCheckResult(status="PASSED", detail="ok")
+        return MetaCheckResult(
+            drc=passed,
+            erc=SubCheckResult(status="PASSED", detail="ok"),
+            lvs=SubCheckResult(status="PASSED", detail="ok"),
+            manifest=SubCheckResult(status="PASSED", detail="ok"),
+            **kwargs,
+        )
+
+    def test_flag_drives_incomplete(self):
+        result = self._result(coverage_incomplete=True, incomplete_categories=("mask_to_copper",))
+        result.compute_overall()
+        assert result.overall == "INCOMPLETE"
+
+    def test_failed_subcheck_still_wins_over_the_flag(self):
+        """A FAILED board never reads INCOMPLETE: incompleteness cannot mask failure."""
+        from kicad_tools.cli.check_cmd import SubCheckResult
+
+        result = self._result(coverage_incomplete=True)
+        result.drc = SubCheckResult(status="FAILED", detail="2 error(s)")
+        result.compute_overall()
+        assert result.overall == "FAILED"
+
+    def test_without_flag_all_passed_stays_passed(self):
+        result = self._result()
+        result.compute_overall()
+        assert result.overall == "PASSED"
+
+    def test_flag_not_serialized_into_json(self):
+        result = self._result(coverage_incomplete=True, incomplete_categories=("mask_to_copper",))
+        data = result.to_dict()
+        # Issue #9062: the category NAME list is serialized (additive key);
+        # the ``coverage_incomplete`` flag itself is not -- machine
+        # consumers read ``overall``.
+        assert "coverage_incomplete" not in data
+        assert data["incomplete_categories"] == ["mask_to_copper"]
+        assert set(data.keys()) == {
+            "drc",
+            "erc",
+            "lvs",
+            "manifest",
+            "overall",
+            "schematic_missing",
+            "incomplete_categories",
+        }
+
+
+def test_several_incomplete_assessments_roll_up_to_one_incomplete(tmp_path):
+    """Edge case: several incomplete assessments at once stay one INCOMPLETE.
+
+    The category is named once (not per assessment) and the verdict is
+    ``incomplete`` -- never masked, never duplicated.
+    """
+    from kicad_tools.cli.check_cmd import DRCResults, evaluate_check_verdict
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    results = DRCResults(
+        mask_copper_assessments=[
+            MaskCopperAssessment(coverage="incomplete", reasons=["first"]),
+            MaskCopperAssessment(coverage="incomplete", reasons=["second"]),
+        ],
+        rules_checked=1,
+    )
+    verdict = evaluate_check_verdict(tmp_path / "x.kicad_pcb", results, mask_copper_default=True)
+    assert verdict.verdict == "incomplete"
+    assert verdict.exit_code == 2
+    assert verdict.meta.coverage_incomplete is True
+    assert verdict.meta.incomplete_categories == ("mask_to_copper",)
+
+
+def test_explicit_mask_check_that_cannot_run_is_failed_and_not_named(tmp_path):
+    """Edge case (issue #9062): an explicitly requested mask check stays FAILED.
+
+    The #8949 boundary is unchanged: the wider ``incomplete_categories`` list
+    only names a *default-applied* mask assessment.  An explicit request that
+    cannot run is a failed check (the user asked for it), so the verdict is
+    ``fail`` and the category is not listed as incomplete.
+    """
+    from kicad_tools.cli.check_cmd import DRCResults, evaluate_check_verdict
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    results = DRCResults(
+        mask_copper_assessments=[
+            MaskCopperAssessment(coverage="not_run", reasons=["no native geometry"]),
+        ],
+        rules_checked=1,
+    )
+    verdict = evaluate_check_verdict(tmp_path / "x.kicad_pcb", results, mask_copper_default=False)
+    assert verdict.verdict == "fail"
+    assert verdict.exit_code == 2
+    assert verdict.meta is not None
+    assert verdict.meta.coverage_incomplete is False
+    assert verdict.meta.incomplete_categories == ()
+    assert verdict.meta.to_dict()["incomplete_categories"] == []
+
+
+def test_incomplete_mask_with_provisional_findings_is_named_and_stays_fail(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """Issue #9062 AC 5: provisional findings must not un-name the category.
+
+    A default-applied mask assessment that did not pass *with* a
+    ``violation``/``uncertain`` measurement goes to ``mask_failed`` (verdict
+    ``fail``), so the #8949 flag stays unset -- but the check still did not
+    complete (``coverage.mask_to_copper`` is ``unknown``) and must be named
+    in the serialized ``meta_checks.incomplete_categories``.
+    """
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    pcb = _stage_board00_for_mask(tmp_path)
+    provisional = MaskCopperMeasurement(
+        opening_uuids=("00000000-0000-0000-0000-000000000001",),
+        conductor_uuid="00000000-0000-0000-0000-000000000002",
+        mask_side="F.Mask",
+        copper_layer="F.Cu",
+        location_mm=(1.0, 2.0),
+        clearance_mm=0.01,
+        exposed_area_mm2=0.5,
+        relation="overlap",
+        disposition="uncertain",
+        uncertainty_mm=0.02,
+        opening_kind="pad:rect",
+        mask_defined=False,
+        margin_provenance="native",
+    )
+    _patch_mask_assessment(
+        monkeypatch,
+        coverage="incomplete",
+        reasons=["F.Mask: unattributed native mask region"],
+        measurements=[provisional],
+    )
+
+    result = main([str(pcb), "--mfr", "jlcpcb", "--format", "json"])
+    assert result == 2
+    data = json.loads(capsys.readouterr().out)
+
+    # The verdict stays fail: provisional findings still drive FAILED.
+    assert data["verdict"] == "fail"
+    assert data["exit_code"] == 2
+    meta = data["meta_checks"]
+    assert meta["overall"] == "FAILED"
+    # ...but the category is named as not completed, agreeing with coverage.
+    assert meta["incomplete_categories"] == ["mask_to_copper"]
+    assert data["coverage"]["mask_to_copper"]["state"] == "unknown"
+    assert "mask_to_copper" in data["summary"]["coverage_blocking_unknown"]
+
+
+def test_completed_mask_with_real_violation_is_not_named_as_incomplete(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """Issue #9062: "did not pass" is not "did not complete" -- the discriminator.
+
+    A default-applied mask check that COMPLETED and found a real violation
+    is ``passed=False`` (a failed check) but ``coverage == "complete"`` (a
+    completed check).  The coverage row keys on ``coverage`` -- it reads
+    ``checked`` -- so the serialized ``incomplete_categories`` must key on
+    the same predicate and leave the category unnamed.  Keying on
+    ``passed`` here would report a board with a genuine mask violation as
+    "did not complete", inverting the list's meaning.
+    """
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    pcb = _stage_board00_for_mask(tmp_path)
+    violation = MaskCopperMeasurement(
+        opening_uuids=("00000000-0000-0000-0000-000000000001",),
+        conductor_uuid="00000000-0000-0000-0000-000000000002",
+        mask_side="F.Mask",
+        copper_layer="F.Cu",
+        location_mm=(1.0, 2.0),
+        clearance_mm=0.01,
+        exposed_area_mm2=0.5,
+        relation="overlap",
+        disposition="violation",
+        uncertainty_mm=0.0,
+        opening_kind="pad:rect",
+        mask_defined=False,
+        margin_provenance="native",
+    )
+    _patch_mask_assessment(monkeypatch, coverage="complete", measurements=[violation])
+
+    result = main([str(pcb), "--mfr", "jlcpcb", "--format", "json"])
+    assert result == 2
+    data = json.loads(capsys.readouterr().out)
+
+    # The board genuinely fails on the violation...
+    assert data["verdict"] == "fail"
+    assert data["exit_code"] == 2
+    meta = data["meta_checks"]
+    assert meta["overall"] == "FAILED"
+    # ...but the check completed, so nothing is named as incomplete --
+    # agreeing with the coverage row (checked, not unknown).
+    assert meta["incomplete_categories"] == []
+    assert data["coverage"]["mask_to_copper"]["state"] == "checked"
+    assert data["summary"]["coverage_blocking_unknown"] == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #4616: full-fidelity LVS records under meta_checks.lvs
+# ---------------------------------------------------------------------------
+
+BOARD_02_DIR = REPO_ROOT / "boards" / "02-charlieplex-led" / "output"
+BOARD_02_SCH = BOARD_02_DIR / "charlieplex_3x3.kicad_sch"
+BOARD_02_PCB = BOARD_02_DIR / "charlieplex_3x3_routed.kicad_pcb"
+
+_LVS_RECORD_KEYS = {
+    "mismatches": {"ref", "pad", "schematic_net", "pcb_net"},
+    "copper_mismatches": {"kind", "net_a", "net_b", "pad_a", "pad_b"},
+}
+
+
+def _strip_all_segments(src_pcb: Path, dest_pcb: Path) -> Path:
+    """Copy ``src_pcb`` to ``dest_pcb`` with every routed ``segment`` removed.
+
+    Un-routing the board leaves each multi-pad net split across separate
+    copper islands, which the copper-extracted comparator reports as
+    ``open`` mismatches — a cheap way to synthesize a copper-dirty board
+    with a controllable number of findings, without touching any
+    committed artifact.
+    """
+    from kicad_tools.sexp import SExp, parse_file
+
+    doc = parse_file(src_pcb)
+    doc.children = [c for c in doc.children if not (isinstance(c, SExp) and c.name == "segment")]
+    dest_pcb.write_text(doc.to_string() + "\n")
+    return dest_pcb
+
+
+def _stage_board02_unrouted(dest_dir: Path) -> Path:
+    """Stage board 02 (charlieplex) with all segments stripped.
+
+    Yields >= 4 copper mismatches (22 at the time of writing), which is
+    what makes the ``(+N more)`` truncation observable end-to-end.
+    """
+    if not BOARD_02_SCH.exists() or not BOARD_02_PCB.exists():
+        pytest.skip("board 02 artifacts missing; run generate_design.py")
+
+    shutil.copy(BOARD_02_SCH, dest_dir / BOARD_02_SCH.name)
+    return _strip_all_segments(BOARD_02_PCB, dest_dir / BOARD_02_PCB.name)
+
+
+def _strip_all_pad_nets(src_pcb: Path, dest_pcb: Path) -> Path:
+    """Copy ``src_pcb`` to ``dest_pcb`` with every pad's ``(net ...)`` child removed.
+
+    Reproduces the #4681 board shape: the PCB side supplies **zero** net
+    bindings, so the label leg has no evidence at all.  The copper leg is
+    untouched — :meth:`ConnectivityValidator.extract_pad_partition` never
+    reads pad net labels.
+    """
+    from kicad_tools.sexp import SExp, parse_file
+
+    doc = parse_file(src_pcb)
+    for fp in doc.find_all("footprint"):
+        for pad in fp.find_all("pad"):
+            pad.children = [
+                c for c in pad.children if not (isinstance(c, SExp) and c.name == "net")
+            ]
+    dest_pcb.write_text(doc.to_string() + "\n")
+    return dest_pcb
+
+
+def _stage_board00_both_legs_dirty(dest_dir: Path) -> Path:
+    """Stage a board 00 copy that is dirty on **both** LVS comparators.
+
+    ``_swap_d1_pad_nets_in_pcb`` dirties the label leg (D1's declared pad
+    nets no longer match the schematic); stripping the segments dirties
+    the copper leg (LED_ANODE splits into two islands).  Before issue
+    #4616 the copper-dirty early return in ``_lvs_subcheck`` discarded the
+    already-computed label findings entirely, so this board's D1
+    mismatches appeared in *no* output.
+    """
+    pcb, _manifest = _stage_board00_copy(dest_dir)
+    _swap_d1_pad_nets_in_pcb(pcb, pcb)
+    _strip_all_segments(pcb, pcb)
+    return pcb
+
+
+class TestCheckLVSFullFidelity:
+    """``meta_checks.lvs`` carries every mismatch as structured data (#4616).
+
+    The ``detail`` string stays the bounded 3-record human summary; the
+    machine payload reuses the v1 ``lvs.json`` record shapes verbatim so
+    one consumer parses both surfaces.
+    """
+
+    def test_copper_dirty_board_still_carries_label_leg(self, tmp_path: Path, capsys):
+        """Regression: a copper-dirty board must not drop the label findings.
+
+        This is the data-loss bug the issue's Curator found (#4616
+        "Correction 3").  ``_lvs_subcheck`` computed the label result,
+        then early-returned on the copper leg without ever formatting or
+        attaching it — so the D1 label mismatches below were *absent*,
+        not truncated.  Fails on ``origin/main``.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "FAILED"
+        # The copper leg still wins the human ``detail`` line...
+        assert lvs["detail"].startswith("copper: ")
+        # ...but the label leg is no longer discarded.
+        assert [(m["ref"], m["pad"]) for m in lvs["mismatches"]] == [("D1", "1"), ("D1", "2")]
+        # ``LED_ANODE`` is a local label on board 00's root sheet, so the
+        # schematic side reports KiCad's sheet-qualified identity
+        # ``/LED_ANODE`` (issue #5809); ``GND`` comes from a power symbol
+        # and is not sheet-scoped, so it stays bare.
+        assert {m["schematic_net"] for m in lvs["mismatches"]} == {"GND", "/LED_ANODE"}
+        assert len(lvs["copper_mismatches"]) >= 1
+
+    def test_payload_enumerates_every_copper_mismatch(self, tmp_path: Path, capsys):
+        """A board with >= 4 copper mismatches enumerates all of them."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board02_unrouted(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        # ``detail`` is still the truncated prose sentence...
+        count = int(lvs["detail"].split("copper: ")[1].split(" mismatch(es)")[0])
+        assert count >= 4
+        assert f"(+{count - 3} more)" in lvs["detail"]
+        # ...while the array is complete and carries no truncation marker.
+        assert len(lvs["copper_mismatches"]) == count
+        assert "more)" not in json.dumps(lvs["copper_mismatches"])
+        # Records use the v1 lvs.json field names verbatim.
+        for record in lvs["copper_mismatches"]:
+            assert set(record) == _LVS_RECORD_KEYS["copper_mismatches"]
+        # Stable sort order: (kind, pad_a, pad_b).
+        keys = [(m["kind"], m["pad_a"], m["pad_b"]) for m in lvs["copper_mismatches"]]
+        assert keys == sorted(keys)
+
+    def test_clean_board_emits_empty_payload(self, tmp_path: Path, capsys):
+        """A PASSED board still carries the payload, with empty lists."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 0
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "PASSED"
+        # Consumers must never have to branch on key presence to tell
+        # "clean" from "old kct".
+        assert lvs["mismatches"] == []
+        assert lvs["copper_mismatches"] == []
+        assert lvs["copper_vacuous"] is False
+        assert lvs["copper_bound_pad_count"] is not None
+        assert lvs["copper_bound_pad_count"] > 0
+        assert lvs["netlist_vacuous"] is False
+
+    def test_payload_omitted_when_lvs_not_run(self, drc_clean_pcb: Path, capsys):
+        """No schematic -> NOT RUN -> {status, detail} only."""
+        from kicad_tools.cli.check_cmd import main
+
+        assert main([str(drc_clean_pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "NOT RUN"
+        assert set(lvs) == {"status", "detail"}
+
+    @pytest.mark.parametrize(
+        "module_path,symbol",
+        [
+            ("kicad_tools.lvs.board_lvs", "compare_netlists"),
+            ("kicad_tools.lvs.copper_lvs", "compare_copper_netlist"),
+        ],
+    )
+    def test_payload_omitted_when_comparator_raises(
+        self, tmp_path: Path, monkeypatch, module_path: str, symbol: str
+    ):
+        """A raised comparator keeps the legacy {status, detail} shape."""
+        import importlib
+
+        from kicad_tools.cli.check_cmd import _lvs_subcheck
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        sch = tmp_path / "simple_led.kicad_sch"
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("synthetic comparator failure")
+
+        monkeypatch.setattr(importlib.import_module(module_path), symbol, _boom)
+
+        sub = _lvs_subcheck(sch, pcb)
+        assert sub.status == "FAILED"
+        assert sub.data is None
+        assert set(sub.to_dict()) == {"status", "detail"}
+        assert "RuntimeError" in sub.detail
+
+    def test_stdout_and_file_report_carry_identical_payload(self, tmp_path: Path, capsys):
+        """``--format json`` and ``-o report.json`` must agree exactly."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+        report = tmp_path / "check.json"
+
+        assert main([str(pcb), "--format", "json", "-o", str(report)]) == 2
+
+        stdout_lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+        file_lvs = json.loads(report.read_text())["meta_checks"]["lvs"]
+        assert stdout_lvs == file_lvs
+        assert file_lvs["mismatches"], "file report must carry the label leg too"
+
+    def test_drc_only_still_omits_meta_checks(self, tmp_path: Path, capsys):
+        """The widened payload must not leak into the --drc-only envelope."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+
+        main([str(pcb), "--format", "json", "--drc-only"])
+        assert "meta_checks" not in json.loads(capsys.readouterr().out)
+
+    def test_other_subchecks_serialize_unchanged(self, tmp_path: Path, capsys):
+        """DRC / ERC / Manifest keep the legacy two-key JSON shape."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+
+        main([str(pcb), "--format", "json"])
+        meta = json.loads(capsys.readouterr().out)["meta_checks"]
+
+        for name in ("drc", "erc", "manifest"):
+            assert set(meta[name]) == {"status", "detail"}, name
+
+    def test_verbose_expands_list_default_stays_truncated(self, tmp_path: Path, capsys):
+        """Default terminal line is unchanged; --verbose lists everything."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board02_unrouted(tmp_path)
+
+        main([str(pcb)])
+        plain = capsys.readouterr().out
+        plain_lvs = next(ln for ln in plain.splitlines() if ln.startswith("LVS:"))
+        count = int(plain_lvs.split("copper: ")[1].split(" mismatch(es)")[0])
+        assert f"(+{count - 3} more)" in plain_lvs
+        # Exactly the 3 preview records appear on the default path.
+        assert plain.count("    open ") == 0
+
+        main([str(pcb), "--verbose"])
+        verbose = capsys.readouterr().out
+        verbose_lvs = next(ln for ln in verbose.splitlines() if ln.startswith("LVS:"))
+        # The status line itself is byte-identical...
+        assert verbose_lvs == plain_lvs
+        # ...and every record is listed beneath it, uncapped.
+        assert f"  copper: {count} mismatch(es)" in verbose
+        assert verbose.count("    open ") == count
+
+    def test_verbose_matches_json_payload(self, tmp_path: Path, capsys):
+        """The --verbose expansion is rendered from the JSON payload itself."""
+        from kicad_tools.cli.check_cmd import (
+            MetaCheckResult,
+            SubCheckResult,
+            _lvs_subcheck,
+            print_meta_check_stanza,
+        )
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+        sub = _lvs_subcheck(tmp_path / "simple_led.kicad_sch", pcb)
+        stub = SubCheckResult(status="PASSED", detail="-")
+        meta = MetaCheckResult(drc=stub, erc=stub, lvs=sub, manifest=stub)
+
+        print_meta_check_stanza(meta, verbose=True)
+        out = capsys.readouterr().out
+
+        for record in sub.data["copper_mismatches"]:
+            assert (
+                f"{record['kind']} {record['pad_a']}({record['net_a']})"
+                f"/{record['pad_b']}({record['net_b']})" in out
+            )
+        for record in sub.data["mismatches"]:
+            assert f"{record['ref']}.{record['pad']} sch=" in out
+
+
+class TestCheckLVSVacuousLabelLeg:
+    """A net-less PCB degrades loudly, and ``detail`` names both legs (#4681).
+
+    The filed board emitted 264 label records, every one ``pcb_net:
+    null`` — the PCB side supplied zero net bindings, so each bound
+    schematic pin trivially "mismatched" — while ``detail`` reported the
+    *copper* leg's 2 findings.  Two fixes are pinned here: the label leg
+    now returns one explicit vacuous verdict instead of N pseudo-records,
+    and ``detail`` names both legs' outcomes so a consumer can pair the
+    prose with the right embedded array.
+    """
+
+    def test_netless_board_reports_vacuous_not_per_pin_records(self, tmp_path: Path, capsys):
+        """Zero PCB net bindings -> one synthetic record + netlist_vacuous."""
+        from kicad_tools.cli.check_cmd import main
+        from kicad_tools.lvs.board_lvs import NETLIST_VACUOUS_NET, NETLIST_VACUOUS_REF
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        _strip_all_pad_nets(pcb, pcb)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["status"] == "FAILED"  # no evidence is not a pass
+        assert lvs["netlist_vacuous"] is True
+        # ONE synthetic record — not one pseudo-mismatch per bound pin.
+        assert len(lvs["mismatches"]) == 1
+        assert lvs["mismatches"][0]["ref"] == NETLIST_VACUOUS_REF
+        assert lvs["mismatches"][0]["pcb_net"] == NETLIST_VACUOUS_NET
+        # ``detail`` spells out the vacuity and names the other leg too.
+        assert "label: vacuous" in lvs["detail"]
+        assert "copper: 0 mismatch(es)" in lvs["detail"]
+
+    def test_detail_counts_match_embedded_arrays(self, tmp_path: Path, capsys):
+        """Regression (#4681): per-leg counts in ``detail`` == array lengths.
+
+        The filer paired ``detail`` ("copper: 2 mismatch(es)") with the
+        ``mismatches`` array (264 records) because the prose named only
+        one leg.  Both legs' counts now appear, and each equals the
+        length of its embedded array.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_both_legs_dirty(tmp_path)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        copper_count = int(lvs["detail"].split("copper: ")[1].split(" mismatch(es)")[0])
+        label_count = int(lvs["detail"].split("label: ")[1].split(" mismatch(es)")[0])
+        assert copper_count == len(lvs["copper_mismatches"]) > 0
+        assert label_count == len(lvs["mismatches"]) > 0
+        assert lvs["netlist_vacuous"] is False
+
+    def test_label_dirty_detail_names_copper_leg_too(self, tmp_path: Path, capsys):
+        """Copper-clean/label-dirty boards also name both legs in ``detail``."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        _swap_d1_pad_nets_in_pcb(pcb, pcb)
+
+        assert main([str(pcb), "--format", "json"]) == 2
+        lvs = json.loads(capsys.readouterr().out)["meta_checks"]["lvs"]
+
+        assert lvs["detail"].startswith("label: ")
+        assert "; copper: 0 mismatch(es)" in lvs["detail"]
+        label_count = int(lvs["detail"].split("label: ")[1].split(" mismatch(es)")[0])
+        assert label_count == len(lvs["mismatches"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #4096: stale-zone-fill advisory + opt-in --refill-zones flag
+# ---------------------------------------------------------------------------
+
+
+def _make_zone_clearance_violation(rule_id: str):
+    """Build a synthetic ERROR DRCViolation carrying a zone-clearance rule_id."""
+    from kicad_tools.core.types import Severity
+    from kicad_tools.validate.models import DRCViolation
+
+    return DRCViolation(
+        severity=Severity.ERROR,
+        message=f"synthetic {rule_id} finding",
+        rule_id=rule_id,
+    )
+
+
+class TestStaleZoneFillWarning:
+    """Unit coverage for the _warn_stale_zone_fills advisory (issue #4096)."""
+
+    def test_warns_on_segment_zone_clearance(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+
+        pcb = tmp_path / "board.kicad_pcb"
+        violations = [_make_zone_clearance_violation("clearance_segment_zone")]
+
+        _warn_stale_zone_fills(violations, pcb)
+
+        err = capsys.readouterr().err
+        assert "clearance_segment_zone" in err
+        assert "STALE" in err
+        assert "kicad-cli pcb drc --refill-zones --save-board" in err
+        assert str(pcb) in err
+
+    def test_warns_on_via_and_pad_zone_clearance(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+
+        pcb = tmp_path / "board.kicad_pcb"
+        violations = [
+            _make_zone_clearance_violation("clearance_via_zone"),
+            _make_zone_clearance_violation("clearance_pad_zone"),
+        ]
+
+        _warn_stale_zone_fills(violations, pcb)
+
+        err = capsys.readouterr().err
+        assert "clearance_via_zone" in err
+        assert "clearance_pad_zone" in err
+
+    def test_no_warning_without_zone_clearance_findings(self, tmp_path: Path, capsys):
+        """A board with only non-zone findings must not emit the advisory."""
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+        from kicad_tools.core.types import Severity
+        from kicad_tools.validate.models import DRCViolation
+
+        pcb = tmp_path / "board.kicad_pcb"
+        violations = [
+            DRCViolation(
+                severity=Severity.ERROR,
+                message="unrelated clearance",
+                rule_id="clearance_trace_trace",
+            )
+        ]
+
+        _warn_stale_zone_fills(violations, pcb)
+
+        assert "refill-zones" not in capsys.readouterr().err
+
+    def test_no_warning_on_empty_violations(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.check_cmd import _warn_stale_zone_fills
+
+        _warn_stale_zone_fills([], tmp_path / "board.kicad_pcb")
+
+        assert capsys.readouterr().err == ""
+
+    def test_warning_fires_through_main_on_zone_clearance_finding(
+        self, drc_clean_pcb: Path, monkeypatch, capsys
+    ):
+        """End-to-end: a clearance_*_zone finding triggers the advisory via main().
+
+        Injects a synthetic ``clearance_segment_zone`` error into the DRC
+        results so the assertion pins the *wiring* (main -> advisory) rather
+        than a specific committed board's fill staleness, which drifts as
+        artifacts are refilled.  --drc-only confirms the advisory is
+        independent of the meta-check rollup.
+        """
+        import kicad_tools.cli.check_cmd as check_cmd
+        from kicad_tools.cli.check_cmd import main
+        from kicad_tools.validate.violations import DRCResults
+
+        real_run = check_cmd.run_selected_checks
+
+        def _inject(*args, **kwargs) -> DRCResults:
+            results = real_run(*args, **kwargs)
+            results.add(_make_zone_clearance_violation("clearance_segment_zone"))
+            return results
+
+        monkeypatch.setattr(check_cmd, "run_selected_checks", _inject)
+
+        main([str(drc_clean_pcb), "--drc-only"])
+
+        err = capsys.readouterr().err
+        assert "kicad-cli pcb drc --refill-zones --save-board" in err
+        assert "STALE" in err
+
+    def test_no_warning_through_main_on_clean_board(self, drc_clean_pcb: Path, capsys):
+        """A clean board (no zone-clearance findings) emits no advisory."""
+        from kicad_tools.cli.check_cmd import main
+
+        main([str(drc_clean_pcb), "--drc-only"])
+
+        assert "refill-zones" not in capsys.readouterr().err
+
+
+class TestRefillZonesFlag:
+    """Coverage for the opt-in --refill-zones flag (issue #4096)."""
+
+    def test_flag_invokes_kicad_cli_when_available(self, drc_clean_pcb: Path, monkeypatch, capsys):
+        """--refill-zones shells out to run_refill_zones before loading the PCB."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        calls: list[Path] = []
+
+        def _spy(pcb_path, kicad_cli=None):
+            calls.append(Path(pcb_path))
+            return KiCadCLIResult(success=True, output_path=Path(pcb_path))
+
+        monkeypatch.setattr(runner, "run_refill_zones", _spy)
+
+        result = main_(drc_clean_pcb)
+
+        assert result == 0
+        assert len(calls) == 1
+        assert calls[0] == drc_clean_pcb.resolve()
+        assert "refilled zones in place" in capsys.readouterr().err
+
+    def test_flag_degrades_gracefully_when_kicad_cli_absent(
+        self, drc_clean_pcb: Path, monkeypatch, capsys
+    ):
+        """A missing kicad-cli warns and continues rather than crashing."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        def _absent(pcb_path, kicad_cli=None):
+            return KiCadCLIResult(success=False, stderr="kicad-cli not found.")
+
+        monkeypatch.setattr(runner, "run_refill_zones", _absent)
+
+        # Must not raise, and the check itself still runs to a clean exit.
+        result = main_(drc_clean_pcb)
+
+        assert result == 0
+        err = capsys.readouterr().err
+        assert "--refill-zones requested but the refill did not run" in err
+        assert "kicad-cli not found" in err
+
+    def test_no_refill_by_default(self, drc_clean_pcb: Path, monkeypatch):
+        """Without --refill-zones the refill helper is never called."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.check_cmd import main
+
+        def _boom(pcb_path, kicad_cli=None):
+            raise AssertionError("run_refill_zones must not run by default")
+
+        monkeypatch.setattr(runner, "run_refill_zones", _boom)
+
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+
+    def test_help_text_documents_board_mutation(self, capsys):
+        """The flag help must warn that it mutates the board file."""
+        from kicad_tools.cli.check_cmd import main
+
+        with pytest.raises(SystemExit):
+            main(["--help"])
+
+        out = capsys.readouterr().out
+        assert "--refill-zones" in out
+        # The MUTATES side effect must be surfaced explicitly.
+        assert "MUTATE" in out.upper()
+
+
+class TestRunRefillZonesHelper:
+    """Direct coverage for runner.run_refill_zones (issue #4096)."""
+
+    def test_returns_failure_when_kicad_cli_missing(self, tmp_path: Path, monkeypatch):
+        """No kicad-cli on PATH → success=False with an explanatory message."""
+        import kicad_tools.cli.runner as runner
+
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: None)
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        result = runner.run_refill_zones(pcb)
+
+        assert result.success is False
+        assert "kicad-cli not found" in result.stderr
+
+    def test_builds_refill_save_board_command(self, tmp_path: Path, monkeypatch):
+        """Invokes `kicad-cli pcb drc --refill-zones --save-board <pcb>`."""
+        import kicad_tools.cli.runner as runner
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        fake_cli = tmp_path / "kicad-cli"
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        captured_cmd: list[list[str]] = []
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, capture_output=True, text=True, **kwargs):
+            captured_cmd.append(cmd)
+            # Write a non-empty report so the helper reports success.
+            out_idx = cmd.index("--output") + 1
+            Path(cmd[out_idx]).write_text("{}")
+            return _Completed()
+
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: fake_cli)
+        monkeypatch.setattr(runner, "_kicad_drc_supports_refill", lambda _cli: True)
+        # Skip net-table repair (no real board content to restore).
+        monkeypatch.setattr(runner, "_snapshot_net_declarations", lambda _p: [])
+        monkeypatch.setattr(runner, "_snapshot_element_nets", lambda _p: {})
+        monkeypatch.setattr(runner, "_restore_net_declarations", lambda *a, **k: None)
+        monkeypatch.setattr(runner.subprocess, "run", _fake_run)
+
+        result: KiCadCLIResult = runner.run_refill_zones(pcb)
+
+        assert result.success is True
+        assert result.output_path == pcb
+        assert len(captured_cmd) == 1
+        cmd = captured_cmd[0]
+        assert cmd[1:3] == ["pcb", "drc"]
+        assert "--refill-zones" in cmd
+        assert "--save-board" in cmd
+        assert str(pcb) == cmd[-1]
+
+
+def main_(pcb: Path) -> int:
+    """Invoke `kct check --refill-zones` with the fast/complete-friendly flags."""
+    from kicad_tools.cli.check_cmd import main
+
+    return main([str(pcb), "--refill-zones", "--allow-incomplete"])
+
+
+class TestDrillClearanceNetRelationship:
+    """Issue #4102: net-relationship enrichment for hole_to_hole_clearance.
+
+    The findings already carry both endpoints' nets (``nets=(net1, net2)``,
+    also serialized in ``--format json`` via ``DRCViolation.to_dict``).  These
+    tests exercise the report *formatting* only: net names shown
+    unconditionally with a same-net / different-net qualifier on the finding
+    line, and a same-net / different-net sub-count in the ``BY RULE:`` summary.
+    """
+
+    @staticmethod
+    def _violation(nets, severity="error"):
+        from kicad_tools.validate import DRCViolation
+
+        return DRCViolation(
+            rule_id="hole_to_hole_clearance",
+            severity=severity,
+            message="Hole-to-hole clearance 0.113mm < minimum 0.500mm",
+            location=(10.0, 20.0),
+            layer=None,
+            actual_value=0.113,
+            required_value=0.500,
+            items=("V1", "R1-2:GND"),
+            nets=tuple(nets),
+        )
+
+    def test_net_relationship_helper(self):
+        from kicad_tools.cli.check_cmd import _net_relationship
+
+        assert _net_relationship(("HALL_A", "GND")) == "different-net"
+        assert _net_relationship(("HALL_A", "HALL_A")) == "same-net"
+        # Two *distinct named* nets that happen to look like placeholders --
+        # NOT a floating-pad scenario (floating pads never get distinct
+        # per-pad numbers; they all resolve to the single "net:0" sentinel).
+        assert _net_relationship(("net:3", "net:7")) == "different-net"
+        # Not a pair -> nothing to compare.
+        assert _net_relationship(()) is None
+        assert _net_relationship(("only-one",)) is None
+
+    def test_net_relationship_floating_pins(self):
+        """Issue #4127: floating/unconnected pins never read as same-net.
+
+        Every genuinely unconnected pad/via resolves to the *same* ``net:0``
+        placeholder (net 0 is a single canonical no-net sentinel), so a naive
+        string equality would mislabel two distinct floating pins as same-net.
+        Any pair involving a floating endpoint must classify as different-net.
+        """
+        from kicad_tools.cli.check_cmd import _net_relationship
+
+        # Core regression: two distinct floating pins, both resolved to net:0,
+        # must NOT read as same-net.
+        assert _net_relationship(("net:0", "net:0")) == "different-net"
+        # Floating vs named (already correct today; keep it correct).
+        assert _net_relationship(("net:0", "GND")) == "different-net"
+        assert _net_relationship(("GND", "net:0")) == "different-net"
+        # Empty-string spelling of the no-net sentinel is also floating.
+        assert _net_relationship(("", "")) == "different-net"
+        assert _net_relationship(("", "GND")) == "different-net"
+        assert _net_relationship(("GND", "")) == "different-net"
+        # Named/named is unchanged -- the fix does not over-broaden.
+        assert _net_relationship(("GND", "GND")) == "same-net"
+
+    def test_different_net_finding_shows_label_and_nets_default(self, capsys):
+        """Default (non-verbose) output labels the pair and prints both nets."""
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("HALL_A", "GND")), verbose=False)
+        out = capsys.readouterr().out
+        assert "hole_to_hole_clearance (different-net)" in out
+        assert "Nets: HALL_A / GND" in out
+
+    def test_same_net_finding_shows_label_and_nets_default(self, capsys):
+        """Same-net pairs are labeled same-net; still shown without --verbose."""
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("HALL_A", "HALL_A")), verbose=False)
+        out = capsys.readouterr().out
+        assert "hole_to_hole_clearance (same-net)" in out
+        assert "Nets: HALL_A / HALL_A" in out
+
+    def test_verbose_keeps_label_and_nets(self, capsys):
+        """--verbose keeps the qualifier and the Nets line (no duplicate)."""
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("HALL_A", "GND")), verbose=True)
+        out = capsys.readouterr().out
+        assert "hole_to_hole_clearance (different-net)" in out
+        # Net endpoints rendered exactly once, in the net-relationship form.
+        assert out.count("Nets:") == 1
+        assert "Nets: HALL_A / GND" in out
+
+    def test_other_rules_unaffected(self, capsys):
+        """Non-drill rules keep their plain header and verbose-only Nets line."""
+        from kicad_tools.cli.check_cmd import _print_violation
+        from kicad_tools.validate import DRCViolation
+
+        v = DRCViolation(
+            rule_id="clearance_trace_trace",
+            severity="error",
+            message="clearance too small",
+            nets=("NET_A", "NET_B"),
+        )
+        _print_violation(v, verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_trace_trace" in out
+        assert "(different-net)" not in out
+        assert "Nets:" not in out  # gated on --verbose for non-drill rules
+
+    def test_by_rule_summary_includes_breakdown(self, capsys):
+        """BY RULE line carries the different-net / same-net sub-count."""
+        from pathlib import Path
+
+        from kicad_tools.cli.check_cmd import output_table
+        from kicad_tools.validate import DRCResults
+
+        results = DRCResults()
+        # 2 different-net + 1 same-net.
+        violations = [
+            self._violation(("HALL_A", "GND")),
+            self._violation(("SIG", "GND")),
+            self._violation(("GND", "GND")),
+        ]
+        for v in violations:
+            results.add(v)
+        results.rules_checked = 1
+
+        output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
+        out = capsys.readouterr().out
+        assert "hole_to_hole_clearance: 3 errors (2 different-net, 1 same-net)" in out
+
+    def test_by_rule_summary_floating_pair_counts_as_different(self, capsys):
+        """Issue #4127: floating/floating pairs count as different-net in BY RULE.
+
+        The ``diff_n + same_n == errors`` invariant must hold after the fix:
+        1 floating/floating + 1 named-different + 1 named-same ->
+        (2 different-net, 1 same-net).
+        """
+        from pathlib import Path
+
+        from kicad_tools.cli.check_cmd import output_table
+        from kicad_tools.validate import DRCResults
+
+        results = DRCResults()
+        violations = [
+            self._violation(("net:0", "net:0")),  # floating/floating
+            self._violation(("HALL_A", "GND")),  # named-different
+            self._violation(("GND", "GND")),  # named-same
+        ]
+        for v in violations:
+            results.add(v)
+        results.rules_checked = 1
+
+        output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
+        out = capsys.readouterr().out
+        assert "hole_to_hole_clearance: 3 errors (2 different-net, 1 same-net)" in out
+
+
+class TestClearanceSegmentViaNetRelationship:
+    """Issue #4318: same-net / different-net split for copper-copper clearance.
+
+    ``clearance_segment_via`` (and the sibling ``clearance_segment_segment`` /
+    ``clearance_via_via`` / ``clearance_pad_via`` rules) already carry
+    ``nets=(net_a, net_b)`` (set in ``_create_violation``,
+    ``validate/rules/clearance.py``), also serialized in ``--format json``.
+    Adding them to ``_NET_RELATIONSHIP_RULE_IDS`` gives them the same
+    presentational split ``hole_to_hole_clearance`` gets: a per-finding
+    qualifier + unconditional ``Nets:`` line and a ``BY RULE`` sub-count.  An
+    agent can then triage a genuine different-net short ahead of a lower-risk
+    same-net coincidence.  Presentational only; severity is unchanged.
+    """
+
+    @staticmethod
+    def _violation(nets, rule_id="clearance_segment_via", severity="error"):
+        from kicad_tools.validate import DRCViolation
+
+        return DRCViolation(
+            rule_id=rule_id,
+            severity=severity,
+            message="Segment to via clearance 0.000mm < minimum 0.200mm",
+            location=(10.0, 20.0),
+            layer="F.Cu",
+            actual_value=0.0,
+            required_value=0.200,
+            items=("seg-1", "via-1"),
+            nets=tuple(nets),
+        )
+
+    def test_rule_ids_registered(self):
+        from kicad_tools.cli.check_cmd import _NET_RELATIONSHIP_RULE_IDS
+
+        for rid in (
+            "clearance_segment_via",
+            "clearance_segment_segment",
+            "clearance_via_via",
+            "clearance_pad_via",
+        ):
+            assert rid in _NET_RELATIONSHIP_RULE_IDS
+
+    def test_different_net_header_and_nets_default(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("SIG1", "SIG2")), verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via (different-net)" in out
+        assert "Nets: SIG1 / SIG2" in out
+
+    def test_same_net_header_and_nets_default(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        _print_violation(self._violation(("SIG1", "SIG1")), verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via (same-net)" in out
+        assert "Nets: SIG1 / SIG1" in out
+
+    def test_floating_endpoint_is_different_net(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        # A floating (net:0) endpoint in a segment-via pair classifies as
+        # different-net (#4127) -- never same-net.
+        _print_violation(self._violation(("net:0", "SIG1")), verbose=False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via (different-net)" in out
+
+    def test_by_rule_summary_split(self, capsys):
+        from pathlib import Path
+
+        from kicad_tools.cli.check_cmd import output_table
+        from kicad_tools.validate import DRCResults
+
+        results = DRCResults()
+        violations = [
+            self._violation(("SIG1", "SIG2")),  # different-net
+            self._violation(("SIG3", "SIG4")),  # different-net
+            self._violation(("SIG1", "SIG1")),  # same-net
+        ]
+        for v in violations:
+            results.add(v)
+        results.rules_checked = 1
+
+        output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 2, False)
+        out = capsys.readouterr().out
+        assert "clearance_segment_via: 3 errors (2 different-net, 1 same-net)" in out
+
+    def test_json_still_carries_nets(self):
+        # AC T3: --format json must keep the nets pair (no schema regression).
+        v = self._violation(("SIG1", "SIG2"))
+        d = v.to_dict()
+        assert d["nets"] == ["SIG1", "SIG2"]
+
+    def test_sibling_rules_also_split(self, capsys):
+        from kicad_tools.cli.check_cmd import _print_violation
+
+        for rid in ("clearance_segment_segment", "clearance_via_via", "clearance_pad_via"):
+            _print_violation(self._violation(("A", "B"), rule_id=rid), verbose=False)
+            out = capsys.readouterr().out
+            assert f"{rid} (different-net)" in out
+
+
+class TestManifestContentFreshness:
+    def bundle(self, tmp_path):
+        import hashlib
+        import zipfile
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)\n")
+        bundle = tmp_path / "manufacturing"
+        bundle.mkdir()
+        archive = bundle / "kicad_project.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr(pcb.name, pcb.read_bytes())
+        manifest = bundle / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "files": {
+                        archive.name: {
+                            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                            "size": archive.stat().st_size,
+                        }
+                    }
+                }
+            )
+        )
+        return pcb, manifest, archive
+
+    @pytest.mark.parametrize("compression, offset, value", [(8, 0, 0x07), (14, 4, 0xFF)])
+    def test_hash_bound_corrupt_compression_is_unverified(
+        self, tmp_path, compression, offset, value
+    ):
+        import hashlib
+        import struct
+        import zipfile
+
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, archive = self.bundle(tmp_path)
+        with zipfile.ZipFile(archive, "w", compression=compression) as z:
+            z.writestr(pcb.name, pcb.read_bytes())
+        content = bytearray(archive.read_bytes())
+        name_length, extra_length = struct.unpack_from("<HH", content, 26)
+        # Invalid deflate block type or unsupported LZMA properties.
+        content[30 + name_length + extra_length + offset] = value
+        archive.write_bytes(content)
+        data = json.loads(manifest.read_text())
+        data["files"][archive.name] = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+        manifest.write_text(json.dumps(data))
+        result = _manifest_subcheck(pcb)
+        assert result.status == "FAILED"
+        assert "unverified" in result.detail
+
+    def test_matching_content_ignores_mtime(self, tmp_path):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, _ = self.bundle(tmp_path)
+        os.utime(manifest, (1, 1))
+        os.utime(pcb, (999999, 999999))
+        assert _manifest_subcheck(pcb).status == "PASSED"
+
+    def test_changed_content_with_identical_mtime(self, tmp_path):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, _ = self.bundle(tmp_path)
+        pcb.write_text("(kicad_pcb (version 20240108))")
+        for p in (pcb, manifest):
+            os.utime(p, (100, 100))
+        assert _manifest_subcheck(pcb).status == "FAILED"
+
+    @pytest.mark.parametrize(
+        "mutation",
+        ["no_hash", "no_files", "bad_hash", "archive_changed", "archive_missing", "invalid_json"],
+    )
+    def test_unverified_manifest_cannot_pass(self, tmp_path, mutation):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, archive = self.bundle(tmp_path)
+        data = json.loads(manifest.read_text())
+        if mutation == "no_hash":
+            del data["files"][archive.name]["sha256"]
+        elif mutation == "no_files":
+            del data["files"]
+        elif mutation == "bad_hash":
+            data["files"][archive.name]["sha256"] = "0" * 64
+        elif mutation == "archive_changed":
+            archive.write_bytes(archive.read_bytes() + b"changed")
+        elif mutation == "archive_missing":
+            archive.unlink()
+        manifest.write_text("invalid" if mutation == "invalid_json" else json.dumps(data))
+        assert _manifest_subcheck(pcb).status == "FAILED"
+
+    @pytest.mark.parametrize(
+        "members",
+        [
+            ["other.kicad_pcb"],
+            ["nested/board.kicad_pcb"],
+            ["board.kicad_pcb", "nested/board.kicad_pcb"],
+            ["board.kicad_pcb", "board.kicad_pcb"],
+        ],
+    )
+    def test_archive_requires_unambiguous_exact_source(self, tmp_path, members):
+        import hashlib
+        import warnings
+        import zipfile
+
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, archive = self.bundle(tmp_path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with zipfile.ZipFile(archive, "w") as z:
+                for name in members:
+                    z.writestr(name, pcb.read_bytes())
+        manifest.write_text(
+            json.dumps(
+                {
+                    "files": {
+                        archive.name: {
+                            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                            "size": archive.stat().st_size,
+                        }
+                    }
+                }
+            )
+        )
+        assert _manifest_subcheck(pcb).status == "FAILED"
+
+    def test_no_bundle_is_not_run(self, tmp_path):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.touch()
+        assert _manifest_subcheck(pcb).status == "NOT RUN"

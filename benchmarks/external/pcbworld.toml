@@ -1,0 +1,65 @@
+# PCBWorld D3 corpus manifest (issue #6331, Phase 1 of #5942).
+#
+# This is deliberately NOT a boards.toml entry: D3 is a *generated* corpus
+# (PCBWorld's own prep code turns PCBench source boards into KiCad 9 "guide"
+# boards), so we pin the two upstream repositories and let PCBWorld's own
+# split files enumerate the boards. No board list, PCBWorld code, PCBench
+# board or generated board is copied into this repository -- everything is
+# fetched at runtime into the gitignored benchmark cache and PCBWorld is only
+# ever executed as an external subprocess under its own interpreter.
+
+[pcbworld]
+repo_url = "https://github.com/LGAI-Research/PCBWorld"
+vcs = "github"
+# Registry pin (kct ecosystem show pcbworld), verified 2026-10-13.
+commit = "b3d62f5c37e7528670d112e03d9a90029f23f4f3"
+license = "BSD-3-Clause"
+license_note = "BSD-3-Clause; its `engine` submodule is GPL-3.0 and is never fetched or built here (external binary only)."
+
+[pcbench]
+repo_url = "https://github.com/PCBench/PCBench"
+vcs = "github"
+# Resolved from PCBWorld's documented `main @ dec3be75` (prepare_pcbench.sh
+# itself clones PCBench `main` unpinned; we pin instead).
+commit = "dec3be75cbdef74787625f9043c7391cd473bb64"
+license = "MIT (repository); individual board licenses are mixed"
+license_note = "Mixed per-board licenses: boards are cache-only and must never be committed or redistributed."
+
+[kicad]
+# PCBWorld prepares and scores with KiCad 9 only. Any other major version
+# makes prep/scoring fail rather than report a non-comparable Clean Pass.
+required_major = 9
+
+[prep]
+# The scored variant (config `board_filename` in configs/datasets/d3.json).
+variant = "guide"
+# NOTE (issue #6332): this is the *routed* guide board -- make_guide.md at the
+# pin says "the routed guide board is the artifact the benchmark loads", and
+# PCBWorld deletes its tracks/vias at reset(). kct routes from the bare
+# variant make_guide writes alongside it, and uses the routed guide only as
+# the human wirelength/via reference.
+guide_board_filename = "processed_v9_guide_v3.kicad_pcb"
+unrouted_board_filename = "processed_v9_guide_v3_unrouted.kicad_pcb"
+# Where PCBWorld's own split files live inside the PCBWorld checkout.
+splits_file = "experiments/kdd/configs/quickstart/splits.json"
+
+# Split aliases resolve through PCBWorld's own splits.json at the pinned
+# commit (d3a = easy/test, d3b = medium/test); only the alias -> splits.json
+# key mapping is recorded here.
+[splits.d3a]
+splits_key = "d3a"
+difficulty = "easy"
+partition = "test"
+
+[splits.d3b]
+splits_key = "d3b"
+difficulty = "medium"
+partition = "test"
+
+# Named sub-denominators, read from PCBWorld's own files at the pin. fair95 is
+# the "PCBench fair-95" set PCBWorld's RQ2 table scores d3a routability/DRV on
+# (excludes 0004, 0024, 0035, 0077 and the train-only 0096). Reported next to,
+# never instead of, the full 99-board split.
+[subsets.fair95]
+split = "d3a"
+path = "methods/baselines/rule_based/eval/_scripts/pcbench_fair95.txt"

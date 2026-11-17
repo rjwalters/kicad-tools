@@ -1,0 +1,1269 @@
+"""Routing output and diagnostics display utilities.
+
+This module provides shared output functions for displaying routing results,
+including successful routes, failed routes, and actionable suggestions.
+"""
+
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import Autorouter, RoutingFailure
+    from .fine_pitch import FinePitchReport
+    from .primitives import Route
+
+
+def show_routing_summary(
+    router: Autorouter,
+    net_map: dict[str, int],
+    nets_to_route: int,
+    quiet: bool = False,
+    verbose: bool = False,
+    current_strategy: str = "basic",
+    pcb_file: str | None = None,
+    nets_to_route_ids: set[int] | None = None,
+    single_pad_count: int = 0,
+    auto_layers_attempted: bool = False,
+) -> None:
+    """Show comprehensive routing summary with successes, failures, and suggestions.
+
+    Displays:
+    - Successfully routed nets with endpoints and trace lengths
+    - Failed routes with specific reasons and blocking components
+    - Actionable suggestions for improving routing success
+
+    Args:
+        router: The Autorouter instance with completed routing
+        net_map: Mapping of net names to net IDs
+        nets_to_route: Total number of nets that should be routed
+        quiet: If True, skip output
+        verbose: If True, show detailed path analysis for failures
+        current_strategy: The routing strategy that was used (e.g. "basic",
+            "negotiated", "monte-carlo"). Suggestions will exclude this strategy
+            since the user already tried it.
+        pcb_file: Optional PCB file path for inclusion in suggestion commands.
+        nets_to_route_ids: Optional set of net IDs targeted for routing
+            (multi-pad signal nets).  When provided, ``routed_net_ids`` is
+            filtered to this set so numerator and denominator are consistent.
+            When ``None``, the function falls back to ``router.nets``
+            (multi-pad nets only) so user-skipped power/pour nets are not
+            mis-reported as failed routes (Issue #2498).
+        auto_layers_attempted: If True, the layer-escalation loop already ran
+            (i.e. ``--auto-layers`` was on, which is the default).  Recommending
+            ``--auto-layers`` again in that case is misleading — Issue #2634.
+            Callers from outside the escalation loop should leave this False so
+            users still see the suggestion.
+    """
+    if quiet:
+        return
+
+    # Build reverse mapping for net names
+    reverse_net = {v: k for k, v in net_map.items() if v > 0}
+
+    # Calculate route lengths by net
+    route_lengths_by_net: dict[int, float] = {}
+    route_vias_by_net: dict[int, int] = {}
+    for route in router.routes:
+        net_id = route.net
+        # Calculate route length
+        length_mm = _calculate_route_length(route)
+        route_lengths_by_net[net_id] = route_lengths_by_net.get(net_id, 0) + length_mm
+        # Track vias
+        route_vias_by_net[net_id] = route_vias_by_net.get(net_id, 0) + len(route.vias)
+
+    # Identify routed and unrouted nets — filter to target population
+    # so numerator/denominator are consistent (Issue #1643, #1833)
+    all_routed_net_ids = {route.net for route in router.routes}
+    if nets_to_route_ids is not None:
+        routed_net_ids = all_routed_net_ids & nets_to_route_ids
+        # Only report unrouted nets from the target population (multi-pad
+        # signal nets).  Skipped power nets and single-pad nets are not
+        # routing candidates and must not appear as "No path found".
+        unrouted_ids = nets_to_route_ids - all_routed_net_ids
+    else:
+        routed_net_ids = all_routed_net_ids
+        # Issue #2498: Fall back to ``router.nets`` when the caller didn't
+        # provide a target net population.  ``router.nets`` reflects the
+        # post-skip state — pads on user-skipped nets (e.g. pour nets like
+        # GND/VCC, or named nets in route_demo.py's ``skip_nets`` list) have
+        # already been rewritten to net=0 by ``load_pcb_for_routing``, so
+        # their net IDs no longer appear in ``router.nets``.  ``net_map``,
+        # by contrast, still contains those nets for diagnostics, which
+        # caused them to be reported as "No path found" failures.
+        # Restrict to multi-pad nets to mirror the convention used by
+        # ``cli/route_cmd.py`` (see ``multi_pad_nets`` there).
+        router_nets = getattr(router, "nets", None)
+        if isinstance(router_nets, dict) and router_nets:
+            all_net_ids = {
+                net_id
+                for net_id, pads in router_nets.items()
+                if isinstance(net_id, int) and net_id > 0 and len(pads) >= 2
+            }
+        else:
+            all_net_ids = {v for k, v in net_map.items() if v > 0}
+        unrouted_ids = all_net_ids - all_routed_net_ids
+
+    # Group recorded failures by net
+    failures_by_net: dict[int, list[RoutingFailure]] = {}
+    for failure in getattr(router, "routing_failures", []):
+        if failure.net not in failures_by_net:
+            failures_by_net[failure.net] = []
+        failures_by_net[failure.net].append(failure)
+
+    # --- Connectivity validation (Issue #2254) ---
+    # When pad data is available, check actual pad-to-pad connectivity
+    # so we don't report SUCCESS for nets that only have escape stubs.
+    connectivity: dict[int, dict] | None = None
+    partially_connected_nets: dict[int, dict] = {}
+    has_disconnected_islands = False
+    if hasattr(router, "pads") and hasattr(router, "nets") and router.pads and router.nets:
+        from .observability import validate_net_connectivity
+
+        net_pads: dict[int, list] = {}
+        for net_id, pad_keys in router.nets.items():
+            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+            if pad_list:
+                net_pads[net_id] = pad_list
+        target_pads = (
+            {nid: pads for nid, pads in net_pads.items() if nid in nets_to_route_ids}
+            if nets_to_route_ids is not None
+            else net_pads
+        )
+        connectivity = validate_net_connectivity(router.routes, target_pads)
+        for net_id, info in connectivity.items():
+            if info["total_pads"] >= 2 and not info["connected"]:
+                has_disconnected_islands = True
+                # A net that has routes but is not fully connected
+                if net_id in routed_net_ids:
+                    partially_connected_nets[net_id] = info
+        # Adjust routed count: remove partially-connected nets
+        routed_net_ids = routed_net_ids - set(partially_connected_nets.keys())
+
+    # Calculate success percentage
+    success_rate = len(routed_net_ids) / nets_to_route * 100 if nets_to_route > 0 else 0
+
+    print(f"\n{'=' * 60}")
+    if has_disconnected_islands or unrouted_ids or partially_connected_nets:
+        connectivity_pct = f" ({success_rate:.0f}% connected)"
+        print(f"Routing Incomplete{connectivity_pct}")
+    else:
+        print("Routing Complete!")
+    routed_line = f"  Nets routed: {len(routed_net_ids)}/{nets_to_route} ({success_rate:.0f}%)"
+    if single_pad_count:
+        routed_line += f" -- {single_pad_count} single-pad net(s) excluded"
+    print(routed_line)
+
+    # Issue #3311 / #3255: surface partial-route count alongside the
+    # strict-connect headline.  Distinguishing "partial" (has segments
+    # but not all pads connected) from "unrouted" (no segments at all)
+    # turns a single misleading "5/48 routed" number into the more
+    # informative "5 strict / 28 partial / 15 unrouted" breakdown.
+    partial_count = len(partially_connected_nets)
+    unrouted_count = len(unrouted_ids)
+    if nets_to_route > 0:
+        partial_pct = partial_count / nets_to_route * 100
+        unrouted_pct = unrouted_count / nets_to_route * 100
+    else:
+        partial_pct = 0.0
+        unrouted_pct = 0.0
+    print(
+        f"  Partial routes: {partial_count}/{nets_to_route} "
+        f"({partial_pct:.0f}%) -- have segments, not all pads connected"
+    )
+    print(
+        f"  Unrouted: {unrouted_count}/{nets_to_route} ({unrouted_pct:.0f}%) -- no segments at all"
+    )
+
+    # Show partially-connected nets (have segments but not all pads connected)
+    if partially_connected_nets:
+        print(f"\n  Partially connected nets ({len(partially_connected_nets)}):")
+        for net_id in sorted(partially_connected_nets):
+            info = partially_connected_nets[net_id]
+            net_name = reverse_net.get(net_id, f"Net_{net_id}")
+            print(f"    {net_name}: {info['connected_pads']}/{info['total_pads']} pads connected")
+
+    # Show cleanup statistics if any artifacts were removed
+    cleanup_stats = getattr(router, "_cleanup_stats", None)
+    if cleanup_stats:
+        total_removed = sum(cleanup_stats.values())
+        if total_removed > 0:
+            parts = []
+            if cleanup_stats.get("net0_routes_removed"):
+                parts.append(f"{cleanup_stats['net0_routes_removed']} net-0 route(s)")
+            net0_items = cleanup_stats.get("net0_segments_removed", 0) + cleanup_stats.get(
+                "net0_vias_removed", 0
+            )
+            if net0_items:
+                parts.append(f"{net0_items} net-0 segment/via(s)")
+            oob_items = cleanup_stats.get("oob_segments_removed", 0) + cleanup_stats.get(
+                "oob_vias_removed", 0
+            )
+            if oob_items:
+                parts.append(f"{oob_items} out-of-bounds segment/via(s)")
+            # Issue #8919: ``total_removed`` sums EVERY cleanup counter,
+            # including ones this sentence does not enumerate (repairs,
+            # restorations, single-layer vias -- each of which prints its own
+            # line from ``cleanup_artifacts``).  Without this guard a run whose
+            # only cleanup was e.g. an acute fold-back repair printed a bare
+            # "Cleanup: removed " with nothing after it.
+            if parts:
+                print(f"  Cleanup: removed {', '.join(parts)}")
+
+    print(f"{'=' * 60}")
+
+    # Show unrouted nets section first if there are failures (more important)
+    if unrouted_ids:
+        print("\nUnrouted nets:")
+
+    # Show failed routes first with detailed diagnostics
+    shown_nets_first: set[int] = set()
+    for net_id in sorted(unrouted_ids):
+        if net_id in shown_nets_first:
+            continue
+        shown_nets_first.add(net_id)
+
+        net_name = reverse_net.get(net_id, f"Net_{net_id}")
+        net_failures = failures_by_net.get(net_id, [])
+
+        if net_failures:
+            failure = net_failures[0]
+            analysis = getattr(failure, "analysis", None)
+
+            # Use the new format_summary if analysis is available
+            if analysis and hasattr(analysis, "format_summary"):
+                print(analysis.format_summary(net_name))
+            else:
+                # Fallback to basic format
+                cause_name = (
+                    failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
+                )
+                print(f"  {net_name}: {cause_name} - {failure.reason}")
+        else:
+            print(f"  {net_name}: No path found")
+
+    # Show successful routes (brief, only in verbose mode)
+    if verbose and routed_net_ids:
+        print(f"\n{'=' * 60}")
+        print("Successfully Routed Nets")
+        print(f"{'=' * 60}")
+
+        for net_id in sorted(routed_net_ids):
+            net_name = reverse_net.get(net_id, f"Net_{net_id}")
+            length = route_lengths_by_net.get(net_id, 0)
+            vias = route_vias_by_net.get(net_id, 0)
+            via_info = f", {vias} via{'s' if vias != 1 else ''}" if vias > 0 else ""
+            print(f"  {net_name}: {length:.1f}mm{via_info}")
+
+    # Group failures by cause for summary
+    failures_by_cause: dict[str, list[RoutingFailure]] = defaultdict(list)
+    all_failures: list[RoutingFailure] = []
+    for failure in getattr(router, "routing_failures", []):
+        if failure.net in unrouted_ids:
+            cause_name = (
+                failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
+            )
+            failures_by_cause[cause_name].append(failure)
+            all_failures.append(failure)
+
+    # Show verbose details for each failed net
+    if verbose and unrouted_ids:
+        # Only print section if at least one net has failure records
+        nets_with_detail = [
+            net_id for net_id in sorted(unrouted_ids) if failures_by_net.get(net_id)
+        ]
+        if nets_with_detail:
+            print(f"\n{'=' * 60}")
+            print("Detailed Failure Analysis")
+            print(f"{'=' * 60}")
+
+        for net_id in nets_with_detail:
+            net_name = reverse_net.get(net_id, f"Net_{net_id}")
+            net_failures = failures_by_net[net_id]
+
+            failure = net_failures[0]
+            analysis = getattr(failure, "analysis", None)
+
+            print(f"\n{net_name}:")
+
+            # Show path coordinates
+            if hasattr(failure, "source_coords") and failure.source_coords:
+                src = failure.source_coords
+                tgt = failure.target_coords
+                src_ref = (
+                    f"{failure.source_pad[0]}.{failure.source_pad[1]}"
+                    if failure.source_pad
+                    else "?"
+                )
+                tgt_ref = (
+                    f"{failure.target_pad[0]}.{failure.target_pad[1]}"
+                    if failure.target_pad
+                    else "?"
+                )
+                print(
+                    f"  Path: {src_ref} ({src[0]:.1f}, {src[1]:.1f}) -> {tgt_ref} ({tgt[0]:.1f}, {tgt[1]:.1f})"
+                )
+
+            if analysis:
+                print(
+                    f"  Root cause: {analysis.root_cause.value} ({analysis.confidence:.0%} confidence)"
+                )
+                print(f"  Congestion score: {analysis.congestion_score:.0%}")
+
+                # Show blocked area info
+                area = analysis.failure_area
+                print(
+                    f"  Blocked area: ({area.min_x:.1f}, {area.min_y:.1f}) to ({area.max_x:.1f}, {area.max_y:.1f})"
+                )
+                print(f"                Size: {area.width:.1f}mm x {area.height:.1f}mm")
+
+                if analysis.clearance_margin != float("inf"):
+                    print(f"  Clearance margin: {analysis.clearance_margin:.2f}mm")
+
+                if analysis.blocking_net_name:
+                    print(f"  Blocking net: {analysis.blocking_net_name}")
+
+                if analysis.blocking_elements:
+                    print(f"  Blocking elements ({len(analysis.blocking_elements)}):")
+                    for elem in analysis.blocking_elements[:5]:
+                        elem_desc = f"{elem.type}"
+                        if elem.ref:
+                            elem_desc += f" ({elem.ref})"
+                        if elem.net:
+                            elem_desc += f" net={elem.net}"
+                        print(f"    - {elem_desc}")
+                    if len(analysis.blocking_elements) > 5:
+                        print(f"    ... and {len(analysis.blocking_elements) - 5} more")
+
+                if analysis.suggestions:
+                    print("  Suggestions:")
+                    for suggestion in analysis.suggestions:
+                        print(f"    - {suggestion}")
+
+                # Show actionable suggestions with details
+                if hasattr(analysis, "actionable_suggestions") and analysis.actionable_suggestions:
+                    print("  Actionable fixes:")
+                    for action in analysis.actionable_suggestions:
+                        details = []
+                        if action.affected_component:
+                            details.append(f"component: {action.affected_component}")
+                        if action.affected_net:
+                            details.append(f"net: {action.affected_net}")
+                        if action.direction and action.distance_mm:
+                            details.append(f"{action.direction} {action.distance_mm}mm")
+                        detail_str = f" ({', '.join(details)})" if details else ""
+                        print(f"    [{action.category}] {action.summary}{detail_str}")
+
+    # Show summary grouped by failure reason
+    if failures_by_cause:
+        print(f"\n{'=' * 60}")
+        print("Failure Summary by Cause")
+        print(f"{'=' * 60}")
+
+        total_failed = len(unrouted_ids)
+        for cause, failures in sorted(failures_by_cause.items(), key=lambda x: -len(x[1])):
+            count = len({f.net for f in failures})
+            pct = count / total_failed * 100 if total_failed > 0 else 0
+            print(f"  {cause.upper()}: {count} net{'s' if count != 1 else ''} ({pct:.0f}%)")
+
+    # Generate pattern-based suggestions
+    if unrouted_ids:
+        print(f"\n{'=' * 60}")
+        print("Routing Suggestions")
+        print(f"{'=' * 60}")
+        print("\nBased on failure analysis:\n")
+
+        suggestions_shown = 0
+
+        # Check for PAD_INACCESSIBLE issues
+        all_pin_failures = failures_by_cause.get("pin_access", [])
+        # Issue #8155: a decline from via-site exhaustion is a boxed-in pin
+        # escape, not a grid misalignment -- don't send the operator to --grid.
+        via_site_failures = [f for f in all_pin_failures if getattr(f, "via_site_exhausted", False)]
+        pad_failures = [f for f in all_pin_failures if f not in via_site_failures]
+        if via_site_failures:
+            count = len({f.net for f in via_site_failures})
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. PIN ESCAPE BOXED IN ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print("   Every via site near the pad is blocked by existing copper/vias,")
+            print("   so legal via sites are only reachable by a local hand-routed escape.")
+            print("   Try: rip up or shift the trace along the pin tips, then re-route\n")
+        if pad_failures:
+            count = len({f.net for f in pad_failures})
+            grid_res = getattr(router.grid, "resolution", 0.25)
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. GRID ALIGNMENT ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print(f"   Some pads don't align with the {grid_res}mm routing grid.")
+            print(f"   Try: --grid {grid_res / 2} or adjust pad positions\n")
+
+        # Check for CONGESTION issues
+        congestion_failures = failures_by_cause.get("congestion", [])
+        if congestion_failures:
+            count = len({f.net for f in congestion_failures})
+            num_layers = getattr(router.grid, "num_layers", 2)
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. CONGESTION ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print(
+                f"   Routing channels are saturated on {num_layers} layer{'s' if num_layers != 1 else ''}."
+            )
+            if num_layers < 4:
+                print("   Try: --layers 4-all or --layers 6 for more routing resources\n")
+            else:
+                print("   Try: Increase board area or reduce component density\n")
+
+        # Check for ROUTING_ORDER issues (traces blocking other traces)
+        order_failures = failures_by_cause.get("routing_order", [])
+        if order_failures:
+            count = len({f.net for f in order_failures})
+            blocking_nets: set[str] = set()
+            for f in order_failures:
+                if hasattr(f, "analysis") and f.analysis and f.analysis.blocking_net_name:
+                    blocking_nets.add(f.analysis.blocking_net_name)
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. ROUTING ORDER ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print("   Earlier routed nets are blocking these paths.")
+            if blocking_nets:
+                net_list = ", ".join(sorted(blocking_nets)[:5])
+                if len(blocking_nets) > 5:
+                    net_list += f" +{len(blocking_nets) - 5} more"
+                print(f"   Blocking nets: {net_list}")
+            if current_strategy != "negotiated":
+                print("   Try: kct route --strategy negotiated (allows rip-up and reroute)\n")
+            elif current_strategy != "monte-carlo":
+                print(
+                    "   Try: kct route --strategy monte-carlo --mc-trials 20 (randomized rerouting)\n"
+                )
+            else:
+                print("   Try: Reposition components to reduce routing-order conflicts\n")
+
+        # Check for BLOCKED_PATH issues
+        blocked_failures = failures_by_cause.get("blocked_path", [])
+        if blocked_failures:
+            count = len({f.net for f in blocked_failures})
+            all_blocking = set()
+            for f in blocked_failures:
+                all_blocking.update(f.blocking_components)
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. COMPONENT BLOCKING ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print("   Direct paths are blocked by component keepouts.")
+            if all_blocking:
+                comp_list = ", ".join(sorted(all_blocking)[:5])
+                if len(all_blocking) > 5:
+                    comp_list += f" and {len(all_blocking) - 5} more"
+                print(f"   Blocking components: {comp_list}")
+            print("   Try: Reposition components or use vias to route around\n")
+
+        # Check for CLEARANCE issues
+        clearance_failures = failures_by_cause.get("clearance", [])
+        if clearance_failures:
+            count = len({f.net for f in clearance_failures})
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. CLEARANCE VIOLATIONS ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print("   Cannot meet trace clearance requirements.")
+            print("   Try: --clearance <smaller_value> (check manufacturer limits)\n")
+
+        # General suggestions if nothing specific
+        if suggestions_shown == 0:
+            num_layers = getattr(router.grid, "num_layers", 2)
+            suggestion_num = 0
+            pcb_arg = f" {pcb_file}" if pcb_file else ""
+            all_strategies = {
+                "negotiated": f"Try negotiated routing: kct route{pcb_arg} --strategy negotiated",
+                "monte-carlo": f"Try Monte Carlo routing: kct route{pcb_arg} --strategy monte-carlo --mc-trials 20",
+            }
+            for strategy_name, suggestion_text in all_strategies.items():
+                if strategy_name != current_strategy:
+                    suggestion_num += 1
+                    print(f"{suggestion_num}. {suggestion_text}")
+            if num_layers <= 2:
+                suggestion_num += 1
+                print(
+                    f"{suggestion_num}. Consider 4-layer routing: kct route{pcb_arg} --layers 4-all"
+                )
+
+        # Layer escalation recommendation with percentage-based threshold
+        num_layers = getattr(router.grid, "num_layers", 2)
+        failed_count = len(unrouted_ids)
+        failure_pct = failed_count / nets_to_route * 100 if nets_to_route > 0 else 0
+        pcb_arg = f" {pcb_file}" if pcb_file else ""
+
+        if num_layers < 4 and failure_pct > 20:
+            print(f"\n{'=' * 60}")
+            print(
+                f"RECOMMENDATION: {failed_count}/{nets_to_route} nets "
+                f"({failure_pct:.0f}%) failed on {num_layers} layers."
+            )
+            # Issue #2634: Do not recommend --auto-layers when it already ran.
+            # The escalation loop chose this layer count as the best result.
+            if auto_layers_attempted:
+                print("  Auto-layer escalation already ran; this was the best layer count.")
+                print(
+                    f"  Try: kct route{pcb_arg} --layers {max(num_layers + 2, 4)} "
+                    "(force more layers)"
+                )
+                print(
+                    "  Or:  review component placement (failures look like topology, "
+                    "not congestion)"
+                )
+            else:
+                print(f"  Try: kct route{pcb_arg} --auto-layers")
+                print(f"  Or:  kct route{pcb_arg} --layers 4")
+        elif num_layers < 4:
+            print(
+                f"\nTip: {failed_count}/{nets_to_route} nets failed on {num_layers} layers "
+                f"({failure_pct:.0f}% failure rate)."
+            )
+            # Issue #2634: Same suppression for the lower-severity tip.
+            if not auto_layers_attempted:
+                print(f"Try automatic layer escalation: kct route{pcb_arg} --auto-layers")
+
+        # Strategy suggestion: surface monte-carlo when using negotiated.
+        # Issue #2634: Only suggest MC if the user is not already on it.  The
+        # ``current_strategy == "negotiated"`` guard already handles this, but
+        # be explicit for clarity in case the set of strategies grows.
+        if current_strategy == "negotiated":
+            print("\nTip: Try randomized net ordering for better results:")
+            print(f"  kct route{pcb_arg} --strategy monte-carlo --mc-trials 20")
+
+        # Export failed nets suggestion
+        print(
+            "\nTip: Export failed net names for triage, then diagnose why each is stuck (kct net-status --why):"
+        )
+        print(f"  kct route{pcb_arg} --export-failed-nets failed_nets.txt")
+
+    print(f"\n{'=' * 60}")
+
+
+def _calculate_route_length(route: Route) -> float:
+    """Calculate total length of a route in millimeters.
+
+    Args:
+        route: Route object with segments
+
+    Returns:
+        Total length in millimeters
+    """
+    length = 0.0
+    for segment in route.segments:
+        dx = segment.end[0] - segment.start[0]
+        dy = segment.end[1] - segment.start[1]
+        length += (dx**2 + dy**2) ** 0.5
+    return length
+
+
+def _grid_report_block(router: Autorouter, selection: str | None) -> dict | None:
+    """``router.grid_report(selection)``, or None when unavailable (Issue #6875).
+
+    Test doubles and pre-#6875 router stand-ins have no real grid; the key is
+    then omitted rather than emitting a non-serializable value.
+    """
+    report_fn = getattr(type(router), "grid_report", None)
+    if report_fn is None:
+        return None
+    try:
+        block = router.grid_report(selection)
+    except Exception:  # pragma: no cover - defensive: never break the JSON
+        return None
+    return block if isinstance(block, dict) else None
+
+
+def get_routing_diagnostics_json(
+    router: Autorouter,
+    net_map: dict[str, int],
+    nets_to_route: int,
+    current_strategy: str = "basic",
+    nets_to_route_ids: set[int] | None = None,
+    single_pad_count: int = 0,
+    min_completion: float = 1.0,
+    routing_plan: dict | None = None,
+    diagnose_unrouted_budget: float | None = None,
+    grid_selection: str | None = None,
+) -> dict:
+    """Get routing diagnostics as a JSON-serializable dictionary.
+
+    Returns structured diagnostic information suitable for tooling and automation.
+
+    Args:
+        router: The Autorouter instance with completed routing
+        net_map: Mapping of net names to net IDs
+        nets_to_route: Total number of nets that should be routed
+        current_strategy: The routing strategy that was used. Suggestions will
+            exclude this strategy since the user already tried it.
+        nets_to_route_ids: Optional set of net IDs targeted for routing
+            (multi-pad signal nets).  When provided, ``routed_net_ids`` is
+            filtered to this set so numerator and denominator are consistent.
+        single_pad_count: Number of single-pad nets excluded from routing.
+            Shown in the summary for diagnostic clarity.
+        min_completion: Routing-population threshold for the additive
+            ``clean_success`` summary when placement metadata is present.
+            Requested placement errors always prevent success, even at zero.
+        routing_plan: Optional ``RoutingPlan`` summary block (Issue #5519,
+            Epic #5510 Phase 1) -- typically ``{"overflow_report": ...,
+            "sidecar": "<path>"}``.  Added under the ``"routing_plan"`` key
+            when provided; the key is absent (not ``null``) when the caller
+            passes ``None`` (e.g. no dense package triggered the two-phase
+            global pass, or ``--no-routing-plan`` in a later phase).
+        diagnose_unrouted_budget: Issue #5944.  When a positive number of
+            seconds, every unrouted connection (fully unrouted nets and the
+            missing edges of partial nets) is re-searched with all other
+            signal copper lifted and classified ``congested`` / ``blocked``
+            under the ``"unrouted"`` key, with the pass's own timing under
+            ``"unrouted_diagnosis"``.  ``None`` / ``0`` (the default) skips
+            the pass; both keys are then absent.
+        grid_selection: Issue #6875.  ``"explicit"`` or ``"auto"`` -- how
+            ``kct route`` chose the requested pitch -- reported as
+            ``grid.selection`` (None for library callers).
+
+    Returns:
+        Dictionary with routing diagnostics in JSON-serializable format
+    """
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    from .reporting import RoutingPlacementReport
+
+    disposition = getattr(router, "placement_disposition", None)
+    if not isinstance(disposition, RoutingPlacementDisposition):
+        disposition = None
+    if disposition is not None:
+        # Original named requests survive loader exclusions and absent net IDs.
+        nets_to_route = len(disposition.requested_nets)
+        nets_to_route_ids = {
+            net_map[name] for name in disposition.eligible_nets if net_map.get(name, 0) > 0
+        }
+
+    # Build reverse mapping for net names
+    reverse_net = {v: k for k, v in net_map.items() if v > 0}
+
+    # Calculate route metrics
+    route_lengths_by_net: dict[int, float] = {}
+    route_vias_by_net: dict[int, int] = {}
+    for route in router.routes:
+        net_id = route.net
+        length_mm = _calculate_route_length(route)
+        route_lengths_by_net[net_id] = route_lengths_by_net.get(net_id, 0) + length_mm
+        route_vias_by_net[net_id] = route_vias_by_net.get(net_id, 0) + len(route.vias)
+
+    # Identify routed and unrouted nets — filter to target population
+    # so numerator/denominator are consistent (Issue #1643, #1833)
+    all_routed_net_ids = {route.net for route in router.routes}
+    if nets_to_route_ids is not None:
+        routed_net_ids = all_routed_net_ids & nets_to_route_ids
+        # Only report unrouted nets from the target population (multi-pad
+        # signal nets).  Skipped power nets and single-pad nets are not
+        # routing candidates and must not appear as "No path found".
+        unrouted_ids = nets_to_route_ids - all_routed_net_ids
+    else:
+        routed_net_ids = all_routed_net_ids
+        # Issue #2498: Fall back to ``router.nets`` when the caller didn't
+        # provide a target net population.  ``router.nets`` reflects the
+        # post-skip state — pads on user-skipped nets (e.g. pour nets like
+        # GND/VCC, or named nets in route_demo.py's ``skip_nets`` list) have
+        # already been rewritten to net=0 by ``load_pcb_for_routing``, so
+        # their net IDs no longer appear in ``router.nets``.  ``net_map``,
+        # by contrast, still contains those nets for diagnostics, which
+        # caused them to be reported as "No path found" failures.
+        # Restrict to multi-pad nets to mirror the convention used by
+        # ``cli/route_cmd.py`` (see ``multi_pad_nets`` there).
+        router_nets = getattr(router, "nets", None)
+        if isinstance(router_nets, dict) and router_nets:
+            all_net_ids = {
+                net_id
+                for net_id, pads in router_nets.items()
+                if isinstance(net_id, int) and net_id > 0 and len(pads) >= 2
+            }
+        else:
+            all_net_ids = {v for k, v in net_map.items() if v > 0}
+        unrouted_ids = all_net_ids - all_routed_net_ids
+
+    # --- Connectivity validation (Issue #2254) ---
+    connectivity: dict[int, dict] | None = None
+    partially_connected: list[dict] = []
+    has_disconnected_islands = False
+    if hasattr(router, "pads") and hasattr(router, "nets") and router.pads and router.nets:
+        from .observability import validate_net_connectivity
+
+        net_pads_map: dict[int, list] = {}
+        for net_id_iter, pad_keys in router.nets.items():
+            pad_list = [router.pads[k] for k in pad_keys if k in router.pads]
+            if pad_list:
+                net_pads_map[net_id_iter] = pad_list
+        target_pads = (
+            {nid: pads for nid, pads in net_pads_map.items() if nid in nets_to_route_ids}
+            if nets_to_route_ids is not None
+            else net_pads_map
+        )
+        connectivity_routes = list(router.routes)
+        if disposition is not None:
+            # Retained copper and trivial one-pad connectivity are evidence of
+            # completion, even when this invocation creates no new route.
+            connectivity_routes.extend(getattr(router, "existing_routes", []))
+        connectivity = validate_net_connectivity(connectivity_routes, target_pads)
+        for nid, info in connectivity.items():
+            if disposition is not None and info["connected"]:
+                routed_net_ids.add(nid)
+                unrouted_ids.discard(nid)
+            if info["total_pads"] >= 2 and not info["connected"]:
+                has_disconnected_islands = True
+                if nid in routed_net_ids:
+                    partially_connected.append(
+                        {
+                            "net_id": nid,
+                            "net_name": reverse_net.get(nid, f"Net_{nid}"),
+                            "connected_pads": info["connected_pads"],
+                            "total_pads": info["total_pads"],
+                        }
+                    )
+                    routed_net_ids = routed_net_ids - {nid}
+
+    # Build successful routes list
+    successful_routes = []
+    for net_id in sorted(routed_net_ids):
+        net_name = reverse_net.get(net_id, f"Net_{net_id}")
+        successful_routes.append(
+            {
+                "net_id": net_id,
+                "net_name": net_name,
+                "status": "already_connected"
+                if disposition is not None and net_id not in all_routed_net_ids
+                else "routed",
+                "length_mm": round(route_lengths_by_net.get(net_id, 0), 2),
+                "vias": route_vias_by_net.get(net_id, 0),
+            }
+        )
+
+    # Build failed routes list with diagnostics
+    failed_routes = []
+    failures_by_cause: dict[str, int] = defaultdict(int)
+
+    for failure in getattr(router, "routing_failures", []):
+        if failure.net not in unrouted_ids:
+            continue
+
+        cause_name = failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
+        failures_by_cause[cause_name] += 1
+
+        failure_dict = {
+            "net_id": failure.net,
+            "net_name": failure.net_name,
+            "status": "failed",
+            "failure_cause": cause_name,
+            "reason": failure.reason,
+            "source_pad": {"ref": failure.source_pad[0], "pin": failure.source_pad[1]},
+            "target_pad": {"ref": failure.target_pad[0], "pin": failure.target_pad[1]},
+            "blocking_components": failure.blocking_components,
+        }
+
+        if hasattr(failure, "source_coords") and failure.source_coords:
+            failure_dict["source_coords"] = list(failure.source_coords)
+            failure_dict["target_coords"] = list(failure.target_coords)
+
+        if hasattr(failure, "analysis") and failure.analysis:
+            failure_dict["analysis"] = failure.analysis.to_dict()
+
+        failed_routes.append(failure_dict)
+
+    # Build suggestions based on failure patterns
+    suggestions = []
+    num_layers = getattr(router.grid, "num_layers", 2)
+    grid_res = getattr(router.grid, "resolution", 0.25)
+
+    if failures_by_cause.get("pin_access", 0) > 0:
+        suggestions.append(
+            {
+                "category": "GRID_ALIGNMENT",
+                "affected_nets": failures_by_cause["pin_access"],
+                "description": f"Some pads don't align with the {grid_res}mm routing grid",
+                "fix": f"--grid {grid_res / 2} or adjust pad positions",
+            }
+        )
+
+    if failures_by_cause.get("congestion", 0) > 0:
+        suggestions.append(
+            {
+                "category": "LAYER_COUNT",
+                "affected_nets": failures_by_cause["congestion"],
+                "description": f"Routing channels saturated on {num_layers} layers",
+                "fix": "--layers 4-all" if num_layers < 4 else "Increase board area",
+            }
+        )
+
+    if failures_by_cause.get("blocked_path", 0) > 0:
+        suggestions.append(
+            {
+                "category": "COMPONENT_BLOCKING",
+                "affected_nets": failures_by_cause["blocked_path"],
+                "description": "Direct paths blocked by component keepouts",
+                "fix": "Reposition components or use vias",
+            }
+        )
+
+    if failures_by_cause.get("clearance", 0) > 0:
+        suggestions.append(
+            {
+                "category": "CLEARANCE",
+                "affected_nets": failures_by_cause["clearance"],
+                "description": "Cannot meet trace clearance requirements",
+                "fix": "--clearance <smaller_value> (check manufacturer limits)",
+            }
+        )
+
+    if failures_by_cause.get("routing_order", 0) > 0:
+        fix_text = (
+            "--strategy negotiated (allows rip-up and reroute)"
+            if current_strategy != "negotiated"
+            else "--strategy monte-carlo --mc-trials 20 (randomized rerouting)"
+            if current_strategy != "monte-carlo"
+            else "Reposition components to reduce routing-order conflicts"
+        )
+        suggestions.append(
+            {
+                "category": "ROUTING_ORDER",
+                "affected_nets": failures_by_cause["routing_order"],
+                "description": "Earlier routed nets are blocking paths",
+                "fix": fix_text,
+            }
+        )
+
+    # Add general strategy suggestions if no cause-specific suggestions
+    if not suggestions:
+        all_strategy_suggestions = {
+            "negotiated": {
+                "category": "STRATEGY",
+                "description": "Try negotiated routing for rip-up and reroute",
+                "fix": "--strategy negotiated",
+            },
+            "monte-carlo": {
+                "category": "STRATEGY",
+                "description": "Try Monte Carlo routing for randomized optimization",
+                "fix": "--strategy monte-carlo --mc-trials 20",
+            },
+        }
+        for strategy_name, suggestion in all_strategy_suggestions.items():
+            if strategy_name != current_strategy:
+                suggestions.append(suggestion)
+
+    # Layer escalation recommendation when >20% failure on < 4 layers
+    failure_pct = len(unrouted_ids) / nets_to_route * 100 if nets_to_route > 0 else 0
+    if num_layers < 4 and failure_pct > 20:
+        suggestions.append(
+            {
+                "category": "LAYER_ESCALATION",
+                "description": (
+                    f"{len(unrouted_ids)}/{nets_to_route} nets ({failure_pct:.0f}%) "
+                    f"failed on {num_layers} layers"
+                ),
+                "fix": "--auto-layers",
+            }
+        )
+
+    # Surface monte-carlo suggestion when using negotiated strategy
+    if current_strategy == "negotiated":
+        # Only add if not already suggested via cause-specific logic
+        mc_already_suggested = any("monte-carlo" in s.get("fix", "") for s in suggestions)
+        if not mc_already_suggested:
+            suggestions.append(
+                {
+                    "category": "STRATEGY",
+                    "description": "Try randomized net ordering for better results",
+                    "fix": "--strategy monte-carlo --mc-trials 20",
+                }
+            )
+
+    # Always suggest --export-failed-nets when there are unrouted nets
+    if unrouted_ids:
+        suggestions.append(
+            {
+                "category": "EXPORT",
+                "description": "Export failed net names for triage, then diagnose with kct net-status --why",
+                "fix": "--export-failed-nets failed_nets.txt",
+            }
+        )
+
+    # Issue #3311 / #3255: surface partial / unrouted breakdown in JSON
+    # so machine-readable consumers (CI, dashboards, agent prompts) can
+    # report something more honest than the strict-connect headline.
+    partial_count = len(partially_connected)
+    unrouted_count = len(unrouted_ids)
+    summary_dict: dict = {
+        "nets_requested": nets_to_route,
+        "nets_routed": len(routed_net_ids),
+        "nets_partial": partial_count,
+        "nets_unrouted": unrouted_count,
+        "nets_failed": unrouted_count,
+        "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1)
+        if nets_to_route > 0
+        else 0,
+        "partial_rate": round(partial_count / nets_to_route * 100, 1) if nets_to_route > 0 else 0,
+        "unrouted_rate": round(unrouted_count / nets_to_route * 100, 1) if nets_to_route > 0 else 0,
+        "has_disconnected_islands": has_disconnected_islands,
+    }
+    if single_pad_count:
+        summary_dict["single_pad_nets"] = single_pad_count
+        summary_dict["total_nets_on_board"] = nets_to_route + single_pad_count
+
+    result_dict: dict = {
+        "summary": summary_dict,
+        "failure_breakdown": dict(failures_by_cause),
+        "successful_routes": successful_routes,
+        "failed_routes": failed_routes,
+        "suggestions": suggestions,
+    }
+    # Issue #6875: the grid actually routed on (requested vs used pitch,
+    # cols/rows/layers/cells, explicit-or-auto, coarsened and why).
+    grid_block = _grid_report_block(router, grid_selection)
+    if grid_block is not None:
+        result_dict["grid"] = grid_block
+    if disposition is not None:
+        placement = RoutingPlacementReport(
+            disposition, frozenset(reverse_net[nid] for nid in routed_net_ids if nid in reverse_net)
+        )
+        blocked = disposition.requested_invalid_nets
+        # Account for eligible names even when an early loader rejection or
+        # missing net ID left no router population. Partial nets are separate.
+        unrouted_count = len(disposition.eligible_nets - placement.completed_nets) - partial_count
+        summary_dict.update(
+            nets_unrouted=unrouted_count,
+            unrouted_rate=round(unrouted_count / nets_to_route * 100, 1) if nets_to_route else 0,
+            nets_eligible=len(disposition.eligible_nets),
+            nets_placement_blocked=len(blocked),
+            nets_completed=len(placement.completed_nets),
+            nets_completed_without_new_routes=len(routed_net_ids - all_routed_net_ids),
+            total_nets_on_board=len(
+                disposition.all_nets
+                | disposition.requested_nets
+                | disposition.invalid_nets
+                | disposition.user_excluded_nets
+                | disposition.plane_excluded_nets
+                | disposition.unrequested_nets
+            ),
+            nets_failed=unrouted_count + len(blocked),
+            clean_success=disposition.check_available
+            and placement.meets_completion(min_completion),
+        )
+        result_dict["placement_disposition"] = placement.to_dict()
+        for name in sorted(blocked):
+            failed_routes.append(
+                {
+                    "net_id": net_map.get(name),
+                    "net_name": name,
+                    "status": "not_attempted",
+                    "failure_cause": "placement_invalid",
+                    "reason": "placement-invalid, not attempted",
+                    "attribution": "direct"
+                    if name in disposition.direct_invalid_nets
+                    else "coupled",
+                }
+            )
+        if blocked:
+            result_dict["failure_breakdown"]["placement_invalid"] = len(blocked)
+    if partially_connected:
+        result_dict["partially_connected"] = partially_connected
+    # Issue #7425 (#7093 AC1): engaged diff pairs committed with unequal via
+    # counts.  ABSENT (not empty) when there are none, so a clean board's JSON
+    # is unchanged; reporting only -- it does not change the exit status.
+    parity_failures = getattr(router, "pair_via_parity_failures", None)
+    if parity_failures:
+        result_dict["pair_via_parity_failures"] = [
+            {
+                "p_net": f.p_name,
+                "n_net": f.n_name,
+                "vias_p": f.vias_p,
+                "vias_n": f.vias_n,
+            }
+            for f in parity_failures
+        ]
+    if routing_plan is not None:
+        # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
+        # summary.  Absent (not null) when no plan was built -- the key
+        # signals "a plan exists"; a present-but-empty dict would be
+        # ambiguous.
+        result_dict["routing_plan"] = routing_plan
+    # Issue #5517 (Epic #5508, Phase 1b): the replay-derived access witness --
+    # which commit closed each unrouted pad's access set, and when.  This is
+    # the routing report the epic names, and it replaces the guessed
+    # PLACEMENT_BOUND / CONGESTION_SATURATED hypotheses with evidence.  Same
+    # convention as ``routing_plan``: the key is ABSENT (not null) when the
+    # run stranded nothing, so a fully-routed board's JSON is unchanged.
+    witness_block = _access_witness_block(router)
+    if witness_block is not None:
+        result_dict["access_witness"] = witness_block
+    # Issue #5944: congested-vs-blocked classification of each unrouted
+    # connection.  Absent (not empty) when the pass did not run or nothing is
+    # unrouted, so a fully-routed board's JSON is unchanged.
+    diagnosis_block = _unrouted_diagnosis_block(
+        router,
+        unrouted_ids,
+        {entry["net_id"] for entry in partially_connected},
+        reverse_net,
+        diagnose_unrouted_budget,
+    )
+    if diagnosis_block is not None:
+        result_dict["unrouted"], result_dict["unrouted_diagnosis"] = diagnosis_block
+    return result_dict
+
+
+def _unrouted_diagnosis_block(
+    router: Autorouter,
+    unrouted_ids: set[int],
+    partial_ids: set[int],
+    net_names: dict[int, str],
+    budget_s: float | None,
+) -> tuple[list[dict], dict] | None:
+    """The ``"unrouted"`` / ``"unrouted_diagnosis"`` JSON pair (Issue #5944).
+
+    ``kct route`` runs the diagnosis while its grid is still live and stashes
+    it on ``router.unrouted_diagnosis`` (the grid's occupancy planes are
+    released before the report is built).  Library callers can instead pass
+    ``budget_s`` to run it here.  Only connections of nets that are still
+    unrouted / partial in THIS report are emitted.
+
+    Never raises a regular exception: a diagnostic must not be able to fail
+    the report that carries it.  A live run's one-line summary goes to
+    stderr so the ``--format json`` stdout contract (#5938) holds.
+    """
+    import sys
+
+    wanted = set(unrouted_ids) | set(partial_ids)
+    if not wanted:
+        return None
+    diagnosis = getattr(router, "unrouted_diagnosis", None)
+    if diagnosis is None and budget_s:
+        try:
+            from .unrouted_cause import diagnose_unrouted
+
+            diagnosis = diagnose_unrouted(
+                router,
+                unrouted_ids,
+                partial_net_ids=partial_ids,
+                net_names=net_names,
+                budget_s=float(budget_s),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Warning: unrouted diagnosis failed: {exc}", file=sys.stderr)
+            return None
+        if diagnosis is not None:
+            print(diagnosis.summary_line(), file=sys.stderr)
+    if diagnosis is None or not hasattr(diagnosis, "connections"):
+        return None
+    entries = [conn.to_dict() for conn in diagnosis.connections if conn.net_id in wanted]
+    if not entries:
+        return None
+    summary = diagnosis.summary_dict()
+    # Counts describe the emitted entries, not every connection searched.
+    summary["connections"] = len(entries)
+    for cause in ("congested", "blocked", "unclassified"):
+        summary[cause] = sum(1 for entry in entries if entry["cause"] == cause)
+    return entries, summary
+
+
+def _access_witness_block(router: Autorouter) -> dict | None:
+    """The router's replay-derived access witness, or ``None``.
+
+    Never raises: a diagnostic block must not be able to fail the JSON report
+    that carries it.  ``None`` covers three cases that all mean "no witness to
+    show" -- no journal (a non-grid engine), nothing stranded, and a replay
+    that could not run.
+    """
+    try:
+        from .access_witness import witness_for_router
+
+        witness = witness_for_router(router)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not witness:
+        return None
+    return witness.to_dict()
+
+
+def print_routing_diagnostics_json(
+    router: Autorouter,
+    net_map: dict[str, int],
+    nets_to_route: int,
+    current_strategy: str = "basic",
+    nets_to_route_ids: set[int] | None = None,
+    single_pad_count: int = 0,
+    routing_plan: dict | None = None,
+    diagnose_unrouted_budget: float | None = None,
+    verdict: str | None = None,
+    grid_selection: str | None = None,
+) -> None:
+    """Print routing diagnostics as JSON to stdout.
+
+    Args:
+        router: The Autorouter instance with completed routing
+        net_map: Mapping of net names to net IDs
+        nets_to_route: Total number of nets that should be routed
+        current_strategy: The routing strategy that was used. Suggestions will
+            exclude this strategy since the user already tried it.
+        nets_to_route_ids: Optional set of net IDs targeted for routing.
+        single_pad_count: Number of single-pad nets excluded from routing.
+        routing_plan: Optional ``RoutingPlan`` summary block -- see
+            :func:`get_routing_diagnostics_json`.
+        diagnose_unrouted_budget: Seconds for the congested/blocked
+            classification pass (Issue #5944) -- see
+            :func:`get_routing_diagnostics_json`.
+        verdict: The run's single final verdict (``"success"`` / ``"failed"``,
+            Issue #6239).  Emitted as ``summary.verdict`` when given.
+        grid_selection: ``"explicit"`` / ``"auto"`` for ``grid.selection``
+            (Issue #6875) -- see :func:`get_routing_diagnostics_json`.
+    """
+    diagnostics = get_routing_diagnostics_json(
+        router,
+        net_map,
+        nets_to_route,
+        current_strategy=current_strategy,
+        nets_to_route_ids=nets_to_route_ids,
+        single_pad_count=single_pad_count,
+        routing_plan=routing_plan,
+        diagnose_unrouted_budget=diagnose_unrouted_budget,
+        grid_selection=grid_selection,
+    )
+    if verdict is not None:
+        diagnostics["summary"]["verdict"] = verdict
+    # json_stdout(): the real stdout even while ``kct route --format json``
+    # diverts progress prints to stderr (issue #5938).
+    from kicad_tools.json_stdout import json_stdout
+
+    print(json.dumps(diagnostics, indent=2), file=json_stdout())
+
+
+def format_failed_nets_summary(
+    routing_failures: list[RoutingFailure],
+    max_display: int = 10,
+) -> str:
+    """Format a compact summary of failed routing attempts.
+
+    Produces output like:
+        Failed nets:
+          - Net 33 "Net-(R20-Pad1)": congestion (area too crowded)
+          - Net 35 "Net-(U3-OUTH)": blocked_path (blocked by U1, R4)
+          - Net 41 "PRECHG_NEG": pin_access (pad not on grid)
+
+    Args:
+        routing_failures: List of RoutingFailure objects from router
+        max_display: Maximum number of failures to show (default 10)
+
+    Returns:
+        Formatted string ready for printing, or empty string if no failures.
+    """
+    if not routing_failures:
+        return ""
+
+    # Group failures by net to avoid duplicates (one net may have multiple failed paths)
+    seen_nets: set[int] = set()
+    unique_failures: list[RoutingFailure] = []
+    for failure in routing_failures:
+        if failure.net not in seen_nets:
+            seen_nets.add(failure.net)
+            unique_failures.append(failure)
+
+    if not unique_failures:
+        return ""
+
+    lines = ["Failed nets:"]
+
+    for i, failure in enumerate(unique_failures[:max_display]):
+        # Format: Net ID "name": cause (details)
+        cause = failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
+
+        # Build detail string based on failure type
+        details = ""
+        if failure.blocking_components:
+            blockers = ", ".join(failure.blocking_components[:3])
+            if len(failure.blocking_components) > 3:
+                blockers += f" +{len(failure.blocking_components) - 3} more"
+            details = f"blocked by {blockers}"
+        elif failure.blocking_nets:
+            net_count = len(failure.blocking_nets)
+            details = f"{net_count} blocking net{'s' if net_count != 1 else ''}"
+        elif failure.reason and failure.reason != "No path found":
+            # Use the reason if it's more specific
+            details = failure.reason
+        else:
+            # Provide cause-specific details
+            cause_details = {
+                "congestion": "area too crowded",
+                "blocked_path": "no clear path",
+                "clearance": "clearance violation",
+                "layer_conflict": "wrong layer",
+                "pin_access": "pad not on grid",
+                "length_constraint": "length limit exceeded",
+                "differential_pair": "pair constraint failed",
+                "keepout": "crosses keepout zone",
+            }
+            details = cause_details.get(cause, "no path found")
+
+        lines.append(f'  - Net {failure.net} "{failure.net_name}": {cause} ({details})')
+
+        # Add detailed pad access blocker information if available
+        if (
+            hasattr(failure, "analysis")
+            and failure.analysis
+            and hasattr(failure.analysis, "pad_access_blockers")
+            and failure.analysis.pad_access_blockers
+        ):
+            for blocker in failure.analysis.pad_access_blockers[:2]:  # Show top 2 blockers
+                lines.append(
+                    f'    Pad {blocker.pad_ref}: blocked by clearance from "{blocker.blocking_net_name}" '
+                    f"({blocker.blocking_type} at {blocker.distance:.2f}mm distance)"
+                )
+            # Add suggestion if available
+            if failure.analysis.suggestions:
+                for suggestion in failure.analysis.suggestions[:1]:  # Show top suggestion
+                    if "clearance" in suggestion.lower():
+                        lines.append(f"    Suggestion: {suggestion}")
+
+    # Show count of remaining failures if truncated
+    remaining = len(unique_failures) - max_display
+    if remaining > 0:
+        lines.append(f"  ... and {remaining} more failed net{'s' if remaining != 1 else ''}")
+
+    return "\n".join(lines)
+
+
+def show_fine_pitch_warnings(
+    report: FinePitchReport,
+    quiet: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Display fine-pitch component warnings before routing.
+
+    This function displays warnings about fine-pitch ICs that may cause
+    routing difficulties due to grid/clearance constraints. It's designed
+    to be called before routing begins so users can adjust settings.
+
+    Args:
+        report: FinePitchReport from analyze_fine_pitch_components()
+        quiet: If True, skip output (useful for scripting)
+        verbose: If True, show detailed per-pad information
+    """
+    if quiet:
+        return
+
+    if not report.has_warnings:
+        return
+
+    print(report.format_warnings(verbose=verbose))
+
+
+__all__ = [
+    "format_failed_nets_summary",
+    "get_routing_diagnostics_json",
+    "print_routing_diagnostics_json",
+    "show_fine_pitch_warnings",
+    "show_routing_summary",
+]

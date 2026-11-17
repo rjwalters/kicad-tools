@@ -1,0 +1,10 @@
+# Codex user config -- comments and layout must survive
+model = "gpt-6-astra"
+approval_policy = "never"
+
+[mcp_servers.other]
+command = "/usr/bin/other"
+args = ["serve"]
+
+[profiles.bench]
+model = "sol"

@@ -1,0 +1,654 @@
+"""Authored per-net clearance minima, judged by the shared clearance kernel (#6243).
+
+A project's ``.kicad_pro`` netclasses can require more clearance for some nets
+than the board-wide base the router is configured with -- an isolated
+high-voltage net, a sensitive analog input.  KiCad's own DRC then measures the
+gap between two foreign nets against ``max(clearance[a], clearance[b])``.
+:mod:`kicad_tools.core.project_clearance` resolves those per-net values
+(pinned by a 36-case kicad-cli oracle) and the routing loader stores the ones
+stricter than the project's ``Default`` class in
+:attr:`DesignRules.net_clearance_floors <kicad_tools.router.rules.DesignRules>`.
+
+This module is where those minima meet geometry.  It owns **one** predicate,
+used by search, commit and final validation alike:
+
+    two foreign coppers ``a`` and ``b`` are legal only when the kernel's exact
+    edge-to-edge gap is at least ``max(floor[a], floor[b])``.
+
+Rule resolution is the pair floor (:func:`pair_floor`); geometry is the
+Epic #5509 clearance kernel (:mod:`.clearance_kernel`), reached through
+:mod:`.clearance_shapes` so the
+copper here is the very copper every other migrated consumer measures.  The C++
+backend mirrors this predicate in ``Grid3D::authored_*_clear``
+(``cpp/src/grid.cpp``) with the same kernel and the same epsilon, and
+``tests/router/test_clearance_kernel_parity.py`` holds the two to identical
+verdicts.
+
+Why a separate gate instead of widening the raster
+--------------------------------------------------
+The grid search's occupancy raster carries many deliberate local reliefs --
+pad-exit relaxation, same-component carve-outs, diff-pair partner gaps,
+negotiated sharing, HV attach-zone waivers.  Each is legitimate for the fab
+scalar it relaxes and wrong for a designer-authored electrical minimum.  So the
+minimum is not folded into the raster at all: every search step, every via
+placement and every committed segment/via is additionally asked of this gate,
+which no relief reaches.  The scalar machinery still enforces the base
+clearance exactly as before; this gate only ever *adds* a requirement, and it is
+a no-op (``floors`` empty) on every board whose project declares nothing
+stricter than ``Default``.
+
+Scope
+-----
+Copper the gate knows: every pad registered on the grid (including skipped /
+placement-excluded pads, whose own authored minimum rides on
+:attr:`Pad.authored_clearance <kicad_tools.router.primitives.Pad>` because their
+routing net id is neutralised to ``0``), and every committed route segment and
+via.  Preserved fills are handled by raising each fill's own clearance to its
+source net's minimum where the fills are built (:mod:`.fixed_copper`), which the
+fill predicate already honours symmetrically.  Vias are modelled as copper on
+every layer (:data:`~.clearance_shapes.ALL_LAYERS`) -- exact for the through
+vias the router emits and conservative for a blind/buried barrel.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from .clearance_shapes import (
+    CLEARANCE_EPSILON_MM,
+    KShape,
+    copper_gap,
+    pad_shape,
+    segment_shape,
+    shapes_clear,
+    via_shape,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .primitives import Pad, Route, Segment, Via
+
+__all__ = [
+    "AuthoredCopperIndex",
+    "AuthoredViolation",
+    "attach_zone_floor_waiver",
+    "authored_violations",
+    "pad_authored_floor",
+    "pad_label",
+    "pair_floor",
+]
+
+#: Spatial bucket edge in mm.  Buckets only *select* candidates; every verdict
+#: is the kernel's.  1 mm matches ``Grid3D``'s fixed-fill bins.
+_BUCKET_MM = 1.0
+
+
+def pair_floor(
+    floors: Mapping[int, float],
+    net_a: int,
+    net_b: int,
+    own_a: float = 0.0,
+    own_b: float = 0.0,
+) -> float:
+    """The authored minimum two coppers must keep apart (0.0 = none).
+
+    Same-net copper is never a clearance obstacle, so it needs nothing.  Each
+    side contributes the larger of its net's floor and its item-level floor
+    (``own_*``, e.g. a neutralised pad's :attr:`Pad.authored_clearance`).
+    """
+    if net_a == net_b:
+        return 0.0
+    return max(floors.get(net_a, 0.0), floors.get(net_b, 0.0), own_a, own_b)
+
+
+def pad_authored_floor(pad: Pad, floors: Mapping[int, float]) -> float:
+    """A pad's own authored minimum: its net's floor or its item-level floor."""
+    return max(floors.get(pad.net, 0.0), float(getattr(pad, "authored_clearance", 0.0) or 0.0))
+
+
+@dataclass(frozen=True)
+class AuthoredViolation:
+    """One authored-minimum shortfall between two foreign coppers."""
+
+    x: float
+    y: float
+    net: int
+    other_net: int
+    required: float
+    actual: float
+    kind: str  # "pad" | "segment" | "via"
+    #: Issue #6670: a human name for the foreign copper (``"GND pad U2.G3"``).
+    #: A neutralised pour pad is ``net 0`` in the router, which hides both the
+    #: net whose class sets the floor and which pad it is; empty when unknown.
+    other_label: str = ""
+    #: Issue #8029: the offending copper itself (the scanned
+    #: :class:`~.primitives.Segment` / :class:`~.primitives.Via`) and the
+    #: foreign copper it is too close to (a ``Pad``, ``Segment`` or ``Via``),
+    #: so a consumer can waive by geometry (the #4506 attach zone) or strip
+    #: exactly the offending connection.  ``None`` when not known.
+    copper: Any = field(default=None, compare=False, repr=False)
+    other: Any = field(default=None, compare=False, repr=False)
+    #: The foreign copper's net NAME (survives a pad's neutralisation to 0).
+    other_name: str = ""
+
+
+#: A census waiver: ``True`` drops the violation (the next foreign copper is
+#: then asked), ``False`` keeps it.
+AuthoredWaiver = Callable[[AuthoredViolation], bool]
+
+
+@dataclass(frozen=True)
+class _Item:
+    shape: KShape
+    net: int
+    floor: float
+    kind: str
+    x: float
+    y: float
+    bbox: tuple[float, float, float, float]
+    label: str = ""
+    source: Any = None
+    name: str = ""
+
+
+def pad_label(pad: Pad) -> str:
+    """``"<net name> pad <REF>.<PAD>"`` for log lines (issue #6670).
+
+    Uses the pad's retained ``net_name``, so a pour pad neutralised to net 0
+    is still named by its real net (``GND pad U2.G3``).  Falls back to the
+    net id and omits the designator when the pad carries none.
+    """
+    name = pad.net_name or f"net {pad.net}"
+    ref = f" {pad.ref}.{pad.pin}" if pad.ref and pad.pin else (f" {pad.ref}" if pad.ref else "")
+    return f"{name} pad{ref}"
+
+
+def _seg_bbox(seg: Segment) -> tuple[float, float, float, float]:
+    h = seg.width / 2.0
+    return (
+        min(seg.x1, seg.x2) - h,
+        min(seg.y1, seg.y2) - h,
+        max(seg.x1, seg.x2) + h,
+        max(seg.y1, seg.y2) + h,
+    )
+
+
+def _via_bbox(via: Via) -> tuple[float, float, float, float]:
+    r = via.diameter / 2.0
+    return (via.x - r, via.y - r, via.x + r, via.y + r)
+
+
+def _pad_bbox(pad: Pad) -> tuple[float, float, float, float]:
+    # Encloses every rotation of the pad rectangle (and the circle radius).
+    r = math.hypot(pad.width, pad.height) / 2.0
+    return (pad.x - r, pad.y - r, pad.x + r, pad.y + r)
+
+
+class AuthoredCopperIndex:
+    """Bucketed foreign copper the authored-minimum predicate is asked against.
+
+    Built from a pad census and a route list once, then queried per candidate.
+    Two bucket maps are kept: every item, and only items that themselves carry
+    a floor.  A candidate whose own net has no floor can only conflict with
+    floored copper, so it walks the (typically tiny) second map -- which is
+    what keeps the gate cheap on a board where one isolated net is strict.
+    """
+
+    def __init__(
+        self,
+        floors: Mapping[int, float],
+        pads: Iterable[Pad] = (),
+        routes: Iterable[Route] = (),
+    ) -> None:
+        self.floors: dict[int, float] = dict(floors)
+        self.max_floor = max(self.floors.values(), default=0.0)
+        self._all: dict[tuple[int, int], list[_Item]] = {}
+        self._floored: dict[tuple[int, int], list[_Item]] = {}
+        self._max_item_floor = 0.0
+        for pad in pads:
+            self._add(
+                _Item(
+                    pad_shape(pad),
+                    pad.net,
+                    pad_authored_floor(pad, self.floors),
+                    "pad",
+                    pad.x,
+                    pad.y,
+                    _pad_bbox(pad),
+                    pad_label(pad),
+                    pad,
+                    pad.net_name or "",
+                )
+            )
+        self.add_routes(routes)
+
+    def add_routes(self, routes: Iterable[Route]) -> None:
+        """Index more committed routes (Issue #6427: append without a rebuild)."""
+        for route in routes:
+            floor = max(
+                self.floors.get(route.net, 0.0),
+                float(getattr(route, "authored_clearance", 0.0) or 0.0),
+            )
+            for seg in route.segments:
+                self._add(
+                    _Item(
+                        segment_shape(seg),
+                        route.net,
+                        floor,
+                        "segment",
+                        (seg.x1 + seg.x2) / 2.0,
+                        (seg.y1 + seg.y2) / 2.0,
+                        _seg_bbox(seg),
+                        "",
+                        seg,
+                        route.net_name or "",
+                    )
+                )
+            for via in route.vias:
+                self._add(
+                    _Item(
+                        via_shape(via),
+                        route.net,
+                        floor,
+                        "via",
+                        via.x,
+                        via.y,
+                        _via_bbox(via),
+                        "",
+                        via,
+                        route.net_name or "",
+                    )
+                )
+
+    @property
+    def active(self) -> bool:
+        """True when any copper carries an authored minimum at all."""
+        return self.max_floor > 0.0 or self._max_item_floor > 0.0
+
+    def _add(self, item: _Item) -> None:
+        if item.floor > self._max_item_floor:
+            self._max_item_floor = item.floor
+        for key in _bucket_keys(item.bbox, 0.0):
+            self._all.setdefault(key, []).append(item)
+            if item.floor > 0.0:
+                self._floored.setdefault(key, []).append(item)
+
+    def _candidates(
+        self, bbox: tuple[float, float, float, float], own_floor: float
+    ) -> Iterable[_Item]:
+        if own_floor > 0.0:
+            buckets, reach = self._all, max(own_floor, self._max_item_floor)
+        else:
+            buckets, reach = self._floored, self._max_item_floor
+        if not buckets or reach <= 0.0:
+            return ()
+        seen: set[int] = set()
+        out: list[_Item] = []
+        for key in _bucket_keys(bbox, reach):
+            for item in buckets.get(key, ()):
+                if id(item) in seen:
+                    continue
+                seen.add(id(item))
+                out.append(item)
+        return out
+
+    def first_violation(
+        self,
+        shape: KShape,
+        bbox: tuple[float, float, float, float],
+        net: int,
+        own_floor=None,
+        *,
+        copper: Any = None,
+        waive: AuthoredWaiver | None = None,
+    ) -> AuthoredViolation | None:
+        """The first foreign copper ``shape`` (owned by ``net``) is too close to.
+
+        ``own_floor`` defaults to the net's floor; a caller holding an
+        item-level floor (a neutral pad) passes it explicitly.  ``copper`` is
+        the router object ``shape`` was built from (carried on the result);
+        ``waive`` (issue #8029) may drop a shortfall, in which case the next
+        foreign copper is asked.
+        """
+        own = self.floors.get(net, 0.0) if own_floor is None else own_floor
+        for item in self._candidates(bbox, own):
+            if item.net == net:
+                continue
+            required = max(own, item.floor)
+            if required <= 0.0:
+                continue
+            if not shapes_clear(shape, item.shape, required):
+                hit = AuthoredViolation(
+                    item.x,
+                    item.y,
+                    net,
+                    item.net,
+                    required,
+                    copper_gap(shape, item.shape),
+                    item.kind,
+                    item.label,
+                    copper,
+                    item.source,
+                    item.name,
+                )
+                if waive is not None and waive(hit):
+                    continue
+                return hit
+        return None
+
+    def candidate_mask(
+        self,
+        net: int,
+        own_radius: float,
+        *,
+        origin: tuple[float, float],
+        resolution: float,
+        shape: tuple[int, int, int],
+        layer_values: list[int | None],
+        all_layers: bool = False,
+    ) -> Any:
+        """Grid cells where ``net``'s copper could come within an authored minimum.
+
+        A search-speed broad phase, never a verdict: cell ``(L, y, x)`` is
+        ``False`` only when copper of radius ``own_radius`` centred anywhere
+        within one grid step of that cell centre provably clears every foreign
+        item's authored minimum (each item's bounding box grown by
+        ``required + own_radius + resolution``).  A ``True`` cell still goes to
+        the exact kernel predicate.  ``all_layers`` folds every layer into
+        each plane (a through-via probe).
+
+        Args:
+            net: The querying net.
+            own_radius: The probe copper's half-width (trace) or radius (via).
+            origin: Grid origin ``(x, y)`` in mm.
+            resolution: Grid pitch in mm.
+            shape: ``(layers, rows, cols)``.
+            layer_values: Per grid layer, the kernel layer value its copper
+                carries (``Layer.value``), or ``None`` when unmapped.
+            all_layers: Treat the probe as present on every layer.
+
+        Returns:
+            A boolean ``numpy`` array of ``shape``.
+        """
+        import numpy as np
+
+        from .clearance_shapes import ALL_LAYERS
+
+        layers, rows, cols = shape
+        mask = np.zeros(shape, dtype=bool)
+        own = self.floors.get(net, 0.0)
+        buckets = self._all if own > 0.0 else self._floored
+        seen: set[int] = set()
+        ox, oy = origin
+        for bucket in buckets.values():
+            for item in bucket:
+                if id(item) in seen or item.net == net:
+                    continue
+                seen.add(id(item))
+                required = max(own, item.floor)
+                if required <= 0.0:
+                    continue
+                grow = required + own_radius + resolution
+                x0 = max(0, math.floor((item.bbox[0] - grow - ox) / resolution))
+                y0 = max(0, math.floor((item.bbox[1] - grow - oy) / resolution))
+                x1 = min(cols - 1, math.ceil((item.bbox[2] + grow - ox) / resolution))
+                y1 = min(rows - 1, math.ceil((item.bbox[3] + grow - oy) / resolution))
+                if x0 > x1 or y0 > y1:
+                    continue
+                item_layer = getattr(item.shape, "layer", ALL_LAYERS)
+                for idx in range(layers):
+                    if (
+                        not all_layers
+                        and item_layer != ALL_LAYERS
+                        and layer_values[idx] is not None
+                        and layer_values[idx] != item_layer
+                    ):
+                        continue
+                    mask[idx, y0 : y1 + 1, x0 : x1 + 1] = True
+        return mask
+
+    def segment_violation(
+        self, seg: Segment, net: int | None = None, *, waive: AuthoredWaiver | None = None
+    ) -> AuthoredViolation | None:
+        """Authored-minimum check for a trace segment (``net`` defaults to ``seg.net``)."""
+        return self.first_violation(
+            segment_shape(seg),
+            _seg_bbox(seg),
+            seg.net if net is None else net,
+            copper=seg,
+            waive=waive,
+        )
+
+    def via_violation(
+        self, via: Via, net: int | None = None, *, waive: AuthoredWaiver | None = None
+    ) -> AuthoredViolation | None:
+        """Authored-minimum check for a via barrel on every layer."""
+        return self.first_violation(
+            via_shape(via),
+            _via_bbox(via),
+            via.net if net is None else net,
+            copper=via,
+            waive=waive,
+        )
+
+    def segment_clear(self, seg: Segment, net: int | None = None) -> bool:
+        return self.segment_violation(seg, net) is None
+
+    def via_clear(self, via: Via, net: int | None = None) -> bool:
+        return self.via_violation(via, net) is None
+
+
+def _bucket_keys(bbox: tuple[float, float, float, float], reach: float) -> list[tuple[int, int]]:
+    x0 = math.floor((bbox[0] - reach) / _BUCKET_MM)
+    y0 = math.floor((bbox[1] - reach) / _BUCKET_MM)
+    x1 = math.floor((bbox[2] + reach) / _BUCKET_MM)
+    y1 = math.floor((bbox[3] + reach) / _BUCKET_MM)
+    return [(bx, by) for bx in range(x0, x1 + 1) for by in range(y0, y1 + 1)]
+
+
+def authored_violations(
+    floors: Mapping[int, float],
+    pads: Iterable[Pad],
+    routes: Iterable[Route],
+    *,
+    first_per_net: bool = False,
+    waive: AuthoredWaiver | None = None,
+) -> list[AuthoredViolation]:
+    """Every committed segment/via that breaks an authored minimum.
+
+    The final-validation census: the same predicate the search gate and the
+    commit validators ask, run over finished copper.  Each offending pair is
+    reported once per offending segment/via (from the side being scanned).
+    ``waive`` (issue #8029, e.g. :func:`attach_zone_floor_waiver`) drops the
+    shortfalls it accepts; ``None`` keeps every one, as before.
+    """
+    routes = list(routes)
+    index = AuthoredCopperIndex(floors, pads, routes)
+    if not index.active:
+        return []
+    found: list[AuthoredViolation] = []
+    flagged: set[int] = set()
+    for route in routes:
+        if first_per_net and route.net in flagged:
+            continue
+        for seg in route.segments:
+            hit = index.segment_violation(seg, route.net, waive=waive)
+            if hit is not None:
+                found.append(hit)
+                flagged.add(route.net)
+                if first_per_net:
+                    break
+        if first_per_net and route.net in flagged:
+            continue
+        for via in route.vias:
+            hit = index.via_violation(via, route.net, waive=waive)
+            if hit is not None:
+                found.append(hit)
+                flagged.add(route.net)
+                if first_per_net:
+                    break
+    return found
+
+
+def _zone_item(item: Any, net_name: str) -> Any:
+    """A router :class:`Segment` / :class:`Via` / :class:`Pad` as a floor-zone item."""
+    from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+
+    from kicad_tools.manufacturers.attach_zone_dru import ZoneItem
+
+    from .pairwise_clearance import _norm_layer_key
+
+    if hasattr(item, "x1"):
+        shape = LineString([(item.x1, item.y1), (item.x2, item.y2)]).buffer(item.width / 2.0)
+        return ZoneItem(shape, net_name, _norm_layer_key(item.layer), "segment")
+    if hasattr(item, "diameter"):
+        return ZoneItem(Point(item.x, item.y).buffer(item.diameter / 2.0), net_name, None, "via")
+    shape = box(
+        item.x - item.width / 2.0,
+        item.y - item.height / 2.0,
+        item.x + item.width / 2.0,
+        item.y + item.height / 2.0,
+    )
+    return ZoneItem(shape, net_name, _norm_layer_key(item.layer), "pad")
+
+
+def attach_zone_floor_waiver(
+    zones: Sequence[Any],
+    *,
+    base: float,
+    designer: Mapping[int, float] | None,
+    designer_by_name: Mapping[str, float] | None = None,
+    net_names: Mapping[int, str] | None = None,
+) -> AuthoredWaiver | None:
+    """Waive ROUTER-class floor shortfalls inside an attach zone (issues #8029, #8048).
+
+    Since #6427 ``net_clearance_floors`` carries the router's own net-class
+    clearances as well as the designer's ``.kicad_pro`` / DRU minimums.  A pair
+    of a rated footprint's pad nets, inside its courtyard, is spaced by the
+    part's own pin pitch, so the router-class floor does not govern it.  The
+    zones (:class:`~kicad_tools.manufacturers.attach_zone_dru.FloorZone`) are
+    the very ones the emitted ``.kicad_dru`` and ``kct check`` apply, so the
+    backstop stops demoting exactly the copper both engines accept.
+
+    A shortfall is waived only when a zone exempts the pair AND the gap still
+    meets ``base`` (the board-wide base clearance, never relaxed) and the
+    pair's DESIGNER floor -- a designer minimum is enforced by kicad-cli and
+    is never waived.
+
+    ``designer is None`` means the rules were built outside the loader, and
+    every floor is treated as designer-authored (#6449): no waiver at all.
+    Returns ``None`` (no waiver) then, or when no zone is installed.
+    """
+    if designer is None or not zones:
+        return None
+    from kicad_tools.manufacturers.attach_zone_dru import zones_exempt
+
+    by_name = designer_by_name or {}
+    names = net_names or {}
+
+    def _designer_floor(net: int, name: str, item: Any) -> float:
+        if net:
+            return float(designer.get(net, 0.0))
+        # A neutralised pad (net 0) keeps its designer minimum by name, exactly
+        # as the lattice pad masks read it (``_designer_pad_extra``).  Other
+        # neutralised copper carries an item floor of unknown provenance:
+        # treat it as designer-authored (strict).
+        if hasattr(item, "pin") or hasattr(item, "through_hole"):
+            return float(by_name.get(name, 0.0))
+        return float(getattr(item, "authored_clearance", 0.0) or 0.0)
+
+    def waive(hit: AuthoredViolation) -> bool:
+        if hit.copper is None or hit.other is None:
+            return False
+        own_name = names.get(hit.net, "") or str(getattr(hit.copper, "net_name", "") or "")
+        other_name = hit.other_name or names.get(hit.other_net, "")
+        if not own_name or not other_name:
+            return False
+        strict = max(
+            base,
+            _designer_floor(hit.net, own_name, hit.copper),
+            _designer_floor(hit.other_net, other_name, hit.other),
+        )
+        if hit.actual < strict - CLEARANCE_EPSILON_MM:
+            return False
+        return zones_exempt(
+            zones, _zone_item(hit.copper, own_name), _zone_item(hit.other, other_name)
+        )
+
+    return waive
+
+
+_EMPTY: list[Any] = []
+# Shared, never-mutated stand-in for an empty floors map (the index copies it).
+_NO_FLOORS: dict[int, float] = {}
+
+
+def grid_authored_index(grid: Any) -> AuthoredCopperIndex | None:
+    """The grid's cached index of its own pads and committed routes, or ``None``.
+
+    ``None`` -- the overwhelmingly common case -- means the grid's rules carry
+    no authored minima and no registered pad or marked route carries an
+    item-level one (``RoutingGrid._authored_item_floors``), so
+    every caller short-circuits.  The cache is keyed on the copper the index
+    was built from (route/pad list identity, length and last element, and the
+    floors mapping), so any mark/unmark or pad registration rebuilds it before
+    the next query.
+    """
+    rules = getattr(grid, "rules", None)
+    # NB: never ``or {}`` -- a fresh empty dict per call changes ``id(floors)``
+    # in the key below and rebuilds the index on every query (#7716: ~0.1 s per
+    # rebuild, one per Python-A* expansion step, on a board whose floors are
+    # all item-level).
+    floors = getattr(rules, "net_clearance_floors", None)
+    if not floors:
+        floors = _NO_FLOORS
+    # NB: never ``or []`` here -- a fresh empty list per call would change the
+    # cache key below on every query and rebuild the index each time.
+    pads = getattr(grid, "_pads", None)
+    if pads is None:
+        pads = _EMPTY
+    if not isinstance(floors, dict):
+        floors = _NO_FLOORS
+    if not floors and getattr(grid, "_authored_item_floors", False) is not True:
+        return None
+    routes = getattr(grid, "routes", None)
+    if routes is None:
+        routes = _EMPTY
+    key = (
+        id(floors),
+        len(floors),
+        id(routes),
+        len(routes),
+        id(routes[-1]) if routes else 0,
+        id(pads),
+        len(pads),
+        id(pads[-1]) if pads else 0,
+    )
+    cached = getattr(grid, "_authored_index_cache", None)
+    if cached is not None and cached[0] == key:
+        hit: AuthoredCopperIndex | None = cached[1]
+        return hit
+    # Issue #6427: committing a route only APPENDS to ``grid.routes``.  With
+    # router net classes feeding the floors, the gate is live on most boards
+    # and a full rebuild per commit dominated its cost, so extend the cached
+    # index when everything else in the key is unchanged and the previous
+    # last route is still where it was (no removal before it).
+    if cached is not None and cached[1] is not None:
+        old = cached[0]
+        old_len = old[3]
+        if (
+            old[:3] == key[:3]
+            and old[5:] == key[5:]
+            and 0 < old_len < len(routes)
+            and id(routes[old_len - 1]) == old[4]
+        ):
+            grown: AuthoredCopperIndex = cached[1]
+            grown.add_routes(routes[old_len:])
+            grid._authored_index_cache = (key, grown)
+            return grown
+    index = AuthoredCopperIndex(floors, pads, routes)
+    result = index if index.active else None
+    grid._authored_index_cache = (key, result)
+    return result

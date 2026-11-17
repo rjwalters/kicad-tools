@@ -1,0 +1,2470 @@
+"""Tests for the TraceOptimizer staircase compression feature."""
+
+import pytest
+
+from kicad_tools.router import (
+    DesignRules,
+    GridCollisionChecker,
+    Layer,
+    OptimizationConfig,
+    Route,
+    RoutingGrid,
+    Segment,
+    TraceOptimizer,
+)
+
+
+class TestStaircaseCompression:
+    """Tests for staircase pattern compression."""
+
+    @pytest.fixture
+    def optimizer(self):
+        """Create a TraceOptimizer with default config."""
+        return TraceOptimizer()
+
+    @pytest.fixture
+    def optimizer_disabled(self):
+        """Create a TraceOptimizer with staircase compression disabled."""
+        config = OptimizationConfig(compress_staircase=False)
+        return TraceOptimizer(config)
+
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        """Helper to create a segment with default properties."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    def test_synthetic_staircase_horizontal_diagonal(self, optimizer):
+        """Test that alternating horizontal/diagonal segments are compressed.
+
+        Creates a staircase pattern:
+          Seg 0: horizontal (180°)
+          Seg 1: diagonal (225°)
+          Seg 2: horizontal (180°)
+          Seg 3: diagonal (225°)
+          ... etc
+
+        Should be compressed to 2 segments: diagonal + horizontal.
+        """
+        segments = []
+        x, y = 0.0, 0.0
+
+        # Create 10 alternating segments
+        for i in range(10):
+            if i % 2 == 0:
+                # Horizontal segment going left (180°)
+                new_x = x - 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                # Diagonal segment going down-left (225°)
+                new_x = x - 0.5
+                new_y = y - 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Before: 10 segments
+        assert len(segments) == 10
+
+        # After: should be ≤4 segments
+        result = optimizer.compress_staircase(segments)
+        assert len(result) <= 4, f"Expected ≤4 segments, got {len(result)}"
+
+        # Verify endpoints are preserved
+        assert abs(result[0].x1 - segments[0].x1) < 1e-4
+        assert abs(result[0].y1 - segments[0].y1) < 1e-4
+        assert abs(result[-1].x2 - segments[-1].x2) < 1e-4
+        assert abs(result[-1].y2 - segments[-1].y2) < 1e-4
+
+    def test_diagonal_only_unchanged(self, optimizer):
+        """Test that a path that's already optimal is not changed."""
+        # Create a diagonal followed by horizontal (already optimal)
+        segments = [
+            self.make_segment(0, 0, 5, 5),  # Diagonal
+            self.make_segment(5, 5, 10, 5),  # Horizontal
+        ]
+
+        result = optimizer.compress_staircase(segments)
+
+        # Should be unchanged (not a staircase pattern)
+        assert len(result) == 2
+
+    def test_short_staircase_not_compressed(self, optimizer):
+        """Test that staircases below threshold are not compressed."""
+        # Create just 2 alternating segments (below default threshold of 3)
+        segments = [
+            self.make_segment(0, 0, 1, 0),  # Horizontal
+            self.make_segment(1, 0, 1.5, 0.5),  # Diagonal
+        ]
+
+        result = optimizer.compress_staircase(segments)
+
+        # Should be unchanged (too short)
+        assert len(result) == 2
+
+    def test_mixed_pattern_staircases_compressed(self, optimizer):
+        """Test that staircases in mixed patterns are compressed."""
+        # Create: straight + staircase + straight
+        segments = []
+
+        # First: long horizontal
+        segments.append(self.make_segment(0, 0, 5, 0))
+
+        # Middle: staircase pattern (5 segments)
+        x, y = 5, 0
+        for i in range(5):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # End: long horizontal
+        segments.append(self.make_segment(x, y, x + 5, y))
+
+        # Total: 1 + 5 + 1 = 7 segments
+        assert len(segments) == 7
+
+        result = optimizer.compress_staircase(segments)
+
+        # Staircase (5 segs) should compress to ≤2, total ≤4
+        assert len(result) <= 5, f"Expected ≤5 segments, got {len(result)}"
+
+    def test_segment_properties_preserved(self, optimizer):
+        """Test that width, layer, net, net_name are preserved."""
+        template = Segment(
+            x1=0,
+            y1=0,
+            x2=1,
+            y2=0,
+            width=0.35,
+            layer=Layer.B_CU,
+            net=42,
+            net_name="SPECIAL_NET",
+        )
+
+        # Create staircase with specific properties
+        segments = []
+        x, y = 0, 0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1
+                seg = Segment(
+                    x1=x,
+                    y1=y,
+                    x2=new_x,
+                    y2=y,
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+                segments.append(seg)
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                seg = Segment(
+                    x1=x,
+                    y1=y,
+                    x2=new_x,
+                    y2=new_y,
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+                segments.append(seg)
+                x, y = new_x, new_y
+
+        result = optimizer.compress_staircase(segments)
+
+        # All result segments should have same properties
+        for seg in result:
+            assert seg.width == template.width
+            assert seg.layer == template.layer
+            assert seg.net == template.net
+            assert seg.net_name == template.net_name
+
+    def test_compression_disabled(self, optimizer_disabled):
+        """Test that compression can be disabled via config."""
+        segments = []
+        x, y = 0.0, 0.0
+
+        # Create staircase pattern
+        for i in range(10):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        result = optimizer_disabled.compress_staircase(segments)
+
+        # Should be unchanged when disabled
+        assert len(result) == 10
+
+    def test_different_angles_not_compressed(self, optimizer):
+        """Test that patterns with non-45° angle differences are not compressed."""
+        # Create segments with 60° angle difference (not a valid staircase)
+        segments = [
+            self.make_segment(0, 0, 1, 0),  # 0°
+            self.make_segment(1, 0, 1.5, 0.866),  # 60°
+            self.make_segment(1.5, 0.866, 2.5, 0.866),  # 0°
+            self.make_segment(2.5, 0.866, 3, 1.732),  # 60°
+        ]
+
+        result = optimizer.compress_staircase(segments)
+
+        # Not a valid staircase pattern, should be mostly unchanged
+        # (may still be processed segment by segment)
+        assert len(result) >= 2
+
+    def test_full_optimize_pipeline(self, optimizer):
+        """Test that staircase compression works in full optimize pipeline."""
+        segments = []
+        x, y = 0.0, 0.0
+
+        # Create staircase pattern
+        for i in range(8):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Use full optimize_segments which includes all passes
+        result = optimizer.optimize_segments(segments)
+
+        # Should be significantly reduced
+        assert len(result) < len(segments)
+
+
+class TestSegmentDirection:
+    """Tests for _segment_direction helper."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(self, x1, y1, x2, y2):
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    def test_right_direction(self, optimizer):
+        """Test 0° direction (positive X)."""
+        seg = self.make_segment(0, 0, 1, 0)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 0) < 1
+
+    def test_up_direction(self, optimizer):
+        """Test 90° direction (positive Y)."""
+        seg = self.make_segment(0, 0, 0, 1)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 90) < 1
+
+    def test_left_direction(self, optimizer):
+        """Test 180° direction (negative X)."""
+        seg = self.make_segment(0, 0, -1, 0)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 180) < 1
+
+    def test_down_direction(self, optimizer):
+        """Test 270° direction (negative Y)."""
+        seg = self.make_segment(0, 0, 0, -1)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 270) < 1
+
+    def test_diagonal_45(self, optimizer):
+        """Test 45° direction."""
+        seg = self.make_segment(0, 0, 1, 1)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 45) < 1
+
+    def test_diagonal_135(self, optimizer):
+        """Test 135° direction."""
+        seg = self.make_segment(0, 0, -1, 1)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 135) < 1
+
+    def test_diagonal_225(self, optimizer):
+        """Test 225° direction."""
+        seg = self.make_segment(0, 0, -1, -1)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 225) < 1
+
+    def test_diagonal_315(self, optimizer):
+        """Test 315° direction."""
+        seg = self.make_segment(0, 0, 1, -1)
+        angle = optimizer._segment_direction(seg)
+        assert abs(angle - 315) < 1
+
+
+class TestOptimalPath:
+    """Tests for _optimal_path helper."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    @pytest.fixture
+    def template(self):
+        return Segment(
+            x1=0,
+            y1=0,
+            x2=1,
+            y2=0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    def test_purely_horizontal(self, optimizer, template):
+        """Test optimal path for horizontal movement."""
+        result = optimizer._optimal_path((0, 0), (10, 0), template)
+
+        # Should be single horizontal segment
+        assert len(result) == 1
+        assert abs(result[0].x1 - 0) < 1e-4
+        assert abs(result[0].y1 - 0) < 1e-4
+        assert abs(result[0].x2 - 10) < 1e-4
+        assert abs(result[0].y2 - 0) < 1e-4
+
+    def test_purely_vertical(self, optimizer, template):
+        """Test optimal path for vertical movement."""
+        result = optimizer._optimal_path((0, 0), (0, 10), template)
+
+        # Should be single vertical segment
+        assert len(result) == 1
+        assert abs(result[0].x2 - 0) < 1e-4
+        assert abs(result[0].y2 - 10) < 1e-4
+
+    def test_pure_diagonal(self, optimizer, template):
+        """Test optimal path for 45° diagonal movement."""
+        result = optimizer._optimal_path((0, 0), (5, 5), template)
+
+        # Should be single diagonal segment
+        assert len(result) == 1
+        assert abs(result[0].x2 - 5) < 1e-4
+        assert abs(result[0].y2 - 5) < 1e-4
+
+    def test_mostly_horizontal(self, optimizer, template):
+        """Test optimal path for mostly horizontal with some vertical."""
+        result = optimizer._optimal_path((0, 0), (10, 3), template)
+
+        # Should be 2 segments: diagonal + horizontal
+        assert len(result) == 2
+
+        # First segment is diagonal
+        diag = result[0]
+        assert abs(diag.x2 - diag.x1) > 0
+        assert abs(diag.y2 - diag.y1) > 0
+
+        # Second segment is horizontal/vertical for remaining
+        ortho = result[1]
+        # Endpoints should match
+        assert abs(ortho.x2 - 10) < 1e-4
+        assert abs(ortho.y2 - 3) < 1e-4
+
+    def test_mostly_vertical(self, optimizer, template):
+        """Test optimal path for mostly vertical with some horizontal."""
+        result = optimizer._optimal_path((0, 0), (3, 10), template)
+
+        # Should be 2 segments: diagonal + vertical
+        assert len(result) == 2
+
+        # Endpoints should match
+        assert abs(result[-1].x2 - 3) < 1e-4
+        assert abs(result[-1].y2 - 10) < 1e-4
+
+    def test_negative_direction(self, optimizer, template):
+        """Test optimal path for negative X and Y."""
+        result = optimizer._optimal_path((10, 10), (0, 0), template)
+
+        # Should handle negative movement
+        assert len(result) <= 2
+        assert abs(result[0].x1 - 10) < 1e-4
+        assert abs(result[0].y1 - 10) < 1e-4
+        assert abs(result[-1].x2 - 0) < 1e-4
+        assert abs(result[-1].y2 - 0) < 1e-4
+
+    def test_same_point(self, optimizer, template):
+        """Test optimal path when start equals end."""
+        result = optimizer._optimal_path((5, 5), (5, 5), template)
+
+        # Should return empty list
+        assert len(result) == 0
+
+
+class TestFindStaircaseEnd:
+    """Tests for _find_staircase_end helper."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(self, x1, y1, x2, y2):
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    def test_valid_staircase_pattern(self, optimizer):
+        """Test detection of valid horizontal/diagonal staircase."""
+        segments = [
+            self.make_segment(0, 0, 1, 0),  # 0° horizontal
+            self.make_segment(1, 0, 1.5, 0.5),  # 45° diagonal
+            self.make_segment(1.5, 0.5, 2.5, 0.5),  # 0° horizontal
+            self.make_segment(2.5, 0.5, 3, 1),  # 45° diagonal
+            self.make_segment(3, 1, 4, 1),  # 0° horizontal
+        ]
+
+        end_idx = optimizer._find_staircase_end(segments, 0)
+        assert end_idx == 5  # All segments are part of staircase
+
+    def test_staircase_ends_at_different_angle(self, optimizer):
+        """Test that staircase detection stops at non-alternating angle."""
+        segments = [
+            self.make_segment(0, 0, 1, 0),  # 0° horizontal
+            self.make_segment(1, 0, 1.5, 0.5),  # 45° diagonal
+            self.make_segment(1.5, 0.5, 2.5, 0.5),  # 0° horizontal
+            self.make_segment(2.5, 0.5, 2.5, 1.5),  # 90° vertical (breaks pattern)
+        ]
+
+        end_idx = optimizer._find_staircase_end(segments, 0)
+        assert end_idx == 3  # Staircase ends before vertical segment
+
+    def test_rectilinear_hv_staircase_detected(self, optimizer):
+        """Test that 90° H/V patterns ARE detected as staircases.
+
+        This is the core fix for issue #124 - A* router produces H/V
+        alternating patterns that should be compressed.
+        """
+        segments = [
+            self.make_segment(0, 0, 1, 0),  # 0° horizontal
+            self.make_segment(1, 0, 1, 1),  # 90° vertical
+            self.make_segment(1, 1, 2, 1),  # 0° horizontal
+            self.make_segment(2, 1, 2, 2),  # 90° vertical
+            self.make_segment(2, 2, 3, 2),  # 0° horizontal
+        ]
+
+        end_idx = optimizer._find_staircase_end(segments, 0)
+        assert end_idx == 5  # All segments are part of staircase
+
+    def test_invalid_angle_not_detected(self, optimizer):
+        """Test that angle differences outside valid ranges are not detected."""
+        # Create segments with 30° angle difference (outside both 45° and 90° ranges)
+        # 0° horizontal to 30° diagonal
+        import math
+
+        segments = [
+            self.make_segment(0, 0, 1, 0),  # 0° horizontal
+            self.make_segment(1, 0, 2, math.tan(math.radians(30))),  # ~30°
+        ]
+
+        end_idx = optimizer._find_staircase_end(segments, 0)
+        assert end_idx == 1  # Not a valid staircase
+
+
+class TestRectilinearStaircaseCompression:
+    """Tests for rectilinear (H/V) staircase compression (issue #124)."""
+
+    @pytest.fixture
+    def optimizer(self):
+        """Create a TraceOptimizer with default config."""
+        return TraceOptimizer()
+
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        """Helper to create a segment with default properties."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    def test_hv_staircase_compressed(self, optimizer):
+        """Test that alternating H/V segments are compressed.
+
+        Creates a staircase pattern like the A* router produces:
+          Seg 0: horizontal (0°)
+          Seg 1: vertical (90°)
+          Seg 2: horizontal (0°)
+          Seg 3: vertical (90°)
+          ... etc
+
+        Should be compressed to 2 segments: diagonal + orthogonal.
+        """
+        segments = []
+        x, y = 0.0, 0.0
+
+        # Create 10 alternating H/V segments (classic A* staircase)
+        for i in range(10):
+            if i % 2 == 0:
+                # Horizontal segment going right (0°)
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                # Vertical segment going up (90°)
+                new_y = y + 1.0
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Before: 10 segments
+        assert len(segments) == 10
+
+        # After: should be ≤4 segments
+        result = optimizer.compress_staircase(segments)
+        assert len(result) <= 4, f"Expected ≤4 segments, got {len(result)}"
+
+        # Verify endpoints are preserved
+        assert abs(result[0].x1 - segments[0].x1) < 1e-4
+        assert abs(result[0].y1 - segments[0].y1) < 1e-4
+        assert abs(result[-1].x2 - segments[-1].x2) < 1e-4
+        assert abs(result[-1].y2 - segments[-1].y2) < 1e-4
+
+    def test_hv_staircase_properties_preserved(self, optimizer):
+        """Test that width, layer, net, net_name are preserved after compression."""
+        template = Segment(
+            x1=0,
+            y1=0,
+            x2=1,
+            y2=0,
+            width=0.35,
+            layer=Layer.B_CU,
+            net=42,
+            net_name="SWDIO",
+        )
+
+        # Create H/V staircase with specific properties
+        segments = []
+        x, y = 0, 0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 0.5
+                seg = Segment(
+                    x1=x,
+                    y1=y,
+                    x2=new_x,
+                    y2=y,
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+                segments.append(seg)
+                x = new_x
+            else:
+                new_y = y + 0.5
+                seg = Segment(
+                    x1=x,
+                    y1=y,
+                    x2=x,
+                    y2=new_y,
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+                segments.append(seg)
+                y = new_y
+
+        result = optimizer.compress_staircase(segments)
+
+        # All result segments should have same properties
+        for seg in result:
+            assert seg.width == template.width
+            assert seg.layer == template.layer
+            assert seg.net == template.net
+            assert seg.net_name == template.net_name
+
+    def test_perfect_diagonal_hv_staircase(self, optimizer):
+        """Test H/V staircase where dx == dy produces single diagonal."""
+        # Create equal H/V steps that result in perfect diagonal
+        segments = []
+        x, y = 0.0, 0.0
+
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 1.0
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Total displacement: 3mm horizontal, 3mm vertical = perfect 45° diagonal
+        result = optimizer.compress_staircase(segments)
+
+        # Should compress to 1-2 segments (diagonal, or diagonal + small stub)
+        assert len(result) <= 2, f"Expected ≤2 segments for perfect diagonal, got {len(result)}"
+
+    def test_asymmetric_hv_staircase(self, optimizer):
+        """Test H/V staircase with unequal H and V totals."""
+        # Create staircase where total H > total V
+        segments = []
+        x, y = 0.0, 0.0
+
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 2.0  # Longer horizontal
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 1.0  # Shorter vertical
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Total: 6mm horizontal, 3mm vertical
+        result = optimizer.compress_staircase(segments)
+
+        # Should compress to 2 segments (diagonal + horizontal stub)
+        assert len(result) <= 3, f"Expected ≤3 segments, got {len(result)}"
+
+        # Verify endpoints preserved
+        assert abs(result[-1].x2 - segments[-1].x2) < 1e-4
+        assert abs(result[-1].y2 - segments[-1].y2) < 1e-4
+
+    def test_hv_staircase_in_full_pipeline(self, optimizer):
+        """Test that H/V staircase compression works in full optimize pipeline."""
+        segments = []
+        x, y = 0.0, 0.0
+
+        for i in range(8):
+            if i % 2 == 0:
+                new_x = x + 0.5
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 0.5
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Use full optimize_segments which includes all passes
+        result = optimizer.optimize_segments(segments)
+
+        # Should be significantly reduced
+        assert len(result) < len(segments)
+
+    def test_mixed_diagonal_and_hv_patterns(self, optimizer):
+        """Test that both diagonal and H/V staircases can be in same route."""
+        segments = []
+
+        # First: diagonal staircase (H + 45° diagonal)
+        x, y = 0.0, 0.0
+        for i in range(4):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Then: H/V staircase
+        for i in range(4):
+            if i % 2 == 0:
+                new_x = x + 0.5
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 0.5
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Total: 8 segments
+        assert len(segments) == 8
+
+        result = optimizer.compress_staircase(segments)
+
+        # Both patterns should be compressed
+        assert len(result) < len(segments)
+
+
+class TestConfigOptions:
+    """Tests for configuration options."""
+
+    def test_min_staircase_segments_config(self):
+        """Test that min_staircase_segments config is respected."""
+        config = OptimizationConfig(min_staircase_segments=5)
+        optimizer = TraceOptimizer(config)
+
+        # Create 4-segment staircase (below threshold of 5)
+        segments = []
+        x, y = 0, 0
+        for i in range(4):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(
+                    Segment(
+                        x1=x,
+                        y1=y,
+                        x2=new_x,
+                        y2=y,
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=1,
+                        net_name="TEST",
+                    )
+                )
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(
+                    Segment(
+                        x1=x,
+                        y1=y,
+                        x2=new_x,
+                        y2=new_y,
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=1,
+                        net_name="TEST",
+                    )
+                )
+                x, y = new_x, new_y
+
+        result = optimizer.compress_staircase(segments)
+
+        # Should not be compressed (4 < 5 threshold)
+        assert len(result) == 4
+
+    def test_compress_staircase_in_config(self):
+        """Test that compress_staircase config option works."""
+        config = OptimizationConfig(compress_staircase=True)
+        assert config.compress_staircase is True
+
+        config = OptimizationConfig(compress_staircase=False)
+        assert config.compress_staircase is False
+
+
+class TestChainSorting:
+    """Tests for segment chain sorting (issue #105 fix)."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
+        """Helper to create a segment with default properties."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name=f"NET{net}",
+        )
+
+    def test_single_chain_detected(self, optimizer):
+        """Test that a single connected chain is detected as one chain."""
+        # Create a simple L-shaped path
+        segments = [
+            self.make_segment(0, 0, 5, 0),  # Horizontal
+            self.make_segment(5, 0, 5, 5),  # Vertical
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 1
+        assert len(chains[0]) == 2
+
+    def test_multiple_chains_detected(self, optimizer):
+        """Test that disconnected segments form separate chains."""
+        # Create two separate paths that don't touch
+        segments = [
+            # Chain 1: L-shape at origin
+            self.make_segment(0, 0, 5, 0),
+            self.make_segment(5, 0, 5, 5),
+            # Chain 2: L-shape 20mm away (not connected)
+            self.make_segment(20, 0, 25, 0),
+            self.make_segment(25, 0, 25, 5),
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 2
+        assert len(chains[0]) == 2
+        assert len(chains[1]) == 2
+
+    def test_chain_segments_sorted_in_order(self, optimizer):
+        """Test that chain segments are sorted in path order."""
+        # Create segments in scrambled order
+        segments = [
+            self.make_segment(5, 0, 5, 5),  # Middle (should be second)
+            self.make_segment(0, 0, 5, 0),  # Start (should be first)
+            self.make_segment(5, 5, 10, 5),  # End (should be third)
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 1
+        sorted_chain = chains[0]
+
+        # Check segments are in path order
+        assert abs(sorted_chain[0].x1 - 0) < 1e-4  # Starts at origin
+        assert abs(sorted_chain[-1].x2 - 10) < 1e-4  # Ends at (10, 5)
+
+        # Check connectivity: each segment's end connects to next segment's start
+        for i in range(len(sorted_chain) - 1):
+            assert abs(sorted_chain[i].x2 - sorted_chain[i + 1].x1) < 1e-4
+            assert abs(sorted_chain[i].y2 - sorted_chain[i + 1].y1) < 1e-4
+
+    def test_reversed_segments_handled(self, optimizer):
+        """Test that segments with reversed direction are handled correctly."""
+        # Create segments where one is "backwards"
+        segments = [
+            self.make_segment(0, 0, 5, 0),  # Forward: (0,0) -> (5,0)
+            self.make_segment(5, 5, 5, 0),  # Backwards: end connects to previous end
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 1
+        sorted_chain = chains[0]
+
+        # After sorting, segments should be connected end-to-start
+        for i in range(len(sorted_chain) - 1):
+            assert abs(sorted_chain[i].x2 - sorted_chain[i + 1].x1) < 1e-4
+            assert abs(sorted_chain[i].y2 - sorted_chain[i + 1].y1) < 1e-4
+
+
+class TestMultiChainOptimization:
+    """Tests for multi-chain optimization safety (issue #105 core fix)."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
+        """Helper to create a segment with default properties."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name=f"NET{net}",
+        )
+
+    def test_parallel_chains_not_merged(self, optimizer):
+        """Test that parallel but separate chains are not merged.
+
+        This is the core issue #105 scenario: two parallel traces that
+        should remain separate after optimization.
+        """
+        # Two parallel horizontal traces 5mm apart
+        segments = [
+            # Chain 1: horizontal at y=0
+            self.make_segment(0, 0, 10, 0),
+            # Chain 2: horizontal at y=5 (parallel, not connected)
+            self.make_segment(0, 5, 10, 5),
+        ]
+
+        result = optimizer.optimize_segments(segments)
+
+        # Should still have 2 segments (one per chain)
+        assert len(result) == 2
+
+        # Verify chains weren't merged into something crossing between them
+        # Each segment should be purely horizontal
+        for seg in result:
+            assert abs(seg.y1 - seg.y2) < 1e-4, "Segment should be horizontal"
+
+    def test_disconnected_staircases_optimized_independently(self, optimizer):
+        """Test that two disconnected staircase patterns optimize separately."""
+        segments = []
+
+        # Staircase 1: at y=0
+        x, y = 0, 0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Staircase 2: 20mm away (not connected)
+        x, y = 20, 0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Before: 12 segments (6 per staircase)
+        assert len(segments) == 12
+
+        result = optimizer.optimize_segments(segments)
+
+        # After: should be less than 12 (staircases compressed)
+        assert len(result) < 12
+
+        # Verify no segment crosses from chain 1 to chain 2
+        # Chain 1 should have x < 10, Chain 2 should have x > 15
+        for seg in result:
+            if seg.x1 < 10:
+                assert seg.x2 < 15, "Segment from chain 1 should not reach chain 2"
+            if seg.x1 > 15:
+                assert seg.x2 > 10, "Segment from chain 2 should not reach chain 1"
+
+    def test_t_junction_split_into_branches(self, optimizer):
+        """Test that a T-junction is split into one sub-chain per branch.
+
+        Each arm of a T/Y junction is a linear path that the downstream
+        optimisers can safely process; merging arms into a single
+        "chain" caused the optimiser to drop branches and disconnect
+        pads (issue #2389).  ``sort_into_chains`` therefore splits at
+        any vertex of degree >= 3.
+        """
+        # T-junction: segments meet at (5, 0)
+        segments = [
+            self.make_segment(0, 0, 5, 0),  # Left arm
+            self.make_segment(5, 0, 10, 0),  # Right arm
+            self.make_segment(5, 0, 5, 5),  # Vertical arm
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        # All three arms are split off as separate sub-chains.
+        assert len(chains) == 3
+        # Total segments preserved.
+        assert sum(len(c) for c in chains) == 3
+        # Every chain is a single-segment branch (length 1) since the
+        # only branch endpoint that isn't a leaf is the junction.
+        for chain in chains:
+            assert len(chain) == 1
+
+    def test_endpoints_preserved_after_optimization(self, optimizer):
+        """Test that chain endpoints are preserved after optimization."""
+        # Create a connected staircase
+        segments = []
+        x, y = 0, 0
+        for i in range(8):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Record original endpoints
+        original_start = (segments[0].x1, segments[0].y1)
+        original_end = (segments[-1].x2, segments[-1].y2)
+
+        result = optimizer.optimize_segments(segments)
+
+        # Find actual start and end in result
+        all_starts = [(s.x1, s.y1) for s in result]
+        all_ends = [(s.x2, s.y2) for s in result]
+        all_points = set(all_starts + all_ends)
+
+        # Original endpoints should still exist
+        assert any(
+            abs(p[0] - original_start[0]) < 1e-4 and abs(p[1] - original_start[1]) < 1e-4
+            for p in all_points
+        ), "Original start point should be preserved"
+        assert any(
+            abs(p[0] - original_end[0]) < 1e-4 and abs(p[1] - original_end[1]) < 1e-4
+            for p in all_points
+        ), "Original end point should be preserved"
+
+
+class TestSegmentsTouch:
+    """Tests for _segments_touch helper."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(self, x1, y1, x2, y2):
+        return Segment(
+            x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
+        )
+
+    def test_end_to_start_connection(self, optimizer):
+        """Test end-to-start connection detected."""
+        s1 = self.make_segment(0, 0, 5, 0)
+        s2 = self.make_segment(5, 0, 10, 0)
+        assert optimizer._segments_touch(s1, s2) is True
+
+    def test_end_to_end_connection(self, optimizer):
+        """Test end-to-end connection detected."""
+        s1 = self.make_segment(0, 0, 5, 0)
+        s2 = self.make_segment(10, 0, 5, 0)  # Ends at same point
+        assert optimizer._segments_touch(s1, s2) is True
+
+    def test_start_to_start_connection(self, optimizer):
+        """Test start-to-start connection detected."""
+        s1 = self.make_segment(5, 0, 10, 0)
+        s2 = self.make_segment(5, 0, 5, 5)  # Starts at same point
+        assert optimizer._segments_touch(s1, s2) is True
+
+    def test_no_connection(self, optimizer):
+        """Test disconnected segments not detected as touching."""
+        s1 = self.make_segment(0, 0, 5, 0)
+        s2 = self.make_segment(10, 0, 15, 0)  # 5mm gap
+        assert optimizer._segments_touch(s1, s2) is False
+
+
+class MockCollisionChecker:
+    """Mock collision checker for testing."""
+
+    def __init__(self, blocked_paths: list[tuple[float, float, float, float]] | None = None):
+        """Initialize with optional list of blocked paths.
+
+        Args:
+            blocked_paths: List of (x1, y1, x2, y2) tuples representing blocked paths.
+        """
+        self.blocked_paths = blocked_paths or []
+        self.calls: list[tuple[float, float, float, float, Layer, float, int]] = []
+
+    def path_is_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> bool:
+        """Check if a path is clear."""
+        self.calls.append((x1, y1, x2, y2, layer, width, exclude_net))
+
+        # Check if any blocked path overlaps
+        for bx1, by1, bx2, by2 in self.blocked_paths:
+            # Simple check: if paths cross, block it
+            if self._paths_cross(x1, y1, x2, y2, bx1, by1, bx2, by2):
+                return False
+        return True
+
+    def _paths_cross(
+        self,
+        ax1: float,
+        ay1: float,
+        ax2: float,
+        ay2: float,
+        bx1: float,
+        by1: float,
+        bx2: float,
+        by2: float,
+    ) -> bool:
+        """Simplified check if two paths cross."""
+        # Check if they share any significant overlap
+        # For testing, we use a simple bounding box check
+        a_min_x, a_max_x = min(ax1, ax2), max(ax1, ax2)
+        a_min_y, a_max_y = min(ay1, ay2), max(ay1, ay2)
+        b_min_x, b_max_x = min(bx1, bx2), max(bx1, bx2)
+        b_min_y, b_max_y = min(by1, by2), max(by1, by2)
+
+        # Check for overlap in both dimensions
+        x_overlap = a_min_x <= b_max_x and a_max_x >= b_min_x
+        y_overlap = a_min_y <= b_max_y and a_max_y >= b_min_y
+
+        return x_overlap and y_overlap
+
+
+class TestCollisionChecker:
+    """Tests for CollisionChecker protocol and GridCollisionChecker."""
+
+    @pytest.fixture
+    def simple_grid(self):
+        """Create a simple routing grid for testing."""
+        rules = DesignRules(
+            grid_resolution=0.25,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+        )
+        return grid
+
+    @pytest.fixture
+    def grid_checker(self, simple_grid):
+        """Create a GridCollisionChecker."""
+        return GridCollisionChecker(simple_grid)
+
+    def test_grid_collision_checker_clear_path(self, grid_checker):
+        """Test that an unobstructed path is clear."""
+        result = grid_checker.path_is_clear(
+            x1=1.0,
+            y1=1.0,
+            x2=5.0,
+            y2=1.0,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is True
+
+    def test_grid_collision_checker_blocked_by_other_net(self, simple_grid, grid_checker):
+        """Test that a path blocked by another net returns False."""
+        # Add a segment from a different net to block the path
+        from kicad_tools.router import Segment as RouteSegment
+
+        # Mark some cells as blocked by another net
+        blocking_seg = RouteSegment(
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,  # Different net
+            net_name="BLOCKER",
+        )
+
+        # Create a route and mark it on the grid
+        from kicad_tools.router import Route
+
+        blocking_route = Route(net=2, net_name="BLOCKER", segments=[blocking_seg])
+        simple_grid.mark_route(blocking_route)
+
+        # Check if path crossing the blocker is detected
+        result = grid_checker.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,  # This crosses the vertical segment at x=3.0
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,  # We're net 1, the blocker is net 2
+        )
+        assert result is False
+
+    def test_grid_collision_checker_same_net_allowed(self, simple_grid, grid_checker):
+        """Test that cells from the same net don't block."""
+        # Add a segment from the same net
+        from kicad_tools.router import Route
+        from kicad_tools.router import Segment as RouteSegment
+
+        same_net_seg = RouteSegment(
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,  # Same net
+            net_name="SAME",
+        )
+        same_net_route = Route(net=1, net_name="SAME", segments=[same_net_seg])
+        simple_grid.mark_route(same_net_route)
+
+        # Check if path crossing same-net segment is allowed
+        result = grid_checker.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,  # Same net as the segment
+        )
+        assert result is True
+
+
+class TestCollisionAwareOptimization:
+    """Tests for collision-aware optimization in TraceOptimizer."""
+
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
+        """Helper to create a segment."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name="TEST",
+        )
+
+    def test_optimizer_without_collision_checker(self):
+        """Test that optimizer works without collision checker (backwards compatible)."""
+        optimizer = TraceOptimizer()
+        assert optimizer.collision_checker is None
+
+        # Should still optimize normally
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),  # Collinear
+        ]
+        result = optimizer.merge_collinear(segments)
+        assert len(result) == 1  # Should merge
+
+    def test_optimizer_with_collision_checker(self):
+        """Test that optimizer accepts a collision checker."""
+        checker = MockCollisionChecker()
+        optimizer = TraceOptimizer(collision_checker=checker)
+        assert optimizer.collision_checker is checker
+
+    def test_merge_collinear_blocked_by_collision(self):
+        """Test that merge_collinear respects collision checker."""
+        # Block the merged path (from 0,0 to 2,0)
+        checker = MockCollisionChecker(blocked_paths=[(0.5, -0.1, 1.5, 0.1)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),  # Would normally merge
+        ]
+        result = optimizer.merge_collinear(segments)
+
+        # Should NOT merge because merged path would cross blocked area
+        assert len(result) == 2
+
+    def test_merge_collinear_allowed_when_clear(self):
+        """Test that merge_collinear proceeds when path is clear."""
+        checker = MockCollisionChecker()  # No blocked paths
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),
+        ]
+        result = optimizer.merge_collinear(segments)
+
+        # Should merge because path is clear
+        assert len(result) == 1
+        # Verify collision checker was called
+        assert len(checker.calls) > 0
+
+    def test_eliminate_zigzags_blocked_by_collision(self):
+        """Test that eliminate_zigzags respects collision checker."""
+        # Block the shortcut path
+        checker = MockCollisionChecker(blocked_paths=[(0, 0, 2, 1)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create a zigzag pattern
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 1, 1),  # Zigzag
+            self.make_segment(1, 1, 2, 1),
+        ]
+        result = optimizer.eliminate_zigzags(segments)
+
+        # Should keep all segments because shortcut is blocked
+        assert len(result) >= 2
+
+    def test_compress_staircase_blocked_by_collision(self):
+        """Test that compress_staircase respects collision checker."""
+        # Block the optimal diagonal path
+        checker = MockCollisionChecker(blocked_paths=[(0, 0, 5, 3)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create a staircase pattern
+        segments = []
+        x, y = 0.0, 0.0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        result = optimizer.compress_staircase(segments)
+
+        # Should keep original staircase because optimal path is blocked
+        assert len(result) == 6
+
+    def test_convert_corners_45_blocked_by_collision(self):
+        """Test that convert_corners_45 respects collision checker."""
+        # Block diagonal paths
+        checker = MockCollisionChecker(blocked_paths=[(-1, -1, 1, 1)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create a 90-degree corner
+        segments = [
+            self.make_segment(0, 0, 5, 0),  # Horizontal
+            self.make_segment(5, 0, 5, 5),  # Vertical (90° corner)
+        ]
+        result = optimizer.convert_corners_45(segments)
+
+        # Even with collision, the function may still add segments
+        # but should not add chamfers that would cross blocked areas
+        # (Implementation detail depends on how collision is checked)
+        assert len(result) >= 2
+
+    def test_full_optimization_with_collision_checker(self):
+        """Test full optimize_segments with collision checker."""
+        checker = MockCollisionChecker()
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create some segments
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),  # Collinear
+        ]
+        result = optimizer.optimize_segments(segments)
+
+        # Should optimize since no paths are blocked
+        assert len(result) <= len(segments)
+        # Verify collision checker was used
+        assert len(checker.calls) > 0
+
+
+class TestPadEndpointPreservation:
+    """Regression tests for pad endpoint preservation during optimisation.
+
+    These tests verify that convert_corners_45 (and the full optimise
+    pipeline) do not move trace endpoints away from pad positions.
+    See issue #1434.
+    """
+
+    def make_segment(self, x1, y1, x2, y2):
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def test_l_shaped_trace_pad_endpoints_preserved(self, optimizer):
+        """A 2-segment L-shaped trace (pad->corner->pad) must keep its
+        terminal endpoints after convert_corners_45.
+
+        This is the primary regression case from issue #1434.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (5.0, 5.0)
+        corner = (5.0, 0.0)
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], corner[0], corner[1]),
+            self.make_segment(corner[0], corner[1], pad_b[0], pad_b[1]),
+        ]
+
+        result = optimizer.convert_corners_45(segments)
+
+        # Terminal endpoints must be preserved exactly.
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4, (
+            f"First segment start X moved: {result[0].x1} != {pad_a[0]}"
+        )
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4, (
+            f"First segment start Y moved: {result[0].y1} != {pad_a[1]}"
+        )
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4, (
+            f"Last segment end X moved: {result[-1].x2} != {pad_b[0]}"
+        )
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4, (
+            f"Last segment end Y moved: {result[-1].y2} != {pad_b[1]}"
+        )
+
+    def test_three_segment_chain_interior_chamfer_fires(self, optimizer):
+        """A 3-segment chain with a 90-degree interior corner should
+        chamfer at the interior but preserve terminal endpoints.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 5.0)
+        corner1 = (5.0, 0.0)
+        corner2 = (5.0, 5.0)
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], corner1[0], corner1[1]),
+            self.make_segment(corner1[0], corner1[1], corner2[0], corner2[1]),
+            self.make_segment(corner2[0], corner2[1], pad_b[0], pad_b[1]),
+        ]
+
+        result = optimizer.convert_corners_45(segments)
+
+        # Terminal endpoints must be unchanged.
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4
+
+        # Interior should have been chamfered -- more segments than the
+        # original 3 (chamfer diagonals are inserted).
+        assert len(result) >= 3
+
+    def test_full_pipeline_preserves_pad_endpoints(self, optimizer):
+        """Running optimize_segments (all passes) on an L-shaped trace
+        must not displace the terminal endpoints.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (5.0, 5.0)
+        corner = (5.0, 0.0)
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], corner[0], corner[1]),
+            self.make_segment(corner[0], corner[1], pad_b[0], pad_b[1]),
+        ]
+
+        result = optimizer.optimize_segments(segments)
+
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4
+
+    def test_short_segment_at_pad_not_shortened_below_zero(self, optimizer):
+        """A segment shorter than corner_chamfer_size terminating at a pad
+        must not be shortened below zero length or move the pad endpoint.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (5.0, 0.3)  # Very short final approach
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], 5.0, 0.0),
+            self.make_segment(5.0, 0.0, pad_b[0], pad_b[1]),  # 0.3mm, shorter than chamfer
+        ]
+
+        result = optimizer.convert_corners_45(segments)
+
+        # Pad endpoints must still be preserved.
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4
+
+        # No zero-length segments should be produced.
+        for seg in result:
+            length = ((seg.x2 - seg.x1) ** 2 + (seg.y2 - seg.y1) ** 2) ** 0.5
+            assert length > 0, "Zero-length segment produced"
+
+
+class TestOverflowTolerantCollisionChecker:
+    """Tests for ignore_overflow mode in GridCollisionChecker (Issue #2303).
+
+    When the router finishes with residual overflow (overused cells where
+    multiple nets share the same cell), the optimizer's collision checker
+    should not treat these soft blocks as hard obstacles.  Otherwise the
+    optimizer fragments routes and destroys connectivity.
+
+    Issue #3433 scoped the tolerance to GENUINELY overused cells
+    (``usage_count > 1``).  The original blanket skip made the checker
+    blind to EVERY foreign-net trace whenever ANY residual overflow
+    existed anywhere on the board: on board 04 (overflow=2 in an
+    unrelated OSC corridor) the staircase-compression pass straightened
+    SWO's zigzag straight across SWCLK's clean run, committing
+    -0.200 mm full overlaps.
+    """
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        """Create a small routing grid with two routes that overlap."""
+        rules = DesignRules(
+            grid_resolution=0.25,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
+        return grid, rules
+
+    def _mark_blocking_route(self, grid, net_id=2, usage=0):
+        """Place a vertical route for net_id crossing x=3.
+
+        Args:
+            usage: How many times to additionally mark route USAGE on
+                the cells.  ``usage >= 2`` simulates an overused
+                (overflow) corridor; ``0``/``1`` is a clean committed
+                trace.
+        """
+        from kicad_tools.router import Route
+        from kicad_tools.router import Segment as RouteSegment
+
+        seg = RouteSegment(
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net_id,
+            net_name=f"NET{net_id}",
+        )
+        route = Route(net=net_id, net_name=f"NET{net_id}", segments=[seg])
+        grid.mark_route(route)
+        for _ in range(usage):
+            grid.mark_route_usage(route)
+
+    def test_default_blocks_other_net(self, grid_and_rules):
+        """Without ignore_overflow, path crossing another net is blocked."""
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2)
+
+        checker = GridCollisionChecker(grid, ignore_overflow=False)
+        result = checker.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is False
+
+    def test_ignore_overflow_allows_overused_soft_block(self, grid_and_rules):
+        """With ignore_overflow=True, OVERUSED cells (usage_count > 1, i.e.
+        cells already shared by multiple nets) do not refuse a path off the
+        raster -- the Issue #2303 contract.  A path whose copper clears the
+        foreign trace but whose clearance buffer runs through that trace's
+        overused halo is allowed.
+
+        Issue #3433: the tolerance is decided per cell on the SAME
+        predicate ``get_total_overflow`` uses (``usage_count > 1``).
+        Force the whole region overused so the path's clearance buffer
+        (which also touches the blocking route's zero-usage halo
+        cells) reflects a genuine everything-overflowed corridor.
+        """
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2, usage=2)
+        # Simulate a fully-overflowed corridor: every cell shared.
+        grid._usage_count[:] = 2
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        # Passes just beyond the blocking trace's end at (3.0, 5.0):
+        # centreline distance 0.5 mm, edge gap 0.3 mm >= 0.15 mm.
+        result = checker.path_is_clear(
+            x1=1.0,
+            y1=5.5,
+            x2=5.0,
+            y2=5.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is True
+
+    def test_ignore_overflow_still_refuses_crossing_overused_trace(self, grid_and_rules):
+        """Issue #6184: overused cells waive only the RASTER verdict.  A path
+        that physically crosses the foreign trace is still refused by the
+        exact kernel measurement, as ``VectorCollisionChecker`` (the rtree
+        path) always refused it.  Before #6184 this returned True: the
+        rtree-less fallback skipped overused cells with no exact check, the
+        hole board 03's USB_D+ fell through."""
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2, usage=2)
+        grid._usage_count[:] = 2
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        result = checker.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is False
+
+    def test_ignore_overflow_still_blocks_clean_foreign_trace(self, grid_and_rules):
+        """Issue #3433: with ignore_overflow=True, a CLEAN foreign trace
+        (usage_count <= 1) still blocks.  The blanket tolerance let the
+        optimizer straighten board-04 SWO straight across SWCLK
+        (-0.200 mm full overlaps) whenever ANY residual overflow
+        existed anywhere on the board."""
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2, usage=1)
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        result = checker.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is False
+
+    def test_ignore_overflow_still_blocks_hard_obstacles(self, grid_and_rules):
+        """With ignore_overflow=True, hard obstacles (pads) still block."""
+        grid, _rules = grid_and_rules
+
+        # Mark a cell as a hard obstacle (pad)
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        gx, gy = grid.world_to_grid(3.0, 2.5)
+        cell = grid.grid[layer_idx][gy][gx]
+        cell.blocked = True
+        cell.is_obstacle = True
+        cell.net = 99
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        result = checker.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is False
+
+    def test_ignore_overflow_noop_when_no_overflow(self, grid_and_rules):
+        """When there is no overflow, ignore_overflow has no effect."""
+        grid, _rules = grid_and_rules
+        # No routes marked => no blocked cells => both modes agree
+        checker_normal = GridCollisionChecker(grid, ignore_overflow=False)
+        checker_overflow = GridCollisionChecker(grid, ignore_overflow=True)
+
+        result_normal = checker_normal.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        result_overflow = checker_overflow.path_is_clear(
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result_normal == result_overflow == True  # noqa: E712
+
+    def test_optimizer_preserves_segments_with_overflow(self, grid_and_rules):
+        """End-to-end: optimizer with ignore_overflow preserves connectivity.
+
+        Creates a route with segments passing through an overused cell and
+        verifies that the optimizer does not strip them when
+        ignore_overflow=True.
+        """
+        grid, _rules = grid_and_rules
+
+        # Place a blocking route (net 2) through the area
+        self._mark_blocking_route(grid, net_id=2)
+
+        # Create segments for net 1 that cross through the blocked area
+        segments = [
+            Segment(
+                x1=1.0, y1=2.5, x2=3.0, y2=2.5, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+            ),
+            Segment(
+                x1=3.0, y1=2.5, x2=5.0, y2=2.5, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+            ),
+        ]
+
+        # With ignore_overflow=True, all segments should be preserved
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        optimizer = TraceOptimizer(collision_checker=checker)
+        result = optimizer.optimize_segments(segments)
+
+        # The two collinear segments should merge into one (not be stripped)
+        assert len(result) >= 1
+        # Verify connectivity: start of first == 1.0, end of last == 5.0
+        assert abs(result[0].x1 - 1.0) < 0.01
+        assert abs(result[-1].x2 - 5.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# PullTight tests
+# ---------------------------------------------------------------------------
+
+
+class TestPullTight:
+    """Tests for PullTight perpendicular segment translation."""
+
+    def _seg(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
+        )
+
+    def _total_length(self, segs: list[Segment]) -> float:
+        total = 0.0
+        for s in segs:
+            dx = s.x2 - s.x1
+            dy = s.y2 - s.y1
+            total += (dx * dx + dy * dy) ** 0.5
+        return total
+
+    def test_detour_path_shortens(self):
+        """A rectangular detour should be pulled tight to a straight line.
+
+        Path: (0,0) -> (2,0) -> (2,3) -> (6,3) -> (6,0) -> (10,0)
+        This U-shaped detour can be iteratively collapsed by pull-tight.
+        """
+        segments = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 3),
+            self._seg(2, 3, 6, 3),
+            self._seg(6, 3, 6, 0),
+            self._seg(6, 0, 10, 0),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=20,
+        )
+        optimizer = TraceOptimizer(config=config)
+        original_length = self._total_length(segments)
+        result = optimizer.pull_tight(segments)
+
+        # Length should decrease substantially
+        assert self._total_length(result) < original_length - 0.5
+
+        # Endpoints must be preserved
+        assert abs(result[0].x1 - 0) < 1e-4
+        assert abs(result[0].y1 - 0) < 1e-4
+        assert abs(result[-1].x2 - 10) < 1e-4
+        assert abs(result[-1].y2 - 0) < 1e-4
+
+    def test_collinear_collapse(self):
+        """Segments that become collinear after translation should merge."""
+        # Small U-shaped detour that can collapse
+        # (0,0) -> (0,2) -> (0.001,2) -> (0.001,4)
+        # The tiny horizontal segment should collapse after pull-tight
+        segments = [
+            self._seg(0, 0, 0, 2),
+            self._seg(0, 2, 0.001, 2),
+            self._seg(0.001, 2, 0.001, 4),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+
+        # Should merge into fewer segments (ideally 1-2)
+        assert len(result) <= len(segments)
+
+    def test_zero_length_removal(self):
+        """Zero-length segments produced by translation should be removed."""
+        # Create a configuration where the middle segment fully collapses:
+        # (0,0) -> (0,1) -> (0,1) [zero-length] -> (0,2)
+        # This tests the zero-length removal path in pull_tight_pass.
+        segments = [
+            self._seg(0, 0, 0, 1),
+            self._seg(0, 1, 0.0001, 1),  # Near-zero length
+            self._seg(0.0001, 1, 0.0001, 2),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+
+        # No zero-length segments in result
+        for s in result:
+            dx = s.x2 - s.x1
+            dy = s.y2 - s.y1
+            length = (dx * dx + dy * dy) ** 0.5
+            assert length > 1e-4, "Zero-length segment should have been removed"
+
+    def test_collision_blocks_movement(self):
+        """When CollisionChecker blocks, segments stay in original positions."""
+
+        class BlockingChecker:
+            """Always reports path as blocked."""
+
+            def path_is_clear(self, x1, y1, x2, y2, layer, width, exclude_net):
+                return False
+
+        segments = [
+            self._seg(0, 0, 0, 5),
+            self._seg(0, 5, 5, 5),
+            self._seg(5, 5, 5, 10),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config, collision_checker=BlockingChecker())
+        result = optimizer.pull_tight(segments)
+
+        # Segments should not move at all
+        assert len(result) == 3
+        for orig, res in zip(segments, result, strict=False):
+            assert abs(orig.x1 - res.x1) < 1e-4
+            assert abs(orig.y1 - res.y1) < 1e-4
+            assert abs(orig.x2 - res.x2) < 1e-4
+            assert abs(orig.y2 - res.y2) < 1e-4
+
+    def test_convergence_within_max_iterations(self):
+        """Pull-tight should terminate within pull_tight_max_iterations."""
+        # Build a long zigzag chain
+        segments = []
+        x, y = 0.0, 0.0
+        for i in range(20):
+            if i % 2 == 0:
+                segments.append(self._seg(x, y, x, y + 1))
+                y += 1
+            else:
+                segments.append(self._seg(x, y, x + 1, y))
+                x += 1
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=5,
+        )
+        optimizer = TraceOptimizer(config=config)
+        # Should not hang -- just verify it returns
+        result = optimizer.pull_tight(segments)
+        assert len(result) >= 1
+
+    def test_connectivity_preserved(self):
+        """After pull-tight, every segment endpoint connects to its neighbour."""
+        segments = [
+            self._seg(0, 0, 0, 3),
+            self._seg(0, 3, 4, 3),
+            self._seg(4, 3, 4, 0),
+            self._seg(4, 0, 8, 0),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+            pull_tight_max_iterations=10,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+
+        # Check chain connectivity
+        for i in range(len(result) - 1):
+            assert abs(result[i].x2 - result[i + 1].x1) < 1e-3, (
+                f"Gap between segment {i} end and segment {i + 1} start"
+            )
+            assert abs(result[i].y2 - result[i + 1].y1) < 1e-3, (
+                f"Gap between segment {i} end and segment {i + 1} start"
+            )
+
+    def test_existing_optimizations_unchanged_with_pull_tight_disabled(self):
+        """Existing optimizer tests should not regress when pull_tight=False."""
+        config = OptimizationConfig(pull_tight=False)
+        optimizer = TraceOptimizer(config=config)
+
+        # Simple collinear merge still works
+        segments = [
+            self._seg(0, 0, 1, 0),
+            self._seg(1, 0, 2, 0),
+        ]
+        result = optimizer.optimize_segments(segments)
+        assert len(result) == 1
+        assert abs(result[0].x1 - 0) < 1e-4
+        assert abs(result[0].x2 - 2) < 1e-4
+
+    def test_pull_tight_in_optimize_segments_pipeline(self):
+        """Verify pull_tight is invoked as part of optimize_segments."""
+        segments = [
+            self._seg(0, 0, 0, 5),
+            self._seg(0, 5, 5, 5),
+            self._seg(5, 5, 5, 10),
+        ]
+        # With pull_tight enabled
+        config_on = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+        )
+        # With pull_tight disabled
+        config_off = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+        )
+        result_on = TraceOptimizer(config=config_on).optimize_segments(segments)
+        result_off = TraceOptimizer(config=config_off).optimize_segments(segments)
+
+        len_on = self._total_length(result_on)
+        len_off = self._total_length(result_off)
+
+        # pull_tight enabled should produce shorter or equal length
+        assert len_on <= len_off + 1e-4
+
+    def test_two_segments_unchanged(self):
+        """Pull-tight requires >= 3 segments; 2 segments should pass through unchanged."""
+        segments = [
+            self._seg(0, 0, 1, 0),
+            self._seg(1, 0, 1, 1),
+        ]
+        config = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=True,
+        )
+        optimizer = TraceOptimizer(config=config)
+        result = optimizer.pull_tight(segments)
+        assert len(result) == 2
+
+
+class TestYJunctionConnectivityPreserved:
+    """Issue #2389: optimiser must not disconnect pads on Y/T-junction nets.
+
+    Reproduces the failing scenario from board 01 (voltage divider) where a
+    3-pad VOUT net with a T-junction in the middle ended up with one pad
+    dropped from the optimised segment graph, producing a "PARTIAL: Routed
+    1/3 signal nets" warning.  The fix is two-fold:
+
+    1. ``sort_into_chains`` splits at junction vertices so each branch is
+       optimised as a true linear path.
+    2. ``TraceOptimizer.optimize_route`` runs a connectivity-preserving
+       guard and reverts to pre-optimisation segments if any pad-like
+       endpoint becomes unreachable.
+
+    These tests verify the guard upholds connectivity end-to-end, which is
+    the user-visible acceptance criterion.
+    """
+
+    @staticmethod
+    def _seg(
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        net: int = 1,
+    ) -> Segment:
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name="VOUT",
+        )
+
+    @staticmethod
+    def _build_pad_graph(
+        segments: list[Segment], tolerance: float = 1e-3
+    ) -> dict[tuple[float, float], set[tuple[float, float]]]:
+        """Build an adjacency map keyed on (x, y) for connectivity checks."""
+        from collections import defaultdict
+
+        def key(x: float, y: float) -> tuple[float, float]:
+            # Snap to a tolerance-sized grid so endpoints near each other
+            # share a key.
+            return (round(x / tolerance) * tolerance, round(y / tolerance) * tolerance)
+
+        adj: dict[tuple[float, float], set[tuple[float, float]]] = defaultdict(set)
+        for seg in segments:
+            a = key(seg.x1, seg.y1)
+            b = key(seg.x2, seg.y2)
+            adj[a].add(b)
+            adj[b].add(a)
+        return adj
+
+    @classmethod
+    def _all_pads_reachable(
+        cls,
+        segments: list[Segment],
+        pads: list[tuple[float, float]],
+        tolerance: float = 1e-3,
+    ) -> bool:
+        """True if every pad is in the same connected component of segments."""
+        adj = cls._build_pad_graph(segments, tolerance)
+
+        def key(x: float, y: float) -> tuple[float, float]:
+            return (round(x / tolerance) * tolerance, round(y / tolerance) * tolerance)
+
+        pad_keys = [key(*p) for p in pads]
+        # Every pad must appear as a vertex.
+        if not all(k in adj for k in pad_keys):
+            return False
+        # BFS from first pad and ensure all others are reachable.
+        start = pad_keys[0]
+        visited = {start}
+        queue = [start]
+        while queue:
+            node = queue.pop()
+            for n in adj[node]:
+                if n not in visited:
+                    visited.add(n)
+                    queue.append(n)
+        return all(k in visited for k in pad_keys)
+
+    def test_y_junction_preserves_connectivity(self):
+        """A 3-pad Y-shaped route stays connected after full optimisation.
+
+        Geometry mirrors the failing VOUT net on board 01: three pads
+        connected through a single T-junction.  All three pads must be
+        reachable from each other in the optimised segment graph.
+        """
+        # Three pads: A (left), B (right), C (below); T-junction at (5, 0).
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 0.0)
+        pad_c = (5.0, 5.0)
+        junction = (5.0, 0.0)
+
+        # Build a Y-shape with a couple of intermediate kinks so the
+        # collinear-merge / pull-tight passes have something to chew on
+        # (a single segment per arm would already be optimal and would
+        # not stress the optimiser).
+        segments = [
+            # Arm A: (0,0) -> (2,0) -> (5,0)
+            self._seg(*pad_a, 2.0, 0.0),
+            self._seg(2.0, 0.0, *junction),
+            # Arm B: (5,0) -> (7,0) -> (10,0)
+            self._seg(*junction, 7.0, 0.0),
+            self._seg(7.0, 0.0, *pad_b),
+            # Arm C: (5,0) -> (5,2) -> (5,5)
+            self._seg(*junction, 5.0, 2.0),
+            self._seg(5.0, 2.0, *pad_c),
+        ]
+
+        # Sanity check: pre-optimisation connectivity is sound.
+        assert self._all_pads_reachable(segments, [pad_a, pad_b, pad_c])
+
+        route = Route(net=1, net_name="VOUT", segments=segments, vias=[])
+        optimizer = TraceOptimizer()
+        result = optimizer.optimize_route(route)
+
+        assert self._all_pads_reachable(result.segments, [pad_a, pad_b, pad_c]), (
+            "All three pads of a Y-shaped route must remain connected "
+            "after optimisation (issue #2389)."
+        )
+
+    def test_y_junction_chains_split_at_junction(self):
+        """Verify chains are split at the junction vertex itself."""
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 0.0)
+        pad_c = (5.0, 5.0)
+        junction = (5.0, 0.0)
+        segments = [
+            self._seg(*pad_a, *junction),
+            self._seg(*junction, *pad_b),
+            self._seg(*junction, *pad_c),
+        ]
+
+        optimizer = TraceOptimizer()
+        chains = optimizer._sort_into_chains(segments)
+
+        # Three arms => three sub-chains.
+        assert len(chains) == 3
+        # Each sub-chain endpoints touch either a leaf or the junction.
+        leaves = {pad_a, pad_b, pad_c}
+        for chain in chains:
+            endpoints = {chain[0].start, chain[-1].end}
+            # One endpoint is a leaf, the other is the junction.
+            assert endpoints & leaves, "Each branch should terminate at one of the pad leaves"
+            assert junction in endpoints
+
+    def test_optimizer_guard_reverts_if_branch_dropped(self):
+        """If a hostile optimiser drops a branch, the guard must revert.
+
+        Constructs a route, monkey-patches ``optimize_segments`` to return
+        only the first segment (simulating the original branch-dropping
+        bug), and checks that ``optimize_route`` still returns a fully
+        connected segment graph -- it must fall back to the original
+        segments rather than silently disconnect a pad.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 0.0)
+        pad_c = (5.0, 5.0)
+        junction = (5.0, 0.0)
+        segments = [
+            self._seg(*pad_a, *junction),
+            self._seg(*junction, *pad_b),
+            self._seg(*junction, *pad_c),
+        ]
+        route = Route(net=1, net_name="VOUT", segments=segments, vias=[])
+
+        optimizer = TraceOptimizer()
+        # Force optimize_segments to drop two of the three branches.
+        optimizer.optimize_segments = lambda segs: segs[:1]  # type: ignore[assignment]
+
+        result = optimizer.optimize_route(route)
+
+        # Guard must have reverted to the original three segments so all
+        # pads remain reachable from one another.
+        assert self._all_pads_reachable(result.segments, [pad_a, pad_b, pad_c]), (
+            "Guard failed to revert when branches were dropped"
+        )
+        assert len(result.segments) == 3
+
+
+class TestShortenDetours:
+    """Whole-chain detour replacement (Issue #8217)."""
+
+    def _seg(self, x1, y1, x2, y2):
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="N")
+
+    def _tent(self):
+        # climb 45deg, flat, descent 45deg between (0,0) and (6,0)
+        return [self._seg(0, 0, 1, 1), self._seg(1, 1, 5, 1), self._seg(5, 1, 6, 0)]
+
+    def _len(self, segs):
+        return sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in segs)
+
+    def _opt(self, config=None, blocked=None, anchors=None):
+        return TraceOptimizer(
+            config=config or OptimizationConfig(),
+            collision_checker=MockCollisionChecker(blocked_paths=blocked),
+            net_anchors={1: []} if anchors is None else anchors,
+        )
+
+    def test_tent_collapses_to_straight(self):
+        result = self._opt().shorten_detours(self._tent())
+        assert len(result) == 1
+        assert (result[0].x1, result[0].y1, result[0].x2, result[0].y2) == (0, 0, 6, 0)
+        assert result[0].width == 0.2 and result[0].layer == Layer.F_CU and result[0].net == 1
+
+    def test_no_collision_checker_is_noop(self):
+        # Blocking 1: an unchecked whole-chain rewrite can short other nets.
+        opt = TraceOptimizer(config=OptimizationConfig(), net_anchors={1: []})
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+        assert opt.optimize_segments(tent) == tent
+
+    def test_no_anchor_info_is_noop(self):
+        opt = TraceOptimizer(config=OptimizationConfig(), collision_checker=MockCollisionChecker())
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+
+    def test_foreign_trace_not_crossed(self):
+        # A foreign-net trace sits across the straight path; tent must stay.
+        opt = self._opt(blocked=[(2.9, -1.0, 3.1, 0.5)])
+        tent = self._tent()
+        assert opt.optimize_segments(tent) == tent
+
+    def test_mid_chain_same_net_pad_stays_connected(self):
+        # Blocking 2: daisy-chain pad on the flat run at (3, 1) must stay on copper.
+        tent = [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 3, 1),
+            self._seg(3, 1, 5, 1),
+            self._seg(5, 1, 6, 0),
+        ]
+        opt = self._opt(anchors={1: [(0, 0), (3, 1), (6, 0)]})
+        assert opt.shorten_detours(tent) == tent
+        # Same chain with no pad in the middle still collapses.
+        opt = self._opt(anchors={1: [(0, 0), (6, 0)]})
+        assert len(opt.shorten_detours(tent)) == 1
+
+    def test_obstacle_on_shorter_path_leaves_chain(self):
+        # Block everything touching y in [-0.1, 0.5] except the original tent top.
+        opt = self._opt(blocked=[(2.0, -0.1, 4.0, 0.5)])
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+
+    def test_falls_back_to_next_candidate(self):
+        # Endpoints (0,0)->(6,2): diag-first bends at (2,2) (blocked), ortho-first at (4,0).
+        chain = [
+            self._seg(0, 0, 0, 3),
+            self._seg(0, 3, 6, 3),
+            self._seg(6, 3, 6, 2),
+        ]
+        opt = self._opt(blocked=[(0.5, 1.5, 1.5, 1.8)])
+        result = opt.shorten_detours(chain)
+        assert len(result) == 2
+        assert (result[0].x2, result[0].y2) == pytest.approx((4, 0))
+        assert (result[0].x1, result[-1].x2, result[-1].y2) == (0, 6, 2)
+
+    def test_already_optimal_unchanged(self):
+        chain = [self._seg(0, 0, 1, 0), self._seg(1, 0, 2, 0), self._seg(2, 0, 3, 0)]
+        assert self._opt().shorten_detours(chain) == chain
+
+    def test_loop_unchanged(self):
+        chain = [self._seg(0, 0, 1, 0), self._seg(1, 0, 1, 1), self._seg(1, 1, 0, 0)]
+        assert self._opt().shorten_detours(chain) == chain
+
+    def test_config_flag_disables(self):
+        cfg = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+            shorten_detours=False,
+        )
+        tent = self._tent()
+        assert len(self._opt(config=cfg).optimize_segments(tent)) == 3
+        cfg.shorten_detours = True
+        out = self._opt(config=cfg).optimize_segments(tent)
+        assert len(out) == 1 and self._len(out) == pytest.approx(6.0)
+
+
+class TestRemoveLateralJogs:
+    """Slide a short sideways step between parallel runs to the next corner (Issue #8269)."""
+
+    def _seg(self, x1, y1, x2, y2):
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="N")
+
+    def _pts(self, segs):
+        return [(round(s.x1, 6), round(s.y1, 6), round(s.x2, 6), round(s.y2, 6)) for s in segs]
+
+    def _len(self, segs):
+        return sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in segs)
+
+    def _opt(self, config=None, blocked=None, anchors=None):
+        return TraceOptimizer(
+            config=config or OptimizationConfig(),
+            collision_checker=MockCollisionChecker(blocked_paths=blocked),
+            net_anchors={1: []} if anchors is None else anchors,
+        )
+
+    def _diag_jog(self):
+        # 45deg diagonal, 0.05 mm horizontal step, parallel diagonal, then a
+        # horizontal run: the shape left at a J2 header on a real board.
+        return [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 1.05, 1),
+            self._seg(1.05, 1, 2.05, 2),
+            self._seg(2.05, 2, 5, 2),
+        ]
+
+    def test_diagonal_jog_slides_forward_into_horizontal(self):
+        chain = self._diag_jog()
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, 0, 2, 2), (2, 2, 5, 2)]
+        assert self._len(result) == pytest.approx(self._len(chain))
+
+    def test_orthogonal_jog_slides_forward_into_diagonal(self):
+        # horizontal, 0.071 mm diagonal step, horizontal, then a diagonal parallel to the step
+        chain = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2.05, 0.05),
+            self._seg(2.05, 0.05, 4, 0.05),
+            self._seg(4, 0.05, 5, 1.05),
+        ]
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, 0, 3.95, 0), (3.95, 0, 5, 1.05)]
+
+    def test_jog_slides_backward_when_only_the_previous_corner_fits(self):
+        # vertical lead-in parallel to the step, then the jog, then a straight end
+        chain = [
+            self._seg(0, -1, 0, 0),
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 0.05),
+            self._seg(2, 0.05, 4, 0.05),
+        ]
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, -1, 0, 0.05), (0, 0.05, 4, 0.05)]
+
+    def test_step_shrinks_an_opposite_corner(self):
+        # the step points against the next segment, so the slide shortens it
+        chain = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 0.05),
+            self._seg(2, 0.05, 4, 0.05),
+            self._seg(4, 0.05, 4, -1),
+        ]
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, 0, 4, 0), (4, 0, 4, -1)]
+        assert self._len(result) < self._len(chain)
+
+    def test_no_parallel_corner_leaves_chain(self):
+        # neither neighbour of the jog window is parallel to the step
+        chain = [
+            self._seg(-1, -1, 0, 0),
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 0.05),
+            self._seg(2, 0.05, 4, 0.05),
+            self._seg(4, 0.05, 5, 1.05),
+        ]
+        assert self._opt().remove_jogs(chain) == chain
+
+    def test_anchor_on_moved_vertex_leaves_chain(self):
+        # 0.5 mm jog with a same-net via at B's start (1.5, 1): the slid
+        # diagonal would pass 0.35 mm from it, off the copper, so keep the chain.
+        chain = [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 1.5, 1),
+            self._seg(1.5, 1, 2.5, 2),
+            self._seg(2.5, 2, 5, 2),
+        ]
+        assert self._opt(anchors={1: [(0, 0), (1.5, 1), (5, 2)]}).remove_jogs(chain) == chain
+        # A via on the far corner (2.5, 2) stays on the new horizontal: allowed.
+        moved = self._opt(anchors={1: [(0, 0), (2.5, 2), (5, 2)]}).remove_jogs(chain)
+        assert self._pts(moved) == [(0, 0, 2, 2), (2, 2, 5, 2)]
+
+    def test_collision_on_moved_run_leaves_chain(self):
+        # a foreign obstacle sits where the moved diagonal would run
+        chain = self._diag_jog()
+        opt = self._opt(blocked=[(1.4, 1.38, 1.5, 1.42)])
+        assert opt.remove_jogs(chain) == chain
+
+    def test_step_longer_than_limit_leaves_chain(self):
+        cfg = OptimizationConfig(max_jog_length=0.04)
+        assert self._opt(config=cfg).remove_jogs(self._diag_jog()) == self._diag_jog()
+
+    def test_no_collision_checker_or_anchors_is_noop(self):
+        chain = self._diag_jog()
+        assert (
+            TraceOptimizer(config=OptimizationConfig(), net_anchors={1: []}).remove_jogs(chain)
+            == chain
+        )
+        no_anchors = TraceOptimizer(
+            config=OptimizationConfig(), collision_checker=MockCollisionChecker()
+        )
+        assert no_anchors.remove_jogs(chain) == chain
+
+    def test_chain_endpoints_never_move(self):
+        result = self._opt().remove_jogs(self._diag_jog())
+        assert (result[0].x1, result[0].y1) == (0, 0)
+        assert (result[-1].x2, result[-1].y2) == (5, 2)
+
+    def test_branch_ending_on_the_jogged_run_stays_connected(self):
+        # The board case: a 0.4 mm step between two diagonals, and a branch of the
+        # same net whose end rests on the second diagonal's body (a T-join KiCad
+        # counts as connected). Sliding the step would move that diagonal 0.28 mm
+        # off the branch's end, so optimize_segments must keep the chain.
+        chain = [
+            self._seg(0, 0, 3, 3),
+            self._seg(3, 3, 3, 3.4),
+            self._seg(3, 3.4, 4.2, 4.6),
+            self._seg(4.2, 4.6, 4.2, 5.6),
+        ]
+        branch = [self._seg(5, 3, 3.85, 4.25)]  # ends on (3, 3.4)-(4.2, 4.6), off its vertices
+        cfg = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+            shorten_detours=False,
+        )
+        out = self._opt(config=cfg).optimize_segments(chain + branch)
+        assert sorted(self._pts(out)) == sorted(self._pts(chain + branch))
+        # Without the branch the same chain is cleaned.
+        assert len(self._opt(config=cfg).optimize_segments(chain)) == 2
+
+    def test_no_pass_strands_a_branch_t_joined_to_the_chain(self):
+        # The exact board geometry: compress_staircase collapsed this chain
+        # 0.34 mm off a same-net branch ending on its body, leaving the branch
+        # dangling in kicad-cli. Every pass is now held to the anchor guard.
+        def seg(x1, y1, x2, y2):
+            return Segment(
+                x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="N"
+            )
+
+        chain = [
+            seg(166.44, 110.2, 170.04, 113.8),
+            seg(170.04, 113.8, 170.04, 114.2),
+            seg(170.04, 114.2, 171.24, 115.4),
+            seg(171.24, 115.4, 171.24, 115.5),
+            seg(171.24, 115.5, 171.39, 115.65),
+        ]
+        branch = [
+            seg(171.39, 114.54, 171.09, 114.84),
+            seg(171.09, 114.84, 171.04, 114.84),
+            seg(171.04, 114.84, 170.89, 114.99),
+        ]
+        out = self._opt().optimize_segments(chain + branch)
+        tip = (170.89, 114.99)
+
+        def dist(s):
+            dx, dy = s.x2 - s.x1, s.y2 - s.y1
+            k = max(
+                0.0, min(1.0, ((tip[0] - s.x1) * dx + (tip[1] - s.y1) * dy) / (dx * dx + dy * dy))
+            )
+            return ((tip[0] - s.x1 - k * dx) ** 2 + (tip[1] - s.y1 - k * dy) ** 2) ** 0.5
+
+        # The chain's (+1, +1) diagonal must still run under the branch's tip
+        # (the branch itself runs the other way, so it cannot satisfy this).
+        diagonals = [s for s in out if (s.x2 - s.x1) * (s.y2 - s.y1) > 0]
+        assert min(dist(s) for s in diagonals) <= 0.1 + 1e-4
+
+    def test_config_flag_gates_the_pass_in_optimize_segments(self):
+        cfg = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+            shorten_detours=False,
+            remove_jogs=False,
+        )
+        assert len(self._opt(config=cfg).optimize_segments(self._diag_jog())) == 4
+        cfg.remove_jogs = True
+        assert len(self._opt(config=cfg).optimize_segments(self._diag_jog())) == 2

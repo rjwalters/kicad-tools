@@ -1,0 +1,1610 @@
+"""Tests for kicad_tools.placement module."""
+
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.placement import (
+    Conflict,
+    ConflictSeverity,
+    ConflictType,
+    PlacementAnalyzer,
+    PlacementFix,
+    PlacementFixer,
+)
+from kicad_tools.placement.analyzer import DesignRules
+from kicad_tools.placement.conflict import Point, Rectangle
+from tests.conftest import EXTERNAL_BOARDS_ENV_VAR, resolve_external_boards_dir
+
+# Test PCB with overlapping component courtyards
+OVERLAPPING_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 100.5 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+  )
+)
+"""
+
+# Test PCB with hole-to-hole violations
+HOLE_CONFLICT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Connector:PinHeader_1x02"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 -2.5 0) (layer "F.SilkS"))
+    (property "Value" "Conn" (at 0 2.5 0) (layer "F.Fab"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "NET1"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 ""))
+  )
+  (footprint "Connector:PinHeader_1x02"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 100.3 100)
+    (property "Reference" "J2" (at 0 -2.5 0) (layer "F.SilkS"))
+    (property "Value" "Conn" (at 0 2.5 0) (layer "F.Fab"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "NET1"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 ""))
+  )
+)
+"""
+
+# Test PCB with edge clearance violations
+EDGE_CONFLICT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (gr_rect (start 100 100) (end 110 110)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 101.5 105)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+# Test PCB with no conflicts
+CLEAN_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 105 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+
+# --- Off-board fixtures (issue #4156) -----------------------------------------
+#
+# These deliberately draw the Edge.Cuts outline as a *graphics* ``gr_rect``
+# ONLY -- with NO hand-injected copper ``(segment ... Edge.Cuts)`` elements.
+# That is exactly the shape ``kct create-pcb`` and KiCad itself emit, and it is
+# the path the original bug hid behind: ``_extract_board_edge`` read the outline
+# via ``segments_on_layer("Edge.Cuts")`` (copper segments only), which is always
+# empty on a real board, so the off-board / edge-clearance checks never ran.
+# The pre-fix ``EDGE_CONFLICT_PCB`` masked this by adding fake ``segment``
+# elements alongside the ``gr_rect``; these fixtures must not.
+#
+# Board outline is (100,100)-(120,110) in sheet coordinates. With the detected
+# board origin at (100,100), that is board-relative (0,0)-(20,10).
+
+
+def _offboard_pcb(footprint_at: tuple[float, float]) -> str:
+    """Build a synthetic board (graphics outline + one R_0402) as S-expression.
+
+    ``footprint_at`` is the sheet-absolute ``(x, y)`` of the single footprint.
+    """
+    fx, fy = footprint_at
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (gr_rect (start 100 100) (end 120 110)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at {fx} {fy})
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+
+@pytest.fixture
+def offboard_inside_pcb(tmp_path: Path) -> Path:
+    """Footprint fully inside a graphics-drawn outline (no conflicts)."""
+    pcb_file = tmp_path / "offboard_inside.kicad_pcb"
+    pcb_file.write_text(_offboard_pcb((110, 105)))
+    return pcb_file
+
+
+@pytest.fixture
+def offboard_fully_outside_pcb(tmp_path: Path) -> Path:
+    """Footprint shifted +20mm beyond the north edge -- fully off the board."""
+    pcb_file = tmp_path / "offboard_fully.kicad_pcb"
+    pcb_file.write_text(_offboard_pcb((110, 130)))
+    return pcb_file
+
+
+@pytest.fixture
+def offboard_partial_pcb(tmp_path: Path) -> Path:
+    """Footprint straddling the south edge -- courtyard partially off the board."""
+    pcb_file = tmp_path / "offboard_partial.kicad_pcb"
+    pcb_file.write_text(_offboard_pcb((110, 109.9)))
+    return pcb_file
+
+
+@pytest.fixture
+def overlapping_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with overlapping components."""
+    pcb_file = tmp_path / "overlapping.kicad_pcb"
+    pcb_file.write_text(OVERLAPPING_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def hole_conflict_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with hole-to-hole conflicts."""
+    pcb_file = tmp_path / "hole_conflict.kicad_pcb"
+    pcb_file.write_text(HOLE_CONFLICT_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def edge_conflict_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with edge clearance violations."""
+    pcb_file = tmp_path / "edge_conflict.kicad_pcb"
+    pcb_file.write_text(EDGE_CONFLICT_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def clean_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with no placement conflicts."""
+    pcb_file = tmp_path / "clean.kicad_pcb"
+    pcb_file.write_text(CLEAN_PCB)
+    return pcb_file
+
+
+class TestConflictTypes:
+    """Tests for conflict data structures."""
+
+    def test_point_distance(self):
+        """Test Point distance calculation."""
+        p1 = Point(0, 0)
+        p2 = Point(3, 4)
+        assert p1.distance_to(p2) == pytest.approx(5.0)
+
+    def test_point_addition(self):
+        """Test Point addition."""
+        p1 = Point(1, 2)
+        p2 = Point(3, 4)
+        result = p1 + p2
+        assert result.x == 4
+        assert result.y == 6
+
+    def test_rectangle_intersects(self):
+        """Test Rectangle intersection detection."""
+        r1 = Rectangle(0, 0, 10, 10)
+        r2 = Rectangle(5, 5, 15, 15)
+        r3 = Rectangle(20, 20, 30, 30)
+
+        assert r1.intersects(r2) is True
+        assert r1.intersects(r3) is False
+
+    def test_rectangle_overlap_vector(self):
+        """Test Rectangle overlap vector calculation."""
+        r1 = Rectangle(0, 0, 10, 10)
+        r2 = Rectangle(8, 0, 18, 10)
+
+        overlap = r1.overlap_vector(r2)
+        assert overlap is not None
+        # Should move in x direction (smaller overlap)
+        assert overlap.x != 0 or overlap.y != 0
+
+    def test_rectangle_no_overlap(self):
+        """Test Rectangle overlap vector when not overlapping."""
+        r1 = Rectangle(0, 0, 10, 10)
+        r2 = Rectangle(20, 20, 30, 30)
+
+        overlap = r1.overlap_vector(r2)
+        assert overlap is None
+
+    def test_conflict_to_dict(self):
+        """Test Conflict serialization."""
+        conflict = Conflict(
+            type=ConflictType.COURTYARD_OVERLAP,
+            severity=ConflictSeverity.WARNING,
+            component1="R1",
+            component2="R2",
+            message="courtyards overlap",
+            location=Point(100, 100),
+            overlap_amount=0.5,
+        )
+
+        d = conflict.to_dict()
+        assert d["type"] == "courtyard_overlap"
+        assert d["severity"] == "warning"
+        assert d["component1"] == "R1"
+        assert d["component2"] == "R2"
+        assert d["overlap_amount"] == 0.5
+        # New field defaults to False and serializes for JSON consumers (#4227).
+        assert conflict.is_bbox_fallback is False
+        assert d["is_bbox_fallback"] is False
+
+
+class TestPlacementAnalyzer:
+    """Tests for PlacementAnalyzer."""
+
+    def test_find_courtyard_overlap(self, overlapping_pcb: Path):
+        """Test detecting courtyard overlaps."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        # Should detect overlap between R1 and R2
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1
+
+        conflict = overlap_conflicts[0]
+        assert {conflict.component1, conflict.component2} == {"R1", "R2"}
+        assert conflict.severity == ConflictSeverity.WARNING
+        # These footprints carry no F.CrtYd artwork, so the finding comes from
+        # the pad-bbox fallback and must be labeled as such (#4227).
+        assert conflict.is_bbox_fallback is True
+        assert "pad-bbox fallback" in conflict.message
+
+    def test_find_pad_clearance_violations(self, overlapping_pcb: Path):
+        """Test detecting pad clearance violations."""
+        analyzer = PlacementAnalyzer()
+        # Use tight clearance to ensure violations are detected
+        rules = DesignRules(min_pad_clearance=0.2)
+        conflicts = analyzer.find_conflicts(overlapping_pcb, rules)
+
+        # Should detect pad clearance issues or courtyard overlap
+        # May or may not have pad conflicts depending on exact overlap
+        # At minimum, courtyard should be detected
+        assert len(conflicts) >= 1
+
+    def test_find_hole_to_hole_violations(self, hole_conflict_pcb: Path):
+        """Test detecting hole-to-hole violations."""
+        analyzer = PlacementAnalyzer()
+        rules = DesignRules(min_hole_to_hole=0.5)
+        conflicts = analyzer.find_conflicts(hole_conflict_pcb, rules)
+
+        hole_conflicts = [c for c in conflicts if c.type == ConflictType.HOLE_TO_HOLE]
+        # The holes are 0.3mm apart (centers), with 1.0mm drill each
+        # So edge-to-edge they overlap
+        assert len(hole_conflicts) >= 1
+
+    def test_find_edge_clearance_violations(self, edge_conflict_pcb: Path):
+        """Test detecting edge clearance violations."""
+        analyzer = PlacementAnalyzer()
+        rules = DesignRules(min_edge_clearance=0.5)
+        conflicts = analyzer.find_conflicts(edge_conflict_pcb, rules)
+
+        edge_conflicts = [c for c in conflicts if c.type == ConflictType.EDGE_CLEARANCE]
+        # Component courtyard sits within min_edge_clearance of the (graphics-
+        # drawn) outline -- and is NOT off-board -- so it is an EDGE_CLEARANCE
+        # conflict.  This fixture draws Edge.Cuts as a bare ``gr_rect`` with no
+        # fake copper segments, so it exercises the real ``get_board_outline``
+        # path that the original bug hid behind (issue #4156).
+        assert len(edge_conflicts) >= 1
+        # It must NOT be misclassified as off-board (courtyard is fully inside).
+        assert not [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+
+    # --- Off-board detection (issue #4156) ---------------------------------
+    #
+    # The critical property: these boards draw Edge.Cuts as a graphics
+    # ``gr_rect`` (as ``create-pcb``/KiCad do), NOT as copper ``segment``
+    # elements.  Before the fix, ``_extract_board_edge`` read the outline via
+    # ``segments_on_layer`` (copper only), returned ``None`` on every real
+    # board, and silently skipped the off-board / edge checks -- so
+    # ``find_conflicts`` reported zero conflicts no matter how far off-board a
+    # footprint sat.  These tests fail against that pre-fix behaviour.
+
+    def test_offboard_fully_outside_reports_error(self, offboard_fully_outside_pcb: Path):
+        """Footprint fully outside a graphics outline -> OFF_BOARD error."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(offboard_fully_outside_pcb)
+
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert off[0].component1 == "R1"
+        assert "fully outside" in off[0].message
+        # At least one error, so `kct placement check` exits non-zero.
+        assert any(c.severity == ConflictSeverity.ERROR for c in conflicts)
+
+    def test_offboard_partial_reports_error(self, offboard_partial_pcb: Path):
+        """Footprint straddling the outline edge -> OFF_BOARD error."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(offboard_partial_pcb)
+
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert "partially outside" in off[0].message
+
+    def test_offboard_all_inside_is_clean(self, offboard_inside_pcb: Path):
+        """Footprint fully inside a graphics outline -> no off-board/edge error."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(offboard_inside_pcb)
+
+        assert not [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert not [c for c in conflicts if c.type == ConflictType.EDGE_CLEARANCE]
+        assert conflicts == []
+
+    def test_no_conflicts_in_clean_pcb(self, clean_pcb: Path):
+        """Test that clean PCB has no conflicts."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(clean_pcb)
+
+        # Components are 5mm apart, should be fine
+        assert len(conflicts) == 0
+
+    def test_custom_design_rules(self, clean_pcb: Path):
+        """Test that custom design rules are respected."""
+        analyzer = PlacementAnalyzer()
+
+        # With default rules, should be clean
+        conflicts1 = analyzer.find_conflicts(clean_pcb)
+        assert len(conflicts1) == 0
+
+        # With extreme rules, might find issues
+        extreme_rules = DesignRules(
+            min_pad_clearance=10.0,  # Very large
+            courtyard_margin=5.0,
+        )
+        conflicts2 = analyzer.find_conflicts(clean_pcb, extreme_rules)
+        # Components 5mm apart with 5mm courtyard margin would overlap
+        assert len(conflicts2) >= 1
+
+    def test_get_components(self, clean_pcb: Path):
+        """Test retrieving component information."""
+        analyzer = PlacementAnalyzer()
+        analyzer.find_conflicts(clean_pcb)
+
+        components = analyzer.get_components()
+        assert len(components) == 2
+
+        refs = {c.reference for c in components}
+        assert refs == {"R1", "R2"}
+
+
+class TestPlacementFixer:
+    """Tests for PlacementFixer."""
+
+    def test_suggest_fixes_for_overlap(self, overlapping_pcb: Path):
+        """Test suggesting fixes for overlapping components."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        # Should suggest at least one fix
+        assert len(fixes) >= 1
+
+        fix = fixes[0]
+        assert fix.component in {"R1", "R2"}
+        assert fix.move_vector.x != 0 or fix.move_vector.y != 0
+
+    def test_anchored_component_not_moved(self, overlapping_pcb: Path):
+        """Test that anchored components are not moved."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer(anchored={"R1"})
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        # R1 should not be moved
+        for fix in fixes:
+            assert fix.component != "R1"
+
+    # --- _choose_component_to_move with EDGE_CLEARANCE conflicts ---
+    #
+    # EDGE_CLEARANCE conflicts use component2 = "<edge>_edge" (e.g., "left_edge")
+    # as a sentinel; only component1 is a real, movable footprint.
+    # These tests guard against the regression where the EDGE_CLEARANCE branch
+    # short-circuited and bypassed the anchored set (issue #2541).
+
+    @staticmethod
+    def _make_edge_conflict(component: str = "J1", edge: str = "left_edge") -> Conflict:
+        """Build a synthetic EDGE_CLEARANCE conflict for fixer-level unit tests."""
+        return Conflict(
+            type=ConflictType.EDGE_CLEARANCE,
+            severity=ConflictSeverity.ERROR,
+            component1=component,
+            component2=edge,
+            message=f"{component} too close to {edge}",
+            location=Point(0.0, 0.0),
+            actual_clearance=0.1,
+            required_clearance=0.5,
+        )
+
+    def test_choose_component_edge_c1_anchored_returns_none(self):
+        """EDGE_CLEARANCE: when c1 is anchored, return None (cannot resolve)."""
+        fixer = PlacementFixer(anchored={"J1"})
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        # c1 is anchored and c2 is just an edge sentinel -- no movable component
+        # remains, so the fixer must skip this conflict.
+        assert fixer._choose_component_to_move(conflict) is None
+
+    def test_choose_component_edge_c2_anchored_still_moves_c1(self):
+        """EDGE_CLEARANCE: anchoring the edge sentinel is a no-op.
+
+        Note the asymmetry vs. overlap-style conflicts: ``c2`` for an
+        EDGE_CLEARANCE conflict is a sentinel string like ``"left_edge"`` (see
+        analyzer.py:533-542), not a real component reference. Adding it to
+        ``anchored`` therefore has no meaningful effect -- the fixer should
+        still choose to move ``c1``.
+        """
+        fixer = PlacementFixer(anchored={"left_edge"})
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        assert fixer._choose_component_to_move(conflict) == "J1"
+
+    def test_choose_component_edge_both_anchored_returns_none(self):
+        """EDGE_CLEARANCE: both anchored is the degenerate case of (a)."""
+        fixer = PlacementFixer(anchored={"J1", "left_edge"})
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        # c1 in anchored is sufficient on its own to short-circuit to None.
+        assert fixer._choose_component_to_move(conflict) is None
+
+    def test_choose_component_edge_neither_anchored_returns_c1(self):
+        """EDGE_CLEARANCE: with no anchors, behavior is unchanged (returns c1)."""
+        fixer = PlacementFixer()
+        conflict = self._make_edge_conflict(component="J1", edge="left_edge")
+
+        assert fixer._choose_component_to_move(conflict) == "J1"
+
+    def test_preview_fixes(self, overlapping_pcb: Path):
+        """Test generating fix preview."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        preview = fixer.preview_fixes(fixes)
+        assert "Suggested fixes" in preview
+        assert "Move" in preview
+
+    def test_empty_fixes_preview(self):
+        """Test preview with no fixes."""
+        fixer = PlacementFixer()
+        preview = fixer.preview_fixes([])
+        assert "No fixes suggested" in preview
+
+    def test_fix_confidence_scoring(self, overlapping_pcb: Path):
+        """Test that fixes have confidence scores."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        for fix in fixes:
+            assert 0.0 <= fix.confidence <= 1.0
+
+
+class TestPlacementFixSerialization:
+    """Tests for PlacementFix serialization."""
+
+    def test_fix_to_dict(self):
+        """Test PlacementFix serialization."""
+        conflict = Conflict(
+            type=ConflictType.COURTYARD_OVERLAP,
+            severity=ConflictSeverity.WARNING,
+            component1="R1",
+            component2="R2",
+            message="overlap",
+            location=Point(100, 100),
+        )
+
+        fix = PlacementFix(
+            conflict=conflict,
+            component="R2",
+            move_vector=Point(1.0, 0.0),
+            confidence=0.8,
+            new_position=Point(101, 100),
+        )
+
+        d = fix.to_dict()
+        assert d["component"] == "R2"
+        assert d["move_vector"]["x"] == 1.0
+        assert d["confidence"] == 0.8
+        assert d["new_position"]["x"] == 101
+
+
+class TestDesignRules:
+    """Tests for DesignRules."""
+
+    def test_default_rules(self):
+        """Test default design rule values."""
+        rules = DesignRules()
+        assert rules.min_pad_clearance == 0.1
+        assert rules.min_hole_to_hole == 0.5
+        assert rules.min_edge_clearance == 0.3
+        assert rules.courtyard_margin == 0.25
+
+    def test_custom_rules(self):
+        """Test custom design rule values."""
+        rules = DesignRules(
+            min_pad_clearance=0.15,
+            min_hole_to_hole=0.6,
+        )
+        assert rules.min_pad_clearance == 0.15
+        assert rules.min_hole_to_hole == 0.6
+
+
+class TestParallelConflictDetection:
+    """Tests for parallel conflict detection (issue #570)."""
+
+    def test_parallel_matches_sequential(self, overlapping_pcb: Path):
+        """Test that parallel results match sequential results exactly."""
+        analyzer = PlacementAnalyzer()
+
+        # Run with single worker (sequential)
+        sequential_conflicts = analyzer.find_conflicts(overlapping_pcb, max_workers=1)
+
+        # Run with multiple workers (parallel)
+        parallel_conflicts = analyzer.find_conflicts(overlapping_pcb, max_workers=4)
+
+        # Results should be identical (same conflicts, same order after sorting)
+        assert len(sequential_conflicts) == len(parallel_conflicts)
+
+        for seq, par in zip(sequential_conflicts, parallel_conflicts, strict=True):
+            assert seq.type == par.type
+            assert seq.severity == par.severity
+            assert seq.component1 == par.component1
+            assert seq.component2 == par.component2
+            assert seq.location.x == pytest.approx(par.location.x, abs=0.001)
+            assert seq.location.y == pytest.approx(par.location.y, abs=0.001)
+
+    def test_parallel_with_hole_conflicts(self, hole_conflict_pcb: Path):
+        """Test parallel detection of hole-to-hole conflicts."""
+        analyzer = PlacementAnalyzer()
+        rules = DesignRules(min_hole_to_hole=0.5)
+
+        sequential = analyzer.find_conflicts(hole_conflict_pcb, rules, max_workers=1)
+        parallel = analyzer.find_conflicts(hole_conflict_pcb, rules, max_workers=4)
+
+        assert len(sequential) == len(parallel)
+
+        # Verify hole conflicts are detected
+        seq_holes = [c for c in sequential if c.type == ConflictType.HOLE_TO_HOLE]
+        par_holes = [c for c in parallel if c.type == ConflictType.HOLE_TO_HOLE]
+        assert len(seq_holes) == len(par_holes)
+        assert len(seq_holes) >= 1
+
+    def test_parallel_clean_pcb(self, clean_pcb: Path):
+        """Test parallel detection finds no conflicts in clean PCB."""
+        analyzer = PlacementAnalyzer()
+
+        sequential = analyzer.find_conflicts(clean_pcb, max_workers=1)
+        parallel = analyzer.find_conflicts(clean_pcb, max_workers=4)
+
+        assert len(sequential) == 0
+        assert len(parallel) == 0
+
+    def test_max_workers_defaults_to_cpu_count(self, clean_pcb: Path):
+        """Test that max_workers defaults to CPU count when not specified."""
+        import os
+
+        analyzer = PlacementAnalyzer(verbose=True)
+
+        # Just verify it doesn't crash when max_workers is None
+        conflicts = analyzer.find_conflicts(clean_pcb, max_workers=None)
+        assert isinstance(conflicts, list)
+
+        # CPU count should be at least 1
+        assert (os.cpu_count() or 1) >= 1
+
+    def test_single_worker_graceful(self, overlapping_pcb: Path):
+        """Test single-core systems work correctly with max_workers=1."""
+        analyzer = PlacementAnalyzer()
+
+        conflicts = analyzer.find_conflicts(overlapping_pcb, max_workers=1)
+
+        # Should still detect conflicts
+        assert len(conflicts) >= 1
+
+    def test_edge_cases_zero_components(self, tmp_path: Path):
+        """Test parallel detection with zero components."""
+        empty_pcb = tmp_path / "empty.kicad_pcb"
+        empty_pcb.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+)
+""")
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(empty_pcb, max_workers=4)
+        assert len(conflicts) == 0
+
+    def test_edge_cases_one_component(self, tmp_path: Path):
+        """Test parallel detection with single component (no pairs)."""
+        single_pcb = tmp_path / "single.kicad_pcb"
+        single_pcb.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+""")
+        analyzer = PlacementAnalyzer()
+
+        sequential = analyzer.find_conflicts(single_pcb, max_workers=1)
+        parallel = analyzer.find_conflicts(single_pcb, max_workers=4)
+
+        assert len(sequential) == 0
+        assert len(parallel) == 0
+
+    def test_edge_cases_two_components(self, tmp_path: Path):
+        """Test parallel detection with exactly two components (one pair)."""
+        two_pcb = tmp_path / "two.kicad_pcb"
+        two_pcb.write_text(OVERLAPPING_PCB)  # Has exactly 2 components
+
+        analyzer = PlacementAnalyzer()
+
+        sequential = analyzer.find_conflicts(two_pcb, max_workers=1)
+        parallel = analyzer.find_conflicts(two_pcb, max_workers=4)
+
+        assert len(sequential) == len(parallel)
+        assert len(sequential) >= 1  # Should detect overlap
+
+
+class TestCLIIntegration:
+    """Tests for CLI integration."""
+
+    def test_placement_check_command(self, clean_pcb: Path):
+        """Test placement check command."""
+        from kicad_tools.cli.placement_cmd import main
+
+        result = main(["check", str(clean_pcb)])
+        assert result == 0  # No errors for clean PCB
+
+    def test_placement_check_finds_conflicts(self, overlapping_pcb: Path):
+        """Test placement check finds conflicts."""
+        from kicad_tools.cli.placement_cmd import main
+
+        # Conflicts exist but may be warnings, not errors
+        result = main(["check", str(overlapping_pcb)])
+        # Result is 0 for warnings, 1 for errors
+        assert result in (0, 1)
+
+    def test_placement_fix_dry_run(self, overlapping_pcb: Path):
+        """Test placement fix dry run."""
+        from kicad_tools.cli.placement_cmd import main
+
+        result = main(["fix", str(overlapping_pcb), "--dry-run"])
+        assert result == 0
+
+    def test_placement_check_json_output(self, overlapping_pcb: Path, capsys):
+        """Test placement check JSON output."""
+        from kicad_tools.cli.placement_cmd import main
+
+        main(["check", str(overlapping_pcb), "--format", "json"])
+        captured = capsys.readouterr()
+
+        import json
+
+        conflicts = json.loads(captured.out)
+        assert isinstance(conflicts, list)
+        if len(conflicts) > 0:
+            assert "type" in conflicts[0]
+            assert "component1" in conflicts[0]
+
+
+# Test PCB with diagonally overlapping components (45 degree angle)
+DIAGONAL_OVERLAP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 100.3 100.3)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+# Test PCB with vertically overlapping components (same X, different Y)
+VERTICAL_OVERLAP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 100 100.5)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+
+@pytest.fixture
+def diagonal_overlap_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with diagonally overlapping components."""
+    pcb_file = tmp_path / "diagonal_overlap.kicad_pcb"
+    pcb_file.write_text(DIAGONAL_OVERLAP_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def vertical_overlap_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with vertically overlapping components."""
+    pcb_file = tmp_path / "vertical_overlap.kicad_pcb"
+    pcb_file.write_text(VERTICAL_OVERLAP_PCB)
+    return pcb_file
+
+
+class TestDiagonalMovement:
+    """Tests for 2D displacement vectors in PlacementFixer."""
+
+    def test_diagonal_courtyard_fix(self, diagonal_overlap_pcb: Path):
+        """Test that diagonal overlap produces diagonal fix vector.
+
+        When components are positioned at a 45° angle, the fix should
+        move along that diagonal rather than X-only.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(diagonal_overlap_pcb)
+
+        # Find courtyard overlap conflict
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1, "Should detect courtyard overlap"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1, "Should suggest at least one fix"
+
+        fix = fixes[0]
+        # Both X and Y should have non-zero values for diagonal movement
+        assert fix.move_vector.x != 0, "Diagonal fix should have X component"
+        assert fix.move_vector.y != 0, "Diagonal fix should have Y component"
+
+        # The X and Y components should be roughly equal for 45° angle
+        # Note: tolerance is wider (0.5-2.0) because component footprint geometry
+        # and courtyard margins can shift the effective centroid slightly
+        ratio = (
+            abs(fix.move_vector.x / fix.move_vector.y) if fix.move_vector.y != 0 else float("inf")
+        )
+        assert 0.5 < ratio < 2.0, f"Diagonal fix should be roughly diagonal, got ratio {ratio}"
+
+    def test_vertical_courtyard_fix_y_only(self, vertical_overlap_pcb: Path):
+        """Test that vertical overlap produces Y-only fix vector.
+
+        When components are positioned on the same X axis (vertical alignment),
+        the fix should move along Y axis.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(vertical_overlap_pcb)
+
+        # Find courtyard overlap conflict
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1, "Should detect courtyard overlap"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1, "Should suggest at least one fix"
+
+        fix = fixes[0]
+        # For vertical alignment, Y should dominate
+        assert abs(fix.move_vector.y) > abs(fix.move_vector.x), (
+            f"Vertical overlap fix should have larger Y component: "
+            f"got x={fix.move_vector.x}, y={fix.move_vector.y}"
+        )
+
+    def test_horizontal_courtyard_fix_x_only(self, overlapping_pcb: Path):
+        """Test that horizontal overlap produces X-dominant fix vector.
+
+        The existing OVERLAPPING_PCB has components at (100, 100) and (100.5, 100),
+        which is horizontal alignment - fix should be X-dominant.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1, "Should detect courtyard overlap"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1, "Should suggest at least one fix"
+
+        fix = fixes[0]
+        # For horizontal alignment, X should dominate
+        assert abs(fix.move_vector.x) > abs(fix.move_vector.y), (
+            f"Horizontal overlap fix should have larger X component: "
+            f"got x={fix.move_vector.x}, y={fix.move_vector.y}"
+        )
+
+    def test_fallback_to_x_only_without_analyzer(self):
+        """Test that fix falls back to X-only when no analyzer is provided."""
+        conflict = Conflict(
+            type=ConflictType.COURTYARD_OVERLAP,
+            severity=ConflictSeverity.WARNING,
+            component1="R1",
+            component2="R2",
+            message="courtyard overlap",
+            location=Point(100, 100),
+            overlap_amount=0.5,
+        )
+
+        fixer = PlacementFixer()
+        # Call suggest_fixes without analyzer
+        fixes = fixer.suggest_fixes([conflict], analyzer=None)
+
+        assert len(fixes) == 1, "Should suggest one fix"
+
+        fix = fixes[0]
+        # Without analyzer, should fall back to X-only
+        assert fix.move_vector.x != 0, "Fallback should have X component"
+        assert fix.move_vector.y == 0, "Fallback should have no Y component (X-only)"
+
+    def test_diagonal_fix_magnitude_reasonable(self, diagonal_overlap_pcb: Path):
+        """Test that diagonal fix magnitude is smaller than X-only would be.
+
+        A diagonal move should have a smaller total displacement than
+        an X-only move covering the same overlap.
+        """
+        import math
+
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(diagonal_overlap_pcb)
+
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1
+
+        fix = fixes[0]
+        magnitude = math.sqrt(fix.move_vector.x**2 + fix.move_vector.y**2)
+
+        # The magnitude should be roughly overlap + margin
+        overlap = overlap_conflicts[0].overlap_amount
+        if overlap:
+            expected_magnitude = overlap + 0.1  # margin
+            # Allow 50% tolerance for different calculation methods
+            assert magnitude < expected_magnitude * 1.5, (
+                f"Diagonal fix magnitude {magnitude} should be close to {expected_magnitude}"
+            )
+
+
+class TestApplyFixes:
+    """Tests for PlacementFixer.apply_fixes - the fix command's core functionality."""
+
+    def test_apply_fixes_modifies_positions(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that apply_fixes actually modifies component positions.
+
+        This is the core bug fix for issue #361 - fixes were being suggested
+        but the regex wasn't matching, so 0 fixes were applied.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+        assert len(conflicts) >= 1, "Should have conflicts to fix"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+        assert len(fixes) >= 1, "Should suggest fixes"
+
+        # Apply fixes to a new file
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path)
+
+        # The key assertion: fixes_applied should be > 0
+        assert result.fixes_applied > 0, (
+            f"Should apply at least one fix, but applied {result.fixes_applied}. "
+            "This was the bug in issue #361."
+        )
+
+        # Verify the output file was modified
+        original = overlapping_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Output file should be different from original"
+
+    def test_apply_fixes_changes_coordinates(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that apply_fixes changes the actual coordinate values."""
+        import re
+
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        # Get the component being moved
+        component_to_move = fixes[0].component
+        move_vector = fixes[0].move_vector
+
+        # Find original position
+        original = overlapping_pcb.read_text()
+
+        # Apply fixes
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path)
+
+        assert result.fixes_applied > 0
+
+        # Read modified content and verify position changed
+        modified = output_path.read_text()
+
+        # Extract positions from both files for the moved component
+        # Look for the (at X Y) pattern in the footprint block for the given reference.
+        def find_position(content: str, ref: str) -> tuple[float, float] | None:
+            # Step 1: Find all footprint blocks
+            ref_pattern = re.compile(
+                rf'(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
+            )
+            fp_starts = [m.start() for m in re.finditer(r'\(footprint\s+"[^"]+"', content)]
+            for i, fp_start in enumerate(fp_starts):
+                fp_end = fp_starts[i + 1] if i + 1 < len(fp_starts) else len(content)
+                fp_block = content[fp_start:fp_end]
+                if not ref_pattern.search(fp_block):
+                    continue
+                # Step 2: Extract the first (at X Y) in this block (footprint position)
+                at_match = re.search(r"\(at\s+([\d.-]+)\s+([\d.-]+)", fp_block)
+                if at_match:
+                    return float(at_match.group(1)), float(at_match.group(2))
+            return None
+
+        orig_pos = find_position(original, component_to_move)
+        new_pos = find_position(modified, component_to_move)
+
+        assert orig_pos is not None, f"Should find original position for {component_to_move}"
+        assert new_pos is not None, f"Should find new position for {component_to_move}"
+
+        # Verify position changed by approximately the move vector
+        dx = new_pos[0] - orig_pos[0]
+        dy = new_pos[1] - orig_pos[1]
+
+        assert abs(dx - move_vector.x) < 0.001, (
+            f"X position change {dx} should match move vector {move_vector.x}"
+        )
+        assert abs(dy - move_vector.y) < 0.001, (
+            f"Y position change {dy} should match move vector {move_vector.y}"
+        )
+
+    def test_apply_fixes_dry_run(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that dry_run=True doesn't write changes."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        output_path = tmp_path / "should_not_exist.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path, dry_run=True)
+
+        # Should report fixes would be applied
+        assert result.fixes_applied > 0
+        assert "dry run" in result.message.lower()
+
+        # But file should not be created
+        assert not output_path.exists(), "Dry run should not create output file"
+
+    def test_apply_fixes_reduces_conflicts(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that applying fixes reduces the number of conflicts."""
+        analyzer = PlacementAnalyzer()
+        original_conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(original_conflicts, analyzer)
+
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path)
+
+        assert result.fixes_applied > 0
+
+        # Re-analyze the fixed file
+        new_conflicts = analyzer.find_conflicts(output_path)
+
+        # Should have fewer or equal conflicts (ideally zero)
+        assert len(new_conflicts) <= len(original_conflicts), (
+            f"Fixed file should have fewer conflicts: "
+            f"original={len(original_conflicts)}, new={len(new_conflicts)}"
+        )
+
+    def test_cli_fix_applies_changes(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that the CLI fix command actually applies fixes (not just suggests)."""
+        from kicad_tools.cli.placement_cmd import main
+
+        output_path = tmp_path / "cli_fixed.kicad_pcb"
+
+        # Run fix command (not dry-run)
+        # Note: may return 1 if conflicts remain after fixes, but fixes should still be applied
+        main(["fix", str(overlapping_pcb), "-o", str(output_path), "--quiet"])
+
+        # Verify output file exists and is different from original
+        assert output_path.exists(), "Fix command should create output file"
+
+        original = overlapping_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Fix command should modify the file"
+
+
+# Test PCB using legacy fp_text reference format (real KiCad file format)
+# This format is used by actual KiCad PCB files, as opposed to the
+# property "Reference" format used in inline test fixtures.
+FP_TEXT_FORMAT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad-tools-demo")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Package_QFP:TQFP-32_7x7mm_P0.8mm"
+    (layer "F.Cu")
+    (uuid "mcu-u1-001")
+    (at 100 100)
+    (fp_text reference "U1"
+      (at 0 -6)
+      (layer "F.SilkS")
+      (uuid "u1-ref-001")
+      (effects
+        (font
+          (size 1 1)
+          (thickness 0.15)
+        )
+      )
+    )
+    (fp_text value "STM32F103"
+      (at 0 6)
+      (layer "F.Fab")
+      (uuid "u1-val-001")
+    )
+    (pad "1" smd rect (at -4.500 -2.800) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+  )
+  (footprint "Package_QFP:TQFP-32_7x7mm_P0.8mm"
+    (layer "F.Cu")
+    (uuid "mcu-u2-001")
+    (at 100.5 100)
+    (fp_text reference "U2"
+      (at 0 -6)
+      (layer "F.SilkS")
+      (uuid "u2-ref-001")
+      (effects
+        (font
+          (size 1 1)
+          (thickness 0.15)
+        )
+      )
+    )
+    (fp_text value "STM32F103"
+      (at 0 6)
+      (layer "F.Fab")
+      (uuid "u2-val-001")
+    )
+    (pad "1" smd rect (at -4.500 -2.800) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def fp_text_format_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file using the legacy fp_text reference format."""
+    pcb_file = tmp_path / "fp_text_format.kicad_pcb"
+    pcb_file.write_text(FP_TEXT_FORMAT_PCB)
+    return pcb_file
+
+
+class TestFpTextReferenceFormat:
+    """Tests for fix application with fp_text reference format (issue #547).
+
+    Real KiCad PCB files use fp_text reference "REF" format, not
+    property "Reference" "REF". This was causing the fix command to
+    suggest fixes but apply 0 of them.
+    """
+
+    def test_apply_fixes_with_fp_text_format(self, fp_text_format_pcb: Path, tmp_path: Path):
+        """Test that apply_fixes works with fp_text reference format.
+
+        This is the core test for issue #547 - fixes were being suggested
+        but the regex wasn't matching fp_text format, so 0 fixes were applied.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(fp_text_format_pcb)
+        assert len(conflicts) >= 1, "Should have conflicts to fix"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+        assert len(fixes) >= 1, "Should suggest fixes"
+
+        # Apply fixes to a new file
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(fp_text_format_pcb, fixes, output_path)
+
+        # The key assertion: fixes_applied should be > 0
+        assert result.fixes_applied > 0, (
+            f"Should apply at least one fix with fp_text format, but applied {result.fixes_applied}. "
+            "This was the bug in issue #547."
+        )
+
+        # Verify the output file was modified
+        original = fp_text_format_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Output file should be different from original"
+
+    def test_fp_text_format_position_changes(self, fp_text_format_pcb: Path, tmp_path: Path):
+        """Test that fp_text format positions are actually modified."""
+        import re
+
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(fp_text_format_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        # Get the component being moved
+        component_to_move = fixes[0].component
+        move_vector = fixes[0].move_vector
+
+        # Find original position
+        original = fp_text_format_pcb.read_text()
+
+        # Apply fixes
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(fp_text_format_pcb, fixes, output_path)
+
+        assert result.fixes_applied > 0
+
+        # Read modified content and verify position changed
+        modified = output_path.read_text()
+
+        # Helper to find position - must match both formats
+        def find_position(content: str, ref: str) -> tuple[float, float] | None:
+            # Step 1: Find all footprint blocks
+            ref_pattern = re.compile(
+                rf'(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
+            )
+            fp_starts = [m.start() for m in re.finditer(r'\(footprint\s+"[^"]+"', content)]
+            for i, fp_start in enumerate(fp_starts):
+                fp_end = fp_starts[i + 1] if i + 1 < len(fp_starts) else len(content)
+                fp_block = content[fp_start:fp_end]
+                if not ref_pattern.search(fp_block):
+                    continue
+                # Step 2: Extract the first (at X Y) in this block (footprint position)
+                at_match = re.search(r"\(at\s+([\d.-]+)\s+([\d.-]+)", fp_block)
+                if at_match:
+                    return float(at_match.group(1)), float(at_match.group(2))
+            return None
+
+        orig_pos = find_position(original, component_to_move)
+        new_pos = find_position(modified, component_to_move)
+
+        assert orig_pos is not None, f"Should find original position for {component_to_move}"
+        assert new_pos is not None, f"Should find new position for {component_to_move}"
+
+        # Verify position changed by approximately the move vector
+        dx = new_pos[0] - orig_pos[0]
+        dy = new_pos[1] - orig_pos[1]
+
+        assert abs(dx - move_vector.x) < 0.001, (
+            f"X position change {dx} should match move vector {move_vector.x}"
+        )
+        assert abs(dy - move_vector.y) < 0.001, (
+            f"Y position change {dy} should match move vector {move_vector.y}"
+        )
+
+    def test_cli_fix_with_fp_text_format(self, fp_text_format_pcb: Path, tmp_path: Path):
+        """Test that CLI fix command works with fp_text format."""
+        from kicad_tools.cli.placement_cmd import main
+
+        output_path = tmp_path / "cli_fixed.kicad_pcb"
+
+        # Run fix command
+        main(["fix", str(fp_text_format_pcb), "-o", str(output_path), "--quiet"])
+
+        # Verify output file exists and is different from original
+        assert output_path.exists(), "Fix command should create output file"
+
+        original = fp_text_format_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Fix command should modify the file with fp_text format"
+
+
+# --- Offset-origin boards and courtyard edge overhang (issue #4290) -----------
+#
+# Softstart rev-C's Edge.Cuts spans (68.5, 55) -> (228.5, 155): a 160x100 board
+# whose min corner is NOT the sheet origin.  #4290 reported U14 (an
+# ESP32-C3-WROOM-02 whose antenna-keepout courtyard intentionally protrudes
+# past the edge) as a blocking OFF_BOARD error, forcing `kct route
+# --allow-offboard`.  Two guarantees are pinned here:
+#
+# 1. Pads and outline are compared in ONE coordinate frame, so a footprint
+#    fully inside an offset outline is never flagged (and a genuinely
+#    off-board footprint on the same offset board still errors).
+# 2. Courtyard-artwork-only edge overhang with every pad on-board is a
+#    WARNING (probable intentional overhang: antenna/connector), not a
+#    placement-invalidating ERROR.
+
+# 160x100 outline with min corner (50, 40) -> (210, 140), drawn as chained
+# gr_line segments exactly like the softstart board (exercises the
+# _detect_board_origin gr_line fallback path, not the gr_rect path).
+_OFFSET_OUTLINE = """  (gr_line (start 50 40) (end 210 40)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 210 40) (end 210 140)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 210 140) (end 50 140)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 50 140) (end 50 40)
+    (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
+"""
+
+
+def _offset_board_pcb(footprints: str) -> str:
+    """Synthetic offset-origin board (Edge.Cuts min corner at (50, 40))."""
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+    (47 "F.CrtYd" user "F.Courtyard")
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+{_OFFSET_OUTLINE}{footprints})
+"""
+
+
+def _r0402_at(ref: str, x: float, y: float, uuid_n: int) -> str:
+    """R_0402 footprint at sheet-absolute (x, y); no courtyard artwork."""
+    return f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000{uuid_n:02d}")
+    (at {x} {y})
+    (property "Reference" "{ref}" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+"""
+
+
+def _antenna_module_at(ref: str, x: float, y: float) -> str:
+    """Footprint whose real F.CrtYd artwork extends 2mm above its pads.
+
+    Models an antenna module: pads sit at (x, y) but the courtyard rectangle
+    spans y-7 .. y+2 relative to the anchor, so placing it near the top edge
+    leaves every pad on-board while the courtyard overhangs the outline.
+    """
+    return f"""  (footprint "RF_Module:Fake_Antenna_Module"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000099")
+    (at {x} {y})
+    (property "Reference" "{ref}" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "ANT" (at 0 1.5 0) (layer "F.Fab"))
+    (fp_rect (start -2 -7) (end 2 2)
+      (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+"""
+
+
+class TestOffsetOriginOffBoard:
+    """Off-board detection on boards whose Edge.Cuts min corner is not (0,0)."""
+
+    def _conflicts(self, tmp_path: Path, footprints: str):
+        pcb_file = tmp_path / "offset_board.kicad_pcb"
+        pcb_file.write_text(_offset_board_pcb(footprints))
+        return PlacementAnalyzer().find_conflicts(pcb_file)
+
+    def test_inside_far_corner_is_clean(self, tmp_path: Path):
+        """Footprint near the far corner but fully inside -> no OFF_BOARD.
+
+        Sheet (205, 135) is board-relative (155, 95) on the 160x100 outline.
+        A checker that normalized the outline to the origin while leaving pad
+        coordinates sheet-absolute (the #4290 mis-diagnosis scenario) would
+        flag this footprint (205 > 160); comparing both in one frame must not.
+        """
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 205, 135, 10))
+        assert not [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+
+    def test_fully_offboard_still_errors(self, tmp_path: Path):
+        """Genuinely off-board footprint on the offset board -> ERROR."""
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 230, 150, 10))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert "fully outside" in off[0].message
+        # The message reports the outline in both frames so offset boards do
+        # not read as origin-normalized (the confusion that produced #4290).
+        assert "sheet 50.0,40.0 to 210.0,140.0" in off[0].message
+
+    def test_straddling_pads_still_errors(self, tmp_path: Path):
+        """Footprint whose pads cross the offset outline edge -> ERROR."""
+        # At sheet x=209.9 the right pad spans 210.14..210.68 -> past 210.
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 209.9, 90, 10))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.ERROR
+        assert "partially outside" in off[0].message
+
+    def test_pads_inside_margin_overhang_is_warning(self, tmp_path: Path):
+        """Pads on-board, only the courtyard margin overhangs -> WARNING.
+
+        The fallback courtyard is the pads bbox expanded by 0.25mm; a pad
+        0.1mm from the edge keeps all copper on-board while the margin pokes
+        out.  This must warn (it routes and fabs fine), not invalidate.
+        """
+        # Right pad extent: 209.0 + 0.51 + 0.27 = 209.78 (inside the 210
+        # edge); the fallback courtyard adds 0.25 -> 210.03 (0.03mm overhang).
+        conflicts = self._conflicts(tmp_path, _r0402_at("R1", 209.0, 90, 10))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.WARNING
+        assert "all pads are on-board" in off[0].message
+        # Warnings alone must not fail `kct placement check` (exit code is
+        # driven by ERROR-severity conflicts only).
+        assert not [c for c in off if c.severity == ConflictSeverity.ERROR]
+
+    def test_real_courtyard_overhang_pads_inside_is_warning(self, tmp_path: Path):
+        """Antenna-style F.CrtYd artwork past the edge, pads inside -> WARNING.
+
+        This is the exact softstart rev-C U14 shape: every pad on-board, the
+        module's courtyard protruding past the outline by design.
+        """
+        pytest.importorskip("shapely")
+        # Anchor at sheet (100, 45): pads at y=45 (board-relative 5, inside);
+        # courtyard spans sheet y 38..47 -> 2mm past the top edge (40).
+        conflicts = self._conflicts(tmp_path, _antenna_module_at("U14", 100, 45))
+        off = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
+        assert len(off) == 1
+        assert off[0].severity == ConflictSeverity.WARNING
+        assert off[0].component1 == "U14"
+        assert "top 2.00mm" in off[0].message
+        assert "all pads are on-board" in off[0].message
+
+
+class TestSoftstartRevCOffBoard:
+    """Live check against the local-only softstart rev-C fixture (#4290).
+
+    ``boards/external/softstart`` is a local-only relative symlink calibrated
+    for the primary checkout's location on disk; from a git worktree the same
+    symlink resolves to a path that doesn't exist, which used to look
+    identical to "fixture genuinely not provisioned on this host" (#4925).
+    ``resolve_external_boards_dir()`` locates the primary checkout's
+    ``boards/external/`` via ``git rev-parse --git-common-dir`` (stable
+    across worktrees) so this test only skips when the fixture is *actually*
+    absent, not merely unreachable from a worktree's own relative path. Set
+    ``KICAD_TOOLS_EXTERNAL_BOARDS_DIR`` to override the resolution entirely.
+    """
+
+    _SOFTSTART_REVC = (
+        resolve_external_boards_dir() / "softstart" / "output_revc" / "softstart_revc.kicad_pcb"
+    )
+
+    def test_u14_antenna_overhang_is_not_an_error(self):
+        """U14's antenna courtyard overhang must not invalidate the placement."""
+        board = self._SOFTSTART_REVC
+        try:
+            available = board.exists()
+        except OSError:
+            available = False
+        if not available:
+            pytest.skip(
+                f"softstart fixture not available at {board} (local-only symlink; "
+                f"see #4925 -- if it exists elsewhere, set "
+                f"{EXTERNAL_BOARDS_ENV_VAR}=/path/to/boards/external)"
+            )
+
+        conflicts = PlacementAnalyzer().find_conflicts(board)
+        off_errors = [
+            c
+            for c in conflicts
+            if c.type == ConflictType.OFF_BOARD and c.severity == ConflictSeverity.ERROR
+        ]
+        assert off_errors == []

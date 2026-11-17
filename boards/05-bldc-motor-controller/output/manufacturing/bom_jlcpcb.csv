@@ -1,0 +1,24 @@
+Comment,Designator,Footprint,LCSC Part #
+0.5R,R1,Resistor_SMD:R_2512_6332Metric,C511023
+100nF,"C10,C11,C12,C14,C15,C16,C2,C3,C5,C9",Capacitor_SMD:C_0805_2012Metric,C49678
+10k,RV1,Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical,C34846
+10k,"R10,R11,R12,R3,R5,R6,R7,R8,R9",Resistor_SMD:R_0805_2012Metric,C17414
+10nF,"C13,C4",Capacitor_SMD:C_0805_2012Metric,C1710
+10uF,C8,Capacitor_SMD:C_0805_2012Metric,C15850
+12-24V INPUT,J1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C7501260
+1A 63V,F1,Fuse:Fuse_1206_3216Metric,C3167176
+1k,"R13,R4",Resistor_SMD:R_0805_2012Metric,C17513
+1uF,C7,Capacitor_SMD:C_0805_2012Metric,C28323
+220uF 50V,C1,board05_revB:CP_Elec_8x10.5_PolarityMark,C178594
+470nF,C6,Capacitor_SMD:C_0805_2012Metric,C13967
+56k,R2,Resistor_SMD:R_0805_2012Metric,C17756
+ATmega328P-AU,U1,Package_QFP:TQFP-32_7x7mm_P0.8mm,C14877
+AVR ISP,J4,Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical,C65114
+DRV8313PWPR,U2,board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias,C92482
+HALL,J3,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,C37208
+MOTOR ABC,J2,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,C49257
+RED,D3,LED_SMD:LED_0805_2012Metric,C84256
+RUN SWITCH,J5,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C7501260
+SMBJ24A,D2,Diode_SMD:D_SMB,C224017
+SS36,D1,Diode_SMD:D_SMA,C16015
+TPS7A1650DGNR,U3,Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias,C468238

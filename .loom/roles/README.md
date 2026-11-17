@@ -1,0 +1,191 @@
+# Loom Role Definitions
+
+This directory contains role definitions for Loom terminal configurations.
+
+## Source of Truth
+
+**The single source of truth for all Loom role definitions is `.claude/commands/loom/*.md`.**
+
+This directory contains:
+- **Symlinks** (`*.md`) pointing to `../.claude/commands/loom/*.md` for backward compatibility
+- **Metadata files** (`*.json`) with default settings for each role
+
+### Why Symlinks?
+
+- **Claude Code CLI** uses `.claude/commands/loom/` for slash commands. Subdirectory commands are invoked in the namespaced `/loom:<role>` form (e.g., `/loom:builder`, `/loom:loom`) as of Claude Code 2.1+ (see #3345)
+- **Daemon and tooling** that historically read role files from `.loom/roles/` continue to work without code changes
+- Symlinks ensure both access the same content - single source of truth
+
+### Editing Roles
+
+To edit a role definition:
+1. Edit the file in `.claude/commands/loom/<role>.md`
+2. The symlink in `roles/<role>.md` automatically reflects changes
+
+## Available Roles
+
+| Role | Purpose | Autonomous |
+|------|---------|------------|
+| `architect` | System architecture proposals | 15min |
+| `auditor` | Main branch build/runtime validation | 10min |
+| `builder` | Feature implementation | Manual |
+| `champion` | Proposal evaluation and PR auto-merge | 10min |
+| `curator` | Issue enhancement | 5min |
+| `doctor` | Bug fixes and PR feedback | 5min |
+| `driver` | Plain shell environment | Manual |
+| `guide` | Issue triage and prioritization | 15min |
+| `hermit` | Code simplification proposals | 15min |
+| `judge` | Code review | 5min |
+| `loom` | Tier 2 daemon-mode operator surface | 1min |
+
+> **Note**: the `shepherd` role (Layer 1 issue-lifecycle orchestrator) was
+> removed in v0.10.0. Use `/loom:sweep <issue>` for the same single-issue
+> lifecycle, or `mcp__loom__dispatch_sweep` against the Rust `loom-daemon` for
+> multi-account dispatch — see
+> [the migration guide](https://github.com/rjwalters/loom/blob/main/docs/migration/v0.10.0-shepherd-deprecation.md)
+> (upstream Loom repo — `docs/migration/` is not shipped to consumer installs).
+
+## Metadata Files (*.json)
+
+Each role can have an optional JSON metadata file with default settings:
+
+```json
+{
+  "name": "Builder",
+  "description": "Implements features and fixes",
+  "suggestedWorkerType": "claude"
+}
+```
+
+### Metadata Fields
+
+- **`name`** (string): Display name for this role
+- **`description`** (string): Brief description
+- **`suggestedModel`** (string): Default model alias for this role (`haiku`, `sonnet`, `opus`) or a pinned model ID; the role-default tier of the model-selection precedence chain
+- **`suggestedWorkerType`** (string): "claude" or "codex"
+- **`stuckThresholds`** (object): Per-role stuck-detection limits (e.g. `maxNoOutput`, `maxNeedsInput`, in milliseconds)
+- **`toolPolicy`** (object): Per-role sensitive-capability allowlist — see below
+
+### `toolPolicy.allowedCapabilities` — the sensitive-capability allowlist
+
+Optional. Declares which **sensitive capabilities** a role may reach; every
+capability it does not name is denied (issue #8256): by the guard hooks on
+every tool call, and at session spawn as defense in depth.
+
+`loom-daemon role-tool-policy` is the **only** implementation of the rules below —
+`check` gives the guard hooks their verdict, `deny-specs` gives the Claude path
+its `--disallowedTools` list, `restricted` gives the Codex path its predicate —
+so the hooks and spawn scripts call out to it rather than re-deriving the
+answer, and the two runtimes cannot disagree about the same role file. The
+shipped read-only roles (architect, auditor, champion, curator,
+guide, hermit, judge) declare `[]`; builder, doctor, driver and loom declare
+`["*"]`. What `check` matches, and its fail-closed rule, are in
+`defaults/docs/guard-hooks.md` ("Per-role tool restriction").
+
+```json
+{ "toolPolicy": { "allowedCapabilities": [] } }               // reaches none
+{ "toolPolicy": { "allowedCapabilities": ["cloud-cli"] } }    // reaches only that one
+{ "toolPolicy": { "allowedCapabilities": ["*"] } }            // unrestricted
+```
+
+**The namespace is exactly four literal strings.** There are no others, and the
+list is not extensible from a role file:
+
+| Capability | Denies |
+|---|---|
+| `remote-shell` | `ssh`, `scp`, `sftp`, `ssh-add`/`-agent`/`-keygen`/`-keyscan`/`-copy-id`, `autossh` |
+| `cloud-cli` | `aws`, `gcloud`, `az`, `doctl`, `flyctl`, `fly`, `wrangler`, `heroku`, `kubectl`, `eksctl` |
+| `forge-secrets` | `gh secret`, `gh variable`, `gh auth token`/`login`/`refresh`/`logout`/`setup-git` (never `gh auth status` — every role runs it) |
+| `credential-store` | Read/Edit/Write of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh` |
+
+**Three rules govern the array's contents** (unified in issue #8943):
+
+1. **Omitting the key is not the same as declaring `[]`.** No `toolPolicy` (or no
+   `allowedCapabilities` array, or unparseable JSON) means *undeclared* —
+   **unrestricted**, so adding the control never silently breaks a consumer repo.
+   `"allowedCapabilities": []` means *declared and empty* — **fully restricted**.
+2. **`"*"` is the only wildcard, matched as a whole element.** `["*"]` waives the
+   restriction. A string that merely *contains* `*` is **not** a wildcard.
+3. **Any other string is inert.** A name outside the four above — a typo
+   (`"cloud_cli"`), an unknown capability (`"database"`), or a glob-shaped name
+   (`"cloud-*"`, `"*-cli"`) — grants nothing and waives nothing. The restriction
+   stays fully in force, so a mistake here **fails closed**. Glob/prefix matching
+   is deliberately unsupported: `"cloud-*"` does not mean "every `cloud-`
+   capability", it means nothing at all.
+
+Rule 3 is the fail-closed choice, and it is a deliberate change from the
+substring test an earlier draft of `spawn-claude.sh` used, where `["cloud-*"]`
+disarmed the restriction entirely. Full reasoning: the "One wildcard rule"
+section of `loom-daemon/src/role_tool_policy.rs`.
+
+## Creating Custom Roles
+
+To create a custom role:
+
+1. Create `.claude/commands/loom/my-role.md` with the full role definition
+2. Optionally create `roles/my-role.json` with metadata
+3. Use it via `/loom:my-role` in Claude Code or reference it from daemon terminal configuration
+
+### Role File Structure
+
+```markdown
+# My Custom Role
+
+You are a specialist in this repository...
+
+## Your Role
+- Primary responsibility
+- Secondary responsibility
+
+## Workflow
+1. First step
+2. Second step
+
+## Guidelines
+- Best practices
+- Working style
+
+## Completion
+
+**Work completion is detected automatically.**
+
+When you complete your task (apply appropriate end-state labels), the orchestration
+layer detects this and terminates the session automatically. No explicit exit command is needed.
+```
+
+### Completion Detection
+
+Worker completion is detected automatically through **phase contracts** - the orchestration layer validates that the expected end-state has been achieved (e.g., correct labels applied) and terminates the session.
+
+**How it works:**
+1. `/loom:sweep` (or `mcp__loom__dispatch_sweep` against `loom-daemon`) dispatches worker agents (builder, judge, doctor, curator) for each phase
+2. `validate-phase.sh` checks for phase-specific completion criteria:
+   - **Curator**: `loom:curated` label on issue
+   - **Builder**: PR with `loom:review-requested` label linked to issue
+   - **Judge**: `loom:pr` or `loom:changes-requested` label on PR
+   - **Doctor**: `loom:review-requested` label after fixes
+3. When the phase contract is satisfied, the session terminates automatically
+4. Idle detection provides a fallback if the agent becomes unresponsive
+
+**Benefits of automatic detection:**
+- No ambiguity about what "completion" means (it's defined by labels)
+- Agents don't need to execute shell commands to signal completion
+- Consistent behavior across all worker roles
+
+### Template Variables
+
+Role prompts are written as plain language ("this repository") rather than
+templated paths. Install-time substitution is limited to the `CLAUDE.md`
+placeholders handled by the installer (`{{REPO_OWNER}}`, `{{REPO_NAME}}`,
+`{{LOOM_VERSION}}`, `{{LOOM_COMMIT}}`, `{{INSTALL_DATE}}`); the `.claude/`
+role and agent files are copied verbatim, with no substitution pass. Do not
+add unimplemented placeholders such as `{{workspace}}` to role files.
+
+## Default vs Workspace Roles
+
+When installed to a target repository:
+- `defaults/.claude/commands/loom/*.md` → copied to `.claude/commands/loom/`
+- `defaults/roles/*.md` (symlinks) → copied as files to `.loom/roles/`
+- `defaults/roles/*.json` → copied to `.loom/roles/`
+
+The installation process dereferences symlinks, so target repos get regular files (not symlinks).

@@ -1,0 +1,125 @@
+# JLCPCB Pricing Data
+# Based on https://jlcpcb.com/capabilities/pcb-capabilities
+# Prices in USD, approximate as of 2024
+
+pcb:
+  # Base cost for standard 2-layer board (5 boards minimum)
+  base_cost: 2.0
+
+  # Cost per square centimeter of board area
+  per_cm2: 0.02
+
+  # Layer count multipliers (relative to 2-layer)
+  layer_multiplier:
+    1: 1.0
+    2: 1.0
+    4: 1.8
+    6: 2.5
+    8: 3.5
+    10: 5.0
+    12: 6.5
+    14: 8.0
+    16: 10.0
+
+  # Surface finish costs (per order)
+  finish:
+    hasl: 0.0
+    hasl_lead_free: 0.0
+    enig: 1.0
+    osp: 0.0
+    hard_gold: 30.0
+    immersion_silver: 5.0
+
+  # Solder mask color costs (per order)
+  color:
+    green: 0.0
+    red: 0.0
+    blue: 0.0
+    black: 0.0
+    white: 2.0
+    yellow: 2.0
+    purple: 2.0
+    matte_black: 5.0
+    matte_green: 5.0
+
+  # Board thickness costs
+  thickness:
+    0.4: 3.0
+    0.6: 2.0
+    0.8: 0.0
+    1.0: 0.0
+    1.2: 0.0
+    1.6: 0.0
+    2.0: 2.0
+    2.4: 5.0
+
+  # Quantity discounts (percentage of base price)
+  quantity_discount:
+    5: 1.0
+    10: 0.85
+    20: 0.75
+    30: 0.70
+    50: 0.65
+    100: 0.55
+    200: 0.45
+    500: 0.35
+
+assembly:
+  # Fixed setup fee per order
+  setup_fee: 8.0
+
+  # Stencil fee (for SMT assembly)
+  stencil_fee: 1.50
+
+  # Cost per solder joint (SMT)
+  smt_per_joint: 0.0017
+
+  # Cost per through-hole part
+  through_hole_per_part: 0.02
+
+  # Extended part fee (per unique extended part type)
+  extended_part_fee: 3.0
+
+  # BGA placement fee per component
+  bga_per_part: 0.10
+
+  # Fine pitch multiplier (< 0.5mm pitch)
+  fine_pitch_multiplier: 1.5
+
+  # Double-sided assembly multiplier
+  double_sided_multiplier: 1.8
+
+  # Minimum assembly cost per board
+  minimum_fee: 1.0
+
+components:
+  # Default price for unknown parts
+  default_price: 0.01
+
+  # Passive component prices by package size
+  passives:
+    "0201": 0.002
+    "0402": 0.003
+    "0603": 0.004
+    "0805": 0.005
+    "1206": 0.008
+    "1210": 0.010
+    "2010": 0.015
+    "2512": 0.020
+
+  # Common component estimates by type
+  by_category:
+    resistor: 0.005
+    capacitor: 0.008
+    inductor: 0.02
+    diode: 0.02
+    led: 0.02
+    transistor: 0.05
+    mosfet: 0.10
+    regulator: 0.15
+    mcu: 1.50
+    connector: 0.15
+    crystal: 0.20
+    switch: 0.10
+    fuse: 0.05
+    ferrite: 0.01

@@ -1,0 +1,1339 @@
+"""Silkscreen reference-designator placement solver (issue #5030).
+
+``kct fix-silkscreen`` (baseline b8d5f595) repairs undersized silk stroke
+widths and text heights, but has no way to *move* a reference designator
+that collides with a pad, other silk, a neighboring component, or the
+board edge -- so the only way to clear those DRC findings today is a
+destructive one (hide, shrink, or delete the label). This module is the
+missing placement solver: it moves (and, optionally, rotates) **visible**
+reference text just far enough to clear real collisions while preserving
+its visibility, text height, and stroke width exactly.
+
+Design, in one pass:
+
+* **Read geometry through the same helpers ``kct check``'s geometric
+  silk DRC rules use** (:mod:`kicad_tools.validate.rules.silkscreen`,
+  :mod:`kicad_tools.geometry.courtyard`). Text uses an oriented approximate
+  envelope, not native glyph strokes; a clear plan is not a native DRC verdict.
+* **Write back through the SAME shared S-expression tree** the schema
+  parsed from (:attr:`~kicad_tools.schema.pcb.Footprint._sexp_node`),
+  following the exact parse-mutate-save pattern already established by
+  :mod:`kicad_tools.drc.repair_silkscreen` and
+  :mod:`kicad_tools.silkscreen.generator`.  A dry run (:meth:`plan`
+  alone, never calling :meth:`SilkRefPlacer.apply`) never touches the
+  tree, so the source file is byte-for-byte unchanged.
+* **Coordinate-only mutation**: only the reference text's own
+  ``(at x y [angle])`` node is ever written.  Footprint position, pads,
+  copper, and net bindings are never touched -- this cannot silently
+  break routing or move a part.
+* **Explicit failure reporting**: a reference that has no collision-free
+  candidate within the search radius is left exactly where it was and
+  reported as ``unplaceable`` (or ``under_component_fallback`` when its
+  untouched position already sits on top of its own component's
+  courtyard) -- never silently hidden, shrunk, or deleted to make a
+  checker pass.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import math
+from collections.abc import Collection
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from kicad_tools._shapely import require_shapely
+from kicad_tools.core.board_outline import board_outline_bounds
+from kicad_tools.core.sexp_file import save_pcb
+from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform, _side_has_geometry
+from kicad_tools.schema.pcb import PCB, _is_footprint_tag
+from kicad_tools.sexp.parser import SExp, parse_file
+
+# Issue #5240: the numeric defaults live in the dependency-free
+# ``_silk_defaults`` leaf module (single source of truth) so
+# ``kicad_tools.cli.parser`` can read them for ``--help`` output without
+# importing this module's ``kicad_tools.validate.rules.silkscreen``
+# dependency (and that package's own heavy transitive chain).
+# Re-exported here unchanged for existing callers.
+from kicad_tools.silkscreen._silk_defaults import (
+    DEFAULT_CLEARANCE_MM,
+    DEFAULT_MAX_OFFSET_MM,
+    DEFAULT_STEP_MM,
+    SILK_EDGE_CLEARANCE_MM,
+)
+from kicad_tools.validate.rules.silkscreen import (
+    _iter_graphic_mask_apertures,
+    _iter_pad_apertures,
+    _iter_via_apertures,
+    _silk_side,
+    _stroke_geometry,
+    _text_bbox_geometry,
+    iter_drill_holes,
+)
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import Footprint
+
+# Floating-point tolerance, matching ``validate.rules.silkscreen``.
+_EPSILON_MM = 1e-4
+
+#: A reference should sit at least this much closer (mm) to its own courtyard
+#: than to any other part's, so a reader attributes it to the right part
+#: (Issue #8628; the value the reporter's post-pass used).
+ASSOCIATION_MARGIN_MM = 0.4
+
+#: Extra spacing (mm) the planner adds to pad/silk clearance because the shared
+#: text box (``_text_bbox_geometry``) under-sizes KiCad's real stroke-font
+#: extents. Measured against ``kicad-cli pcb drc`` on a probe board (10.0.x,
+#: 1 mm / 0.15 mm text beside a 1 mm pad, no clearance): "C22" and "LED4" both
+#: needed 0.225 mm more gap than the box model, independent of text length.
+#: Planner-only; ``kct check`` semantics are unchanged (Issue #8628).
+KICAD_TEXT_EXTENT_SLACK_MM = 0.225
+
+
+def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
+    """Yield ``(side, geom, label)`` for every non-plated hole pad.
+
+    ``_iter_pad_apertures`` skips NPTH pads (no copper, so silk over them is
+    not ``silk_over_copper``), but kicad-cli still flags silk over the hole,
+    so the placer treats them as obstacles on both sides (Issue #8628).
+    """
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
+    from shapely.geometry import box  # type: ignore[import-untyped]
+
+    for footprint in pcb.footprints:
+        transform = _fp_transform(footprint)
+        for pad in footprint.pads:
+            if pad.type != "np_thru_hole":
+                continue
+            cx, cy = transform(pad.position)
+            w = max(pad.size[0], pad.drill) + 2.0 * mask_clearance_mm
+            h = max(pad.size[1], pad.drill) + 2.0 * mask_clearance_mm
+            geom = box(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+            rotation = getattr(pad, "rotation", 0.0) or 0.0
+            if rotation % 360.0:
+                geom = rotate(geom, -rotation, origin=(cx, cy))
+            label = f"{footprint.reference} NPTH {pad.number}"
+            for side in ("F", "B"):
+                yield side, geom, label
+
+
+def _iter_drill_obstacles(pcb: PCB):
+    """Yield ``(side, geom, label)`` for every drilled hole, per pierced side.
+
+    Issue #9054: :func:`_iter_via_apertures` only sees *untented* vias, so a
+    reference over a filled/capped via drill was left in place while
+    ``silk_hole_overlap`` flagged it.  The holes come from the checker's own
+    :func:`iter_drill_holes`, so the placer and the check share one
+    definition; through-via and pad drills pierce the board so both silk
+    sides get them, while a blind/micro via reaches only the outer side its
+    layers name and a buried via neither (#9076).
+    """
+    for geom, label, sides in iter_drill_holes(pcb.vias, pcb.footprints):
+        label = f"drill {label}"
+        for side in ("F", "B"):
+            if side in sides:
+                yield side, geom, label
+
+
+def references_over_holes(pcb: PCB) -> set[str]:
+    """Footprint references whose reference text ``silk_hole_overlap`` flags.
+
+    Feeds ``plan(only=...)`` / ``kct place-silk-refs --over-holes`` (Issue
+    #9054) so a recipe can move exactly the references sitting on a drill,
+    leaving every reviewed position that is already clear where it is.  Read
+    from the rule's own findings, so it can never name a different set.
+    """
+    from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+
+    rules = DesignRules(
+        min_trace_width_mm=0.0,
+        min_clearance_mm=0.0,
+        min_via_drill_mm=0.0,
+        min_via_diameter_mm=0.0,
+        min_annular_ring_mm=0.0,
+    )
+    suffix = " (reference)"
+    return {
+        violation.items[0][: -len(suffix)]
+        for violation in check_silk_hole_overlap(pcb, rules).violations
+        if violation.items and violation.items[0].endswith(suffix)
+    }
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Mirrors ``repair_silkscreen._find_all_footprints`` / matches both the
+    modern ``(footprint ...)`` spelling and the legacy pre-KiCad-6
+    ``(module ...)`` spelling.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
+
+
+def _find_reference_node(footprint: Footprint) -> SExp | None:
+    """Return the raw ``fp_text reference`` / ``property "Reference"`` node.
+
+    Reads ``footprint._sexp_node`` -- the same back-reference
+    :meth:`PCB._link_footprint_sexp_nodes` attaches for ``Pad``/``Footprint``
+    write-through -- rather than re-parsing, so the returned node is the
+    live node :meth:`SilkRefPlacer.save` will serialise.
+    """
+    node: SExp | None = footprint.__dict__.get("_sexp_node")
+    if node is None:
+        return None
+    for child in node.children:
+        if not child.is_atom and child.name == "fp_text" and child.children:
+            atoms = child.get_atoms()
+            if atoms and str(atoms[0]) == "reference" and len(atoms) >= 2:
+                return child
+    for child in node.children:
+        if not child.is_atom and child.name == "property" and child.children:
+            atoms = child.get_atoms()
+            if atoms and str(atoms[0]) == "Reference" and len(atoms) >= 2:
+                return child
+    return None
+
+
+def _read_text_angle(ref_node: SExp) -> float:
+    """Return the third (angle) token of a text node's ``(at x y [angle])``."""
+    at_node = ref_node.find("at")
+    if at_node is None:
+        return 0.0
+    atoms = at_node.get_atoms()
+    if len(atoms) >= 3:
+        try:
+            return float(atoms[2])
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _oriented_text_geometry(
+    text: str,
+    font_size: tuple[float, float],
+    thickness: float,
+    center: tuple[float, float],
+    angle: float,
+) -> Any:
+    """Rotate the complete text envelope, retaining glyph dimensions.
+
+    KiCad 10 parsePCB_TEXT stores an absolute board-frame angle (subtracting
+    the footprint orientation before its position transform). Do not add the
+    footprint angle again. KiCad positive angles turn toward negative board y.
+    """
+    return _text_bbox_geometry(text, font_size, thickness, center, angle)
+
+
+def _set_text_at(ref_node: SExp, x: float, y: float, angle: float) -> None:
+    """Write ``(at x y [angle])`` on *ref_node* in place.
+
+    Coordinate-only: no other child of *ref_node* (layer, effects, hide,
+    text content) is touched.
+    """
+    at_node = ref_node.find("at")
+    if at_node is None:
+        raise ValueError("Reference text node has no (at ...) child")
+    at_node.set_atom(0, round(x, 6))
+    at_node.set_atom(1, round(y, 6))
+    atoms = at_node.get_atoms()
+    if len(atoms) >= 3:
+        at_node.set_atom(2, round(angle, 6))
+    elif angle != 0.0:
+        at_node.add(round(angle, 6))
+
+
+def _visible_reference(footprint: Footprint):
+    """Return ``(ref_text, side, ref_node, center, geom)`` for a visible reference.
+
+    ``None`` when the footprint has no reference text, it is hidden, it is not
+    on a silk layer, or its geometry cannot be built -- the references
+    :class:`SilkRefPlacer` never moves.
+    """
+    ref_text = next((t for t in footprint.texts if t.text_type == "reference"), None)
+    if ref_text is None or ref_text.hidden:
+        return None
+    side = _silk_side(ref_text.layer)
+    if side is None:
+        return None
+    ref_node = _find_reference_node(footprint)
+    if ref_node is None:
+        return None
+    center = _fp_transform(footprint)(ref_text.position)
+    geom = _oriented_text_geometry(
+        ref_text.text,
+        ref_text.font_size,
+        ref_text.font_thickness,
+        center,
+        _read_text_angle(ref_node),
+    )
+    if geom is None:
+        return None
+    return ref_text, side, ref_node, center, geom
+
+
+def _inverse_fp_transform(footprint: Footprint):
+    """Return a ``(X, Y) -> (x, y)`` board->local transform for a footprint.
+
+    Exact inverse of ``geometry.courtyard._fp_transform`` /
+    ``validate.rules.silkscreen._fp_transform``.
+    """
+    fp_x, fp_y = footprint.position
+    theta = math.radians(-footprint.rotation)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+
+    def inverse(point: tuple[float, float]) -> tuple[float, float]:
+        dx = point[0] - fp_x
+        dy = point[1] - fp_y
+        return (dx * cos_t + dy * sin_t, -dx * sin_t + dy * cos_t)
+
+    return inverse
+
+
+def _iter_static_silk_obstacles(pcb: PCB):
+    """Yield ``(side, geom, label)`` for every silk element that never moves.
+
+    Sibling of ``validate.rules.silkscreen._iter_silk_geometries`` with
+    reference-designator text excluded -- those are the movable elements
+    this module places, tracked separately as "dynamic" obstacles by the
+    caller so each already-decided reference still blocks the next one.
+    """
+    for side, geom, label, _owner in _iter_owned_static_silk(pcb):
+        yield side, geom, label
+
+
+def _iter_owned_static_silk(pcb: PCB):
+    """:func:`_iter_static_silk_obstacles` plus the owning footprint reference.
+
+    Yields ``(side, geom, label, owner)``; ``owner`` is ``None`` for
+    board-level silk (``gr_text`` / ``gr_*`` graphics).
+    """
+    for footprint in pcb.footprints:
+        transform = _fp_transform(footprint)
+
+        for fp_text in footprint.texts:
+            if fp_text.text_type == "reference":
+                continue
+            side = _silk_side(fp_text.layer)
+            if side is None or fp_text.hidden:
+                continue
+            center = transform(fp_text.position)
+            geom = _oriented_text_geometry(
+                fp_text.text, fp_text.font_size, fp_text.font_thickness, center, fp_text.rotation
+            )
+            if geom is None:
+                continue
+            yield side, geom, f"{footprint.reference} ({fp_text.text_type})", footprint.reference
+
+        for graphic in footprint.graphics:
+            side = _silk_side(graphic.layer)
+            if side is None:
+                continue
+            geom = _stroke_geometry(graphic, transform)
+            if geom is None:
+                continue
+            yield (
+                side,
+                geom,
+                f"{footprint.reference} (fp_{graphic.graphic_type})",
+                footprint.reference,
+            )
+
+    # Footprints are board-relative after load; gr_text / gr_* are still
+    # sheet-absolute, so shift them into the same frame (Issue #8561).
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    for text in pcb.texts:
+        side = _silk_side(text.layer)
+        if side is None or text.hidden:
+            continue
+        geom = _oriented_text_geometry(
+            text.text, text.font_size, text.font_thickness, to_board(text.position), text.rotation
+        )
+        if geom is None:
+            continue
+        yield side, geom, (text.text[:20] if text.text else "gr_text"), None
+
+    for board_graphic in pcb.graphics:
+        side = _silk_side(board_graphic.layer)
+        if side is None:
+            continue
+        geom = _stroke_geometry(board_graphic, to_board if (ox or oy) else None)
+        if geom is None:
+            continue
+        yield side, geom, f"gr_{board_graphic.graphic_type}", None
+
+
+def _component_bbox(
+    footprint: Footprint, side: str, Polygon: Any
+) -> tuple[float, float, float, float]:
+    """Return ``(min_x, min_y, max_x, max_y)`` for a footprint's body on *side*.
+
+    Prefers the real courtyard polygon (accurate body outline); falls back
+    to the bounding box of the footprint's pads, then to a small box
+    around the footprint's anchor point when neither is available (rare --
+    e.g. a footprint with no courtyard and no pads).
+    """
+    courtyard = _courtyard_polygon(footprint, side, Polygon)
+    if courtyard is not None:
+        min_x, min_y, max_x, max_y = courtyard.bounds
+        return (min_x, min_y, max_x, max_y)
+
+    transform = _fp_transform(footprint)
+    xs: list[float] = []
+    ys: list[float] = []
+    for pad in footprint.pads:
+        cx, cy = transform(pad.position)
+        half_w, half_h = pad.size[0] / 2.0, pad.size[1] / 2.0
+        xs.extend([cx - half_w, cx + half_w])
+        ys.extend([cy - half_h, cy + half_h])
+    if xs and ys:
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    fx, fy = footprint.position
+    return (fx - 1.0, fy - 1.0, fx + 1.0, fy + 1.0)
+
+
+def _candidate_points(
+    bbox: tuple[float, float, float, float],
+    text_w: float,
+    text_h: float,
+    max_offset_mm: float,
+    step_mm: float,
+) -> list[tuple[float, float]]:
+    """Return candidate centers on rings of increasing distance from *bbox*.
+
+    Each ring contributes the midpoint of each of the 4 edges plus the 4
+    corners of *bbox* expanded by the ring's offset, so the label is
+    tested progressively farther from the component body without ever
+    losing the "near its own component" property the caller sorts on.
+    """
+    min_x, min_y, max_x, max_y = bbox
+    cx, cy = (min_x + max_x) / 2.0, (min_y + max_y) / 2.0
+    half_w, half_h = text_w / 2.0, text_h / 2.0
+
+    points: list[tuple[float, float]] = []
+    for ring in range(math.floor(max_offset_mm / step_mm) + 1):
+        offset = ring * step_mm
+        top_y = min_y - offset - half_h
+        bottom_y = max_y + offset + half_h
+        left_x = min_x - offset - half_w
+        right_x = max_x + offset + half_w
+        points.extend(
+            [
+                (cx, top_y),
+                (cx, bottom_y),
+                (left_x, cy),
+                (right_x, cy),
+                (left_x, top_y),
+                (right_x, top_y),
+                (left_x, bottom_y),
+                (right_x, bottom_y),
+            ]
+        )
+    return points
+
+
+class _SilkscreenPCB(PCB):
+    """Retain malformed outlines for placement diagnostics, without a guessed origin."""
+
+    outline_error: str = ""
+
+    def _detect_board_origin(self) -> None:
+        # Validate before the schema converts any coordinates. Only silkscreen
+        # planning can proceed without an outline; every placement will fail
+        # closed below. Ordinary PCB/routing loads retain strict validation.
+        try:
+            board_outline_bounds(self._sexp)
+        except ValueError as exc:
+            self.outline_error = f"board outline unavailable: {exc}"
+            return
+        super()._detect_board_origin()
+
+
+def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None, str]:
+    """Resolve closed polygon contours without guessing missing board material.
+
+    Reuse the schema's segment stitching and 0.01mm endpoint tolerance.
+    Nested contours alternate material/cutout (including islands). Curved
+    outlines are explicitly unsupported here: the schema's two-chord arc
+    approximation is not sufficiently accurate to prove containment.
+    """
+    if pcb.outline_error:
+        return [], None, pcb.outline_error
+    segments = pcb.get_board_outline_segments()
+    ox, oy = pcb._board_origin
+    for node in pcb._sexp.children:
+        if node.is_atom:
+            continue
+        if _is_footprint_tag(node.name):
+            for element in node.iter_all():
+                element_layer = element.find("layer")
+                if element_layer is not None and element_layer.get_string(0) == "Edge.Cuts":
+                    return segments, None, "board outline unavailable: footprint-local Edge.Cuts"
+        layer = node.find("layer")
+        if layer is None or layer.get_string(0) != "Edge.Cuts":
+            continue
+        if node.name not in {"gr_line", "gr_rect", "gr_poly"}:
+            return segments, None, f"board outline unavailable: unsupported {node.name}"
+        if node.name in {"gr_line", "gr_rect"}:
+            for endpoint in ("start", "end"):
+                point = node.find(endpoint)
+                if point is None or len(point.get_atoms()) != 2:
+                    return segments, None, "board outline unavailable: malformed endpoint"
+                for coordinate in (point.get_float(0), point.get_float(1)):
+                    if coordinate is None or not math.isfinite(coordinate):
+                        return segments, None, "board outline unavailable: malformed endpoint"
+        if node.name == "gr_poly":
+            pts = node.find("pts")
+            vertices = []
+            if pts is not None:
+                for xy in pts.children:
+                    if xy.is_atom or xy.name != "xy":
+                        return segments, None, "board outline unavailable: malformed polygon"
+                    x, y = xy.get_float(0), xy.get_float(1)
+                    if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+                        return segments, None, "board outline unavailable: malformed polygon"
+                    vertices.append((x - ox, y - oy))
+            if len(vertices) > 1 and vertices[-1] == vertices[0]:
+                vertices.pop()
+            if len(vertices) < 3:
+                return segments, None, "board outline unavailable: malformed polygon"
+            segments.extend(zip(vertices, vertices[1:] + vertices[:1], strict=True))
+    if not segments:
+        return segments, None, "board outline unavailable: missing Edge.Cuts"
+    if any(not math.isfinite(v) for segment in segments for point in segment for v in point):
+        return segments, None, "board outline unavailable: non-finite coordinates"
+    contours: list[Any] = []
+    for indices in PCB._group_segments_by_connectivity(segments, 0.01):
+        ring = PCB._chain_segment_indices(segments, indices, 0.01)
+        if not ring:
+            return segments, None, "board outline unavailable: open or branched contour"
+        polygon = Polygon(ring)
+        if not polygon.is_valid or polygon.is_empty or polygon.area <= 0:
+            return segments, None, "board outline unavailable: invalid contour"
+        for other in contours:
+            # Separate islands and strictly nested cutouts are valid; touching
+            # or crossing contours do not define an unambiguous material side.
+            if polygon.boundary.intersects(other.boundary):
+                return segments, None, "board outline unavailable: intersecting contours"
+        contours.append(polygon)
+    material = Polygon()
+    for polygon in contours:
+        material = material.symmetric_difference(polygon)
+    return segments, material, ""
+
+
+def _candidate_clear(
+    geom: Any,
+    *,
+    apertures: list[tuple[Any, str]],
+    silk_obstacles: list[tuple[Any, str]],
+    courtyards: list[tuple[Any, str]],
+    outline: Any | None,
+    board_material: Any | None,
+    outline_error: str,
+    clearance_mm: float,
+    edge_clearance_mm: float,
+) -> tuple[bool, str]:
+    """Return ``(True, "")`` if *geom* clears every obstacle, else ``(False, why)``.
+
+    Pad apertures and other silk are checked against *geom* expanded by
+    ``clearance_mm`` (a real spacing requirement, not bare non-overlap).
+    Courtyards are a hard keep-out -- landing on top of ANY component body
+    (its own or a neighbor's) is never acceptable regardless of clearance.
+    Board edge uses true distance, matching
+    ``validate.rules.silkscreen.check_silk_edge_clearance``.
+    """
+    if outline_error:
+        return False, outline_error
+    if board_material is None or not board_material.covers(geom):
+        return False, "outside board material or inside a cutout"
+    expanded = geom.buffer(clearance_mm) if clearance_mm > 0 else geom
+    for ap_geom, label in apertures:
+        if expanded.intersects(ap_geom):
+            return False, f"pad aperture {label}"
+    for silk_geom, label in silk_obstacles:
+        if expanded.intersects(silk_geom):
+            return False, f"silkscreen {label}"
+    for body_geom, label in courtyards:
+        if geom.intersects(body_geom):
+            return False, f"component body {label}"
+    if outline is not None:
+        distance = geom.distance(outline)
+        if distance < edge_clearance_mm - _EPSILON_MM:
+            return False, "board edge"
+    return True, ""
+
+
+@dataclass
+class RefPlacement:
+    """The plan (or outcome) for a single reference designator."""
+
+    footprint_ref: str
+    layer: str
+    old_position: tuple[float, float]  # board-relative mm
+    new_position: tuple[float, float]  # board-relative mm
+    old_rotation: float
+    new_rotation: float
+    #: "unchanged" (already clear, not moved) | "moved" | "unplaceable" |
+    #: "under_component_fallback" (best-effort position still sits on its
+    #: own component's courtyard -- reported, never silently accepted).
+    status: str
+    reason: str = ""
+    #: Footprint-local coordinates to write into the ``(at ...)`` node.
+    #: Populated only for ``status == "moved"``.
+    new_local_position: tuple[float, float] | None = None
+    #: Own-vs-nearest-other courtyard margin (mm) of the final position, or
+    #: ``None`` when the part has no courtyard. Positive = nearer its own part.
+    association_margin_mm: float | None = None
+    #: True when no clear candidate reached ``ASSOCIATION_MARGIN_MM`` and the
+    #: best-margin clear candidate was used instead (Issue #8628).
+    low_association: bool = False
+
+    @property
+    def moved(self) -> bool:
+        return self.status == "moved"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "footprint_ref": self.footprint_ref,
+            "layer": self.layer,
+            "old_position_mm": list(self.old_position),
+            "new_position_mm": list(self.new_position),
+            "old_rotation_deg": self.old_rotation,
+            "new_rotation_deg": self.new_rotation,
+            "status": self.status,
+            "reason": self.reason,
+            "association_margin_mm": self.association_margin_mm,
+            "low_association": self.low_association,
+        }
+
+
+@dataclass
+class FixedTextConflict:
+    """A board-level ``gr_text`` overlapping a mask opening (report-only)."""
+
+    text: str
+    layer: str
+    position: tuple[float, float]  # board-relative mm
+    opening: str
+    candidates: list[tuple[float, float]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "layer": self.layer,
+            "position": list(self.position),
+            "opening": self.opening,
+            "candidate_positions": [list(c) for c in self.candidates],
+        }
+
+
+def _report_fixed_text_over_openings(
+    pcb: PCB,
+    apertures: dict[str, list[tuple[Any, str]]],
+    result: PlaceSilkRefsResult,
+    *,
+    clearance_mm: float,
+    max_offset_mm: float,
+    step_mm: float,
+) -> None:
+    """Record board-level ``gr_text`` over a mask opening; never moves it.
+
+    Candidate clear positions reuse the ring search of :func:`_candidate_points`
+    around the text's own box and are tested against the same aperture set
+    the reference placer uses (Issue #8862).
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    for text in pcb.texts:
+        side = _silk_side(text.layer)
+        if side is None or text.hidden or not apertures.get(side):
+            continue
+        center = (text.position[0] - ox, text.position[1] - oy)
+
+        def geom_at(point: tuple[float, float], text: Any = text) -> Any:
+            return _oriented_text_geometry(
+                text.text, text.font_size, text.font_thickness, point, text.rotation
+            )
+
+        geom = geom_at(center)
+        if geom is None:
+            continue
+        reach = clearance_mm + KICAD_TEXT_EXTENT_SLACK_MM
+        hit = next(
+            (label for g, label in apertures[side] if geom.buffer(reach).intersects(g)), None
+        )
+        if hit is None:
+            continue
+        min_x, min_y, max_x, max_y = geom.bounds
+        points = _candidate_points(
+            (min_x, min_y, max_x, max_y), max_x - min_x, max_y - min_y, max_offset_mm, step_mm
+        )
+        points.sort(key=lambda p: math.hypot(p[0] - center[0], p[1] - center[1]))
+        clear: list[tuple[float, float]] = []
+        for point in points:
+            cand = geom_at(point)
+            if cand is None:
+                continue
+            grown = cand.buffer(reach)
+            if not any(grown.intersects(g) for g, _ in apertures[side]):
+                clear.append(point)
+                if len(clear) == 3:
+                    break
+        result.fixed_text_conflicts.append(
+            FixedTextConflict(text.text, text.layer, center, hit, clear)
+        )
+
+
+@dataclass
+class PlaceSilkRefsResult:
+    """Aggregate result of a reference-placement plan."""
+
+    clearance_mm: float
+    placements: list[RefPlacement] = field(default_factory=list)
+    #: Board-level ``gr_text`` sitting over a mask opening. Report-only: the
+    #: text is never moved (Issue #8862).
+    fixed_text_conflicts: list[FixedTextConflict] = field(default_factory=list)
+
+    @property
+    def moved(self) -> list[RefPlacement]:
+        return [p for p in self.placements if p.status == "moved"]
+
+    @property
+    def unchanged(self) -> list[RefPlacement]:
+        return [p for p in self.placements if p.status == "unchanged"]
+
+    @property
+    def unplaceable(self) -> list[RefPlacement]:
+        return [p for p in self.placements if p.status == "unplaceable"]
+
+    @property
+    def under_component_fallback(self) -> list[RefPlacement]:
+        return [p for p in self.placements if p.status == "under_component_fallback"]
+
+    @property
+    def total_moved(self) -> int:
+        return len(self.moved)
+
+    @property
+    def total_unplaceable(self) -> int:
+        return len(self.unplaceable) + len(self.under_component_fallback)
+
+
+def _svg_escape(text: str) -> str:
+    """Minimal XML-escaping for SVG text content and attribute values."""
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
+
+
+def _render_svg(
+    pcb: PCB,
+    result: PlaceSilkRefsResult,
+    context: dict[str, Any],
+    output_path: Path,
+) -> Path:
+    """Build and write the SVG review artifact described by :meth:`SilkRefPlacer.render_svg`."""
+
+    margin_mm = 3.0
+    xs: list[float] = []
+    ys: list[float] = []
+
+    def _bounds_of(x0: float, y0: float, x1: float, y1: float) -> None:
+        xs.extend([x0, x1])
+        ys.extend([y0, y1])
+
+    outline_segments = context["outline_segments"]
+    for start, end in outline_segments:
+        _bounds_of(start[0], start[1], end[0], end[1])
+
+    for side_geoms in context["courtyards"].values():
+        for geom, _label in side_geoms:
+            b = geom.bounds
+            _bounds_of(*b)
+    for side_geoms in context["apertures"].values():
+        for geom, _label in side_geoms:
+            b = geom.bounds
+            _bounds_of(*b)
+    for placement in result.placements:
+        for x, y in (placement.old_position, placement.new_position):
+            _bounds_of(x - 2.0, y - 2.0, x + 2.0, y + 2.0)
+
+    if not xs or not ys:
+        xs, ys = [0.0, 10.0], [0.0, 10.0]
+
+    min_x, max_x = min(xs) - margin_mm, max(xs) + margin_mm
+    min_y, max_y = min(ys) - margin_mm, max(ys) + margin_mm
+    width = max(max_x - min_x, 1.0)
+    height = max(max_y - min_y, 1.0)
+    # SVG y-axis grows downward; board Y in KiCad also grows downward, so no
+    # flip is needed -- this matches how KiCad itself renders the board.
+    scale = 10.0  # px per mm, purely cosmetic
+
+    parts: list[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="{min_x * scale:.2f} {min_y * scale:.2f} '
+        f'{width * scale:.2f} {height * scale:.2f}" '
+        f'width="{width * scale:.0f}" height="{height * scale:.0f}">',
+        f'<rect x="{min_x * scale:.2f}" y="{min_y * scale:.2f}" '
+        f'width="{width * scale:.2f}" height="{height * scale:.2f}" fill="white"/>',
+        "<!-- kct place-silk-refs review artifact (issue #5030) -->",
+        "<!-- legend: green=unchanged, blue(+dashed old)=moved, "
+        "red=unplaceable/under_component_fallback -->",
+    ]
+
+    def _poly_points(geom: Any) -> str:
+        coords = list(geom.exterior.coords) if hasattr(geom, "exterior") else list(geom.coords)
+        return " ".join(f"{x * scale:.2f},{y * scale:.2f}" for x, y in coords)
+
+    # Board outline.
+    for start, end in outline_segments:
+        parts.append(
+            f'<line x1="{start[0] * scale:.2f}" y1="{start[1] * scale:.2f}" '
+            f'x2="{end[0] * scale:.2f}" y2="{end[1] * scale:.2f}" '
+            f'stroke="black" stroke-width="1"/>'
+        )
+
+    # Courtyards (component bodies -- hard keep-out context).
+    for side_geoms in context["courtyards"].values():
+        for geom, label in side_geoms:
+            try:
+                pts = _poly_points(geom)
+            except Exception:
+                continue
+            parts.append(
+                f'<polygon points="{pts}" fill="none" stroke="#999999" '
+                f'stroke-width="0.5" stroke-dasharray="2,2">'
+                f"<title>{_svg_escape(label)} courtyard</title></polygon>"
+            )
+
+    # Pad / via apertures.
+    for side_geoms in context["apertures"].values():
+        for geom, label in side_geoms:
+            b = geom.bounds
+            parts.append(
+                f'<rect x="{b[0] * scale:.2f}" y="{b[1] * scale:.2f}" '
+                f'width="{(b[2] - b[0]) * scale:.2f}" height="{(b[3] - b[1]) * scale:.2f}" '
+                f'fill="#ffcc66" fill-opacity="0.5">'
+                f"<title>{_svg_escape(label)}</title></rect>"
+            )
+
+    # Static obstacles use the same oriented polygons as collision detection.
+    for side_geoms in context["static_silk"].values():
+        for geom, label in side_geoms:
+            for polygon in getattr(geom, "geoms", [geom]):
+                if not hasattr(polygon, "exterior"):
+                    continue
+                points = " ".join(
+                    f"{x * scale:.2f},{y * scale:.2f}" for x, y in polygon.exterior.coords
+                )
+                parts.append(
+                    f'<polygon points="{points}" fill="#666666" fill-opacity="0.4">'
+                    f"<title>{_svg_escape(label)}</title></polygon>"
+                )
+
+    # Reference placements: the actual review content.
+    ref_texts_by_ref = {
+        fp.reference: next((t for t in fp.texts if t.text_type == "reference"), None)
+        for fp in pcb.footprints
+    }
+    for placement in sorted(result.placements, key=lambda p: p.footprint_ref):
+        ref_text = ref_texts_by_ref.get(placement.footprint_ref)
+        font_size = ref_text.font_size if ref_text is not None else (1.0, 1.0)
+        font_thickness = ref_text.font_thickness if ref_text is not None else 0.15
+        text = ref_text.text if ref_text is not None else placement.footprint_ref
+
+        if placement.status == "moved":
+            old_geom = _oriented_text_geometry(
+                text, font_size, font_thickness, placement.old_position, placement.old_rotation
+            )
+            if old_geom is not None:
+                points = " ".join(
+                    f"{x * scale:.2f},{y * scale:.2f}" for x, y in old_geom.exterior.coords
+                )
+                parts.append(
+                    f'<polygon points="{points}" '
+                    f'fill="none" stroke="#999999" stroke-width="0.5" stroke-dasharray="1,1"/>'
+                )
+            ox, oy = placement.old_position
+            nx, ny = placement.new_position
+            parts.append(
+                f'<line x1="{ox * scale:.2f}" y1="{oy * scale:.2f}" '
+                f'x2="{nx * scale:.2f}" y2="{ny * scale:.2f}" '
+                f'stroke="#3366cc" stroke-width="0.3" stroke-dasharray="1,1"/>'
+            )
+            color = "#3366cc"
+        elif placement.status == "unchanged":
+            color = "#2e8b57"
+        else:  # unplaceable / under_component_fallback
+            color = "#cc3333"
+
+        geom = _oriented_text_geometry(
+            text, font_size, font_thickness, placement.new_position, placement.new_rotation
+        )
+        if geom is not None:
+            points = " ".join(f"{x * scale:.2f},{y * scale:.2f}" for x, y in geom.exterior.coords)
+            parts.append(
+                f'<polygon points="{points}" '
+                f'fill="{color}" fill-opacity="0.35" stroke="{color}" stroke-width="0.4">'
+                f"<title>{_svg_escape(placement.footprint_ref)}: {_svg_escape(placement.status)}"
+                f"{' -- ' + _svg_escape(placement.reason) if placement.reason else ''}"
+                f"</title></polygon>"
+            )
+        nx, ny = placement.new_position
+        parts.append(
+            f'<text x="{nx * scale:.2f}" y="{ny * scale:.2f}" font-size="{max(font_size[1] * scale * 0.6, 4):.1f}" '
+            f'transform="rotate({-placement.new_rotation:g} {nx * scale:.2f} {ny * scale:.2f})" '
+            f'fill="{color}" text-anchor="middle" dominant-baseline="middle">'
+            f"{_svg_escape(placement.footprint_ref)}</text>"
+        )
+
+    parts.append("</svg>")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(parts), encoding="utf-8")
+    return output_path
+
+
+class SilkRefPlacer:
+    """Plan and apply readable, collision-free reference-designator placement.
+
+    Usage::
+
+        placer = SilkRefPlacer(Path("board.kicad_pcb"))
+        result = placer.plan(clearance_mm=0.15)
+        # ... inspect result.placements ...
+        placer.apply(result)   # mutates the in-memory tree only
+        placer.save()          # write to disk
+    """
+
+    def __init__(self, pcb_path: str | Path) -> None:
+        self.path = Path(pcb_path)
+        self.doc: SExp = parse_file(self.path)
+        self.pcb: _SilkscreenPCB = _SilkscreenPCB(self.doc, self.path)
+        # Populated by plan(): footprint reference -> live (fp_text
+        # reference)/(property "Reference") node, for apply().
+        self._ref_nodes: dict[str, SExp] = {}
+        # Populated by plan(): a snapshot of the obstacle geometry used to
+        # compute the plan, reused (read-only) by render_svg() so the review
+        # artifact draws exactly what the solver saw -- never a re-derived
+        # (and potentially inconsistent) second pass over the tree.
+        self._render_context: dict[str, Any] | None = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def plan(
+        self,
+        *,
+        clearance_mm: float = DEFAULT_CLEARANCE_MM,
+        edge_clearance_mm: float = SILK_EDGE_CLEARANCE_MM,
+        mask_clearance_mm: float = 0.05,
+        max_offset_mm: float = DEFAULT_MAX_OFFSET_MM,
+        step_mm: float = DEFAULT_STEP_MM,
+        allow_rotate: bool = False,
+        only: Collection[str] | None = None,
+    ) -> PlaceSilkRefsResult:
+        """Compute a per-reference move plan without mutating the tree.
+
+        Args:
+            clearance_mm: Required spacing between a reference's text box
+                and any pad aperture or other silk element.
+            edge_clearance_mm: Required spacing to the board outline.
+            mask_clearance_mm: Solder-mask margin used to size pad/via
+                apertures (matches ``DesignRules.min_solder_mask_clearance_mm``).
+            max_offset_mm: How far from the component body to search.
+            step_mm: Search ring spacing.
+            allow_rotate: If True, also try each candidate with the text
+                rotated 90 degrees about its anchor when the
+                original orientation does not fit.
+            only: If given, plan only the references of these footprints
+                (issue #6256). Every other visible reference is left out of
+                the result -- never moved -- but still blocks the planned
+                ones at its current position.
+
+        Returns:
+            A :class:`PlaceSilkRefsResult` with one :class:`RefPlacement`
+            per visible reference designator (restricted to *only*).  Nothing is written to the
+            S-expression tree -- call :meth:`apply` to do that.
+        """
+        values = {
+            "clearance_mm": clearance_mm,
+            "edge_clearance_mm": edge_clearance_mm,
+            "mask_clearance_mm": mask_clearance_mm,
+            "max_offset_mm": max_offset_mm,
+        }
+        for name, value in values.items():
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if not math.isfinite(step_mm) or step_mm <= 0:
+            raise ValueError("step_mm must be finite and positive")
+        if max_offset_mm / step_mm >= 4096:
+            raise ValueError("search exceeds 4096 rings; increase step_mm or reduce max_offset_mm")
+
+        require_shapely("silk reference placement")
+        from shapely.geometry import MultiLineString, Polygon
+
+        pcb = self.pcb
+        # Reference strings identify both move targets and own-component
+        # obstacle exclusions. Hidden references also participate in those
+        # exclusions, so require uniqueness across the whole footprint set.
+        seen_refs: set[str] = set()
+        for footprint in pcb.footprints:
+            if footprint.reference in seen_refs:
+                raise ValueError(
+                    f"Duplicate footprint reference {footprint.reference!r}; "
+                    "assign unique references before placing silkscreen"
+                )
+            seen_refs.add(footprint.reference)
+        result = PlaceSilkRefsResult(clearance_mm=clearance_mm)
+        self._ref_nodes = {}
+
+        # --- Static obstacles (never move) ---
+        apertures: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+        for aperture_side, geom, label in _iter_pad_apertures(pcb, mask_clearance_mm):
+            apertures[aperture_side].append((geom, label))
+        for aperture_side, geom, label in _iter_via_apertures(pcb, mask_clearance_mm):
+            apertures[aperture_side].append((geom, label))
+        for aperture_side, geom, label in _iter_npth_apertures(pcb, mask_clearance_mm):
+            apertures[aperture_side].append((geom, label))
+        # Every via/PTH/NPTH drill, tented or not -- the set
+        # ``silk_hole_overlap`` measures against (Issue #9054).
+        for aperture_side, geom, label in _iter_drill_obstacles(pcb):
+            apertures[aperture_side].append((geom, label))
+        # gr_*/fp_* shapes on F.Mask/B.Mask open the mask just like pads do
+        # (Issue #8862); same iterator the silk-over-mask validator uses.
+        for aperture_side, geom, label in _iter_graphic_mask_apertures(pcb):
+            apertures[aperture_side].append((geom, label))
+
+        _report_fixed_text_over_openings(
+            pcb,
+            apertures,
+            result,
+            clearance_mm=clearance_mm,
+            max_offset_mm=max_offset_mm,
+            step_mm=step_mm,
+        )
+
+        static_silk: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+        for static_side, geom, label in _iter_static_silk_obstacles(pcb):
+            static_silk[static_side].append((geom, label))
+
+        courtyards: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+        own_courtyard: dict[tuple[int, str], Any] = {}
+        for footprint in pcb.footprints:
+            for crtyd_side in ("F", "B"):
+                if not _side_has_geometry(footprint, crtyd_side):
+                    continue
+                poly = _courtyard_polygon(footprint, crtyd_side, Polygon)
+                if poly is not None:
+                    courtyards[crtyd_side].append((poly, footprint.reference))
+                    own_courtyard[(id(footprint), crtyd_side)] = poly
+
+        outline_segments, board_material, outline_error = _board_material(pcb, Polygon)
+        outline = (
+            MultiLineString([[start, end] for start, end in outline_segments])
+            if outline_segments and not outline_error
+            else None
+        )
+
+        self._render_context = {
+            "apertures": apertures,
+            "static_silk": static_silk,
+            "courtyards": courtyards,
+            "outline_segments": outline_segments,
+        }
+
+        # --- Movable elements: every visible reference ---
+        entries = []
+        dynamic: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+        for footprint in pcb.footprints:
+            visible = _visible_reference(footprint)
+            if visible is None:
+                continue
+            ref_text, side, ref_node, original_center, geom0 = visible
+
+            self._ref_nodes[footprint.reference] = ref_node
+            entries.append(
+                {
+                    "footprint": footprint,
+                    "ref_text": ref_text,
+                    "side": side,
+                    "inverse": _inverse_fp_transform(footprint),
+                    "original_center": original_center,
+                    "old_rotation": _read_text_angle(ref_node),
+                    "geom0": geom0,
+                }
+            )
+            dynamic[side].append((geom0, footprint.reference))
+
+        # Deterministic processing order.
+        entries.sort(key=lambda e: e["footprint"].reference)
+
+        for entry in entries:
+            footprint = entry["footprint"]
+            ref = footprint.reference
+            side = entry["side"]
+            ref_text = entry["ref_text"]
+            geom0 = entry["geom0"]
+            original_center = entry["original_center"]
+            old_rotation = entry["old_rotation"]
+            if only is not None and ref not in only:
+                # Outside the requested set: never planned or moved, but its
+                # text stays in the pool as an obstacle for the others.
+                continue
+
+            pool = dynamic[side]
+            with contextlib.suppress(ValueError):
+                pool.remove((geom0, ref))
+
+            combined_apertures = apertures.get(side, [])
+            combined_silk = static_silk[side] + pool
+            combined_courtyards = courtyards.get(side, [])
+
+            def clears(geom: Any) -> tuple[bool, str]:
+                return _candidate_clear(
+                    geom,
+                    apertures=combined_apertures,
+                    silk_obstacles=combined_silk,
+                    courtyards=combined_courtyards,
+                    outline=outline,
+                    board_material=board_material,
+                    outline_error=outline_error,
+                    clearance_mm=clearance_mm + KICAD_TEXT_EXTENT_SLACK_MM,
+                    edge_clearance_mm=edge_clearance_mm,
+                )
+
+            bbox = _component_bbox(footprint, side, Polygon)
+            candidates = _candidate_points(
+                bbox, ref_text.font_size[0], ref_text.font_size[1], max_offset_mm, step_mm
+            )
+            candidates.sort(
+                key=lambda p: math.hypot(p[0] - original_center[0], p[1] - original_center[1])
+            )
+            ordered = [original_center, *candidates]
+
+            own_poly_now = own_courtyard.get((id(footprint), side))
+            other_courtyards = [g for g, owner in combined_courtyards if owner != ref]
+
+            def margin_of(geom: Any, own_poly: Any = own_poly_now, others: list = other_courtyards):
+                if own_poly is None or not others:
+                    return None
+                return min(g.distance(geom) for g in others) - own_poly.distance(geom)
+
+            chosen_point: tuple[float, float] | None = None
+            chosen_rotation = old_rotation
+            chosen_geom = None
+            chosen_margin: float | None = None
+            last_reason = ""
+            for point in ordered:
+                trials = [(old_rotation, 0)]
+                if allow_rotate:
+                    trials.append((old_rotation + 90.0, 1))
+                for rotation, _ in trials:
+                    geom = _oriented_text_geometry(
+                        ref_text.text,
+                        ref_text.font_size,
+                        ref_text.font_thickness,
+                        point,
+                        rotation,
+                    )
+                    ok, why = clears(geom)
+                    if not ok:
+                        last_reason = why
+                        continue
+                    margin = margin_of(geom)
+                    if chosen_geom is None or (
+                        margin is not None
+                        and (chosen_margin is None or margin > chosen_margin + _EPSILON_MM)
+                    ):
+                        chosen_point, chosen_geom = point, geom
+                        chosen_rotation, chosen_margin = rotation, margin
+                    if margin is None or margin >= ASSOCIATION_MARGIN_MM:
+                        break
+                else:
+                    continue
+                break
+
+            if chosen_point is None:
+                # No candidate cleared every constraint -- leave untouched
+                # and report explicitly (no destructive fallback).
+                dynamic[side].append((geom0, ref))
+                own_poly = own_courtyard.get((id(footprint), side))
+                fallback = own_poly is not None and geom0.intersects(own_poly)
+                status = "under_component_fallback" if fallback else "unplaceable"
+                result.placements.append(
+                    RefPlacement(
+                        footprint_ref=ref,
+                        layer=ref_text.layer,
+                        old_position=original_center,
+                        new_position=original_center,
+                        old_rotation=old_rotation,
+                        new_rotation=old_rotation,
+                        status=status,
+                        reason=last_reason or "no collision-free candidate within search radius",
+                    )
+                )
+                continue
+
+            dynamic[side].append((chosen_geom, ref))
+            low_assoc = chosen_margin is not None and chosen_margin < ASSOCIATION_MARGIN_MM
+            assoc_reason = (
+                f"low association: {chosen_margin:.2f} mm nearer own courtyard "
+                f"than the nearest other (< {ASSOCIATION_MARGIN_MM} mm)"
+                if low_assoc
+                else ""
+            )
+
+            moved = (
+                abs(chosen_point[0] - original_center[0]) > _EPSILON_MM
+                or abs(chosen_point[1] - original_center[1]) > _EPSILON_MM
+                or chosen_rotation != old_rotation
+            )
+            if moved:
+                local = entry["inverse"](chosen_point)
+                result.placements.append(
+                    RefPlacement(
+                        footprint_ref=ref,
+                        layer=ref_text.layer,
+                        old_position=original_center,
+                        new_position=chosen_point,
+                        old_rotation=old_rotation,
+                        new_rotation=chosen_rotation,
+                        status="moved",
+                        reason=assoc_reason,
+                        new_local_position=local,
+                        association_margin_mm=chosen_margin,
+                        low_association=low_assoc,
+                    )
+                )
+            else:
+                result.placements.append(
+                    RefPlacement(
+                        footprint_ref=ref,
+                        layer=ref_text.layer,
+                        old_position=original_center,
+                        new_position=original_center,
+                        old_rotation=old_rotation,
+                        new_rotation=old_rotation,
+                        status="unchanged",
+                        reason=assoc_reason,
+                        association_margin_mm=chosen_margin,
+                        low_association=low_assoc,
+                    )
+                )
+
+        return result
+
+    def refs_blocked_by(
+        self,
+        owners: Collection[str],
+        *,
+        clearance_mm: float = DEFAULT_CLEARANCE_MM,
+        mask_clearance_mm: float = 0.05,
+    ) -> set[str]:
+        """Return footprints whose visible reference collides with *owners*.
+
+        A reference is blocked by an owner when its current text box, grown
+        by ``clearance_mm``, meets one of the owner's pad apertures, silk
+        elements or visible reference, or when the bare text box lies on the
+        owner's courtyard -- the same tests :meth:`plan` applies, restricted
+        to the owners' geometry. The owners' own references are not
+        reported. Read-only: nothing in the tree changes.
+
+        Used after the decoupling snap (issue #6256) to find the neighbours
+        whose otherwise-untouched reference text a moved cap now sits under.
+        """
+        require_shapely("silk reference placement")
+        from shapely.geometry import Polygon
+
+        owner_set = set(owners)
+        if not owner_set:
+            return set()
+        pcb = self.pcb
+        copper: dict[str, list[Any]] = {"F": [], "B": []}
+        for side, geom, label in _iter_pad_apertures(pcb, mask_clearance_mm):
+            ref, sep, _ = label.rpartition(" pad ")
+            if sep and ref in owner_set:
+                copper[side].append(geom)
+        for side, geom, _label, owner in _iter_owned_static_silk(pcb):
+            if owner in owner_set:
+                copper[side].append(geom)
+        bodies: dict[str, list[Any]] = {"F": [], "B": []}
+        texts: list[tuple[str, str, Any]] = []
+        for footprint in pcb.footprints:
+            visible = _visible_reference(footprint)
+            if footprint.reference in owner_set:
+                if visible is not None:
+                    copper[visible[1]].append(visible[4])
+                for side in ("F", "B"):
+                    if _side_has_geometry(footprint, side):
+                        poly = _courtyard_polygon(footprint, side, Polygon)
+                        if poly is not None:
+                            bodies[side].append(poly)
+            elif visible is not None:
+                texts.append((footprint.reference, visible[1], visible[4]))
+
+        blocked: set[str] = set()
+        for ref, side, geom in texts:
+            expanded = geom.buffer(clearance_mm) if clearance_mm > 0 else geom
+            if any(expanded.intersects(g) for g in copper[side]) or any(
+                geom.intersects(b) for b in bodies[side]
+            ):
+                blocked.add(ref)
+        return blocked
+
+    def apply(self, result: PlaceSilkRefsResult) -> int:
+        """Write every ``moved`` placement's new ``(x, y, [angle])``.
+
+        Only the reference text's own ``at`` node is mutated -- footprint
+        position, pads, copper, and net bindings are never touched.
+
+        Returns:
+            The number of references actually mutated.
+        """
+        applied = 0
+        for placement in result.moved:
+            ref_node = self._ref_nodes.get(placement.footprint_ref)
+            if ref_node is None or placement.new_local_position is None:
+                continue
+            lx, ly = placement.new_local_position
+            _set_text_at(ref_node, lx, ly, placement.new_rotation)
+            applied += 1
+        return applied
+
+    def save(self, output_path: str | Path | None = None) -> None:
+        """Write the (possibly modified) SExp tree to disk."""
+        save_pcb(self.doc, Path(output_path) if output_path else self.path)
+
+    def render_svg(self, result: PlaceSilkRefsResult, output_path: str | Path) -> Path:
+        """Render a visual review artifact for *result* to an SVG file.
+
+        This is the "actual rendered review artifact" the acceptance
+        criteria call for -- DRC passing does not, by itself, prove the
+        placement is *readable*.  The rendering shows, per reference:
+
+        * green solid box -- already clear, never moved (``unchanged``);
+        * blue solid box (with a dashed gray box at the old position and a
+          connecting line) -- moved to clear a collision (``moved``);
+        * red solid box -- could not be placed cleanly and was left exactly
+          where it was (``unplaceable`` / ``under_component_fallback``).
+
+        Board outline, pad apertures, and component courtyards are drawn as
+        context so a reviewer can see *why* each reference landed where it
+        did.  Requires :meth:`plan` to have been called first (uses the
+        obstacle snapshot it records).
+        """
+        if self._render_context is None:
+            raise RuntimeError("render_svg() requires plan() to be called first")
+        return _render_svg(self.pcb, result, self._render_context, Path(output_path))

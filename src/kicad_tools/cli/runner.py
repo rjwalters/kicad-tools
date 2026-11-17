@@ -1,0 +1,3326 @@
+"""KiCad CLI runner utility.
+
+Provides functions to locate and run kicad-cli commands for
+ERC validation, DRC validation, netlist export, and more.
+"""
+
+import contextlib
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from kicad_tools.kicad_install import windows_kicad_base_dirs, windows_kicad_install_roots
+from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
+
+from .kicad_toolchain import (
+    KICAD_DOCKER_ENV,
+    KICAD_DOCKER_IMAGE_ENV,
+    PINNED_KICAD_IMAGE,
+    _synced_model_dir,
+    docker_fallback_enabled,
+    docker_model_args,
+    pinned_kicad_image,
+    process_config_home,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Seconds to wait for ``kicad-cli version`` before declaring a candidate wedged.
+#: A healthy-but-cold KiCad 10 on macOS was measured at a steady ~6 s
+#: (#5932), so the default leaves headroom; ``KCT_KICAD_CLI_PROBE_TIMEOUT``
+#: overrides it per process.
+KICAD_CLI_PROBE_TIMEOUT: float = 10
+
+#: Env var overriding :data:`KICAD_CLI_PROBE_TIMEOUT` (seconds, float).
+KICAD_CLI_PROBE_TIMEOUT_ENV = "KCT_KICAD_CLI_PROBE_TIMEOUT"
+
+#: A candidate whose first probe times out is retried once with this multiple
+#: of the base timeout before the lookup is reported as ``probe_failed``.
+KICAD_CLI_PROBE_RETRY_FACTOR = 2
+
+#: Opt-in env var enabling the container fallback (``docker run kicad/kicad``).
+#: The fallback runs CI's pinned image digest by default, not the floating
+#: ``kicad/kicad:10.0`` tag (Issue #6962); see :mod:`.kicad_toolchain`.
+#: ``KICAD_DOCKER_ENV`` / ``KICAD_DOCKER_IMAGE_ENV`` are imported from there.
+#:
+#: Mirror of CI's ``KICAD_IMAGE`` digest; :func:`pinned_kicad_image` reads the
+#: live value from ``.github/workflows/ci.yml`` in a checkout.
+DEFAULT_KICAD_DOCKER_IMAGE = PINNED_KICAD_IMAGE
+
+#: :class:`KiCadCLILookup` statuses.
+KICAD_CLI_FOUND = "found"
+KICAD_CLI_NOT_FOUND = "not_found"  # definitive: no candidate, or every candidate answered "broken"
+KICAD_CLI_PROBE_FAILED = "probe_failed"  # indeterminate: a candidate timed out / transient OS error
+
+_INSTALL_HINT = "Install KiCad 8+ from https://www.kicad.org/download/"
+
+
+@dataclass(frozen=True)
+class KiCadCLILookup:
+    """Outcome of locating a working ``kicad-cli`` (issue #5932).
+
+    ``status`` distinguishes a definitive absence (``not_found``) from a probe
+    that could not reach a verdict (``probe_failed`` -- e.g. ``kicad-cli
+    version`` timed out). Only ``found`` and ``not_found`` are memoized; a
+    ``probe_failed`` lookup is re-probed on the next call.
+    """
+
+    path: Path | None
+    status: str
+    detail: str = ""
+
+    @property
+    def found(self) -> bool:
+        return self.status == KICAD_CLI_FOUND
+
+    @property
+    def probe_failed(self) -> bool:
+        return self.status == KICAD_CLI_PROBE_FAILED
+
+    @property
+    def reason(self) -> str:
+        """Short human-readable reason kicad-cli is unavailable ("" when found)."""
+        if self.status == KICAD_CLI_FOUND:
+            return ""
+        if self.status == KICAD_CLI_PROBE_FAILED:
+            msg = "kicad-cli probe failed"
+            return f"{msg} ({self.detail})" if self.detail else msg
+        if self.detail:
+            return f"kicad-cli not installed ({self.detail})"
+        return "kicad-cli not installed"
+
+
+def _probe_timeout() -> float:
+    """Base probe timeout: env override, else :data:`KICAD_CLI_PROBE_TIMEOUT`."""
+    raw = os.environ.get(KICAD_CLI_PROBE_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if value > 0:
+            return value
+    return float(KICAD_CLI_PROBE_TIMEOUT)
+
+
+#: ``version`` stdout recorded by successful discovery probes, keyed by the
+#: resolved path string.  Consumed by ``export.gerber.get_kicad_cli_version``.
+PROBED_KICAD_CLI_VERSIONS: dict[str, str] = {}
+
+
+def _probe_kicad_cli(path: Path, timeout: float | None = None) -> bool | None:
+    """Probe ``<path> version``.
+
+    Returns:
+        ``True`` when it answers promptly with exit code 0; ``False`` when the
+        verdict is definitive (non-zero exit, missing or non-executable file);
+        ``None`` when indeterminate (timeout or another transient failure) --
+        callers must not memoize ``None`` as "not installed" (#5932).
+    """
+    try:
+        result = subprocess.run(
+            [str(path), "version"],
+            capture_output=True,
+            text=True,
+            timeout=_probe_timeout() if timeout is None else timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except (FileNotFoundError, PermissionError, NotADirectoryError, IsADirectoryError):
+        return False
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode == 0:
+        # Remember the answer so ``get_kicad_cli_version`` need not launch
+        # kicad-cli a second time for the same path (#5910).
+        PROBED_KICAD_CLI_VERSIONS[str(path)] = result.stdout.strip()
+        return True
+    return False
+
+
+def _locate_kicad_cli_uncached() -> KiCadCLILookup:
+    candidates = _kicad_cli_candidates()
+    if not candidates:
+        return KiCadCLILookup(None, KICAD_CLI_NOT_FOUND, "")
+    base = _probe_timeout()
+    indeterminate: list[str] = []
+    for candidate in candidates:
+        verdict = _probe_kicad_cli(candidate, timeout=base)
+        if verdict is None:
+            # Retry once with a longer budget: a cold start or a transient
+            # stall must not be reported as "not installed" (#5932).
+            retry_timeout = base * KICAD_CLI_PROBE_RETRY_FACTOR
+            verdict = _probe_kicad_cli(candidate, timeout=retry_timeout)
+            if verdict is None:
+                indeterminate.append(
+                    f"`{candidate} version` did not answer within {base:g}s "
+                    f"then {retry_timeout:g}s; set {KICAD_CLI_PROBE_TIMEOUT_ENV} to raise it"
+                )
+                continue
+        if verdict:
+            return KiCadCLILookup(candidate, KICAD_CLI_FOUND)
+    if indeterminate:
+        return KiCadCLILookup(None, KICAD_CLI_PROBE_FAILED, "; ".join(indeterminate))
+    return KiCadCLILookup(None, KICAD_CLI_NOT_FOUND, "no candidate answered `kicad-cli version`")
+
+
+#: Env var overriding :data:`KICAD_CLI_PROBE_FAILED_TTL` (seconds, float; <=0 disables).
+KICAD_CLI_PROBE_FAILED_TTL_ENV = "KCT_KICAD_CLI_PROBE_FAILED_TTL"
+
+#: A ``probe_failed`` lookup is reused for this many seconds (issue #5992) so a
+#: hanging kicad-cli does not cost the full probe+retry (~30s) on every lookup.
+#: Deliberately short: a process-lifetime cache would resurrect #5932 in
+#: long-lived processes (MCP server, daemons).
+KICAD_CLI_PROBE_FAILED_TTL: float = 60.0
+
+_lookup_cache: list[KiCadCLILookup] = []
+_last_lookup: list[KiCadCLILookup] = []
+_probe_failed_cache: list[tuple[float, KiCadCLILookup]] = []  # (expiry, lookup)
+_lookup_lock = threading.Lock()
+_monotonic: Callable[[], float] = time.monotonic  # patchable fake clock for tests
+
+
+def _probe_failed_ttl() -> float:
+    raw = os.environ.get(KICAD_CLI_PROBE_FAILED_TTL_ENV)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return KICAD_CLI_PROBE_FAILED_TTL
+
+
+def locate_kicad_cli() -> KiCadCLILookup:
+    """Locate a working kicad-cli and report *why* when there is none.
+
+    Definitive results (``found`` / ``not_found``) are memoized for the
+    process lifetime. ``probe_failed`` is never reported as "not installed"
+    (#5932) and is cached only for a short TTL
+    (``KCT_KICAD_CLI_PROBE_FAILED_TTL``, default 60s; issue #5992), after
+    which the next call re-probes. Thread-safe: concurrent callers share one
+    probe. Clear with ``find_kicad_cli.cache_clear()``.
+    """
+    if _lookup_cache:
+        return _lookup_cache[0]
+    with _lookup_lock:
+        if _lookup_cache:
+            return _lookup_cache[0]
+        if _probe_failed_cache:
+            expiry, cached = _probe_failed_cache[0]
+            if _monotonic() < expiry:
+                return cached
+            _probe_failed_cache.clear()
+        lookup = _locate_kicad_cli_uncached()
+        _last_lookup[:] = [lookup]
+        if lookup.status != KICAD_CLI_PROBE_FAILED:
+            _lookup_cache[:] = [lookup]
+        else:
+            ttl = _probe_failed_ttl()
+            if ttl > 0:
+                # Expiry is measured from probe completion.
+                _probe_failed_cache[:] = [(_monotonic() + ttl, lookup)]
+        return lookup
+
+
+def _clear_kicad_cli_cache() -> None:
+    with _lookup_lock:
+        _lookup_cache.clear()
+        _last_lookup.clear()
+        _probe_failed_cache.clear()
+
+
+def last_kicad_cli_lookup() -> KiCadCLILookup | None:
+    """The most recent lookup result, without probing (None if never probed)."""
+    if _lookup_cache:
+        return _lookup_cache[0]
+    return _last_lookup[0] if _last_lookup else None
+
+
+locate_kicad_cli.cache_clear = _clear_kicad_cli_cache  # type: ignore[attr-defined]
+
+
+def find_kicad_cli() -> Path | None:
+    """Find a *working* kicad-cli executable.
+
+    Searches PATH and common installation locations for KiCad 8+. Each
+    candidate is probed with ``kicad-cli version`` under a timeout (retried
+    once with a longer budget on timeout). A definitive answer is memoized
+    for the process lifetime (use ``find_kicad_cli.cache_clear()`` to
+    re-probe); a timeout is *not* cached, so a transient stall cannot leave
+    the process believing kicad-cli is absent (#5932).
+
+    Callers that need to tell "not installed" from "probe failed" (e.g. to
+    warn before skipping a zone refill) should use :func:`locate_kicad_cli`.
+
+    Returns:
+        Path to kicad-cli if found and responsive, None otherwise
+    """
+    return locate_kicad_cli().path
+
+
+find_kicad_cli.cache_clear = _clear_kicad_cli_cache  # type: ignore[attr-defined]
+
+
+def kicad_cli_unavailable_message(lookup: KiCadCLILookup | None = None) -> str:
+    """One-line explanation for why kicad-cli is unusable, with remediation.
+
+    Without *lookup*, explains the most recent :func:`find_kicad_cli` result
+    (no re-probe). Distinguishes "probe failed" (installed but unresponsive,
+    #5877) from "not installed" (#5932).
+    """
+    if lookup is None:
+        lookup = last_kicad_cli_lookup()
+    if lookup is None or lookup.found:
+        lookup = KiCadCLILookup(None, KICAD_CLI_NOT_FOUND)
+    if lookup.probe_failed:
+        return (
+            f"{lookup.reason}. kicad-cli appears installed but did not respond (see issue #5877)."
+        )
+    return f"{lookup.reason}. {_INSTALL_HINT}"
+
+
+def kicad_cli_unavailable_reason() -> str:
+    """Short reason (no remediation) for the most recent failed lookup."""
+    lookup = last_kicad_cli_lookup()
+    if lookup is None or lookup.found:
+        return "kicad-cli not installed"
+    return lookup.reason
+
+
+def _kicad_cli_candidates() -> list[Path]:
+    """Return candidate kicad-cli paths in priority order (PATH first)."""
+    found: list[Path] = []
+    # Check PATH first
+    if which_path := shutil.which("kicad-cli"):
+        found.append(Path(which_path))
+
+    # Common installation locations
+    locations = [
+        # macOS
+        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+        str(Path.home() / "Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"),
+        "/opt/homebrew/bin/kicad-cli",
+        "/usr/local/bin/kicad-cli",
+        # Linux
+        "/usr/bin/kicad-cli",
+        "/usr/local/bin/kicad-cli",
+    ]
+    if sys.platform == "win32":
+        # Versioned installs (newest first), then the unversioned layout.
+        locations += [str(root / "bin" / "kicad-cli.exe") for root in windows_kicad_install_roots()]
+        locations += [str(base / "bin" / "kicad-cli.exe") for base in windows_kicad_base_dirs()]
+
+    for loc in locations:
+        path = Path(loc)
+        if path.exists() and path not in found:
+            found.append(path)
+
+    return found
+
+
+#: Where :func:`build_docker_kicad_cmd` mounts the pinned config home.
+_DOCKER_CONFIG_HOME = "/kct-kicad-config"
+#: Where it mounts the synced pinned 3D model subset (#7683).
+_DOCKER_MODEL_DIR = "/kct-3dmodels"
+
+
+def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
+    """Build a ``docker run`` command invoking kicad-cli with ``args`` in ``workdir``.
+
+    Modeled on ``benchmarks/interop/tscircuit/run_gate.py``'s ``KicadCli``.
+    Any path in ``args`` must be relative to (or under ``/work``, the mount of)
+    ``workdir``.
+
+    The image defaults to CI's pinned digest (``KCT_KICAD_DOCKER_IMAGE``
+    overrides it), and kicad-cli reads its library tables from a mounted
+    scratch ``KICAD_CONFIG_HOME`` holding the pinned tables, so the result does
+    not depend on the image user's own config (``--user`` overrides, another
+    image) -- Issue #6962.
+    """
+    image = os.environ.get(KICAD_DOCKER_IMAGE_ENV) or pinned_kicad_image()
+    config_home = process_config_home()
+    # The synced pinned 3D model subset (kct models sync, #7683), when verified.
+    model_args = docker_model_args(_synced_model_dir(), _DOCKER_MODEL_DIR)
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/amd64",
+        "-v",
+        f"{workdir}:/work",
+        "-v",
+        f"{config_home}:{_DOCKER_CONFIG_HOME}",
+        "-e",
+        f"KICAD_CONFIG_HOME={_DOCKER_CONFIG_HOME}",
+        *model_args,
+        "-w",
+        "/work",
+        "--entrypoint",
+        "kicad-cli",
+        image,
+        *args,
+    ]
+
+
+@dataclass
+class KiCadCLIResult:
+    """Result from running kicad-cli."""
+
+    success: bool
+    output_path: Path | None = None
+    stdout: str = ""
+    stderr: str = ""
+    return_code: int = 0
+    #: ``kct drc`` asked for ``--schematic-parity`` but kicad-cli could not
+    #: fetch the schematic netlist, so the parity checks never ran (Issue
+    #: #7077).  kicad-cli still exits 0 and writes ``"schematic_parity": []``,
+    #: so this flag is the only sign of it.  Does not affect ``success``.
+    parity_skipped: bool = False
+    #: The schematic kicad-cli ran (or tried to run) parity against: the one
+    #: next to the board or the one staged under the board's name (Issue
+    #: #7147).  ``None`` when parity was not requested or none resolved.
+    parity_schematic: Path | None = None
+    #: Cause-specific NOT RUN reason when :attr:`parity_skipped` (Issue #7147).
+    parity_skip_reason: str | None = None
+    #: Issue #8053: what the self-verifying foreign-pad carve did to the
+    #: saved fill (e.g. "rolled back on the whole board"), for the caller to
+    #: print.  Empty when the carve was kept as is or never ran.
+    fill_notes: list[str] = field(default_factory=list)
+    #: Issue #8053: zones whose KiCad fill violates foreign-pad clearance
+    #: (so the carve is needed) *and* whose carve splits the saved fill, one
+    #: line per zone naming the foreign pads.  Non-empty means the saved
+    #: fill is clearance-correct but fragmented; ``kct zones fill`` exits 1.
+    fill_conflicts: list[str] = field(default_factory=list)
+
+
+#: The line kicad-cli prints (and then exits 0) when ``--schematic-parity``
+#: was requested but no annotated schematic netlist could be built (Issue
+#: #7077, KiCad 10.0.6).
+PARITY_SKIPPED_MARKER = "Failed to fetch schematic netlist"
+
+
+def parity_skipped_in_output(stdout: object, stderr: object) -> bool:
+    """Whether kicad-cli said it could not run the schematic parity checks.
+
+    The marker is looked for on both streams: which one carries it is a
+    kicad-cli implementation detail (Issue #7077).
+    """
+    return any(isinstance(s, str) and PARITY_SKIPPED_MARKER in s for s in (stdout, stderr))
+
+
+def run_erc(
+    schematic_path: Path,
+    output_path: Path | None = None,
+    format: str = "json",
+    severity_all: bool = True,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Run KiCad ERC on a schematic.
+
+    Args:
+        schematic_path: Path to .kicad_sch file
+        output_path: Where to save the report (default: temp file)
+        format: Output format - "json" or "report"
+        severity_all: Include all severity levels
+        kicad_cli: Path to kicad-cli (auto-detected if not provided)
+
+    Returns:
+        KiCadCLIResult with success status and output path
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+            )
+
+    # Determine output path
+    if output_path is None:
+        suffix = ".json" if format == "json" else ".rpt"
+        fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix="erc_")
+        output_path = Path(temp_path)
+        # Close the file descriptor - kicad-cli will write to it
+        import os
+
+        os.close(fd)
+
+    # Build command
+    cmd = [
+        str(kicad_cli),
+        "sch",
+        "erc",
+        "--output",
+        str(output_path),
+        "--format",
+        format,
+        "--units",
+        "mm",
+    ]
+
+    if severity_all:
+        cmd.append("--severity-all")
+
+    cmd.append(str(schematic_path))
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # ERC returns non-zero when violations are found but still produces a
+        # report.  However, when kicad-cli fails to LOAD the schematic it
+        # also returns non-zero (exit 3) while writing nothing — yet the
+        # tempfile pre-created above continues to exist with zero bytes.
+        # Treat a load failure (recognised by either explicit stderr text or
+        # an empty output file paired with a non-zero exit code) as a
+        # genuine failure so the caller doesn't false-pass a broken
+        # schematic.  See issue #2780.
+        load_failed = "Failed to load schematic" in (result.stderr or "") or "Failed to load" in (
+            result.stderr or ""
+        )
+        empty_output = not output_path.exists() or output_path.stat().st_size == 0
+        # Issue #6724: a kicad-cli killed by a signal (negative status, e.g.
+        # the OOM killer) or one that left the pre-created file empty never
+        # produced a report, whatever its exit status.
+        kicad_cli_errored = result.returncode < 0 or empty_output
+
+        if load_failed or kicad_cli_errored:
+            return KiCadCLIResult(
+                success=False,
+                stderr=result.stderr or "ERC failed to load schematic",
+                return_code=result.returncode,
+            )
+
+        if output_path.exists():
+            return KiCadCLIResult(
+                success=True,
+                output_path=output_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        else:
+            return KiCadCLIResult(
+                success=False,
+                stderr=result.stderr or "ERC produced no output",
+                return_code=result.returncode,
+            )
+
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to run ERC: {e}")
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Symlink ``dst -> src``; copy when symlinks are unavailable (Windows)."""
+    try:
+        dst.symlink_to(src, target_is_directory=src.is_dir())
+    except OSError:
+        if src.is_dir():
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst)
+
+
+def stage_pcb_for_parity(pcb_path: Path, schematic: Path, stage_dir: Path) -> Path:
+    """Mirror the board folder into ``stage_dir`` with ``schematic`` under the board's name.
+
+    kicad-cli ``pcb drc --schematic-parity`` has no ``--schematic`` option: it
+    only reads ``<pcb-stem>.kicad_sch`` next to the board, so a routed board
+    (``foo_routed.kicad_pcb``) never finds ``foo.kicad_sch`` (Issue #7147).
+    Every sibling of the board is linked in -- ``${KIPRJMOD}`` becomes the
+    staging dir, and board-local library tables point at sibling
+    ``.pretty``/``.kicad_sym`` paths -- except ``*.kicad_prl`` (kicad-cli writes
+    one per run, which now lands in the staging dir instead of the user's
+    folder) and any existing ``<pcb-stem>.kicad_sch``.  When the schematic
+    lives elsewhere its sibling ``.kicad_sch`` sub-sheets are linked too, so
+    hierarchical sheet references resolve.  Returns the staged PCB path.
+    """
+    pcb_path = Path(pcb_path).resolve()
+    schematic = Path(schematic).resolve()
+    staged_sch_name = f"{pcb_path.stem}.kicad_sch"
+    for entry in sorted(pcb_path.parent.iterdir()):
+        if entry.suffix == ".kicad_prl" or entry.name == staged_sch_name:
+            continue
+        _link_or_copy(entry, stage_dir / entry.name)
+    _link_or_copy(schematic, stage_dir / staged_sch_name)
+    if schematic.parent != pcb_path.parent:
+        for sheet in sorted(schematic.parent.glob("*.kicad_sch")):
+            target = stage_dir / sheet.name
+            if sheet == schematic or target.exists() or target.is_symlink():
+                continue
+            _link_or_copy(sheet, target)
+    return stage_dir / pcb_path.name
+
+
+def _resolve_parity_schematic(
+    pcb_path: Path, schematic: Path | None
+) -> tuple[Path | None, str | None]:
+    """The schematic parity should use, or ``(None, reason)`` (Issue #7147)."""
+    from kicad_tools.drc.parity import parity_reason_ambiguous, parity_reason_no_schematic
+    from kicad_tools.sync.discover import (
+        resolve_schematic_for_pcb,
+        unresolved_schematic_candidates,
+    )
+
+    if schematic is not None:
+        if Path(schematic).is_file():
+            return Path(schematic), None
+        return None, parity_reason_no_schematic(pcb_path.name)
+    resolved = resolve_schematic_for_pcb(pcb_path)
+    if resolved is not None:
+        return resolved, None
+    if len(unresolved_schematic_candidates(pcb_path)) > 1:
+        return None, parity_reason_ambiguous(pcb_path.name)
+    return None, parity_reason_no_schematic(pcb_path.name)
+
+
+def run_drc(
+    pcb_path: Path,
+    output_path: Path | None = None,
+    format: str = "json",
+    schematic_parity: bool = True,
+    kicad_cli: Path | None = None,
+    all_track_errors: bool = False,
+    refill_zones: bool = False,
+    schematic: Path | None = None,
+) -> KiCadCLIResult:
+    """Run KiCad DRC on a PCB.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file
+        output_path: Where to save the report (default: temp file)
+        format: Output format - "json" or "report"
+        schematic_parity: Check schematic parity.  The schematic is
+            ``schematic`` when given, else :func:`resolve_schematic_for_pcb`
+            (which strips ``_routed`` etc.).  When it is not already
+            ``<pcb-stem>.kicad_sch`` next to the board, kicad-cli runs on a
+            temporary mirror of the board folder (:func:`stage_pcb_for_parity`)
+            -- the user's folder is never written (Issue #7147).
+        kicad_cli: Path to kicad-cli (auto-detected if not provided)
+        all_track_errors: Pass ``--all-track-errors`` (report every track
+            violation, not just the first per track) -- the gate the fleet's
+            manufacturability check uses (Issue #6431).
+        refill_zones: Pass ``--refill-zones`` (refill before checking; the
+            board file is not saved).  Only when this kicad-cli supports it
+            (KiCad 10+); KiCad 8/9 reject the option, so it is dropped there
+            (Issue #6724).
+        schematic: Explicit schematic for parity (``kct drc --schematic``);
+            ignored when ``schematic_parity`` is false.
+
+    Returns:
+        KiCadCLIResult with success status and output path
+    """
+    with contextlib.ExitStack() as stack:
+        parity_sch: Path | None = None
+        no_sch_reason: str | None = None
+        staging_failed = False
+        run_pcb = Path(pcb_path)
+        if schematic_parity:
+            parity_sch, no_sch_reason = _resolve_parity_schematic(run_pcb, schematic)
+            native_sch = run_pcb.with_suffix(".kicad_sch")
+            if parity_sch is not None and not (
+                native_sch.exists() and native_sch.resolve() == parity_sch.resolve()
+            ):
+                stage_dir = Path(
+                    stack.enter_context(tempfile.TemporaryDirectory(prefix="kct_drc_"))
+                )
+                try:
+                    run_pcb = stage_pcb_for_parity(run_pcb, parity_sch, stage_dir)
+                except OSError as exc:
+                    # Setup failed (permissions, disk full, unreadable
+                    # sibling): run DRC without parity and report parity NOT
+                    # RUN with the cause instead of a traceback.
+                    staging_failed = True
+                    no_sch_reason = (
+                        "could not stage a temporary copy of the board folder "
+                        f"for the parity check: {exc}"
+                    )
+                    run_pcb = Path(pcb_path)
+        result = _run_drc_once(
+            run_pcb,
+            output_path,
+            format=format,
+            # Issue #7237: with no schematic there is nothing to compare; a
+            # silent kicad-cli would otherwise read as parity PASSED.
+            schematic_parity=schematic_parity and not staging_failed and parity_sch is not None,
+            kicad_cli=kicad_cli,
+            all_track_errors=all_track_errors,
+            refill_zones=refill_zones,
+        )
+    if schematic_parity:
+        from kicad_tools.drc.parity import parity_reason_netlist_failed
+
+        result.parity_schematic = parity_sch
+        if staging_failed or parity_sch is None:
+            # Never ran parity (no/ambiguous schematic, or staging failed).
+            result.parity_skipped = True
+            result.parity_skip_reason = no_sch_reason
+        elif result.parity_skipped:
+            result.parity_skip_reason = (
+                parity_reason_netlist_failed(str(parity_sch))
+                if parity_sch is not None
+                else no_sch_reason
+            )
+    return result
+
+
+def _run_drc_once(
+    pcb_path: Path,
+    output_path: Path | None,
+    *,
+    format: str,
+    schematic_parity: bool,
+    kicad_cli: Path | None,
+    all_track_errors: bool,
+    refill_zones: bool,
+) -> KiCadCLIResult:
+    """One ``kicad-cli pcb drc`` run on ``pcb_path`` as given (see :func:`run_drc`)."""
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+            )
+
+    # Determine output path
+    if output_path is None:
+        suffix = ".json" if format == "json" else ".rpt"
+        fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix="drc_")
+        output_path = Path(temp_path)
+        import os
+
+        os.close(fd)
+    # Issue #6724: the report must be one kicad-cli wrote on THIS run.  A
+    # pre-created (mkstemp) or left-over file survived a killed kicad-cli
+    # and read as a clean report, so clear it before the run.
+    Path(output_path).unlink(missing_ok=True)
+
+    # Build command
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "drc",
+        "--output",
+        str(output_path),
+        "--format",
+        format,
+        "--units",
+        "mm",
+    ]
+
+    if schematic_parity:
+        cmd.append("--schematic-parity")
+    if all_track_errors:
+        cmd.append("--all-track-errors")
+
+    def build_cmd(refill: bool) -> list[str]:
+        return [*cmd, *(["--refill-zones"] if refill else []), str(pcb_path)]
+
+    try:
+        # Issue #6724: --refill-zones only on a kicad-cli that accepts it
+        # (attempted when unknown, retried without it on rejection).
+        result, _refilled = run_kicad_drc_command(
+            build_cmd, Path(kicad_cli), refill_zones=refill_zones, text=True
+        )
+
+        # Issue #6724: without ``--exit-code-violations`` kicad-cli exits 0
+        # even when it finds violations, so another status (a load failure is
+        # 3, a signal kill such as the OOM killer is negative) is a failure --
+        # as is a missing, empty or truncated report.
+        problem = drc_report_problem(
+            output_path,
+            result.returncode,
+            format=format,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+        if problem is None:
+            return KiCadCLIResult(
+                success=True,
+                output_path=output_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+                # Issue #7077: only meaningful when parity was requested.
+                parity_skipped=schematic_parity
+                and parity_skipped_in_output(result.stdout, result.stderr),
+            )
+        stderr = (result.stderr or "").strip()
+        return KiCadCLIResult(
+            success=False,
+            stdout=result.stdout,
+            stderr=f"DRC failed: {problem}" + (f"\n{stderr}" if stderr else ""),
+            return_code=result.returncode,
+        )
+
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to run DRC: {e}")
+
+
+def drc_report_problem(
+    output_path: Path,
+    returncode: int,
+    *,
+    format: str = "json",
+    stdout: object = None,
+    stderr: object = None,
+) -> str | None:
+    """Why a ``kicad-cli pcb drc`` run did not produce a trustworthy report.
+
+    ``None`` means it did: kicad-cli exited 0 and wrote a complete report.
+    Otherwise a short reason (Issue #6724).  Without ``--exit-code-violations``
+    kicad-cli exits 0 when it finds violations (verified on 10.0.6), so any
+    status other than 0 or the documented "violations found" code 5 means the
+    board was not checked.
+    """
+    from kicad_tools.drc.geometric import (
+        KICAD_CLI_DRC_OK_EXIT_CODES,
+        describe_returncode,
+        load_kicad_cli_json_report,
+    )
+
+    if returncode not in KICAD_CLI_DRC_OK_EXIT_CODES:
+        # ``stdout``/``stderr`` let exit 1 name a rejected option; without an
+        # ``Unknown argument`` line it is a plain non-zero exit (Issue #6724).
+        return describe_returncode(returncode, stdout=stdout, stderr=stderr)
+    output_path = Path(output_path)
+    if format == "json":
+        return load_kicad_cli_json_report(output_path)
+    try:
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            return "kicad-cli wrote no DRC report"
+    except OSError as exc:
+        return f"kicad-cli DRC report unreadable: {exc}"
+    return None
+
+
+def run_refill_zones(
+    pcb_path: Path,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Refill all copper zones in-place via ``kicad-cli pcb drc --refill-zones``.
+
+    Shells out to ``kicad-cli pcb drc --refill-zones --save-board <pcb>`` so
+    the on-disk ``filled_polygon`` geometry is brought back in sync with the
+    current copper before the pure-Python ``kct check`` pipeline reads it
+    (issue #4096).  This is the authoritative refill: KiCad's own fill engine
+    knocks the pours out around foreign copper, eliminating the phantom
+    ``clearance_*_zone`` findings that stale committed fills produce.
+
+    This **mutates the board file in place** (``--save-board``) — the caller
+    is responsible for surfacing that side effect to the user.
+
+    Graceful degradation: when ``kicad-cli`` is not found on PATH the call
+    returns ``success=False`` with an explanatory ``stderr`` rather than
+    raising, so the caller can warn and continue without refilling.
+
+    A non-zero exit code caused by DRC *violations* (not a fill failure) is
+    treated as success — the zones were still refilled and saved.  When the
+    installed ``kicad-cli`` predates the explicit ``--refill-zones`` /
+    ``--save-board`` flags (KiCad 8/9), DRC refills zones automatically as a
+    side effect and the board is saved by the plain ``drc`` run.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file to refill (rewritten in place).
+        kicad_cli: Path to kicad-cli (auto-detected when not provided).
+
+    Returns:
+        KiCadCLIResult with ``output_path`` set to ``pcb_path`` on success.
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+            )
+
+    # Snapshot net state so a --save-board that strips the net table on a
+    # kicad-tools-serialized board can be repaired, mirroring the protection
+    # in _run_fill_zones_via_drc.
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
+
+    fd, report_name = tempfile.mkstemp(suffix=".json", prefix="refill_drc_")
+    os.close(fd)
+    report_path = Path(report_name)
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "drc",
+        "--output",
+        str(report_path),
+        "--format",
+        "json",
+    ]
+
+    # KiCad 10+ requires explicit flags to refill zones and persist changes;
+    # KiCad 8/9 refill + save as a side effect of the plain drc run.
+    if _kicad_drc_supports_refill(kicad_cli):
+        cmd.extend(["--refill-zones", "--save-board"])
+
+    cmd.append(str(pcb_path))
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # A produced report means the command ran to completion (a non-zero
+        # exit code here signals DRC violations, not a fill failure).  Issue
+        # #6724: a signal kill (negative status) did not complete, whatever
+        # it left in the pre-created report file.
+        if result.returncode >= 0 and report_path.exists() and report_path.stat().st_size > 0:
+            _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+            return KiCadCLIResult(
+                success=True,
+                output_path=pcb_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        from kicad_tools.drc.geometric import describe_returncode
+
+        failure = (
+            describe_returncode(result.returncode)
+            if result.returncode < 0
+            else "no report produced"
+        )
+        return KiCadCLIResult(
+            success=False,
+            stderr=result.stderr or f"Zone refill via DRC failed — {failure}",
+            return_code=result.returncode,
+        )
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to refill zones: {e}")
+    finally:
+        report_path.unlink(missing_ok=True)
+
+
+def run_netlist_export(
+    schematic_path: Path,
+    output_path: Path | None = None,
+    format: str = "kicad",
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Export netlist from schematic.
+
+    Args:
+        schematic_path: Path to .kicad_sch file
+        output_path: Where to save the netlist
+        format: Output format - "kicad", "cadstar", "orcadpcb2", "spice", "spice-model"
+        kicad_cli: Path to kicad-cli
+
+    Returns:
+        KiCadCLIResult with success status and output path
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(success=False, stderr="kicad-cli not found")
+
+    # Determine output path
+    if output_path is None:
+        suffix = ".net" if format == "kicad" else f".{format}"
+        fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix="netlist_")
+        output_path = Path(temp_path)
+        import os
+
+        os.close(fd)
+
+    cmd = [
+        str(kicad_cli),
+        "sch",
+        "export",
+        "netlist",
+        "--output",
+        str(output_path),
+        "--format",
+        format,
+        str(schematic_path),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode == 0 and output_path.exists():
+            return KiCadCLIResult(
+                success=True,
+                output_path=output_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        else:
+            return KiCadCLIResult(
+                success=False,
+                stderr=result.stderr or "Netlist export failed",
+                return_code=result.returncode,
+            )
+
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to export netlist: {e}")
+
+
+@lru_cache(maxsize=8)
+def _kicad_cli_has_fill_zones(kicad_cli: Path) -> bool:
+    """Check whether the installed kicad-cli supports 'pcb fill-zones'.
+
+    This subcommand does not exist in KiCad 8, 9, or 10 but may be
+    added in a future release.
+
+    Memoised per ``kicad_cli`` path (Issue #5566): support for a
+    subcommand is a fixed property of the installed binary, so a fresh
+    ``--help`` subprocess on every call is pure repetition. A single
+    zone-fill-then-thermal-remediation pass already probes this (and its
+    ``--refill-zones`` sibling below) up to twice each; under the CI
+    native-concurrency gate (``KCT_NATIVE_MAX_CONCURRENCY=1``) every one of
+    those probe launches queues behind genuinely slow native DRC/fill work,
+    so repeating a probe whose answer cannot change multiplies a test's
+    wait-tail for no benefit.
+    """
+    try:
+        result = subprocess.run(
+            [str(kicad_cli), "pcb", "fill-zones", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        # kicad-cli returns 0 and prints the parent help when a subcommand
+        # is unknown, so we check stdout for "fill-zones" to confirm support.
+        return result.returncode == 0 and "fill-zones" in result.stdout
+    except Exception:
+        return False
+
+
+def run_fill_zones(
+    pcb_path: Path,
+    output_path: Path | None = None,
+    kicad_cli: Path | None = None,
+    *,
+    native_clearance: bool = False,
+    time_left: Callable[[], float | None] | None = None,
+) -> KiCadCLIResult:
+    """Fill all copper zones in a PCB using kicad-cli.
+
+    Attempts ``kicad-cli pcb fill-zones`` first (for future KiCad versions
+    that may add it).  When that subcommand is unavailable (KiCad 8/9/10),
+    falls back to ``kicad-cli pcb drc`` which fills all zones as a side
+    effect before running design-rule checks.
+
+    With the DRC fallback a non-zero exit code caused by DRC *violations*
+    (not a fill failure) is treated as success — the zones were still filled.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file
+        output_path: Where to save the filled PCB (default: overwrites input)
+        kicad_cli: Path to kicad-cli (auto-detected if not provided)
+        native_clearance: Persist the existing conservative post-fill
+            clearance target in native DRU rules before filling, and let
+            KiCad handle the resulting geometry instead of carving saved
+            polygons. Opt-in, in-place only; preserves other callers' policy.
+        time_left: Issue #6273.  Seconds the caller can still spend
+            (``None`` = unbounded), e.g. what is left of ``kct route
+            --timeout``.  The fill's kicad-cli call is bounded by it (a fill
+            that would overrun is stopped and reported as failed, with the
+            board's previous fills restored), and the starved-thermal
+            remediation only starts a pass the time left can cover.
+
+    Returns:
+        KiCadCLIResult with success status and output path
+    """
+    if native_clearance:
+        if output_path is not None:
+            raise ValueError("Native clearance currently requires an in-place fill")
+        from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+        write_native_zone_clearance_rules(pcb_path)
+
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr=kicad_cli_unavailable_message(),
+            )
+
+    # Issue #6273: a caller on a hard deadline bounds the kicad-cli call.  The
+    # keyword is only passed when bounded so unbounded callers (and test
+    # doubles of the two fill helpers) see the historical call unchanged.
+    fill_kwargs: dict[str, float] = {}
+    if time_left is not None:
+        budget = time_left()
+        if budget is not None:
+            if budget <= 0.0:
+                return KiCadCLIResult(
+                    success=False,
+                    stderr="Zone fill skipped: no --timeout budget left (issue #6273)",
+                )
+            fill_kwargs["timeout"] = budget
+
+    # Pre-fill normalization (Issues #3727 / #3729): legacy zones use thermal
+    # relief for *all* pads, which starves pads that cannot form the 2 spokes
+    # KiCad's geometric DRC requires (``starved_thermal``).  The selective
+    # policy keeps thermal relief on pads that CAN host 2 spokes and forces a
+    # solid per-pad connection only on the pads that would otherwise starve,
+    # applied *before* the fill so the refilled copper reflects it.
+    #
+    # When the normalization actually changes a zone, the fill must read the
+    # *normalized* board.
+    #
+    # * ``output_path is None`` (fill in place): the caller already accepts
+    #   that ``pcb_path`` is rewritten, so normalize it directly.
+    # * ``output_path`` given: mutating ``pcb_path`` would be a surprising
+    #   side effect, so stage the normalized board in a temp file and feed
+    #   that to the fill as input.  The fill's own ``output_path`` handling
+    #   (and the native ``--output`` contract) is left completely unchanged.
+    normalized_tmp: Path | None = None
+    if output_path is None:
+        _normalize_pad_connection_in_place(pcb_path)
+        fill_input = pcb_path
+    else:
+        normalized_tmp = _stage_normalized_pad_connection(pcb_path)
+        fill_input = normalized_tmp if normalized_tmp is not None else pcb_path
+
+    fill_started = _monotonic()
+    try:
+        if _kicad_cli_has_fill_zones(kicad_cli):
+            result = _run_fill_zones_native(fill_input, output_path, kicad_cli, **fill_kwargs)
+        else:
+            result = _run_fill_zones_via_drc(fill_input, output_path, kicad_cli, **fill_kwargs)
+    finally:
+        if normalized_tmp is not None:
+            normalized_tmp.unlink(missing_ok=True)
+
+    # Post-fill thermal remediation (Issue #3729) + foreign-pad clearance
+    # (Issue #3711), run together so they settle to a single consistent fill:
+    #
+    #   * Remediation: a pad KiCad's DRC flags ``starved_thermal`` (single
+    #     spoke) steps one rung down the thermal spoke ladder (Issue #7295),
+    #     with solid as the fallback only when no narrower rung remains.  A
+    #     pad whose lone spoke strands an ``isolated_copper`` sliver is still
+    #     forced solid directly (no ladder).  Then refills via kicad-cli.
+    #   * The foreign-pad carve subtracts foreign-net antipads from each
+    #     filled_polygon so the fill clears foreign copper by the zone
+    #     clearance (kicad-cli's own fill can leave it too tight on
+    #     kicad-tools-serialized boards).
+    #
+    # The carve is a pure-Python edit that a later kicad-cli refill would
+    # revert, and the carve itself can strand a thermal-relief sliver that
+    # DRC then flags.  So the carve is applied *inside* each remediation pass
+    # (before that pass's DRC check), letting remediation force the offending
+    # pad solid until the post-carve board is clean.  Both are no-ops without
+    # shapely / kicad-cli; guarded so they never disturb a successful fill.
+    #
+    # Issue #5617: when the fill just above went through
+    # :func:`_run_fill_zones_via_drc` (the only reachable branch on every
+    # kicad-cli 8/9/10 -- ``_kicad_cli_has_fill_zones`` is unconditionally
+    # False there, see its docstring) *and* that call already used
+    # ``--refill-zones --save-board`` (``_kicad_drc_supports_refill`` true),
+    # ``result.output_path`` is already a freshly filled, saved board -- an
+    # exact duplicate of what remediation's own first-pass refill would
+    # redo.  Nothing mutates ``pcb_path`` between the fill above and this
+    # call, and #5578 (see ``tests/test_pour_fill_determinism_5578.py``)
+    # already established the fill engine is deterministic given identical
+    # input (short-free input -- a shorted board refills differently each
+    # time, Issue #6215, and skipping a refill cannot make that worse), so
+    # re-running it here would reproduce byte-identical zone
+    # geometry at the cost of one more full kicad-cli launch (measured
+    # locally at ~1/3 of a "zone fill" call's wall time -- one of three
+    # kicad-cli round trips a clean first pass makes).  Skip that redundant
+    # first-pass refill in exactly this case; every other path (the native
+    # ``fill-zones`` branch, or a kicad-cli whose DRC doesn't support
+    # ``--refill-zones``) keeps the original, unconditional refill.
+    if result.success and result.output_path is not None:
+        already_freshly_refilled = (not _kicad_cli_has_fill_zones(kicad_cli)) and (
+            _kicad_drc_supports_refill(kicad_cli) is True
+        )
+        # Issue #6273: the fill just measured is one KiCad load + refill.
+        fill_cost = _monotonic() - fill_started
+        remediation_kwargs: dict = {}
+        if time_left is not None:
+            remediation_kwargs = {
+                "time_left": time_left,
+                "refill_cost_estimate": fill_cost,
+            }
+        # Issue #8053: remember whether the carve that is on disk at the end
+        # actually changed any copper, so a no-op carve costs nothing extra.
+        carve_on_disk = [False]
+
+        def _carve(path: Path) -> None:
+            carve_on_disk[0] = bool(_apply_foreign_pad_clearance(path))
+
+        settled_report = _remediate_starved_thermal(
+            result.output_path,
+            kicad_cli,
+            settle=None if native_clearance else _carve,
+            skip_first_refill=already_freshly_refilled,
+            **remediation_kwargs,
+        )
+        if carve_on_disk[0]:
+            verify_affordable = True
+            if time_left is not None:
+                left = time_left()
+                # One refill plus one read-only DRC, like a remediation pass.
+                cost = 2.0 * fill_cost * _REMEDIATION_DEADLINE_SAFETY
+                verify_affordable = left is None or left >= cost
+            if verify_affordable:
+                notes, conflicts = _verify_foreign_pad_carve(
+                    result.output_path,
+                    kicad_cli,
+                    settled_report if isinstance(settled_report, dict) else None,
+                )
+                result.fill_notes.extend(notes)
+                result.fill_conflicts.extend(conflicts)
+
+    return result
+
+
+def relieve_solid_overrides(
+    pcb_path: Path,
+    output_path: Path | None = None,
+    kicad_cli: Path | None = None,
+) -> Path:
+    """Issue #8659: retry thermal relief on stale solid pad overrides.
+
+    Copies to ``output_path`` when given, then runs the refill/DRC loop with
+    ``revisit_solid=True``.  Returns the path of the resulting board.
+    """
+    import shutil
+
+    kicad_cli = kicad_cli or find_kicad_cli()
+    if kicad_cli is None:
+        raise FileNotFoundError("kicad-cli not found")
+    target = output_path or pcb_path
+    if target != pcb_path:
+        shutil.copy2(pcb_path, target)
+
+    def _carve(path: Path) -> None:
+        _apply_foreign_pad_clearance(path)
+
+    _remediate_starved_thermal(target, kicad_cli, settle=_carve, revisit_solid=True)
+    return target
+
+
+#: Issue #6273: a remediation step is only started when the time left covers
+#: its estimated kicad-cli cost times this factor.
+_REMEDIATION_DEADLINE_SAFETY = 1.25
+
+
+def _remediate_starved_thermal(
+    pcb_path: Path,
+    kicad_cli: Path,
+    max_passes: int = 4,
+    settle: Callable[[Path], None] | None = None,
+    *,
+    skip_first_refill: bool = False,
+    time_left: Callable[[], float | None] | None = None,
+    refill_cost_estimate: float = 0.0,
+    revisit_solid: bool = False,
+) -> dict | None:
+    """Remediate the pads KiCad's DRC flags (Issue #3729).
+
+    The size-based selective pass clears the obvious small-SMD starved pads;
+    this measurement-driven pass mops up the residue that pad size cannot
+    predict, using KiCad's own geometric DRC as the source of truth:
+
+    * ``starved_thermal`` (error) -- the pad forms only one spoke (pour edge,
+      single-spoke THT power tab).  KiCad names the pad UUID, so we step that
+      exact pad one rung down the spoke ladder (Issue #7295), falling back to
+      solid only when no narrower rung remains.
+    * ``isolated_copper`` (warning) -- a thermal-relief pad's lone spoke left
+      a tiny copper sliver KiCad considers an island.  KiCad names only the
+      zone, so we resolve the sliver geometrically and force its anchoring
+      same-net pad solid directly (no spoke ladder), merging the sliver into
+      the pour on refill.
+
+    Each pass: (1) ``kicad-cli pcb drc --refill-zones --save-board`` refills
+    the zones (baking in the previous pass's overrides); (2) the optional
+    ``settle`` callback runs -- the foreign-pad clearance carve (#3711) -- so
+    the geometry checked includes the carve; (3) a read-only DRC reports the
+    flags against that settled geometry; (4) the ``starved_thermal`` pads are
+    stepped down the spoke ladder (solid as fallback), the ``isolated_copper``
+    anchoring pads are forced solid, and the result is saved.  Repeating lets a
+    pad whose thermal sliver the carve strands be remediated on the next pass.
+    Because the carve is reverted by the next refill, ``settle`` is re-applied
+    every pass and once more at the end so the shipped copper carries it.  A pass that finds nothing returns
+    early.  Any failure (kicad-cli missing, malformed report) is swallowed so the fill is
+    left as produced.
+
+    Args:
+        revisit_solid: Issue #8659.  Strip stale per-pad ``(zone_connect 2)``
+            overrides on two-pad parts and through-hole pins before pass 0, so
+            the loop re-decides each pad on measured geometry (relief where it
+            fits, solid again only where relief starves).  Forces pass 0 to
+            refill, overriding ``skip_first_refill``.
+        skip_first_refill: When ``True``, step (1) is skipped on the very
+            first pass only -- the caller asserts ``pcb_path`` is already a
+            freshly filled, saved board (Issue #5617), so pass 0's own
+            refill would be a byte-for-byte redundant kicad-cli launch.
+            Every later pass still refills unconditionally: once
+            ``force_solid_on_pads_by_uuid``/``save_pcb`` below mutate the
+            board, a real refill is required again.
+        time_left: Issue #6273.  Seconds the caller can still spend
+            (``None`` = unbounded).  A pass (refill + read-only DRC, about
+            two kicad-cli runs) or the closing refill is only started when
+            the time left covers its estimated cost; otherwise the board is
+            left as the last completed step wrote it.
+        refill_cost_estimate: Seconds of one KiCad refill of this board
+            (the caller's measured fill).  Measured passes replace it.
+
+    Returns:
+        Issue #8053: the read-only DRC report of the settled geometry when
+        that is exactly what is left on disk (so the caller can judge the
+        saved fill without another kicad-cli run), else ``None``.
+    """
+    try:
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import (
+            force_solid_on_isolated_island_pads,
+            force_solid_on_pads_by_uuid,
+            isolated_copper_zone_uuids,
+            revisit_solid_pad_overrides,
+            starved_thermal_pad_uuids,
+        )
+    except Exception:
+        return None
+
+    def _run_drc(refill: bool) -> dict | None:
+        return _kicad_drc_report(pcb_path, kicad_cli, refill=refill)
+
+    def _settle() -> None:
+        if settle is not None:
+            settle(pcb_path)
+
+    pass_costs: list[float] = []
+
+    def _affordable(kicad_runs: int) -> bool:
+        if time_left is None:
+            return True
+        left = time_left()
+        if left is None:
+            return True
+        estimate = max(pass_costs) if (kicad_runs == 2 and pass_costs) else 0.0
+        estimate = max(estimate, kicad_runs * refill_cost_estimate)
+        return left >= estimate * _REMEDIATION_DEADLINE_SAFETY
+
+    try:
+        if revisit_solid:
+            revisit_doc = parse_file(pcb_path)
+            if revisit_solid_pad_overrides(revisit_doc):
+                save_pcb(revisit_doc, pcb_path)
+            skip_first_refill = False  # overrides changed: pass 0 must refill
+        for pass_num in range(max_passes):
+            if not _affordable(2):
+                return None  # Issue #6273: out of --timeout budget; keep the fill.
+            pass_started = _monotonic()
+            # Refill the zones (bakes in prior overrides), then apply the
+            # foreign-pad carve so the DRC we read reflects the shipped copper.
+            # Issue #5617: pass 0's refill is skippable when the caller
+            # already guarantees a freshly filled, saved board on disk --
+            # see the ``skip_first_refill`` docstring above.
+            if not (skip_first_refill and pass_num == 0):
+                if _run_drc(refill=True) is None:
+                    return None
+            _settle()
+            report = _run_drc(refill=False)
+            if report is None:
+                return None
+            starved_pads = starved_thermal_pad_uuids(report)
+            isolated_zones = isolated_copper_zone_uuids(report)
+            if not starved_pads and not isolated_zones:
+                return report  # board is clean (carve already applied) -> done
+            doc = parse_file(pcb_path)
+            applied = force_solid_on_pads_by_uuid(doc, starved_pads)
+            applied += force_solid_on_isolated_island_pads(doc, isolated_zones)
+            if applied == 0:
+                # Flagged but nothing new to remediate -- the carve geometry
+                # is already on disk and we cannot improve it; stop here.
+                return report
+            save_pcb(doc, pcb_path)
+            pass_costs.append(_monotonic() - pass_started)
+            # Next pass refills (reverting the carve), re-applies it, re-checks.
+        # Pass budget exhausted with overrides still pending: do a final
+        # refill + carve so the shipped copper reflects both.
+        if _affordable(1) and _run_drc(refill=True) is not None:
+            _settle()
+        return None
+    except ModuleNotFoundError:
+        # shapely unavailable -> the carve/remediation is not clearance-
+        # correct (issue #3824).  Propagate loud rather than shipping a
+        # fill that silently omitted foreign-net clearances.
+        raise
+    except Exception:
+        # Never let remediation abort a successful fill.
+        return None
+
+
+def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict | None:
+    """Run DRC on ``pcb_path`` and return the parsed report (or ``None``).
+
+    ``refill`` adds ``--refill-zones --save-board`` so the run also refills
+    and persists the zones.  The default (all) severity is used so
+    ``isolated_copper`` *warnings* are visible alongside ``starved_thermal``
+    *errors*; ``--schematic-parity`` is omitted because the fill output may
+    lack a paired schematic.  The input net table is snapshotted and
+    restored around every invocation -- kicad-cli's ``--save-board`` can
+    strip the net declarations on kicad-tools-serialized boards, the same
+    quirk :func:`_run_fill_zones_via_drc` guards against -- so a refill
+    never drops the nets that segments/vias/pads depend on.
+    """
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
+
+    fd, report_name = tempfile.mkstemp(suffix=".json", prefix="thermal_drc_")
+    os.close(fd)
+    report_path = Path(report_name)
+    try:
+        cmd = [
+            str(kicad_cli),
+            "pcb",
+            "drc",
+            "--output",
+            str(report_path),
+            "--format",
+            "json",
+        ]
+        if refill and _kicad_drc_supports_refill(kicad_cli):
+            cmd.extend(["--refill-zones", "--save-board"])
+        cmd.append(str(pcb_path))
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+        # Issue #6724: a killed kicad-cli (negative status) or a missing,
+        # empty or truncated report is "no report", never an empty one.
+        if proc.returncode < 0:
+            return None
+        if not report_path.exists() or report_path.stat().st_size == 0:
+            return None
+        try:
+            parsed = json.loads(report_path.read_text())
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    finally:
+        report_path.unlink(missing_ok=True)
+
+
+def _normalize_pad_connection_in_place(pcb_path: Path) -> None:
+    """Apply the selective pad-connection policy in place (Issues #3727 / #3729).
+
+    Loads the PCB and runs :func:`normalize_zone_pad_connection` in its
+    default *selective* mode: zones keep thermal relief, while pads too small
+    to host the 2 spokes KiCad's DRC requires get the first narrower per-pad
+    ``(thermal_width W) (thermal_gap G)`` rung that fits (Issue #7295), or a
+    per-pad solid ``(zone_connect 2)`` override only when no rung fits.  Rewrites the file only when at
+    least one pad changed.  Any failure is swallowed so the fill is never aborted by
+    the normalization.
+    """
+    try:
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_file(pcb_path)
+        changed = normalize_zone_pad_connection(doc)
+        if changed:
+            save_pcb(doc, pcb_path)
+    except Exception:
+        # Never let normalization abort a fill.
+        return
+
+
+def _stage_normalized_pad_connection(pcb_path: Path) -> Path | None:
+    """Stage a selectively-connected copy of ``pcb_path`` for the fill (Issues #3727 / #3729).
+
+    Returns the path to a temp ``.kicad_pcb`` whose pads-that-cannot-host-2-spokes
+    have received a per-pad narrower-spoke override, or solid
+    ``(zone_connect 2)`` when no rung fits (selective policy, Issue #7295),
+    or ``None`` when no pad needed changing (so the caller can feed
+    the original file unchanged and skip a needless copy).  Any failure
+    returns ``None`` so the fill proceeds on the original board.
+    """
+    try:
+        import os
+
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_file(pcb_path)
+        if normalize_zone_pad_connection(doc) == 0:
+            return None
+        fd, tmp_name = tempfile.mkstemp(suffix=".kicad_pcb", prefix="zonenorm_")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        save_pcb(doc, tmp_path)
+        return tmp_path
+    except Exception:
+        return None
+
+
+def _apply_foreign_pad_clearance(pcb_path: Path) -> int:
+    """Carve foreign-net antipads out of every zone fill (Issue #3711).
+
+    Loads the filled PCB, applies the pure-Python clearance correction,
+    and rewrites the file only when at least one filled_polygon changed.
+    Returns the number of ``filled_polygon`` nodes it changed (Issue #8053).
+
+    A missing/broken ``shapely`` is propagated **loud** (it is a core
+    dependency — issue #3824): silently leaving the fill as kicad-cli
+    produced it would ship a board with uncarved foreign-net antipads and
+    real ``clearance_pad_zone`` shorts while reporting a clean fill.  Only
+    non-import geometry edge cases are swallowed so a degenerate ring never
+    aborts an otherwise successful fill.
+    """
+    from kicad_tools.core.sexp_file import save_pcb
+    from kicad_tools.sexp import parse_file
+    from kicad_tools.zones.fill_clearance import apply_foreign_pad_clearance
+
+    try:
+        doc = parse_file(pcb_path)
+        modified = apply_foreign_pad_clearance(doc)
+        if modified:
+            save_pcb(doc, pcb_path)
+        return modified
+    except ModuleNotFoundError:
+        # shapely unavailable -> the fill is NOT clearance-correct.  Never
+        # swallow this: surface it so the caller cannot mistake an uncarved
+        # fill for a clean one.
+        raise
+    except Exception:
+        # Non-import geometry edge case: never let it abort a successful fill.
+        return 0
+
+
+#: Issue #8053: the saved-fill measures the export gate compares against a
+#: refill (:func:`kicad_tools.drc.geometric.saved_fill_regressions`).
+_FILL_CONNECTIVITY_MEASURES: tuple[str, ...] = (
+    "unconnected_items",
+    "isolated_copper",
+    "copper_sliver",
+)
+
+#: Issue #8053: DRC findings that show KiCad's own fill too close to foreign
+#: copper -- the defect the #3711 carve exists to fix.
+_FOREIGN_CLEARANCE_TYPES: frozenset[str] = frozenset({"clearance", "hole_clearance"})
+
+
+def _fill_connectivity_counts(report: dict) -> dict[str, int]:
+    """Count the saved-fill connectivity measures in a kicad-cli DRC report."""
+    counts = dict.fromkeys(_FILL_CONNECTIVITY_MEASURES, 0)
+    counts["unconnected_items"] = len(report.get("unconnected_items") or [])
+    for v in report.get("violations") or []:
+        if not isinstance(v, dict):
+            continue
+        t = v.get("type")
+        if t in counts and t != "unconnected_items" and v.get("severity") != "ignore":
+            counts[t] += 1
+    return counts
+
+
+def _fill_regressions(carved: dict[str, int], uncarved: dict[str, int]) -> list[str]:
+    """One line per measure where the carved fill is worse than KiCad's."""
+    return [
+        f"{m}: {carved[m]} with the carve vs {uncarved[m]} on KiCad's fill"
+        for m in _FILL_CONNECTIVITY_MEASURES
+        if carved[m] > uncarved[m]
+    ]
+
+
+def _zone_identities(doc) -> dict[str, str]:
+    """Map every zone's UUID to a ``<net> on <layers>`` label."""
+    out: dict[str, str] = {}
+    for zone in doc.find_all("zone"):
+        uuid_node = zone.find("uuid")
+        uuid = uuid_node.get_string(0) if uuid_node is not None else None
+        if not uuid:
+            continue
+        net_name = zone.find("net_name")
+        net = net_name.get_string(0) if net_name is not None else None
+        if not net:
+            net_node = zone.find("net")
+            if net_node is not None:
+                net = net_node.get_string(1) or net_node.get_string(0)
+        layers_node = zone.find("layers")
+        if layers_node is None:
+            layers_node = zone.find("layer")
+        layers = "?"
+        if layers_node is not None:
+            layers = " ".join(str(a) for a in layers_node.get_atoms()) or "?"
+        out[str(uuid)] = f"zone {net or '?'} on {layers}"
+    return out
+
+
+def _foreign_clearance_conflicts(report: dict, zone_uuids: set[str]) -> dict[str, list[str]]:
+    """Zones KiCad's fill puts too close to foreign copper (Issue #8053).
+
+    Returns ``{zone_uuid: [description of each foreign item]}`` for every
+    ``clearance`` / ``hole_clearance`` finding between a zone and a non-zone
+    item (pad, via, track).  Zone-to-zone findings are left out: the carve
+    only clears pads and vias.
+    """
+    out: dict[str, list[str]] = {}
+    for v in report.get("violations") or []:
+        if not isinstance(v, dict) or v.get("type") not in _FOREIGN_CLEARANCE_TYPES:
+            continue
+        if v.get("severity") == "ignore":
+            continue
+        items = [i for i in v.get("items") or [] if isinstance(i, dict)]
+        zones = [i for i in items if i.get("uuid") in zone_uuids]
+        others = [i for i in items if i.get("uuid") not in zone_uuids]
+        if not zones or not others:
+            continue
+        for z in zones:
+            for o in others:
+                desc = str(o.get("description") or o.get("uuid") or "?")
+                bucket = out.setdefault(str(z["uuid"]), [])
+                if desc not in bucket:
+                    bucket.append(desc)
+    return out
+
+
+def _transplant_zone_fills(target_doc, source_doc, zone_uuids: set[str]) -> int:
+    """Copy ``source_doc``'s ``filled_polygon`` nodes into ``target_doc`` for ``zone_uuids``."""
+
+    def _by_uuid(doc) -> dict:
+        out = {}
+        for zone in doc.find_all("zone"):
+            u = zone.find("uuid")
+            if u is not None and u.get_string(0):
+                out[str(u.get_string(0))] = zone
+        return out
+
+    src = _by_uuid(source_doc)
+    moved = 0
+    for uuid, zone in _by_uuid(target_doc).items():
+        if uuid not in zone_uuids or uuid not in src:
+            continue
+        fills = [c for c in src[uuid].children if c.name == "filled_polygon"]
+        idx = next(
+            (i for i, c in enumerate(zone.children) if c.name == "filled_polygon"),
+            len(zone.children),
+        )
+        zone.children = [c for c in zone.children if c.name != "filled_polygon"]
+        zone.children[idx:idx] = fills
+        moved += 1
+    return moved
+
+
+def _verify_foreign_pad_carve(
+    pcb_path: Path,
+    kicad_cli: Path,
+    carved_report: dict | None = None,
+) -> tuple[list[str], list[str]]:
+    """Keep the #3711 carve only where it fixes a real clearance (Issue #8053).
+
+    The carve subtracts foreign-net antipads from KiCad's saved fill.  It is
+    more conservative than KiCad's filler, so where KiCad's fill already
+    clears foreign copper it fixes nothing and can still leave slivers or
+    cut the pour (chorus v25: ``copper_sliver`` 5 vs 0 on KiCad's own fill),
+    which ``kct export`` then refuses (#6078).  ``pcb_path`` holds the
+    carved fill on entry.
+
+    1. If the carved fill shows no unconnected item, ``isolated_copper`` or
+       ``copper_sliver``, keep it (one read-only DRC, reused from
+       remediation when ``carved_report`` is given).
+    2. Otherwise refill in place with KiCad (the un-carved fill).  If the
+       carved fill is no worse than that, restore the carve.
+    3. If it is worse and KiCad's fill has no zone-to-foreign-copper
+       clearance finding, keep KiCad's fill: the carve is rolled back.
+    4. Otherwise keep the carve only on the zones DRC names, and re-check.
+       If that still regresses, the carve is needed for clearance *and*
+       splits the pour: return one conflict line per such zone.
+
+    Returns ``(notes, conflicts)``.  Never raises except for a missing
+    shapely; any kicad-cli failure leaves the carved fill as it was.
+    """
+    from kicad_tools.core.sexp_file import save_pcb
+    from kicad_tools.sexp import parse_file, parse_string
+
+    try:
+        if carved_report is None:
+            carved_report = _kicad_drc_report(pcb_path, kicad_cli, refill=False)
+            if carved_report is None:
+                return [], []
+        carved = _fill_connectivity_counts(carved_report)
+        if not any(carved.values()):
+            return [], []
+
+        carved_text = pcb_path.read_text()
+        uncarved_report = _kicad_drc_report(pcb_path, kicad_cli, refill=True)
+        if uncarved_report is None:
+            pcb_path.write_text(carved_text)
+            return [], []
+        uncarved = _fill_connectivity_counts(uncarved_report)
+        regressions = _fill_regressions(carved, uncarved)
+        if not regressions:
+            pcb_path.write_text(carved_text)
+            return [], []
+
+        uncarved_doc = parse_file(pcb_path)
+        zones = _zone_identities(uncarved_doc)
+        needed = _foreign_clearance_conflicts(uncarved_report, set(zones))
+        why = "; ".join(regressions)
+        if not needed:
+            return [
+                "Foreign-pad clearance carve (#3711) rolled back: KiCad's fill already "
+                f"meets foreign-pad clearance and the carve split it ({why})."
+            ], []
+
+        carved_doc = parse_string(carved_text)
+        _transplant_zone_fills(uncarved_doc, carved_doc, set(needed))
+        save_pcb(uncarved_doc, pcb_path)
+        partial_report = _kicad_drc_report(pcb_path, kicad_cli, refill=False)
+        if partial_report is None:
+            return [], []
+        partial = _fill_connectivity_counts(partial_report)
+        kept = ", ".join(zones[u] for u in needed)
+        if not _fill_regressions(partial, uncarved):
+            note = (
+                f"Foreign-pad clearance carve (#3711) kept only on {kept}, where KiCad's "
+                f"fill violates foreign-pad clearance; rolled back elsewhere ({why})."
+            )
+            return [note], []
+        conflicts = [
+            f"{zones[u]}: KiCad's fill violates clearance to {', '.join(pads)}, "
+            f"and the carve that fixes it splits the pour"
+            for u, pads in needed.items()
+        ]
+        return [], conflicts
+    except ModuleNotFoundError:
+        raise
+    except Exception:
+        # Never let verification abort a successful fill.
+        return [], []
+
+
+def _run_fill_zones_native(
+    pcb_path: Path,
+    output_path: Path | None,
+    kicad_cli: Path,
+    timeout: float | None = None,
+) -> KiCadCLIResult:
+    """Fill zones using the native ``kicad-cli pcb fill-zones`` subcommand.
+
+    Snapshots net declarations and per-element net assignments before
+    running the external command, then restores them afterward — mirroring
+    the protection in :func:`_run_fill_zones_via_drc`.
+    """
+    # Snapshot net state before invoking kicad-cli.
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
+
+    cmd = [str(kicad_cli), "pcb", "fill-zones"]
+
+    if output_path is not None:
+        cmd.extend(["--output", str(output_path)])
+
+    cmd.append(str(pcb_path))
+
+    try:
+        # Issue #6273: ``timeout`` (seconds) bounds a caller on a hard
+        # deadline; an expiry surfaces as SubprocessError below.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+        expected_path = output_path if output_path is not None else pcb_path
+
+        if result.returncode == 0:
+            # Restore net declarations and per-element nets if kicad-cli
+            # rewrote them.  Guard on file existence since the output may
+            # be at a different path than the input.
+            if expected_path.exists():
+                _restore_net_declarations(expected_path, input_net_nodes, input_element_nets)
+
+            return KiCadCLIResult(
+                success=True,
+                output_path=expected_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        else:
+            return KiCadCLIResult(
+                success=False,
+                stdout=result.stdout,
+                stderr=result.stderr or "Zone fill failed",
+                return_code=result.returncode,
+            )
+
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
+
+
+#: Seconds the ``pcb drc --help`` capability probe may take.  Help output is
+#: instant; a stall means kicad-cli is wedged (#5877/#5932) and must not hold
+#: the caller past its own budget.
+_REFILL_PROBE_TIMEOUT_S = 30.0
+
+#: The option the ``--refill-zones`` probe looks for.
+REFILL_ZONES_OPTION = "--refill-zones"
+
+
+class _DrcRefillProbe:
+    """Does ``kicad-cli pcb drc`` support ``--refill-zones``?  (Issue #6724)
+
+    KiCad 10+ added explicit ``--refill-zones`` and ``--save-board`` flags.
+    Earlier versions (8, 9) always refill zones as part of DRC.
+
+    Memoised per ``kicad_cli`` path (Issue #5566): flag support cannot change
+    between calls in the same process, but the probe is otherwise re-run once
+    per :func:`_run_fill_zones_via_drc` call *and* once per
+    :func:`_remediate_starved_thermal` refill pass -- each an independent,
+    gated ``kicad-cli`` launch under ``KCT_NATIVE_MAX_CONCURRENCY``.
+
+    Only a *definitive* answer is cached: exit 0 with either the flag listed
+    or usage text that lacks it.  A killed, failed, timed-out or empty probe
+    answers ``False`` for that call but is not cached, and is recorded in
+    :meth:`inconclusive` so the geometric DRC gate can tell "this kicad-cli
+    has no ``--refill-zones``" from "we could not find out" (it passes the
+    flag in the latter case and lets kicad-cli's own ``Unknown argument``
+    rejection decide).
+    """
+
+    def __init__(self) -> None:
+        self._answers: dict[Path, bool] = {}
+        self._inconclusive: set[Path] = set()
+
+    def __call__(self, kicad_cli: Path) -> bool:
+        kicad_cli = Path(kicad_cli)
+        if kicad_cli in self._answers:
+            return self._answers[kicad_cli]
+        answer = self._probe(kicad_cli)
+        if answer is None:
+            self._inconclusive.add(kicad_cli)
+            return False
+        self._inconclusive.discard(kicad_cli)
+        self._answers[kicad_cli] = answer
+        return answer
+
+    def inconclusive(self, kicad_cli: Path) -> bool:
+        """True if the latest probe of ``kicad_cli`` gave no definitive answer."""
+        return Path(kicad_cli) in self._inconclusive
+
+    def record(self, kicad_cli: Path, supported: bool) -> None:
+        """Memoise a definitive answer learned elsewhere (e.g. a DRC run that
+        rejected ``--refill-zones`` with ``Unknown argument``)."""
+        kicad_cli = Path(kicad_cli)
+        self._inconclusive.discard(kicad_cli)
+        self._answers[kicad_cli] = supported
+
+    def cache_clear(self) -> None:
+        self._answers.clear()
+        self._inconclusive.clear()
+
+    @staticmethod
+    def _probe(kicad_cli: Path) -> bool | None:
+        try:
+            result = subprocess.run(
+                [str(kicad_cli), "pcb", "drc", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=_REFILL_PROBE_TIMEOUT_S,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        if "--refill-zones" in stdout:
+            return True
+        # Exit 0 without the flag only counts when it really was the help
+        # text: an empty or garbled reply says nothing about the flag.
+        if "Usage" in stdout or "--output" in stdout:
+            return False
+        return None
+
+
+_kicad_drc_supports_refill = _DrcRefillProbe()
+
+
+def _refill_probe_inconclusive(kicad_cli: Path) -> bool:
+    """True if the refill probe could not tell whether ``kicad_cli`` has the flag.
+
+    Tolerates a probe replaced by a plain callable (tests monkeypatch
+    ``_kicad_drc_supports_refill`` with lambdas): no ``inconclusive`` means
+    every answer is definitive.
+    """
+    inconclusive = getattr(_kicad_drc_supports_refill, "inconclusive", None)
+    return bool(callable(inconclusive) and inconclusive(Path(kicad_cli)))
+
+
+def run_kicad_drc_command(
+    build_cmd: Callable[[bool], list[str]],
+    kicad_cli: Path,
+    *,
+    refill_zones: bool,
+    timeout: float | None = None,
+    text: bool = False,
+) -> tuple["subprocess.CompletedProcess", bool]:
+    """Run a ``kicad-cli pcb drc`` command, with ``--refill-zones`` when possible.
+
+    ``build_cmd(refill)`` returns the argv, including ``--refill-zones`` iff
+    ``refill`` is true.  Returns ``(completed process, refilled)``.
+
+    Issue #6775: KiCad 8/9 reject ``--refill-zones`` (exit 1, ``Unknown
+    argument: --refill-zones``, no report).  The option is passed unless the
+    capability probe *definitively* said it is unsupported; when the probe's
+    answer is unknown (killed, timed out) the option is attempted and, if
+    kicad-cli rejects it, the run is retried once without it (and that
+    definitive answer is memoised).  Running without a requested refill is
+    logged as a WARNING, never silently.
+
+    ``timeout`` is the whole budget (probe + run + retry); a
+    :class:`subprocess.TimeoutExpired` propagates to the caller.
+    """
+    from kicad_tools.drc.geometric import KICAD_CLI_ERR_ARGS, unknown_argument
+
+    deadline = None if timeout is None else _monotonic() + timeout
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        return max(deadline - _monotonic(), 1.0)
+
+    use_refill = False
+    if refill_zones:
+        use_refill = bool(_kicad_drc_supports_refill(Path(kicad_cli)))
+        if not use_refill and _refill_probe_inconclusive(kicad_cli):
+            # Unknown is not "no": let kicad-cli's own parser decide.
+            use_refill = True
+    proc = subprocess.run(
+        build_cmd(use_refill),
+        capture_output=True,
+        text=text,
+        timeout=remaining(),
+        check=False,
+    )
+    if (
+        use_refill
+        and getattr(proc, "returncode", 0) == KICAD_CLI_ERR_ARGS
+        and unknown_argument(getattr(proc, "stdout", None), getattr(proc, "stderr", None))
+        == REFILL_ZONES_OPTION
+    ):
+        record = getattr(_kicad_drc_supports_refill, "record", None)
+        if callable(record):
+            record(Path(kicad_cli), False)
+        use_refill = False
+        proc = subprocess.run(
+            build_cmd(False),
+            capture_output=True,
+            text=text,
+            timeout=remaining(),
+            check=False,
+        )
+    if refill_zones and not use_refill:
+        logger.warning(
+            "kicad-cli %s does not support --refill-zones; DRC ran WITHOUT "
+            "--refill-zones, so zone fills are the ones saved in the board "
+            "file and may be stale",
+            kicad_cli,
+        )
+    return proc, use_refill
+
+
+def _snapshot_net_declarations(pcb_path: Path) -> list:
+    """Snapshot net declaration S-expression nodes from a PCB file.
+
+    Returns a list of ``(net N "name")`` SExp nodes extracted from the
+    PCB's top-level children.  These can be used later by
+    :func:`_restore_net_declarations` to repair a PCB whose net table
+    was stripped by kicad-cli.
+
+    Returns an empty list if the file cannot be read (e.g. it does not
+    exist).  In that scenario the subsequent DRC subprocess call will
+    also fail, so skipping the snapshot is harmless.
+    """
+    from kicad_tools.core.sexp_file import load_pcb
+
+    try:
+        sexp = load_pcb(str(pcb_path))
+    except Exception:
+        return []
+    return [child for child in sexp.children if child.name == "net"]
+
+
+def _get_fp_reference(fp_node) -> str:
+    """Extract the reference designator from a footprint S-expression node.
+
+    Checks both KiCad 8+ ``(property "Reference" "U1" ...)`` format and
+    KiCad 7 ``(fp_text reference "U1" ...)`` format.
+
+    Returns an empty string if no reference is found.
+    """
+    # KiCad 8+ format: (property "Reference" "U1" ...)
+    for child in fp_node.children:
+        if child.name == "property":
+            prop_name = child.get_string(0)
+            if prop_name == "Reference":
+                return child.get_string(1) or ""
+    # KiCad 7 format: (fp_text reference "U1" ...)
+    for child in fp_node.children:
+        if child.name == "fp_text":
+            text_type = child.get_string(0)
+            if text_type == "reference":
+                return child.get_string(1) or ""
+    return ""
+
+
+def _has_nonzero_net(net_node) -> bool:
+    """Check whether a ``(net ...)`` S-expression carries a real net assignment.
+
+    Returns True for:
+    - ``(net 1 "GND")`` — KiCad 8/9 format with nonzero net number
+    - ``(net "GND")`` — KiCad 10 format (name-only, no number)
+
+    Returns False for:
+    - ``(net 0)`` or ``(net 0 "")`` — unconnected pad
+    - None
+    """
+    if net_node is None:
+        return False
+    net_num = net_node.get_int(0)
+    if net_num is not None:
+        # Traditional format: (net N "name") — nonzero means connected
+        return net_num != 0
+    # KiCad 10 name-only format: (net "name") — presence of a name means connected
+    net_name = net_node.get_string(0)
+    return bool(net_name)
+
+
+def _has_canonical_net(net_node) -> bool:
+    """Check whether a ``(net ...)`` node is in canonical ``(net N ...)`` format.
+
+    Returns True only when the net has a numeric ID as its first child AND
+    the ID is nonzero.  Name-only format ``(net "name")`` — which kicad-cli
+    may emit as a corruption artefact — returns False so that the restore
+    logic will overwrite it with the snapshotted canonical form.
+
+    Returns True for:
+    - ``(net 1 "GND")`` — canonical format with nonzero net number
+    - ``(net 18)`` — numeric-only (valid, no name)
+
+    Returns False for:
+    - ``(net "SYNC_R")`` — name-only, missing numeric ID (corruption)
+    - ``(net "")`` — empty name-only (corruption)
+    - ``(net 0)`` or ``(net 0 "")`` — unconnected
+    - None
+    """
+    if net_node is None:
+        return False
+    net_num = net_node.get_int(0)
+    if net_num is not None:
+        return net_num != 0
+    # No numeric first child — this is name-only format, treat as needing restore
+    return False
+
+
+def _make_segment_via_key(child, *, precision: int = 4) -> str | None:
+    """Build a geometry-based key for a segment or via S-expression node.
+
+    Uses ``(start, end, layer)`` for segments and ``(position, size, layers)``
+    for vias, which are stable across kicad-cli UUID regeneration.
+
+    Coordinates are rounded to *precision* decimal places (default 4) so that
+    minor floating-point drift introduced by kicad-cli re-serialization still
+    produces identical keys.
+
+    Returns None if required geometry fields are missing.
+    """
+    if child.name == "segment":
+        start_node = child.get("start")
+        end_node = child.get("end")
+        layer_node = child.get("layer")
+        if start_node is None or end_node is None or layer_node is None:
+            return None
+        sx = round(start_node.get_float(0) or 0.0, precision)
+        sy = round(start_node.get_float(1) or 0.0, precision)
+        ex = round(end_node.get_float(0) or 0.0, precision)
+        ey = round(end_node.get_float(1) or 0.0, precision)
+        layer = layer_node.get_string(0) or ""
+        return f"seg:{sx},{sy}:{ex},{ey}:{layer}"
+    elif child.name == "via":
+        at_node = child.get("at")
+        size_node = child.get("size")
+        layers_node = child.get("layers")
+        if at_node is None or size_node is None:
+            return None
+        ax = round(at_node.get_float(0) or 0.0, precision)
+        ay = round(at_node.get_float(1) or 0.0, precision)
+        sz = round(size_node.get_float(0) or 0.0, precision)
+        layer_strs = []
+        if layers_node is not None:
+            for c in layers_node.children:
+                if c.is_atom and isinstance(c.value, str):
+                    layer_strs.append(c.value)
+        return f"via:{ax},{ay}:{sz}:{','.join(layer_strs)}"
+    return None
+
+
+def _get_element_uuid(child) -> str | None:
+    """Extract the UUID string from a segment or via S-expression node.
+
+    Returns the UUID value if a ``(uuid ...)`` child exists, else None.
+    """
+    uuid_node = child.get("uuid")
+    if uuid_node is None:
+        return None
+    return uuid_node.get_string(0)
+
+
+def _canonicalize_net_node(net_node, name_to_number: dict[str, int], *, numeric_only: bool = False):
+    """Canonicalize a ``(net ...)`` S-expression to canonical format.
+
+    KiCad 10 may emit inline net references as ``(net "name")`` without a
+    numeric ID.  If the node is in name-only format and the name appears in
+    *name_to_number*, return a corrected node.  Otherwise return the original
+    node unchanged.
+
+    Args:
+        net_node: The S-expression node to canonicalize.
+        name_to_number: Mapping from net name to net number.
+        numeric_only: When *True*, produce ``(net N)`` (required for
+            segments and vias in KiCad 9+).  When *False* (default),
+            produce ``(net N "name")`` (valid for pads and net
+            declarations).
+    """
+    from kicad_tools.sexp import SExp
+
+    if net_node is None:
+        return net_node
+    # Already has a numeric first value
+    if net_node.get_int(0) is not None:
+        # When numeric_only is requested, strip any trailing name string.
+        # kicad-cli DRC may rewrite (net N) → (net N "name") on segments;
+        # KiCad 9 rejects the dual-atom format on segments/vias.
+        if numeric_only and len(net_node.children) > 1:
+            return SExp.list("net", net_node.get_int(0))
+        return net_node
+    # Name-only format: (net "name")
+    net_name = net_node.get_string(0) or ""
+    if net_name and net_name in name_to_number:
+        num = name_to_number[net_name]
+        if numeric_only:
+            return SExp.list("net", num)
+        return SExp.list("net", num, net_name)
+    return net_node
+
+
+@dataclass
+class NetFormatReport:
+    """Result of :func:`validate_net_format`."""
+
+    valid: bool
+    """True when every checked element has canonical numeric net format."""
+    name_only_segments: int = 0
+    """Count of segments with name-only ``(net "name")`` format."""
+    name_only_vias: int = 0
+    """Count of vias with name-only ``(net "name")`` format."""
+    name_only_pads: int = 0
+    """Count of pads with name-only ``(net "name")`` format."""
+    empty_net_segments: int = 0
+    """Count of segments with empty ``(net "")`` format."""
+    empty_net_vias: int = 0
+    """Count of vias with empty ``(net "")`` format."""
+    empty_net_pads: int = 0
+    """Count of pads with empty ``(net "")`` format."""
+    name_only_dialect: bool = False
+    """True when the board has no numeric net id anywhere (issue #6989).
+
+    A KiCad-10 board can be written entirely in the name-only dialect --
+    ``(net "NAME")`` on every pad, segment and via, with no header net
+    table.  Such a board is not corrupt, so its name-only references are
+    not counted.  Empty ``(net "")`` references are still reported.
+    """
+
+    @property
+    def total_corrupt(self) -> int:
+        return (
+            self.name_only_segments
+            + self.name_only_vias
+            + self.name_only_pads
+            + self.empty_net_segments
+            + self.empty_net_vias
+            + self.empty_net_pads
+        )
+
+
+def validate_net_format(pcb_path: Path) -> NetFormatReport:
+    """Validate that all segments, vias, and pads have canonical numeric net format.
+
+    Canonical format is ``(net N)`` or ``(net N "name")`` where N is a nonzero
+    integer.  Name-only format ``(net "name")`` and empty-net ``(net "")`` on
+    elements that should be connected are flagged as corrupt.
+
+    Elements with ``(net 0)`` (unconnected pads) are not flagged — those are
+    legitimately unconnected.
+
+    Args:
+        pcb_path: Path to a ``.kicad_pcb`` file.
+
+    Returns:
+        A :class:`NetFormatReport` summarising any corruption found.
+    """
+    from kicad_tools.core.sexp_file import load_pcb
+
+    try:
+        sexp = load_pcb(str(pcb_path))
+    except Exception:
+        # If we can't load the file, report as valid — the caller will
+        # surface the load failure through other channels.
+        return NetFormatReport(valid=True)
+
+    report = NetFormatReport(valid=True)
+
+    # Issue #6989: name-only references are corruption only on a board that
+    # also uses numeric ids (a header table or numbered references).  A board
+    # with no numeric id anywhere is name-only by design (KiCad 10).
+    def _has_numeric_id(node) -> bool:
+        if node.name == "net" and node.get_int(0) is not None:
+            return True
+        return any(_has_numeric_id(c) for c in node.children if c.children)
+
+    name_only_dialect = not _has_numeric_id(sexp)
+    report.name_only_dialect = name_only_dialect
+
+    def _check_net_node(net_node, element_kind: str) -> None:
+        """Classify a ``(net ...)`` node and update *report* counters."""
+        if net_node is None:
+            return
+        net_num = net_node.get_int(0)
+        if net_num is not None:
+            # Has numeric ID — canonical (even if 0, that's just unconnected)
+            return
+        # Name-only or empty-string format
+        net_name = net_node.get_string(0)
+        if net_name and name_only_dialect:
+            # Name-only is the board's own dialect, not corruption (#6989).
+            return
+        if net_name:
+            # Name-only corruption: (net "SYNC_R")
+            if element_kind == "segment":
+                report.name_only_segments += 1
+            elif element_kind == "via":
+                report.name_only_vias += 1
+            elif element_kind == "pad":
+                report.name_only_pads += 1
+            report.valid = False
+        elif net_name == "":
+            # Empty-string corruption: (net "")
+            if element_kind == "segment":
+                report.empty_net_segments += 1
+            elif element_kind == "via":
+                report.empty_net_vias += 1
+            elif element_kind == "pad":
+                report.empty_net_pads += 1
+            report.valid = False
+
+    # Check top-level segments and vias
+    for child in sexp.children:
+        if child.name == "segment":
+            _check_net_node(child.get("net"), "segment")
+        elif child.name == "via":
+            _check_net_node(child.get("net"), "via")
+
+    # Check pads inside footprints
+    for fp_node in (c for c in sexp.children if _is_footprint_tag(c.name)):
+        for pad_node in (c for c in fp_node.children if c.name == "pad"):
+            _check_net_node(pad_node.get("net"), "pad")
+
+    return report
+
+
+def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
+    """Snapshot per-element inline ``(net ...)`` assignments from a PCB.
+
+    Captures the ``(net ...)`` child S-expression for every pad, segment,
+    and via, keyed by a stable identifier:
+
+    - **Pads**: keyed by ``"<reference>:<pad_number>"`` using the footprint's
+      reference designator, which is stable across kicad-cli UUID regeneration.
+    - **Segments/Vias (UUID)**: keyed by ``"uuid:<uuid>"`` when the element
+      carries a ``(uuid ...)`` node.  UUID-based keys are immune to coordinate
+      drift from DRC displacement (up to 0.5 mm for drill clearance repair).
+    - **Segments (geometry)**: keyed by ``"seg:<sx>,<sy>:<ex>,<ey>:<layer>"``.
+    - **Vias (geometry)**: keyed by ``"via:<x>,<y>:<size>:<layers>"``.
+
+    Both UUID and geometry keys are stored for each element so that the
+    restore pass can try UUID first (handles displacement) then fall back
+    to geometry (handles UUID regeneration by kicad-cli).
+
+    Net nodes are canonicalized to ``(net N "name")`` format using the PCB
+    header net declarations, so that restoring always writes the full format
+    even when the original used KiCad 10 name-only ``(net "name")`` syntax.
+
+    Returns a dict mapping key strings to a list ``[net_sexp_node]``
+    containing the (potentially canonicalized) ``(net ...)`` S-expression.
+    An empty dict is returned if the file cannot be read.
+    """
+    from kicad_tools.core.sexp_file import load_pcb
+    from kicad_tools.sexp import SExp
+
+    try:
+        sexp = load_pcb(str(pcb_path))
+    except Exception:
+        return {}
+
+    # Build name -> number lookup from header (net N "name") declarations
+    name_to_number: dict[str, int] = {}
+    for child in sexp.children:
+        if child.name == "net":
+            net_num = child.get_int(0)
+            net_name = child.get_string(1) or ""
+            if net_num is not None and net_num != 0 and net_name:
+                name_to_number[net_name] = net_num
+
+    snapshot: dict[str, list] = {}
+
+    # Snapshot pads inside footprints, keyed by reference + pad number
+    for fp_node in (c for c in sexp.children if _is_footprint_tag(c.name)):
+        fp_ref = _get_fp_reference(fp_node)
+        if not fp_ref:
+            continue
+
+        for pad_node in (c for c in fp_node.children if c.name == "pad"):
+            net_node = pad_node.get("net")
+            if not _has_nonzero_net(net_node):
+                continue
+            # Use the pad's first atom (its number) as sub-key
+            pad_number = pad_node.get_first_atom()
+            if pad_number is None:
+                continue
+            key = f"{fp_ref}:{pad_number}"
+            snapshot[key] = [_canonicalize_net_node(net_node, name_to_number)]
+
+    # Snapshot segments and vias at the top level, keyed by both UUID and
+    # geometry.  Include ALL segments/vias — even (net 0) — so that zone
+    # fill corruption to (net "") can be restored to the original net.
+    for child in sexp.children:
+        if child.name in ("segment", "via"):
+            net_node = child.get("net")
+            if _has_nonzero_net(net_node):
+                canonical = [_canonicalize_net_node(net_node, name_to_number, numeric_only=True)]
+            else:
+                # Preserve (net 0) assignment so restore can distinguish
+                # "originally unconnected" from "newly created by fill".
+                canonical = [SExp.list("net", 0)]
+
+            # Store under geometry key (handles UUID regeneration).
+            geo_key = _make_segment_via_key(child)
+            if geo_key:
+                snapshot[geo_key] = canonical
+
+            # Store under UUID key (handles coordinate displacement).
+            elem_uuid = _get_element_uuid(child)
+            if elem_uuid:
+                snapshot[f"uuid:{elem_uuid}"] = canonical
+
+    return snapshot
+
+
+def _fallback_restore_by_proximity(output_sexp, element_nets: dict[str, list]) -> bool:
+    """Second-pass restore for segments/vias still carrying ``(net "")``.
+
+    After the primary geometry-key restore, some elements may remain
+    unmatched due to coordinate drift exceeding the rounding tolerance or
+    new geometry created by kicad-cli during zone fill.
+
+    This function builds per-layer spatial indices from the *element_nets*
+    snapshot and assigns each remaining ``(net "")`` element the net of the
+    nearest snapshotted element on the same layer, provided the distance is
+    within a generous tolerance (0.5 mm -- matching the drill clearance max_displacement
+    and still well below typical minimum trace clearance of 0.15 mm+).
+
+    Returns True if any element was modified.
+    """
+    import math
+
+    PROXIMITY_THRESHOLD = 0.5  # mm — must cover drill clearance max_displacement (0.5 mm)
+
+    # Parse snapshot keys into spatial buckets by (element_type, layer_key).
+    # segment keys: "seg:sx,sy:ex,ey:layer"
+    # via keys:     "via:ax,ay:sz:layer1,layer2,..."
+    spatial_index: dict[tuple[str, str], list[tuple[float, float, float, float, list]]] = {}
+    for key, net_nodes in element_nets.items():
+        parts = key.split(":")
+        if len(parts) < 4:
+            continue
+        etype = parts[0]
+        if etype == "seg":
+            try:
+                sx, sy = float(parts[1].split(",")[0]), float(parts[1].split(",")[1])
+                ex, ey = float(parts[2].split(",")[0]), float(parts[2].split(",")[1])
+            except (ValueError, IndexError):
+                continue
+            layer_key = parts[3]
+            bucket = spatial_index.setdefault(("segment", layer_key), [])
+            bucket.append((sx, sy, ex, ey, net_nodes))
+        elif etype == "via":
+            try:
+                ax, ay = float(parts[1].split(",")[0]), float(parts[1].split(",")[1])
+            except (ValueError, IndexError):
+                continue
+            layer_key = parts[3]  # comma-joined layers string
+            bucket = spatial_index.setdefault(("via", layer_key), [])
+            bucket.append((ax, ay, 0.0, 0.0, net_nodes))
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        current_net = child.get("net")
+        if _has_canonical_net(current_net):
+            continue
+        # This element still has a bad net -- attempt proximity match.
+        if child.name == "segment":
+            start_node = child.get("start")
+            end_node = child.get("end")
+            layer_node = child.get("layer")
+            if start_node is None or end_node is None or layer_node is None:
+                continue
+            sx = start_node.get_float(0) or 0.0
+            sy = start_node.get_float(1) or 0.0
+            ex = end_node.get_float(0) or 0.0
+            ey = end_node.get_float(1) or 0.0
+            layer_key = layer_node.get_string(0) or ""
+            bucket = spatial_index.get(("segment", layer_key), [])
+            best_dist = PROXIMITY_THRESHOLD
+            best_net = None
+            for bsx, bsy, bex, bey, net_nodes in bucket:
+                # Use the worst (max) single-endpoint distance rather
+                # than the sum of both.  The combined metric is too
+                # restrictive: when zone fill shifts both endpoints
+                # slightly, the sum can exceed the threshold even though
+                # each individual shift is small.  Using max() ensures
+                # *both* endpoints are within the threshold individually.
+                start_dist = math.hypot(sx - bsx, sy - bsy)
+                end_dist = math.hypot(ex - bex, ey - bey)
+                dist = max(start_dist, end_dist)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_net = net_nodes
+        elif child.name == "via":
+            at_node = child.get("at")
+            if at_node is None:
+                continue
+            ax = at_node.get_float(0) or 0.0
+            ay = at_node.get_float(1) or 0.0
+            # Build the layers string to match the bucket key
+            layers_node = child.get("layers")
+            layer_strs = []
+            if layers_node is not None:
+                for c in layers_node.children:
+                    if c.is_atom and isinstance(c.value, str):
+                        layer_strs.append(c.value)
+            layer_key = ",".join(layer_strs)
+            bucket = spatial_index.get(("via", layer_key), [])
+            best_dist = PROXIMITY_THRESHOLD
+            best_net = None
+            for bax, bay, _, _, net_nodes in bucket:
+                dist = math.hypot(ax - bax, ay - bay)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_net = net_nodes
+        else:
+            continue
+
+        if best_net is not None:
+            if current_net is not None:
+                child.remove(current_net)
+            child.append(best_net[0])
+            changed = True
+
+    return changed
+
+
+def _assign_empty_nets_to_zero(output_sexp) -> bool:
+    """Replace remaining (net "") on segments/vias with (net 0).
+
+    After key-based and proximity-based restore passes, any segments or
+    vias still carrying (net "") are new geometry created by kicad-cli
+    zone fill that had no snapshot entry.  Rather than leaving the empty
+    string (which causes DRC errors), assign them (net 0) (the
+    unconnected net) — a valid KiCad net that will not trigger DRC
+    empty-net violations.
+
+    Returns True if any element was modified.
+    """
+    from kicad_tools.sexp import SExp
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        net_node = child.get("net")
+        if net_node is None:
+            continue
+        # Check for (net "") — empty string net
+        net_str = net_node.get_string(0)
+        if net_str is not None and net_str == "":
+            # Also check there is no numeric value (pure empty string)
+            if net_node.get_int(0) is None:
+                child.remove(net_node)
+                child.append(SExp.list("net", 0))
+                changed = True
+    return changed
+
+
+def _strip_dual_atom_nets(output_sexp) -> bool:
+    """Strip trailing name from ``(net N "name")`` on segments and vias.
+
+    KiCad 9 rejects dual-atom ``(net N "name")`` format on segments and
+    vias — it expects ``(net N)`` only.  kicad-cli DRC may rewrite nets
+    into dual-atom format.  This final pass ensures all segments/vias
+    have numeric-only net nodes.
+
+    Returns True if any element was modified.
+    """
+    from kicad_tools.sexp import SExp
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        net_node = child.get("net")
+        if net_node is None:
+            continue
+        net_num = net_node.get_int(0)
+        if net_num is not None and len(net_node.children) > 1:
+            child.remove(net_node)
+            child.append(SExp.list("net", net_num))
+            changed = True
+    return changed
+
+
+def _resolve_name_only_nets(output_sexp) -> bool:
+    """Resolve name-only ``(net "NAME")`` on segments/vias to ``(net N)``.
+
+    kicad-cli zone fill may create new segments or vias with name-only
+    net references like ``(net "GND")`` instead of ``(net 2)``.  These
+    won't match any snapshot entry, so the key-based and proximity
+    restore passes leave them untouched.
+
+    This pass builds a name→number lookup from the PCB's net declarations
+    and resolves any remaining name-only references.
+
+    Returns True if any element was modified.
+    """
+    from kicad_tools.sexp import SExp
+
+    # Build name → number mapping from header net declarations.
+    name_to_number: dict[str, int] = {}
+    for child in output_sexp.children:
+        if child.name == "net":
+            net_num = child.get_int(0)
+            net_name = child.get_string(1) or ""
+            if net_num is not None and net_num != 0 and net_name:
+                name_to_number[net_name] = net_num
+
+    if not name_to_number:
+        return False
+
+    changed = False
+    for child in output_sexp.children:
+        if child.name not in ("segment", "via"):
+            continue
+        net_node = child.get("net")
+        if net_node is None:
+            continue
+        # Skip if already has a numeric ID
+        if net_node.get_int(0) is not None:
+            continue
+        # Name-only format: (net "GND")
+        net_name = net_node.get_string(0)
+        if net_name and net_name in name_to_number:
+            child.remove(net_node)
+            child.append(SExp.list("net", name_to_number[net_name]))
+            changed = True
+    return changed
+
+
+def _restore_net_declarations(
+    target_pcb: Path,
+    net_nodes: list,
+    element_nets: dict[str, list] | None = None,
+) -> None:
+    """Restore net declarations and per-element net assignments in *target_pcb*.
+
+    kicad-cli may strip ``(net N "name")`` header declarations and/or
+    inline ``(net N)`` assignments inside pads, segments, and vias when
+    re-serializing a PCB.  This function restores both from snapshots
+    captured before the DRC run.
+
+    The net table restoration is a no-op when the output already has at
+    least as many net declarations as the snapshot.
+
+    The per-element restoration is a no-op when no element_nets snapshot
+    was provided or when no elements had their nets zeroed out.
+    """
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+
+    output_sexp = load_pcb(str(target_pcb))
+
+    modified = False
+
+    # --- Restore net table headers ---
+    output_net_nodes = [child for child in output_sexp.children if child.name == "net"]
+
+    if len(output_net_nodes) < len(net_nodes):
+        # Remove whatever net declarations remain in the output.
+        for node in output_net_nodes:
+            output_sexp.children.remove(node)
+
+        # Find insertion point: nets go after ``setup`` / ``title_block`` and
+        # before modern/legacy footprints, segments, vias, zones, or graphics.
+        insert_index = len(output_sexp.children)
+        content_tags = {
+            *FOOTPRINT_TAGS,
+            "segment",
+            "via",
+            "zone",
+            "gr_line",
+            "gr_arc",
+            "gr_text",
+            "gr_rect",
+            "gr_circle",
+            "gr_poly",
+        }
+        for i, child in enumerate(output_sexp.children):
+            if child.name in content_tags:
+                insert_index = i
+                break
+
+        for offset, net_node in enumerate(net_nodes):
+            output_sexp.children.insert(insert_index + offset, net_node)
+        modified = True
+
+    # --- Restore per-element inline net assignments ---
+    if element_nets:
+        # Restore pad nets inside footprints (keyed by reference:pad_number)
+        for fp_node in (c for c in output_sexp.children if _is_footprint_tag(c.name)):
+            fp_ref = _get_fp_reference(fp_node)
+            if not fp_ref:
+                continue
+
+            for pad_node in (c for c in fp_node.children if c.name == "pad"):
+                pad_number = pad_node.get_first_atom()
+                if pad_number is None:
+                    continue
+                key = f"{fp_ref}:{pad_number}"
+                if key not in element_nets:
+                    continue
+                current_net = pad_node.get("net")
+                if not _has_canonical_net(current_net):
+                    if current_net is not None:
+                        pad_node.remove(current_net)
+                    pad_node.append(element_nets[key][0])
+                    modified = True
+
+        # Restore segment and via nets at the top level.
+        # Try UUID-based key first (immune to coordinate displacement),
+        # then fall back to geometry-based key (handles UUID regeneration).
+        for child in output_sexp.children:
+            if child.name in ("segment", "via"):
+                current_net = child.get("net")
+                if _has_canonical_net(current_net):
+                    continue
+
+                # Try UUID-based lookup first.
+                snapshot_net = None
+                elem_uuid = _get_element_uuid(child)
+                if elem_uuid:
+                    uuid_key = f"uuid:{elem_uuid}"
+                    if uuid_key in element_nets:
+                        snapshot_net = element_nets[uuid_key]
+
+                # Fall back to geometry-based lookup.
+                if snapshot_net is None:
+                    geo_key = _make_segment_via_key(child)
+                    if geo_key and geo_key in element_nets:
+                        snapshot_net = element_nets[geo_key]
+
+                if snapshot_net is not None:
+                    if current_net is not None:
+                        child.remove(current_net)
+                    child.append(snapshot_net[0])
+                    modified = True
+
+        # --- Fallback pass for remaining unmatched (net "") elements ---
+        # After the primary key-based restore, some segments/vias may still
+        # have (net "") due to coordinate drift beyond the rounding threshold
+        # or geometry created by kicad-cli during fill.  Use spatial proximity
+        # to find the nearest snapshotted element on the same layer.
+        if _fallback_restore_by_proximity(output_sexp, element_nets):
+            modified = True
+
+        # --- Final pass: assign remaining (net "") to (net 0) ---
+        # After key-based restore and proximity fallback, any segments/vias
+        # still carrying (net "") are new geometry created by zone fill
+        # with no snapshot entry.  Assign them (net 0) (unconnected) to
+        # prevent DRC errors from empty-string net corruption.
+        if _assign_empty_nets_to_zero(output_sexp):
+            modified = True
+
+    # --- Resolve name-only (net "NAME") on segments/vias ---
+    # kicad-cli zone fill may create new segments/vias with name-only net
+    # references that have no snapshot entry.  Resolve them using the
+    # PCB's net declarations.
+    if _resolve_name_only_nets(output_sexp):
+        modified = True
+
+    # --- Strip dual-atom (net N "name") from segments/vias ---
+    # KiCad 9 rejects dual-atom format on segments/vias.  kicad-cli DRC
+    # may rewrite (net N) → (net N "name"); this pass ensures only (net N).
+    # Runs unconditionally (not just when element_nets is populated) since
+    # the corruption can also come from the router output or other tools.
+    if _strip_dual_atom_nets(output_sexp):
+        modified = True
+
+    if modified:
+        save_pcb(output_sexp, target_pcb)
+
+
+def _run_fill_zones_via_drc(
+    pcb_path: Path,
+    output_path: Path | None,
+    kicad_cli: Path,
+    timeout: float | None = None,
+) -> KiCadCLIResult:
+    """Fill zones by running ``kicad-cli pcb drc`` as a side-effect.
+
+    ``kicad-cli pcb drc`` fills all zones before performing design-rule
+    checks.  In KiCad 8/9 this happens automatically; in KiCad 10+ the
+    ``--refill-zones`` and ``--save-board`` flags must be passed explicitly.
+
+    A non-zero exit code caused by DRC *violations* does **not** indicate
+    a fill failure.
+
+    After a successful DRC run the output PCB's net declarations are
+    verified against the input.  If kicad-cli stripped the net table
+    (a known issue when the PCB was serialized by kicad-tools rather
+    than KiCad itself), the original net declarations are restored so
+    that segments and vias retain their net assignments.
+    """
+    import os
+
+    # Snapshot input net declarations and per-element net assignments
+    # *before* DRC runs — the DRC may modify the file in-place when
+    # no output_path is given.
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
+
+    # DRC modifies the input file in-place.  If the caller requested a
+    # separate output file, copy the source first and run DRC on the copy.
+    if output_path is not None:
+        shutil.copy2(pcb_path, output_path)
+        target_pcb = output_path
+    else:
+        target_pcb = pcb_path
+
+    # Create a temp file for the DRC report (we don't need it).
+    fd, drc_report_path = tempfile.mkstemp(suffix=".json", prefix="drc_fill_")
+    os.close(fd)
+    drc_report = Path(drc_report_path)
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "drc",
+        "--output",
+        str(drc_report),
+        "--format",
+        "json",
+    ]
+
+    # KiCad 10+ requires explicit flags to refill zones and persist changes.
+    refills = _kicad_drc_supports_refill(kicad_cli) is True
+    if refills:
+        cmd.extend(["--refill-zones", "--save-board"])
+
+    cmd.append(str(target_pcb))
+
+    # Issue #5934: drop the stale fills before KiCad loads the board.  See
+    # :func:`_strip_stale_zone_fills`.  Only when the run refills AND saves:
+    # a KiCad 8/9 DRC refills in memory but persists nothing, so stripping
+    # there would ship the board unfilled.
+    # Issue #6724: the board as it was before this run, so a kicad-cli killed
+    # mid ``--save-board`` cannot leave a truncated board behind.
+    try:
+        pre_run_bytes: bytes | None = target_pcb.read_bytes() if refills else None
+    except OSError:
+        pre_run_bytes = None
+    unfilled_backup = _strip_stale_zone_fills(target_pcb) if refills else None
+    # Issue #6023: the stripped board's bytes.  KiCad's --save-board always
+    # rewrites the file (with fresh fills), so a board still holding exactly
+    # these bytes after a run that produced a report was never saved.
+    stripped: bytes | None = None
+    stripped_mtime_ns: int | None = None
+    # Issue #6023: the stale fills are restored on EVERY path that does not
+    # end in a verified save -- including exceptions the handlers below do
+    # not name (PermissionError, KeyboardInterrupt, ...).
+    filled = False
+
+    try:
+        if unfilled_backup is not None:
+            # Inside the try so an OSError/Ctrl-C here still restores.
+            stripped = target_pcb.read_bytes()
+            stripped_mtime_ns = target_pcb.stat().st_mtime_ns
+        # Issue #6273: ``timeout`` bounds a caller on a hard deadline.  An
+        # expiry raises TimeoutExpired (a SubprocessError, handled below) and
+        # the ``finally`` restores the board's previous fills.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+        # DRC returns non-zero when there are violations, but the zones
+        # are still filled.  We treat it as success when the DRC report
+        # was actually produced (meaning the command ran to completion).
+        # Issue #6724: except after a signal kill (negative status, e.g. the
+        # OOM killer) -- the run did not complete, and its --save-board may
+        # not have either, so the ``finally`` restores the previous fills.
+        if result.returncode < 0:
+            from kicad_tools.drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stdout=result.stdout,
+                stderr=f"Zone fill via DRC failed — {describe_returncode(result.returncode)}",
+                return_code=result.returncode,
+            )
+        if drc_report.exists() and drc_report.stat().st_size > 0:
+            if stripped is not None and _board_unchanged(target_pcb, stripped, stripped_mtime_ns):
+                # The DRC ran (report written) but the board was not saved:
+                # without the restore it would ship with no fills at all.
+                return KiCadCLIResult(
+                    success=False,
+                    stdout=result.stdout,
+                    stderr=(
+                        "Zone fill via DRC failed — kicad-cli wrote the DRC report but did "
+                        "not save the refilled board"
+                        + (f": {result.stderr.strip()}" if result.stderr.strip() else "")
+                    ),
+                    return_code=result.returncode,
+                )
+            filled = True
+            # Restore net declarations and per-element net assignments
+            # if kicad-cli stripped them.
+            _restore_net_declarations(target_pcb, input_net_nodes, input_element_nets)
+
+            return KiCadCLIResult(
+                success=True,
+                output_path=target_pcb,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        else:
+            return KiCadCLIResult(
+                success=False,
+                stderr=result.stderr or "Zone fill via DRC failed — no report produced",
+                return_code=result.returncode,
+            )
+
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
+    finally:
+        if not filled:
+            if unfilled_backup is None and pre_run_bytes is not None:
+                # Issue #6724: no stale fills to restore below, but a kicad-cli
+                # killed (signal) or timed out mid ``--save-board`` may have
+                # left the board half-written: put back the pre-run bytes.
+                # A run that did not refill or save leaves them unchanged.
+                if not _board_unchanged(target_pcb, pre_run_bytes):
+                    with contextlib.suppress(OSError):
+                        target_pcb.write_bytes(pre_run_bytes)
+            _restore_stale_zone_fills(target_pcb, unfilled_backup)
+        # Clean up the temporary DRC report.
+        drc_report.unlink(missing_ok=True)
+
+
+def _board_unchanged(pcb_path: Path, expected: bytes, expected_mtime_ns: int | None = None) -> bool:
+    """Whether ``pcb_path`` still holds exactly ``expected`` (Issue #6023).
+
+    Bytes AND mtime must both match: KiCad's ``--save-board`` always rewrites
+    the file, so a changed mtime proves a save even if KiCad's output happens
+    to be byte-identical to the stripped board.
+
+    A file that cannot be read counts as changed: the caller only uses this
+    to detect a save that did not happen, and must not mistake an unreadable
+    board for an intact one.
+    """
+    try:
+        if pcb_path.read_bytes() != expected:
+            return False
+        if expected_mtime_ns is not None and pcb_path.stat().st_mtime_ns != expected_mtime_ns:
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def _strip_stale_zone_fills(pcb_path: Path) -> bytes | None:
+    """Remove every zone's ``filled_polygon`` before a KiCad refill (Issue #5934).
+
+    Returns the original bytes when the file changed (so a failed fill can
+    restore them with :func:`_restore_stale_zone_fills`), else ``None``.
+
+    ``kicad-cli pcb drc --refill-zones`` recomputes every fill, but it builds
+    its connectivity from the board *as loaded*, stale fills included.  When
+    copper was added since the last fill -- a stitch or link via that crosses
+    another net's plane -- the new item overlaps that net's stale fill, KiCad
+    sees one cluster holding two nets, and resolves the conflict in an
+    arbitrary (run-to-run varying) order.  Measured on board 03 (KiCad
+    10.0.1): a GND island-join via inside the stale VCC ``In2.Cu`` fill was
+    saved as ``(net "VCC")`` in 2 of 8 refills of one byte-identical file,
+    which also changed the GND pours by 0.43 mm^2 per layer.  With the stale
+    fills removed first, 8/8 refills were byte-identical and kept the via on
+    GND.  The fills are about to be recomputed, so nothing is lost.
+    """
+    try:
+        from kicad_tools.core.sexp_file import load_pcb, save_pcb
+
+        original = pcb_path.read_bytes()
+        if b"filled_polygon" not in original:
+            return None
+        doc = load_pcb(str(pcb_path))
+        removed = 0
+        for zone in (c for c in doc.children if c.name == "zone"):
+            for poly in [c for c in zone.children if c.name == "filled_polygon"]:
+                zone.children.remove(poly)
+                removed += 1
+        if not removed:
+            return None
+        save_pcb(doc, pcb_path)
+        return original
+    except Exception:
+        # Never block a fill over this; KiCad refills either way.
+        return None
+
+
+def _restore_stale_zone_fills(pcb_path: Path, original: bytes | None) -> None:
+    """Undo :func:`_strip_stale_zone_fills` after a fill that did not complete."""
+    if original is not None:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            pcb_path.write_bytes(original)
+
+
+def run_pcb_export_svg(
+    pcb_path: Path,
+    output_path: Path,
+    layers: list[str],
+    black_and_white: bool = False,
+    theme: str | None = None,
+    timeout: int = 120,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Export a 2D layer plot of a PCB to an SVG using ``kicad-cli pcb export svg``.
+
+    KiCad 10 removed the raster ``pcb export png`` subcommand entirely, so the
+    2D layer plots are produced as scalable SVGs instead (a better web format
+    for ``<img src>`` anyway). ``--mode-single`` writes the full output path as a
+    single file (avoiding the KiCad-9 deprecation warning that flips the default
+    to directory output); ``--page-size-mode 2`` and ``--fit-page-to-board`` keep
+    the plot trimmed to the board content.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file to plot.
+        output_path: Where to write the SVG.
+        layers: Layer names to render (e.g. ``["F.Cu", "F.Silkscreen", "Edge.Cuts"]``).
+        black_and_white: Render in black & white instead of color.
+        theme: Optional KiCad color theme name.
+        timeout: Subprocess timeout in seconds.
+        kicad_cli: Path to kicad-cli (auto-detected when not provided).
+
+    Returns:
+        KiCadCLIResult with success status and output path.
+    """
+    docker_workdir: Path | None = None
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            if docker_fallback_enabled() and shutil.which("docker"):
+                # Opt-in container fallback: mount the common parent of the
+                # input and output so both resolve inside the container.
+                docker_workdir = Path(
+                    os.path.commonpath(
+                        [str(pcb_path.resolve().parent), str(output_path.resolve().parent)]
+                    )
+                )
+            else:
+                return KiCadCLIResult(
+                    success=False,
+                    stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/"
+                    f" (or set {KICAD_DOCKER_ENV}=1 to use a container).",
+                )
+
+    def _arg(p: Path) -> str:
+        if docker_workdir is None:
+            return str(p)
+        return "/work/" + p.resolve().relative_to(docker_workdir).as_posix()
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "export",
+        "svg",
+        "--mode-single",
+        "--output",
+        _arg(output_path),
+        "--layers",
+        ",".join(layers),
+        "--page-size-mode",
+        "2",  # fit page to board content
+        "--fit-page-to-board",
+    ]
+
+    if black_and_white:
+        cmd.append("--black-and-white")
+    if theme:
+        cmd.extend(["--theme", theme])
+
+    cmd.append(_arg(pcb_path))
+    if docker_workdir is not None:
+        cmd = build_docker_kicad_cmd(cmd[1:], docker_workdir)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+        if result.returncode != 0:
+            # A killed kicad-cli (e.g. OOM, -9) can leave a truncated
+            # non-empty file behind; never report that as success.
+            from ..drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stderr=f"SVG export failed: {describe_returncode(result.returncode)}"
+                + (f": {result.stderr.strip()}" if result.stderr and result.stderr.strip() else ""),
+                return_code=result.returncode,
+            )
+        if output_path.exists() and output_path.stat().st_size > 0:
+            return KiCadCLIResult(
+                success=True,
+                output_path=output_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        return KiCadCLIResult(
+            success=False,
+            stderr=result.stderr or "SVG export produced no output",
+            return_code=result.returncode,
+        )
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.TimeoutExpired:
+        return KiCadCLIResult(success=False, stderr=f"SVG export timed out after {timeout} seconds")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to export SVG: {e}")
+
+
+# KiCad text-variable names used by footprint (model ...) references across
+# KiCad releases. Footprints embedded from a KiCad-N library reference
+# ${KICADn_3DMODEL_DIR}; a given kicad-cli only auto-resolves names it knows,
+# so renders of boards whose footprints came from a different KiCad release
+# need the missing names supplied (KiCad resolves them from the process
+# environment).
+KICAD_3DMODEL_ENV_VARS = (
+    "KICAD10_3DMODEL_DIR",
+    "KICAD9_3DMODEL_DIR",
+    "KICAD8_3DMODEL_DIR",
+    "KICAD7_3DMODEL_DIR",
+    "KICAD6_3DMODEL_DIR",
+)
+
+
+def find_kicad_3dmodel_dir(kicad_cli: Path | None = None) -> Path | None:
+    """Locate the KiCad 3D model library directory (``*.3dshapes`` parent).
+
+    Checks, in order:
+    1. ``KICADn_3DMODEL_DIR`` environment variables (newest first).
+    2. A directory derived from the ``kicad-cli`` location (macOS app
+       bundle ``Contents/SharedSupport/3dmodels``, or a sibling
+       ``share/kicad/3dmodels`` on Linux-style prefixes).
+    3. Common platform install locations.
+
+    Returns:
+        Path to the 3dmodels directory, or None if not found.
+    """
+    for var in KICAD_3DMODEL_ENV_VARS:
+        val = os.environ.get(var)
+        if val and Path(val).is_dir():
+            return Path(val)
+
+    candidates: list[Path] = []
+    if kicad_cli is not None:
+        kicad_cli = Path(kicad_cli)
+        # macOS bundle: .../KiCad.app/Contents/MacOS/kicad-cli
+        candidates.append(kicad_cli.parent.parent / "SharedSupport" / "3dmodels")
+        # Unix prefix: <prefix>/bin/kicad-cli -> <prefix>/share/kicad/3dmodels
+        candidates.append(kicad_cli.parent.parent / "share" / "kicad" / "3dmodels")
+
+    candidates += [
+        Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels"),
+        Path.home() / "Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels",
+        Path("/usr/share/kicad/3dmodels"),
+        Path("/usr/local/share/kicad/3dmodels"),
+        Path("/opt/homebrew/share/kicad/3dmodels"),
+    ]
+
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _render_env(kicad_cli: Path | None) -> dict[str, str] | None:
+    """Build a subprocess environment that resolves 3D model path variables.
+
+    Sets the ``KICADn_3DMODEL_DIR`` variables (when a KiCad model dir is found)
+    and ``KCT_LCSC_3D_DIR`` (the LCSC fetch-on-demand STEP cache) so committed
+    ``(model "${...}/...")`` refs resolve at render time.  Returns None (inherit
+    as-is) only when neither can be supplied.  Existing environment variables
+    are never overridden.
+    """
+    from kicad_tools.pcb.lcsc_models import DEFAULT_CACHE_ENV_VAR, lcsc_cache_dir
+
+    model_dir = find_kicad_3dmodel_dir(kicad_cli)
+    lcsc_dir = lcsc_cache_dir()
+    if model_dir is None and DEFAULT_CACHE_ENV_VAR in os.environ:
+        # Nothing to inject: KiCad libs absent and the LCSC var is already set.
+        return None
+    env = os.environ.copy()
+    if model_dir is not None:
+        for var in KICAD_3DMODEL_ENV_VARS:
+            env.setdefault(var, str(model_dir))
+    env.setdefault(DEFAULT_CACHE_ENV_VAR, str(lcsc_dir))
+    return env
+
+
+def _configured_model_variables(kicad_cli: Path | None) -> dict[str, str]:
+    """Read native Configure Paths values without changing KiCad settings.
+
+    KiCad stores these under environment.vars in the active minor version's
+    kicad_common.json. Process variables take precedence at the call site.
+    """
+    version = get_kicad_version(kicad_cli)
+    match = re.search(r"(\d+)\.(\d+)", version or "")
+    if match is None:
+        return {}
+    if override := os.environ.get("KICAD_CONFIG_HOME"):
+        root = Path(override)
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library/Preferences/kicad"
+    elif sys.platform == "win32":
+        root = Path(os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))) / "kicad"
+    else:
+        root = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "kicad"
+    config = root / f"{match[1]}.{match[2]}" / "kicad_common.json"
+    try:
+        data = json.loads(config.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("environment"), dict):
+        return {}
+    variables = data["environment"].get("vars", {})
+    if not isinstance(variables, dict):
+        return {}
+    return {key: value for key, value in variables.items() if isinstance(value, str)}
+
+
+def inspect_pcb_models(pcb_path: Path, kicad_cli: Path | None = None, report: Any = None) -> dict:
+    """Inspect enabled model references with the same environment as rendering.
+
+    This verifies file resolution only, not model geometry or electrical rules.
+    It never rewrites the PCB, substitutes models, or fetches missing resources.
+    The classification itself lives in :mod:`kicad_tools.pcb.model_audit`
+    (issue #7682); pass an already-computed *report* to avoid a second parse.
+    """
+    from kicad_tools.pcb.model_audit import audit_pcb_models
+
+    if report is None:
+        report = audit_pcb_models(pcb_path, env="host", kicad_cli=kicad_cli)
+    reasons = {
+        "unresolved_var": "unresolved path variable",
+        "dangling": "model file not found",
+        "lcsc_cache_miss": "model file not found",
+    }
+    unresolved: list[dict] = []
+    for reference, raw, klass, path in report.refs:
+        if klass not in reasons:
+            continue
+        reason = "empty model path" if not raw else reasons[klass]
+        unresolved.append(
+            {
+                "reference": reference,
+                "model": raw,
+                "resolved_path": path,
+                "reason": reason,
+            }
+        )
+    return {
+        "status": "failed" if unresolved else "passed",
+        "checked_models": len(report.refs),
+        "unresolved_models": unresolved,
+    }
+
+
+def run_pcb_render(
+    pcb_path: Path,
+    output_path: Path,
+    side: str = "front",
+    quality: str = "high",
+    timeout: int = 300,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Ray-trace a 3D render of a PCB to a PNG using ``kicad-cli pcb render``.
+
+    ``kicad-cli pcb render`` was added in KiCad 8.0.4 and requires a display
+    (or a virtual framebuffer such as ``xvfb-run`` on headless CI).
+
+    The logical ``"front"``/``"back"`` sides map to oblique 3/4 views of the
+    component (top) and solder (bottom) faces, not kicad-cli's native
+    ``front``/``back`` *edge* views (which look at the thin board edge and
+    render as a narrow sliver). Callers passing a native kicad-cli side
+    (``top``/``bottom``/``left``/``right``/``front``/``back``) directly get a
+    straight-on view with no auto-rotate.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file to render.
+        output_path: Where to write the PNG.
+        side: Camera side — ``"front"`` (oblique top/component view) or
+            ``"back"`` (oblique bottom/solder view). Native kicad-cli presets
+            (``top``/``bottom``/``left``/``right``/``front``/``back``) pass
+            through unchanged.
+        quality: Render quality preset (``basic``/``high``/``user``).
+        timeout: Subprocess timeout in seconds (ray-tracing is slow).
+        kicad_cli: Path to kicad-cli (auto-detected when not provided).
+
+    Returns:
+        KiCadCLIResult with success status and output path.
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8.0.4+ from https://www.kicad.org/download/",
+            )
+
+    # Translate logical side → kicad-cli side + oblique rotate. The component
+    # faces are kicad-cli's "top"/"bottom"; an oblique tilt about X gives a 3/4
+    # view instead of a straight-down shot — and avoids the edge-on sliver you
+    # get from kicad-cli's native "front"/"back" edge views.
+    _SIDE_MAP = {
+        "front": ("top", "-70,0,0"),
+        "back": ("bottom", "70,0,0"),
+    }
+    # Native kicad-cli sides (top/bottom/left/right/front/back) pass through with
+    # no auto-rotate; logical front/back get the oblique mapping above.
+    kicad_side, rotate = _SIDE_MAP.get(side, (side, None))
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "render",
+        "--output",
+        str(output_path),
+        "--side",
+        kicad_side,
+        "--quality",
+        quality,
+    ]
+    if rotate:
+        cmd += ["--rotate", rotate, "--perspective"]
+    cmd.append(str(pcb_path))
+
+    try:
+        # Supply KICADn_3DMODEL_DIR for all KiCad releases so footprint
+        # (model "${KICADn_3DMODEL_DIR}/...") references resolve even when
+        # they were embedded from a different KiCad version than the one
+        # rendering (kicad-cli only auto-resolves its own version's name).
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_render_env(kicad_cli),
+        )
+
+        if result.returncode != 0:
+            # A killed kicad-cli (e.g. OOM, -9) can leave a truncated
+            # non-empty file behind; never report that as success.
+            from ..drc.geometric import describe_returncode
+
+            return KiCadCLIResult(
+                success=False,
+                stderr=f"3D render failed: {describe_returncode(result.returncode)}"
+                + (f": {result.stderr.strip()}" if result.stderr and result.stderr.strip() else ""),
+                return_code=result.returncode,
+            )
+        if output_path.exists() and output_path.stat().st_size > 0:
+            return KiCadCLIResult(
+                success=True,
+                output_path=output_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        return KiCadCLIResult(
+            success=False,
+            stderr=result.stderr or "3D render produced no output",
+            return_code=result.returncode,
+        )
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.TimeoutExpired:
+        return KiCadCLIResult(success=False, stderr=f"3D render timed out after {timeout} seconds")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to render 3D: {e}")
+
+
+def get_kicad_version(kicad_cli: Path | None = None) -> str | None:
+    """Get KiCad version string.
+
+    Returns:
+        Version string like "8.0.6" or None if kicad-cli not found
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return None
+
+    try:
+        result = subprocess.run(
+            [str(kicad_cli), "version"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+
+    return None

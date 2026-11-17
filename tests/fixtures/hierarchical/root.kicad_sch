@@ -1,0 +1,137 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "root-uuid-0001")
+	(paper "A4")
+	(title_block
+		(title "Hierarchical Test Root")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+		(symbol "power:GND"
+			(symbol "GND_0_1"
+				(polyline (pts (xy 0 0) (xy 0 -1.27)) (stroke (width 0)) (fill (type none)))
+			)
+			(symbol "GND_1_1"
+				(pin power_in line (at 0 0 270) (length 0) (name "GND") (number "1"))
+			)
+		)
+		(symbol "power:VCC"
+			(symbol "VCC_0_1"
+				(polyline (pts (xy 0 0) (xy 0 2.54)) (stroke (width 0)) (fill (type none)))
+			)
+			(symbol "VCC_1_1"
+				(pin power_in line (at 0 0 90) (length 0) (name "VCC") (number "1"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "root-r1-uuid")
+		(property "Reference" "R1"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10k"
+			(at 102 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "root-r1-pin1"))
+		(pin "2" (uuid "root-r1-pin2"))
+	)
+	(symbol
+		(lib_id "power:VCC")
+		(at 100 40 0)
+		(unit 1)
+		(uuid "root-vcc-uuid")
+		(property "Reference" "#PWR01"
+			(at 100 44 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "VCC"
+			(at 100 36 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "root-vcc-pin1"))
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 100 60 0)
+		(unit 1)
+		(uuid "root-gnd-uuid")
+		(property "Reference" "#PWR02"
+			(at 100 66 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "GND"
+			(at 100 64 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "root-gnd-pin1"))
+	)
+	(wire (pts (xy 100 40) (xy 100 46.19))
+		(stroke (width 0) (type default))
+		(uuid "wire-vcc-r1")
+	)
+	(wire (pts (xy 100 53.81) (xy 100 60))
+		(stroke (width 0) (type default))
+		(uuid "wire-r1-gnd")
+	)
+	(global_label "DATA_BUS"
+		(shape bidirectional)
+		(at 120 50 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "root-gl-databus")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 120 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+	)
+	(sheet
+		(at 150 30) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-sub-a-uuid")
+		(property "Sheetname" "SubSheetA"
+			(at 150 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "sub_a.kicad_sch"
+			(at 150 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+	(sheet
+		(at 150 70) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-sub-b-uuid")
+		(property "Sheetname" "SubSheetB"
+			(at 150 69 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "sub_b.kicad_sch"
+			(at 150 101 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+)

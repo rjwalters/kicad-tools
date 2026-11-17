@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+# Routed-copper determinism smoke for a board's UNROUTED PCB (Issue #3799).
+#
+# Routes a board's committed unrouted ``output/<stem>.kicad_pcb`` N times
+# (default N=2) with the board's production ``kct route`` flags -- which
+# now include ``--deterministic-budget`` + ``--seed 42`` + a pinned
+# ``PYTHONHASHSEED=42`` -- and asserts that the UUID-normalized routed
+# COPPER (the ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` set) is
+# byte-identical across every run AND that the blocking-incomplete-net
+# COUNT (NetStatusAnalyzer.blocking_incomplete_count -- the same metric the
+# board CI gates enforce) is identical across every run (Issue #3894).
+#
+# WHY this exists (Issue #3799 root cause):
+#   ``--seed`` only seeds Python's global ``random``.  It does NOT control
+#   the per-net A* WALL-CLOCK cutoff (``--per-net-timeout``, default 30 s)
+#   checked inside the C++ A* loop.  On a loaded machine that budget fires
+#   mid-search and the net lands less copper -- SAME seed, DIFFERENT copper.
+#   ``--deterministic-budget`` (#3538) swaps the wall-clock cutoff for a
+#   fixed node-expansion ITERATION budget, so the abort point is
+#   machine-independent and the seed-42 route is reproducible.  This smoke
+#   is the regression gate proving boards 02/03/04 stay reproducible.
+#
+# Usage:
+#   ./scripts/ci/board_route_determinism_smoke.sh <board-number> [runs]
+#   ./scripts/ci/board_route_determinism_smoke.sh --normalize-copper <pcb>
+#
+# Examples:
+#   ./scripts/ci/board_route_determinism_smoke.sh 02        # 2 runs
+#   ./scripts/ci/board_route_determinism_smoke.sh 04 3      # 3 runs
+#
+# ``--normalize-copper <pcb>`` prints the normalized copper for ONE already-
+# routed PCB and exits -- the exact code path the determinism loop below
+# compares.  It exists so the normalizer can be exercised directly, without
+# routing a board (Issue #5580); ``tests/test_ci_normalize_copper.py`` is the
+# positive control that mutates one copper coordinate through this hook and
+# asserts the output changes.
+#
+# Supported boards: 02 (charlieplex-led), 03 (usb-joystick),
+# 04 (stm32-devboard).  Each board's flag set mirrors the ``kct route`` argv
+# in its ``boards/<dir>/{generate_,}design.py:route_pcb()``.  KEEP THE FLAG
+# LISTS BELOW IN SYNC with the recipes.
+#
+# NOTE (issue #3894): board 05 is NOT covered by this strict route-twice
+# determinism gate.  #3887 briefly added a board-05 case on a deterministic
+# per-net ITERATION budget, but #3894 REVERTED board 05 to its pre-#3887
+# wall-clock recipe (``--per-net-timeout 60``): the iteration budget did less
+# total routing work than the wall-clock outer rip-up/reroute loop and
+# REGRESSED reach (12-15 blocking vs the historical 9-10), and was never
+# actually byte-deterministic.  Board 05's wall-clock re-route is inherently
+# nondeterministic run-to-run, so it would FAIL this strict copper/count
+# assertion; genuine board-05 routing determinism is deferred to
+# #3775 / #3766 / #3829.  The count-stability assertion below still guards
+# the boards that ARE deterministic (02/03/04).
+#
+# NOTE (Issue #5587): this smoke wants a reasonably QUIET host.  Boards 02
+# and 04 were observed to FAIL non-deterministically on a loaded host (load
+# average 6-11 on an 8-core machine) even with ``--deterministic-budget``
+# active, because the OUTER ``--timeout`` stage deadline is still
+# wall-clock and can fire inconsistently between runs (see the per-board
+# ``--timeout`` comments below).  This script is NOT wired into any GitHub
+# workflow -- it is a manual/local gate cited in PR reviews -- so a FAIL
+# here should be cross-checked against host load before being treated as a
+# genuine router regression.  A pre-flight load check below prints a
+# WARNING (not a skip -- a false skip could just as easily hide a real
+# regression) when the 1-minute load average per core looks contended.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Normalize routed copper to the SORTED SET of whole, paren-balanced
+# ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` nodes -- geometry, width,
+# layer and net included; ``uuid`` / ``tstamp`` children stripped (they are
+# deterministic per-seed, but stripped defensively so a regression in that
+# toggle cannot masquerade as a copper divergence); zone pour fills excluded
+# (#5578).  Sorted, so element WRITE ORDER in the file does not matter --
+# only the multiset of copper geometry.  One record per line, so the ``diff``
+# below is readable per element.
+#
+# Issue #5580: this used to be a ``grep -E '^[[:space:]]*\((segment|via|arc)'``
+# over the raw file.  This repo writes copper as MULTI-LINE s-expressions, so
+# that grep kept only the bare ``(segment`` / ``(via`` HEADER lines and threw
+# away every ``(start ...)`` / ``(end ...)`` / ``(width ...)`` /
+# ``(layer ...)`` / ``(net ...)`` child.  Its output was one line per copper
+# element drawn from a handful of IDENTICAL strings -- on board 03, 1793 lines
+# holding 3 distinct values (measured 2026-09-19 at 0c261d41; #5580 measured
+# 1913 lines = 1872 segments + 41 vias on an earlier route).  The copper
+# assertion had silently degenerated into ``segment_count == segment_count &&
+# via_count == via_count`` and would have passed two completely different
+# routes.  The helper below compares whole nodes; it exits non-zero on a parse
+# failure or when a PCB contains NO copper at all (two empty normalizations
+# would otherwise compare equal and report determinism never measured).
+normalize_copper() {
+  uv run python "${REPO_ROOT}/scripts/ci/normalize_copper.py" "$1"
+}
+
+# Self-test / introspection hook (Issue #5580): normalize ONE routed PCB and
+# exit.  Keep this delegating to normalize_copper() above so the tested code
+# path is the same one the determinism loop runs.
+if [[ "${1:-}" == "--normalize-copper" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    echo "ERROR: --normalize-copper requires a .kicad_pcb path" >&2
+    echo "Usage: $0 --normalize-copper <pcb>" >&2
+    exit 1
+  fi
+  normalize_copper "$2"
+  exit 0
+fi
+
+BOARD="${1:-}"
+N="${2:-2}"
+
+if [[ -z "${BOARD}" ]]; then
+  echo "ERROR: board number required (02, 03, or 04)" >&2
+  echo "Usage: $0 <board-number> [runs]" >&2
+  exit 1
+fi
+
+# Per-board configuration: directory, unrouted-PCB stem, and the exact
+# ``kct route`` flag list from generate_design.py:route_pcb().  These flag
+# lists are the load-bearing part of the test -- they MUST mirror the
+# recipe so the smoke routes the SAME copper the production recipe emits.
+case "${BOARD}" in
+  02)
+    BOARD_DIR="boards/02-charlieplex-led"
+    STEM="charlieplex_3x3"
+    # Issue #5587: this list had drifted from generate_design.py:route_pcb()
+    # since the smoke script's introduction (#3800) -- it was missing
+    # --no-auto-pour / --no-auto-layers / --grid 0.1 and carried a stale
+    # --skip-nets GND that the recipe dropped when board 02 moved to
+    # "Revision B" (routing both power rails explicitly).  With the drift,
+    # this smoke exercised --auto-layers' layer-escalation mode (which
+    # subdivides --timeout across per-attempt stage budgets) instead of the
+    # single negotiated call the recipe actually runs -- the real source of
+    # the observed ~60s stage-timeout host-load sensitivity.  Corrected to
+    # mirror the recipe byte-for-byte (also enforced by
+    # tests/router/test_board_route_determinism.py's
+    # test_board02_determinism_uses_actual_recipe_command AST check, which
+    # this script's flags were never covered by).  --timeout raised
+    # 240 -> 900: even with the correct flags, 240s can still fire on a
+    # contended host before the negotiated loop's own best-stall-patience
+    # early-stop does.
+    ROUTE_FLAGS=(
+      --strategy negotiated
+      --iterations 30
+      --deterministic-budget
+      --timeout 900
+      --seed 42
+      --no-auto-pour
+      --no-auto-layers
+      --grid 0.1
+      --manufacturer jlcpcb
+    )
+    ;;
+  03)
+    BOARD_DIR="boards/03-usb-joystick"
+    STEM="usb_joystick"
+    ROUTE_FLAGS=(
+      --seed 42
+      --manufacturer jlcpcb-tier1
+      --backend cpp
+      --deterministic-budget
+      --timeout 600
+      # Issue #6829: route with the committed map so USB_D resolves USB2_FS
+      # rather than the generic 0.5 mm skew default.
+      --net-class-map boards/03-usb-joystick/output/net_class_map.json
+    )
+    ;;
+  04)
+    BOARD_DIR="boards/04-stm32-devboard"
+    STEM="stm32_devboard"
+    # Issue #5587: this list had drifted from generate_design.py:route_pcb()
+    # the same way board 02's did above -- it carried --auto-layers /
+    # --auto-mfr-tier / --micro-via-in-pad-fallback (not in the recipe) and
+    # was missing --no-auto-layers / --layers 2 / --grid 0.05 / --via-drill
+    # 0.15 / --via-diameter 0.30 / --no-cache.  Corrected to mirror the
+    # recipe byte-for-byte.  Note: fixing the mirror does NOT make this
+    # board immune to the C++-pathfinder-give-up-then-slow-Python-fallback
+    # failure mode (Issue #5599) -- that reproduces under the corrected
+    # flags too, since it is a router defect, not a smoke-script bug.
+    # --timeout is left at 600 (unchanged, matches the recipe); see #5599
+    # before raising it further.
+    ROUTE_FLAGS=(
+      --mfr jlcpcb-tier1
+      --auto-fix
+      --no-auto-layers
+      --layers 2
+      --grid 0.05
+      --via-drill 0.15
+      --via-diameter 0.30
+      --placement-feedback
+      --no-cache
+      --seed 42
+      --deterministic-budget
+      --timeout 600
+    )
+    ;;
+  *)
+    echo "ERROR: unsupported board '${BOARD}' (supported: 02, 03, 04)" >&2
+    echo "       Board 05 is intentionally excluded (Issue #3894): its" >&2
+    echo "       wall-clock re-route is nondeterministic run-to-run." >&2
+    exit 1
+    ;;
+esac
+
+INPUT="${REPO_ROOT}/${BOARD_DIR}/output/${STEM}.kicad_pcb"
+OUT_DIR="${BOARD_ROUTE_DETERMINISM_OUT:-/tmp/board-route-determinism-${BOARD}}"
+
+if [[ ! -f "${INPUT}" ]]; then
+  echo "ERROR: unrouted PCB not found at ${INPUT}" >&2
+  echo "       Run the board recipe once to generate it." >&2
+  exit 1
+fi
+
+mkdir -p "${OUT_DIR}"
+rm -f "${OUT_DIR}"/run-*.kicad_pcb "${OUT_DIR}"/run-*.norm "${OUT_DIR}"/run-*.log
+
+# Pin PYTHONHASHSEED for the child route processes -- mirrors the recipe's
+# own pinning (#3799) so dict/set string-iteration entropy can never
+# re-enter, matching board-07's convention.
+export PYTHONHASHSEED="${PYTHONHASHSEED:-42}"
+
+# Pre-flight host-load check (Issue #5587).  --deterministic-budget removes
+# the PER-NET wall-clock A* cutoff, but the OUTER --timeout stage deadline
+# is still wall-clock -- on a contended host it can fire inconsistently
+# between runs even with an identical seed, producing a copper/count
+# mismatch that looks like a genuine determinism regression but is really
+# host contention.  This is advisory only: it WARNS loudly (so a FAIL below
+# is correctly attributed) rather than silently skipping, because skipping
+# on a hunch could just as easily mask a real regression.  Override the
+# warning threshold with BOARD_ROUTE_DETERMINISM_LOAD_WARN (per-core 1-
+# minute load average; default 1.5).
+report_host_load() {
+  local cores load1 ratio threshold
+  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 0)"
+  load1="$(uptime 2>/dev/null | sed -n 's/.*load average[s]*: *\([0-9.]*\).*/\1/p')"
+  threshold="${BOARD_ROUTE_DETERMINISM_LOAD_WARN:-1.5}"
+
+  if [[ -z "${load1}" || -z "${cores}" || "${cores}" -le 0 ]]; then
+    echo "    Host load:      (unavailable -- cannot pre-flight check contention)"
+    return
+  fi
+
+  ratio="$(awk -v l="${load1}" -v c="${cores}" 'BEGIN { printf "%.2f", l / c }')"
+  echo "    Host load:      ${load1} (1m avg) / ${cores} cores = ${ratio} per-core"
+
+  if awk -v r="${ratio}" -v t="${threshold}" 'BEGIN { exit !(r > t) }'; then
+    echo
+    echo "    ⚠ WARNING: host load (${ratio} per-core) exceeds ${threshold}."
+    echo "      --deterministic-budget removes the per-net wall-clock A*"
+    echo "      cutoff, but the OUTER --timeout stage deadline is still"
+    echo "      wall-clock and CAN fire inconsistently on a contended host"
+    echo "      (Issue #5587).  A FAIL below may be host contention, not a"
+    echo "      genuine determinism regression -- re-run on a quiet host"
+    echo "      (or after other local agents/builds finish) before filing a"
+    echo "      router bug.  Raise the threshold with"
+    echo "      BOARD_ROUTE_DETERMINISM_LOAD_WARN=<n> if this host is"
+    echo "      expected to run busy."
+    echo
+  fi
+}
+
+echo "==> Board ${BOARD} routed-copper determinism smoke (Issue #3799)"
+echo "    Input:          ${INPUT}"
+echo "    Runs:           ${N}"
+echo "    Flags:          ${ROUTE_FLAGS[*]}"
+echo "    PYTHONHASHSEED: ${PYTHONHASHSEED}"
+echo "    Output dir:     ${OUT_DIR}"
+report_host_load
+echo
+
+# Issue #3894: blocking-incomplete-net count for a routed PCB, via the same
+# NetStatusAnalyzer.blocking_incomplete_count metric the board CI gates and
+# the DRC gate enforce.  The determinism contract is extended from "byte-
+# identical copper" to "identical blocking COUNT": the count is the metric the
+# gates actually enforce, so asserting it is stable run-to-run guards against a
+# regression that varies the count even when copper looks similar.  This guards
+# the deterministic boards (02/03/04); board 05 is intentionally NOT run here
+# because its wall-clock recipe is nondeterministic (see the case block /
+# header note).  Prints just the integer on stdout (empty on analysis failure,
+# which the caller treats as a tool error).
+blocking_count() {
+  uv run python - "$1" <<'PY' 2>/dev/null || true
+import sys
+from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+try:
+    result = NetStatusAnalyzer(sys.argv[1]).analyze()
+except Exception:
+    sys.exit(1)
+print(result.blocking_incomplete_count)
+PY
+}
+
+prev_norm=""
+prev_count=""
+for ((i = 1; i <= N; i++)); do
+  pcb="${OUT_DIR}/run-${i}.kicad_pcb"
+  log="${OUT_DIR}/run-${i}.log"
+  norm="${OUT_DIR}/run-${i}.norm"
+
+  echo "==> Run ${i}/${N}..."
+  start_s=$(date +%s)
+  # ``kct route`` exits non-zero on partial routing (codes 2/3); the routed
+  # PCB is still written, so we tolerate a non-zero exit and let the copper
+  # comparison be the gate.  Fatal codes (1 crash / 5 SIGINT) surface as an
+  # empty / missing output, which the existence check below catches.
+  PYTHONHASHSEED="${PYTHONHASHSEED}" uv run kct route "${INPUT}" \
+    --output "${pcb}" "${ROUTE_FLAGS[@]}" >"${log}" 2>&1 || true
+  end_s=$(date +%s)
+
+  if [[ ! -s "${pcb}" ]]; then
+    echo "FAIL: run ${i} produced no routed PCB (see ${log})" >&2
+    tail -20 "${log}" >&2 || true
+    exit 2
+  fi
+
+  # A non-zero exit here is a TOOL error (unparseable PCB, or a PCB with no
+  # copper at all) -- never silently accept it, because an empty/partial
+  # normalization would compare equal to the next one and report determinism
+  # that was never measured (Issue #5580).
+  if ! normalize_copper "${pcb}" >"${norm}"; then
+    echo "FAIL: run ${i} routed copper could not be normalized (see above)." >&2
+    echo "      PCB preserved at ${pcb}." >&2
+    exit 2
+  fi
+  count="$(blocking_count "${pcb}")"
+  echo "  Elapsed:         $((end_s - start_s))s"
+  echo "  Copper elements: $(wc -l <"${norm}")"
+  echo "  Blocking nets:   ${count:-<analysis failed>}"
+
+  if [[ -z "${count}" ]]; then
+    echo "FAIL: run ${i} blocking-net analysis failed (NetStatusAnalyzer)." >&2
+    echo "      See ${log} for the route log." >&2
+    exit 2
+  fi
+
+  if [[ -n "${prev_norm}" ]]; then
+    if ! diff -q "${prev_norm}" "${norm}" >/dev/null; then
+      echo
+      echo "FAIL: run ${i} routed copper differs from the prior run."
+      echo "      Same board + --seed 42 + --deterministic-budget +"
+      echo "      PYTHONHASHSEED=42 produced DIFFERENT copper -- the"
+      echo "      determinism guarantee regressed (Issue #3799)."
+      echo "      Normalized copper diff (first 40 lines):"
+      diff "${prev_norm}" "${norm}" | head -40
+      echo "      PCBs preserved in ${OUT_DIR} for post-mortem."
+      exit 3
+    fi
+    # Issue #3894: extend the determinism contract from copper to the
+    # blocking COUNT.  (Within one run/machine this is implied by the copper
+    # diff above; the explicit assertion documents the metric and guards
+    # against a future change that varies the count without varying copper.)
+    if [[ "${count}" != "${prev_count}" ]]; then
+      echo
+      echo "FAIL: run ${i} blocking-net COUNT (${count}) differs from the"
+      echo "      prior run (${prev_count}).  Same board + deterministic"
+      echo "      budget produced a DIFFERENT blocking count -- the count-"
+      echo "      determinism guarantee regressed (Issue #3894)."
+      echo "      PCBs preserved in ${OUT_DIR} for post-mortem."
+      exit 3
+    fi
+  fi
+  prev_norm="${norm}"
+  prev_count="${count}"
+done
+
+echo
+echo "PASS: board ${BOARD} routed byte-identical copper AND a stable"
+echo "      blocking-net count (${prev_count}) across ${N} runs."

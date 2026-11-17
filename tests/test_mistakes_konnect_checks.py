@@ -1,0 +1,583 @@
+"""Tests for the Konnect design-review audit-parity checks (issue #4899).
+
+Covers the four net-new ``MistakeCheck`` implementations added for parity
+with Konnect's ``audit_decoupling`` / ``audit_connections`` /
+``check_bom_health`` rule categories, plus the #4011-style
+``CheckIncomplete`` coverage-honesty discipline added to
+``MistakeDetector``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.explain.checks import connectivity
+from kicad_tools.explain.checks.bom_health import BomFieldHealthCheck
+from kicad_tools.explain.checks.connectivity import (
+    LedSeriesResistorCheck,
+    PullUpResistorCheck,
+)
+from kicad_tools.explain.checks.decoupling import MissingDecouplingCapCheck
+from kicad_tools.explain.mistakes import (
+    CheckIncomplete,
+    MistakeCategory,
+    MistakeDetector,
+    get_default_checks,
+)
+from kicad_tools.schema.pcb import PCB
+
+_HEADER = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+"""
+
+_FOOTER = ")\n"
+
+
+def _load_pcb(tmp_path: Path, body: str) -> PCB:
+    """Write a minimal PCB (header + body) to *tmp_path* and load it."""
+    pcb_file = tmp_path / "board.kicad_pcb"
+    pcb_file.write_text(_HEADER + body + _FOOTER)
+    return PCB.load(str(pcb_file))
+
+
+# ---------------------------------------------------------------------------
+# MissingDecouplingCapCheck
+# ---------------------------------------------------------------------------
+
+
+_IC_NO_CAP = """
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG")
+  (net 4 "SIG2")
+
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "U1")
+    (property "Value" "MCU")
+    (pad "1" smd rect (at -2 0) (size 1 1) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 2 "GND"))
+    (pad "3" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 3 "SIG"))
+    (pad "4" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 4 "SIG2"))
+  )
+"""
+
+_IC_WITH_CAP = (
+    _IC_NO_CAP
+    + """
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (at 12 10)
+    (property "Reference" "C1")
+    (property "Value" "100nF")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+"""
+)
+
+
+def test_missing_decoupling_cap_flags_ic_with_no_cap(tmp_path: Path) -> None:
+    pcb = _load_pcb(tmp_path, _IC_NO_CAP)
+    mistakes = MissingDecouplingCapCheck().check(pcb)
+    assert len(mistakes) == 1
+    m = mistakes[0]
+    assert m.category == MistakeCategory.DECOUPLING
+    assert m.severity == "error"
+    assert m.components == ["U1"]
+
+
+def test_missing_decoupling_cap_passes_when_cap_present(tmp_path: Path) -> None:
+    pcb = _load_pcb(tmp_path, _IC_WITH_CAP)
+    mistakes = MissingDecouplingCapCheck().check(pcb)
+    assert mistakes == []
+
+
+def test_missing_decoupling_cap_ignores_boards_with_no_ics(tmp_path: Path) -> None:
+    """Zero applicable components (no IC-like footprints) -> clean, no flag."""
+    body = """
+  (net 1 "VCC")
+  (net 2 "GND")
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "C1")
+    (property "Value" "100nF")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+"""
+    pcb = _load_pcb(tmp_path, body)
+    assert MissingDecouplingCapCheck().check(pcb) == []
+
+
+# ---------------------------------------------------------------------------
+# PullUpResistorCheck
+# ---------------------------------------------------------------------------
+
+_I2C_NO_PULLUP = """
+  (net 1 "SDA")
+  (net 2 "SCL")
+
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "U1")
+    (property "Value" "MCU")
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "SDA"))
+    (pad "2" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "SCL"))
+  )
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "U2")
+    (property "Value" "SENSOR")
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "SDA"))
+    (pad "2" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "SCL"))
+  )
+"""
+
+_I2C_WITH_PULLUP = (
+    _I2C_NO_PULLUP
+    + """
+  (net 3 "+3V3")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 5 5)
+    (property "Reference" "R1")
+    (property "Value" "4.7k")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "SDA"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 3 "+3V3"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 6 5)
+    (property "Reference" "R2")
+    (property "Value" "4.7k")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "SCL"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 3 "+3V3"))
+  )
+"""
+)
+
+
+def test_pullup_resistor_flags_i2c_bus_without_pullup(tmp_path: Path) -> None:
+    pcb = _load_pcb(tmp_path, _I2C_NO_PULLUP)
+    mistakes = PullUpResistorCheck().check(pcb)
+    titles = {m.title for m in mistakes}
+    assert "Missing pull-up resistor" in titles
+    assert len(mistakes) == 2  # SDA and SCL each flagged
+
+
+def test_pullup_resistor_passes_with_pullup(tmp_path: Path) -> None:
+    pcb = _load_pcb(tmp_path, _I2C_WITH_PULLUP)
+    mistakes = PullUpResistorCheck().check(pcb)
+    assert mistakes == []
+
+
+def test_pullup_resistor_ignores_single_pad_net(tmp_path: Path) -> None:
+    """A net named SDA touching only one footprint is not a real bus."""
+    body = """
+  (net 1 "SDA")
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "U1")
+    (property "Value" "MCU")
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "SDA"))
+  )
+"""
+    pcb = _load_pcb(tmp_path, body)
+    assert PullUpResistorCheck().check(pcb) == []
+
+
+# ---------------------------------------------------------------------------
+# LedSeriesResistorCheck
+# ---------------------------------------------------------------------------
+
+_LED_NO_RESISTOR = """
+  (net 1 "LED_A")
+  (net 2 "GND")
+
+  (footprint "LED_SMD:LED_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "D1")
+    (property "Value" "LED")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "LED_A"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+"""
+
+_LED_WITH_RESISTOR = (
+    _LED_NO_RESISTOR
+    + """
+  (net 3 "+3V3")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 8 10)
+    (property "Reference" "R1")
+    (property "Value" "330")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 3 "+3V3"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "LED_A"))
+  )
+"""
+)
+
+
+def test_led_series_resistor_flags_led_without_resistor(tmp_path: Path) -> None:
+    pcb = _load_pcb(tmp_path, _LED_NO_RESISTOR)
+    mistakes = LedSeriesResistorCheck().check(pcb)
+    assert len(mistakes) == 1
+    assert mistakes[0].components == ["D1"]
+
+
+def test_led_series_resistor_passes_with_resistor(tmp_path: Path) -> None:
+    pcb = _load_pcb(tmp_path, _LED_WITH_RESISTOR)
+    assert LedSeriesResistorCheck().check(pcb) == []
+
+
+def test_led_series_resistor_ignores_boards_with_no_leds(tmp_path: Path) -> None:
+    body = """
+  (net 1 "SIG")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "SIG"))
+  )
+"""
+    pcb = _load_pcb(tmp_path, body)
+    assert LedSeriesResistorCheck().check(pcb) == []
+
+
+# ---------------------------------------------------------------------------
+# BomFieldHealthCheck
+# ---------------------------------------------------------------------------
+
+_BOM_MIXED_COVERAGE = """
+  (net 1 "VCC")
+  (net 2 "GND")
+
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "U1")
+    (property "Value" "MCU")
+    (property "MPN" "STM32F103C8T6")
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "VCC"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+"""
+
+_BOM_NO_TRACKING = """
+  (net 1 "VCC")
+  (net 2 "GND")
+
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "U1")
+    (property "Value" "MCU")
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "VCC"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+"""
+
+_BOM_ALL_EXCLUDED = """
+  (net 1 "VCC")
+
+  (footprint "MountingHole:MountingHole_3.2mm"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr exclude_from_bom exclude_from_pos_files)
+    (property "Reference" "MH1")
+    (property "Value" "MountingHole")
+  )
+"""
+
+
+def test_bom_field_health_flags_component_missing_mpn(tmp_path: Path) -> None:
+    pcb = _load_pcb(tmp_path, _BOM_MIXED_COVERAGE)
+    mistakes = BomFieldHealthCheck().check(pcb)
+    assert len(mistakes) == 1
+    assert mistakes[0].components == ["R1"]
+    assert mistakes[0].category == MistakeCategory.BOM_HEALTH
+
+
+def test_bom_field_health_raises_incomplete_when_no_board_wide_tracking(
+    tmp_path: Path,
+) -> None:
+    """No component anywhere defines an MPN/LCSC field -> CheckIncomplete."""
+    pcb = _load_pcb(tmp_path, _BOM_NO_TRACKING)
+    with pytest.raises(CheckIncomplete):
+        BomFieldHealthCheck().check(pcb)
+
+
+def test_bom_field_health_no_candidates_is_a_clean_ran_check(tmp_path: Path) -> None:
+    """Zero BOM-eligible components (all excluded) -> clean pass, not incomplete."""
+    pcb = _load_pcb(tmp_path, _BOM_ALL_EXCLUDED)
+    assert BomFieldHealthCheck().check(pcb) == []
+
+
+# ---------------------------------------------------------------------------
+# MistakeDetector coverage discipline (mirrors #4011 for `lvs`)
+# ---------------------------------------------------------------------------
+
+
+def test_detector_reports_incomplete_coverage_without_dropping_mistakes(
+    tmp_path: Path,
+) -> None:
+    pcb = _load_pcb(tmp_path, _BOM_NO_TRACKING)
+    detector = MistakeDetector()
+    mistakes, coverage = detector.detect_with_coverage(pcb)
+
+    # One CheckCoverage entry per registered check.
+    assert len(coverage) == len(detector.checks)
+
+    incomplete = [c for c in coverage if c.status == "incomplete"]
+    assert len(incomplete) == 1
+    assert incomplete[0].check_name == "BomFieldHealthCheck"
+    assert incomplete[0].category == MistakeCategory.BOM_HEALTH
+    assert incomplete[0].reason  # non-empty explanation
+
+    # Every other check still ran and contributed to `mistakes` normally --
+    # the incomplete BOM check does not silently swallow other findings.
+    ran_names = {c.check_name for c in coverage if c.status == "ran"}
+    assert "BomFieldHealthCheck" not in ran_names
+    assert len(ran_names) == len(detector.checks) - 1
+    assert isinstance(mistakes, list)
+
+
+def test_detector_detect_still_returns_plain_list_backward_compatible(
+    tmp_path: Path,
+) -> None:
+    """`detect()` keeps its original list[Mistake] signature (no crash,
+    no coverage info required of legacy callers) even when a check is
+    incomplete."""
+    pcb = _load_pcb(tmp_path, _BOM_NO_TRACKING)
+    mistakes = MistakeDetector().detect(pcb)
+    assert isinstance(mistakes, list)
+
+
+def test_get_default_checks_registers_all_four_new_checks() -> None:
+    checks = get_default_checks()
+    names = {type(c).__name__ for c in checks}
+    assert {
+        "MissingDecouplingCapCheck",
+        "PullUpResistorCheck",
+        "LedSeriesResistorCheck",
+        "BomFieldHealthCheck",
+    } <= names
+
+
+@pytest.mark.parametrize("return_net", ['(net 3 "SIG")', '(net 1 "VCC")'])
+def test_decoupling_requires_distinct_ground_return(tmp_path: Path, return_net: str) -> None:
+    ic, cap = _IC_WITH_CAP.split('  (footprint "Capacitor_SMD:C_0402"')
+    cap = cap.replace('(net 2 "GND")', return_net)
+    pcb = _load_pcb(tmp_path, ic + '  (footprint "Capacitor_SMD:C_0402"' + cap)
+    assert len(MissingDecouplingCapCheck().check(pcb)) == 1
+
+
+@pytest.mark.parametrize("topology", ["unrelated_ground", "parallel", "same_net", "branched"])
+def test_led_requires_series_topology(tmp_path: Path, topology: str) -> None:
+    led, resistor = _LED_WITH_RESISTOR.split('  (footprint "Resistor_SMD:R_0402"')
+    if topology == "unrelated_ground":
+        resistor = resistor.replace('(net 1 "LED_A")', '(net 2 "GND")')
+    elif topology == "parallel":
+        resistor = resistor.replace('(net 3 "+3V3")', '(net 2 "GND")')
+    elif topology == "same_net":
+        resistor = resistor.replace('(net 3 "+3V3")', '(net 1 "LED_A")')
+    body = led + '  (footprint "Resistor_SMD:R_0402"' + resistor
+    if topology == "branched":
+        body += """
+  (footprint "Connector:PinHeader"
+    (layer "F.Cu") (at 20 20)
+    (property "Reference" "J1") (property "Value" "GPIO")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "LED_A"))
+  )
+"""
+    pcb = _load_pcb(tmp_path, body)
+    assert len(LedSeriesResistorCheck().check(pcb)) == 1
+
+
+def test_led_low_side_series_resistor(tmp_path: Path) -> None:
+    # Swap the external rails while preserving the exclusive LED/R junction.
+    body = _LED_WITH_RESISTOR.replace('"GND"', '"VCC"').replace('"+3V3"', '"GND"')
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+# ---------------------------------------------------------------------------
+# LedSeriesResistorCheck path rule (issue #5940)
+# ---------------------------------------------------------------------------
+
+
+def _fp(ref: str, value: str, *nets: tuple[int, str]) -> str:
+    pads = "\n".join(
+        f'    (pad "{i}" smd rect (at {i} 0) (size 0.5 0.5) (layers "F.Cu") (net {n} "{name}"))'
+        for i, (n, name) in enumerate(nets, start=1)
+    )
+    return f"""
+  (footprint "Lib:{value}"
+    (layer "F.Cu") (at 10 10)
+    (property "Reference" "{ref}") (property "Value" "{value}")
+{pads}
+  )
+"""
+
+
+_VCC, _GND, _NODE = (1, "VCC"), (2, "GND"), (3, "NODE")
+_NETS = '  (net 1 "VCC")\n  (net 2 "GND")\n  (net 3 "NODE")\n  (net 4 "MID")\n  (net 5 "GPIO")\n'
+
+
+def test_led_shared_resistor_driving_two_leds_passes(tmp_path: Path) -> None:
+    body = (
+        _NETS
+        + _fp("R1", "330", _VCC, _NODE)
+        + _fp("D1", "LED", _NODE, _GND)
+        + _fp("D2", "LED", _NODE, _GND)
+    )
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_series_chain_through_second_led_passes(tmp_path: Path) -> None:
+    body = (
+        _NETS
+        + _fp("D1", "LED", _VCC, (4, "MID"))
+        + _fp("D2", "LED", (4, "MID"), _NODE)
+        + _fp("R1", "330", _NODE, _GND)
+    )
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_gpio_through_resistor_passes(tmp_path: Path) -> None:
+    body = (
+        _NETS
+        + _fp("U1", "MCU", _VCC, _GND, (5, "GPIO"))
+        + _fp("R1", "330", (5, "GPIO"), _NODE)
+        + _fp("D1", "LED", _NODE, _GND)
+    )
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_driven_directly_by_gpio_is_flagged(tmp_path: Path) -> None:
+    body = _NETS + _fp("U1", "MCU", _VCC, _GND, (5, "GPIO")) + _fp("D1", "LED", (5, "GPIO"), _GND)
+    mistakes = LedSeriesResistorCheck().check(_load_pcb(tmp_path, body))
+    assert [m.components for m in mistakes] == [["D1"]]
+
+
+def test_led_rail_to_rail_without_resistor_is_flagged(tmp_path: Path) -> None:
+    body = _NETS + _fp("D1", "LED", _VCC, _GND) + _fp("C1", "100nF", _VCC, _GND)
+    mistakes = LedSeriesResistorCheck().check(_load_pcb(tmp_path, body))
+    assert [m.components for m in mistakes] == [["D1"]]
+
+
+def test_charlieplex_line_resistors_pass(tmp_path: Path) -> None:
+    nets = "".join(
+        f'  (net {i} "{name}")\n'
+        for i, name in enumerate(["VCC", "GND", "LA", "LB", "LC", "NA", "NB", "NC"], start=1)
+    )
+    lines = [(3, "LA"), (4, "LB"), (5, "LC")]
+    nodes = [(6, "NA"), (7, "NB"), (8, "NC")]
+    body = nets + _fp("U1", "MCU", (1, "VCC"), (2, "GND"), *lines)
+    for i, (line, node) in enumerate(zip(lines, nodes, strict=True), start=1):
+        body += _fp(f"R{i}", "330", line, node)
+    ref = 1
+    for a in nodes:
+        for k in nodes:
+            if a != k:
+                body += _fp(f"D{ref}", "LED", a, k)
+                ref += 1
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+@pytest.mark.parametrize("ref", ["RLY1", "RL1"])
+def test_led_behind_relay_contact_is_flagged(tmp_path: Path, ref: str) -> None:
+    # VCC -> relay contact -> NODE -> LED -> GND. A relay reference starts
+    # with "R" but it is not a current limiter (issue #5940 review).
+    body = _NETS + _fp(ref, "RELAY", _VCC, _NODE, (4, "MID"), _GND) + _fp("D1", "LED", _NODE, _GND)
+    mistakes = LedSeriesResistorCheck().check(_load_pcb(tmp_path, body))
+    assert [m.components for m in mistakes] == [["D1"]]
+
+
+def test_led_resistor_array_prefix_still_counts(tmp_path: Path) -> None:
+    body = _NETS + _fp("RN1", "4x330", _VCC, _NODE) + _fp("D1", "LED", _NODE, _GND)
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []
+
+
+def test_led_matrix_32x32_walk_work_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Perf guard: the side walk must not re-flood the matrix per LED.
+
+    Counts ``_ref_prefix`` calls (one per footprint visited by the walk)
+    instead of wall-clock time, so CI load cannot make it flaky.
+    """
+    size = 32
+    names = ["VCC", "GND"]
+    names += [f"ROW{i}" for i in range(size)]
+    names += [f"COL{j}" for j in range(size)]
+    names += [f"CN{j}" for j in range(size)]
+    num = {name: i for i, name in enumerate(names, start=1)}
+    body = "".join(f'  (net {i} "{name}")\n' for name, i in num.items())
+    mcu_nets = [(num[n], n) for n in names if n.startswith(("ROW", "COL"))]
+    body += _fp("U1", "MCU", (1, "VCC"), (2, "GND"), *mcu_nets)
+    for j in range(size):
+        body += _fp(f"R{j + 1}", "330", (num[f"COL{j}"], f"COL{j}"), (num[f"CN{j}"], f"CN{j}"))
+    ref = 1
+    for i in range(size):
+        for j in range(size):
+            body += _fp(f"D{ref}", "LED", (num[f"ROW{i}"], f"ROW{i}"), (num[f"CN{j}"], f"CN{j}"))
+            ref += 1
+    pcb = _load_pcb(tmp_path, body)
+
+    calls = 0
+    real_ref_prefix = connectivity._ref_prefix
+
+    def counting_ref_prefix(ref: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real_ref_prefix(ref)
+
+    monkeypatch.setattr(connectivity, "_ref_prefix", counting_ref_prefix)
+    LedSeriesResistorCheck().check(pcb)
+    # Measured 34,816 calls on 2026-10-15; a per-LED re-flood multiplies this
+    # by roughly the net fan-out (32x or more), so ~2x headroom is safe.
+    assert calls < 70_000
+
+
+_BOARD02 = (
+    Path(__file__).resolve().parents[1]
+    / "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
+)
+
+
+@pytest.mark.skipif(not _BOARD02.exists(), reason="board 02 output not present")
+def test_board02_charlieplex_has_no_led_series_resistor_findings() -> None:
+    assert LedSeriesResistorCheck().check(PCB.load(str(_BOARD02))) == []

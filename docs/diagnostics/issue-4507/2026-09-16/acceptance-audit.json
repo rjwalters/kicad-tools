@@ -1,0 +1,71 @@
+{
+  "candidate": {
+    "planner_commit": "2fb4ebdc8ed9ef0d9f4890c71b5cb38b110ecc02",
+    "zones_cmd_commit": "6b381f353ef3a599292a2e9d48f8f401ec322f02",
+    "zones_cmd_sha256": "c9a0b4e30de88c6246c58c45270de2b00fe6f1bcbb8ee041acacf71fcad9dcfe",
+    "remote_root": "/private/tmp/4507-planner-2fb-full"
+  },
+  "stages": {
+    "2": {
+      "board_sha256": "0541f21cf6f079a7d52daa0583c831a16563366a7693624cae477f74bcf25c39",
+      "exact_sidecars": {
+        ".kicad_pro": false,
+        ".kicad_dru": false
+      },
+      "checks": {
+        "pairwise": {
+          "exit": 0,
+          "json_valid": true,
+          "violation_count": 0
+        },
+        "creepage": {
+          "exit": 1,
+          "json_valid": true,
+          "unwaived_fail_count": 31
+        },
+        "connectivity": {
+          "exit": 2,
+          "json_valid": true,
+          "summary": {
+            "total_nets": 99,
+            "complete": 93,
+            "incomplete": 6,
+            "unrouted": 0,
+            "total_unconnected_pads": 77
+          }
+        }
+      }
+    },
+    "3": {
+      "board_sha256": "98a73b55d89b3109178671d613f39aa4747631b366b9d16c134cec606c0f8c36",
+      "exact_sidecars": {
+        ".kicad_pro": false,
+        ".kicad_dru": false
+      },
+      "checks": {
+        "pairwise": {
+          "exit": 0,
+          "json_valid": true,
+          "violation_count": 0
+        },
+        "creepage": {
+          "exit": 1,
+          "json_valid": true,
+          "unwaived_fail_count": 13
+        },
+        "connectivity": {
+          "exit": 2,
+          "json_valid": true,
+          "summary": {
+            "total_nets": 99,
+            "complete": 93,
+            "incomplete": 6,
+            "unrouted": 0,
+            "total_unconnected_pads": 72
+          }
+        }
+      }
+    }
+  },
+  "scope": "Read-only geometry evidence; native DRC and per-residual attribution still required. No automatic acceptance or issue closure."
+}

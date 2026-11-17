@@ -1,0 +1,1232 @@
+"""Per-layer lattice masking + committed-copper model (issue #4278).
+
+Two legality sources gate every lattice resource, mirroring the mesh
+``ObstacleModel`` discipline (``router/mesh/obstacles.py``) extended
+per copper layer:
+
+* **Static pad masks** (:class:`LatticeObstacleModel`) -- built ONCE with
+  the lattice.  Every lattice node/edge records which inflated pad
+  keep-outs cover it, per layer: an SMD pad masks only its own copper
+  layer, a through-hole pad masks EVERY layer.  Same-net pads are not
+  obstacles, so the masks store pad *indices* and the per-net predicate
+  resolves net membership at query time (no per-net rebuild).
+
+* **Committed copper** (:class:`CommittedCopper`) -- the dynamic model a
+  negotiation pass accumulates.  Checks are geometric (real edge-to-edge
+  copper gaps against the applicable clearance), not merely discrete
+  node-occupancy: adjacent fine-lattice rows can sit closer than the
+  copper gap, so occupancy alone could ship a clearance violation.  This
+  is the #3906 "consult the obstacle model, never blind-fit" lesson.
+
+Epic #5509 Phase 3d: :meth:`CommittedCopper.seg_clear`, :meth:`~CommittedCopper.node_clear`
+and :meth:`~CommittedCopper.via_clear` no longer carry their own distance
+arithmetic.  Every gap is measured by the shared exact-geometry clearance
+kernel through :mod:`.kernel_adapter`, which projects the lattice's integer
+net-id copper onto the kernel's net-agnostic shapes.  Only the *geometry*
+moved: the thresholds, the negotiation order and the #4506/#4602 exemption
+paths are untouched.  The pad-mask half of this module
+(:class:`LatticeObstacleModel`, :class:`LatticeKeepoutMask`) gates *site
+availability* against inflated keep-out rectangles as a broad phase; the
+final accept/reject for a pad hit is the exact pad outline (rounded, oval,
+rotated) measured by the same kernel (issue #7503), so a point diagonal to a
+pad corner is no longer judged against the corner's bounding square.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from kicad_tools.geometry.copper import pad_gate_polygon as _pad_gate_polygon
+from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
+
+from ..clearance_shapes import pad_kernel_params
+from ..primitives import Pad, pad_half_extents
+from . import kernel_adapter as ka
+from .geometry import (
+    Pt,
+    Rect,
+    SegHash,
+    dist,
+    polygon_bbox,
+    pt_in_rect,
+    seg_near_polygon,
+    seg_pt_dist,
+    seg_rect_intersect,
+)
+from .quadtree import EdgeKey, NodeKey, OctilinearLattice
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .kelvin import KelvinBranchGuard
+    from .pairwise import LatticePairwise
+
+_BUCKET = 4.0  # mm; pad-lookup acceleration grid
+
+# Manufacturing co-location epsilon (matches ``_COLOCATION_EPSILON_MM`` in
+# ``validate/rules/clearance.py``).  A segment ENDPOINT coincident with a via
+# center within this distance is the legitimate in-pad-escape router invariant
+# (#2706) and is NOT a defect.  A segment whose INTERIOR (body) crosses a via
+# center *is* malformed copper: for different-net pairs the DRC checker flags
+# it at 0.000mm, and for same-net pairs it is an octilinear segment running
+# across an unrelated via node that no nudge post-pass can clean (issue #4318).
+_COLOCATION_EPSILON_MM = 1e-4
+
+
+def seg_body_crosses_pt(a: Pt, b: Pt, p: Pt, eps: float = _COLOCATION_EPSILON_MM) -> bool:
+    """True iff ``p`` coincides with segment ``a-b``'s INTERIOR, not an endpoint.
+
+    Distinguishes the malformed "segment body crosses a via center" case
+    (rejected) from the legitimate in-pad-escape endpoint-at-via-center
+    invariant (#2706, permitted).  ``p`` counts as a body crossing only when it
+    is within ``eps`` of the segment yet farther than ``eps`` from BOTH
+    endpoints -- so a via tapped at a segment endpoint (the router invariant) is
+    never treated as malformed, while a via center the segment merely runs over
+    mid-span is.  See issue #4318.
+    """
+    if seg_pt_dist(a, b, p) >= eps:
+        return False
+    return dist(a, p) >= eps and dist(b, p) >= eps
+
+
+def pad_waiver_probe_point(a: Pt, b: Pt, pad: Pad, own_half: float) -> Pt | None:
+    """Use the audit's copper midpoint, or decline an inexact pad model.
+
+    Router pads retain rect/circle/oval dimensions and residual rotation, but
+    not the authored roundrect radius. A containing AABB bounds distance; it
+    does not conservatively bound membership in an arbitrary waiver zone.
+    """
+    from kicad_tools.geometry.copper import segment_copper_polygon
+    from kicad_tools.router.pairwise_clearance import _shapely_gap_and_midpoint
+
+    polygon = _pad_waiver_polygon(pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation)
+    if polygon is None:
+        return None
+    copper = segment_copper_polygon(a, b, own_half * 2)
+    if copper is None:
+        return None
+    _, x, y = _shapely_gap_and_midpoint(copper, polygon)
+    return x, y
+
+
+def _pad_midpoint_envelope_exempt(
+    a: Pt,
+    b: Pt,
+    pad: Pad,
+    own_half: float,
+    net: int,
+    layer: int | None,
+    pairwise: LatticePairwise,
+) -> bool:
+    """Waive missing corner metadata only when every possible midpoint is rated.
+
+    Each endpoint of the true shortest line lies inside its copper's AABB.
+    Their componentwise average therefore lies inside this envelope. Require
+    ONE applicable zone to contain the whole envelope, not separate zones at
+    its corners. This may reject an otherwise valid narrow waiver.
+    """
+    hw, hh = pad_half_extents(pad)
+    x0 = (min(a[0], b[0]) - own_half + pad.x - hw) / 2
+    y0 = (min(a[1], b[1]) - own_half + pad.y - hh) / 2
+    x1 = (max(a[0], b[0]) + own_half + pad.x + hw) / 2
+    y1 = (max(a[1], b[1]) + own_half + pad.y + hh) / 2
+    for zx0, zy0, zx1, zy1, ids, layers in pairwise.zones:
+        if not (
+            zx0 <= x0 <= x1 <= zx1 and zy0 <= y0 <= y1 <= zy1 and net in ids and pad.net in ids
+        ):
+            continue
+        if layer is None or not layers:
+            return True
+        a_layers, b_layers = layers.get(net), layers.get(pad.net)
+        if (a_layers is None or layer in a_layers) and (b_layers is None or layer in b_layers):
+            return True
+    return False
+
+
+def _pad_pair_zone_contains_both(
+    a: Pt,
+    b: Pt,
+    pad: Pad,
+    own_half: float,
+    net: int,
+    layer: int | None,
+    pairwise: LatticePairwise,
+) -> bool:
+    """Waive only when ONE zone holds the whole segment AND the whole pad (#8277).
+
+    The commit gate waives an attach-zone pair only when both nearest points
+    lie in a zone and the copper outside it still clears.  When one zone
+    contains both pieces entirely, both witnesses are in the zone and no
+    residual copper exists, so the gate waives it too: the search is never
+    more permissive than the gate.  It may be stricter (a segment leaving the
+    zone is declined here although the gate may accept its residual).
+    """
+    hw, hh = pad_half_extents(pad)
+    x0 = min(min(a[0], b[0]) - own_half, pad.x - hw)
+    y0 = min(min(a[1], b[1]) - own_half, pad.y - hh)
+    x1 = max(max(a[0], b[0]) + own_half, pad.x + hw)
+    y1 = max(max(a[1], b[1]) + own_half, pad.y + hh)
+    for zx0, zy0, zx1, zy1, ids, layers in pairwise.zones:
+        if not (
+            zx0 <= x0 and x1 <= zx1 and zy0 <= y0 and y1 <= zy1 and net in ids and pad.net in ids
+        ):
+            continue
+        if layer is None or not layers:
+            return True
+        a_layers, b_layers = layers.get(net), layers.get(pad.net)
+        if (a_layers is None or layer in a_layers) and (b_layers is None or layer in b_layers):
+            return True
+    return False
+
+
+def _pad_zone_waives(
+    a: Pt,
+    b: Pt,
+    pad: Pad,
+    own_half: float,
+    net: int,
+    layer: int | None,
+    req: float,
+    pairwise: LatticePairwise,
+) -> bool:
+    """Search-time twin of the commit gate's attach-zone verdict (#8277).
+
+    Runs the very same ``_attach_zone_verdict`` (both nearest points in one
+    zone AND the copper outside it clears) on the true segment/pad copper, so
+    search and gate cannot disagree.  A ``roundrect`` pad is measured with
+    its corner radius (or as its enclosing rectangle when the ratio is
+    unknown), as the gate does (#8327); only a shape with no polygon falls
+    back to requiring one zone to hold both pieces whole.
+    """
+    from kicad_tools.geometry.copper import segment_copper_polygon
+    from kicad_tools.router.pairwise_clearance import (
+        _PASS_TOLERANCE,
+        AttachZone,
+        _attach_zone_verdict,
+        _shapely_gap_and_midpoint,
+    )
+
+    polygon = _pad_gate_polygon(
+        pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation, pad.roundrect_rratio
+    )
+    copper = segment_copper_polygon(a, b, own_half * 2)
+    if polygon is None or copper is None:
+        return _pad_pair_zone_contains_both(a, b, pad, own_half, net, layer, pairwise)
+    gap, _, _ = _shapely_gap_and_midpoint(copper, polygon)
+    if gap >= req - _PASS_TOLERANCE:
+        return True
+    names = frozenset({str(net), str(pad.net)})
+    zones = []
+    for x0, y0, x1, y1, ids, layers in pairwise.zones:
+        if net not in ids or pad.net not in ids:
+            continue
+        if layer is not None and layers:
+            a_layers, b_layers = layers.get(net), layers.get(pad.net)
+            if not (
+                (a_layers is None or layer in a_layers) and (b_layers is None or layer in b_layers)
+            ):
+                continue
+        zones.append(AttachZone(x0, y0, x1, y1, names))
+    if not zones:
+        return False
+    # No end-cap overhang (#8327): the trace-vs-pad gate
+    # (``_copper_pair_violation``) clips the zone without one, and now that
+    # roundrect pads reach this verdict too, passing ``own_half`` would let
+    # the search waive copper the gate refuses.
+    return (
+        _attach_zone_verdict(
+            copper, polygon, zones, str(net), str(pad.net), None, req, _PASS_TOLERANCE
+        )
+        is None
+    )
+
+
+class LatticeObstacleModel:
+    """Static per-layer pad masks over a built lattice (built once per board).
+
+    Args:
+        lattice: the built :class:`OctilinearLattice`.
+        pads: every pad on the board.
+        pad_layer_indices: for each pad, the routing-layer indices its copper
+            occupies (SMD: its own layer; PTH: all layers) -- resolved by the
+            caller against the real :class:`~kicad_tools.router.layers.LayerStack`.
+        num_layers: copper layer count of the stack.
+        agent_radius: half trace width + clearance (Minkowski inflation).
+        pad_extra: per-pad growth of the keep-out rectangle AND exact test
+            (authored / grown floors above the base clearance).
+        pad_class_extra: per-pad net-class requirement above the base
+            clearance; tightens only the exact-outline test (issue #7503).
+    """
+
+    def __init__(
+        self,
+        lattice: OctilinearLattice,
+        pads: list[Pad],
+        pad_layer_indices: list[tuple[int, ...]],
+        num_layers: int,
+        agent_radius: float,
+        pad_extra: list[float] | None = None,
+        pad_class_extra: list[float] | None = None,
+    ) -> None:
+        self.lattice = lattice
+        self.pads = pads
+        self.pad_layer_indices = pad_layer_indices
+        self.num_layers = num_layers
+        self.agent_radius = agent_radius
+
+        # Inflated keep-out rectangle per pad (pad half-extent + agent radius).
+        # Issue #6243: ``pad_extra[i]`` grows pad ``i``'s keep-out by the
+        # amount its authored netclass minimum exceeds the board-global
+        # clearance baked into ``agent_radius`` -- the pad's own side of the
+        # pair, honoured by every predicate that reads ``pad_rects``.
+        self.pad_rects: list[Rect] = []
+        # Euclidean inflation radius per pad for the exact-outline test
+        # (issue #7503): agent radius + the larger of its own growth and
+        # ``pad_class_extra[i]``, the amount the pad's net-class requirement
+        # exceeds the board-global clearance.  The class side only tightens
+        # the exact test INSIDE the unchanged broad-phase rectangle, so a
+        # point the old bounding square blocked is released only when it
+        # also clears the pad's class (the pair rule a 0.2 mm Power pad next
+        # to a 0.15 mm board default needs) -- never more than main blocked,
+        # and the edge band beyond the rectangle stays with
+        # :mod:`.class_pad_repair` exactly as before.
+        self._pad_reach: list[float] = []
+        # Issue #7880: each pad's ``pad_extra`` growth (authored floor, #6489
+        # class growth), kept so :meth:`pairwise_pad_blocked` can compose the
+        # pair requirement with it by ``max`` instead of adding the two.  The
+        # pathfinder turns that on (:attr:`pairwise_composes_pad_extra`) only
+        # under an HV ``--voltage-map`` projection, so every other board keeps
+        # its pre-#7880 keep-outs byte-for-byte.
+        self._pad_grow: list[float] = []
+        self.pairwise_composes_pad_extra = False
+        for i, pad in enumerate(pads):
+            half_w, half_h = pad_half_extents(pad)
+            grow = pad_extra[i] if pad_extra is not None else 0.0
+            self._pad_grow.append(grow)
+            class_grow = pad_class_extra[i] if pad_class_extra is not None else 0.0
+            hx = half_w + agent_radius + grow
+            hy = half_h + agent_radius + grow
+            self._pad_reach.append(agent_radius + max(grow, class_grow))
+            self.pad_rects.append((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy))
+
+        self._pad_outlines: dict[int, ka.KPad] = {}
+
+        # Pad-lookup buckets.
+        self._pad_buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for idx, rect in enumerate(self.pad_rects):
+            for ix in range(int(rect[0] // _BUCKET), int(rect[2] // _BUCKET) + 1):
+                for iy in range(int(rect[1] // _BUCKET), int(rect[3] // _BUCKET) + 1):
+                    self._pad_buckets[(ix, iy)].append(idx)
+
+        # node_pads[L][key] / edge_pads[L][edge] -> pad indices whose keep-out
+        # covers that resource on layer L.
+        self.node_pads: list[dict[NodeKey, list[int]]] = [{} for _ in range(num_layers)]
+        self.edge_pads: list[dict[EdgeKey, list[int]]] = [{} for _ in range(num_layers)]
+        for key, point in lattice.nodes.items():
+            for idx in self.pads_near(point[0], point[1], point[0], point[1]):
+                if pt_in_rect(point, self.pad_rects[idx]) and self.pad_keepout_hit(
+                    idx, point, point
+                ):
+                    for layer in pad_layer_indices[idx]:
+                        self.node_pads[layer].setdefault(key, []).append(idx)
+        for edge in lattice.edges:
+            a = lattice.node_point(edge[0])
+            b = lattice.node_point(edge[1])
+            x0, x1 = min(a[0], b[0]), max(a[0], b[0])
+            y0, y1 = min(a[1], b[1]), max(a[1], b[1])
+            for idx in self.pads_near(x0, y0, x1, y1):
+                if seg_rect_intersect(a, b, self.pad_rects[idx]) and self.pad_keepout_hit(
+                    idx, a, b
+                ):
+                    for layer in pad_layer_indices[idx]:
+                        self.edge_pads[layer].setdefault(edge, []).append(idx)
+
+    # -- queries -------------------------------------------------------------
+
+    def pad_centerline_gap(self, idx: int, a: Pt, b: Pt) -> float:
+        """Exact distance in mm from segment ``a-b`` to pad ``idx``'s copper outline."""
+        outline = self._pad_outlines.get(idx)
+        if outline is None:
+            pad = self.pads[idx]
+            shape, rratio = pad_kernel_params(pad)
+            outline = ka.pad_outline(
+                shape, pad.width, pad.height, rratio, pad.rotation, (pad.x, pad.y)
+            )
+            self._pad_outlines[idx] = outline
+        return ka.gap(outline, ka.trace(a, b, 0.0))
+
+    def pad_keepout_hit(self, idx: int, a: Pt, b: Pt, extra: float = 0.0) -> bool:
+        """True when segment ``a-b`` enters pad ``idx``'s keep-out (issue #7503).
+
+        The keep-out is the pad's TRUE copper outline (circle, oval, roundrect
+        with a known ratio, rotated) grown by ``agent_radius + max(pad_extra,
+        pad_class_extra) + extra`` -- the set the DRC engines reject under the
+        pair rule ``max(class(probe), class(pad))`` (the probe's side rides on
+        ``extra``) -- rather than the inflated bounding rectangle ``pad_rects``
+        holds, which stays the broad phase.  Callers pass only pads whose rectangle already hit, so the
+        rectangle (a superset of the true keep-out) never lets a hit slip
+        through.  Boundary contact counts as a hit, as the rectangle did.
+        """
+        gap = self.pad_centerline_gap(idx, a, b)
+        return gap <= self._pad_reach[idx] + extra + ka.LATTICE_CLEARANCE_EPSILON_MM
+
+    def pads_near(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
+        """Pad indices whose inflated rect may touch the query box."""
+        out: set[int] = set()
+        for ix in range(int(x0 // _BUCKET), int(x1 // _BUCKET) + 1):
+            for iy in range(int(y0 // _BUCKET), int(y1 // _BUCKET) + 1):
+                out.update(self._pad_buckets.get((ix, iy), ()))
+        return out
+
+    def node_blocked(self, key: NodeKey, layer: int, net: int) -> bool:
+        """True if the node sits in an OTHER-net pad keep-out on ``layer``."""
+        return any(self.pads[idx].net != net for idx in self.node_pads[layer].get(key, ()))
+
+    def edge_blocked(self, edge: EdgeKey, layer: int, net: int) -> bool:
+        """True if the edge crosses an OTHER-net pad keep-out on ``layer``."""
+        return any(self.pads[idx].net != net for idx in self.edge_pads[layer].get(edge, ()))
+
+    def segment_blocked(self, a: Pt, b: Pt, layer: int, net: int, extra: float = 0.0) -> bool:
+        """True if free segment ``a-b`` (e.g. a stub leg) enters an other-net
+        pad keep-out on ``layer`` (geometric, not lattice-resource, check).
+
+        ``extra`` (issue #4271) inflates every pad keep-out beyond the
+        global ``agent_radius`` -- the per-connection surcharge for a net
+        class wider (or more cleared) than the board default, so oversize
+        copper is spaced from other-net pads at its TRUE half-width.  The
+        degenerate ``a == b`` form doubles as a point (lattice-node) probe.
+        """
+        x0, x1 = min(a[0], b[0]), max(a[0], b[0])
+        y0, y1 = min(a[1], b[1]), max(a[1], b[1])
+        for idx in self.pads_near(x0 - extra, y0 - extra, x1 + extra, y1 + extra):
+            if self.pads[idx].net == net:
+                continue
+            if layer not in self.pad_layer_indices[idx]:
+                continue
+            rect = self.pad_rects[idx]
+            if extra > 0.0:
+                rect = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
+            if seg_rect_intersect(a, b, rect) and self.pad_keepout_hit(idx, a, b, extra):
+                return True
+        return False
+
+    def same_net_pad_band_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float,
+        edge_mm: float,
+    ) -> bool:
+        """True when the copper swept by segment ``a-b`` parks in the fab
+        slit band beside an own-net SMD pad on ``layer`` (issue #9018).
+
+        The leg form of the #8974 via-seat guard.  A same-net pad is not an
+        obstacle -- ``segment_blocked`` skips it above -- so a leg-acceptance
+        predicate that never looks at it lets A* pick lines parallel to an
+        own-net pad edge inside the fab ``pad_spacing`` band: copper the fab
+        grades as a slit (board 07's 14 same-net findings, #9011).  The
+        acceptable regions are exactly two, as in
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        (#9012): the swept copper UNIONS the pad (gap <= 0 -- the pad's own
+        stub or attach necessarily qualifies) or keeps the detection edge
+        ``edge_mm`` (the ``GapBand.detection_edge_mm`` of the resolved
+        ``pad_spacing`` dfm entry, never ``error_edge_mm`` -- #8976).  The
+        open band ``(0, edge_mm)`` in between is rejected.
+
+        The gap is exact swept-copper geometry: the kernel's true pad outline
+        (rotated, oval, roundrect -- the #7503 discipline) minus the sweep
+        identity, ``gap = centreline-to-outline distance - half``, never a
+        grown rectangle.  Pads with a drill are skipped -- the #9012
+        predicate's SMD scope, mirroring ``_via_ok_at``'s band branch (a
+        through-hole neighbour is the hole-to-hole floor's business).  The
+        degenerate ``a == b`` form is the point probe.  ``edge_mm <= 0``
+        keeps the guard off (an unresolvable stackup changes nothing).
+        """
+        if edge_mm <= 0.0:
+            return False
+        reach = half + edge_mm + 0.5
+        x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
+        y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
+        ax0, ax1 = min(a[0], b[0]), max(a[0], b[0])
+        ay0, ay1 = min(a[1], b[1]), max(a[1], b[1])
+        eps = ka.LATTICE_CLEARANCE_EPSILON_MM
+        for idx in self.pads_near(x0, y0, x1, y1):
+            pad = self.pads[idx]
+            if pad.net != net or pad.through_hole or pad.drill > 0:
+                continue
+            if layer not in self.pad_layer_indices[idx]:
+                continue
+            hw, hh = pad_half_extents(pad)
+            # Perf (#6182 pattern): the exact centreline-to-outline distance
+            # is >= the axis-aligned bbox separation, so a separation that
+            # already clears the band skips the kernel call without moving a
+            # verdict.
+            sep = max(pad.x - hw - ax1, ax0 - (pad.x + hw), pad.y - hh - ay1, ay0 - (pad.y + hh))
+            if sep - half > edge_mm + eps:
+                continue
+            gap = self.pad_centerline_gap(idx, a, b) - half
+            if eps < gap < edge_mm - eps:
+                return True
+        return False
+
+    def pairwise_pad_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int | None,
+        net: int,
+        own_half: float,
+        base_extra: float,
+        pairwise: LatticePairwise,
+    ) -> bool:
+        """Pairwise-ONLY (HV) pad keep-out for free segment ``a-b`` (#4602).
+
+        Additive to the scalar checks (``node_blocked`` / ``edge_blocked`` /
+        ``segment_blocked``), which run unchanged: this predicate fires only
+        when the PAIR requirement between the querying net and a pad's net
+        exceeds what the scalar path already keeps out.  Each pad's keep-out
+        rect is grown per-pair to ``raw pad extent + own_half +
+        required(net, pad_net)`` (i.e. ``pad_rects[idx]`` inflated by
+        ``own_half + req - agent_radius``) -- a per-PAD, per-PAIR inflation,
+        never a uniform surcharge.  ``layer is None`` checks every layer the
+        pad occupies (the through-via probe).  A hit inside a #4506 attach
+        zone covering both nets is waived -- that is what keeps a rated
+        domain-bridging footprint routable in-search.
+
+        ``base_extra`` is the scalar inflation the ordinary checks already
+        apply (``max(0, own_half + own_clr - agent_radius)``): pads whose
+        pairwise inflation does not exceed it are the scalar path's business.
+        The degenerate ``a == b`` form doubles as a point probe.
+
+        Issue #7880: ``pad_rects`` already carry each pad's ``pad_extra``
+        growth (its authored floor, or the #6489 class growth), which the
+        scalar checks hold in full.  With :attr:`pairwise_composes_pad_extra`
+        set, that growth is taken back out of the pairwise inflation, so the
+        pad is held to ``max(pair requirement, its own floor)`` -- each at its
+        full value -- rather than their sum.  Unset (every board without a
+        voltage map, including the #6703 fallback-leg projection) the
+        pre-#7880 inflation is unchanged.
+        """
+        reach = pairwise.max_required_for(net)
+        if reach <= 0.0:
+            return False
+        floor_extra = max(base_extra, 0.0)
+        row = pairwise.row(net)
+        max_extra = own_half + reach - self.agent_radius
+        if max_extra <= floor_extra:
+            return False
+        x0, x1 = min(a[0], b[0]), max(a[0], b[0])
+        y0, y1 = min(a[1], b[1]), max(a[1], b[1])
+        for idx in self.pads_near(x0 - max_extra, y0 - max_extra, x1 + max_extra, y1 + max_extra):
+            pad = self.pads[idx]
+            if pad.net == net:
+                continue
+            req = row.get(pad.net, 0.0)
+            if req <= 0.0:
+                continue
+            extra_pw = own_half + req - self.agent_radius
+            if self.pairwise_composes_pad_extra:
+                extra_pw -= self._pad_grow[idx]
+            if extra_pw <= floor_extra:
+                continue
+            if layer is not None and layer not in self.pad_layer_indices[idx]:
+                continue
+            rect = self.pad_rects[idx]
+            grown = (rect[0] - extra_pw, rect[1] - extra_pw, rect[2] + extra_pw, rect[3] + extra_pw)
+            if not seg_rect_intersect(a, b, grown):
+                continue
+            # Match the actual copper gate, including width, caps and pad
+            # rotation. Missing corner metadata cannot justify a point waiver.
+            if not any(net in ids and pad.net in ids for *_, ids, _layers in pairwise.zones):
+                return True
+            if not _pad_zone_waives(a, b, pad, own_half, net, layer, req, pairwise):
+                return True
+        return False
+
+
+@dataclass(frozen=True)
+class KeepoutArea:
+    """One resolved keepout rule area in lattice space (issue #4605).
+
+    The CALLER (``Autorouter._lattice_keepout_projection``) resolves the
+    KiCad ``(zone ... (keepout ...))`` rule areas into this flat carrier --
+    sheet-absolute polygon, lattice layer indices, per-object-type blocking
+    flags, and a net-id applicability filter -- so the pathfinder stays
+    geometry-only and never sees net names or net classes (#4597 discipline).
+
+    Applicability (the ``spatial_keepouts`` sidecar filter): the area applies
+    to net ``n`` iff ``(only is None or n in only) and n not in exempt``.
+    ``only=None, exempt=frozenset()`` is the KiCad-default all-nets rule.
+    """
+
+    polygon: tuple[Pt, ...]
+    layers: frozenset[int]  # lattice layer indices the area covers
+    blocks_tracks: bool
+    blocks_vias: bool
+    only: frozenset[int] | None = None
+    exempt: frozenset[int] = frozenset()
+    name: str = ""
+    bbox: Rect = field(default=(0.0, 0.0, 0.0, 0.0))
+
+    def __post_init__(self) -> None:
+        if len(self.polygon) >= 3 and self.bbox == (0.0, 0.0, 0.0, 0.0):
+            object.__setattr__(self, "bbox", polygon_bbox(self.polygon))
+
+    def applies_to(self, net: int) -> bool:
+        """True when the area's rule governs net id ``net``."""
+        if self.only is not None and net not in self.only:
+            return False
+        return net not in self.exempt
+
+
+class LatticeKeepoutMask:
+    """Static per-board keepout rule-area mask for the lattice engine (#4605).
+
+    A parallel legality source to the pad masks: built once from the resolved
+    :class:`KeepoutArea` list and consulted by the same predicates the
+    pathfinder already routes every expansion through.  All queries are
+    geometric with an AABB pre-filter -- boards carry a handful of rule
+    areas, so per-query polygon checks (cached per lattice resource by the
+    search's ``edge_ok`` / ``node_ok`` memos) beat a full node/edge
+    precompute.
+
+    Semantics (KiCad rule-area flags, finding 6 of the #4605 curation):
+
+    * ``tracks not_allowed`` blocks SEGMENTS on the area's layers -- the
+      copper edge must stay out, so every query inflates by the querying
+      copper's half-width;
+    * ``vias not_allowed`` blocks a through-via whose barrel would enter the
+      area on ANY of the area's layers (a through-via exists on all layers);
+    * ``copperpour`` / ``pads`` / ``footprints`` flags are the zone filler's
+      and placement's business and are deliberately ignored here -- a
+      pour-void-only rule area (the ``kct zones hv-keepout`` output) must
+      never affect routing.
+    """
+
+    def __init__(self, areas: list[KeepoutArea] | tuple[KeepoutArea, ...]) -> None:
+        self.areas: tuple[KeepoutArea, ...] = tuple(
+            a for a in areas if len(a.polygon) >= 3 and (a.blocks_tracks or a.blocks_vias)
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self.areas)
+
+    def segment_blocked(self, a: Pt, b: Pt, layer: int, net: int, half: float) -> bool:
+        """True if copper of half-width ``half`` along ``a-b`` on ``layer``
+        would enter a track-blocking rule area governing ``net``.
+
+        The degenerate ``a == b`` form doubles as a point (lattice-node)
+        probe, mirroring :meth:`LatticeObstacleModel.segment_blocked`.
+        """
+        x0, x1 = min(a[0], b[0]) - half, max(a[0], b[0]) + half
+        y0, y1 = min(a[1], b[1]) - half, max(a[1], b[1]) + half
+        for area in self.areas:
+            if not area.blocks_tracks or layer not in area.layers:
+                continue
+            if not area.applies_to(net):
+                continue
+            bx0, by0, bx1, by1 = area.bbox
+            if x1 < bx0 or bx1 < x0 or y1 < by0 or by1 < y0:
+                continue
+            if seg_near_polygon(a, b, area.polygon, half):
+                return True
+        return False
+
+    def blocking_names(self, a: Pt, b: Pt, layer: int, net: int, half: float) -> list[str]:
+        """Names of the track-blocking rule areas :meth:`segment_blocked`
+        would trip on for the same query (issue #6935 diagnostics)."""
+        return [
+            area.name or "<unnamed>"
+            for area in self.areas
+            if area.blocks_tracks
+            and layer in area.layers
+            and area.applies_to(net)
+            and seg_near_polygon(a, b, area.polygon, half)
+        ]
+
+    def via_blocked(self, point: Pt, net: int, via_radius: float) -> bool:
+        """True if a through-via at ``point`` would enter a via-blocking rule
+        area governing ``net`` (layer-agnostic: the barrel spans the stack,
+        so an area on any copper layer subset still intersects it)."""
+        x0, x1 = point[0] - via_radius, point[0] + via_radius
+        y0, y1 = point[1] - via_radius, point[1] + via_radius
+        for area in self.areas:
+            if not area.blocks_vias or not area.layers:
+                continue
+            if not area.applies_to(net):
+                continue
+            bx0, by0, bx1, by1 = area.bbox
+            if x1 < bx0 or bx1 < x0 or y1 < by0 or by1 < y0:
+                continue
+            if seg_near_polygon(point, point, area.polygon, via_radius):
+                return True
+        return False
+
+
+class CommittedCopper:
+    """Copper committed by already-routed nets in one negotiation pass.
+
+    Geometric per-layer model: traces live in per-layer :class:`SegHash`
+    structures, vias in a flat list (a through-via blocks EVERY layer).
+    Every clearance predicate measures a real **edge-to-edge copper gap**
+    through the shared clearance kernel (Epic #5509 Phase 3d, via
+    :mod:`.kernel_adapter`) and compares it against the applicable
+    clearance.
+
+    Issue #4271 (net-class widths): every committed segment carries its TRUE
+    ``half_width`` and its class ``clearance``, and every predicate takes the
+    querying connection's own ``half`` / ``clearance``.  The requirement
+    between two traces is ``max(own_clearance, stored_clearance)`` of
+    edge-to-edge gap -- equivalently, before Phase 3d, a *centreline* gap of::
+
+        own_half + stored_half + max(own_clearance, stored_clearance)
+
+    so 2.6 mm HV_HICUR copper is spaced as 2.6 mm copper and a 0.3 mm HV
+    class clearance is honored from EITHER side of the pair (mirroring
+    KiCad's conditional-rule semantics, where the wider constraint governs
+    when either net is in the class).  ``None`` arguments fall back to the
+    board-global trace geometry -- the pre-#4271 behavior, byte-for-byte.
+
+    Issue #4597 (preserved copper): committed VIAS carry a stored clearance
+    too, so ``seg_clear`` / ``node_clear`` require
+    ``max(own_clearance, stored_via_clearance)`` between a trace's copper edge
+    and the via's barrel edge.
+    That is what lets ``--preserve-existing`` copper seeded from an earlier
+    routing step keep its net-class-map clearance across the pass boundary
+    instead of collapsing to the board-global floor.
+
+    Issue #4602 (search-time HV pairwise clearance): ``pairwise`` is the
+    optional net-id-space projection of ``rules.pairwise_clearance``
+    (:class:`~kicad_tools.router.lattice.pairwise.LatticePairwise`).  When
+    set, every cross-net predicate widens its requirement to
+    ``max(own_clr, stored_clr, pairwise(query, stored))`` of edge-to-edge
+    gap -- the required clearance depends on the PAIR, never on a
+    widened per-net scalar (widening the scalar is exactly the inadequate
+    workaround #4431 documents: it would force LV<->LV spacing to HV<->LV
+    distances).  A hit that satisfies the scalar gap but falls inside the
+    pairwise requirement may be exempted by a #4506 attach zone probed at
+    the closest-gap midpoint, mirroring ``segment_pair_violation`` so the
+    search verdict and the #4588 post-route gate agree.  ``None`` (the
+    default, and always the case without ``--voltage-map``) runs the
+    pre-#4602 scalar path byte-for-byte.
+    """
+
+    def __init__(
+        self,
+        num_layers: int,
+        *,
+        trace_half: float,
+        clearance: float,
+        via_radius: float,
+        via_via_gap: float,
+        same_net_via_gap: float,
+        pairwise: LatticePairwise | None = None,
+    ) -> None:
+        self.kelvin_guard: KelvinBranchGuard | None = None
+        self.num_layers = num_layers
+        self.trace_half = trace_half  # global default copper half-width
+        self.clearance = clearance  # global default (floor) clearance
+        self.via_radius = via_radius  # via body radius
+        self.via_via_gap = via_via_gap  # via centre to via centre (cross-net)
+        self.same_net_via_gap = same_net_via_gap  # hole-to-hole floor
+        self.pairwise = pairwise  # id-space HV pairwise projection (#4602)
+        from ..fixed_copper import FixedFillObstacles
+
+        self.fixed_fills = FixedFillObstacles()
+        self.fixed_fill_via_clearance = clearance
+        self.copper: list[SegHash] = [SegHash() for _ in range(num_layers)]
+        # ``(point, net, clearance)`` -- the stored clearance is the via's own
+        # net-class clearance (issue #4597), defaulting to the board-global
+        # floor.  It participates in ``max(own_clr, stored_clr)`` exactly the
+        # way a stored SEGMENT's clearance does, so a preserved HV via keeps
+        # its class gap instead of collapsing to the global via gap.
+        self.vias: list[tuple[Pt, int, float]] = []
+        self.via_copper: list[tuple[Pt, int, float, tuple[int, ...]]] = []
+        # Issue #6703: trial journal (see :meth:`begin_trial`).  ``None`` when
+        # no trial is open -- the pre-#6703 add path, byte-for-byte.
+        self._journal: list[tuple[int, Pt, Pt, int, float, float]] | None = None
+        self._trial_depth = 0
+        # Issue #7931: ``(partner net, site, reach, gap)`` while a hybrid leg is
+        # searched.  Only the partner's copper, and only for geometry wholly
+        # within ``reach`` of the leg's virtual site, is held to ``gap`` (the
+        # pair's own intra-pair gap) instead of the leg's full clearance.
+        self.intra_pair: tuple[int, Pt, float, float] | None = None
+
+    # -- trial commits (issue #6703) ---------------------------------------
+
+    def begin_trial(self) -> tuple[int, int, int]:
+        """Open a (nestable) trial; returns the mark to end it with.
+
+        Every commit made while a trial is open is journaled, so
+        :meth:`rollback_trial` can undo exactly the commits made since its
+        mark.  The uncoupled diff-pair fallback (#6703) uses this to try
+        several leg orders, keep the best-matched one and roll the rest back.
+        """
+        if self._journal is None:
+            self._journal = []
+        self._trial_depth += 1
+        return (len(self._journal), len(self.vias), len(self.via_copper))
+
+    def rollback_trial(self, mark: tuple[int, int, int]) -> None:
+        """Undo every commit made since ``mark`` and close that trial."""
+        journal = self._journal
+        if journal is None or self._trial_depth <= 0:
+            raise RuntimeError("no CommittedCopper trial is open")
+        while len(journal) > mark[0]:
+            layer, a, b, net, hw, clr = journal.pop()
+            index = self.copper[layer]
+            item = (a, b, net, hw, clr)
+            for key in index._cells_for_seg(a, b, pad=hw + clr + 0.5):
+                bucket = index.buckets[key]
+                # Commits append, so a reverse-order undo pops each item
+                # from the tail of every cell it was added to.
+                if not bucket or bucket[-1] != item:
+                    raise RuntimeError("CommittedCopper trial journal out of sync")
+                bucket.pop()
+        del self.vias[mark[1] :]
+        del self.via_copper[mark[2] :]
+        self._end_trial()
+
+    def keep_trial(self, mark: tuple[int, int, int]) -> None:
+        """Close the trial opened at ``mark`` keeping its commits.
+
+        Inside an enclosing trial the commits stay journaled, so the outer
+        trial can still roll them back.
+        """
+        if self._journal is None or self._trial_depth <= 0:
+            raise RuntimeError("no CommittedCopper trial is open")
+        self._end_trial()
+
+    def _end_trial(self) -> None:
+        self._trial_depth -= 1
+        if self._trial_depth == 0:
+            self._journal = None
+
+    def _add_seg(self, layer: int, a: Pt, b: Pt, net: int, hw: float, clr: float) -> None:
+        self.copper[layer].add(a, b, net, hw, clr)
+        if self._journal is not None:
+            self._journal.append((layer, a, b, net, hw, clr))
+
+    # -- mutation --------------------------------------------------------
+
+    def add_run(
+        self,
+        layer: int,
+        points: list[Pt],
+        net: int,
+        half_width: float,
+        clearance: float | None = None,
+    ) -> None:
+        """Commit a polyline of copper on ``layer`` at its TRUE half-width
+        and class clearance (``None`` -> the board-global clearance)."""
+        clr = self.clearance if clearance is None else clearance
+        for a, b in zip(points, points[1:], strict=False):
+            if dist(a, b) > 1e-9:
+                self._add_seg(layer, a, b, net, half_width, clr)
+
+    def remove_run(
+        self,
+        layer: int,
+        points: list[Pt],
+        net: int,
+        half_width: float,
+        clearance: float | None = None,
+    ) -> None:
+        """Undo one :meth:`add_run` with the same arguments (issue #7650).
+
+        Removes one stored copy of each segment; raises if a segment was never
+        committed, so a caller can never silently leave stale copper behind.
+        Not allowed inside a trial: the journal could no longer replay.
+        """
+        if self._journal is not None:
+            raise RuntimeError("CommittedCopper.remove_run inside an open trial")
+        clr = self.clearance if clearance is None else clearance
+        index = self.copper[layer]
+        for a, b in zip(points, points[1:], strict=False):
+            if dist(a, b) <= 1e-9:
+                continue
+            item = (a, b, net, half_width, clr)
+            for key in index._cells_for_seg(a, b, pad=half_width + clr + 0.5):
+                bucket = index.buckets.get(key)
+                if not bucket or item not in bucket:
+                    raise RuntimeError("CommittedCopper.remove_run: segment was not committed")
+                bucket.remove(item)
+
+    def add_run_widths(
+        self,
+        layer: int,
+        points: list[Pt],
+        net: int,
+        seg_halves: list[float],
+        clearance: float | None = None,
+    ) -> None:
+        """Commit a polyline whose segments carry PER-SEGMENT half-widths.
+
+        The tapered pad-escape mechanism (issue #4293) emits the escape legs
+        at a narrower neck width than the widened lattice body, so the spacing
+        model must record each segment at the width it was ACTUALLY emitted
+        at -- a neck leg spaced as neck copper, the body spaced at the full
+        class width.  ``seg_halves[i]`` is the half-width of the segment from
+        ``points[i]`` to ``points[i + 1]``.
+        """
+        clr = self.clearance if clearance is None else clearance
+        for (a, b), hw in zip(zip(points, points[1:], strict=False), seg_halves, strict=False):
+            if dist(a, b) > 1e-9:
+                self._add_seg(layer, a, b, net, hw, clr)
+
+    def add_via(
+        self,
+        point: Pt,
+        net: int,
+        clearance: float | None = None,
+        *,
+        radius: float | None = None,
+        layers: tuple[int, ...] | None = None,
+    ) -> None:
+        """Commit a through-via (blocks the site on ALL layers).
+
+        ``clearance`` is the via's own net-class clearance (issue #4597);
+        ``None`` -> the board-global clearance, which is exactly the pre-#4597
+        behavior for every caller that does not pass one.
+        """
+        self.vias.append((point, net, self.clearance if clearance is None else clearance))
+        # Preserve physical bodies for Kelvin branch isolation. Generated
+        # lattice vias default to through-vias; imported copper may differ.
+        self.via_copper.append(
+            (
+                point,
+                net,
+                self.via_radius if radius is None else radius,
+                tuple(range(self.num_layers)) if layers is None else layers,
+            )
+        )
+
+    # -- predicates --------------------------------------------------------
+
+    def _own(self, half: float | None, clearance: float | None) -> tuple[float, float]:
+        """Resolve the querying connection's (half-width, clearance)."""
+        own_half = self.trace_half if half is None else half
+        own_clr = self.clearance if clearance is None else clearance
+        return own_half, own_clr
+
+    def _intra_gap(self, cnet: int, a: Pt, b: Pt, required: float) -> float:
+        """``required``, relaxed to the intra-pair gap for the hybrid partner (#7931)."""
+        ip = self.intra_pair
+        if ip is None or cnet != ip[0]:
+            return required
+        _net, site, reach, gap = ip
+        if dist(a, site) > reach or dist(b, site) > reach:
+            return required
+        return min(required, gap)
+
+    def seg_clear(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float | None = None,
+        clearance: float | None = None,
+    ) -> bool:
+        """True if segment ``a-b`` on ``layer`` clears other-net copper + vias."""
+        own_half, own_clr = self._own(half, clearance)
+        if self.kelvin_guard is not None and not self.kelvin_guard.clear(a, b, layer, own_half):
+            return False
+        if not self.fixed_fills.segment_clear(a, b, layer, own_half, own_clr):
+            return False
+        # Issue #4602: an active pairwise projection inflates the spatial query
+        # window to the widest requirement THIS net participates in (the #4511
+        # search-radius trap: a ~3 mm creepage requirement vastly exceeds the
+        # DRU scalar, so an un-inflated window silently misses far-but-
+        # forbidden copper).  Dormant/unmapped nets keep the scalar window.
+        pw = self.pairwise
+        pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        # Perf (#7881): one per-net partner row instead of ``pw.required`` per obstacle.
+        row = pw.row(net) if pw is not None else {}
+        pad = own_half + max(own_clr, pw_reach) + 0.5
+        # Epic #5509 Phase 3d: every gap below is the KERNEL's edge-to-edge
+        # answer, measured once per obstacle and compared against the
+        # clearance alone (the old form composed a centreline gap and
+        # compared distances -- algebraically the same comparison).
+        probe = ka.LatticeProbe(ka.trace(a, b, own_half, layer), net)
+        # Perf (#6182): the spatial query returns every segment in the padded
+        # bucket window, most of which are far beyond any requirement.  The
+        # centreline distance is >= the axis-aligned bbox separation, so when
+        # ``bbox_sep - half-widths`` already exceeds the largest requirement
+        # (plus a float-safety slack) the exact kernel gap necessarily passes
+        # every comparison below and the kernel call can be skipped without
+        # changing any verdict.
+        ax0, ax1 = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
+        ay0, ay1 = (a[1], b[1]) if a[1] <= b[1] else (b[1], a[1])
+        for c, d, cnet, hw, iclr in self.copper[layer].query_seg(a, b, pad=pad):
+            if not probe.foreign(cnet):
+                continue
+            need = own_clr if own_clr > iclr else iclr
+            if pw is not None:
+                req = row.get(cnet, 0.0)
+                if req > need:
+                    need = req
+            cx0, cx1 = (c[0], d[0]) if c[0] <= d[0] else (d[0], c[0])
+            cy0, cy1 = (c[1], d[1]) if c[1] <= d[1] else (d[1], c[1])
+            sep = max(cx0 - ax1, ax0 - cx1, cy0 - ay1, ay0 - cy1)
+            if sep - own_half - hw > need + 1e-6:
+                continue
+            edge_gap = probe.gap(ka.trace(c, d, hw, layer))
+            if not ka.satisfies(edge_gap, self._intra_gap(cnet, a, b, max(own_clr, iclr))):
+                return False
+            # Issue #4602: pair term.  The gap widens to the PAIR requirement
+            # (never a per-net scalar); a scalar-passing hit inside the
+            # requirement may be waived by a #4506 attach zone, probed at the
+            # closest-gap midpoint exactly as the #4588 gate probes it.
+            if pw is not None:
+                req = row.get(cnet, 0.0)
+                if req > max(own_clr, iclr):
+                    if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_seg(
+                        a, b, c, d, net, cnet, layer, half_a=own_half, half_b=hw, req=req
+                    ):
+                        return False
+        # Issue #4597: honor the STORED via's class clearance the same way the
+        # copper loop above honors a stored segment's -- a preserved HV via must
+        # be cleared at its own class gap, not merely at the querying net's.
+        # ``max`` can only grow the requirement, so a via stored at the global
+        # floor is cleared at ``own_clr`` and is byte-identical.
+        for point, vnet, vclr in self.vias:
+            if probe.foreign(vnet):
+                # Perf (#6182): same exact bbox lower-bound skip as above.
+                need = own_clr if own_clr > vclr else vclr
+                if pw is not None:
+                    vreq = row.get(vnet, 0.0)
+                    if vreq > need:
+                        need = vreq
+                vsep = max(ax0 - point[0], point[0] - ax1, ay0 - point[1], point[1] - ay1)
+                if vsep - own_half - self.via_radius > need + 1e-6:
+                    continue
+                via_gap = probe.gap(ka.site(point, self.via_radius))
+                if not ka.satisfies(via_gap, max(own_clr, vclr)):
+                    return False
+                # Issue #4602: a committed via is copper too -- the pair
+                # requirement spaces the trace from its barrel edge.
+                if pw is not None:
+                    req = row.get(vnet, 0.0)
+                    if req > max(own_clr, vclr):
+                        if not ka.satisfies(via_gap, req) and not pw.exempt_seg_pt(
+                            a,
+                            b,
+                            point,
+                            net,
+                            vnet,
+                            layer,
+                            half=own_half,
+                            radius=self.via_radius,
+                            req=req,
+                        ):
+                            return False
+            elif seg_body_crosses_pt(a, b, point):
+                # Same-net octilinear segment whose BODY runs across a same-net
+                # via center is malformed lattice copper (#4318).  The DRC
+                # checker skips same-net pairs, so this coincidence would never
+                # surface downstream and no nudge post-pass could clean it --
+                # the negotiator must simply not emit it.  The legal
+                # endpoint-at-via-center in-pad invariant (#2706) is preserved
+                # by ``seg_body_crosses_pt``'s endpoint exemption.
+                return False
+        return True
+
+    def node_clear(
+        self,
+        point: Pt,
+        layer: int,
+        net: int,
+        half: float | None = None,
+        clearance: float | None = None,
+    ) -> bool:
+        """True if a node site on ``layer`` clears other-net copper + vias."""
+        own_half, own_clr = self._own(half, clearance)
+        if self.kelvin_guard is not None and not self.kelvin_guard.clear(
+            point, point, layer, own_half
+        ):
+            return False
+        if not self.fixed_fills.segment_clear(point, point, layer, own_half, own_clr):
+            return False
+        # Issue #4602: inflate the query window to the pairwise reach (see
+        # ``seg_clear``); dormant/unmapped nets keep the scalar window.
+        pw = self.pairwise
+        pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        # Perf (#7881): one per-net partner row instead of ``pw.required`` per obstacle.
+        row = pw.row(net) if pw is not None else {}
+        pad = own_half + max(own_clr, pw_reach) + 0.5
+        # Epic #5509 Phase 3d: the node site is a disc of the querying copper's
+        # own half-width, and every gap below is the kernel's (see ``seg_clear``).
+        probe = ka.LatticeProbe(ka.site(point, own_half), net)
+        px, py = point
+        for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
+            if not probe.foreign(cnet):
+                continue
+            # Perf (#7881): the exact bbox lower-bound skip ``seg_clear`` uses
+            # (#6182) -- when the bbox separation already exceeds the largest
+            # requirement the kernel gap necessarily passes every test below.
+            need = own_clr if own_clr > iclr else iclr
+            if pw is not None:
+                req = row.get(cnet, 0.0)
+                if req > need:
+                    need = req
+            sx = max(min(c[0], d[0]) - px, px - max(c[0], d[0]), 0.0)
+            sy = max(min(c[1], d[1]) - py, py - max(c[1], d[1]), 0.0)
+            if max(sx, sy) - own_half - hw > need + 1e-6:
+                continue
+            edge_gap = probe.gap(ka.trace(c, d, hw, layer))
+            if not ka.satisfies(edge_gap, self._intra_gap(cnet, point, point, max(own_clr, iclr))):
+                return False
+            if pw is not None:
+                req = row.get(cnet, 0.0)
+                if req > max(own_clr, iclr):
+                    if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
+                        c,
+                        d,
+                        point,
+                        net,
+                        cnet,
+                        layer,
+                        half=hw,
+                        radius=own_half,
+                        req=req,
+                    ):
+                        return False
+        # Issue #4597: ``max(own_clr, stored_via_clr)`` -- see ``seg_clear``.
+        for vpt, vnet, vclr in self.vias:
+            if not probe.foreign(vnet):
+                continue
+            via_gap = probe.gap(ka.site(vpt, self.via_radius))
+            if not ka.satisfies(via_gap, max(own_clr, vclr)):
+                return False
+            if pw is not None:
+                req = row.get(vnet, 0.0)
+                if req > max(own_clr, vclr):
+                    if not ka.satisfies(via_gap, req) and not pw.exempt_pt_pt(
+                        point,
+                        vpt,
+                        net,
+                        vnet,
+                        layer,
+                        radius_p=own_half,
+                        radius_q=self.via_radius,
+                        req=req,
+                    ):
+                        return False
+        return True
+
+    def via_clear(self, point: Pt, net: int, clearance: float | None = None) -> bool:
+        """True if a through-via at ``point`` clears committed copper (ALL
+        layers) and committed vias (cross-net body gap, same-net hole gap).
+
+        The via-to-trace and cross-net via-to-via gaps use the maximum of
+        the querying class, stored class and board-global clearances. Same-net
+        vias retain their drill-spacing floor regardless of class clearance.
+        """
+        own_clr = self.clearance if clearance is None else max(self.clearance, clearance)
+        # Issue #4602: a through-via is copper on EVERY layer, so its pair
+        # requirement against foreign copper applies on all of them.  The
+        # query window inflates by the net's pairwise reach (see ``seg_clear``).
+        if self.kelvin_guard is not None and any(
+            not self.kelvin_guard.clear(point, point, layer, self.via_radius)
+            for layer in range(self.num_layers)
+        ):
+            return False
+        if not self.fixed_fills.via_clear(
+            point,
+            tuple(range(self.num_layers)),
+            self.via_radius,
+            (
+                self.fixed_fill_via_clearance
+                if clearance is None
+                else max(self.fixed_fill_via_clearance, own_clr)
+            ),
+        ):
+            return False
+        pw = self.pairwise
+        pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        # Perf (#7881): one per-net partner row instead of ``pw.required`` per obstacle.
+        row = pw.row(net) if pw is not None else {}
+        pad = self.via_radius + own_clr + self.trace_half + 2.0 + pw_reach
+        # Epic #5509 Phase 3d: the candidate is a through-via barrel, and
+        # every gap below is the kernel's (see ``seg_clear``).
+        probe = ka.LatticeProbe(ka.site(point, self.via_radius), net)
+        for layer in range(self.num_layers):
+            for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
+                if not probe.foreign(cnet):
+                    continue
+                # Perf (#6182): exact bbox lower-bound skip (see ``seg_clear``).
+                need = own_clr if own_clr > iclr else iclr
+                if pw is not None:
+                    preq = row.get(cnet, 0.0)
+                    if preq > need:
+                        need = preq
+                sx = max(min(c[0], d[0]) - point[0], point[0] - max(c[0], d[0]), 0.0)
+                sy = max(min(c[1], d[1]) - point[1], point[1] - max(c[1], d[1]), 0.0)
+                if max(sx, sy) - self.via_radius - hw > need + 1e-6:
+                    continue
+                edge_gap = probe.gap(ka.trace(c, d, hw, layer))
+                if not ka.satisfies(edge_gap, max(own_clr, iclr)):
+                    return False
+                if pw is not None:
+                    req = row.get(cnet, 0.0)
+                    if req > max(own_clr, iclr):
+                        if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
+                            c,
+                            d,
+                            point,
+                            net,
+                            cnet,
+                            layer,
+                            half=hw,
+                            radius=self.via_radius,
+                            req=req,
+                        ):
+                            return False
+        # The via-to-via requirements below are composed CENTRE-to-centre by
+        # the pathfinder (``via_via_gap`` is a via diameter plus a clearance;
+        # ``same_net_via_gap`` is a drill diameter plus the hole-to-hole
+        # floor), so each is re-expressed as the edge-to-edge requirement the
+        # kernel answers by subtracting the two barrel radii.  Same arithmetic,
+        # same verdict -- only the frame of reference moves.
+        two_radii = 2.0 * self.via_radius
+        for vpt, vnet, vclr in self.vias:
+            # Cross-net vias must honor BOTH the copper gap (via_via_gap =
+            # via diameter + clearance, centre-to-centre) AND the drill
+            # hole-to-hole floor (same_net_via_gap = via_drill +
+            # min_hole_to_hole).  At JLC defaults the copper gap alone puts
+            # two 0.3mm drills only 0.45mm hole-edge-to-edge -- under the
+            # 0.5mm floor (issue #4291: 16 hole_to_hole DRC warnings on the
+            # softstart P4 run of record).
+            if probe.foreign(vnet):
+                # Derive the copper gap from the larger of the querying
+                # and stored class clearances. Keep
+                # the original global copper gap and drill floor as lower
+                # bounds, including when either class is unspecified.
+                required = max(
+                    self.via_via_gap - two_radii,
+                    max(own_clr, vclr),
+                    self.same_net_via_gap - two_radii,
+                )
+            else:
+                required = self.same_net_via_gap - two_radii
+            barrel_gap = probe.gap(ka.site(vpt, self.via_radius))
+            if not ka.satisfies(barrel_gap, required):
+                return False
+            # Issue #4602: barrel-to-barrel pair requirement for cross-net vias.
+            if pw is not None and probe.foreign(vnet):
+                req = row.get(vnet, 0.0)
+                if req > 0.0:
+                    if not ka.satisfies(barrel_gap, req) and not pw.exempt_pt_pt(
+                        point,
+                        vpt,
+                        net,
+                        vnet,
+                        radius_p=self.via_radius,
+                        radius_q=self.via_radius,
+                        req=req,
+                    ):
+                        return False
+        return True

@@ -1,0 +1,840 @@
+"""
+Assembly package generator.
+
+Creates complete manufacturing packages including BOM, CPL, and Gerbers.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+
+from ..parts.lcsc import LCSCDependencyMissingError
+from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
+from .bom_formats import (
+    BOMExportConfig,
+    apply_existing_lcsc_assignments,
+    export_bom,
+    get_bom_formatter,
+    read_existing_lcsc_assignments,
+)
+from .bom_spec_overlay import (
+    SpecOverlayReport,
+    apply_spec_overlay,
+    find_spec_file,
+    resolved_refs,
+)
+from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
+from .pnp import (
+    PlacementData,
+    PnPExportConfig,
+    _aux_origin_of,
+    count_rotation_corrections,
+    export_pnp,
+    extract_placements,
+    extract_tht_exclusions,
+    get_pnp_formatter,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AssemblyConfig:
+    """Configuration for assembly package generation."""
+
+    # Output settings
+    output_dir: Path = field(default_factory=lambda: Path("assembly"))
+
+    # BOM settings
+    include_bom: bool = True
+    bom_filename: str = "bom_{manufacturer}.csv"
+    bom_config: BOMExportConfig | None = None
+
+    # CPL/PnP settings
+    include_pnp: bool = True
+    pnp_filename: str = "cpl_{manufacturer}.csv"
+    pnp_config: PnPExportConfig | None = None
+
+    # Gerber settings
+    include_gerbers: bool = True
+    gerbers_subdir: str = "gerbers"
+    gerber_config: GerberConfig | None = None
+
+    # LCSC auto-matching
+    auto_lcsc: bool = True
+    auto_lcsc_prefer_basic: bool = True
+    auto_lcsc_min_stock: int = 100
+
+    # Spec overlay
+    no_spec: bool = False
+    spec_path: Path | None = None
+
+    # BOM source: "schematic" (default), "pcb", or "auto"
+    bom_source: str = "schematic"
+
+    # LCSC CSV merge: preserve manually-assigned LCSC part numbers from
+    # an existing BOM CSV when regenerating.  Enabled by default.
+    merge_lcsc: bool = True
+
+    # Explicit LCSC merge source (issue #8260).  When set, replaces the
+    # default ``<output-dir>/bom_<mfr>.csv`` lookup so a new revision's bundle
+    # can name the previous verified BOM.  A missing file is an error.
+    # ``merge_lcsc=False`` (--no-merge-lcsc) takes precedence.
+    merge_lcsc_from: Path | None = None
+
+    # Filtering
+    exclude_references: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AssemblyPackageResult:
+    """Result of assembly package generation."""
+
+    output_dir: Path
+    bom_path: Path | None = None
+    pnp_path: Path | None = None
+    gerber_path: Path | None = None
+    spec_overlay: SpecOverlayReport | None = None
+    lcsc_enrichment: EnrichmentReport | None = None
+    rotation_corrections_applied: int = 0
+    """Number of CPL rows whose rotation was shifted by a manufacturer
+    per-footprint correction (issue #7107).  0 when the manufacturer
+    profile has no corrections."""
+    tht_excluded: list[PlacementData] = field(default_factory=list)
+    """Through-hole components excluded from the CPL by the THT filter
+    (issue #3539).  These are on the board and in the BOM but absent
+    from the SMT pick-and-place file, so the assembler must hand-solder
+    them.  Empty when the effective PnP config has ``exclude_tht=False``
+    or the board has no THT parts."""
+    bom_component_count: int = 0
+    """Component instances written to the BOM (after DNP/virtual filtering)."""
+    bom_unique_parts: int = 0
+    """Distinct (value, footprint, LCSC) part groups in the BOM."""
+    bom_missing_lcsc: list[str] = field(default_factory=list)
+    """References written to the BOM with no LCSC part number."""
+    lcsc_merge_source: str | None = None
+    """One-line description of the LCSC merge source used (issue #8260):
+    the CSV path, "no existing BOM to merge", or "disabled"."""
+    lcsc_merge_count: int = 0
+    """Parts that received an LCSC number from the merge source (issue #8260)."""
+    lcsc_merge_conflicts: list[str] = field(default_factory=list)
+    """``REF (kept X, source Y)`` for rows whose already-assigned LCSC
+    (schematic/spec) disagrees with the merge source (issue #8260).  The
+    assigned value always wins; this only makes the disagreement visible."""
+    lcsc_merge_exempt_skipped: list[str] = field(default_factory=list)
+    """``REF (source Y)`` for spec-exempt refs the merge source would have
+    supplied a number for but which were excluded from the merge (issue #8282)."""
+    pnp_placement_count: int = 0
+    """Rows written to the CPL."""
+    pnp_layers: list[str] = field(default_factory=list)
+    """Sides with CPL placements (``"top"`` / ``"bottom"``)."""
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def success(self) -> bool:
+        """Check if generation was successful."""
+        return len(self.errors) == 0
+
+    def __str__(self) -> str:
+        lines = [f"Assembly Package: {self.output_dir}"]
+        if self.bom_path:
+            lines.append(f"  BOM: {self.bom_path.name}")
+        if self.pnp_path:
+            lines.append(f"  CPL: {self.pnp_path.name}")
+        if self.gerber_path:
+            lines.append(f"  Gerbers: {self.gerber_path.name}")
+        if self.errors:
+            lines.append(f"  Errors: {len(self.errors)}")
+            for err in self.errors:
+                lines.append(f"    - {err}")
+        return "\n".join(lines)
+
+
+class AssemblyPackage:
+    """
+    Generate complete assembly packages for PCB manufacturing.
+
+    Combines BOM, pick-and-place (CPL), and Gerber files into
+    manufacturer-ready packages.
+
+    Example::
+
+        # Quick export for JLCPCB
+        pkg = AssemblyPackage.create(
+            pcb="board.kicad_pcb",
+            schematic="board.kicad_sch",
+            manufacturer="jlcpcb",
+        )
+        result = pkg.export("output/")
+        print(f"Created: {result.bom_path}, {result.pnp_path}, {result.gerber_path}")
+
+        # Custom configuration
+        config = AssemblyConfig(
+            include_gerbers=False,
+            exclude_references=["TP*", "MH*"],
+        )
+        pkg = AssemblyPackage(
+            pcb_path="board.kicad_pcb",
+            schematic_path="board.kicad_sch",
+            manufacturer="pcbway",
+            config=config,
+        )
+        result = pkg.export()
+    """
+
+    def __init__(
+        self,
+        pcb_path: str | Path,
+        schematic_path: str | Path | None = None,
+        manufacturer: str = "jlcpcb",
+        config: AssemblyConfig | None = None,
+    ):
+        """
+        Initialize assembly package generator.
+
+        Args:
+            pcb_path: Path to KiCad PCB file (.kicad_pcb)
+            schematic_path: Path to KiCad schematic file (.kicad_sch)
+                           If not provided, will look for same name as PCB
+            manufacturer: Manufacturer ID (jlcpcb, pcbway, etc.)
+            config: Assembly configuration
+
+        Raises:
+            KiCadFileNotFoundError: when the PCB file does not exist, or when
+                the schematic cannot be auto-discovered and the configured
+                ``bom_source`` requires one (i.e. anything other than
+                ``"pcb"``).  Failing fast here avoids generating a partial
+                manufacturing package (Gerbers + CPL but no BOM) on disk.
+        """
+        self.pcb_path = Path(pcb_path)
+        if not self.pcb_path.exists():
+            raise KiCadFileNotFoundError(
+                "PCB file not found",
+                context={"file": str(pcb_path)},
+                suggestions=["Check that the file path is correct"],
+            )
+
+        self.manufacturer = manufacturer.lower()
+        # Resolve the fab *family* for export-format concerns (BOM/CPL CSV
+        # format, Gerber preset, LCSC enrichment, output filenames).
+        # Capability tiers like ``jlcpcb-tier1`` share the parent fab's
+        # formats while keeping their own DRC profile (issue #3497).
+        from kicad_tools.manufacturers import get_fab_family
+
+        self.fab_family = get_fab_family(self.manufacturer)
+        self.config = config or AssemblyConfig()
+
+        # Find schematic
+        if schematic_path:
+            self.schematic_path = Path(schematic_path)
+        else:
+            from kicad_tools.report.utils import find_schematic
+
+            self.schematic_path = find_schematic(self.pcb_path)
+
+        if self.schematic_path is not None and not self.schematic_path.exists():
+            logger.warning(f"Schematic not found: {self.schematic_path}")
+            self.schematic_path = None
+
+        # Fail-fast when the schematic is required for the configured
+        # BOM source.  Without this guard ``export`` would still produce
+        # Gerbers/CPL/Report/ProjectZip/Manifest before ``_generate_bom``
+        # raised -- leaving a partial (and easily misread) package on disk.
+        if (
+            self.config.include_bom
+            and self.schematic_path is None
+            and self.config.bom_source != "pcb"
+        ):
+            from kicad_tools.report.utils import (
+                SCHEMATIC_STRIP_SUFFIXES,
+                schematic_candidate_paths,
+            )
+
+            candidates = schematic_candidate_paths(self.pcb_path)
+            raise KiCadFileNotFoundError(
+                "Schematic file not found for BOM generation",
+                context={
+                    "pcb": str(self.pcb_path),
+                    "pcb_stem": self.pcb_path.stem,
+                    "search_dir": str(self.pcb_path.parent),
+                    "bom_source": self.config.bom_source,
+                    "strip_suffixes": list(SCHEMATIC_STRIP_SUFFIXES),
+                    "candidates_tried": [str(c) for c in candidates],
+                },
+                suggestions=[
+                    "Pass --sch <path-to-.kicad_sch> to point at the schematic explicitly",
+                    "Use --bom-source pcb to generate the BOM from PCB footprints",
+                    "Use --no-bom to skip BOM generation entirely",
+                ],
+            )
+
+    @classmethod
+    def create(
+        cls,
+        pcb: str | Path,
+        schematic: str | Path | None = None,
+        manufacturer: str = "jlcpcb",
+        output_dir: str | Path | None = None,
+    ) -> AssemblyPackage:
+        """
+        Factory method for quick assembly package creation.
+
+        Args:
+            pcb: Path to PCB file
+            schematic: Path to schematic file (optional)
+            manufacturer: Manufacturer ID
+            output_dir: Output directory (optional)
+
+        Returns:
+            Configured AssemblyPackage instance
+        """
+        config = AssemblyConfig()
+        if output_dir:
+            config.output_dir = Path(output_dir)
+
+        return cls(pcb, schematic, manufacturer, config)
+
+    def export(self, output_dir: str | Path | None = None) -> AssemblyPackageResult:
+        """
+        Generate complete assembly package.
+
+        Args:
+            output_dir: Output directory (overrides config)
+
+        Returns:
+            AssemblyPackageResult with paths and any errors
+        """
+        out_dir = Path(output_dir) if output_dir else self.config.output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        result = AssemblyPackageResult(output_dir=out_dir)
+
+        # Generate BOM
+        if self.config.include_bom:
+            try:
+                result.bom_path = self._generate_bom(out_dir, result)
+            except LCSCDependencyMissingError:
+                # A missing ``parts`` extra means --auto-lcsc could not run
+                # at all.  Propagate out of ``export`` so the manufacturing
+                # pipeline aborts BEFORE writing the manifest/bundle, rather
+                # than recording an error and shipping a BOM with an empty
+                # ``LCSC Part #`` column (issue #4104).
+                raise
+            except Exception as e:
+                result.errors.append(f"BOM generation failed: {e}")
+                logger.error(f"BOM generation failed: {e}")
+
+        # Generate CPL
+        if self.config.include_pnp:
+            try:
+                result.pnp_path = self._generate_pnp(out_dir, result)
+            except Exception as e:
+                result.errors.append(f"CPL generation failed: {e}")
+                logger.error(f"CPL generation failed: {e}")
+
+        # Generate Gerbers
+        if self.config.include_gerbers:
+            try:
+                result.gerber_path = self._generate_gerbers(out_dir)
+            except Exception as e:
+                result.errors.append(f"Gerber generation failed: {e}")
+                logger.error(f"Gerber generation failed: {e}")
+
+        return result
+
+    def _generate_bom(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
+        """Generate BOM file.
+
+        When ``auto_lcsc`` is enabled (the default) and the target
+        manufacturer is ``jlcpcb``, missing LCSC part numbers are
+        populated automatically via :func:`enrich_bom_lcsc` before
+        the BOM CSV is written.
+
+        The ``bom_source`` config field controls where BOM data is
+        sourced from:
+
+        - ``"schematic"`` (default): extract from schematic symbols
+        - ``"pcb"``: extract from PCB footprints (no schematic needed)
+        - ``"auto"``: use schematic by default, fall back to PCB when
+          reference sets diverge significantly
+
+        Args:
+            output_dir: Directory to write the BOM CSV into.
+            result: Optional result object to attach enrichment report.
+
+        Returns:
+            Path to the written BOM CSV.
+        """
+        bom_source = self.config.bom_source
+
+        if bom_source == "pcb":
+            from ..schema.bom import extract_bom_from_pcb
+
+            bom = extract_bom_from_pcb(str(self.pcb_path))
+            items = bom.items
+        elif bom_source == "auto":
+            items = self._resolve_auto_bom_source()
+        else:
+            # Default: schematic source
+            if not self.schematic_path:
+                from kicad_tools.report.utils import (
+                    SCHEMATIC_STRIP_SUFFIXES,
+                    schematic_candidate_paths,
+                )
+
+                candidates = schematic_candidate_paths(self.pcb_path)
+                raise KiCadFileNotFoundError(
+                    "Schematic file not found for BOM generation",
+                    context={
+                        "pcb": str(self.pcb_path),
+                        "pcb_stem": self.pcb_path.stem,
+                        "search_dir": str(self.pcb_path.parent),
+                        "bom_source": bom_source,
+                        "strip_suffixes": list(SCHEMATIC_STRIP_SUFFIXES),
+                        "candidates_tried": [str(c) for c in candidates],
+                    },
+                    suggestions=[
+                        "Pass --sch <path-to-.kicad_sch> to point at the schematic explicitly",
+                        "Use --bom-source pcb to generate the BOM from PCB footprints",
+                        "Use --no-bom to skip BOM generation entirely",
+                    ],
+                )
+
+            from ..schema.bom import backfill_footprints_from_pcb, extract_bom
+
+            bom = extract_bom(self.schematic_path)
+            items = bom.items
+
+            # Back-fill empty BOMItem.footprint values from the PCB.
+            # Spec-overlay / programmatically generated schematics often
+            # leave the instance-level Footprint property blank; without
+            # this fallback the BOM CSV's Footprint column ends up empty.
+            # The helper never overwrites a non-empty footprint, so
+            # schematic-driven boards (e.g. board 01) are unaffected.
+            try:
+                filled = backfill_footprints_from_pcb(items, self.pcb_path)
+                if filled:
+                    logger.info(
+                        "Back-filled %d footprint ref(s) from PCB (schematic metadata was blank)",
+                        filled,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Footprint back-fill from PCB failed (continuing without): %s",
+                    e,
+                )
+
+        # Filter excluded references
+        if self.config.exclude_references:
+            items = self._filter_references(items)
+
+        # Spec overlay: apply MPN/LCSC from .kct before auto-enrichment
+        spec_refs: set[str] = set()
+        exempt_refs: set[str] = set()
+        if not self.config.no_spec:
+            try:
+                spec_file = self.config.spec_path
+                if spec_file is None:
+                    # Auto-detect from schematic/PCB directory
+                    spec_file = find_spec_file(self.pcb_path.parent)
+                if spec_file is not None:
+                    from ..spec.parser import load_spec
+
+                    spec = load_spec(spec_file)
+                    if spec.bom_entries:
+                        overlay_report = apply_spec_overlay(items, spec.bom_entries)
+                        if result is not None:
+                            result.spec_overlay = overlay_report
+                        for line in overlay_report.summary_lines():
+                            logger.info(line)
+                        # Collect refs the spec overlay explicitly resolved --
+                        # either an LCSC number directly, or an MPN with no
+                        # LCSC (an explicit non-LCSC supplier selection, e.g.
+                        # a Samtec/Digikey-sourced part). Both must be exempt
+                        # from downstream generic auto-matching: a matched
+                        # MPN-only entry still represents explicit sourcing
+                        # intent that must never be silently overwritten by a
+                        # generic (value, footprint) LCSC guess (issue #4995).
+                        spec_refs = resolved_refs(overlay_report)
+                        # Refs declared ``exempt`` (consigned / non-LCSC) must
+                        # never pick up an LCSC from the CSV merge (#8282).
+                        from .bom_spec_overlay import declared_exemptions
+
+                        exempt_refs = set(declared_exemptions(spec.bom_entries))
+            except Exception as e:
+                logger.warning(f"Spec overlay failed (continuing without): {e}")
+
+        # Merge LCSC assignments from existing BOM CSV.  This runs after
+        # spec overlay (which has higher priority) but before API
+        # auto-matching (which has lower priority).  Items that already
+        # received an LCSC from the schematic or spec overlay are not
+        # overwritten. Explicit MPN-only selections also take priority over
+        # old generic CSV assignments, even with auto-matching disabled.
+        csv_merge_refs: set[str] = set()
+        merge_source = ""
+        total_merged = 0
+        source_is_file = False
+        conflicts: list[str] = []
+        exempt_skipped: list[str] = []
+        if not self.config.merge_lcsc:
+            merge_source = "LCSC merge: disabled (--no-merge-lcsc)"
+        else:
+            filename = self.config.bom_filename.format(manufacturer=self.fab_family)
+            if self.config.merge_lcsc_from is not None:
+                existing_csv = Path(self.config.merge_lcsc_from)
+                if not existing_csv.is_file():
+                    msg = f"--merge-lcsc-from file not found: {existing_csv}"
+                    raise FileNotFoundError(msg)
+            else:
+                existing_csv = output_dir / filename
+            if existing_csv.is_file():
+                merge_source = f"LCSC merge source: {existing_csv}"
+                source_is_file = True
+                existing = read_existing_lcsc_assignments(existing_csv)
+                if existing:
+                    # Validate read-back assignments against the local
+                    # parts cache so a wrong-part LCSC in the committed
+                    # CSV does not self-perpetuate (issue #3590).
+                    parts_cache = None
+                    try:
+                        from ..parts.cache import PartsCache
+
+                        parts_cache = PartsCache()
+                    except Exception as e:
+                        logger.debug("Parts cache unavailable for CSV-merge validation: %s", e)
+                    # Make disagreements between the source and an already
+                    # assigned (schematic/spec) LCSC visible; precedence is
+                    # unchanged -- the assigned value wins (issue #8260).
+                    for item in items:
+                        assigned = getattr(item, "lcsc", "")
+                        src = existing.get((item.value, item.footprint))
+                        if assigned and src and src != assigned:
+                            conflicts.append(f"{item.reference} (kept {assigned}, source {src})")
+                    # Record exempt refs the source would have supplied a
+                    # number for (#8282); they are excluded from the merge.
+                    for item in items:
+                        src = existing.get((item.value, item.footprint))
+                        if item.reference in exempt_refs and src:
+                            exempt_skipped.append(f"{item.reference} (source {src})")
+                    merged_count, csv_merge_refs = apply_existing_lcsc_assignments(
+                        [
+                            item
+                            for item in items
+                            if item.reference not in exempt_refs
+                            and not (item.reference in spec_refs and item.mpn and not item.lcsc)
+                        ],
+                        existing,
+                        parts_cache=parts_cache,
+                    )
+                    total_merged = merged_count
+                    if merged_count:
+                        logger.info(
+                            "CSV merge: preserved %d LCSC assignment(s) from existing BOM",
+                            merged_count,
+                        )
+            else:
+                merge_source = (
+                    f"LCSC merge source: no existing BOM to merge (looked for {existing_csv})"
+                )
+
+        if source_is_file:
+            merge_source += f" ({total_merged} parts merged)"
+        if conflicts:
+            logger.warning(
+                "LCSC merge source disagrees with assigned LCSC for %d part(s): %s",
+                len(conflicts),
+                ", ".join(conflicts),
+            )
+        if exempt_skipped:
+            logger.info(
+                "LCSC merge skipped %d spec-exempt part(s): %s",
+                len(exempt_skipped),
+                ", ".join(exempt_skipped),
+            )
+        if result is not None:
+            result.lcsc_merge_exempt_skipped = exempt_skipped
+            result.lcsc_merge_source = merge_source
+            result.lcsc_merge_count = total_merged
+            result.lcsc_merge_conflicts = conflicts
+        logger.info(merge_source)
+
+        # LCSC auto-matching for JLCPCB exports
+        if self.config.auto_lcsc and self.fab_family == "jlcpcb":
+            try:
+                enrichment = enrich_bom_lcsc(
+                    items,
+                    prefer_basic=self.config.auto_lcsc_prefer_basic,
+                    min_stock=self.config.auto_lcsc_min_stock,
+                    spec_refs=spec_refs | csv_merge_refs,
+                    exempt_refs=exempt_refs,
+                )
+                if result is not None:
+                    result.lcsc_enrichment = enrichment
+                for line in enrichment.summary_lines():
+                    logger.info(line)
+            except LCSCDependencyMissingError:
+                # The optional ``parts`` extra is missing, so --auto-lcsc
+                # (the CLI default for JLCPCB) cannot populate a single LCSC
+                # part number.  Do NOT swallow this into a warning-and-
+                # continue: propagate it so the BOM CSV is never written and
+                # ``kct export`` exits non-zero with the install hint, before
+                # the manifest/bundle is finalized (issue #4104).  This is
+                # distinct from best-effort degradation (cache-unavailable,
+                # a single API hiccup, a genuine no-match), which must keep
+                # exit 0.
+                raise
+            except Exception as e:
+                logger.warning(f"LCSC auto-matching failed (continuing without): {e}")
+
+        # Converge BOM/CPL library-prefix forms (issue #8569).
+        self._cpl_footprint_overrides = {}
+        try:
+            from ..schema.pcb import PCB as _PCB
+            from .footprint_form import reconcile_bom_items
+
+            _names = {fp.reference: fp.name for fp in _PCB.load(str(self.pcb_path)).footprints}
+            self._cpl_footprint_overrides = reconcile_bom_items(items, _names)
+        except Exception as e:
+            logger.warning("BOM/CPL footprint-form reconciliation skipped: %s", e)
+
+        # Generate BOM
+        bom_config = self.config.bom_config or BOMExportConfig()
+        bom_csv = export_bom(items, self.fab_family, bom_config)
+        if result is not None:
+            # Issue #7260: record the BOM's facts from the items the
+            # formatter writes, so callers never re-parse the CSV.
+            written = get_bom_formatter(self.fab_family, bom_config).filter_items(items)
+            result.bom_component_count = len(written)
+            result.bom_unique_parts = len(
+                {(i.value, i.footprint, getattr(i, "lcsc", "") or "") for i in written}
+            )
+            result.bom_missing_lcsc = sorted(
+                i.reference for i in written if not (getattr(i, "lcsc", "") or "").strip()
+            )
+
+        # Write to file
+        filename = self.config.bom_filename.format(manufacturer=self.fab_family)
+        bom_path = output_dir / filename
+        # newline="\n" keeps the on-disk file byte-identical to the
+        # formatted string on every platform, so manifest.json checksums
+        # match the committed (git-normalized, LF) content (issue #3529).
+        bom_path.write_text(bom_csv, newline="\n")
+
+        logger.info(f"Generated BOM: {bom_path}")
+        return bom_path
+
+    def _generate_pnp(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
+        """Generate pick-and-place file.
+
+        When *result* is provided, the through-hole components excluded
+        from the CPL by the effective THT filter are recorded on
+        ``result.tht_excluded`` so downstream consumers (manufacturing
+        report / README) can enumerate the hand-solder set (issue #3539).
+        """
+        # Import here to avoid circular imports
+        from ..schema.pcb import PCB
+
+        pcb = PCB.load(str(self.pcb_path))
+        footprints = list(pcb.footprints)
+
+        # Filter excluded references
+        if self.config.exclude_references:
+            footprints = [fp for fp in footprints if not self._is_excluded(fp.reference)]
+
+        # Qualify bare CPL names to match the BOM's lib:name form (issue #8569).
+        overrides = getattr(self, "_cpl_footprint_overrides", None) or {}
+        if overrides:
+            import copy
+
+            patched = []
+            for fp in footprints:
+                new_name = overrides.get(fp.reference)
+                if new_name:
+                    fp = copy.copy(fp)
+                    fp.name = new_name
+                patched.append(fp)
+            footprints = patched
+
+        # Resolve per-footprint rotation corrections from manufacturer profile
+        rotation_corrections = self._get_rotation_corrections()
+
+        # Generate CPL – pass None when no explicit config so that the
+        # formatter can apply its own defaults (a fab-specific exclude_tht default).
+        # The CPL must share the Gerbers' frame, so take use_aux_origin from
+        # the same preset the package plots with (OSH Park: False) unless
+        # the caller supplied an explicit pnp_config.
+        pnp_config = self.config.pnp_config
+        if pnp_config is None and self.fab_family in MANUFACTURER_PRESETS:
+            use_aux = MANUFACTURER_PRESETS[self.fab_family].config.use_aux_origin
+            if not use_aux:
+                pnp_config = PnPExportConfig(use_aux_origin=False)
+        aux_origin = _aux_origin_of(pcb.setup)
+        pnp_csv = export_pnp(
+            footprints,
+            self.fab_family,
+            pnp_config,
+            rotation_corrections=rotation_corrections,
+            aux_origin=aux_origin,
+        )
+
+        # Record the THT hand-solder set excluded from the CPL.  Use the
+        # formatter's *effective* config so manufacturer defaults
+        # (fab-specific exclude_tht) are honoured when no explicit
+        # pnp_config was supplied.
+        if result is not None:
+            result.rotation_corrections_applied = count_rotation_corrections(
+                footprints,
+                self.fab_family,
+                pnp_config,
+                rotation_corrections=rotation_corrections,
+            )
+            effective_config = get_pnp_formatter(self.fab_family, pnp_config).config
+            result.tht_excluded = extract_tht_exclusions(
+                footprints, effective_config, aux_origin=aux_origin
+            )
+            if result.tht_excluded:
+                logger.info(
+                    "CPL excludes %d through-hole component(s) (hand-solder): %s",
+                    len(result.tht_excluded),
+                    ", ".join(p.reference for p in result.tht_excluded),
+                )
+            # Issue #7260: the CPL rows' facts, from the same placement
+            # filters export_pnp applies (callers never re-parse the CSV).
+            formatter = get_pnp_formatter(self.fab_family, pnp_config, rotation_corrections)
+            placements = formatter.filter_placements(
+                extract_placements(footprints, formatter.config, aux_origin)
+            )
+            result.pnp_placement_count = len(placements)
+            sides = {p.layer for p in placements}
+            result.pnp_layers = [
+                side for side, layer in (("top", "F.Cu"), ("bottom", "B.Cu")) if layer in sides
+            ]
+
+        # Write to file
+        filename = self.config.pnp_filename.format(manufacturer=self.fab_family)
+        pnp_path = output_dir / filename
+        # newline="\n": see _generate_bom — keep disk == git == manifest.
+        pnp_path.write_text(pnp_csv, newline="\n")
+
+        logger.info(f"Generated CPL: {pnp_path}")
+        return pnp_path
+
+    def _get_rotation_corrections(self) -> dict[str, float] | None:
+        """Resolve rotation corrections from the manufacturer profile.
+
+        Returns the per-footprint rotation correction dict from the
+        manufacturer's profile, or ``None`` if no corrections are
+        available.
+        """
+        try:
+            from ..manufacturers import get_profile
+
+            profile = get_profile(self.manufacturer)
+            if profile.rotation_corrections:
+                return profile.rotation_corrections
+        except (ValueError, ImportError):
+            pass
+        return None
+
+    def _generate_gerbers(self, output_dir: Path) -> Path:
+        """Generate Gerber files."""
+        gerber_dir = output_dir / self.config.gerbers_subdir
+
+        exporter = GerberExporter(self.pcb_path)
+
+        if self.fab_family in MANUFACTURER_PRESETS:
+            # The preset owns the Gerber options; an explicit V-score layer
+            # opt-in (Issue #6193) still applies on top of it.
+            gc = self.config.gerber_config
+            return exporter.export_for_manufacturer(
+                self.fab_family, gerber_dir, vscore_layers=gc.vscore_layers if gc else None
+            )
+        else:
+            config = self.config.gerber_config or GerberConfig()
+            return exporter.export(config, gerber_dir)
+
+    def _resolve_auto_bom_source(self) -> list:
+        """Resolve BOM source automatically.
+
+        Uses schematic when available and reference sets align with PCB.
+        Falls back to PCB when the mismatch exceeds 10% or 5 references.
+        """
+        from ..schema.bom import extract_bom_from_pcb
+
+        pcb_bom = extract_bom_from_pcb(str(self.pcb_path))
+        pcb_refs = {item.reference for item in pcb_bom.items if not item.is_virtual}
+
+        if self.schematic_path and self.schematic_path.exists():
+            from ..schema.bom import extract_bom
+
+            sch_bom = extract_bom(self.schematic_path)
+            sch_refs = {
+                item.reference for item in sch_bom.items if not item.is_virtual and not item.dnp
+            }
+
+            # Compute mismatch
+            mismatch = len(sch_refs.symmetric_difference(pcb_refs))
+            total = max(len(sch_refs), len(pcb_refs), 1)
+            mismatch_pct = mismatch / total
+
+            if mismatch <= 5 and mismatch_pct <= 0.10:
+                logger.info(
+                    "Auto BOM source: using schematic (mismatch: %d refs, %.0f%%)",
+                    mismatch,
+                    mismatch_pct * 100,
+                )
+                return sch_bom.items
+            else:
+                logger.warning(
+                    "Auto BOM source: using PCB due to significant reference "
+                    "mismatch with schematic (%d refs, %.0f%%)",
+                    mismatch,
+                    mismatch_pct * 100,
+                )
+                return pcb_bom.items
+        else:
+            logger.info("Auto BOM source: using PCB (no schematic available)")
+            return pcb_bom.items
+
+    def _filter_references(self, items: list) -> list:
+        """Filter items by excluded reference patterns."""
+        result = []
+        for item in items:
+            if not self._is_excluded(item.reference):
+                result.append(item)
+        return result
+
+    def _is_excluded(self, reference: str) -> bool:
+        """Check if reference matches any exclusion pattern."""
+        import fnmatch
+
+        for pattern in self.config.exclude_references:
+            if fnmatch.fnmatch(reference, pattern):
+                return True
+        return False
+
+
+def create_assembly_package(
+    pcb: str | Path,
+    schematic: str | Path | None = None,
+    manufacturer: str = "jlcpcb",
+    output_dir: str | Path | None = None,
+) -> AssemblyPackageResult:
+    """
+    Convenience function to create assembly package.
+
+    Args:
+        pcb: Path to PCB file
+        schematic: Path to schematic file (optional)
+        manufacturer: Manufacturer ID
+        output_dir: Output directory
+
+    Returns:
+        AssemblyPackageResult with generated files
+    """
+    pkg = AssemblyPackage.create(pcb, schematic, manufacturer, output_dir)
+    return pkg.export()

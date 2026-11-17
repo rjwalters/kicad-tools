@@ -1,0 +1,83 @@
+# Temperature Sensor Pattern
+# NTC thermistor interface with filtering and optional protection
+#
+# This pattern defines the placement and validation rules for a common
+# temperature sensing circuit using an NTC thermistor in a voltage divider
+# configuration with filtering.
+#
+# Typical circuit:
+#   VCC ──┬── RT1 (NTC) ──┬── GND
+#         │               │
+#         └── R1 (bias) ──┴── C1 (filter) ── ADC_IN
+#
+
+name: temperature_sensor
+description: NTC thermistor with filtering and protection
+category: sensor
+
+components:
+  - role: thermistor
+    reference_prefix: RT
+    value_range: [10k, 100k]
+
+  - role: bias_resistor
+    reference_prefix: R
+    value: match_thermistor
+    # Bias resistor should match thermistor nominal value for best linearity
+
+  - role: filter_cap
+    reference_prefix: C
+    value_range: [100n, 1u]
+    # Filter capacitor for noise rejection
+
+  - role: protection_diode
+    reference_prefix: D
+    optional: true
+    # Optional ESD/overvoltage protection
+
+placement_rules:
+  - component: filter_cap
+    relative_to: thermistor
+    max_distance_mm: 5
+    preferred_angle: 90
+    rationale: "Filter cap close to sensor for noise rejection"
+
+  - component: bias_resistor
+    relative_to: thermistor
+    max_distance_mm: 10
+    preferred_angle: 180
+    rationale: "Bias resistor near thermistor for clean voltage divider"
+
+  - component: protection_diode
+    relative_to: thermistor
+    max_distance_mm: 8
+    preferred_angle: 0
+    rationale: "Protection diode near sensor input"
+    priority: low
+
+routing_constraints:
+  - nets: [thermistor_signal]
+    type: analog
+    guard_ring: recommended
+    max_length_mm: 50
+    min_width_mm: 0.2
+    rationale: "Keep analog signal trace short to minimize noise pickup"
+
+validation:
+  - check: component_distance
+    params:
+      from_component: thermistor
+      to_component: filter_cap
+      max_mm: 5
+
+  - check: value_range
+    params:
+      component: filter_cap
+      min_value: "100n"
+      max_value: "1u"
+
+  - check: component_present
+    params:
+      component: protection_diode
+      optional: true
+      rationale: "ESD protection recommended for external sensors"

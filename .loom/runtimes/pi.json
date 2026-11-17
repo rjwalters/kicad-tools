@@ -1,0 +1,14 @@
+{
+  "runtime": "pi",
+  "tier": 2,
+  "tierLabel": "guarded native tools",
+  "capabilities": {
+    "mcp": "no",
+    "subagents": "no",
+    "hooks": "partial",
+    "skills": "partial",
+    "worktreeIsolation": "yes",
+    "loomControl": "yes"
+  },
+  "note": "Loom-managed role launches disable unguarded harness tools and provide four Rust-backed tools using the shared worktree/workflow/destructive policies. CLI workflow control is supported; MCP and subagent support are not claimed. See guardrail-parity-native.md for the tested versions, evidence and residual limits."
+}

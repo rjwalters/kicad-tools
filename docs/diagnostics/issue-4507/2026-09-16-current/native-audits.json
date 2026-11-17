@@ -1,0 +1,130 @@
+{
+  "native-stage2": {
+    "version": "10.0.1",
+    "argv": [
+      "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+      "pcb",
+      "drc",
+      "--format",
+      "json",
+      "--all-track-errors",
+      "--severity-all",
+      "--refill-zones",
+      "--save-board",
+      "--exit-code-violations",
+      "-o",
+      "/private/tmp/4507-current-main-20260916/native-stage2/drc.json",
+      "/private/tmp/4507-current-main-20260916/native-stage2/step2.kicad_pcb"
+    ],
+    "original_hashes": {
+      ".kicad_pcb": "384e24faa80e4a2adc2a5b15789f30cc98f6339a51bee313993e663da214ff53",
+      ".kicad_pro": "0c01aee0b1b030f220a1767423dabe8f369ac2dd86aa7a0cf398c0aa2fcfc706",
+      ".kicad_dru": "2ceed4fc04784a911a3c3310e067afb324f249003943276766b92f3f5a3ce076"
+    },
+    "started": 1789534968.518854,
+    "pid": 19233,
+    "exit": 5,
+    "ended": 1789534969.913118,
+    "refilled_board_sha256": "bb4b89122032fdd6b2943b8a199953f942362b0cd3932bbe476355b8c8d7ab3d",
+    "non_connectivity_errors": 0,
+    "warnings": 18,
+    "unconnected_items": 67,
+    "originals_unchanged": true,
+    "copied_sidecars_unchanged": true
+  },
+  "native-saved-stage2": {
+    "version": "10.0.1",
+    "argv": [
+      "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+      "pcb",
+      "drc",
+      "--format",
+      "json",
+      "--all-track-errors",
+      "--severity-all",
+      "--exit-code-violations",
+      "-o",
+      "/private/tmp/4507-current-main-20260916/native-saved-stage2/drc.json",
+      "/private/tmp/4507-current-main-20260916/native-saved-stage2/step2.kicad_pcb"
+    ],
+    "original_hashes": {
+      ".kicad_pcb": "384e24faa80e4a2adc2a5b15789f30cc98f6339a51bee313993e663da214ff53",
+      ".kicad_pro": "0c01aee0b1b030f220a1767423dabe8f369ac2dd86aa7a0cf398c0aa2fcfc706",
+      ".kicad_dru": "2ceed4fc04784a911a3c3310e067afb324f249003943276766b92f3f5a3ce076"
+    },
+    "started": 1789534967.281798,
+    "pid": 18012,
+    "exit": 5,
+    "ended": 1789534968.34386,
+    "audited_board_sha256": "384e24faa80e4a2adc2a5b15789f30cc98f6339a51bee313993e663da214ff53",
+    "non_connectivity_errors": 0,
+    "warnings": 18,
+    "unconnected_items": 69,
+    "originals_unchanged": true,
+    "copied_sidecars_unchanged": true
+  },
+  "native-stage3": {
+    "version": "10.0.1",
+    "argv": [
+      "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+      "pcb",
+      "drc",
+      "--format",
+      "json",
+      "--all-track-errors",
+      "--severity-all",
+      "--refill-zones",
+      "--save-board",
+      "--exit-code-violations",
+      "-o",
+      "/private/tmp/4507-current-main-20260916/native-stage3/drc.json",
+      "/private/tmp/4507-current-main-20260916/native-stage3/step3.kicad_pcb"
+    ],
+    "original_hashes": {
+      ".kicad_pcb": "49fe9bac2e5fc86a61738d266ea6fbbc7a0c22304ac4967bb8fa02b9c783b83b",
+      ".kicad_pro": "0c01aee0b1b030f220a1767423dabe8f369ac2dd86aa7a0cf398c0aa2fcfc706",
+      ".kicad_dru": "2ceed4fc04784a911a3c3310e067afb324f249003943276766b92f3f5a3ce076"
+    },
+    "started": 1789534969.916485,
+    "pid": 20260,
+    "exit": 5,
+    "ended": 1789534973.501585,
+    "refilled_board_sha256": "c02126d51744527aebc9256571187f381d9a51e693bbbc3b3999025805d5d248",
+    "non_connectivity_errors": 0,
+    "warnings": 18,
+    "unconnected_items": 68,
+    "originals_unchanged": true,
+    "copied_sidecars_unchanged": true
+  },
+  "native-saved-stage3": {
+    "version": "10.0.1",
+    "argv": [
+      "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+      "pcb",
+      "drc",
+      "--format",
+      "json",
+      "--all-track-errors",
+      "--severity-all",
+      "--exit-code-violations",
+      "-o",
+      "/private/tmp/4507-current-main-20260916/native-saved-stage3/drc.json",
+      "/private/tmp/4507-current-main-20260916/native-saved-stage3/step3.kicad_pcb"
+    ],
+    "original_hashes": {
+      ".kicad_pcb": "49fe9bac2e5fc86a61738d266ea6fbbc7a0c22304ac4967bb8fa02b9c783b83b",
+      ".kicad_pro": "0c01aee0b1b030f220a1767423dabe8f369ac2dd86aa7a0cf398c0aa2fcfc706",
+      ".kicad_dru": "2ceed4fc04784a911a3c3310e067afb324f249003943276766b92f3f5a3ce076"
+    },
+    "started": 1789534968.347682,
+    "pid": 19008,
+    "exit": 5,
+    "ended": 1789534969.54986,
+    "audited_board_sha256": "49fe9bac2e5fc86a61738d266ea6fbbc7a0c22304ac4967bb8fa02b9c783b83b",
+    "non_connectivity_errors": 0,
+    "warnings": 18,
+    "unconnected_items": 68,
+    "originals_unchanged": true,
+    "copied_sidecars_unchanged": true
+  }
+}

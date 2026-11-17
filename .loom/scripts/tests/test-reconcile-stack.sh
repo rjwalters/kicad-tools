@@ -1,0 +1,883 @@
+#!/usr/bin/env bash
+# test-reconcile-stack.sh — Regression tests for reconcile-stack.sh (#3776).
+#
+# Covers the two defects hit live 2026-07-22 when collapsing a stacked-PR stack:
+#
+#   1. Worktree-checked-out child branch (the blocker). A Loom child branch is
+#      ALWAYS checked out in its own managed worktree, and git refuses to rebase
+#      a branch checked out in another worktree
+#      (`fatal: '<branch>' is already used by worktree at ...`). reconcile-stack.sh
+#      must detect that worktree (via `git worktree list`) and run the rebase
+#      INSIDE it. Scenario A drives the exact failure and asserts a clean rebase.
+#
+#   2. False "origin/<parent> still exists" warning on a stale local ref. With
+#      delete-branch-on-merge the parent branch is deleted on the remote the
+#      instant it merges, but the local refs/remotes/origin/<parent> can linger
+#      stale until a prune — a `git show-ref` of that stale ref then false-warns
+#      on every post-merge reconcile. The fix queries the remote live via
+#      `git ls-remote`. Both scenarios assert the spurious warning is absent.
+#
+# Strategy: build a real, offline git sandbox (bare "remote" + a clone), stack a
+# child on a parent, simulate the parent's merge to the default branch,
+# delete the parent branch IN THE BARE REMOTE (leaving the clone's local
+# remote-tracking ref stale — the exact #3776 condition), then run the ACTUAL
+# defaults/scripts/reconcile-stack.sh with a stubbed `gh` on PATH. No network.
+#
+#   Scenario A: child branch checked out in a worktree  -> rebase runs there.
+#   Scenario B: child branch NOT checked out anywhere    -> in-place fallback.
+#
+# Since #8583 the planning/execution half of the subject is
+# `loom-daemon reconcile-stack` (Rust), reached through this script — so the
+# suite needs a BUILT loom-daemon and is wired in the "Native Port Suites" CI
+# job rather than shell-suite-tests, which builds no binary. Every assertion
+# below predates that port apart from Scenario J and the two rebase-target
+# assertions the fix necessarily changed, which is what makes it equivalence
+# evidence rather than a restatement of the new implementation.
+#
+# Usage:
+#   cargo build --package loom-daemon
+#   ./.loom/scripts/tests/test-reconcile-stack.sh
+
+set -euo pipefail
+
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
+RECONCILE="$SCRIPTS_DIR/reconcile-stack.sh"
+
+# Pin the binary every invocation of reconcile-stack.sh execs to the one built
+# from THIS tree (#8176), and fail — never skip — when none resolves: without
+# it the suite would report green while testing nothing.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "reconcile-stack"
+# #9548: a real run vets its write target (`loom_write_repo`) before it pushes
+# or retargets. Each sandbox clone is registered as owner/repo
+# (write-scope-fixture.sh), so the real gate admits it; see setup_sandbox for
+# how the clone stays offline with a GitHub origin.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$TEST_DIR/lib/write-scope-fixture.sh"
+
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+
+# Per-scenario sandbox globals.
+SANDBOX=""
+REMOTE=""
+MAIN=""
+GH_STUB_DIR=""
+GH_EDIT_LOG=""
+GIT_STUB_DIR=""
+
+# The sandbox clone's raw `origin` is this GitHub URL (what the write-scope
+# gate reads); its TRANSPORT goes to the bare $REMOTE. See setup_sandbox.
+ORIGIN_URL="https://github.com/owner/repo.git"
+# git_q passes that transport rewrite too ($LOOM_TEST_ORIGIN_TRANSPORT
+# overrides the bare remote, for a fetch that must fail).
+git_q() {
+    git -c advice.detachedHead=false -c protocol.file.allow=always \
+        -c "url.${LOOM_TEST_ORIGIN_TRANSPORT:-${REMOTE:-/nonexistent}}.insteadOf=$ORIGIN_URL" "$@"
+}
+
+# Build a fresh sandbox:
+#   remote.git  — bare "origin"
+#   main/       — a clone with:
+#       main branch:  base -> P-squash          (parent already squash-merged)
+#       feature/issue-8001 (parent): base -> P-original   (pushed, then DELETED
+#                                                          in the bare remote so
+#                                                          the clone keeps a
+#                                                          STALE origin ref)
+#       feature/issue-8002 (child):  base -> P-original -> C   (pushed)
+# The child therefore still carries the parent's pre-squash commit; a correct
+# `rebase --onto main <parent> <child>` must strip P-original, leaving base ->
+# P-squash -> C.
+CHILD_BR="feature/issue-8002"
+PARENT_BR="feature/issue-8001"
+CHILD_PR="9002"
+
+setup_sandbox() {
+    SANDBOX="$(mktemp -d)"
+    REMOTE="$SANDBOX/remote.git"
+    MAIN="$SANDBOX/main"
+
+    git_q init --quiet --bare "$REMOTE"
+
+    git_q init --quiet "$MAIN"
+    git_q -C "$MAIN" config user.email "test@loom.local"
+    git_q -C "$MAIN" config user.name "Loom Test"
+    git_q -C "$MAIN" config commit.gpgsign false
+    git_q -C "$MAIN" checkout -q -b main
+    echo "base" > "$MAIN/base.txt"
+    git_q -C "$MAIN" add base.txt
+    git_q -C "$MAIN" commit -q -m "base"
+    git_q -C "$MAIN" remote add origin "$REMOTE"
+    git_q -C "$MAIN" push -q -u origin main
+
+    # Parent branch: one original pre-squash commit.
+    git_q -C "$MAIN" checkout -q -b "$PARENT_BR"
+    echo "parent" > "$MAIN/parent.txt"
+    git_q -C "$MAIN" add parent.txt
+    git_q -C "$MAIN" commit -q -m "P-original"
+    git_q -C "$MAIN" push -q -u origin "$PARENT_BR"
+
+    # Child branch: stacked on the parent, one own commit.
+    git_q -C "$MAIN" checkout -q -b "$CHILD_BR"
+    echo "child" > "$MAIN/child.txt"
+    git_q -C "$MAIN" add child.txt
+    git_q -C "$MAIN" commit -q -m "C-own-commit"
+    git_q -C "$MAIN" push -q -u origin "$CHILD_BR"
+
+    # Simulate the parent squash-merging to main: one squashed commit on main.
+    git_q -C "$MAIN" checkout -q main
+    echo "parent" > "$MAIN/parent.txt"
+    git_q -C "$MAIN" add parent.txt
+    git_q -C "$MAIN" commit -q -m "P-squash (#8001)"
+    git_q -C "$MAIN" push -q origin main
+
+    # Delete the parent branch IN THE BARE REMOTE directly (delete-branch-on-merge
+    # equivalent), WITHOUT pruning the clone — so refs/remotes/origin/<parent>
+    # is now STALE in the clone. This is the exact #3776 false-warn condition.
+    git_q -C "$REMOTE" branch -D "$PARENT_BR" >/dev/null 2>&1
+
+    # Sanity: the stale local ref really is still present in the clone.
+    if ! git_q -C "$MAIN" show-ref --verify --quiet "refs/remotes/origin/$PARENT_BR"; then
+        echo -e "  ${RED}FATAL${NC}: test setup expected a stale origin/$PARENT_BR ref in the clone" >&2
+        exit 2
+    fi
+
+    # #9548: register the clone as owner/repo, which repoints its raw origin
+    # to $ORIGIN_URL: both write-scope deciders read that raw URL (the daemon
+    # from `git config`, the shell fallback from `git remote get-url`). NOT
+    # `url.<bare>.insteadOf` in the clone's config: `git remote get-url`
+    # applies it, so the shell fallback would read the bare path while the
+    # daemon reads the raw URL. Instead the stub git below (and git_q) pass the
+    # rewrite with `-c` only to the transport commands (fetch, push,
+    # ls-remote, pull), which therefore still reach the bare remote, offline.
+    # Registered after the gh stub path is known: the fixture's LOOM_GH_BIN
+    # answers the permission probe and hands every other call to it.
+    WRITE_SCOPE_INNER_GH="$SANDBOX/bin/gh" write_scope_register "$MAIN" owner/repo
+
+    # Stub gh on PATH: resolve the child head branch and record `pr edit`.
+    GH_STUB_DIR="$SANDBOX/bin"
+    mkdir -p "$GH_STUB_DIR"
+    GH_EDIT_LOG="$SANDBOX/gh-edit.log"
+    : > "$GH_EDIT_LOG"
+    cat > "$GH_STUB_DIR/gh" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "pr" && "\$2" == "view" ]]; then
+  # gh pr view <n> --json headRefName --jq '.headRefName'
+  # A scenario reconciling several children writes "<pr> <branch>" lines to
+  # \$PR_BRANCH_MAP; any PR not listed (every single-child scenario) resolves
+  # to the default $CHILD_BR.
+  _b=""
+  if [[ -f "$SANDBOX/pr-branches" ]]; then
+    _b="\$(awk -v p="\$3" '\$1 == p { print \$2 }' "$SANDBOX/pr-branches")"
+  fi
+  echo "\${_b:-$CHILD_BR}"
+  exit 0
+fi
+if [[ "\$1" == "pr" && "\$2" == "edit" ]]; then
+  echo "\$*" >> "$GH_EDIT_LOG"
+  exit 0
+fi
+echo "stub gh: unhandled: \$*" >&2
+exit 3
+STUB
+    chmod +x "$GH_STUB_DIR/gh"
+
+    # Stub `git` that transparently delegates to the REAL git (adding the
+    # origin transport rewrite to fetch/push/ls-remote/pull, see above) for
+    # everything except a --force-with-lease push made while LOOM_TEST_FAKE_REJECT=1: in
+    # that one case it runs the real push (so the remote genuinely updates,
+    # exactly like the LFS-hook race in #6695), then discards the real exit
+    # code and prints a synthetic rejection instead — modeling a push that
+    # reports failure even though it landed.
+    GIT_STUB_DIR="$SANDBOX/gitbin"
+    mkdir -p "$GIT_STUB_DIR"
+    REAL_GIT="$(command -v git)"
+    cat > "$GIT_STUB_DIR/git" <<STUB
+#!/usr/bin/env bash
+REAL_GIT="$REAL_GIT"
+# Find the SUBCOMMAND, skipping any leading global options that take a value.
+# Since #8583 the script always invokes \`git -C <dir> push\`, so keying on
+# \$1 alone would silently stop matching and this scenario would assert
+# nothing.
+_args=("\$@")
+_sub=""
+_i=0
+while [[ \$_i -lt \${#_args[@]} ]]; do
+    case "\${_args[\$_i]}" in
+        -C|-c) _i=\$((_i + 2)) ;;
+        -*)    _i=\$((_i + 1)) ;;
+        *)     _sub="\${_args[\$_i]}"; break ;;
+    esac
+done
+_rw=()
+case "\$_sub" in
+    fetch|push|ls-remote|pull) _rw=(-c "url.\${LOOM_TEST_ORIGIN_TRANSPORT:-$REMOTE}.insteadOf=$ORIGIN_URL") ;;
+esac
+if [[ "\$_sub" == "push" && -n "\${LOOM_TEST_PUSH_RACE_SCRIPT:-}" && ! -f "$SANDBOX/.race-fired" ]]; then
+    # #9487: fire a one-shot race hook at the instant of the push — AFTER the
+    # script captured its lease pin. The hook lands a conflicting commit on the
+    # bare remote and fetches it into \$MAIN, so this clone's shared
+    # refs/remotes/origin/<child> now agrees with the moved remote (what a
+    # sibling worktree's fetch does). A BARE --force-with-lease is satisfied by
+    # that agreement and clobbers; the pinned one must still reject.
+    : > "$SANDBOX/.race-fired"
+    "\$LOOM_TEST_PUSH_RACE_SCRIPT"
+    exec "\$REAL_GIT" "\${_rw[@]}" "\$@"
+fi
+if [[ "\$_sub" == "push" && "\${LOOM_TEST_FAKE_REJECT:-0}" == "1" ]]; then
+    "\$REAL_GIT" "\${_rw[@]}" "\$@"
+    rc=\$?
+    if [[ \$rc -eq 0 ]]; then
+        echo "To $REMOTE" >&2
+        echo " ! [rejected]        $CHILD_BR -> $CHILD_BR (stale info)" >&2
+        echo "error: failed to push some refs to '$REMOTE'" >&2
+        echo "remote rejected $CHILD_BR -> $CHILD_BR (is at deadbeefcafe but expected 0000000)" >&2
+        exit 1
+    fi
+    exit "\$rc"
+fi
+exec "\$REAL_GIT" \${_rw[@]+"\${_rw[@]}"} "\$@"
+STUB
+    chmod +x "$GIT_STUB_DIR/git"
+}
+
+teardown_sandbox() {
+    [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"
+    SANDBOX=""
+}
+
+# Run reconcile-stack.sh from $1 (a cwd), capturing combined output + exit code.
+# The scenarios above Scenario M exercise the rebase path, so the policy is
+# pinned to `rebase` unless the caller sets LOOM_BRANCH_UPDATE_STRATEGY
+# (empty = unset, i.e. the daemon's own `auto` answer) (#10771).
+# Result in RUN_OUT / RUN_RC. gh stub + git file-protocol are made available.
+# Extra positional args (e.g. --dry-run) are forwarded to reconcile-stack.sh.
+# LOOM_VERSION_CHECK_SCRIPT, when set in the caller's environment, is
+# forwarded too (the #7341 version-check-gate.sh test seam).
+RUN_OUT=""
+RUN_RC=0
+run_reconcile() {
+    local cwd="$1"
+    shift
+    RUN_RC=0
+    RUN_OUT="$(
+        cd "$cwd" &&
+        PATH="$GIT_STUB_DIR:$GH_STUB_DIR:$PATH" \
+        LOOM_DEFAULT_BRANCH="main" \
+        LOOM_BRANCH_UPDATE_STRATEGY="${LOOM_BRANCH_UPDATE_STRATEGY-rebase}" \
+        LOOM_TEST_FAKE_REJECT="${LOOM_TEST_FAKE_REJECT:-0}" \
+        LOOM_TEST_PUSH_RACE_SCRIPT="${LOOM_TEST_PUSH_RACE_SCRIPT:-}" \
+        LOOM_VERSION_CHECK_SCRIPT="${LOOM_VERSION_CHECK_SCRIPT:-}" \
+        LOOM_TEST_ORIGIN_TRANSPORT="${LOOM_TEST_ORIGIN_TRANSPORT:-}" \
+        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="protocol.file.allow" GIT_CONFIG_VALUE_0="always" \
+        bash "$RECONCILE" "$CHILD_PR" "$PARENT_BR" "$@" 2>&1
+    )" || RUN_RC=$?
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Scenario A: child branch checked out in a worktree (the #3776 blocker)"
+setup_sandbox
+
+# Create a linked worktree holding the child branch checked out — exactly the
+# Loom managed-worktree situation that made the un-fixed script fail.
+CHILD_WT="$SANDBOX/child-wt"
+git_q -C "$MAIN" worktree add -q "$CHILD_WT" "$CHILD_BR"
+
+# Run from the MAIN worktree (NOT the child worktree) — the reported failure mode.
+run_reconcile "$MAIN"
+
+assert_eq "0" "$RUN_RC" "A: reconcile exits 0 even though the child branch is checked out in a worktree"
+assert_not_contains "$RUN_OUT" "is already used by worktree" \
+  "A: no 'already used by worktree' fatal (rebase ran inside the child worktree)"
+assert_contains "$RUN_OUT" "checked out in worktree" \
+  "A: script reports it detected the child worktree"
+
+# The child branch must now be base -> P-squash -> C (parent's original commit stripped).
+CHILD_LOG="$(git_q -C "$CHILD_WT" log --format=%s main.."$CHILD_BR")"
+assert_eq "C-own-commit" "$CHILD_LOG" "A: child branch carries ONLY its own commit above main"
+FULL_LOG="$(git_q -C "$CHILD_WT" log --format=%s)"
+assert_not_contains "$FULL_LOG" "P-original" "A: parent's pre-squash commit was stripped by the rebase"
+assert_contains "$FULL_LOG" "P-squash" "A: child now sits on main's squashed parent commit"
+
+# The false stale-origin warning must NOT appear (parent gone on remote).
+assert_not_contains "$RUN_OUT" "still exists" \
+  "A: no false 'origin/<parent> still exists' warning on a stale local ref"
+
+# The base retarget was attempted via gh.
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
+  "A: child PR base retargeted to the default branch"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario H: a STALE pinned ref (reused branch name) is refused, not rebased onto (#8010 item 4)"
+setup_sandbox
+
+# The reachable shape, not a hypothetical: `feature/issue-N` branch names ARE
+# reused in this repo (CLAUDE.md's #5657/#3667 note on a partial-increment
+# slice's name being reused by the next slice), and before #8010 nothing ever
+# reaped refs/loom/parent/<branch>. So a pin left by an EARLIER merge of the
+# same name could be picked up by a later, unrelated child.
+#
+# What makes it dangerous rather than merely wrong: `git rebase --onto <default>
+# <non-ancestor> <child>` does NOT error. It replays the wrong commit range, and
+# the child PR silently gains commits it should never have had.
+git_q -C "$MAIN" branch -D "$PARENT_BR" >/dev/null 2>&1
+git_q -C "$MAIN" update-ref -d "refs/remotes/origin/$PARENT_BR" >/dev/null 2>&1 || true
+
+# A pin pointing at a commit that is NOT an ancestor of the child: main's own
+# squashed parent commit, which the child never had in its history.
+STALE_PIN_SHA="$(git_q -C "$MAIN" rev-parse main)"
+git_q -C "$MAIN" update-ref "refs/loom/parent/$PARENT_BR" "$STALE_PIN_SHA"
+
+CHILD_BEFORE_H="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+run_reconcile "$MAIN"
+
+assert_eq "1" "$RUN_RC" "H: refuses with a non-zero exit rather than rebasing onto a non-ancestor"
+assert_contains "$RUN_OUT" "NOT an ancestor" "H: says plainly why it refused"
+assert_contains "$RUN_OUT" "silently add commits" \
+  "H: names the consequence, so the operator knows this is not a cosmetic refusal"
+assert_contains "$RUN_OUT" "update-ref" "H: offers the exact recovery commands"
+
+CHILD_AFTER_H="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+assert_eq "$CHILD_BEFORE_H" "$CHILD_AFTER_H" \
+  "H: the child branch was not touched at all"
+assert_not_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR" \
+  "H: the child PR was not retargeted either"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario I: a consumed pin is reaped, so it cannot become the next run's stale pin (#8010 item 4)"
+setup_sandbox
+
+PARENT_TIP_I="$(git_q -C "$MAIN" rev-parse "$PARENT_BR")"
+git_q -C "$MAIN" branch -D "$PARENT_BR" >/dev/null 2>&1
+git_q -C "$MAIN" update-ref -d "refs/remotes/origin/$PARENT_BR" >/dev/null 2>&1 || true
+git_q -C "$MAIN" update-ref "refs/loom/parent/$PARENT_BR" "$PARENT_TIP_I"
+
+run_reconcile "$MAIN"
+assert_eq "0" "$RUN_RC" "I: reconcile succeeds through the pinned-ref path"
+
+PIN_AFTER_I="$(git_q -C "$MAIN" rev-parse --verify --quiet "refs/loom/parent/$PARENT_BR" 2>/dev/null || echo "gone")"
+assert_eq "gone" "$PIN_AFTER_I" \
+  "I: the consumed pin was deleted after use (left behind, it becomes the next reuse's stale pin)"
+assert_contains "$RUN_OUT" "Reaped the consumed pin" "I: says so, rather than deleting silently"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario B: child branch NOT checked out in any worktree (in-place fallback)"
+setup_sandbox
+
+# No worktree created — the branch is checked out nowhere, so the historical
+# in-place rebase path applies and must still work.
+run_reconcile "$MAIN"
+
+assert_eq "0" "$RUN_RC" "B: reconcile exits 0 in the no-worktree fallback path"
+assert_not_contains "$RUN_OUT" "checked out in worktree" \
+  "B: script does NOT claim a worktree when none holds the branch"
+CHILD_LOG_B="$(git_q -C "$MAIN" log --format=%s main.."$CHILD_BR")"
+assert_eq "C-own-commit" "$CHILD_LOG_B" "B: child branch carries ONLY its own commit above main"
+assert_not_contains "$RUN_OUT" "still exists" \
+  "B: no false 'origin/<parent> still exists' warning on a stale local ref"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario C: push --force-with-lease reports a rejection but the ref landed (#6695)"
+setup_sandbox
+
+# LOOM_TEST_FAKE_REJECT=1 makes the git stub run the REAL push (so origin
+# genuinely advances, exactly like the LFS pre-push hook race) and then
+# discard the real (successful) exit code in favor of a synthetic rejection —
+# modeling the observed failure mode.
+LOOM_TEST_FAKE_REJECT=1 run_reconcile "$MAIN"
+
+assert_eq "0" "$RUN_RC" \
+  "C: reconcile still exits 0 — the push-lease-verify check treats the landed ref as success"
+assert_contains "$RUN_OUT" "PUSH-LEASE-RACE-DETECTED" \
+  "C: the race is logged with the greppable PUSH-LEASE-RACE-DETECTED marker"
+assert_not_contains "$RUN_OUT" "Force-with-lease push was rejected (someone else pushed" \
+  "C: the reported rejection is NOT treated as an ordinary failure"
+
+# The remote must actually carry the rebased child tip — confirms the push
+# really did land, not just that the script decided to proceed anyway.
+LOCAL_CHILD_SHA="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+REMOTE_CHILD_SHA="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+assert_eq "$LOCAL_CHILD_SHA" "$REMOTE_CHILD_SHA" \
+  "C: origin/$CHILD_BR actually equals the local child tip after the 'rejected' push"
+
+# The base retarget still ran (script proceeded past the false rejection).
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
+  "C: child PR base still retargeted after the race was detected"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario D: a concurrent commit landed BEFORE this run — refused before anything is mutated (#9487)"
+setup_sandbox
+
+# Simulate a concurrent pusher landing a DIFFERENT commit on the child branch,
+# directly against the bare remote, behind $MAIN's back (no fetch in $MAIN).
+CONFLICT_CLONE="$SANDBOX/conflict-clone"
+git_q clone --quiet "$REMOTE" "$CONFLICT_CLONE"
+git_q -C "$CONFLICT_CLONE" checkout -q "$CHILD_BR"
+echo "concurrent" > "$CONFLICT_CLONE/conflict.txt"
+git_q -C "$CONFLICT_CLONE" add conflict.txt
+git_q -C "$CONFLICT_CLONE" commit -q -m "concurrent push (not from \$MAIN)"
+git_q -C "$CONFLICT_CLONE" push -q origin "$CHILD_BR"
+
+CHILD_BEFORE_D="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+
+# Since #9487 the lease pin is read LIVE from origin before the rebase, and the
+# run then checks that this clone has incorporated it. Here it has not — the
+# concurrent commit is on origin and nowhere in $MAIN — so the run refuses as a
+# precondition failure (exit 1) instead of rebasing first and discovering the
+# conflict at push time. Nothing is mutated, locally or remotely.
+run_reconcile "$MAIN"
+
+assert_eq "1" "$RUN_RC" \
+  "D: an unincorporated remote head is a precondition failure (exit 1), caught before the rebase"
+assert_contains "$RUN_OUT" "has not incorporated" \
+  "D: the refusal names the unincorporated remote head (#9487)"
+assert_contains "$RUN_OUT" "LEASE-PIN" \
+  "D: the refusal carries the greppable prerequisite token"
+assert_not_contains "$RUN_OUT" "PUSH-LEASE-RACE-DETECTED" \
+  "D: a refused precondition is never mislabeled as the #6695 race condition"
+assert_eq "$CHILD_BEFORE_D" "$(git_q -C "$MAIN" rev-parse "$CHILD_BR")" \
+  "D: the local child branch was never rebased"
+# The concurrent pusher's commit remains on origin — $MAIN's push did not land.
+REMOTE_CHILD_SHA_D="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+CONFLICT_SHA="$(git_q -C "$CONFLICT_CLONE" rev-parse "$CHILD_BR")"
+assert_eq "$CONFLICT_SHA" "$REMOTE_CHILD_SHA_D" \
+  "D: origin/$CHILD_BR still holds the concurrent commit, unaffected"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "D: the child PR was not retargeted either"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario D2: a sibling pushes AND fetches between the pin and the push — the pinned lease still rejects (#9487)"
+setup_sandbox
+
+# This is the live PR #9483 incident, mechanically. The conflicting push lands
+# *after* reconcile-stack.sh captured its lease pin, and the sibling's fetch
+# fast-forwards this clone's SHARED refs/remotes/origin/<child> to the moved
+# remote head. A bare `--force-with-lease` compares against exactly that ref,
+# finds it in agreement, and clobbers; the pinned lease compares against the
+# pre-race value and must be rejected.
+CONFLICT_CLONE_D2="$SANDBOX/conflict-clone-d2"
+git_q clone --quiet "$REMOTE" "$CONFLICT_CLONE_D2"
+git_q -C "$CONFLICT_CLONE_D2" checkout -q "$CHILD_BR"
+echo "sibling doctor's fix" > "$CONFLICT_CLONE_D2/conflict.txt"
+git_q -C "$CONFLICT_CLONE_D2" add conflict.txt
+git_q -C "$CONFLICT_CLONE_D2" commit -q -m "sibling Doctor's fix (already approved)"
+
+RACE_SCRIPT="$SANDBOX/push-race.sh"
+cat > "$RACE_SCRIPT" <<RACE
+#!/usr/bin/env bash
+# Fired by the stub git at the moment of the push (one-shot).
+set -e
+REAL_GIT="$(command -v git)"
+"\$REAL_GIT" -c protocol.file.allow=always -C "$CONFLICT_CLONE_D2" push -q origin "$CHILD_BR"
+# …and the sibling's fetch advances the SHARED remote-tracking ref in \$MAIN.
+"\$REAL_GIT" -c protocol.file.allow=always -c "url.$REMOTE.insteadOf=$ORIGIN_URL" -C "$MAIN" fetch -q origin "$CHILD_BR"
+RACE
+chmod +x "$RACE_SCRIPT"
+
+SIBLING_SHA_D2="$(git_q -C "$CONFLICT_CLONE_D2" rev-parse "$CHILD_BR")"
+
+LOOM_TEST_PUSH_RACE_SCRIPT="$RACE_SCRIPT" run_reconcile "$MAIN"
+
+assert_eq "2" "$RUN_RC" \
+  "D2: the pinned lease rejects the clobbering push (exit 2), despite the advanced tracking ref"
+assert_contains "$RUN_OUT" "Force-with-lease push was rejected (someone else pushed to $CHILD_BR)" \
+  "D2: the rejection is reported as an ordinary failure"
+assert_not_contains "$RUN_OUT" "PUSH-LEASE-RACE-DETECTED" \
+  "D2: a real rejection is never mislabeled as the #6695 race condition"
+# The decisive assertion: the sibling's commit is still what origin holds.
+assert_eq "$SIBLING_SHA_D2" "$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")" \
+  "D2: the sibling's already-pushed commit SURVIVES on origin (the #9487 data loss does not occur)"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "D2: the child PR was not retargeted after the rejected push"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario E: version-check-gate.sh (#7168, extended #7341) reports a mismatch after rebase --onto"
+setup_sandbox
+
+# `git rebase --onto` replays ONLY the child's own commits, silently
+# absorbing whatever version-bearing values the default branch already had
+# -- the exact drift that shipped as bef3e07a on feature/issue-6612 (#7341).
+# Stub LOOM_VERSION_CHECK_SCRIPT (the shared gate's own test seam) to report
+# a MISMATCH unconditionally, simulating that drift, and confirm
+# reconcile-stack.sh aborts BEFORE pushing or retargeting the child PR.
+STUB_MISMATCH="$SANDBOX/version-mismatch.sh"
+cat > "$STUB_MISMATCH" <<'STUB'
+#!/usr/bin/env bash
+echo "MISMATCH  .loom/install-metadata.json: 0.1.0 (expected 0.2.0)"
+exit 1
+STUB
+chmod +x "$STUB_MISMATCH"
+
+REMOTE_CHILD_SHA_BEFORE_E="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+LOOM_VERSION_CHECK_SCRIPT="$STUB_MISMATCH" run_reconcile "$MAIN"
+
+assert_eq "2" "$RUN_RC" "E: a version-bearing-file mismatch after rebase aborts with exit 2 (never pushed)"
+assert_contains "$RUN_OUT" "BLOCKER" "E: the shared gate's BLOCKER: message is surfaced"
+assert_contains "$RUN_OUT" "out of sync" "E: reconcile-stack.sh's own abort message names the mismatch"
+assert_not_contains "$RUN_OUT" "Step 2/3" "E: the push step never started"
+REMOTE_CHILD_SHA_AFTER_E="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+assert_eq "$REMOTE_CHILD_SHA_BEFORE_E" "$REMOTE_CHILD_SHA_AFTER_E" \
+  "E: origin/$CHILD_BR is unchanged -- the rebased-but-ungated commit was never pushed"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "E: the child PR base was never retargeted"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario F: --dry-run skips the version-check-gate (nothing was actually rebased)"
+setup_sandbox
+
+LOOM_VERSION_CHECK_SCRIPT="$STUB_MISMATCH" run_reconcile "$MAIN" --dry-run
+
+assert_eq "0" "$RUN_RC" "F: --dry-run exits 0 even with a mismatching gate stub (no real rebase happened)"
+assert_not_contains "$RUN_OUT" "BLOCKER" "F: the gate never runs under --dry-run"
+assert_contains "$RUN_OUT" "Dry run complete" "F: dry-run still reports its own completion message"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario L: the child's remote head carries a hand-resolved merge the rebase flattens (#9282)"
+setup_sandbox
+
+# The child merged a side branch and, IN THE MERGE COMMIT, hand-edited
+# child.txt (the shape of a reasoned conflict resolution). `rebase --onto`
+# replays the side branch's commit but flattens the merge, so that hand edit
+# is silently gone: the rebase exits 0 and the tree is clean. Real git and the
+# real `loom-daemon forge rebase-guard` (the binary pinned above), no stub.
+git_q -C "$MAIN" checkout -q -b side-8002 main~1
+echo "side" > "$MAIN/side.txt"
+git_q -C "$MAIN" add side.txt
+git_q -C "$MAIN" commit -q -m "side work"
+git_q -C "$MAIN" checkout -q "$CHILD_BR"
+git_q -C "$MAIN" merge -q --no-ff --no-commit side-8002
+echo "child, moved off the colliding coordinate" > "$MAIN/child.txt"
+git_q -C "$MAIN" add child.txt
+git_q -C "$MAIN" commit -q -m "Merge side-8002: resolve by hand"
+MERGE_SHA_L="$(git_q -C "$MAIN" rev-parse HEAD)"
+git_q -C "$MAIN" push -q origin "$CHILD_BR"
+git_q -C "$MAIN" checkout -q main
+
+REMOTE_CHILD_SHA_BEFORE_L="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+run_reconcile "$MAIN"
+
+assert_eq "2" "$RUN_RC" "L: a discarded hand resolution aborts with exit 2"
+assert_contains "$RUN_OUT" "RESOLUTION_DISCARDED $MERGE_SHA_L" \
+  "L: the verb names the merge commit whose resolution the rebase dropped"
+assert_contains "$RUN_OUT" "child.txt" "L: the BLOCKER names the path the resolution touched"
+assert_contains "$RUN_OUT" "Not pushing '$CHILD_BR'" "L: reconcile-stack.sh's own abort message names the child"
+assert_not_contains "$RUN_OUT" "Step 2/3" "L: the push step never started"
+assert_eq "$REMOTE_CHILD_SHA_BEFORE_L" "$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")" \
+  "L: origin/$CHILD_BR still holds the hand-resolved merge -- nothing was pushed"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "L: the child PR base was never retargeted"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario G: parent branch gone everywhere (remote AND local) -- falls back to the pinned ref (#7982)"
+setup_sandbox
+
+# Simulate the REAL post-merge state this fix targets: delete_branch_on_merge
+# already removed the parent on the remote (setup_sandbox does this), and
+# merge-pr.sh's own worktree/branch cleanup has ALSO removed the parent's
+# local branch in $MAIN -- unlike every scenario above, where $PARENT_BR
+# survives as a local branch in $MAIN and the rebase resolves it that way
+# without ever needing the fallback. Deleting it here forces
+# reconcile-stack.sh through the refs/loom/parent/<branch> path.
+PARENT_TIP_SHA="$(git_q -C "$MAIN" rev-parse "$PARENT_BR")"
+git_q -C "$MAIN" branch -D "$PARENT_BR" >/dev/null 2>&1
+git_q -C "$MAIN" update-ref -d "refs/remotes/origin/$PARENT_BR" >/dev/null 2>&1 || true
+
+# Sanity: the branch really is gone in $MAIN now (both forms).
+if git_q -C "$MAIN" rev-parse --verify --quiet "${PARENT_BR}^{commit}" >/dev/null 2>&1; then
+    echo -e "  ${RED}FATAL${NC}: test setup expected '$PARENT_BR' to no longer resolve in \$MAIN" >&2
+    exit 2
+fi
+
+# Pin the parent's pre-merge tip exactly as merge-pr.sh's merge-ordering guard
+# does before merging a stacked parent (#7982's _pin_parent_tip).
+git_q -C "$MAIN" update-ref "refs/loom/parent/$PARENT_BR" "$PARENT_TIP_SHA"
+
+run_reconcile "$MAIN"
+
+assert_eq "0" "$RUN_RC" "G: reconcile exits 0 even though the parent branch resolves nowhere but the pinned ref"
+assert_contains "$RUN_OUT" "no longer resolves locally" \
+  "G: script reports the branch-name fallback explicitly"
+assert_contains "$RUN_OUT" "refs/loom/parent/$PARENT_BR" \
+  "G: script names the pinned ref it fell back to"
+# The destination is the FETCHED remote tip as a COMMIT, never the branch name
+# (#8583). In this sandbox local and remote main agree, so the expected SHA is
+# unambiguous — what is asserted is that a commit, not `main`, is what the
+# rebase was given.
+TARGET_SHA_G="$(git_q -C "$MAIN" rev-parse main)"
+assert_contains "$RUN_OUT" "rebase --onto $TARGET_SHA_G refs/loom/parent/$PARENT_BR $CHILD_BR" \
+  "G: the rebase step is run against the pinned remote COMMIT and the pinned parent ref, not the (gone) branch name"
+assert_not_contains "$RUN_OUT" "rebase --onto main " \
+  "G: the branch NAME is never handed to the rebase (#8583)"
+
+CHILD_LOG_G="$(git_q -C "$MAIN" log --format=%s main.."$CHILD_BR")"
+assert_eq "C-own-commit" "$CHILD_LOG_G" "G: child branch carries ONLY its own commit above main"
+FULL_LOG_G="$(git_q -C "$MAIN" log --format=%s)"
+assert_not_contains "$FULL_LOG_G" "P-original" "G: parent's pre-squash commit was stripped by the rebase"
+assert_contains "$FULL_LOG_G" "P-squash" "G: child now sits on main's squashed parent commit"
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
+  "G: child PR base retargeted to the default branch via the pinned-ref fallback"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario J: the local default branch is STALE — rebase must target the FETCHED tip (#8583)"
+setup_sandbox
+
+# The state that exists at the exact moment reconciliation runs: the parent
+# squash-merged ON THE FORGE, so origin/main has moved and the local clone has
+# pulled nothing. Reproduce it by rewinding the local default branch to the
+# pre-merge base and dropping the remote-tracking ref, so ONLY a real fetch can
+# find the merged tip.
+git_q -C "$MAIN" checkout -q main
+git_q -C "$MAIN" reset -q --hard HEAD~1
+git_q -C "$MAIN" update-ref -d refs/remotes/origin/main >/dev/null 2>&1 || true
+STALE_LOCAL_MAIN="$(git_q -C "$MAIN" rev-parse main)"
+REMOTE_MAIN_J="$(git_q -C "$REMOTE" rev-parse main)"
+if [[ "$STALE_LOCAL_MAIN" == "$REMOTE_MAIN_J" ]]; then
+    echo -e "  ${RED}FATAL${NC}: scenario J expected a STALE local main" >&2
+    exit 2
+fi
+
+run_reconcile "$MAIN"
+
+assert_eq "0" "$RUN_RC" "J: reconcile succeeds against a stale local default branch"
+assert_contains "$RUN_OUT" "rebase --onto $REMOTE_MAIN_J " \
+  "J: the destination is the FETCHED remote tip, not the stale local branch"
+assert_not_contains "$RUN_OUT" "rebase --onto $STALE_LOCAL_MAIN " \
+  "J: the stale local commit is never the destination"
+
+# The silent-failure signature: with an independent child file the old rebase
+# exited 0 and simply lost the merged parent's implementation.
+PARENT_FILE_J="$(git_q -C "$MAIN" show "$CHILD_BR:parent.txt" 2>/dev/null || echo "MISSING")"
+assert_eq "parent" "$PARENT_FILE_J" \
+  "J: the just-merged parent's implementation survives on the child branch"
+CHILD_FILE_J="$(git_q -C "$MAIN" show "$CHILD_BR:child.txt" 2>/dev/null || echo "MISSING")"
+assert_eq "child" "$CHILD_FILE_J" "J: the child's own work survives too"
+CHILD_LOG_J="$(git_q -C "$MAIN" log --format=%s "$REMOTE_MAIN_J..$CHILD_BR")"
+assert_eq "C-own-commit" "$CHILD_LOG_J" "J: ONLY the child's own commit is replayed"
+assert_eq "$STALE_LOCAL_MAIN" "$(git_q -C "$MAIN" rev-parse main)" \
+  "J: the operator's local default branch is left exactly where it was"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario K: a failed fetch refuses instead of falling back to the stale local branch (#8583)"
+setup_sandbox
+
+git_q -C "$MAIN" checkout -q main
+git_q -C "$MAIN" reset -q --hard HEAD~1
+CHILD_BEFORE_K="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+# Origin's transport, not its URL: the URL must stay the registered one, or the
+# write-scope gate (not the fetch) would be what refuses.
+LOOM_TEST_ORIGIN_TRANSPORT="$SANDBOX/not-a-repository" run_reconcile "$MAIN"
+
+assert_eq "1" "$RUN_RC" "K: a fetch failure is a precondition failure (exit 1), not a silent degrade"
+assert_contains "$RUN_OUT" "FETCH" "K: the diagnostics name the failing prerequisite"
+assert_eq "$CHILD_BEFORE_K" "$(git_q -C "$MAIN" rev-parse "$CHILD_BR")" \
+  "K: the child branch was not touched"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "K: the child PR was not retargeted either"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario M: a merge-only repo retargets the child and never rewrites it (#10771)"
+for M_MODE in merge auto-unknown; do
+    setup_sandbox
+    CHILD_BEFORE_M="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+    REMOTE_BEFORE_M="$(git_q -C "$MAIN" ls-remote origin "refs/heads/$CHILD_BR" | cut -f1)"
+    if [[ "$M_MODE" == "merge" ]]; then
+        LOOM_BRANCH_UPDATE_STRATEGY=merge run_reconcile "$MAIN"
+    else
+        # No override: the daemon asks the forge, the gh stub cannot answer
+        # `api repos/...`, and unknown must fail toward merge.
+        LOOM_BRANCH_UPDATE_STRATEGY="" run_reconcile "$MAIN"
+    fi
+    assert_eq "0" "$RUN_RC" "M ($M_MODE): reconcile exits 0"
+    assert_contains "$RUN_OUT" "#10771" "M ($M_MODE): the output names the merge-only policy"
+    assert_eq "$CHILD_BEFORE_M" "$(git_q -C "$MAIN" rev-parse "$CHILD_BR")" \
+      "M ($M_MODE): the local child branch was not rewritten"
+    assert_eq "$REMOTE_BEFORE_M" "$(git_q -C "$MAIN" ls-remote origin "refs/heads/$CHILD_BR" | cut -f1)" \
+      "M ($M_MODE): nothing was pushed to the child branch"
+    assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
+      "M ($M_MODE): the child PR base is still retargeted to the default branch"
+    teardown_sandbox
+done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenarios N/O: a real-git 3-deep stack whose branch names do NOT follow
+# feature/issue-<N> (#13388, AC4 of #13332). merge-pr retargets a child of a
+# non-feature/issue-N parent by rebasing it with reconcile-stack.sh first, so
+# the contract under test is: after each bottom-up squash-merge, reconciling
+# the next child leaves it carrying exactly its own commit and file.
+#
+#   main <- chore/a <- feat/b <- feat/c     (one own commit + one own file each)
+
+# Replace setup_sandbox's two-branch fixture with the 3-deep stack, then squash
+# the bottom (chore/a, PR 101) into main and delete it on the remote.
+setup_stack_sandbox() {
+    setup_sandbox
+    git_q -C "$MAIN" checkout -q main
+    git_q -C "$MAIN" reset -q --hard HEAD~1
+    git_q -C "$MAIN" push -q --force origin main
+    git_q -C "$MAIN" branch -D "$PARENT_BR" "$CHILD_BR" >/dev/null 2>&1
+    git_q -C "$REMOTE" branch -D "$PARENT_BR" "$CHILD_BR" >/dev/null 2>&1 || true
+    git_q -C "$MAIN" update-ref -d "refs/remotes/origin/$PARENT_BR"
+    git_q -C "$MAIN" update-ref -d "refs/remotes/origin/$CHILD_BR"
+
+    local prev=main br
+    for br in chore/a feat/b feat/c; do
+        git_q -C "$MAIN" checkout -q -b "$br" "$prev"
+        echo "${br#*/}" > "$MAIN/${br#*/}.txt"
+        git_q -C "$MAIN" add "${br#*/}.txt"
+        git_q -C "$MAIN" commit -q -m "${br#*/}-own"
+        git_q -C "$MAIN" push -q -u origin "$br"
+        prev="$br"
+    done
+    printf '102 feat/b\n103 feat/c\n' > "$SANDBOX/pr-branches"
+    squash_into_main chore/a "a-squash (#101)"
+}
+
+# Squash-merge origin/<branch> into main (what the forge does), push it, and
+# delete the branch on the remote only — the clone keeps its local branch and a
+# stale remote-tracking ref, as after delete-branch-on-merge.
+squash_into_main() {
+    local br="$1" msg="$2"
+    git_q -C "$MAIN" fetch -q origin
+    git_q -C "$MAIN" checkout -q main
+    git_q -C "$MAIN" reset -q --hard origin/main
+    git_q -C "$MAIN" merge -q --squash "origin/$br" >/dev/null
+    git_q -C "$MAIN" commit -q -m "$msg"
+    git_q -C "$MAIN" push -q origin main
+    git_q -C "$REMOTE" branch -D "$br" >/dev/null 2>&1
+}
+
+# Reconcile PR $1 (branch $2) whose parent was $3.
+reconcile_stack_child() {
+    CHILD_PR="$1" CHILD_BR="$2" PARENT_BR="$3" run_reconcile "$MAIN"
+}
+
+echo ""
+echo "Scenario N: 3-deep non-feature/issue-N stack, squash-merged bottom-up"
+setup_stack_sandbox
+
+reconcile_stack_child 102 feat/b chore/a
+assert_eq "0" "$RUN_RC" "N: reconcile of B (parent chore/a) exits 0"
+git_q -C "$MAIN" fetch -q origin
+assert_eq "b-own" "$(git_q -C "$MAIN" log --format=%s origin/main..origin/feat/b)" \
+  "N: B carries only its own commit above main (parent's chore/a commit stripped)"
+assert_eq "b.txt" "$(git_q -C "$MAIN" diff --name-only origin/main origin/feat/b)" \
+  "N: B's diff against main is exactly its own file"
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit 102 --repo owner/repo --base main" \
+  "N: PR 102 (B) retargeted to main"
+assert_not_contains "$(cat "$GH_EDIT_LOG")" "pr edit 103" \
+  "N: PR 103 (C) is not touched while reconciling B"
+assert_eq "0" "$(git_q -C "$MAIN" merge-base --is-ancestor origin/main origin/feat/b && echo 0 || echo 1)" \
+  "N: B sits on top of main"
+
+squash_into_main feat/b "b-squash (#102)"
+
+reconcile_stack_child 103 feat/c feat/b
+assert_eq "0" "$RUN_RC" "N: reconcile of C (parent feat/b) exits 0"
+git_q -C "$MAIN" fetch -q origin
+assert_eq "c-own" "$(git_q -C "$MAIN" log --format=%s origin/main..origin/feat/c)" \
+  "N: C carries only its own commit above main (A and B content stripped)"
+assert_eq "c.txt" "$(git_q -C "$MAIN" diff --name-only origin/main origin/feat/c)" \
+  "N: C's diff against main is exactly its own file"
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit 103 --repo owner/repo --base main" \
+  "N: PR 103 (C) retargeted to main"
+
+# C merges cleanly, and main ends up with all three files exactly once.
+squash_into_main feat/c "c-squash (#103)"
+assert_eq "a.txt b.txt base.txt c.txt" "$(git_q -C "$MAIN" ls-tree --name-only origin/main | tr '\n' ' ' | sed 's/ $//')" \
+  "N: main holds every stacked change after the bottom-up merges"
+
+teardown_sandbox
+
+echo ""
+echo "Scenario O: LOOM_BRANCH_UPDATE_STRATEGY=merge retargets but keeps the parent's commit (documented limitation)"
+setup_stack_sandbox
+B_REMOTE_BEFORE="$(git_q -C "$MAIN" ls-remote origin refs/heads/feat/b | cut -f1)"
+LOOM_BRANCH_UPDATE_STRATEGY=merge reconcile_stack_child 102 feat/b chore/a
+assert_eq "0" "$RUN_RC" "O: reconcile of B under the merge strategy exits 0"
+assert_contains "$RUN_OUT" "#10771" "O: the output names the merge-only policy (rebase + force-push skipped)"
+assert_eq "$B_REMOTE_BEFORE" "$(git_q -C "$MAIN" ls-remote origin refs/heads/feat/b | cut -f1)" \
+  "O: nothing was pushed to B"
+git_q -C "$MAIN" fetch -q origin
+assert_contains "$(git_q -C "$MAIN" log --format=%s origin/main..origin/feat/b)" "a-own" \
+  "O: B still carries the parent's original commit (the squash left it behind)"
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit 102 --repo owner/repo --base main" \
+  "O: the retarget is still performed and logged"
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Source guards: fail loudly if a refactor drops either fix.
+echo ""
+echo "Source guards on reconcile-stack.sh"
+src="$(cat "$RECONCILE")"
+assert_contains "$src" '"$DAEMON_BIN" reconcile-stack' \
+  "reconcile-stack.sh delegates planning/execution to loom-daemon reconcile-stack (#8583)"
+assert_contains "$src" "LOOM_RS_TARGET_COMMIT" \
+  "reconcile-stack.sh consumes the pinned destination COMMIT the subcommand resolved (#8583)"
+assert_not_contains "$src" 'rebase --onto "$DEFAULT_BRANCH"' \
+  "reconcile-stack.sh never rebases onto the LOCAL default branch name (#8583)"
+assert_contains "$src" "git -C" \
+  "reconcile-stack.sh runs the push in the worktree the rebase ran in via git -C"
+assert_contains "$src" "push_landed_despite_rejection" \
+  "reconcile-stack.sh verifies the actual remote ref state after a rejected --force-with-lease push (#6695)"
+assert_contains "$src" '"$DAEMON_BIN" push-lease pin-flag --remote origin --branch "$CHILD_BRANCH" --local-ref "refs/heads/$CHILD_BRANCH"' \
+  "reconcile-stack.sh builds the pinned lease via loom-daemon push-lease pin-flag, not in shell (#9487)"
+assert_contains "$src" 'run "${GIT_C[@]}" push "$PUSH_LEASE_ARG" origin "$CHILD_BRANCH"' \
+  "reconcile-stack.sh pushes with the PINNED lease argument the subcommand printed (#9487)"
+assert_not_contains "$src" 'push --force-with-lease;' \
+  "reconcile-stack.sh never issues a BARE --force-with-lease (#9487)"
+assert_contains "$src" 'loom_daemon_version_preflight push-lease "$DAEMON_BIN"' \
+  "a loom-daemon too old for push-lease is refused with the floor, never degraded to a bare lease (#9487)"
+assert_contains "$src" "PUSH-LEASE-RACE-DETECTED" \
+  "reconcile-stack.sh logs a greppable marker when a reported rejection is actually landed"
+assert_contains "$src" '"$SCRIPT_DIR/version-check-gate.sh"' \
+  "reconcile-stack.sh runs the shared version-check-gate.sh after rebase, before push (#7168, #7341)"
+assert_contains "$src" 'DRY_RUN' \
+  "reconcile-stack.sh's version-check-gate call is itself skipped under --dry-run"
+assert_contains "$src" 'LOOM_RS_PARENT_PIN_REF' \
+  "reconcile-stack.sh reaps the refs/loom/parent/<branch> pin only when the fallback was used (#7982, #8010)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "────────────────────────────────"
+echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    exit 1
+fi
+exit 0

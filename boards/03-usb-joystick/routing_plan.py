@@ -1,0 +1,497 @@
+"""Replay the reviewed revision-B copper only on its exact physical circuit.
+
+This is saved PCB design data, including manual repairs, not an autorouter
+success claim. Every replay still needs native zone refill, DRC and copper LVS.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections import defaultdict
+from pathlib import Path
+
+from kicad_tools.core.canonical_uuids import canonicalize_board_uuids
+from kicad_tools.core.schematic_uuids import uuids_in_text
+from kicad_tools.manufacturers.fabrication_overrides import (
+    FABRICATION_OVERRIDES_SIDECAR_BASENAME,
+    FabricationOverride,
+    discover_fabrication_overrides_sidecar,
+    load_fabrication_overrides,
+)
+from kicad_tools.router.pair_protocols import (
+    PROTOCOL_DEFAULTS,
+    SKEW_STRETCH_TARGET_MM,
+    PairProtocol,
+)
+from kicad_tools.router.quantize import OffAngleSegmentError, verify_segment_45
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp import SExp, parse_file, parse_string, serialize_sexp
+from kicad_tools.validate.rules.clearance import CopperElement
+from kicad_tools.validate.rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
+
+PLAN = Path(__file__).with_name("routing-plan.json")
+
+# Issue #6443: USB_D is a full-speed (12 Mbit/s) pair, so its intra-pair skew
+# bound is the USB2_FS value of the protocol defaults table -- 2.5 mm, per the
+# Renesas full-speed board guide (Table 2).  It was the generic 0.5 mm, five
+# times tighter than that guidance.  0.5 mm stays the stretch target the P5
+# skew tuner (#6447) aims for; the reviewed copper sits at 0.166 mm.
+USB_FS_MAX_SKEW_MM = float(PROTOCOL_DEFAULTS[PairProtocol.USB2_FS].max_skew_mm.value)
+USB_SKEW_STRETCH_TARGET_MM = SKEW_STRETCH_TARGET_MM
+
+# Board-relative rectangle (x0, x1, y0, y1) around the USB_D In2.Cu common
+# ESD-to-termination run that ``usb_geometry()`` measures.  Unchanged since
+# before #7084: every profile is measured over y = 13..16.8 unless the
+# via-in-pad exception below applies.
+USB_COMMON_RUN_WINDOW = (37.5, 40.3, 13.0, 16.8)
+
+# Issue #7084 via-in-pad exception (operator ruling 2026-10-19, Q10 = 1).
+# Under ``jlcpcb-tier1`` via-in-pad drops the USB_D launch vias *inside* the
+# ESD lands (U2 pads 4 / 6, y 10.975..12.30; the ruling cites them as
+# U2.1 / U2.3, which are the connector-side pair at y 8.70..10.03) and the
+# termination lands (R3 / R4 pad 1, y 17.22..17.76), at
+# y = 11.737 / 17.419, where the fixed window above clips both ends of the
+# coupled In2.Cu run.  Only when a USB_D via sits inside one of these lands is
+# the matching window edge moved out to that via, so the counted copper runs
+# via to via.  A via outside the lands (plain ``jlcpcb``: y = 12.638 / 16.890)
+# leaves the window -- and the committed board's 4.100 mm -- untouched.
+# Lands are the pads' board-frame size boxes, (x0, x1, y0, y1), keyed by net.
+#
+# Removal condition: delete this exception (and the lookup in
+# ``usb_geometry()``) once board 03's gate measures the common run from the
+# launch via for every profile, or once board 03 no longer routes USB_D
+# with via-in-pad launches -- whichever comes first.  It expires on
+# USB_VIA_IN_PAD_EXCEPTION_EXPIRES: ``tests/test_board03_usb_window_7084.py``
+# fails after that date so the exception is re-ruled rather than kept.
+USB_VIA_IN_PAD_EXCEPTION_ISSUE = 7487
+# Extended to 2027-10-19 by operator ruling (fleet:decide 20261024-r1 q55,
+# 2026-10-27, option 1; recorded on issue #7487).  Re-rule before this date.
+USB_VIA_IN_PAD_EXCEPTION_EXPIRES = "2027-10-19"
+USB_ESD_LANDS_7084 = {
+    "USB_D+": (36.75, 37.35, 10.975, 12.30),  # U2 pad 4
+    "USB_D-": (38.65, 39.25, 10.975, 12.30),  # U2 pad 6
+}
+USB_TERMINATION_LANDS_7084 = {
+    "USB_D+": (39.13, 39.77, 17.22, 17.76),  # R4 pad 1
+    "USB_D-": (40.23, 40.87, 17.22, 17.76),  # R3 pad 1
+}
+# Segment endpoints sit on the via centre up to float noise.
+_VIA_EDGE_TOL_MM = 1e-6
+
+
+def _in_land(position, land):
+    x0, x1, y0, y1 = land
+    return x0 <= position[0] <= x1 and y0 <= position[1] <= y1
+
+
+def usb_common_run_window(pcb):
+    """``USB_COMMON_RUN_WINDOW``, widened only for via-in-pad launches (#7084).
+
+    Each y edge moves out to a USB_D via that sits inside that net's ESD land
+    (lower edge) or termination land (upper edge); otherwise it stays put.
+    """
+    x0, x1, y0, y1 = USB_COMMON_RUN_WINDOW
+    for via in pcb.vias:
+        name = pcb.nets[via.net_number].name if via.net_number in pcb.nets else None
+        if name in USB_ESD_LANDS_7084 and _in_land(via.position, USB_ESD_LANDS_7084[name]):
+            y0 = min(y0, via.position[1] - _VIA_EDGE_TOL_MM)
+        if name in USB_TERMINATION_LANDS_7084 and _in_land(
+            via.position, USB_TERMINATION_LANDS_7084[name]
+        ):
+            y1 = max(y1, via.position[1] + _VIA_EDGE_TOL_MM)
+    return x0, x1, y0, y1
+
+
+# Issue #5006: the board's reviewed, cited fabrication floors live in this
+# committed sidecar -- the single source of truth shared by the Python
+# checker (``check_manufacturing.py``), the native project emission below,
+# and every ``resolve_pcb_fabrication_overrides`` call site in ``kct``.
+COMMITTED_FABRICATION_OVERRIDES = (
+    Path(__file__).resolve().parent / "output" / FABRICATION_OVERRIDES_SIDECAR_BASENAME
+)
+
+
+def fabrication_overrides_path(pcb_path=None) -> Path:
+    """Locate the reviewed fabrication-overrides sidecar for ``pcb_path``.
+
+    Probes the shared three-directory order (board dir, its ``output/``, the
+    parent's ``output/``) so a board copy that ships its own sidecar wins,
+    then falls back to this board's committed sidecar. Without the fallback a
+    board generated anywhere other than ``boards/03-usb-joystick/output/``
+    would have no sidecar at all and die with ``FileNotFoundError``.
+    """
+    if pcb_path is not None:
+        discovered = discover_fabrication_overrides_sidecar(pcb_path)
+        if discovered is not None:
+            return discovered
+    if not COMMITTED_FABRICATION_OVERRIDES.is_file():
+        raise FileNotFoundError(
+            f"Reviewed fabrication-overrides sidecar is missing: {COMMITTED_FABRICATION_OVERRIDES}"
+        )
+    return COMMITTED_FABRICATION_OVERRIDES
+
+
+def load_board_fabrication_overrides(pcb_path=None) -> list[FabricationOverride]:
+    """Load this board's reviewed overrides (fail loud on missing/invalid)."""
+    return load_fabrication_overrides(fabrication_overrides_path(pcb_path))
+
+
+def select_fabrication_override(overrides, field) -> FabricationOverride:
+    """Return the override for ``field`` or raise an actionable error."""
+    override = next((o for o in overrides if o.field == field), None)
+    if override is None:
+        declared = sorted(o.field for o in overrides)
+        raise ValueError(
+            f"Reviewed fabrication-overrides sidecar declares no {field!r} override "
+            f"(declared: {declared or 'none'})"
+        )
+    return override
+
+
+def reviewed_fab_floor(field="min_hole_to_hole_mm", pcb_path=None) -> float:
+    """Reviewed value for ``field`` straight from the sidecar."""
+    return select_fabrication_override(load_board_fabrication_overrides(pcb_path), field).value
+
+
+def apply_native_fab_floor(pcb_path):
+    """Match JLC's published pad-hole limit after generic rule emission.
+
+    The generic profile currently carries a conservative 0.50 mm hole floor.
+    The narrower reviewed floor is read from the committed
+    fabrication-overrides sidecar (Issue #5006) rather than restated here, so
+    the native project setting can never drift from the cited value the
+    Python checker applies. It is hash-bound by readiness evidence, and does
+    not alter pad geometry or suppress any violation by UUID.
+    """
+    project = Path(pcb_path).with_suffix(".kicad_pro")
+    data = json.loads(project.read_text())
+    data.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})[
+        "min_hole_to_hole"
+    ] = reviewed_fab_floor()
+    project.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _rounded(value):
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, (list, tuple)):
+        return [_rounded(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _rounded(v) for k, v in value.items()}
+    return value
+
+
+def _reference(fp):
+    return next(
+        p.get_string(1) for p in fp.find_children("property") if p.get_string(0) == "Reference"
+    )
+
+
+# Issue #5744: a footprint's silk-layer children are two unrelated kinds of
+# data, and the plan may only ever replay ONE of them.
+#
+#   * ``property`` nodes are the reviewed revision-B silkscreen *text*
+#     placement -- reference designators nudged by hand off pads and copper
+#     during the review.  That placement is a manual repair which exists
+#     nowhere else, so it is captured in the plan and replayed.
+#   * ``fp_line``/``fp_rect``/``fp_circle``/``fp_arc``/``fp_poly`` are the
+#     footprint *geometry* (body outlines, pin-1 markers) the footprint
+#     generator emits from the library at placement time.  Every regeneration
+#     reproduces it identically from the input board, so the plan has no
+#     business carrying -- or rewriting -- it.
+#
+# Before this distinction existed, both helpers matched on layer alone:
+# ``apply_plan()`` deleted every silk-layer child and restored only what the
+# plan held, and because the plan only ever held ``property`` nodes that
+# silently wiped all 139 footprint silk graphics (including every pin-1
+# marker) out of the routed artifact.
+def _on_silk(node):
+    layer = node.find_child("layer")
+    return layer is not None and layer.get_string(0) in {"F.SilkS", "B.SilkS"}
+
+
+def _silk_text(node):
+    """A reviewed silkscreen text node -- the only silk data the plan replays."""
+    return node.name == "property" and _on_silk(node)
+
+
+def physical_contract(path):
+    """Ignore UUID/format churn, bind placement, every land/net, stack and pours."""
+    pcb, doc = PCB.load(path), parse_file(path)
+    footprints = []
+    for fp in sorted(pcb.footprints, key=lambda f: f.reference):
+        pads = [
+            {
+                "number": p.number,
+                "type": p.type,
+                "shape": p.shape,
+                "position": p.position,
+                "rotation": p.rotation % 360,
+                "size": p.size,
+                "drill": p.drill,
+                "layers": sorted(p.layers),
+                "net": p.net_name,
+                "roundrect_rratio": p.roundrect_rratio,
+                "mask_margin": p.solder_mask_margin,
+            }
+            for p in fp.pads
+        ]
+        footprints.append(
+            {
+                "ref": fp.reference,
+                "library": fp.name,
+                "value": fp.value,
+                "position": fp.position,
+                "rotation": fp.rotation % 360,
+                "layer": fp.layer,
+                "pads": sorted(pads, key=lambda p: (p["number"], p["position"])),
+            }
+        )
+    setup = doc.find_child("setup")
+    stack = setup.find_child("stackup")
+    layers = []
+    if stack:
+        for layer in stack.find_children("layer"):
+            layers.append(
+                [
+                    layer.get_string(0),
+                    *[
+                        layer.find_child(k).get_atoms() if layer.find_child(k) else None
+                        for k in ["type", "thickness", "material", "epsilon_r", "loss_tangent"]
+                    ],
+                ]
+            )
+    return _rounded(
+        {
+            "origin": pcb.board_origin,
+            "size": pcb.board_size,
+            "outline": pcb.get_board_outline_segments(),
+            "copper_layers": sorted(l.name for l in pcb.copper_layers),
+            "footprints": footprints,
+            "stackup": layers,
+            "via_filling": setup.find_child("filling").get_string(0)
+            if setup.find_child("filling")
+            else "no",
+            "via_capping": setup.find_child("capping").get_string(0)
+            if setup.find_child("capping")
+            else "no",
+            "zones": sorted(
+                [
+                    {
+                        "net": z.net_name,
+                        "layer": z.layer,
+                        "polygon": z.polygon,
+                        "clearance": z.clearance,
+                        "thermal_gap": z.thermal_gap,
+                        "thermal_bridge_width": z.thermal_bridge_width,
+                        "min_thickness": z.min_thickness,
+                    }
+                    for z in pcb.zones
+                    # Rule areas are routing steering, not circuit: a fresh
+                    # route may carry one (Issue #7498) and its plan must
+                    # still replay onto the keepout-free input.
+                    if z.keepout is None
+                ],
+                key=lambda z: (z["layer"], z["net"]),
+            ),
+        }
+    )
+
+
+def fingerprint(path):
+    return hashlib.sha256(json.dumps(physical_contract(path), sort_keys=True).encode()).hexdigest()
+
+
+def usb_geometry(path):
+    """Circuit-specific bounds complement the generic branched-net percentage.
+
+    The common run must be physically connected and paired on In2.Cu. The
+    surrounding USB-C orientation contacts and 1.9 mm ESD lands are launches.
+    These engineering bounds are not limits from the USB specification.
+    """
+    pcb = PCB.load(path)
+    tracks = defaultdict(list)
+    for segment in pcb.segments:
+        tracks[pcb.nets[segment.net_number].name].append(segment)
+    lengths = {
+        n: sum(math.dist(s.start, s.end) for s in tracks[n])
+        for n in ["USB_D+", "USB_D-", "USB_MCU_D+", "USB_MCU_D-"]
+    }
+    x0, x1, y0, y1 = usb_common_run_window(pcb)
+    common = {}
+    for name in ["USB_D+", "USB_D-"]:
+        # Board-relative rectangle around the common ESD-to-termination run.
+        common[name] = [
+            CopperElement.from_segment(s)
+            for s in tracks[name]
+            if s.layer == "In2.Cu"
+            and all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in [s.start, s.end])
+        ]
+        segments = common[name]
+        if not segments:
+            raise ValueError(f"Missing USB common run: {name}")
+        reached = {0}
+        while True:
+            added = {
+                i
+                for i, s in enumerate(segments)
+                if any(
+                    math.dist(a, b) < 1e-5
+                    for j in reached
+                    for a in [s.geometry[:2], s.geometry[2:4]]
+                    for b in [segments[j].geometry[:2], segments[j].geometry[2:4]]
+                )
+            }
+            if added <= reached:
+                break
+            reached |= added
+        if len(reached) != len(segments):
+            raise ValueError(f"Disconnected USB common run: {name}")
+    rule = DiffPairRoutingContinuityRule(engaged_pairs=set())
+    coupled = min(
+        rule._coupled_length(common[a], common[b])
+        for a, b in [("USB_D+", "USB_D-"), ("USB_D-", "USB_D+")]
+    )
+    skew = abs(lengths["USB_D+"] - lengths["USB_D-"])
+    if (
+        coupled < 4.0
+        or max(lengths["USB_D+"], lengths["USB_D-"]) > 16.0
+        or skew > USB_FS_MAX_SKEW_MM
+    ):
+        raise ValueError(
+            f"USB branch bounds failed: lengths={lengths}, common={coupled}, skew={skew} "
+            f"(limit {USB_FS_MAX_SKEW_MM} mm)"
+        )
+    if max(lengths["USB_MCU_D+"], lengths["USB_MCU_D-"]) > 4.0:
+        raise ValueError("MCU USB launch exceeds 4 mm")
+    return {"lengths_mm": lengths, "common_coupled_mm": coupled, "branch_skew_mm": skew}
+
+
+def _require_45_degree_copper(path):
+    # Parse the nodes rather than relying on KiCad's pretty-print layout.
+    for segment in parse_file(path).find_children("segment"):
+        start, end = segment.find_child("start"), segment.find_child("end")
+        try:
+            verify_segment_45(
+                start.get_float(0),
+                start.get_float(1),
+                end.get_float(0),
+                end.get_float(1),
+                strict=True,
+            )
+        except OffAngleSegmentError as exc:
+            raise ValueError(
+                "Routing plan contains off-angle copper; repair and revalidate before replay"
+            ) from exc
+
+
+def _copper_by_net_name(doc):
+    """Serialize copper with ``(net "NAME")`` refs (Issue #7033).
+
+    Net ids are per-board, so a numeric ``(net N)`` stored in the plan would
+    bind to a different net (or none) on the board it is replayed onto.
+    Refs already carrying a name pass through untouched.
+    """
+    names = {n.get_int(0): n.get_string(1) for n in doc.find_children("net")}
+    copper = []
+    for node in doc.children:
+        if node.name not in {"segment", "via", "arc"}:
+            continue
+        net = node.find_child("net")
+        if net is not None and len(net.children) == 1 and isinstance(net.children[0].value, int):
+            net_id = net.children[0].value
+            if net_id not in names:
+                raise ValueError(
+                    f"{node.name} references net id {net_id} that is not in the board's net table"
+                )
+            net.children[0] = SExp.quoted_atom(names[net_id])
+        copper.append(serialize_sexp(node))
+    return copper
+
+
+def save_plan(reviewed_board, plan_path=PLAN):
+    _require_45_degree_copper(reviewed_board)
+    doc = parse_file(reviewed_board)
+    data = {
+        "schema_version": 1,
+        "physical_sha256": fingerprint(reviewed_board),
+        "description": "Revision B fixed-placement copper, manually completed, USB pair repaired, and 45-degree aligned",
+        "required_factory_options": {
+            "layers": 4,
+            "stackup": "JLC7628",
+            "finish": "ENIG",
+            "via_covering": "Epoxy-filled & Capped",
+            "secondary_soldering": "J1 USB4085 through-hole",
+            "minimum_pad_hole_spacing_mm": 0.45,
+        },
+        "usb_geometry": usb_geometry(reviewed_board),
+        "copper": _copper_by_net_name(doc),
+        # Text only, symmetric with ``apply_plan()`` below (Issue #5744).
+        # Footprint silk *geometry* is regenerated from the library on every
+        # rebuild and is deliberately NOT snapshotted here -- capturing it
+        # would freeze stale outlines into the plan, and the replay side no
+        # longer removes it, so there would be nothing for it to restore.
+        "silkscreen": {
+            _reference(fp): [serialize_sexp(n) for n in fp.children if _silk_text(n)]
+            for fp in doc.find_children("footprint")
+        },
+    }
+    Path(plan_path).write_text(json.dumps(data, indent=2) + "\n")
+
+
+def apply_plan(input_path, output_path, plan_path=PLAN):
+    plan = json.loads(Path(plan_path).read_text())
+    if plan.get("schema_version") != 1 or fingerprint(input_path) != plan["physical_sha256"]:
+        raise ValueError(
+            "Routing plan does not match physical circuit; reroute and review this revision"
+        )
+    doc = parse_file(input_path)
+    nets = {n.get_string(1): n.get_int(0) for n in doc.find_children("net")}
+    doc.children = [n for n in doc.children if n.name not in {"segment", "via", "arc"}]
+    for source in plan["copper"]:
+        node = parse_string(source)
+        net = node.find_child("net")
+        if len(net.children) == 1 and isinstance(net.children[0].value, int):
+            raise ValueError(
+                f"Routing plan holds numeric net id {net.children[0].value}; net ids are "
+                "per-board, so recapture the plan with save_plan() to store net names"
+            )
+        name = net.get_string(0) if len(net.children) == 1 else net.get_string(1)
+        node.remove_child("net")
+        node.add(parse_string(f"(net {nets[name]})"))
+        doc.add(node)
+    for fp in doc.find_children("footprint"):
+        reference = _reference(fp)
+        # Replace the reviewed silk TEXT only.  Footprint silk geometry
+        # (outlines, pin-1 markers) is regenerated from the library into
+        # ``input_path`` and is carried through untouched (Issue #5744).
+        replacements = [parse_string(source) for source in plan["silkscreen"][reference]]
+        stale = [n.name for n in replacements if not _silk_text(n)]
+        if stale:
+            raise ValueError(
+                f"Routing plan stores non-text silkscreen nodes for {reference} ({stale}); "
+                "recapture it with save_plan() -- footprint silk geometry is replayed from "
+                "the input board, never from the plan"
+            )
+        fp.children = [n for n in fp.children if not _silk_text(n)]
+        for node in replacements:
+            fp.add(node)
+    # Issue #6076: library footprint pads/graphics reach this point without a
+    # ``(uuid ...)``, and KiCad gives each a random one on its first load
+    # (the zone fill), so two replays of the same plan never saved the same
+    # bytes.  Fill every missing UUID from (parent UUID, tag, ordinal) now,
+    # before KiCad sees the board.  Every UUID already present -- generated
+    # footprints, reviewed plan copper and silk text -- is kept as-is.
+    canonicalize_board_uuids(doc, keep=uuids_in_text(serialize_sexp(doc)))
+    output_path = Path(output_path)
+    candidate = output_path.with_name(f".{output_path.stem}.candidate.kicad_pcb")
+    try:
+        candidate.write_text(serialize_sexp(doc))
+        _require_45_degree_copper(candidate)
+        usb_geometry(candidate)
+        candidate.replace(output_path)
+    finally:
+        candidate.unlink(missing_ok=True)
+    return True

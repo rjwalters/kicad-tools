@@ -1,0 +1,934 @@
+/*
+ * Router C++ Core - nanobind Python bindings
+ * Part of kicad-tools router performance optimization (Phase 4)
+ */
+
+#include "grid.hpp"
+#include "geometry.hpp"
+#include "pathfinder.hpp"
+#include "coupled_pathfinder.hpp"
+#include "types.hpp"
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/vector.h>
+#include <nanobind/stl/pair.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/unordered_map.h>
+
+namespace nb = nanobind;
+using namespace nb::literals;
+using namespace router;
+
+// Defined in mesh.cpp (issue #4268): registers the poly2tri constrained-
+// Delaunay mesh binding onto the module. Kept in its own translation unit so
+// the vendored poly2tri headers stay out of the main bindings compile.
+void register_mesh(nb::module_& m);
+
+// Defined in clearance_kernel.cpp (Epic #5509 Phase 1b): registers the
+// exact-geometry clearance kernel (KSegment/KVia/KEdge + copper_gap/hole_gap/
+// clear).  Same "own translation unit" pattern as register_mesh above -- the
+// kernel is deliberately independent of Grid3D and the pathfinder, and no
+// shipped consumer calls it yet.
+void register_clearance_kernel(nb::module_& m);
+
+NB_MODULE(router_cpp, m) {
+    // Issue #6272: the shared trace/via floor, exposed for parity tests
+    // against ``clearance_resolver.trace_via_clearance_mm``.
+    m.def("trace_via_clearance", &trace_via_clearance,
+          "trace_clearance"_a, "via_clearance"_a,
+          "Issue #6272: max(trace_clearance, via_clearance) -- the native "
+          "trace/via copper floor.");
+    // Issue #6994: the native A* search radius, exposed for the Python/C++
+    // parity test against ``search_radius.search_radius_cells``.
+    m.def("search_radius_cells", &search_radius_cells,
+          "half_mm"_a, "clearance_mm"_a, "resolution"_a,
+          "Issue #6994: guarded A* search radius in cells, "
+          "max(1, ceil(x)) with x = (half + clearance) / resolution snapped "
+          "to the nearest integer within 1e-4 cells.");
+    m.doc() = "C++ router core for high-performance PCB routing";
+
+    // GridCell struct
+    nb::class_<GridCell>(m, "GridCell")
+        .def(nb::init<>())
+        .def_rw("blocked", &GridCell::blocked)
+        .def_rw("net", &GridCell::net)
+        .def_rw("usage_count", &GridCell::usage_count)
+        .def_rw("history_cost", &GridCell::history_cost)
+        .def_rw("is_obstacle", &GridCell::is_obstacle)
+        .def_rw("is_zone", &GridCell::is_zone)
+        .def_rw("pad_blocked", &GridCell::pad_blocked)
+        .def_rw("original_net", &GridCell::original_net)
+        // Issue #3545: static-blockage flag -- set by ``mark_blocked``
+        // for board geometry (pads, halos, keepouts); consulted by
+        // ``unmark_segment`` / ``unmark_via`` so rip-up restores static
+        // blockage instead of erasing it.
+        .def_rw("static_blocked", &GridCell::static_blocked)
+        .def_rw("avoidance_cost", &GridCell::avoidance_cost)
+        // Issue #8999: prospective airwire-separation cost (weighted
+        // unrouted-desire-line crossing count; 0.0 when the flag is off).
+        .def_rw("airwire_cost", &GridCell::airwire_cost)
+        // Issue #4071: per-cell corridor-reservation owner set count
+        // (read-only surface for parity tests; the owner nets are written
+        // via ``Grid3D::reserve_cell`` / read via ``is_reserved_for``).
+        .def_ro("reserved_count", &GridCell::reserved_count)
+        // Issue #6315: pad-geometry provenance (normally written through
+        // ``Grid3D::mark_blocked``'s ``pad_source`` / ``shared_pad_halo``;
+        // writable so a caller that temporarily repaints a cell -- the
+        // Kelvin branch isolation -- can void and restore it).
+        .def_rw("pad_cell", &GridCell::pad_cell)
+        .def_rw("shared_pad_halo", &GridCell::shared_pad_halo);
+
+    // DesignRules struct
+    nb::class_<DesignRules>(m, "DesignRules")
+        .def(nb::init<>())
+        .def_rw("trace_width", &DesignRules::trace_width)
+        .def_rw("trace_clearance", &DesignRules::trace_clearance)
+        .def_rw("allow_smd_vias", &DesignRules::allow_smd_vias)
+        .def_rw("via_drill", &DesignRules::via_drill)
+        .def_rw("via_diameter", &DesignRules::via_diameter)
+        .def_rw("via_clearance", &DesignRules::via_clearance)
+        .def_rw("grid_resolution", &DesignRules::grid_resolution)
+        .def_rw("cost_straight", &DesignRules::cost_straight)
+        .def_rw("cost_turn", &DesignRules::cost_turn)
+        .def_rw("cost_via", &DesignRules::cost_via)
+        .def_rw("cost_congestion", &DesignRules::cost_congestion)
+        .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
+        .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
+        .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
+        .def_rw("min_via_pad_edge_gap", &DesignRules::min_via_pad_edge_gap)
+        // Issue #8994: same-net pad slit-band detection edge (0 = guard off).
+        .def_rw("same_net_pad_gap_band_edge_mm", &DesignRules::same_net_pad_gap_band_edge_mm)
+        // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
+        .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
+
+    // ValidationResult struct (Issue #2439)
+    nb::class_<ValidationResult>(m, "ValidationResult")
+        .def(nb::init<>())
+        .def_rw("valid", &ValidationResult::valid)
+        .def_rw("min_clearance", &ValidationResult::min_clearance)
+        .def_rw("violation_x", &ValidationResult::violation_x)
+        .def_rw("violation_y", &ValidationResult::violation_y)
+        .def_rw("violation_type", &ValidationResult::violation_type);
+
+    // AttachZone struct (Issue #4510 / #4506)
+    //
+    // Net-id-translated mirror of the ``AttachZone`` frozen dataclass in
+    // ``router/pairwise_clearance.py``.  Python constructs these once per
+    // routing session (``cpp_backend.py::_sync_pairwise_domains_to_cpp``) and
+    // installs them via ``Grid3D.set_attach_zones``.
+    nb::class_<AttachZone>(m, "AttachZone")
+        .def(nb::init<>())
+        .def_rw("min_x", &AttachZone::min_x)
+        .def_rw("min_y", &AttachZone::min_y)
+        .def_rw("max_x", &AttachZone::max_x)
+        .def_rw("max_y", &AttachZone::max_y)
+        .def_rw("net_ids", &AttachZone::net_ids)
+        // Issue #4507: net id -> grid layer indices that net has PAD copper on
+        // here.  A net absent from the map is unrestricted (through-hole);
+        // leaving the whole map empty keeps the pre-#4507 layer-agnostic
+        // waiver, which is what hand-built zones produce.
+        .def_rw("net_layers", &AttachZone::net_layers);
+
+    // PadBounds struct
+    nb::class_<PadBounds>(m, "PadBounds")
+        .def(nb::init<>())
+        .def_rw("metal_gx1", &PadBounds::metal_gx1)
+        .def_rw("metal_gy1", &PadBounds::metal_gy1)
+        .def_rw("metal_gx2", &PadBounds::metal_gx2)
+        .def_rw("metal_gy2", &PadBounds::metal_gy2)
+        .def_rw("approach_gx1", &PadBounds::approach_gx1)
+        .def_rw("approach_gy1", &PadBounds::approach_gy1)
+        .def_rw("approach_gx2", &PadBounds::approach_gx2)
+        .def_rw("approach_gy2", &PadBounds::approach_gy2)
+        .def_rw("centre_gx", &PadBounds::centre_gx)
+        .def_rw("centre_gy", &PadBounds::centre_gy)
+        .def_rw("long_axis", &PadBounds::long_axis)
+        .def_rw("lane_half_cells", &PadBounds::lane_half_cells)
+        .def_rw("tip_lo", &PadBounds::tip_lo)
+        .def_rw("tip_hi", &PadBounds::tip_hi);
+
+    // PadChannelBudget struct (Issue #3143)
+    //
+    // Soft per-cell penalty rectangle used to nudge the A* search toward
+    // less-contested escape paths in the lateral channels adjacent to
+    // dense-package pad rows.  See types.hpp::PadChannelBudget for the
+    // per-field contract and the cost-shaping rationale.  Python callers
+    // (cpp_backend.py / core.py) construct these once per net before
+    // dispatching to route_resumable().
+    nb::class_<PadChannelBudget>(m, "PadChannelBudget")
+        .def(nb::init<>())
+        .def_rw("gx1", &PadChannelBudget::gx1)
+        .def_rw("gy1", &PadChannelBudget::gy1)
+        .def_rw("gx2", &PadChannelBudget::gx2)
+        .def_rw("gy2", &PadChannelBudget::gy2)
+        .def_rw("layer", &PadChannelBudget::layer)
+        .def_rw("capacity", &PadChannelBudget::capacity)
+        .def_rw("overflow_penalty", &PadChannelBudget::overflow_penalty)
+        .def_rw("origin_pad_ref_hash", &PadChannelBudget::origin_pad_ref_hash)
+        // Issue #3143: ``source_net`` (origin net of the escape pad) lets
+        // the Python adapter filter out the current net's own budget
+        // entries before forwarding to the C++ pathfinder.
+        .def_rw("source_net", &PadChannelBudget::source_net);
+
+    // Segment struct
+    nb::class_<Segment>(m, "Segment")
+        .def(nb::init<>())
+        .def_rw("x1", &Segment::x1)
+        .def_rw("y1", &Segment::y1)
+        .def_rw("x2", &Segment::x2)
+        .def_rw("y2", &Segment::y2)
+        .def_rw("width", &Segment::width)
+        .def_rw("layer", &Segment::layer)
+        .def_rw("net", &Segment::net);
+
+    // Via struct
+    nb::class_<Via>(m, "Via")
+        .def(nb::init<>())
+        .def_rw("x", &Via::x)
+        .def_rw("y", &Via::y)
+        .def_rw("drill", &Via::drill)
+        .def_rw("diameter", &Via::diameter)
+        .def_rw("layer_from", &Via::layer_from)
+        .def_rw("layer_to", &Via::layer_to)
+        .def_rw("net", &Via::net);
+
+    // RouteResult struct
+    nb::class_<RouteResult>(m, "RouteResult")
+        .def(nb::init<>())
+        .def_ro("segments", &RouteResult::segments)
+        .def_ro("vias", &RouteResult::vias)
+        .def_ro("net", &RouteResult::net)
+        .def_ro("success", &RouteResult::success)
+        // Issue #2476: structured failure diagnostics (mirrors
+        // ValidationResult::violation_type vocabulary).
+        .def_ro("failure_reason", &RouteResult::failure_reason)
+        .def_ro("blocking_via_net", &RouteResult::blocking_via_net)
+        .def_ro("failure_x", &RouteResult::failure_x)
+        .def_ro("failure_y", &RouteResult::failure_y)
+        // Issue #5599: the goal node the A* actually accepted.
+        .def_ro("goal_gx", &RouteResult::goal_gx)
+        .def_ro("goal_gy", &RouteResult::goal_gy)
+        .def_ro("goal_layer", &RouteResult::goal_layer);
+
+    // Issue #2476: FailureReason constants (exposed as module attributes
+    // so Python tests/strategies can dispatch on the same vocabulary the
+    // C++ search uses internally).
+    m.attr("FAILURE_NONE") = static_cast<int>(FAILURE_NONE);
+    m.attr("FAILURE_NO_PATH") = static_cast<int>(FAILURE_NO_PATH);
+    m.attr("FAILURE_ITERATION_LIMIT") = static_cast<int>(FAILURE_ITERATION_LIMIT);
+    // Issue #2610: wall-clock deadline (--per-net-timeout) was hit.
+    m.attr("FAILURE_TIMEOUT") = static_cast<int>(FAILURE_TIMEOUT);
+    m.attr("FAILURE_VIA_VIA_BLOCKED") = static_cast<int>(FAILURE_VIA_VIA_BLOCKED);
+    // Issue #4507: the open set drained while cross-domain (HV) pairwise
+    // widening refused expansions; ``blocking_via_net`` names the foreign net.
+    m.attr("FAILURE_PAIRWISE_BLOCKED") =
+        static_cast<int>(FAILURE_PAIRWISE_BLOCKED);
+
+    // Grid3D class
+    nb::class_<Grid3D>(m, "Grid3D")
+        .def(nb::init<int, int, int, float, float, float>(),
+             "cols"_a, "rows"_a, "layers"_a, "resolution"_a,
+             "origin_x"_a = 0.0f, "origin_y"_a = 0.0f)
+        // Cell access
+        .def("at", nb::overload_cast<int, int, int>(&Grid3D::at),
+             "x"_a, "y"_a, "layer"_a, nb::rv_policy::reference)
+        .def("is_valid", &Grid3D::is_valid, "x"_a, "y"_a, "layer"_a)
+        .def("is_valid_and_free", &Grid3D::is_valid_and_free,
+             "x"_a, "y"_a, "layer"_a, "net"_a)
+        // Coordinate conversion
+        .def("world_to_grid", &Grid3D::world_to_grid, "x"_a, "y"_a)
+        .def("grid_to_world", &Grid3D::grid_to_world, "gx"_a, "gy"_a)
+        // Blocking operations.
+        //
+        // Issue #3224: ``pad_blocked`` (default ``false``) marks the cell as
+        // foreign pad copper.  The A* clearance branch in
+        // ``pathfinder.cpp`` (lines 680 and 1173 -- the one-shot and
+        // resumable / negotiated paths) reads ``cell.pad_blocked`` to
+        // distinguish foreign-pad metal from foreign-pad clearance halo;
+        // only halo cells participate in the pad-exit exemption.
+        // Without the bit, the C++ A* accepted traces stepping through
+        // foreign pad copper.  Defaults to ``false`` so existing callers
+        // that mark obstacle cells (board outline, copper-pour clearance
+        // halos) preserve their pre-#3224 behavior.
+        .def("set_component_holes_known", &Grid3D::set_component_holes_known)
+        .def("clear_component_holes", &Grid3D::clear_component_holes)
+        .def("add_component_hole", &Grid3D::add_component_hole)
+        .def("component_holes_clear", &Grid3D::component_holes_clear)
+        .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
+        .def("add_fixed_fill", &Grid3D::add_fixed_fill)
+        .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
+        // Epic #5509 Phase 3c (#5662): bound so a test can *assert* the
+        // premise of the #4507 construction -- a board with no pour at all --
+        // instead of asserting around it.
+        .def("has_fixed_fills", &Grid3D::has_fixed_fills)
+        // Issue #6008: keepout rule areas the occupancy planes cannot hold
+        // (net-filtered track rules, every via rule).
+        .def("clear_rule_area_keepouts", &Grid3D::clear_rule_area_keepouts)
+        .def("add_rule_area_keepout", &Grid3D::add_rule_area_keepout,
+             "blocks_tracks"_a, "blocks_vias"_a, "layers"_a,
+             "x0"_a, "y0"_a, "w"_a, "h"_a, "cells"_a,
+             "has_only"_a, "only"_a, "exempt"_a)
+        .def("rule_area_keepout_count", &Grid3D::rule_area_keepout_count)
+        .def("rule_area_trace_blocked", &Grid3D::rule_area_trace_blocked,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "radius"_a)
+        .def("rule_area_via_blocked", &Grid3D::rule_area_via_blocked,
+             "x"_a, "y"_a, "net"_a, "radius"_a)
+        .def("route_geometry_complete", &Grid3D::route_geometry_complete)
+        .def("route_cell_has_geometry", &Grid3D::route_cell_has_geometry)
+        .def("register_route_mark", &Grid3D::register_route_mark,
+             "kind"_a, "net"_a, "layer"_a, "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+             "radius"_a, "add"_a = true,
+             "Issue #5410: replay a RouteHaloGeometry mark onto a grid that "
+             "was bulk-copied from a Python RoutingGrid, so cells carry the "
+             "coverage provenance search-time refinement requires.")
+        .def("set_cell_static_blocked", &Grid3D::set_cell_static_blocked,
+             "x"_a, "y"_a, "layer"_a, "value"_a,
+             "Issue #5410: restore a bulk-copied cell's static/dynamic split, "
+             "which mark_blocked cannot express.")
+        .def("set_cells_static_blocked", &Grid3D::set_cells_static_blocked,
+             "xs"_a, "ys"_a, "layers"_a, "value"_a,
+             "Issue #5410: bulk form of set_cell_static_blocked.")
+        .def("route_trace_geometry_clear", &Grid3D::route_trace_geometry_clear)
+        .def("route_via_geometry_clear", &Grid3D::route_via_geometry_clear,
+             "via"_a, "clearance"_a, "hole_clearance"_a, "same_net_drill_clearance"_a,
+             "trace_clearance"_a = -1.0f,
+             "Issue #6272: a non-negative trace_clearance raises the "
+             "via-vs-stored-segment floor to max(trace_clearance, clearance).")
+        .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
+        .def("mark_blocked", &Grid3D::mark_blocked,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
+             "pad_blocked"_a = false, "pad_source"_a = false,
+             "shared_pad_halo"_a = false)
+        // Issue #6315: exact swept-edge vs foreign-pad clearance used to
+        // resolve pad-derived cells in the A*.
+        .def("pad_geometry_clear", &Grid3D::pad_geometry_clear,
+             "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
+             "half_width"_a, "clearance"_a, "only_net"_a = -1)
+        // Issue #6375: validate_route()'s seg-vs-pad verdict over the pads
+        // the bucket index places within reach -- the function the A*
+        // own-pad step gate calls (search/validator parity surface).
+        .def("segment_pads_clear", &Grid3D::segment_pads_clear,
+             "seg"_a, "exclude_net"_a,
+             "exclude_ref_hashes"_a = std::vector<uint32_t>{},
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{})
+        // Issue #7887: the pad whose pairwise (HV) floor alone refuses ``seg``.
+        .def("segment_pads_pairwise_blocker", &Grid3D::segment_pads_pairwise_blocker,
+             "seg"_a, "exclude_net"_a,
+             "exclude_ref_hashes"_a = std::vector<uint32_t>{},
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{})
+        .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
+        // Route marking
+        .def("mark_segment", &Grid3D::mark_segment,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "clearance_cells"_a)
+        .def("mark_via", &Grid3D::mark_via,
+             "x"_a, "y"_a, "net"_a, "radius_cells"_a)
+        .def("unmark_segment", &Grid3D::unmark_segment,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "clearance_cells"_a)
+        .def("unmark_via", &Grid3D::unmark_via,
+             "x"_a, "y"_a, "net"_a, "radius_cells"_a)
+        // Issue #4071: corridor-reservation write/read API.  Mirrors
+        // Python ``RoutingGrid.reserve_corridor_cells`` (per-cell),
+        // ``is_reserved_for``, ``clear_corridor_reservations``, and
+        // ``reserved_cell_count``.  ``mark_via`` and the A* cost loop
+        // honour these reservations (keep-out + attractor).
+        // Issue #4079: ``soft`` (default False) selects HARD (via + lateral
+        // keep-out) vs SOFT (attractor-only) reservation strength.
+        .def("reserve_cell", &Grid3D::reserve_cell,
+             "x"_a, "y"_a, "layer"_a, "net_ids"_a, "soft"_a = false)
+        .def("clear_reservations", &Grid3D::clear_reservations)
+        .def("reserved_cell_count", &Grid3D::reserved_cell_count)
+        .def("is_reserved_for", &Grid3D::is_reserved_for,
+             "x"_a, "y"_a, "layer"_a, "net"_a)
+        .def("has_reservations", &Grid3D::has_reservations)
+        .def("corridor_attractor_bonus", &Grid3D::corridor_attractor_bonus,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "bonus"_a)
+        // DRC avoidance feedback
+        .def("boost_region_cost", &Grid3D::boost_region_cost,
+             "center_x"_a, "center_y"_a, "layer"_a, "radius_cells"_a, "amount"_a)
+        .def("clear_avoidance_costs", &Grid3D::clear_avoidance_costs)
+        // Issue #8999: airwire-separation plane verbs (see grid.hpp).
+        .def("clear_airwire_costs", &Grid3D::clear_airwire_costs)
+        .def("set_airwire_cells", &Grid3D::set_airwire_cells,
+             "xs"_a, "ys"_a, "costs"_a)
+        // Congestion
+        .def("get_congestion", &Grid3D::get_congestion, "x"_a, "y"_a, "layer"_a)
+        .def("update_congestion", &Grid3D::update_congestion,
+             "x"_a, "y"_a, "layer"_a, "delta"_a = 1)
+        // Negotiated routing
+        .def("reset_usage", &Grid3D::reset_usage)
+        .def("increment_usage", &Grid3D::increment_usage, "x"_a, "y"_a, "layer"_a)
+        .def("decrement_usage", &Grid3D::decrement_usage, "x"_a, "y"_a, "layer"_a,
+             "Issue #3438: rip-up parity -- mirrors "
+             "RoutingGrid.unmark_route_usage so the C++ sharing-mode "
+             "clauses see the same usage counts as the Python grid.")
+        .def("get_negotiated_cost", &Grid3D::get_negotiated_cost,
+             "x"_a, "y"_a, "layer"_a, "present_factor"_a, "net"_a = 0)
+        .def("update_history_costs", &Grid3D::update_history_costs, "increment"_a)
+        .def("get_total_overflow", &Grid3D::get_total_overflow)
+        // Properties
+        .def_prop_ro("cols", &Grid3D::cols)
+        .def_prop_ro("rows", &Grid3D::rows)
+        .def_prop_ro("layers", &Grid3D::layers)
+        .def_prop_ro("resolution", &Grid3D::resolution)
+        .def_prop_ro("total_cells", &Grid3D::total_cells)
+        // Statistics
+        .def("count_blocked", &Grid3D::count_blocked)
+        .def("memory_mb", &Grid3D::memory_mb)
+        // Geometric validation (Issue #2439)
+        .def("add_pad", &Grid3D::add_pad,
+             "x"_a, "y"_a, "width"_a, "height"_a,
+             "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a,
+             "is_plane_net"_a = false, "rotation"_a = 0.0f,
+             "is_circular"_a = false)
+        .def("set_pad_class_clearances", &Grid3D::set_pad_class_clearances,
+             "clearances"_a)
+        .def("set_pad_via_policy", &Grid3D::set_pad_via_policy,
+             "index"_a, "clearance"_a, "carveout_eligible"_a)
+        .def("add_stored_segment", &Grid3D::add_stored_segment,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+             "width"_a, "layer_idx"_a, "net"_a, "grid_endpoints"_a = nb::none(),
+             "authored_floor"_a = 0.0f)
+        .def("add_stored_via", &Grid3D::add_stored_via,
+             "x"_a, "y"_a, "drill"_a, "diameter"_a, "net"_a, "grid_center"_a = nb::none(), "layer_from"_a = 0, "layer_to"_a = -1,
+             "authored_floor"_a = 0.0f)
+        // Issue #6243: authored per-net clearance minima.
+        .def("set_net_clearance_floors", &Grid3D::set_net_clearance_floors,
+             "nets"_a, "floors"_a)
+        .def("net_clearance_floor", &Grid3D::net_clearance_floor, "net"_a)
+        .def("authored_pair_floor", &Grid3D::authored_pair_floor, "net_a"_a, "net_b"_a)
+        .def("set_pad_authored", &Grid3D::set_pad_authored,
+             "index"_a, "shape"_a, "width"_a, "height"_a, "rotation"_a,
+             "x"_a, "y"_a, "drill"_a, "item_floor"_a, "rratio"_a)
+        .def("rebuild_authored_index", &Grid3D::rebuild_authored_index)
+        .def("authored_active", &Grid3D::authored_active)
+        .def("authored_segment_clear", &Grid3D::authored_segment_clear,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "width"_a, "layer"_a, "net"_a)
+        .def("authored_via_clear", &Grid3D::authored_via_clear,
+             "x"_a, "y"_a, "diameter"_a, "net"_a)
+        .def("trace_stored_vias_clear", &Grid3D::trace_stored_vias_clear,
+             "segment"_a, "clearance"_a, "partner_net"_a = -1, "partner_clearance"_a = -1.0f,
+             "Issue #6272: clearance is the trace/via floor; the partner arguments "
+             "only widen the lookup and never relax a barrel (even the partner's).")
+        .def("clear_validation_data", &Grid3D::clear_validation_data)
+        .def("clear_stored_routes", &Grid3D::clear_stored_routes,
+             "Issue #2481: Drop only stored route data (segments + vias), "
+             "keeping pads.  Used after rip-up to invalidate the cached "
+             "snapshot consulted by Pathfinder::is_via_blocked_diag.")
+        .def("validate_route", &Grid3D::validate_route,
+             "segments"_a, "vias"_a, "exclude_net"_a,
+             "exclude_ref_hashes"_a, "trace_clearance"_a,
+             "via_clearance"_a, "min_drill_clearance"_a,
+             "partner_net"_a = -1,
+             "intra_pair_clearance"_a = 0.0f,
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{},
+             "min_hole_clearance"_a = -1.0f,
+             "Validate a candidate route against stored geometry.  Issue #2559 "
+             "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
+             "segment-to-segment comparisons against partner_net use intra_pair_clearance instead "
+             "of trace_clearance (defaults preserve pre-#2559 behavior).  "
+             "Issue #5166: refs in exclude_ref_hashes keep the full-skip "
+             "same-component carve-out (#2452 corridor relief, whose floor is "
+             "the search's own trace_width/2 blocked-cell construction), while "
+             "refs in clamp_ref_hashes -- eligible only via a configured "
+             "override that resolved smaller than the default clearance -- "
+             "enforce that resolved per-pad value as a hard floor instead.  "
+             "An empty clamp_ref_hashes reproduces pre-#5166 behavior.")
+        // Pairwise (HV-isolation) domain clearance -- Issue #4510 / #4431 Phase 2a
+        .def("set_pairwise_domains", &Grid3D::set_pairwise_domains,
+             "net_to_domain"_a, "matrix"_a,
+             "Install the per-net domain-id array (indexed by net id, -1 = no "
+             "domain) plus the dense symmetric domain-pair required-clearance "
+             "matrix in mm.  Dormant by default: until this is called (or when "
+             "called with empty containers) validate_route() behaves exactly as "
+             "before.  Matrix entries are pure WIDENING values -- the validator "
+             "applies max(effective_scalar, matrix[dom_a][dom_b]).")
+        .def("set_attach_zones", &Grid3D::set_attach_zones, "zones"_a,
+             "Install rated-footprint attach zones (Issue #4506) whose bbox + "
+             "net-id membership waives the pairwise WIDENING (never the scalar "
+             "floor) for a pair terminating on the same domain-bridging "
+             "footprint.  Empty vector (the default) clears them.")
+        .def_prop_ro("pairwise_active", &Grid3D::pairwise_active)
+        .def_prop_ro("attach_zone_count", &Grid3D::attach_zone_count)
+        .def("pairwise_required_clearance", &Grid3D::pairwise_required_clearance,
+             "net_a"_a, "net_b"_a,
+             "Required pairwise clearance (mm) between two net ids; 0.0 when "
+             "dormant or when either net has no domain.")
+        .def("attach_zone_exempts", &Grid3D::attach_zone_exempts,
+             "x"_a, "y"_a, "net_a"_a, "net_b"_a, "layer"_a = -1,
+             "True when an installed attach zone contains (x, y) and lists BOTH "
+             "net ids among its members.  Issue #4507: when ``layer`` is a real "
+             "grid layer index the zone must also reach it for BOTH nets "
+             "(AttachZone.net_layers); ``layer = -1`` (the default) or a zone "
+             "with an empty net_layers map keeps the layer-agnostic verdict.")
+        .def_prop_ro("max_pairwise_clearance", &Grid3D::max_pairwise_clearance,
+             "Issue #4511: the widest widening (mm) in the installed domain "
+             "matrix, 0.0 when dormant.  Sizes the search-time widened kernel.")
+        .def_prop_ro("pad_count", &Grid3D::pad_count)
+        .def_prop_ro("stored_segment_count", &Grid3D::stored_segment_count)
+        .def_prop_ro("stored_via_count", &Grid3D::stored_via_count);
+
+    // Pathfinder class
+    nb::class_<Pathfinder>(m, "Pathfinder")
+        // Issue #4485: ``Pathfinder`` stores ``Grid3D& grid_`` -- a bare C++
+        // reference to the ``Grid3D`` argument.  Without a keep-alive policy
+        // nanobind is free to garbage-collect the Python ``Grid3D`` wrapper as
+        // soon as the caller drops its last reference (e.g. the common
+        // ``Pathfinder(Grid3D(...), rules).route(...)`` idiom, where the grid
+        // is an unnamed temporary).  That frees the underlying ``cells_``
+        // storage and leaves ``grid_`` dangling; the next ``route()`` reads
+        // freed heap, producing the nondeterministic segment-count instability
+        // reported in #4485 (confirmed as a heap-use-after-free by
+        // AddressSanitizer at ``pathfinder.cpp`` ``grid_.at(...)``).
+        // ``keep_alive<1, 2>`` ties the grid's lifetime (patient, arg index 2)
+        // to the newly-constructed Pathfinder (nurse, index 1 = the implicit
+        // ``self``/instance slot of the ``__init__`` binding).
+        .def(nb::init<Grid3D&, const DesignRules&, bool>(),
+             "grid"_a, "rules"_a, "diagonal_routing"_a = true,
+             nb::keep_alive<1, 2>())
+        // Issue #4346: ``start_pad_bounds`` / ``end_pad_bounds`` are bound via a
+        // thin lambda taking ``std::optional<PadBounds>`` defaulting to
+        // ``nb::none()`` instead of a materialized ``PadBounds{}`` default arg.
+        // A *bound-type* default argument makes nanobind cast the sentinel into a
+        // persistent Python object held for the module's lifetime; because CPython
+        // does not deallocate extension modules at interpreter finalization, those
+        // objects are still live when nanobind's teardown leak checker runs -- the
+        // exact source of the "leaked 4 instances of PadBounds" report on
+        // ``kct build-native``. Defaulting to None keeps zero tracked instances;
+        // the omitted case substitutes an all-zero ``PadBounds{}`` inside the
+        // lambda, preserving pre-#4346 Python-visible behavior identically.
+        .def("route",
+             [](Pathfinder& self,
+                float start_x, float start_y, int start_layer,
+                float end_x, float end_y, int end_layer,
+                int net,
+                const std::vector<int>& start_layers,
+                const std::vector<int>& end_layers,
+                bool negotiated_mode,
+                float present_cost_factor,
+                float weight,
+                int trace_radius_cells,
+                int via_radius_cells,
+                std::optional<PadBounds> start_pad_bounds,
+                std::optional<PadBounds> end_pad_bounds,
+                int partner_net,
+                int intra_pair_radius_cells,
+                double per_net_timeout_seconds,
+                int max_search_iterations,
+                float emit_trace_width,
+                float emit_via_diameter,
+                float emit_via_drill,
+                const std::vector<PadChannelBudget>& pad_channel_budgets) {
+                 return self.route(
+                     start_x, start_y, start_layer,
+                     end_x, end_y, end_layer,
+                     net,
+                     start_layers, end_layers,
+                     negotiated_mode, present_cost_factor, weight,
+                     trace_radius_cells, via_radius_cells,
+                     start_pad_bounds.value_or(PadBounds{}),
+                     end_pad_bounds.value_or(PadBounds{}),
+                     partner_net, intra_pair_radius_cells,
+                     per_net_timeout_seconds, max_search_iterations,
+                     emit_trace_width, emit_via_diameter, emit_via_drill,
+                     pad_channel_budgets);
+             },
+             "start_x"_a, "start_y"_a, "start_layer"_a,
+             "end_x"_a, "end_y"_a, "end_layer"_a,
+             "net"_a,
+             "start_layers"_a = std::vector<int>{},
+             "end_layers"_a = std::vector<int>{},
+             "negotiated_mode"_a = false,
+             "present_cost_factor"_a = 0.0f,
+             "weight"_a = 1.0f,
+             "trace_radius_cells"_a = 0,
+             "via_radius_cells"_a = 0,
+             "start_pad_bounds"_a = nb::none(),
+             "end_pad_bounds"_a = nb::none(),
+             // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+             "partner_net"_a = -1,
+             "intra_pair_radius_cells"_a = 0,
+             // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
+             // and override for the iteration backstop (<= 0 = cols*rows*4).
+             "per_net_timeout_seconds"_a = 0.0,
+             "max_search_iterations"_a = 0,
+             // Issue #3130: per-net emit widths/diameters (0 = use rules_ defaults).
+             // Defaults preserve pre-#3130 emit behavior identically.
+             "emit_trace_width"_a = 0.0f,
+             "emit_via_diameter"_a = 0.0f,
+             "emit_via_drill"_a = 0.0f,
+             // Issue #3143: per-pad lateral-channel budget (empty = inert).
+             "pad_channel_budgets"_a = std::vector<PadChannelBudget>{})
+        .def("route_resumable",
+             [](Pathfinder& self,
+                float start_x, float start_y, int start_layer,
+                float end_x, float end_y, int end_layer,
+                int net,
+                const std::vector<int>& start_layers,
+                const std::vector<int>& end_layers,
+                bool negotiated_mode,
+                float present_cost_factor,
+                float weight,
+                int trace_radius_cells,
+                int via_radius_cells,
+                std::optional<PadBounds> start_pad_bounds,
+                std::optional<PadBounds> end_pad_bounds,
+                int partner_net,
+                int intra_pair_radius_cells,
+                double per_net_timeout_seconds,
+                int max_search_iterations,
+                float emit_trace_width,
+                float emit_via_diameter,
+                float emit_via_drill,
+                const std::vector<PadChannelBudget>& pad_channel_budgets) {
+                 return self.route_resumable(
+                     start_x, start_y, start_layer,
+                     end_x, end_y, end_layer,
+                     net,
+                     start_layers, end_layers,
+                     negotiated_mode, present_cost_factor, weight,
+                     trace_radius_cells, via_radius_cells,
+                     start_pad_bounds.value_or(PadBounds{}),
+                     end_pad_bounds.value_or(PadBounds{}),
+                     partner_net, intra_pair_radius_cells,
+                     per_net_timeout_seconds, max_search_iterations,
+                     emit_trace_width, emit_via_diameter, emit_via_drill,
+                     pad_channel_budgets);
+             },
+             "start_x"_a, "start_y"_a, "start_layer"_a,
+             "end_x"_a, "end_y"_a, "end_layer"_a,
+             "net"_a,
+             "start_layers"_a = std::vector<int>{},
+             "end_layers"_a = std::vector<int>{},
+             "negotiated_mode"_a = false,
+             "present_cost_factor"_a = 0.0f,
+             "weight"_a = 1.0f,
+             "trace_radius_cells"_a = 0,
+             "via_radius_cells"_a = 0,
+             "start_pad_bounds"_a = nb::none(),
+             "end_pad_bounds"_a = nb::none(),
+             // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
+             "partner_net"_a = -1,
+             "intra_pair_radius_cells"_a = 0,
+             // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
+             // and override for the iteration backstop (<= 0 = cols*rows*4).
+             "per_net_timeout_seconds"_a = 0.0,
+             "max_search_iterations"_a = 0,
+             // Issue #3130: per-net emit widths/diameters (0 = use rules_ defaults).
+             // Defaults preserve pre-#3130 emit behavior identically.
+             "emit_trace_width"_a = 0.0f,
+             "emit_via_diameter"_a = 0.0f,
+             "emit_via_drill"_a = 0.0f,
+             // Issue #3143: per-pad lateral-channel budget (empty = inert).
+             "pad_channel_budgets"_a = std::vector<PadChannelBudget>{})
+        .def("resume", &Pathfinder::resume,
+             "reject_x"_a, "reject_y"_a, "reject_layer"_a)
+        .def("clear_search_state", &Pathfinder::clear_search_state)
+        .def("set_routable_layers", &Pathfinder::set_routable_layers, "layers"_a)
+        .def("is_via_blocked", &Pathfinder::is_via_blocked,
+             "x"_a, "y"_a, "net"_a, "allow_sharing"_a, "radius_override"_a = 0,
+             "Check if a via placement at (x, y) is blocked. "
+             "Includes both grid-cell blocking and geometric via-vs-via "
+             "clearance against stored_vias_ (Issue #2466).")
+        .def("is_diagonal_blocked", &Pathfinder::is_diagonal_blocked,
+             "x"_a, "y"_a, "dx"_a, "dy"_a, "layer"_a, "net"_a,
+             "allow_sharing"_a,
+             "Check if a diagonal move from (x, y) toward (dx, dy) would "
+             "cut through obstacle corners.  Exposed for the Issue #3456 "
+             "regression tests: same-net cells must be passable in "
+             "standard mode regardless of the obstacle flag (parity with "
+             "the Python _is_diagonal_corner_blocked, Issue #864).")
+        .def("is_trace_blocked", &Pathfinder::is_trace_blocked,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "allow_sharing"_a,
+             "radius_override"_a = 0, "partner_net"_a = -1,
+             "partner_radius"_a = 0, "from_x"_a = -1, "from_y"_a = -1,
+             "Check if a trace placement at (x, y, layer) is blocked, "
+             "accounting for trace width.  Exposed for the Issue #3456 "
+             "regression tests: same-net cells must be passable in "
+             "standard mode regardless of the obstacle flag (parity with "
+             "the Python _is_trace_blocked, Issue #864).")
+        .def("is_foreign_pad_metal_within_radius",
+             &Pathfinder::is_foreign_pad_metal_within_radius,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "radius"_a,
+             "Return True if any cell within Chebyshev ``radius`` of (x, y, layer) "
+             "has pad_blocked=True and a foreign net.  Used by the pad-exit "
+             "clearance guard (Issue #3226) to refuse a relaxation step into the "
+             "inner part of an adjacent foreign pad's halo.")
+        .def("set_relief_mode", &Pathfinder::set_relief_mode, "enabled"_a,
+             "Issue #3438: enable/disable the relief-probe mode.  When "
+             "enabled, sharing-mode foreign usage-0 non-obstacle cells "
+             "(escape stubs, route clearance halos, via halo rings) become "
+             "passable at a finite per-step penalty instead of hard, so a "
+             "zero-overflow hard failure can produce a min-conflict probe "
+             "path whose crossed owner nets feed the targeted rip-up.")
+        // Issue #5599: evidence-gated strict foreign-pad kernel for the A*
+        // neighbor filter (see pathfinder.hpp).  Armed by the Python resume
+        // loop after a repeated post-route clearance violation, localized to
+        // a disc around that violation site (cx/cy/radius; cx < 0 = global).
+        .def("set_search_strict_pad_kernel", &Pathfinder::set_search_strict_pad_kernel,
+             "enabled"_a, "cx"_a = -1, "cy"_a = -1, "radius"_a = 0)
+        .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
+        .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
+        // Issue #6315: copper clearance a foreign pad may demand (the
+        // largest net-class clearance on the board).
+        .def("set_search_pad_clearance_floor", &Pathfinder::set_search_pad_clearance_floor)
+        // Issue #6375: the own-pad step gate -- validator carve-out sets
+        // and the narrowest emittable width for this search.
+        .def("set_search_own_pad_gate", &Pathfinder::set_search_own_pad_gate,
+             "exclude_ref_hashes"_a, "clamp_ref_hashes"_a, "trace_width"_a)
+        .def("own_pad_step_clear", &Pathfinder::own_pad_step_clear,
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a,
+             "emit_trace_width"_a = 0.0f)
+        .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
+        .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
+             "trace_half_width_mm"_a, "via_half_diam_mm"_a,
+             "Issue #4511 / Epic #4431 Phase 2b: set the routing net's copper "
+             "half-extents (mm) the search-time pairwise (HV-isolation) "
+             "widening measures from -- trace_width/2 and via_diameter/2.  Call "
+             "once per net before route()/route_resumable(); 0.0 (the default) "
+             "falls back to the global rules widths.  Dormant unless the grid "
+             "has an installed pairwise domain matrix.")
+        .def("cross_domain_trace_blocked",
+             &Pathfinder::cross_domain_trace_blocked,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "scalar_radius"_a,
+             "Issue #4511: True when foreign cross-domain (HV) copper in the "
+             "widened annulus beyond ``scalar_radius`` (and not attach-zone "
+             "exempt) would violate the pairwise clearance.  Exposed for the "
+             "Phase 2b search<->validate mirror regression tests.")
+        .def("cross_domain_via_blocked", &Pathfinder::cross_domain_via_blocked,
+             "x"_a, "y"_a, "net"_a,
+             "Issue #4511: via sibling of ``cross_domain_trace_blocked`` -- "
+             "scans the widened annulus across every layer.")
+        .def("pairwise_avoidance_cost", &Pathfinder::pairwise_avoidance_cost,
+             "x"_a, "y"_a, "layer"_a, "net"_a,
+             "Issue #4511 Scope 2: the soft cross-domain avoidance cost (0.0 "
+             "when dormant or no HV copper in the gradient band).")
+        .def("clear_pairwise_block_diagnostics",
+             &Pathfinder::clear_pairwise_block_diagnostics,
+             "Issue #4507: reset the cross-domain (HV) rip-up diagnostics.  "
+             "Called automatically at the start of every search; exposed so "
+             "tests can drive the kernels in isolation.")
+        .def_prop_ro("pairwise_block_count",
+                     &Pathfinder::pairwise_block_count,
+                     "Issue #4507: how many expansions the search-time "
+                     "pairwise (HV) widening refused since the last reset.")
+        .def_prop_ro("last_pairwise_block_net",
+                     &Pathfinder::last_pairwise_block_net,
+                     "Issue #4507: net id of the most recently observed "
+                     "cross-domain blocker (0 when none).  Surfaced on a "
+                     "drained search as ``RouteResult.blocking_via_net`` with "
+                     "``failure_reason == FAILURE_PAIRWISE_BLOCKED``.")
+        .def_prop_ro("last_pairwise_block_x",
+                     &Pathfinder::last_pairwise_block_x,
+                     "Issue #4507: world X of the refused candidate.")
+        .def_prop_ro("last_pairwise_block_y",
+                     &Pathfinder::last_pairwise_block_y,
+                     "Issue #4507: world Y of the refused candidate.")
+        .def_prop_ro("iterations", &Pathfinder::get_iterations)
+        .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
+
+    // CoupledPathNode struct (Issue #4065): one joint-state node on the
+    // reconstructed coupled path (root->goal order).  The Python wrapper
+    // unpacks these into the ``p_path`` / ``n_path`` lists that
+    // ``_reconstruct_coupled_routes`` builds, then feeds them to the
+    // unchanged Python ``_build_route_from_path``.
+    nb::class_<CoupledPathNode>(m, "CoupledPathNode")
+        .def(nb::init<>())
+        .def_ro("p_x", &CoupledPathNode::p_x)
+        .def_ro("p_y", &CoupledPathNode::p_y)
+        .def_ro("p_layer", &CoupledPathNode::p_layer)
+        .def_ro("n_x", &CoupledPathNode::n_x)
+        .def_ro("n_y", &CoupledPathNode::n_y)
+        .def_ro("n_layer", &CoupledPathNode::n_layer)
+        .def_ro("via_from_parent", &CoupledPathNode::via_from_parent);
+
+    // CoupledRouteResult struct (Issue #4065): the two-trace joint path plus
+    // the #4052 budget-exit diagnostics (iterations / best_progress /
+    // timeout_exceeded / iteration_limited) the Python caller reads back as
+    // ``last_*`` attributes.
+    nb::class_<CoupledRouteResult>(m, "CoupledRouteResult")
+        .def(nb::init<>())
+        .def_ro("path", &CoupledRouteResult::path)
+        .def_ro("success", &CoupledRouteResult::success)
+        .def_ro("iterations", &CoupledRouteResult::iterations)
+        .def_ro("best_progress", &CoupledRouteResult::best_progress)
+        .def_ro("timeout_exceeded", &CoupledRouteResult::timeout_exceeded)
+        .def_ro("iteration_limited", &CoupledRouteResult::iteration_limited)
+        // Issue #4459: per-reason move-rejection histogram (reason -> count).
+        .def_ro("rejections", &CoupledRouteResult::rejections);
+
+    // CoupledPathfinder class (Issue #4065): C++ port of the joint-state
+    // diff-pair A* loop.  Consumes the SAME Grid3D as the single-ended
+    // Pathfinder.  See coupled_pathfinder.hpp for the v1 scope / deferred
+    // features (allow_swap_via, manhattan_sum heuristic).  Issue #4459 wired
+    // the string-keyed rejection histogram out of the C++ search (previously
+    // Python-only), surfaced on ``CoupledRouteResult::rejections``.
+    nb::class_<CenterlinePose>(m, "CenterlinePose")
+        .def(nb::init<>())
+        .def("__init__", [](CenterlinePose* self, int x, int y, int heading, int layer) {
+            new (self) CenterlinePose{x, y, heading, layer};
+        }, "x"_a, "y"_a, "heading"_a, "layer"_a)
+        .def_rw("x", &CenterlinePose::x)
+        .def_rw("y", &CenterlinePose::y)
+        .def_rw("heading", &CenterlinePose::heading)
+        .def_rw("layer", &CenterlinePose::layer);
+    nb::class_<CenterlineEndpoint>(m, "CenterlineEndpoint")
+        .def(nb::init<>())
+        .def("__init__", [](CenterlineEndpoint* self, CenterlinePose pose, double cost) {
+            new (self) CenterlineEndpoint{pose, cost};
+        }, "pose"_a, "cost"_a = 0.0)
+        .def_rw("pose", &CenterlineEndpoint::pose)
+        .def_rw("cost", &CenterlineEndpoint::cost);
+    nb::class_<CenterlineRouteResult>(m, "CenterlineRouteResult")
+        .def_ro("path", &CenterlineRouteResult::path)
+        .def_ro("success", &CenterlineRouteResult::success)
+        .def_ro("start_index", &CenterlineRouteResult::start_index)
+        .def_ro("goal_index", &CenterlineRouteResult::goal_index)
+        .def_ro("iterations", &CenterlineRouteResult::iterations)
+        .def_ro("best_progress", &CenterlineRouteResult::best_progress)
+        .def_ro("timeout_exceeded", &CenterlineRouteResult::timeout_exceeded)
+        .def_ro("iteration_limited", &CenterlineRouteResult::iteration_limited)
+        .def_ro("rejections", &CenterlineRouteResult::rejections);
+
+    // Issue #5786: Dubins path length (port of KiCadRoutingTools'
+    // DubinsCalculator, MIT -- see dubins.hpp and THIRD_PARTY_NOTICES.md).
+    m.def("dubins_path_length",
+          [](double x1, double y1, double t1, double x2, double y2, double t2,
+             double min_radius) {
+              return DubinsCalculator(min_radius).path_length_f(x1, y1, t1, x2, y2, t2);
+          },
+          "x1"_a, "y1"_a, "theta1"_a, "x2"_a, "y2"_a, "theta2"_a, "min_radius"_a,
+          "Shortest Dubins path length between two poses (unscaled).");
+    m.def("dubins_path_length_scaled",
+          [](double x1, double y1, double t1, double x2, double y2, double t2,
+             double min_radius) {
+              return DubinsCalculator(min_radius).path_length(x1, y1, t1, x2, y2, t2);
+          },
+          "x1"_a, "y1"_a, "theta1"_a, "x2"_a, "y2"_a, "theta2"_a, "min_radius"_a,
+          "KRT-compatible: length * 1000 truncated to int.");
+
+    nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
+        .def("set_fill_rail_dimensions", &CoupledPathfinder::set_fill_rail_dimensions)
+        // Issue #6840: via-aware partner clearance radii (grid cells).
+        .def("set_partner_via_clearance", &CoupledPathfinder::set_partner_via_clearance,
+             nb::arg("p_trace_vs_n_via"), nb::arg("n_trace_vs_p_via"), nb::arg("via_vs_via"))
+        // Issue #5410 (B1): the net-class dimensions the dynamic route-halo
+        // refinement re-measures with.  Without these the C++ arm waives
+        // clearance the raster enforced whenever a net class is wider than
+        // the global rule.
+        // Issue #5711: ``partner_net`` / ``partner_clearance`` carry the
+        // diff-pair intra-pair waiver the Python ``RouteHaloRefiner`` applies;
+        // they default to "no waiver" so a caller that installs only the three
+        // dimensions keeps the v44 behaviour.
+        .def("set_halo_net_dimensions", &CoupledPathfinder::set_halo_net_dimensions,
+             "net"_a, "trace_width"_a, "trace_clearance"_a, "via_diameter"_a,
+             "partner_net"_a = -1, "partner_clearance"_a = -1.0,
+             "Install the effective net-class trace width / clearance / via "
+             "diameter used by the dynamic route-halo refinement for one net, "
+             "plus the optional diff-pair intra-pair clearance waiver.")
+        .def("clear_halo_net_dimensions", &CoupledPathfinder::clear_halo_net_dimensions)
+        // Issue #4485: like ``Pathfinder``, ``CoupledPathfinder`` holds a bare
+        // ``Grid3D& grid_`` reference, so the grid argument must outlive the
+        // pathfinder.  ``keep_alive<1, 2>`` ties the grid (patient, arg index
+        // 2) to the constructed CoupledPathfinder (nurse, index 1) to prevent
+        // the same dangling-reference use-after-free.
+        .def(nb::init<Grid3D&, const DesignRules&, int, int, int, int, int,
+                      double, double>(),
+             "grid"_a, "rules"_a, "target_spacing_cells"_a, "min_spacing_cells"_a,
+             "trace_half_width_cells"_a, "via_extra_cells"_a, "via_drill_cells"_a,
+             "spacing_penalty_factor"_a, "heuristic_weight"_a,
+             nb::keep_alive<1, 2>())
+        .def("route", &CoupledPathfinder::route,
+             "p_start_x"_a, "p_start_y"_a, "n_start_x"_a, "n_start_y"_a,
+             "start_layer"_a,
+             "p_goal_x"_a, "p_goal_y"_a, "n_goal_x"_a, "n_goal_y"_a,
+             "end_layer"_a,
+             "p_net"_a, "n_net"_a,
+             "effective_target_spacing"_a, "effective_approach_radius"_a,
+             "effective_departure_radius"_a,
+             "routable_layers"_a, "corridor_bitset"_a,
+             "max_iterations_budget"_a, "timeout_seconds"_a,
+             "p_goal_any_layer"_a, "n_goal_any_layer"_a)
+        .def("route_centerline", &CoupledPathfinder::route_centerline,
+             "starts"_a, "goals"_a, "p_net"_a, "n_net"_a, "half_pitch"_a,
+             "p_side"_a, "p_half"_a, "p_gap"_a, "n_half"_a, "n_gap"_a,
+             "min_radius_cells"_a, "turn_penalty"_a, "heuristic_weight"_a,
+             "max_iterations_budget"_a, "timeout_seconds"_a,
+             "Issue #5786: pose-based centerline search (Dubins heuristic)")
+        .def("rail_segment_clear", &CoupledPathfinder::rail_segment_clear,
+             "sx"_a, "sy"_a, "ex"_a, "ey"_a, "layer"_a, "net"_a, "partner_net"_a,
+             "half"_a, "gap"_a)
+        .def("centerline_step_clear", &CoupledPathfinder::centerline_step_clear,
+             "ax"_a, "ay"_a, "prev_heading"_a, "bx"_a, "by"_a, "heading"_a,
+             "layer"_a, "p_net"_a, "n_net"_a, "half_pitch"_a, "p_side"_a,
+             "p_half"_a, "p_gap"_a, "n_half"_a, "n_gap"_a)
+        .def("trace_blocked", &CoupledPathfinder::trace_blocked,
+             "gx"_a, "gy"_a, "layer"_a, "net"_a, "from_x"_a = -1, "from_y"_a = -1,
+             "Issue #5410: probe the coupled trace predicate, including the "
+             "dynamic route-halo physical refinement.")
+        .def("via_blocked", &CoupledPathfinder::via_blocked,
+             "gx"_a, "gy"_a, "net"_a,
+             "Issue #5410: probe the coupled via predicate, including the "
+             "dynamic route-halo physical refinement.")
+        // Epic #5509 Phase 3c (#5662).  ``rail_clear`` used to be a lambda
+        // inside ``route()``, which made group 7 of the epic's consumer
+        // inventory the one entry point no oracle adapter could reach.  It is
+        // a named method now, so the conformance harness can measure it
+        // directly instead of recording it as "unexposed".
+        .def("rail_clear", &CoupledPathfinder::rail_clear,
+             "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
+             "partner_net"_a = -1, "rail_half"_a = -1.0, "rail_gap"_a = -1.0,
+             "is_via"_a = false,
+             "Clearance gate for one candidate rail step, in GRID cells "
+             "(Epic #5509 group 7)")
+        .def("rail_clear_world", &CoupledPathfinder::rail_clear_world,
+             "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
+             "partner_net"_a = -1, "rail_half"_a = -1.0, "rail_gap"_a = -1.0,
+             "is_via"_a = false,
+             "The same gate in world millimetres -- what the conformance "
+             "adapter drives, so grid quantisation cannot move a verdict");
+
+    // Geometry functions (Issue #2439)
+    m.def("fnv1a_hash", [](const std::string& s) -> uint32_t {
+        return router::fnv1a_hash(s.c_str(), s.size());
+    }, "s"_a, "Compute FNV-1a hash of a string (deterministic)");
+
+    m.def("point_to_segment_distance",
+          &router::point_to_segment_distance,
+          "px"_a, "py"_a, "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+          "Point-to-segment distance");
+
+    m.def("segment_to_segment_distance",
+          &router::segment_to_segment_distance,
+          "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+          "x3"_a, "y3"_a, "x4"_a, "y4"_a,
+          "Segment-to-segment distance");
+
+    m.def("segments_intersect",
+          &router::segments_intersect,
+          "ax1"_a, "ay1"_a, "ax2"_a, "ay2"_a,
+          "bx1"_a, "by1"_a, "bx2"_a, "by2"_a,
+          "Test whether two segments properly intersect");
+
+    // Version info
+    m.def("version", []() { return "1.0.0"; });
+    m.def("is_available", []() { return true; });
+
+    // Build version (Issue #2501): exposed both as a module attribute (for cheap
+    // identity checks at import time) and a callable (for parity with version()).
+    // The Python side mirrors this as _REQUIRED_CPP_BUILD_VERSION in
+    // cpp_backend.py; mismatch indicates the compiled .so is stale relative to
+    // the cpp/ source tree and the C++ backend is disabled with an actionable
+    // "kct build-native" hint.
+    m.attr("BUILD_VERSION") = router::ROUTER_CPP_BUILD_VERSION;
+    m.def("build_version", []() { return router::ROUTER_CPP_BUILD_VERSION; });
+
+    // Issue #4268: poly2tri constrained-Delaunay mesh binding for the
+    // mesh-router navigation substrate.
+    register_mesh(m);
+
+    // Epic #5509 Phase 1b: exact-geometry clearance kernel (no consumer
+    // switched -- parity/fixture evidence only).
+    register_clearance_kernel(m);
+}

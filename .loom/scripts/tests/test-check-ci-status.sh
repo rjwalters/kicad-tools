@@ -1,0 +1,670 @@
+#!/usr/bin/env bash
+# test-check-ci-status.sh - Unit tests for check-ci-status.sh's workflow-run
+# fold-in (issue #5495) and per-job status filter (issue #5748).
+#
+# Bug (#5495): analyze_status() only ever iterated over check-runs the Checks
+# API already knows about. A workflow_run that is still `queued` (no jobs
+# dispatched yet, so zero check-runs exist for it) was completely invisible
+# to the pending count. If a handful of OTHER, faster/independent workflows
+# for the same commit had already completed successfully,
+# `success > 0 && pending == 0` was satisfied and the script reported
+# overall "success" even though the primary CI workflow hadn't run a single
+# job -- exactly the incident reproduced on commit
+# 96c2b8246403c9c91d37c2c7d6eebf7558f790f4 in the issue (4 unrelated
+# already-completed checks satisfied success>0/pending==0 while the "CI"
+# workflow_run sat `pending` with zero jobs for 3+ minutes).
+#
+# Feature (#5748): --job "<name>" reports one named check-run's own
+# status/conclusion instead of the aggregate across all checks, so a caller
+# without docker locally (e.g. Auditor) can still look up the real
+# forge-reported outcome of a docker-dependent CI leg like
+# worker-image-smoke ("loom-worker Image Smoke Test").
+#
+# check-ci-status.sh is a full CLI script (not sourced functions), so this
+# is a black-box test: stub `gh` on PATH (mirrors test-check-duplicate.sh's
+# convention) and invoke the real script as a subprocess, asserting on
+# stdout/exit code. `LOOM_FORGE_TYPE=github` short-circuits forge_detect()
+# before it ever touches the config-resolver tier chain or `git remote`, so
+# no `git` stub is needed; every test passes an explicit `--commit`, so
+# `git rev-parse HEAD` is never invoked either.
+#
+# Usage:
+#   ./.loom/scripts/tests/test-check-ci-status.sh
+
+set -uo pipefail
+
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
+CCS="$SCRIPTS_DIR/check-ci-status.sh"
+
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+
+if [[ ! -x "$CCS" ]]; then
+    echo -e "${RED}FATAL${NC}: $CCS not found or not executable" >&2
+    exit 2
+fi
+
+STUB_DIR="$(mktemp -d)"
+trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
+
+# --- Stub gh on PATH ---
+#   gh repo view --json nameWithOwner --jq ...  -> "owner/repo"
+#   gh api repos/{nwo}/commits/{sha}/check-runs ...        -> cat $STUB_DIR/check-runs.json
+#                                                              (or {"total_count":0,"check_runs":[]};
+#                                                              fails if $STUB_DIR/check-runs-fail exists)
+#   gh api repos/{nwo}/commits/{sha}/status ...            -> cat $STUB_DIR/commit-status.json
+#                                                              (or {"state":"unknown","statuses":[]};
+#                                                              fails if $STUB_DIR/commit-status-fail exists)
+#   gh api repos/{nwo}/actions/runs?head_sha=...&per_page=... -> cat $STUB_DIR/workflow-runs.json
+#                                                              (or {"workflow_runs":[]};
+#                                                              fails if $STUB_DIR/workflow-runs-fail exists)
+#
+# The stub deliberately outputs already-`--jq`-shaped JSON (matching the
+# shape forge-helpers.sh's own --jq filters produce) rather than applying the
+# real gh --jq filter itself -- the same convention test-check-duplicate.sh
+# uses for its `gh api` stub.
+cat > "$STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub gh: LOOM_TEST_STUB_DIR not set}"
+
+case "$1" in
+  repo)
+    if [[ "$2" == "view" ]]; then
+      echo "owner/repo"
+      exit 0
+    fi
+    echo "stub gh: unhandled repo args: $*" >&2
+    exit 3
+    ;;
+  api)
+    path="$2"
+    if [[ "$path" == *"/actions/runs?"* ]]; then
+      if [[ -f "$STUB_DIR_FROM_ENV/workflow-runs-fail" ]]; then
+        echo "stub gh: workflow runs api call failed" >&2
+        exit 1
+      fi
+      canned="$STUB_DIR_FROM_ENV/workflow-runs.json"
+      if [[ -f "$canned" ]]; then cat "$canned"; else echo '{"workflow_runs": []}'; fi
+      exit 0
+    elif [[ "$path" == *"/check-runs" || "$path" == *"/check-runs?"* ]]; then
+      if [[ -f "$STUB_DIR_FROM_ENV/check-runs-fail" ]]; then
+        echo "stub gh: check-runs api call failed" >&2
+        exit 1
+      fi
+      canned="$STUB_DIR_FROM_ENV/check-runs.json"
+      if [[ -f "$canned" ]]; then cat "$canned"; else echo '{"total_count": 0, "check_runs": []}'; fi
+      exit 0
+    elif [[ "$path" == *"/status" ]]; then
+      if [[ -f "$STUB_DIR_FROM_ENV/commit-status-fail" ]]; then
+        echo "stub gh: commit status api call failed" >&2
+        exit 1
+      fi
+      canned="$STUB_DIR_FROM_ENV/commit-status.json"
+      if [[ -f "$canned" ]]; then cat "$canned"; else echo '{"state": "unknown", "statuses": []}'; fi
+      exit 0
+    fi
+    echo "stub gh: unhandled api args: $*" >&2
+    exit 3
+    ;;
+  *)
+    echo "stub gh: unhandled args: $*" >&2
+    exit 3
+    ;;
+esac
+STUB
+chmod +x "$STUB_DIR/gh"
+
+export LOOM_TEST_STUB_DIR="$STUB_DIR"
+export PATH="$STUB_DIR:$PATH"
+export LOOM_FORGE_TYPE="github"
+
+reset_state() {
+    rm -f "$STUB_DIR"/check-runs.json "$STUB_DIR"/commit-status.json "$STUB_DIR"/workflow-runs.json
+    rm -f "$STUB_DIR"/check-runs-fail "$STUB_DIR"/commit-status-fail "$STUB_DIR"/workflow-runs-fail
+}
+
+run_ccs() {
+    # Runs check-ci-status.sh, capturing stdout to $OUT, exit to $RC.
+    OUT="$("$CCS" "$@" 2>"$STUB_DIR/stderr.log")"
+    RC=$?
+}
+
+SHA="96c2b8246403c9c91d37c2c7d6eebf7558f790f4"
+
+# --- Fixture used by every scenario below: four unrelated, fast checks that
+# have already completed successfully (CodeQL, Cargo Audit, Shellcheck, loc)
+# -- exactly the four named in the issue's reproduction. ---
+write_four_fast_checks() {
+    cat > "$STUB_DIR/check-runs.json" <<EOF
+{
+  "total_count": 4,
+  "check_runs": [
+    {"name": "CodeQL Analysis", "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/1"},
+    {"name": "Cargo Audit", "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/2"},
+    {"name": "Shellcheck", "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/3"},
+    {"name": "loc", "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/4"}
+  ]
+}
+EOF
+}
+
+echo "Testing check-ci-status.sh workflow-run pending fold-in (#5495)..."
+
+# (a) THE bug: 4 fast checks completed, but the primary "CI" workflow_run is
+# still `queued` with zero dispatched jobs (so it has no check-runs entry at
+# all). Must NOT report "success".
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/commit-status.json" <<'EOF'
+{"state": "pending", "statuses": []}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "queued", "conclusion": null}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "pending" "$OUT" "(a) Queued primary workflow run with 4 unrelated completed checks -> quiet output 'pending', not 'success'"
+assert_eq "2" "$RC" "(a) Exit code 2 (pending)"
+
+# (a2) Same fixture, but the primary run is `in_progress` instead of
+# `queued` -- both non-completed states must be folded into pending.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "in_progress", "conclusion": null}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "pending" "$OUT" "(a2) in_progress primary workflow run -> quiet output 'pending'"
+
+# (a3) --json output surfaces the workflow_runs array and the corrected
+# pending count so callers other than --quiet can see the same signal.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "queued", "conclusion": null}]}
+EOF
+run_ccs --commit "$SHA" --json
+status_field="$(echo "$OUT" | jq -r '.status')"
+assert_eq "pending" "$status_field" "(a3) --json .status is 'pending'"
+pending_count="$(echo "$OUT" | jq -r '.counts.pending')"
+assert_eq "1" "$pending_count" "(a3) --json .counts.pending reflects the queued workflow run"
+wf_status="$(echo "$OUT" | jq -r '.workflow_runs[0].status')"
+assert_eq "queued" "$wf_status" "(a3) --json .workflow_runs[0].status is 'queued'"
+
+# (b) Regression guard: no false negative introduced. Same 4 fast checks,
+# but the workflow-run list is empty (nothing queued/in_progress for this
+# commit) -> still reports "success", exactly like before this fix.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": []}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(b) No pending workflow runs -> quiet output still 'success'"
+assert_eq "0" "$RC" "(b) Exit code 0 (success)"
+
+# (c) A `completed` workflow run must NOT be double-counted into pending --
+# its job-level detail already arrived via check_runs.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(c) completed workflow run -> quiet output 'success' (not double-counted)"
+
+# (c2) #10415: the primary "CI" run completed `cancelled` with ZERO jobs
+# (superseded before dispatch), while unrelated checks passed. No check-run
+# speaks for CI, so this is NO VERDICT -- never "success".
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "cancelled"}, {"name": "loc", "status": "completed", "conclusion": "success"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "unknown" "$OUT" "(c2) cancelled zero-job CI run + passing unrelated checks -> 'unknown' (no verdict), not 'success'"
+assert_eq "3" "$RC" "(c2) Exit code 3 (no verdict)"
+run_ccs --commit "$SHA" --json
+assert_eq "1" "$(echo "$OUT" | jq -r '.counts.no_verdict')" "(c2) --json .counts.no_verdict counts the cancelled workflow"
+run_ccs --commit "$SHA"
+assert_contains "$OUT" "CI: cancelled workflow run, no verdict" "(c2) human output names the no-verdict workflow"
+
+# (c3) A replacement run of the same workflow completed successfully: the
+# cancelled run is superseded, so the genuine success stands.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success"}, {"name": "CI", "status": "completed", "conclusion": "cancelled"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(c3) cancelled CI run with a successful replacement -> 'success'"
+
+# (c4) Failure precedence is preserved: a failed check-run still dominates a
+# cancelled zero-job workflow run.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<'EOF'
+{"total_count": 2, "check_runs": [{"name": "loc", "status": "completed", "conclusion": "success"}, {"name": "Shellcheck", "status": "completed", "conclusion": "failure"}]}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "cancelled"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "failure" "$OUT" "(c4) failed check + cancelled CI run -> 'failure' (failure precedence kept)"
+
+# (c5) A queued replacement run keeps the verdict pending, not no-verdict.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "queued", "conclusion": null}, {"name": "CI", "status": "completed", "conclusion": "cancelled"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "pending" "$OUT" "(c5) cancelled CI run with a queued replacement -> 'pending'"
+
+# (c6) #11147: a `workflow_run`-event workflow (Build and Release) is filed by
+# the forge under the default-branch tip at trigger time, so its cancelled
+# (superseded, zero-job) and skipped runs are about OTHER commits' CI. Beside
+# a green push `CI` run they must not mask the genuine success. Fixture shape:
+# commit 2db42044eb9a9d9ca71fad5ca920a8abb8456944.
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}, {"name": "Build and Release", "status": "completed", "conclusion": "skipped", "event": "workflow_run"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(c6) green push CI + {cancelled, skipped} workflow_run-event runs -> 'success'"
+assert_eq "0" "$RC" "(c6) Exit code 0 (success)"
+run_ccs --commit "$SHA" --json
+assert_eq "0" "$(echo "$OUT" | jq -r '.counts.no_verdict')" "(c6) --json .counts.no_verdict is 0"
+assert_eq "workflow_run" "$(echo "$OUT" | jq -r '.workflow_runs[1].event')" "(c6) --json .workflow_runs[] carries event"
+
+# (c7) #11147: a lone cancelled workflow_run-event run (no skipped sibling).
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(c7) green push CI + lone cancelled workflow_run-event run -> 'success'"
+assert_eq "0" "$RC" "(c7) Exit code 0 (success)"
+
+# (c8) #11147 must not weaken #10415: a cancelled zero-job run of every
+# commit-verifying event is still NO VERDICT, also beside an exempt
+# workflow_run-event run -- and only the verifying run is named.
+for ev in push pull_request merge_group schedule; do
+    reset_state
+    write_four_fast_checks
+    cat > "$STUB_DIR/workflow-runs.json" <<EOF
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "cancelled", "event": "$ev"}, {"name": "loc", "status": "completed", "conclusion": "success", "event": "$ev"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}]}
+EOF
+    run_ccs --commit "$SHA" --quiet
+    assert_eq "unknown" "$OUT" "(c8) cancelled zero-job CI run [event $ev] -> 'unknown' (no verdict)"
+    assert_eq "3" "$RC" "(c8) Exit code 3 (no verdict) [event $ev]"
+done
+run_ccs --commit "$SHA" --json
+assert_eq "1" "$(echo "$OUT" | jq -r '.counts.no_verdict')" "(c8) --json .counts.no_verdict counts only the commit-verifying workflow"
+run_ccs --commit "$SHA"
+assert_contains "$OUT" "CI: cancelled workflow run, no verdict" "(c8) human output names the no-verdict CI workflow"
+assert_eq "0" "$(echo "$OUT" | grep -c 'Build and Release: cancelled' || true)" "(c8) human output does not name the exempt workflow_run-event run"
+
+# (c9) Gitea shape (no `event` key at all, or an explicit null): unchanged --
+# a cancelled run with no successful sibling is still NO VERDICT, whatever
+# its name. (c2)-(c5) above cover the same key-less shape for "CI".
+for run in '{"name": "Build and Release", "status": "completed", "conclusion": "cancelled"}' \
+           '{"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": null}'; do
+    reset_state
+    write_four_fast_checks
+    cat > "$STUB_DIR/workflow-runs.json" <<EOF
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success"}, $run]}
+EOF
+    run_ccs --commit "$SHA" --quiet
+    assert_eq "unknown" "$OUT" "(c9) cancelled run without an event value -> still 'unknown'"
+    assert_eq "3" "$RC" "(c9) Exit code 3 (no verdict)"
+done
+
+# (c10) The pending count is untouched: a queued (or in-progress)
+# workflow_run-event run still reads pending -- nothing unfinished goes green.
+for st in queued in_progress; do
+    reset_state
+    write_four_fast_checks
+    cat > "$STUB_DIR/workflow-runs.json" <<EOF
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "$st", "conclusion": null, "event": "workflow_run"}]}
+EOF
+    run_ccs --commit "$SHA" --quiet
+    assert_eq "pending" "$OUT" "(c10) $st workflow_run-event run -> 'pending'"
+    assert_eq "2" "$RC" "(c10) Exit code 2 (pending) [$st]"
+done
+
+# (c11) Failure precedence is untouched: a release job that really failed
+# arrives through check_runs and still dominates, exempt run or not.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<'EOF'
+{"total_count": 2, "check_runs": [{"name": "loc", "status": "completed", "conclusion": "success"}, {"name": "publish", "status": "completed", "conclusion": "failure"}]}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "success", "event": "push"}, {"name": "Build and Release", "status": "completed", "conclusion": "failure", "event": "workflow_run"}, {"name": "Build and Release", "status": "completed", "conclusion": "cancelled", "event": "workflow_run"}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "failure" "$OUT" "(c11) failed check-run of a workflow_run-event workflow -> 'failure'"
+assert_eq "1" "$RC" "(c11) Exit code 1 (failure)"
+
+# (d) Graceful degradation: the workflow-runs API call itself fails (e.g.
+# Actions scope/permissions issue). This must NOT break the script -- it
+# should fall back to check-run-only behavior, exactly like the pre-fix
+# script (fail-open: a failure here can only ever miss a true pending, never
+# fabricate one).
+reset_state
+write_four_fast_checks
+: > "$STUB_DIR/workflow-runs-fail"
+run_ccs --commit "$SHA" --quiet
+assert_eq "success" "$OUT" "(d) Workflow-runs API failure -> degrades gracefully, quiet output still 'success'"
+assert_eq "0" "$RC" "(d) Exit code 0 (success) despite workflow-runs API failure"
+
+# (e) The most literal form of the bug: check-runs are COMPLETELY empty
+# (nothing has reported anything yet at all), but the workflow-run API
+# already shows the primary run queued. Must report "pending", not
+# "unknown" -- this is the "3+ minutes of pending with zero jobs" state from
+# the issue's reproduction, before any of the fast checks even started.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<'EOF'
+{"total_count": 0, "check_runs": []}
+EOF
+cat > "$STUB_DIR/commit-status.json" <<'EOF'
+{"state": "pending", "statuses": []}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "queued", "conclusion": null}]}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "pending" "$OUT" "(e) Zero check-runs anywhere, one queued workflow run -> quiet output 'pending'"
+assert_eq "2" "$RC" "(e) Exit code 2 (pending)"
+
+# (f) Human-readable output lists the queued workflow run distinctly under
+# "Pending checks" (annotated as a workflow run, since it has no check-run
+# name/status pairing of its own).
+reset_state
+write_four_fast_checks
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": [{"name": "CI", "status": "queued", "conclusion": null}]}
+EOF
+run_ccs --commit "$SHA"
+assert_contains "$OUT" "PENDING" "(f) Human-readable output shows overall PENDING"
+assert_contains "$OUT" "CI: queued (workflow run)" "(f) Human-readable pending list includes the queued workflow run"
+
+echo ""
+echo "Testing check-ci-status.sh empty-output false-settle guard (#6169)..."
+
+# (n) The #6169 trap, reproduced at the forge-helper layer: ALL THREE
+# underlying API calls (check-runs, commit-status, workflow-runs) return
+# their genuinely-empty shape -- e.g. what a transient forge failure (an
+# intermittent TLS error, a GraphQL hiccup) can produce. A naive settle-poll
+# that only checks "is anything marked pending" would treat this as
+# "nothing pending -> settled/success". check-ci-status.sh must NOT do that:
+# zero rows everywhere must fall through to "unknown" (exit 3), never
+# "success" (exit 0) -- there is nothing here to positively confirm CI green.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<'EOF'
+{"total_count": 0, "check_runs": []}
+EOF
+cat > "$STUB_DIR/commit-status.json" <<'EOF'
+{"state": "unknown", "statuses": []}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": []}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "unknown" "$OUT" "(n) Zero rows across check-runs/commit-status/workflow-runs -> quiet output 'unknown', NOT 'success' (#6169 false-settle guard)"
+assert_eq "3" "$RC" "(n) Exit code 3 (unknown) -- not the success exit code"
+
+echo ""
+echo "Testing check-ci-status.sh --job per-job status filter (#5748)..."
+
+JOB="loom-worker Image Smoke Test"
+
+# (g) Job present & success.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<EOF
+{
+  "total_count": 2,
+  "check_runs": [
+    {"name": "Shellcheck", "status": "completed", "conclusion": "success"},
+    {"name": "$JOB", "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/smoke"}
+  ]
+}
+EOF
+run_ccs --commit "$SHA" --job "$JOB" --quiet
+assert_eq "success" "$OUT" "(g) Job present & success -> quiet output 'success'"
+assert_eq "0" "$RC" "(g) Exit code 0 (success)"
+
+# (h) Job present & failure.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<EOF
+{
+  "total_count": 1,
+  "check_runs": [
+    {"name": "$JOB", "status": "completed", "conclusion": "failure", "html_url": "https://example.invalid/smoke"}
+  ]
+}
+EOF
+run_ccs --commit "$SHA" --job "$JOB" --quiet
+assert_eq "failure" "$OUT" "(h) Job present & failure -> quiet output 'failure'"
+assert_eq "1" "$RC" "(h) Exit code 1 (failure)"
+
+# (i) Job present & pending (queued/in_progress).
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<EOF
+{
+  "total_count": 1,
+  "check_runs": [
+    {"name": "$JOB", "status": "in_progress", "conclusion": null}
+  ]
+}
+EOF
+run_ccs --commit "$SHA" --job "$JOB" --quiet
+assert_eq "pending" "$OUT" "(i) Job present & in_progress -> quiet output 'pending'"
+assert_eq "2" "$RC" "(i) Exit code 2 (pending)"
+
+# (j) Job present but skipped (its own `if:` condition evaluated false for
+# this commit, e.g. worker-image-smoke's docker-changed-files gate on a
+# non-push event) -> reported distinctly, not as a false pass/fail.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<EOF
+{
+  "total_count": 1,
+  "check_runs": [
+    {"name": "$JOB", "status": "completed", "conclusion": "skipped"}
+  ]
+}
+EOF
+run_ccs --commit "$SHA" --job "$JOB" --quiet
+assert_eq "skipped" "$OUT" "(j) Job present & skipped -> quiet output 'skipped' (not a false pass/fail)"
+assert_eq "3" "$RC" "(j) Exit code 3 (unknown bucket, per script's existing convention)"
+
+# (k) Job absent entirely from the commit's check-run set (e.g. a Gitea repo,
+# which has no GitHub Actions job of that name -- or a non-docker-path PR
+# whose workflow run never dispatched it). Must not crash and must not report
+# a false pass/fail.
+reset_state
+write_four_fast_checks
+run_ccs --commit "$SHA" --job "$JOB" --quiet
+assert_eq "not_found" "$OUT" "(k) Job absent entirely -> quiet output 'not_found'"
+assert_eq "3" "$RC" "(k) Exit code 3 (unknown bucket) when job never ran for this commit"
+
+# (l) --json output surfaces the structured job result for programmatic
+# callers.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<EOF
+{
+  "total_count": 1,
+  "check_runs": [
+    {"name": "$JOB", "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/smoke"}
+  ]
+}
+EOF
+run_ccs --commit "$SHA" --job "$JOB" --json
+job_field="$(echo "$OUT" | jq -r '.job')"
+assert_eq "$JOB" "$job_field" "(l) --json .job echoes the requested job name"
+found_field="$(echo "$OUT" | jq -r '.found')"
+assert_eq "true" "$found_field" "(l) --json .found is true when the job was located"
+status_field="$(echo "$OUT" | jq -r '.status')"
+assert_eq "success" "$status_field" "(l) --json .status is 'success'"
+
+# (m) Human-readable output for a not-found job names the job and does not
+# claim a pass or a fail.
+reset_state
+write_four_fast_checks
+run_ccs --commit "$SHA" --job "$JOB"
+assert_contains "$OUT" "NOT FOUND" "(m) Human-readable output reports NOT FOUND for an absent job"
+assert_contains "$OUT" "$JOB" "(m) Human-readable output names the requested job"
+
+# --- (n)-(p) workflow-runs feed failure is PENDING, never a false green
+# (#9879): the helper's failure used to be coerced to an empty success, so a
+# commit whose CI feed was unreadable read as resolved. Exercised in GITEA
+# mode (a git checkout + curl shim, the test-forge-helpers.sh pattern): the
+# GitHub stub's gh shim serves the helper directly, so a helper failure
+# can't be simulated there without faking gh's exit — and the Gitea branch
+# is the path #9879 actually changed. --quiet prints only the overall
+# status; exit 2 = pending, 0 = success. ---
+echo ""
+echo "Testing check-ci-status.sh fail-closed workflow-runs feed (#9879)..."
+
+G_DIR="$(mktemp -d)"
+mkdir -p "$G_DIR/shim"
+git -C "$G_DIR" init -q
+git -C "$G_DIR" remote add origin https://gitea.example.com/owner/repo.git
+git -C "$G_DIR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+
+# curl shim: the check/status endpoints answer green; the actions/tasks
+# endpoint fails when $G_FAIL_FILE exists (the unreadable feed), else short.
+cat > "$G_DIR/shim/curl" <<'SHIM'
+#!/usr/bin/env bash
+path=""
+for a in "$@"; do
+  case "$a" in
+    http*) path="$a" ;;
+  esac
+done
+case "$path" in
+  *"/actions/tasks"*)
+    # ENV marker (cwd-independent): check-ci-status.sh cd's to its own
+    # WORKSPACE_ROOT before calling the helper, so a cwd-placed marker
+    # never fires (measured — the first draft of (n) read 'success').
+    if [[ -n "${G_FAIL_FILE:-}" && -f "$G_FAIL_FILE" && "$G_FAIL_FILE" != */no-marker ]]; then
+      printf 'server error\n500\n'; exit 0
+    fi
+    printf '{"workflow_runs": []}\n200\n'
+    ;;
+  *"/commits/"*"/statuses"*) printf '[]\n200\n' ;;
+  *"/status"*)
+    printf '{"state": "success", "statuses": []}\n200\n'
+    ;;
+  *)
+    printf '{"total_count": 0, "check_runs": []}\n200\n'
+    ;;
+esac
+SHIM
+chmod +x "$G_DIR/shim/curl"
+
+run_gitea_ccs() {  # run_gitea_ccs <args...> — sets OUT, RC
+    # Real exported env, NOT command-prefix assignments: a prefix assignment
+    # to a command does not survive into re-detection the script does later
+    # (bash restores function-prefix assignments after the call — the same
+    # lesson test-forge-helpers.sh encodes). FORGE_TYPE="" clears the
+    # detection cache; LOOM_FORGE_TYPE steers it to the gitea branch.
+    OUT="$(cd "$G_DIR" \
+        && export FORGE_TYPE="" LOOM_FORGE_TYPE="gitea" \
+        GITEA_URL="https://gitea.example.com" GITEA_TOKEN="tok" \
+        G_FAIL_FILE="${G_FAIL_FILE:-$G_DIR/no-marker}" \
+        PATH="$G_DIR/shim:$PATH" \
+        && "$CCS" --commit "$SHA" "$@" 2>/dev/null)"
+    RC=$?
+}
+
+# (n) Green checks/status + unreadable workflow-runs feed: must be PENDING,
+# not "success" — the pre-#9879 behavior coerced the failure to "no runs"
+# and every-green read as resolved.
+touch "$G_DIR/feed-fails"
+export G_FAIL_FILE="$G_DIR/feed-fails"   # env marker: cwd never fires (see shim note)
+run_gitea_ccs --quiet
+assert_eq "pending" "$OUT" "(n) Unreadable Gitea CI feed + green checks -> 'pending', not 'success'"
+assert_eq "2" "$RC" "(n) Exit code 2 (pending)"
+
+# (o) A definitive failure still dominates the unknown feed: "some CI
+# failed" + "the rest is unreadable" must NOT soften to pending.
+cat > "$G_DIR/shim/curl" <<'SHIM'
+#!/usr/bin/env bash
+path=""
+for a in "$@"; do
+  case "$a" in
+    http*) path="$a" ;;
+  esac
+done
+case "$path" in
+  *"/actions/tasks"*)
+    # ENV marker (cwd-independent): check-ci-status.sh cd's to its own
+    # WORKSPACE_ROOT before calling the helper, so a cwd-placed marker
+    # never fires (measured — the first draft of (n) read 'success').
+    if [[ -n "${G_FAIL_FILE:-}" && -f "$G_FAIL_FILE" && "$G_FAIL_FILE" != */no-marker ]]; then
+      printf 'server error\n500\n'; exit 0
+    fi
+    printf '{"workflow_runs": []}\n200\n'
+    ;;
+  *"/commits/"*"/statuses"*)
+    printf '[{"context": "ci", "status": "failure", "target_url": ""}]\n200\n'
+    ;;
+  *"/status"*)
+    printf '{"state": "failure", "statuses": []}\n200\n'
+    ;;
+esac
+SHIM
+run_gitea_ccs --quiet
+assert_eq "failure" "$OUT" "(o) Definitive failure + unreadable feed stays 'failure' (no softening)"
+assert_eq "1" "$RC" "(o) Exit code 1 (failure)"
+
+# (p) The state marker rides the JSON output (non-quiet) for consumers.
+cat > "$G_DIR/shim/curl" <<'SHIM'
+#!/usr/bin/env bash
+path=""
+for a in "$@"; do
+  case "$a" in
+    http*) path="$a" ;;
+  esac
+done
+case "$path" in
+  *"/actions/tasks"*)
+    # ENV marker (cwd-independent): check-ci-status.sh cd's to its own
+    # WORKSPACE_ROOT before calling the helper, so a cwd-placed marker
+    # never fires (measured — the first draft of (n) read 'success').
+    if [[ -n "${G_FAIL_FILE:-}" && -f "$G_FAIL_FILE" && "$G_FAIL_FILE" != */no-marker ]]; then
+      printf 'server error\n500\n'; exit 0
+    fi
+    printf '{"workflow_runs": []}\n200\n'
+    ;;
+  *"/commits/"*"/statuses"*) printf '[]\n200\n' ;;
+  *"/status"*)
+    printf '{"state": "success", "statuses": []}\n200\n'
+    ;;
+  *)
+    printf '{"total_count": 0, "check_runs": []}\n200\n'
+    ;;
+esac
+SHIM
+export G_FAIL_FILE="$G_DIR/feed-fails"
+run_gitea_ccs --json
+assert_contains "$OUT" '"workflow_runs_state": "unknown"' "(p) JSON output carries workflow_runs_state=unknown on feed failure"
+rm -f "$G_DIR/feed-fails"
+export G_FAIL_FILE="$G_DIR/no-marker"
+run_gitea_ccs --json
+assert_contains "$OUT" '"workflow_runs_state": "ok"' "(p) JSON output carries workflow_runs_state=ok when the feed read fine"
+rm -rf "$G_DIR"
+
+echo ""
+echo "=== Test Summary ==="
+echo "Total:  $TESTS_RUN"
+echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
+    exit 1
+else
+    echo -e "Failed: $TESTS_FAILED"
+    exit 0
+fi

@@ -1,0 +1,617 @@
+"""
+Optimization workflow module.
+
+Provides a high-level API for running placement optimizations,
+extracting the core logic from CLI commands for reusability.
+
+Example::
+
+    from kicad_tools.optim.workflow import OptimizationWorkflow, OptimizationResult
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load("board.kicad_pcb")
+    workflow = OptimizationWorkflow(pcb)
+
+    # Run force-directed optimization
+    result = workflow.run(
+        strategy="force-directed",
+        iterations=1000,
+        grid=0.5,
+    )
+
+    if result.success:
+        print(f"Optimized {result.components_updated} components")
+        print(f"Wire length: {result.wire_length_mm:.2f} mm")
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from kicad_tools.optim.constraints import GroupingConstraint
+    from kicad_tools.optim.evolutionary import EvolutionaryPlacementOptimizer
+    from kicad_tools.optim.keepout import KeepoutZone
+    from kicad_tools.optim.placement import PlacementOptimizer
+    from kicad_tools.placement.conflict import Conflict
+    from kicad_tools.router.primitives import Route
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.violations import DRCResults
+
+__all__ = ["OptimizationResult", "OptimizationWorkflow"]
+
+
+@dataclass
+class RoutabilityInfo:
+    """Routability check results."""
+
+    rate: float
+    nets: int
+    problem_nets: int
+
+
+@dataclass
+class RoutabilityComparison:
+    """Before/after routability comparison."""
+
+    before: RoutabilityInfo
+    after: RoutabilityInfo
+    change: float
+
+
+@dataclass
+class OptimizationResult:
+    """
+    Result of an optimization run.
+
+    This is the unified result type for both placement-only optimization
+    (via OptimizationWorkflow) and integrated place-route-DRC optimization
+    (via PlaceRouteOptimizer).
+
+    Attributes:
+        success: Whether optimization completed successfully.
+        strategy: The optimization strategy used.
+        components: Number of components in the optimization.
+        iterations: Number of iterations/generations run.
+        wire_length_mm: Total wire length after optimization.
+        energy: System energy after optimization.
+        components_updated: Number of components whose positions changed.
+        constraint_violations: List of constraint violations (if any).
+        routability: Routability comparison (if checked).
+        output_path: Path where optimized PCB was saved (if saved).
+        message: Human-readable status message.
+        pcb_path: Path to the PCB file (used by PlaceRouteOptimizer).
+        routes: List of routes from the autorouter (if routing was performed).
+        placement_conflicts: Remaining placement conflicts (if any).
+        drc_results: DRC check results (if DRC was run).
+    """
+
+    success: bool = False
+    strategy: str = ""
+    components: int = 0
+    iterations: int = 0
+    wire_length_mm: float = 0.0
+    energy: float = 0.0
+    components_updated: int = 0
+    constraint_violations: list[str] = field(default_factory=list)
+    routability: RoutabilityComparison | None = None
+    output_path: Path | None = None
+    message: str = ""
+
+    # Board-containment check (issue #3804). After a physics-based run, lists
+    # the refs of any non-fixed component whose center escaped the Edge.Cuts
+    # outline (minus boundary margin). Empty on a healthy run.
+    out_of_bounds_components: list[str] = field(default_factory=list)
+
+    # Routing-specific fields (used by PlaceRouteOptimizer)
+    pcb_path: Path | None = None
+    routes: list[Route] | None = None
+    placement_conflicts: list[Conflict] | None = None
+    drc_results: DRCResults | None = None
+
+    @property
+    def has_placement_conflicts(self) -> bool:
+        """Check if there are unresolved placement conflicts."""
+        return bool(self.placement_conflicts)
+
+    @property
+    def has_drc_violations(self) -> bool:
+        """Check if there are DRC violations."""
+        if self.drc_results is None:
+            return False
+        return not self.drc_results.passed
+
+    @property
+    def routing_complete(self) -> bool:
+        """Check if routing produced any routes."""
+        return self.routes is not None and len(self.routes) > 0
+
+    def __str__(self) -> str:
+        status = "SUCCESS" if self.success else "FAILED"
+        parts = [f"OptimizationResult({status}"]
+        if self.iterations > 0:
+            parts.append(f", iterations={self.iterations}")
+        if self.routes:
+            parts.append(f", routes={len(self.routes)}")
+        if self.out_of_bounds_components:
+            parts.append(f", out_of_bounds={len(self.out_of_bounds_components)}")
+        if self.message:
+            parts.append(f", message={self.message!r}")
+        parts.append(")")
+        return "".join(parts)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert result to dictionary for JSON serialization."""
+        result: dict[str, Any] = {
+            "success": self.success,
+            "strategy": self.strategy,
+            "components": self.components,
+            "iterations": self.iterations,
+            "wire_length_mm": round(self.wire_length_mm, 2),
+            "energy": round(self.energy, 4),
+            "components_updated": self.components_updated,
+            "constraint_violations": self.constraint_violations,
+            "out_of_bounds_components": self.out_of_bounds_components,
+            "out_of_bounds_count": len(self.out_of_bounds_components),
+            "output_path": str(self.output_path) if self.output_path else None,
+            "message": self.message,
+        }
+        if self.routability:
+            result["routability"] = {
+                "before": {
+                    "rate": round(self.routability.before.rate, 3),
+                    "nets": self.routability.before.nets,
+                    "problem_nets": self.routability.before.problem_nets,
+                },
+                "after": {
+                    "rate": round(self.routability.after.rate, 3),
+                    "nets": self.routability.after.nets,
+                    "problem_nets": self.routability.after.problem_nets,
+                },
+                "change": round(self.routability.change, 3),
+            }
+        else:
+            result["routability"] = None
+        return result
+
+
+@dataclass
+class WorkflowConfig:
+    """Configuration for optimization workflow."""
+
+    # Strategy selection
+    strategy: str = "force-directed"
+
+    # Common parameters
+    grid: float = 0.0  # Grid snap in mm (0 = no snapping)
+    iterations: int = 1000  # For force-directed and hybrid physics phase
+    verbose: bool = False
+
+    # Force-directed specific
+    thermal: bool = False
+
+    # Evolutionary specific
+    generations: int = 100
+    population: int = 50
+
+    # Optional features
+    enable_clustering: bool = False
+    edge_detect: bool = False
+
+    # Board boundary parameters
+    boundary_margin: float | None = None  # Extra margin in mm (None = use PlacementConfig default)
+
+    # Fixed components (list of reference designators)
+    fixed_refs: list[str] = field(default_factory=list)
+
+    # Routing-based fitness (KiCad-2 / Issue #2720).
+    # When True, the evolutionary / hybrid strategies construct a
+    # ``CppAstarRoutingEvaluator`` from the loaded PCB and inject it into the
+    # placement GA so the routability term is computed by *actual* C++ A*
+    # routing (the inner loop of the cascaded architecture, epic
+    # #7199 in a private repo) instead of the average-pairwise-spacing proxy.
+    #
+    # Default ``False`` keeps existing production runs unchanged until the
+    # A/B benchmark validates this signal.  Has no effect on the
+    # force-directed strategy.
+    use_routing_fitness: bool = False
+
+    # Optional path to the source ``.kicad_pcb`` to use when constructing the
+    # router factory.  When ``None``, ``OptimizationWorkflow.run()`` will
+    # attempt to derive the path from the loaded PCB; if the PCB has no path
+    # (was constructed in-memory), ``use_routing_fitness`` becomes a no-op.
+    pcb_path_for_routing: Path | None = None
+
+
+class OptimizationWorkflow:
+    """
+    High-level workflow for placement optimization.
+
+    Encapsulates the logic for running different optimization strategies
+    (force-directed, evolutionary, hybrid) with support for constraints,
+    keepout zones, and routability checking.
+
+    This class extracts core optimization logic from CLI commands to make
+    it reusable from Python API without CLI dependencies.
+    """
+
+    def __init__(
+        self,
+        pcb: PCB,
+        config: WorkflowConfig | None = None,
+        constraints: list[GroupingConstraint] | None = None,
+        keepout_zones: list[KeepoutZone] | None = None,
+    ):
+        """
+        Initialize optimization workflow.
+
+        Args:
+            pcb: The PCB to optimize.
+            config: Workflow configuration (uses defaults if None).
+            constraints: Grouping constraints to apply.
+            keepout_zones: Keepout zones to avoid.
+        """
+        self.pcb = pcb
+        self.config = config or WorkflowConfig()
+        self.constraints = constraints or []
+        self.keepout_zones = keepout_zones or []
+
+        # Will be set after optimization
+        self._optimizer: PlacementOptimizer | EvolutionaryPlacementOptimizer | None = None
+
+    @property
+    def optimizer(
+        self,
+    ) -> PlacementOptimizer | EvolutionaryPlacementOptimizer | None:
+        """Get the underlying optimizer (available after run())."""
+        return self._optimizer
+
+    def run(
+        self,
+        callback: Callable[[int, float], None] | None = None,
+        cancel_flag: Callable[[], bool] | None = None,
+    ) -> OptimizationResult:
+        """
+        Run the placement optimization.
+
+        Args:
+            callback: Optional progress callback(iteration, energy/fitness).
+            cancel_flag: Optional callable returning True when cancellation
+                is requested. Threaded through to the underlying optimizer
+                so that the loop exits early on interrupt.
+
+        Returns:
+            OptimizationResult with metrics and status.
+
+        Raises:
+            ValueError: If an unknown strategy is specified.
+        """
+        strategy = self.config.strategy
+
+        if strategy == "force-directed":
+            return self._run_force_directed(callback, cancel_flag=cancel_flag)
+        elif strategy == "evolutionary":
+            return self._run_evolutionary(callback)
+        elif strategy == "hybrid":
+            return self._run_hybrid(callback)
+        else:
+            return OptimizationResult(
+                success=False,
+                strategy=strategy,
+                message=f"Unknown strategy: {strategy}",
+            )
+
+    def _run_force_directed(
+        self,
+        callback: Callable[[int, float], None] | None = None,
+        cancel_flag: Callable[[], bool] | None = None,
+    ) -> OptimizationResult:
+        """Run force-directed (physics-based) optimization."""
+        from kicad_tools.optim import PlacementConfig, PlacementOptimizer, add_keepout_zones
+
+        config_kwargs: dict = {
+            "grid_size": self.config.grid if self.config.grid > 0 else 0.0,
+            "rotation_grid": 90.0,
+            "thermal_enabled": self.config.thermal,
+        }
+        if self.config.boundary_margin is not None:
+            config_kwargs["boundary_margin"] = self.config.boundary_margin
+        config = PlacementConfig(**config_kwargs)
+
+        optimizer = PlacementOptimizer.from_pcb(
+            self.pcb,
+            config=config,
+            fixed_refs=self.config.fixed_refs,
+            enable_clustering=self.config.enable_clustering,
+            edge_detect=self.config.edge_detect,
+        )
+
+        # Add constraints if loaded
+        if self.constraints:
+            optimizer.add_grouping_constraints(self.constraints)
+
+        # Add keepout zones
+        if self.keepout_zones:
+            add_keepout_zones(optimizer, self.keepout_zones)
+
+        # Run simulation
+        iterations_run = optimizer.run(
+            iterations=self.config.iterations,
+            callback=callback,
+            cancel_flag=cancel_flag,
+        )
+
+        # Snap to grid
+        if self.config.grid > 0:
+            optimizer.snap_to_grid(self.config.grid, 90.0)
+
+        self._optimizer = optimizer
+
+        # Get constraint violations
+        violations: list[str] = []
+        if self.constraints and hasattr(optimizer, "validate_constraints"):
+            violations = optimizer.validate_constraints() or []
+
+        # End-of-run containment check (#3804): flag any non-fixed component
+        # that escaped the board outline.
+        out_of_bounds = optimizer.out_of_bounds_components()
+
+        message = "Optimization completed successfully"
+        if out_of_bounds:
+            message += (
+                f"; WARNING: {len(out_of_bounds)} component(s) outside board "
+                f"outline: {', '.join(out_of_bounds)}"
+            )
+
+        return OptimizationResult(
+            success=True,
+            strategy="force-directed",
+            components=len(optimizer.components),
+            iterations=iterations_run,
+            wire_length_mm=optimizer.total_wire_length(),
+            energy=optimizer.compute_energy(),
+            constraint_violations=violations,
+            out_of_bounds_components=out_of_bounds,
+            message=message,
+        )
+
+    def _build_routing_evaluator(self) -> Any | None:
+        """Construct a :class:`CppAstarRoutingEvaluator` for the loaded PCB.
+
+        Returns ``None`` (silently) when:
+
+        * ``self.config.use_routing_fitness`` is ``False`` (the common case);
+        * the PCB has no resolvable file path (the factory needs one to load
+          the base router); or
+        * the router-evaluator imports fail (e.g. C++ extension not built and
+          a friendly fallback is desired — the GA's routability path already
+          falls back to the spacing proxy when the evaluator raises).
+
+        This keeps the workflow API's surface stable: callers opt in via the
+        flag, but the workflow does not raise if the optional dependency is
+        unavailable.
+        """
+        if not self.config.use_routing_fitness:
+            return None
+
+        # Resolve the PCB file path: explicit override wins, otherwise read
+        # from the loaded PCB's stored path.
+        pcb_path = self.config.pcb_path_for_routing
+        if pcb_path is None:
+            pcb_path = getattr(self.pcb, "_path", None)
+        if pcb_path is None:
+            # Cannot construct a router factory without a file path.  The GA
+            # will silently fall back to the spacing proxy.
+            return None
+
+        try:
+            from kicad_tools.optim.router_factory import build_pcb_router_factory
+            from kicad_tools.router.evaluators import (
+                CppAstarRoutingEvaluator,
+                RoutingEvaluatorConfig,
+            )
+        except ImportError:
+            return None
+
+        try:
+            factory = build_pcb_router_factory(pcb_path)
+        except Exception:
+            # Loading the PCB for routing failed (e.g. invalid grid).  Don't
+            # crash the workflow — just disable the routing-fitness signal.
+            return None
+
+        return CppAstarRoutingEvaluator(
+            router_factory=factory,
+            config=RoutingEvaluatorConfig(
+                # Keep inner-loop fast by default; callers wanting tighter
+                # tuning can construct the workflow with their own evaluator.
+                pop_size=5,
+                generations=2,
+                seed=None,
+                timeout_seconds=5.0,
+                num_workers=1,
+            ),
+        )
+
+    def _run_evolutionary(
+        self,
+        callback: Callable[[int, float], None] | None = None,
+    ) -> OptimizationResult:
+        """Run evolutionary (genetic algorithm) optimization."""
+        from kicad_tools.optim import EvolutionaryPlacementOptimizer, add_keepout_zones
+        from kicad_tools.optim.evolutionary import EvolutionaryConfig
+
+        config = EvolutionaryConfig(
+            generations=self.config.generations,
+            population_size=self.config.population,
+            grid_snap=self.config.grid if self.config.grid > 0 else 0.127,
+            use_routing_fitness=self.config.use_routing_fitness,
+        )
+
+        routing_evaluator = self._build_routing_evaluator()
+
+        optimizer = EvolutionaryPlacementOptimizer.from_pcb(
+            self.pcb,
+            config=config,
+            fixed_refs=self.config.fixed_refs,
+            enable_clustering=self.config.enable_clustering,
+            routing_evaluator=routing_evaluator,
+        )
+
+        # Add keepout zones
+        if self.keepout_zones:
+            add_keepout_zones(optimizer, self.keepout_zones)
+
+        # Wrap callback for evolutionary interface
+        evo_callback = None
+        if callback:
+
+            def evo_callback(gen: int, best: Any) -> None:
+                callback(gen, best.fitness)
+
+        # Run optimization
+        best = optimizer.optimize(
+            generations=self.config.generations,
+            population_size=self.config.population,
+            callback=evo_callback,
+        )
+
+        self._optimizer = optimizer
+
+        return OptimizationResult(
+            success=True,
+            strategy="evolutionary",
+            components=len(optimizer.components),
+            iterations=self.config.generations,
+            wire_length_mm=optimizer.total_wire_length(),
+            energy=optimizer.compute_energy(),
+            message=f"Best fitness: {best.fitness:.2f}",
+        )
+
+    def _run_hybrid(
+        self,
+        callback: Callable[[int, float], None] | None = None,
+    ) -> OptimizationResult:
+        """Run hybrid optimization (evolutionary + physics refinement)."""
+        from kicad_tools.optim import (
+            EvolutionaryPlacementOptimizer,
+            PlacementConfig,
+            add_keepout_zones,
+        )
+        from kicad_tools.optim.evolutionary import EvolutionaryConfig
+
+        evo_config = EvolutionaryConfig(
+            generations=self.config.generations,
+            population_size=self.config.population,
+            grid_snap=self.config.grid if self.config.grid > 0 else 0.127,
+            use_routing_fitness=self.config.use_routing_fitness,
+        )
+
+        physics_kwargs: dict = {
+            "grid_size": self.config.grid if self.config.grid > 0 else 0.0,
+            "rotation_grid": 90.0,
+        }
+        if self.config.boundary_margin is not None:
+            physics_kwargs["boundary_margin"] = self.config.boundary_margin
+        physics_config = PlacementConfig(**physics_kwargs)
+
+        routing_evaluator = self._build_routing_evaluator()
+
+        evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(
+            self.pcb,
+            config=evo_config,
+            fixed_refs=self.config.fixed_refs,
+            enable_clustering=self.config.enable_clustering,
+            routing_evaluator=routing_evaluator,
+        )
+
+        # Add keepout zones
+        if self.keepout_zones:
+            add_keepout_zones(evo_optimizer, self.keepout_zones)
+
+        # Wrap callback for evolutionary interface
+        evo_callback = None
+        if callback:
+
+            def evo_callback(gen: int, best: Any) -> None:
+                callback(gen, best.fitness)
+
+        # Run hybrid optimization
+        physics_optimizer = evo_optimizer.optimize_hybrid(
+            evolutionary_generations=self.config.generations,
+            population_size=self.config.population,
+            physics_iterations=self.config.iterations,
+            physics_config=physics_config,
+            callback=evo_callback,
+        )
+
+        self._optimizer = physics_optimizer
+
+        # End-of-run containment check (#3804). The hybrid strategy reuses the
+        # PlacementOptimizer physics layer for its refinement phase, so the
+        # same check applies.
+        out_of_bounds: list[str] = []
+        if hasattr(physics_optimizer, "out_of_bounds_components"):
+            out_of_bounds = physics_optimizer.out_of_bounds_components()
+
+        message = "Hybrid optimization completed successfully"
+        if out_of_bounds:
+            message += (
+                f"; WARNING: {len(out_of_bounds)} component(s) outside board "
+                f"outline: {', '.join(out_of_bounds)}"
+            )
+
+        return OptimizationResult(
+            success=True,
+            strategy="hybrid",
+            components=len(physics_optimizer.components),
+            iterations=self.config.generations + self.config.iterations,
+            wire_length_mm=physics_optimizer.total_wire_length(),
+            energy=physics_optimizer.compute_energy(),
+            out_of_bounds_components=out_of_bounds,
+            message=message,
+        )
+
+    def write_to_pcb(self) -> int:
+        """
+        Write optimized positions back to the PCB.
+
+        Returns:
+            Number of components updated.
+
+        Raises:
+            RuntimeError: If run() hasn't been called yet.
+        """
+        if self._optimizer is None:
+            raise RuntimeError("Must call run() before write_to_pcb()")
+        return self._optimizer.write_to_pcb(self.pcb)
+
+    def save(self, output_path: Path | str) -> int:
+        """
+        Write optimized positions and save PCB to file.
+
+        Args:
+            output_path: Path to save the optimized PCB.
+
+        Returns:
+            Number of components updated.
+        """
+        updated = self.write_to_pcb()
+        self.pcb.save(str(output_path))
+        return updated
+
+    def get_report(self) -> str:
+        """
+        Get optimization report.
+
+        Returns:
+            Human-readable report string.
+
+        Raises:
+            RuntimeError: If run() hasn't been called yet.
+        """
+        if self._optimizer is None:
+            raise RuntimeError("Must call run() before get_report()")
+        return self._optimizer.report()

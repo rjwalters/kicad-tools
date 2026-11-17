@@ -1,0 +1,127 @@
+/**
+ * TypeScript types for the `board.json` data contract (schema v1).
+ *
+ * Mirrors `docs/board-json-schema.md` in the repository root. Keep these in
+ * sync with that document — it is the canonical contract produced by
+ * `kct board-metrics` and consumed by this Astro site.
+ *
+ * Optional-field rule: a missing source artifact means the field is OMITTED,
+ * never emitted as `null`. Accordingly every optional field is typed `?: T`
+ * (not `T | null`). Downstream code should treat a missing key as "unknown".
+ */
+
+/** Schema version this loader understands. Documents with a different major
+ *  version are skipped (forward-compat guard). */
+export const SCHEMA_VERSION = 1;
+
+/** Board status enum — see `docs/board-json-schema.md` "status values". */
+export type BoardStatus = "ok" | "partial" | "no_artifacts";
+
+/**
+ * Gallery section a board belongs to. Loader-assigned (NOT part of the
+ * `board.json` contract): `"project"` for boards under `boards/external/`,
+ * `"demo"` for the numbered tutorial boards.
+ */
+export type BoardCategory = "demo" | "project";
+
+/** Physical board dimensions in millimeters. */
+export interface BoardSize {
+  width: number;
+  height: number;
+}
+
+/** Cost estimate block. All members optional (omitted when absent). */
+export interface CostEstimate {
+  per_board_usd?: number;
+  batch_qty?: number;
+  batch_total_usd?: number;
+}
+
+/** An open issue recorded against a board's readiness evidence (#7261). */
+export interface KnownIssue {
+  issue: number;
+  /** `defect` keeps the board from ready; `exception`/`advisory` are disclosed. */
+  kind: "defect" | "exception" | "advisory";
+  summary: string;
+  /** ISO date (YYYY-MM-DD) the issue was recorded. */
+  recorded: string;
+  /** `kct check` warning findings the issue accounts for, as sorted unique identities (#7389). */
+  warnings?: { rule: string; ref: string; pad: string }[];
+  /** `exception` only: `kct check` errors accepted, as sorted unique `{rule, at: [x_mm, y_mm]}` or location-less `{rule, item}` identities (#7355). */
+  errors?: ({ rule: string; at: [number, number] } | { rule: string; item: string })[];
+}
+
+export interface Readiness {
+  schema_version?: number;
+  checked_at?: string;
+  mode?: "assembly" | "pcb_only";
+  status: "ready" | "blocked" | "unverified";
+  blockers: string[];
+  inputs?: Record<string, string>;
+  checks?: Array<{ name: string; status: "passed" | "failed" | "not_run"; detail?: string }>;
+  evidence?: Record<string, string>;
+  /** Fabrication tier the evidence was produced for. */
+  manufacturer?: string;
+  known_issues?: KnownIssue[];
+  metrics?: {
+    drc_violations?: number;
+    nets_routed_pct?: number;
+    lvs_clean?: boolean;
+    lvs_mismatches?: number;
+  };
+}
+
+/**
+ * A fully-parsed board record matching `board.json` schema v1.
+ *
+ * Required fields (always present): `$schema`, `schema_version`,
+ * `generated_at`, `slug`, `status`. All other fields are optional and omitted
+ * when the underlying artifact is missing.
+ */
+export interface Board {
+  $schema: string;
+  schema_version: number;
+  generated_at: string;
+  slug: string;
+  status: BoardStatus;
+  /** Gallery section, assigned by the loader (not from `board.json`). */
+  category: BoardCategory;
+  name?: string;
+  /** Human title from the schematic title block (#7666); preferred for headings. */
+  title?: string;
+  /** True when board.json predates the readiness evidence (#7666); set by the loader. */
+  stale?: boolean;
+  description?: string;
+  layer_count?: number;
+  board_size_mm?: BoardSize;
+  part_count?: number;
+  nets_routed_pct?: number;
+  drc_violations?: number;
+  cost?: CostEstimate;
+  /** Map of render id → path relative to the board.json location. */
+  renders?: Record<string, string>;
+  /** 3D model coverage from `kct render` (#7689); `percent` is null when nothing is non-exempt. */
+  model_coverage?: {
+    env?: string;
+    covered?: number;
+    total?: number;
+    percent?: number | null;
+  };
+  manufacturing_package?: string;
+  manifest_generated_at?: string;
+  /** Fresh report validated against current source and manufacturing hashes. */
+  readiness?: Readiness;
+  /**
+   * LVS (Layout-vs-Schematic) verification result (#3748, #3749). Sourced from
+   * `output/lvs.json` → `clean`. Omitted when the board has not run LVS yet
+   * (e.g. boards 01-05 in v1 — the fleet rollout is tracked by #3742). A
+   * missing `lvs_clean` is treated as "unverified" and must NOT display as
+   * "Ready" by the gallery chip.
+   */
+  lvs_clean?: boolean;
+  /**
+   * Number of schematic-vs-PCB mismatches recorded in `output/lvs.json`
+   * (#3748, #3749). Omitted when the board has not run LVS yet.
+   */
+  lvs_mismatches?: number;
+}

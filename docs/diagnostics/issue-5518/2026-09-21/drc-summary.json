@@ -1,0 +1,432 @@
+{
+  "schema_version": 1,
+  "tool": "kicad-cli pcb drc --refill-zones",
+  "record_only": true,
+  "artifact_count": 17,
+  "artifacts": {
+    "05-run1--bldc_controller_routed_checkpoint_unverified_mkymxnfp": {
+      "report": "drc-05-run1--bldc_controller_routed_checkpoint_unverified_mkymxnfp.rpt",
+      "violations_in_report": 108,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 14,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1723,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 108,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:07:13Z",
+        "END 2026-09-21T09:07:57Z RC=0"
+      ]
+    },
+    "05-run1--bldc_controller_routed_completed_unverified_gm9chr8w": {
+      "report": "drc-05-run1--bldc_controller_routed_completed_unverified_gm9chr8w.rpt",
+      "violations_in_report": 141,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 47,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1578,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 141,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:08:34Z",
+        "END 2026-09-21T09:09:11Z RC=0"
+      ]
+    },
+    "05-run1--bldc_controller_routed_timeout_unverified_mkpn56z5": {
+      "report": "drc-05-run1--bldc_controller_routed_timeout_unverified_mkpn56z5.rpt",
+      "violations_in_report": 108,
+      "rule_histogram": {
+        "unconnected_items": 89,
+        "lib_footprint_mismatch": 55,
+        "track_width": 13,
+        "clearance": 12,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 5,
+        "silk_edge_clearance": 2,
+        "shorting_items": 1
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1723,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 108,
+      "unconnected_items": 89,
+      "times": [
+        "START 2026-09-21T09:09:49Z",
+        "END 2026-09-21T09:10:22Z RC=0"
+      ]
+    },
+    "05-run2--bldc_controller_routed_checkpoint_unverified_7vejn9kb": {
+      "report": "drc-05-run2--bldc_controller_routed_checkpoint_unverified_7vejn9kb.rpt",
+      "violations_in_report": 118,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 24,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1583,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 118,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:11:00Z",
+        "END 2026-09-21T09:11:50Z RC=0"
+      ]
+    },
+    "05-run2--bldc_controller_routed_completed_unverified_wi6m_k20": {
+      "report": "drc-05-run2--bldc_controller_routed_completed_unverified_wi6m_k20.rpt",
+      "violations_in_report": 134,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 40,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1583,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 134,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:12:35Z",
+        "END 2026-09-21T09:13:16Z RC=0"
+      ]
+    },
+    "05-run2--bldc_controller_routed_timeout_unverified_feqjcfct": {
+      "report": "drc-05-run2--bldc_controller_routed_timeout_unverified_feqjcfct.rpt",
+      "violations_in_report": 141,
+      "rule_histogram": {
+        "unconnected_items": 89,
+        "lib_footprint_mismatch": 55,
+        "clearance": 36,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "shorting_items": 10,
+        "starved_thermal": 8,
+        "track_dangling": 5,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.0319,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 141,
+      "unconnected_items": 89,
+      "times": [
+        "START 2026-09-21T09:13:59Z",
+        "END 2026-09-21T09:14:39Z RC=0"
+      ]
+    },
+    "05-run3--bldc_controller_routed_checkpoint_unverified_k59kx5yk": {
+      "report": "drc-05-run3--bldc_controller_routed_checkpoint_unverified_k59kx5yk.rpt",
+      "violations_in_report": 141,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 47,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1578,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 141,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:15:19Z",
+        "END 2026-09-21T09:16:07Z RC=0"
+      ]
+    },
+    "05-run3--bldc_controller_routed_completed_unverified_8cpb5npe": {
+      "report": "drc-05-run3--bldc_controller_routed_completed_unverified_8cpb5npe.rpt",
+      "violations_in_report": 118,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 24,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1583,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 118,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:17:05Z",
+        "END 2026-09-21T09:18:04Z RC=0"
+      ]
+    },
+    "05-run3--bldc_controller_routed_timeout_unverified_hymaa_8p": {
+      "report": "drc-05-run3--bldc_controller_routed_timeout_unverified_hymaa_8p.rpt",
+      "violations_in_report": 141,
+      "rule_histogram": {
+        "unconnected_items": 89,
+        "lib_footprint_mismatch": 55,
+        "clearance": 36,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "shorting_items": 10,
+        "starved_thermal": 8,
+        "track_dangling": 5,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.0319,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 141,
+      "unconnected_items": 89,
+      "times": [
+        "START 2026-09-21T09:18:58Z",
+        "END 2026-09-21T09:19:38Z RC=0"
+      ]
+    },
+    "05-run4--bldc_controller_routed_checkpoint_unverified_irf861h6": {
+      "report": "drc-05-run4--bldc_controller_routed_checkpoint_unverified_irf861h6.rpt",
+      "violations_in_report": 108,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 14,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1723,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 108,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:20:20Z",
+        "END 2026-09-21T09:21:07Z RC=0"
+      ]
+    },
+    "05-run4--bldc_controller_routed_completed_unverified_zavttb1r": {
+      "report": "drc-05-run4--bldc_controller_routed_completed_unverified_zavttb1r.rpt",
+      "violations_in_report": 141,
+      "rule_histogram": {
+        "unconnected_items": 86,
+        "lib_footprint_mismatch": 55,
+        "clearance": 47,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "starved_thermal": 8,
+        "track_dangling": 4,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1578,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 141,
+      "unconnected_items": 86,
+      "times": [
+        "START 2026-09-21T09:21:58Z",
+        "END 2026-09-21T09:22:44Z RC=0"
+      ]
+    },
+    "05-run4--bldc_controller_routed_timeout_unverified_nlgc3kr0": {
+      "report": "drc-05-run4--bldc_controller_routed_timeout_unverified_nlgc3kr0.rpt",
+      "violations_in_report": 173,
+      "rule_histogram": {
+        "unconnected_items": 88,
+        "clearance": 68,
+        "lib_footprint_mismatch": 55,
+        "track_width": 13,
+        "silk_over_copper": 12,
+        "shorting_items": 10,
+        "starved_thermal": 8,
+        "track_dangling": 5,
+        "silk_edge_clearance": 2
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.0319,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 173,
+      "unconnected_items": 88,
+      "times": [
+        "START 2026-09-21T09:23:36Z",
+        "END 2026-09-21T09:24:22Z RC=0"
+      ]
+    },
+    "06-on-1--diffpair_test_routed": {
+      "report": "drc-06-on-1--diffpair_test_routed.rpt",
+      "violations_in_report": 563,
+      "rule_histogram": {
+        "track_width": 199,
+        "drill_out_of_range": 182,
+        "via_diameter": 149,
+        "clearance": 17,
+        "silk_over_copper": 7,
+        "lib_footprint_issues": 6,
+        "track_dangling": 2,
+        "lib_footprint_mismatch": 1
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.122,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 563,
+      "unconnected_items": 0,
+      "times": [
+        "START 2026-09-21T09:25:04Z",
+        "END 2026-09-21T09:26:04Z RC=0"
+      ]
+    },
+    "06-on-2--diffpair_test_routed": {
+      "report": "drc-06-on-2--diffpair_test_routed.rpt",
+      "violations_in_report": 561,
+      "rule_histogram": {
+        "track_width": 199,
+        "drill_out_of_range": 182,
+        "via_diameter": 149,
+        "clearance": 15,
+        "silk_over_copper": 7,
+        "lib_footprint_issues": 6,
+        "track_dangling": 2,
+        "lib_footprint_mismatch": 1
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.122,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 561,
+      "unconnected_items": 0,
+      "times": [
+        "START 2026-09-21T09:27:20Z",
+        "END 2026-09-21T09:28:36Z RC=0"
+      ]
+    },
+    "07-run1--matchgroup_test_routed_timeout_unverified_u4m68ps_": {
+      "report": "drc-07-run1--matchgroup_test_routed_timeout_unverified_u4m68ps_.rpt",
+      "violations_in_report": 24,
+      "rule_histogram": {
+        "unconnected_items": 190,
+        "clearance": 10,
+        "lib_footprint_issues": 6,
+        "silk_over_copper": 5,
+        "lib_footprint_mismatch": 2,
+        "isolated_copper": 1
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1414,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 24,
+      "unconnected_items": 190,
+      "times": [
+        "START 2026-09-21T09:29:34Z",
+        "END 2026-09-21T09:30:09Z RC=0"
+      ]
+    },
+    "07-run2--matchgroup_test_routed_partial": {
+      "report": "drc-07-run2--matchgroup_test_routed_partial.rpt",
+      "violations_in_report": 223,
+      "rule_histogram": {
+        "track_width": 199,
+        "unconnected_items": 167,
+        "clearance": 10,
+        "lib_footprint_issues": 6,
+        "silk_over_copper": 5,
+        "lib_footprint_mismatch": 2,
+        "isolated_copper": 1
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1414,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 223,
+      "unconnected_items": 167,
+      "times": [
+        "START 2026-09-21T09:30:34Z",
+        "END 2026-09-21T09:31:24Z RC=0"
+      ]
+    },
+    "07-run2--matchgroup_test_routed_timeout_unverified_muqjoj9p": {
+      "report": "drc-07-run2--matchgroup_test_routed_timeout_unverified_muqjoj9p.rpt",
+      "violations_in_report": 24,
+      "rule_histogram": {
+        "unconnected_items": 190,
+        "clearance": 10,
+        "lib_footprint_issues": 6,
+        "silk_over_copper": 5,
+        "lib_footprint_mismatch": 2,
+        "isolated_copper": 1
+      },
+      "narrowest_clearance": {
+        "rule_mm": 0.2,
+        "actual_mm": 0.1414,
+        "note": "KiCad enforces the project rule; the router used the resolver value recorded in the witness clearance block (#5509 delta)"
+      },
+      "violations": 24,
+      "unconnected_items": 190,
+      "times": [
+        "START 2026-09-21T09:32:14Z",
+        "END 2026-09-21T09:33:02Z RC=0"
+      ]
+    }
+  }
+}

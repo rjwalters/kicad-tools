@@ -1,0 +1,32 @@
+{
+  // Loom-managed nested Biome configuration (issue #6031).
+  //
+  // Companion to `.loom/biome.jsonc`. Loom installs a handful of files under
+  // `.claude/` that the consumer neither authors nor formats -- most notably
+  // `.claude/settings.json`, which the installer writes/merges with 2-space
+  // JSON serialization and which therefore fails a repo-wide `biome check .`
+  // for any consumer whose Biome config uses a different indent (Biome's own
+  // default is tabs).
+  //
+  // Unlike `.loom/` (entirely Loom's), `.claude/` is SHARED with the consumer:
+  // their own commands, skills, and scripts live here too. So this config is a
+  // narrow allow-everything-except list naming only the Loom-owned paths --
+  // consumer-authored files under `.claude/` stay fully linted.
+  //
+  // Biome 1.x has no nested-configuration support and ignores this file; see
+  // `.loom/biome.jsonc` for the same caveat.
+  "root": false,
+  "files": {
+    // Trailing `/**` is deliberately omitted on the directory entries: since
+    // Biome 2.2.0 a bare directory name is the correct folder-ignore form, and
+    // the `lint/suspicious/useBiomeIgnoreFolder` rule flags the `/**` variant.
+    // `!biome.jsonc` excludes this file from its own formatter check.
+    "includes": [
+      "**",
+      "!biome.jsonc",
+      "!settings.json",
+      "!agents",
+      "!commands/loom"
+    ]
+  }
+}

@@ -1,0 +1,524 @@
+"""
+KiCad Schematic Element Models
+
+Wire, Junction, Label, HierarchicalLabel, GlobalLabel, PowerSymbol, and WireCollision classes.
+"""
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Optional
+
+from kicad_tools.core.schematic_uuids import pin_uuid, provisional_uuid
+from kicad_tools.core.symbol_transform import normalize_mirror
+from kicad_tools.sexp import SExp
+from kicad_tools.sexp.builders import (
+    at,
+    global_label_node,
+    hier_label_node,
+    junction_node,
+    label_node,
+    no_connect_node,
+    pin_uuid_node,
+    symbol_instances_node,
+    symbol_property_node,
+    uuid_node,
+    wire_node,
+)
+from kicad_tools.sexp.power import is_power_symbol
+
+if TYPE_CHECKING:
+    from .symbol import SymbolDef
+
+
+@dataclass
+class Wire:
+    """A wire segment connecting two points."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    uuid_str: str = field(default_factory=provisional_uuid)
+
+    @classmethod
+    def between(cls, p1: tuple[float, float], p2: tuple[float, float]) -> "Wire":
+        """Create a wire between two points."""
+        # Round coordinates for consistent matching
+        return cls(x1=round(p1[0], 2), y1=round(p1[1], 2), x2=round(p2[0], 2), y2=round(p2[1], 2))
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this wire."""
+        return wire_node(self.x1, self.y1, self.x2, self.y2, self.uuid_str)
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "Wire":
+        """Parse a Wire from an S-expression node.
+
+        Expected format:
+            (wire (pts (xy x1 y1) (xy x2 y2)) (stroke ...) (uuid ...))
+        """
+        pts_node = node["pts"]
+        xy_nodes = [c for c in pts_node.children if c.name == "xy"]
+        if len(xy_nodes) < 2:
+            raise ValueError("Wire must have at least 2 xy points")
+
+        p1_atoms = xy_nodes[0].get_atoms()
+        p2_atoms = xy_nodes[1].get_atoms()
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
+
+        return cls(
+            x1=round(float(p1_atoms[0]), 2),
+            y1=round(float(p1_atoms[1]), 2),
+            x2=round(float(p2_atoms[0]), 2),
+            y2=round(float(p2_atoms[1]), 2),
+            uuid_str=uuid_str,
+        )
+
+
+@dataclass
+class WireCollision:
+    """Represents a wire endpoint collision with an existing wire segment.
+
+    This occurs when a wire endpoint lands on the interior of another wire
+    segment (not at its endpoints), potentially creating an unintended
+    electrical connection in KiCad.
+
+    Attributes:
+        endpoint: The (x, y) coordinates of the colliding endpoint
+        endpoint_type: Whether this is the "start" or "end" of the colliding wire
+        colliding_wire: The wire that has the endpoint collision
+        target_wire: The existing wire being collided with
+    """
+
+    endpoint: tuple[float, float]
+    endpoint_type: str  # "start" or "end"
+    colliding_wire: Wire
+    target_wire: Wire
+
+    def __str__(self) -> str:
+        """Return a human-readable description of the collision."""
+        return (
+            f"Wire {self.endpoint_type} at ({self.endpoint[0]}, {self.endpoint[1]}) "
+            f"lands on wire from ({self.target_wire.x1}, {self.target_wire.y1}) to "
+            f"({self.target_wire.x2}, {self.target_wire.y2})"
+        )
+
+
+@dataclass
+class Junction:
+    """A junction point where wires connect."""
+
+    x: float
+    y: float
+    uuid_str: str = field(default_factory=provisional_uuid)
+
+    def __post_init__(self):
+        # Round coordinates for consistent matching
+        self.x = round(self.x, 2)
+        self.y = round(self.y, 2)
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this junction."""
+        return junction_node(self.x, self.y, self.uuid_str)
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "Junction":
+        """Parse a Junction from an S-expression node.
+
+        Expected format:
+            (junction (at x y) (diameter 0) (color ...) (uuid ...))
+        """
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
+
+        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=uuid_str)
+
+
+@dataclass
+class NoConnect:
+    """A no-connect marker indicating a pin is intentionally unconnected.
+
+    No-connect markers silence ERC "pin not connected" warnings.
+    Place them at pin endpoints to indicate intentional non-connection.
+    """
+
+    x: float
+    y: float
+    uuid_str: str = field(default_factory=provisional_uuid)
+
+    def __post_init__(self):
+        # Round coordinates for consistent matching
+        self.x = round(self.x, 2)
+        self.y = round(self.y, 2)
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this no-connect marker."""
+        return no_connect_node(self.x, self.y, self.uuid_str)
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "NoConnect":
+        """Parse a NoConnect from an S-expression node.
+
+        Expected format:
+            (no_connect (at x y) (uuid ...))
+        """
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
+
+        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=uuid_str)
+
+
+@dataclass
+class Label:
+    """A net label."""
+
+    text: str
+    x: float
+    y: float
+    rotation: float = 0
+    uuid_str: str = field(default_factory=provisional_uuid)
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this label."""
+        return label_node(self.text, self.x, self.y, self.rotation, self.uuid_str)
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "Label":
+        """Parse a Label from an S-expression node.
+
+        Expected format:
+            (label "text" (at x y [rotation]) ... (uuid ...))
+        """
+        # Get text from first atom child
+        text = node.get_first_atom()
+        if text is None:
+            raise ValueError("Label must have text")
+
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+        x = round(float(atoms[0]), 2)
+        y = round(float(atoms[1]), 2)
+        rotation = float(atoms[2]) if len(atoms) > 2 else 0
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
+
+        return cls(text=str(text), x=x, y=y, rotation=rotation, uuid_str=uuid_str)
+
+
+@dataclass
+class HierarchicalLabel:
+    """A hierarchical sheet label."""
+
+    text: str
+    x: float
+    y: float
+    shape: str = "input"  # input, output, bidirectional, passive
+    rotation: float = 0
+    uuid_str: str = field(default_factory=provisional_uuid)
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this hierarchical label."""
+        return hier_label_node(self.text, self.x, self.y, self.shape, self.rotation, self.uuid_str)
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "HierarchicalLabel":
+        """Parse a HierarchicalLabel from an S-expression node.
+
+        Expected format:
+            (hierarchical_label "text" (shape output) (at x y [rotation]) ... (uuid ...))
+        """
+        # Get text from first atom child
+        text = node.get_first_atom()
+        if text is None:
+            raise ValueError("HierarchicalLabel must have text")
+
+        # Get shape
+        shape_node = node.get("shape")
+        shape = shape_node.get_first_atom() if shape_node else "input"
+
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+        x = round(float(atoms[0]), 2)
+        y = round(float(atoms[1]), 2)
+        rotation = float(atoms[2]) if len(atoms) > 2 else 0
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
+
+        return cls(text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=uuid_str)
+
+
+@dataclass
+class GlobalLabel:
+    """A global label that connects nets by name across all sheets.
+
+    Global labels are simpler than hierarchical labels - they don't require
+    sheet pins on parent sheets. Nets with the same global label name are
+    automatically connected throughout the entire schematic hierarchy.
+
+    Commonly used for:
+    - Power rails (VCC, GND, +3V3, AGND, DGND)
+    - Domain-specific power (VCC_3V3A, VCC_3V3D)
+    - Shared buses (I2C_SDA, I2C_SCL)
+    - Control signals that span multiple sheets
+    """
+
+    text: str
+    x: float
+    y: float
+    shape: str = "bidirectional"  # input, output, bidirectional, tri_state, passive
+    rotation: float = 0
+    uuid_str: str = field(default_factory=provisional_uuid)
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this global label."""
+        return global_label_node(
+            self.text, self.x, self.y, self.shape, self.rotation, self.uuid_str
+        )
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "GlobalLabel":
+        """Parse a GlobalLabel from an S-expression node.
+
+        Expected format:
+            (global_label "text" (shape bidirectional) (at x y [rotation]) ... (uuid ...))
+        """
+        # Get text from first atom child
+        text = node.get_first_atom()
+        if text is None:
+            raise ValueError("GlobalLabel must have text")
+
+        # Get shape
+        shape_node = node.get("shape")
+        shape = shape_node.get_first_atom() if shape_node else "bidirectional"
+
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+        x = round(float(atoms[0]), 2)
+        y = round(float(atoms[1]), 2)
+        rotation = float(atoms[2]) if len(atoms) > 2 else 0
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
+
+        return cls(text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=uuid_str)
+
+
+@dataclass
+class PowerSymbol:
+    """A power symbol (GND, VCC, etc.)."""
+
+    lib_id: str  # e.g., "power:GND", "power:+3.3V"
+    x: float
+    y: float
+    rotation: float = 0
+    reference: str = "#PWR?"
+    uuid_str: str = field(default_factory=provisional_uuid)
+    # BOM / DNP flags.  Defaults preserve historical byte output exactly
+    # (in_bom=True -> "yes", dnp=False -> "no") while letting callers emit
+    # exclude-from-BOM / do-not-populate power symbols (issue #4303).
+    in_bom: bool = True
+    dnp: bool = False
+    # ``(mirror x|y)`` axis, kept so a load/save round trip does not flip a
+    # mirrored power symbol back (issue #6005); ``""`` = unmirrored.
+    mirror: str = ""
+    # The placed symbol's ``Value`` property.  KiCad names the global net a
+    # power symbol drives after this field, not after the lib_id, and the two
+    # legitimately differ (``power:+3.3V`` placed with Value ``+3V3``, or a
+    # rescued ``Proj-rescue:+16V-power`` with Value ``+16V``).  ``""`` means
+    # "derive from the lib_id", which is what programmatic placement wants;
+    # a loaded schematic keeps the original so a load/save round trip does not
+    # rename nets (issue #6048).
+    value: str = ""
+
+    _symbol_def: Optional["SymbolDef"] = field(default=None, repr=False)
+
+    @property
+    def is_power_flag(self) -> bool:
+        """Whether this symbol declares an external driver without naming a net.
+
+        Matched by symbol name in *any* library (``power:PWR_FLAG``, a bare
+        ``PWR_FLAG``, or a project-library copy such as ``myproj:PWR_FLAG``),
+        since the parser routes library-flagged power symbols from any
+        library here (#7637). Otherwise a project-library flag would report
+        its Value ``"PWR_FLAG"`` as a global net name and merge every flagged
+        rail into one ``PWR_FLAG`` net.
+        """
+        return self.lib_id.rsplit(":", 1)[-1] == "PWR_FLAG"
+
+    @property
+    def net_name(self) -> str | None:
+        """Global rail name, absent for a PWR_FLAG driver declaration."""
+        return None if self.is_power_flag else self.value_text
+
+    @property
+    def value_text(self) -> str:
+        """The ``Value`` property written for this symbol (see ``value``)."""
+        return self.value or self.lib_id.split(":", 1)[-1]
+
+    def to_sexp_node(self, project_name: str, sheet_path: str) -> SExp:
+        """Build S-expression tree for this power symbol."""
+        value = self.value_text
+
+        # Build symbol node with all standard fields
+        sym = SExp.list(
+            "symbol",
+            SExp.list("lib_id", self.lib_id),
+            at(self.x, self.y, self.rotation),
+        )
+        if self.mirror:
+            sym.append(SExp.list("mirror", self.mirror))
+        for child in (
+            SExp.list("unit", 1),
+            SExp.list("exclude_from_sim", "no"),
+            SExp.list("in_bom", "yes" if self.in_bom else "no"),
+            SExp.list("on_board", "yes"),
+            SExp.list("dnp", "yes" if self.dnp else "no"),
+            uuid_node(self.uuid_str),
+        ):
+            sym.append(child)
+
+        # Add properties - Reference (hidden), Value (visible), Footprint, Datasheet
+        sym.append(
+            symbol_property_node("Reference", self.reference, self.x, self.y + 2.54, hide=True)
+        )
+        sym.append(symbol_property_node("Value", value, self.x, self.y + 5.08, hide=False))
+        sym.append(symbol_property_node("Footprint", "", self.x, self.y, hide=True))
+        sym.append(symbol_property_node("Datasheet", "", self.x, self.y, hide=True))
+
+        # Power symbols always have pin "1"
+        sym.append(pin_uuid_node("1", pin_uuid(self.uuid_str, "1")))
+
+        # Add instances section
+        sym.append(symbol_instances_node(project_name, sheet_path, self.reference, 1))
+
+        return sym
+
+    def to_sexp(self, project_name: str, sheet_path: str) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node(project_name, sheet_path).to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "PowerSymbol":
+        """Parse a PowerSymbol from an S-expression node.
+
+        Expected format:
+            (symbol
+                (lib_id "power:GND")
+                (at x y [rotation])
+                ...
+                (uuid "...")
+                (property "Reference" "#PWR01" ...)
+                ...
+            )
+
+        Power symbols are identified by lib_id starting with "power:".
+        """
+        # Get lib_id
+        lib_id_node = node["lib_id"]
+        lib_id = str(lib_id_node.get_first_atom())
+
+        # Get position
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+        x = round(float(atoms[0]), 2)
+        y = round(float(atoms[1]), 2)
+        rotation = float(atoms[2]) if len(atoms) > 2 else 0
+        mirror_node = node.get("mirror")
+        mirror = normalize_mirror(mirror_node.get_first_atom()) if mirror_node else ""
+
+        # Get UUID
+        uuid_node_elem = node.get("uuid")
+        uuid_str = str(uuid_node_elem.get_first_atom()) if uuid_node_elem else provisional_uuid()
+
+        # Get reference from properties
+        reference = "#PWR?"
+        value = ""
+        for prop_node in node.find_all("property"):
+            atoms = prop_node.get_atoms()
+            if len(atoms) >= 2 and str(atoms[0]) == "Reference":
+                reference = str(atoms[1])
+            elif len(atoms) >= 2 and str(atoms[0]) == "Value":
+                value = str(atoms[1])
+
+        # Get BOM / DNP flags (issue #4303); default to historical values
+        # when the token is absent so older schematics round-trip unchanged.
+        in_bom_node = node.get("in_bom")
+        in_bom = str(in_bom_node.get_first_atom()).lower() != "no" if in_bom_node else True
+        dnp_node = node.get("dnp")
+        dnp = str(dnp_node.get_first_atom()).lower() == "yes" if dnp_node else False
+
+        return cls(
+            lib_id=lib_id,
+            x=x,
+            y=y,
+            rotation=rotation,
+            reference=reference,
+            uuid_str=uuid_str,
+            in_bom=in_bom,
+            dnp=dnp,
+            mirror=mirror,
+            value=value,
+        )
+
+    @staticmethod
+    def is_power_symbol(node: SExp, lib_symbols: Mapping[str, SExp] | None = None) -> bool:
+        """Check if an S-expression node represents a power symbol.
+
+        Delegates to the shared :func:`kicad_tools.sexp.power.is_power_symbol`
+        (#7637): the library ``(power)`` flag looked up in *lib_symbols* (the
+        schematic's embedded ``lib_symbols`` by name), the stock ``power:`` /
+        ``kicad_tools_pwr:`` prefixes, or a ``#`` reference designator when
+        the symbol has no embedded definition (so a non-power ``#LOGO1``
+        stays an ordinary symbol). When *lib_symbols* is omitted only the
+        prefix and reference rules apply.
+        """
+        lib_id_node = node.get("lib_id")
+        lib_id = str(lib_id_node.get_first_atom()) if lib_id_node else ""
+
+        reference = ""
+        for prop_node in node.find_all("property"):
+            atoms = prop_node.get_atoms()
+            if len(atoms) >= 2 and str(atoms[0]) == "Reference":
+                reference = str(atoms[1])
+                break
+
+        return is_power_symbol(
+            lib_id,
+            reference,
+            lookup=lib_symbols.get if lib_symbols is not None else None,
+            placed=node,
+        )

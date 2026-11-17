@@ -1,0 +1,2028 @@
+{
+  "postprocessing-001-quality-pre-optimize": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "b70df1e956faf7baf34a2ab0c28e057ebb5de66367376a4f1596cb345ce09097",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-001-quality-pre-optimize/saved-native.json",
+        "/capture/postprocessing/001-quality-pre-optimize.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "b6054525cebe72045c80a59f0591604b6814afad6298d9d5111334e2313a1948",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-001-quality-pre-optimize/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-001-quality-pre-optimize/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-002-before-optimizer": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "86f951a4660d50e3dfe8dac1c64e89115b59f7e2bb1e31f1e456634776a4e9c4",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-002-before-optimizer/saved-native.json",
+        "/capture/postprocessing/002-before-optimizer.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "307a484dab1e506ad2a7b20405764251ce2db4bb375ebcb46fa3ef5b72000363",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-002-before-optimizer/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-002-before-optimizer/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-003-after-optimizer": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "e8a304f948e19c910ab5402165c1147bd90befb3eb5a5ec8c25206f2443952ad",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-003-after-optimizer/saved-native.json",
+        "/capture/postprocessing/003-after-optimizer.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "b3298939b51d712b10893ab9a97b6ef3c49afeaf953cee4f0442764d236f525b",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-003-after-optimizer/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-003-after-optimizer/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-004-quality-post-optimize": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "e12a5fd38b9cef17816a521e67d4cd015dd72f806125947c8b9591abe01817bf",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-004-quality-post-optimize/saved-native.json",
+        "/capture/postprocessing/004-quality-post-optimize.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "14b66c142c10782e5563215497cecf845da87fdaff418f7a85b239bcf15f6d29",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-004-quality-post-optimize/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-004-quality-post-optimize/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-005-before-nudge": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "7afc9ecef785e0347280ae8d28d04f5e76b29a6af50566149b87f73f94e64c45",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-005-before-nudge/saved-native.json",
+        "/capture/postprocessing/005-before-nudge.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "4cfbc57b8ac8df2fa03bdc7c812f299836c6986621ed2adb52e5d258c73fca36",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-005-before-nudge/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-005-before-nudge/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-006-after-nudge": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "18cc4c3fc789cbb305d0ef10769e739df837fe9de3d84c6976aa7074ade9eb18",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-006-after-nudge/saved-native.json",
+        "/capture/postprocessing/006-after-nudge.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "3316a773d8fd95c34d1012ed7dfe4a27cc4896e8d21507570505dabeaeadfa03",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-006-after-nudge/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-006-after-nudge/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-007-quality-post-nudge": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "a46f0805b242ceb8daa46d95a7a66ea75a37efffee1ae644242dfce3c6010a7f",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-007-quality-post-nudge/saved-native.json",
+        "/capture/postprocessing/007-quality-post-nudge.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "27b496350568dabe221656e6523919e4f53828e763322675979b0c03b3e0a048",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-007-quality-post-nudge/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-007-quality-post-nudge/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-008-before-consolidation": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "071ee5cb1e3ef839e10d6fb08fff96b4c3495f466bc5b99d579b74dd0908696b",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-008-before-consolidation/saved-native.json",
+        "/capture/postprocessing/008-before-consolidation.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "68a3fa4e85855619263f1d29f9552f59318440a1b525944efec49b9ae505120f",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-008-before-consolidation/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-008-before-consolidation/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-009-quality-post-consolidate": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "b60bbd470d25139e5ecc91d39d072ee2d498871155ca806a4b28f85e5047866b",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-009-quality-post-consolidate/saved-native.json",
+        "/capture/postprocessing/009-quality-post-consolidate.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "94d8dad722350ce9e9496bdecf61746eb3bd8d7bd3260b7473d42678d433768a",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-009-quality-post-consolidate/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-009-quality-post-consolidate/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-010-after-consolidation": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "a39f2196cd95b42d01ba40c4fbc476e71983a03b19e3ff52e4358d2b977463ca",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-010-after-consolidation/saved-native.json",
+        "/capture/postprocessing/010-after-consolidation.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "edbd372c891c5e93b8d30122a0f217a98e60c2c219847378ad33fa1d91910c1e",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-010-after-consolidation/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-010-after-consolidation/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-011-before-finalize-gate": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "c66ce763c6257b1ad2c6c4cda01d5bfecece812badb8f8c45e497e07b0a575cc",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-011-before-finalize-gate/saved-native.json",
+        "/capture/postprocessing/011-before-finalize-gate.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "89e1bdef6edbd21babedfefb57917fbf1db1e860cd556f491fd7763386590b0b",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-011-before-finalize-gate/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-011-before-finalize-gate/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-012-after-finalize-gate": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "8d2af211f19e232d7bce474da3713353d193b055e0b0263ef6d5847257ea675b",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-012-after-finalize-gate/saved-native.json",
+        "/capture/postprocessing/012-after-finalize-gate.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "071ac54b1a1f1a28331a97cf4327696c037b10a4463cc0993a97f4590e529ed3",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-012-after-finalize-gate/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-012-after-finalize-gate/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-013-quality-post-finalize": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "18a0986f6700ec41033fc2300c91ceb2e5a5a2885f42dd30a6a3e683e65584a3",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-013-quality-post-finalize/saved-native.json",
+        "/capture/postprocessing/013-quality-post-finalize.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "ef2960c75613087420ed889cacfab194c6ca8c085866c19998f730af6552126f",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-013-quality-post-finalize/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-013-quality-post-finalize/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-014-before-group-tuning": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "036ffbbec5e315f8908168091f4aabd8843976ff8c6bba6516dff23890698d9b",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-014-before-group-tuning/saved-native.json",
+        "/capture/postprocessing/014-before-group-tuning.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "ba06456774a8d65b3c340e4b6eba55b0f47ea378138790252985823c9e30f40c",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-014-before-group-tuning/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-014-before-group-tuning/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-015-after-group-tuning": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "98bd249f7f30604e4f5566938700970921b624018bab15053eac20be61ac8009",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-015-after-group-tuning/saved-native.json",
+        "/capture/postprocessing/015-after-group-tuning.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "82deb13a1d26b5b18548d18450457ab95e31dcda6a3b36c14715b8c12bbe8b8e",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-015-after-group-tuning/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-015-after-group-tuning/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-016-before-cleanup-serialization": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "b8e11f8cf7e39d0f811e55e2b4cdd494e7ffc0c95b9884be9dc80b171e38c9e3",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-016-before-cleanup-serialization/saved-native.json",
+        "/capture/postprocessing/016-before-cleanup-serialization.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "dec5d53d71c0fc172e2c240d27358f50bd8c18fb7586dbdadde38080aacddd5d",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-016-before-cleanup-serialization/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-016-before-cleanup-serialization/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-017-after-cleanup-serialization": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "2e38a0878d41b220d3d48c9beae5ac28bc40e42f17b6b0cb1bce8711bc64ab89",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-017-after-cleanup-serialization/saved-native.json",
+        "/capture/postprocessing/017-after-cleanup-serialization.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "d66f6669789024af85520a95d3e5281e47515b74eed3a1a78b0c1212ea82ecee",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-017-after-cleanup-serialization/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-017-after-cleanup-serialization/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-018-terminal-before-engine-release": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "392c8427699a4569310a8a09941a3e98f44c9cc3dcee4c5832c16ef8d782f3a5",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-018-terminal-before-engine-release/saved-native.json",
+        "/capture/postprocessing/018-terminal-before-engine-release.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "712a1cb264b8fc166dc2ce9c64457a830f94077a8009bca1d3d30afe2f9a722c",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-018-terminal-before-engine-release/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-018-terminal-before-engine-release/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-native-fill-after": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "69058fb217c1b0681579468edaf54ce3021aa28dec6b73db4a3865b75734c1bf",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 13,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-native-fill-after/saved-native.json",
+        "/capture/postprocessing/native-fill-after.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "711bbf8f7e3eb57ee4214e74bf72b57668e8f84c025f153b4ae4cf933f7098aa",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-native-fill-after/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-native-fill-after/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "postprocessing-native-fill-before": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "3bef1762f3008783db132a478ca23545ec642c27436d4386e4a71f93ddd051f9",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-native-fill-before/saved-native.json",
+        "/capture/postprocessing/native-fill-before.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "52743a3ddc80220bcd59164e9f61f4d969c4a00093b9d9d9cfff8b8400dcb2be",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/postprocessing-native-fill-before/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/postprocessing-native-fill-before/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-001-loaded-prefix-native-fill": {
+    "identical_bytes_to": "postprocessing-native-fill-after",
+    "sha256": "69058fb217c1b0681579468edaf54ce3021aa28dec6b73db4a3865b75734c1bf"
+  },
+  "snapshots-002-before-auto_create_zones_for_pour_nets": {
+    "identical_bytes_to": "postprocessing-native-fill-after",
+    "sha256": "69058fb217c1b0681579468edaf54ce3021aa28dec6b73db4a3865b75734c1bf"
+  },
+  "snapshots-003-after-auto_create_zones_for_pour_nets": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "d48b09d1991b1334bbc64fbe44f8362eb3a017e4879e07dc72493712d75a753d",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-003-after-auto_create_zones_for_pour_nets/saved-native.json",
+        "/capture/finishing/snapshots/003-after-auto_create_zones_for_pour_nets.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "e5258a546c90f97fea59922aad6cb4e1fe5e606ad2f80e9376b69587c059c959",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-003-after-auto_create_zones_for_pour_nets/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-003-after-auto_create_zones_for_pour_nets/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-004-before-subprocess-3": {
+    "identical_bytes_to": "snapshots-003-after-auto_create_zones_for_pour_nets",
+    "sha256": "d48b09d1991b1334bbc64fbe44f8362eb3a017e4879e07dc72493712d75a753d"
+  },
+  "snapshots-005-after-subprocess-3": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "6c31749c5832e4af0ad9974366bb094c5373f0d99896075225efbd907698a63f",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 13,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-005-after-subprocess-3/saved-native.json",
+        "/capture/finishing/snapshots/005-after-subprocess-3.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "e5258a546c90f97fea59922aad6cb4e1fe5e606ad2f80e9376b69587c059c959",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-005-after-subprocess-3/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-005-after-subprocess-3/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-006-before-subprocess-5": {
+    "identical_bytes_to": "snapshots-005-after-subprocess-3",
+    "sha256": "6c31749c5832e4af0ad9974366bb094c5373f0d99896075225efbd907698a63f"
+  },
+  "snapshots-007-after-subprocess-5": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "5a4f36857200869462ca335a6e8308c4135775d8a4ccd3a74f10e957fdc28bae",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "isolated_copper": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-007-after-subprocess-5/saved-native.json",
+        "/capture/finishing/snapshots/007-after-subprocess-5.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "c0c16692cd509153370d0154aec22fcf794248ab2233afaef608262f4970ff46",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-007-after-subprocess-5/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-007-after-subprocess-5/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-008-before-_relocate_pad_drills": {
+    "identical_bytes_to": "snapshots-007-after-subprocess-5",
+    "sha256": "5a4f36857200869462ca335a6e8308c4135775d8a4ccd3a74f10e957fdc28bae"
+  },
+  "snapshots-009-after-_relocate_pad_drills": {
+    "identical_bytes_to": "snapshots-007-after-subprocess-5",
+    "sha256": "5a4f36857200869462ca335a6e8308c4135775d8a4ccd3a74f10e957fdc28bae"
+  },
+  "snapshots-010-before-_repair_pour_connectivity": {
+    "identical_bytes_to": "snapshots-007-after-subprocess-5",
+    "sha256": "5a4f36857200869462ca335a6e8308c4135775d8a4ccd3a74f10e957fdc28bae"
+  },
+  "snapshots-011-after-_repair_pour_connectivity": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "2ea5a905b35afc6d56a4039e7013e673c45a47519f571cbc9c5e2cc620283943",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "clearance": 99,
+        "hole_clearance": 69,
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-011-after-_repair_pour_connectivity/saved-native.json",
+        "/capture/finishing/snapshots/011-after-_repair_pour_connectivity.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "a2fe4862c18efe68970390f2f24a250448511b45d3601ff04b172f7c9aa4e0ad",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-011-after-_repair_pour_connectivity/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-011-after-_repair_pour_connectivity/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-012-before-subprocess-11": {
+    "identical_bytes_to": "snapshots-011-after-_repair_pour_connectivity",
+    "sha256": "2ea5a905b35afc6d56a4039e7013e673c45a47519f571cbc9c5e2cc620283943"
+  },
+  "snapshots-013-after-subprocess-11": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "ec144ee64c152bd14da8883a05a856276b3b8bda8dd3492b3055f2b5a4bf3455",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "isolated_copper": 4,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-013-after-subprocess-11/saved-native.json",
+        "/capture/finishing/snapshots/013-after-subprocess-11.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "a2fe4862c18efe68970390f2f24a250448511b45d3601ff04b172f7c9aa4e0ad",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3",
+        "GND"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-013-after-subprocess-11/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-013-after-subprocess-11/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-014-before-_try_local_pour_detour": {
+    "identical_bytes_to": "snapshots-013-after-subprocess-11",
+    "sha256": "ec144ee64c152bd14da8883a05a856276b3b8bda8dd3492b3055f2b5a4bf3455"
+  },
+  "snapshots-015-before-_repair_pour_connectivity": {
+    "identical_bytes_to": "snapshots-013-after-subprocess-11",
+    "sha256": "ec144ee64c152bd14da8883a05a856276b3b8bda8dd3492b3055f2b5a4bf3455"
+  },
+  "snapshots-016-after-_repair_pour_connectivity": {
+    "identical_bytes_to": "snapshots-013-after-subprocess-11",
+    "sha256": "ec144ee64c152bd14da8883a05a856276b3b8bda8dd3492b3055f2b5a4bf3455"
+  },
+  "snapshots-017-after-_try_local_pour_detour": {
+    "identical_bytes_to": "snapshots-013-after-subprocess-11",
+    "sha256": "ec144ee64c152bd14da8883a05a856276b3b8bda8dd3492b3055f2b5a4bf3455"
+  },
+  "snapshots-018-before-_repair_pour_connectivity": {
+    "identical_bytes_to": "snapshots-013-after-subprocess-11",
+    "sha256": "ec144ee64c152bd14da8883a05a856276b3b8bda8dd3492b3055f2b5a4bf3455"
+  },
+  "snapshots-019-after-_repair_pour_connectivity": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "48956811b973c176359ba2479480a9a2abc722a3694388b8643479859d1d0f4c",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V8",
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "clearance": 66,
+        "hole_clearance": 47,
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-019-after-_repair_pour_connectivity/saved-native.json",
+        "/capture/finishing/snapshots/019-after-_repair_pour_connectivity.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "f569c31b7c56ed9c92c06f2c658658f99fd6bf7afb9e0a62a6e32f2b6bf6a908",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-019-after-_repair_pour_connectivity/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-019-after-_repair_pour_connectivity/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-020-before-subprocess-19": {
+    "identical_bytes_to": "snapshots-019-after-_repair_pour_connectivity",
+    "sha256": "48956811b973c176359ba2479480a9a2abc722a3694388b8643479859d1d0f4c"
+  },
+  "snapshots-021-after-subprocess-19": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V8",
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-021-after-subprocess-19/saved-native.json",
+        "/capture/finishing/snapshots/021-after-subprocess-19.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "f569c31b7c56ed9c92c06f2c658658f99fd6bf7afb9e0a62a6e32f2b6bf6a908",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-021-after-subprocess-19/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-021-after-subprocess-19/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-022-before-_try_local_pour_detour": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-023-before-_repair_pour_connectivity": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-024-after-_repair_pour_connectivity": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-025-before-subprocess-24": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-026-after-subprocess-24": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-027-before-subprocess-26": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-028-after-subprocess-26": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-029-before-subprocess-28": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-030-after-subprocess-28": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-031-before-subprocess-30": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-032-after-subprocess-30": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-033-before-subprocess-32": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-034-after-subprocess-32": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-035-before-subprocess-34": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-036-after-subprocess-34": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-037-before-subprocess-36": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-038-after-subprocess-36": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-039-before-subprocess-38": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-040-after-subprocess-38": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-041-before-subprocess-40": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-042-after-subprocess-40": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-043-before-subprocess-42": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-044-after-subprocess-42": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-045-before-subprocess-44": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-046-after-subprocess-44": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-047-before-subprocess-46": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-048-after-subprocess-46": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-049-before-subprocess-48": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-050-after-subprocess-48": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-051-before-subprocess-50": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-052-after-subprocess-50": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-053-before-subprocess-52": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-054-after-subprocess-52": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-055-before-subprocess-54": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-056-after-subprocess-54": {
+    "identical_bytes_to": "snapshots-021-after-subprocess-19",
+    "sha256": "0388d8493e2722c43a437684b639a9cb9d71438d5c2b0626b04c2382e49e10c8"
+  },
+  "snapshots-057-after-_try_local_pour_detour": {
+    "saved_refilled_components_equal": true,
+    "saved": {
+      "sha256": "9f8ec88c07a855762d11feefbb02641d2cfe389b9c4165f8b4950fd93e9d7cf9",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-057-after-_try_local_pour_detour/saved-native.json",
+        "/capture/finishing/snapshots/057-after-_try_local_pour_detour.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "e36188392015d739ad7aa3f5ab165e713fa5abd459f760b784c60f18ccf132a0",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-057-after-_try_local_pour_detour/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-057-after-_try_local_pour_detour/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-058-before-quantize_pcb_file": {
+    "identical_bytes_to": "snapshots-057-after-_try_local_pour_detour",
+    "sha256": "9f8ec88c07a855762d11feefbb02641d2cfe389b9c4165f8b4950fd93e9d7cf9"
+  },
+  "snapshots-059-after-quantize_pcb_file": {
+    "saved_refilled_components_equal": true,
+    "saved": {
+      "sha256": "6777925c846231c4acfbe0f5de8ed3ba73000086ecc5ce8ee2caaa59d8ce2e76",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-059-after-quantize_pcb_file/saved-native.json",
+        "/capture/finishing/snapshots/059-after-quantize_pcb_file.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "1551c5c980286ff005812f3091dc9742d915d54976aa0ff78935a2c3a2570370",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-059-after-quantize_pcb_file/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-059-after-quantize_pcb_file/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-060-before-subprocess-59": {
+    "identical_bytes_to": "snapshots-059-after-quantize_pcb_file",
+    "sha256": "6777925c846231c4acfbe0f5de8ed3ba73000086ecc5ce8ee2caaa59d8ce2e76"
+  },
+  "snapshots-061-after-subprocess-59": {
+    "saved_refilled_components_equal": true,
+    "saved": {
+      "sha256": "9fa80d9388bf0f3fc3fe790cbcfd94a63a16c45121dbc529826d874a0ef992f0",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-061-after-subprocess-59/saved-native.json",
+        "/capture/finishing/snapshots/061-after-subprocess-59.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "1551c5c980286ff005812f3091dc9742d915d54976aa0ff78935a2c3a2570370",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-061-after-subprocess-59/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-061-after-subprocess-59/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-062-before-subprocess-61": {
+    "saved_refilled_components_equal": true,
+    "saved": {
+      "sha256": "19b348b8d8aba0ed1749200926eb664c3ab019c7519c8940579e6e04e6dc221a",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-062-before-subprocess-61/saved-native.json",
+        "/capture/finishing/snapshots/062-before-subprocess-61.kicad_pcb"
+      ],
+      "native_exit": 0
+    },
+    "refilled": {
+      "sha256": "5d46784dea466ce1f9db872b06b90105b95ce0a00ca0bad424e14b9a501460d6",
+      "pad_count": 244,
+      "all_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "via_dangling": 11,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      },
+      "drc_command": [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "--format",
+        "json",
+        "--output",
+        "/capture/native-stage-audit/snapshots-062-before-subprocess-61/refilled-native.json",
+        "--refill-zones",
+        "--save-board",
+        "/capture/native-stage-audit/snapshots-062-before-subprocess-61/refilled.kicad_pcb"
+      ],
+      "native_exit": 0
+    }
+  },
+  "snapshots-063-after-subprocess-61": {
+    "identical_bytes_to": "snapshots-062-before-subprocess-61",
+    "sha256": "19b348b8d8aba0ed1749200926eb664c3ab019c7519c8940579e6e04e6dc221a"
+  },
+  "snapshots-064-final-translated": {
+    "identical_bytes_to": "snapshots-062-before-subprocess-61",
+    "sha256": "19b348b8d8aba0ed1749200926eb664c3ab019c7519c8940579e6e04e6dc221a"
+  }
+}

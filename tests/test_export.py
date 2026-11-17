@@ -1,0 +1,1260 @@
+"""Tests for the export module."""
+
+import csv
+import io
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.exceptions import ConfigurationError
+from kicad_tools.export.bom_formats import (
+    BOMExportConfig,
+    GenericBOMFormatter,
+    JLCPCBBOMFormatter,
+    PCBWayBOMFormatter,
+    SeeedBOMFormatter,
+    export_bom,
+    get_bom_formatter,
+)
+from kicad_tools.export.pnp import (
+    GenericPnPFormatter,
+    JLCPCBPnPFormatter,
+    PCBWayPnPFormatter,
+    PlacementData,
+    PnPExportConfig,
+    SeeedPnPFormatter,
+    export_pnp,
+    extract_placements,
+    extract_tht_exclusions,
+    get_aux_origin,
+    get_pnp_formatter,
+    group_tht_exclusions,
+)
+
+
+# Mock BOM item for testing
+@dataclass
+class MockBOMItem:
+    reference: str
+    value: str
+    footprint: str
+    quantity: int = 1
+    lcsc: str = ""
+    manufacturer: str = ""
+    mfr_part: str = ""
+    dnp: bool = False
+
+
+# Mock Footprint for testing
+@dataclass
+class MockFootprint:
+    reference: str
+    value: str
+    name: str
+    position: tuple
+    rotation: float
+    layer: str
+    exclude_from_pos_files: bool = False
+    attr: str = "smd"
+    dnp: bool = False
+
+    @property
+    def sheet_position(self) -> tuple:
+        # Mock boards have a (0, 0) board origin: position is already sheet-absolute.
+        return self.position
+
+
+class TestBOMExportConfig:
+    """Tests for BOMExportConfig."""
+
+    def test_defaults(self):
+        config = BOMExportConfig()
+        assert config.include_dnp is False
+        assert config.group_by_value is True
+        assert config.include_lcsc is True
+        assert config.include_mfr is True
+
+
+class TestJLCPCBBOMFormatter:
+    """Tests for JLCPCB BOM formatter."""
+
+    @pytest.fixture
+    def items(self) -> list[MockBOMItem]:
+        return [
+            MockBOMItem("R1", "10k", "0402", lcsc="C123456"),
+            MockBOMItem("R2", "10k", "0402", lcsc="C123456"),
+            MockBOMItem("C1", "100nF", "0402", lcsc="C456789"),
+            MockBOMItem("U1", "STM32", "LQFP48", lcsc="C999999"),
+        ]
+
+    def test_headers(self):
+        formatter = JLCPCBBOMFormatter()
+        headers = formatter.get_headers()
+        assert headers == ["Comment", "Designator", "Footprint", "LCSC Part #"]
+
+    def test_format_grouped(self, items):
+        formatter = JLCPCBBOMFormatter()
+        output = formatter.format(items)
+
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+
+        # Header + 3 grouped rows (R1+R2, C1, U1)
+        assert len(rows) == 4
+
+        # Check header
+        assert rows[0] == ["Comment", "Designator", "Footprint", "LCSC Part #"]
+
+        # Check grouped resistors
+        r_row = next(r for r in rows[1:] if "10k" in r[0])
+        assert "R1" in r_row[1] and "R2" in r_row[1]
+        assert r_row[3] == "C123456"
+
+    def test_format_ungrouped(self, items):
+        config = BOMExportConfig(group_by_value=False)
+        formatter = JLCPCBBOMFormatter(config)
+        output = formatter.format(items)
+
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+
+        # Header + 4 rows (R1+R2 still share key, C1, U1)
+        # Note: Items with identical (value, footprint, lcsc) still get one row
+        assert len(rows) == 4
+
+    def test_filter_dnp(self, items):
+        items.append(MockBOMItem("R3", "1k", "0402", dnp=True))
+
+        # Without DNP
+        formatter = JLCPCBBOMFormatter()
+        output = formatter.format(items)
+        assert "R3" not in output
+
+        # With DNP
+        config = BOMExportConfig(include_dnp=True)
+        formatter = JLCPCBBOMFormatter(config)
+        output = formatter.format(items)
+        assert "R3" in output
+
+
+class TestPCBWayBOMFormatter:
+    """Tests for PCBWay BOM formatter."""
+
+    @pytest.fixture
+    def items(self) -> list[MockBOMItem]:
+        return [
+            MockBOMItem("R1", "10k", "0402", manufacturer="Yageo", mfr_part="RC0402"),
+            MockBOMItem("R2", "10k", "0402", manufacturer="Yageo", mfr_part="RC0402"),
+        ]
+
+    def test_headers(self):
+        formatter = PCBWayBOMFormatter()
+        headers = formatter.get_headers()
+        assert "Manufacturer" in headers
+        assert "Mfr. Part #" in headers
+
+    def test_format_includes_quantity(self, items):
+        formatter = PCBWayBOMFormatter()
+        output = formatter.format(items)
+
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+
+        # Find the row with resistors (grouped)
+        data_row = rows[1]
+        # Qty column should be 2 (R1 + R2)
+        assert data_row[2] == "2"
+
+
+class TestGenericBOMFormatter:
+    """Tests for Generic BOM formatter."""
+
+    def test_all_fields_included(self):
+        config = BOMExportConfig(include_lcsc=True, include_mfr=True)
+        formatter = GenericBOMFormatter(config)
+        headers = formatter.get_headers()
+
+        assert "LCSC" in headers
+        assert "Manufacturer" in headers
+        assert "MPN" in headers
+
+
+class TestGetBOMFormatter:
+    """Tests for get_bom_formatter function."""
+
+    def test_get_jlcpcb(self):
+        formatter = get_bom_formatter("jlcpcb")
+        assert isinstance(formatter, JLCPCBBOMFormatter)
+
+    def test_get_pcbway(self):
+        formatter = get_bom_formatter("pcbway")
+        assert isinstance(formatter, PCBWayBOMFormatter)
+
+    def test_get_seeed(self):
+        formatter = get_bom_formatter("seeed")
+        assert isinstance(formatter, SeeedBOMFormatter)
+
+    def test_get_generic(self):
+        formatter = get_bom_formatter("generic")
+        assert isinstance(formatter, GenericBOMFormatter)
+
+    def test_case_insensitive(self):
+        formatter = get_bom_formatter("JLCPCB")
+        assert isinstance(formatter, JLCPCBBOMFormatter)
+
+    def test_unknown_raises(self):
+        with pytest.raises(ConfigurationError, match="Unknown manufacturer"):
+            get_bom_formatter("unknown")
+
+
+class TestExportBOM:
+    """Tests for export_bom convenience function."""
+
+    def test_export_bom(self):
+        items = [MockBOMItem("R1", "10k", "0402", lcsc="C123")]
+        output = export_bom(items, "jlcpcb")
+        assert "R1" in output
+        assert "C123" in output
+
+
+class TestPlacementData:
+    """Tests for PlacementData dataclass."""
+
+    def test_creation(self):
+        pd = PlacementData(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            x=10.5,
+            y=20.3,
+            rotation=90.0,
+            layer="F.Cu",
+        )
+        assert pd.reference == "R1"
+        assert pd.x == 10.5
+        assert pd.rotation == 90.0
+
+
+class TestPnPExportConfig:
+    """Tests for PnPExportConfig."""
+
+    def test_defaults(self):
+        config = PnPExportConfig()
+        assert config.x_offset == 0.0
+        assert config.y_offset == 0.0
+        assert config.mirror_x is False
+        assert config.rotation_offset == 0.0
+
+
+class TestJLCPCBPnPFormatter:
+    """Tests for JLCPCB pick-and-place formatter."""
+
+    @pytest.fixture
+    def placements(self) -> list[PlacementData]:
+        return [
+            PlacementData("R1", "10k", "0402", 10.0, 20.0, 0.0, "F.Cu"),
+            PlacementData("U1", "STM32", "LQFP48", 50.0, 50.0, 45.0, "F.Cu"),
+            PlacementData("C1", "100nF", "0402", 15.0, 25.0, 180.0, "B.Cu"),
+        ]
+
+    def test_headers(self):
+        formatter = JLCPCBPnPFormatter()
+        headers = formatter.get_headers()
+        assert headers == ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+
+    def test_format_includes_all(self, placements):
+        formatter = JLCPCBPnPFormatter()
+        output = formatter.format(placements)
+
+        assert "R1" in output
+        assert "U1" in output
+        assert "C1" in output
+
+    def test_layer_capitalized_top_bottom(self, placements):
+        formatter = JLCPCBPnPFormatter()
+        output = formatter.format(placements)
+
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+
+        # JLCPCB expects capitalized "Top" and "Bottom" layer values
+        layer_values = [row[-1] for row in rows[1:]]  # skip header
+        assert "Top" in layer_values
+        assert "Bottom" in layer_values
+
+        # Ensure we do NOT have lowercase-only "top"/"bottom"
+        # (The values must be exactly "Top" and "Bottom", not "top" and "bottom")
+        for val in layer_values:
+            assert val in ("Top", "Bottom"), f"Unexpected layer value: {val!r}"
+
+    def test_filter_top_only(self, placements):
+        config = PnPExportConfig(top_only=True)
+        formatter = JLCPCBPnPFormatter(config)
+        output = formatter.format(placements)
+
+        assert "R1" in output
+        assert "U1" in output
+        assert "C1" not in output  # C1 is on bottom
+
+    def test_filter_bottom_only(self, placements):
+        config = PnPExportConfig(bottom_only=True)
+        formatter = JLCPCBPnPFormatter(config)
+        output = formatter.format(placements)
+
+        assert "C1" in output
+        assert "R1" not in output
+        assert "U1" not in output
+
+
+class TestSeeedPnPFormatter:
+    """Tests for Seeed Fusion pick-and-place formatter."""
+
+    @pytest.fixture
+    def placements(self) -> list[PlacementData]:
+        return [
+            PlacementData("R1", "10k", "0402", 10.0, 20.0, 0.0, "F.Cu"),
+            PlacementData("U1", "STM32", "LQFP48", 50.0, 50.0, 45.0, "F.Cu"),
+            PlacementData("C1", "100nF", "0402", 15.0, 25.0, 180.0, "B.Cu"),
+        ]
+
+    def test_headers(self):
+        formatter = SeeedPnPFormatter()
+        headers = formatter.get_headers()
+        assert headers == ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+
+    def test_format_includes_all(self, placements):
+        formatter = SeeedPnPFormatter()
+        output = formatter.format(placements)
+
+        assert "R1" in output
+        assert "U1" in output
+        assert "C1" in output
+
+    def test_layer_top_bottom(self, placements):
+        formatter = SeeedPnPFormatter()
+        output = formatter.format(placements)
+
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+
+        layer_values = [row[-1] for row in rows[1:]]
+        assert "Top" in layer_values
+        assert "Bottom" in layer_values
+
+
+class TestPnPTransforms:
+    """Tests for coordinate transforms."""
+
+    def test_offset(self):
+        config = PnPExportConfig(x_offset=5.0, y_offset=-3.0)
+        formatter = JLCPCBPnPFormatter(config)
+
+        placement = PlacementData("R1", "10k", "0402", 10.0, 20.0, 0.0, "F.Cu")
+        transformed = formatter.apply_transforms(placement)
+
+        assert transformed.x == 15.0
+        assert transformed.y == 17.0
+
+    def test_mirror(self):
+        config = PnPExportConfig(mirror_x=True)
+        formatter = JLCPCBPnPFormatter(config)
+
+        placement = PlacementData("R1", "10k", "0402", 10.0, 20.0, 0.0, "F.Cu")
+        transformed = formatter.apply_transforms(placement)
+
+        assert transformed.x == -10.0
+        assert transformed.y == 20.0
+
+    def test_rotation_offset(self):
+        config = PnPExportConfig(rotation_offset=90.0)
+        formatter = JLCPCBPnPFormatter(config)
+
+        placement = PlacementData("R1", "10k", "0402", 10.0, 20.0, 45.0, "F.Cu")
+        transformed = formatter.apply_transforms(placement)
+
+        assert transformed.rotation == 135.0
+
+    def test_rotation_wraparound(self):
+        config = PnPExportConfig(rotation_offset=180.0)
+        formatter = JLCPCBPnPFormatter(config)
+
+        placement = PlacementData("R1", "10k", "0402", 10.0, 20.0, 270.0, "F.Cu")
+        transformed = formatter.apply_transforms(placement)
+
+        assert transformed.rotation == 90.0
+
+
+class TestGetPnPFormatter:
+    """Tests for get_pnp_formatter function."""
+
+    def test_get_jlcpcb(self):
+        formatter = get_pnp_formatter("jlcpcb")
+        assert isinstance(formatter, JLCPCBPnPFormatter)
+
+    def test_get_pcbway(self):
+        formatter = get_pnp_formatter("pcbway")
+        assert isinstance(formatter, PCBWayPnPFormatter)
+
+    def test_get_seeed(self):
+        formatter = get_pnp_formatter("seeed")
+        assert isinstance(formatter, SeeedPnPFormatter)
+
+    def test_get_generic(self):
+        formatter = get_pnp_formatter("generic")
+        assert isinstance(formatter, GenericPnPFormatter)
+
+    def test_unknown_raises(self):
+        with pytest.raises(ConfigurationError, match="Unknown manufacturer"):
+            get_pnp_formatter("unknown")
+
+
+class TestExtractPlacements:
+    """Tests for extract_placements function."""
+
+    def test_extract_basic(self):
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+            MockFootprint("U1", "STM32", "LQFP48", (50.0, 50.0), 45.0, "F.Cu"),
+        ]
+
+        placements = extract_placements(footprints)
+
+        assert len(placements) == 2
+        assert placements[0].reference == "R1"
+        assert placements[0].x == 10.0
+        assert placements[1].reference == "U1"
+        assert placements[1].rotation == 45.0
+
+    def test_excludes_pos_excluded(self):
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+            MockFootprint(
+                "MH1", "MountHole", "MH_3mm", (0.0, 0.0), 0.0, "F.Cu", exclude_from_pos_files=True
+            ),
+        ]
+
+        placements = extract_placements(footprints)
+
+        assert len(placements) == 1
+        assert placements[0].reference == "R1"
+
+
+class TestExportPnP:
+    """Tests for export_pnp convenience function."""
+
+    def test_export_pnp(self):
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+
+        output = export_pnp(footprints, "jlcpcb")
+
+        assert "R1" in output
+        assert "10k" in output
+
+
+class TestSetupAuxAxisOrigin:
+    """Tests for aux_axis_origin parsing in PCB Setup."""
+
+    def test_aux_axis_origin_default(self):
+        """Setup dataclass should default aux_axis_origin to (0, 0)."""
+        from kicad_tools.schema.pcb import Setup
+
+        setup = Setup()
+        assert setup.aux_axis_origin == (0.0, 0.0)
+
+    def test_aux_axis_origin_parsed_from_pcb(self):
+        """Verify aux_axis_origin is parsed from the multilayer_zones fixture."""
+        from kicad_tools.schema.pcb import PCB
+
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        pcb = PCB.load(fixture)
+        assert pcb.setup is not None
+        # The fixture has (aux_axis_origin 0 0)
+        assert pcb.setup.aux_axis_origin == (0.0, 0.0)
+
+
+class TestGetAuxOrigin:
+    """Tests for get_aux_origin helper function."""
+
+    def test_get_aux_origin_from_fixture(self):
+        """get_aux_origin should return the aux_axis_origin from the PCB file."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        origin = get_aux_origin(fixture)
+        assert origin == (0.0, 0.0)
+
+
+def _cpl_rows(output: str) -> dict[str, dict[str, str]]:
+    import csv
+    import io
+
+    return {r["Designator"]: r for r in csv.DictReader(io.StringIO(output))}
+
+
+class TestExportPnPWithAuxOrigin:
+    """Tests for export_pnp with auxiliary origin auto-detection."""
+
+    def test_export_pnp_without_pcb_path(self):
+        """export_pnp without pcb_path should work as before."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb")
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
+
+    def test_export_pnp_with_pcb_path_zero_origin(self):
+        """export_pnp with pcb_path but (0,0) aux origin should not change coords."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb", pcb_path=fixture)
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
+
+    def test_export_pnp_use_aux_origin_disabled(self):
+        """export_pnp with use_aux_origin=False should skip origin auto-detection."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        config = PnPExportConfig(use_aux_origin=False)
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
+
+    def test_export_pnp_manual_offset_combined(self):
+        """Manual x_offset/y_offset should combine with aux origin offset."""
+        # Even with zero aux origin, manual offsets should still be applied
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        config = PnPExportConfig(x_offset=5.0, y_offset=-3.0)
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
+        # x: 10 + 5 = 15; Y-up frame: -20 + (-3) = -23
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("15.0000mm", "-23.0000mm")
+
+    def test_aux_origin_config_none_jlcpcb_includes_tht(self, tmp_path):
+        """Aux-origin branch + config=None must honor JLCPCB's exclude_tht default.
+
+        Regression test for issue #3618: the aux-origin branch used to
+        synthesize a bare PnPExportConfig when config was None, silently
+        dropping the formatter's default.  The CPL and the hand-solder set
+        (computed from the formatter's effective config) could then diverge.
+        JLCPCB now assembles THT (issue #7239), so the default includes THT
+        and the hand-solder set is empty.
+        """
+        # Build a PCB with a NONZERO aux origin so the branch actually fires.
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        pcb_text = fixture.read_text().replace("(aux_axis_origin 0 0)", "(aux_axis_origin 100 50)")
+        assert "(aux_axis_origin 100 50)" in pcb_text
+        pcb_path = tmp_path / "aux_origin.kicad_pcb"
+        pcb_path.write_text(pcb_text)
+        assert get_aux_origin(pcb_path) == (100.0, 50.0)
+
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (110.0, 70.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1",
+                "Conn_01x04",
+                "PinHeader_1x04",
+                (150.0, 60.0),
+                0.0,
+                "F.Cu",
+                attr="through_hole",
+            ),
+        ]
+
+        output = export_pnp(footprints, "jlcpcb", config=None, pcb_path=pcb_path)
+
+        # THT component kept in the CPL (JLCPCB default, issue #7239),
+        # in the aux-origin, Y-up frame: x = 110 - 100 = 10, y = 50 - 70 = -20
+        # for R1 and x = 50, y = -10 for J1.
+        rows = _cpl_rows(output)
+        assert (rows["R1"]["Mid X"], rows["R1"]["Mid Y"]) == ("10.0000mm", "-20.0000mm")
+        assert (rows["J1"]["Mid X"], rows["J1"]["Mid Y"]) == ("50.0000mm", "-10.0000mm")
+
+        # The hand-solder set computed from the formatter's effective config
+        # (the assembly.py pattern) must AGREE with the CPL: nothing excluded.
+        effective = get_pnp_formatter("jlcpcb", None).config
+        assert extract_tht_exclusions(footprints, effective) == []
+
+    def test_aux_origin_explicit_config_fields_preserved(self, tmp_path):
+        """dataclasses.replace path keeps all caller-set fields intact."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        pcb_text = fixture.read_text().replace("(aux_axis_origin 0 0)", "(aux_axis_origin 100 50)")
+        pcb_path = tmp_path / "aux_origin.kicad_pcb"
+        pcb_path.write_text(pcb_text)
+
+        config = PnPExportConfig(x_offset=5.0, y_offset=-3.0, exclude_tht=False)
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (110.0, 70.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (150.0, 60.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+        ]
+        output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=pcb_path)
+
+        # Explicit exclude_tht=False overrides the JLCPCB default: J1 stays.
+        assert "J1" in output
+        # Manual offsets apply after the frame transform:
+        # x = 110 - 100 + 5 = 15; y = (50 - 70) + (-3) = -23.
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("15.0000mm", "-23.0000mm")
+
+
+class TestCplFrame:
+    """CPL coordinates use KiCad's pos frame / the Gerbers' frame (#7059)."""
+
+    FPS = [
+        MockFootprint("R1", "10k", "0402", (105.0, 105.0), 0.0, "F.Cu"),
+        MockFootprint("R2", "10k", "0402", (115.0, 107.0), 180.0, "B.Cu"),
+    ]
+
+    def _xy(self, output, ref):
+        row = _cpl_rows(output)[ref]
+        return row["Mid X"], row["Mid Y"]
+
+    def test_aux_origin_lower_left(self):
+        out = export_pnp(self.FPS, "jlcpcb", aux_origin=(100.0, 110.0))
+        assert self._xy(out, "R1") == ("5.0000mm", "5.0000mm")
+        assert self._xy(out, "R2") == ("15.0000mm", "3.0000mm")
+        assert _cpl_rows(out)["R2"]["Rotation"] == "180.0"
+        assert _cpl_rows(out)["R2"]["Layer"] == "Bottom"
+
+    def test_no_aux_origin(self):
+        out = export_pnp(self.FPS, "jlcpcb")
+        assert self._xy(out, "R1") == ("105.0000mm", "-105.0000mm")
+        assert self._xy(out, "R2") == ("115.0000mm", "-107.0000mm")
+
+    def test_use_aux_origin_false_ignores_origin(self):
+        cfg = PnPExportConfig(use_aux_origin=False)
+        out = export_pnp(self.FPS, "jlcpcb", config=cfg, aux_origin=(100.0, 110.0))
+        assert self._xy(out, "R1") == ("105.0000mm", "-105.0000mm")
+
+    @pytest.mark.parametrize("mfr", ["generic", "pcbway", "seeed"])
+    def test_other_formatters_share_frame(self, mfr):
+        out = export_pnp(self.FPS, mfr, aux_origin=(100.0, 110.0))
+        r2 = next(line for line in out.splitlines() if "R2" in line)
+        assert "15.0000" in r2 and "3.0000" in r2 and "-" not in r2
+
+    def test_pcb_path_reads_aux_origin(self, tmp_path):
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        text = fixture.read_text().replace("(aux_axis_origin 0 0)", "(aux_axis_origin 100 110)")
+        pcb_path = tmp_path / "b.kicad_pcb"
+        pcb_path.write_text(text)
+        out = export_pnp(self.FPS, "jlcpcb", pcb_path=pcb_path)
+        assert self._xy(out, "R2") == ("15.0000mm", "3.0000mm")
+
+    def test_footprint_sheet_position_adds_board_origin(self):
+        from kicad_tools.schema.pcb import Footprint
+
+        fp = Footprint(
+            name="x", layer="F.Cu", position=(5.0, 5.0), rotation=0.0, reference="R1", value="v"
+        )
+        object.__setattr__(fp, "_board_origin", (100.0, 100.0))
+        assert fp.sheet_position == (105.0, 105.0)
+
+
+class TestGerberExporter:
+    """Tests for GerberExporter (basic tests without kicad-cli)."""
+
+    def test_find_kicad_cli_not_found(self):
+        from kicad_tools.export.gerber import find_kicad_cli
+
+        # This might find kicad-cli or not depending on environment
+        # Just test it doesn't crash
+        result = find_kicad_cli()
+        assert result is None or isinstance(result, Path)
+
+    def test_manufacturer_presets_exist(self):
+        from kicad_tools.export.gerber import MANUFACTURER_PRESETS
+
+        assert "jlcpcb" in MANUFACTURER_PRESETS
+        assert "pcbway" in MANUFACTURER_PRESETS
+        assert "oshpark" in MANUFACTURER_PRESETS
+        assert "seeed" in MANUFACTURER_PRESETS
+
+
+class TestAssemblyConfig:
+    """Tests for AssemblyConfig."""
+
+    def test_defaults(self):
+        from kicad_tools.export.assembly import AssemblyConfig
+
+        config = AssemblyConfig()
+        assert config.include_bom is True
+        assert config.include_pnp is True
+        assert config.include_gerbers is True
+
+    def test_filename_templates(self):
+        from kicad_tools.export.assembly import AssemblyConfig
+
+        config = AssemblyConfig()
+        assert "{manufacturer}" in config.bom_filename
+        assert "{manufacturer}" in config.pnp_filename
+
+
+class TestAssemblyPackageResult:
+    """Tests for AssemblyPackageResult."""
+
+    def test_success_when_no_errors(self):
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = AssemblyPackageResult(
+            output_dir=Path("output"),
+            bom_path=Path("output/bom.csv"),
+            pnp_path=Path("output/cpl.csv"),
+        )
+        assert result.success is True
+
+    def test_failure_when_errors(self):
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = AssemblyPackageResult(
+            output_dir=Path("output"),
+            errors=["BOM generation failed"],
+        )
+        assert result.success is False
+
+    def test_str_representation(self):
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = AssemblyPackageResult(
+            output_dir=Path("output"),
+            bom_path=Path("output/bom.csv"),
+        )
+        output = str(result)
+        assert "Assembly Package" in output
+        assert "BOM" in output
+
+
+class TestExtractPlacementsTHTFiltering:
+    """Tests for THT filtering in extract_placements."""
+
+    @pytest.fixture
+    def mixed_footprints(self) -> list[MockFootprint]:
+        """Board with SMD and THT components."""
+        return [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint("U1", "STM32", "LQFP48", (30.0, 30.0), 45.0, "F.Cu", attr="smd"),
+        ]
+
+    def test_default_config_includes_tht(self, mixed_footprints):
+        """Default PnPExportConfig does not exclude THT."""
+        config = PnPExportConfig()
+        placements = extract_placements(mixed_footprints, config)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1", "C1", "J1", "U1"}
+
+    def test_exclude_tht_filters_through_hole(self, mixed_footprints):
+        """exclude_tht=True should remove through_hole footprints."""
+        config = PnPExportConfig(exclude_tht=True)
+        placements = extract_placements(mixed_footprints, config)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1", "C1", "U1"}
+        assert "J1" not in refs
+
+    def test_exclude_tht_keeps_smd(self, mixed_footprints):
+        """exclude_tht should not affect SMD components."""
+        config = PnPExportConfig(exclude_tht=True)
+        placements = extract_placements(mixed_footprints, config)
+        assert len(placements) == 3
+
+    def test_all_tht_board_produces_empty_cpl(self):
+        """Board with only THT components + exclude_tht should produce empty list."""
+        footprints = [
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint(
+                "J2", "Conn", "PinHeader", (20.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        placements = extract_placements(footprints, config)
+        assert len(placements) == 0
+
+
+class TestExtractPlacementsDNPFiltering:
+    """Tests for DNP filtering in extract_placements."""
+
+    def test_dnp_excluded_by_default(self):
+        """DNP footprints should be excluded by default."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("R2", "1k", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd", dnp=True),
+        ]
+        placements = extract_placements(footprints)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1"}
+
+    def test_dnp_included_when_configured(self):
+        """DNP footprints should be included when include_dnp=True."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("R2", "1k", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd", dnp=True),
+        ]
+        config = PnPExportConfig(include_dnp=True)
+        placements = extract_placements(footprints, config)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1", "R2"}
+
+
+class TestJLCPCBPnPFormatterDefaults:
+    """Tests for JLCPCB formatter default THT exclusion."""
+
+    def test_jlcpcb_defaults_include_tht(self):
+        """JLCPCB formatter should default to exclude_tht=False (issue #7239)."""
+        formatter = JLCPCBPnPFormatter()
+        assert formatter.config.exclude_tht is False
+
+    def test_jlcpcb_explicit_exclude_tht(self):
+        """Passing exclude_tht=True should override JLCPCB default."""
+        config = PnPExportConfig(exclude_tht=True)
+        formatter = JLCPCBPnPFormatter(config)
+        assert formatter.config.exclude_tht is True
+
+    def test_generic_does_not_exclude_tht(self):
+        """Generic formatter should include THT by default."""
+        formatter = GenericPnPFormatter()
+        assert formatter.config.exclude_tht is False
+
+    def test_pcbway_does_not_exclude_tht(self):
+        """PCBWay formatter should include THT by default."""
+        formatter = PCBWayPnPFormatter()
+        assert formatter.config.exclude_tht is False
+
+
+class TestExportPnPTHTIntegration:
+    """Integration tests for THT filtering through export_pnp."""
+
+    @pytest.fixture
+    def mixed_footprints(self) -> list[MockFootprint]:
+        return [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1", "Conn", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+        ]
+
+    def test_jlcpcb_includes_tht(self, mixed_footprints):
+        """JLCPCB export should include THT components by default (issue #7239)."""
+        output = export_pnp(mixed_footprints, "jlcpcb")
+        assert "R1" in output
+        assert "J1" in output
+
+    def test_jlcpcb_exclude_tht_override(self, mixed_footprints):
+        """JLCPCB export with exclude_tht=True should drop THT."""
+        config = PnPExportConfig(exclude_tht=True)
+        output = export_pnp(mixed_footprints, "jlcpcb", config=config)
+        assert "R1" in output
+        assert "J1" not in output
+
+    def test_generic_includes_tht(self, mixed_footprints):
+        """Generic export should include THT components by default."""
+        output = export_pnp(mixed_footprints, "generic")
+        assert "R1" in output
+        assert "J1" in output
+
+    def test_pcbway_includes_tht(self, mixed_footprints):
+        """PCBWay export should include THT components by default."""
+        output = export_pnp(mixed_footprints, "pcbway")
+        assert "R1" in output
+        assert "J1" in output
+
+
+class TestAssemblyPackageJLCPCBTHTIntegration:
+    """Integration test: AssemblyPackage JLCPCB path keeps THT components."""
+
+    def test_jlcpcb_assembly_package_includes_tht(self, tmp_path):
+        """AssemblyPackage with manufacturer='jlcpcb' and no explicit pnp_config
+        should produce a CPL file that includes through-hole components
+        (JLCPCB assembles THT, issue #7239).
+
+        This guards against AssemblyPackage._generate_pnp() overriding the
+        JLCPCB formatter's own default with a bare PnPExportConfig.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        # Create a minimal PCB file so the constructor's existence check passes
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        config = AssemblyConfig(
+            include_bom=False,
+            include_gerbers=False,
+            include_pnp=True,
+            # Intentionally leave pnp_config=None to exercise the default path
+        )
+
+        pkg = AssemblyPackage(
+            pcb_path=pcb_file,
+            schematic_path=None,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+
+        # Mock PCB.load to return footprints with mixed SMD and THT
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+        ]
+
+        # Patch PCB at the schema module level; the lazy import in
+        # _generate_pnp (``from ..schema.pcb import PCB``) resolves
+        # against this module.
+        with patch("kicad_tools.schema.pcb.PCB") as MockPCB:
+            MockPCB.load.return_value = mock_pcb
+            result = pkg.export(output_dir=tmp_path / "out")
+
+        assert result.pnp_path is not None
+        cpl_content = result.pnp_path.read_text()
+
+        # SMD components must be present
+        assert "R1" in cpl_content
+        assert "C1" in cpl_content
+        # THT connector must be present
+        assert "J1" in cpl_content
+
+
+class TestAssemblyPackageExplicitSourcingIntegration:
+    """Integration regression for issue #4995, on the real board 06 PCB.
+
+    #4995: board 06's spec sourced J1/J2/J3 as Samtec headers (``mpn`` set,
+    no ``lcsc``) and ``enrich_bom_lcsc``'s generic (value, footprint)
+    auto-matcher silently gave J1 an unrelated LCSC part (``C404027``).
+    Explicit MPN-only parts must stay unresolved even with the default
+    ``auto_lcsc=True``.
+
+    Issue #7422 (operator ruling #7268 Q2 = 3) since swapped J1-J3 for
+    reviewed LCSC-stocked PZ254V headers, so the committed spec no longer
+    has an MPN-only part. The guard therefore runs against a temporary copy
+    of the spec with the Samtec entries restored (issue #7445), and a second
+    test pins the reviewed sourcing on the committed spec.
+    """
+
+    @staticmethod
+    def _export_rows(spec_path: Path | None = None):
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+        from tests._board06_sourcing import BOARD06_PCB
+
+        if not BOARD06_PCB.exists():
+            pytest.skip("board06 routed fixture not present in this checkout")
+
+        config = AssemblyConfig(
+            include_bom=True,
+            include_pnp=False,
+            include_gerbers=False,
+            auto_lcsc=True,  # exercise the default, not the --no-auto-lcsc workaround
+            merge_lcsc=False,  # isolate spec-overlay behavior from any committed CSV
+            spec_path=spec_path,
+        )
+        pkg = AssemblyPackage(pcb_path=BOARD06_PCB, manufacturer="jlcpcb-tier1", config=config)
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = pkg.export(output_dir=Path(tmp))
+            assert result.bom_path is not None
+            with open(result.bom_path, newline="") as f:
+                rows = list(csv.DictReader(f))
+
+        by_ref: dict[str, dict] = {}
+        for row in rows:
+            for ref in row["Designator"].split(","):
+                by_ref[ref.strip()] = row
+        return result, by_ref
+
+    def test_board06_explicit_samtec_headers_stay_unresolved(self, tmp_path):
+        from tests._board06_sourcing import SAMTEC_HEADERS, write_samtec_spec
+
+        result, by_ref = self._export_rows(write_samtec_spec(tmp_path))
+
+        # The explicit Samtec-sourced headers must never acquire a generic
+        # LCSC substitute -- not the old C404027, and not the PZ254V parts
+        # the committed spec now reviews either.
+        for ref in SAMTEC_HEADERS:
+            assert ref in by_ref, f"{ref} missing from generated BOM"
+            assert by_ref[ref]["LCSC Part #"] == "", (
+                f"{ref} acquired an unreviewed LCSC substitute "
+                f"({by_ref[ref]['LCSC Part #']!r}) despite explicit Samtec "
+                "sourcing with no LCSC in the project spec (issue #4995)"
+            )
+
+        # Sanity: the enrichment report distinguishes this from a genuine
+        # "no match found" and other refs are unaffected (still get an
+        # LCSC either from the spec overlay or generic auto-matching).
+        assert result.lcsc_enrichment is not None
+        assert result.lcsc_enrichment.spec_unresolved == 3
+        assert {
+            e for entry in result.lcsc_enrichment.spec_unresolved_entries for e in entry.references
+        } == set(SAMTEC_HEADERS)
+
+    def test_board06_reviewed_pz254v_headers_come_from_the_spec(self):
+        """The committed spec's reviewed J1-J3 sourcing (#7422) is emitted exactly."""
+        from tests._board06_sourcing import REVIEWED_HEADERS
+
+        result, by_ref = self._export_rows()
+
+        for ref, (_mpn, lcsc) in REVIEWED_HEADERS.items():
+            assert by_ref[ref]["LCSC Part #"] == lcsc, ref
+        assert result.lcsc_enrichment is not None
+        assert result.lcsc_enrichment.spec_unresolved == 0
+        header_entries = {
+            ref: entry
+            for entry in result.lcsc_enrichment.entries
+            for ref in entry.references
+            if ref in REVIEWED_HEADERS
+        }
+        assert set(header_entries) == set(REVIEWED_HEADERS)
+        for ref, entry in header_entries.items():
+            assert (entry.source, entry.lcsc_part) == ("spec", REVIEWED_HEADERS[ref][1]), ref
+
+
+class TestExtractTHTExclusions:
+    """Tests for extract_tht_exclusions (issue #3539)."""
+
+    @pytest.fixture
+    def mixed_footprints(self) -> list[MockFootprint]:
+        return [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("R20", "1k", "THT_Axial", (12.0, 20.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint("R6", "1k", "THT_Axial", (14.0, 20.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint(
+                "J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint("U1", "STM32", "LQFP48", (30.0, 30.0), 45.0, "F.Cu", attr="smd"),
+        ]
+
+    def test_lists_exactly_the_excluded_tht_set(self, mixed_footprints):
+        """Exclusions must be exactly the THT parts the CPL filter drops."""
+        config = PnPExportConfig(exclude_tht=True)
+        included = {p.reference for p in extract_placements(mixed_footprints, config)}
+        excluded = extract_tht_exclusions(mixed_footprints, config)
+        excluded_refs = {p.reference for p in excluded}
+
+        assert excluded_refs == {"R6", "R20", "J1"}
+        assert excluded_refs.isdisjoint(included)
+        all_refs = {fp.reference for fp in mixed_footprints}
+        assert included | excluded_refs == all_refs
+
+    def test_natural_reference_ordering(self, mixed_footprints):
+        """R6 must sort before R20 (natural, not lexicographic, order)."""
+        config = PnPExportConfig(exclude_tht=True)
+        refs = [p.reference for p in extract_tht_exclusions(mixed_footprints, config)]
+        assert refs == ["J1", "R6", "R20"]
+
+    def test_exclude_tht_false_returns_empty(self, mixed_footprints):
+        """When the CPL includes THT, nothing is hand-solder-excluded."""
+        config = PnPExportConfig(exclude_tht=False)
+        assert extract_tht_exclusions(mixed_footprints, config) == []
+
+    def test_no_config_returns_empty(self, mixed_footprints):
+        """Default config has exclude_tht=False -> empty exclusion set."""
+        assert extract_tht_exclusions(mixed_footprints) == []
+
+    def test_smd_only_board_returns_empty(self):
+        """SMD-only board has no hand-solder set even with exclude_tht."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        assert extract_tht_exclusions(footprints, config) == []
+
+    def test_dnp_tht_not_listed(self):
+        """DNP THT parts are not placed at all -> not in the hand-solder set."""
+        footprints = [
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint(
+                "J2", "Conn", "PinHeader", (20.0, 10.0), 0.0, "F.Cu", attr="through_hole", dnp=True
+            ),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        refs = [p.reference for p in extract_tht_exclusions(footprints, config)]
+        assert refs == ["J1"]
+
+    def test_exclude_from_pos_files_not_listed(self):
+        """Footprints excluded from position files are never CPL candidates."""
+        footprints = [
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint(
+                "H1",
+                "MountingHole",
+                "MountingHole_3.2mm",
+                (20.0, 10.0),
+                0.0,
+                "F.Cu",
+                attr="through_hole",
+                exclude_from_pos_files=True,
+            ),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        refs = [p.reference for p in extract_tht_exclusions(footprints, config)]
+        assert refs == ["J1"]
+
+
+class TestGroupTHTExclusions:
+    """Tests for group_tht_exclusions presentation grouping (issue #3539)."""
+
+    def test_groups_by_value_and_footprint(self):
+        placements = [
+            PlacementData("R20", "1k", "THT_Axial", 0, 0, 0, "F.Cu"),
+            PlacementData("R6", "1k", "THT_Axial", 0, 0, 0, "F.Cu"),
+            PlacementData("J1", "Conn_01x04", "PinHeader_1x04", 0, 0, 0, "F.Cu"),
+        ]
+        rows = group_tht_exclusions(placements)
+
+        assert rows == [
+            {"value": "Conn_01x04", "footprint": "PinHeader_1x04", "qty": 1, "refs": "J1"},
+            {"value": "1k", "footprint": "THT_Axial", "qty": 2, "refs": "R6, R20"},
+        ]
+
+    def test_same_value_different_footprint_not_merged(self):
+        placements = [
+            PlacementData("R1", "1k", "THT_Axial_Small", 0, 0, 0, "F.Cu"),
+            PlacementData("R2", "1k", "THT_Axial_Large", 0, 0, 0, "F.Cu"),
+        ]
+        rows = group_tht_exclusions(placements)
+        assert len(rows) == 2
+
+    def test_empty_input(self):
+        assert group_tht_exclusions([]) == []
+
+
+class TestAssemblyPackageTHTExcludedSurfacing:
+    """AssemblyPackageResult.tht_excluded records the CPL hand-solder set."""
+
+    def _make_package(self, tmp_path, manufacturer="jlcpcb", pnp_config=None):
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        config = AssemblyConfig(
+            include_bom=False,
+            include_gerbers=False,
+            include_pnp=True,
+            pnp_config=pnp_config,
+        )
+        return AssemblyPackage(
+            pcb_path=pcb_file,
+            schematic_path=None,
+            manufacturer=manufacturer,
+            config=config,
+        )
+
+    def _export_with_footprints(self, pkg, tmp_path, footprints):
+        from unittest.mock import MagicMock, patch
+
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = footprints
+        with patch("kicad_tools.schema.pcb.PCB") as MockPCB:
+            MockPCB.load.return_value = mock_pcb
+            return pkg.export(output_dir=tmp_path / "out")
+
+    def test_jlcpcb_records_tht_excluded(self, tmp_path):
+        """An explicit exclude_tht=True on JLCPCB surfaces the excluded refs."""
+        pkg = self._make_package(tmp_path, pnp_config=PnPExportConfig(exclude_tht=True))
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+                MockFootprint(
+                    "J1",
+                    "Conn_01x04",
+                    "PinHeader_1x04",
+                    (50.0, 10.0),
+                    0.0,
+                    "F.Cu",
+                    attr="through_hole",
+                ),
+                MockFootprint(
+                    "SW1", "SW_Push", "SW_PUSH_6mm", (60.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+
+        assert [p.reference for p in result.tht_excluded] == ["J1", "SW1"]
+        # Sanity: the same refs are absent from the CPL on disk
+        cpl_content = result.pnp_path.read_text()
+        assert "J1" not in cpl_content
+        assert "SW1" not in cpl_content
+        assert "R1" in cpl_content
+
+    def test_jlcpcb_default_has_no_tht_excluded(self, tmp_path):
+        """JLCPCB assembles THT (issue #7239): default leaves nothing to hand-solder."""
+        pkg = self._make_package(tmp_path)
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+                MockFootprint(
+                    "J1", "Conn", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+        assert result.tht_excluded == []
+        assert "J1" in result.pnp_path.read_text()
+
+    def test_smd_only_board_has_empty_tht_excluded(self, tmp_path):
+        pkg = self._make_package(tmp_path)
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+                MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+            ],
+        )
+        assert result.tht_excluded == []
+
+    def test_explicit_include_tht_has_empty_tht_excluded(self, tmp_path):
+        """exclude_tht=False means the CPL includes THT -> nothing to document."""
+        pkg = self._make_package(tmp_path, pnp_config=PnPExportConfig(exclude_tht=False))
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint(
+                    "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+        assert result.tht_excluded == []
+        assert "J1" in result.pnp_path.read_text()
+
+    def test_generic_manufacturer_has_empty_tht_excluded(self, tmp_path):
+        """Generic formatter includes THT by default -> no hand-solder set."""
+        pkg = self._make_package(tmp_path, manufacturer="generic")
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint(
+                    "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+        assert result.tht_excluded == []

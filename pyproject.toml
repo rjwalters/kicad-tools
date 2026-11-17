@@ -1,0 +1,444 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kicad-tools"
+version = "0.29.0"
+description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "RJ Walters" }
+]
+keywords = [
+    "kicad",
+    "eda",
+    "pcb",
+    "schematic",
+    "electronics",
+    "hardware",
+    "automation",
+    "drc",
+    "erc",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "rich>=13.0",
+    "tomli>=2.0; python_version < '3.11'",
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "pydantic>=2.0",
+    # shapely is load-bearing for the correctness-critical copper paths
+    # (zone-fill clearance carving and the zone-vs-copper clearance DRC
+    # rules), so it is a CORE dependency rather than an optional extra
+    # (issue #3824).  shapely 2.x ships prebuilt manylinux/macOS/Windows
+    # wheels (vendored GEOS), so this imposes no system-library build
+    # burden on typical installs.  The ``geometry`` extra remains as a
+    # back-compat alias.
+    "shapely>=2.0",
+    # rtree is a CORE dependency (issue #6198).  The router's collision
+    # checking switches behaviour on whether rtree imports (grid.py
+    # RTREE_AVAILABLE, drc/incremental.py), and the rtree-less fallback was
+    # never exercised end to end in CI, which hid #6184 / #6185.  rtree
+    # 1.x ships pure-Python py3-none wheels with libspatialindex vendored
+    # for manylinux/musllinux/macOS/Windows (x86_64 and arm64, ~0.4-1.5 MB),
+    # so this adds no build burden on any supported platform.
+    "rtree>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/rjwalters/kicad-tools"
+Repository = "https://github.com/rjwalters/kicad-tools"
+Issues = "https://github.com/rjwalters/kicad-tools/issues"
+
+[project.scripts]
+# Unified CLI
+kicad-tools = "kicad_tools.cli:main"
+kct = "kicad_tools.cli:main"
+
+# Standalone shortcuts
+kicad-symbols = "kicad_tools.cli:symbols_main"
+kicad-nets = "kicad_tools.cli:nets_main"
+kicad-erc = "kicad_tools.cli:erc_main"
+kicad-drc = "kicad_tools.cli:drc_main"
+kicad-drc-summary = "kicad_tools.cli:drc_summary_main"
+kicad-bom = "kicad_tools.cli:bom_main"
+
+# PCB tools (not yet in unified CLI)
+kicad-pcb-query = "kicad_tools.cli.pcb_query:main"
+kicad-pcb-modify = "kicad_tools.cli.pcb_modify:main"
+kicad-pcb-stitch = "kicad_tools.cli.stitch_cmd:main"
+
+# Library tools (not yet in unified CLI)
+kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
+
+# Hierarchy validation
+kicad-sch-hierarchy = "kicad_tools.cli.sch_hierarchy:main"
+
+# Net status reporting
+kicad-net-status = "kicad_tools.cli:net_status_main"
+
+# Manufacturer design rules
+kicad-fab-rules = "kicad_tools.cli.fab_rules_cmd:main"
+
+# Project tools
+kicad-project-clean = "kicad_tools.cli.clean_cmd:main"
+
+[project.optional-dependencies]
+# Shapely-based board geometry engine.  shapely is now a CORE dependency
+# (see ``[project] dependencies``); this extra is retained as a
+# back-compat alias so ``pip install kicad-tools[geometry]`` keeps working.
+geometry = [
+    "shapely>=2.0",
+]
+# Incremental DRC with R-tree spatial indexing
+drc = [
+    "rtree>=1.0",
+]
+# LCSC parts API access
+parts = [
+    "requests>=2.28",
+]
+# Datasheet PDF processing
+datasheet = [
+    "markitdown>=0.1.0",
+    "pdfplumber>=0.10.0",
+    "PyMuPDF>=1.23.0",
+]
+# CMA-ES placement optimization strategy
+placement = [
+    "cmaes>=0.12.0",
+]
+# Research utilities for the FOM weight-calibration pipeline (#3187 + #3188):
+# - pymoo: NSGA-II Pareto sweep in scripts/research/calibrate_fom.py
+# - pandas/pyarrow: labels.parquet loaders in notebooks
+# - scikit-learn/joblib: Phase 0 routability classifier (used by
+#   scripts/research/train_phase0_classifier.py and demo_integration.py)
+# Not required at runtime -- install with `uv sync --extra research` if you
+# want to re-run scripts/research/calibrate_fom.py or load the classifier
+# via compute_fom's predictor hook.
+research = [
+    "pymoo>=0.6.1.6",
+    "pandas>=2.3.3",
+    "pyarrow>=24.0.0",
+    "scikit-learn>=1.7.2",
+    "joblib>=1.5.3",
+]
+# KiCad IPC API client (live instance interaction, KiCad 9.0+)
+ipc = [
+    "pynng>=0.8.0",
+]
+# MCP server for AI agent integration
+mcp = [
+    "fastmcp>=4,<5",
+    "pydantic>=2.0",
+    # jsonschema is imported only by src/kicad_tools/mcp/server.py, which is
+    # itself reached exclusively through lazy, function-local imports gated on
+    # invoking the MCP subsystem -- so it belongs here rather than in the core
+    # dependency list (issue #5804).
+    "jsonschema>=4.20",
+]
+# C++ native router acceleration (requires C++ compiler)
+native = [
+    "nanobind>=2.0",
+    "scikit-build-core>=0.8",
+    "cmake>=3.15",
+    "ninja>=1.10",
+]
+# CUDA GPU acceleration (NVIDIA GPUs on Linux/Windows)
+cuda = [
+    "cupy-cuda12x>=13.0; sys_platform != 'darwin'",
+]
+# Metal GPU acceleration (Apple Silicon Macs)
+metal = [
+    "mlx>=0.5",
+]
+# Placement optimization visualization
+visualization = [
+    "matplotlib>=3.5",
+]
+# Bayesian Optimization placement strategy (Ax/BoTorch)
+bayesian = [
+    "ax-platform>=0.4.0",
+    "botorch>=0.12.0",
+]
+# Screenshot/visualization pipeline (SVG to PNG conversion)
+screenshot = [
+    "cairosvg>=2.6",
+]
+# Report generation (Jinja2 Markdown templates) and rendering (Markdown to HTML/PDF).
+# cairosvg is included because manufacturing reports embed PCB/schematic
+# figures by default (issue #3583); without it `kct export` ships no images/.
+report = [
+    "jinja2>=3.1",
+    "markdown>=3.5",
+    "weasyprint>=60.0",
+    "cairosvg>=2.6",
+]
+# Parametric 3D body generation: `kct models generate` (Issue #7687).
+# CadQuery and its OCP bindings are Apache-2.0, but the OCP wheels are large
+# (~1 GB installed), so this extra is opt-in and deliberately NOT part of
+# `all`.  Placeholder bodies (`--placeholder`) need no extra.
+models = [
+    "cadquery>=2.4; python_version < '3.14'",
+]
+# JLCPCB attended order driver (`kct submit-jlcpcb`).  Playwright attaches to
+# the user's own Chrome over CDP, so `playwright install` is NOT needed.
+# Deliberately NOT part of `all` (heavy, niche dependency).
+submit = [
+    "playwright>=1.40",
+]
+# All optional features
+all = [
+    "rtree>=1.0",
+    "numpy>=1.24",
+    "requests>=2.28",
+    "markitdown>=0.1.0",
+    "pdfplumber>=0.10.0",
+    "PyMuPDF>=1.23.0",
+    "pyyaml>=6.0",
+    "fastmcp>=4,<5",
+    "pydantic>=2.0",
+    "jsonschema>=4.20",
+    "cupy-cuda12x>=13.0; sys_platform != 'darwin'",
+    "mlx>=0.5",
+    "matplotlib>=3.5",
+    "ax-platform>=0.4.0",
+    "botorch>=0.12.0",
+    "cmaes>=0.12.0",
+    "cairosvg>=2.6",
+    "jinja2>=3.1",
+    "markdown>=3.5",
+    "weasyprint>=60.0",
+    # nanobind is the build-time dependency for the C++ router extension
+    # (`kct build-native`). Included here so `pip install kicad-tools[all]`
+    # keeps it resolved; see the `native` extra and issue #4412.
+    "nanobind>=2.0",
+    # shapely is a core dependency; listed here too for explicitness.
+    "shapely>=2.0",
+]
+# Development dependencies
+dev = [
+    "gerbonara==1.6.3; python_version >= '3.12'",  # Independent native Gerber geometry test oracle
+    "pytest>=7.0",
+    "pytest-xdist>=3.5",
+    "pytest-cov>=4.0",
+    "pytest-benchmark>=4.0",
+    "pytest-timeout>=2.3",
+    "ruff==0.17.3",
+    "mypy>=1.0",
+    "rtree>=1.0",
+    "numpy>=1.24",
+    "requests>=2.28",
+    "responses>=0.23.0",
+    "pyyaml>=6.0",
+    "fastmcp>=4,<5",
+    "pydantic>=2.0",
+    # jsonschema moved out of the core dependency list into the `mcp` extra
+    # (issue #5804); the MCP test suite imports kicad_tools.mcp.server, so the
+    # dev environment still needs it explicitly -- same reason fastmcp is here.
+    "jsonschema>=4.20",
+    "cmaes>=0.12.0",
+    "matplotlib>=3.5",
+    "jinja2>=3.1",
+    "markdown>=3.5",
+    "weasyprint>=60.0",
+    # shapely is now a CORE dependency (issue #3824) so it no longer needs
+    # an explicit entry here; it is always installed with the package.
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kicad_tools"]
+
+[tool.hatch.build.targets.sdist]
+# boards/external holds local-only symlinks to sibling repos (chorus,
+# softstart) that point outside the repository; newer uv/hatchling
+# versions hard-fail sdist builds on external symlinks.
+#
+# Release 0.21.0 size fix: the committed board artifacts (manufacturing
+# bundles, readiness/engineering/diagnostics evidence, the site tree) and
+# the installed Loom tooling copies grew the sdist to 127 MB compressed --
+# over PyPI's 100 MB per-file limit for this project (the 0.21.0 publish
+# was rejected server-side with "400 File too large"). None of these are
+# build inputs: the wheel packages only src/kicad_tools, and the recipes'
+# committed unrouted PCBs stay packaged. Excluded classes:
+#   - **/manufacturing.zip + boards/*/output/manufacturing|readiness/
+#       (generated fab bundles/PDFs -- "verified gallery releases")
+#   - boards/*/diagnostics/ + boards/*/engineering/ (investigation evidence)
+#   - .loom/.claude/.agents (Loom orchestration tooling copies)
+#   - site/ (the documentation site sources)
+exclude = [
+    "boards/external",
+    "site",
+    ".loom",
+    ".claude",
+    ".agents",
+    "**/manufacturing.zip",
+    "boards/*/output/manufacturing",
+    "boards/*/output/readiness",
+    "boards/*/diagnostics",
+    "boards/*/engineering",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# .claude/, .loom/ and .agents/ hold Loom-vendored markdown (README.md,
+# role/pattern docs, generated agent skills) refreshed by
+# `./.loom/scripts/resync-installed.sh` on every Loom update. Their embedded
+# Python code blocks are illustrative examples, not repo source -- ruff's
+# markdown formatting on them just gets clobbered by the next resync (#4895,
+# #4930, #4938, #4940, #4950, #5697), breaking `main` CI repeatedly. Exclude
+# the vendored surface instead of re-formatting it.
+# .agents/skills/ joined this list at #5697: it is the same INSTALLED surface,
+# not repo source. Every file in it is written by a tool installer -- Loom's
+# resync (`loom-<name>/SKILL.md`, marked `<!-- loom-managed-skill -->`, 18 of
+# 47 files) plus the Squad and Repo Skills installers for the rest. None of it
+# is authored here, so formatting it only produces churn the next install
+# clobbers. It was simply missed when that tree was introduced (loom #8673).
+# Manufacturing bundles contain immutable, hash-bound source snapshots. Format
+# the source recipes, not the archived copies used to reproduce a release.
+extend-exclude = [".claude", ".loom", ".agents", "boards/*/output/manufacturing"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long - handled by formatter
+    "SIM108", # ternary operator - sometimes less readable
+    "SIM102", # nested if - sometimes more readable
+    "SIM103", # return negated - sometimes less readable
+    "SIM117", # combine with - sometimes less readable
+    "SIM118", # key in dict.keys() - sometimes explicit is clearer
+    "E402",   # module level import not at top - common in tests
+    "E741",   # ambiguous variable name - sometimes 'l' is fine for layer/line
+    "B904",   # raise from - requires careful refactoring
+    "B007",   # unused loop variable - use _ prefix instead
+    "B023",   # function doesn't bind loop variable - requires refactoring
+    "UP035",  # deprecated typing imports - requires Python 3.9+ for generics
+    # ---------------------------------------------------------------------
+    # The residual backlog baselined when the CI Lint & Format gate was
+    # turned on (#3464) has been fully burned down by #3663: F841, SIM105,
+    # F401, F601, SIM115, F811, SIM101, SIM116, and UP007 are all enforced
+    # again. Two latent defects were fixed in the process -- duplicate dict
+    # keys in erc/violation.py (F601) and a shadowed duplicate test class in
+    # test_pcb_sync_netlist.py (F811).
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+known-first-party = ["kicad_tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--cov=kicad_tools --cov-report=term-missing --cov-report=html"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests requiring real board fixtures",
+    "benchmark: marks A/B benchmarks (run with 'pytest -m benchmark', skipped by default)",
+    "ci_extended: slow tail of the bulk pool, run by the \"Test (extended)\" CI job instead of \"Test\" (tests/ci_extended.txt, Issue #6013)",
+    "pr_required: merge-gate test that must run in the PR \"Test\" job however slow; never added to ci_extended (Issue #6102)",
+]
+
+[tool.coverage.run]
+source = ["src/kicad_tools"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+precision = 2
+
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+warn_return_any = true
+warn_unused_configs = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+namespace_packages = true
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "mlx.*", "ax.*", "botorch.*", "torch.*", "cadquery.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "kicad_tools.intent.*",
+    "kicad_tools.constraints.*",
+    "kicad_tools.schematic.blocks.base",
+    "kicad_tools.validate.models",
+]
+disallow_untyped_defs = true
+disallow_any_generics = true
+warn_return_any = true
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.0.0",
+    "jinja2>=3.1",
+    # HTTP client for the MCP streamable-http smoke test
+    # (tests/test_mcp_http.py::TestHTTPTransportSmoke). fastmcp < 4 pulled
+    # httpx transitively; fastmcp 4 (#5601) dropped it, which would have
+    # silently skipped the only end-to-end HTTP transport test.
+    "httpx>=0.27",
+    # Figure rendering for `kct export` reports (issue #3583): without
+    # cairosvg in the default sync, worktree exports silently shipped
+    # bundles with no images/ (per-layer renders, assembly views).
+    "cairosvg>=2.6",
+    # C++ router build tooling (mirrors the `native` extra). This group is
+    # installed by a default `uv sync`, so keeping the build deps here means
+    # nanobind stays resolved in the lockfile and a later `uv sync` won't
+    # prune it. Previously `kct build-native` ad-hoc-installed nanobind out
+    # of band, so an unrelated `uv sync` (e.g. adding `--extra placement`)
+    # silently removed it and the next rebuild failed (issue #4412).
+    "nanobind>=2.0",
+    "scikit-build-core>=0.8",
+    "cmake>=3.15",
+    "ninja>=1.10",
+]

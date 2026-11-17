@@ -1,0 +1,115 @@
+{
+  "rows": [
+    {
+      "board": "03",
+      "scale": 1.5,
+      "mode": "rigid",
+      "grid_policy": "pinned",
+      "seed": 42,
+      "loadavg_start": [
+        35.8,
+        39.6,
+        36.14
+      ],
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.5,
+        "scale_y": 1.5,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          87.5
+        ],
+        "footprints_moved": 38,
+        "graphics_scaled": 1,
+        "zones_scaled": 4,
+        "fills_dropped": 0,
+        "clusters": 26,
+        "clustered_footprints": 16,
+        "outline_mm": [
+          120.0,
+          90.0
+        ]
+      },
+      "input": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/b2/03-rigid-1.5-pinned/usb_joystick.kicad_pcb",
+      "deterministic_rescue": false,
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/b2/03-rigid-1.5-pinned/usb_joystick.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/b2/03-rigid-1.5-pinned/usb_joystick_routed.kicad_pcb --timeout 2400 --no-cache --route-engine lattice --strategy basic --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --seed 42 --grid 0.05",
+      "exit_code": 3,
+      "wall_s": 1919.3,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "router_nets": "24/24",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "pinned_grid_mm": 0.05,
+      "routed": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/b2/03-rigid-1.5-pinned/usb_joystick_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 25,
+      "nets_total": 27,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 112,
+      "connections_total": 115,
+      "via_count": 69,
+      "vias_per_connection": 0.616,
+      "wirelength_mm": 1250.1,
+      "kct_check_errors": 1,
+      "kct_check_errors_total": 1,
+      "kct_check_by_rule": {
+        "diffpair_routing_continuity": 1
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-03/b2/03-rigid-1.5-pinned/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 3,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 2
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {
+        "GND": "pour_discontinuous",
+        "VCC": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "BTN1": 4,
+        "BTN2": 6,
+        "BTN3": 10,
+        "BTN4": 6,
+        "GND": 1,
+        "ISP_MISO": 2,
+        "ISP_MOSI": 2,
+        "ISP_SCK": 2,
+        "JOY_BTN": 4,
+        "JOY_X": 4,
+        "JOY_Y": 4,
+        "USB_CC1": 1,
+        "USB_D-": 1,
+        "VBUS": 5,
+        "VCC": 17
+      },
+      "zone_nets": [
+        "GND",
+        "VBUS",
+        "VCC"
+      ],
+      "manufacturable": false,
+      "loadavg_end": [
+        51.57,
+        53.28,
+        51.05
+      ]
+    }
+  ],
+  "transitions": []
+}

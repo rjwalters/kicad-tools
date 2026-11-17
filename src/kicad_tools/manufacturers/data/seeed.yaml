@@ -1,0 +1,116 @@
+# Seeed Fusion Design Rules Configuration
+# Source: https://www.seeedstudio.com/fusion_pcb.html
+#         https://support.seeedstudio.com/knowledgebase/articles/447362-fusion-pcb-specification
+# Last verified: 2026-01-16
+#
+# V-score copper clearance (Issue #6177): UNSOURCED, min_copper_to_vscore_mm
+# deliberately left unset.  No copper-to-V-score figure found on Seeed's
+# published Fusion PCB pages (checked 2026-10-07).  kct panel --cut vcut
+# falls back to the conservative unsourced default in
+# kicad_tools.manufacturers.vscore.
+#
+# All measurements in millimeters unless otherwise noted.
+# Note: Seeed offers comparable capabilities to JLCPCB with some differences:
+#       - More conservative trace/clearance for 2-layer (6 mil vs 5 mil)
+#       - Supports 1oz inner copper for 4-layer 2oz boards (vs JLCPCB's 0.5oz)
+
+design_rules:
+  2layer_1oz:
+    min_trace_width_mm: 0.1524      # 6 mil
+    min_clearance_mm: 0.1524        # 6 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15   # 6 mil
+    min_silkscreen_height_mm: 0.8   # 32 mil
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0
+
+  2layer_2oz:
+    min_trace_width_mm: 0.2         # 8 mil for 2oz
+    min_clearance_mm: 0.2           # 8 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 0.0
+
+  4layer_1oz:
+    min_trace_width_mm: 0.1524      # 6 mil (conservative)
+    min_clearance_mm: 0.1524        # 6 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
+
+  4layer_2oz:
+    min_trace_width_mm: 0.2         # 8 mil for 2oz outer
+    min_clearance_mm: 0.2           # 8 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 1.0
+
+  6layer_1oz:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.25
+    min_via_diameter_mm: 0.5
+    min_annular_ring_mm: 0.125
+    min_hole_diameter_mm: 0.25
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5

@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""
+Replace a symbol in a KiCad schematic.
+
+Usage:
+    python3 sch-replace-symbol.py <schematic.kicad_sch> <reference> <new_lib_id> [options]
+
+Options:
+    --value <value>        Set new value for the symbol
+    --footprint <fp>       Set new footprint
+    --lib-path <path>      Path to .kicad_sym library containing the new symbol.
+                           When provided, the embedded lib_symbols definition
+                           and instance pins are updated to match the new symbol.
+    --dry-run              Show what would change without modifying
+    --backup               Create backup before modifying
+
+Examples:
+    # Replace U1 with a different library symbol
+    python3 sch-replace-symbol.py amplifier.kicad_sch U1 "chorus-revA:TPA3116D2"
+
+    # Replace with full library update (recommended)
+    python3 sch-replace-symbol.py amplifier.kicad_sch U1 "chorus-revA:TPA3116D2" \\
+        --lib-path path/to/chorus-revA.kicad_sym
+
+    # Replace with new value and footprint
+    python3 sch-replace-symbol.py amplifier.kicad_sch U1 "chorus-revA:TPA3116D2" \\
+        --value "TPA3116D2" --footprint "Package_SO:HTSSOP-32-1EP_6.1x11mm_P0.65mm_EP5.2x11mm"
+
+    # Dry run to see changes
+    python3 sch-replace-symbol.py amplifier.kicad_sch U1 "chorus-revA:TPA3116D2" --dry-run
+"""
+
+import argparse
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
+from kicad_tools.operations.symbol_ops import replace_symbol_lib_id
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Replace a symbol in a KiCad schematic",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("schematic", help="Path to .kicad_sch file")
+    parser.add_argument("reference", help="Symbol reference to replace (e.g., U1)")
+    parser.add_argument("new_lib_id", help="New library ID (e.g., 'chorus-revA:TPA3116D2')")
+    parser.add_argument("--value", help="New value for the symbol")
+    parser.add_argument("--footprint", help="New footprint")
+    parser.add_argument(
+        "--lib-path",
+        help="Path to .kicad_sym library file containing the new symbol. "
+        "Updates embedded pin definitions to prevent ERC regressions.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Show changes without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(parser)
+
+    args = parser.parse_args(argv)
+    return run_with_json_summary(
+        "replace",
+        args.schematic,
+        lambda: run_replace_symbol(args),
+        output_format=args.format,
+        dry_run=args.dry_run,
+    )
+
+
+def run_replace_symbol(args) -> int:
+    """Execute the replace command against a parsed argument namespace."""
+    # Validate input
+    if not Path(args.schematic).exists():
+        print(f"Error: File not found: {args.schematic}", file=sys.stderr)
+        sys.exit(1)
+
+    # Create backup if requested
+    if args.backup and not args.dry_run:
+        backup_path = f"{args.schematic}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        shutil.copy2(args.schematic, backup_path)
+        record(backup=backup_path)
+        print(f"Backup created: {backup_path}")
+
+    try:
+        result = replace_symbol_lib_id(
+            schematic_path=args.schematic,
+            reference=args.reference,
+            new_lib_id=args.new_lib_id,
+            new_value=args.value,
+            new_footprint=args.footprint,
+            dry_run=args.dry_run,
+            lib_path=args.lib_path,
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    record(
+        reference=result.reference,
+        old_lib_id=result.old_lib_id,
+        new_lib_id=result.new_lib_id,
+        old_pin_count=result.old_pin_count,
+        new_pin_count=result.new_pin_count,
+        changes=list(result.changes_made),
+        pin_type_changes=[
+            {
+                "pin_number": ptc.pin_number,
+                "pin_name": ptc.pin_name,
+                "old_type": ptc.old_type,
+                "new_type": ptc.new_type,
+            }
+            for ptc in result.pin_type_changes
+        ],
+        wires_adjusted=result.wires_adjusted,
+        preserved_properties=list(result.preserved_properties),
+        lib_symbol_updated=bool(result.lib_symbol_updated),
+    )
+
+    # Output results
+    if args.dry_run:
+        print("DRY RUN - No changes made")
+        print("=" * 50)
+
+    print(f"Symbol: {result.reference}")
+    print(f"Library ID: {result.old_lib_id} -> {result.new_lib_id}")
+    print(f"Pin count: {result.old_pin_count} -> {result.new_pin_count}")
+    print()
+
+    if result.changes_made:
+        print("Changes:")
+        for change in result.changes_made:
+            print(f"  - {change}")
+    else:
+        print("No changes made")
+
+    if result.pin_type_changes:
+        print()
+        print("Pin type changes:")
+        for ptc in result.pin_type_changes:
+            print(f"  Pin {ptc.pin_number} ({ptc.pin_name}): {ptc.old_type} -> {ptc.new_type}")
+
+    if result.wires_adjusted > 0:
+        print()
+        print(
+            f"Wire adjustments: {result.wires_adjusted} endpoint(s) moved to match new pin positions"
+        )
+
+    if result.preserved_properties:
+        print()
+        print(f"Preserved properties: {', '.join(result.preserved_properties)}")
+
+    if not args.dry_run:
+        print()
+        if result.lib_symbol_updated:
+            print("Schematic updated successfully (lib_symbols definition replaced)")
+        else:
+            print("Schematic updated successfully")
+            print()
+            print("Warning: This replacement only updated the lib_id and properties.")
+            print("   The embedded pin definitions were NOT updated.")
+            print("   Use --lib-path to provide the new symbol's library file")
+            print("   so that pin types are updated and ERC regressions are avoided.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    main()

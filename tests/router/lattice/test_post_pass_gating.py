@@ -1,0 +1,401 @@
+"""#4281: geometric post-passes (optimize + DRC nudge) are grid-engine-only.
+
+The lattice and mesh engines commit copper by appending to ``router.routes``
+without calling ``_mark_route``, so the grid's obstacle model (cell occupancy
++ per-layer segment R-tree) contains no route copper after a non-grid run.
+The CLI's post-route TraceOptimizer validates every move against that empty
+model (everything is "clear"), and the DRC-nudge repair has no
+foreign-segment destination gate -- both passes corrupted correct lattice
+copper into cross-net shorts, which the #3989/#4208 backstop then demoted
+(board 02: 7/8 instead of 8/8; LINE_A demoted even under ``--no-optimize``
+because the nudge is not covered by that flag).
+
+Fix under test: one shared predicate, ``_engine_post_passes_enabled``, gates
+BOTH passes at all four optimize+nudge call-site pairs; the #4208 backstop
+stays unconditional (defense in depth).
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.route_cmd import _engine_post_passes_enabled
+
+# Issue #5556: CI's `Test` job runs the suite with
+# `pytest -n auto -o addopts= --benchmark-disable --timeout=60` (ci.yml "Run
+# tests").  Note `-o addopts=`: CI does NOT run coverage, so the comparable
+# local baseline is a `--no-cov`-equivalent run.  All three `test_cli_*` tests
+# below spawn a full `kct route` CLI over a real board fixture.  Measured
+# serially on an unloaded 18-core host with the C++ backend built, using CI's
+# exact flags (2026-09-18):
+#
+#   6.76s  test_cli_lattice_optimize_runs_passes_without_demotion
+#   6.13s  test_cli_lattice_skips_both_passes_and_demotes_nothing[default]
+#   6.03s  test_cli_lattice_skips_both_passes_and_demotes_nothing[no-optimize]
+#
+# All three nevertheless blew the 60 s cap on six separate `main`/PR runs on
+# 2026-09-18 (35326888585, 35332776797, 35352885759, 35377430154, 35389517906,
+# 35396447396/35396782236), i.e. CI inflates them by >=8.9x.  Two contributors,
+# neither of which the test can control: `-n auto` xdist CPU contention inside
+# the container, and `KCT_NATIVE_MAX_CONCURRENCY=1` (#5501/#5524, merged
+# 2026-09-18T06:00Z -- the first of these failures started 67 s later), whose
+# slot wait is charged as ordinary wall time inside the *waiting* test and was
+# measured there at up to +23.1 s for a single test.
+#
+# 180 s follows the existing convention (tests/test_board_05_drc_allowlist.py,
+# tests/test_board_06_diffpair_test.py) and leaves ~26x headroom over the
+# measured CI-equivalent cost -- ~3x above the worst inflation actually
+# observed -- while staying short enough to reap a genuine hang.  For
+# reference, the same three cost 33.5s/30.7s/28.8s when run locally *with*
+# `--cov=kicad_tools`, so a local coverage run also stays inside this budget.
+#
+# Issue #6134: the 180 s cap still tripped on main under load.  Profiling shows
+# ~19.5 s of pure-Python lattice pathfinding per CLI run (not C++-accelerated,
+# so the backend cannot be swapped without changing what is tested) plus ~7 s
+# of post-route kicad-cli zone fill / pour oracle that no assertion reads.  The
+# latter is now stubbed (autouse fixture below): ~22 s -> ~14.7 s per test.
+pytestmark = pytest.mark.timeout(180)
+
+_REPO = Path(__file__).resolve().parents[3]
+_CHARLIEPLEX = (
+    _REPO
+    / "tests/fixtures/historical_demo_boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
+)
+_VOLTAGE_DIVIDER = (
+    _REPO
+    / "tests/fixtures/historical_demo_boards/01-voltage-divider/output/voltage_divider.kicad_pcb"
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared predicate unit behavior.
+# ---------------------------------------------------------------------------
+
+
+def test_grid_enables_post_passes_silently(capsys: pytest.CaptureFixture) -> None:
+    args = argparse.Namespace(route_engine="grid")
+    assert _engine_post_passes_enabled(args) is True
+    # Grid must be a strict no-op: no notice printed (byte-identical output).
+    assert capsys.readouterr().out == ""
+
+
+def test_missing_route_engine_defaults_to_grid() -> None:
+    # Callers that never defined --route-engine keep today's behavior.
+    assert _engine_post_passes_enabled(argparse.Namespace()) is True
+    assert _engine_post_passes_enabled(argparse.Namespace(route_engine=None)) is True
+
+
+@pytest.mark.parametrize("engine", ["lattice", "mesh"])
+def test_non_grid_engines_disable_post_passes(engine: str, capsys: pytest.CaptureFixture) -> None:
+    args = argparse.Namespace(route_engine=engine)
+    assert _engine_post_passes_enabled(args) is False
+    out = capsys.readouterr().out
+    # One-line notice so users know why no optimize pass ran.
+    assert "Skipping optimize/nudge post-passes" in out
+    assert engine in out
+    assert "#4281" in out
+
+
+@pytest.mark.parametrize("engine", ["lattice", "mesh"])
+def test_quiet_suppresses_skip_notice(engine: str, capsys: pytest.CaptureFixture) -> None:
+    args = argparse.Namespace(route_engine=engine)
+    assert _engine_post_passes_enabled(args, quiet=True) is False
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# #4318: --lattice-optimize opt-in flips the gate for non-grid engines.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("engine", ["lattice", "mesh"])
+def test_lattice_optimize_flag_enables_post_passes(
+    engine: str, capsys: pytest.CaptureFixture
+) -> None:
+    args = argparse.Namespace(route_engine=engine, lattice_optimize=True)
+    assert _engine_post_passes_enabled(args) is True
+    out = capsys.readouterr().out
+    assert "--lattice-optimize" in out
+    assert engine in out
+    assert "#4318" in out
+
+
+@pytest.mark.parametrize("engine", ["lattice", "mesh"])
+def test_lattice_optimize_absent_preserves_skip(engine: str, capsys: pytest.CaptureFixture) -> None:
+    # Flag explicitly False (as argparse store_true yields) == the #4281 skip:
+    # the byte-identical-output guarantee for a plain --route-engine run.
+    args = argparse.Namespace(route_engine=engine, lattice_optimize=False)
+    assert _engine_post_passes_enabled(args) is False
+    assert "Skipping optimize/nudge post-passes" in capsys.readouterr().out
+
+
+def test_lattice_optimize_flag_ignored_for_grid(capsys: pytest.CaptureFixture) -> None:
+    # Grid always runs the passes and stays silent; the flag adds no notice.
+    args = argparse.Namespace(route_engine="grid", lattice_optimize=True)
+    assert _engine_post_passes_enabled(args) is True
+    assert capsys.readouterr().out == ""
+
+
+def test_lattice_optimize_quiet_suppresses_optin_notice(capsys: pytest.CaptureFixture) -> None:
+    args = argparse.Namespace(route_engine="lattice", lattice_optimize=True)
+    assert _engine_post_passes_enabled(args, quiet=True) is True
+    assert capsys.readouterr().out == ""
+
+
+def test_mark_nongrid_routes_noop_without_flag() -> None:
+    """The grid-marking helper is inert unless engine is non-grid AND flag set."""
+    from kicad_tools.cli.route_cmd import _mark_nongrid_routes_for_post_pass
+
+    class _Router:
+        def __init__(self) -> None:
+            self.routes = [object(), object()]
+            self.marked: list[object] = []
+
+        def _mark_route(self, route: object) -> None:  # pragma: no cover - guarded off
+            self.marked.append(route)
+
+    # grid engine: no-op regardless of flag.
+    r = _Router()
+    _mark_nongrid_routes_for_post_pass(
+        r, argparse.Namespace(route_engine="grid", lattice_optimize=True), quiet=True
+    )
+    assert r.marked == []
+
+    # lattice, flag absent: no-op (byte-identical default path).
+    r = _Router()
+    _mark_nongrid_routes_for_post_pass(
+        r, argparse.Namespace(route_engine="lattice", lattice_optimize=False), quiet=True
+    )
+    assert r.marked == []
+
+
+def test_mark_nongrid_routes_marks_when_opted_in() -> None:
+    """With --lattice-optimize the committed lattice routes are marked into the grid."""
+    from kicad_tools.cli.route_cmd import _mark_nongrid_routes_for_post_pass
+
+    class _Router:
+        def __init__(self) -> None:
+            self.routes = [object(), object(), object()]
+            self.marked: list[object] = []
+
+        def _mark_route(self, route: object) -> None:
+            self.marked.append(route)
+
+    r = _Router()
+    _mark_nongrid_routes_for_post_pass(
+        r, argparse.Namespace(route_engine="lattice", lattice_optimize=True), quiet=True
+    )
+    assert r.marked == r.routes
+
+
+# ---------------------------------------------------------------------------
+# CLI tail integration: lattice copper never reaches optimize/nudge; the
+# unconditional #4208 backstop finds nothing to demote (board 02 is 8/8).
+# ---------------------------------------------------------------------------
+
+
+def _spy_post_passes(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Wrap the two post-pass entry points with call counters.
+
+    ``route_cmd`` imports both lazily (``from ... import ...`` inside the
+    gated blocks), so patching the source modules observes exactly what the
+    CLI tail executes.
+    """
+    import kicad_tools.router.drc_nudge as drc_nudge_mod
+    import kicad_tools.router.optimizer as optimizer_mod
+
+    calls = {"optimize": 0, "nudge": 0}
+    real_optimize = optimizer_mod.optimize_routes_grid_synced
+    real_nudge = drc_nudge_mod.drc_verify_and_nudge
+
+    def spy_optimize(*args: object, **kwargs: object) -> object:
+        calls["optimize"] += 1
+        return real_optimize(*args, **kwargs)
+
+    def spy_nudge(*args: object, **kwargs: object) -> object:
+        calls["nudge"] += 1
+        return real_nudge(*args, **kwargs)
+
+    monkeypatch.setattr(optimizer_mod, "optimize_routes_grid_synced", spy_optimize)
+    monkeypatch.setattr(drc_nudge_mod, "drc_verify_and_nudge", spy_nudge)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _no_post_route_kicad_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the post-route zone fill and pour-oracle kicad-cli stages (#6134).
+
+    Every CLI test here asserts on the route result (rc, spy counts, report
+    text, ``Nets routed``, output exists); none reads the zone fill or the
+    pour oracle, which run AFTER routing as serialized ``kicad-cli`` launches
+    (~2-7 s locally, and subject to native-slot waits under CI load).  Both
+    stubs reproduce the documented "kicad-cli unavailable" behaviour: the
+    fill is skipped and the oracle leaves the board untouched with 0
+    stranded links (same approach as tests/test_route_plan_gate_5521.py).
+    """
+    from kicad_tools.cli import route_cmd
+
+    def _no_oracle(output_path, *, args, quiet=False, **_kw):
+        args._stranded_pour_links = 0
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
+    monkeypatch.setattr(route_cmd, "_run_pour_oracle_stage", _no_oracle)
+
+
+@pytest.fixture(scope="module")
+def lattice_default_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Route board 02 once with the lattice engine and default flags (#6182).
+
+    The skip-both-passes assertions all read this single route.  Previously a
+    ``[default]`` / ``[no-optimize]`` parametrization ran the ~10 s pure-Python
+    lattice route twice.  ``--no-optimize`` cannot change the outcome: the
+    gate (``_engine_post_passes_enabled``) keys only on ``route_engine`` /
+    ``lattice_optimize`` and skips optimize AND nudge together, so the
+    ``--no-optimize`` hole (nudge not covered by the flag) is pinned cheaply by
+    ``test_no_optimize_flag_does_not_reenable_nudge`` against the predicate.
+    Module scope means the function-scoped kicad-cli stubs are applied here.
+    """
+    import contextlib
+    import io
+
+    from kicad_tools.cli import route_cmd
+
+    out_pcb = tmp_path_factory.mktemp("lattice_default") / "routed.kicad_pcb"
+    buf = io.StringIO()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
+
+        def _no_oracle(output_path, *, args, quiet=False, **_kw):
+            args._stranded_pour_links = 0
+            return 0
+
+        mp.setattr(route_cmd, "_run_pour_oracle_stage", _no_oracle)
+        calls = _spy_post_passes(mp)
+        with contextlib.redirect_stdout(buf):
+            rc = route_cmd.main(
+                [
+                    str(_CHARLIEPLEX),
+                    "--route-engine",
+                    "lattice",
+                    "--strategy",
+                    "basic",
+                    "--seed",
+                    "42",
+                    "--skip-drc",
+                    "-o",
+                    str(out_pcb),
+                ]
+            )
+    return {"rc": rc, "calls": calls, "out": buf.getvalue(), "pcb": out_pcb}
+
+
+def test_no_optimize_flag_does_not_reenable_nudge(capsys: pytest.CaptureFixture) -> None:
+    """``--no-optimize`` must not change the gate for non-grid engines.
+
+    Covers the second hole of #4281 (LINE_A demoted under ``--no-optimize``
+    because the nudge is not covered by that flag) without a second route.
+    """
+    for engine in ("lattice", "mesh"):
+        args = argparse.Namespace(route_engine=engine, no_optimize=True)
+        assert _engine_post_passes_enabled(args) is False
+    assert "Skipping optimize/nudge post-passes" in capsys.readouterr().out
+
+
+def test_cli_lattice_skips_both_passes_and_demotes_nothing(lattice_default_run: dict) -> None:
+    """Board-02 lattice run: 8/8, no optimize, no nudge, no backstop demotion."""
+    run = lattice_default_run
+    out = run["out"]
+
+    assert run["rc"] == 0
+    assert run["calls"] == {"optimize": 0, "nudge": 0}, "post-passes must not touch lattice copper"
+    assert "Skipping optimize/nudge post-passes for --route-engine lattice" in out
+    # The unconditional #4208 backstop ran and found nothing to demote
+    # (pre-fix: 'Post-optimize backstop demoted 1 net(s) ...' -> 7/8).
+    assert "Post-optimize backstop demoted" not in out
+    assert "Nets routed:     8/8" in out
+    assert run["pcb"].exists()
+
+
+def test_cli_lattice_optimize_runs_passes_without_demotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """#4318 AC T2: ``--lattice-optimize`` runs the post-passes on lattice copper.
+
+    The opt-in must (a) actually run BOTH geometric passes on the non-grid
+    copper (the #4281 skip is lifted), (b) first mark the committed lattice
+    routes into the grid so the optimizer's collision checker is not blind, and
+    (c) NOT trigger the #3989/#4208 backstop demotion -- board-02 stays 8/8 with
+    no completion loss (the exact regression the marking prevents).
+    """
+    from kicad_tools.cli import route_cmd
+
+    calls = _spy_post_passes(monkeypatch)
+    out_pcb = tmp_path / "routed.kicad_pcb"
+    rc = route_cmd.main(
+        [
+            str(_CHARLIEPLEX),
+            "--route-engine",
+            "lattice",
+            "--strategy",
+            "basic",
+            "--seed",
+            "42",
+            "--lattice-optimize",
+            "--skip-drc",
+            "-o",
+            str(out_pcb),
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # Both passes ran (the opt-in lifted the #4281 skip).
+    assert calls["optimize"] >= 1, "--lattice-optimize must run the optimizer on lattice copper"
+    assert calls["nudge"] >= 1, "--lattice-optimize must run the DRC nudge on lattice copper"
+    assert "--lattice-optimize: running optimize/nudge post-passes" in out
+    # The committed lattice routes were marked into the grid obstacle model so
+    # the collision checker is not blind (the #4281 root cause).
+    assert "marked" in out and "into the grid obstacle model" in out
+    assert "Skipping optimize/nudge post-passes" not in out
+    # No backstop demotion: completion is preserved (8/8), NOT a cross-net short
+    # demoted to a completion loss.
+    assert "Post-optimize backstop demoted" not in out
+    assert "Nets routed:     8/8" in out
+    assert out_pcb.exists()
+
+
+def test_cli_grid_still_runs_both_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Default (grid) engine keeps today's tail: optimize AND nudge both run."""
+    from kicad_tools.cli import route_cmd
+
+    calls = _spy_post_passes(monkeypatch)
+    out_pcb = tmp_path / "routed.kicad_pcb"
+    rc = route_cmd.main(
+        [
+            str(_VOLTAGE_DIVIDER),
+            "--strategy",
+            "basic",
+            "--seed",
+            "42",
+            "--skip-drc",
+            "-o",
+            str(out_pcb),
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert calls["optimize"] >= 1, "grid engine must still optimize"
+    assert calls["nudge"] >= 1, "grid engine must still run the DRC nudge"
+    assert "Skipping optimize/nudge post-passes" not in out
+    assert out_pcb.exists()

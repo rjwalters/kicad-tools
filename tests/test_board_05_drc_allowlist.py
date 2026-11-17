@@ -1,0 +1,290 @@
+"""Regression guard: board-05 routed DRC error count stays at-or-below the allowlist.
+
+Issue #2901 (umbrella #2746 child 4) — pin the post-#2904 DRC state so a
+future change that increases the error count above the per-board
+allowlist trips CI even when the count is still within the historic
+tolerance.
+
+The allowlist lives at ``.github/routed-drc-tolerance.yml`` and tracks
+the per-board maximum allowed error count under JLCPCB rules.  The CI
+job ``routed-pcb-drc-check`` (``scripts/ci/check_routed_drc.py``) is the
+binding gate in CI; this test mirrors the same comparison so a unit-test
+run on the developer's laptop catches the regression too.
+
+**Why a separate test file rather than extending
+``test_board_05_routing_regression.py``**: that file is marked
+``@pytest.mark.slow`` because it re-runs ``kct route`` (4-minute wall
+clock).  The DRC count check only invokes ``kct check`` on the committed
+``_routed.kicad_pcb`` artifact (~1-2 seconds), so it belongs in the
+fast-PR-CI lane.  Keeping the files split lets the slow regression
+remain nightly while this guard runs on every PR.
+
+**Auto-tightening**: the test reads the allowlist file rather than
+hardcoding the value, so when a router improvement drops the allowlist
+from 53 → 30, this test automatically pins the new lower floor without
+requiring a code change here.  The complement (drift warning when the
+actual count goes BELOW the allowlist) is implemented by the CI script's
+``annotate_drift_warning``; this test only asserts the upper bound.
+
+**Advisory-rule filter (Issue #3294)**: the CI gate
+(``scripts/ci/check_routed_drc.py::_count_blocking_errors``) filters
+advisory rules (currently just ``connectivity``) out of the count it
+compares against the allowlist, mirroring
+``DRCChecker.ADVISORY_RULE_IDS`` and the audit pipeline's
+``ManufacturingAudit._check_drc``.  This test now applies the same filter
+so the developer-laptop result matches the CI verdict.  Before the fix
+this test was failing on board 05 (29 unfiltered errors vs allowlist 9)
+even though CI happily passed (6 blocking vs allowlist 9) — a noisy
+false positive that masked real regressions.  See PR #3258's notes
+"pre-existing failure in ``test_board_05_drc_allowlist`` (advisory rule
+filter mismatch with CI) is unchanged by this PR".
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+from kicad_tools.validate.checker import DRCChecker
+
+# Issue #4160: CI runs the suite with `-n auto --timeout=60`. The current DRC
+# subprocess takes about 50s unloaded and can exceed 60s under
+# full-suite xdist CPU contention (concurrent routing-regression jobs share
+# the runner pool). The timeout marker overrides the CLI default with a
+# contention-tolerant budget; it does NOT slow the happy path. 180 stays
+# above the inner `subprocess.run(..., timeout=120)` cap so a genuinely
+# hung `kct check` still trips `TimeoutExpired` first (a clear tool-level
+# signal) rather than the bare outer pytest-timeout reaper.
+pytestmark = pytest.mark.timeout(180)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
+ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
+ALLOWLIST_PATH = REPO_ROOT / ".github" / "routed-drc-tolerance.yml"
+
+# Repo-relative key used inside the allowlist YAML for board 05.
+BOARD_05_ALLOWLIST_KEY = "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+
+
+@pytest.fixture(scope="module")
+def routed_pcb_path() -> Path:
+    """Resolve the committed routed PCB or skip if absent."""
+    if not ROUTED_PCB.exists():
+        pytest.skip(
+            f"Board 05 routed PCB not found at {ROUTED_PCB!s}; "
+            "regenerate via "
+            "`uv run python boards/05-bldc-motor-controller/design.py`"
+        )
+    return ROUTED_PCB
+
+
+# Issue #5044: the redesigned board landed in d95b6eff with a clean
+# manufacturing check and no tolerance entry; the historical DRV8301 geometry
+# lives in dedicated regression fixtures.
+#
+# Issue #6390 declared the router's own net classes in the routed sidecars,
+# exposing 27 ``netclass_clearance_copper`` violations of those classes in the
+# committed copper.  Issue #6395 repaired that copper (smaller fan-out vias,
+# shifted stitch vias, a VM run moved off the C8-1 pad), so the entry is gone
+# and the strict-zero ``None`` is restored.
+BOARD_05_EXPECTED_TOLERANCE: int | None = None
+
+
+@pytest.fixture(scope="module")
+def board_05_allowlist_value() -> int:
+    """Require the retired tolerance to remain absent (strict zero errors)."""
+    if not ALLOWLIST_PATH.exists():
+        pytest.skip(f"Allowlist file not found at {ALLOWLIST_PATH!s}")
+
+    data = yaml.safe_load(ALLOWLIST_PATH.read_text())
+    if not isinstance(data, dict) or "tolerances" not in data:
+        pytest.fail(
+            f"Allowlist {ALLOWLIST_PATH!s} missing top-level 'tolerances' "
+            f"mapping; got {type(data).__name__}"
+        )
+
+    tolerances = data["tolerances"]
+    actual = tolerances.get(BOARD_05_ALLOWLIST_KEY)
+    if actual != BOARD_05_EXPECTED_TOLERANCE:
+        pytest.fail(
+            f"Board 05 allowlist entry {BOARD_05_ALLOWLIST_KEY!r} is "
+            f"{actual!r} but this test pins "
+            f"{BOARD_05_EXPECTED_TOLERANCE!r} (None = entry absent).  "
+            f"Changing the board-05 tolerance requires reviewer sign-off "
+            f"AND an update to ``BOARD_05_EXPECTED_TOLERANCE`` in this "
+            f"test with a tracking-issue link (see Issues #3470/#3527/"
+            f"#3553 for the history)."
+        )
+
+    # Absence of the entry = strict 0-blocking-error gate.
+    return 0 if actual is None else actual
+
+
+def _run_kct_check(pcb_path: Path) -> dict:
+    """Run ``kct check`` on *pcb_path* and return its complete JSON report.
+
+    Mirrors ``scripts/ci/check_routed_drc.py::_count_blocking_errors`` --
+    uses ``--mfr jlcpcb-tier1 --errors-only --format json`` to get a
+    machine-parsable count and applies the same advisory-rule filter
+    (currently ``connectivity``) the CI gate uses.  Without the filter
+    this test diverged from CI on boards that ship with non-zero
+    partial-route reports (board 05's committed PCB had 23 connectivity
+    advisories that the CI gate correctly excluded but this test was
+    counting against the allowlist).
+
+    Tool-level failures (exit 1) raise ``RuntimeError`` so a
+    misconfigured environment surfaces clearly rather than masquerading
+    as a zero-error count.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "check",
+        str(pcb_path),
+        # Issue #3425: board 05 routes + DRC-gates against jlcpcb-tier1
+        # (Capability-Plus legalizes the DRV8301 in-pad rescue vias).
+        # The CI gate reads the same profile from the manufacturers:
+        # override in .github/routed-drc-tolerance.yml; this test pins
+        # the profile inline to stay aligned with that verdict.
+        "--mfr",
+        "jlcpcb-tier1",
+        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
+        # in this gate; skipped until the #8839 threshold table lands.
+        "--skip",
+        "mask_to_copper",
+        "--errors-only",
+        "--format",
+        "json",
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    # Exit 1 = tool-level failure (file not found, parse error).
+    # Exit 0 = no errors.  Exit 2 = errors found.  Both 0 and 2 produce
+    # valid JSON on stdout.
+    if proc.returncode == 1:
+        raise RuntimeError(
+            f"kct check failed on {pcb_path} (exit 1).\nstderr:\n{proc.stderr.strip()}"
+        )
+    if proc.returncode not in (0, 2):
+        raise RuntimeError(
+            f"kct check returned unexpected exit code {proc.returncode} "
+            f"on {pcb_path}.\nstderr:\n{proc.stderr.strip()}"
+        )
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"kct check produced invalid JSON on {pcb_path}: {e}\n"
+            f"stdout (first 500 chars):\n{proc.stdout[:500]}"
+        ) from e
+
+    return data
+
+
+def _count_blocking_errors(data: dict) -> int:
+    # Filter advisory rules (e.g. ``connectivity``) out of the count so
+    # the test's comparison matches the CI gate's verdict.  Prefer the
+    # per-violation ``violations`` list (richer payload) and fall back to
+    # the unfiltered ``summary.errors`` for legacy/malformed payloads.
+    violations = data.get("violations")
+    if isinstance(violations, list):
+        blocking = 0
+        for v in violations:
+            if not isinstance(v, dict):
+                continue
+            if v.get("severity", "error") != "error":
+                continue
+            rule_id = v.get("rule_id", "")
+            if not isinstance(rule_id, str):
+                continue
+            if DRCChecker.is_advisory_rule(rule_id):
+                continue
+            blocking += 1
+        return blocking
+
+    summary = data.get("summary", {})
+    errors = summary.get("errors")
+    if not isinstance(errors, int):
+        raise RuntimeError(
+            f"kct check JSON missing both violations array and summary.errors "
+            f"field: keys={list(summary)!r}"
+        )
+    return errors
+
+
+class TestBoard05DRCAllowlistGuard:
+    """Acceptance criterion 3 of issue #2901."""
+
+    def test_routed_drc_error_count_at_or_below_allowlist(
+        self,
+        routed_pcb_path: Path,
+        board_05_allowlist_value: int,
+    ) -> None:
+        """Routed PCB DRC blocking-error count must be ≤ allowlist.
+
+        Reads the allowlist value from
+        ``.github/routed-drc-tolerance.yml`` so this test auto-tightens
+        when the allowlist drops -- no need to update a hard-coded
+        constant here when a router improvement reduces the floor.
+
+        The count compared here is the *blocking* error count (advisory
+        rules such as ``connectivity`` are excluded), matching
+        ``scripts/ci/check_routed_drc.py::_count_blocking_errors`` and
+        the audit pipeline's classifier
+        (``DRCChecker.is_advisory_rule``).  This keeps the developer-
+        laptop verdict aligned with what CI gates the build on.
+
+        A failure here typically indicates one of:
+
+        * A real routing regression that introduced new DRC violations
+          (e.g., a planner change that emits traces clipping pads).
+        * A footprint or library change that altered pad geometry without
+          re-running the router.
+        * The committed routed PCB drifted from the source unrouted PCB
+          (someone edited ``_routed.kicad_pcb`` directly).
+
+        Re-route the board via
+        ``uv run python boards/05-bldc-motor-controller/design.py`` to
+        regenerate and re-check, OR update the allowlist value with
+        reviewer sign-off if the new floor is the new reality.
+        """
+        from tests.test_board_05_drc_hotspot_regression import Board05DRCHotspotAssertions
+
+        report = _run_kct_check(routed_pcb_path)
+        errors = _count_blocking_errors(report)
+        # Check the same real-board result once, including every former
+        # hotspot guard. Separate subprocesses repeated this 8,114-segment
+        # check five times and competed for CPU under xdist.
+        violations = report.get("violations", [])
+        hotspot = Board05DRCHotspotAssertions()
+        hotspot.assert_pad_segment_count_at_or_below_documented_floor(violations)
+        hotspot.assert_pad_segment_violations_at_known_hotspots_only(violations)
+        hotspot.assert_pad_segment_shortfalls_within_documented_band(violations)
+        hotspot.assert_committed_pcb_absent_rule_families(violations)
+        assert errors <= board_05_allowlist_value, (
+            f"Board 05 routed PCB reports {errors} blocking DRC error(s) "
+            f"under JLCPCB rules (excluding advisory rules per "
+            f"DRCChecker.ADVISORY_RULE_IDS); allowlist max is "
+            f"{board_05_allowlist_value} (from "
+            f"{ALLOWLIST_PATH.relative_to(REPO_ROOT)!s}).  This is "
+            f"a routing regression -- either revert the offending change "
+            f"or raise the allowlist value with reviewer justification "
+            f"and a tracking-issue link in the PR description."
+        )
+
+    def test_allowlist_value_matches_documented_floor(self, board_05_allowlist_value: int) -> None:
+        """The redesigned active board keeps its strict-zero gate, except for
+        the #6390-exposed net-class violations tracked in #6395."""
+        assert board_05_allowlist_value == (BOARD_05_EXPECTED_TOLERANCE or 0)

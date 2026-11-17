@@ -1,0 +1,3850 @@
+"""
+Build command implementation for end-to-end workflow from spec to manufacturable design.
+
+Orchestrates the full build pipeline:
+1. Load project spec (.kct file)
+2. Run schematic generator (if exists)
+3. Run ERC on the schematic and persist ``erc_report.json``
+4. Run PCB generator (if exists)
+5. Run autorouter
+6. Run verification (DRC, audit)
+7. Export manufacturing package (Gerbers, BOM, CPL)
+
+Machine output (``--format json``, issue #4674): one document describing the
+run -- the resolved spec/artifact paths, the effective manufacturer, and a
+``steps`` array with one entry per executed step (its success, message,
+output file and elapsed time) -- or ``{"error": ..., "success": false}`` when
+the project directory cannot be resolved.  Exit codes are unchanged.  See
+``docs/reference/machine-output.md``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from rich.console import Console
+
+logger = logging.getLogger(__name__)
+from rich.markup import escape as markup_escape
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+
+from kicad_tools.cli.format_options import (
+    FORMAT_JSON,
+    FORMAT_TEXT,
+    add_format_flag,
+    emit_json,
+    stdout_to_stderr_when,
+)
+from kicad_tools.manufacturers import get_all_manufacturer_names
+
+if TYPE_CHECKING:
+    from kicad_tools.spec.schema import ProjectSpec
+
+__all__ = ["main"]
+
+
+class BuildStep(str, Enum):
+    """Build pipeline steps."""
+
+    SCHEMATIC = "schematic"
+    ERC = "erc"
+    PCB = "pcb"
+    SYNC = "sync"
+    OUTLINE = "outline"
+    PLACEMENT = "placement"
+    ZONES = "zones"
+    SILKSCREEN = "silkscreen"
+    ROUTE = "route"
+    STITCH = "stitch"
+    PAGE_FIT = "page-fit"
+    PREFLIGHT_ROUTING = "preflight-routing"
+    VERIFY = "verify"
+    EXPORT = "export"
+    ALL = "all"
+
+
+# Canonical ordering for ``kct build --step all``.
+#
+# EXPORT precedes VERIFY (issue #3970): export writes
+# ``manufacturing/manifest.json``, and VERIFY's meta-check reads that
+# manifest.  Verifying before exporting left the manifest sub-check
+# ``NOT RUN`` -> rollup ``INCOMPLETE`` -> exit 2, which the verify step
+# misreported as "DRC found issues".  Producing the artifact before
+# verifying it is the correct dependency order and lets VERIFY validate
+# the freshly-exported bundle.
+_ALL_STEPS: tuple[BuildStep, ...] = (
+    BuildStep.SCHEMATIC,
+    BuildStep.ERC,
+    BuildStep.PCB,
+    BuildStep.SYNC,
+    BuildStep.OUTLINE,
+    BuildStep.PLACEMENT,
+    BuildStep.ZONES,
+    BuildStep.SILKSCREEN,
+    BuildStep.ROUTE,
+    BuildStep.STITCH,
+    BuildStep.PAGE_FIT,
+    BuildStep.PREFLIGHT_ROUTING,
+    BuildStep.EXPORT,
+    BuildStep.VERIFY,
+)
+
+
+@dataclass
+class BuildResult:
+    """Result of a build step."""
+
+    step: str
+    success: bool
+    message: str
+    output_file: Path | None = None
+
+
+@dataclass
+class BuildContext:
+    """Context for a build operation."""
+
+    project_dir: Path
+    spec_file: Path | None
+    spec: ProjectSpec | None = None
+    schematic_file: Path | None = None
+    pcb_file: Path | None = None
+    routed_pcb_file: Path | None = None
+    output_dir: Path | None = None
+    mfr: str = "jlcpcb"
+    verbose: bool = False
+    dry_run: bool = False
+    quiet: bool = False
+    force: bool = False
+    optimize_placement: bool = False
+    smoke_check: bool = True
+    allow_incomplete: bool = False
+    # HV pairwise-clearance passthrough (issue #4607).  When voltage_map is
+    # set, the route step forwards these to the `kct route` subprocess and a
+    # clearance-dirty route result (exit 3/4) becomes fatal instead of a
+    # warning.  When None, routing behaviour is byte-identical to before.
+    voltage_map: str | None = None
+    creepage_standard: str = "iec60664"
+    pollution_degree: int = 2
+    material_group: str = "IIIa"
+    hv_threshold: float = 30.0
+    _executed_scripts: set[Path] | None = None
+    _kicad_cli_warning_emitted: bool = False
+
+    def mark_script_executed(self, script: Path) -> None:
+        """Mark a script as having been executed."""
+        if self._executed_scripts is None:
+            self._executed_scripts = set()
+        self._executed_scripts.add(script.resolve())
+
+    def was_script_executed(self, script: Path) -> bool:
+        """Check if a script has already been executed."""
+        if self._executed_scripts is None:
+            return False
+        return script.resolve() in self._executed_scripts
+
+
+def _resolve_effective_mfr(
+    cli_mfr: str | None,
+    spec: ProjectSpec | None,
+    default: str = "jlcpcb",
+) -> str:
+    """Resolve the single manufacturer profile the whole build judges against.
+
+    Precedence (highest first):
+
+    1. ``cli_mfr`` -- an explicit ``--mfr`` flag. ``None`` means the flag was
+       not supplied (the argparse default is ``None``), so it does not win.
+    2. ``spec.requirements.manufacturing.target_fab`` -- the project's
+       declared fab tier.
+    3. ``default`` -- the historical ``"jlcpcb"`` fallback.
+
+    This is the fix for the issue #3920 "split-brain": previously only the
+    export step consulted ``target_fab`` while route/verify/stitch used the
+    CLI default ``"jlcpcb"``, so a board whose recipe routed at (e.g.)
+    ``jlcpcb-tier1`` was verified at the base tier and reported spurious
+    ``via_in_pad`` errors. Resolving once here and threading the result
+    through ``BuildContext.mfr`` makes every stage agree.
+    """
+    if cli_mfr is not None:
+        return cli_mfr
+
+    if (
+        spec is not None
+        and spec.requirements is not None
+        and spec.requirements.manufacturing is not None
+        and spec.requirements.manufacturing.target_fab
+    ):
+        return spec.requirements.manufacturing.target_fab
+
+    return default
+
+
+def _find_spec_file(directory: Path) -> Path | None:
+    """Find a .kct file in the given directory."""
+    kct_files = list(directory.glob("*.kct"))
+    if len(kct_files) == 1:
+        return kct_files[0]
+    elif len(kct_files) > 1:
+        # Prefer 'project.kct' if it exists
+        project_kct = directory / "project.kct"
+        if project_kct.exists():
+            return project_kct
+        # Otherwise return the first one found
+        return kct_files[0]
+    return None
+
+
+def _generator_candidates(script_type: str) -> list[str]:
+    """Return the list of candidate filenames for a generator script type.
+
+    Args:
+        script_type: Type of script ('schematic', 'pcb', 'design')
+
+    Returns:
+        List of candidate filenames in search order
+    """
+    candidates = [
+        f"generate_{script_type}.py",
+        f"gen_{script_type}.py",
+        f"{script_type}_gen.py",
+    ]
+
+    # Also check for combined 'design' generator
+    if script_type in ("schematic", "pcb"):
+        candidates.append("generate_design.py")
+        candidates.append("design.py")
+
+    return candidates
+
+
+def _find_generator_script(directory: Path, script_type: str) -> Path | None:
+    """Find a generator script in the project directory.
+
+    Args:
+        directory: Project directory to search
+        script_type: Type of script ('schematic', 'pcb', 'design')
+
+    Returns:
+        Path to the generator script if found
+    """
+    for candidate in _generator_candidates(script_type):
+        script_path = directory / candidate
+        if script_path.exists():
+            return script_path
+
+    return None
+
+
+def _format_no_generator_message(script_type: str, directory: Path) -> str:
+    """Format an informative error message when no generator script is found.
+
+    Args:
+        script_type: Type of script ('schematic' or 'pcb')
+        directory: The project directory that was searched
+
+    Returns:
+        Multi-line error message with candidate list and guidance
+    """
+    candidates = _generator_candidates(script_type)
+    candidate_list = "\n".join(f"  - {c}" for c in candidates)
+    return (
+        f"No {script_type} generator found in {directory}\n"
+        f"Searched for:\n"
+        f"{candidate_list}\n"
+        f"Hint: create one of these files, or use a combined generator "
+        f"(see boards/00-simple-led/generate_design.py for an example)"
+    )
+
+
+def _get_expected_pcb_artifact(ctx: BuildContext) -> str | None:
+    """Get the expected PCB artifact path from the project spec.
+
+    Returns:
+        The expected PCB path string if defined in spec, None otherwise.
+    """
+    if ctx.spec and ctx.spec.project.artifacts and ctx.spec.project.artifacts.pcb:
+        return ctx.spec.project.artifacts.pcb
+    return None
+
+
+def _find_artifacts(directory: Path, spec_file: Path | None) -> tuple[Path | None, Path | None]:
+    """Find schematic and PCB files in the project directory.
+
+    Returns:
+        Tuple of (schematic_path, pcb_path)
+    """
+    schematic = None
+    pcb = None
+
+    # Try to load from spec file first
+    if spec_file and spec_file.exists():
+        try:
+            from kicad_tools.spec import load_spec
+
+            spec = load_spec(spec_file)
+            if spec.project.artifacts:
+                if spec.project.artifacts.schematic:
+                    sch_path = directory / spec.project.artifacts.schematic
+                    if sch_path.exists():
+                        schematic = sch_path
+                if spec.project.artifacts.pcb:
+                    pcb_path = directory / spec.project.artifacts.pcb
+                    if pcb_path.exists():
+                        pcb = pcb_path
+        except Exception as e:
+            logger.warning(
+                "Failed to load artifacts from spec file %s: %s. Falling back to directory search.",
+                spec_file,
+                e,
+            )
+
+    # Fall back to finding files in directory (search recursively including subdirectories)
+    if not schematic:
+        sch_files = list(directory.glob("**/*.kicad_sch"))
+        # Filter out backup files
+        sch_files = [f for f in sch_files if not f.name.endswith("-bak.kicad_sch")]
+        if sch_files:
+            schematic = sch_files[0]
+
+    if not pcb:
+        pcb_files = list(directory.glob("**/*.kicad_pcb"))
+        # Filter out routed and backup files
+        pcb_files = [
+            f
+            for f in pcb_files
+            if not f.name.endswith("_routed.kicad_pcb") and not f.name.endswith("-bak.kicad_pcb")
+        ]
+        if pcb_files:
+            pcb = pcb_files[0]
+
+    return schematic, pcb
+
+
+def _run_python_script(
+    script_path: Path,
+    cwd: Path,
+    verbose: bool = False,
+    env_vars: dict[str, str] | None = None,
+    script_args: list[str] | None = None,
+    quiet: bool = False,
+) -> tuple[bool, str]:
+    """Run a Python generator script.
+
+    Args:
+        script_path: Path to the Python script
+        cwd: Working directory for execution
+        verbose: Reserved for backward compatibility -- previously gated
+            *all* stdout streaming behind ``--verbose``.  Issue #2794
+            inverts the default: stdout is now streamed line-by-line at
+            the default verbosity so users see board progress (per-net
+            routing, optimization steps, etc.) without needing
+            ``--verbose``.  Setting ``verbose=True`` is still honoured
+            for ``stderr`` echo.
+        env_vars: Optional additional environment variables to pass
+        script_args: Optional positional arguments to pass to the script
+        quiet: When True, suppress live stdout streaming (capture
+            silently and only surface errors).  Used by ``--quiet`` /
+            CI paths that don't want per-net chatter.
+
+    Returns:
+        Tuple of (success, output/error message)
+
+    Notes:
+        Issue #2794: ``subprocess.run(..., capture_output=not verbose)``
+        previously buffered the entire child stdout until the script
+        completed.  For long-running routing scripts (board 05 BLDC
+        controller, etc.) this meant a 22-minute silent hang was
+        indistinguishable from a 22-second silent wait -- the prints
+        existed, but were trapped in the buffer.  We now use
+        ``Popen`` with line-buffered stdout and stream each line to
+        the parent process as it arrives, so progress is observable
+        in real time.
+    """
+    import os
+
+    # Build environment with optional extra variables
+    run_env = os.environ.copy()
+    if env_vars:
+        run_env.update(env_vars)
+    # Force unbuffered stdio in the child so per-line progress prints
+    # flush immediately even when the child doesn't call
+    # ``flush=True`` explicitly.  Equivalent to ``python -u``.
+    run_env.setdefault("PYTHONUNBUFFERED", "1")
+
+    cmd = [sys.executable, str(script_path)] + (script_args or [])
+
+    try:
+        if quiet:
+            # Quiet path: capture both streams silently; only surface
+            # stderr in the error message.  No live output.
+            result = subprocess.run(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                env=run_env,
+            )
+            if result.returncode == 0:
+                return True, f"Script {script_path.name} completed successfully"
+            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
+            return False, f"Script {script_path.name} failed: {error_msg}"
+
+        # Default + verbose path: stream stdout line-by-line so progress
+        # is visible immediately.  stderr is captured (so we can include
+        # it in the failure message) and echoed at the end on failure.
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # line-buffered
+            env=run_env,
+        )
+
+        # Drain stdout into the parent's stdout as lines arrive.
+        # ``readline`` blocks until a line is available or the pipe
+        # closes; the loop exits when EOF (empty string) is hit.
+        assert process.stdout is not None
+        for line in iter(process.stdout.readline, ""):
+            # Already terminated by readline; just echo verbatim.
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        process.stdout.close()
+
+        # Now wait for the child and collect any stderr.
+        stderr_output = ""
+        if process.stderr is not None:
+            stderr_output = process.stderr.read()
+            process.stderr.close()
+        returncode = process.wait()
+
+        if returncode == 0:
+            return True, f"Script {script_path.name} completed successfully"
+        error_msg = stderr_output if stderr_output else f"Exit code: {returncode}"
+        return False, f"Script {script_path.name} failed: {error_msg}"
+
+    except Exception as e:
+        return False, f"Failed to run {script_path.name}: {e}"
+
+
+# Interval (seconds) between "still running" heartbeats emitted while a
+# long subprocess step is alive.  Chosen well under the 60s ceiling in
+# issue #3944's acceptance criteria so users can distinguish "still
+# working" from "hung" without waiting a full minute.
+_HEARTBEAT_INTERVAL_S = 30.0
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format an elapsed duration for ledger / summary lines.
+
+    Sub-minute durations render as fractional seconds (``24.3s``);
+    longer durations render as ``4m32s`` so multi-minute steps read
+    cleanly.  All timing is fed from ``time.monotonic()`` deltas so it
+    is insensitive to wall-clock adjustments (issue #3944).
+    """
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    rem = int(round(seconds - minutes * 60))
+    if rem == 60:  # rounding pushed us to the next minute
+        minutes += 1
+        rem = 0
+    return f"{minutes}m{rem:02d}s"
+
+
+def _run_subprocess_with_heartbeat(
+    cmd: list[str],
+    *,
+    cwd: str,
+    console: Console,
+    label: str,
+    quiet: bool,
+    heartbeat_interval: float = _HEARTBEAT_INTERVAL_S,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd`` while emitting periodic "still running" heartbeats.
+
+    Issue #3944: several ``kct build`` sub-steps (placement, route
+    fallback, verify DRC/sync, export) shelled out with
+    ``subprocess.run(capture_output=...)`` and went completely silent for
+    minutes at a time -- indistinguishable from a hang.  This helper
+    captures the child's stdout/stderr (so callers keep the same
+    ``CompletedProcess`` contract they had with ``subprocess.run``) but
+    spawns a daemon thread that prints ``[label]: still running, Xs
+    elapsed`` every ``heartbeat_interval`` seconds until the process
+    exits.
+
+    ``quiet`` suppresses the heartbeat entirely (the existing ``--quiet``
+    contract).  The returned object matches ``subprocess.run(...,
+    capture_output=True, text=True)`` so callers can inspect
+    ``returncode``, ``stdout``, and ``stderr`` unchanged.
+    """
+    start = time.monotonic()
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    stop = threading.Event()
+
+    # Escape the label so Rich renders the surrounding brackets as
+    # literal ``[label]`` text instead of interpreting them as console
+    # markup (which would otherwise silently strip the label).
+    safe_label = markup_escape(label)
+
+    def _heartbeat() -> None:
+        # Wait in interval-sized slices; exit promptly when signalled.
+        while not stop.wait(heartbeat_interval):
+            elapsed = time.monotonic() - start
+            console.print(
+                f"  [dim]\\[{safe_label}]: still running, {_format_elapsed(elapsed)} elapsed[/dim]"
+            )
+
+    thread: threading.Thread | None = None
+    if not quiet:
+        thread = threading.Thread(target=_heartbeat, daemon=True)
+        thread.start()
+
+    try:
+        stdout, stderr = process.communicate()
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=1.0)
+
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run schematic generation step."""
+    script = _find_generator_script(ctx.project_dir, "schematic")
+
+    if not script:
+        # Check if schematic already exists (unless force rebuild)
+        if ctx.schematic_file and ctx.schematic_file.exists() and not ctx.force:
+            return BuildResult(
+                step="schematic",
+                success=True,
+                message="Schematic already exists, skipping generation",
+                output_file=ctx.schematic_file,
+            )
+        return BuildResult(
+            step="schematic",
+            success=False,
+            message=_format_no_generator_message("schematic", ctx.project_dir),
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="schematic",
+            success=True,
+            message=f"[dry-run] Would run: {script.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running {script.name}...")
+
+    script_args = [str(ctx.output_dir)] if ctx.output_dir else None
+    success, message = _run_python_script(
+        script,
+        ctx.project_dir,
+        ctx.verbose,
+        script_args=script_args,
+        quiet=ctx.quiet,
+    )
+
+    # Mark this script as executed to avoid running it again in PCB step
+    ctx.mark_script_executed(script)
+
+    # Re-scan for artifacts after generation (check output dir first, then project dir)
+    search_dir = ctx.output_dir if ctx.output_dir else ctx.project_dir
+    schematic, _ = _find_artifacts(search_dir, ctx.spec_file)
+    if not schematic and ctx.output_dir:
+        schematic, _ = _find_artifacts(ctx.project_dir, ctx.spec_file)
+
+    return BuildResult(
+        step="schematic",
+        success=success,
+        message=message,
+        output_file=schematic,
+    )
+
+
+def _capture_routed_artifact_mtime(pcb_file: Path | None) -> float | None:
+    """Snapshot the ``*_routed.kicad_pcb`` sibling's mtime before the PCB step.
+
+    Returns the ``st_mtime`` of the candidate routed artifact next to
+    ``pcb_file`` if it already exists on disk, otherwise ``None`` (no file
+    to compare against). Called immediately *before* ``_run_step_pcb()`` so
+    the post-PCB scan can tell whether the PCB step actually (re)wrote the
+    routed artifact or merely found a stale copy left in the repo. See
+    :func:`_scan_recipe_routed_artifact` and issue #3978.
+    """
+    if pcb_file is None:
+        return None
+    candidate = pcb_file.with_stem(pcb_file.stem + "_routed")
+    if candidate.exists():
+        return candidate.stat().st_mtime
+    return None
+
+
+def _scan_recipe_routed_artifact(
+    pcb_output_file: Path,
+    pre_pcb_routed_mtime: float | None,
+    console: Console,
+    *,
+    quiet: bool = False,
+) -> Path | None:
+    """Decide whether the PCB step produced a trustworthy routed artifact.
+
+    Board 04's ``generate_design.py`` routes, stitches, and fills zones
+    during the PCB step, writing ``*_routed.kicad_pcb`` in-place. When it
+    does, the ROUTE step's guard must skip re-routing instead of clobbering
+    that artifact with the generic autorouter (issue #3971).
+
+    However, *existence alone* is not proof of freshness: an external board
+    whose PCB generator does **not** route in-place could have a stale
+    ``*_routed.kicad_pcb`` committed in the repo (or left from a prior
+    partial run). Trusting it on existence would silently skip routing and
+    ship stale copper (issue #3978).
+
+    This helper compares the routed artifact's mtime *after* the PCB step
+    against the snapshot taken *before* it (``pre_pcb_routed_mtime``). The
+    artifact is trusted only when it was newly created (no prior file) or
+    its mtime advanced (the PCB step rewrote it). A stale file that survived
+    the PCB step unchanged is rejected with a warning so the ROUTE step
+    re-routes.
+
+    Note this compares the routed file against *its own* pre-run state, not
+    against the unrouted file, so it does not reintroduce the same-mtime
+    quantum race #3971 mitigated.
+
+    Returns the routed :class:`~pathlib.Path` when it should be recorded on
+    ``ctx.routed_pcb_file``, otherwise ``None``.
+    """
+    expected_routed = pcb_output_file.with_stem(pcb_output_file.stem + "_routed")
+    if not expected_routed.exists():
+        return None
+
+    routed_mtime = expected_routed.stat().st_mtime
+    if pre_pcb_routed_mtime is None or routed_mtime > pre_pcb_routed_mtime:
+        # Either the PCB step created the routed artifact, or it advanced an
+        # existing one's mtime — safe to trust it.
+        return expected_routed
+
+    # The file existed before the PCB step and was not updated by it: stale.
+    if not quiet:
+        console.print(
+            f"  [yellow]Stale {expected_routed.name} found (not written by the "
+            f"PCB step); ROUTE step will re-route. Use --force to override.[/yellow]"
+        )
+    return None
+
+
+def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run PCB generation step."""
+    script = _find_generator_script(ctx.project_dir, "pcb")
+
+    if not script:
+        # Check if PCB already exists (unless force rebuild)
+        if ctx.pcb_file and ctx.pcb_file.exists() and not ctx.force:
+            return BuildResult(
+                step="pcb",
+                success=True,
+                message="PCB already exists, skipping generation",
+                output_file=ctx.pcb_file,
+            )
+        return BuildResult(
+            step="pcb",
+            success=False,
+            message=_format_no_generator_message("pcb", ctx.project_dir),
+        )
+
+    # Skip if this script was already executed (e.g., generate_design.py ran in schematic step)
+    if ctx.was_script_executed(script):
+        # Re-scan for artifacts that may have been created by the earlier run
+        search_dir = ctx.output_dir if ctx.output_dir else ctx.project_dir
+        _, pcb = _find_artifacts(search_dir, ctx.spec_file)
+        if not pcb and ctx.output_dir:
+            _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
+
+        # Verify that a PCB was actually created
+        if pcb and pcb.exists():
+            return BuildResult(
+                step="pcb",
+                success=True,
+                message=f"Script {script.name} already ran (produces both schematic and PCB)",
+                output_file=pcb,
+            )
+        else:
+            # Script ran but didn't produce a PCB - report the failure clearly
+            expected_pcb = _get_expected_pcb_artifact(ctx)
+            if expected_pcb:
+                return BuildResult(
+                    step="pcb",
+                    success=False,
+                    message=f"Script {script.name} ran but expected artifact '{expected_pcb}' was not created. "
+                    f"PCB generation may not be implemented.",
+                )
+            else:
+                return BuildResult(
+                    step="pcb",
+                    success=False,
+                    message=f"Script {script.name} ran but no PCB file was created. "
+                    f"PCB generation may not be implemented.",
+                )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="pcb",
+            success=True,
+            message=f"[dry-run] Would run: {script.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running {script.name}...")
+
+    script_args = [str(ctx.output_dir)] if ctx.output_dir else None
+    success, message = _run_python_script(
+        script,
+        ctx.project_dir,
+        ctx.verbose,
+        script_args=script_args,
+        quiet=ctx.quiet,
+    )
+
+    # Mark this script as executed
+    ctx.mark_script_executed(script)
+
+    # Re-scan for artifacts after generation (check output dir first, then project dir)
+    search_dir = ctx.output_dir if ctx.output_dir else ctx.project_dir
+    _, pcb = _find_artifacts(search_dir, ctx.spec_file)
+    if not pcb and ctx.output_dir:
+        _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
+
+    # Verify that a PCB was actually created (even if script reported success)
+    if success and (not pcb or not pcb.exists()):
+        expected_pcb = _get_expected_pcb_artifact(ctx)
+        if expected_pcb:
+            return BuildResult(
+                step="pcb",
+                success=False,
+                message=f"Script {script.name} completed but expected artifact '{expected_pcb}' was not created. "
+                f"PCB generation may not be implemented.",
+            )
+        else:
+            return BuildResult(
+                step="pcb",
+                success=False,
+                message=f"Script {script.name} completed but no PCB file was created. "
+                f"PCB generation may not be implemented.",
+            )
+
+    return BuildResult(
+        step="pcb",
+        success=success,
+        message=message,
+        output_file=pcb,
+    )
+
+
+def _parse_dimension_mm(value: str | None) -> float | None:
+    """Parse a dimension string like '0.3mm' or '0.2 mm' into a float in mm.
+
+    Args:
+        value: String like "0.3mm", "0.2 mm", "0.15", or None
+
+    Returns:
+        Float value in mm, or None if parsing fails
+    """
+    if value is None:
+        return None
+
+    # Strip whitespace
+    value = value.strip()
+    if not value:
+        return None
+
+    # Try to parse numeric value with optional 'mm' suffix
+    match = re.match(r"^([\d.]+)\s*(?:mm)?$", value, re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    return None
+
+
+def _get_routing_params(
+    mfr: str, spec: ProjectSpec | None = None
+) -> tuple[float, float, float, float, float]:
+    """Get routing parameters from project spec or manufacturer rules.
+
+    Priority:
+    1. Project spec (min_trace, min_space from project.kct)
+    2. Manufacturer profile defaults
+
+    Auto-calculates grid to be compatible with clearance.
+    Grid must be <= clearance / 2 to allow routing without DRC violations.
+
+    Args:
+        mfr: Manufacturer ID (e.g., "jlcpcb")
+        spec: Optional ProjectSpec loaded from project.kct
+
+    Returns:
+        Tuple of (grid, clearance, trace_width, via_drill, via_diameter)
+    """
+    from kicad_tools.manufacturers import get_profile
+
+    # Start with None values to track what we've found
+    clearance: float | None = None
+    trace_width: float | None = None
+    via_drill: float | None = None
+    via_diameter: float | None = None
+
+    # First, try to get values from the project spec
+    if spec is not None and spec.requirements is not None:
+        mfr_reqs = spec.requirements.manufacturing
+        if mfr_reqs is not None:
+            # Parse min_space -> clearance
+            if mfr_reqs.min_space is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_space)
+                if parsed is not None:
+                    clearance = parsed
+
+            # Parse min_trace -> trace_width
+            if mfr_reqs.min_trace is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_trace)
+                if parsed is not None:
+                    trace_width = parsed
+
+            # Parse min_via -> via_diameter
+            if mfr_reqs.min_via is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_via)
+                if parsed is not None:
+                    via_diameter = parsed
+
+            # Parse min_drill -> via_drill
+            if mfr_reqs.min_drill is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_drill)
+                if parsed is not None:
+                    via_drill = parsed
+
+    # Fill in missing values from manufacturer profile
+    try:
+        profile = get_profile(mfr)
+        rules = profile.get_design_rules(layers=2)  # Use 2-layer defaults
+
+        if clearance is None:
+            clearance = rules.min_clearance_mm
+        if trace_width is None:
+            trace_width = rules.min_trace_width_mm
+        if via_drill is None:
+            via_drill = rules.min_via_drill_mm
+        if via_diameter is None:
+            via_diameter = rules.min_via_diameter_mm
+
+    except Exception:
+        # Fall back to safe defaults if manufacturer lookup fails
+        if clearance is None:
+            clearance = 0.15
+        if trace_width is None:
+            trace_width = 0.15
+        if via_drill is None:
+            via_drill = 0.3
+        if via_diameter is None:
+            via_diameter = 0.6
+
+    # Auto-calculate grid: must be <= clearance / 2 so that worst-case
+    # grid-quantisation error stays within DRC clearance margin.
+    # Snap to a known-good grid value that divides evenly into common
+    # imperial pitches (2.54mm, 5.08mm) to avoid off-grid THT pads.
+    max_grid = clearance / 2
+    # Candidate grids ordered coarsest-first; includes 0.127mm (5 mil)
+    # which divides evenly into 2.54mm (20x) and 5.08mm (40x).
+    _GRID_CANDIDATES = [0.25, 0.127, 0.1, 0.065, 0.05]
+    grid = 0.05  # fallback minimum
+    for candidate in _GRID_CANDIDATES:
+        if candidate <= max_grid:
+            grid = candidate
+            break
+
+    return grid, clearance, trace_width, via_drill, via_diameter
+
+
+def _run_step_outline(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run board outline generation step.
+
+    Reads mechanical dimensions from the project spec and writes a closed
+    polygon on Edge.Cuts to the PCB file.  Skips if:
+    - No PCB file exists yet
+    - No mechanical dimensions in the spec
+    - An outline already exists on Edge.Cuts
+    """
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="outline",
+            success=True,
+            message="No PCB file found, skipping outline generation",
+        )
+
+    # Extract mechanical dimensions from spec
+    width_mm = None
+    height_mm = None
+
+    if ctx.spec and ctx.spec.requirements and ctx.spec.requirements.mechanical:
+        mech = ctx.spec.requirements.mechanical
+        if mech.dimensions:
+            width_mm = _parse_dimension_mm(mech.dimensions.get("width"))
+            height_mm = _parse_dimension_mm(mech.dimensions.get("height"))
+
+    if width_mm is None or height_mm is None:
+        return BuildResult(
+            step="outline",
+            success=True,
+            message="No mechanical dimensions in spec, skipping outline generation",
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="outline",
+            success=True,
+            message=f"[dry-run] Would add {width_mm}x{height_mm}mm outline on Edge.Cuts",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Adding board outline: {width_mm}x{height_mm}mm")
+
+    try:
+        from kicad_tools.pcb.editor import PCBEditor
+
+        editor = PCBEditor(str(ctx.pcb_file))
+
+        if editor.has_board_outline():
+            if not ctx.quiet:
+                console.print("  Outline already exists on Edge.Cuts, skipping")
+            return BuildResult(
+                step="outline",
+                success=True,
+                message="Board outline already exists, skipping",
+                output_file=ctx.pcb_file,
+            )
+
+        nodes = editor.add_board_outline(width_mm, height_mm)
+
+        if not nodes:
+            return BuildResult(
+                step="outline",
+                success=True,
+                message="Board outline already exists, skipping",
+                output_file=ctx.pcb_file,
+            )
+
+        # Place mounting holes if specified
+        mounting_msg = ""
+        if (
+            ctx.spec
+            and ctx.spec.requirements
+            and ctx.spec.requirements.mechanical
+            and ctx.spec.requirements.mechanical.mounting_holes
+        ):
+            holes = ctx.spec.requirements.mechanical.mounting_holes
+            hole_count = 0
+            for hole in holes:
+                hx = _parse_dimension_mm(hole.x)
+                hy = _parse_dimension_mm(hole.y)
+                diameter = _parse_dimension_mm(hole.diameter)
+                if hx is not None and hy is not None and diameter is not None:
+                    # Offset mounting hole positions relative to the board origin
+                    abs_x = 100.0 + hx
+                    abs_y = 100.0 + hy
+                    editor.place_component(
+                        f"H{hole_count + 1}",
+                        abs_x,
+                        abs_y,
+                    )
+                    hole_count += 1
+            if hole_count > 0:
+                mounting_msg = f" with {hole_count} mounting hole(s)"
+
+        editor.save()
+
+        return BuildResult(
+            step="outline",
+            success=True,
+            message=f"Added {width_mm}x{height_mm}mm outline on Edge.Cuts{mounting_msg}",
+            output_file=ctx.pcb_file,
+        )
+
+    except Exception as e:
+        return BuildResult(
+            step="outline",
+            success=False,
+            message=f"Outline generation failed: {e}",
+        )
+
+
+def _run_step_placement(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run placement optimization step.
+
+    This step is opt-in: it only runs when ``--optimize-placement`` is passed.
+    When enabled it invokes ``kct optimize-placement`` as a subprocess so that
+    the existing PCB component positions are used as the starting layout and the
+    optimizer refines them in-place.
+    """
+    if not ctx.optimize_placement:
+        return BuildResult(
+            step="placement",
+            success=True,
+            message="Placement optimization not requested, skipping",
+        )
+
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="placement",
+            success=True,
+            message="No PCB file found, skipping placement optimization",
+        )
+
+    # Determine output path: optimise in-place (overwrite the PCB file) so the
+    # subsequent routing step picks up the improved positions.
+    output_path = ctx.pcb_file
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="placement",
+            success=True,
+            message=f"[dry-run] Would run: kct optimize-placement {ctx.pcb_file.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running placement optimization on {ctx.pcb_file.name}...")
+
+    try:
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "optimize-placement",
+            str(ctx.pcb_file),
+            "--strategy",
+            "cmaes",
+            "--max-iterations",
+            "300",
+            # Wall-clock cap: with the feasibility-gated convergence
+            # added in #2821 the optimizer no longer terminates at a
+            # plateau in the infeasible region, so a hard time budget
+            # is required to keep the build step bounded. Generous
+            # default (5 minutes) -- callers who need more should run
+            # `kct optimize-placement` directly.
+            "--time-budget",
+            "300",
+            "--seed",
+            "force-directed",
+            "--output",
+            str(output_path),
+        ]
+
+        if ctx.quiet:
+            cmd.append("--quiet")
+        if ctx.verbose:
+            cmd.append("--verbose")
+
+        result = _run_subprocess_with_heartbeat(
+            cmd,
+            cwd=str(ctx.project_dir),
+            console=console,
+            label="placement",
+            quiet=ctx.quiet,
+        )
+        if ctx.verbose and result.stdout:
+            console.print(result.stdout)
+
+        if result.returncode == 0:
+            return BuildResult(
+                step="placement",
+                success=True,
+                message="Placement optimization completed",
+                output_file=output_path,
+            )
+        else:
+            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
+            return BuildResult(
+                step="placement",
+                success=False,
+                message=f"Placement optimization failed: {error_msg}",
+            )
+
+    except Exception as e:
+        return BuildResult(
+            step="placement",
+            success=False,
+            message=f"Placement optimization failed: {e}",
+        )
+
+
+def _run_step_silkscreen(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run silkscreen generation step.
+
+    Ensures footprint reference designators are visible on silkscreen layers
+    and adds board-level markings (project name, revision, date) from the
+    project spec metadata.
+    """
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="silkscreen",
+            success=True,
+            message="No PCB file found, skipping silkscreen generation",
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="silkscreen",
+            success=True,
+            message="[dry-run] Would generate silkscreen content",
+        )
+
+    try:
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(ctx.pcb_file)
+
+        # Step 1: Ensure ref des are visible
+        ref_result = gen.ensure_ref_des_visible()
+
+        # Step 2: Add board markings from spec metadata
+        mark_result = None
+        name = None
+        revision = None
+        date_str = None
+
+        if ctx.spec and ctx.spec.project:
+            name = ctx.spec.project.name
+            revision = ctx.spec.project.revision
+            if ctx.spec.project.created:
+                date_str = str(ctx.spec.project.created)
+
+        if name:
+            mark_result = gen.add_board_markings(
+                name=name,
+                revision=revision,
+                date=date_str,
+            )
+
+        gen.save()
+
+        # Build summary message
+        parts = []
+        if ref_result.refs_unhidden:
+            parts.append(f"{ref_result.refs_unhidden} ref(s) unhidden")
+        if mark_result and mark_result.markings_added:
+            parts.append(f"{mark_result.markings_added} marking(s) added")
+        if mark_result and mark_result.markings_skipped:
+            parts.append(f"{mark_result.markings_skipped} marking(s) already present")
+
+        if parts:
+            message = "Silkscreen: " + ", ".join(parts)
+        else:
+            message = "Silkscreen: no changes needed"
+
+        if not ctx.quiet:
+            for msg in ref_result.messages:
+                console.print(f"    {msg}")
+            if mark_result:
+                for msg in mark_result.messages:
+                    console.print(f"    {msg}")
+
+        return BuildResult(
+            step="silkscreen",
+            success=True,
+            message=message,
+            output_file=ctx.pcb_file,
+        )
+
+    except Exception as e:
+        return BuildResult(
+            step="silkscreen",
+            success=False,
+            message=f"Silkscreen generation failed: {e}",
+        )
+
+
+def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run automatic zone creation for power and ground nets.
+
+    Identifies pour nets (POWER and GROUND) via net classification and
+    creates copper zone definitions on the PCB before routing.  Layer
+    assignment is stackup-aware: on 4-layer boards GND goes on In1.Cu
+    and power nets are distributed across In2.Cu / F.Cu.
+
+    Zones are *defined* here (unfilled polygons).  Filling happens later
+    after routing -- ``kct route`` calls :func:`route_cmd._fill_zones_after_route`
+    once routing succeeds, and :func:`pipeline_cmd._run_step_zones` performs
+    the same fill via ``kct zones fill``.  ``kct export`` also runs a
+    safety-net fill if the PCB still has unfilled zones at export time
+    (see :func:`export.gerber.GerberExporter._export_gerbers`).
+
+    All-power-board guard (issue #2740)
+    -----------------------------------
+
+    When *every* net on the board classifies as POWER or GROUND (e.g.
+    board 01-voltage-divider with VIN/VOUT/GND only), zone creation is
+    **skipped** entirely so the router can route those nets as ordinary
+    signals.  If zones were created instead, ``kct route``'s
+    ``_auto_skip_pour_nets`` would auto-skip every net (each has a zone),
+    ``nets_to_route`` would drop to 0, the router would report 100%
+    completion trivially, and the build would silently ship a PCB with
+    zero copper segments.  This guard mirrors the one in
+    :func:`kicad_tools.router.auto_pour.auto_pour_if_missing` and both
+    call sites share :func:`classify_pour_candidates` so the two cannot
+    drift again.
+    """
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="zones",
+            success=True,
+            message="No PCB file found, skipping zone creation",
+        )
+
+    try:
+        from kicad_tools.router.auto_pour import classify_pour_candidates
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        pcb = PCB.load(str(ctx.pcb_file))
+
+        # Build net_names dict {net_id: net_name} for classification
+        net_names: dict[int, str] = {
+            net_id: net.name for net_id, net in pcb.nets.items() if net.name
+        }
+
+        if not net_names:
+            return BuildResult(
+                step="zones",
+                success=True,
+                message="No nets found in PCB, skipping zone creation",
+            )
+
+        # Classify nets and check the all-power-board guard.  This MUST
+        # match the guard in router.auto_pour.auto_pour_if_missing -- both
+        # call sites use the same helper to prevent drift.  See the
+        # function docstring for issue-#2740 context.
+        pour_nets, _signal_net_count, is_all_power_board = classify_pour_candidates(net_names)
+
+        if not pour_nets:
+            return BuildResult(
+                step="zones",
+                success=True,
+                message="No power/ground nets detected, skipping zone creation",
+            )
+
+        if is_all_power_board:
+            if not ctx.quiet:
+                console.print(
+                    "  All nets are power/ground "
+                    "(skipping zone creation — routing as signals instead)"
+                )
+            return BuildResult(
+                step="zones",
+                success=True,
+                message=(
+                    "All nets are power/ground; skipping zone creation so the "
+                    "router routes them as signals (see issue #2740)"
+                ),
+                output_file=ctx.pcb_file,
+            )
+
+        # Check for existing zones on these nets (idempotency)
+        existing_zone_nets = {z.net_name for z in pcb.zones}
+        new_pour_nets = [(name, cls) for name, cls in pour_nets if name not in existing_zone_nets]
+
+        if not new_pour_nets:
+            return BuildResult(
+                step="zones",
+                success=True,
+                message="Zones already exist for all power/ground nets, skipping",
+                output_file=ctx.pcb_file,
+            )
+
+        if ctx.dry_run:
+            net_list = ", ".join(f"{name} ({cls.value})" for name, cls in new_pour_nets)
+            return BuildResult(
+                step="zones",
+                success=True,
+                message=f"[dry-run] Would create zones for: {net_list}",
+            )
+
+        if not ctx.quiet:
+            net_list = ", ".join(f"{name} ({cls.value})" for name, cls in new_pour_nets)
+            console.print(f"  Creating zones for: {net_list}")
+
+        # Look up edge_clearance from the manufacturer profile so that zone
+        # copper does not extend to the board edge.  This mirrors the
+        # auto-fill logic in route_cmd.py and prevents `edge_clearance_zone`
+        # DRC violations when `kct build` is used (which calls this step
+        # directly instead of going through `auto_pour_if_missing`).
+        from kicad_tools.router.mfr_limits import get_mfr_limits
+
+        edge_clearance: float | None = None
+        try:
+            _mfr_limits = get_mfr_limits(ctx.mfr)
+            if _mfr_limits.min_edge_clearance > 0:
+                edge_clearance = _mfr_limits.min_edge_clearance
+        except ValueError:
+            pass  # Unknown manufacturer -- edge_clearance stays None
+
+        count = auto_create_zones_for_pour_nets(
+            ctx.pcb_file, new_pour_nets, edge_clearance=edge_clearance
+        )
+
+        return BuildResult(
+            step="zones",
+            success=True,
+            message=f"Created {count} zone(s) for power/ground nets",
+            output_file=ctx.pcb_file,
+        )
+
+    except Exception as e:
+        logger.exception("Zone creation failed")
+        return BuildResult(
+            step="zones",
+            success=False,
+            message=f"Zone creation failed: {e}",
+        )
+
+
+def _resolve_routed_pcb_path(ctx: BuildContext) -> Path:
+    """Resolve the on-disk path for the router's output PCB.
+
+    Resolution order (first match wins):
+
+    1. ``ctx.spec.project.artifacts.pcb_routed`` if declared in ``project.kct``.
+       Resolved relative to ``ctx.project_dir``.  This lets boards opt into a
+       non-default path (e.g. ``output/<name>_routed.kicad_pcb``) without
+       relying on ``--output``.
+    2. ``ctx.output_dir / "<stem>_routed.kicad_pcb"`` if ``--output`` was
+       passed on the CLI.
+    3. ``<pcb_file>.with_stem(<stem> + "_routed")`` as the historical
+       default (sibling of the unrouted PCB).
+
+    The caller is responsible for ensuring ``ctx.pcb_file`` is set before
+    invoking this; ``_run_step_route`` guards that precondition.
+
+    Returns:
+        Absolute or project-relative ``Path`` to write the routed PCB to.
+    """
+    assert ctx.pcb_file is not None, "_resolve_routed_pcb_path requires ctx.pcb_file"
+
+    if (
+        ctx.spec
+        and ctx.spec.project
+        and ctx.spec.project.artifacts
+        and ctx.spec.project.artifacts.pcb_routed
+    ):
+        declared = Path(ctx.spec.project.artifacts.pcb_routed)
+        if not declared.is_absolute():
+            declared = ctx.project_dir / declared
+        return declared
+
+    if ctx.output_dir:
+        return ctx.output_dir / (ctx.pcb_file.stem + "_routed.kicad_pcb")
+
+    return ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+
+
+# Module-level sentinel a recipe script can define to opt into the Tier 2
+# ``generate_design.py --step route`` discovery path without needing a
+# ``build.route_recipe`` declaration in ``project.kct``.  Detection greps the
+# script source for this literal (see ``_generate_design_supports_step_route``)
+# so no import/exec of the recipe is required at probe time.
+_ROUTE_STEP_SENTINEL = "SUPPORTS_STEP_ROUTE = True"
+
+
+def _resolve_route_recipe(ctx: BuildContext) -> list[str] | None:
+    """Resolve the route-step recipe command from the discovery contract.
+
+    Returns the argv (as a list, ``sys.executable`` prepended by the caller)
+    for the recipe that should route the committed unrouted PCB, or ``None``
+    if no recipe applies (the caller then falls through to the standalone
+    ``route_demo.py`` / ``route.py`` probe and finally generic ``kct route``).
+
+    Probe order (first match wins):
+
+    1. **Tier 1 — ``project.kct`` explicit declaration.** If
+       ``spec.build.route_recipe`` is set, split it into argv and resolve the
+       first token (the script) relative to ``ctx.project_dir``.  This is the
+       cleanest, heuristic-free contract for recipe-first boards.
+    2. **Tier 2 — ``generate_design.py --step route`` sentinel.** If
+       ``generate_design.py`` exists in ``ctx.project_dir`` and its source
+       contains the ``SUPPORTS_STEP_ROUTE = True`` sentinel, invoke it with
+       ``--step route``.  Covers boards 06/07 even without a ``project.kct``
+       key.
+
+    The returned argv is a *script + args* list (no interpreter); the caller
+    runs it with ``sys.executable`` and forwards the output dir as a trailing
+    positional argument.
+    """
+    # Tier 1: explicit project.kct declaration.  Guard on ``isinstance(str)``
+    # rather than mere truthiness so a partially-mocked BuildContext (whose
+    # ``spec`` auto-vivifies attributes) never reaches ``shlex.split`` with a
+    # non-string; a real spec always carries a ``str | None`` here.
+    route_recipe = getattr(getattr(ctx.spec, "build", None), "route_recipe", None)
+    if isinstance(route_recipe, str) and route_recipe.strip():
+        tokens = shlex.split(route_recipe)
+        if tokens:
+            script = Path(tokens[0])
+            if not script.is_absolute():
+                script = ctx.project_dir / script
+            if script.exists():
+                return [str(script), *tokens[1:]]
+
+    # Tier 2: generate_design.py with the --step route sentinel.
+    design_script = ctx.project_dir / "generate_design.py"
+    if design_script.exists() and _generate_design_supports_step_route(design_script):
+        return [str(design_script), "--step", "route"]
+
+    return None
+
+
+def _generate_design_supports_step_route(script: Path) -> bool:
+    """Return True if ``script`` opts into the ``--step route`` recipe path.
+
+    Detection is a cheap source grep for the ``SUPPORTS_STEP_ROUTE = True``
+    module-level sentinel — no import or ``--help`` subprocess is required, so
+    a syntactically-broken or side-effectful recipe never runs merely to be
+    probed.  Boards 06 and 07 declare the sentinel near the top of their
+    ``generate_design.py``.
+    """
+    try:
+        return _ROUTE_STEP_SENTINEL in script.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+
+def _hv_recipe_route_refusal(ctx: BuildContext, tier_desc: str) -> BuildResult:
+    """Loud refusal: ``--voltage-map`` cannot ride through a route recipe/script.
+
+    Tier 1-3 route recipes and standalone route scripts build their own
+    router invocation, so the HV pairwise-clearance audit flags on the
+    build context never reach the router.  Silently dispatching to such a
+    tier would disable the HV safety gate the flag exists to enforce
+    (issue #4607) — so the route step fails fast instead, telling the user
+    how to run the audit.
+    """
+    return BuildResult(
+        step="route",
+        success=False,
+        message=(
+            f"--voltage-map is set but this board routes via {tier_desc}, "
+            "which cannot carry the HV pairwise-clearance audit flags; "
+            "refusing to route without the audit rather than silently "
+            "skipping it. Either add the HV flags "
+            "(--voltage-map/--creepage-standard/--pollution-degree/"
+            "--material-group/--hv-threshold) to the recipe's own `kct route` "
+            "invocation, or audit the routed copper directly with "
+            f"`kct creepage <board> --voltage-map {ctx.voltage_map}`."
+        ),
+    )
+
+
+def _run_route_recipe(
+    ctx: BuildContext,
+    console: Console,
+    recipe_argv: list[str],
+) -> BuildResult:
+    """Invoke a discovered route recipe (Tier 1 / Tier 2) and locate its output.
+
+    ``recipe_argv`` is a *script + args* list (no interpreter). The output dir
+    is forwarded as a trailing positional argument so the recipe writes its
+    ``*_routed.kicad_pcb`` where the rest of the pipeline looks for it.
+    """
+    script = Path(recipe_argv[0])
+    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr, ctx.spec)
+    route_env_vars = {
+        "KCT_ROUTE_GRID": str(grid),
+        "KCT_ROUTE_CLEARANCE": str(clearance),
+        "KCT_ROUTE_TRACE_WIDTH": str(trace_width),
+        "KCT_ROUTE_VIA_DRILL": str(via_drill),
+        "KCT_ROUTE_VIA_DIAMETER": str(via_diameter),
+    }
+
+    # The recipe takes the output dir as a positional argument (matching the
+    # convention generate_design.py / route_demo.py already use).
+    script_args = list(recipe_argv[1:])
+    if ctx.output_dir:
+        script_args.append(str(ctx.output_dir))
+
+    recipe_desc = " ".join([script.name, *recipe_argv[1:]])
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="route",
+            success=True,
+            message=f"[dry-run] Would run: {recipe_desc}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running {recipe_desc}...")
+
+    success, message = _run_python_script(
+        script,
+        ctx.project_dir,
+        ctx.verbose,
+        env_vars=route_env_vars,
+        script_args=script_args,
+        quiet=ctx.quiet,
+    )
+
+    # Locate the routed PCB the recipe wrote.  Recipes conventionally write
+    # ``<name>_routed.kicad_pcb`` next to the unrouted PCB (typically an
+    # ``output/`` subdir), so probe the explicit output dir, the unrouted
+    # PCB's own directory, and the project dir — non-recursively first, then
+    # fall back to a recursive scan so a nested ``output/`` layout is still
+    # found regardless of how ``ctx.output_dir`` was (or wasn't) set.
+    search_dirs: list[Path] = []
+    if ctx.output_dir:
+        search_dirs.append(ctx.output_dir)
+    if ctx.pcb_file:
+        search_dirs.append(ctx.pcb_file.parent)
+    search_dirs.append(ctx.project_dir)
+
+    # Preserve order while de-duplicating.
+    seen: set[Path] = set()
+    unique_search_dirs: list[Path] = []
+    for d in search_dirs:
+        if d not in seen:
+            seen.add(d)
+            unique_search_dirs.append(d)
+
+    output_file: Path | None = None
+    for search_dir in unique_search_dirs:
+        routed_files_found = list(search_dir.glob("*_routed.kicad_pcb"))
+        if routed_files_found:
+            output_file = routed_files_found[0]
+            break
+    if output_file is None:
+        # Recursive fallback: recipes that write into a nested ``output/``
+        # subdir the search above didn't enumerate (e.g. ``ctx.output_dir``
+        # unset and the PCB discovered elsewhere) are still located here.
+        for search_dir in unique_search_dirs:
+            routed_files_found = sorted(search_dir.glob("**/*_routed.kicad_pcb"))
+            if routed_files_found:
+                output_file = routed_files_found[0]
+                break
+
+    if success and output_file is None:
+        # The recipe reported success but produced no routed artifact — surface
+        # this as a failure rather than silently continuing to verify the
+        # unrouted PCB.
+        return BuildResult(
+            step="route",
+            success=False,
+            message=f"{recipe_desc} completed but no *_routed.kicad_pcb was produced",
+        )
+
+    return BuildResult(
+        step="route",
+        success=success,
+        message=message,
+        output_file=output_file,
+    )
+
+
+def _audit_routed_artifact_for_skip(
+    ctx: BuildContext, console: Console, routed_pcb: Path
+) -> BuildResult:
+    """Gate a route-skip on a ``kct creepage`` audit of the routed artifact.
+
+    HV skip gate (issue #4733, extending #4649 to ``kct build``): each of the
+    three route-skip paths in :func:`_run_step_route` returns success before
+    any ``ctx.voltage_map`` check, so a ``kct build --voltage-map`` on an
+    already-routed board would otherwise skip routing with zero creepage
+    auditing -- the exact false pass #4649 closed for ``kct pipeline``.
+
+    Thin :class:`BuildResult` wrapper over the shared
+    :func:`~kicad_tools.cli.pipeline_cmd.run_creepage_skip_audit` core: the
+    (destructive) re-route stays skipped, and the step succeeds iff the
+    audit of ``routed_pcb`` (the routed artifact -- NOT ``ctx.pcb_file``,
+    which is the unrouted PCB and may be ``None``) exits clean.  The gate is
+    strict ``returncode == 0`` with the exit-2 EXIT_HV_UNCLASSIFIED vacuity
+    discrimination; a launch failure falls back to the #4607-style refusal.
+    ``--force`` bypasses the skip paths entirely and re-routes with the
+    audit.
+
+    On success (clean audit or dry-run) ``output_file`` is ``routed_pcb`` so
+    downstream build steps see the same context as the ungated skip.
+    """
+    from .pipeline_cmd import run_creepage_skip_audit
+
+    success, message = run_creepage_skip_audit(
+        routed_pcb,
+        voltage_map=str(ctx.voltage_map),
+        creepage_standard=ctx.creepage_standard,
+        pollution_degree=ctx.pollution_degree,
+        material_group=ctx.material_group,
+        hv_threshold=ctx.hv_threshold,
+        dry_run=ctx.dry_run,
+        quiet=ctx.quiet,
+        verbose=ctx.verbose,
+        console=console,
+    )
+    return BuildResult(
+        step="route",
+        success=success,
+        message=message,
+        output_file=routed_pcb if success else None,
+    )
+
+
+def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run the autorouting step.
+
+    Route-recipe discovery contract (first match wins):
+
+    0. **Recipe-produced artifact guard.** If a prior step (or run) already
+       left a ``*_routed.kicad_pcb`` recorded on ``ctx.routed_pcb_file`` (or
+       newer than the unrouted PCB), preserve it instead of re-routing. See
+       issue #3971 / #3977. ``--force`` bypasses this.
+    1. **Tier 1 — ``project.kct`` ``build.route_recipe``.** An explicit
+       command (e.g. ``generate_design.py --step route``) is invoked verbatim
+       with the output dir forwarded. Cleanest contract for recipe-first
+       boards (see ``_resolve_route_recipe``).
+    2. **Tier 2 — ``generate_design.py --step route`` sentinel.** If
+       ``generate_design.py`` exists and declares ``SUPPORTS_STEP_ROUTE =
+       True``, invoke ``generate_design.py --step route``. Covers boards
+       06/07 without a ``project.kct`` key.
+    3. **Tier 3 — ``route_demo.py`` / ``route.py``.** Standalone route scripts.
+    4. **Fallback — generic ``kct route``.** Boards with no dedicated routing
+       recipe route through the CLI autorouter with manufacturer defaults.
+
+    Tiers 1-2 exist because recipe-first boards (06 diff-pair, 07 match-group)
+    bake diff-pair / match-group / seed / layer flags into their recipe that
+    the generic ``kct route`` fallback does not replicate; routing them through
+    the fallback silently drops those flags and under-routes the board.
+
+    HV guard (issue #4607): only the generic ``kct route`` fallback can carry
+    the ``--voltage-map`` pairwise-clearance audit flags.  When
+    ``ctx.voltage_map`` is set and a Tier 1-3 recipe/script wins the probe,
+    the step refuses loudly (:func:`_hv_recipe_route_refusal`) instead of
+    silently routing with the HV audit disabled.
+    """
+    # If the PCB step (or a prior run) already left a routed artifact and
+    # recorded it on the context, skip re-routing entirely. This protects
+    # recipe-routed boards (e.g. board 04's generate_design.py, which routes,
+    # stitches, and fills zones during the PCB step) from being clobbered by
+    # the generic autorouter. The post-PCB scan in main() populates
+    # ``ctx.routed_pcb_file`` when it finds a ``*_routed.kicad_pcb`` sibling,
+    # so this guard is robust against filesystem mtime granularity that the
+    # timestamp-based checks below cannot reliably resolve. ``--force`` (which
+    # sets ``ctx.force``) intentionally re-routes and bypasses this guard.
+    if not ctx.force and ctx.routed_pcb_file and ctx.routed_pcb_file.exists():
+        if not ctx.quiet:
+            console.print(f"  Recipe already produced routed PCB: {ctx.routed_pcb_file.name}")
+        # HV skip gate (#4733): with --voltage-map set, the skip must audit
+        # the existing copper before reporting success.
+        if ctx.voltage_map:
+            return _audit_routed_artifact_for_skip(ctx, console, ctx.routed_pcb_file)
+        return BuildResult(
+            step="route",
+            success=True,
+            message="Skipping route: recipe-produced routed PCB already present",
+            output_file=ctx.routed_pcb_file,
+        )
+
+    # Check if a routed PCB already exists (e.g., from generate_design.py)
+    # This prevents double-routing when a script already handled routing
+    # Skip these checks if force rebuild is requested
+    if not ctx.force:
+        # Search in the same directory as the unrouted PCB, or recursively in project
+        if ctx.pcb_file and ctx.pcb_file.exists():
+            # Look for routed file alongside the unrouted PCB
+            expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+            if expected_routed.exists():
+                if expected_routed.stat().st_mtime >= ctx.pcb_file.stat().st_mtime:
+                    if not ctx.quiet:
+                        console.print(f"  Found existing routed PCB: {expected_routed.name}")
+                    # HV skip gate (#4733): audit the routed sibling before
+                    # letting the skip report success under --voltage-map.
+                    if ctx.voltage_map:
+                        return _audit_routed_artifact_for_skip(ctx, console, expected_routed)
+                    return BuildResult(
+                        step="route",
+                        success=True,
+                        message="Using existing routed PCB (newer than unrouted)",
+                        output_file=expected_routed,
+                    )
+        else:
+            # No unrouted PCB, search recursively for any routed PCB
+            search_dirs = [ctx.output_dir, ctx.project_dir] if ctx.output_dir else [ctx.project_dir]
+            routed_files: list[Path] = []
+            for sd in search_dirs:
+                routed_files = list(sd.glob("**/*_routed.kicad_pcb"))
+                if routed_files:
+                    break
+            if routed_files:
+                routed_file = routed_files[0]
+                if not ctx.quiet:
+                    console.print(f"  Found existing routed PCB: {routed_file.name}")
+                # HV skip gate (#4733): audit the discovered routed artifact
+                # before letting the skip report success under --voltage-map.
+                if ctx.voltage_map:
+                    return _audit_routed_artifact_for_skip(ctx, console, routed_file)
+                return BuildResult(
+                    step="route",
+                    success=True,
+                    message="Using existing routed PCB",
+                    output_file=routed_file,
+                )
+
+    # Pad-grid preflight: detect off-grid pads BEFORE invoking the router.
+    # This surfaces routability problems at PCB-write time with an actionable
+    # message instead of a deep PADS_OFF_GRID failure inside the router.
+    # See issue #2497.
+    grid_for_preflight, clearance_for_preflight, *_ = _get_routing_params(ctx.mfr, ctx.spec)
+    preflight_target = ctx.pcb_file
+    if preflight_target and preflight_target.exists() and not ctx.dry_run:
+        try:
+            from kicad_tools.router.preflight import check_pad_grid_alignment
+
+            report = check_pad_grid_alignment(
+                preflight_target,
+                grid_resolution=float(grid_for_preflight),
+                clearance=float(clearance_for_preflight),
+            )
+            if not report.passed and not ctx.quiet:
+                # Off-grid pads are advisory: surface the report so the user can
+                # round pad coords or pick a finer grid, but don't block routing.
+                # The router's own off-grid check is the authoritative gate.
+                console.print(
+                    f"  [warning] Pad grid preflight: "
+                    f"{len(report.off_grid_pads)} off-grid pad(s) at "
+                    f"grid {report.grid_resolution}mm (continuing)"
+                )
+                if ctx.verbose:
+                    console.print(report.summary())
+        except Exception as e:
+            # Preflight is advisory; never block routing on a bug in the
+            # check itself.  Surface the error in verbose mode.
+            if ctx.verbose:
+                console.print(f"  [warning] Pad grid preflight skipped: {e}")
+
+    # Tier 1 / Tier 2: a declared or sentinel-detected route recipe. These
+    # recipes bake diff-pair / match-group / seed / layer flags into their
+    # own `kct route` invocation, so they must win over both the standalone
+    # route_demo.py probe below and the generic `kct route` fallback (which
+    # would silently drop those flags). See _resolve_route_recipe.
+    recipe_argv = _resolve_route_recipe(ctx)
+    if recipe_argv is not None:
+        # HV guard (issue #4607): a recipe builds its own router invocation,
+        # so ctx.voltage_map would be silently dropped — refuse loudly
+        # instead of routing with the HV audit disabled.
+        if ctx.voltage_map:
+            return _hv_recipe_route_refusal(ctx, f"route recipe {Path(recipe_argv[0]).name}")
+        return _run_route_recipe(ctx, console, recipe_argv)
+
+    # Tier 3: standalone route script.
+    route_script = ctx.project_dir / "route_demo.py"
+    if not route_script.exists():
+        route_script = ctx.project_dir / "route.py"
+
+    if route_script.exists():
+        # HV guard (issue #4607): same reasoning as the recipe tiers above —
+        # a standalone route script cannot carry the audit flags.
+        if ctx.voltage_map:
+            return _hv_recipe_route_refusal(ctx, f"route script {route_script.name}")
+        # Get routing parameters from project.kct to pass as environment variables
+        # This allows custom route scripts to optionally use project.kct settings
+        grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(
+            ctx.mfr, ctx.spec
+        )
+        route_env_vars = {
+            "KCT_ROUTE_GRID": str(grid),
+            "KCT_ROUTE_CLEARANCE": str(clearance),
+            "KCT_ROUTE_TRACE_WIDTH": str(trace_width),
+            "KCT_ROUTE_VIA_DRILL": str(via_drill),
+            "KCT_ROUTE_VIA_DIAMETER": str(via_diameter),
+        }
+
+        if ctx.dry_run:
+            return BuildResult(
+                step="route",
+                success=True,
+                message=f"[dry-run] Would run: {route_script.name}",
+            )
+
+        if not ctx.quiet:
+            console.print(f"  Running {route_script.name}...")
+            if ctx.verbose:
+                console.print("    Routing params from project.kct:")
+                console.print(f"      Grid: {grid}mm, Clearance: {clearance}mm")
+                console.print(f"      Trace width: {trace_width}mm")
+                console.print(f"      Via: {via_drill}mm drill, {via_diameter}mm diameter")
+
+        script_args = [str(ctx.output_dir)] if ctx.output_dir else None
+        success, message = _run_python_script(
+            route_script,
+            ctx.project_dir,
+            ctx.verbose,
+            env_vars=route_env_vars,
+            script_args=script_args,
+            quiet=ctx.quiet,
+        )
+
+        # Find routed PCB (check output dir first, then project dir)
+        output_file: Path | None = None
+        for search_dir in (
+            [ctx.output_dir, ctx.project_dir] if ctx.output_dir else [ctx.project_dir]
+        ):
+            routed_files_found = list(search_dir.glob("*_routed.kicad_pcb"))
+            if routed_files_found:
+                output_file = routed_files_found[0]
+                break
+
+        return BuildResult(
+            step="route",
+            success=success,
+            message=message,
+            output_file=output_file,
+        )
+
+    # Fall back to kct route command
+    if not ctx.pcb_file:
+        return BuildResult(
+            step="route",
+            success=False,
+            message="No PCB file found to route",
+        )
+
+    # Place routed PCB in output dir if specified, otherwise alongside input
+    output_file = _resolve_routed_pcb_path(ctx)
+
+    # Get routing parameters from project spec (preferred) or manufacturer rules (fallback)
+    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr, ctx.spec)
+
+    if ctx.dry_run:
+        dry_run_msg = (
+            f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
+            f"--grid {grid} --clearance {clearance}"
+        )
+        if ctx.voltage_map:
+            dry_run_msg += f" --voltage-map {ctx.voltage_map}"
+        return BuildResult(
+            step="route",
+            success=True,
+            message=dry_run_msg,
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running autorouter on {ctx.pcb_file.name}...")
+        if ctx.verbose:
+            console.print(f"    Grid: {grid}mm, Clearance: {clearance}mm")
+
+    try:
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "route",
+            str(ctx.pcb_file),
+            "-o",
+            str(output_file),
+            "--grid",
+            "auto",  # Let route command auto-select grid from pad positions
+            "--clearance",
+            str(clearance),
+            "--trace-width",
+            str(trace_width),
+            "--via-drill",
+            str(via_drill),
+            "--via-diameter",
+            str(via_diameter),
+        ]
+
+        # HV pairwise-clearance passthrough (issue #4607): only forwarded
+        # when a voltage map is in play, so every existing no-voltage-map
+        # invocation builds an identical subprocess argv.
+        if ctx.voltage_map:
+            cmd.extend(
+                [
+                    "--voltage-map",
+                    str(ctx.voltage_map),
+                    "--creepage-standard",
+                    ctx.creepage_standard,
+                    "--pollution-degree",
+                    str(ctx.pollution_degree),
+                    "--material-group",
+                    ctx.material_group,
+                    "--hv-threshold",
+                    str(ctx.hv_threshold),
+                ]
+            )
+
+        if ctx.quiet:
+            cmd.append("--quiet")
+
+        result = _run_subprocess_with_heartbeat(
+            cmd,
+            cwd=str(ctx.project_dir),
+            console=console,
+            label="route",
+            quiet=ctx.quiet,
+        )
+        if ctx.verbose and result.stdout:
+            console.print(result.stdout)
+
+        if result.returncode == 0:
+            # Defense-in-depth postcondition (issue #2740): the router can
+            # silently "succeed" with zero segments when every multi-pad net
+            # is auto-skipped for zone fill but no traces are produced.
+            # Verify that the routed PCB actually contains copper when the
+            # input had routable signal nets.
+            postcondition = _check_route_postcondition(
+                input_pcb=ctx.pcb_file,
+                routed_pcb=output_file,
+            )
+            if postcondition is not None:
+                return postcondition
+            return BuildResult(
+                step="route",
+                success=True,
+                message="Routing completed successfully",
+                output_file=output_file if output_file.exists() else None,
+            )
+        elif result.returncode in (2, 3, 4, 5):
+            # Exit codes 2-5 all produce usable output files:
+            #   2 = partial routing below --min-completion threshold
+            #   3 = routing meets threshold but the copper is clearance-dirty
+            #       (DRC violations, --auto-fix rollback, or the HV
+            #       pairwise-clearance audit under --voltage-map -- #4588)
+            #   4 = partial routing with clearance violations
+            #       (segment-segment or HV pairwise)
+            #   5 = interrupted by SIGINT with partial results saved
+            # Without a voltage map these are non-fatal so the build pipeline
+            # continues to verification.  With a voltage map in play the
+            # clearance-dirty codes (3/4) may mean the HV pairwise-clearance
+            # audit failed; a board whose HV creepage may be short must NOT
+            # flow on to verification and manufacturing export, so those two
+            # become fatal (issue #4607).  The exit code alone cannot
+            # distinguish which of the shared meanings fired, so the split
+            # keys on --voltage-map presence.
+            if ctx.voltage_map and result.returncode in (3, 4):
+                return BuildResult(
+                    step="route",
+                    success=False,
+                    message=(
+                        f"Routing left clearance-dirty copper (exit "
+                        f"{result.returncode}: DRC violations, --auto-fix "
+                        "rollback, or HV pairwise audit) with --voltage-map "
+                        "in effect; failing the build instead of continuing "
+                        "to verification"
+                    ),
+                    output_file=output_file if output_file.exists() else None,
+                )
+            _route_warning_messages = {
+                2: "Routing completed (some nets skipped for zone fill)",
+                3: (
+                    "Routing complete but copper is clearance-dirty "
+                    "(DRC violations, --auto-fix rollback, or HV pairwise audit)"
+                ),
+                4: "Partial routing with clearance violations",
+                5: "Routing interrupted by user, partial results saved",
+            }
+            return BuildResult(
+                step="route",
+                success=True,
+                message=_route_warning_messages[result.returncode],
+                output_file=output_file if output_file.exists() else None,
+            )
+        else:
+            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
+            return BuildResult(
+                step="route",
+                success=False,
+                message=f"Routing failed: {error_msg}",
+            )
+
+    except Exception as e:
+        return BuildResult(
+            step="route",
+            success=False,
+            message=f"Routing failed: {e}",
+        )
+
+
+def _count_multi_pad_signal_nets(input_pcb: Path) -> int:
+    """Return the count of nets that need routing (>=2 pads, not pour-only).
+
+    Used by :func:`_check_route_postcondition` to decide whether a
+    "success exit, zero segments" result from ``kct route`` is plausible
+    (no signal nets to route) or pathological (silent empty output --
+    issue #2740).
+
+    A net counts as routable if:
+
+    * It is referenced by at least two pads in the PCB, AND
+    * It is *not* a pure pour net with an existing zone (those nets
+      get connected via copper fill rather than traces, so zero
+      segments on them is legitimate).
+
+    A POWER/GROUND net **without** a zone is still counted -- such nets
+    must be routed as signal traces (see :func:`route_cmd._auto_skip_pour_nets`
+    and the ``_pour_nets_without_zones`` carve-out from issue #1841).
+
+    Args:
+        input_pcb: Path to the unrouted PCB the router consumed.
+
+    Returns:
+        Number of nets the router was expected to produce segments for.
+        Returns 0 if the file cannot be parsed (postcondition then
+        cannot fire -- best-effort).
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(input_pcb))
+
+        # Count pads per net.
+        pad_counts: dict[int, int] = {}
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number > 0:
+                    pad_counts[pad.net_number] = pad_counts.get(pad.net_number, 0) + 1
+
+        # Determine which nets have zones (pour-handled, segments not required).
+        zone_net_names = {z.net_name for z in pcb.zones if z.net_name}
+
+        # Build net_number -> net_name lookup.
+        nets_with_zones: set[int] = set()
+        for net_id, net in pcb.nets.items():
+            if net.name and net.name in zone_net_names:
+                nets_with_zones.add(net_id)
+
+        # Count multi-pad nets that lack a zone (so must be routed as signals).
+        return sum(
+            1
+            for net_id, count in pad_counts.items()
+            if count >= 2 and net_id not in nets_with_zones
+        )
+    except Exception:
+        return 0
+
+
+def _check_route_postcondition(
+    input_pcb: Path | None,
+    routed_pcb: Path | None,
+) -> BuildResult | None:
+    """Validate that ``kct route``'s successful exit produced real copper.
+
+    Defense-in-depth check for issues #2740 and #2782.  The router can
+    exit 0 with ``completion = 1.0`` when every multi-pad net is
+    auto-skipped as a pour net (``nets_to_route`` becomes 0 -> the
+    ``nets_routed / nets_to_route if nets_to_route > 0 else 1.0`` ternary
+    in :mod:`kicad_tools.cli.route_cmd` returns 1.0).  Without this
+    postcondition the build pipeline would proceed to verify/export with
+    an electrically empty PCB and the only symptom would be
+    ``zone_unfilled`` warnings (severity = warning, not error).
+
+    Returns a *failure* :class:`BuildResult` when:
+
+    * The input PCB had at least one multi-pad signal net (so routing
+      should produce >=1 segment) AND the routed PCB has zero segments
+      and zero vias (issue #2740 -- silent empty-route), OR
+    * The routed PCB is byte-identical to the input PCB despite
+      ``kct route`` reporting success (issue #2782 -- silent write-path
+      failure where the router never touched the on-disk file).
+
+    Returns ``None`` (i.e., "postcondition OK, continue") otherwise --
+    including when the input PCB has no routable signal nets (small
+    designs where every net is poured), when files are missing (handled
+    by upstream callers), or when the PCB cannot be parsed.
+    """
+    if not input_pcb or not routed_pcb or not routed_pcb.exists():
+        return None
+
+    expected = _count_multi_pad_signal_nets(input_pcb)
+    if expected == 0:
+        return None  # No signal nets to route -- zero segments is legitimate
+
+    # Byte-identical check (issue #2782): if the router reported success
+    # for a PCB with routable signal nets but the output file's bytes
+    # exactly match the input, then either the router silently failed to
+    # write its result or the build pipeline pointed at the wrong path.
+    # Either way, the on-disk artifact is an unrouted PCB masquerading
+    # as a routed one -- fail loudly rather than ship it downstream.
+    try:
+        if input_pcb.exists() and input_pcb.resolve() != routed_pcb.resolve():
+            input_bytes = input_pcb.read_bytes()
+            routed_bytes = routed_pcb.read_bytes()
+            if input_bytes == routed_bytes:
+                return BuildResult(
+                    step="route",
+                    success=False,
+                    message=(
+                        f"Route step exited 0 but the routed PCB at "
+                        f"{routed_pcb} is byte-identical to the unrouted "
+                        f"input at {input_pcb} despite {expected} routable "
+                        f"signal net(s).  This indicates a silent write-path "
+                        f"failure (see issue #2782 -- the build will not "
+                        f"ship an unrouted PCB as a routed one)."
+                    ),
+                    output_file=routed_pcb,
+                )
+    except OSError:
+        # Best-effort: I/O failures should fall through to the segment
+        # check rather than mask a real router fault behind a file-read
+        # error.
+        pass
+
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        routed = PCB.load(str(routed_pcb))
+        segment_count = len(routed.segments)
+        via_count = len(routed.vias)
+    except Exception:
+        return None  # Best-effort: parse failure should not break the build
+
+    if segment_count == 0 and via_count == 0:
+        return BuildResult(
+            step="route",
+            success=False,
+            message=(
+                f"Route step exited 0 but produced 0 segments and 0 vias "
+                f"for {expected} routable signal net(s).  This indicates a "
+                f"silent router failure (see issue #2740 -- the build will "
+                f"not ship an electrically empty PCB)."
+            ),
+            output_file=routed_pcb,
+        )
+    return None
+
+
+def _detect_layer_count(pcb_file: Path) -> int:
+    """Return the number of copper layers defined in *pcb_file*.
+
+    Probes the ``(layers ...)`` block via the same helper the stitch
+    command uses (``get_copper_layers``) so the layer count matches what
+    the stitcher sees.  Returns 2 on any error so the stitch step
+    short-circuits to the 2-layer skip path rather than crashing.
+    """
+    try:
+        from kicad_tools.cli.stitch_cmd import get_copper_layers
+        from kicad_tools.core.sexp_file import load_pcb
+
+        sexp = load_pcb(pcb_file)
+        return len(get_copper_layers(sexp))
+    except Exception as exc:
+        logger.debug("Could not detect layer count for %s: %s", pcb_file, exc)
+        return 2
+
+
+def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run stitching-via insertion on the routed PCB.
+
+    Adds thermal-relief / connection vias from plane-net pads (e.g.
+    GND, VCC, VBUS) down to the inner-layer zone copper so they end
+    up electrically connected after zone fill.
+
+    Skips gracefully when:
+    - No PCB to stitch (no route output) — succeeds as a no-op.
+    - The PCB has no plane-net zones to stitch onto.
+    - Every plane-net pad already sits on the pour layer for its net
+      (no cross-layer stitching work needed).  Issue #3279: this
+      replaced the prior ``layer_count <= 2`` blanket skip so that
+      2-layer boards with a B.Cu pour and F.Cu SMD pads get stitched.
+
+    Operates on :attr:`BuildContext.routed_pcb_file` when present (the
+    output of the route step), falling back to :attr:`BuildContext.pcb_file`
+    so ``kct build --step stitch`` still works when invoked in isolation.
+
+    Idempotent: ``run_stitch`` skips already-connected pads via
+    ``is_pad_connected``, so a second invocation reports
+    ``already_connected > 0`` and adds zero new vias.
+    """
+    # Locate the PCB to stitch.  Preference order:
+    #   1. ctx.routed_pcb_file (populated by the preceding ROUTE step)
+    #   2. An on-disk *_routed.kicad_pcb sibling of ctx.pcb_file (so
+    #      `kct build --step stitch` finds the route output when
+    #      invoked in isolation, mirroring _run_step_route's recovery
+    #      path).
+    #   3. ctx.pcb_file (unrouted PCB) -- the stitcher will still
+    #      detect plane nets / pads correctly on an unrouted board.
+    pcb_to_stitch = ctx.routed_pcb_file
+    if (not pcb_to_stitch or not pcb_to_stitch.exists()) and ctx.pcb_file:
+        expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+        if expected_routed.exists():
+            pcb_to_stitch = expected_routed
+
+    if not pcb_to_stitch or not pcb_to_stitch.exists():
+        pcb_to_stitch = ctx.pcb_file
+
+    if not pcb_to_stitch or not pcb_to_stitch.exists():
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message="stitch: no PCB file found — skipped",
+        )
+
+    # Probe the PCB for plane nets before invoking the stitcher.  This
+    # avoids any work when there is nothing to stitch (e.g. a multi-layer
+    # board whose zones step did not run, or a board with no power pours).
+    #
+    # Historical note (#3279): previously this step short-circuited on any
+    # board with <= 2 copper layers under the assumption that "no internal
+    # planes" means "nothing to stitch."  That holds for the 4-layer case
+    # the skip was introduced for (#2747) but **not** for the 2-layer
+    # cross-layer case: e.g. a 2L board with the GND pour on B.Cu and
+    # F.Cu SMD GND pads needs a same-layer via stack (F.Cu -> B.Cu) to
+    # connect the pads to the pour.  ``run_stitch`` already handles the
+    # 2L fallback correctly (see stitch_cmd.py "fall back to B.Cu"), so
+    # the only fix needed here is to gate on "is there real work to do?"
+    # rather than layer count.
+    try:
+        from kicad_tools.cli.stitch_cmd import (
+            find_all_plane_nets,
+            find_pads_on_nets,
+        )
+        from kicad_tools.core.sexp_file import load_pcb as _load_pcb
+
+        sexp = _load_pcb(pcb_to_stitch)
+        plane_nets = find_all_plane_nets(sexp)
+    except Exception as exc:
+        logger.debug("Could not probe plane nets: %s", exc)
+        plane_nets = {}
+        sexp = None
+
+    if not plane_nets:
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message="stitch: no plane nets detected — skipped",
+            output_file=pcb_to_stitch,
+        )
+
+    # Pad-layer-mismatch probe (#3279).  Skip only when every plane-net
+    # pad already sits on the pour layer for its net -- nothing to
+    # stitch.  Otherwise (including the 2L F.Cu-pad-with-B.Cu-pour case)
+    # fall through to ``run_stitch`` and let it place the vias.
+    #
+    # Through-hole pads carry their own ``*.Cu`` barrel and are
+    # effectively present on every layer, so their footprint ``layer``
+    # value should not count as a mismatch.  We treat ``thru_hole`` pads
+    # as already-on-the-pour-layer for this gate.
+    layer_count = _detect_layer_count(pcb_to_stitch)
+    try:
+        pads = find_pads_on_nets(sexp, set(plane_nets.keys())) if sexp else []
+    except Exception as exc:
+        logger.debug("Could not probe plane-net pads: %s", exc)
+        pads = []
+
+    needs_stitch = any(
+        pad.pad_type != "thru_hole" and pad.layer != plane_nets.get(pad.net_name) for pad in pads
+    )
+
+    if not needs_stitch:
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message=(
+                "stitch: no cross-layer plane pads — skipped"
+                if pads
+                else "stitch: no plane-net pads found — skipped"
+            ),
+            output_file=pcb_to_stitch,
+        )
+
+    # Look up manufacturer-aware via dimensions so the stitching vias
+    # satisfy DRC.  Fall back to conservative defaults if profile lookup
+    # fails (e.g. unknown manufacturer string).
+    try:
+        from kicad_tools.manufacturers import get_profile
+
+        profile = get_profile(ctx.mfr)
+        rules = profile.get_design_rules(layers=layer_count)
+        via_size = rules.min_via_diameter_mm
+        via_drill = rules.min_via_drill_mm
+    except Exception:
+        via_size = 0.6
+        via_drill = 0.3
+
+    if ctx.dry_run:
+        nets_str = ", ".join(sorted(plane_nets.keys()))
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct stitch {pcb_to_stitch.name} "
+                f"--via-size {via_size} --drill {via_drill} "
+                f"(auto-detected nets: {nets_str})"
+            ),
+            output_file=pcb_to_stitch,
+        )
+
+    if not ctx.quiet:
+        console.print(
+            f"  Stitching vias on {pcb_to_stitch.name} "
+            f"({len(plane_nets)} plane net(s), "
+            f"via {via_size}mm/{via_drill}mm drill for {ctx.mfr})..."
+        )
+
+    # Invoke the in-process stitcher.  Preferred over the subprocess
+    # entry point because it shares the loaded PCB representation and
+    # surfaces structured StitchResult details for error messages.
+    try:
+        from kicad_tools.cli.stitch_cmd import run_stitch
+
+        result = run_stitch(
+            pcb_to_stitch,
+            net_names=sorted(plane_nets.keys()),
+            via_size=via_size,
+            drill=via_drill,
+        )
+    except Exception as exc:
+        return BuildResult(
+            step="stitch",
+            success=False,
+            message=f"Stitching failed: {exc}",
+            output_file=pcb_to_stitch,
+        )
+
+    added = len(result.vias_added)
+    already = result.already_connected
+    skipped = len(result.pads_skipped)
+    fallback = len(result.connectivity_fallback)
+
+    # Issue #3910: connectivity fallbacks that graze FOREIGN pour copper are
+    # now rejected inside run_stitch (they short across nets once zones
+    # re-fill), so a remaining non-empty connectivity_fallback list is only a
+    # marginal graze against sibling stitch geometry (#3633), not a short.
+    # Surface it as a visible warning so the operator can inspect the board.
+    if fallback and not ctx.quiet:
+        console.print(
+            f"  [yellow]warning:[/yellow] {fallback} pour pad(s) used the "
+            "connectivity fallback (marginal cross-net graze against sibling "
+            "stitch geometry; run `kicad-cli pcb drc --refill-zones` to "
+            "confirm no shorts)"
+        )
+
+    if added == 0 and already > 0:
+        message = (
+            f"Stitching complete: {already} plane pad(s) already connected, no new vias needed"
+        )
+    elif added > 0:
+        message = (
+            f"Stitching complete: added {added} via(s) for "
+            f"{len(plane_nets)} plane net(s)"
+            + (f", {already} pad(s) already connected" if already else "")
+            + (f", {skipped} pad(s) skipped" if skipped else "")
+        )
+    else:
+        message = (
+            f"Stitching complete: no via candidates found for "
+            f"{len(plane_nets)} plane net(s)" + (f", {skipped} pad(s) skipped" if skipped else "")
+        )
+
+    return BuildResult(
+        step="stitch",
+        success=True,
+        message=message,
+        output_file=pcb_to_stitch,
+    )
+
+
+def _run_step_page_fit(ctx: BuildContext, console: Console) -> BuildResult:
+    """Resize the drawing sheet to fit the board and center it.
+
+    Runs after STITCH (the final layout-modifying step) so the committed
+    board has a tight ``(paper "User" W H)`` page with the board centered.
+    The interactive viewer (KiCanvas) fits its camera to the whole sheet,
+    so a tight page makes the board fill and center the frame instead of
+    appearing tiny in an A4 page.
+
+    This is a pure geometric translate: every item shifts together, so
+    routing/DRC validity is preserved and no re-route is needed.
+
+    ROUTED-OUTPUT ONLY (issue #3714): page-fit must *never* touch the
+    unrouted ``*.kicad_pcb`` source.  The autorouter and the routing
+    regression baselines are absolute-grid-position-dependent, so
+    translating the unrouted board changes routing outcomes (board 02
+    segment counts shift; board 06/07 plane nets fracture under the
+    copper-union pour audit, #3509/#3617).  We therefore resolve the
+    routed PCB (``ctx.routed_pcb_file`` or the ``*_routed.kicad_pcb``
+    sibling of the unrouted PCB) and skip cleanly when no routed output
+    exists -- we do *not* fall back to the unrouted source.  Idempotent:
+    a second run yields the same page size.
+    """
+    pcb_to_fit = ctx.routed_pcb_file
+    if (not pcb_to_fit or not pcb_to_fit.exists()) and ctx.pcb_file:
+        expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+        if expected_routed.exists():
+            pcb_to_fit = expected_routed
+
+    if not pcb_to_fit or not pcb_to_fit.exists():
+        # Deliberately do NOT page-fit the unrouted PCB -- doing so would
+        # move the absolute-grid board that routing/tests start from and
+        # silently change routing outcomes (issue #3714).
+        return BuildResult(
+            step="page-fit",
+            success=True,
+            message="page-fit: no routed PCB found — skipped (unrouted source left untouched)",
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="page-fit",
+            success=True,
+            message="[dry-run] Would resize drawing sheet to fit + center board",
+            output_file=pcb_to_fit,
+        )
+
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(pcb_to_fit)
+        new_w, new_h = pcb.page_fit(margin=5.0)
+        pcb.save(pcb_to_fit)
+    except ValueError as exc:
+        # No Edge.Cuts outline to fit — non-fatal, leave the page as-is.
+        return BuildResult(
+            step="page-fit",
+            success=True,
+            message=f"page-fit: skipped ({exc})",
+            output_file=pcb_to_fit,
+        )
+    except Exception as exc:
+        return BuildResult(
+            step="page-fit",
+            success=False,
+            message=f"page-fit failed: {exc}",
+            output_file=pcb_to_fit,
+        )
+
+    return BuildResult(
+        step="page-fit",
+        success=True,
+        message=f'Page fit: (paper "User" {new_w} {new_h}) — board centered',
+        output_file=pcb_to_fit,
+    )
+
+
+def _run_step_erc(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run ERC (Electrical Rules Check) on the schematic.
+
+    Invokes ``kicad-cli sch erc`` to produce ``erc_report.json`` adjacent
+    to the schematic (or in ``ctx.output_dir`` when set), so that the
+    export-time preflight (``export/preflight.py:_check_erc``) finds the
+    report instead of emitting a "No ERC report found" warning.
+
+    Failures are surfaced as a non-success ``BuildResult`` but do not
+    halt the pipeline unconditionally; the same "stop on failure unless
+    VERIFY/EXPORT" rule as DRC applies, mirroring ``_run_step_verify``.
+    """
+    if not ctx.schematic_file or not ctx.schematic_file.exists():
+        return BuildResult(
+            step="erc",
+            success=False,
+            message="No schematic file found to run ERC against",
+        )
+
+    # Choose where to write the report. Mirror DRC: prefer ctx.output_dir,
+    # otherwise drop the report next to the schematic so the export
+    # preflight's auto-discovery picks it up.
+    if ctx.output_dir:
+        ctx.output_dir.mkdir(parents=True, exist_ok=True)
+        erc_report_path = ctx.output_dir / "erc_report.json"
+    else:
+        erc_report_path = ctx.schematic_file.parent / "erc_report.json"
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="erc",
+            success=True,
+            message=f"[dry-run] Would run: kicad-cli sch erc {ctx.schematic_file.name}",
+            output_file=erc_report_path,
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running ERC on {ctx.schematic_file.name}...")
+
+    try:
+        from kicad_tools.cli.runner import find_kicad_cli, run_erc
+
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            # ERC is best-effort: when kicad-cli is unavailable we
+            # warn but do not block the pipeline. The export preflight
+            # will subsequently see "no report" and emit its own warning.
+            if not ctx.quiet:
+                console.print(
+                    "  [yellow]WARN[/yellow] kicad-cli not found; "
+                    "skipping ERC (export preflight will warn)"
+                )
+            return BuildResult(
+                step="erc",
+                success=True,
+                message="ERC skipped: kicad-cli not found",
+            )
+
+        result = run_erc(
+            ctx.schematic_file,
+            output_path=erc_report_path,
+            format="json",
+            severity_all=True,
+            kicad_cli=kicad_cli,
+        )
+
+        if not result.success:
+            return BuildResult(
+                step="erc",
+                success=False,
+                message=f"ERC failed: {result.stderr or 'kicad-cli returned no output'}",
+            )
+
+        # Issue #7190: bind the report to the schematic bytes it checked so
+        # export preflight's auto-discovery can trust it.  kicad-cli ignores
+        # the extra top-level key; ``ERCReport`` reads it back.
+        from kicad_tools.drc.report_binding import ERC_HASH_KEY, stamp_report_hash
+
+        stamp_report_hash(erc_report_path, ctx.schematic_file, ERC_HASH_KEY)
+
+        # Parse the report to surface error/warning counts.
+        try:
+            from kicad_tools.erc.report import ERCReport
+
+            report = ERCReport.load(erc_report_path)
+            error_count = report.error_count
+            warning_count = report.warning_count
+        except Exception as exc:
+            return BuildResult(
+                step="erc",
+                success=False,
+                message=f"Could not parse ERC report: {exc}",
+                output_file=erc_report_path,
+            )
+
+        if error_count > 0:
+            return BuildResult(
+                step="erc",
+                success=False,
+                message=(f"ERC found {error_count} error(s), {warning_count} warning(s)"),
+                output_file=erc_report_path,
+            )
+
+        return BuildResult(
+            step="erc",
+            success=True,
+            message=f"ERC: 0 errors, {warning_count} warning(s)",
+            output_file=erc_report_path,
+        )
+
+    except Exception as e:  # pragma: no cover - defensive
+        return BuildResult(
+            step="erc",
+            success=False,
+            message=f"ERC step failed: {e}",
+        )
+
+
+def _print_sync_analysis_detail(analysis, console: Console) -> None:
+    """Print per-category sync analysis detail.
+
+    Mirrors :func:`pipeline_cmd._print_sync_analysis_detail` so the build
+    command surfaces the same actionable detail as ``kct pipeline``.
+    """
+    if analysis.value_mismatches:
+        console.print(f"    Value mismatches ({len(analysis.value_mismatches)}):")
+        for mm in analysis.value_mismatches:
+            console.print(
+                f"      {mm['reference']}: sch={mm['schematic_value']} pcb={mm['pcb_value']}"
+            )
+
+    if analysis.footprint_mismatches:
+        console.print(f"    Footprint mismatches ({len(analysis.footprint_mismatches)}):")
+        for mm in analysis.footprint_mismatches:
+            console.print(
+                f"      {mm['reference']}: sch={mm['schematic_footprint']}"
+                f" pcb={mm['pcb_footprint']}"
+            )
+
+    if analysis.add_footprint_actions:
+        console.print(f"    Add footprint ({len(analysis.add_footprint_actions)}):")
+        for action in analysis.add_footprint_actions:
+            ref = action["reference"]
+            fp = action.get("footprint", "")
+            val = action.get("value", "")
+            console.print(f"      {ref}: {fp} ({val})")
+
+    if analysis.schematic_orphans:
+        console.print(f"    Schematic-only ({len(analysis.schematic_orphans)}):")
+        for ref in analysis.schematic_orphans:
+            console.print(f"      {ref} - missing from PCB")
+
+    if analysis.pcb_orphans:
+        console.print(f"    PCB-only ({len(analysis.pcb_orphans)}):")
+        for ref in analysis.pcb_orphans:
+            console.print(f"      {ref} - not in schematic")
+
+
+def _run_step_sync(ctx: BuildContext, console: Console) -> BuildResult:
+    """Reconcile schematic <-> PCB component sets in-process.
+
+    Uses :class:`kicad_tools.sync.reconciler.Reconciler` to analyse drift
+    between the schematic and PCB right after the PCB write — before any
+    expensive downstream work (placement, zones, routing) is performed
+    and well before manufacturing artefacts are produced.
+
+    Mirrors :func:`pipeline_cmd._run_step_sync`'s blocking semantics:
+
+    - In sync: success with a one-line "sync: in sync" message.
+    - Schematic orphans (refs missing from PCB): blocking failure.
+      ``ctx.force`` converts this into a non-blocking warning so the user
+      can deliberately bypass the gate.
+    - Value/footprint mismatches or PCB-only refs without schematic
+      orphans: warning, build continues with ``success=True``.
+    - No schematic available: skipped (``success=True``).
+
+    Note: unlike :func:`pipeline_cmd._run_step_sync`, this implementation
+    does NOT expose a ``--apply-sync`` flag.  ``kct build --force`` is the
+    only escape hatch.  Auto-fixing drift belongs to ``kct pipeline`` /
+    ``kct sync --apply``.
+    """
+    # Skip if no schematic file available
+    if ctx.schematic_file is None or not ctx.schematic_file.exists():
+        return BuildResult(
+            step="sync",
+            success=True,
+            message=(
+                "sync: no schematic available — skipped"
+                " (use 'kct build --step schematic' or supply a schematic)"
+            ),
+        )
+
+    # Find the PCB to reconcile (prefer routed version when available,
+    # but typically SYNC runs right after PCB write so ctx.pcb_file is set
+    # and ctx.routed_pcb_file is still None).
+    pcb_to_check = ctx.routed_pcb_file or ctx.pcb_file
+    if not pcb_to_check or not pcb_to_check.exists():
+        return BuildResult(
+            step="sync",
+            success=False,
+            message="sync: no PCB file found to reconcile",
+        )
+
+    # Dry-run mode: preview without instantiating Reconciler
+    if ctx.dry_run:
+        return BuildResult(
+            step="sync",
+            success=True,
+            message=(
+                f"[dry-run] Would reconcile {ctx.schematic_file.name} <-> {pcb_to_check.name}"
+            ),
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Reconciling {ctx.schematic_file.name} <-> {pcb_to_check.name}...")
+
+    # Instantiate Reconciler in-process (no subprocess overhead)
+    try:
+        from kicad_tools.sync.reconciler import Reconciler
+
+        reconciler = Reconciler(
+            schematic=ctx.schematic_file,
+            pcb=pcb_to_check,
+        )
+        analysis = reconciler.analyze()
+    except Exception as e:
+        logger.warning("sync: failed to analyze: %s", e)
+        return BuildResult(
+            step="sync",
+            success=False,
+            message=f"sync: failed to analyze — {e}",
+        )
+
+    # Clean pass
+    if analysis.is_in_sync:
+        return BuildResult(
+            step="sync",
+            success=True,
+            message="sync: in sync",
+        )
+
+    # Print the summary plus per-category detail
+    if not ctx.quiet:
+        for line in analysis.summary().splitlines():
+            console.print(f"    {line}")
+        _print_sync_analysis_detail(analysis, console)
+
+    schematic_orphans = list(analysis.schematic_orphans)
+    value_mismatch_count = len(analysis.value_mismatches)
+    footprint_mismatch_count = len(analysis.footprint_mismatches)
+    pcb_orphan_count = len(analysis.pcb_orphans)
+
+    # Schematic orphans are blocking (parallels ERC's blocking semantics).
+    # --force lets the user bypass; otherwise the build halts here so no
+    # downstream BOM/manufacturing artefacts are produced.
+    if schematic_orphans:
+        if ctx.force:
+            if not ctx.quiet:
+                console.print(
+                    f"  [yellow]sync: {len(schematic_orphans)} schematic-only ref(s)"
+                    " missing from PCB — continuing (--force)[/yellow]"
+                )
+            return BuildResult(
+                step="sync",
+                success=True,
+                message=(
+                    f"sync: {len(schematic_orphans)} schematic-only ref(s)"
+                    " missing from PCB — continuing (--force)"
+                ),
+            )
+
+        return BuildResult(
+            step="sync",
+            success=False,
+            message=(
+                f"sync: {len(schematic_orphans)} schematic-only ref(s) missing"
+                " from PCB (use --force to continue, or 'kct sync --apply' to fix)"
+            ),
+        )
+
+    # No blocking schematic orphans, but other drift exists -> warn, success=True
+    parts = []
+    if value_mismatch_count:
+        parts.append(f"{value_mismatch_count} value mismatch(es)")
+    if footprint_mismatch_count:
+        parts.append(f"{footprint_mismatch_count} footprint mismatch(es)")
+    if pcb_orphan_count:
+        parts.append(f"{pcb_orphan_count} PCB-only ref(s)")
+
+    return BuildResult(
+        step="sync",
+        success=True,
+        message=(
+            "sync: drift detected — " + (", ".join(parts) if parts else "non-blocking issues")
+        ),
+    )
+
+
+def _print_net_status_detail(result, console: Console, max_nets: int = 10) -> None:
+    """Print per-net detail for incomplete/unrouted nets.
+
+    Lists at most ``max_nets`` offending nets sorted by status (incomplete
+    first, then unrouted), then by name.  Mirrors the indentation used by
+    :func:`_print_sync_analysis_detail` so the build command's surface
+    reads consistently across SYNC and PREFLIGHT_ROUTING failures.
+    """
+    # Nets are already sorted by status in NetStatusResult.analyze()
+    # (incomplete, then unrouted, then complete). Pull just the offenders.
+    offenders = [n for n in result.nets if n.status in ("incomplete", "unrouted")]
+    if not offenders:
+        return
+
+    shown = offenders[:max_nets]
+    console.print(f"    Offending nets ({len(offenders)} total, showing {len(shown)}):")
+    for net in shown:
+        if net.status == "incomplete":
+            detail = f"{net.connected_count}/{net.total_pads} pads connected"
+        else:
+            detail = f"unrouted ({net.total_pads} pads)"
+        console.print(f"      {net.net_name}: {detail}")
+
+    if len(offenders) > max_nets:
+        console.print(f"      ... and {len(offenders) - max_nets} more")
+
+
+def _run_step_preflight_routing(ctx: BuildContext, console: Console) -> BuildResult:
+    """Routing-completeness gate between STITCH and VERIFY.
+
+    Runs the in-process :class:`NetStatusAnalyzer` against the routed PCB
+    and halts the build if any nets are incomplete or unrouted.  This
+    closes the issue #2831 gap where ``kct build`` would emit a full
+    manufacturing package (gerbers, BOM, CPL) even when nets were
+    unconnected.
+
+    Semantics mirror :func:`_run_step_sync`:
+
+    - No PCB available: skipped (``success=True``).
+    - All nets complete: ``success=True``.
+    - Any incomplete/unrouted nets: blocking failure naming both the
+      ``--allow-incomplete`` escape hatch and ``kct route ... --auto-fix``.
+    - ``ctx.force`` bypass converts the failure into a warning
+      (parity with SYNC's ``--force`` semantics).
+    - ``ctx.allow_incomplete`` is the targeted, advertised opt-out and
+      also converts the failure into a warning.
+
+    The check is read-only and is intentionally *not* added to
+    ``_PCB_WRITE_STEPS`` (no smoke-check needed) or to the "stop on
+    failure" exemption set (we want it to halt the build, same as SYNC).
+    """
+    # Skip if no PCB file available (e.g., running just this step before
+    # PCB generation has happened).
+    pcb_to_check = ctx.routed_pcb_file or ctx.pcb_file
+    if not pcb_to_check or not pcb_to_check.exists():
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=(
+                "preflight-routing: no PCB available — skipped (run 'kct build --step pcb' first)"
+            ),
+        )
+
+    # Dry-run mode: preview without instantiating the analyser
+    if ctx.dry_run:
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=f"[dry-run] Would check net status on {pcb_to_check.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Checking net status on {pcb_to_check.name}...")
+
+    # Instantiate NetStatusAnalyzer in-process (no subprocess overhead).
+    try:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        analyzer = NetStatusAnalyzer(pcb_to_check)
+        result = analyzer.analyze()
+    except Exception as e:
+        logger.warning("preflight-routing: failed to analyze: %s", e)
+        return BuildResult(
+            step="preflight-routing",
+            success=False,
+            message=f"preflight-routing: failed to analyze — {e}",
+        )
+
+    total = result.total_nets
+    incomplete = result.incomplete_count
+    unrouted = result.unrouted_count
+
+    # Clean pass: every net is complete (or there are no nets at all).
+    if incomplete == 0 and unrouted == 0:
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=f"preflight-routing: {total}/{total} nets complete",
+        )
+
+    # Print the summary plus per-net detail for offenders
+    if not ctx.quiet:
+        for line in result.summary().splitlines():
+            console.print(f"    {line}")
+        _print_net_status_detail(result, console)
+
+    offending = incomplete + unrouted
+
+    # --allow-incomplete: targeted, grep-friendly opt-out advertised in the
+    # FAIL message itself.  Convert blocking failure into a yellow warning
+    # so the build proceeds through VERIFY and EXPORT.
+    if ctx.allow_incomplete:
+        if not ctx.quiet:
+            console.print(
+                f"  [yellow]preflight-routing: {offending}/{total} nets incomplete"
+                " — continuing (--allow-incomplete)[/yellow]"
+            )
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=(
+                f"preflight-routing: {offending}/{total} nets incomplete"
+                " — continuing (--allow-incomplete)"
+            ),
+        )
+
+    # --force: existing umbrella escape hatch (mirrors SYNC semantics).
+    if ctx.force:
+        if not ctx.quiet:
+            console.print(
+                f"  [yellow]preflight-routing: {offending}/{total} nets incomplete"
+                " — continuing (--force)[/yellow]"
+            )
+        return BuildResult(
+            step="preflight-routing",
+            success=True,
+            message=(
+                f"preflight-routing: {offending}/{total} nets incomplete — continuing (--force)"
+            ),
+        )
+
+    return BuildResult(
+        step="preflight-routing",
+        success=False,
+        message=(
+            f"preflight-routing: {offending}/{total} nets incomplete;"
+            " run `kct route ... --auto-fix` or pass --allow-incomplete to bypass"
+        ),
+    )
+
+
+def _classify_verify_result(returncode: int, stdout: str) -> str:
+    """Map a ``kct check`` exit code + stdout to a truthful verify message.
+
+    Issue #3970 (Bug B): the verify step previously mapped *every* nonzero
+    exit to ``"DRC found issues"``.  ``kct check`` runs in meta-check mode and
+    its exit codes carry finer meaning (check_cmd.py exit-code policy):
+
+    * ``0``  — all sub-checks PASSED.
+    * ``1``  — tool-level failure (file not found, parse error).
+    * ``2``  — a sub-check FAILED, **or** the rollup is ``INCOMPLETE`` because
+      a sub-check is ``NOT RUN`` (e.g. the manufacturing manifest has not been
+      generated yet), or warnings + ``--strict``.
+
+    An ``INCOMPLETE`` rollup is not a DRC failure, so reporting "DRC found
+    issues" there is self-contradicting (the log shows ``DRC: PASSED``).  With
+    EXPORT now running before VERIFY the manifest exists and this path should
+    not fire during a full build, but we keep the distinction so a genuinely
+    missing manifest (or single ``--step verify`` invocation) is reported
+    honestly rather than misattributed to DRC.
+    """
+    if returncode == 0:
+        return "DRC passed"
+
+    if returncode == 1:
+        return "Verification tool error"
+
+    # returncode == 2 (or any other nonzero): distinguish an INCOMPLETE
+    # rollup (manifest / sub-check NOT RUN) from an actual DRC/sub-check
+    # failure by inspecting the meta-check stdout.
+    haystack = stdout or ""
+    if "INCOMPLETE" in haystack or "NOT RUN" in haystack:
+        return "Manifest not yet generated (export step not run)"
+
+    return "DRC found issues"
+
+
+def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run verification step (DRC + audit)."""
+    # Find the PCB to verify (prefer routed version)
+    pcb_to_verify = ctx.routed_pcb_file or ctx.pcb_file
+
+    if not pcb_to_verify or not pcb_to_verify.exists():
+        return BuildResult(
+            step="verify",
+            success=False,
+            message="No PCB file found to verify",
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="verify",
+            success=True,
+            message=f"[dry-run] Would run: kct check {pcb_to_verify.name} --mfr {ctx.mfr}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running DRC check on {pcb_to_verify.name}...")
+
+    # Run DRC check
+    try:
+        # Write DRC report to output dir if specified, otherwise next to the PCB file
+        if ctx.output_dir:
+            drc_report_path = ctx.output_dir / "drc_report.json"
+        else:
+            drc_report_path = pcb_to_verify.parent / "drc_report.json"
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "check",
+            str(pcb_to_verify),
+            "--mfr",
+            ctx.mfr,
+            "--output",
+            str(drc_report_path),
+        ]
+
+        result = _run_subprocess_with_heartbeat(
+            cmd,
+            cwd=str(ctx.project_dir),
+            console=console,
+            label="verify",
+            quiet=ctx.quiet,
+        )
+
+        drc_success = result.returncode == 0
+        drc_message = _classify_verify_result(result.returncode, result.stdout)
+
+        if ctx.verbose and result.stdout:
+            console.print(result.stdout)
+
+        # Also run validate --sync if we have both schematic and PCB
+        sync_message = ""
+        if ctx.schematic_file and ctx.schematic_file.exists():
+            if not ctx.quiet:
+                console.print("  Running schematic-PCB sync check...")
+
+            sync_cmd = [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "validate",
+                "--sync",
+                str(ctx.schematic_file),
+                str(pcb_to_verify),
+            ]
+
+            sync_result = _run_subprocess_with_heartbeat(
+                sync_cmd,
+                cwd=str(ctx.project_dir),
+                console=console,
+                label="verify (sync)",
+                quiet=ctx.quiet,
+            )
+
+            if sync_result.returncode != 0:
+                sync_message = " (sync check found mismatches)"
+            else:
+                sync_message = " (sync OK)"
+        else:
+            # Sync check was skipped - determine why and inform user
+            spec_defines_schematic = (
+                ctx.spec and ctx.spec.project.artifacts and ctx.spec.project.artifacts.schematic
+            )
+
+            if spec_defines_schematic:
+                # Spec defines a schematic but it wasn't found - always warn
+                expected_path = ctx.spec.project.artifacts.schematic
+                if not ctx.quiet:
+                    console.print(
+                        f"  [yellow]⚠[/yellow] Skipping sync check: "
+                        f"schematic '{expected_path}' not found"
+                    )
+                sync_message = " (sync skipped: schematic not found)"
+            elif ctx.verbose:
+                # No schematic defined in spec and verbose mode - inform user
+                console.print("  [dim]Skipping sync check: no schematic available[/dim]")
+
+        return BuildResult(
+            step="verify",
+            success=drc_success,
+            message=f"{drc_message}{sync_message}",
+            output_file=pcb_to_verify,
+        )
+
+    except Exception as e:
+        return BuildResult(
+            step="verify",
+            success=False,
+            message=f"Verification failed: {e}",
+        )
+
+
+def _run_step_export(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run manufacturing export step (Gerbers, BOM, CPL).
+
+    Invokes ``kct export`` as a subprocess to generate a manufacturing
+    package in a ``manufacturing/`` directory.
+    """
+    # Find the PCB to export (prefer routed version)
+    pcb_to_export = ctx.routed_pcb_file or ctx.pcb_file
+
+    if not pcb_to_export or not pcb_to_export.exists():
+        return BuildResult(
+            step="export",
+            success=False,
+            message="No PCB file found to export",
+        )
+
+    # Use the single resolved profile. ctx.mfr was resolved once in main()
+    # from (in precedence order) an explicit --mfr flag, the spec's
+    # manufacturing.target_fab, or the "jlcpcb" default -- so every pipeline
+    # step judges against the same manufacturer (issue #3920). Re-reading
+    # target_fab here would silently override an explicit --mfr and re-open
+    # the split-brain, so we deliberately do not.
+    mfr = ctx.mfr
+
+    # Determine output directory
+    if ctx.output_dir:
+        mfr_dir = ctx.output_dir / "manufacturing"
+    else:
+        mfr_dir = pcb_to_export.parent / "manufacturing"
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="export",
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct export {pcb_to_export.name} --mfr {mfr} -o {mfr_dir}"
+            ),
+        )
+
+    # Generators own their 3D models (#7684): re-run the existence-checked
+    # model ladder so a regenerated board never exports without bodies.
+    # Non-fatal -- a missing model is a render/STEP-export quality issue.
+    try:
+        from kicad_tools.pcb.models3d import ensure_models
+
+        model_report = ensure_models(pcb_to_export)
+        if not ctx.quiet and model_report.dangling_in_library:
+            console.print(
+                "  [yellow]3D models: library ref(s) point at missing files, skipped: "
+                + ", ".join(sorted(model_report.dangling_in_library))
+                + "[/yellow]"
+            )
+    except Exception as e:  # noqa: BLE001
+        if not ctx.quiet:
+            console.print(f"  [yellow]3D model step skipped: {e}[/yellow]")
+
+    if not ctx.quiet:
+        console.print(f"  Exporting manufacturing package for {pcb_to_export.name}...")
+
+    try:
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "export",
+            str(pcb_to_export),
+            "--mfr",
+            mfr,
+            "-o",
+            str(mfr_dir),
+        ]
+
+        # Pass schematic for BOM generation if available
+        if ctx.schematic_file and ctx.schematic_file.exists():
+            cmd.extend(["--sch", str(ctx.schematic_file)])
+
+        # Skip BOM/CPL if no assembly specified in spec
+        if not (
+            ctx.spec
+            and ctx.spec.requirements
+            and ctx.spec.requirements.manufacturing
+            and ctx.spec.requirements.manufacturing.assembly
+        ):
+            cmd.append("--no-bom")
+            cmd.append("--no-cpl")
+
+        result = _run_subprocess_with_heartbeat(
+            cmd,
+            cwd=str(ctx.project_dir),
+            console=console,
+            label="export",
+            quiet=ctx.quiet,
+        )
+        if ctx.verbose and result.stdout:
+            console.print(result.stdout)
+
+        if result.returncode == 0:
+            return BuildResult(
+                step="export",
+                success=True,
+                message=f"Manufacturing package exported to {mfr_dir}",
+                output_file=mfr_dir,
+            )
+        else:
+            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
+            return BuildResult(
+                step="export",
+                success=False,
+                message=f"Export failed: {error_msg}",
+            )
+
+    except Exception as e:
+        return BuildResult(
+            step="export",
+            success=False,
+            message=f"Export failed: {e}",
+        )
+
+
+# Build steps whose output is a *.kicad_pcb file that can be smoke-checked
+# by kicad-cli.  Other steps (SCHEMATIC, VERIFY, EXPORT) are skipped:
+# SCHEMATIC produces a schematic, VERIFY is read-only, and EXPORT is
+# terminal (its own kicad-cli call surfaces load failures directly).
+_PCB_WRITE_STEPS: set[BuildStep] = {
+    BuildStep.PCB,
+    BuildStep.OUTLINE,
+    BuildStep.PLACEMENT,
+    BuildStep.ZONES,
+    BuildStep.SILKSCREEN,
+    BuildStep.ROUTE,
+    BuildStep.STITCH,
+    BuildStep.PAGE_FIT,
+}
+
+
+def _smoke_check_pcb(
+    pcb_path: Path,
+    producing_step: str,
+    console: Console,
+    ctx: BuildContext,
+) -> BuildResult | None:
+    """Verify that ``pcb_path`` can be loaded by kicad-cli.
+
+    Runs ``kicad-cli pcb drc --schematic-parity off`` against the PCB and
+    checks for a "Failed to load board" signal in stderr/stdout.  This
+    catches PCB-write bugs (corrupt S-expressions, unrecognised tokens,
+    bogus ``generator_version`` strings, etc.) at the writer that
+    introduced them rather than at the export step many minutes later.
+
+    Args:
+        pcb_path: PCB file just written by ``producing_step``.
+        producing_step: Name of the step that produced *pcb_path* (for
+            attribution in the failure message).
+        console: Rich console for warnings.
+        ctx: Build context — used to track whether the
+            "kicad-cli not installed" warning has already been emitted
+            (so it prints at most once per build).
+
+    Returns:
+        ``None`` when the smoke check passes (kicad-cli loads the PCB
+        without complaint, or kicad-cli is not installed).  A failed
+        :class:`BuildResult` when kicad-cli rejects the file with
+        "Failed to load board" in its output.
+
+    Note:
+        Real DRC rule violations cause kicad-cli to exit non-zero, but
+        without the "Failed to load board" marker.  Those are *not*
+        treated as smoke-check failures — only true parse rejections.
+    """
+    import contextlib
+    import os
+    import tempfile
+
+    from kicad_tools.cli.runner import find_kicad_cli, run_drc
+
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        if not ctx._kicad_cli_warning_emitted:
+            console.print(
+                "  [yellow]warning[/yellow] kicad-cli not installed; skipping PCB smoke checks"
+            )
+            ctx._kicad_cli_warning_emitted = True
+        return None
+
+    # Use a temp file for the DRC report — we don't care about its
+    # contents, only that kicad-cli could parse the input.
+    fd, report_path_str = tempfile.mkstemp(suffix=".json", prefix="smoke_drc_")
+    os.close(fd)
+    report_path = Path(report_path_str)
+
+    try:
+        result = run_drc(
+            pcb_path,
+            output_path=report_path,
+            schematic_parity=False,
+            kicad_cli=kicad_cli,
+        )
+    finally:
+        # Clean up the report regardless of outcome.
+        with contextlib.suppress(OSError):
+            report_path.unlink(missing_ok=True)
+
+    # Discriminate "load failure" from "DRC violations":
+    # kicad-cli emits "Failed to load board" in stderr (and sometimes
+    # stdout) when the .kicad_pcb cannot be parsed.  Real DRC violations
+    # exit non-zero with no such marker.
+    combined = (result.stderr or "") + "\n" + (result.stdout or "")
+    if "Failed to load board" in combined:
+        message = (
+            f"Output of '{producing_step}' rejected by kicad-cli: "
+            f"{result.stderr.strip() or result.stdout.strip()}\n"
+            f"  Inspect with: head -10 {pcb_path}"
+        )
+        return BuildResult(
+            step=producing_step,
+            success=False,
+            message=message,
+            output_file=pcb_path,
+        )
+
+    return None
+
+
+def _build_inner_parser() -> argparse.ArgumentParser:
+    """Build the inner (authoritative) ``kct build`` argument parser.
+
+    Extracted from ``main()`` so the parity test in
+    ``tests/test_build_parser_parity.py`` can introspect this parser without
+    invoking the full ``main()`` entry point.  The outer parser at
+    ``src/kicad_tools/cli/parser.py::_add_build_parser`` must mirror every
+    long option string and ``--step`` choice declared here.
+    """
+    parser = argparse.ArgumentParser(
+        prog="kct build",
+        description="Build from spec to manufacturable design",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    kct build                           # Build from .kct in current directory
+    kct build project.kct               # Build from specific spec file
+    kct build --step schematic          # Run only schematic generation
+    kct build --step verify --mfr jlcpcb # Run only verification for JLCPCB
+    kct build --dry-run                 # Preview what would be done
+    kct build --force                   # Rebuild even if outputs exist
+    kct build -o /tmp/output            # Write generated files to output dir
+        """,
+    )
+
+    parser.add_argument(
+        "spec",
+        nargs="?",
+        help="Path to .kct file or project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--step",
+        "-s",
+        choices=[
+            "schematic",
+            "erc",
+            "pcb",
+            "sync",
+            "outline",
+            "placement",
+            "zones",
+            "silkscreen",
+            "route",
+            "stitch",
+            "page-fit",
+            "preflight-routing",
+            "verify",
+            "export",
+            "all",
+        ],
+        default="all",
+        help="Run specific step or all (default: all)",
+    )
+    parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Target manufacturer for verification. When omitted, the "
+            "manufacturing.target_fab from the project spec is used "
+            "(default: jlcpcb if neither is set). An explicit --mfr "
+            "always overrides the spec."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview build steps without executing",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed output",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Force rebuild, ignoring existing outputs and timestamp checks",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output directory for generated files (default: project directory)",
+    )
+    parser.add_argument(
+        "--optimize-placement",
+        action="store_true",
+        help="Run CMA-ES placement optimization before routing (opt-in)",
+    )
+    parser.add_argument(
+        "--no-smoke-check",
+        action="store_true",
+        help=(
+            "Disable the per-step kicad-cli load smoke check that runs "
+            "after each PCB-write step.  Use to restore prior behaviour "
+            "when kicad-cli is misbehaving or pipeline speed matters."
+        ),
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help=(
+            "Skip the routing-completeness preflight "
+            "(advertised in failure messages; CI greppable)."
+        ),
+    )
+    # Issue #4607: HV pairwise-clearance passthrough.  Mirrors the
+    # `kct route` flags; forwarded to the route subprocess when a voltage
+    # map is in play.  Must stay in lockstep with parser.py::_add_build_parser
+    # (enforced by tests/test_build_parser_parity.py).
+    parser.add_argument(
+        "--voltage-map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts}, forwarded "
+            "to the route step to enable the HV pairwise-clearance audit "
+            "(see `kct route --voltage-map`). With a voltage map in play, a "
+            "clearance-dirty route result (exit 3/4) fails the build."
+        ),
+    )
+    parser.add_argument(
+        "--creepage-standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: iec60664)."
+        ),
+    )
+    parser.add_argument(
+        "--pollution-degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: 2)."
+        ),
+    )
+    parser.add_argument(
+        "--material-group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup, forwarded to the route step "
+            "(default: IIIa)."
+        ),
+    )
+    parser.add_argument(
+        "--hv-threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance, forwarded to the route "
+            "step (default: 30.0)."
+        ),
+    )
+    add_format_flag(parser)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kct build command."""
+    parser = _build_inner_parser()
+    args = parser.parse_args(argv)
+    as_json = getattr(args, "format", FORMAT_TEXT) == FORMAT_JSON
+
+    # JSON mode owns stdout: the build header, the per-step ledger and the
+    # streamed stdout of every generator script / kct subprocess all land
+    # there.  Divert the lot to stderr so the diagnostics survive and exactly
+    # one document lands on stdout.
+    with stdout_to_stderr_when(as_json):
+        exit_code, document = _run_main(args, as_json)
+    if as_json and document is not None:
+        emit_json(document)
+    return exit_code
+
+
+def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None]:
+    """Execute one ``kct build`` run; returns (exit code, JSON document).
+
+    Split out of :func:`main` so the JSON document is emitted *outside* the
+    stdout diversion that protects the single-document contract.  The document
+    is ``None`` in text mode.
+    """
+    console = Console(quiet=args.quiet)
+
+    # Determine project directory and spec file
+    if args.spec:
+        spec_path = Path(args.spec).resolve()
+        if spec_path.is_file():
+            project_dir = spec_path.parent
+            spec_file = spec_path
+        elif spec_path.is_dir():
+            project_dir = spec_path
+            spec_file = _find_spec_file(project_dir)
+        else:
+            # Path doesn't exist -- if it looks like a file (.kct suffix), use parent
+            if spec_path.suffix == ".kct":
+                project_dir = spec_path.parent
+                spec_file = None
+            else:
+                project_dir = spec_path
+                spec_file = None
+    else:
+        project_dir = Path.cwd()
+        spec_file = _find_spec_file(project_dir)
+
+    if not project_dir.exists():
+        message = f"Directory not found: {project_dir}"
+        if as_json:
+            return 1, {
+                "command": "build",
+                "spec": str(args.spec) if args.spec else None,
+                "error": message,
+                "success": False,
+            }
+        console.print(f"[red]Error:[/red] Directory not found: {project_dir}")
+        return 1, None
+
+    # Load the spec file if available
+    spec = None
+    if spec_file and spec_file.exists():
+        try:
+            from kicad_tools.spec import load_spec
+
+            spec = load_spec(spec_file)
+        except Exception as e:
+            logger.warning(
+                "Failed to load spec file %s: %s. Continuing without spec.",
+                spec_file,
+                e,
+            )
+
+    # Resolve the effective manufacturer profile once, so every pipeline
+    # step (route, stitch, verify, export) judges against a single source
+    # of truth (issue #3920). Precedence: an explicit --mfr flag wins,
+    # otherwise the spec's manufacturing.target_fab, otherwise "jlcpcb".
+    effective_mfr = _resolve_effective_mfr(args.mfr, spec)
+
+    # Resolve output directory if provided
+    output_dir: Path | None = None
+    if args.output:
+        output_dir = Path(args.output).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find existing artifacts (search output dir first, then project dir)
+    search_dir = output_dir if output_dir else project_dir
+    schematic, pcb = _find_artifacts(search_dir, spec_file)
+    # Fall back to project dir if nothing found in output dir
+    if output_dir and not schematic and not pcb:
+        schematic, pcb = _find_artifacts(project_dir, spec_file)
+
+    # Imported lazily (like the gate core at _audit_routed_artifact_for_skip)
+    # to keep `kct build` from paying pipeline_cmd's import cost eagerly.
+    from .pipeline_cmd import resolve_voltage_map_arg
+
+    # Create build context
+    ctx = BuildContext(
+        project_dir=project_dir,
+        spec_file=spec_file,
+        spec=spec,
+        schematic_file=schematic,
+        pcb_file=pcb,
+        output_dir=output_dir,
+        mfr=effective_mfr,
+        verbose=args.verbose,
+        dry_run=args.dry_run,
+        quiet=args.quiet,
+        force=args.force,
+        optimize_placement=args.optimize_placement,
+        smoke_check=not args.no_smoke_check,
+        allow_incomplete=args.allow_incomplete,
+        # Absolutize now, while cwd is still the user's invocation directory
+        # (#4751).  The route fallback runs with cwd=ctx.project_dir and the
+        # route-skip creepage audit with cwd=<routed artifact>.parent -- which,
+        # under -o/--output, is outside the project entirely.
+        voltage_map=resolve_voltage_map_arg(args.voltage_map),
+        creepage_standard=args.creepage_standard,
+        pollution_degree=args.pollution_degree,
+        material_group=args.material_group,
+        hv_threshold=args.hv_threshold,
+    )
+
+    # Print build header
+    if not args.quiet:
+        project_name = spec.project.name if spec else project_dir.name
+
+        header_lines = (
+            f"[bold]Building:[/bold] {project_name}\n"
+            f"[dim]Directory:[/dim] {project_dir}\n"
+            f"[dim]Manufacturer:[/dim] {effective_mfr}"
+        )
+        if output_dir:
+            header_lines += f"\n[dim]Output:[/dim] {output_dir}"
+
+        console.print(
+            Panel.fit(
+                header_lines,
+                title="kct build",
+            )
+        )
+
+    # Determine steps to run
+    if args.step == "all":
+        steps = list(_ALL_STEPS)
+    else:
+        steps = [BuildStep(args.step)]
+
+    # Run build steps
+    results: list[BuildResult] = []
+    # Per-step wall time, parallel to ``results`` (issue #4674): the JSON
+    # document reports it per entry; the prose already prints it inline.
+    step_elapsed_s: list[float] = []
+
+    # Wall-clock anchor for the whole pipeline (issue #3944).  Uses
+    # ``time.monotonic()`` so the reported totals are immune to system
+    # clock adjustments mid-build.
+    build_start = time.monotonic()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        disable=args.quiet,
+    ) as progress:
+        for step in steps:
+            task = progress.add_task(f"[cyan]{step.value}[/cyan]...", total=None)
+            step_start = time.monotonic()
+
+            if step == BuildStep.SCHEMATIC:
+                result = _run_step_schematic(ctx, console)
+                if result.output_file:
+                    ctx.schematic_file = result.output_file
+
+            elif step == BuildStep.ERC:
+                result = _run_step_erc(ctx, console)
+
+            elif step == BuildStep.PCB:
+                # Snapshot any pre-existing routed artifact's mtime *before*
+                # the PCB step runs so we can tell whether the step actually
+                # (re)wrote it or merely found a stale copy. See issue #3978.
+                pre_pcb_routed_mtime = _capture_routed_artifact_mtime(ctx.pcb_file)
+                result = _run_step_pcb(ctx, console)
+                if result.output_file:
+                    ctx.pcb_file = result.output_file
+                    # If the PCB step's recipe already produced a routed
+                    # artifact (e.g. board 04's generate_design.py routes,
+                    # stitches, and fills zones in-place), record it so the
+                    # ROUTE step's guard skips re-routing instead of clobbering
+                    # it with the generic autorouter (issue #3971). Only trust
+                    # the artifact when the PCB step created or refreshed it —
+                    # a stale pre-existing file is rejected (issue #3978).
+                    routed = _scan_recipe_routed_artifact(
+                        result.output_file,
+                        pre_pcb_routed_mtime,
+                        console,
+                        quiet=args.quiet,
+                    )
+                    if routed is not None:
+                        ctx.routed_pcb_file = routed
+
+            elif step == BuildStep.SYNC:
+                result = _run_step_sync(ctx, console)
+
+            elif step == BuildStep.OUTLINE:
+                result = _run_step_outline(ctx, console)
+
+            elif step == BuildStep.PLACEMENT:
+                result = _run_step_placement(ctx, console)
+
+            elif step == BuildStep.ZONES:
+                result = _run_step_zones(ctx, console)
+
+            elif step == BuildStep.SILKSCREEN:
+                result = _run_step_silkscreen(ctx, console)
+
+            elif step == BuildStep.ROUTE:
+                result = _run_step_route(ctx, console)
+                if result.output_file:
+                    ctx.routed_pcb_file = result.output_file
+
+            elif step == BuildStep.STITCH:
+                result = _run_step_stitch(ctx, console)
+                if result.output_file:
+                    ctx.routed_pcb_file = result.output_file
+
+            elif step == BuildStep.PAGE_FIT:
+                result = _run_step_page_fit(ctx, console)
+                if result.output_file:
+                    ctx.routed_pcb_file = result.output_file
+
+            elif step == BuildStep.PREFLIGHT_ROUTING:
+                result = _run_step_preflight_routing(ctx, console)
+
+            elif step == BuildStep.VERIFY:
+                result = _run_step_verify(ctx, console)
+                # Re-arm the #3929 connectivity DRC safety floor on the
+                # reordered EXPORT-before-VERIFY path (#3976). After PR #3974
+                # put EXPORT ahead of VERIFY, a fresh single-pass build writes
+                # the manufacturing bundle before VERIFY has produced a
+                # drc_report.json for the export-time floor to read — so a
+                # shorted board could leave a bundle on disk even though the
+                # build correctly exits FAILED. If VERIFY fails after EXPORT
+                # already ran, delete the bundle it wrote so no artifact
+                # survives a shorted build.
+                if not result.success:
+                    export_result = next(
+                        (r for r in results if r.step == BuildStep.EXPORT.value and r.output_file),
+                        None,
+                    )
+                    if (
+                        export_result is not None
+                        and export_result.output_file is not None
+                        and export_result.output_file.exists()
+                    ):
+                        shutil.rmtree(export_result.output_file)
+                        console.print(
+                            "  [yellow]WARN[/yellow] manufacturing bundle "
+                            "removed — verify step detected DRC failures"
+                        )
+
+            elif step == BuildStep.EXPORT:
+                result = _run_step_export(ctx, console)
+
+            else:
+                result = BuildResult(step=step.value, success=False, message="Unknown step")
+
+            step_elapsed = time.monotonic() - step_start
+            results.append(result)
+            step_elapsed_s.append(step_elapsed)
+            progress.remove_task(task)
+
+            # Print step result with per-step elapsed time (issue #3944)
+            # so users can see how long each stage took directly on the
+            # ledger line, e.g. ``[OK] route: ... (24.3s)``.
+            if not args.quiet:
+                status = "[green]OK[/green]" if result.success else "[red]FAIL[/red]"
+                console.print(
+                    f"  [{status}] {step.value}: {result.message} ({_format_elapsed(step_elapsed)})"
+                )
+
+            # Stop on failure unless verifying or exporting
+            if not result.success and step not in (
+                BuildStep.ERC,
+                BuildStep.VERIFY,
+                BuildStep.EXPORT,
+            ):
+                break
+
+            # Smoke-check: after every successful PCB-write step, ask
+            # kicad-cli whether the PCB it produced is loadable.  This
+            # attributes load-time rejections to the writer that just
+            # ran rather than to the much-later EXPORT step.  Skipped
+            # under --dry-run (no PCB was actually written) and when
+            # the user opts out via --no-smoke-check.
+            if result.success and ctx.smoke_check and not ctx.dry_run and step in _PCB_WRITE_STEPS:
+                pcb_for_check = ctx.routed_pcb_file or ctx.pcb_file
+                if pcb_for_check is not None and pcb_for_check.exists():
+                    smoke = _smoke_check_pcb(pcb_for_check, step.value, console, ctx)
+                    if smoke is not None:
+                        results.append(smoke)
+                        step_elapsed_s.append(0.0)
+                        if not args.quiet:
+                            console.print(
+                                f"  [[red]FAIL[/red]] {step.value} (smoke-check): {smoke.message}"
+                            )
+                        break
+
+    # Summary
+    wall_time_s = time.monotonic() - build_start
+    success_count = sum(1 for r in results if r.success)
+    total_count = len(results)
+    build_succeeded = success_count == total_count
+
+    export_results = [r for r in results if r.step == "export" and r.success]
+    manufacturing_output = (
+        str(export_results[0].output_file)
+        if export_results and export_results[0].output_file
+        else None
+    )
+
+    # Print summary
+    if not args.quiet:
+        total_elapsed = _format_elapsed(wall_time_s)
+        console.print()
+
+        if build_succeeded:
+            console.print(
+                f"[green]Build completed successfully[/green] "
+                f"({success_count}/{total_count} steps) in {total_elapsed}"
+            )
+
+            # Show output files
+            if ctx.routed_pcb_file and ctx.routed_pcb_file.exists():
+                console.print(f"\n[dim]Output:[/dim] {ctx.routed_pcb_file}")
+            elif ctx.pcb_file and ctx.pcb_file.exists():
+                console.print(f"\n[dim]Output:[/dim] {ctx.pcb_file}")
+
+            # Show manufacturing output if export step ran
+            if manufacturing_output is not None:
+                console.print(f"[dim]Manufacturing:[/dim] {manufacturing_output}")
+        else:
+            console.print(
+                f"[red]Build failed[/red] "
+                f"({success_count}/{total_count} steps succeeded) in {total_elapsed}"
+            )
+
+    # The exit code no longer depends on --quiet.  It used to be computed
+    # inside the `if not args.quiet` block above, so `kct build --quiet`
+    # exited 0 even when a step failed -- which would also have made the
+    # JSON document's "success": false contradict the exit code (#4674).
+    exit_code = 0 if build_succeeded else 1
+
+    if not as_json:
+        return exit_code, None
+
+    document = {
+        "command": "build",
+        "spec": str(spec_file) if spec_file else None,
+        "project_dir": str(project_dir),
+        "output_dir": str(output_dir) if output_dir else None,
+        "mfr": effective_mfr,
+        "step": args.step,
+        "dry_run": ctx.dry_run,
+        "force": ctx.force,
+        "schematic": str(ctx.schematic_file) if ctx.schematic_file else None,
+        "pcb": str(ctx.pcb_file) if ctx.pcb_file else None,
+        "routed_pcb": str(ctx.routed_pcb_file) if ctx.routed_pcb_file else None,
+        "manufacturing_output": manufacturing_output,
+        "steps": [
+            {
+                "step": result.step,
+                "success": result.success,
+                "message": result.message,
+                "output_file": str(result.output_file) if result.output_file else None,
+                # Volatile by nature; named rather than hidden so determinism
+                # is asserted modulo it (batch-6 convention).
+                "elapsed_s": round(elapsed, 3),
+            }
+            # ``step_elapsed_s`` is appended in lockstep with ``results`` at
+            # every site, so a length mismatch is a bug worth raising rather
+            # than silently truncating the ledger.
+            for result, elapsed in zip(results, step_elapsed_s, strict=True)
+        ],
+        "counts": {
+            "total": total_count,
+            "succeeded": success_count,
+            "failed": total_count - success_count,
+        },
+        "wall_time_s": round(wall_time_s, 3),
+        "exit_code": exit_code,
+        "success": build_succeeded,
+    }
+    return exit_code, document
+
+
+if __name__ == "__main__":
+    sys.exit(main())

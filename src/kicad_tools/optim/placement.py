@@ -1,0 +1,2505 @@
+"""
+Force-directed placement optimizer.
+
+Provides the PlacementOptimizer class that uses a physics simulation to
+optimize component placement on a PCB. Components repel each other via
+electrostatic-like charges while net connections act as springs pulling
+connected pins together.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
+
+from kicad_tools.optim.board_outline import extract_board_outline as _extract_board_outline_shared
+from kicad_tools.optim.board_outline import to_origin_relative
+from kicad_tools.optim.components import (
+    ClusterType,
+    Component,
+    FunctionalCluster,
+    Keepout,
+    Pin,
+    Spring,
+)
+from kicad_tools.optim.config import PlacementConfig
+from kicad_tools.optim.constraints import (
+    ConstraintType,
+    ConstraintViolation,
+    GroupingConstraint,
+    validate_grouping_constraints,
+)
+from kicad_tools.optim.edge_placement import (
+    BoardEdges,
+    EdgeConstraint,
+    compute_edge_force,
+    compute_edge_orientation_torque,
+    detect_edge_components,
+    edge_orientation_potential_energy,
+    mating_face_misalignment_deg,
+)
+from kicad_tools.optim.geometry import Polygon, Vector2D
+from kicad_tools.optim.thermal import (
+    ThermalClass,
+    ThermalConfig,
+    ThermalConstraint,
+    ThermalProperties,
+    classify_thermal_properties,
+    detect_thermal_constraints,
+)
+
+if TYPE_CHECKING:
+    from kicad_tools.acceleration.kernels.placement import PlacementGPUAccelerator
+    from kicad_tools.optim.zones import PlacementZone
+    from kicad_tools.performance import PerformanceConfig
+    from kicad_tools.schema.pcb import PCB
+
+__all__ = ["PlacementOptimizer"]
+
+
+class PlacementOptimizer:
+    """
+    Component placement optimizer using force-directed simulation.
+
+    Uses a physics model where:
+    - Board edges and component outlines have constant linear charge density
+    - Same-sign charges repel (keeps components apart and on board)
+    - Net connections are modeled as springs (pulls connected pins together)
+
+    The simulation runs until equilibrium or max iterations reached.
+    """
+
+    def __init__(
+        self,
+        board_outline: Polygon,
+        config: PlacementConfig | None = None,
+        record_decisions: bool = False,
+        perf_config: PerformanceConfig | None = None,
+    ):
+        """
+        Initialize the optimizer.
+
+        Args:
+            board_outline: Polygon defining the board boundary
+            config: Optimization parameters
+            record_decisions: If True, record placement decisions for later querying
+            perf_config: Performance configuration for GPU acceleration
+        """
+        self.board_outline = board_outline
+        self.config = config or PlacementConfig()
+        self.components: list[Component] = []
+        self.springs: list[Spring] = []
+        self.keepouts: list[Keepout] = []
+        self.clusters: list[FunctionalCluster] = []
+        self.grouping_constraints: list[GroupingConstraint] = []
+        self._component_map: dict[str, Component] = {}
+        self.thermal_constraints: list[ThermalConstraint] = []
+        self._thermal_props: dict[str, ThermalProperties] = {}
+
+        # Edge constraints
+        self.board_edges = BoardEdges.from_polygon(board_outline)
+        self._edge_constraints: dict[str, EdgeConstraint] = {}
+
+        # GPU acceleration
+        self._perf_config = perf_config
+        self._gpu_accelerator: PlacementGPUAccelerator | None = None
+        self._gpu_enabled = False
+
+        # C++ force engine acceleration
+        self._cpp_force_available = False
+        try:
+            from kicad_tools.optim.cpp_backend import is_cpp_available
+
+            self._cpp_force_available = is_cpp_available()
+        except ImportError:
+            pass
+
+        # Decision recording
+        self.record_decisions = record_decisions
+        self._decision_store: DecisionStore | None = None
+        self._initial_positions: dict[str, tuple[float, float, float]] = {}
+        if record_decisions:
+            from kicad_tools.explain.decisions import DecisionStore
+
+            self._decision_store = DecisionStore()
+
+    def _effective_boundary_charge(self) -> float:
+        """Compute effective boundary charge, auto-scaled by component density.
+
+        When ``config.auto_scale_boundary`` is True the boundary charge is
+        multiplied by ``max(1, n_components / 20)`` so that the cumulative
+        inter-component repulsion on a dense board cannot overwhelm the
+        boundary forces.  For a 71-component board this gives roughly a 3.5x
+        boost, keeping all components inside the Edge.Cuts outline.
+        """
+        charge = self.config.boundary_charge
+        if self.config.auto_scale_boundary:
+            n = len([c for c in self.components if not c.fixed])
+            charge *= max(1.0, n / 20.0)
+        return charge
+
+    @property
+    def gpu_enabled(self) -> bool:
+        """Return True if GPU acceleration is enabled for this optimizer."""
+        return self._gpu_enabled
+
+    @property
+    def gpu_backend(self) -> str | None:
+        """Return the active GPU backend type, or None if not using GPU."""
+        if self._gpu_accelerator is not None:
+            return self._gpu_accelerator.backend_type.value
+        return None
+
+    def enable_gpu(self, force: bool = False) -> bool:
+        """Enable GPU acceleration if available.
+
+        Args:
+            force: If True, enable GPU regardless of component count threshold.
+
+        Returns:
+            True if GPU was enabled, False if not available.
+        """
+        from kicad_tools.acceleration import BackendType, get_best_available_backend
+        from kicad_tools.acceleration.kernels.placement import PlacementGPUAccelerator
+
+        backend = get_best_available_backend()
+        if backend.backend_type == BackendType.CPU and not force:
+            return False
+
+        self._gpu_accelerator = PlacementGPUAccelerator(
+            perf_config=self._perf_config, backend=backend
+        )
+        self._gpu_enabled = True
+
+        if self.components:
+            self._gpu_accelerator.prepare_batch(self.components)
+
+        return True
+
+    def disable_gpu(self) -> None:
+        """Disable GPU acceleration and use CPU for all calculations."""
+        self._gpu_enabled = False
+        self._gpu_accelerator = None
+
+    @classmethod
+    def from_pcb(
+        cls,
+        pcb: PCB,
+        config: PlacementConfig | None = None,
+        fixed_refs: list[str] | None = None,
+        enable_clustering: bool | None = None,
+        edge_detect: bool = False,
+        edge_constraints: list[EdgeConstraint] | None = None,
+        record_decisions: bool = False,
+        perf_config: PerformanceConfig | None = None,
+        allow_estimated_outline: bool = False,
+        mating_faces: Mapping[str, float] | None = None,
+    ) -> PlacementOptimizer:
+        """
+        Create optimizer from a loaded PCB.
+
+        Args:
+            pcb: Loaded PCB object
+            config: Optimization parameters
+            fixed_refs: List of reference designators for fixed components
+                       (e.g., ["J1", "J2"] for connectors)
+            enable_clustering: If True, detect and add functional clusters.
+                              If None, uses config.cluster_enabled.
+            edge_detect: If True, auto-detect edge components (connectors, etc.)
+            edge_constraints: Manual list of edge constraints to apply
+            record_decisions: If True, record placement decisions for later querying
+            perf_config: Performance configuration for GPU acceleration
+            allow_estimated_outline: If True, fall back to estimating the board
+                outline from current component positions when the Edge.Cuts
+                outline cannot be parsed. This fallback is unsafe -- if any
+                footprints start off-board it inflates the "board" far beyond
+                the real Edge.Cuts and lets the optimizer scatter components
+                off-board (issue #3804). When False (the default) an
+                unparseable Edge.Cuts raises ``ValueError`` so the failure is
+                visible rather than silently producing a bogus boundary.
+            mating_faces: Optional ``{reference: mating_face_offset_deg}`` map
+                forwarded to ``edge_detect`` so auto-detected connectors are
+                also rotated to face off-board (issue #4450). Ignored when
+                ``edge_detect`` is False; references not in the map keep the
+                translation-only edge behavior.
+
+        Raises:
+            ValueError: If the board outline cannot be parsed from Edge.Cuts
+                and ``allow_estimated_outline`` is False.
+        """
+        fixed_refs = set(fixed_refs or [])
+
+        # Try Shapely-based geometry first, fall back to legacy parsing.
+        # Distinguish a genuine geometry parse failure (Edge.Cuts present but
+        # cannot be closed into a polygon -- a ValueError) from Shapely being
+        # unavailable (ImportError), so that a real parse failure is surfaced
+        # rather than silently degrading to an estimated outline (#3804).
+        board = None
+        shapely_parse_error: Exception | None = None
+        try:
+            from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
+
+            if has_shapely():
+                try:
+                    board_geom = BoardGeometry.from_pcb(pcb)
+                    board = board_geom.to_optim_polygon()
+                    # BoardGeometry.from_pcb subtracts pcb.board_origin from
+                    # every Edge.Cuts vertex, so to_optim_polygon() is already
+                    # in the origin-relative frame that Footprint.position
+                    # uses. Components and outline therefore share one frame.
+                    logger.debug("Using Shapely-based board geometry engine")
+                except ValueError as exc:
+                    # Edge.Cuts could not be closed into a polygon. Remember
+                    # the real error; we may still succeed via the legacy
+                    # parser below, but if not we re-raise this.
+                    shapely_parse_error = exc
+                    logger.debug("Shapely geometry parse failed (%s), trying legacy parser", exc)
+                except Exception as exc:  # pragma: no cover - defensive
+                    shapely_parse_error = exc
+                    logger.debug("Shapely geometry failed (%s), trying legacy parser", exc)
+        except ImportError:
+            pass
+
+        if board is None:
+            # The legacy parser reads raw (absolute) Edge.Cuts coordinates;
+            # move them into the origin-relative frame of Footprint.position.
+            board = to_origin_relative(cls._extract_board_outline(pcb), pcb)
+
+        if board is None:
+            # Neither the Shapely engine nor the legacy parser could recover a
+            # closed outline from Edge.Cuts. Estimating a board from component
+            # positions is the mechanism that lets parts spread far off-board
+            # (#3804), so it is now opt-in and otherwise fails loudly.
+            detail = f" ({shapely_parse_error})" if shapely_parse_error else ""
+            if not allow_estimated_outline:
+                raise ValueError(
+                    "Could not extract a closed board outline from Edge.Cuts"
+                    f"{detail}. The placement optimizer requires a valid board "
+                    "boundary to contain components. Add a closed Edge.Cuts "
+                    "outline to the board, or pass allow_estimated_outline=True "
+                    "to fall back to an outline estimated from component "
+                    "positions (which may let components escape the real board)."
+                )
+
+            # Opt-in fallback: estimate from component positions. This is
+            # unsafe when footprints start off-board -- it inflates the
+            # boundary -- so it is gated behind allow_estimated_outline.
+            logger.warning(
+                "Could not extract board outline from Edge.Cuts%s; "
+                "falling back to estimated outline from component positions "
+                "(allow_estimated_outline=True). Boundary enforcement may be "
+                "degraded and components may escape the real board.",
+                detail,
+            )
+            min_x = min_y = float("inf")
+            max_x = max_y = float("-inf")
+
+            for fp in pcb.footprints:
+                x, y = fp.position
+                min_x = min(min_x, x - 10)
+                max_x = max(max_x, x + 10)
+                min_y = min(min_y, y - 10)
+                max_y = max(max_y, y + 10)
+
+            if min_x == float("inf"):
+                # No footprints, use default
+                board = Polygon.rectangle(100, 100, 100, 80)
+            else:
+                board = Polygon.rectangle(
+                    (min_x + max_x) / 2,
+                    (min_y + max_y) / 2,
+                    max_x - min_x,
+                    max_y - min_y,
+                )
+
+        optimizer = cls(board, config, record_decisions=record_decisions, perf_config=perf_config)
+
+        # Add components
+        for fp in pcb.footprints:
+            # Estimate component size from pads
+            if fp.pads:
+                pad_xs = [p.position[0] for p in fp.pads]
+                pad_ys = [p.position[1] for p in fp.pads]
+                width = max(pad_xs) - min(pad_xs) + 2.0
+                height = max(pad_ys) - min(pad_ys) + 2.0
+            else:
+                width, height = 2.0, 2.0
+
+            # Mark connectors, mounting holes, etc. as fixed
+            is_fixed = fp.reference in fixed_refs
+            # Auto-detect connectors and mounting holes
+            if not is_fixed:
+                ref_prefix = "".join(c for c in fp.reference if c.isalpha())
+                if ref_prefix in ("J", "H", "MH"):  # Connectors and mounting holes
+                    is_fixed = True
+
+            comp = Component(
+                ref=fp.reference,
+                x=fp.position[0],
+                y=fp.position[1],
+                rotation=fp.rotation,
+                width=max(width, 1.0),
+                height=max(height, 1.0),
+                fixed=is_fixed,
+                pins=[
+                    Pin(
+                        number=p.number,
+                        x=fp.position[0] + p.position[0],
+                        y=fp.position[1] + p.position[1],
+                        net=p.net_number,
+                        net_name=p.net_name,
+                    )
+                    for p in fp.pads
+                ],
+            )
+            optimizer.add_component(comp)
+
+        # Create springs for nets
+        optimizer.create_springs_from_nets()
+
+        # Detect and add functional clusters if enabled
+        use_clustering = (
+            enable_clustering if enable_clustering is not None else optimizer.config.cluster_enabled
+        )
+        if use_clustering:
+            from kicad_tools.optim.clustering import detect_functional_clusters
+
+            clusters = detect_functional_clusters(optimizer.components)
+            for cluster in clusters:
+                optimizer.add_cluster(cluster)
+
+        # Apply edge constraints
+        all_constraints: list[EdgeConstraint] = []
+
+        if edge_detect:
+            all_constraints.extend(detect_edge_components(pcb, mating_faces=mating_faces))
+
+        if edge_constraints:
+            all_constraints.extend(edge_constraints)
+
+        for constraint in all_constraints:
+            optimizer.add_edge_constraint(constraint)
+
+        # Apply thermal properties if enabled
+        if config and config.thermal_enabled:
+            optimizer.apply_thermal_properties(pcb)
+
+        return optimizer
+
+    @staticmethod
+    def _extract_board_outline(pcb: PCB) -> Polygon | None:
+        """Extract board outline from Edge.Cuts layer.
+
+        Handles ``gr_rect``, ``gr_line``, and ``gr_arc`` elements.  Arcs are
+        linearised into short line segments so that the resulting polygon
+        closely approximates curved board edges.
+
+        For boards without arcs, delegates to
+        :func:`kicad_tools.optim.board_outline.extract_board_outline`.
+
+        Returns None if no outline found.
+        """
+        sexp = pcb._sexp
+
+        # Check whether any arcs exist on Edge.Cuts
+        has_arcs = False
+        for child in sexp.iter_children():
+            if child.tag == "gr_arc":
+                layer = child.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    has_arcs = True
+                    break
+
+        if not has_arcs:
+            # Delegate to the shared implementation (gr_rect + gr_line only)
+            return _extract_board_outline_shared(pcb)
+
+        # Arc-aware path: collect gr_line and gr_arc segments
+        edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        for child in sexp.iter_children():
+            if child.tag == "gr_line":
+                layer = child.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    start = child.find("start")
+                    end = child.find("end")
+                    if start and end:
+                        x1 = start.get_float(0) or 0.0
+                        y1 = start.get_float(1) or 0.0
+                        x2 = end.get_float(0) or 0.0
+                        y2 = end.get_float(1) or 0.0
+                        edge_lines.append(((x1, y1), (x2, y2)))
+
+            elif child.tag == "gr_arc":
+                layer = child.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    arc_lines = PlacementOptimizer._linearize_arc(child)
+                    edge_lines.extend(arc_lines)
+
+        if len(edge_lines) >= 3:
+            vertices = PlacementOptimizer._chain_lines_to_polygon(edge_lines)
+            if vertices:
+                return Polygon(vertices=[Vector2D(x, y) for x, y in vertices])
+
+        return None
+
+    @staticmethod
+    def _linearize_arc(
+        arc_sexp,
+        num_segments: int = 16,
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Approximate a ``gr_arc`` as a sequence of short line segments.
+
+        Normalize legacy center/angle arcs through the shared schema parser.
+        Modern gr_arc is defined by *start* (arc start point), *mid*
+        (midpoint on the arc), and *end* (arc end point).  We recover the
+        centre and radius via the circumscribed-circle of these three points,
+        then emit *num_segments* chords.
+        """
+        from kicad_tools.schema.pcb import GraphicArc
+
+        if not (arc_sexp.find("start") and arc_sexp.find("end")):
+            return []
+        if arc_sexp.find("mid") is None and arc_sexp.find("angle") is None:
+            return []
+        arc = GraphicArc.from_sexp(arc_sexp)
+        sx, sy = arc.start
+        mx, my = arc.mid
+        ex, ey = arc.end
+
+        # Find circumscribed circle through (sx,sy), (mx,my), (ex,ey)
+        ax, ay = sx, sy
+        bx, by = mx, my
+        cx, cy = ex, ey
+
+        D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        if abs(D) < 1e-12:
+            # Degenerate (collinear) -- fall back to a straight line
+            return [((sx, sy), (ex, ey))]
+
+        ux = (
+            (ax * ax + ay * ay) * (by - cy)
+            + (bx * bx + by * by) * (cy - ay)
+            + (cx * cx + cy * cy) * (ay - by)
+        ) / D
+        uy = (
+            (ax * ax + ay * ay) * (cx - bx)
+            + (bx * bx + by * by) * (ax - cx)
+            + (cx * cx + cy * cy) * (bx - ax)
+        ) / D
+
+        radius = math.sqrt((sx - ux) ** 2 + (sy - uy) ** 2)
+
+        # Compute angles
+        angle_start = math.atan2(sy - uy, sx - ux)
+        angle_mid = math.atan2(my - uy, mx - ux)
+        angle_end = math.atan2(ey - uy, ex - ux)
+
+        # Determine arc direction by checking whether mid lies on the
+        # short arc from start to end going CCW or CW.
+        def _norm_angle(a: float) -> float:
+            while a < 0:
+                a += 2 * math.pi
+            while a >= 2 * math.pi:
+                a -= 2 * math.pi
+            return a
+
+        a_s = _norm_angle(angle_start)
+        a_m = _norm_angle(angle_mid)
+        a_e = _norm_angle(angle_end)
+
+        # CCW sweep from start to end
+        sweep_ccw = _norm_angle(a_e - a_s)
+        mid_in_ccw = _norm_angle(a_m - a_s)
+        if mid_in_ccw <= sweep_ccw:
+            sweep = sweep_ccw
+        else:
+            sweep = -(2 * math.pi - sweep_ccw)
+
+        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        for i in range(num_segments):
+            t0 = i / num_segments
+            t1 = (i + 1) / num_segments
+            a0 = angle_start + sweep * t0
+            a1 = angle_start + sweep * t1
+            p0 = (ux + radius * math.cos(a0), uy + radius * math.sin(a0))
+            p1 = (ux + radius * math.cos(a1), uy + radius * math.sin(a1))
+            segments.append((p0, p1))
+
+        return segments
+
+    @staticmethod
+    def _chain_lines_to_polygon(
+        lines: list[tuple[tuple[float, float], tuple[float, float]]],
+    ) -> list[tuple[float, float]] | None:
+        """Chain line segments into a closed polygon."""
+        if not lines:
+            return None
+
+        tolerance = 0.01  # mm tolerance for point matching
+        vertices = []
+        used = [False] * len(lines)
+
+        # Start with first line
+        vertices.append(lines[0][0])
+        current_end = lines[0][1]
+        used[0] = True
+
+        while True:
+            found = False
+            for i, (start, end) in enumerate(lines):
+                if used[i]:
+                    continue
+
+                # Check if this line continues from current_end
+                if (
+                    abs(start[0] - current_end[0]) < tolerance
+                    and abs(start[1] - current_end[1]) < tolerance
+                ):
+                    vertices.append(start)
+                    current_end = end
+                    used[i] = True
+                    found = True
+                    break
+                elif (
+                    abs(end[0] - current_end[0]) < tolerance
+                    and abs(end[1] - current_end[1]) < tolerance
+                ):
+                    vertices.append(end)
+                    current_end = start
+                    used[i] = True
+                    found = True
+                    break
+
+            if not found:
+                break
+
+        # Check if polygon closes
+        if (
+            vertices
+            and abs(vertices[0][0] - current_end[0]) < tolerance
+            and abs(vertices[0][1] - current_end[1]) < tolerance
+        ):
+            return vertices
+
+        # Polygon didn't close, return bounding box
+        if lines:
+            all_x = [p[0] for line in lines for p in line]
+            all_y = [p[1] for line in lines for p in line]
+            return [
+                (min(all_x), min(all_y)),
+                (max(all_x), min(all_y)),
+                (max(all_x), max(all_y)),
+                (min(all_x), max(all_y)),
+            ]
+
+        return None
+
+    def add_component(self, comp: Component):
+        """Add a component to the optimizer."""
+        self.components.append(comp)
+        self._component_map[comp.ref] = comp
+
+        # Capture initial position for decision recording
+        if self.record_decisions:
+            self._initial_positions[comp.ref] = (comp.x, comp.y, comp.rotation)
+
+    def get_component(self, ref: str) -> Component | None:
+        """Get component by reference."""
+        return self._component_map.get(ref)
+
+    def add_grouping_constraint(self, constraint: GroupingConstraint) -> None:
+        """
+        Add a grouping constraint to the optimizer.
+
+        Constraints define spatial relationships between component groups
+        and are enforced as soft penalty forces during optimization.
+
+        Args:
+            constraint: Grouping constraint to add
+        """
+        self.grouping_constraints.append(constraint)
+
+    def add_grouping_constraints(self, constraints: list[GroupingConstraint]) -> None:
+        """
+        Add multiple grouping constraints to the optimizer.
+
+        Args:
+            constraints: List of grouping constraints to add
+        """
+        self.grouping_constraints.extend(constraints)
+
+    def add_zone(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+    ) -> PlacementZone:
+        """
+        Add a named placement zone.
+
+        Creates a rectangular zone that can have components assigned to it.
+        Components in the zone will be constrained to stay within the zone
+        during optimization.
+
+        Args:
+            name: Unique identifier for the zone
+            x: X coordinate of the zone's bottom-left corner (mm)
+            y: Y coordinate of the zone's bottom-left corner (mm)
+            width: Zone width (mm)
+            height: Zone height (mm)
+
+        Returns:
+            The created PlacementZone object
+
+        Example::
+
+            optimizer = PlacementOptimizer.from_pcb(pcb)
+            zone = optimizer.add_zone("power", x=10, y=10, width=50, height=30)
+            optimizer.assign_to_zone("power", pattern=r"C[0-9]+")
+        """
+        from kicad_tools.optim.zones import PlacementZone
+
+        zone = PlacementZone(name=name, x=x, y=y, width=width, height=height)
+
+        # Store zone for later reference
+        if not hasattr(self, "_zones"):
+            self._zones: dict[str, PlacementZone] = {}
+        self._zones[name] = zone
+
+        return zone
+
+    def assign_to_zone(
+        self,
+        zone_name: str,
+        *,
+        pattern: str | None = None,
+        references: list[str] | None = None,
+    ) -> list[str]:
+        """
+        Assign components to a named placement zone.
+
+        Components can be assigned by regex pattern or explicit reference list.
+        The zone constraint keeps assigned components within the zone during
+        optimization.
+
+        Args:
+            zone_name: Name of the zone to assign components to
+            pattern: Regex pattern to match component references
+                    (e.g., "C1[0-6][0-9]" for C100-C169)
+            references: Explicit list of component references to assign
+
+        Returns:
+            List of component references that were assigned
+
+        Raises:
+            ValueError: If zone not found, or neither pattern nor references
+                       specified
+
+        Example::
+
+            optimizer.add_zone("supercaps", x=10, y=10, width=120, height=50)
+
+            # Assign by regex pattern
+            optimizer.assign_to_zone("supercaps", pattern=r"C1[0-6][0-9]")
+
+            # Or assign by explicit references
+            optimizer.assign_to_zone("power", references=["U1", "U2", "U3"])
+        """
+        from kicad_tools.optim.zones import assign_zone
+
+        if not hasattr(self, "_zones") or zone_name not in self._zones:
+            raise ValueError(f"Zone '{zone_name}' not found. Use add_zone() first.")
+
+        zone = self._zones[zone_name]
+        return assign_zone(self, zone, pattern=pattern, references=references)
+
+    def get_zone(self, name: str) -> PlacementZone | None:
+        """
+        Get a placement zone by name.
+
+        Args:
+            name: Zone name
+
+        Returns:
+            PlacementZone if found, None otherwise
+        """
+        if not hasattr(self, "_zones"):
+            return None
+        return self._zones.get(name)
+
+    def get_zones(self) -> list[PlacementZone]:
+        """
+        Get all registered placement zones.
+
+        Returns:
+            List of all PlacementZone objects
+        """
+        if not hasattr(self, "_zones"):
+            return []
+        return list(self._zones.values())
+
+    def validate_constraints(self) -> list[ConstraintViolation]:
+        """
+        Check if current placement satisfies all grouping constraints.
+
+        Returns:
+            List of constraint violations (empty if all satisfied)
+        """
+        return validate_grouping_constraints(self.components, self.grouping_constraints)
+
+    def add_keepout(
+        self, outline: Polygon, charge_multiplier: float = 10.0, name: str = ""
+    ) -> Keepout:
+        """
+        Add a keepout zone that repels components.
+
+        Args:
+            outline: Polygon defining the keepout area
+            charge_multiplier: Repulsion strength relative to normal edges
+            name: Optional name for the keepout
+
+        Returns:
+            The created Keepout object
+        """
+        keepout = Keepout(outline=outline, charge_multiplier=charge_multiplier, name=name)
+        self.keepouts.append(keepout)
+        return keepout
+
+    def add_keepout_circle(
+        self, x: float, y: float, radius: float, charge_multiplier: float = 10.0, name: str = ""
+    ) -> Keepout:
+        """
+        Add a circular keepout zone (e.g., for mounting holes).
+
+        Args:
+            x, y: Center position
+            radius: Keepout radius in mm
+            charge_multiplier: Repulsion strength
+            name: Optional name
+
+        Returns:
+            The created Keepout object
+        """
+        outline = Polygon.circle(x, y, radius)
+        return self.add_keepout(outline, charge_multiplier, name)
+
+    def add_edge_constraint(self, constraint: EdgeConstraint) -> None:
+        """
+        Add an edge constraint for a component.
+
+        Edge constraints keep components at board edges during optimization.
+        Useful for connectors, mounting holes, and other edge-accessible components.
+
+        Args:
+            constraint: EdgeConstraint specifying component and edge behavior
+        """
+        self._edge_constraints[constraint.reference] = constraint
+
+        # Also set on the component if it exists
+        comp = self._component_map.get(constraint.reference)
+        if comp:
+            comp.edge_constraint = constraint
+
+    def add_edge_constraints(self, constraints: list[EdgeConstraint]) -> None:
+        """
+        Add multiple edge constraints.
+
+        Args:
+            constraints: List of EdgeConstraint objects
+        """
+        for constraint in constraints:
+            self.add_edge_constraint(constraint)
+
+    def get_edge_constraint(self, ref: str) -> EdgeConstraint | None:
+        """Get edge constraint for a component by reference."""
+        return self._edge_constraints.get(ref)
+
+    @property
+    def edge_constrained_components(self) -> list[Component]:
+        """Get list of components with edge constraints."""
+        return [comp for comp in self.components if comp.ref in self._edge_constraints]
+
+    def create_springs_from_nets(self):
+        """Create springs connecting all pins on the same net."""
+        # Group pins by net
+        net_pins: dict[int, list[tuple[str, Pin]]] = {}
+        for comp in self.components:
+            for pin in comp.pins:
+                if pin.net > 0:  # Skip unconnected pins
+                    if pin.net not in net_pins:
+                        net_pins[pin.net] = []
+                    net_pins[pin.net].append((comp.ref, pin))
+
+        # Create springs between all pairs (star topology)
+        # Could also use minimum spanning tree for fewer springs
+        for net, pins in net_pins.items():
+            if len(pins) < 2:
+                continue
+
+            # Determine spring stiffness based on net type
+            net_name = pins[0][1].net_name
+            if self._is_power_net(net_name):
+                stiffness = self.config.power_net_stiffness
+            elif self._is_clock_net(net_name):
+                stiffness = self.config.clock_net_stiffness
+            else:
+                stiffness = self.config.spring_stiffness
+
+            # Create spring from first pin to all others (star topology)
+            ref0, pin0 = pins[0]
+            for ref1, pin1 in pins[1:]:
+                spring = Spring(
+                    comp1_ref=ref0,
+                    pin1_num=pin0.number,
+                    comp2_ref=ref1,
+                    pin2_num=pin1.number,
+                    stiffness=stiffness,
+                    rest_length=0.0,
+                    net=net,
+                    net_name=net_name,
+                )
+                self.springs.append(spring)
+
+    def _is_power_net(self, name: str) -> bool:
+        """Check if net is a power net."""
+        name_lower = name.lower()
+        return any(
+            p in name_lower
+            for p in ["vcc", "vdd", "gnd", "+3", "+5", "+12", "-12", "pwr", "v+", "v-"]
+        )
+
+    def _is_clock_net(self, name: str) -> bool:
+        """Check if net is a clock net."""
+        name_lower = name.lower()
+        return any(p in name_lower for p in ["clk", "clock", "mclk", "sclk", "bclk", "xtal"])
+
+    def add_cluster(self, cluster: FunctionalCluster):
+        """
+        Add a functional cluster to the optimizer.
+
+        Creates strong springs between the cluster anchor and all member
+        components to keep them close together during optimization.
+
+        Args:
+            cluster: FunctionalCluster defining the group
+        """
+        self.clusters.append(cluster)
+        self._create_cluster_springs(cluster)
+
+    def _create_cluster_springs(self, cluster: FunctionalCluster):
+        """
+        Create springs to enforce cluster proximity constraints.
+
+        Creates strong springs from anchor component center to each member
+        component center. These springs have higher stiffness than normal
+        net connections to ensure cluster members stay close together.
+
+        Args:
+            cluster: FunctionalCluster to create springs for
+        """
+        anchor_comp = self._component_map.get(cluster.anchor)
+        if not anchor_comp:
+            return
+
+        # Decoupling caps (issue #6020): spring each cap's supply pad to the
+        # IC supply pin it is assigned, one cap per pin before any pin gets
+        # two, instead of every cap to the IC's first pin.
+        if (
+            cluster.cluster_type == ClusterType.POWER
+            and not cluster.anchor_pin
+            and self._create_decoupling_springs(cluster, anchor_comp)
+        ):
+            return
+
+        # Find the anchor pin to use (if specified) or use component center
+        anchor_pin = None
+        if cluster.anchor_pin:
+            anchor_pin = next(
+                (p for p in anchor_comp.pins if p.number == cluster.anchor_pin),
+                None,
+            )
+
+        # If no specific anchor pin, use the first pin as proxy for center
+        if anchor_pin is None and anchor_comp.pins:
+            anchor_pin = anchor_comp.pins[0]
+
+        if anchor_pin is None:
+            return
+
+        # Create strong springs from anchor to each member
+        for member_ref in cluster.members:
+            member_comp = self._component_map.get(member_ref)
+            if not member_comp or not member_comp.pins:
+                continue
+
+            # Use first pin of member component
+            member_pin = member_comp.pins[0]
+
+            # Create cluster spring with high stiffness
+            spring = Spring(
+                comp1_ref=cluster.anchor,
+                pin1_num=anchor_pin.number,
+                comp2_ref=member_ref,
+                pin2_num=member_pin.number,
+                stiffness=self.config.cluster_stiffness,
+                rest_length=0.0,  # Want them as close as possible
+                net=-1,  # Special marker for cluster springs
+                net_name=f"_cluster_{cluster.cluster_type.value}",
+            )
+            self.springs.append(spring)
+
+    def _create_decoupling_springs(
+        self, cluster: FunctionalCluster, anchor_comp: Component
+    ) -> bool:
+        """Spring each POWER-cluster cap to its assigned IC supply pin.
+
+        Uses :func:`kicad_tools.placement.decoupling.assign_caps_to_pins` on
+        the current pin positions. Returns False (caller falls back to the
+        anchor-centre springs) when no member shares a non-ground net with
+        the anchor.
+        """
+        from kicad_tools.placement.decoupling import (
+            DecouplingCap,
+            DecouplingGroup,
+            SupplyPin,
+            assign_caps_to_pins,
+        )
+        from kicad_tools.router.net_class import is_ground_rail_name
+
+        groups: dict[str, tuple[list[DecouplingCap], list[SupplyPin]]] = {}
+        positions: dict[tuple[str, str], tuple[float, float]] = {}
+        for pin in anchor_comp.pins:
+            if not pin.net_name or is_ground_rail_name(pin.net_name):
+                continue
+            groups.setdefault(pin.net_name, ([], []))[1].append(
+                SupplyPin(anchor_comp.ref, pin.number)
+            )
+            positions[(anchor_comp.ref, pin.number)] = (pin.x, pin.y)
+        for member_ref in cluster.members:
+            member = self._component_map.get(member_ref)
+            if member is None:
+                continue
+            ground = next((p for p in member.pins if is_ground_rail_name(p.net_name)), None)
+            supply = next((p for p in member.pins if p.net_name in groups), None)
+            if supply is None or ground is None:
+                continue
+            groups[supply.net_name][0].append(
+                DecouplingCap(member_ref, supply.number, ground.number)
+            )
+            positions[(member_ref, supply.number)] = (supply.x, supply.y)
+
+        made = False
+        for net_name, (caps, pins) in groups.items():
+            if not caps:
+                continue
+            group = DecouplingGroup(net_name, tuple(caps), tuple(pins))
+            for cap, supply_pin, _ in assign_caps_to_pins(group, positions):
+                self.springs.append(
+                    Spring(
+                        comp1_ref=anchor_comp.ref,
+                        pin1_num=supply_pin.pad,
+                        comp2_ref=cap.reference,
+                        pin2_num=cap.supply_pad,
+                        stiffness=self.config.cluster_stiffness,
+                        rest_length=0.0,
+                        net=-1,
+                        net_name=f"_cluster_{cluster.cluster_type.value}",
+                    )
+                )
+                made = True
+        return made
+
+    def get_clusters(self) -> list[FunctionalCluster]:
+        """Get all registered functional clusters."""
+        return list(self.clusters)
+
+    def validate_cluster_distances(self) -> list[tuple[str, str, float, float]]:
+        """
+        Check if cluster members are within their max distance constraints.
+
+        Returns:
+            List of (cluster_anchor, member_ref, actual_distance, max_distance)
+            tuples for violations.
+        """
+        violations = []
+
+        for cluster in self.clusters:
+            anchor_comp = self._component_map.get(cluster.anchor)
+            if not anchor_comp:
+                continue
+
+            anchor_pos = Vector2D(anchor_comp.x, anchor_comp.y)
+
+            for member_ref in cluster.members:
+                member_comp = self._component_map.get(member_ref)
+                if not member_comp:
+                    continue
+
+                member_pos = Vector2D(member_comp.x, member_comp.y)
+                distance = (member_pos - anchor_pos).magnitude()
+
+                if distance > cluster.max_distance_mm:
+                    violations.append(
+                        (cluster.anchor, member_ref, distance, cluster.max_distance_mm)
+                    )
+
+        return violations
+
+    def apply_thermal_properties(self, pcb: PCB):
+        """
+        Apply thermal classification to all components.
+
+        Classifies components as heat sources, heat-sensitive, or neutral,
+        and detects thermal constraints.
+
+        Args:
+            pcb: The PCB object used to create this optimizer
+        """
+        # Classify components
+        self._thermal_props = classify_thermal_properties(pcb)
+
+        # Apply to components
+        for comp in self.components:
+            if comp.ref in self._thermal_props:
+                comp.thermal_properties = self._thermal_props[comp.ref]
+
+        # Detect constraints
+        thermal_config = ThermalConfig(
+            heat_source_separation_mm=self.config.thermal_separation_mm,
+            edge_preference_max_mm=self.config.thermal_edge_preference_mm,
+            thermal_repulsion_strength=self.config.thermal_repulsion_strength,
+            edge_attraction_strength=self.config.thermal_edge_attraction,
+        )
+        self.thermal_constraints = detect_thermal_constraints(
+            pcb, self._thermal_props, thermal_config
+        )
+
+    def get_heat_sources(self) -> list[Component]:
+        """Get all components classified as heat sources."""
+        return [
+            comp
+            for comp in self.components
+            if comp.thermal_properties
+            and comp.thermal_properties.thermal_class == ThermalClass.HEAT_SOURCE
+        ]
+
+    def get_heat_sensitive(self) -> list[Component]:
+        """Get all components classified as heat-sensitive."""
+        return [
+            comp
+            for comp in self.components
+            if comp.thermal_properties
+            and comp.thermal_properties.thermal_class == ThermalClass.HEAT_SENSITIVE
+        ]
+
+    def compute_thermal_forces(self) -> dict[str, Vector2D]:
+        """
+        Compute thermal-related forces on all components.
+
+        Includes:
+        - Repulsion between heat sources and heat-sensitive components
+        - Edge attraction for heat sources (they should be near board edges)
+
+        Returns:
+            Dictionary mapping component reference to force vector
+        """
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+
+        if not self.config.thermal_enabled:
+            return forces
+
+        heat_sources = self.get_heat_sources()
+        heat_sensitive = self.get_heat_sensitive()
+
+        # 1. Repulsion between heat sources and sensitive components
+        for source in heat_sources:
+            if source.fixed:
+                continue
+            source_pos = source.position()
+
+            for sensitive in heat_sensitive:
+                sensitive_pos = sensitive.position()
+                delta = source_pos - sensitive_pos
+                distance = delta.magnitude()
+
+                # Clamp minimum distance
+                distance = max(distance, self.config.min_distance)
+
+                # Strong repulsion when closer than thermal_separation_mm
+                if distance < self.config.thermal_separation_mm:
+                    # Force magnitude inversely proportional to distance^2
+                    force_mag = self.config.thermal_repulsion_strength / (distance * distance)
+                    force = delta.normalized() * force_mag
+
+                    # Apply to source (push away from sensitive)
+                    forces[source.ref] = forces[source.ref] + force
+
+                    # Also push sensitive away if not fixed
+                    if not sensitive.fixed:
+                        forces[sensitive.ref] = forces[sensitive.ref] - force
+
+        # 2. Edge attraction for heat sources
+        for source in heat_sources:
+            if source.fixed:
+                continue
+            source_pos = source.position()
+
+            # Find nearest edge and distance
+            min_edge_dist = float("inf")
+            nearest_edge_point = source_pos
+
+            for edge_start, edge_end in self.board_outline.edges():
+                # Project point onto edge
+                edge = edge_end - edge_start
+                edge_len = edge.magnitude()
+                if edge_len < 1e-10:
+                    continue
+
+                to_point = source_pos - edge_start
+                t = to_point.dot(edge) / (edge_len * edge_len)
+                t = max(0.0, min(1.0, t))
+
+                closest = edge_start + edge * t
+                dist = (source_pos - closest).magnitude()
+
+                if dist < min_edge_dist:
+                    min_edge_dist = dist
+                    nearest_edge_point = closest
+
+            # Apply attraction force toward edge if far from edge
+            if min_edge_dist > self.config.thermal_edge_preference_mm:
+                # Force toward nearest edge point
+                to_edge = nearest_edge_point - source_pos
+                distance = to_edge.magnitude()
+                if distance > 0.1:
+                    # Gentle attraction, stronger when farther
+                    excess_dist = min_edge_dist - self.config.thermal_edge_preference_mm
+                    force_mag = self.config.thermal_edge_attraction * excess_dist
+                    force = to_edge.normalized() * force_mag
+                    forces[source.ref] = forces[source.ref] + force
+
+        return forces
+
+    def compute_edge_to_point_force(
+        self, point: Vector2D, edge_start: Vector2D, edge_end: Vector2D, charge_density: float
+    ) -> Vector2D:
+        """
+        Compute repulsion force on a point from a charged line segment.
+
+        Uses linear charge density model with 1/r falloff.
+        For a line segment with charge density lambda, integrates the field.
+
+        Args:
+            point: Point being repelled
+            edge_start: Start of charged edge
+            edge_end: End of charged edge
+            charge_density: Linear charge density lambda
+
+        Returns:
+            Force vector on the point
+        """
+        # Keep intermediate coordinates scalar: this hot path runs once per
+        # edge sample, so temporary Vector2D objects dominate the CPU fallback.
+        edge_x = edge_end.x - edge_start.x
+        edge_y = edge_end.y - edge_start.y
+        edge_len = math.sqrt(edge_x * edge_x + edge_y * edge_y)
+        if edge_len < 1e-10:
+            return Vector2D(0.0, 0.0)
+
+        point_x = point.x - edge_start.x
+        point_y = point.y - edge_start.y
+        t = (point_x * edge_x + point_y * edge_y) / (edge_len * edge_len)
+        t = max(0.0, min(1.0, t))
+        displacement_x = point.x - (edge_start.x + edge_x * t)
+        displacement_y = point.y - (edge_start.y + edge_y * t)
+        magnitude = math.sqrt(displacement_x * displacement_x + displacement_y * displacement_y)
+        distance = max(magnitude, self.config.min_distance)
+        force_mag = charge_density * edge_len / (distance * distance)
+
+        # Normalize using the actual displacement, independently of the force
+        # singularity clamp, exactly as Vector2D.normalized() does.
+        if magnitude < 1e-10:
+            return Vector2D(0.0 * force_mag, 0.0 * force_mag)
+        return Vector2D(
+            (displacement_x / magnitude) * force_mag,
+            (displacement_y / magnitude) * force_mag,
+        )
+
+    def compute_edge_to_edge_force(
+        self,
+        edge1_start: Vector2D,
+        edge1_end: Vector2D,
+        edge2_start: Vector2D,
+        edge2_end: Vector2D,
+        num_samples: int = 5,
+    ) -> tuple[Vector2D, float]:
+        """
+        Compute repulsion force and torque between two charged edges.
+
+        Discretizes edge1 into sample points and computes force from edge2
+        on each sample. Returns net force and torque about edge1's center.
+
+        Args:
+            edge1_start, edge1_end: First edge (receives force)
+            edge2_start, edge2_end: Second edge (source of field)
+            num_samples: Number of sample points on edge1
+
+        Returns:
+            Tuple of (net force on edge1, torque about edge1 center)
+        """
+        edge1 = edge1_end - edge1_start
+        edge1_len = edge1.magnitude()
+        if edge1_len < 1e-10:
+            return Vector2D(0.0, 0.0), 0.0
+
+        edge1_center = (edge1_start + edge1_end) * 0.5
+        total_force = Vector2D(0.0, 0.0)
+        total_torque = 0.0
+
+        # Sample points along edge1
+        for i in range(num_samples):
+            t = (i + 0.5) / num_samples
+            sample_point = edge1_start + edge1 * t
+
+            # Force on this sample point from edge2
+            # Use charge density scaled by sample fraction
+            sample_charge = self.config.charge_density * edge1_len / num_samples
+            force = self.compute_edge_to_point_force(
+                sample_point, edge2_start, edge2_end, sample_charge
+            )
+
+            total_force = total_force + force
+
+            # Torque: r x F where r is from edge1 center to sample point
+            r = sample_point - edge1_center
+            torque = r.cross(force)
+            total_torque += torque
+
+        return total_force, total_torque
+
+    def compute_charge_force(
+        self, point: Vector2D, edge_start: Vector2D, edge_end: Vector2D
+    ) -> Vector2D:
+        """
+        Compute repulsion force on a point from a charged line segment.
+
+        Convenience wrapper for compute_edge_to_point_force using default charge density.
+        """
+        return self.compute_edge_to_point_force(
+            point, edge_start, edge_end, self.config.charge_density
+        )
+
+    def compute_spring_force(self, spring: Spring) -> tuple[Vector2D, Vector2D]:
+        """
+        Compute spring forces between two pins.
+
+        Uses Hooke's law: F = -k(x - x0)
+
+        Args:
+            spring: Spring connecting two pins
+
+        Returns:
+            Tuple of (force on comp1, force on comp2)
+        """
+        comp1 = self._component_map.get(spring.comp1_ref)
+        comp2 = self._component_map.get(spring.comp2_ref)
+
+        if not comp1 or not comp2:
+            return Vector2D(0.0, 0.0), Vector2D(0.0, 0.0)
+
+        # Find pins
+        pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+        pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+
+        if not pin1 or not pin2:
+            return Vector2D(0.0, 0.0), Vector2D(0.0, 0.0)
+
+        # Vector from pin1 to pin2
+        p1 = Vector2D(pin1.x, pin1.y)
+        p2 = Vector2D(pin2.x, pin2.y)
+        delta = p2 - p1
+        distance = delta.magnitude()
+
+        if distance < 1e-10:
+            return Vector2D(0.0, 0.0), Vector2D(0.0, 0.0)
+
+        # Spring extension
+        extension = distance - spring.rest_length
+
+        # Force magnitude (positive = attraction when extended)
+        force_mag = spring.stiffness * extension
+
+        # Direction from p1 to p2
+        direction = delta.normalized()
+
+        # Force on comp1 is toward comp2 (pulls together)
+        force1 = direction * force_mag
+        force2 = -force1
+
+        return force1, force2
+
+    def compute_constraint_forces(
+        self,
+        constraint_stiffness: float = 50.0,
+    ) -> dict[str, Vector2D]:
+        """
+        Compute penalty forces from grouping constraints.
+
+        Constraints act as soft springs that pull components toward
+        satisfying the constraint conditions.
+
+        Args:
+            constraint_stiffness: Stiffness of constraint penalty springs
+
+        Returns:
+            Dict mapping component ref to constraint penalty force
+        """
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+
+        if not self.grouping_constraints:
+            return forces
+
+        all_refs = list(self._component_map.keys())
+
+        for group in self.grouping_constraints:
+            members = group.get_resolved_members(all_refs)
+            member_comps = [
+                self._component_map[ref] for ref in members if ref in self._component_map
+            ]
+
+            if len(member_comps) < 2:
+                continue
+
+            for constraint in group.constraints:
+                constraint_forces = self._compute_single_constraint_forces(
+                    constraint, member_comps, constraint_stiffness
+                )
+                for ref, force in constraint_forces.items():
+                    forces[ref] = forces[ref] + force
+
+        return forces
+
+    def _compute_single_constraint_forces(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute forces for a single constraint."""
+        forces: dict[str, Vector2D] = {}
+
+        if constraint.constraint_type == ConstraintType.MAX_DISTANCE:
+            forces = self._constraint_force_max_distance(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.ALIGNMENT:
+            forces = self._constraint_force_alignment(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.ORDERING:
+            forces = self._constraint_force_ordering(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.WITHIN_BOX:
+            forces = self._constraint_force_within_box(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.RELATIVE_POSITION:
+            forces = self._constraint_force_relative_position(constraint, members, stiffness)
+
+        return forces
+
+    def _constraint_force_max_distance(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for max_distance constraint."""
+        forces = {}
+        params = constraint.parameters
+        anchor_ref = params["anchor"]
+        radius = params["radius_mm"]
+
+        anchor = self._component_map.get(anchor_ref)
+        if not anchor:
+            return forces
+
+        for comp in members:
+            if comp.ref == anchor_ref:
+                continue
+
+            dx = comp.x - anchor.x
+            dy = comp.y - anchor.y
+            dist = math.sqrt(dx * dx + dy * dy)
+
+            if dist > radius and dist > 1e-10:
+                # Pull toward anchor
+                excess = dist - radius
+                direction = Vector2D(-dx / dist, -dy / dist)
+                forces[comp.ref] = direction * (stiffness * excess)
+
+        return forces
+
+    def _constraint_force_alignment(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for alignment constraint."""
+        forces = {}
+        params = constraint.parameters
+        axis = params["axis"]
+
+        if len(members) < 2:
+            return forces
+
+        # Compute target position (mean)
+        if axis == "horizontal":
+            target = sum(comp.y for comp in members) / len(members)
+            for comp in members:
+                deviation = target - comp.y
+                forces[comp.ref] = Vector2D(0.0, stiffness * deviation)
+        else:  # vertical
+            target = sum(comp.x for comp in members) / len(members)
+            for comp in members:
+                deviation = target - comp.x
+                forces[comp.ref] = Vector2D(stiffness * deviation, 0.0)
+
+        return forces
+
+    def _constraint_force_ordering(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for ordering constraint."""
+        forces = {}
+        params = constraint.parameters
+        axis = params["axis"]
+        expected_order = params["order"]
+
+        comp_by_ref = {comp.ref: comp for comp in members}
+        ordered_comps = [(ref, comp_by_ref[ref]) for ref in expected_order if ref in comp_by_ref]
+
+        if len(ordered_comps) < 2:
+            return forces
+
+        # Check adjacent pairs and push to correct order
+        for i in range(len(ordered_comps) - 1):
+            ref1, comp1 = ordered_comps[i]
+            ref2, comp2 = ordered_comps[i + 1]
+
+            if axis == "horizontal":
+                if comp1.x >= comp2.x:
+                    # Push comp1 left, comp2 right
+                    overlap = comp1.x - comp2.x + 1.0  # Small margin
+                    forces[ref1] = forces.get(ref1, Vector2D(0, 0)) + Vector2D(
+                        -stiffness * overlap / 2, 0
+                    )
+                    forces[ref2] = forces.get(ref2, Vector2D(0, 0)) + Vector2D(
+                        stiffness * overlap / 2, 0
+                    )
+            else:  # vertical
+                if comp1.y >= comp2.y:
+                    overlap = comp1.y - comp2.y + 1.0
+                    forces[ref1] = forces.get(ref1, Vector2D(0, 0)) + Vector2D(
+                        0, -stiffness * overlap / 2
+                    )
+                    forces[ref2] = forces.get(ref2, Vector2D(0, 0)) + Vector2D(
+                        0, stiffness * overlap / 2
+                    )
+
+        return forces
+
+    def _constraint_force_within_box(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for within_box constraint."""
+        forces = {}
+        params = constraint.parameters
+        box_x = params["x"]
+        box_y = params["y"]
+        box_width = params["width"]
+        box_height = params["height"]
+
+        x_min, x_max = box_x, box_x + box_width
+        y_min, y_max = box_y, box_y + box_height
+
+        for comp in members:
+            fx, fy = 0.0, 0.0
+
+            if comp.x < x_min:
+                fx = stiffness * (x_min - comp.x)
+            elif comp.x > x_max:
+                fx = stiffness * (x_max - comp.x)
+
+            if comp.y < y_min:
+                fy = stiffness * (y_min - comp.y)
+            elif comp.y > y_max:
+                fy = stiffness * (y_max - comp.y)
+
+            if fx != 0.0 or fy != 0.0:
+                forces[comp.ref] = Vector2D(fx, fy)
+
+        return forces
+
+    def _constraint_force_relative_position(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for relative_position constraint."""
+        forces = {}
+        params = constraint.parameters
+        reference_ref = params["reference"]
+        dx = params["dx"]
+        dy = params["dy"]
+
+        reference = self._component_map.get(reference_ref)
+        if not reference:
+            return forces
+
+        expected_x = reference.x + dx
+        expected_y = reference.y + dy
+
+        for comp in members:
+            if comp.ref == reference_ref:
+                continue
+
+            # Pull toward expected position
+            error_x = expected_x - comp.x
+            error_y = expected_y - comp.y
+
+            forces[comp.ref] = Vector2D(stiffness * error_x, stiffness * error_y)
+
+        return forces
+
+    def compute_boundary_force(self, point: Vector2D) -> Vector2D:
+        """
+        Compute force keeping point inside board boundary.
+
+        Board edges have charge that repels components, keeping them inside.
+        The repulsion is stronger when closer to edges.
+        """
+        total_force = Vector2D(0.0, 0.0)
+
+        # Check if inside board
+        inside = self.board_outline.contains_point(point)
+
+        for edge_start, edge_end in self.board_outline.edges():
+            # Compute repulsion from edge (points away from edge)
+            force = self.compute_charge_force(point, edge_start, edge_end)
+
+            # Scale by boundary charge strength (auto-scaled for dense boards)
+            scale = self._effective_boundary_charge() / self.config.charge_density
+
+            if inside:
+                # Inside board: edge charges repel component away from edges
+                # This keeps components away from the board perimeter
+                total_force = total_force + force * scale
+            else:
+                # Outside board: very strong force to push back inside
+                # Invert the force direction to push toward board center
+                total_force = total_force - force * scale * 10
+
+        return total_force
+
+    def _init_gpu_accelerator(self) -> None:
+        """Initialize GPU accelerator if not already done.
+
+        Creates the GPU accelerator and prepares edge batch for the current components.
+        Called lazily on first force computation.
+        """
+        if self._gpu_accelerator is not None:
+            return
+
+        from kicad_tools.acceleration.config import should_use_gpu
+
+        # Check if GPU should be used based on component count
+        n_components = len(self.components)
+        if self._perf_config is not None:
+            self._gpu_enabled = should_use_gpu(self._perf_config, n_components, "placement")
+        else:
+            # Default: use GPU for 50+ components
+            self._gpu_enabled = n_components >= 50
+
+        if self._gpu_enabled:
+            from kicad_tools.acceleration.kernels.placement import PlacementGPUAccelerator
+
+            self._gpu_accelerator = PlacementGPUAccelerator(perf_config=self._perf_config)
+            self._gpu_accelerator.prepare_batch(self.components)
+
+    def _compute_component_repulsion_gpu(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute component-component repulsion forces using GPU.
+
+        Returns:
+            Tuple of (forces dict, torques dict) for component repulsion only.
+        """
+        if self._gpu_accelerator is None:
+            return {}, {}
+
+        fixed_refs = {comp.ref for comp in self.components if comp.fixed}
+        return self._gpu_accelerator.compute_repulsion_forces(
+            self.components, self.config, fixed_refs
+        )
+
+    def _compute_component_repulsion_cpu(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute component-component repulsion forces using CPU.
+
+        Returns:
+            Tuple of (forces dict, torques dict) for component repulsion only.
+        """
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+        torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
+
+        for i, comp1 in enumerate(self.components):
+            outline1 = comp1.outline()
+            center1 = comp1.position()
+
+            for j, comp2 in enumerate(self.components):
+                if i >= j:
+                    continue
+
+                outline2 = comp2.outline()
+                center2 = comp2.position()
+
+                # For each edge of comp1, compute force from all edges of comp2
+                if not comp1.fixed:
+                    for e1_start, e1_end in outline1.edges():
+                        for e2_start, e2_end in outline2.edges():
+                            force, edge_torque = self.compute_edge_to_edge_force(
+                                e1_start,
+                                e1_end,
+                                e2_start,
+                                e2_end,
+                                num_samples=self.config.edge_samples,
+                            )
+                            forces[comp1.ref] = forces[comp1.ref] + force
+                            # Convert edge torque to component torque
+                            edge_center = (e1_start + e1_end) * 0.5
+                            r = edge_center - center1
+                            torques[comp1.ref] += r.cross(force) + edge_torque
+
+                # Symmetric: forces on comp2 from comp1's edges
+                if not comp2.fixed:
+                    for e2_start, e2_end in outline2.edges():
+                        for e1_start, e1_end in outline1.edges():
+                            force, edge_torque = self.compute_edge_to_edge_force(
+                                e2_start,
+                                e2_end,
+                                e1_start,
+                                e1_end,
+                                num_samples=self.config.edge_samples,
+                            )
+                            forces[comp2.ref] = forces[comp2.ref] + force
+                            edge_center = (e2_start + e2_end) * 0.5
+                            r = edge_center - center2
+                            torques[comp2.ref] += r.cross(force) + edge_torque
+
+        return forces, torques
+
+    def _compute_component_repulsion_cpp(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute component-component repulsion forces using C++ backend.
+
+        Returns:
+            Tuple of (forces dict, torques dict) for component repulsion only.
+        """
+        from kicad_tools.optim.cpp_backend import compute_repulsion_cpp
+
+        return compute_repulsion_cpp(self.components, self.config)
+
+    def _compute_boundary_forces_cpp(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute board boundary forces using C++ backend.
+
+        Returns:
+            Tuple of (forces dict, torques dict) for boundary forces only.
+        """
+        from kicad_tools.optim.cpp_backend import compute_boundary_forces_cpp
+
+        return compute_boundary_forces_cpp(
+            self.components,
+            self.board_outline,
+            self.config,
+            effective_boundary_charge=self._effective_boundary_charge(),
+        )
+
+    def compute_forces_and_torques(self) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """
+        Compute net forces and torques on all components.
+
+        Uses edge-to-edge charge interactions where each component's edges
+        repel all other components' edges. GPU acceleration is used when
+        available and the component count exceeds the configured threshold.
+
+        Returns:
+            Tuple of (forces dict, torques dict)
+        """
+        # Initialize GPU accelerator on first call
+        self._init_gpu_accelerator()
+
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+        torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
+
+        # 1. Component-component repulsion (edge-to-edge charges)
+        # Use GPU when available, then C++ backend, then fall back to Python CPU
+        if self._gpu_enabled and self._gpu_accelerator is not None:
+            # Update edge positions (components may have moved)
+            self._gpu_accelerator.update_edge_positions(self.components)
+            repulsion_forces, repulsion_torques = self._compute_component_repulsion_gpu()
+        elif self._cpp_force_available:
+            repulsion_forces, repulsion_torques = self._compute_component_repulsion_cpp()
+        else:
+            repulsion_forces, repulsion_torques = self._compute_component_repulsion_cpu()
+
+        # Add repulsion forces/torques to totals
+        for ref, force in repulsion_forces.items():
+            forces[ref] = forces[ref] + force
+        for ref, torque in repulsion_torques.items():
+            torques[ref] += torque
+
+        # 2. Board boundary forces (edge-to-edge with board)
+        if self._cpp_force_available:
+            boundary_forces, boundary_torques = self._compute_boundary_forces_cpp()
+            for ref, force in boundary_forces.items():
+                forces[ref] = forces[ref] + force
+            for ref, torque in boundary_torques.items():
+                torques[ref] += torque
+        else:
+            for comp in self.components:
+                if comp.fixed:
+                    continue
+                outline = comp.outline()
+                center = comp.position()
+                inside = self.board_outline.contains_point(center)
+                scale = self._effective_boundary_charge() / self.config.charge_density
+
+                for e_start, e_end in outline.edges():
+                    for b_start, b_end in self.board_outline.edges():
+                        force, edge_torque = self.compute_edge_to_edge_force(
+                            e_start, e_end, b_start, b_end, num_samples=self.config.edge_samples
+                        )
+                        # Board edges repel to keep components inside
+                        if inside:
+                            force = force * scale
+                        else:
+                            # Strong repulsion to push back inside
+                            force = force * (-scale * 10)
+
+                        forces[comp.ref] = forces[comp.ref] + force
+                        edge_center = (e_start + e_end) * 0.5
+                        r = edge_center - center
+                        torques[comp.ref] += r.cross(force) + edge_torque * scale
+
+        # 3. Keepout zone forces
+        for keepout in self.keepouts:
+            for comp in self.components:
+                if comp.fixed:
+                    continue
+                outline = comp.outline()
+                center = comp.position()
+
+                for e_start, e_end in outline.edges():
+                    for k_start, k_end in keepout.outline.edges():
+                        force, edge_torque = self.compute_edge_to_edge_force(
+                            e_start, e_end, k_start, k_end, num_samples=self.config.edge_samples
+                        )
+                        # Keepouts always repel
+                        force = force * keepout.charge_multiplier
+                        forces[comp.ref] = forces[comp.ref] + force
+                        edge_center = (e_start + e_end) * 0.5
+                        r = edge_center - center
+                        torques[comp.ref] += (
+                            r.cross(force) + edge_torque * keepout.charge_multiplier
+                        )
+
+        # 4. Spring forces (net connections)
+        for spring in self.springs:
+            force1, force2 = self.compute_spring_force(spring)
+
+            comp1 = self._component_map.get(spring.comp1_ref)
+            comp2 = self._component_map.get(spring.comp2_ref)
+
+            if comp1 and not comp1.fixed:
+                forces[comp1.ref] = forces[comp1.ref] + force1
+                # Spring torque from pin position
+                pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+                if pin1:
+                    r = Vector2D(pin1.x, pin1.y) - comp1.position()
+                    torques[comp1.ref] += r.cross(force1)
+
+            if comp2 and not comp2.fixed:
+                forces[comp2.ref] = forces[comp2.ref] + force2
+                pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+                if pin2:
+                    r = Vector2D(pin2.x, pin2.y) - comp2.position()
+                    torques[comp2.ref] += r.cross(force2)
+
+        # 5. Grouping constraint forces
+        if self.grouping_constraints:
+            constraint_forces = self.compute_constraint_forces()
+            for ref, force in constraint_forces.items():
+                comp = self._component_map.get(ref)
+                if comp and not comp.fixed:
+                    forces[ref] = forces[ref] + force
+
+        # 6. Thermal forces (heat source repulsion and edge attraction)
+        if self.config.thermal_enabled:
+            thermal_forces = self.compute_thermal_forces()
+            for ref, force in thermal_forces.items():
+                forces[ref] = forces[ref] + force
+
+        # 7. Rotation potential torque (torsion spring toward 90 deg slots)
+        for comp in self.components:
+            if not comp.fixed:
+                rot_torque = comp.compute_rotation_potential_torque(self.config.rotation_stiffness)
+                torques[comp.ref] += rot_torque
+
+        # 7. Edge constraint forces
+        for comp in self.components:
+            if comp.fixed:
+                continue
+
+            constraint = self._edge_constraints.get(comp.ref)
+            if constraint:
+                edge_force, _ = compute_edge_force(
+                    comp, constraint, self.board_edges, stiffness=self.config.edge_stiffness
+                )
+                forces[comp.ref] = forces[comp.ref] + edge_force
+
+                # Edge ORIENTATION torque (issue #4450): pulling an off-board
+                # connector to the perimeter is not enough -- a USB-C mouth
+                # facing the board interior still cannot accept a cable.  When
+                # the constraint carries a mating-face hint, add a torsion
+                # spring that turns the mating face along the assigned edge's
+                # outward normal.  Summed alongside the 90-degree
+                # rotation-potential torque above (both have a well at every
+                # cardinal orientation, so they agree at the solution).
+                # Constraints without a hint contribute exactly 0.0, keeping
+                # pre-#4450 edge constraints translation-only.
+                orientation_torque, _ = compute_edge_orientation_torque(
+                    comp,
+                    constraint,
+                    self.board_edges,
+                    stiffness=self.config.edge_orientation_stiffness,
+                )
+                torques[comp.ref] += orientation_torque
+
+        return forces, torques
+
+    def compute_forces(self) -> dict[str, Vector2D]:
+        """Compute net forces on all components (legacy wrapper)."""
+        forces, _ = self.compute_forces_and_torques()
+        return forces
+
+    def compute_torques(self) -> dict[str, float]:
+        """
+        Compute torques on all components.
+
+        Spring forces applied at pin positions create torque around component center.
+        """
+        torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
+
+        for spring in self.springs:
+            comp1 = self._component_map.get(spring.comp1_ref)
+            comp2 = self._component_map.get(spring.comp2_ref)
+
+            if not comp1 or not comp2:
+                continue
+
+            pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+            pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+
+            if not pin1 or not pin2:
+                continue
+
+            # Spring force
+            p1 = Vector2D(pin1.x, pin1.y)
+            p2 = Vector2D(pin2.x, pin2.y)
+            delta = p2 - p1
+            distance = delta.magnitude()
+
+            if distance < 1e-10:
+                continue
+
+            extension = distance - spring.rest_length
+            force_mag = spring.stiffness * extension
+            direction = delta.normalized()
+
+            # Torque = r x F (2D cross product gives scalar)
+            if not comp1.fixed:
+                r1 = p1 - comp1.position()
+                force1 = direction * force_mag
+                torque1 = r1.cross(force1)
+                torques[comp1.ref] += torque1
+
+            if not comp2.fixed:
+                r2 = p2 - comp2.position()
+                force2 = -direction * force_mag
+                torque2 = r2.cross(force2)
+                torques[comp2.ref] += torque2
+
+        return torques
+
+    def compute_energy(self) -> float:
+        """
+        Compute total system energy (kinetic + potential).
+
+        Includes:
+        - Linear kinetic energy (1/2 m v^2)
+        - Rotational kinetic energy (1/2 I omega^2)
+        - Spring potential energy (1/2 k x^2)
+        - Rotation potential energy (torsion spring toward 90 deg slots)
+        """
+        kinetic = 0.0
+        for comp in self.components:
+            if not comp.fixed:
+                # Linear kinetic energy
+                kinetic += 0.5 * comp.mass * (comp.vx**2 + comp.vy**2)
+                # Rotational kinetic energy
+                inertia = comp.mass * (comp.width**2 + comp.height**2) / 12
+                omega_rad = math.radians(comp.angular_velocity)
+                kinetic += 0.5 * inertia * omega_rad**2
+
+        potential = 0.0
+
+        # Spring potential energy
+        for spring in self.springs:
+            comp1 = self._component_map.get(spring.comp1_ref)
+            comp2 = self._component_map.get(spring.comp2_ref)
+
+            if not comp1 or not comp2:
+                continue
+
+            pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+            pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+
+            if not pin1 or not pin2:
+                continue
+
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            distance = math.sqrt(dx * dx + dy * dy)
+            extension = distance - spring.rest_length
+            potential += 0.5 * spring.stiffness * extension * extension
+
+        # Rotation potential energy (torsion springs toward 90 deg slots)
+        for comp in self.components:
+            if not comp.fixed:
+                potential += comp.rotation_potential_energy(self.config.rotation_stiffness)
+
+        # Edge-orientation potential energy (issue #4450).  Without this term
+        # ``run()`` -- whose convergence test reads energy plus LINEAR velocity
+        # only -- declares the system settled while an edge connector is still
+        # mid-flip, freezing it with its mating face pointing at the board
+        # interior.  Contributes exactly 0.0 for edge constraints with no
+        # mating-face hint, so hintless boards see an unchanged energy trace.
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            constraint = self._edge_constraints.get(comp.ref)
+            if constraint is not None:
+                potential += edge_orientation_potential_energy(
+                    comp,
+                    constraint,
+                    self.board_edges,
+                    stiffness=self.config.edge_orientation_stiffness,
+                )
+
+        return kinetic + potential
+
+    def _compute_max_force(self) -> float:
+        """Compute the max force limit for force clamping.
+
+        If config.max_force > 0, use that value directly.
+        Otherwise auto-compute from board perimeter:
+        max_force = boundary_charge * board_perimeter / 4.
+        """
+        if self.config.max_force > 0:
+            return self.config.max_force
+        perimeter = self.board_outline.perimeter()
+        return self.config.boundary_charge * perimeter / 4
+
+    def step(self, dt: float):
+        """
+        Perform one simulation step.
+
+        Args:
+            dt: Time step size
+        """
+        # Compute forces and torques together (more efficient)
+        forces, torques = self.compute_forces_and_torques()
+
+        # Compute force clamp limit
+        max_force = self._compute_max_force()
+
+        # Update velocities and apply forces/torques
+        for comp in self.components:
+            if comp.fixed:
+                continue
+
+            force = forces[comp.ref]
+            torque = torques[comp.ref]
+
+            # Clamp net force magnitude to prevent runaway acceleration
+            force_mag = force.magnitude()
+            if force_mag > max_force:
+                force = force * (max_force / force_mag)
+
+            comp.apply_force(force, dt)
+            comp.apply_torque(torque, dt)
+
+            # Clamp linear velocity
+            speed = math.sqrt(comp.vx**2 + comp.vy**2)
+            if speed > self.config.max_velocity:
+                scale = self.config.max_velocity / speed
+                comp.vx *= scale
+                comp.vy *= scale
+
+            # Apply damping
+            comp.apply_damping(self.config.damping, self.config.angular_damping)
+
+        # Compute board bounding box for position clamping
+        if self.board_outline.vertices:
+            min_x = min(v.x for v in self.board_outline.vertices)
+            max_x = max(v.x for v in self.board_outline.vertices)
+            min_y = min(v.y for v in self.board_outline.vertices)
+            max_y = max(v.y for v in self.board_outline.vertices)
+        else:
+            min_x = max_x = min_y = max_y = 0.0
+
+        # Update positions and rotations
+        for comp in self.components:
+            if comp.fixed:
+                continue
+
+            # Update position and rotation
+            comp.update_position(dt)
+
+            # Hard-clamp position to board bounding box (prevents escape)
+            # Use per-component courtyard extent so the entire physical
+            # footprint stays within the board, not just the center.
+            half_w = comp.width / 2 + self.config.boundary_margin
+            half_h = comp.height / 2 + self.config.boundary_margin
+            # Guard against an inverted clamp box when the margin (plus half the
+            # component) exceeds half the board: collapse to the box center so
+            # min(...) does not exceed max(...) and flip the bounds (#3804).
+            lo_x, hi_x = min_x + half_w, max_x - half_w
+            lo_y, hi_y = min_y + half_h, max_y - half_h
+            if lo_x > hi_x:
+                lo_x = hi_x = (min_x + max_x) / 2
+            if lo_y > hi_y:
+                lo_y = hi_y = (min_y + max_y) / 2
+            comp.x = max(lo_x, min(hi_x, comp.x))
+            comp.y = max(lo_y, min(hi_y, comp.y))
+
+            # If component was clamped, kill its outward velocity
+            if comp.x <= lo_x or comp.x >= hi_x:
+                comp.vx = 0.0
+            if comp.y <= lo_y or comp.y >= hi_y:
+                comp.vy = 0.0
+
+            # For non-rectangular outlines the AABB clamp above is necessary but
+            # not sufficient: a center can sit inside the bounding box yet
+            # outside a concave/cut-out polygon. Project any such center back to
+            # the nearest point on the outline boundary (#3804). The rectangular
+            # common case is already fully contained by the AABB clamp, so this
+            # only fires on genuinely non-rectangular boards.
+            if len(self.board_outline.vertices) > 4 and not self.board_outline.contains_point(
+                Vector2D(comp.x, comp.y)
+            ):
+                nearest = self.board_outline.nearest_point_on_boundary(Vector2D(comp.x, comp.y))
+                comp.x, comp.y = nearest.x, nearest.y
+                comp.vx = 0.0
+                comp.vy = 0.0
+
+            # Update pin positions based on new position and rotation
+            comp.update_pin_positions()
+
+    def run(
+        self,
+        iterations: int = 1000,
+        dt: float = 0.01,
+        callback: callable | None = None,
+        cancel_flag: callable | None = None,
+    ) -> int:
+        """
+        Run the optimization simulation.
+
+        Args:
+            iterations: Maximum number of iterations
+            dt: Time step size
+            callback: Optional function called each iteration with (iteration, energy)
+            cancel_flag: Optional callable returning True when cancellation is
+                requested. Checked each iteration; when True the loop exits
+                early and returns the current iteration count. This enables
+                cooperative cancellation from CLI signal handlers without
+                installing signal handlers in library code.
+
+        Returns:
+            Number of iterations run
+        """
+        for i in range(iterations):
+            # Cooperative cancellation check
+            if cancel_flag is not None and cancel_flag():
+                return i
+
+            self.step(dt)
+
+            energy = self.compute_energy()
+
+            if callback:
+                callback(i, energy)
+
+            # Check convergence
+            max_velocity = 0.0
+            for comp in self.components:
+                if not comp.fixed:
+                    speed = math.sqrt(comp.vx**2 + comp.vy**2)
+                    max_velocity = max(max_velocity, speed)
+
+            if (
+                energy < self.config.energy_threshold
+                and max_velocity < self.config.velocity_threshold
+            ):
+                return i + 1
+
+        return iterations
+
+    def snap_rotations_to_90(self):
+        """
+        Force all components to exact 90 deg orientations.
+
+        Call after optimization to ensure components are at 0 deg, 90 deg, 180 deg, or 270 deg.
+        """
+        self.snap_rotations(90.0)
+
+    def snap_rotations(self, grid: float | None = None):
+        """
+        Snap all component rotations to nearest grid angle.
+
+        Edge-constrained components carrying a ``mating_face_offset_deg`` hint
+        snap to the grid angle that points their mating face **off-board**
+        rather than to the nearest one (issue #4450).  Snapping is where a
+        continuous rotation becomes a discrete manufacturing decision, so it
+        is also where the off-board-facing requirement must be resolved: the
+        board boundary's own alignment torque has equal-depth wells 180
+        degrees apart (a rectangle looks the same either way round), so the
+        soft orientation torque alone can leave a connector resting in the
+        mouth-inward well.  Choosing the outward grid slot here makes the
+        outcome deterministic instead of dependent on how far the torque got.
+
+        Args:
+            grid: Rotation grid in degrees (default: config.rotation_grid)
+        """
+        grid = grid or self.config.rotation_grid
+        if grid <= 0:
+            return
+
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            constraint = self._edge_constraints.get(comp.ref)
+            if constraint is not None and constraint.mating_face_offset_deg is not None:
+                slot = self._outward_facing_slot(comp, constraint, grid)
+            else:
+                # Snap to nearest grid angle
+                slot = round(comp.rotation / grid) * grid % 360
+            comp.rotation = slot
+            comp.angular_velocity = 0.0
+            comp.update_pin_positions()
+
+    def _outward_facing_slot(
+        self, comp: Component, constraint: EdgeConstraint, grid: float
+    ) -> float:
+        """Grid angle whose mating face best matches the edge's outward normal.
+
+        Ties (e.g. a 90-degree grid with a 45-degree-off normal) break toward
+        the slot nearest the component's current rotation, so the choice stays
+        stable across repeated snaps.
+        """
+        slots = [i * grid % 360 for i in range(max(1, int(round(360.0 / grid))))]
+        original = comp.rotation
+
+        best_slot = slots[0]
+        best_key = None
+        for slot in slots:
+            comp.rotation = slot
+            delta = mating_face_misalignment_deg(comp, constraint, self.board_edges)
+            misalignment = abs(delta) if delta is not None else 0.0
+            # Distance from the pre-snap rotation, as the tie-break.
+            drift = abs((slot - original + 180.0) % 360.0 - 180.0)
+            key = (round(misalignment, 6), drift)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_slot = slot
+
+        comp.rotation = original
+        return best_slot
+
+    def snap_positions(self, grid: float | None = None):
+        """
+        Snap all component positions to nearest grid point.
+
+        Args:
+            grid: Position grid in mm (default: config.grid_size)
+        """
+        grid = grid or self.config.grid_size
+        if grid <= 0:
+            return
+
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            # Snap to nearest grid point
+            comp.x = round(comp.x / grid) * grid
+            comp.y = round(comp.y / grid) * grid
+            comp.vx = 0.0
+            comp.vy = 0.0
+            comp.update_pin_positions()
+
+    def snap_to_grid(self, position_grid: float | None = None, rotation_grid: float | None = None):
+        """
+        Snap all components to position and rotation grids.
+
+        Args:
+            position_grid: Position grid in mm (default: config.grid_size)
+            rotation_grid: Rotation grid in degrees (default: config.rotation_grid)
+        """
+        self.snap_positions(position_grid)
+        self.snap_rotations(rotation_grid)
+
+    def write_to_pcb(self, pcb: PCB) -> int:
+        """
+        Write optimized component positions back to a PCB object.
+
+        Updates the footprint positions in the PCB's S-expression tree.
+        After calling this, use pcb.save() to write to a file.
+
+        If record_decisions is enabled, this also records placement decisions
+        for each component that was moved.
+
+        Args:
+            pcb: PCB object to update
+
+        Returns:
+            Number of components successfully updated
+        """
+        updated = 0
+        for comp in self.components:
+            if pcb.update_footprint_position(comp.ref, comp.x, comp.y, comp.rotation):
+                updated += 1
+
+                # Record decision if enabled and component moved
+                if self.record_decisions and self._decision_store:
+                    self._record_placement_decision(comp)
+
+        # Save decisions alongside PCB if we have a path
+        if self.record_decisions and self._decision_store and updated > 0:
+            from pathlib import Path
+
+            from kicad_tools.explain.decisions import get_decisions_path
+
+            pcb_path = Path(pcb.path) if hasattr(pcb, "path") and pcb.path else None
+            if pcb_path:
+                decisions_path = get_decisions_path(pcb_path)
+                self._decision_store.save(decisions_path)
+
+        return updated
+
+    def _record_placement_decision(self, comp: Component) -> None:
+        """Record a placement decision for a component."""
+        if not self._decision_store:
+            return
+
+        from kicad_tools.explain.decisions import Alternative, Decision
+
+        # Get initial position
+        initial = self._initial_positions.get(comp.ref, (0.0, 0.0, 0.0))
+        initial_x, initial_y, initial_rot = initial
+
+        # Check if component actually moved
+        moved = (
+            abs(comp.x - initial_x) > 0.01
+            or abs(comp.y - initial_y) > 0.01
+            or abs(comp.rotation - initial_rot) > 0.1
+        )
+
+        if not moved and not comp.fixed:
+            return
+
+        # Determine if this is a "place" or "move" action
+        action = "move" if not comp.fixed else "place"
+
+        # Build rationale based on optimizer context
+        rationale_parts = []
+
+        # Check edge constraints
+        if comp.ref in self._edge_constraints:
+            edge_constraint = self._edge_constraints[comp.ref]
+            rationale_parts.append(f"Placed at {edge_constraint.edge.value} edge per constraint")
+
+        # Check cluster membership
+        for cluster in self.clusters:
+            if comp.ref in cluster.component_refs:
+                rationale_parts.append(f"Part of {cluster.name} functional cluster")
+                break
+
+        # Check thermal constraints
+        thermal_props = self._thermal_props.get(comp.ref)
+        if thermal_props and thermal_props.thermal_class == ThermalClass.HIGH_POWER:
+            rationale_parts.append(
+                "High-power component placed near board edge for thermal dissipation"
+            )
+
+        if not rationale_parts:
+            rationale_parts.append("Optimized position via force-directed placement")
+
+        rationale = "; ".join(rationale_parts)
+
+        # Create alternative showing original position
+        alternatives = []
+        if moved:
+            alternatives.append(
+                Alternative(
+                    description=f"Original position ({initial_x:.2f}, {initial_y:.2f})",
+                    rejected_because="Force-directed optimization found better position",
+                )
+            )
+
+        # Build constraints satisfied
+        constraints_satisfied = []
+        if comp.ref in self._edge_constraints:
+            constraints_satisfied.append("edge_placement")
+        for cluster in self.clusters:
+            if comp.ref in cluster.component_refs:
+                constraints_satisfied.append(f"cluster_{cluster.name}")
+
+        decision = Decision.create(
+            action=action,
+            components=[comp.ref],
+            position=(comp.x, comp.y),
+            rationale=rationale,
+            decided_by="optimizer",
+            alternatives_considered=alternatives,
+            constraints_satisfied=constraints_satisfied,
+            metrics={
+                "rotation": comp.rotation,
+                "moved_distance": (
+                    ((comp.x - initial_x) ** 2 + (comp.y - initial_y) ** 2) ** 0.5 if moved else 0.0
+                ),
+            },
+        )
+
+        self._decision_store.record(decision)
+
+    def total_wire_length(self) -> float:
+        """Compute total estimated wire length (spring lengths)."""
+        total = 0.0
+        for spring in self.springs:
+            comp1 = self._component_map.get(spring.comp1_ref)
+            comp2 = self._component_map.get(spring.comp2_ref)
+
+            if not comp1 or not comp2:
+                continue
+
+            pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+            pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+
+            if not pin1 or not pin2:
+                continue
+
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            total += math.sqrt(dx * dx + dy * dy)
+
+        return total
+
+    def out_of_bounds_components(self, margin: float | None = None) -> list[str]:
+        """Return refs of non-fixed components whose center is outside the board.
+
+        A component center is considered out of bounds if it lies outside the
+        board outline's axis-aligned bounding box inset by ``margin`` (or, for
+        non-rectangular outlines with more than four vertices, outside the
+        polygon itself). Fixed components are excluded since they are intended
+        to be pinned by the caller and may legitimately sit on/near the edge.
+
+        This is the end-of-run containment check for issue #3804: a healthy run
+        returns an empty list; a non-empty list signals components escaped the
+        Edge.Cuts outline.
+
+        Args:
+            margin: Boundary margin to apply. Defaults to ``config.boundary_margin``.
+
+        Returns:
+            Sorted list of reference designators that are out of bounds.
+        """
+        if margin is None:
+            margin = self.config.boundary_margin
+
+        verts = self.board_outline.vertices
+        if not verts:
+            return []
+
+        min_x = min(v.x for v in verts)
+        max_x = max(v.x for v in verts)
+        min_y = min(v.y for v in verts)
+        max_y = max(v.y for v in verts)
+
+        # Small epsilon so a component clamped exactly to the inset bound is
+        # not flagged due to floating-point round-off.
+        eps = 1e-6
+        violators: list[str] = []
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            lo_x, hi_x = min_x + margin, max_x - margin
+            lo_y, hi_y = min_y + margin, max_y - margin
+            if lo_x > hi_x:
+                lo_x = hi_x = (min_x + max_x) / 2
+            if lo_y > hi_y:
+                lo_y = hi_y = (min_y + max_y) / 2
+            outside = (
+                comp.x < lo_x - eps
+                or comp.x > hi_x + eps
+                or comp.y < lo_y - eps
+                or comp.y > hi_y + eps
+            )
+            if not outside and len(verts) > 4:
+                outside = not self.board_outline.contains_point(Vector2D(comp.x, comp.y))
+            if outside:
+                violators.append(comp.ref)
+        return sorted(violators)
+
+    def report(self) -> str:
+        """Generate a text report of current placement."""
+        lines = [
+            "Placement Optimizer Report",
+            "=" * 40,
+            f"Components: {len(self.components)}",
+            f"Springs (net connections): {len(self.springs)}",
+            f"Total wire length: {self.total_wire_length():.2f} mm",
+            f"System energy: {self.compute_energy():.4f}",
+            "",
+            "Component Positions:",
+            "-" * 40,
+        ]
+
+        for comp in sorted(self.components, key=lambda c: c.ref):
+            lines.append(
+                f"  {comp.ref:8s}: ({comp.x:7.2f}, {comp.y:7.2f}) @ {comp.rotation:6.1f} deg"
+            )
+
+        return "\n".join(lines)

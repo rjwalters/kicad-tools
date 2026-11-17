@@ -1,0 +1,84 @@
+# RC Low-Pass Filter Pattern
+# Simple first-order low-pass filter for signal conditioning
+#
+# This pattern defines placement rules for RC low-pass filters
+# commonly used for analog signal conditioning, PWM smoothing,
+# and anti-aliasing.
+#
+# Typical circuit:
+#   INPUT ── R1 ──┬── OUTPUT
+#                 │
+#                 C1
+#                 │
+#                GND
+#
+# Cutoff frequency: fc = 1 / (2 * pi * R * C)
+#
+
+name: rc_lowpass_filter
+description: First-order RC low-pass filter
+category: analog
+
+components:
+  - role: series_resistor
+    reference_prefix: R
+    # Sets filter impedance and cutoff frequency
+
+  - role: shunt_capacitor
+    reference_prefix: C
+    # Sets cutoff frequency with resistor
+
+  - role: input_protection
+    reference_prefix: R
+    optional: true
+    # Optional additional series resistance for input protection
+
+placement_rules:
+  - component: shunt_capacitor
+    relative_to: series_resistor
+    max_distance_mm: 3
+    min_distance_mm: 0.5
+    preferred_angle: 90
+    rationale: "Capacitor directly at resistor output for effective filtering"
+    priority: critical
+
+  - component: input_protection
+    relative_to: series_resistor
+    max_distance_mm: 5
+    preferred_angle: 180
+    rationale: "Input protection resistor before filter"
+    priority: low
+
+routing_constraints:
+  - net_role: filter_input
+    min_width_mm: 0.15
+    max_length_mm: 20
+    rationale: "Keep input trace reasonably short"
+
+  - net_role: filter_output
+    min_width_mm: 0.15
+    max_length_mm: 15
+    rationale: "Short output trace to minimize noise pickup after filtering"
+
+  - net_role: filter_ground
+    plane_connection: true
+    rationale: "Clean ground reference for filter capacitor"
+
+validation:
+  - check: component_distance
+    params:
+      from_component: series_resistor
+      to_component: shunt_capacitor
+      max_mm: 3
+
+  - check: component_present
+    params:
+      component: series_resistor
+      optional: false
+      rationale: "Series resistor required for RC filter"
+
+  - check: component_present
+    params:
+      component: shunt_capacitor
+      optional: false
+      rationale: "Shunt capacitor required for RC filter"

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img"
+     aria-label="No render available for this board">
+  <rect width="400" height="300" fill="#0d1b14" />
+  <!-- subtle PCB grid -->
+  <g stroke="#16352a" stroke-width="1">
+    <path d="M0 60 H400 M0 120 H400 M0 180 H400 M0 240 H400" />
+    <path d="M80 0 V300 M160 0 V300 M240 0 V300 M320 0 V300" />
+  </g>
+  <!-- decorative traces -->
+  <g fill="none" stroke="#2e7d5b" stroke-width="3" stroke-linecap="round">
+    <path d="M60 220 H170 V150 H260" />
+    <path d="M120 80 V160 H210" />
+    <path d="M300 90 H230 V200" />
+  </g>
+  <g fill="#3fae7a">
+    <circle cx="60" cy="220" r="6" />
+    <circle cx="260" cy="150" r="6" />
+    <circle cx="120" cy="80" r="6" />
+    <circle cx="300" cy="90" r="6" />
+    <circle cx="230" cy="200" r="6" />
+  </g>
+  <text x="200" y="158" text-anchor="middle"
+        font-family="system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="22" font-weight="600" fill="#7fd4aa">No render</text>
+  <text x="200" y="184" text-anchor="middle"
+        font-family="system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="13" fill="#4f8c6e">artifacts not generated</text>
+</svg>

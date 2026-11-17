@@ -1,0 +1,484 @@
+"""DRC parity regression tests for ``kct check`` net_class_map handling.
+
+Issue #3151.  Three DRC rule families re-derive their working state from a
+``net_class_map`` and **no-op when none is supplied** -- the documented
+graceful-degradation contract for external-router boards (#2684, #2652,
+#2675, #2710):
+
+    * ``diffpair_length_skew``
+    * ``diffpair_routing_continuity``
+    * ``match_group_length_skew``
+
+``kct check`` only populates the map when ``--net-class-map <sidecar>`` is
+passed.  The in-pipeline DRC in ``generate_design.py::run_drc`` IS the same
+``kct check`` call plus the sidecar, which is the entire 18-vs-27 delta on
+board 07.  Before #3151 the strict CI gate
+(``scripts/ci/check_routed_drc.py``) shelled out to ``kct check`` with NO
+sidecar, so it silently missed those three families on routed boards.
+
+These tests pin two contracts so a future silent-no-op regression (cf.
+#3098 / PR #3145) is caught:
+
+1. **No-op contract (must be PRESERVED):** bare ``kct check`` on board 07's
+   routed PCB reports ZERO of the three families.  External-router boards
+   rely on this -- it must never start firing diff-pair / match-group rules
+   without a net_class_map.
+2. **Parity (the fix):** ``kct check --net-class-map <sidecar>`` reports the
+   bare error set PLUS exactly the three families, with the family-level
+   counts pinned in ``BOARD_07_EXPECTED_FAMILY_DELTA`` (diffpair_length_skew=6,
+   match_group_length_skew=1 on board 07 since #6725; see #6802).
+
+It also exercises the CI gate's net-class-map resolver
+(``scripts/ci/net_class_map_resolver.py``) directly: committed-sidecar
+preference, in-process fallback for boards (like 06) that don't commit one,
+and ``None`` for boards that declare no net classes.
+
+The real-``kct check`` parity checks are marked ``integration`` +
+``pr_required``, not ``slow``, so they run in the PR "Test" job (Issue
+#6805; the whole module takes ~10s with ``--no-cov``).  The
+resolver unit tests are fast (temp dirs + a tiny derived map) and always
+run.
+
+Sidecar isolation (Issue #4009): since #3948 ``kct check`` auto-discovers a
+committed ``net_class_map.json`` next to the PCB, so a "bare" run against a
+committed board artifact is no longer actually bare.  The ``bare`` fixture
+below isolates the PCB from its sidecar via the shared
+``isolate_pcb_from_sidecars`` helper in ``tests/conftest.py`` -- reuse that
+helper for any future board's bare-check parity test instead of
+re-deriving the tmp-dir-copy pattern.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+import pytest
+
+from tests.conftest import isolate_pcb_from_sidecars
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CI_DIR = REPO_ROOT / "scripts" / "ci"
+
+BOARD_07_PCB = (
+    REPO_ROOT
+    / "boards"
+    / "07-matchgroup-test"
+    / "regression-fixture"
+    / "matchgroup_test_routed.kicad_pcb"
+)
+BOARD_07_SIDECAR = (
+    REPO_ROOT / "boards" / "07-matchgroup-test" / "regression-fixture" / "net_class_map.json"
+)
+
+BOARD_06_PCB = (
+    REPO_ROOT
+    / "boards"
+    / "06-diffpair-test"
+    / "regression-fixture"
+    / "diffpair_test_routed.kicad_pcb"
+)
+BOARD_06_SIDECAR = (
+    REPO_ROOT / "boards" / "06-diffpair-test" / "regression-fixture" / "net_class_map.json"
+)
+
+# The three rule families gated on the net_class_map.  Pinning these by name
+# is the load-bearing assertion: a regression that disables any one of them
+# would drop it from the WITH-sidecar set and fail this test.
+NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
+    "diffpair_length_skew",
+    "diffpair_routing_continuity",
+    "diffpair_uncoupled_length",
+    "match_group_length_skew",
+)
+
+# Re-pinned by #6802 after PR #6729 (#6725) switched ``kct check`` to measure
+# net length exactly as kicad-cli does (pad/via trims + stackup via height).
+# Bisected: 8555f0924 (before #6729) reported 2 skew errors (DQS, TMDS_D2);
+# 940d66415 (#6729 merge) and every later merge through a34d5a632 report the
+# set below, unchanged by #6779/#6780/#6792. The committed artifact did not
+# change; the old pins were measured with the pre-#6725 length model.
+#
+# Verified against Docker kicad/kicad:10.0 (kicad-cli 10.0.6) on this exact
+# file with per-net length + per-pair/group skew rules: every per-net length
+# agrees within 0.05 um, and kicad-cli raises skew_out_of_range for the same
+# six findings -- DQS 6.7722, MIPI_CLK 0.1198, MIPI_DAT0 0.1292, MIPI_DAT1
+# 0.1063, TMDS_D2 4.9094 mm (pairs), and ADDR_BUS 1.0998 mm (> 0.5 mm group
+# tolerance; A3 44.8727 vs A4 43.7728 mm). The MIPI pairs, which the old model
+# placed within 0.05 mm, are 0.11-0.13 mm apart under kicad-cli as well.
+# (kicad-cli additionally flags TMDS_D0/TMDS_D1, whose N nets are unrouted;
+# kct reports those as connectivity, not skew, both before and after #6729.)
+# Continuity is info-only since #6443 and no board 07 class declares an
+# uncoupled-length limit, so those families stay at 0. The real assembled
+# SDRAM demo has its own zero-error readiness checks.
+#
+# Re-pinned by #6730: the fixture's ADDR_BUS nets A4/A6 were re-tuned in place
+# with ``kct retune-lengths --group ADDR_BUS`` (skew 1.0998 -> 0.0169 mm), so
+# ``match_group_length_skew`` is now clean (0). The five pair-skew findings
+# above are untouched.
+#
+# Re-pinned by #7894: the fixture's pair classes now declare ``pair_protocol``.
+# DQS declares ``DDR_DQS_CK``, so its UG583 2 ps timing limit is an error
+# (48.4 ps).  The MIPI (8.05 ps) and TMDS (3.36 ps) budgets are maximum-rate
+# warnings and add no error.
+#
+# Re-pinned by #7913: the hand-set ``skew_tolerance_mm`` caps are gone from the
+# fixture's DQS/MIPI/TMDS classes, so their five 0.05/0.075 mm cap errors
+# (DQS, MIPI_CLK, MIPI_DAT0, MIPI_DAT1, TMDS_D2) no longer fire.  Only the DQS
+# 2 ps timing error is left: 6 -> 1.  The committed copper did not change.
+BOARD_07_EXPECTED_FAMILY_DELTA = {
+    "diffpair_length_skew": 1,
+    "diffpair_routing_continuity": 0,
+    "diffpair_uncoupled_length": 0,
+    "match_group_length_skew": 0,
+}
+
+# Re-pinned by #8938: the fab-view copper gap pass no longer downgrades a
+# same-net gap to a warning (the fab cannot see nets and flags it anyway), and
+# pad-involving gaps are judged at pad_spacing's recorded 0.15 mm danger edge
+# instead of the old hardcoded 0.10 mm.  On this fixture that re-severitied
+# 101 findings from warning to error: 96 same-net slits (mostly the dense
+# 0.0891 mm via-field pattern) plus 5 different-net pad-involving gaps at
+# 0.115-0.1345 mm, below the table's pad danger edge.  The committed copper
+# did not change.
+BOARD_07_EXPECTED_GAP_ERRORS = 101
+
+
+def _load_resolver_module():
+    """Import ``scripts/ci/net_class_map_resolver.py`` as a module."""
+    path = CI_DIR / "net_class_map_resolver.py"
+    spec = importlib.util.spec_from_file_location("net_class_map_resolver_test_mod", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["net_class_map_resolver_test_mod"] = module
+    # The resolver itself adds scripts/ci to sys.path for its own imports.
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_kct_check(pcb: Path, sidecar: Path | None) -> dict:
+    """Run ``kct check ... --errors-only --format json`` and parse the JSON.
+
+    Mirrors the exact invocation used by ``scripts/ci/check_routed_drc.py``
+    and board 07's ``generate_design.py::run_drc`` so the parity comparison
+    is apples-to-apples.
+    """
+    cmd = [
+        "uv",
+        "run",
+        "kct",
+        "check",
+        str(pcb),
+        "--mfr",
+        "jlcpcb",
+        "--skip",
+        "mask_to_copper",
+        "--errors-only",
+        "--format",
+        "json",
+    ]
+    if sidecar is not None:
+        cmd.extend(["--net-class-map", str(sidecar)])
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=REPO_ROOT)
+    assert proc.returncode in (0, 2), (
+        f"kct check exited {proc.returncode} on {pcb}.\nstderr:\n{proc.stderr}"
+    )
+    return json.loads(proc.stdout)
+
+
+def _family_counts(payload: dict) -> Counter:
+    """Counter of error-severity violations keyed by rule_id."""
+    return Counter(
+        v.get("rule_id")
+        for v in payload.get("violations", [])
+        if v.get("severity", "error") == "error"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resolver unit tests (fast -- no real kct check)
+# ---------------------------------------------------------------------------
+
+
+class TestNetClassMapResolver:
+    """The CI gate's net_class_map resolution logic (Issue #3151, Option B)."""
+
+    def test_prefers_committed_sidecar(self, tmp_path: Path) -> None:
+        """A committed ``net_class_map.json`` next to the PCB is used directly."""
+        resolver = _load_resolver_module()
+        out = tmp_path / "boards" / "demo" / "output"
+        out.mkdir(parents=True)
+        pcb = out / "demo_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sidecar = out / "net_class_map.json"
+        sidecar.write_text("{}")
+
+        with resolver.resolve_net_class_map_sidecar(pcb) as resolved:
+            assert resolved is not None
+            assert resolved.resolve() == sidecar.resolve()
+
+    def test_in_process_fallback_when_no_sidecar(self, tmp_path: Path, monkeypatch) -> None:
+        """No committed sidecar -> derive the map in-process to a temp file.
+
+        The temp file must exist (and contain the derived map) inside the
+        context, and be cleaned up on exit.
+        """
+        resolver = _load_resolver_module()
+        out = tmp_path / "boards" / "demo" / "output"
+        out.mkdir(parents=True)
+        pcb = out / "demo_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.router.rules import NetClassRouting
+
+        derived = {"NET_A": NetClassRouting(name="DiffPair", coupled_routing=True)}
+        monkeypatch.setattr(resolver, "build_net_class_map_for_board", lambda board_dir: derived)
+
+        with resolver.resolve_net_class_map_sidecar(pcb) as resolved:
+            assert resolved is not None
+            assert resolved != (out / "net_class_map.json")
+            assert resolved.is_file()
+            data = json.loads(resolved.read_text())
+            assert "NET_A" in data
+            tmp_name = resolved
+
+        # Cleaned up on exit.
+        assert not tmp_name.exists()
+
+    def test_none_when_no_map_available(self, tmp_path: Path, monkeypatch) -> None:
+        """A board with no committed sidecar AND no derivable map yields None.
+
+        This is the path that preserves the standalone-CLI no-op contract for
+        external-router boards: the gate runs bare and the rules no-op.
+        """
+        resolver = _load_resolver_module()
+        out = tmp_path / "boards" / "demo" / "output"
+        out.mkdir(parents=True)
+        pcb = out / "demo_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        monkeypatch.setattr(resolver, "build_net_class_map_for_board", lambda board_dir: None)
+
+        with resolver.resolve_net_class_map_sidecar(pcb) as resolved:
+            assert resolved is None
+
+    def test_build_failure_degrades_to_none(self, tmp_path: Path, monkeypatch) -> None:
+        """If the board recipe raises while building the map, run bare (not crash)."""
+        resolver = _load_resolver_module()
+        out = tmp_path / "boards" / "demo" / "output"
+        out.mkdir(parents=True)
+        pcb = out / "demo_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        def _boom(board_dir):
+            raise RuntimeError("recipe import blew up")
+
+        monkeypatch.setattr(resolver, "build_net_class_map_for_board", _boom)
+
+        with resolver.resolve_net_class_map_sidecar(pcb) as resolved:
+            assert resolved is None
+
+    def test_board_07_resolves_committed_sidecar(self) -> None:
+        """Board 07's real PCB resolves to its committed sidecar."""
+        if not BOARD_07_PCB.is_file():
+            pytest.skip("board 07 routed PCB not present")
+        assert BOARD_07_SIDECAR.is_file(), "board 07 should ship a committed sidecar"
+        resolver = _load_resolver_module()
+        with resolver.resolve_net_class_map_sidecar(BOARD_07_PCB) as resolved:
+            assert resolved is not None
+            assert resolved.resolve() == BOARD_07_SIDECAR.resolve()
+
+    def test_board_06_resolves_committed_sidecar(self) -> None:
+        """Board 06's real PCB resolves to its committed sidecar.
+
+        Issue #3828: board 06's ``generate_design.py`` now emits a
+        ``net_class_map.json`` next to the routed PCB (the same sidecar its
+        in-pipeline ``run_drc`` and the diff-pair coverage gate consume), so
+        the diff-pair length-skew / routing-continuity rules are ACTIVE under
+        ``kct check`` on both the committed artifact and every CI re-route.
+        That sidecar is committed alongside the routed PCB, so -- exactly like
+        board 07 -- the resolver yields the committed file directly rather than
+        falling back to in-process derivation.  (The in-process derivation path
+        is still covered generically by ``test_in_process_fallback_when_no_sidecar``.)
+        """
+        if not BOARD_06_PCB.is_file():
+            pytest.skip("board 06 routed PCB not present")
+        assert BOARD_06_SIDECAR.is_file(), "board 06 should ship a committed sidecar"
+        resolver = _load_resolver_module()
+        with resolver.resolve_net_class_map_sidecar(BOARD_06_PCB) as resolved:
+            assert resolved is not None
+            assert resolved.resolve() == BOARD_06_SIDECAR.resolve()
+            data = json.loads(resolved.read_text())
+            assert len(data) > 0, "board 06's committed map should be non-empty"
+
+
+# ---------------------------------------------------------------------------
+# Real kct check parity (integration / pr_required)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+# Issue #6805: not `slow`, so the PR "Test" job runs it; `pr_required` keeps
+# update_ci_extended.py from moving it to "Test (extended)" (Issue #6102).
+@pytest.mark.pr_required
+@pytest.mark.xdist_group("board07_kct_check_parity")
+# Default-on fab view (#8843) makes `kct check --mfr jlcpcb` several times slower
+# than before on dense boards (board 07: ~12-17 s per run; the board-05 recipe
+# below: ~8 s on main -> ~40 s, measured on an 8-core host, one run each). The
+# global 60 s cap is too tight for the 2-vCPU CI runner, so these are given
+# explicit headroom; the cost is not hidden, follow-up profiling should cut it.
+@pytest.mark.timeout(180)
+class TestBoard07KctCheckParity:
+    """End-to-end parity on board 07's committed routed PCB (Issue #3151).
+
+    Runs the real ``kct check`` engine both ways.  Not marked ``slow``: the
+    PR "Test" job must catch a change that moves board-07 counts (Issue
+    #6805).
+    """
+
+    @pytest.fixture(scope="class")
+    def bare(self, tmp_path_factory: pytest.TempPathFactory) -> dict:
+        """Run ``kct check`` with NO net-class map resolvable.
+
+        Issue #3948 made ``kct check`` auto-discover a committed
+        ``net_class_map.json`` next to the PCB, so running against the
+        in-repo artifact is no longer "bare" -- the no-op contract this
+        class pins is only observable when no sidecar is DISCOVERABLE.
+        Use the shared ``isolate_pcb_from_sidecars`` helper (Issue #4009)
+        to copy the routed PCB into an isolated tmp dir without the
+        sidecar so the graceful-degradation path is actually exercised.
+        """
+        if not BOARD_07_PCB.is_file():
+            pytest.skip("board 07 routed PCB not present")
+        isolated = isolate_pcb_from_sidecars(BOARD_07_PCB, tmp_path_factory.mktemp("board07-bare"))
+        return _run_kct_check(isolated, sidecar=None)
+
+    @pytest.fixture(scope="class")
+    def with_sidecar(self) -> dict:
+        if not (BOARD_07_PCB.is_file() and BOARD_07_SIDECAR.is_file()):
+            pytest.skip("board 07 routed PCB / sidecar not present")
+        return _run_kct_check(BOARD_07_PCB, sidecar=BOARD_07_SIDECAR)
+
+    def test_bare_check_noop_contract_preserved(self, bare: dict) -> None:
+        """Sidecar-less ``kct check`` reports ZERO of the net-class-gated families.
+
+        This is the graceful-degradation contract external-router boards
+        rely on; it must NEVER regress to firing these rules without a map.
+        (Since #3948 the map may be auto-discovered from a committed
+        sidecar; the ``bare`` fixture isolates the PCB so no map resolves.)
+        """
+        counts = _family_counts(bare)
+        for family in NET_CLASS_GATED_FAMILIES:
+            assert counts.get(family, 0) == 0, (
+                f"bare kct check fired {family!r} without a net_class_map -- "
+                "the standalone no-op contract regressed (see Issue #3151)"
+            )
+
+    def test_sidecar_adds_exactly_the_three_families(self, bare: dict, with_sidecar: dict) -> None:
+        """WITH-sidecar set == bare set PLUS exactly the pinned gated families.
+
+        Pins the family-level delta so a silent-no-op regression in any one
+        rule is caught (cf. #3098 / PR #3145).
+        """
+        bare_counts = _family_counts(bare)
+        sidecar_counts = _family_counts(with_sidecar)
+
+        # Every family present bare must be unchanged with the sidecar
+        # (the sidecar only ADDS the gated families, it must not perturb the
+        # clearance/connectivity families).
+        for family, count in bare_counts.items():
+            assert sidecar_counts.get(family, 0) == count, (
+                f"sidecar perturbed an unrelated family {family!r}: "
+                f"bare={count} sidecar={sidecar_counts.get(family, 0)}"
+            )
+
+        # The added families are EXACTLY the gated families that the
+        # committed artifact still has errors for: diffpair_length_skew since
+        # the kicad-cli-exact length model (#6725 / PR #6729; re-pinned by
+        # #6802; ADDR_BUS cleared by #6730). Families pinned at 0
+        # are gated-but-clean; their ENGAGEMENT is pinned elsewhere (e.g. the
+        # matchgroup CI gate's rules_checked_by_rule assertion).
+        added = {
+            family
+            for family in sidecar_counts
+            if sidecar_counts[family] > bare_counts.get(family, 0)
+        }
+        expected_added = {
+            family for family, expected in BOARD_07_EXPECTED_FAMILY_DELTA.items() if expected > 0
+        }
+        assert added == expected_added, (
+            f"sidecar added {sorted(added)}; expected exactly {sorted(expected_added)}"
+        )
+
+    def test_family_delta_counts_pinned(self, bare: dict, with_sidecar: dict) -> None:
+        """The per-family counts match the documented 18->27 delta."""
+        bare_counts = _family_counts(bare)
+        sidecar_counts = _family_counts(with_sidecar)
+        for family, expected in BOARD_07_EXPECTED_FAMILY_DELTA.items():
+            delta = sidecar_counts.get(family, 0) - bare_counts.get(family, 0)
+            assert delta == expected, (
+                f"{family!r} delta was {delta}, expected {expected} "
+                "(re-baseline this test AND the tolerance floor together "
+                "if the routed artifact legitimately changed)"
+            )
+
+    def test_total_error_count_delta(self, bare: dict, with_sidecar: dict) -> None:
+        """Total error count rises by the sum of the gated family deltas."""
+        bare_total = bare["summary"]["errors"]
+        sidecar_total = with_sidecar["summary"]["errors"]
+        assert sidecar_total - bare_total == sum(BOARD_07_EXPECTED_FAMILY_DELTA.values())
+
+
+@pytest.mark.integration
+# Issue #6805: not `slow`, so the PR "Test" job runs it; `pr_required` keeps
+# update_ci_extended.py from moving it to "Test (extended)" (Issue #6102).
+@pytest.mark.pr_required
+@pytest.mark.timeout(180)
+class TestCiGateCountsGatedFamilies:
+    """The strict CI gate now counts the gated families (Issue #3151 AC #1)."""
+
+    def _load_gate(self):
+        path = CI_DIR / "check_routed_drc.py"
+        spec = importlib.util.spec_from_file_location("check_routed_drc_test_mod", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["check_routed_drc_test_mod"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_board_07_gate_counts_diffpair_and_matchgroup(self) -> None:
+        """The preserved synthetic witness retains both real and gated findings.
+
+        The corrected drill/pad intersection check (#5012) exposes five
+        unsupported partial drill overlaps under the default manufacturer;
+        the net-class-gated families add the skew findings pinned in
+        ``BOARD_07_EXPECTED_FAMILY_DELTA`` (#6802; the DQS timing error
+        only since the #7913 cap removal).
+        These are preserved fixture findings, not manufacturing waivers.
+        """
+        if not BOARD_07_PCB.is_file():
+            pytest.skip("board 07 regression fixture not present")
+        gate = self._load_gate()
+        blocking, advisory = gate.count_errors(BOARD_07_PCB)
+        assert (
+            blocking
+            == 5 + sum(BOARD_07_EXPECTED_FAMILY_DELTA.values()) + BOARD_07_EXPECTED_GAP_ERRORS
+        )
+        assert advisory.get("connectivity", 0) == 4
+
+
+def test_authored_min_clearance_reaches_drc_checker(tmp_path):
+    """A ``.kicad_pro`` ``rules.min_clearance`` is read for DRCChecker (#6575)."""
+    from kicad_tools.cli.check_cmd import _authored_min_clearance_mm
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb (version 20240108))\n")
+    assert _authored_min_clearance_mm(pcb) is None
+    (tmp_path / "b.kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.15}}}})
+    )
+    assert _authored_min_clearance_mm(pcb) == 0.15

@@ -1,0 +1,249 @@
+"""Single-link router used by the oracle completion loop (Issue #5785)."""
+
+from __future__ import annotations
+
+import pytest
+
+shapely = pytest.importorskip("shapely")
+from shapely.geometry import box  # noqa: E402
+
+from kicad_tools.router.link_router import (  # noqa: E402
+    LinkRouteRules,
+    LinkTerminal,
+    _BoardModel,
+    _Item,
+    _octilinear,
+    _shortcut,
+    net_components,
+    padless_components,
+    route_link,
+)
+
+RULES = LinkRouteRules(trace_width=0.2, clearance=0.2, via_size=0.6, via_drill=0.3, margin=2.0)
+
+
+def _model(copper, items=(), fills=None) -> _BoardModel:
+    return _BoardModel(
+        copper=list(copper),
+        items=list(items),
+        drills=[],
+        pad_geoms=[],
+        fills=fills or {},
+        outline=None,
+    )
+
+
+def _term(label, x, y, layer="F.Cu", half=0.4) -> LinkTerminal:
+    return LinkTerminal(label, (x, y), {layer: box(x - half, y - half, x + half, y + half)})
+
+
+class TestShortcut:
+    def test_staircase_collapses_to_one_diagonal(self):
+        stairs = [(0.0, 0.0), (0.05, 0.0), (0.05, 0.05), (0.1, 0.05), (0.1, 0.1)]
+        # Octilinear only: the whole thing is the (0,0)-(0.1,0.1) diagonal.
+        assert _shortcut(stairs, [], 0.1, None) == [(0.0, 0.0), (0.1, 0.1)]
+
+    def test_blocked_shortcut_is_refused(self):
+        pts = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]
+        wall = box(0.4, 0.4, 0.6, 0.6)  # sits on the diagonal, clear of both legs
+        assert _shortcut(pts, [(wall, 0.1)], 0.0, None) == pts
+
+    def test_endpoints_always_kept(self):
+        pts = [(0.0, 0.0), (0.3, 0.1), (0.5, 0.5)]
+        out = _shortcut(pts, [], 0.1, None)
+        assert out[0] == pts[0] and out[-1] == pts[-1]
+
+    @pytest.mark.parametrize(
+        ("p", "q", "ok"),
+        [
+            ((0, 0), (1, 0), True),
+            ((0, 0), (0, 2), True),
+            ((0, 0), (2, 2), True),
+            ((0, 0), (2, 1), False),
+        ],
+    )
+    def test_octilinear(self, p, q, ok):
+        assert _octilinear(p, q) is ok
+
+
+class TestRouteLink:
+    def test_straight_link_lands_on_centi_mm_inside_terminals(self):
+        a, b = _term("a", 10.003, 10.0), _term("b", 14.0, 10.0)
+        route = route_link(None, 1, "N", a, b, RULES, model=_model(["F.Cu", "B.Cu"]))
+        assert route is not None and not route.vias
+        for x1, y1, x2, y2, layer in route.segments:
+            assert layer == "F.Cu"
+            for v in (x1, y1, x2, y2):
+                assert round(v, 2) == pytest.approx(v)  # exactly what the writer keeps
+        (sx, sy, *_), (*_, ex, ey, _l) = route.segments[0], route.segments[-1]
+        assert box(9.6, 9.6, 10.4, 10.4).contains(shapely.geometry.Point(sx, sy))
+        assert box(13.6, 9.6, 14.4, 10.4).contains(shapely.geometry.Point(ex, ey))
+
+    def test_foreign_wall_forces_detour_clear_of_it(self):
+        wall = _Item(2, {"F.Cu": box(11.8, 8.0, 12.2, 12.0)})
+        a, b = _term("a", 10.0, 10.0), _term("b", 14.0, 10.0)
+        route = route_link(None, 1, "N", a, b, RULES, model=_model(["F.Cu", "B.Cu"], [wall]))
+        assert route is not None
+        assert route.vias  # the wall spans the F.Cu window: hop to B.Cu
+        for x1, y1, x2, y2, layer in route.segments:
+            if layer == "F.Cu":
+                line = shapely.geometry.LineString([(x1, y1), (x2, y2)])
+                assert line.distance(wall.layers["F.Cu"]) >= 0.2 + 0.1 - 1e-6
+
+    def test_no_track_runs_along_a_plane_layer(self):
+        plane = {"In1.Cu": [(9, box(0, 0, 40, 40))]}  # foreign pour on In1
+        wall = _Item(2, {"F.Cu": box(11.8, 0.0, 12.2, 40.0), "B.Cu": box(11.8, 0.0, 12.2, 40.0)})
+        a, b = _term("a", 10.0, 10.0), _term("b", 14.0, 10.0)
+        model = _model(["F.Cu", "In1.Cu", "B.Cu"], [wall], plane)
+        route = route_link(None, 1, "N", a, b, RULES, model=model)
+        # F.Cu and B.Cu are walled; In1 is a plane layer: no legal route.
+        assert route is None
+
+    def test_unreachable_returns_none(self):
+        ring = [
+            _Item(2, {"F.Cu": box(12.0, 8.0, 12.4, 12.0), "B.Cu": box(12.0, 8.0, 12.4, 12.0)}),
+        ]
+        a, b = _term("a", 10.0, 10.0), _term("b", 14.0, 10.0)
+        tight = LinkRouteRules(margin=0.5)
+        assert route_link(None, 1, "N", a, b, tight, model=_model(["F.Cu", "B.Cu"], ring)) is None
+
+
+def _edge_gap(route, geom, layer="F.Cu") -> float:
+    """Smallest copper-edge gap between ``route``'s tracks on ``layer`` and ``geom``."""
+    gaps = [
+        shapely.geometry.LineString([(x1, y1), (x2, y2)]).buffer(route.width / 2).distance(geom)
+        for x1, y1, x2, y2, lyr in route.segments
+        if lyr == layer
+    ]
+    return min(gaps) if gaps else float("inf")
+
+
+class TestPerNetClearance:
+    """Issue #6374: a link keeps each neighbour's class clearance, not one scalar."""
+
+    # A foreign pad whose edge sits 0.17 mm off the straight corridor's copper
+    # edge: legal at 0.15 mm, illegal at a 0.2 mm class clearance.
+    PAD = box(11.5, 10.0 + 0.1 + 0.17, 12.5, 11.0)
+
+    def _route(self, rules, items):
+        a, b = _term("a", 10.0, 10.0), _term("b", 14.0, 10.0)
+        return route_link(None, 1, "GND", a, b, rules, model=_model(["F.Cu"], items))
+
+    def test_default_scalar_passes_at_the_floor(self):
+        rules = LinkRouteRules(trace_width=0.2, clearance=0.15, margin=2.0)
+        route = self._route(rules, [_Item(2, {"F.Cu": self.PAD}, True)])
+        assert route is not None
+        gap = _edge_gap(route, self.PAD)
+        assert 0.15 - 1e-6 <= gap < 0.2  # the straight corridor, as before
+
+    def test_neighbour_class_clearance_is_kept(self):
+        rules = LinkRouteRules(
+            trace_width=0.2, clearance=0.15, margin=2.0, clearance_by_net={2: 0.2}
+        )
+        route = self._route(rules, [_Item(2, {"F.Cu": self.PAD}, True)])
+        assert route is not None
+        assert _edge_gap(route, self.PAD) >= 0.2 - 1e-6
+
+    def test_classless_third_net_keeps_only_the_floor(self):
+        # Net 2 demands 0.2; net 3 (no class entry) only the 0.15 floor.
+        other = box(11.5, 10.0 - 0.1 - 0.17 - 0.73, 12.5, 10.0 - 0.1 - 0.17)
+        rules = LinkRouteRules(
+            trace_width=0.2, clearance=0.15, margin=2.0, clearance_by_net={2: 0.2}
+        )
+        items = [_Item(2, {"F.Cu": self.PAD}, True), _Item(3, {"F.Cu": other}, True)]
+        route = self._route(rules, items)
+        assert route is not None
+        assert _edge_gap(route, self.PAD) >= 0.2 - 1e-6
+        gap3 = _edge_gap(route, other)
+        assert 0.15 - 1e-6 <= gap3 < 0.2  # pushed toward the classless net
+
+    def test_floor_wins_over_a_smaller_class(self):
+        rules = LinkRouteRules(clearance=0.2, clearance_by_net={2: 0.1})
+        assert rules.clearance_for(2) == 0.2
+        assert rules.clearance_for(99) == 0.2
+        assert LinkRouteRules(clearance=0.15).clearance_for(2) == 0.15
+
+    def test_none_map_is_byte_identical_to_an_empty_one(self):
+        items = [_Item(2, {"F.Cu": self.PAD}, True)]
+        plain = self._route(LinkRouteRules(clearance=0.15, margin=2.0), items)
+        empty = self._route(LinkRouteRules(clearance=0.15, margin=2.0, clearance_by_net={}), items)
+        assert plain is not None and empty is not None
+        assert plain.segments == empty.segments and plain.vias == empty.vias
+
+
+class TestPadlessComponents:
+    def test_pad_bearing_island_is_not_floating(self):
+        pad = _Item(1, {"F.Cu": box(0, 0, 1, 1)}, True)
+        model = _model(
+            ["F.Cu"],
+            [pad],
+            {"F.Cu": [(1, box(0.5, 0.5, 3, 3)), (1, box(20, 20, 24, 24))]},
+        )
+        comps = net_components(model, 1)
+        assert len(comps) == 2
+        floating = padless_components(model, 1, comps)
+        assert len(floating) == 1
+        assert floating[0]["F.Cu"].bounds == (20.0, 20.0, 24.0, 24.0)
+
+
+class TestDegenerateSegmentCommitCheck:
+    """Issue #8417: a start == end segment is a disc of the trace width."""
+
+    @staticmethod
+    def _route(x: float, y: float):
+        from kicad_tools.router.link_router import LinkRoute
+
+        r = LinkRoute(net_number=1, net_name="A", width=0.2, via_size=0.6, via_drill=0.3)
+        r.segments.append((x, y, x, y, "F.Cu"))
+        return r
+
+    @staticmethod
+    def _foreign():
+        from shapely.geometry import LineString
+
+        # Net B: 45-degree track, buffered by its half width, 0.2 mm clearance.
+        return {"F.Cu": [(LineString([(0, 0), (4, 4)]).buffer(0.1), 0.2)]}
+
+    def test_degenerate_segment_on_foreign_track_rejected(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert _route_violates_foreign(self._route(2.0, 2.0), self._foreign(), 0.1)
+
+    def test_degenerate_segment_inside_clearance_rejected(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert _route_violates_foreign(self._route(2.0, 2.2), self._foreign(), 0.1)
+
+    def test_degenerate_segment_clear_of_foreign_accepted(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert not _route_violates_foreign(self._route(2.0, 4.0), self._foreign(), 0.1)
+
+    def test_no_foreign_copper_accepted(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert not _route_violates_foreign(self._route(2.0, 2.0), {}, 0.1)
+
+
+class TestSubResolutionSliverNotWritten:
+    """Issue #8495: a sliver that rounds to start == end must not be written."""
+
+    @staticmethod
+    def _written(segments, origin=(0.0, 0.0)):
+        from kicad_tools.router.link_router import LinkRoute, _append_route_nodes
+
+        r = LinkRoute(net_number=1, net_name="A", width=0.2, via_size=0.6, via_drill=0.3)
+        r.segments.extend(segments)
+        doc: list = []
+        _append_route_nodes(doc, r, origin)
+        return doc
+
+    def test_sliver_dropped(self):
+        assert self._written([(188.981, 69.0, 188.984, 69.002, "F.Cu")]) == []
+
+    def test_sliver_dropped_with_origin(self):
+        assert self._written([(8.981, 9.0, 8.984, 9.002, "F.Cu")], origin=(180.0, 60.0)) == []
+
+    def test_genuine_short_segment_kept(self):
+        assert len(self._written([(188.98, 69.0, 189.0, 69.0, "F.Cu")])) == 1
+        assert len(self._written([(188.98, 69.0, 188.99, 69.0, "F.Cu")])) == 1

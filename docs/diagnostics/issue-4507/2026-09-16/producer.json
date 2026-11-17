@@ -1,0 +1,10 @@
+{
+  "planner_commit": "2fb4ebdc8ed9ef0d9f4890c71b5cb38b110ecc02",
+  "zones_cmd_source_commit": "6b381f353ef3a599292a2e9d48f8f401ec322f02",
+  "source_files_sha256": "440abf4179948c23582b3728aa10cef461de351fc1ba73569f7b98a6e31ee177",
+  "python": "3.12.11 (main, Oct  7 2025, 15:53:48) [Clang 20.1.4 ]",
+  "source_snapshot": "verified 5450-integrated-final/src plus exact main zones_cmd.py",
+  "kct": "/private/tmp/4507-main-a901-full/source/.venv/bin/kct",
+  "supervisor_sha256": "5ee49296d1888adc716fd63ffe63cc622d715af251c2d2ac368c1f2f067bbed0",
+  "sidecar_preseed": false
+}

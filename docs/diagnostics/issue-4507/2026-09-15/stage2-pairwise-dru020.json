@@ -1,0 +1,10 @@
+{
+  "board": "/tmp/4507-af6b-terminal-evidence/stage2/step2.kicad_pcb",
+  "mapped_nets": 84,
+  "cross_pairs": 1922,
+  "attach_zones_applied": true,
+  "pad_geometry_applied": true,
+  "violation_count": 0,
+  "net_pairs": [],
+  "violations": []
+}

@@ -1,0 +1,10821 @@
+"""
+Argument parser setup for kicad-tools CLI.
+
+This module contains all the argparse configuration for the kicad-tools CLI.
+The parser is organized into subparsers for each major command category.
+"""
+
+import argparse
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from kicad_tools import __version__
+
+# ``--difficulty`` choices come from the Difficulty enum itself so they cannot
+# drift from the handler's "valid options" error text (issue #4752).  The
+# benchmark package's runner/generators are import-light (the router is behind
+# TYPE_CHECKING), so this costs ~2.5 ms on top of an already-imported
+# ``kicad_tools`` -- measured, and well under 1% of CLI startup.
+from kicad_tools.benchmark.cases import Difficulty
+from kicad_tools.cli.check_categories import CHECK_CATEGORIES
+from kicad_tools.cli.copper_weight import add_check_copper_argument
+from kicad_tools.cli.export_cmd import STACKUP_ID_CHOICES, STACKUP_ID_HELP
+from kicad_tools.cli.format_options import add_format_flag
+from kicad_tools.manufacturers import get_all_manufacturer_names
+
+__all__ = [
+    "LATTICE_ITERATIONS_HELP",
+    "PASSTHROUGH_SUBCOMMANDS",
+    "create_parser",
+    "passthrough_main",
+    "passthrough_parser",
+    "positive_int",
+    "resolve_passthrough",
+]
+
+# Subcommands whose argv ``cli.main`` hands verbatim to the owning module
+# (issue #7017).  ``create_parser()`` registers only a help-less stub for each,
+# so anything that walks the parser tree -- the agent-guide checker, the
+# ``--format json`` leaf walkers -- must resolve the stub through
+# :func:`passthrough_parser` to see the real flags.  Values are
+# ``(module, main function, parser factory)``; modules are imported lazily so
+# ``create_parser()`` stays cheap.
+PASSTHROUGH_SUBCOMMANDS: dict[str, tuple[str, str, str]] = {
+    "route": ("kicad_tools.cli.route_cmd", "main", "_route_parser"),
+}
+
+
+def _passthrough_attr(name: str, index: int) -> Any:
+    import importlib
+
+    entry = PASSTHROUGH_SUBCOMMANDS[name]
+    return getattr(importlib.import_module(entry[0]), entry[index])
+
+
+def passthrough_parser(name: str) -> argparse.ArgumentParser:
+    """Return the real parser behind passthrough subcommand *name*."""
+    parser = _passthrough_attr(name, 2)()
+    assert isinstance(parser, argparse.ArgumentParser)
+    return parser
+
+
+def passthrough_main(name: str) -> Callable[[list[str]], int]:
+    """Return the ``main(argv) -> int`` that owns passthrough subcommand *name*."""
+    main: Callable[[list[str]], int] = _passthrough_attr(name, 1)
+    return main
+
+
+def resolve_passthrough(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Swap each passthrough stub in *parser* for its real parser, in place.
+
+    For tools that walk the whole command tree (``--format json`` audits,
+    agent-guide checks).  This imports the passthrough modules, so the CLI's
+    own startup path never calls it.  Returns *parser* for chaining.
+    """
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name in PASSTHROUGH_SUBCOMMANDS:
+                if name in action.choices:
+                    action.choices[name] = passthrough_parser(name)
+    return parser
+
+
+def positive_int(value: str) -> int:
+    """argparse ``type=`` for a strictly positive integer (``N >= 1``)."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
+# Issue #6362: the ``--lattice-iterations`` help used by
+# ``route_cmd._route_parser``.  It lives here so ``route_cmd`` can import it
+# without the reverse import.
+LATTICE_ITERATIONS_HELP = (
+    "Round cap for the lattice engine's whole-netset negotiation (default: 12). "
+    "Applies only to '--route-engine lattice' and to '--complete', which drives "
+    "the lattice; --iterations does not affect the lattice. Raise it when the "
+    "log says 'stopped by: round cap'. Must be >= 1."
+)
+
+# Module docstring used as epilog in help
+CLI_DOCSTRING = """
+Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct` command:
+
+    kicad-tools symbols <schematic>    - List and query symbols
+    kicad-tools nets <schematic>       - Trace and analyze nets
+    kicad-tools erc <report>           - Parse ERC report
+    kicad-tools drc <report>           - Parse DRC report
+    kicad-tools bom <schematic>        - Generate bill of materials
+    kicad-tools check <pcb>            - Pure Python DRC (no kicad-cli)
+    kicad-tools validate --sync        - Check schematic-to-PCB netlist sync
+    kicad-tools sch <command> <file>   - Schematic analysis tools
+    kicad-tools pcb <command> <file>   - PCB query tools
+    kicad-tools lib <command> <file>   - Symbol library tools
+    kicad-tools footprint <command>    - Footprint generation tools
+    kicad-tools mfr <command>          - Manufacturer tools
+    kicad-tools parts <command>        - LCSC parts lookup and search
+    kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
+    kicad-tools route <pcb>            - Autoroute a PCB
+    kicad-tools zones <command>        - Add copper pour zones
+    kicad-tools stitch <pcb>           - Auto-add stitching vias for plane connections
+    kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
+    kicad-tools placement <command>    - Detect and fix placement conflicts
+    kicad-tools optimize-placement     - Run CMA-ES placement optimization
+    kicad-tools optimize-traces <pcb>  - Optimize PCB traces
+    kicad-tools validate-footprints    - Validate footprint pad spacing
+    kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
+    kicad-tools analyze <command>      - PCB analysis tools
+    kicad-tools audit <project>        - Manufacturing readiness audit
+    kicad-tools pipeline <pcb>         - End-to-end repair pipeline for existing PCBs
+    kicad-tools create-pcb <schematic>  - Create PCB from schematic
+    kicad-tools clean <project>        - Clean up old/orphaned files
+    kicad-tools init <project>         - Initialize project with manufacturer rules
+    kicad-tools run <script>           - Run Python script with kicad-tools interpreter
+    kicad-tools config                 - View/manage configuration
+    kicad-tools interactive            - Launch interactive REPL mode
+
+Schematic subcommands (kct sch <command>):
+    summary        - Quick schematic overview
+    hierarchy      - Show hierarchy tree
+    labels         - List labels
+    validate       - Run validation checks
+    wires          - List wire segments and junctions
+    info           - Show symbol details
+    pins           - Show symbol pin positions
+    connections    - Check pin connections using library positions
+    unconnected    - Find unconnected pins and issues
+    replace        - Replace a symbol's library ID
+    sync-hierarchy - Synchronize sheet pins and hierarchical labels
+
+Examples:
+    kct symbols design.kicad_sch --filter "U*"
+    kct nets design.kicad_sch --net VCC
+    kct erc design-erc.json --errors-only
+    kct drc design-drc.rpt --mfr jlcpcb
+    kct bom design.kicad_sch --format csv
+    kct sch summary design.kicad_sch
+    kct sch wires design.kicad_sch --stats
+    kct sch info design.kicad_sch U1 --show-pins
+    kct sch replace design.kicad_sch U1 "mylib:NewSymbol" --dry-run
+    kct pcb summary board.kicad_pcb
+    kct mfr compare
+    kct parts lookup C123456
+    kct parts search "100nF 0402" --in-stock
+    kct parts availability design.kicad_sch --quantity 100
+    kct datasheet convert STM32F103.pdf --output summary.md
+    kct datasheet extract-images STM32F103.pdf --output images/
+    kct route board.kicad_pcb --strategy negotiated
+    kct reason board.kicad_pcb --export-state
+    kct reason board.kicad_pcb --analyze
+    kct validate-footprints board.kicad_pcb --min-pad-gap 0.15
+    kct fix-footprints board.kicad_pcb --min-pad-gap 0.2 --dry-run
+    kct footprint generate soic --pins 8 -o SOIC8.kicad_mod
+    kct footprint generate chip --size 0402 --prefix R
+    kct footprint generate qfp --pins 48 --pitch 0.5
+    kct footprint generate sot --variant SOT-23
+    kct footprint generate --list
+    kct interactive
+    kct interactive --project myboard.kicad_pro
+    kct audit project.kicad_pro --mfr jlcpcb
+    kct audit board.kicad_pcb --mfr jlcpcb --skip-erc
+    kct audit project.kicad_pro --format json --strict
+    kct clean project.kicad_pro
+    kct clean project.kicad_pro --deep --force
+    kct init myproject --mfr jlcpcb --layers 4
+    kct init existing.kicad_pro --mfr seeed
+"""
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create and configure the main argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="kicad-tools",
+        description="KiCad automation toolkit",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=CLI_DOCSTRING,
+    )
+    parser.add_argument("--version", action="version", version=f"kicad-tools {__version__}")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show full stack traces on errors",
+        dest="global_verbose",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+        dest="global_quiet",
+    )
+    parser.add_argument(
+        "--units",
+        choices=["mm", "mils"],
+        default=None,
+        help="Unit system for output (mm or mils). Overrides config and env var.",
+        dest="global_units",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Add all subparsers
+    _add_symbols_parser(subparsers)
+    _add_nets_parser(subparsers)
+    _add_netlist_parser(subparsers)
+    _add_erc_parser(subparsers)
+    _add_drc_parser(subparsers)
+    _add_bom_parser(subparsers)
+    _add_check_parser(subparsers)
+    _add_creepage_parser(subparsers)
+    _add_creepage_export_rules_parser(subparsers)
+    _add_sch_parser(subparsers)
+    _add_pcb_parser(subparsers)
+    _add_lib_parser(subparsers)
+    _add_footprint_parser(subparsers)
+    _add_mfr_parser(subparsers)
+    _add_zones_parser(subparsers)
+    _add_stitch_parser(subparsers)
+    _add_route_stub(subparsers)
+    _add_route_auto_parser(subparsers)
+    _add_route_link_parser(subparsers)
+    _add_retune_lengths_parser(subparsers)
+    _add_reason_parser(subparsers)
+    _add_optimize_parser(subparsers)
+    _add_validate_footprints_parser(subparsers)
+    _add_fix_footprints_parser(subparsers)
+    _add_fix_vias_parser(subparsers)
+    _add_fix_silkscreen_parser(subparsers)
+    _add_place_silk_refs_parser(subparsers)
+    _add_repair_clearance_parser(subparsers)
+    _add_repair_creepage_parser(subparsers)
+    _add_fix_drc_parser(subparsers)
+    _add_fix_erc_parser(subparsers)
+    _add_parts_parser(subparsers)
+    _add_datasheet_parser(subparsers)
+    _add_decisions_parser(subparsers)
+    _add_placement_parser(subparsers)
+    _add_optimize_placement_parser(subparsers)
+    _add_config_parser(subparsers)
+    _add_interactive_parser(subparsers)
+    _add_validate_parser(subparsers)
+    _add_analyze_parser(subparsers)
+    _add_constraints_parser(subparsers)
+    _add_estimate_parser(subparsers)
+    _add_audit_parser(subparsers)
+    _add_suggest_parser(subparsers)
+    _add_net_status_parser(subparsers)
+    _add_fleet_parser(subparsers)
+    _add_ecosystem_parser(subparsers)
+    _add_models_parser(subparsers)
+    _add_skills_parser(subparsers)
+    _add_agent_guide_parser(subparsers)
+    _add_render_parser(subparsers)
+    _add_export_formats_parser(subparsers)
+    _add_board_metrics_parser(subparsers)
+    _add_readiness_parser(subparsers)
+    _add_submit_jlcpcb_parser(subparsers)
+    _add_tapeout_signoff_parser(subparsers)
+    _add_clean_parser(subparsers)
+    _add_impedance_parser(subparsers)
+    _add_mcp_parser(subparsers)
+    _add_ipc_parser(subparsers)
+    _add_init_parser(subparsers)
+    _add_panel_parser(subparsers)
+    _add_pipeline_parser(subparsers)
+    _add_create_pcb_parser(subparsers)
+    _add_build_parser(subparsers)
+    _add_build_native_parser(subparsers)
+    _add_doctor_parser(subparsers)
+    _add_spec_parser(subparsers)
+    _add_benchmark_parser(subparsers)
+    _add_bench_parser(subparsers)
+    _add_sync_parser(subparsers)
+    _add_run_parser(subparsers)
+    _add_explain_parser(subparsers)
+    _add_detect_mistakes_parser(subparsers)
+    _add_calibrate_parser(subparsers)
+    _add_screenshot_parser(subparsers)
+    _add_board_view_parser(subparsers)
+    _add_report_parser(subparsers)
+    _add_export_parser(subparsers)
+    _add_optim_parser(subparsers)
+
+    return parser
+
+
+def _add_optim_parser(subparsers) -> None:
+    """Add ``optim`` subcommand parser (issue #3186 hybrid FOM).
+
+    ``optim`` has nested subcommands:
+
+    * ``optim fom-debug <pcb> [--weights weights.yaml] [--format text|json]``
+    """
+    optim_parser = subparsers.add_parser(
+        "optim",
+        help="Placement / routing FOM tools (issue #3186)",
+    )
+    optim_subs = optim_parser.add_subparsers(dest="optim_command", help="Optim subcommand")
+
+    fom_debug = optim_subs.add_parser(
+        "fom-debug",
+        help=(
+            "Print the per-term FOM breakdown for an existing placement. "
+            "Scores rank placements of the same board; not comparable across boards."
+        ),
+    )
+    fom_debug.add_argument("pcb", help="Path to .kicad_pcb file (placement or routed)")
+    fom_debug.add_argument(
+        "--weights",
+        default=None,
+        help="Path to weights YAML (default: the calibrated optim/weights/default.yaml)",
+    )
+    fom_debug.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        dest="output_format",
+        help="Output format (default: text)",
+    )
+    fom_debug.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Include feature-extraction stats above the FOM table",
+    )
+
+
+def _add_symbols_parser(subparsers) -> None:
+    """Add symbols subcommand parser."""
+    symbols_parser = subparsers.add_parser("symbols", help="List symbols in a schematic")
+    symbols_parser.add_argument("schematic", help="Path to .kicad_sch file")
+    symbols_parser.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    symbols_parser.add_argument("--filter", dest="pattern", help="Filter by reference")
+    symbols_parser.add_argument("--lib", dest="lib_id", help="Filter by library ID")
+    symbols_parser.add_argument("-v", "--verbose", action="store_true")
+
+
+def _add_nets_parser(subparsers) -> None:
+    """Add nets subcommand parser."""
+    nets_parser = subparsers.add_parser("nets", help="Trace nets in a schematic")
+    nets_parser.add_argument("schematic", help="Path to .kicad_sch file")
+    nets_parser.add_argument("--format", choices=["table", "json"], default="table")
+    nets_parser.add_argument("--net", help="Trace a specific net by label")
+    nets_parser.add_argument("--stats", action="store_true", help="Show statistics only")
+
+
+def _add_netlist_parser(subparsers) -> None:
+    """Add netlist subcommand parser with its subcommands."""
+    netlist_parser = subparsers.add_parser("netlist", help="Netlist analysis and comparison tools")
+    netlist_subparsers = netlist_parser.add_subparsers(
+        dest="netlist_command", help="Netlist commands"
+    )
+
+    # netlist analyze
+    netlist_analyze = netlist_subparsers.add_parser("analyze", help="Show connectivity statistics")
+    netlist_analyze.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_analyze.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist list
+    netlist_list = netlist_subparsers.add_parser(
+        "list", help="List all nets with connection counts"
+    )
+    netlist_list.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_list.add_argument(
+        "--format", dest="netlist_format", choices=["table", "json"], default="table"
+    )
+    netlist_list.add_argument(
+        "--sort",
+        dest="netlist_sort",
+        choices=["name", "connections"],
+        default="connections",
+    )
+
+    # netlist show
+    netlist_show = netlist_subparsers.add_parser("show", help="Show specific net details")
+    netlist_show.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_show.add_argument("--net", dest="netlist_net", required=True, help="Net name")
+    netlist_show.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist check
+    netlist_check = netlist_subparsers.add_parser("check", help="Find connectivity issues")
+    netlist_check.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_check.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist compare
+    netlist_compare = netlist_subparsers.add_parser("compare", help="Compare two netlists")
+    netlist_compare.add_argument("netlist_old", help="Path to old .kicad_sch file")
+    netlist_compare.add_argument("netlist_new", help="Path to new .kicad_sch file")
+    netlist_compare.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist export
+    netlist_export = netlist_subparsers.add_parser("export", help="Export netlist file")
+    netlist_export.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_export.add_argument("-o", "--output", dest="netlist_output", help="Output path")
+    netlist_export.add_argument(
+        "--format", dest="netlist_format", choices=["kicad", "json"], default="kicad"
+    )
+
+
+def _add_erc_parser(subparsers) -> None:
+    """Add ERC subcommand parser with subcommands."""
+    erc_parser = subparsers.add_parser(
+        "erc",
+        help="ERC validation and analysis",
+        description="Run ERC on schematics or analyze ERC reports",
+    )
+
+    erc_subparsers = erc_parser.add_subparsers(
+        dest="erc_command", help="ERC commands", required=True
+    )
+
+    # erc parse subcommand (default behavior for backwards compatibility)
+    # Usage: kct erc parse <file> OR kct erc <file> (auto-inserted by main)
+    erc_parse = erc_subparsers.add_parser(
+        "parse",
+        help="Parse ERC report (default command)",
+        description="Parse and display ERC report from schematic or JSON file",
+    )
+    # Every option of ``erc_cmd.build_parser`` is mirrored here and forwarded
+    # by the ``erc parse`` shim in ``cli/__init__.py`` (Issue #7161); the
+    # drift test in tests/test_cli_parser_drift.py keeps the two in step.
+    erc_parse.add_argument(
+        "report",
+        nargs="?",
+        help="Path to schematic (.kicad_sch) or ERC report (.json or .rpt)",
+    )
+    erc_parse.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    erc_parse.add_argument("--errors-only", action="store_true")
+    erc_parse.add_argument(
+        "--strict",
+        dest="erc_strict",
+        action="store_true",
+        help="Exit with code 2 when only warnings are found",
+    )
+    erc_parse.add_argument(
+        "--type", "-t", dest="filter_type", help="Filter by violation type (view only)"
+    )
+    erc_parse.add_argument("--sheet", help="Filter by sheet path (view only)")
+    erc_parse.add_argument(
+        "--by-sheet", dest="erc_by_sheet", action="store_true", help="Group violations by sheet"
+    )
+    erc_parse.add_argument(
+        "--verbose",
+        "-v",
+        dest="erc_verbose",
+        action="store_true",
+        help="Show detailed violation information",
+    )
+    erc_parse.add_argument(
+        "--filter-config",
+        dest="erc_filter_config",
+        help="TOML file with [[erc.filters]] rules to suppress or reclassify violations",
+    )
+    erc_parse.add_argument(
+        "--keep-report",
+        dest="erc_keep_report",
+        action="store_true",
+        help="Keep the ERC report file after running",
+    )
+    erc_parse.add_argument("--output", "-o", dest="erc_output", help="Save ERC report to this path")
+    erc_parse.add_argument(
+        "--list-types",
+        dest="erc_list_types",
+        action="store_true",
+        help="List all known ERC violation types and exit",
+    )
+
+    # erc explain subcommand
+    erc_explain = erc_subparsers.add_parser(
+        "explain",
+        help="Detailed ERC error analysis with root cause and fixes",
+        description="Analyze ERC errors with detailed explanations, root causes, and fix suggestions",
+    )
+    erc_explain.add_argument(
+        "explain_input",
+        help="Path to schematic (.kicad_sch) or ERC report (.json/.rpt)",
+    )
+    erc_explain.add_argument(
+        "--format",
+        dest="explain_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    erc_explain.add_argument(
+        "--errors-only",
+        dest="explain_errors_only",
+        action="store_true",
+        help="Show only errors, not warnings",
+    )
+    erc_explain.add_argument(
+        "--type",
+        "-t",
+        dest="explain_filter_type",
+        help="Filter by violation type",
+    )
+    erc_explain.add_argument(
+        "--keep-report",
+        dest="explain_keep_report",
+        action="store_true",
+        help="Keep the ERC report file after running",
+    )
+
+
+def _add_drc_parser(subparsers) -> None:
+    """Add DRC subcommand parser."""
+    from kicad_tools.drc.violation import ViolationCategory
+
+    drc_parser = subparsers.add_parser("drc", help="Run DRC or parse a DRC report")
+    drc_parser.add_argument(
+        "report", help="PCB (.kicad_pcb) to check or DRC report (.json/.rpt) to parse"
+    )
+    drc_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    drc_parser.add_argument("--errors-only", action="store_true")
+    drc_parser.add_argument(
+        "--strict", action="store_true", help="Exit with error code on warnings"
+    )
+    drc_parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help=(
+            "Exit 0 instead of 2 when schematic parity did NOT RUN (no "
+            "schematic resolved, several candidates, one kicad-cli cannot "
+            "netlist, or a report that does not record whether parity ran). "
+            "Same name and meaning as kct check --allow-incomplete (Issue #7077)"
+        ),
+    )
+    drc_parser.add_argument(
+        "--ignore-unconnected",
+        action="store_true",
+        help=(
+            "Do not count unconnected-item (missing connection) findings toward "
+            "the verdict and exit code -- the old clearance-only semantics. By "
+            "default an unrouted board fails DRC (Issue #7096)"
+        ),
+    )
+    drc_parser.add_argument(
+        "--schematic",
+        type=Path,
+        default=None,
+        help=(
+            "Schematic for the parity check (default: resolved from the board "
+            "-- project.kct, then <base>.kicad_sch with _routed/_optimized/... "
+            "stripped).  kicad-cli only reads <pcb-stem>.kicad_sch, so kct "
+            "runs it on a temporary copy of the board folder with this "
+            "schematic under the board's name (Issue #7147).  Ignored for "
+            ".json/.rpt report input"
+        ),
+    )
+    drc_parser.add_argument(
+        "--type", "-t", dest="filter_type", help="Filter by violation type (partial match)"
+    )
+    drc_parser.add_argument("--net", help="Filter by net name")
+    drc_parser.add_argument(
+        "--category",
+        "-c",
+        choices=[c.value for c in ViolationCategory],
+        help="Filter by root-cause category (placement, routing, manufacturing, connectivity, cosmetic)",
+    )
+    drc_parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        help="Check against manufacturer design rules",
+    )
+    drc_parser.add_argument(
+        "--layers", "-l", type=int, default=2, help="Number of copper layers (default: 2)"
+    )
+    drc_parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Show detailed violation information"
+    )
+    drc_parser.add_argument(
+        "--suggest", "-s", action="store_true", help="Show fix suggestions for each violation"
+    )
+    drc_parser.add_argument(
+        "--filter-config",
+        type=Path,
+        help="TOML file with [[drc.filters]] rules to suppress or reclassify violations",
+    )
+    drc_parser.add_argument(
+        "--keep-report", action="store_true", help="Keep the DRC report file after running"
+    )
+    drc_parser.add_argument("--output", "-o", type=Path, help="Save DRC report to this path")
+    drc_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        default=None,
+        help=(
+            "Path to a .kct_waivers.json sidecar (schema v2) waiving DRC "
+            "findings by rule + component-ref set; matched findings report as "
+            "WAIVED and are excluded from the error gate. Auto-discovered next "
+            "to the input when omitted (Issue #4691)"
+        ),
+    )
+
+
+def _add_bom_parser(subparsers) -> None:
+    """Add BOM subcommand parser."""
+    bom_parser = subparsers.add_parser("bom", help="Generate bill of materials")
+    bom_parser.add_argument("schematic", help="Path to .kicad_sch file")
+    bom_parser.add_argument(
+        "--format",
+        choices=["table", "csv", "json", "jlcpcb"],
+        default="table",
+        help="Output format (jlcpcb: JLCPCB assembly BOM)",
+    )
+    bom_parser.add_argument("--group", action="store_true", help="Group identical components")
+    bom_parser.add_argument(
+        "--exclude", action="append", default=[], help="Exclude references matching pattern"
+    )
+    bom_parser.add_argument("--include-dnp", action="store_true")
+    bom_parser.add_argument(
+        "--sort", choices=["reference", "value", "footprint"], default="reference"
+    )
+    # Issue #8907 / #8893: these five are declared by the inner parser
+    # (cli/bom_cmd.py) and must be declared here too -- an inner flag the
+    # outer parser does not know is rejected before dispatch (the #3159 /
+    # #4691 drift trap). Keep types, defaults and help text in sync with
+    # bom_cmd.py, and forward each from the `bom` dispatch block.
+    bom_parser.add_argument(
+        "--check-availability",
+        action="store_true",
+        help="Check stock availability from LCSC/JLCPCB",
+    )
+    bom_parser.add_argument(
+        "--check-distributor-stock",
+        action="store_true",
+        help=(
+            "Flag BOM lines with no DigiKey/Mouser stock at --quantity boards "
+            "(needs distributor API credentials; exit 2 if any line is flagged)"
+        ),
+    )
+    bom_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help=(
+            "With --check-availability/--check-distributor-stock, bypass the parts cache "
+            "and fetch live"
+        ),
+    )
+    bom_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate BOM against JLCPCB/LCSC parts library for assembly",
+    )
+    bom_parser.add_argument(
+        "--quantity",
+        type=int,
+        default=1,
+        help="Number of boards (for availability check or validation)",
+    )
+
+
+def _add_creepage_parser(subparsers) -> None:
+    """Add creepage subcommand parser (HV surface-path audit, Issue #4327)."""
+    creepage_parser = subparsers.add_parser(
+        "creepage",
+        help="HV creepage/clearance census (surface-path distance)",
+    )
+    creepage_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    creepage_parser.add_argument(
+        "--net-class",
+        dest="net_class",
+        default="HV",
+        help="Net class to treat as the HV group (default: HV)",
+    )
+    creepage_parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields (parsed by net_class_map_from_dict); nets whose class "
+            "name matches --net-class are the HV group.  Falls back to "
+            "name-pattern classification for unmapped nets."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--min",
+        type=float,
+        default=None,
+        help=(
+            "Required minimum creepage (surface-path) distance in mm.  Manual "
+            "override / phase-1 mode.  Optional when --standard is supplied; "
+            "when BOTH are given the stricter (larger) of {manual, derived} "
+            "governs per pair.  Provide either --standard or --min."
+        ),
+    )
+    # Phase 2 (#4332): derive the required creepage/clearance from an IEC table.
+    creepage_parser.add_argument(
+        "--standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage (and clearance) from an IEC "
+            "standard table instead of --min: iec60664 (IEC 60664-1 Table F.5 "
+            "creepage; clearance = max of Table F.2 at the Table F.1 rated "
+            "impulse voltage and Table F.8 at the steady-state peak) or "
+            "iec62368 (IEC 62368-1 Table 17 / Table 14, same clearance "
+            "derivation).  Requires --working-voltage and --pollution-degree.  "
+            "Insulation type per --insulation (default basic), altitude "
+            "<= 2000 m.  Engineering aid, NOT a certification."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help=(
+            "IEC pollution degree (1=sealed, 2=typical indoor/office FR-4, "
+            "3=conductive pollution).  Required with --standard."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--working-voltage",
+        dest="working_voltage",
+        type=float,
+        default=None,
+        help=(
+            "RMS working voltage in volts.  Creepage keys on this RMS value "
+            "directly (step-up to the next-higher tabulated row, never "
+            "interpolated).  Clearance treats it as the line-to-neutral rated "
+            "voltage: with --overvoltage-category it selects the rated impulse "
+            "withstand voltage (Table F.1) that keys Table F.2, and its peak "
+            "(RMS x sqrt(2), sinusoidal assumption) keys the steady-state "
+            "Table F.8; the larger governs.  Required with --standard unless "
+            "--voltage-map is supplied."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--overvoltage-category",
+        dest="overvoltage_category",
+        choices=["I", "II", "III", "IV"],
+        default="II",
+        help=(
+            "IEC 60664-1 overvoltage category for the clearance derivation "
+            "(Table F.1 rated impulse voltage).  Default II -- equipment "
+            "energised from the fixed mains installation.  Use I for circuits "
+            "with transient protection / not directly mains-connected, III/IV "
+            "for fixed-installation / origin-of-installation equipment."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--insulation",
+        dest="insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="basic",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic (230 V OVC II: "
+            "1.5 mm); supplementary uses the same table values.  Opt in to "
+            "reinforced for mains-to-SELV barriers: the Table F.1 rated impulse "
+            "voltage steps up one preferred-series value before Table F.2 "
+            "(230 V OVC II: 4000 V -> 3.0 mm) and creepage doubles."
+        ),
+    )
+    # Per-net voltage model (#4371): derive the requirement per pair from |ΔV|.
+    creepage_parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to their RMS working "
+            'potential (volts) about a common reference, e.g. {"/AC_LINE": 150, '
+            '"/AC_NEUTRAL": 0, "/SCAP_POS": 90}.  With --standard, the required '
+            "creepage/clearance is derived PER PAIR from |V_a - V_b| instead of "
+            "one global --working-voltage: same-potential nets require ~0 and "
+            "cross-domain pairs use their real difference.  Unmapped nets default "
+            "to 0 V; the reserved key _edge_voltage sets the board-edge/earth "
+            "reference (default 0 V); the reserved key _pair_bounds is a list of "
+            '{"nets": [a, b], "max_dv": V, "why": "..."} device-bounded caps that '
+            "can only LOWER that pair's |ΔV| (transitive pairs are the author's "
+            "to declare); other _-prefixed keys (e.g. _comment) are "
+            "ignored.  Potentials are worst-case DC-equivalent magnitudes -- AC "
+            "phase is not modelled, so |ΔV| is conservative for in-phase nets.  "
+            "Requires --standard (and --pollution-degree)."
+        ),
+    )
+    # Voltage-derived census membership (issue #4401): a high-|V| net whose
+    # routing class is not HV must still enter the census.
+    creepage_parser.add_argument(
+        "--census-threshold",
+        dest="census_threshold",
+        type=float,
+        default=30.0,
+        help=(
+            "Voltage threshold (volts) for voltage-derived HV census membership. "
+            "Only takes effect with --voltage-map: any net whose mapped potential "
+            "differs from the board-edge reference (_edge_voltage) by at least "
+            "this many volts is added to the HV census, in UNION with the "
+            "class-based/name-pattern selection.  This pulls a high-|V| net "
+            "carrying a non-HV routing class (e.g. a 150 V gate-drive net classed "
+            "Digital) into the audit instead of silently excluding it.  Default "
+            "30.0 -- aligned with optimize-placement --hv-threshold."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help=(
+            "Insulation material group by CTI (I: CTI>=600, II: 400<=CTI<600, "
+            "IIIa: 175<=CTI<400, IIIb: 100<=CTI<175).  Default IIIa -- the "
+            "conservative assumption for common FR-4."
+        ),
+    )
+    # Same-footprint waiver (#4403): pairs whose binding gap is between two pads
+    # of ONE footprint are component pin-pitch (functional insulation governed
+    # by the component's own rating, not board creepage tables).  Off by default
+    # -- when set, such pairs stay listed (annotated WAIVED) but drop out of the
+    # exit-code gate so board-level defects are no longer buried.  This is a
+    # STANDALONE-CLI opt-in only: it never relaxes the ``kct audit``
+    # manufacturing-readiness gate (which keys off the raw, un-waived result).
+    creepage_parser.add_argument(
+        "--witness",
+        dest="witness",
+        action="store_true",
+        help=(
+            "Add a Witness column to the table: the A-side closest point (x,y in "
+            "board mm) and the items on each side (pad REF.pin, or "
+            "segment/via/zone:<uuid>, Edge.Cuts), so a failing pair can be located "
+            "in KiCad.  JSON always carries a 'witness' object per row.  Points "
+            "are straight-line closest points: for slot-detour rows (creepage > "
+            "clearance) they mark the clearance gap, not the detour path."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--waive-same-footprint",
+        dest="waive_same_footprint",
+        action="store_true",
+        help=(
+            "Exclude same-footprint pad pairs (component-internal spacing) from "
+            "the exit-code gate.  They remain listed (annotated WAIVED) as "
+            "component-rating residuals -- qualify them at the component, not the "
+            "layout.  A waived same-footprint row is NOT evidence the pair has no "
+            "board-level exposure: such pairs also get a separate board row "
+            "(#8232) that this flag never waives.  Does NOT affect the kct audit "
+            "manufacturing-readiness gate."
+        ),
+    )
+    # Attach-zone waiver (#8028): the census-side counterpart of the router's
+    # #4506 rated-footprint exemption.  Zones come from the same
+    # build_attach_zones() the router uses.  Per-witness: a pair is waived only
+    # if the copper outside the zone still passes.
+    creepage_parser.add_argument(
+        "--waive-attach-zone",
+        dest="waive_attach_zone",
+        action="store_true",
+        help=(
+            "Waive pairs whose binding gap lies inside a rated-footprint attach "
+            "zone (the same zone kct route --voltage-map exempts, #4506) AND "
+            "whose residual -- the pair re-measured with the zone's copper "
+            "clipped away -- still clears the requirement; a failing residual "
+            "keeps the pair FAIL.  Waived rows stay listed (relationship "
+            "attach_zone, WAIVED).  Off by default; does NOT affect the kct "
+            "audit manufacturing-readiness gate."
+        ),
+    )
+    creepage_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help=(
+            "Output format (default: table).  JSON carries two verdicts (#4687): "
+            "'passed' is the raw, waiver-blind result (what kct audit uses), "
+            "while 'gate_passed' honors --waive-same-footprint / --waive-attach-zone and is what the "
+            "exit code follows -- CI consumers should key on 'gate_passed'."
+        ),
+    )
+
+
+def _add_creepage_export_rules_parser(subparsers) -> None:
+    """Add creepage-export-rules parser (referee-enforceable HV rule export, #4508).
+
+    A NEW SIBLING top-level command (NOT a subcommand of the flat ``kct creepage
+    <pcb>`` census): emits voltage-domain netclasses into ``<project>.kicad_pro``
+    and pairwise clearance ``(rule ...)`` clauses into ``<project>.kicad_dru`` so
+    ``kicad-cli pcb drc`` can independently confirm the pairwise HV<->LV creepage
+    requirement.
+    """
+    p = subparsers.add_parser(
+        "creepage-export-rules",
+        help=(
+            "Export voltage-domain netclasses + pairwise HV clearance (rule) "
+            "clauses so kicad-cli DRC enforces creepage (Issue #4508)"
+        ),
+    )
+    p.add_argument("project", help="Path to the .kicad_pro project file")
+    p.add_argument(
+        "--pcb",
+        dest="pcb",
+        default=None,
+        help=(
+            "Path to the .kicad_pcb board (nets + footprints).  Defaults to the "
+            "project's sibling <project>.kicad_pcb."
+        ),
+    )
+    p.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to their RMS working "
+            "potential (volts), same format as `kct creepage --voltage-map`.  "
+            "Without it the command is a clean no-op (nothing written)."
+        ),
+    )
+    p.add_argument(
+        "--standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for the derived per-pair minima (default: iec60664).",
+    )
+    p.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree (default: 2, typical indoor/office FR-4).",
+    )
+    p.add_argument(
+        "--material-group",
+        dest="material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative FR-4).",
+    )
+    p.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        help=(
+            "Minimum |dV| (volts) for a domain pair to receive a pairwise rule "
+            "(default 30.0 -- aligned with the census/placement HV threshold)."
+        ),
+    )
+    p.add_argument(
+        "--dru-floor",
+        dest="dru_floor",
+        type=float,
+        default=None,
+        help=(
+            "Board-wide DRU clearance floor (mm).  Domain pairs at/below this "
+            "require nothing extra (no rule).  Defaults to the project's "
+            "min_clearance, else 0.2mm."
+        ),
+    )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print the derived netclasses + rules without writing any files.",
+    )
+    add_format_flag(p)
+
+
+def _add_check_parser(subparsers) -> None:
+    """Add check subcommand parser (pure Python DRC)."""
+    check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
+    check_parser.add_argument(
+        "pcb",
+        nargs="?",
+        default=None,
+        help="Path to .kicad_pcb file (omit when using --diff OLD NEW)",
+    )
+    # Issue #5946: revision diff + evidence-bound waiver recording.
+    check_parser.add_argument(
+        "--diff",
+        nargs=2,
+        metavar=("OLD", "NEW"),
+        default=None,
+        help=(
+            "Report findings introduced/resolved between two revisions (paths "
+            "or git REV:path specs), paired by stable finding key"
+        ),
+    )
+    check_parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help="Record an evidence-bound waiver for the findings with this key (repeatable)",
+    )
+    check_parser.add_argument("--waive-reason", dest="waive_reason", default=None)
+    check_parser.add_argument("--waive-reviewer", dest="waive_reviewer", default=None)
+    check_parser.add_argument("--waive-issue", dest="waive_issue", default=None)
+    check_parser.add_argument("--physical-copper-gap", type=float, default=None, metavar="MM")
+    check_parser.add_argument(
+        "--mask-copper-config",
+        help="Path to explicit mask-to-copper process policy and native runtime JSON",
+    )
+    check_parser.add_argument(
+        "--format", choices=["table", "json", "summary", "sarif"], default="table"
+    )
+    check_parser.add_argument("--errors-only", action="store_true")
+    check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
+    check_parser.add_argument(
+        "--3d-models",
+        dest="models_3d",
+        action="store_true",
+        help="Run the model_coverage category (issue #7682); default-on since #7685, "
+        "so this flag is a no-op kept for compatibility",
+    )
+    check_parser.add_argument(
+        "--strict-connectivity",
+        dest="strict_connectivity",
+        action="store_true",
+        help=(
+            "No-op kept for script compatibility: real-geometry (strict) "
+            "connectivity is now the DEFAULT for the connectivity DRC rule "
+            "(issue #4673, matching kct net-status since issue #4557). Use "
+            "--legacy-connectivity to opt back into the old proximity model. "
+            "Distinct from --strict (warnings fatal)."
+        ),
+    )
+    check_parser.add_argument(
+        "--legacy-connectivity",
+        dest="legacy_connectivity",
+        action="store_true",
+        help=(
+            "Opt the connectivity DRC rule back into the LEGACY 0.01mm "
+            "endpoint-proximity model (the pre-#4673 default). Takes "
+            "precedence over --strict-connectivity (a no-op) if both are "
+            "given."
+        ),
+    )
+    check_parser.add_argument(
+        "--refill-zones",
+        dest="refill_zones",
+        action="store_true",
+        help=(
+            "Before checking, run `kicad-cli pcb drc --refill-zones "
+            "--save-board` to bring the on-disk zone fills back in sync with "
+            "the copper (issue #4096).  WARNING: this MUTATES the board file "
+            "in place (--save-board rewrites <pcb>).  Fixes phantom "
+            "clearance_*_zone findings caused by stale committed fills.  "
+            "Requires kicad-cli (KiCad 8+); degrades gracefully with a "
+            "warning if kicad-cli is not installed."
+        ),
+    )
+    check_parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Target manufacturer. When omitted, auto-resolves from the "
+            "fab_profile.json sidecar, then project.kct target_fab, then "
+            "falls back to jlcpcb. An explicit --mfr always wins."
+        ),
+    )
+    check_parser.add_argument(
+        "--fab-dfm-result",
+        dest="fab_dfm_result",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a recorded fab DFM tool result (JSON in the shape of "
+            "tests/fixtures/fab_dfm_parity/jlcdfm_*.json, with a 'counts' "
+            "object). Given one, the Fab DFM parity stanza and the "
+            "fab_dfm_parity JSON section print kct's per-category "
+            "error/warning counts beside the recorded fab danger/warning "
+            "counts, and visibly mark categories where the fab reports "
+            "danger but kct reports zero errors (issue #8940). "
+            "JLCPCB-family --mfr only; malformed input is an error."
+        ),
+    )
+    check_parser.add_argument("--layers", "-l", type=int, default=2, help="Number of layers")
+    # Issue #5810: shared definition with check_cmd.py -- a raw string with a
+    # None default, so the keyed form (outer=2,inner=0.5) parses and an
+    # omitted flag defers to the board stackup / profile default.
+    add_check_copper_argument(check_parser)
+    check_parser.add_argument(
+        "--only",
+        dest="only_checks",
+        help=f"Run only specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
+    )
+    check_parser.add_argument(
+        "--skip",
+        dest="skip_checks",
+        help=f"Skip specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
+    )
+    from .check_cmd import add_check_scope_arguments
+
+    add_check_scope_arguments(check_parser)
+    check_parser.add_argument(
+        "--emit-dru",
+        dest="emit_dru",
+        action="store_true",
+        help=(
+            "Emit a sibling <board>.kicad_dru from the SAME resolved design "
+            "rules this check enforced, so 'kicad-cli pcb drc' reasons over "
+            "identical fab-tier floors (issue #4375). Side effect only: never "
+            "modifies the .kicad_pcb or changes the exit code. A .kicad_dru "
+            "alone does NOT give clearance parity (kicad-cli reads the applied "
+            "Default netclass clearance from .kicad_pro, #4097) -- use "
+            "--emit-drc-constraints for full parity."
+        ),
+    )
+    check_parser.add_argument(
+        "--emit-drc-constraints",
+        dest="emit_drc_constraints",
+        action="store_true",
+        help=(
+            "Emit BOTH sidecars (<board>.kicad_dru and <board>.kicad_pro) from "
+            "the SAME resolved design rules this check enforced (issue #4375). "
+            "The .kicad_pro write relaxes the built-in minimums AND the applied "
+            "Default netclass clearance so kicad-cli's clearance test agrees by "
+            "construction (#4097). Preserves an existing .kicad_pro, overwriting "
+            "only the constraint/severity/Default-netclass entries. Recommended "
+            "flag for a kicad-cli cross-gate; --emit-dru is its DRU-only subset."
+        ),
+    )
+    check_parser.add_argument("-v", "--verbose", action="store_true")
+    check_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Write JSON report to file (implies --format json for file output)",
+    )
+    check_parser.add_argument(
+        "--suppress-library",
+        action="store_true",
+        help="Suppress silkscreen warnings from standard KiCad library footprints",
+    )
+    check_parser.add_argument(
+        "--drc-only",
+        dest="drc_only",
+        action="store_true",
+        help=(
+            "Legacy DRC-only mode (issue #3750): skip the ERC / LVS / "
+            "Manifest meta sub-checks and preserve the pre-#3750 stdout "
+            "and exit-code contract.  Use this in CI scripts and recipes "
+            "that depend on the historical 'kct check' semantics."
+        ),
+    )
+    check_parser.add_argument(
+        "--allow-incomplete",
+        dest="allow_incomplete",
+        action="store_true",
+        help=(
+            "Treat Overall: INCOMPLETE (any sub-check NOT RUN) as exit 0 "
+            "(issue #3750).  By default INCOMPLETE exits non-zero so "
+            "consumers that read the exit code do not silently accept a "
+            "partially verified board.  Use this for boards / recipes that "
+            "legitimately lack a sub-check input (no schematic, or "
+            "kct check runs before kct export produces the manifest)."
+        ),
+    )
+    check_parser.add_argument(
+        "--netlist-sync",
+        action="store_true",
+        help=(
+            "Run a blocking schematic/PCB netlist-sync gate (issue #3154): "
+            "compares the schematic component set against the PCB footprint "
+            "set and exits with code 2 when a schematic component is missing "
+            "from the PCB (unbuildable BOM) or a matched component's value or "
+            "footprint diverges (wrong part / wrong package). Benign "
+            "rating-suffix value diffs (issue #4351) do not fail the gate; "
+            "PCB-only extras stay a warning unless --strict. Skips silently "
+            "if no schematic is found."
+        ),
+    )
+    check_parser.add_argument(
+        "--schematic",
+        default=None,
+        help=(
+            "Explicit .kicad_sch path for --netlist-sync / the advisory drift "
+            "banner (default: auto-discover from project.kct or sibling file)."
+        ),
+    )
+    check_parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields.  When supplied, enables the diff-pair DRC rules "
+            "(routing_continuity, length_skew) to fire on routed boards "
+            "(Issue #2684).  Auto-discovered next to the board when this "
+            "flag is omitted -- as <board-stem>.net_class_map.json or "
+            "net_class_map.json, in the board dir then output/ then "
+            "../output/ (Issue #4601).  Use --no-net-class-map to suppress "
+            "that auto-discovery."
+        ),
+    )
+    check_parser.add_argument(
+        "--require-routing-policy",
+        dest="require_routing_policy",
+        action="store_true",
+        help=(
+            "Fail the routing_policy check for every sensitive net class "
+            "(length_critical, noise_sensitive, length_match_group or "
+            "diffpair_partner) whose routed nets declare neither "
+            "max_vias_per_net nor length_constraint.max_length in the "
+            "net-class map (Issue #6044).  Pour nets are exempt.  Needs a "
+            "net-class map.  Off by default."
+        ),
+    )
+    check_parser.add_argument(
+        "--no-net-class-map",
+        dest="no_net_class_map",
+        action="store_true",
+        help=(
+            "Suppress net-class-map sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (the diff-pair / match-group skew rules "
+            "stay inactive).  Cannot be combined with --net-class-map "
+            "(Issue #4601)."
+        ),
+    )
+    check_parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (stable RefDes.pad source/sink endpoints with their own "
+            "declared current, Issue #4980).  When supplied, enables the "
+            "path_ampacity DRC rule to check each declared branch "
+            "independently of --net-class-map's whole-net target_ampacity.  "
+            "Auto-discovered next to the board when this flag is omitted -- "
+            "as <board-stem>.current_paths.json or current_paths.json, in "
+            "the board dir then output/ then ../output/ (mirrors "
+            "--net-class-map, Issue #5124).  Use --no-current-paths to "
+            "suppress that auto-discovery."
+        ),
+    )
+    check_parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive).  Cannot "
+            "be combined with --current-paths."
+        ),
+    )
+    check_parser.add_argument(
+        "--courtyard-waivers",
+        dest="courtyard_waivers",
+        default=None,
+        help=(
+            "Path to a .courtyard_waivers.json sidecar waiving specific "
+            "courtyard-overlap pairs.  Matching overlapping pairs report as "
+            "WAIVED instead of failing the gate.  Auto-discovered next to the "
+            "board when this flag is omitted (Issue #4137)."
+        ),
+    )
+    check_parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        default=None,
+        help=(
+            "Path to a general waivers sidecar (schema version 2, or 3 for "
+            "evidence-bound keyed entries, Issue #5946) waiving findings for "
+            "ANY rule.  Matched findings report as WAIVED instead of failing "
+            "the gate; an evidence-bound entry whose evidence changed is STALE "
+            "and does not suppress its finding.  Auto-discovered next to the "
+            "board (<board>.kct-waivers.json, then .kct_waivers.json) when "
+            "this flag is omitted (Issue #4417)."
+        ),
+    )
+    # Issue #3061: per-board auto-derive of the pad_grid tolerance is the
+    # default for the CLI.  --pad-grid-strict opts back into the PR #3057
+    # fixed-0.05mm constant; --pad-grid-tolerance pins a custom value.
+    pad_grid_group = check_parser.add_mutually_exclusive_group()
+    pad_grid_group.add_argument(
+        "--pad-grid-strict",
+        action="store_true",
+        help=(
+            "Use the fixed 0.05mm pad_grid tolerance (PR #3057 default) "
+            "instead of auto-deriving per-board from the pad-offset "
+            "histogram (issue #3061).  Default: auto-derive."
+        ),
+    )
+    pad_grid_group.add_argument(
+        "--pad-grid-tolerance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Override the pad_grid L2 tolerance with an explicit value "
+            "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
+            "auto-derivation."
+        ),
+    )
+    # Issue #4595: sch_fields schematic field-geometry lint threshold.
+    # Declared on BOTH parsers + forwarded by the shim (see the parser-drift
+    # guard in tests/test_cli_parser_drift.py, issue #4633).
+    check_parser.add_argument(
+        "--sch-field-threshold",
+        dest="sch_field_threshold",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Distance in mm beyond which the sch_fields lint flags a "
+            "visible Reference/Value field as adrift from its symbol body "
+            "(default 15.0, warning severity only; issue #4595).  Fixed "
+            "threshold -- an adaptive per-sheet-median variant is deferred."
+        ),
+    )
+    # Issue #4651: opt-in routing-quality threshold gate over the advisory
+    # #4623 metrics.  Declared on BOTH parsers + forwarded by the shim (see
+    # the parser-drift guard in tests/test_cli_parser_drift.py, #4633).
+    check_parser.add_argument(
+        "--max-fragment-fraction",
+        dest="max_fragment_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's fragment_fraction (share of copper segments "
+            "shorter than 0.25 mm) exceeds this ceiling (0.0-1.0). Exceeding "
+            "emits an error-severity routing_quality_fragment_fraction "
+            "violation and exits 2; equal-to-ceiling passes. Default: unset "
+            "(advisory-only metrics, no gating)."
+        ),
+    )
+    check_parser.add_argument(
+        "--max-staircase-fraction",
+        dest="max_staircase_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's staircase_fraction (share of copper segments "
+            "that are H/V staircase steps with legs shorter than 0.6 mm) "
+            "exceeds this ceiling (0.0-1.0). Exceeding emits an "
+            "error-severity routing_quality_staircase_fraction violation and "
+            "exits 2; equal-to-ceiling passes. Default: unset (advisory-only "
+            "metrics, no gating)."
+        ),
+    )
+    check_parser.add_argument(
+        "--max-off-axis-fraction",
+        dest="max_off_axis_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #8884): fail the check when "
+            "the worst single layer's length-weighted off-axis fraction "
+            "exceeds this ceiling (0.0-1.0). Exceeding emits an "
+            "error-severity routing_quality_off_axis_fraction violation and "
+            "exits 2; equal-to-ceiling passes. Default: unset (advisory-only)."
+        ),
+    )
+
+
+def _add_sch_parser(subparsers) -> None:
+    """Add schematic subcommand parser with its subcommands."""
+    sch_parser = subparsers.add_parser("sch", help="Schematic analysis tools")
+    sch_subparsers = sch_parser.add_subparsers(dest="sch_command", help="Schematic commands")
+
+    # sch summary
+    sch_summary = sch_subparsers.add_parser("summary", help="Quick schematic overview")
+    sch_summary.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_summary.add_argument("--format", choices=["text", "json"], default="text")
+    sch_summary.add_argument("-v", "--verbose", action="store_true")
+
+    # sch hierarchy
+    sch_hierarchy = sch_subparsers.add_parser("hierarchy", help="Show hierarchy tree")
+    sch_hierarchy.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_hierarchy.add_argument(
+        "hierarchy_command",
+        nargs="?",
+        default="tree",
+        choices=["tree", "list", "labels", "path", "stats", "validate"],
+        help="Hierarchy subcommand (default: tree)",
+    )
+    sch_hierarchy.add_argument("--format", choices=["tree", "json"], default="tree")
+    sch_hierarchy.add_argument("--depth", type=int, help="Maximum depth to show")
+
+    # sch labels
+    sch_labels = sch_subparsers.add_parser("labels", help="List labels")
+    sch_labels.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_labels.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    sch_labels.add_argument(
+        "--type", choices=["all", "local", "global", "hierarchical", "power"], default="all"
+    )
+    sch_labels.add_argument("--filter", dest="pattern", help="Filter by label text pattern")
+
+    # sch validate
+    sch_validate = sch_subparsers.add_parser("validate", help="Run validation checks")
+    sch_validate.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_validate.add_argument("--format", choices=["text", "json"], default="text")
+    sch_validate.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 on any warning (errors and checks not run already exit 1)",
+    )
+    sch_validate.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
+    sch_validate.add_argument(
+        "--lib-path",
+        action="append",
+        dest="lib_paths",
+        metavar="DIR",
+        help="Directory of .kicad_sym files used when a symbol is missing from "
+        "the schematic's embedded lib_symbols. May be repeated.",
+    )
+    sch_validate.add_argument(
+        "--skip",
+        action="append",
+        dest="skip_checks",
+        metavar="CHECK",
+        help="Skip a validation check category (e.g. swd_routing). May be repeated.",
+    )
+
+    # sch preflight
+    sch_preflight = sch_subparsers.add_parser(
+        "preflight", help="Pre-layout validation (footprint resolution, pin/pad, nets)"
+    )
+    sch_preflight.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_preflight.add_argument("--format", choices=["text", "json"], default="text")
+    sch_preflight.add_argument("--strict", action="store_true", help="Exit with error on warnings")
+    sch_preflight.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
+
+    # sch wires
+    sch_wires = sch_subparsers.add_parser("wires", help="List wire segments and junctions")
+    sch_wires.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_wires.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    sch_wires.add_argument("--stats", action="store_true", help="Show statistics only")
+    sch_wires.add_argument("--junctions", action="store_true", help="Include junction points")
+
+    # sch info
+    sch_info = sch_subparsers.add_parser("info", help="Show symbol details")
+    sch_info.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_info.add_argument("reference", help="Symbol reference (e.g., U1)")
+    sch_info.add_argument("--format", choices=["text", "json"], default="text")
+    sch_info.add_argument("--show-pins", action="store_true", help="Show pin details")
+    sch_info.add_argument("--show-properties", action="store_true", help="Show all properties")
+
+    # sch pins
+    sch_pins = sch_subparsers.add_parser("pins", help="Show symbol pin positions")
+    sch_pins.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_pins.add_argument("reference", help="Symbol reference (e.g., U1)")
+    sch_pins.add_argument(
+        "--lib",
+        required=False,
+        default=None,
+        help="Path to symbol library file (uses embedded lib_symbols when omitted)",
+    )
+    sch_pins.add_argument("--format", choices=["table", "json"], default="table")
+
+    # sch pin-map
+    sch_pin_map = sch_subparsers.add_parser("pin-map", help="Show resolved pin-to-net assignments")
+    sch_pin_map.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_pin_map.add_argument("--ref", help="Filter by symbol reference (e.g., U1)")
+    sch_pin_map.add_argument(
+        "--sheet", help="Restrict to a specific sheet (name or path substring)"
+    )
+    sch_pin_map.add_argument(
+        "--format", choices=["table", "json"], default="json", help="Output format (default: json)"
+    )
+
+    # sch connections
+    sch_connections = sch_subparsers.add_parser(
+        "connections", help="Check pin connections using library positions"
+    )
+    sch_connections.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_connections.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_connections.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_connections.add_argument("--format", choices=["table", "json"], default="table")
+    sch_connections.add_argument("--filter", dest="pattern", help="Filter by symbol reference")
+    sch_connections.add_argument(
+        "-v", "--verbose", action="store_true", help="Show all pins, not just unconnected"
+    )
+
+    # sch unconnected
+    sch_unconnected = sch_subparsers.add_parser(
+        "unconnected", help="Find unconnected pins and issues"
+    )
+    sch_unconnected.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_unconnected.add_argument("--format", choices=["table", "json"], default="table")
+    sch_unconnected.add_argument("--filter", dest="pattern", help="Filter by symbol reference")
+    sch_unconnected.add_argument(
+        "--include-power", action="store_true", help="Include power symbols"
+    )
+    sch_unconnected.add_argument("--include-dnp", action="store_true", help="Include DNP symbols")
+    sch_unconnected.add_argument(
+        "--no-check-netlist-export",
+        dest="check_netlist_export",
+        action="store_false",
+        default=True,
+        help="Skip the netlist-export cross-check (default: enabled)",
+    )
+
+    # sch replace
+    sch_replace = sch_subparsers.add_parser("replace", help="Replace a symbol's library ID")
+    sch_replace.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_replace.add_argument("reference", help="Symbol reference to replace (e.g., U1)")
+    sch_replace.add_argument("new_lib_id", help="New library ID (e.g., 'mylib:NewSymbol')")
+    sch_replace.add_argument("--value", help="New value for the symbol")
+    sch_replace.add_argument("--footprint", help="New footprint")
+    sch_replace.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    sch_replace.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_replace)
+
+    # sch set-footprint
+    sch_set_fp = sch_subparsers.add_parser(
+        "set-footprint", help="Set footprint assignments for symbols"
+    )
+    sch_set_fp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_fp.add_argument("--ref", help="Symbol reference (e.g., U2, R1)")
+    sch_set_fp.add_argument(
+        "--footprint", help="Footprint to assign (e.g., Package_TO_SOT_SMD:SOT-23-5)"
+    )
+    sch_set_fp.add_argument(
+        "--map",
+        dest="map_file",
+        help="Path to JSON or CSV mapping file (ref -> footprint)",
+    )
+    sch_set_fp.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_fp.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    sch_set_fp.add_argument(
+        "--no-validate",
+        dest="validate",
+        action="store_false",
+        default=True,
+        help="Skip pin-count validation against the footprint library",
+    )
+    sch_set_fp.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail on any pin-count mismatch, even in batch mode",
+    )
+    add_format_flag(sch_set_fp)
+
+    # sch assign-footprints
+    sch_assign_fp = sch_subparsers.add_parser(
+        "assign-footprints",
+        help="Bulk-assign footprints to symbols missing one (auto + dry-run + json)",
+    )
+    sch_assign_fp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_assign_fp.add_argument(
+        "--auto",
+        action="store_true",
+        default=True,
+        help=("Assign only unambiguous candidates (default; only mode currently supported)."),
+    )
+    sch_assign_fp.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Preview the proposed mapping without modifying files",
+    )
+    sch_assign_fp.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    sch_assign_fp.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Max candidates considered per symbol (default: 20)",
+    )
+    sch_assign_fp.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip backup files on write",
+    )
+    sch_assign_fp.add_argument(
+        "--no-validate",
+        dest="validate",
+        action="store_false",
+        default=True,
+        help="Skip pin-count validation on the resolved mapping",
+    )
+    sch_assign_fp.add_argument(
+        "--include-power",
+        action="store_true",
+        help="Also consider power: symbols (default: skip)",
+    )
+    sch_assign_fp.add_argument(
+        "--include-dnp",
+        action="store_true",
+        help="Also consider DNP symbols (default: skip)",
+    )
+    sch_assign_fp.add_argument(
+        "--assign-missing",
+        action="store_true",
+        help=(
+            "Resolve missing footprints with a deterministic value+package "
+            "heuristic for standard SMD passives (no installed library "
+            "required); unknown parts fail loud with a non-zero exit"
+        ),
+    )
+    sch_assign_fp.add_argument(
+        "--force",
+        action="store_true",
+        help="Reconsider symbols that already have a non-empty footprint",
+    )
+    sch_assign_fp.add_argument(
+        "--no-project-lib",
+        action="store_true",
+        help=(
+            "Ignore the project's fp-lib-table and only use global "
+            "footprint libraries (CI / reproducibility opt-out)"
+        ),
+    )
+
+    # sch suggest-footprint
+    sch_suggest_fp = sch_subparsers.add_parser(
+        "suggest-footprint",
+        help="Suggest library footprints for a symbol by pin count / package",
+    )
+    sch_suggest_fp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_suggest_fp.add_argument("--ref", required=True, help="Symbol reference (e.g., U7, R1)")
+    sch_suggest_fp.add_argument(
+        "--package",
+        help="Package keyword hint to filter/rank candidates (e.g., SOT-23, R_0603)",
+    )
+    sch_suggest_fp.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    sch_suggest_fp.add_argument(
+        "--limit", type=int, default=20, help="Maximum number of suggestions (default: 20)"
+    )
+    sch_suggest_fp.add_argument(
+        "--no-project-lib",
+        action="store_true",
+        help=(
+            "Ignore the project's fp-lib-table and only use global "
+            "footprint libraries (CI / reproducibility opt-out)."
+        ),
+    )
+
+    # sch set-value
+    sch_set_val = sch_subparsers.add_parser("set-value", help="Set value property for symbols")
+    sch_set_val.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_val.add_argument("--ref", help="Symbol reference (e.g., U4, R1)")
+    sch_set_val.add_argument("--value", help="Value to assign (e.g., AP2204K-3.3TRG1)")
+    sch_set_val.add_argument(
+        "--map",
+        dest="map_file",
+        help="Path to JSON or CSV mapping file (ref -> value)",
+    )
+    sch_set_val.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_val.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_set_val)
+
+    # sch set-reference
+    sch_set_ref = sch_subparsers.add_parser(
+        "set-reference", help="Rename component reference designators"
+    )
+    sch_set_ref.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_ref.add_argument("--ref", help="Current reference designator (e.g., LED3)")
+    sch_set_ref.add_argument("--new-ref", help="New reference designator (e.g., D3)")
+    sch_set_ref.add_argument(
+        "--map",
+        dest="map_file",
+        help="Path to JSON or CSV mapping file (old_ref -> new_ref)",
+    )
+    sch_set_ref.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_ref.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_set_ref)
+
+    # sch set-symbol-property
+    sch_set_prop = sch_subparsers.add_parser(
+        "set-symbol-property",
+        help="Set symbol-level boolean flags (on_board, in_bom, dnp, exclude_from_sim)",
+    )
+    sch_set_prop.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_set_prop.add_argument("--ref", required=True, help="Symbol reference (e.g., #PWR052, U1)")
+    sch_set_prop.add_argument(
+        "--property",
+        dest="property_name",
+        required=True,
+        help="Flag to modify (on_board, in_bom, dnp, exclude_from_sim)",
+    )
+    sch_set_prop.add_argument("--value", required=True, help="Value to set (yes/no/true/false/1/0)")
+    sch_set_prop.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_prop.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_set_prop)
+
+    # sch sync-hierarchy
+    sch_sync = sch_subparsers.add_parser(
+        "sync-hierarchy", help="Synchronize sheet pins and hierarchical labels"
+    )
+    sch_sync.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_sync.add_argument(
+        "--add-labels",
+        action="store_true",
+        help="Add missing hierarchical labels to child sheets",
+    )
+    sch_sync.add_argument(
+        "--remove-orphan-pins",
+        action="store_true",
+        help="Remove sheet pins that have no matching labels",
+    )
+    sch_sync.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Interactive mode - prompt for each action",
+    )
+    sch_sync.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    sch_sync.add_argument("--format", choices=["text", "json"], default="text")
+    sch_sync.add_argument("--sheet", help="Focus on a specific sheet")
+
+    # sch rename-signal
+    sch_rename_signal = sch_subparsers.add_parser(
+        "rename-signal", help="Rename a signal across the hierarchy"
+    )
+    sch_rename_signal.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_rename_signal.add_argument(
+        "--from", dest="old_name", required=True, help="Current signal name to rename"
+    )
+    sch_rename_signal.add_argument("--to", dest="new_name", required=True, help="New signal name")
+    sch_rename_signal.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_rename_signal.add_argument(
+        "--yes", "-y", action="store_true", help="Skip confirmation prompt"
+    )
+    sch_rename_signal.add_argument(
+        "--include-nets", action="store_true", help="Also rename matching net labels"
+    )
+    sch_rename_signal.add_argument(
+        "--include-globals", action="store_true", help="Also rename matching global labels"
+    )
+    sch_rename_signal.add_argument("--format", choices=["text", "json"], default="text")
+
+    # sch set-label-direction
+    sch_set_label_dir = sch_subparsers.add_parser(
+        "set-label-direction", help="Change shape (direction) of global/hierarchical labels"
+    )
+    sch_set_label_dir.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_set_label_dir.add_argument("--name", required=True, help="Label name to match")
+    sch_set_label_dir.add_argument(
+        "--shape",
+        required=True,
+        choices=("input", "output", "bidirectional", "tri_state", "passive"),
+        help="New shape value",
+    )
+    sch_set_label_dir.add_argument(
+        "--sheet", help="Restrict to a specific sheet (name or path substring)"
+    )
+    sch_set_label_dir.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_set_label_dir.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_set_label_dir)
+    # sch add-no-connect
+    sch_add_nc = sch_subparsers.add_parser("add-no-connect", help="Add no-connect markers to pins")
+    sch_add_nc.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_nc.add_argument("--ref", help="Symbol reference (e.g., U1)")
+    sch_add_nc.add_argument("--pin", help="Pin number to mark")
+    sch_add_nc.add_argument(
+        "--auto", action="store_true", help="Auto-detect and mark all unconnected pins"
+    )
+    sch_add_nc.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_add_nc.add_argument("--lib", action="append", dest="libs", help="Specific library file")
+    sch_add_nc.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_nc.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    add_format_flag(sch_add_nc)
+
+    # sch add-component
+    sch_add_comp = sch_subparsers.add_parser(
+        "add-component", help="Add a component symbol to the schematic"
+    )
+    sch_add_comp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_comp.add_argument(
+        "--lib-id", required=True, help="Library symbol ID (e.g., Device:R, power:GND)"
+    )
+    sch_add_comp.add_argument("--reference", help="Symbol reference (e.g., R1, U1)")
+    sch_add_comp.add_argument("--value", help="Component value (e.g., 10k, 100nF)")
+    sch_add_comp.add_argument(
+        "--footprint", help="Footprint name (e.g., Resistor_SMD:R_0402_1005Metric)"
+    )
+    sch_add_comp.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="Placement coordinates",
+    )
+    sch_add_comp.add_argument(
+        "--rotation", type=float, default=0, help="Rotation in degrees (default: 0)"
+    )
+    sch_add_comp.add_argument(
+        "--mirror", choices=["x", "y"], default="", help="Mirror mode (x or y)"
+    )
+    sch_add_comp.add_argument(
+        "--connect",
+        action="append",
+        dest="connects",
+        metavar="PIN:X,Y",
+        help="Connect pin to coordinates (e.g., 1:120,80). Repeatable.",
+    )
+    sch_add_comp.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_add_comp.add_argument("--lib", action="append", dest="libs", help="Specific library file")
+    sch_add_comp.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_comp.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_add_comp)
+
+    # sch add-bypass-cap
+    sch_add_bypass = sch_subparsers.add_parser(
+        "add-bypass-cap",
+        help="Add a bypass/decoupling capacitor to an IC power pin",
+    )
+    sch_add_bypass.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_bypass.add_argument(
+        "--ref", required=True, help="Target IC reference designator (e.g., U8)"
+    )
+    sch_add_bypass.add_argument(
+        "--pin", required=True, help="Target pin number on that IC (e.g., 4)"
+    )
+    sch_add_bypass.add_argument("--value", default="100nF", help="Capacitor value (default: 100nF)")
+    sch_add_bypass.add_argument(
+        "--ground-net",
+        default="GND",
+        help="Ground power symbol name (default: GND)",
+    )
+    sch_add_bypass.add_argument(
+        "--footprint",
+        default="Capacitor_SMD:C_0402_1005Metric",
+        help="Capacitor footprint (default: Capacitor_SMD:C_0402_1005Metric)",
+    )
+    sch_add_bypass.add_argument(
+        "--reference", default=None, help="Capacitor reference (auto-assigned if omitted)"
+    )
+    sch_add_bypass.add_argument(
+        "--offset",
+        type=float,
+        default=5.08,
+        help="Distance from pin to cap body centre in mm (default: 5.08)",
+    )
+    sch_add_bypass.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_bypass.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_add_bypass)
+
+    # sch add-pull-resistor
+    sch_add_pull = sch_subparsers.add_parser(
+        "add-pull-resistor",
+        help="Add a pull-up or pull-down resistor to a schematic pin",
+    )
+    sch_add_pull.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_pull.add_argument(
+        "--ref", required=True, help="Symbol reference of target IC (e.g., U5)"
+    )
+    sch_add_pull.add_argument("--pin", required=True, help="Pin number on target IC (e.g., 25)")
+    sch_add_pull.add_argument(
+        "--direction",
+        required=True,
+        choices=["up", "down"],
+        help="Pull-up (power) or pull-down (ground)",
+    )
+    sch_add_pull.add_argument("--value", required=True, help="Resistor value (e.g., 10k)")
+    sch_add_pull.add_argument(
+        "--power-net",
+        dest="power_net",
+        help="Power/ground net name (default: +3.3V for up, GND for down)",
+    )
+    sch_add_pull.add_argument(
+        "--reference",
+        help="Reference designator for new resistor (default: R? auto-assign)",
+    )
+    sch_add_pull.add_argument(
+        "--footprint",
+        default="Resistor_SMD:R_0402_1005Metric",
+        help="Resistor footprint (default: Resistor_SMD:R_0402_1005Metric)",
+    )
+    sch_add_pull.add_argument(
+        "--offset",
+        type=float,
+        default=5.08,
+        help="Grid distance from IC pin to resistor center in mm (default: 5.08)",
+    )
+    sch_add_pull.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_add_pull.add_argument("--lib", action="append", dest="libs", help="Specific library file")
+    sch_add_pull.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_pull.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_add_pull.add_argument(
+        "--force", action="store_true", help="Place even if collision detected"
+    )
+    add_format_flag(sch_add_pull)
+
+    # sch add-wire
+    sch_add_wire = sch_subparsers.add_parser("add-wire", help="Add wire segments to the schematic")
+    sch_add_wire.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_wire.add_argument(
+        "--from",
+        nargs=2,
+        type=float,
+        required=True,
+        dest="start",
+        metavar=("X", "Y"),
+        help="Start coordinate",
+    )
+    sch_add_wire.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        action="append",
+        required=True,
+        metavar=("X", "Y"),
+        help="End coordinate (repeatable for multi-segment wires)",
+    )
+    sch_add_wire.add_argument(
+        "--junction",
+        action="store_true",
+        help="Auto-insert junctions where endpoints land on existing wire midpoints",
+    )
+    sch_add_wire.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_wire.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_add_wire)
+
+    # sch add-junction
+    sch_add_junc = sch_subparsers.add_parser("add-junction", help="Add a junction to the schematic")
+    sch_add_junc.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_junc.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="Junction coordinates",
+    )
+    sch_add_junc.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_junc.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_add_junc)
+
+    # sch add-label
+    sch_add_label = sch_subparsers.add_parser(
+        "add-label", help="Add a label (local, global, or hierarchical) to the schematic"
+    )
+    sch_add_label.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_add_label.add_argument(
+        "--type",
+        required=True,
+        choices=["global", "local", "hierarchical"],
+        help="Label type",
+    )
+    sch_add_label.add_argument("--name", required=True, help="Label text / net name")
+    sch_add_label.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="Placement coordinates",
+    )
+    sch_add_label.add_argument(
+        "--shape",
+        choices=["input", "output", "bidirectional", "tri_state", "passive"],
+        default=None,
+        help="Label shape (global and hierarchical only)",
+    )
+    sch_add_label.add_argument(
+        "--rotation", type=float, default=0, help="Rotation in degrees (default: 0)"
+    )
+    sch_add_label.add_argument(
+        "--connect",
+        action="append",
+        dest="connects",
+        metavar="X,Y",
+        help="Draw wire from label to target coordinates (e.g., 120,80). Repeatable.",
+    )
+    sch_add_label.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_add_label.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_add_label)
+
+    # sch cleanup-wires
+    sch_cleanup = sch_subparsers.add_parser(
+        "cleanup-wires", help="Remove zero-length and dangling wires"
+    )
+    sch_cleanup.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_cleanup.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_cleanup.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    sch_cleanup.add_argument("--format", choices=["text", "json"], default="text")
+    sch_cleanup.add_argument(
+        "--stub-threshold",
+        type=float,
+        default=1.27,
+        dest="stub_threshold",
+        help="Max length (mm) for single-end-dangling stubs to remove (default: 1.27, 0 to disable)",
+    )
+
+    # sch remove-wire
+    sch_remove_wire = sch_subparsers.add_parser(
+        "remove-wire", help="Remove a specific wire segment"
+    )
+    sch_remove_wire.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_remove_wire.add_argument(
+        "--from",
+        nargs=2,
+        type=float,
+        dest="from_pt",
+        metavar=("X", "Y"),
+        help="Start endpoint of wire to remove",
+    )
+    sch_remove_wire.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        dest="to_pt",
+        metavar=("X", "Y"),
+        help="End endpoint of wire to remove",
+    )
+    sch_remove_wire.add_argument(
+        "--near",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Find and remove wire nearest to this point",
+    )
+    sch_remove_wire.add_argument(
+        "--tolerance",
+        type=float,
+        default=1.27,
+        help="Coordinate matching tolerance in mm (default: 1.27)",
+    )
+    sch_remove_wire.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_remove_wire.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_remove_wire.add_argument("--format", choices=["text", "json"], default="text")
+
+    # sch insert-inline
+    sch_insert_inline = sch_subparsers.add_parser(
+        "insert-inline",
+        help="Break a wire and insert a component inline in a signal path",
+    )
+    sch_insert_inline.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_insert_inline.add_argument(
+        "--lib-id", required=True, help="Library symbol ID (e.g., Device:D)"
+    )
+    sch_insert_inline.add_argument("--reference", help="Symbol reference (e.g., D1)")
+    sch_insert_inline.add_argument("--value", default="", help="Component value (e.g., BAT54)")
+    sch_insert_inline.add_argument("--footprint", default="", help="Footprint name")
+    sch_insert_inline.add_argument(
+        "--from",
+        nargs=2,
+        type=float,
+        dest="from_pt",
+        metavar=("X", "Y"),
+        help="Start endpoint of the target wire",
+    )
+    sch_insert_inline.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        dest="to_pt",
+        metavar=("X", "Y"),
+        help="End endpoint of the target wire",
+    )
+    sch_insert_inline.add_argument(
+        "--near",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Find target wire nearest to this point",
+    )
+    sch_insert_inline.add_argument("--pin-a", default="1", help="Upstream pin number (default: 1)")
+    sch_insert_inline.add_argument(
+        "--pin-b", default="2", help="Downstream pin number (default: 2)"
+    )
+    sch_insert_inline.add_argument(
+        "--rotation",
+        type=float,
+        default=None,
+        help="Symbol rotation in degrees (auto-detected if omitted)",
+    )
+    sch_insert_inline.add_argument(
+        "--expand-gap",
+        action="store_true",
+        help="Shift downstream geometry if wire is too short for the component",
+    )
+    sch_insert_inline.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_insert_inline.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_insert_inline.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_insert_inline.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_insert_inline)
+
+    # sch disconnect
+    sch_disconnect = sch_subparsers.add_parser("disconnect", help="Disconnect a pin from its net")
+    sch_disconnect.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_disconnect.add_argument("--ref", required=True, help="Symbol reference (e.g., U1)")
+    sch_disconnect.add_argument("--pin", required=True, help="Pin number to disconnect")
+    sch_disconnect.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_disconnect.add_argument("--lib", action="append", dest="libs", help="Specific library file")
+    sch_disconnect.add_argument(
+        "--add-nc", action="store_true", help="Add no-connect marker after disconnecting"
+    )
+    sch_disconnect.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_disconnect.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_disconnect)
+
+    sch_fix_wire_stubs = sch_subparsers.add_parser(
+        "fix-wire-stubs", help="Safely extend exact-grid wire stubs to pins"
+    )
+    sch_fix_wire_stubs.add_argument("schematic", help="Root .kicad_sch file")
+    sch_fix_wire_stubs.add_argument("--dry-run", "-n", action="store_true")
+    add_format_flag(sch_fix_wire_stubs)
+
+    # sch reconnect-pin
+    sch_reconnect_pin = sch_subparsers.add_parser(
+        "reconnect-pin", help="Reconnect a pin from one net to another"
+    )
+    sch_reconnect_pin.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_reconnect_pin.add_argument("--ref", required=True, help="Symbol reference (e.g., C41)")
+    sch_reconnect_pin.add_argument("--pin", required=True, help="Pin number to reconnect")
+    sch_reconnect_pin.add_argument("--to-net", required=True, help="Target net name (e.g., GNDD)")
+    sch_reconnect_pin.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_reconnect_pin.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_reconnect_pin.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_reconnect_pin.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    add_format_flag(sch_reconnect_pin)
+
+    # sch move-component
+    sch_move_component = sch_subparsers.add_parser(
+        "move-component", help="Move a symbol to a new position"
+    )
+    sch_move_component.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_move_component.add_argument(
+        "--ref", required=True, help="Symbol reference designator (e.g., U1)"
+    )
+    sch_move_component.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        required=True,
+        metavar=("X", "Y"),
+        help="New position coordinates",
+    )
+    sch_move_component.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_move_component.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_move_component.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_move_component.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_move_component.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
+    # sch tidy
+    sch_tidy = sch_subparsers.add_parser(
+        "tidy",
+        help=(
+            "Reset Reference/Value field positions to bbox-relative defaults "
+            "(headless field autoplace)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Reset visible Reference/Value field positions to deterministic\n"
+            "offsets from each symbol's placed body bounding box: Reference\n"
+            "centered above the body, Value centered below, grid-aligned and\n"
+            "horizontal. Honors symbol rotation and mirroring. This is a\n"
+            "headless, diff-reviewable field autoplace -- parity with\n"
+            "Eeschema's autoplace algorithm is an explicit non-goal.\n"
+            "\n"
+            "Cosmetic only: nothing but the field (at x y angle) positions\n"
+            "changes, so netlist/ERC/BOM/CPL are unchanged.\n"
+            "\n"
+            "Power/virtual symbols ('#'-prefixed references) and hidden\n"
+            "fields are skipped unless explicitly named via --refs.\n"
+            "Multi-unit symbols: each placed unit's body bbox is estimated\n"
+            "from that unit's pin extents (per-unit body graphics are not\n"
+            "tracked), so placement can be coarser; use --refs to scope\n"
+            "around units needing hand placement."
+        ),
+    )
+    sch_tidy.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_tidy.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0,
+        metavar="MM",
+        help=(
+            "Only touch fields farther than this many mm from the symbol body "
+            "bbox (default 0 = tidy all in-scope fields)"
+        ),
+    )
+    sch_tidy.add_argument(
+        "--refs", help="Comma-separated reference designators to tidy (e.g., C13,C15)"
+    )
+    sch_tidy.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    sch_tidy.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    sch_tidy.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
+    # sch remove-component
+    sch_remove_component = sch_subparsers.add_parser(
+        "remove-component", help="Remove a symbol from a schematic"
+    )
+    sch_remove_component.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_remove_component.add_argument(
+        "--ref", required=True, help="Symbol reference designator (e.g., U1)"
+    )
+    sch_remove_component.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_remove_component.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_remove_component.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview without modifying"
+    )
+    sch_remove_component.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_remove_component.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
+    # sch re-annotate
+    sch_reannotate = sch_subparsers.add_parser(
+        "re-annotate", help="Renumber reference designators sequentially"
+    )
+    sch_reannotate.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_reannotate.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying"
+    )
+    sch_reannotate.add_argument(
+        "--backup", action="store_true", help="Create backup before modifying"
+    )
+    sch_reannotate.add_argument(
+        "--prefix",
+        help="Comma-separated list of prefixes to renumber (e.g., R,C,U)",
+    )
+    sch_reannotate.add_argument(
+        "--start-from",
+        type=int,
+        default=1,
+        help="Starting number for each prefix (default: 1)",
+    )
+    sch_reannotate.add_argument(
+        "--per-sheet",
+        action="store_true",
+        help="Restart numbering per sheet instead of continuous",
+    )
+    sch_reannotate.add_argument(
+        "--unannotated-only",
+        action="store_true",
+        help="Only assign numbers to unannotated (?) references",
+    )
+    sch_reannotate.add_argument("--format", choices=["text", "json"], default="text")
+
+    # sch repair-instances
+    sch_repair_instances = sch_subparsers.add_parser(
+        "repair-instances",
+        help="Fix symbols missing project instances blocks",
+    )
+    sch_repair_instances.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_repair_instances.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    sch_repair_instances.add_argument(
+        "--backup",
+        action="store_true",
+        help="Create backup before modifying",
+    )
+    sch_repair_instances.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+    )
+
+    # sch fix-annotation
+    sch_fix_annotation = sch_subparsers.add_parser(
+        "fix-annotation",
+        help=("Hierarchy-aware power/flag annotation repair (net-neutrality gated)"),
+    )
+    sch_fix_annotation.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_fix_annotation.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    sch_fix_annotation.add_argument(
+        "--backup",
+        action="store_true",
+        help="Create backup before modifying",
+    )
+    sch_fix_annotation.add_argument(
+        "--skip-net-check",
+        action="store_true",
+        help="Skip the net-neutrality gate (unsafe; e.g. no kicad-cli)",
+    )
+    sch_fix_annotation.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+    )
+
+
+def _add_pcb_parser(subparsers) -> None:
+    """Add PCB subcommand parser with its subcommands."""
+    pcb_parser = subparsers.add_parser("pcb", help="PCB query tools")
+    pcb_subparsers = pcb_parser.add_subparsers(dest="pcb_command", help="PCB commands")
+
+    # pcb summary
+    pcb_summary = pcb_subparsers.add_parser("summary", help="Board summary")
+    pcb_summary.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_summary.add_argument("--format", choices=["text", "json"], default="text")
+
+    # pcb footprints
+    pcb_footprints = pcb_subparsers.add_parser("footprints", help="List footprints")
+    pcb_footprints.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_footprints.add_argument("--format", choices=["text", "json"], default="text")
+    pcb_footprints.add_argument("--filter", dest="pattern", help="Filter by reference pattern")
+    pcb_footprints.add_argument("--sorted", action="store_true", help="Sort output")
+
+    # pcb nets
+    pcb_nets = pcb_subparsers.add_parser("nets", help="List nets")
+    pcb_nets.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_nets.add_argument("--format", choices=["text", "json"], default="text")
+    pcb_nets.add_argument("--filter", dest="pattern", help="Filter by net pattern")
+    pcb_nets.add_argument("--sorted", action="store_true", help="Sort output")
+    pcb_nets.add_argument(
+        "--check-connectivity",
+        action="store_true",
+        default=False,
+        help="Run island detection to find disconnected segments within each net",
+    )
+
+    # pcb padmap
+    pcb_padmap = pcb_subparsers.add_parser("padmap", help="Show per-footprint pad-to-net bindings")
+    pcb_padmap.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_padmap.add_argument("--format", choices=["text", "json"], default="text")
+    pcb_padmap.add_argument("--ref", help="Scope to a single footprint reference")
+    pcb_padmap.add_argument("--net", help="Invert to net-owning-pads mode for this net")
+
+    # pcb traces
+    pcb_traces = pcb_subparsers.add_parser("traces", help="Show trace statistics")
+    pcb_traces.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_traces.add_argument("--format", choices=["text", "json"], default="text")
+    pcb_traces.add_argument("--layer", help="Filter by layer (e.g., F.Cu)")
+
+    # pcb stackup
+    pcb_stackup = pcb_subparsers.add_parser("stackup", help="Show layer stackup")
+    pcb_stackup.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_stackup.add_argument("--format", choices=["text", "json"], default="text")
+
+    # pcb strip
+    pcb_strip = pcb_subparsers.add_parser(
+        "strip",
+        help="Remove traces while preserving placement",
+        description="Remove trace segments and vias from a PCB while preserving "
+        "component placement, zones, and other board elements. Useful for "
+        "re-routing a board from scratch with different routing strategies.",
+    )
+    pcb_strip.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_strip.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input or add -stripped suffix)",
+    )
+    pcb_strip.add_argument(
+        "--nets",
+        help="Comma-separated list of net names to strip (default: all nets)",
+    )
+    pcb_strip.add_argument(
+        "--layers",
+        help="Comma-separated list of layer names to strip "
+        "(e.g. In1.Cu,In2.Cu). Only segments on these layers are removed. "
+        "Vias are removed only when ALL their layers are in the set.",
+    )
+    pcb_strip.add_argument(
+        "--include-power",
+        action="store_true",
+        default=False,
+        help="Include power/ground nets in stripping (default: exclude them)",
+    )
+    pcb_strip.add_argument(
+        "--power-pattern",
+        help="Regex pattern for power net names (overrides built-in heuristic)",
+    )
+    pcb_strip.add_argument(
+        "--remove-orphan-vias",
+        action="store_true",
+        default=False,
+        help="Remove vias that no longer connect to any remaining segment "
+        "on either of their layers (only meaningful with --layers)",
+    )
+    pcb_strip.add_argument(
+        "--region",
+        help="Spatially bound the strip to an axis-aligned box "
+        "'x1,y1,x2,y2' (board-relative mm). Only geometry inside the box is "
+        "removed, ANDed with --nets/--layers. Vias are stripped when their "
+        "point is inside; segments fully inside are removed; segments crossing "
+        "the boundary are clipped to the outside portion; segments spanning the "
+        "box with both endpoints outside are left untouched and reported as "
+        "'boundary_skipped'. Zones are only removed (with --no-keep-zones) when "
+        "their whole polygon is inside the box (no polygon clipping).",
+    )
+    pcb_strip.add_argument(
+        "--no-keep-zones",
+        dest="keep_zones",
+        action="store_false",
+        default=True,
+        help="Also remove copper pour zones (default: keep zones)",
+    )
+    pcb_strip.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_strip.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed without modifying files",
+    )
+    pcb_strip.add_argument(
+        "--from-report",
+        metavar="JSON",
+        help="Cut one victim track/via per finding in a kicad-cli DRC JSON "
+        "(clearance/shorting_items) or a 'kct creepage --format json' report "
+        "(rows with a witness only). Exclusive with --nets/--layers/--region.",
+    )
+    pcb_strip.add_argument(
+        "--protect-nets",
+        help="Comma-separated nets --from-report must never cut",
+    )
+    pcb_strip.add_argument(
+        "--radius",
+        type=float,
+        default=0.0,
+        help="With --from-report: also remove same-net track/via items of the "
+        "victim within this many mm of the finding (default: 0 = exact item)",
+    )
+    pcb_strip.add_argument(
+        "--dangling",
+        action="store_true",
+        help="Remove track_dangling/via_dangling copper, repeating until none "
+        "remain; a pass that raises the unconnected count is not applied",
+    )
+    pcb_strip.add_argument(
+        "--keep-via-min",
+        type=float,
+        default=None,
+        help="With --dangling: keep vias whose drill or diameter is >= this many mm (anchor PTHs)",
+    )
+    pcb_strip.add_argument(
+        "--unverified",
+        action="store_true",
+        help="Write even when kicad-cli DRC verification is unavailable",
+    )
+
+    # pcb reinforce (issue #4220 -- Unit A of #4218)
+    pcb_reinforce = pcb_subparsers.add_parser(
+        "reinforce",
+        help="Place same-net PTH buttress-wire anchors at the ends of a routed net's wire legs",
+        description="Post-route buttress-wire reinforcement (#4218, #8741). The "
+        "intended build: a hand-bent solid-core wire is laid along a "
+        "high-current trace and soldered to that trace along its whole length, "
+        "held by exactly two anchor holes, one at each end of the wire. One wire "
+        "stays on one copper layer. The default --anchor-mode ends splits the "
+        "net's routed copper into legs (a run on one copper layer with no "
+        "junction inside it) and places exactly two same-net plated through-hole "
+        "(PTH) anchor vias per leg, one near each end, none in between, each "
+        "at least --end-offset mm clear (straight-line) of the same-net copper "
+        "the leg ends on: a pad or via its track overlaps, or the whole trunk a "
+        "branch tees off. A leg with no room for two such anchors (too short, or "
+        "folding back so they would overlap) gets none and is reported "
+        "too_short; a leg gets ONE anchor only when a clearance or hole-to-hole "
+        "rule refused the other (partial, listed under refused). A Y junction "
+        "becomes a trunk plus a branch; loops and "
+        "higher-degree junctions are reported as unhandled. --anchor-mode "
+        "spaced keeps the old row of anchors every --spacing mm. Anchors are "
+        "sized to the wire gauge, respect the annular-ring floor and are "
+        "same-net (no shorts); a candidate that would collide with a DIFFERENT "
+        "net is refused and reported, not placed. In ends mode the solder mask is "
+        "also opened (#8743) along each fully anchored leg, anchor to anchor: a "
+        "gr_line on the leg's own side's mask layer (F.Cu -> F.Mask, B.Cu -> "
+        "B.Mask), as wide as the trace unless --mask-width is given; the "
+        "anchors are written with per-via tenting off (rings open on both "
+        "sides). With --voltage-map an opening that would break the pairwise "
+        "creepage requirement is refused and reported (no partial opening). "
+        "NOTE: existing zone pours must be refilled "
+        "afterward (e.g. `kicad-cli pcb drc --refill-zones`) so the pours knock "
+        "out around the anchors. In-place by default; use -o to write elsewhere.",
+    )
+    pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_reinforce.add_argument(
+        "--net",
+        help="Net name to reinforce (must have routed copper; required unless --list-wires)",
+    )
+    pcb_reinforce.add_argument(
+        "--list-wires",
+        dest="list_wires",
+        action="store_true",
+        help="Read-only: print the wire list from BOARD's .reinforcement.json sidecar "
+        "(#8744) and exit; --net filters it. Honours --format json.",
+    )
+    pcb_reinforce.add_argument(
+        "--wire-gauge",
+        type=int,
+        default=16,
+        help="Buttress-wire gauge in AWG (default: 16; also supports 14, 12)",
+    )
+    pcb_reinforce.add_argument(
+        "--anchor-mode",
+        dest="anchor_mode",
+        choices=["ends", "spaced"],
+        default="ends",
+        help="ends (default): exactly two anchors per single-layer wire leg, one "
+        "at each end, none mid-run. spaced: the pre-#8742 row of anchors every "
+        "--spacing mm along the run.",
+    )
+    pcb_reinforce.add_argument(
+        "--strategy",
+        dest="strategy",
+        choices=["wire", "parallel", "auto"],
+        default="wire",
+        help="How each leg is reinforced (Issue #8916). wire (default): the "
+        "buttress wire -- two end anchors and a mask opening. parallel: a "
+        "same-net, same-width copy of the leg on the opposite outer layer "
+        "(F.Cu <-> B.Cu), tied to it at both ends (the through-hole pad or "
+        "through via the leg ends on, else a stitching via) and by stitching "
+        "vias about every 5 mm (the board's default via, never closer than "
+        "kct stitch's same-net spacing); no anchors, no mask opening. Every "
+        "copy track and via passes the same clearance checks as an anchor "
+        "(class floors, .kicad_dru rules, --voltage-map creepage, "
+        "hole-to-hole); a copy that does not fit whole is refused and "
+        "reported, never written in part. The minimum wire length does not "
+        "filter parallel legs. auto: parallel for a leg shorter than the "
+        "minimum wire length (--min-wire-length, default 15 mm; 0 makes "
+        "every leg a wire), wire for the rest. parallel and auto need "
+        "--anchor-mode ends: with --anchor-mode spaced they exit with an "
+        "error (spaced mode has no per-leg layout, and no default minimum "
+        "for auto to compare against).",
+    )
+    pcb_reinforce.add_argument(
+        "--end-offset",
+        dest="end_offset",
+        type=float,
+        default=1.0,
+        metavar="MM",
+        help="ends mode: minimum straight-line clearance in mm from each end "
+        "anchor's pad edge to the same-net component pad (or via, or the whole "
+        "trunk) "
+        "the leg ends on (default: 1.0); a leg that bends near its end moves "
+        "the anchor further inward. A leg too short for two anchors at this "
+        "offset is reported too_short and gets none.",
+    )
+    pcb_reinforce.add_argument(
+        "--max-end-shift",
+        dest="max_end_shift",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="ends mode: how far inward along the leg (mm) a refused end anchor "
+        "position is searched for the first position that passes the clearance "
+        "rules (default: a quarter of the leg's length, at least 2 mm). The "
+        "report names each anchor's shift and the uncovered length; a leg is "
+        "reported partial only after this search fails.",
+    )
+    pcb_reinforce.add_argument(
+        "--mask-opening",
+        dest="mask_opening",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Open the solder mask along each fully anchored leg and write the "
+        "anchors with tenting off (Issue #8743). Default: on in ends mode, off "
+        "in spaced mode; --no-mask-opening disables it.",
+    )
+    pcb_reinforce.add_argument(
+        "--mask-width",
+        dest="mask_width",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Solder-mask opening width in mm (default: the leg's trace width; "
+        "e.g. 1.3 for a 16 AWG wire).",
+    )
+    pcb_reinforce.add_argument(
+        "--spacing",
+        type=float,
+        default=None,
+        help="spaced mode only: arc-length spacing between mid-run anchors, in "
+        "mm (default: 15.0). Ignored, with a warning, in ends mode.",
+    )
+    pcb_reinforce.add_argument(
+        "--layer",
+        help="Restrict to a copper layer (default: layer with the most "
+        "cumulative routed length for the net; with --current-paths in ends "
+        "mode, every layer the declared paths use)",
+    )
+    pcb_reinforce.add_argument(
+        "--all-runs",
+        dest="all_runs",
+        action="store_true",
+        help="Anchor EVERY chained run (ends mode: every leg) on the target "
+        "layer, not just the single longest one. With --current-paths in ends "
+        "mode every eligible leg is anchored regardless.",
+    )
+    pcb_reinforce.add_argument(
+        "--min-wire-length",
+        dest="min_wire_length",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Minimum buttress-wire length in mm (ends mode default: 15.0). A "
+        "wire needs a through-hole at each end, and each hole needs both outer "
+        "layers and the inner planes clear, so the two rarely fit on a shorter "
+        "link -- a leg below this is reported and gets no wire and no mask "
+        "opening, and no entry in the .reinforcement.json wire list. Pass 0 for "
+        "no minimum (the pre-#8915 behaviour). --anchor-mode spaced has no "
+        "default minimum; a value given here still applies to it.",
+    )
+    pcb_reinforce.add_argument(
+        "--min-run-length",
+        dest="min_run_length",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Alias for --min-wire-length, kept for existing invocations. Only "
+        "anchor runs (ends mode: legs) at least this long, in mm; shorter ones "
+        "are reported but not anchored. Composes with --all-runs. If both flags "
+        "are given, the larger wins.",
+    )
+    pcb_reinforce.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help="Path to a JSON sidecar declaring branch-specific current-path "
+        "intent (Issue #4980; see kicad_tools.router.current_paths."
+        "CurrentPathSpec). When any declared path targets --net, reinforcement "
+        "gates to an allow-list: only copper covered by a resolved, "
+        "reinforcement-eligible path is anchored -- a declared sense/Kelvin "
+        "branch (reinforcement_eligible=false) is never anchored or bridged, "
+        "even with --all-runs. In ends mode each such path gets one leg per "
+        "copper layer it uses, each with its own two anchors. Unresolved or "
+        "ambiguous declarations are reported (unresolved_paths), not skipped.",
+    )
+    pcb_reinforce.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help="Path to a JSON per-net voltage map (same format as `kct route "
+        "--voltage-map`). Anchors are then refused unless they keep the "
+        "pairwise IEC creepage clearance max(class floor, creepage @ |dV|) "
+        "from every other-net obstacle (Issue #8085). Absent, only the scalar "
+        "fab/net-class floors apply.",
+    )
+    pcb_reinforce.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for the --voltage-map lookup (default: iec60664)",
+    )
+    pcb_reinforce.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for the --voltage-map lookup (default: 2)",
+    )
+    pcb_reinforce.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb (default: IIIa)",
+    )
+    pcb_reinforce.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that triggers a creepage widening (default: 30.0)",
+    )
+    pcb_reinforce.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: modify in place)",
+    )
+    pcb_reinforce.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_reinforce.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report anchors that would be placed/refused without writing files",
+    )
+    pcb_reinforce.add_argument(
+        "--clear",
+        action="store_true",
+        help="Remove the anchors previously placed for --net (same-net through vias "
+        "whose drill and pad equal the --wire-gauge anchor size) and place none. "
+        "Other-size and other-net vias are never touched; a removal that would "
+        "leave the net without its only layer link is refused and reported. "
+        "Refill zone pours afterward.",
+    )
+    pcb_reinforce.add_argument(
+        "--replace",
+        action="store_true",
+        help="Clear the existing anchors for --net (as --clear), then place new "
+        "ones per --anchor-mode, in one write. Use to migrate a board reinforced "
+        "in spaced mode to the end anchors.",
+    )
+
+    # pcb current-paths-audit (issue #4980)
+    pcb_current_paths_audit = pcb_subparsers.add_parser(
+        "current-paths-audit",
+        help="Audit declared branch-specific current-path intent against routed copper",
+        description="Independent post-write audit (Issue #4980): resolves every "
+        "declared current-path (kicad_tools.router.current_paths.CurrentPathSpec) "
+        "against the routed board and reports which physical copper each branch "
+        "covers, which paths failed to resolve (moved/removed pad, off-net, no "
+        "continuous copper) or are ambiguous (a loop/parallel return reachable "
+        "from the endpoints), and which routed copper on a declared net no "
+        "resolved path covers. Read-only -- never mutates or saves the board.",
+    )
+    pcb_current_paths_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_current_paths_audit.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        required=True,
+        help="Path to a JSON sidecar declaring branch-specific current-path intent",
+    )
+    pcb_current_paths_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+
+    # pcb dedupe (issue #4175)
+    pcb_dedupe = pcb_subparsers.add_parser(
+        "dedupe",
+        help="Remove exact-duplicate copper (segments + vias)",
+        description="Remove pre-existing exact-duplicate copper from a board: "
+        "segments and vias that share the same net, geometry, and layer(s) "
+        "(differing only in uuid). Such duplicates are invisible to netlist "
+        "connectivity but silently bloat the file and slow later DRC/optimize "
+        "passes. One instance of each distinct geometry is kept, so net "
+        "connectivity is unchanged. In-place by default; use -o to write "
+        "elsewhere.",
+    )
+    pcb_dedupe.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_dedupe.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input in place)",
+    )
+    pcb_dedupe.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_dedupe.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report duplicates without modifying files",
+    )
+
+    # pcb prune (issue #8216)
+    pcb_prune = pcb_subparsers.add_parser(
+        "prune",
+        help="Remove redundant copper and snap off-centre ends",
+        description="Remove copper that adds no connectivity (redundant branches, "
+        "same-layer loops) and snap off-centre segment ends onto the same-net "
+        "via/pad centre. Connectivity follows KiCad (endpoint-anchored track joins, "
+        "ends inside a pad/via/zone); a segment is removed only if every pad and "
+        "zone terminal stays in the same component and no joint becomes "
+        "overlap-only. Copper that touches other same-net copper away from a "
+        "shared endpoint (e.g. a spur beside a via) is removed only when "
+        "connectivity also holds over those body-touching neighbours; "
+        "straight end-to-end runs of same-width segments are merged into one "
+        "segment -- runs whose joints are pure two-segment joints directly, and "
+        "runs whose joints also sit on a same-net via, pad or zone only when the "
+        "merged run leaves every terminal, neighbour, zone anchor and via/pad "
+        "centre joint as it was. Locked tracks are never touched. With kicad-cli available each "
+        "net's edits are checked with 'pcb drc --refill-zones' and dropped if "
+        "they add violations; without that check the file is only written with "
+        "--unverified. In-place by default; use -o to write elsewhere.",
+    )
+    pcb_prune.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_prune.add_argument("-o", "--output", dest="output", help="Output file path")
+    pcb_prune.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    pcb_prune.add_argument(
+        "--dry-run", action="store_true", help="Report changes without modifying files"
+    )
+    pcb_prune.add_argument(
+        "--nets",
+        metavar="NET[,NET...]",
+        help="Only prune these nets (comma-separated names); other copper is untouched",
+    )
+    pcb_prune.add_argument(
+        "--region",
+        metavar="x1,y1,x2,y2",
+        help="Only apply a net's plan when every edit lies inside this box "
+        "(board-relative mm); plans straddling it are skipped and reported as "
+        "region_skipped",
+    )
+    pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
+    pcb_prune.add_argument(
+        "--project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verifies under "
+        "(default: the files beside the board)",
+    )
+    pcb_prune.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        help="Verify against KiCad default rules when no project rules are found "
+        "(otherwise that is an error)",
+    )
+    pcb_prune.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        metavar="FILE",
+        help="Declared current-path JSON. On the nets it names, also break copper "
+        "loops (including loops closed through vias) by removing each loop's "
+        "narrowest segment below --wide, so 'pcb reinforce' can anchor the run. "
+        "Loops whose segments are all >= --wide are reported, not cut, as is any "
+        "loop the current-path audit still sees afterwards (with its witness).",
+    )
+    pcb_prune.add_argument(
+        "--wide",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="With --current-paths: width (mm) at/above which a segment is never "
+        "cut. Default (unset): net-relative -- cut each loop's narrowest segment "
+        "whatever its width, provided the branch left behind still meets the "
+        "declared current's IPC-2221 width on its own layer (external for "
+        "F.Cu/B.Cu, internal otherwise, at the stackup's copper weight); refused "
+        "cuts are reported.",
+    )
+    pcb_prune.add_argument(
+        "--unverified",
+        action="store_true",
+        help="Write the result even when it was not verified with kicad-cli DRC "
+        "(--no-drc, or kicad-cli missing). Without this the file is left untouched.",
+    )
+
+    # pcb reannotate
+    pcb_reannotate = pcb_subparsers.add_parser(
+        "reannotate",
+        help="Batch rename reference designators",
+        description="Rename reference designators in a PCB using a JSON mapping file. "
+        "Handles collision chains (e.g., C6->C10 while C10->C15) safely using "
+        "temporary intermediate references.",
+    )
+    pcb_reannotate.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_reannotate.add_argument(
+        "--map",
+        required=True,
+        help='Path to JSON mapping file (e.g., {"C1": "C10", "C10": "C15"})',
+    )
+    pcb_reannotate.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input)",
+    )
+    pcb_reannotate.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_reannotate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview renames without modifying the PCB file",
+    )
+
+    # pcb sync-netlist
+    pcb_sync_netlist = pcb_subparsers.add_parser(
+        "sync-netlist",
+        help="Sync PCB footprints from schematic netlist",
+        description="Compare schematic components against PCB footprints. "
+        "Adds missing footprints (placed at board edge), detects renamed "
+        "references, and reports orphaned footprints.",
+    )
+    pcb_sync_netlist.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_sync_netlist.add_argument(
+        "--schematic",
+        required=True,
+        help="Path to root .kicad_sch file",
+    )
+    pcb_sync_netlist.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_sync_netlist.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_sync_netlist.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview sync actions without modifying the PCB file",
+    )
+    pcb_sync_netlist.add_argument(
+        "--remove-orphans",
+        action="store_true",
+        help="Delete orphaned footprints (in PCB but not in schematic)",
+    )
+    pcb_sync_netlist.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove orphans even if they have routed traces",
+    )
+    pcb_sync_netlist.add_argument(
+        "--auto-rename",
+        action="store_true",
+        help="Apply reference renames without interactive confirmation",
+    )
+    pcb_sync_netlist.add_argument(
+        "--remove-orphan-nets",
+        action="store_true",
+        help="Remove nets with no pad references after net assignment",
+    )
+    pcb_sync_netlist.add_argument(
+        "--transactional",
+        action="store_true",
+        help=(
+            "Snapshot the target file before syncing and roll it back "
+            "byte-identical on failure (exception, Ctrl-C, or sync errors); "
+            "the failed attempt is preserved as a <file>.failed-<timestamp> "
+            "sidecar"
+        ),
+    )
+
+    # pcb annotate-pintypes (issue #5985)
+    pcb_annotate_pintypes = pcb_subparsers.add_parser(
+        "annotate-pintypes",
+        help="Copy schematic pin names/electrical types onto PCB pads",
+        description="Write (pinfunction ...) and (pintype ...) on every pad from "
+        "the schematic symbol pins, as KiCad's 'Update PCB from Schematic' does. "
+        "Only those pad children change; the rest of the file is preserved "
+        "byte-for-byte. kct detect-mistakes reads pintype power_in/power_out "
+        "as power-rail evidence.",
+    )
+    pcb_annotate_pintypes.add_argument("pcb", help="Path to .kicad_pcb file (edited in place)")
+    pcb_annotate_pintypes.add_argument(
+        "--schematic",
+        required=True,
+        help="Path to root .kicad_sch file",
+    )
+    pcb_annotate_pintypes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report how many pads would change without writing the file",
+    )
+    pcb_annotate_pintypes.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+
+    # pcb zones
+    pcb_zones = pcb_subparsers.add_parser("zones", help="List copper pour zones")
+    pcb_zones.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_zones.add_argument("--format", choices=["text", "json"], default="text")
+
+    # pcb add-3d-models
+    pcb_add_models = pcb_subparsers.add_parser(
+        "add-3d-models",
+        help="Add missing (model ...) 3D refs from the installed KiCad libraries",
+        description="Patch missing (model ...) 3D model references into PCB "
+        "footprints by copying them from the installed KiCad footprint "
+        "libraries (.kicad_mod sources). Pure metadata insertion: copper, "
+        "placement, zones and nets are untouched, so DRC results are "
+        "identical. Makes kicad-cli pcb render / the KiCad 3D viewer show "
+        "component bodies instead of a bare board.",
+    )
+    pcb_add_models.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_add_models.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: patch input in place)",
+    )
+    pcb_add_models.add_argument(
+        "--lib-path",
+        help="Explicit KiCad footprints directory (default: auto-detect; "
+        "KICAD_FOOTPRINT_DIR is also honored)",
+    )
+    pcb_add_models.add_argument(
+        "--exact",
+        action="store_true",
+        help="Require exact footprint-name matches (disable the same-library "
+        "name-variant fallback used for visual model lookup)",
+    )
+    pcb_add_models.add_argument(
+        "--lcsc-models",
+        dest="lcsc_models",
+        help="Optional lcsc_models.json OVERRIDE of the lib_id -> LCSC C-numbers "
+        "that are otherwise resolved from the board's BOM / procurement review "
+        "(stale sidecar entries are reported). Bodies are "
+        "resolved from a cache dir (${KCT_LCSC_3D_DIR}, default "
+        "~/.cache/kicad-tools/lcsc-3d/) and emitted as portable "
+        "${KCT_LCSC_3D_DIR}/C#####.step refs. An entry may also use the object "
+        'form {"lcsc": "C#####", "rotate": [0,0,90], "offset": [0,0,0]} to '
+        "override the packaged per-part transform table for that board",
+    )
+    pcb_add_models.add_argument(
+        "--fetch-lcsc",
+        action="store_true",
+        help="Fetch missing LCSC STEP bodies from EasyEDA on a cache miss "
+        "(default: cache-only, no network; also enabled by KCT_LCSC_FETCH=1). "
+        "Per-user and opt-in: fetched models stay in your local cache and must "
+        "never be committed or shipped. Capped per run (KCT_LCSC_MAX_FETCHES, "
+        "default 25) and rate-limited (KCT_LCSC_FETCH_INTERVAL seconds)",
+    )
+    pcb_add_models.add_argument(
+        "--no-lcsc-bom",
+        dest="lcsc_from_bom",
+        action="store_false",
+        default=True,
+        help="Do not derive LCSC C-numbers from the board's BOM / procurement "
+        "review / footprint properties (use only --lcsc-models)",
+    )
+    pcb_add_models.add_argument(
+        "--bom",
+        help="BOM CSV to resolve LCSC C-numbers from (default: assembly-bom.csv "
+        "next to the PCB or in its parent directory)",
+    )
+    pcb_add_models.add_argument(
+        "--procurement",
+        help="procurement-review.json mapping MPN -> LCSC C-number (default: "
+        "discovered next to the PCB or in its parent directory)",
+    )
+    pcb_add_models.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_add_models.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be inserted without modifying the PCB file",
+    )
+    pcb_add_models.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-resolve footprints that already carry (model ...) refs and "
+        "replace them with freshly computed ones (picks up current offset/"
+        "rotation/LCSC-transform logic). Footprints that cannot be re-resolved "
+        "keep their existing refs untouched. Default: insert-only — existing "
+        "refs are never modified",
+    )
+    pcb_add_models.add_argument(
+        "--allow-dangling",
+        action="store_true",
+        help="Insert a library (model ...) ref even when its STEP file does not "
+        "exist (KLC F9.3 behaviour). Default: such refs are reported as "
+        "dangling_in_library and nothing is inserted",
+    )
+
+    # pcb add-fiducials
+    pcb_add_fid = pcb_subparsers.add_parser(
+        "add-fiducials",
+        help="Place global fiducials near the board corners",
+        description="Place >=3 asymmetric, non-collinear global fiducials per "
+        "requested side at copper-free sites outside every courtyard and at "
+        "least --edge-margin from the board edge. Placed footprints are flagged "
+        "board_only/exclude_from_bom/exclude_from_pos_files. Fails without "
+        "writing if any side has no free site.",
+    )
+    pcb_add_fid.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_add_fid.add_argument(
+        "--sides",
+        default="front,back",
+        help="Sides to populate: 'front', 'back', 'front,back' or 'populated' "
+        "(sides that carry BOM parts). Default: front,back",
+    )
+    pcb_add_fid.add_argument("--count", type=int, default=3, help="Fiducials per side (default: 3)")
+    pcb_add_fid.add_argument(
+        "--footprint",
+        default="Fiducial_1mm_Mask2mm",
+        help="Footprint name or Library:Name (default: Fiducial:Fiducial_1mm_Mask2mm)",
+    )
+    pcb_add_fid.add_argument(
+        "--keepout",
+        type=float,
+        default=2.0,
+        metavar="MM",
+        help="Copper-free radius around each fiducial in mm (default: 2.0)",
+    )
+    pcb_add_fid.add_argument(
+        "--edge-margin",
+        type=float,
+        default=3.0,
+        metavar="MM",
+        help="Minimum distance from the board edge in mm (default: 3.0)",
+    )
+    pcb_add_fid.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_add_fid.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format for results"
+    )
+    pcb_add_fid.add_argument(
+        "--dry-run", action="store_true", help="Report chosen sites without writing the PCB"
+    )
+
+    # pcb remove-footprint
+    pcb_remove_fp = pcb_subparsers.add_parser(
+        "remove-footprint",
+        help="Remove a footprint from the PCB by reference designator",
+        description="Remove a specific footprint from a PCB file. "
+        "By default, refuses to remove footprints with routed traces "
+        "unless --force is specified.",
+    )
+    pcb_remove_fp.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_remove_fp.add_argument(
+        "--ref",
+        required=True,
+        help="Reference designator of footprint to remove (e.g., C1)",
+    )
+    pcb_remove_fp.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_remove_fp.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_remove_fp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview removal without modifying the PCB file",
+    )
+    pcb_remove_fp.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove footprint even if it has routed traces",
+    )
+
+    # pcb move-footprint
+    pcb_move_fp = pcb_subparsers.add_parser(
+        "move-footprint",
+        help="Move a footprint to new coordinates (board-relative by default)",
+        description="Relocate a footprint to a new position (and optionally "
+        "rotation) by reference designator.  Supports batch mode via --map.  "
+        "Coordinates are board-relative by default (measured from the "
+        "Edge.Cuts top-left origin); pass --absolute to use KiCad page "
+        "coordinates instead.",
+    )
+    pcb_move_fp.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_move_fp.add_argument(
+        "--ref",
+        help="Reference designator of footprint to move (e.g., J2)",
+    )
+    pcb_move_fp.add_argument(
+        "--to",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="New position in mm. Board-relative by default (measured from the "
+        "Edge.Cuts top-left origin); the board-origin offset is added "
+        "automatically. Pass --absolute to give KiCad page coordinates "
+        "directly. Example (board-relative): --to 10 10",
+    )
+    pcb_move_fp.add_argument(
+        "--rotation",
+        type=float,
+        help="New rotation in degrees (optional)",
+    )
+    pcb_move_fp.add_argument(
+        "--absolute",
+        action="store_true",
+        help="Interpret --to / --map coordinates as absolute KiCad page "
+        "coordinates (the same space as a footprint's raw (at ...) node) "
+        "instead of board-relative. Default: board-relative.",
+    )
+    pcb_move_fp.add_argument(
+        "--map",
+        dest="batch_map",
+        help="JSON map for batch moves; x/y are board-relative by default "
+        "(or absolute page coords with --absolute), "
+        'e.g. \'{"J2": {"x": 10, "y": 10}}\'',
+    )
+    pcb_move_fp.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_move_fp.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_move_fp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview moves without modifying the PCB file",
+    )
+    pcb_move_fp.add_argument(
+        "--drag-endpoints",
+        action="store_true",
+        help="Translate trace-segment endpoints coincident with each moved pad "
+        "by that pad's delta, so routed copper follows the footprint instead "
+        "of being stranded. Translation-only; skipped (with a warning) for a "
+        "footprint whose --rotation also changes.",
+    )
+    pcb_move_fp.add_argument(
+        "--drag-tolerance",
+        type=float,
+        default=0.05,
+        metavar="MM",
+        help="Endpoint-coincidence match radius in mm for --drag-endpoints (default: 0.05)",
+    )
+
+    # pcb move-via
+    pcb_move_via = pcb_subparsers.add_parser(
+        "move-via",
+        help="Move a via and drag its attached trace endpoints",
+        description="Relocate exactly one via, selected by --at/--net/--uuid, "
+        "translating coincident trace endpoints on the same net so routed "
+        "copper stays connected. Coordinates are board-relative by default.",
+    )
+    pcb_move_via.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_move_via.add_argument(
+        "--at", nargs=2, type=float, metavar=("X", "Y"), help="Current via position in mm"
+    )
+    pcb_move_via.add_argument("--net", help="Narrow selection to this net name")
+    pcb_move_via.add_argument("--uuid", help="Select the via by UUID")
+    pcb_move_via.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.05,
+        metavar="MM",
+        help="Match radius in mm for --at and endpoint dragging (default: 0.05)",
+    )
+    pcb_move_via.add_argument(
+        "--to", nargs=2, type=float, metavar=("X", "Y"), help="New via position in mm"
+    )
+    pcb_move_via.add_argument(
+        "--by", nargs=2, type=float, metavar=("DX", "DY"), help="Move the via by this offset in mm"
+    )
+    pcb_move_via.add_argument(
+        "--absolute",
+        action="store_true",
+        help="Interpret --at/--to as absolute KiCad page coordinates "
+        "instead of board-relative. Default: board-relative.",
+    )
+    pcb_move_via.add_argument(
+        "--check",
+        action="store_true",
+        help="Refuse (exit 1, nothing written) if the move adds a violation "
+        "on the touched nets: copper clearance (manufacturer rules), plus "
+        "hole_clearance and hole_to_hole for the moved via (board .kicad_pro/.kicad_dru)",
+    )
+    pcb_move_via.add_argument(
+        "--mfr", default="jlcpcb", help="Manufacturer rules for --check (default: jlcpcb)"
+    )
+    pcb_move_via.add_argument(
+        "--layers", type=int, default=4, help="Layer count for --check rules (default: 4)"
+    )
+    pcb_move_via.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_move_via.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format for results"
+    )
+    pcb_move_via.add_argument(
+        "--dry-run", action="store_true", help="Preview the move without modifying the PCB file"
+    )
+
+    # pcb page-fit
+    pcb_page_fit = pcb_subparsers.add_parser(
+        "page-fit",
+        help="Resize the drawing sheet to fit the board and center it",
+        description='Rewrite the (paper ...) node to a tight (paper "User" W H) '
+        "sized to the Edge.Cuts bounding box plus a uniform margin, and "
+        "translate all board items so the board is centered with that margin. "
+        "Pure geometric transform -- routing/DRC preserved, no re-route needed.",
+    )
+    pcb_page_fit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_page_fit.add_argument(
+        "--margin",
+        type=float,
+        default=5.0,
+        help="Margin around the board in mm (default: 5.0)",
+    )
+    pcb_page_fit.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_page_fit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_page_fit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview the new page size without modifying the PCB file",
+    )
+
+    # pcb center-on-sheet
+    pcb_center_sheet = pcb_subparsers.add_parser(
+        "center-on-sheet",
+        help="Center the board in the drawing sheet's usable area "
+        "(inside the frame, above the title block)",
+        description="Rigidly translate ALL board geometry by a single "
+        "grid-snapped (dx, dy) so the Edge.Cuts bounding box is centered in "
+        "the sheet's usable drawing area: inside the 10 mm frame border and "
+        "above the 35 mm title-block band (KiCad default worksheet). "
+        '(paper "User" W H) sheets are upgraded to the smallest standard '
+        "landscape size that fits the board with 15 mm slack per side. "
+        "Pure text transform with exact decimal arithmetic: only coordinate "
+        "atoms change, so routing, 45-degree copper and DRC results are "
+        "preserved exactly.",
+    )
+    pcb_center_sheet.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_center_sheet.add_argument(
+        "--paper",
+        default="auto",
+        help="Sheet handling: 'auto' (default: keep a fitting standard sheet, "
+        "upgrade User/too-small sheets), 'keep' (never change the sheet), or "
+        "an explicit landscape size (A4, A3, A2, A1, A0)",
+    )
+    pcb_center_sheet.add_argument(
+        "--margin",
+        type=float,
+        default=None,
+        help="Frame border inset per side in mm (default: 10)",
+    )
+    pcb_center_sheet.add_argument(
+        "--title-block",
+        dest="title_block",
+        type=float,
+        default=None,
+        help="Reserved title-block band height above the bottom frame line "
+        "in mm (default: 35 -- KiCad default worksheet block is 34 mm)",
+    )
+    pcb_center_sheet.add_argument(
+        "--grid",
+        type=float,
+        default=None,
+        help="Grid to snap the translation delta to in mm (default: 0.05)",
+    )
+    pcb_center_sheet.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: modify input PCB in place)",
+    )
+    pcb_center_sheet.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_center_sheet.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the would-be transform without modifying the PCB file",
+    )
+
+    # pcb add-board-info
+    pcb_board_info = pcb_subparsers.add_parser(
+        "add-board-info",
+        help="Stamp project/rev/date board identification on silkscreen",
+        description=(
+            "Add a board-level silkscreen gr_text whose {project}, {rev} and "
+            "{date} fields come from the PCB title block. Use --at X Y for "
+            "explicit placement or --auto to find a free region clear of "
+            "pads, other silk, courtyards and the board edge."
+        ),
+    )
+    pcb_board_info.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_board_info.add_argument(
+        "--text",
+        default="{project} {rev} {date}",
+        help="Text template; fields: {project} {rev} {date} (default: '%(default)s')",
+    )
+    pcb_board_info.add_argument(
+        "--layer",
+        choices=["F.SilkS", "B.SilkS"],
+        default="F.SilkS",
+        help="Silkscreen layer (B.SilkS text is mirrored)",
+    )
+    pcb_board_info.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Text centre in KiCad file coordinates (mm)",
+    )
+    pcb_board_info.add_argument(
+        "--auto",
+        action="store_true",
+        help="Pick a free region automatically (nearest the bottom-left corner)",
+    )
+    pcb_board_info.add_argument(
+        "--order-placeholder",
+        nargs="?",
+        const="JLCJLCJLCJLC",
+        default=None,
+        metavar="TEXT",
+        help="Also stamp a fab order-number placeholder (default text: JLCJLCJLCJLC)",
+    )
+    pcb_board_info.add_argument("--font-size", type=float, default=1.0, help="Font size (mm)")
+    pcb_board_info.add_argument(
+        "--font-thickness", type=float, default=0.15, help="Font stroke thickness (mm)"
+    )
+    pcb_board_info.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_board_info.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    pcb_board_info.add_argument(
+        "--dry-run", action="store_true", help="Preview without modifying the PCB file"
+    )
+
+    # pcb lock-footprints / unlock-footprints
+    for _cmd_name, _help_verb in (
+        ("lock-footprints", "Lock"),
+        ("unlock-footprints", "Unlock"),
+    ):
+        _lock_fp = pcb_subparsers.add_parser(
+            _cmd_name,
+            help=f"{_help_verb} footprints by reference (for anchor-weight recipe)",
+            description=(
+                f"{_help_verb} footprints in a PCB so the anchor-weight "
+                "recipe (kct optimize-placement --anchor-weight 1.0 "
+                "--allow-infeasible) can identify perimeter anchors. "
+                "Use --refs for explicit selection or --all-perimeter to "
+                "target every footprint whose bounding box touches the "
+                "Edge.Cuts outline.  Idempotent."
+            ),
+        )
+        _lock_fp.add_argument("pcb", help="Path to .kicad_pcb file")
+        _lock_fp.add_argument(
+            "--refs",
+            help="Comma-separated reference designators (e.g. J1,J2,MH1)",
+        )
+        _lock_fp.add_argument(
+            "--all-perimeter",
+            action="store_true",
+            help="Target all footprints whose bbox touches the board edge",
+        )
+        _lock_fp.add_argument(
+            "--perimeter-margin",
+            type=float,
+            default=None,
+            help=(
+                "Tolerance in mm for the --all-perimeter test "
+                "(default: 2.0). Set higher to include footprints "
+                "set further inboard."
+            ),
+        )
+        _lock_fp.add_argument(
+            "-o",
+            "--output",
+            dest="output",
+            help="Output file path (default: overwrite input PCB)",
+        )
+        _lock_fp.add_argument(
+            "--format",
+            choices=["text", "json"],
+            default="text",
+            help="Output format for results",
+        )
+        _lock_fp.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Preview changes without modifying the PCB file",
+        )
+
+    # pcb add-zone
+    pcb_add_zone = pcb_subparsers.add_parser(
+        "add-zone",
+        help="Add a copper pour zone to the PCB",
+        description="Create a copper pour zone on a specified layer and net. "
+        "By default the zone boundary follows the board outline (--fill-board). "
+        "Use --rect with --origin and --size to specify a rectangular boundary.",
+    )
+    pcb_add_zone.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_add_zone.add_argument(
+        "--net",
+        required=True,
+        help="Net name for the zone (e.g., GND, +3.3V)",
+    )
+    pcb_add_zone.add_argument(
+        "--layer",
+        required=True,
+        help="Copper layer (e.g., F.Cu, B.Cu, In1.Cu)",
+    )
+    pcb_add_zone.add_argument(
+        "--priority",
+        type=int,
+        default=0,
+        help="Zone fill priority (higher = fills later, default: 0)",
+    )
+    pcb_add_zone.add_argument(
+        "--min-clearance",
+        type=float,
+        default=0.3,
+        help="Clearance to other nets in mm (default: 0.3)",
+    )
+    pcb_add_zone.add_argument(
+        "--thermal-relief-gap",
+        type=float,
+        default=0.3,
+        help="Thermal relief gap in mm (default: 0.3)",
+    )
+    pcb_add_zone.add_argument(
+        "--thermal-relief-width",
+        type=float,
+        default=0.4,
+        help="Thermal relief spoke width in mm (default: 0.4)",
+    )
+    pcb_add_zone.add_argument(
+        "--min-thickness",
+        type=float,
+        default=0.25,
+        help="Minimum copper thickness in mm (default: 0.25)",
+    )
+    pcb_add_zone.add_argument(
+        "--fill-board",
+        action="store_true",
+        default=False,
+        help="Use board outline as zone boundary (this is the default behavior)",
+    )
+    pcb_add_zone.add_argument(
+        "--rect",
+        action="store_true",
+        default=False,
+        help="Use a rectangular zone boundary (requires --origin and --size)",
+    )
+    pcb_add_zone.add_argument(
+        "--origin",
+        type=float,
+        nargs=2,
+        metavar=("X", "Y"),
+        help="Rectangle origin in mm (bottom-left corner)",
+    )
+    pcb_add_zone.add_argument(
+        "--size",
+        type=float,
+        nargs=2,
+        metavar=("W", "H"),
+        help="Rectangle size in mm (width height)",
+    )
+    pcb_add_zone.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input, consistent with 'zones add')",
+    )
+    pcb_add_zone.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without writing output",
+    )
+    pcb_add_zone.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+
+    # pcb snap-rotation
+    pcb_snap_rot = pcb_subparsers.add_parser(
+        "snap-rotation",
+        help="Normalize component rotation angles to cardinal directions",
+        description="Snap footprint rotations to the nearest multiple of a grid angle "
+        "(default 90 degrees). Useful for cleaning up arbitrary rotations left "
+        "by placement optimization.",
+    )
+    pcb_snap_rot.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_snap_rot.add_argument(
+        "--grid",
+        type=float,
+        default=90.0,
+        help="Rotation grid in degrees (default: 90). Use 45 for 45-degree snapping.",
+    )
+    pcb_snap_rot.add_argument(
+        "--tolerance",
+        type=float,
+        default=None,
+        help="Maximum angular distance (degrees) from the nearest grid angle to snap. "
+        "Footprints further from the grid than this are left unchanged.",
+    )
+    pcb_snap_rot.add_argument(
+        "--exclude",
+        default=None,
+        help="Comma-separated reference designators to skip (e.g., --exclude U8,J1)",
+    )
+    pcb_snap_rot.add_argument(
+        "--only",
+        default=None,
+        help="Comma-separated reference designators to snap (only these are modified)",
+    )
+    pcb_snap_rot.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input)",
+    )
+    pcb_snap_rot.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_snap_rot.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview rotation changes without modifying the PCB file",
+    )
+
+    # pcb edit-outline
+    pcb_edit_outline = pcb_subparsers.add_parser(
+        "edit-outline",
+        help="List, remove, or replace Edge.Cuts board outlines",
+        description="Manage Edge.Cuts contours in a PCB file. "
+        "Supports listing contours, removing specific contours by index, "
+        "keeping only a specific contour, and replacing all outlines with "
+        "a new rectangle. Mounting hole circles are preserved by default.",
+    )
+    pcb_edit_outline.add_argument("pcb", help="Path to .kicad_pcb file")
+
+    outline_action = pcb_edit_outline.add_mutually_exclusive_group(required=True)
+    outline_action.add_argument(
+        "--list",
+        dest="list_contours",
+        action="store_true",
+        help="List all Edge.Cuts contours with bounding boxes",
+    )
+    outline_action.add_argument(
+        "--remove-outline",
+        type=int,
+        metavar="INDEX",
+        help="Remove a contour by its index",
+    )
+    outline_action.add_argument(
+        "--keep-only",
+        type=int,
+        metavar="INDEX",
+        help="Remove all contours except the one at INDEX (preserves mounting holes)",
+    )
+    outline_action.add_argument(
+        "--set-outline",
+        choices=["rect"],
+        help="Replace all outlines with a new shape (preserves mounting holes)",
+    )
+
+    pcb_edit_outline.add_argument(
+        "--origin",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Origin (top-left) for --set-outline in mm",
+    )
+    pcb_edit_outline.add_argument(
+        "--size",
+        nargs=2,
+        type=float,
+        metavar=("W", "H"),
+        help="Width and height for --set-outline in mm",
+    )
+    pcb_edit_outline.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_edit_outline.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_edit_outline.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying the PCB file",
+    )
+
+    # pcb model-audit
+    pcb_model_audit = pcb_subparsers.add_parser(
+        "model-audit",
+        help="Classify every footprint's 3D model coverage",
+        description="Classify every footprint (not just every model ref) as "
+        "resolved, embedded, dangling, no_ref, unresolved_var, hidden_only, "
+        "lcsc_cache_miss, lcsc_content_changed, placeholder or exempt, under an explicit resolution "
+        "environment. A report: exits 0 regardless of coverage.",
+    )
+    pcb_model_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_model_audit.add_argument(
+        "--env",
+        choices=["host", "pinned"],
+        default="host",
+        help="Resolution environment: this machine's render env (host) or the "
+        "pinned toolchain image with the model subset from `kct models sync` (pinned)",
+    )
+    pcb_model_audit.add_argument(
+        "--model-dir",
+        dest="model_dir",
+        help="Resolve every KICADn_3DMODEL_DIR variable against this directory (overrides --env)",
+    )
+    pcb_model_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+
+    # pcb net-audit
+    pcb_net_audit = pcb_subparsers.add_parser(
+        "net-audit",
+        help="Detect stale/duplicate net names from KiCad version changes",
+        description="Detect and optionally fix stale net names that arise when "
+        "a PCB is round-tripped through different KiCad versions. "
+        "Old-style Net-(REF-PadN) and new-style Net-(REF-N) names "
+        "for the same logical net are detected as duplicates.",
+    )
+    pcb_net_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_net_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_net_audit.add_argument(
+        "--fix",
+        action="store_true",
+        help="Reassign pads from stale nets to active nets",
+    )
+    pcb_net_audit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview fixes without modifying the PCB file (implies --fix)",
+    )
+    pcb_net_audit.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+
+    # pcb diff (issue #6417)
+    pcb_diff = pcb_subparsers.add_parser(
+        "diff",
+        help="Geometric diff of two boards (copper, pads, zones, outline)",
+        description="Compare two boards item by item. Footprints and pads pair "
+        "by reference first (R1, R1/2): same-reference items are 'changed' when "
+        "anything differs, and duplicate references (J1/SH, REF**) pair by "
+        "equal content before file order. Copper, zones and graphics with "
+        "identical normalised content are unchanged whatever their uuids; "
+        "leftovers pair by uuid (same kind and net) as 'changed'. The rest are "
+        "removed/added. OLD and NEW accept a path or a REV:path git spec. "
+        "Exit codes: 0 no differences, 2 differences, 1 a side failed to load.",
+    )
+    pcb_diff.add_argument("old", help="OLD board: .kicad_pcb path or REV:path")
+    pcb_diff.add_argument("new", help="NEW board: .kicad_pcb path or REV:path")
+    pcb_diff.add_argument("--format", choices=["text", "json"], default="text")
+    pcb_diff.add_argument(
+        "--net",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Report only items on this net (repeatable; applied after matching)",
+    )
+    pcb_diff.add_argument(
+        "--layer",
+        action="append",
+        default=[],
+        metavar="LAYER",
+        help="Report only items touching this layer (repeatable; a via matches "
+        "every layer in its span)",
+    )
+    pcb_diff.add_argument(
+        "--svg",
+        metavar="OUT.svg",
+        help="Also write an SVG overlay (removed red, added green, changed amber)",
+    )
+
+    # pcb transplant (issue #8311)
+    pcb_transplant = pcb_subparsers.add_parser(
+        "transplant",
+        help="Copy the tracks/vias of named nets from one board revision onto another",
+        description="Replace DST's tracks and vias on the named nets with SRC's "
+        "(nets match by name; net numbers are remapped). All other DST content is "
+        "untouched and DST is never modified: the result is written to -o. Refused "
+        "when the pads of a named net sit at different positions in SRC and DST. "
+        "SRC and DST accept a path or a REV:path git spec.",
+    )
+    pcb_transplant.add_argument("src", help="SRC board: .kicad_pcb path or REV:path")
+    pcb_transplant.add_argument("dst", help="DST board: .kicad_pcb path or REV:path")
+    pcb_transplant.add_argument(
+        "--nets",
+        action="append",
+        required=True,
+        metavar="A,B",
+        help="Comma-separated net names to transplant (repeatable)",
+    )
+    pcb_transplant.add_argument("-o", "--output", help="Output .kicad_pcb path")
+    pcb_transplant.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write nothing; print the change as a pcb diff of DST vs the result "
+        "(exit 0 none, 2 differs, 1 error)",
+    )
+    pcb_transplant.add_argument(
+        "--drc", action="store_true", help="Run kicad-cli DRC on the output (skipped if absent)"
+    )
+    pcb_transplant.add_argument("--format", choices=["text", "json"], default="text")
+
+    # pcb export-dsn
+    pcb_export_dsn = pcb_subparsers.add_parser(
+        "export-dsn",
+        help="Export PCB to Specctra DSN format for Freerouting",
+        description="Export a .kicad_pcb file to Specctra DSN format, suitable "
+        "for routing with Freerouting or other DSN-compatible autorouters.",
+    )
+    pcb_export_dsn.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_export_dsn.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output DSN file path (default: <pcb-stem>.dsn next to input)",
+    )
+    add_format_flag(pcb_export_dsn)
+
+    # pcb import-ses
+    pcb_import_ses = pcb_subparsers.add_parser(
+        "import-ses",
+        help="Import Specctra SES routes into a PCB",
+        description="Import a Freerouting .ses session file and merge the "
+        "routed traces back into a KiCad .kicad_pcb file.",
+    )
+    pcb_import_ses.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_import_ses.add_argument("ses", help="Path to .ses file from Freerouting")
+    pcb_import_ses.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output PCB file path (default: overwrite input PCB)",
+    )
+    pcb_import_ses.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Merge even if the board changed since the DSN was exported",
+    )
+    add_format_flag(pcb_import_ses)
+
+
+def _add_lib_parser(subparsers) -> None:
+    """Add library subcommand parser with its subcommands."""
+    lib_parser = subparsers.add_parser("lib", help="Symbol and footprint library tools")
+    lib_subparsers = lib_parser.add_subparsers(dest="lib_command", help="Library commands")
+
+    # lib list
+    lib_list = lib_subparsers.add_parser("list", help="List available KiCad libraries")
+    lib_list.add_argument("--symbols", action="store_true", help="List only symbol libraries")
+    lib_list.add_argument("--footprints", action="store_true", help="List only footprint libraries")
+    lib_list.add_argument("--format", choices=["table", "json"], default="table")
+
+    # lib symbols
+    lib_symbols = lib_subparsers.add_parser("symbols", help="List symbols in library")
+    lib_symbols.add_argument("library", help="Path to .kicad_sym file")
+    lib_symbols.add_argument("--format", choices=["table", "json"], default="table")
+    lib_symbols.add_argument("--pins", action="store_true", help="Show pin details")
+
+    # lib footprints
+    lib_footprints = lib_subparsers.add_parser(
+        "footprints", help="List footprints in a .pretty library directory"
+    )
+    lib_footprints.add_argument("directory", help="Path to .pretty directory")
+    lib_footprints.add_argument("--format", choices=["table", "json"], default="table")
+
+    # lib footprint
+    lib_footprint = lib_subparsers.add_parser("footprint", help="Show details of a footprint file")
+    lib_footprint.add_argument("file", help="Path to .kicad_mod file")
+    lib_footprint.add_argument("--format", choices=["text", "json"], default="text")
+    lib_footprint.add_argument("--pads", action="store_true", help="Show pad details")
+
+    # lib symbol-info
+    lib_symbol_info = lib_subparsers.add_parser(
+        "symbol-info", help="Show details of a symbol by name"
+    )
+    lib_symbol_info.add_argument("library", help="Library name or path to .kicad_sym file")
+    lib_symbol_info.add_argument("name", help="Symbol name")
+    lib_symbol_info.add_argument("--format", choices=["text", "json"], default="text")
+    lib_symbol_info.add_argument("--pins", action="store_true", help="Show pin details")
+
+    # lib footprint-info
+    lib_footprint_info = lib_subparsers.add_parser(
+        "footprint-info", help="Show details of a footprint by name"
+    )
+    lib_footprint_info.add_argument("library", help="Library name or path to .pretty directory")
+    lib_footprint_info.add_argument("name", help="Footprint name")
+    lib_footprint_info.add_argument("--format", choices=["text", "json"], default="text")
+    lib_footprint_info.add_argument("--pads", action="store_true", help="Show pad details")
+
+    # lib create-symbol-lib
+    lib_create_sym = lib_subparsers.add_parser(
+        "create-symbol-lib", help="Create a new empty symbol library (.kicad_sym)"
+    )
+    lib_create_sym.add_argument("path", help="Path for new .kicad_sym file")
+    lib_create_sym.add_argument("--force", action="store_true", help="Overwrite an existing file")
+    add_format_flag(lib_create_sym)
+
+    # lib create-footprint-lib
+    lib_create_fp = lib_subparsers.add_parser(
+        "create-footprint-lib", help="Create a new empty footprint library (.pretty directory)"
+    )
+    lib_create_fp.add_argument("path", help="Path for new .pretty directory")
+    lib_create_fp.add_argument(
+        "--force",
+        action="store_true",
+        help="Reuse a non-empty directory that already holds .kicad_mod files (never deletes)",
+    )
+    add_format_flag(lib_create_fp)
+
+    # lib generate-footprint
+    lib_generate = lib_subparsers.add_parser(
+        "generate-footprint",
+        help="Generate a parametric footprint into a .pretty library "
+        "(same generators as 'kct footprint generate')",
+    )
+    lib_generate.add_argument("library", help="Target .pretty directory (created if missing)")
+    lib_generate.add_argument(
+        "type", choices=["soic", "qfp", "qfn", "chip", "sot"], help="Footprint type"
+    )
+    lib_generate.add_argument("--pins", type=int, help="Number of pins (soic/qfp/qfn)")
+    lib_generate.add_argument("--pitch", type=float, help="Pin pitch in mm")
+    lib_generate.add_argument("--body-width", type=float, help="Body width in mm (soic)")
+    lib_generate.add_argument("--body-length", type=float, help="Body length in mm (soic)")
+    lib_generate.add_argument("--body-size", type=float, help="Body size (square) in mm (qfp/qfn)")
+    lib_generate.add_argument("--exposed-pad", type=float, help="Exposed pad size in mm (qfn)")
+    lib_generate.add_argument("--size", help="Imperial size code, e.g. 0402 (chip)")
+    lib_generate.add_argument("--variant", help="Package variant, e.g. SOT-23 (sot)")
+    lib_generate.add_argument("--prefix", help="Component prefix, e.g. R (chip)")
+    lib_generate.add_argument("--name", help="Custom footprint name")
+    lib_generate.add_argument(
+        "--force", action="store_true", help="Overwrite an existing footprint of the same name"
+    )
+    add_format_flag(lib_generate)
+
+    # lib export
+    lib_export = lib_subparsers.add_parser("export", help="Export library to JSON")
+    lib_export.add_argument("path", help="Path to library file or item")
+    lib_export.add_argument("--format", choices=["json"], default="json")
+
+    # lib purge
+    lib_purge = lib_subparsers.add_parser(
+        "purge", help="List unused symbols/footprints in project-local libraries"
+    )
+    lib_purge.add_argument(
+        "project_dir",
+        nargs="?",
+        default=".",
+        help="Path to KiCad project directory (default: current directory)",
+    )
+    lib_purge.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+
+
+def _add_footprint_parser(subparsers) -> None:
+    """Add footprint subcommand parser."""
+    footprint_parser = subparsers.add_parser("footprint", help="Footprint generation and tools")
+    footprint_subparsers = footprint_parser.add_subparsers(
+        dest="footprint_command", help="Footprint commands"
+    )
+
+    # footprint generate - dispatched in cli/__init__.py to footprint_generate.main,
+    # which owns its own subparser tree (soic/qfp/qfn/chip/sot/dip/pin-header).
+    footprint_subparsers.add_parser(
+        "generate",
+        help="Generate parametric footprints",
+        add_help=False,  # Let footprint_generate handle --help itself
+    )
+
+
+def _add_mfr_parser(subparsers) -> None:
+    """Add manufacturer subcommand parser with its subcommands."""
+    mfr_parser = subparsers.add_parser("mfr", help="Manufacturer tools")
+    mfr_subparsers = mfr_parser.add_subparsers(dest="mfr_command", help="Manufacturer commands")
+
+    # mfr list
+    mfr_list = mfr_subparsers.add_parser("list", help="List available manufacturers")
+    add_format_flag(mfr_list)
+
+    # mfr info
+    mfr_info = mfr_subparsers.add_parser("info", help="Show manufacturer details")
+    mfr_info.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    add_format_flag(mfr_info)
+
+    # mfr rules
+    mfr_rules = mfr_subparsers.add_parser("rules", help="Show design rules")
+    mfr_rules.add_argument("manufacturer", help="Manufacturer ID")
+    mfr_rules.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    mfr_rules.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    add_format_flag(mfr_rules)
+
+    # mfr compare
+    mfr_compare = mfr_subparsers.add_parser("compare", help="Compare manufacturers")
+    mfr_compare.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    mfr_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    add_format_flag(mfr_compare)
+
+    # mfr apply-rules
+    mfr_apply = mfr_subparsers.add_parser(
+        "apply-rules", help="Apply manufacturer design rules to project/PCB"
+    )
+    mfr_apply.add_argument("file", help="Path to .kicad_pro or .kicad_pcb file")
+    mfr_apply.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    mfr_apply.add_argument("-l", "--layers", type=int, default=2, help="Layer count")
+    mfr_apply.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    mfr_apply.add_argument("-o", "--output", help="Output file (default: modify in place)")
+    mfr_apply.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    add_format_flag(mfr_apply)
+
+    # mfr validate
+    mfr_validate = mfr_subparsers.add_parser(
+        "validate", help="Validate PCB against manufacturer rules (kct DRC engine)"
+    )
+    mfr_validate.add_argument("file", help="Path to .kicad_pcb file")
+    mfr_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    mfr_validate.add_argument(
+        "-l",
+        "--layers",
+        type=int,
+        default=None,
+        help="Layer count (default: auto-detect from board)",
+    )
+    mfr_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    add_format_flag(mfr_validate)
+
+    # mfr export-dru
+    mfr_export_dru = mfr_subparsers.add_parser(
+        "export-dru", help="Export manufacturer rules as KiCad DRU file"
+    )
+    mfr_export_dru.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    mfr_export_dru.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    mfr_export_dru.add_argument(
+        "-c", "--copper", type=float, default=1.0, help="Copper weight (oz)"
+    )
+    mfr_export_dru.add_argument("-o", "--output", type=str, help="Output file path")
+    add_format_flag(mfr_export_dru)
+
+    # mfr import-dru
+    mfr_import_dru = mfr_subparsers.add_parser(
+        "import-dru", help="Parse and display a KiCad design rules file"
+    )
+    mfr_import_dru.add_argument("file", help="Path to .kicad_dru file")
+    mfr_import_dru.add_argument("--format", choices=["text", "json"], default="text")
+
+
+def _add_zones_parser(subparsers) -> None:
+    """Add zones subcommand parser with its subcommands."""
+    zones_parser = subparsers.add_parser("zones", help="Add copper pour zones to PCB")
+    zones_subparsers = zones_parser.add_subparsers(dest="zones_command", help="Zone commands")
+
+    # zones add
+    zones_add = zones_subparsers.add_parser("add", help="Add a copper zone")
+    zones_add.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_add.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
+    )
+    zones_add.add_argument("--net", required=True, help="Net name (e.g., GND, +3.3V)")
+    zones_add.add_argument("--layer", required=True, help="Copper layer (e.g., B.Cu, F.Cu)")
+    zones_add.add_argument("--priority", type=int, default=0, help="Zone fill priority")
+    zones_add.add_argument("--clearance", type=float, default=0.3, help="Clearance in mm")
+    zones_add.add_argument("--thermal-gap", type=float, default=0.3, help="Thermal gap in mm")
+    zones_add.add_argument(
+        "--thermal-bridge", type=float, default=0.4, help="Thermal bridge width in mm"
+    )
+    zones_add.add_argument("--min-thickness", type=float, default=0.25, help="Min thickness in mm")
+    zones_add.add_argument("-v", "--verbose", action="store_true")
+    zones_add.add_argument("--dry-run", action="store_true")
+    add_format_flag(zones_add)
+
+    # zones list
+    zones_list = zones_subparsers.add_parser("list", help="List existing zones")
+    zones_list.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_list.add_argument("--format", choices=["text", "json"], default="text")
+
+    # zones batch
+    zones_batch = zones_subparsers.add_parser("batch", help="Add multiple zones from spec")
+    zones_batch.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_batch.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
+    )
+    zones_batch.add_argument(
+        "--power-nets",
+        required=True,
+        help="Power nets spec: 'NET:LAYER,...' (e.g., 'GND:B.Cu,+3.3V:F.Cu')",
+    )
+    zones_batch.add_argument("--clearance", type=float, default=0.3, help="Clearance in mm")
+    zones_batch.add_argument("-v", "--verbose", action="store_true")
+    zones_batch.add_argument("--dry-run", action="store_true")
+    add_format_flag(zones_batch)
+
+    # zones hv-keepout
+    zones_hv = zones_subparsers.add_parser(
+        "hv-keepout",
+        help="Generate plane pour-keepouts so inner pours clear HV nets",
+    )
+    zones_hv.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_hv.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input, consistent with 'zones fill')",
+    )
+    zones_hv.add_argument(
+        "--net-class", default="HV", help="Net class naming the HV group (default: HV)"
+    )
+    zones_hv.add_argument(
+        "--net-class-map",
+        help="Path to a net-class-map JSON sidecar classifying the HV nets",
+    )
+    zones_hv.add_argument(
+        "--clearance",
+        type=float,
+        required=True,
+        help="Required clearance from HV copper in mm (the void distance)",
+    )
+    zones_hv.add_argument(
+        "--plane-layers",
+        help="Comma-separated copper layers whose pours must void "
+        "(default: all layers carrying a plane pour)",
+    )
+    zones_hv.add_argument(
+        "--refill",
+        action="store_true",
+        help="Run 'kicad-cli pcb drc --refill-zones' after writing the keepouts",
+    )
+    zones_hv.add_argument("-v", "--verbose", action="store_true")
+    zones_hv.add_argument("--dry-run", action="store_true")
+    add_format_flag(zones_hv)
+
+    # zones fill
+    zones_fill = zones_subparsers.add_parser("fill", help="Fill all zones in a PCB")
+    zones_fill.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_fill.add_argument("-o", "--output", help="Output file path (default: overwrites input)")
+    zones_fill.add_argument("--net", help="Fill only zones for this net (e.g., GND)")
+    zones_fill.add_argument("-v", "--verbose", action="store_true")
+    zones_fill.add_argument(
+        "--dry-run", action="store_true", help="Show what would be done, no output"
+    )
+    add_format_flag(zones_fill)
+
+
+def _add_stitch_parser(subparsers) -> None:
+    """Add stitch subcommand parser for stitching vias."""
+    stitch_parser = subparsers.add_parser(
+        "stitch", help="Auto-add stitching vias for plane connections"
+    )
+    stitch_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    stitch_parser.add_argument(
+        "--net",
+        "-n",
+        action="append",
+        dest="stitch_nets",
+        help="Net name to add vias for (can be repeated). "
+        "If not specified, auto-detects all power plane nets from zones.",
+    )
+    stitch_parser.add_argument(
+        "--via-size",
+        type=float,
+        default=0.45,
+        dest="stitch_via_size",
+        help="Via pad diameter in mm (default: 0.45)",
+    )
+    stitch_parser.add_argument(
+        "--drill",
+        type=float,
+        default=0.2,
+        dest="stitch_drill",
+        help="Via drill size in mm (default: 0.2)",
+    )
+    stitch_parser.add_argument(
+        "--clearance",
+        type=float,
+        default=0.2,
+        dest="stitch_clearance",
+        help="Minimum clearance from existing copper in mm (default: 0.2)",
+    )
+    stitch_parser.add_argument(
+        "--offset",
+        type=float,
+        default=0.5,
+        dest="stitch_offset",
+        help="Max distance from pad center for via placement in mm (default: 0.5)",
+    )
+    stitch_parser.add_argument(
+        "--target-layer",
+        "-t",
+        dest="stitch_target_layer",
+        help="Target plane layer (e.g., In1.Cu). Default: auto-detect",
+    )
+    stitch_parser.add_argument(
+        "--trace-width",
+        type=float,
+        default=0.2,
+        dest="stitch_trace_width",
+        help="Width of pad-to-via trace segments in mm (default: 0.2)",
+    )
+    stitch_parser.add_argument(
+        "--escape-distance",
+        type=float,
+        default=3.0,
+        dest="stitch_escape_distance",
+        help="Maximum escape trace length in mm for dense IC pads (default: 3.0)",
+    )
+    stitch_parser.add_argument(
+        "--blanket",
+        "-b",
+        action="store_true",
+        dest="stitch_blanket",
+        help="Place vias on a grid pattern across zone polygons (blanket stitching)",
+    )
+    stitch_parser.add_argument(
+        "--micro-via",
+        action="store_true",
+        dest="stitch_micro_via",
+        help=(
+            "Retry stitch-failed pads with smaller micro-vias "
+            "(0.3mm pad / 0.15mm drill defaults). Micro-vias span only "
+            "adjacent copper layers per KiCad's stack-up rules and help "
+            "fine-pitch IC corner pads (e.g. LQFP-48 GND pins boxed by "
+            "neighbour signal traces) that the standard 0.6mm via cannot "
+            "fit. See issue #3033 for the board-04 U2.23 use case."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--micro-via-size",
+        type=float,
+        default=0.3,
+        dest="stitch_micro_via_size",
+        help="Micro-via pad diameter in mm (default: 0.3). Only used with --micro-via.",
+    )
+    stitch_parser.add_argument(
+        "--micro-via-drill",
+        type=float,
+        default=0.15,
+        dest="stitch_micro_via_drill",
+        help="Micro-via drill diameter in mm (default: 0.15). Only used with --micro-via.",
+    )
+    stitch_parser.add_argument(
+        "--avoid-pad-overlap",
+        action="store_true",
+        dest="stitch_avoid_pad_overlap",
+        help=(
+            "Issue #3271: drop via placements whose drill circle would be "
+            "fully contained inside an SMD pad on the same net.  Required "
+            "on manufacturer profiles that forbid via-in-pad processing "
+            "(e.g. JLCPCB standard tier).  Has no effect under --blanket "
+            "or --thermal."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--spacing",
+        type=float,
+        default=3.0,
+        dest="stitch_spacing",
+        help="Grid spacing for blanket stitching in mm (default: 3.0)",
+    )
+    stitch_parser.add_argument(
+        "--thermal",
+        action="store_true",
+        dest="stitch_thermal",
+        help=(
+            "Place thermal vias under / around MOSFET heat-sink pads. "
+            "Selects pads using footprint-name (TO-220, DPAK, QFN-EP, ...), "
+            "reference-prefix (Q*), and pad-size heuristics, AND-ed with "
+            "target-net membership."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--vias-per-pad",
+        type=int,
+        default=4,
+        dest="stitch_vias_per_pad",
+        help="Number of thermal vias to place per qualifying pad (default: 4)",
+    )
+    stitch_parser.add_argument(
+        "--thermal-radius",
+        type=float,
+        default=2.5,
+        dest="stitch_thermal_radius",
+        help=(
+            "Halo-mode ring radius in mm for thermal vias placed AROUND "
+            "(not under) smaller pads (default: 2.5)"
+        ),
+    )
+    stitch_parser.add_argument(
+        "--thermal-min-pad-size",
+        type=float,
+        default=2.0,
+        dest="stitch_thermal_min_pad_size",
+        help=(
+            "Minimum pad width AND height (mm) for the 'large pad' thermal "
+            "signal (default: 2.0). Pads bigger than this on both axes are "
+            "flagged as heat-sink pads even without a footprint-name match."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--thermal-component-prefix",
+        action="append",
+        dest="stitch_thermal_component_prefixes",
+        help=(
+            "Reference prefix (case-sensitive) for components that should "
+            "be considered thermal-pad candidates. Can be repeated. "
+            "Defaults to 'Q' (transistors / MOSFETs)."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--dry-run",
+        "-d",
+        action="store_true",
+        dest="stitch_dry_run",
+        help="Show changes without applying",
+    )
+    stitch_parser.add_argument(
+        "-o",
+        "--output",
+        dest="stitch_output",
+        help="Output file (default: modify in place)",
+    )
+    stitch_parser.add_argument(
+        "--complete",
+        action="store_true",
+        dest="stitch_complete",
+        help="Commit only physically complete power nets after native refill",
+    )
+    stitch_parser.add_argument(
+        "--evidence-dir",
+        dest="stitch_evidence_dir",
+        help="New directory retaining physical candidates and native reports",
+    )
+    stitch_parser.add_argument(
+        "--kicad-cli",
+        dest="stitch_kicad_cli",
+        help="KiCad 10 CLI used by --complete",
+    )
+    stitch_parser.add_argument(
+        "--drc-strict",
+        action="store_true",
+        dest="stitch_drc_strict",
+        help="Require native DRC with zero findings (implies --drc)",
+    )
+    stitch_parser.add_argument(
+        "--project",
+        dest="stitch_project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) --drc uses "
+        "(default: the files beside the board)",
+    )
+    stitch_parser.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        dest="stitch_allow_default_rules",
+        help="Run --drc against KiCad default rules when no project rules are found",
+    )
+    stitch_parser.add_argument(
+        "--drc",
+        action="store_true",
+        dest="stitch_drc",
+        help="Run DRC after stitching (fills zones automatically via kicad-cli)",
+    )
+    stitch_parser.add_argument(
+        "--mfr",
+        "--manufacturer",
+        dest="stitch_mfr",
+        default=None,
+        help=(
+            "Manufacturer profile (e.g., 'jlcpcb', 'jlcpcb-tier1'). When set, "
+            "stitch via dimensions are resolved from the manufacturer's YAML "
+            "design rules using the board's actual copper layer count, "
+            "overriding --via-size and --drill defaults. When omitted, the "
+            "existing CLI defaults are used."
+        ),
+    )
+    stitch_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        dest="stitch_copper",
+        help=(
+            "Outer copper weight in oz (default: 1.0). Used together with --mfr "
+            "to select the correct design-rules row from the manufacturer YAML."
+        ),
+    )
+    add_format_flag(stitch_parser)
+
+
+def _add_route_stub(subparsers) -> None:
+    """Register ``route`` for ``kct --help``; ``cli.main`` owns its argv.
+
+    ``kct route`` is a passthrough subcommand (issue #7017): ``cli.main``
+    hands everything after ``route`` straight to ``route_cmd.main`` before
+    this parser ever sees it, and ``route_cmd._route_parser`` is the only
+    declaration of its flags.  This stub only puts ``route`` in the
+    top-level command list, and keeps the ~24k-line ``route_cmd`` off the
+    import path of ``create_parser()``.
+    """
+    subparsers.add_parser("route", help="Autoroute a PCB", add_help=False)
+
+
+def _add_retune_lengths_parser(subparsers) -> None:
+    """Add retune-lengths subcommand parser (Issue #6885)."""
+    p = subparsers.add_parser(
+        "retune-lengths",
+        help="Length-tune selected match groups / diff pairs on an already-routed PCB",
+        description=(
+            "Apply the existing match-group and diff-pair skew tuners to the "
+            "SELECTED groups of a routed board, writing a distinct output board "
+            "and a provenance record. The input is never modified; nothing is "
+            "written unless every selected target reaches the limit kct check "
+            "enforces. Unselected copper is preserved."
+        ),
+    )
+    p.add_argument("pcb", help="Path to the routed .kicad_pcb (read-only)")
+    p.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output .kicad_pcb path (must differ from the input and not exist)",
+    )
+    p.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        required=True,
+        help="Net-class sidecar JSON declaring the groups/pairs and tolerances (as for kct check)",
+    )
+    p.add_argument(
+        "--group",
+        dest="groups",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Match group to tune (declared length_match_group); repeatable",
+    )
+    p.add_argument(
+        "--diffpair",
+        dest="diffpairs",
+        action="append",
+        default=[],
+        nargs=2,
+        metavar=("POS_NET", "NEG_NET"),
+        help="Differential pair to skew-tune, as its two net names; repeatable",
+    )
+    p.add_argument(
+        "--timeout",
+        dest="timeout",
+        type=float,
+        default=300.0,
+        help="Wall-clock budget for the tuning step in seconds (default: 300)",
+    )
+    p.add_argument(
+        "--provenance",
+        dest="provenance",
+        default=None,
+        help="Provenance JSON path (default: <output>.retune.json)",
+    )
+    add_format_flag(p)
+
+
+def _add_route_link_parser(subparsers) -> None:
+    """Add route-link subcommand parser (Issue #8310)."""
+    from .route_link_cmd import add_route_link_arguments
+
+    route_link_parser = subparsers.add_parser(
+        "route-link",
+        help="Route individual links between chosen pads/points (with --probe, read-only)",
+    )
+    add_route_link_arguments(route_link_parser)
+
+
+def _add_route_auto_parser(subparsers) -> None:
+    """Add route-auto subcommand parser."""
+    route_auto_parser = subparsers.add_parser(
+        "route-auto",
+        help="Route a net using RoutingOrchestrator smart strategy selection",
+    )
+    route_auto_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    # Issue #4322: --net is no longer unconditionally required because --nets
+    # (route several nets in sequence) is an alternative.  Exactly one of
+    # --net / --nets must be given; the handler enforces this and errors if
+    # both (or neither) are supplied.
+    route_auto_parser.add_argument(
+        "--net",
+        required=False,
+        metavar="NAME",
+        help="Net to route (e.g., 'GND', 'SPI_CLK'). Mutually exclusive with --nets.",
+    )
+    route_auto_parser.add_argument(
+        "--nets",
+        metavar="NAME[,NAME...]",
+        help=(
+            "Comma-separated nets to route in sequence (Issue #4322). Each net "
+            "is routed independently via RoutingOrchestrator, accumulating "
+            "copper into the output; the exit code is non-zero if ANY net "
+            "fails or is left partial. Whitespace around each name is trimmed. "
+            "Mutually exclusive with --net."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--region",
+        metavar="X1,Y1,X2,Y2",
+        help=(
+            "SPATIAL routing bound (Issue #4148): confine routing of --net to "
+            "the axis-aligned box 'x1,y1,x2,y2' (board-relative mm, same "
+            "convention as 'pcb strip --region' and 'route --region'). Every "
+            "cell outside the box is a fixed obstacle and existing copper "
+            "outside is preserved unchanged. If --net has an endpoint outside "
+            "the box the route fails with a clear message. Bare mid-trace "
+            "stub reconnection is deferred to a Phase 2b follow-up."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--strategy",
+        choices=["auto", "global", "escape", "hierarchical", "subgrid", "via_resolution"],
+        default="auto",
+        help=(
+            "Strategy override (default: auto). "
+            "'auto' lets the orchestrator select the best strategy and, on a "
+            "partially-connected multi-pad net, automatically ATTEMPTS the "
+            "'hierarchical' fallback to complete it (Issue #4165); the fallback "
+            "improves completion when it can but does not guarantee it, so a "
+            "hard net may stay partial and route-auto still exits non-zero. "
+            "'global'/'escape'/'subgrid' route a SINGLE two-terminal corridor "
+            "and may leave intermediate pads of a multi-pad net unconnected "
+            "even when they report success (route-auto then reports "
+            "'partially routed: k/n pads connected' and exits non-zero). "
+            "'hierarchical' iterates toward full net completion but may still "
+            "leave a congested net partial."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=(
+            "Persist a partially-routed multi-pad net's copper instead of "
+            "refusing to write incomplete copper. Exit code stays non-zero and "
+            "the k/n partial report is still printed (Issue #4165)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--no-repair",
+        action="store_true",
+        help="Disable automatic clearance repair after routing (repair enabled by default)",
+    )
+    route_auto_parser.add_argument(
+        "--no-via-resolution",
+        action="store_true",
+        help="Disable via conflict resolution (enabled by default)",
+    )
+    route_auto_parser.add_argument(
+        "--via-drill",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Via drill size in mm. Overrides the board-derived via drill "
+            "(Issue #4247). When omitted, route-auto derives the drill from "
+            "the board's net-class via constraints."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--via-diameter",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Via pad diameter in mm. Overrides the board-derived via diameter "
+            "(Issue #4247). When omitted, route-auto derives the diameter from "
+            "the board's net-class via constraints."
+        ),
+    )
+    route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")
+    route_auto_parser.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write the board to PATH (.kicad_pcb) after every net pass that "
+            "improves the score (nets complete, then wirelength and vias), "
+            "plus a PATH-stem .checkpoint.json sidecar with the score and pass "
+            "number. Works without --output (copper accumulates in a private "
+            "working file). Enables regressing-pass rollback (Issue #5945)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--resume",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Start from a checkpoint board's copper instead of the input; "
+            "requested nets it already completed are kept and skipped. Its "
+            "footprints and nets must match the input board (Issue #5945)."
+        ),
+    )
+    # Issue #6054: whole-run lint gate (see kicad_tools.cli.route_lint_gate).
+    route_auto_parser.add_argument(
+        "--lint-gate",
+        action="store_true",
+        help=(
+            "Lint the input board before routing and --output after the last "
+            "net (kct check + kct detect-mistakes, paired by stable finding key); "
+            "if routing introduced new error findings, restore --output to its "
+            "pre-run contents, keep the routed board as "
+            "<output>.lint-rejected.kicad_pcb and exit 3. Requires --output "
+            "(Issue #6054)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--lint-gate-waivers",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Waivers sidecar for both --lint-gate runs. Default: the one "
+            "`kct check` discovers for the INPUT board."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--lint-gate-strict",
+        action="store_true",
+        help="With --lint-gate, new warning findings also roll the run back.",
+    )
+    route_auto_parser.add_argument(
+        "--no-rollback",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep a net pass even when it lowers the number of complete nets. "
+            "By default a multi-net --nets run with --output (or any "
+            "--checkpoint/--resume run) undoes such a pass, reports the net "
+            "as failed (rolled_back in --format json) and exits 1 "
+            "(Issue #5945)."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview strategy selection without routing",
+    )
+    route_auto_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show full traceback on error",
+    )
+    route_auto_parser.add_argument(
+        "--diagnose-unrouted-budget",
+        type=float,
+        default=20.0,
+        metavar="SECONDS",
+        help=(
+            "Issue #6001: wall-clock budget for classifying each connection a "
+            "partial or failed net left unrouted as 'congested' (routable once "
+            "other nets' copper is removed -- the JSON lists those nets as "
+            "'contenders') or 'blocked' (no path even then -- the JSON lists the "
+            "pads/keepouts/edge closing it off as 'blockers'), on the board at "
+            "the strategies' fine grid resolution. A net no fine-grid strategy "
+            "searched is 'unclassified'. Reported per net under 'unrouted' in "
+            "--format json output. 0 disables the pass. Default: 20."
+        ),
+    )
+    add_format_flag(route_auto_parser)
+
+
+def _add_reason_parser(subparsers) -> None:
+    """Add reason subcommand parser."""
+    reason_parser = subparsers.add_parser("reason", help="LLM-driven PCB layout reasoning")
+    reason_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    reason_parser.add_argument("-o", "--output", help="Output file path")
+    reason_parser.add_argument(
+        "--export-state",
+        action="store_true",
+        help="Export state as JSON for external LLM",
+    )
+    reason_parser.add_argument("--state-output", help="Output path for state JSON")
+    reason_parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Run interactive reasoning loop",
+    )
+    reason_parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Print detailed analysis of PCB state",
+    )
+    reason_parser.add_argument(
+        "--auto-route",
+        action="store_true",
+        help="Auto-route priority nets without LLM",
+    )
+    reason_parser.add_argument(
+        "--max-nets",
+        type=int,
+        default=10,
+        help="Maximum nets to auto-route (default: 10)",
+    )
+    reason_parser.add_argument("--drc", help="Path to DRC report file")
+    reason_parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Target manufacturer for DRC rules (default: the board's project.kct "
+            "target_fab, else jlcpcb; Issue #6169)"
+        ),
+    )
+    reason_parser.add_argument("-v", "--verbose", action="store_true")
+    reason_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
+    add_format_flag(reason_parser)
+
+
+def _add_optimize_parser(subparsers) -> None:
+    """Add optimize-traces subcommand parser."""
+    optimize_parser = subparsers.add_parser("optimize-traces", help="Optimize PCB traces")
+    optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
+    optimize_net_group = optimize_parser.add_mutually_exclusive_group()
+    optimize_net_group.add_argument(
+        "--net",
+        help="Only optimize the net with exactly this name (case-sensitive; "
+        "'GND' does not match 'PGND'). Use --net-pattern for globs",
+    )
+    optimize_net_group.add_argument(
+        "--net-pattern",
+        metavar="GLOB",
+        help="Only optimize nets whose name matches this case-sensitive glob "
+        "(fnmatch), e.g. '*GND*'",
+    )
+    optimize_parser.add_argument(
+        "--no-merge", action="store_true", help="Disable collinear merging"
+    )
+    optimize_parser.add_argument(
+        "--no-zigzag", action="store_true", help="Disable zigzag elimination"
+    )
+    optimize_parser.add_argument("--no-45", action="store_true", help="Disable 45-degree corners")
+    optimize_parser.add_argument(
+        "--no-jogs",
+        action="store_true",
+        help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+    )
+    optimize_parser.add_argument(
+        "--no-staircase", action="store_true", help="Disable staircase compression"
+    )
+    optimize_parser.add_argument(
+        "--no-pull-tight",
+        action="store_true",
+        help="Disable PullTight (shortening chains by sliding interior segments)",
+    )
+    optimize_parser.add_argument(
+        "--no-detour",
+        action="store_true",
+        help="Disable detour shortening (replacing a chain with a shorter direct path)",
+    )
+    optimize_parser.add_argument(
+        "--chamfer-size",
+        type=float,
+        default=0.5,
+        help="45-degree chamfer size in mm (default: 0.5)",
+    )
+    optimize_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print a per-net table (segments and length before/after) after the summary",
+    )
+    optimize_parser.add_argument(
+        "--dry-run", action="store_true", help="Show results without writing"
+    )
+    optimize_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    # DRC-aware mode arguments
+    optimize_parser.add_argument(
+        "--drc-aware",
+        action="store_true",
+        help="Enable DRC-aware mode: roll back per-net optimizations that increase violations",
+    )
+    optimize_parser.add_argument(
+        "--mfr",
+        help="Target manufacturer for DRC rules (e.g., jlcpcb, oshpark). Required with --drc-aware",
+    )
+    optimize_parser.add_argument(
+        "--project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
+        "uses (default: the files beside the board)",
+    )
+    optimize_parser.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        help="Verify against KiCad default rules when no project rules are found "
+        "(otherwise that is an error)",
+    )
+    optimize_parser.add_argument(
+        "--layers",
+        type=int,
+        default=2,
+        help="Number of copper layers for DRC checks (default: 2)",
+    )
+    optimize_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz for DRC checks (default: 1.0)",
+    )
+    # HV creepage inputs (#8300): same semantics/defaults as ``kct route``.
+    optimize_parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "JSON per-net voltage map (as for kct route). Rejects individual "
+            "edits that would bring a net pair below its pairwise creepage "
+            "requirement. Absent, behaviour is unchanged"
+        ),
+    )
+    optimize_parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    optimize_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    optimize_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for --voltage-map (default: IIIa)",
+    )
+    optimize_parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that triggers creepage widening (default: 30.0)",
+    )
+    add_format_flag(optimize_parser)
+
+
+def _add_validate_footprints_parser(subparsers) -> None:
+    """Add validate-footprints subcommand parser."""
+    validate_fp_parser = subparsers.add_parser(
+        "validate-footprints", help="Validate footprints for pad spacing issues"
+    )
+    validate_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    validate_fp_parser.add_argument(
+        "--min-pad-gap",
+        type=float,
+        default=0.15,
+        help="Minimum required gap between pads in mm (default: 0.15)",
+    )
+    validate_fp_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    validate_fp_parser.add_argument(
+        "--errors-only",
+        action="store_true",
+        help="Only show errors, not warnings",
+    )
+    # Standard library comparison options
+    validate_fp_parser.add_argument(
+        "--compare-standard",
+        action="store_true",
+        help="Compare footprints against KiCad standard library",
+    )
+    validate_fp_parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.05,
+        help="Tolerance for standard comparison in mm (default: 0.05)",
+    )
+    validate_fp_parser.add_argument(
+        "--kicad-library-path",
+        type=str,
+        default=None,
+        help="Override path to KiCad footprint libraries",
+    )
+
+
+def _add_fix_footprints_parser(subparsers) -> None:
+    """Add fix-footprints subcommand parser."""
+    fix_fp_parser = subparsers.add_parser("fix-footprints", help="Fix footprint pad spacing issues")
+    fix_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_fp_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    fix_fp_parser.add_argument(
+        "--min-pad-gap",
+        type=float,
+        default=0.2,
+        help="Target gap between pads in mm (default: 0.2)",
+    )
+    fix_fp_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    fix_fp_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be changed without applying",
+    )
+
+
+def _add_fix_vias_parser(subparsers) -> None:
+    """Add fix-vias subcommand parser."""
+    fix_vias_parser = subparsers.add_parser(
+        "fix-vias", help="Fix vias to meet manufacturer specifications"
+    )
+    fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_vias_parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
+    )
+    fix_vias_parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Manufacturer to use for design rules (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
+    )
+    fix_vias_parser.add_argument(
+        "--layers",
+        type=int,
+        default=None,
+        help="Number of PCB layers (auto-detected from board if not specified)",
+    )
+    fix_vias_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Outer copper weight in oz (default: 1.0)",
+    )
+    fix_vias_parser.add_argument(
+        "--drill",
+        type=float,
+        help="Target drill diameter in mm (overrides manufacturer rules)",
+    )
+    fix_vias_parser.add_argument(
+        "--diameter",
+        type=float,
+        help="Target via diameter in mm (overrides manufacturer rules)",
+    )
+    fix_vias_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    fix_vias_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_vias_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    fix_vias_parser.add_argument(
+        "--skip-if-clearance-violation",
+        action="store_true",
+        help=(
+            "Skip resizing vias that would cause clearance violations. "
+            "Keeps the original via size when enlargement would violate "
+            "minimum clearance to nearby tracks, pads, or other vias."
+        ),
+    )
+    fix_vias_parser.add_argument(
+        "--relocate-in-pad",
+        action="store_true",
+        help=(
+            "Relocate via-in-pad vias off-pad (connectivity-preserving) so the "
+            "board can move to a manufacturer profile that disallows via-in-pad "
+            "(e.g. standard jlcpcb). Distinct pass from via resizing; slides "
+            "each in-pad signal via just outside the pad along its escape track "
+            "and adds stub segments to preserve the net."
+        ),
+    )
+    fix_vias_parser.add_argument(
+        "--net",
+        action="append",
+        dest="nets",
+        metavar="NET",
+        help=("Restrict --relocate-in-pad to the given net name (repeatable). Default: all nets."),
+    )
+
+
+def _add_fix_silkscreen_parser(subparsers) -> None:
+    """Add fix-silkscreen subcommand parser."""
+    fix_silk_parser = subparsers.add_parser(
+        "fix-silkscreen", help="Fix silkscreen line widths to meet manufacturer specifications"
+    )
+    fix_silk_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_silk_parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Manufacturer to use for design rules (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
+    )
+    fix_silk_parser.add_argument(
+        "--layers",
+        type=int,
+        default=2,
+        help="Number of PCB layers (default: 2)",
+    )
+    fix_silk_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Outer copper weight in oz (default: 1.0)",
+    )
+    fix_silk_parser.add_argument(
+        "--clip-to-pads",
+        action="store_true",
+        help=(
+            "Also trim or remove footprint silk lines closer to a pad than the "
+            "manufacturer's silk-to-pad clearance (pin-1 markers are never touched)"
+        ),
+    )
+    fix_silk_parser.add_argument(
+        "--clip-to-holes",
+        action="store_true",
+        help=(
+            "Also clip footprint silk lines/polygons/rects off drilled holes "
+            "(every via, tented or not, and PTH/NPTH), clearing silk_hole_overlap. "
+            "Run after routing; text is left for place-silk-refs --over-holes"
+        ),
+    )
+    fix_silk_parser.add_argument(
+        "--hole-clearance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Silk-to-hole clearance for --clip-to-holes (default: the silk_hole_overlap rule's, 0)",
+    )
+    fix_silk_parser.add_argument(
+        "--min-width",
+        type=float,
+        help="Minimum silkscreen line width in mm (overrides manufacturer rules)",
+    )
+    fix_silk_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    fix_silk_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_silk_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_place_silk_refs_parser(subparsers) -> None:
+    """Add place-silk-refs subcommand parser (issue #5030).
+
+    Issue #5240: read the argparse defaults from the dependency-free
+    ``kicad_tools.silkscreen._silk_defaults`` leaf module instead of
+    ``kicad_tools.silkscreen.place_refs``.  ``create_parser()`` runs this
+    on *every* CLI invocation (building ``--help`` for every subcommand,
+    not just ``place-silk-refs``), and importing anything from
+    ``place_refs`` forces its ``kicad_tools.validate.rules.silkscreen``
+    import, which -- via ``validate``/``validate.rules``'s eager
+    package-level aggregation of every DRC rule -- transitively imports
+    the whole ``kicad_tools.router`` package.  Measured locally: ~1.6s of
+    CPU time per CLI invocation, regardless of subcommand.  Same values,
+    same defaults -- only the import path used to reach four float
+    literals changes.
+    """
+    from kicad_tools.silkscreen._silk_defaults import (
+        DEFAULT_CLEARANCE_MM,
+        DEFAULT_MAX_OFFSET_MM,
+        DEFAULT_STEP_MM,
+        SILK_EDGE_CLEARANCE_MM,
+    )
+
+    place_refs_parser = subparsers.add_parser(
+        "place-silk-refs",
+        help="Move readable silkscreen reference designators to clear collisions",
+    )
+    place_refs_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    place_refs_parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Manufacturer to source solder-mask clearance from (default: built-in 0.05mm)",
+    )
+    place_refs_parser.add_argument(
+        "--layers", type=int, default=2, help="Number of PCB layers (default: 2)"
+    )
+    place_refs_parser.add_argument(
+        "--copper", type=float, default=1.0, help="Outer copper weight in oz (default: 1.0)"
+    )
+    place_refs_parser.add_argument(
+        "--clearance",
+        type=float,
+        default=DEFAULT_CLEARANCE_MM,
+        help=f"Required silk-to-pad/silk-to-silk clearance in mm (default: {DEFAULT_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--edge-clearance",
+        type=float,
+        default=SILK_EDGE_CLEARANCE_MM,
+        help=f"Required silk-to-board-edge clearance in mm (default: {SILK_EDGE_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--max-offset",
+        type=float,
+        default=DEFAULT_MAX_OFFSET_MM,
+        help=f"Maximum search distance from the component body in mm (default: {DEFAULT_MAX_OFFSET_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--step",
+        type=float,
+        default=DEFAULT_STEP_MM,
+        help=f"Positive search ring spacing in mm; at most 4096 rings (default: {DEFAULT_STEP_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--allow-rotate",
+        action="store_true",
+        help="Also try a 90-degree rotated orientation when the original does not fit",
+    )
+    place_refs_parser.add_argument(
+        "--refs",
+        metavar="REF[,REF...]",
+        help="Comma-separated reference designators to move; others stay put as obstacles",
+    )
+    place_refs_parser.add_argument(
+        "--over-holes",
+        action="store_true",
+        help=(
+            "Move only references whose text overlaps a drilled hole (the "
+            "silk_hole_overlap findings); combined with --refs, the intersection"
+        ),
+    )
+    place_refs_parser.add_argument(
+        "-o", "--output", help="Output file path (default: overwrite input)"
+    )
+    place_refs_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview the move plan without modifying files"
+    )
+    place_refs_parser.add_argument(
+        "--verify-drc",
+        action="store_true",
+        help="After applying, run native DRC; fail on silk findings or unavailable/failed verification",
+    )
+    place_refs_parser.add_argument(
+        "--render",
+        metavar="SVG_PATH",
+        help="Write a rendered review artifact (SVG) of old/new reference positions",
+    )
+    place_refs_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_repair_clearance_parser(subparsers) -> None:
+    """Add repair-clearance subcommand parser."""
+    repair_parser = subparsers.add_parser(
+        "repair-clearance", help="Repair clearance violations by nudging traces"
+    )
+    repair_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    repair_parser.add_argument(
+        "--drc-report",
+        help="Path to existing DRC report (.rpt or .json)",
+    )
+    repair_parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        help="Target manufacturer (for context)",
+    )
+    repair_parser.add_argument(
+        "--max-displacement",
+        type=float,
+        default=0.1,
+        help="Maximum nudge distance in mm (default: 0.1)",
+    )
+    repair_parser.add_argument(
+        "--margin",
+        type=float,
+        default=0.01,
+        help="Extra clearance margin beyond minimum in mm (default: 0.01)",
+    )
+    repair_parser.add_argument(
+        "--prefer",
+        choices=["move-trace", "move-via"],
+        default="move-trace",
+        help="Which object to move (default: move-trace)",
+    )
+    repair_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    repair_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    repair_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_repair_creepage_parser(subparsers) -> None:
+    """Add repair-creepage subcommand parser (Issue #8545)."""
+    from .repair_creepage_cmd import add_repair_creepage_args
+
+    parser = subparsers.add_parser(
+        "repair-creepage",
+        help="Repair HV creepage shortfalls by translating wide traces/vias (keeps width)",
+        description=(
+            "Repair HV creepage shortfalls by translating wide traces/vias. The DRC "
+            "regression gate compares error COUNTS only: a move that fixes one "
+            "violation and creates another is not caught, so re-run `kct check` on the "
+            "result. Without -o the input board is overwritten, even on a partial repair "
+            "(exit 1)."
+        ),
+    )
+    add_repair_creepage_args(parser)
+
+
+def _add_fix_drc_parser(subparsers) -> None:
+    """Add fix-drc subcommand parser."""
+    fix_drc_parser = subparsers.add_parser(
+        "fix-drc", help="Automated DRC violation repair (clearance + drill)"
+    )
+    fix_drc_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_drc_parser.add_argument(
+        "--drc-report",
+        help="Path to existing DRC report (.rpt or .json)",
+    )
+    fix_drc_parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Target manufacturer for design rules (default: the board's "
+            "project.kct target_fab, else jlcpcb; Issue #6169). "
+            "Only used when fix-drc generates a DRC report internally "
+            "(no --drc-report given, or with --verify); ignored when "
+            "--drc-report is supplied since clearances come from the report."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        default=None,
+        help=(
+            "Number of PCB layers used to derive clearance rules "
+            "(default: the board's copper-layer count, as in kct check)."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "--max-displacement",
+        type=float,
+        default=0.5,
+        help="Maximum nudge/slide distance in mm (default: 0.5)",
+    )
+    fix_drc_parser.add_argument(
+        "--margin",
+        type=float,
+        default=0.01,
+        help="Extra clearance margin beyond minimum in mm (default: 0.01)",
+    )
+    fix_drc_parser.add_argument(
+        "--only",
+        choices=["clearance", "drill-clearance"],
+        help="Only fix a specific violation type",
+    )
+    fix_drc_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    fix_drc_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_drc_parser.add_argument(
+        "--max-passes",
+        type=int,
+        default=1,
+        help=(
+            "Maximum number of detect-repair cycles (default: 1). "
+            "Each pass re-runs DRC detection on the modified PCB. "
+            "Iteration stops early when no violations are repaired in a pass."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "--local-reroute",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Attempt local A* rerouting for infeasible violations "
+            "(segments with both endpoints at vias). On by default; "
+            "use --no-local-reroute to disable."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "--no-connectivity-check",
+        action="store_true",
+        help=(
+            "Skip post-pass connectivity check and rollback. "
+            "Use for boards with no footprints where connectivity is meaningless."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Run kct check's rule set before and after repair and report a "
+            "before/after violation delta."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+    )
+    fix_drc_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    fix_drc_parser.add_argument(
+        "--transactional",
+        action="store_true",
+        help=(
+            "Snapshot the output file before repairing and roll it back "
+            "byte-identical if the run fails (exception, Ctrl-C, no-progress "
+            "exit 1, or connectivity-rollback exit 3); the failed attempt is "
+            "preserved as a <file>.failed-<timestamp> sidecar. Exit 2 "
+            "(partial repair) keeps the applied repairs."
+        ),
+    )
+
+
+def _add_fix_erc_parser(subparsers) -> None:
+    """Add fix-erc subcommand parser."""
+    fix_erc_parser = subparsers.add_parser(
+        "fix-erc", help="Automated ERC violation repair (PWR_FLAG + no-connect)"
+    )
+    fix_erc_parser.add_argument("schematic", help="Path to .kicad_sch file")
+    fix_erc_parser.add_argument(
+        "--erc-report",
+        help="Path to existing ERC report (.rpt or .json)",
+    )
+    fix_erc_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_erc_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_parts_parser(subparsers) -> None:
+    """Add parts subcommand parser with its subcommands."""
+    parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
+    parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
+
+    # parts lookup
+    parts_lookup = parts_subparsers.add_parser("lookup", help="Look up part by LCSC number")
+    parts_lookup.add_argument("part", help="LCSC part number (e.g., C123456)")
+    parts_lookup.add_argument("--format", choices=["text", "json"], default="text")
+    parts_lookup.add_argument("--no-cache", action="store_true", help="Bypass cache")
+
+    # parts search
+    parts_search = parts_subparsers.add_parser("search", help="Search for parts")
+    parts_search.add_argument("query", help="Search query")
+    parts_search.add_argument("--format", choices=["text", "json", "table"], default="table")
+    parts_search.add_argument("--limit", type=int, default=20, help="Max results")
+    parts_search.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
+    parts_search.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
+
+    # parts import
+    parts_import = parts_subparsers.add_parser(
+        "import", help="Import part from datasheet to library"
+    )
+    parts_import.add_argument(
+        "parts", nargs="+", help="Part number(s) to import (e.g., STM32F103C8T6)"
+    )
+    parts_import.add_argument(
+        "--library", "-l", required=True, help="Output symbol library (.kicad_sym)"
+    )
+    parts_import.add_argument(
+        "--symbol-lib",
+        dest="symbol_library",
+        help="Symbol library (alias for --library)",
+    )
+    parts_import.add_argument(
+        "--footprint-lib", help="Project footprint library (.pretty directory)"
+    )
+    parts_import.add_argument("--package", "-p", help="Specific package variant (e.g., LQFP48)")
+    parts_import.add_argument(
+        "--layout",
+        choices=["functional", "physical", "simple"],
+        default="functional",
+        help="Pin layout style (default: functional)",
+    )
+    parts_import.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what would be imported without making changes",
+    )
+    parts_import.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Deprecated: not implemented; ignored",
+    )
+    parts_import.add_argument("--overwrite", action="store_true", help="Overwrite existing symbols")
+    parts_import.add_argument("--format", choices=["text", "json"], default="text")
+
+    # parts availability
+    parts_avail = parts_subparsers.add_parser(
+        "availability", help="Check BOM part availability on LCSC"
+    )
+    parts_avail.add_argument("schematic", help="Path to .kicad_sch file")
+    parts_avail.add_argument(
+        "--quantity", "-q", type=int, default=1, help="Number of boards to manufacture (default: 1)"
+    )
+    parts_avail.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    parts_avail.add_argument(
+        "--no-alternatives", action="store_true", help="Don't search for alternative parts"
+    )
+    parts_avail.add_argument(
+        "--issues-only", action="store_true", help="Only show parts with availability issues"
+    )
+    parts_avail.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the parts cache and fetch every part live",
+    )
+    parts_avail.add_argument(
+        "--no-auto-lcsc",
+        action="store_true",
+        help="Don't auto-match LCSC part numbers for lines lacking one "
+        "(auto-matching is on by default, like 'kct export')",
+    )
+
+    # parts cache
+    parts_cache = parts_subparsers.add_parser("cache", help="Cache management")
+    parts_cache.add_argument(
+        "cache_action",
+        nargs="?",
+        choices=["stats", "clear", "clear-expired"],
+        default="stats",
+        help="Cache action (default: stats)",
+    )
+    add_format_flag(parts_cache)
+
+    # parts sync-catalog
+    parts_sync = parts_subparsers.add_parser(
+        "sync-catalog",
+        help="Download the offline jlcparts catalog for offline/rate-limited lookups",
+    )
+    parts_sync.add_argument(
+        "--force", action="store_true", help="Re-download even if a catalog already exists"
+    )
+    parts_sync.add_argument(
+        "--base-url", default=None, help="Override dataset base URL (advanced/testing)"
+    )
+    add_format_flag(parts_sync)
+
+    # parts alternatives
+    parts_alt = parts_subparsers.add_parser(
+        "alternatives",
+        help="Suggest Basic/Preferred JLCPCB alternatives for an LCSC part (offline)",
+        description=(
+            "Suggest in-stock substitutes from the offline jlcparts catalog. "
+            "Ranks Basic, then Preferred, then Extended, then lowest unit price; "
+            "only a strictly better library tier, or the same tier at a lower "
+            "price, is shown."
+        ),
+    )
+    parts_alt.add_argument("part", help="LCSC part number (e.g., C123456)")
+    parts_alt.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    add_format_flag(parts_alt)
+
+    # parts suggest
+    parts_suggest = parts_subparsers.add_parser(
+        "suggest", help="Suggest LCSC part numbers for components without them"
+    )
+    parts_suggest.add_argument("schematic", help="Path to .kicad_sch file")
+    parts_suggest.add_argument(
+        "--format", choices=["table", "json"], default="table", help="Output format"
+    )
+    parts_suggest.add_argument(
+        "--all",
+        action="store_true",
+        dest="show_all",
+        help="Show suggestions for all components (including those with LCSC numbers)",
+    )
+    parts_suggest.add_argument(
+        "--no-basic-preference",
+        action="store_true",
+        help="Don't prefer JLCPCB basic parts",
+    )
+    parts_suggest.add_argument(
+        "--min-stock",
+        type=int,
+        default=100,
+        help="Minimum stock level to consider (default: 100)",
+    )
+    parts_suggest.add_argument(
+        "--max-suggestions",
+        type=int,
+        default=3,
+        help="Maximum suggestions per component (default: 3)",
+    )
+
+
+def _add_datasheet_parser(subparsers) -> None:
+    """Add datasheet subcommand parser with its subcommands."""
+    datasheet_parser = subparsers.add_parser(
+        "datasheet", help="Datasheet search, download, and PDF parsing"
+    )
+    datasheet_subparsers = datasheet_parser.add_subparsers(
+        dest="datasheet_command", help="Datasheet commands"
+    )
+
+    # datasheet search
+    datasheet_search = datasheet_subparsers.add_parser("search", help="Search for datasheets")
+    datasheet_search.add_argument("part", help="Part number to search for")
+    datasheet_search.add_argument("--format", choices=["text", "json"], default="text")
+    datasheet_search.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
+
+    # datasheet download
+    datasheet_download = datasheet_subparsers.add_parser("download", help="Download a datasheet")
+    datasheet_download.add_argument("part", help="Part number to download")
+    datasheet_download.add_argument("-o", "--output", help="Output directory (default: cache)")
+    datasheet_download.add_argument(
+        "--force", action="store_true", help="Force download even if cached"
+    )
+    add_format_flag(datasheet_download)
+
+    # datasheet list
+    datasheet_list = datasheet_subparsers.add_parser("list", help="List cached datasheets")
+    datasheet_list.add_argument("--format", choices=["text", "json"], default="text")
+
+    # datasheet cache
+    datasheet_cache = datasheet_subparsers.add_parser("cache", help="Cache management")
+    datasheet_cache.add_argument(
+        "cache_action",
+        nargs="?",
+        choices=["stats", "clear", "clear-expired"],
+        default="stats",
+        help="Cache action (default: stats)",
+    )
+    datasheet_cache.add_argument(
+        "--older-than", type=int, help="For clear: only clear entries older than N days"
+    )
+    add_format_flag(datasheet_cache)
+
+    # datasheet convert
+    ds_convert = datasheet_subparsers.add_parser("convert", help="Convert PDF to markdown")
+    ds_convert.add_argument("pdf", help="Path to PDF file")
+    ds_convert.add_argument("-o", "--output", help="Output file path (default: stdout)")
+    ds_convert.add_argument("--pages", help="Page range (e.g., '1-10' or '1,2,5')")
+    add_format_flag(ds_convert)
+
+    # datasheet extract-images
+    ds_images = datasheet_subparsers.add_parser("extract-images", help="Extract images from PDF")
+    ds_images.add_argument("pdf", help="Path to PDF file")
+    ds_images.add_argument("-o", "--output", required=True, help="Output directory for images")
+    ds_images.add_argument("--pages", help="Page range (e.g., '1-10' or '1,2,5')")
+    ds_images.add_argument(
+        "--min-size", type=int, default=100, help="Minimum image dimension (default: 100)"
+    )
+    ds_images.add_argument("--format", choices=["text", "json"], default="text")
+
+    # datasheet extract-tables
+    ds_tables = datasheet_subparsers.add_parser("extract-tables", help="Extract tables from PDF")
+    ds_tables.add_argument("pdf", help="Path to PDF file")
+    ds_tables.add_argument("-o", "--output", help="Output directory for tables")
+    ds_tables.add_argument("--pages", help="Page range (e.g., '1-10' or '1,2,5')")
+    ds_tables.add_argument("--format", choices=["markdown", "csv", "json"], default="markdown")
+
+    # datasheet info
+    ds_info = datasheet_subparsers.add_parser("info", help="Show PDF information")
+    ds_info.add_argument("pdf", help="Path to PDF file")
+    ds_info.add_argument("--format", choices=["text", "json"], default="text")
+
+
+def _add_decisions_parser(subparsers) -> None:
+    """Add decisions subcommand parser with its subcommands."""
+    decisions_parser = subparsers.add_parser(
+        "decisions", help="Query design decisions (placement and routing rationale)"
+    )
+    decisions_subparsers = decisions_parser.add_subparsers(
+        dest="decisions_command", help="Decision commands"
+    )
+
+    # decisions show
+    decisions_show = decisions_subparsers.add_parser("show", help="Show decisions matching filters")
+    decisions_show.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_show.add_argument(
+        "-c", "--component", help="Filter by component reference (e.g., U1)"
+    )
+    decisions_show.add_argument("-n", "--net", help="Filter by net name (e.g., USB_D+)")
+    decisions_show.add_argument(
+        "-a",
+        "--action",
+        choices=["place", "route", "move", "reroute", "delete"],
+        help="Filter by action type",
+    )
+    decisions_show.add_argument("-f", "--format", choices=["text", "json", "tree"], default="text")
+    decisions_show.add_argument(
+        "-l", "--limit", type=int, default=20, help="Max decisions to show (default: 20)"
+    )
+
+    # decisions list
+    decisions_list = decisions_subparsers.add_parser("list", help="List summary of all decisions")
+    decisions_list.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_list.add_argument("-f", "--format", choices=["text", "json"], default="text")
+
+    # decisions explain-placement
+    decisions_explain_place = decisions_subparsers.add_parser(
+        "explain-placement", help="Explain why a component is placed where it is"
+    )
+    decisions_explain_place.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_explain_place.add_argument("component", help="Component reference (e.g., U1)")
+    decisions_explain_place.add_argument("-f", "--format", choices=["text", "json"], default="text")
+
+    # decisions explain-route
+    decisions_explain_route = decisions_subparsers.add_parser(
+        "explain-route", help="Explain why a net was routed the way it was"
+    )
+    decisions_explain_route.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_explain_route.add_argument("net", help="Net name (e.g., USB_D+)")
+    decisions_explain_route.add_argument("-f", "--format", choices=["text", "json"], default="text")
+
+
+def _add_placement_parser(subparsers) -> None:
+    """Add placement subcommand parser with its subcommands."""
+    placement_parser = subparsers.add_parser("placement", help="Detect and fix placement conflicts")
+    placement_subparsers = placement_parser.add_subparsers(
+        dest="placement_command", help="Placement commands"
+    )
+
+    # placement check
+    placement_check = placement_subparsers.add_parser(
+        "check", help="Check PCB for placement conflicts"
+    )
+    placement_check.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_check.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    placement_check.add_argument(
+        "--pad-clearance", type=float, default=0.1, help="Min pad clearance (mm)"
+    )
+    placement_check.add_argument(
+        "--hole-clearance", type=float, default=0.5, help="Min hole clearance (mm)"
+    )
+    placement_check.add_argument(
+        "--edge-clearance", type=float, default=0.3, help="Min edge clearance (mm)"
+    )
+    placement_check.add_argument("-v", "--verbose", action="store_true")
+    placement_check.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    placement_check.add_argument(
+        "--signal-integrity",
+        action="store_true",
+        help="Analyze signal integrity and show placement hints",
+    )
+
+    # placement fix
+    placement_fix = placement_subparsers.add_parser("fix", help="Suggest and apply placement fixes")
+    placement_fix.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_fix.add_argument("-o", "--output", help="Output file path")
+    placement_fix.add_argument(
+        "--strategy",
+        choices=["spread", "compact", "anchor"],
+        default="spread",
+        help="Fix strategy",
+    )
+    placement_fix.add_argument("--anchor", help="Comma-separated components to keep fixed")
+    placement_fix.add_argument(
+        "--only",
+        choices=["pad_clearance", "courtyard_overlap", "hole_to_hole", "edge_clearance"],
+        default=None,
+        help="Fix only a specific conflict type (e.g., pad_clearance for fast targeted repair)",
+    )
+    placement_fix.add_argument("--dry-run", action="store_true")
+    placement_fix.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Maximum wall-clock seconds; returns best result so far on expiry",
+    )
+    placement_fix.add_argument("-v", "--verbose", action="store_true")
+    placement_fix.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    add_format_flag(placement_fix)
+
+    # placement nudge (fast pad clearance repair)
+    placement_nudge = placement_subparsers.add_parser(
+        "nudge", help="Fast targeted pad clearance violation repair"
+    )
+    placement_nudge.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_nudge.add_argument("-o", "--output", help="Output file path")
+    placement_nudge.add_argument("--anchor", help="Comma-separated components to keep fixed")
+    placement_nudge.add_argument(
+        "--pad-clearance", type=float, default=0.1, help="Min pad clearance (mm)"
+    )
+    placement_nudge.add_argument("--dry-run", action="store_true", help="Show proposed moves only")
+    placement_nudge.add_argument("-v", "--verbose", action="store_true")
+    placement_nudge.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    add_format_flag(placement_nudge)
+
+    # placement optimize
+    placement_optimize = placement_subparsers.add_parser(
+        "optimize", help="Optimize placement for routability"
+    )
+    placement_optimize.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_optimize.add_argument("-o", "--output", help="Output file path")
+    placement_optimize.add_argument(
+        "--strategy",
+        choices=["force-directed", "evolutionary", "hybrid"],
+        default="force-directed",
+        help="Optimization strategy (default: force-directed)",
+    )
+    placement_optimize.add_argument(
+        "--iterations",
+        type=int,
+        default=1000,
+        help="Max iterations for physics simulation (default: 1000)",
+    )
+    placement_optimize.add_argument(
+        "--generations",
+        type=int,
+        default=100,
+        help="Generations for evolutionary/hybrid mode (default: 100)",
+    )
+    placement_optimize.add_argument(
+        "--population",
+        type=int,
+        default=50,
+        help="Population size for evolutionary/hybrid mode (default: 50)",
+    )
+    placement_optimize.add_argument(
+        "--grid",
+        type=float,
+        default=0.0,
+        help="Position grid snap in mm (0 to disable, default: 0)",
+    )
+    placement_optimize.add_argument(
+        "--fixed",
+        help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
+    )
+    placement_optimize.add_argument(
+        "--cluster",
+        action="store_true",
+        help="Enable functional clustering (groups bypass caps near ICs, etc.)",
+    )
+    placement_optimize.add_argument(
+        "--constraints",
+        help="Path to YAML file with grouping constraints",
+    )
+    placement_optimize.add_argument(
+        "--keepout",
+        metavar="FILE",
+        help="YAML file defining keepout zones",
+    )
+    placement_optimize.add_argument(
+        "--auto-keepout",
+        action="store_true",
+        dest="auto_keepout",
+        help="Auto-detect keepout zones from mounting holes and connectors",
+    )
+    placement_optimize.add_argument(
+        "--edge-detect",
+        action="store_true",
+        help="Auto-detect edge components (connectors, mounting holes, etc.)",
+    )
+    placement_optimize.add_argument(
+        "--thermal",
+        action="store_true",
+        help="Enable thermal-aware placement (keeps heat sources away from sensitive components)",
+    )
+    placement_optimize.add_argument(
+        "--routing-aware",
+        action="store_true",
+        dest="routing_aware",
+        help="Use integrated place-route optimization (iterates between placement and routing)",
+    )
+    placement_optimize.add_argument(
+        "--use-routing-fitness",
+        action="store_true",
+        dest="use_routing_fitness",
+        help=(
+            "(Issue #2720) Replace the evolutionary GA's average-pairwise-spacing "
+            "routability proxy with actual routing completion rate from the C++ A* "
+            "router (CppAstarRoutingEvaluator). Only effective with --strategy "
+            "evolutionary or hybrid. Default off."
+        ),
+    )
+    placement_optimize.add_argument(
+        "--check-routability",
+        action="store_true",
+        dest="check_routability",
+        help="Check routability before and after optimization to show impact",
+    )
+    placement_optimize.add_argument(
+        "--boundary-margin",
+        "--board-margin",
+        type=float,
+        default=None,
+        dest="boundary_margin",
+        help="Extra margin in mm between component courtyards and board edge (default: 1.0)",
+    )
+    placement_optimize.add_argument("--dry-run", action="store_true", help="Preview only")
+    placement_optimize.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    placement_optimize.add_argument("-v", "--verbose", action="store_true")
+    placement_optimize.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement snap
+    placement_snap = placement_subparsers.add_parser("snap", help="Snap components to grid")
+    placement_snap.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_snap.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_snap.add_argument(
+        "--grid",
+        type=float,
+        default=0.5,
+        help="Grid size in mm (default: 0.5)",
+    )
+    placement_snap.add_argument(
+        "--rotation",
+        type=int,
+        default=90,
+        help="Rotation snap in degrees (0 to disable, default: 90)",
+    )
+    placement_snap.add_argument("--dry-run", action="store_true", help="Preview without saving")
+    placement_snap.add_argument("-v", "--verbose", action="store_true")
+    placement_snap.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    add_format_flag(placement_snap)
+
+    # placement align
+    placement_align = placement_subparsers.add_parser(
+        "align", help="Align components in row or column"
+    )
+    placement_align.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_align.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_align.add_argument(
+        "--components",
+        "-c",
+        required=True,
+        help="Comma-separated component refs to align (e.g., R1,R2,R3)",
+    )
+    placement_align.add_argument(
+        "--axis",
+        choices=["row", "column"],
+        default="row",
+        help="Alignment axis: row (horizontal) or column (vertical) (default: row)",
+    )
+    placement_align.add_argument(
+        "--reference",
+        choices=["center", "top", "bottom", "left", "right"],
+        default="center",
+        help="Alignment reference point (default: center)",
+    )
+    placement_align.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.1,
+        help="Tolerance for already-aligned components in mm (default: 0.1)",
+    )
+    placement_align.add_argument("--dry-run", action="store_true", help="Preview without saving")
+    placement_align.add_argument("-v", "--verbose", action="store_true")
+    placement_align.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    add_format_flag(placement_align)
+
+    # placement distribute
+    placement_distribute = placement_subparsers.add_parser(
+        "distribute", help="Distribute components evenly"
+    )
+    placement_distribute.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_distribute.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_distribute.add_argument(
+        "--components",
+        "-c",
+        required=True,
+        help="Comma-separated component refs to distribute (e.g., LED1,LED2,LED3,LED4)",
+    )
+    placement_distribute.add_argument(
+        "--axis",
+        choices=["horizontal", "vertical"],
+        default="horizontal",
+        help="Distribution axis (default: horizontal)",
+    )
+    placement_distribute.add_argument(
+        "--spacing",
+        type=float,
+        default=0.0,
+        help="Fixed spacing in mm (0 for automatic even distribution, default: 0)",
+    )
+    placement_distribute.add_argument(
+        "--dry-run", action="store_true", help="Preview without saving"
+    )
+    placement_distribute.add_argument("-v", "--verbose", action="store_true")
+    placement_distribute.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    add_format_flag(placement_distribute)
+
+    # placement suggest
+    placement_suggest = placement_subparsers.add_parser(
+        "suggest", help="Generate placement suggestions with rationale"
+    )
+    placement_suggest.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_suggest.add_argument(
+        "--component",
+        "-c",
+        help="Explain placement for specific component reference",
+    )
+    placement_suggest.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    placement_suggest.add_argument("-v", "--verbose", action="store_true")
+    placement_suggest.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement refine
+    placement_refine = placement_subparsers.add_parser(
+        "refine", help="Interactive placement refinement session"
+    )
+    placement_refine.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_refine.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_refine.add_argument(
+        "--fixed",
+        help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
+    )
+    placement_refine.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Interface format; 'json' selects the JSON API mode "
+            "(read commands from stdin, write responses to stdout). "
+            "Canonical spelling of --json; see docs/reference/machine-output.md"
+        ),
+    )
+    placement_refine.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON API mode (same as --format json)",
+    )
+    placement_refine.add_argument("-v", "--verbose", action="store_true")
+    placement_refine.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+
+def _add_config_parser(subparsers) -> None:
+    """Add config subcommand parser."""
+    config_parser = subparsers.add_parser("config", help="View and manage configuration")
+    config_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show effective configuration with sources",
+    )
+    config_parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create template config file",
+    )
+    config_parser.add_argument(
+        "--paths",
+        action="store_true",
+        help="Show config file paths",
+    )
+    config_parser.add_argument(
+        "--user",
+        action="store_true",
+        help="Use user config for --init",
+    )
+    config_parser.add_argument(
+        "config_action",
+        nargs="?",
+        choices=["get", "set"],
+        help="Config action",
+    )
+    config_parser.add_argument(
+        "config_key",
+        nargs="?",
+        help="Config key (e.g., defaults.format)",
+    )
+    config_parser.add_argument(
+        "config_value",
+        nargs="?",
+        help="Value to set",
+    )
+    add_format_flag(config_parser)
+
+
+def _add_optimize_placement_parser(subparsers) -> None:
+    """Add optimize-placement subcommand parser."""
+    # kicad_tools.placement.route_check.DEFAULT_ROUTE_CHECK_BUDGET, as a
+    # literal: importing the placement package here would cost every kct
+    # invocation ~0.5 s. tests/test_optimize_placement_route_check.py pins it.
+    route_check_budget_default = 100_000
+
+    op_parser = subparsers.add_parser(
+        "optimize-placement",
+        help="Run CMA-ES placement optimization on a KiCad PCB",
+        epilog=(
+            "PERFORMANCE: A C++ backend is available for faster placement "
+            "evaluation. Check status with 'kct build-native --check' and "
+            "build with 'kct build-native'."
+        ),
+    )
+    op_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    op_parser.add_argument(
+        "--strategy",
+        choices=["cmaes", "bayesian"],
+        default="cmaes",
+        help=(
+            "Optimization strategy (default: cmaes). 'bayesian' requires the "
+            "optional extra: pip install 'kicad-tools[bayesian]'"
+        ),
+    )
+    op_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=1000,
+        help="Maximum number of optimizer iterations (default: 1000)",
+    )
+    op_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output PCB file path (default: overwrite input)",
+    )
+    op_parser.add_argument(
+        "--seed",
+        choices=["force-directed", "random", "current"],
+        default="force-directed",
+        dest="seed_method",
+        help=(
+            "Seed placement method (default: force-directed). "
+            "'current' warm-starts CMA-ES from the board's existing footprint "
+            "positions with a tight step size, refining the current layout "
+            "instead of re-imagining it -- use it to resolve a few local "
+            "violations without discarding a ratified hand floorplan. It never "
+            "returns a placement scoring worse than the one it started from; with "
+            "--max-iterations 0 it keeps the layout and only runs the slide-off "
+            "and decoupling-cap snap passes. On a warm start slide-off only moves "
+            "parts that overlap or break the 0.2 mm clearance rule, and keeps its "
+            "moves on a 0.05 mm grid, so a legal floorplan is not touched."
+        ),
+    )
+    op_parser.add_argument(
+        "--weights",
+        metavar="JSON",
+        help=(
+            'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
+            "Keys: overlap, drc, boundary, wirelength, area, creepage, cohesion, "
+            "decoupling (default 2.0: pull each decoupling cap onto the IC supply pin "
+            "it serves, then snap it beside that pin; 0 turns both off)"
+        ),
+    )
+    op_parser.add_argument(
+        "--voltage-map",
+        metavar="FILE",
+        dest="voltage_map",
+        help=(
+            "Path to a JSON voltage map {net_name: volts} (reuses the #4371 "
+            "format). Enables HV-aware placement (issue #4373): footprints are "
+            "grouped into voltage domains and cross-domain footprints are pushed "
+            "apart to their required creepage. Absent, the objective is "
+            "byte-identical to the voltage-blind default. Mutually exclusive "
+            "with --hv-domains."
+        ),
+    )
+    op_parser.add_argument(
+        "--hv-domains",
+        metavar="FILE",
+        dest="hv_domains",
+        help=(
+            "Path to a JSON HV-domains declaration "
+            '{domain_id: {"refs": [globs], "voltage": v}} -- the manual fallback '
+            "for HV-aware placement when no voltage map is available. Mutually "
+            "exclusive with --voltage-map."
+        ),
+    )
+    op_parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for the required-distance lookup (default: iec60664)",
+    )
+    op_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for the creepage lookup (default: 2)",
+    )
+    op_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for the creepage lookup (default: IIIa)",
+    )
+    op_parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum cross-domain |ΔV| (volts) that triggers a creepage keepout; "
+            "lower-difference domain pairs rely on normal DRC clearance to avoid "
+            "over-segregating low-voltage nets (default: 30.0)"
+        ),
+    )
+    op_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Evaluate current placement without optimizing",
+    )
+    op_parser.add_argument(
+        "--progress",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Print score every N iterations (0 = no progress output)",
+    )
+    op_parser.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Directory for checkpoint save/resume of optimizer state",
+    )
+    op_parser.add_argument(
+        "--no-slide-off",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable slide-off overlap resolution (the pre-pass on the seed and "
+            "the post-pass on the result)"
+        ),
+    )
+    op_parser.add_argument(
+        "--anchor-weight",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help=(
+            "Per-net wirelength multiplier boost for nets that touch "
+            "footprints carrying the KiCad (locked) attribute. Each "
+            "qualifying net's HPWL is scaled by "
+            "1 + anchor_weight * (anchored_pins / total_pins). "
+            "Default 0.0 preserves uniform weighting; recommended "
+            "starting range is 2.0..5.0 to keep perimeter-anchored "
+            "signals (connectors, edge sense FETs) from being starved."
+        ),
+    )
+    op_parser.add_argument(
+        "--pad-anchored-wirelength",
+        action="store_true",
+        default=False,
+        help=(
+            "Measure the wirelength term between transformed pad "
+            "coordinates instead of footprint centres. The pads are "
+            "already computed for every candidate and discarded today, so "
+            "this costs one dict build per evaluation. It makes rotation "
+            "visible to wirelength (a centre-anchored HPWL cannot see it) "
+            "and stops a decap scoring as 'at the chip' while sitting a "
+            "package-diagonal from the pad it decouples. Default off "
+            "keeps the objective unchanged (issue #4831; see "
+            "docs/placement-pad-anchoring-audit.md)."
+        ),
+    )
+    op_parser.add_argument(
+        "--time-budget",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Wall-clock budget in seconds. The optimization loop exits "
+            "once this many seconds have elapsed (after the current "
+            "generation finishes). Use this to bound the new "
+            "feasibility-gated convergence behaviour (issue #2821), "
+            "where the loop refuses to declare convergence while the "
+            "best-known placement is still infeasible. Default: no cap."
+        ),
+    )
+    op_parser.add_argument(
+        "--require-outline",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit nonzero when the board has no Edge.Cuts outline instead of "
+            "falling back to a footprints+10 mm bounding box (issue #7148)."
+        ),
+    )
+    op_parser.add_argument(
+        "--allow-infeasible",
+        action="store_true",
+        default=False,
+        help=(
+            "Return exit code 0 even when the final placement is "
+            "infeasible (overlap/DRC/boundary violations remain). "
+            "Default behaviour (issue #2821) is to exit 1 with a "
+            "FATAL: message on stderr so pipelines do not silently "
+            "hand illegal placements to the router."
+        ),
+    )
+    op_parser.add_argument(
+        "--route-check",
+        action="store_true",
+        default=False,
+        help=(
+            "Confirm the result with bounded real routes before writing it "
+            "(issue #6234). The board as read is the incumbent. The "
+            "optimizer result, and then the decoupling snap, each replace "
+            "it only if a check route reaches at least the incumbent's "
+            "completion with no more DRC errors; otherwise the incumbent is "
+            "kept. Checks run once, after optimization: at most 3 routes "
+            "per run (incumbent, optimizer result, snap), each bounded by "
+            "--route-check-budget and seeded, so the verdict is "
+            "reproducible. Default off."
+        ),
+    )
+    op_parser.add_argument(
+        "--route-check-budget",
+        type=int,
+        default=route_check_budget_default,
+        metavar="N",
+        help=(
+            "Per-net A* node-expansion cap of each --route-check route "
+            "(kct route --per-net-iterations under --deterministic-budget). "
+            f"Default {route_check_budget_default:,}, one tenth of the "
+            "production cap: enough to rank two placements of the same board."
+        ),
+    )
+    op_parser.add_argument("-v", "--verbose", action="store_true")
+    op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    add_format_flag(op_parser)
+
+
+def _add_interactive_parser(subparsers) -> None:
+    """Add interactive subcommand parser."""
+    interactive_parser = subparsers.add_parser("interactive", help="Launch interactive REPL mode")
+    interactive_parser.add_argument(
+        "--project",
+        help="Auto-load a project on startup",
+    )
+
+
+def _add_validate_parser(subparsers) -> None:
+    """Add validate subcommand parser."""
+    validate_parser = subparsers.add_parser("validate", help="Validation tools")
+    validate_parser.add_argument(
+        "validate_files",
+        nargs="*",
+        help="Path(s) to project/schematic/PCB files. Accepts: .kicad_pro, .kicad_sch, .kicad_pcb",
+    )
+    validate_parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Check schematic-to-PCB netlist synchronization",
+    )
+    validate_parser.add_argument(
+        "--connectivity",
+        action="store_true",
+        help="Check net connectivity on PCB (detect unrouted nets)",
+    )
+    validate_parser.add_argument(
+        "--consistency",
+        action="store_true",
+        help="Check schematic-to-PCB consistency (components, nets, properties)",
+    )
+    validate_parser.add_argument(
+        "--placement",
+        action="store_true",
+        help="Check BOM components are placed on PCB",
+    )
+    validate_parser.add_argument(
+        "--lvs",
+        action="store_true",
+        help="Layout-vs-schematic check with hierarchical support and fuzzy matching",
+    )
+    validate_parser.add_argument(
+        "--min-confidence",
+        dest="validate_min_confidence",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum LVS match confidence to display (0.0-1.0, default: 0.0). "
+            "Display only: hidden matches still count toward the verdict and exit code."
+        ),
+    )
+    validate_parser.add_argument(
+        "--schematic",
+        "-s",
+        dest="validate_schematic",
+        help="Path to .kicad_sch file (if not using project file)",
+    )
+    validate_parser.add_argument(
+        "--pcb",
+        "-p",
+        dest="validate_pcb",
+        help="Path to .kicad_pcb file (if not using project file)",
+    )
+    validate_parser.add_argument(
+        "--format",
+        dest="validate_format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    validate_parser.add_argument(
+        "--errors-only",
+        dest="validate_errors_only",
+        action="store_true",
+        help="Show only errors, not warnings",
+    )
+    validate_parser.add_argument(
+        "--strict",
+        dest="validate_strict",
+        action="store_true",
+        help="Exit with error code on warnings",
+    )
+    validate_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="validate_verbose",
+        action="store_true",
+        help="Show detailed issue information",
+    )
+
+
+def _add_analyze_parser(subparsers) -> None:
+    """Add analyze subcommand parser with its subcommands."""
+    analyze_parser = subparsers.add_parser("analyze", help="PCB analysis tools")
+    analyze_subparsers = analyze_parser.add_subparsers(
+        dest="analyze_command", help="Analysis commands"
+    )
+
+    # analyze congestion
+    congestion_parser = analyze_subparsers.add_parser(
+        "congestion",
+        help="Analyze routing congestion",
+        description="Identify congested areas and suggest solutions",
+    )
+    congestion_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    congestion_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    congestion_parser.add_argument(
+        "--grid-size",
+        dest="analyze_grid_size",
+        type=float,
+        default=2.0,
+        help="Grid cell size in mm (default: 2.0)",
+    )
+    congestion_parser.add_argument(
+        "--min-severity",
+        dest="analyze_min_severity",
+        choices=["low", "medium", "high", "critical"],
+        default="low",
+        help="Minimum severity to report (default: low)",
+    )
+
+    # analyze trace-lengths
+    trace_parser = analyze_subparsers.add_parser(
+        "trace-lengths",
+        help="Analyze trace lengths for timing-critical nets",
+        description="Calculate trace lengths, identify differential pairs, and check skew",
+    )
+    trace_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    trace_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    trace_parser.add_argument(
+        "--net",
+        "-n",
+        action="append",
+        dest="analyze_nets",
+        help="Specific net(s) to analyze (can be used multiple times)",
+    )
+    trace_parser.add_argument(
+        "--all",
+        "-a",
+        dest="analyze_all",
+        action="store_true",
+        help="Analyze all nets, not just timing-critical ones",
+    )
+    trace_parser.add_argument(
+        "--diff-pairs",
+        "-d",
+        dest="analyze_diff_pairs",
+        action="store_true",
+        default=True,
+        help="Include differential pair analysis (default: True)",
+    )
+    trace_parser.add_argument(
+        "--no-diff-pairs",
+        action="store_false",
+        dest="analyze_diff_pairs",
+        help="Disable differential pair analysis",
+    )
+
+    # analyze signal-integrity
+    si_parser = analyze_subparsers.add_parser(
+        "signal-integrity",
+        help="Analyze signal integrity (crosstalk and impedance)",
+        description="Identify crosstalk risks and impedance discontinuities",
+    )
+    si_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    si_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    si_parser.add_argument(
+        "--min-risk",
+        dest="analyze_min_risk",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help="Minimum risk level to report for crosstalk (default: medium)",
+    )
+    si_parser.add_argument(
+        "--crosstalk-only",
+        dest="analyze_crosstalk_only",
+        action="store_true",
+        help="Only analyze crosstalk, skip impedance analysis",
+    )
+    si_parser.add_argument(
+        "--impedance-only",
+        dest="analyze_impedance_only",
+        action="store_true",
+        help="Only analyze impedance, skip crosstalk analysis",
+    )
+
+    # analyze thermal
+    thermal_parser = analyze_subparsers.add_parser(
+        "thermal",
+        help="Analyze thermal characteristics and hotspots",
+        description="Identify heat sources, estimate power dissipation, and suggest thermal improvements",
+    )
+    thermal_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    thermal_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    thermal_parser.add_argument(
+        "--cluster-radius",
+        dest="analyze_cluster_radius",
+        type=float,
+        default=10.0,
+        help="Radius for clustering heat sources in mm (default: 10.0)",
+    )
+    thermal_parser.add_argument(
+        "--min-power",
+        dest="analyze_min_power",
+        type=float,
+        default=0.05,
+        help="Minimum power threshold in Watts (default: 0.05)",
+    )
+
+    # analyze complexity
+    complexity_parser = analyze_subparsers.add_parser(
+        "complexity",
+        help="Analyze routing complexity and predict layer requirements",
+        description="Estimate routing complexity, predict layer count, and identify bottlenecks",
+    )
+    complexity_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    complexity_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    complexity_parser.add_argument(
+        "--grid-size",
+        dest="analyze_grid_size",
+        type=float,
+        default=5.0,
+        help="Grid cell size for density analysis in mm (default: 5.0)",
+    )
+
+    # analyze current-sense
+    current_sense_parser = analyze_subparsers.add_parser(
+        "current-sense",
+        help="Analyze sense-net vs. high-current-net parallel coupling",
+        description=(
+            "Flag sense/analog nets that run parallel and close to "
+            "high-current/switching nets on the same layer (advisory)"
+        ),
+    )
+    current_sense_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    current_sense_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    current_sense_parser.add_argument(
+        "--sense-net",
+        action="append",
+        dest="analyze_sense_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a sense net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--hicur-net",
+        action="append",
+        dest="analyze_hicur_nets",
+        default=[],
+        metavar="NAME",
+        help="Explicitly tag NAME as a high-current net (repeatable)",
+    )
+    current_sense_parser.add_argument(
+        "--max-parallel",
+        dest="analyze_max_parallel",
+        type=float,
+        default=10.0,
+        help="Parallel-run FAIL threshold in mm (default: 10.0)",
+    )
+    current_sense_parser.add_argument(
+        "--min-gap",
+        dest="analyze_min_gap",
+        type=float,
+        default=0.5,
+        help="Edge-to-edge gap FAIL threshold in mm (default: 0.5)",
+    )
+    current_sense_parser.add_argument(
+        "--max-loop-area",
+        dest="analyze_max_loop_area",
+        type=float,
+        default=10.0,
+        help=(
+            "Enclosed copper sense-loop area FAIL threshold in mm^2 (default: 10.0; EE-confirmable)"
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-pair",
+        action="append",
+        nargs=2,
+        dest="analyze_sense_pairs",
+        default=[],
+        metavar=("SENSE", "RETURN"),
+        help=(
+            "Kelvin loop pairing: close SENSE's loop with RETURN conductor "
+            "(repeatable). Nets ending _P/_N, +/-, _H/_L auto-pair."
+        ),
+    )
+    current_sense_parser.add_argument(
+        "--sense-return",
+        dest="analyze_sense_return",
+        default=None,
+        metavar="NAME",
+        help="Shared return conductor (e.g. Kelvin ground) to close sense loops",
+    )
+    current_sense_parser.add_argument(
+        "--kelvin-tol",
+        dest="analyze_kelvin_tol",
+        type=float,
+        default=0.05,
+        help="Kelvin-tap coincidence tolerance in mm (default: 0.05)",
+    )
+    current_sense_parser.add_argument(
+        "--kelvin-pair",
+        action="append",
+        dest="analyze_kelvin_pairs",
+        default=[],
+        metavar="SENSE:FORCE",
+        help=(
+            "Kelvin force pairing: check SENSE taps FORCE at a pad "
+            "(repeatable). Nets ending _SENSE/_FORCE, SNS/FRC auto-pair."
+        ),
+    )
+
+    # analyze electrical-rating (operates on a schematic, not a PCB)
+    elec_parser = analyze_subparsers.add_parser(
+        "electrical-rating",
+        help="Check LED overcurrent and capacitor voltage derating (advisory)",
+        description=(
+            "Read Vf/If_max/Voltage_Rating symbol fields from a schematic and "
+            "flag over-driven LEDs (I=(V_rail-Vf)/R_series > If_max) and "
+            "under-rated capacitors (rated_V < V_rail*(1+margin)). Parts "
+            "missing a rating field, or on an unknown rail, are skipped "
+            "(census-counted), never failed."
+        ),
+    )
+    elec_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    elec_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    elec_parser.add_argument(
+        "--derate-margin",
+        dest="analyze_derate_margin",
+        type=float,
+        default=0.2,
+        help=(
+            "Capacitor voltage headroom fraction (default: 0.2; a cap on a "
+            "12V rail must be rated >= 14.4V)"
+        ),
+    )
+    elec_parser.add_argument(
+        "--led-default-vf",
+        dest="analyze_led_default_vf",
+        type=float,
+        default=None,
+        metavar="VOLTS",
+        help=(
+            "Fallback LED forward voltage (V) for parts with If_max but no Vf "
+            "field. Default: skip such parts (zero false positives)."
+        ),
+    )
+
+    # analyze component-stress (operates on a schematic, not a PCB)
+    stress_parser = analyze_subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    stress_parser.add_argument(
+        "--states",
+        dest="analyze_states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        dest="analyze_allow_unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        dest="analyze_allow_uncited_ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
+        ),
+    )
+
+
+def _add_constraints_parser(subparsers) -> None:
+    """Add constraints subcommand parser with its subcommands."""
+    constraints_parser = subparsers.add_parser(
+        "constraints", help="Constraint conflict detection and management"
+    )
+    constraints_subparsers = constraints_parser.add_subparsers(
+        dest="constraints_command", help="Constraints commands"
+    )
+
+    # constraints check
+    constraints_check = constraints_subparsers.add_parser(
+        "check", help="Detect conflicts between constraints"
+    )
+    constraints_check.add_argument("pcb", help="Path to .kicad_pcb file")
+    constraints_check.add_argument(
+        "--format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    constraints_check.add_argument(
+        "--keepout",
+        metavar="FILE",
+        help="YAML file defining keepout zones",
+    )
+    constraints_check.add_argument(
+        "--constraints",
+        metavar="FILE",
+        dest="constraints_file",
+        help="YAML file with grouping constraints",
+    )
+    constraints_check.add_argument(
+        "--auto-keepout",
+        action="store_true",
+        dest="auto_keepout",
+        help="Auto-detect keepout zones from mounting holes and connectors",
+    )
+    constraints_check.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed conflict information",
+    )
+
+
+def _add_estimate_parser(subparsers) -> None:
+    """Add estimate subcommand parser with its subcommands."""
+    estimate_parser = subparsers.add_parser("estimate", help="Manufacturing cost estimation")
+    estimate_subparsers = estimate_parser.add_subparsers(
+        dest="estimate_command", help="Estimate commands"
+    )
+
+    # estimate cost
+    estimate_cost = estimate_subparsers.add_parser("cost", help="Estimate manufacturing costs")
+    estimate_cost.add_argument("pcb", help="Path to .kicad_pcb file")
+    estimate_cost.add_argument(
+        "--bom",
+        help="Path to BOM file (.csv) or schematic (.kicad_sch) for component costs",
+    )
+    estimate_cost.add_argument(
+        "--quantity",
+        "-q",
+        type=int,
+        default=10,
+        help="Number of boards to manufacture (default: 10)",
+    )
+    estimate_cost.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
+    )
+    estimate_cost.add_argument(
+        "--format",
+        "-f",
+        dest="estimate_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    estimate_cost.add_argument(
+        "--finish",
+        choices=["hasl", "hasl_lead_free", "enig", "osp"],
+        default="hasl",
+        help="Surface finish (default: hasl)",
+    )
+    estimate_cost.add_argument(
+        "--color",
+        choices=["green", "red", "blue", "black", "white", "yellow"],
+        default="green",
+        help="Solder mask color (default: green)",
+    )
+    estimate_cost.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        help="Layer count override (auto-detected from PCB if not specified)",
+    )
+    estimate_cost.add_argument(
+        "--thickness",
+        type=float,
+        default=1.6,
+        help="Board thickness in mm (default: 1.6)",
+    )
+    estimate_cost.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed breakdown"
+    )
+    estimate_cost.add_argument(
+        "--no-lcsc",
+        action="store_true",
+        default=False,
+        help="Disable LCSC pricing lookup (use category-based estimates only)",
+    )
+
+
+def _add_audit_parser(subparsers) -> None:
+    """Add audit subcommand parser for manufacturing readiness audit."""
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Manufacturing readiness audit (ERC, DRC, connectivity, compatibility)",
+    )
+    audit_parser.add_argument(
+        "audit_project",
+        help="Path to .kicad_pro or .kicad_pcb file",
+    )
+    audit_parser.add_argument(
+        "--format",
+        dest="audit_format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    audit_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="audit_mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
+    )
+    audit_parser.add_argument(
+        "--layers",
+        "-l",
+        dest="audit_layers",
+        type=int,
+        help="Layer count (auto-detected if not specified)",
+    )
+    audit_parser.add_argument(
+        "--copper",
+        "-c",
+        dest="audit_copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz (default: 1.0)",
+    )
+    audit_parser.add_argument(
+        "--quantity",
+        "-q",
+        dest="audit_quantity",
+        type=int,
+        default=5,
+        help="Quantity for cost estimate (default: 5)",
+    )
+    audit_parser.add_argument(
+        "--skip-erc",
+        dest="audit_skip_erc",
+        action="store_true",
+        help="Skip ERC check (for PCB-only audits)",
+    )
+    audit_parser.add_argument(
+        "--pcb",
+        dest="audit_pcb",
+        type=str,
+        default=None,
+        help="Override auto-detected PCB path (takes precedence over project.kct)",
+    )
+    audit_parser.add_argument(
+        "--strict",
+        dest="audit_strict",
+        action="store_true",
+        help="Exit with code 2 on warnings",
+    )
+    audit_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="audit_verbose",
+        action="store_true",
+        help="Show detailed information",
+    )
+    audit_parser.add_argument(
+        "--net-class-map",
+        dest="audit_net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields.  When supplied, enables the diff-pair DRC rules to "
+            "fire on routed boards (Issue #2684)."
+        ),
+    )
+    # HV / isolation (creepage) audit flags, mirrored from audit_cmd.main
+    # (Issue #4333). Before issue #5979 they were only reachable through the
+    # standalone audit_cmd parser, so `kct audit --hv-standard ...` -- the
+    # manufacturing-readiness skill's Gate 4 -- was rejected by `kct`.
+    audit_parser.add_argument(
+        "--hv-net-class",
+        dest="audit_hv_net_class",
+        default="HV",
+        help="Net class treated as the HV group for the isolation audit (default: HV)",
+    )
+    audit_parser.add_argument(
+        "--hv-min",
+        dest="audit_hv_min",
+        type=float,
+        default=None,
+        help=(
+            "Manual required creepage (surface-path) distance in mm. When "
+            "combined with --hv-standard the stricter creepage bound governs."
+        ),
+    )
+    audit_parser.add_argument(
+        "--hv-standard",
+        dest="audit_hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table instead of --hv-min. Requires --hv-working-voltage and "
+            "--hv-pollution-degree. Engineering aid, NOT a certification."
+        ),
+    )
+    audit_parser.add_argument(
+        "--hv-working-voltage",
+        dest="audit_hv_working_voltage",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    audit_parser.add_argument(
+        "--hv-pollution-degree",
+        dest="audit_hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    audit_parser.add_argument(
+        "--hv-material-group",
+        dest="audit_hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
+    )
+    audit_parser.add_argument(
+        "--hv-overvoltage-category",
+        dest="audit_hv_overvoltage_category",
+        choices=["I", "II", "III", "IV"],
+        default="II",
+        help=(
+            "IEC 60664-1 overvoltage category for the derived clearance "
+            "(Table F.1 rated impulse voltage).  Default II (mains appliance)."
+        ),
+    )
+    audit_parser.add_argument(
+        "--hv-insulation",
+        dest="audit_hv_insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="basic",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic; opt in to "
+            "reinforced for mains-to-SELV barriers (Table F.1 impulse voltage "
+            "one step higher, 2x creepage).  supplementary uses the basic values."
+        ),
+    )
+
+
+def _add_suggest_parser(subparsers) -> None:
+    """Add suggest subcommand parser with its subcommands."""
+    suggest_parser = subparsers.add_parser("suggest", help="Part suggestions and recommendations")
+    suggest_subparsers = suggest_parser.add_subparsers(
+        dest="suggest_command", help="Suggest commands"
+    )
+
+    # suggest alternatives
+    suggest_alt = suggest_subparsers.add_parser(
+        "alternatives", help="Suggest alternative parts for unavailable or expensive components"
+    )
+    suggest_alt.add_argument(
+        "schematic",
+        help="Path to .kicad_sch file (or BOM CSV with --bom flag)",
+    )
+    suggest_alt.add_argument(
+        "--bom",
+        action="store_true",
+        help="Treat input as CSV BOM file instead of schematic",
+    )
+    suggest_alt.add_argument(
+        "--max-alternatives",
+        "-n",
+        type=int,
+        default=3,
+        help="Maximum alternatives per part (default: 3)",
+    )
+    suggest_alt.add_argument(
+        "--format",
+        "-f",
+        dest="suggest_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    suggest_alt.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass parts cache (fetch fresh data)",
+    )
+    suggest_alt.add_argument(
+        "--show-all",
+        action="store_true",
+        help="Show alternatives for all parts, not just problematic ones",
+    )
+    suggest_alt.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed information"
+    )
+
+
+def _add_net_status_parser(subparsers) -> None:
+    """Add net-status subcommand parser."""
+    net_status_parser = subparsers.add_parser(
+        "net-status",
+        help="Report net connectivity status for a PCB",
+        description="Show which nets are complete, incomplete, or unrouted with details on unconnected pads",
+    )
+    net_status_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    net_status_parser.add_argument(
+        "--format",
+        dest="net_status_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    net_status_parser.add_argument(
+        "--incomplete",
+        dest="net_status_incomplete",
+        action="store_true",
+        help="Show only incomplete nets",
+    )
+    net_status_parser.add_argument(
+        "--net",
+        dest="net_status_net",
+        help="Show status for a specific net by name",
+    )
+    net_status_parser.add_argument(
+        "--by-class",
+        dest="net_status_by_class",
+        action="store_true",
+        help="Group output by net class",
+    )
+    net_status_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="net_status_verbose",
+        action="store_true",
+        help="Show all pads with coordinates",
+    )
+    net_status_parser.add_argument(
+        "--why",
+        dest="net_status_why",
+        action="store_true",
+        help=(
+            "Classify each incomplete signal net by WHY it is stuck "
+            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / BUDGET_STARVED / "
+            "PLACEMENT_BOUND) with supporting evidence. Read-only diagnostic "
+            "(issue #3863)."
+        ),
+    )
+    net_status_parser.add_argument(
+        "--crossings",
+        dest="net_status_crossings",
+        action="store_true",
+        help=(
+            "Pre-route bundle crossing report (issue #6339): bundle pin "
+            "orders, inversions per entry side, over-sized conflict sets and "
+            "interleaved hub pin columns. Read-only; honours --format json."
+        ),
+    )
+    net_status_parser.add_argument(
+        "--signal-layers",
+        dest="net_status_signal_layers",
+        type=int,
+        default=None,
+        help="Signal-layer count for the --crossings verdict (default: from board)",
+    )
+    model_group = net_status_parser.add_mutually_exclusive_group()
+    model_group.add_argument(
+        "--strict",
+        dest="net_status_strict",
+        action="store_true",
+        help=(
+            "Decide connectivity by REAL geometric copper contact (shapely "
+            "polygon intersection), matching KiCad's connectivity semantics "
+            "(issue #4176). This has been the DEFAULT since issue #4557; the "
+            "flag is kept as an explicit no-op for script compatibility."
+        ),
+    )
+    model_group.add_argument(
+        "--legacy-proximity",
+        dest="net_status_legacy_proximity",
+        action="store_true",
+        help=(
+            "Opt into the legacy 0.01mm endpoint-proximity connectivity "
+            "model: a segment endpoint is unioned with a pad/via/segment "
+            "whenever their reference points land within 0.01mm, even if the "
+            "actual copper (segment width, pad shape) does not touch. "
+            "Faster (~1.5-2x) but diverges from KiCad in both directions "
+            "(issues #4176, #4557). Mutually exclusive with --strict."
+        ),
+    )
+
+
+def _add_board_metrics_parser(subparsers) -> None:
+    """Add the ``board-metrics`` parser (normalized board.json per board, #3676).
+
+    Emits a stable ``board.json`` data contract per demo board by aggregating
+    artifacts that already exist under ``output/manufacturing/`` (report.md,
+    manifest.json, BOM, kicad_project.zip) plus render images from ``kct render``.
+    """
+    bm_parser = subparsers.add_parser(
+        "board-metrics",
+        help="Emit a normalized board.json per board from existing artifacts",
+        description=(
+            "Aggregate already-computed manufacturing artifacts (report.md, "
+            "manifest.json, BOM, kicad_project.zip) and render images into a "
+            "normalized board.json per board. Sources existing output; never "
+            "recomputes from KiCad. Default output: boards/<id>/output/board.json."
+        ),
+    )
+    bm_parser.add_argument(
+        "board_metrics_board",
+        nargs="?",
+        metavar="board",
+        help="Path to a board directory (e.g. boards/05-bldc-motor-controller)",
+    )
+    bm_parser.add_argument(
+        "--all",
+        dest="board_metrics_all",
+        action="store_true",
+        help="Process every board under --boards-dir instead of a single board",
+    )
+    bm_parser.add_argument(
+        "--boards-dir",
+        dest="board_metrics_boards_dir",
+        default="boards",
+        help="Root directory containing per-board subdirs (default: boards)",
+    )
+    bm_parser.add_argument(
+        "--output",
+        "-o",
+        dest="board_metrics_output",
+        default=None,
+        help="Override output path (single-board mode only)",
+    )
+    bm_parser.add_argument(
+        "--dry-run",
+        dest="board_metrics_dry_run",
+        action="store_true",
+        help="Print board.json to stdout without writing any file",
+    )
+    add_format_flag(bm_parser)
+
+
+def _add_submit_jlcpcb_parser(subparsers) -> None:
+    """Add ``submit-jlcpcb`` (agent-prepared JLCPCB submission, #8466)."""
+    from .submit_jlcpcb_cmd import add_arguments
+
+    add_arguments(
+        subparsers.add_parser(
+            "submit-jlcpcb",
+            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (orders only via the opt-in, attended --checkout leg)",
+        )
+    )
+
+
+def _add_tapeout_signoff_parser(subparsers) -> None:
+    """Add ``tapeout-sign-off`` (records the human sign-off, #8537)."""
+    from .tapeout_signoff_cmd import add_arguments
+
+    add_arguments(
+        subparsers.add_parser(
+            "tapeout-sign-off",
+            help="Record a human sign-off in a tapeout bundle's manifest.json",
+        )
+    )
+
+
+def _add_readiness_parser(subparsers) -> None:
+    """Add the ``readiness`` parser (scriptable manufacturing sign-off, #4977).
+
+    Implements the ``/kct:manufacturing-readiness`` + ``/kct:tapeout`` skill
+    contracts as an orchestrated command and writes the hash-bound
+    ``output/readiness.json`` evidence the demo gallery validates.
+    """
+    rd_parser = subparsers.add_parser(
+        "readiness",
+        help="Run the manufacturing-readiness gates and write output/readiness.json",
+        description=(
+            "Refill and save the canonical PCB, run kct check at the resolved "
+            "fab tier, run the mandatory independent kicad-cli pcb drc "
+            "--refill-zones cross-gate, review LVS and per-rule warnings, export "
+            "and package the manufacturing bundle, then emit hash-bound "
+            "readiness-v1 evidence. Exits non-zero unless every applicable gate "
+            "passes; there is no flag that produces Ready on a partial run."
+        ),
+    )
+    rd_parser.add_argument(
+        "readiness_board",
+        metavar="board",
+        help="Board directory or routed .kicad_pcb to sign off",
+    )
+    rd_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="readiness_manufacturer",
+        metavar="TIER",
+        default=None,
+        help="Fabrication tier (default: discovered from the board's recipe/manifest)",
+    )
+    rd_operation = rd_parser.add_mutually_exclusive_group()
+    rd_operation.add_argument(
+        "--verify",
+        dest="readiness_verify",
+        action="store_true",
+        help="Verify a finished package without changing shipped files (default).",
+    )
+    rd_operation.add_argument(
+        "--generate",
+        dest="readiness_generate",
+        action="store_true",
+        help="Generate a generic package transactionally; refuses recipe-finalised packages.",
+    )
+    rd_mode = rd_parser.add_mutually_exclusive_group()
+    rd_mode.add_argument(
+        "--assembly",
+        dest="readiness_assembly",
+        action="store_true",
+        help="Full assembly package including BOM/CPL procurement identities (default)",
+    )
+    rd_mode.add_argument(
+        "--pcb-only",
+        dest="readiness_pcb_only",
+        action="store_true",
+        help="Bare-board package; makes no component procurement or assembly claim",
+    )
+    rd_parser.add_argument(
+        "--output",
+        "-o",
+        dest="readiness_output",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/); "
+            "must be inside the board directory"
+        ),
+    )
+    rd_parser.add_argument(
+        "--sch",
+        dest="readiness_schematic",
+        metavar="PATH",
+        default=None,
+        help="Path to the .kicad_sch (auto-detected by default)",
+    )
+    rd_parser.add_argument(
+        "--project-root",
+        dest="readiness_project_root",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Directory containing the board directory and every project dependency "
+            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
+            "files outside the board directory but inside this root are collected "
+            "into the staged package and hashed; nothing outside it is ever read."
+        ),
+    )
+    rd_parser.add_argument(
+        "--net-class-map",
+        dest="readiness_net_class_map",
+        metavar="PATH",
+        default=None,
+        help="Net-class map sidecar (auto-discovered by default)",
+    )
+    rd_parser.add_argument(
+        "--ack-warnings",
+        dest="readiness_ack_warnings",
+        metavar="RULES",
+        default="",
+        help=(
+            "Comma-separated rule_ids whose assembly-affecting warnings are "
+            "explicitly accepted; each becomes an accepted-risk line in README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--baseline",
+        dest="readiness_baseline",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Previous revision (.kicad_pcb, board directory or bundle) to diff "
+            "against (Issue #8664). Introduced assembly-affecting warnings block "
+            "unless acknowledged with --ack-warnings"
+        ),
+    )
+    rd_parser.add_argument(
+        "--ack-trace-quality",
+        dest="readiness_ack_trace_quality",
+        action="append",
+        default=[],
+        metavar="RULE=REASON",
+        help=(
+            "Accept a nonzero redundant_copper_* / via_dangling count remaining after "
+            "cleanup; the reason is mandatory and is recorded in README.txt and the "
+            "manifest.  Repeatable"
+        ),
+    )
+    rd_parser.add_argument(
+        "--known-issue",
+        dest="readiness_known_issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY:KIND",
+        help=(
+            "Record an open issue against the board (repeatable). KIND is defect, "
+            "exception or advisory; an open defect makes the board not ready. "
+            "Append :rule@pad[,rule@pad] (e.g. via_at_pad_edge@R3-2) to name the exact "
+            "kct check warning findings it "
+            "accounts for. Recorded issues are carried forward until resolved."
+        ),
+    )
+    rd_parser.add_argument(
+        "--resolve-known-issue",
+        dest="readiness_resolve_known_issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="Drop a recorded known issue (repeatable), e.g. once its fix has landed.",
+    )
+    rd_parser.add_argument(
+        "--include-tht",
+        dest="readiness_include_tht",
+        action="store_true",
+        help="Accept through-hole parts in the CPL (excluded by default only for SMT-only fabs; JLCPCB includes them)",
+    )
+    rd_parser.add_argument(
+        "--skip-fiducials",
+        dest="readiness_skip_fiducials",
+        action="store_true",
+        help=(
+            "Skip adding global fiducials (pcb add-fiducials) during --generate; "
+            "the skip is recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--skip-board-info",
+        dest="readiness_skip_board_info",
+        action="store_true",
+        help=(
+            "Skip adding the board-ID silkscreen text (pcb add-board-info) during "
+            "--generate; the skip is recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--no-archive",
+        dest="readiness_no_archive",
+        action="store_true",
+        help="Skip building output/manufacturing.zip",
+    )
+    rd_parser.add_argument(
+        "--hv-net-class",
+        dest="readiness_hv_net_class",
+        metavar="NAME",
+        default="HV",
+        help="Net-class name identifying high-voltage nets (default: HV)",
+    )
+    rd_parser.add_argument(
+        "--hv-min",
+        dest="readiness_hv_min",
+        metavar="MM",
+        type=float,
+        default=None,
+        help=(
+            "Manual required creepage (surface-path) distance in mm (phase-1). "
+            "When combined with --hv-standard the stricter bound governs."
+        ),
+    )
+    rd_parser.add_argument(
+        "--hv-standard",
+        dest="readiness_hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table instead of --hv-min. Requires --hv-working-voltage and "
+            "--hv-pollution-degree. Engineering aid, NOT a certification."
+        ),
+    )
+    rd_parser.add_argument(
+        "--hv-working-voltage",
+        dest="readiness_hv_working_voltage",
+        metavar="V",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    rd_parser.add_argument(
+        "--hv-pollution-degree",
+        dest="readiness_hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    rd_parser.add_argument(
+        "--hv-material-group",
+        dest="readiness_hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
+    )
+    rd_parser.add_argument(
+        "--voltage-map",
+        dest="readiness_voltage_map",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Per-net voltage map JSON (as `kct creepage --voltage-map`): derive the "
+            "HV requirement per pair from |V_a - V_b| instead of one flat working "
+            "voltage. Requires --hv-standard and --hv-pollution-degree. The map's "
+            "sha256 is recorded in the HV evidence."
+        ),
+    )
+    rd_parser.add_argument(
+        "--waive-same-footprint",
+        dest="readiness_waive_same_footprint",
+        action="store_true",
+        help="With --voltage-map: waive component-internal (same-footprint) HV pairs, listed in evidence.",
+    )
+    rd_parser.add_argument(
+        "--waive-attach-zone",
+        dest="readiness_waive_attach_zone",
+        action="store_true",
+        help="With --voltage-map: waive attach-zone HV pairs whose residual copper clears, listed in evidence.",
+    )
+    rd_parser.add_argument(
+        "--fill-tolerance",
+        dest="readiness_fill_tolerance",
+        metavar="MM2",
+        type=float,
+        default=None,
+        help=(
+            "Per-layer filled-copper area tolerance in mm^2 for the "
+            "saved-vs-refilled equivalence check"
+        ),
+    )
+    rd_parser.add_argument(
+        "--skip-cleanup",
+        dest="readiness_skip_cleanup",
+        action="store_true",
+        help=(
+            "Skip the exact-duplicate copper cleanup (pcb dedupe) that otherwise runs "
+            "before the checks; the skip is recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--merge-lcsc-from",
+        dest="readiness_merge_lcsc_from",
+        metavar="PATH",
+        default=None,
+        help=(
+            "With --generate: merge verified LCSC numbers from a previous BOM CSV, "
+            "as `kct export --merge-lcsc-from` does; the source is recorded in the report"
+        ),
+    )
+    rd_parser.add_argument(
+        "--quantity",
+        dest="readiness_quantity",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Boards in the order, for the LCSC stock check (default: 5, JLCPCB's minimum PCBA "
+            "order); same semantics as `kct export --boards`. With --verify the bundle's recorded "
+            "per-part stock is re-evaluated at this size; recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--inventory-covered",
+        dest="readiness_inventory_covered",
+        metavar="C123,C456",
+        default=None,
+        help=(
+            "Comma-separated LCSC catalog ids held in your own fab parts inventory; they are "
+            "excluded from the stock shortfall verdict and listed as not stock-verified. Explicit "
+            "only, never inferred; same as `kct submit-jlcpcb --inventory-covered`. Recorded in the "
+            "report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--checked-at",
+        dest="readiness_checked_at",
+        metavar="ISO",
+        default=None,
+        help=(
+            "Timestamp to record as checked_at and as each native DRC report's date "
+            "(default: now). Fix it to reproduce evidence byte-for-byte."
+        ),
+    )
+    add_format_flag(rd_parser)
+
+
+def _add_fleet_parser(subparsers) -> None:
+    """Add fleet parent-subaction parser (fleet status; future fleet route-all)."""
+    fleet_parser = subparsers.add_parser(
+        "fleet",
+        help="Fleet-wide PCB status and operations",
+        description=(
+            "Survey every board under a fleet root in one shot. Reports routing "
+            "completion (via NetStatusAnalyzer) and manufacturing-artifact "
+            "readiness (gerbers, BOM, CPL, manifest) with staleness detection."
+        ),
+    )
+    fleet_subparsers = fleet_parser.add_subparsers(dest="fleet_command", help="Fleet commands")
+
+    # fleet status
+    fleet_status = fleet_subparsers.add_parser(
+        "status",
+        help="Survey routing + manufacturing status for all boards",
+    )
+    fleet_status.add_argument(
+        "--boards-dir",
+        dest="fleet_boards_dir",
+        default="boards",
+        help="Root directory containing per-board subdirs (default: boards)",
+    )
+    fleet_status.add_argument(
+        "--format",
+        dest="fleet_format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    fleet_status.add_argument(
+        "--ship-only",
+        dest="fleet_ship_only",
+        action="store_true",
+        help="Show only ship-ready boards in table output",
+    )
+    fleet_status.add_argument(
+        "--include-stale",
+        dest="fleet_include_stale",
+        action="store_true",
+        help="(Reserved) treat stale artifacts as not-shippable (already default)",
+    )
+    fleet_status.add_argument(
+        "--pattern",
+        dest="fleet_pattern",
+        default="*_routed.kicad_pcb",
+        help="Glob to identify routed PCB inside output/ (default: *_routed.kicad_pcb)",
+    )
+    fleet_status.add_argument(
+        "--drc-tolerance-file",
+        dest="fleet_drc_tolerance_file",
+        default=".github/routed-drc-tolerance.yml",
+        help=(
+            "Path to the per-board DRC tolerance allowlist (default: "
+            ".github/routed-drc-tolerance.yml). Boards exceeding the listed "
+            "tolerance -- or any board not listed with errors > 0 -- block "
+            "ship-ready. Missing file is treated as a strict 0-error gate."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # fleet ship-ready (issue #3099)
+    # ------------------------------------------------------------------
+    fleet_ship_ready = fleet_subparsers.add_parser(
+        "ship-ready",
+        help=(
+            "Per-board PASS/FAIL gate across routing + DRC + ERC + manufacturing. "
+            "Warn-only by default; pass --strict for non-zero exit on failure."
+        ),
+        description=(
+            "Aggregate ship-readiness gate. Reads the routed PCB, "
+            "drc_report.json, manifest.json, and any erc_report.json under "
+            "each board's output/ directory and emits a PASS/FAIL row per "
+            "board. Designed for nightly CI use in warn-only mode: --strict "
+            "opts into non-zero exits for humans."
+        ),
+    )
+    fleet_ship_ready.add_argument(
+        "--boards-dir",
+        dest="fleet_ship_boards_dir",
+        default="boards",
+        help="Root directory containing per-board subdirs (default: boards)",
+    )
+    fleet_ship_ready.add_argument(
+        "--format",
+        dest="fleet_ship_format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    fleet_ship_ready.add_argument(
+        "--pattern",
+        dest="fleet_ship_pattern",
+        default="*_routed.kicad_pcb",
+        help="Glob to identify routed PCB inside output/ (default: *_routed.kicad_pcb)",
+    )
+    fleet_ship_ready.add_argument(
+        "--drc-tolerance-file",
+        dest="fleet_ship_drc_tolerance_file",
+        default=".github/routed-drc-tolerance.yml",
+        help=(
+            "Path to the per-board DRC tolerance allowlist (default: "
+            ".github/routed-drc-tolerance.yml)."
+        ),
+    )
+    fleet_ship_ready.add_argument(
+        "--strict",
+        dest="fleet_ship_strict",
+        action="store_true",
+        help=("Exit non-zero (2) if any board fails. Default is warn-only (always exit 0)."),
+    )
+
+
+def _add_render_parser(subparsers) -> None:
+    """Add the ``render`` subcommand parser (Epic #3674, Phase 1).
+
+    Generates per-board 2D layer plots (SVGs) and 3D ray-traced PNGs into
+    ``boards/<id>/output/renders/`` for downstream gallery consumption.
+    """
+    render_parser = subparsers.add_parser(
+        "render",
+        help="Render per-board 2D SVGs + 3D PNGs into output/renders/",
+        description=(
+            "Generate visual artifacts for one board or every board under a "
+            "root: 2D front/back layer plots (copper + silkscreen + edge cuts) "
+            "via 'kicad-cli pcb export svg', and 3D front/back ray-traced PNGs "
+            "via 'kicad-cli pcb render'. Outputs go to a fixed, documented path "
+            "(boards/<id>/output/renders/{pcb-front,pcb-back}.svg and "
+            "{3d-front,3d-back}.png). "
+            "A bare .kicad_pcb file may also be given: it is rendered directly "
+            "to <pcb-dir>/renders/ (or -o/--output), skipping directory scanning. "
+            "The routed PCB is preferred with graceful fallback to the unrouted "
+            "PCB. 3D render requires KiCad 8.0.4+ and a display (xvfb on CI)."
+        ),
+    )
+    render_parser.add_argument(
+        "render_path",
+        metavar="path",
+        help="Board directory, a root containing board directories, or a .kicad_pcb file",
+    )
+    render_parser.add_argument(
+        "-o",
+        "--output",
+        dest="render_output",
+        default=None,
+        help=(
+            "Output directory for a single .kicad_pcb file "
+            "(default: <pcb-dir>/renders/). Ignored in directory/root scanning mode."
+        ),
+    )
+    render_parser.add_argument(
+        "--no-3d",
+        dest="render_no_3d",
+        action="store_true",
+        help="Skip 3D ray-traced renders (for headless CI without a display)",
+    )
+    render_parser.add_argument(
+        "--models",
+        dest="render_models",
+        choices=["pinned", "host"],
+        default=None,
+        help=(
+            "3D model set the coverage audit resolves against (default: pinned "
+            "when synced via `kct models sync`, else host)"
+        ),
+    )
+    render_parser.add_argument(
+        "--allow-incomplete-models",
+        dest="render_allow_incomplete_models",
+        action="store_true",
+        help="Downgrade incomplete 3D model coverage to a warning (exploratory use)",
+    )
+    render_parser.add_argument(
+        "--format",
+        dest="render_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_export_formats_parser(subparsers) -> None:
+    """Add the ``export-formats`` subcommand parser (Issue #8017)."""
+    from .export_formats_cmd import build_parser
+
+    sub = subparsers.add_parser(
+        "export-formats",
+        help="Export PDF/SVG/STEP/IPC-2581/ODB++ via kicad-cli",
+        description=(
+            "Run 'kicad-cli pcb export' for each requested format and report what "
+            "was produced. Exits non-zero unless every format wrote a non-empty file."
+        ),
+    )
+    build_parser(sub)
+    sub.set_defaults(export_formats_cmd=True)
+
+
+def _add_clean_parser(subparsers) -> None:
+    """Add clean subcommand parser for project cleanup."""
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Clean up old/orphaned files from KiCad projects",
+    )
+    clean_parser.add_argument(
+        "clean_project",
+        metavar="project",
+        help="Path to .kicad_pro file",
+    )
+    clean_parser.add_argument(
+        "--dry-run",
+        dest="clean_dry_run",
+        action="store_true",
+        help="Show what would be cleaned without deleting (default behavior)",
+    )
+    clean_parser.add_argument(
+        "--deep",
+        dest="clean_deep",
+        action="store_true",
+        help="Also delete generated output files (gerbers, BOM exports, etc.)",
+    )
+    clean_parser.add_argument(
+        "--force",
+        "-f",
+        dest="clean_force",
+        action="store_true",
+        help="Delete files without confirmation (for CI/automation)",
+    )
+    clean_parser.add_argument(
+        "--format",
+        dest="clean_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    clean_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="clean_verbose",
+        action="store_true",
+        help="Show detailed output",
+    )
+
+
+def _add_impedance_parser(subparsers) -> None:
+    """Add impedance subcommand parser with its subcommands."""
+    impedance_parser = subparsers.add_parser(
+        "impedance",
+        help="Transmission line impedance calculations",
+        description=(
+            "Calculate trace impedance, width for target impedance, "
+            "differential pair parameters, and crosstalk estimation"
+        ),
+    )
+    impedance_subparsers = impedance_parser.add_subparsers(
+        dest="impedance_command", help="Impedance commands"
+    )
+
+    # Common arguments function
+    def add_common_args(parser, require_board=False):
+        """Add common arguments shared by impedance subcommands."""
+        if require_board:
+            parser.add_argument("pcb", nargs="?", help="Path to .kicad_pcb file")
+        else:
+            parser.add_argument(
+                "pcb", nargs="?", help="Path to .kicad_pcb file (optional if --preset used)"
+            )
+        parser.add_argument(
+            "--preset",
+            "-p",
+            dest="impedance_preset",
+            choices=[
+                "jlcpcb-4",
+                "jlcpcb-4-legacy",
+                "jlcpcb-3313",
+                "jlcpcb-7628",
+                "oshpark-4",
+                "generic-2",
+                "generic-4",
+                "generic-6",
+            ],
+            help="Use a preset stackup instead of reading from PCB",
+        )
+        parser.add_argument(
+            "--format",
+            "-f",
+            dest="impedance_format",
+            choices=["text", "json"],
+            default="text",
+            help="Output format (default: text)",
+        )
+
+    # impedance stackup - Display board stackup
+    stackup_parser = impedance_subparsers.add_parser(
+        "stackup",
+        help="Display parsed board stackup",
+        description="Show layer stackup extracted from PCB or from preset",
+    )
+    add_common_args(stackup_parser)
+
+    # impedance width - Calculate trace width for target impedance
+    width_parser = impedance_subparsers.add_parser(
+        "width",
+        help="Calculate trace width for target impedance",
+        description="Find trace width needed to achieve a target characteristic impedance",
+    )
+    add_common_args(width_parser)
+    width_parser.add_argument(
+        "--target",
+        "-z",
+        dest="impedance_target",
+        type=float,
+        required=True,
+        help="Target characteristic impedance in ohms (e.g., 50)",
+    )
+    width_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    width_parser.add_argument(
+        "--mode",
+        "-m",
+        dest="impedance_mode",
+        choices=["auto", "microstrip", "stripline"],
+        default="auto",
+        help="Transmission line mode (default: auto-detect from layer position)",
+    )
+
+    # impedance calculate - Forward impedance calculation
+    calc_parser = impedance_subparsers.add_parser(
+        "calculate",
+        help="Calculate impedance for given geometry",
+        description="Forward calculation: given trace width, compute impedance",
+    )
+    add_common_args(calc_parser)
+    calc_parser.add_argument(
+        "--width",
+        "-w",
+        dest="impedance_width",
+        type=float,
+        required=True,
+        help="Trace width in mm",
+    )
+    calc_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    calc_parser.add_argument(
+        "--mode",
+        "-m",
+        dest="impedance_mode",
+        choices=["auto", "microstrip", "stripline", "cpwg"],
+        default="auto",
+        help="Transmission line mode (default: auto-detect)",
+    )
+    calc_parser.add_argument(
+        "--gap",
+        "-g",
+        dest="impedance_gap",
+        type=float,
+        help="Gap to ground for CPWG mode in mm",
+    )
+    calc_parser.add_argument(
+        "--frequency",
+        dest="impedance_frequency",
+        type=float,
+        default=1.0,
+        help="Signal frequency in GHz for loss calculation (default: 1.0)",
+    )
+
+    # impedance diffpair - Differential pair analysis
+    diffpair_parser = impedance_subparsers.add_parser(
+        "diffpair",
+        help="Analyze differential pair",
+        description="Calculate differential and common mode impedances for coupled lines",
+    )
+    add_common_args(diffpair_parser)
+    diffpair_parser.add_argument(
+        "--width",
+        "-w",
+        dest="impedance_width",
+        type=float,
+        required=True,
+        help="Trace width in mm (each trace)",
+    )
+    diffpair_parser.add_argument(
+        "--gap",
+        "-g",
+        dest="impedance_gap",
+        type=float,
+        required=True,
+        help="Edge-to-edge gap between traces in mm",
+    )
+    diffpair_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    diffpair_parser.add_argument(
+        "--target",
+        "-z",
+        dest="impedance_target",
+        type=float,
+        help="Target differential impedance (e.g., 90, 100) for verification",
+    )
+
+    # impedance crosstalk - Crosstalk estimation
+    crosstalk_parser = impedance_subparsers.add_parser(
+        "crosstalk",
+        help="Estimate crosstalk between parallel traces",
+        description="Calculate NEXT/FEXT crosstalk, or find spacing for budget",
+    )
+    add_common_args(crosstalk_parser)
+    crosstalk_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    crosstalk_parser.add_argument(
+        "--width",
+        "-w",
+        dest="impedance_width",
+        type=float,
+        help="Trace width in mm (both traces)",
+    )
+    crosstalk_parser.add_argument(
+        "--spacing",
+        "-s",
+        dest="impedance_spacing",
+        type=float,
+        help="Edge-to-edge spacing in mm (for analysis mode)",
+    )
+    crosstalk_parser.add_argument(
+        "--length",
+        dest="impedance_length",
+        type=float,
+        help="Parallel run length in mm",
+    )
+    crosstalk_parser.add_argument(
+        "--rise-time",
+        dest="impedance_rise_time",
+        type=float,
+        default=1.0,
+        help="Signal rise time in nanoseconds (default: 1.0)",
+    )
+    crosstalk_parser.add_argument(
+        "--max-percent",
+        dest="impedance_max_percent",
+        type=float,
+        help="Maximum crosstalk %% (for spacing calculation mode)",
+    )
+
+
+def _add_mcp_parser(subparsers) -> None:
+    """Add MCP server subcommand parser."""
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="MCP (Model Context Protocol) server for AI agents",
+        description="Start an MCP server for AI agent integration with KiCad tools.",
+    )
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", help="MCP subcommands")
+
+    # mcp serve subcommand
+    serve_parser = mcp_subparsers.add_parser(
+        "serve",
+        help="Start the MCP server",
+        description=(
+            "Start the MCP server with the specified transport. "
+            "Use stdio (default) for local MCP clients (Claude Code, Codex CLI, "
+            "opencode, Claude Desktop), "
+            "or http for web-based integrations."
+        ),
+    )
+    serve_parser.add_argument(
+        "--transport",
+        "-t",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="Transport mode (default: stdio)",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="localhost",
+        help="Host address for HTTP mode (default: localhost)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8080,
+        help="Port for HTTP mode (default: 8080)",
+    )
+
+    # mcp setup subcommand
+    setup_parser = mcp_subparsers.add_parser(
+        "setup",
+        help="Configure MCP client integration",
+        description=(
+            "Auto-detect the kct binary and register `kct mcp serve` with an MCP "
+            "client: Claude Code (user scope: `claude mcp add-json --scope user`, "
+            "or a direct merge into ~/.claude.json / $CLAUDE_CONFIG_DIR/.claude.json "
+            "when `claude` is not on PATH; ./.mcp.json with --scope project), "
+            "Claude Desktop, Codex CLI "
+            "([mcp_servers.kct] in $CODEX_HOME/config.toml, default "
+            "~/.codex/config.toml) or opencode (the kct entry in "
+            "~/.config/opencode/opencode.json, or ./opencode.json with --project). "
+            "Existing config is preserved and re-running is a no-op."
+        ),
+    )
+    setup_parser.add_argument(
+        "--client",
+        "-c",
+        choices=["claude-code", "claude-desktop", "codex", "opencode"],
+        default="claude-code",
+        help="MCP client to configure: claude-code, claude-desktop, codex, opencode "
+        "(default: claude-code)",
+    )
+    setup_parser.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        metavar="DIR",
+        help="opencode only: write the project-level opencode.json in DIR "
+        "(default: current directory) instead of the user-level config",
+    )
+    setup_parser.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default=None,
+        help="claude-code only: user (default) registers the server in "
+        "~/.claude.json for every project; project writes ./.mcp.json",
+    )
+    setup_parser.add_argument(
+        "--opencode-schema",
+        choices=["auto", "v2", "v1"],
+        default="auto",
+        help="opencode only: config layout to write. v2 = mcp.servers.kct (opencode "
+        ">= 2), v1 = mcp.kct with enabled=true. auto (default) asks `opencode "
+        "--version`, then falls back to the existing file's layout, then v2",
+    )
+    setup_parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Show what would be written without making changes",
+    )
+    add_format_flag(setup_parser)
+
+
+def _add_ipc_parser(subparsers) -> None:
+    """Add IPC subcommand parser for live KiCad instance interaction."""
+    ipc_parser = subparsers.add_parser(
+        "ipc",
+        help="Interact with a running KiCad instance via IPC API (KiCad 9.0+)",
+        description=(
+            "Connect to a running KiCad instance via its IPC API (protobuf over NNG). "
+            "Requires KiCad 9.0+ and the ipc optional dependency: pip install 'kicad-tools[ipc]'"
+        ),
+    )
+    ipc_subparsers = ipc_parser.add_subparsers(dest="ipc_command", help="IPC subcommands")
+
+    # ipc status subcommand
+    status_parser = ipc_subparsers.add_parser(
+        "status",
+        help="Show KiCad IPC connection status",
+        description="Discover running KiCad instances and report their IPC status.",
+    )
+    status_parser.add_argument(
+        "--socket",
+        "-s",
+        help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
+    )
+    add_format_flag(status_parser)
+
+    # ipc connect subcommand
+    connect_parser = ipc_subparsers.add_parser(
+        "connect",
+        help="Test connection to a running KiCad instance",
+        description="Attempt to connect to a running KiCad instance and report the result.",
+    )
+    connect_parser.add_argument(
+        "--socket",
+        "-s",
+        help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
+    )
+    add_format_flag(connect_parser)
+
+    # ipc push-routes subcommand
+    push_parser = ipc_subparsers.add_parser(
+        "push-routes",
+        help="Push routed tracks from a PCB file to a running KiCad instance",
+        description=(
+            "Read tracks and vias from a .kicad_pcb file and push them to "
+            "a running KiCad instance via IPC. All items are created in a "
+            "single undo transaction."
+        ),
+    )
+    push_parser.add_argument(
+        "pcb",
+        help="Path to .kicad_pcb file containing the routing solution",
+    )
+    push_parser.add_argument(
+        "--socket",
+        "-s",
+        help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
+    )
+    push_parser.add_argument(
+        "--net",
+        "-n",
+        help="Only push tracks/vias for a specific net name",
+    )
+    push_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be pushed without actually connecting to KiCad",
+    )
+    add_format_flag(push_parser)
+
+
+def _add_init_parser(subparsers) -> None:
+    """Add init subcommand parser for project initialization."""
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize a KiCad project with manufacturer design rules",
+        description=(
+            "Create or configure a KiCad project with manufacturer-specific design rules. "
+            "This prevents DRC issues by setting appropriate rules from the start."
+        ),
+    )
+    init_parser.add_argument(
+        "init_project",
+        metavar="PROJECT",
+        help="Project name or path to .kicad_pro file (use '.' for current directory)",
+    )
+    init_parser.add_argument(
+        "-m",
+        "--mfr",
+        dest="init_mfr",
+        required=True,
+        metavar="MANUFACTURER",
+        help="Manufacturer ID (jlcpcb, seeed, pcbway, oshpark)",
+    )
+    init_parser.add_argument(
+        "-l",
+        "--layers",
+        dest="init_layers",
+        type=int,
+        default=2,
+        help="Number of copper layers (default: 2)",
+    )
+    init_parser.add_argument(
+        "-c",
+        "--copper",
+        dest="init_copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz (default: 1.0)",
+    )
+    init_parser.add_argument(
+        "-t",
+        "--design-type",
+        dest="init_design_type",
+        choices=["audio", "power_supply", "digital", "mixed_signal", "rf"],
+        default=None,
+        metavar="TYPE",
+        help="Design type for netclass configuration (audio, power_supply, digital, mixed_signal, rf)",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        dest="init_dry_run",
+        action="store_true",
+        help="Show what would be done without making changes",
+    )
+    init_parser.add_argument(
+        "--format",
+        dest="init_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_panel_parser(subparsers) -> None:
+    """Add panel subcommand parser for board panelization."""
+    panel_parser = subparsers.add_parser(
+        "panel",
+        help="Create manufacturing panels from board PCBs",
+        description=(
+            "Panelize a board into a manufacturing panel with configurable "
+            "grid layout, breakaway tabs, mousebite/V-cut separation, "
+            "tooling holes, and fiducial marks."
+        ),
+    )
+    panel_parser.add_argument(
+        "panel_input",
+        metavar="INPUT",
+        help="Path to source .kicad_pcb file",
+    )
+    panel_parser.add_argument(
+        "-o",
+        "--output",
+        dest="panel_output",
+        default=None,
+        help="Output panel PCB file path (default: <input>_panel.kicad_pcb)",
+    )
+    panel_parser.add_argument(
+        "--rows",
+        dest="panel_rows",
+        type=int,
+        default=2,
+        help="Number of board rows (default: 2)",
+    )
+    panel_parser.add_argument(
+        "--cols",
+        dest="panel_cols",
+        type=int,
+        default=2,
+        help="Number of board columns (default: 2)",
+    )
+    panel_parser.add_argument(
+        "--spacing",
+        dest="panel_spacing",
+        type=float,
+        default=None,
+        help=(
+            "Gap between boards in mm (default: 0 with --cut vcut -- V-scored "
+            "boards are butted -- otherwise 2.0)"
+        ),
+    )
+    panel_parser.add_argument(
+        "--spacing-x",
+        dest="panel_spacing_x",
+        type=float,
+        default=None,
+        help=(
+            "Gap between columns in mm, overriding --spacing. With --cut vcut, "
+            "a gapped axis is tab-routed with mousebites and a 0 axis is "
+            "V-scored (mixed panel)"
+        ),
+    )
+    panel_parser.add_argument(
+        "--spacing-y",
+        dest="panel_spacing_y",
+        type=float,
+        default=None,
+        help="Gap between rows in mm, overriding --spacing (see --spacing-x)",
+    )
+    panel_parser.add_argument(
+        "--cut",
+        dest="panel_cut",
+        choices=["mousebite", "vcut"],
+        default="mousebite",
+        help="Separation method (default: mousebite)",
+    )
+    panel_parser.add_argument(
+        "--vcut-layer",
+        dest="panel_vcut_layer",
+        choices=["Cmts.User", "Dwgs.User", "Eco1.User", "Eco2.User"],
+        default="Cmts.User",
+        help=(
+            "Layer for V-score lines with --cut vcut (default: Cmts.User). "
+            "Never Edge.Cuts: an open score line there breaks the outline. "
+            "`kct export` plots whichever layer holds the score lines."
+        ),
+    )
+    panel_parser.add_argument(
+        "--vscore-clearance",
+        dest="panel_vscore_clearance",
+        type=float,
+        default=None,
+        help=(
+            "Minimum copper distance from a V-score line in mm, with --cut vcut "
+            "(default: the --mfr profile's published V-score clearance, e.g. "
+            "0.4 for jlcpcb/pcbway; a conservative unsourced default for fabs "
+            "that publish none). Closer copper is warned about, and a "
+            "copper-pour keepout this wide flanks each score. 0 disables both"
+        ),
+    )
+    panel_parser.add_argument(
+        "--mfr",
+        "--manufacturer",
+        dest="panel_mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Fab profile whose V-score clearance --cut vcut checks against "
+            "(Issue #6177). When omitted, auto-resolves from the "
+            "fab_profile.json sidecar, then project.kct target_fab, then "
+            "falls back to jlcpcb. --vscore-clearance overrides the value"
+        ),
+    )
+    panel_parser.add_argument(
+        "--tab-width",
+        dest="panel_tab_width",
+        type=float,
+        default=3.0,
+        help="Tab width in mm (default: 3.0)",
+    )
+    panel_parser.add_argument(
+        "--tab-count",
+        dest="panel_tab_count",
+        type=int,
+        default=3,
+        help="Number of tabs per edge (default: 3)",
+    )
+    panel_parser.add_argument(
+        "--mousebite-diameter",
+        dest="panel_mousebite_diameter",
+        type=float,
+        default=0.5,
+        help="Mousebite hole diameter in mm (default: 0.5)",
+    )
+    panel_parser.add_argument(
+        "--mousebite-spacing",
+        dest="panel_mousebite_spacing",
+        type=float,
+        default=0.8,
+        help="Mousebite hole spacing in mm (default: 0.8)",
+    )
+    panel_parser.add_argument(
+        "--frame",
+        dest="panel_frame",
+        action="store_true",
+        help="Add a frame (rail) around the panel",
+    )
+    panel_parser.add_argument(
+        "--frame-width",
+        dest="panel_frame_width",
+        type=float,
+        default=5.0,
+        help="Frame rail width in mm (default: 5.0)",
+    )
+    panel_parser.add_argument(
+        "--frame-space",
+        dest="panel_frame_space",
+        type=float,
+        default=None,
+        help=(
+            "Gap between board and frame in mm (default: 0 with --cut vcut -- "
+            "the rails are butted and V-scored off -- otherwise 2.0)"
+        ),
+    )
+    panel_parser.add_argument(
+        "--tooling-holes",
+        dest="panel_tooling_holes",
+        action="store_true",
+        help="Add tooling holes to the panel frame",
+    )
+    panel_parser.add_argument(
+        "--fiducials",
+        dest="panel_fiducials",
+        action="store_true",
+        help="Add fiducial marks to the panel frame",
+    )
+    add_format_flag(panel_parser)
+
+
+def _add_pipeline_parser(subparsers) -> None:
+    """Add pipeline subcommand parser for existing PCB repair workflow."""
+    pipeline_parser = subparsers.add_parser(
+        "pipeline",
+        help="End-to-end repair pipeline for existing PCBs",
+        description=(
+            "Orchestrate the full repair pipeline on an existing PCB: "
+            "erc, fix-silkscreen, fix-vias, route (if needed), fix-drc, optimize-traces, "
+            "zone fill, audit. Auto-detects board state to skip unnecessary steps."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "pipeline_input",
+        metavar="INPUT",
+        help="Path to .kicad_pcb or .kicad_pro file",
+    )
+    pipeline_parser.add_argument(
+        "--step",
+        "-s",
+        dest="pipeline_step",
+        choices=[
+            "erc",
+            "fix-erc",
+            "sync",
+            "fix-silkscreen",
+            "route",
+            "stitch",
+            "fix-vias",
+            "fix-drc",
+            "optimize",
+            "zones",
+            "zones-refill",
+            "audit",
+            "report",
+            "export",
+        ],
+        default=None,
+        help="Run only this step (default: run all steps in order)",
+    )
+    pipeline_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="pipeline_mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
+    )
+    pipeline_parser.add_argument(
+        "--layers",
+        "-l",
+        dest="pipeline_layers",
+        choices=["auto", "2", "4", "4-sig", "4-all", "6"],
+        default=None,
+        help=(
+            "Layer stack configuration: "
+            "'auto' = auto-detect from PCB (default when omitted); "
+            "'2' = 2-layer; '4' = 4-layer with GND/PWR planes; "
+            "'4-sig' = 4-layer with 2 signal + 1 ground plane; "
+            "'4-all' = 4-layer all-signal; '6' = 6-layer. "
+            "Pass '4' when your net-class-map declares is_pour_net / plane "
+            "nets so inner layers are reserved for planes ('auto' cannot see "
+            "pour nets added post-route)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--dry-run",
+        dest="pipeline_dry_run",
+        action="store_true",
+        help="Preview pipeline steps without modifying files",
+    )
+    pipeline_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="pipeline_verbose",
+        action="store_true",
+        help="Show detailed output from each step",
+    )
+    pipeline_parser.add_argument(
+        "-f",
+        "--force",
+        dest="pipeline_force",
+        action="store_true",
+        help="Force all steps (e.g., re-route even if already routed)",
+    )
+    pipeline_parser.add_argument(
+        "--commit",
+        dest="pipeline_commit",
+        action="store_true",
+        default=False,
+        help="Create a git commit with modified files after a successful pipeline run",
+    )
+    pipeline_parser.add_argument(
+        "--max-displacement",
+        dest="pipeline_max_displacement",
+        type=float,
+        default=2.0,
+        help=(
+            "Maximum nudge/slide distance in mm for fix-drc step (default: 2.0). "
+            "Increase when enlarged vias cause segment-to-via violations that "
+            "exceed the displacement budget."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--route-skip-threshold",
+        dest="pipeline_route_skip_threshold",
+        type=float,
+        default=95.0,
+        metavar="PERCENT",
+        help=(
+            "Minimum signal-net completion percentage required to skip the "
+            "route step (default: 95.0). Single-pad nets and zone-fillable "
+            "plane nets are excluded from the signal-net subset and never "
+            "block the skip."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--best-effort",
+        dest="pipeline_best_effort",
+        action="store_true",
+        default=False,
+        help="Continue past routing failures to zone fill, audit, and export",
+    )
+    pipeline_parser.add_argument(
+        "--no-cache",
+        dest="pipeline_no_cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Bypass routing cache (force fresh routing in the route step). "
+            "Not needed after router edits: the cache invalidates on code changes"
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--clear-cache",
+        dest="pipeline_clear_cache",
+        action="store_true",
+        default=False,
+        help="Clear routing cache before the route step runs",
+    )
+    pipeline_parser.add_argument(
+        "--sch",
+        "--schematic",
+        dest="pipeline_sch",
+        default=None,
+        help="Path to root .kicad_sch file (overrides auto-discovery)",
+    )
+    pipeline_parser.add_argument(
+        "--apply-sync",
+        dest="pipeline_apply_sync",
+        action="store_true",
+        default=False,
+        help=(
+            "In the sync step, auto-add missing footprints and apply"
+            " high-confidence value/footprint corrections in place."
+        ),
+    )
+    # Issue #4607: HV pairwise-clearance passthrough.  Mirrors the `kct route`
+    # flags (see route_cmd._route_parser) so the pipeline's route step can forward
+    # them to the route subprocess.  Must stay in lockstep with the inner
+    # parser in pipeline_cmd.main and be forwarded by
+    # commands/pipeline.py::run_pipeline_command (pinned by
+    # tests/test_pipeline_cli_args.py).
+    pipeline_parser.add_argument(
+        "--voltage-map",
+        dest="pipeline_voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts}, forwarded "
+            "to the route step to enable the HV pairwise-clearance audit "
+            "(see `kct route --voltage-map`). With a voltage map in play, a "
+            "clearance-dirty route result (exit 3/4) FAILS the pipeline's "
+            "route step instead of continuing as a warning (issue #4607)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--creepage-standard",
+        dest="pipeline_creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: iec60664)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--pollution-degree",
+        dest="pipeline_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: 2)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--material-group",
+        dest="pipeline_material_group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup, forwarded to the route step "
+            "(default: IIIa)."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--hv-threshold",
+        dest="pipeline_hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance, forwarded to the route "
+            "step (default: 30.0)."
+        ),
+    )
+    add_format_flag(pipeline_parser)
+
+
+def _add_create_pcb_parser(subparsers) -> None:
+    """Add create-pcb subcommand parser for generating PCBs from schematics."""
+    create_pcb_parser = subparsers.add_parser(
+        "create-pcb",
+        help="Create a PCB from a KiCad schematic",
+        description=(
+            "Generate a PCB file from a KiCad schematic. Extracts netlist data, "
+            "creates a blank PCB with specified dimensions, places footprints for "
+            "all components, and assigns nets based on schematic connectivity."
+        ),
+    )
+    create_pcb_parser.add_argument(
+        "create_pcb_schematic",
+        metavar="SCHEMATIC",
+        help="Path to .kicad_sch schematic file",
+    )
+    create_pcb_parser.add_argument(
+        "-o",
+        "--output",
+        dest="create_pcb_output",
+        help="Output .kicad_pcb file path (default: <schematic-stem>.kicad_pcb)",
+    )
+    create_pcb_parser.add_argument(
+        "--width",
+        dest="create_pcb_width",
+        type=float,
+        default=100.0,
+        help="Board width in mm (default: 100.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--height",
+        dest="create_pcb_height",
+        type=float,
+        default=100.0,
+        help="Board height in mm (default: 100.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--layers",
+        dest="create_pcb_layers",
+        type=int,
+        choices=[2, 4],
+        default=2,
+        help="Number of copper layers (default: 2)",
+    )
+    create_pcb_parser.add_argument(
+        "--title",
+        dest="create_pcb_title",
+        default="",
+        help="Board title for title block (default: schematic filename)",
+    )
+    create_pcb_parser.add_argument(
+        "--revision",
+        dest="create_pcb_revision",
+        default="1.0",
+        help="Board revision (default: 1.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--company",
+        dest="create_pcb_company",
+        default="",
+        help="Company name for title block",
+    )
+    create_pcb_parser.add_argument(
+        "--no-place",
+        dest="create_pcb_no_place",
+        action="store_true",
+        help="Skip automatic component placement",
+    )
+    create_pcb_parser.add_argument(
+        "--spacing",
+        dest="create_pcb_spacing",
+        type=float,
+        default=15.0,
+        help="Spacing between auto-placed components in mm (default: 15.0)",
+    )
+    create_pcb_parser.add_argument(
+        "--columns",
+        dest="create_pcb_columns",
+        type=int,
+        default=10,
+        help="Number of columns for auto-placement grid (default: 10)",
+    )
+    create_pcb_parser.add_argument(
+        "--dry-run",
+        dest="create_pcb_dry_run",
+        action="store_true",
+        help="Show what would be done without saving",
+    )
+    add_format_flag(create_pcb_parser)
+
+
+def _add_build_parser(subparsers) -> None:
+    """Add build subcommand parser for end-to-end workflow."""
+    build_parser = subparsers.add_parser(
+        "build",
+        help="Build from spec to manufacturable design",
+        description=(
+            "Orchestrate the full build workflow from .kct specification to routed, verified PCB. "
+            "Runs schematic generation, PCB generation, autorouting, and verification in sequence."
+        ),
+    )
+    build_parser.add_argument(
+        "build_spec",
+        metavar="SPEC",
+        nargs="?",
+        help="Path to .kct file or project directory (default: current directory)",
+    )
+    build_parser.add_argument(
+        "--step",
+        "-s",
+        dest="build_step",
+        choices=[
+            "schematic",
+            "erc",
+            "pcb",
+            "sync",
+            "outline",
+            "placement",
+            "zones",
+            "silkscreen",
+            "route",
+            "stitch",
+            "page-fit",
+            "preflight-routing",
+            "verify",
+            "export",
+            "all",
+        ],
+        default="all",
+        help="Run specific step or all (default: all)",
+    )
+    build_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="build_mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Target manufacturer for verification. When omitted, the "
+            "project spec's manufacturing.target_fab is used (falling back "
+            "to jlcpcb). An explicit --mfr always overrides the spec."
+        ),
+    )
+    build_parser.add_argument(
+        "--dry-run",
+        dest="build_dry_run",
+        action="store_true",
+        help="Preview build steps without executing",
+    )
+    build_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="build_verbose",
+        action="store_true",
+        help="Show detailed output",
+    )
+    build_parser.add_argument(
+        "-q",
+        "--quiet",
+        dest="build_quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+    build_parser.add_argument(
+        "-f",
+        "--force",
+        dest="build_force",
+        action="store_true",
+        help="Force rebuild, ignoring existing outputs and timestamp checks",
+    )
+    build_parser.add_argument(
+        "-o",
+        "--output",
+        dest="build_output",
+        help="Output directory for generated files (default: project directory)",
+    )
+    build_parser.add_argument(
+        "--optimize-placement",
+        dest="build_optimize_placement",
+        action="store_true",
+        help="Run CMA-ES placement optimization before routing (opt-in)",
+    )
+    build_parser.add_argument(
+        "--no-smoke-check",
+        dest="build_no_smoke_check",
+        action="store_true",
+        help=(
+            "Disable the per-step kicad-cli load smoke check that runs "
+            "after each PCB-write step.  Use to restore prior behaviour "
+            "when kicad-cli is misbehaving or pipeline speed matters."
+        ),
+    )
+    build_parser.add_argument(
+        "--allow-incomplete",
+        dest="build_allow_incomplete",
+        action="store_true",
+        help=(
+            "Skip the routing-completeness preflight "
+            "(advertised in failure messages; CI greppable)."
+        ),
+    )
+    # Issue #4607: HV pairwise-clearance passthrough.  Mirrors the `kct route`
+    # flags (see route_cmd._route_parser) so the build's route step can forward them
+    # to the route subprocess.  Must stay in lockstep with
+    # build_cmd._build_inner_parser (enforced by tests/test_build_parser_parity.py)
+    # and be forwarded by commands/build.py::run_build_command.
+    build_parser.add_argument(
+        "--voltage-map",
+        dest="build_voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON per-net voltage map {net_name: volts}, forwarded "
+            "to the route step to enable the HV pairwise-clearance audit "
+            "(see `kct route --voltage-map`). With a voltage map in play, a "
+            "clearance-dirty route result (exit 3/4) FAILS the build instead "
+            "of continuing to verification and export (issue #4607)."
+        ),
+    )
+    build_parser.add_argument(
+        "--creepage-standard",
+        dest="build_creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help=(
+            "Creepage standard for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: iec60664)."
+        ),
+    )
+    build_parser.add_argument(
+        "--pollution-degree",
+        dest="build_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help=(
+            "IEC pollution degree for the --voltage-map pairwise-clearance "
+            "lookup, forwarded to the route step (default: 2)."
+        ),
+    )
+    build_parser.add_argument(
+        "--material-group",
+        dest="build_material_group",
+        default="IIIa",
+        help=(
+            "Insulation material group I/II/IIIa/IIIb for the --voltage-map "
+            "pairwise-clearance lookup, forwarded to the route step "
+            "(default: IIIa)."
+        ),
+    )
+    build_parser.add_argument(
+        "--hv-threshold",
+        dest="build_hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help=(
+            "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
+            "for --voltage-map pairwise clearance, forwarded to the route "
+            "step (default: 30.0)."
+        ),
+    )
+    add_format_flag(build_parser)
+
+
+def _add_build_native_parser(subparsers) -> None:
+    """Add build-native subcommand parser for building C++ router backend."""
+    build_native_parser = subparsers.add_parser(
+        "build-native",
+        help="Build C++ router backend for 10-100x faster routing",
+        description=(
+            "Build and install the C++ router extension for significantly faster routing. "
+            "This command handles all the build steps automatically: checking prerequisites, "
+            "ensuring nanobind is available, configuring cmake, and building the extension. "
+            "For a lockfile-tracked nanobind that survives a later `uv sync`, install the "
+            "build tooling via the `native` extra: `uv sync --extra native` (repo) or "
+            '`pip install "kicad-tools[native]"` (consumer).'
+        ),
+    )
+    build_native_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="build_native_verbose",
+        action="store_true",
+        help="Show detailed build output",
+    )
+    build_native_parser.add_argument(
+        "-f",
+        "--force",
+        dest="build_native_force",
+        action="store_true",
+        help="Force rebuild even if already installed",
+    )
+    build_native_parser.add_argument(
+        "-j",
+        "--jobs",
+        dest="build_native_jobs",
+        type=int,
+        default=None,
+        help="Number of parallel build jobs (default: auto)",
+    )
+    build_native_parser.add_argument(
+        "--format",
+        dest="build_native_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    build_native_parser.add_argument(
+        "--check",
+        dest="build_native_check",
+        action="store_true",
+        help="Just check if C++ backend is available, don't build",
+    )
+
+
+def _add_doctor_parser(subparsers) -> None:
+    """Add doctor subcommand parser for environment/installation health checks."""
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help=(
+            "Diagnose kicad-tools installation health "
+            "(version-record drift + environment preflight)"
+        ),
+        description=(
+            "Check the health of a kicad-tools installation. Two check groups run: "
+            "(1) version-record drift -- the installed package version (ground truth) "
+            "is compared against the records the installer stamps into a consumer "
+            "repo (pyproject.toml dependency pin, .kct/install-metadata.json, and "
+            "the CLAUDE.md marker block); (2) environment preflight -- runtime "
+            "prerequisites are probed fail-soft (native C++ router backend, "
+            "kicad-cli presence + KiCad 8+ version, Python/shapely install health, "
+            "and a PATH 'kct' shadowing the active environment). Each preflight "
+            "reports ok/warn/fail with an actionable remedy. Advisory by default; "
+            "use --strict to exit non-zero on drift or any failed preflight so it "
+            "can gate CI / pre-commit hooks."
+        ),
+    )
+    doctor_parser.add_argument(
+        "--root",
+        dest="doctor_root",
+        default=".",
+        metavar="DIR",
+        help="Directory to look for the version records in (default: current dir)",
+    )
+    doctor_parser.add_argument(
+        "--format",
+        dest="doctor_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    doctor_parser.add_argument(
+        "--strict",
+        dest="doctor_strict",
+        action="store_true",
+        help=(
+            "Exit 1 when any version record has drifted or any environment "
+            "preflight fails (warns stay advisory; default: advisory exit 0)"
+        ),
+    )
+
+
+def _add_spec_parser(subparsers) -> None:
+    """Add spec subcommand parser for .kct project specification files."""
+    spec_parser = subparsers.add_parser(
+        "spec",
+        help="Project specification (.kct) management",
+        description=(
+            "Manage .kct project specification files that capture design intent, "
+            "requirements, decisions, and progress for PCB projects."
+        ),
+    )
+    spec_subparsers = spec_parser.add_subparsers(
+        dest="spec_command",
+        help="Spec commands",
+    )
+
+    # spec init
+    spec_init = spec_subparsers.add_parser(
+        "init",
+        help="Initialize a new .kct specification file",
+        description="Create a new project specification file from a template.",
+    )
+    spec_init.add_argument(
+        "spec_name",
+        metavar="NAME",
+        help="Project name",
+    )
+    spec_init.add_argument(
+        "-t",
+        "--template",
+        dest="spec_template",
+        choices=["minimal", "power_supply", "sensor_board", "mcu_breakout"],
+        default="minimal",
+        help="Template to use (default: minimal)",
+    )
+    spec_init.add_argument(
+        "-o",
+        "--output",
+        dest="spec_output",
+        metavar="FILE",
+        help="Output file path (default: project.kct)",
+    )
+    spec_init.add_argument(
+        "-f",
+        "--force",
+        dest="spec_force",
+        action="store_true",
+        help="Overwrite existing file",
+    )
+    add_format_flag(spec_init, dest="spec_format")
+
+    # spec validate
+    spec_validate = spec_subparsers.add_parser(
+        "validate",
+        help="Validate a .kct specification file",
+        description="Check a spec file for schema and semantic errors.",
+    )
+    spec_validate.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+    add_format_flag(spec_validate, dest="spec_format")
+
+    # spec status
+    spec_status = spec_subparsers.add_parser(
+        "status",
+        help="Show project status and progress",
+        description="Display progress, phase status, and recent decisions from a spec file.",
+    )
+    spec_status.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+    add_format_flag(spec_status, dest="spec_format")
+
+    # spec decide
+    spec_decide = spec_subparsers.add_parser(
+        "decide",
+        help="Record a design decision",
+        description="Add a design decision with rationale to the spec file.",
+    )
+    spec_decide.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+    spec_decide.add_argument(
+        "--topic",
+        dest="decide_topic",
+        required=True,
+        help="Decision topic (e.g., 'Buck Converter Selection')",
+    )
+    spec_decide.add_argument(
+        "--choice",
+        dest="decide_choice",
+        required=True,
+        help="Chosen option",
+    )
+    spec_decide.add_argument(
+        "--rationale",
+        dest="decide_rationale",
+        required=True,
+        help="Reasoning for the decision",
+    )
+    spec_decide.add_argument(
+        "--alternatives",
+        dest="decide_alternatives",
+        help="Comma-separated alternative options considered",
+    )
+    add_format_flag(spec_decide, dest="spec_format")
+
+    # spec check
+    spec_check = spec_subparsers.add_parser(
+        "check",
+        help="Mark a checklist item as complete",
+        description="Mark a progress checklist item as completed.",
+    )
+    spec_check.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+    spec_check.add_argument(
+        "check_item",
+        metavar="ITEM",
+        help="Checklist item to mark complete (format: 'phase.item' or 'item')",
+    )
+    add_format_flag(spec_check, dest="spec_format")
+
+
+def _add_benchmark_parser(subparsers) -> None:
+    """Add benchmark subcommand parser."""
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        help="Run routing benchmarks and regression tests",
+        description="Benchmark routing performance and detect regressions.",
+    )
+    benchmark_subparsers = benchmark_parser.add_subparsers(
+        dest="benchmark_command",
+        help="Benchmark commands",
+    )
+
+    # benchmark run
+    benchmark_run = benchmark_subparsers.add_parser(
+        "run",
+        help="Run benchmark suite",
+        description="Execute routing benchmarks and collect metrics.",
+    )
+    benchmark_run.add_argument(
+        "--cases",
+        help="Comma-separated list of cases to run (default: all)",
+    )
+    benchmark_run.add_argument(
+        "--strategies",
+        help="Comma-separated strategies: basic,negotiated,monte_carlo (default: all)",
+    )
+    benchmark_run.add_argument(
+        "--difficulty",
+        choices=Difficulty.values(),
+        help="Filter by difficulty level",
+    )
+    benchmark_run.add_argument(
+        "-o",
+        "--output",
+        help="Output file path for results",
+    )
+    benchmark_run.add_argument(
+        "--save",
+        action="store_true",
+        help="Save results to benchmarks/ directory",
+    )
+    benchmark_run.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed progress",
+    )
+    add_format_flag(benchmark_run)
+
+    # benchmark compare
+    benchmark_compare = benchmark_subparsers.add_parser(
+        "compare",
+        help="Compare against baseline",
+        description="Run benchmarks and check for regressions against a baseline.",
+    )
+    benchmark_compare.add_argument(
+        "--baseline",
+        required=True,
+        help="Path to baseline results JSON file",
+    )
+    benchmark_compare.add_argument(
+        "--fail-on-warning",
+        action="store_true",
+        help="Exit with error on warnings (not just errors)",
+    )
+    benchmark_compare.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed progress",
+    )
+    add_format_flag(benchmark_compare)
+
+    # benchmark report
+    benchmark_report = benchmark_subparsers.add_parser(
+        "report",
+        help="Generate benchmark report",
+        description="Generate human-readable report from benchmark results.",
+    )
+    benchmark_report.add_argument(
+        "input",
+        help="Path to benchmark results JSON file",
+    )
+    benchmark_report.add_argument(
+        "--format",
+        choices=["text", "markdown", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    # benchmark list
+    benchmark_list = benchmark_subparsers.add_parser(
+        "list",
+        help="List available benchmark cases",
+        description="Show all registered benchmark test cases.",
+    )
+    benchmark_list.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_bench_parser(subparsers) -> None:
+    """Add ``bench`` subcommand parser (Epic #4932 Phase 2, issue #4941).
+
+    Distinct from the ``benchmark`` command above (this repo's own in-tree
+    routing regression-test suite, ``kicad_tools.benchmark``) -- ``bench``
+    runs the DeepPCB-comparable EXTERNAL-board harness
+    (``benchmarks/external/``): fetch a pinned third-party board, rip up
+    its copper, route it with kicad-tools using rules as-shipped, and
+    report the DeepPCB-comparable metric tuple (completion %, vias,
+    wirelength, wall-clock) alongside this project's stricter DRC gates.
+    """
+    bench_parser = subparsers.add_parser(
+        "bench",
+        help="Run external DeepPCB-comparable board benchmarks",
+        description=(
+            "Fetch, route, and measure the third-party boards DeepPCB "
+            "publishes numbers for (Epic #4932)."
+        ),
+    )
+    bench_subparsers = bench_parser.add_subparsers(
+        dest="bench_command",
+        help="Bench commands",
+    )
+
+    bench_external = bench_subparsers.add_parser(
+        "external",
+        help="Zero-touch / tuned protocol: fetch, route, measure, report",
+        description=(
+            "Run the zero-touch protocol (rules as-shipped, no tuning; "
+            "default) or, with --tuned, the tuned protocol (a declared "
+            "per-board netclass/diff-pair config, see "
+            "benchmarks/external/tuned_rules.py) on one or more external "
+            "benchmark boards: fetch at the manifest's pinned commit, rip "
+            "up existing copper, route, then emit a JSON + markdown report "
+            "in the schema documented at "
+            "docs/benchmark-external-report-schema.md. The zero-touch "
+            "protocol mirrors DeepPCB's own vs-Quilter methodology; the "
+            "tuned protocol mirrors DeepPCB's own case-study methodology. "
+            "The two protocols are always reported separately -- never "
+            "merged or averaged."
+        ),
+    )
+    bench_external.add_argument(
+        "--board",
+        action="append",
+        dest="boards",
+        metavar="SLUG",
+        help="Run only this board slug (repeatable); default: every board in the manifest",
+    )
+    bench_external.add_argument(
+        "--suite",
+        choices=["deeppcb", "pcbworld"],
+        default=None,
+        help=(
+            "Benchmark suite (default: deeppcb, the boards.toml boards). 'pcbworld' "
+            "fetches the pinned PCBWorld/PCBench inputs, prepares the D3 'guide' "
+            "boards with PCBWorld's own (external) prep and scores them with BOTH "
+            "the local gates and PCBWorld's Clean Pass, kept separate. Needs "
+            "PCBWORLD_PYTHON, KICAD_CLI (KiCad 9) and PCBNEW_PYTHON; see "
+            "benchmarks/external/README.md."
+        ),
+    )
+    bench_external.add_argument(
+        "--split",
+        default=None,
+        help="--suite pcbworld: D3 split alias from pcbworld.toml (d3a or d3b; default: d3a)",
+    )
+    bench_external.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: number of boards in the deterministic subset (default: 3; with "
+            "--full-split, the size of this invocation's window, default: the rest of the split)"
+        ),
+    )
+    bench_external.add_argument(
+        "--full-split",
+        dest="full_split",
+        action="store_true",
+        help=(
+            "--suite pcbworld: the denominator is the WHOLE split (d3a = 99 boards); "
+            "--offset/--limit only bound which boards this invocation attempts. Writes "
+            "results.json + report.d3.md with an explicit record for every board x rollout"
+        ),
+    )
+    bench_external.add_argument(
+        "--offset",
+        type=int,
+        default=None,
+        help="--suite pcbworld: skip the first N boards of the split (bounded windows)",
+    )
+    bench_external.add_argument(
+        "--rollouts",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: declared rollouts per board, seeds --seed .. --seed+N-1 "
+            "(default: 1). @5 keeps the rollout with the largest PCBWorld potential gain"
+        ),
+    )
+    bench_external.add_argument(
+        "--deterministic-baseline",
+        dest="deterministic_baseline",
+        action="store_true",
+        help=(
+            "--suite pcbworld: declare kct route a deterministic baseline (one rollout; "
+            "@5 reported equal to @1, PCBWorld's convention). Back it with "
+            "benchmarks/external/seed_variation.py evidence"
+        ),
+    )
+    bench_external.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "--suite pcbworld: keep earlier attempt records whose identity (board, rollout, "
+            "seed, input hash, tool commit, pins, KiCad version, router options) still "
+            "matches; anything else is discarded and re-attempted. Without it the ledger "
+            "is cleared"
+        ),
+    )
+    bench_external.add_argument(
+        "--max-attempts",
+        dest="max_attempts",
+        type=int,
+        default=None,
+        help="--suite pcbworld: stop after N new routing attempts (resume later with --resume)",
+    )
+    bench_external.add_argument(
+        "--route-timeout",
+        dest="route_timeout",
+        type=int,
+        default=None,
+        help=(
+            "--suite pcbworld: forwarded as `kct route --timeout` (hard per-attempt budget, "
+            "seconds); a timed-out attempt is always a failure"
+        ),
+    )
+    bench_external.add_argument(
+        "--render-d3",
+        dest="render_d3",
+        metavar="RESULTS_JSON",
+        default=None,
+        help=(
+            "Re-render report.d3.md next to a committed PCBWorld results.json (no routing, "
+            "no network) and exit"
+        ),
+    )
+    bench_external.add_argument(
+        "--tuned",
+        action="store_true",
+        help=(
+            "Run the tuned protocol instead of zero-touch: applies a "
+            "declared per-board netclass/diff-pair config "
+            "(benchmarks/external/tuned_rules.py) mirroring DeepPCB's own "
+            "case-study setup (e.g. STRF's USB 90R diff pair at "
+            "0.20/0.15mm, SPI netclass with a 0.4mm via) before routing. "
+            "Currently defined for STRF only -- other boards report a "
+            "clear per-board error rather than silently falling back to "
+            "zero-touch rules. Output files are named report.tuned.md / "
+            "<slug>.tuned.json, distinct from the zero-touch report."
+        ),
+    )
+    bench_external.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Path to boards.toml (default: benchmarks/external/boards.toml); with "
+            "--suite pcbworld, the corpus manifest (default: benchmarks/external/pcbworld.toml)"
+        ),
+    )
+    bench_external.add_argument(
+        "--cache-dir",
+        dest="cache_dir",
+        default=None,
+        help="Fetch/normalize cache dir (default: .cache/kct-benchmarks/external)",
+    )
+    bench_external.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default=None,
+        help="Where to write reports (default: <cache-dir>/results)",
+    )
+    bench_external.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=(
+            "Router --seed for deterministic, byte-reproducible routing "
+            "(default: 42) -- combined with the manifest's pinned commit, "
+            "this is the reproduction key for the report's numbers"
+        ),
+    )
+    bench_external.add_argument(
+        "--mfr",
+        "--manufacturer",
+        dest="manufacturer",
+        choices=get_all_manufacturer_names(),
+        default="jlcpcb",
+        help="Target manufacturer for the kct check gate (default: jlcpcb)",
+    )
+    bench_external.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        default=4,
+        help="Layer count for the kct check gate (default: 4, matching STRF)",
+    )
+    bench_external.add_argument(
+        "--skip-fetch",
+        dest="skip_fetch",
+        action="store_true",
+        help="Reuse an already-fetched board file in --cache-dir instead of downloading",
+    )
+    bench_external.add_argument(
+        "--skip-kicad-cli-drc",
+        dest="skip_kicad_cli_drc",
+        action="store_true",
+        help=(
+            "Skip the mandatory `kicad-cli pcb drc --refill-zones` cross-gate "
+            "(e.g. no kicad-cli on this host). The report honestly records "
+            "kicad_cli_drc.ran=false -- never a clean verdict."
+        ),
+    )
+    bench_external.add_argument(
+        "--kicad-cli-timeout",
+        dest="kicad_cli_timeout",
+        type=int,
+        default=300,
+        help="Seconds before the kicad-cli DRC cross-gate is abandoned (default: 300)",
+    )
+    bench_external.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print per-board progress",
+    )
+    add_format_flag(bench_external)
+
+
+def _add_sync_parser(subparsers) -> None:
+    """Add sync subcommand parser for schematic/PCB reconciliation."""
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="Reconcile schematic and PCB references",
+        description="Analyze and fix mismatches between schematic and PCB",
+    )
+
+    # Mode selection
+    mode = sync_parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--analyze",
+        dest="sync_analyze",
+        action="store_true",
+        help="Analyze mismatches and report proposed changes",
+    )
+    mode.add_argument(
+        "--apply",
+        dest="sync_apply",
+        action="store_true",
+        help="Apply proposed changes (requires --dry-run or --confirm)",
+    )
+
+    # File arguments
+    sync_parser.add_argument(
+        "sync_project",
+        nargs="?",
+        help="Path to .kicad_pro file (auto-finds schematic and PCB)",
+    )
+    sync_parser.add_argument(
+        "--schematic",
+        "-s",
+        dest="sync_schematic",
+        help="Path to .kicad_sch file (required if no project file)",
+    )
+    sync_parser.add_argument(
+        "--pcb",
+        "-p",
+        dest="sync_pcb",
+        help="Path to .kicad_pcb file (required if no project file)",
+    )
+
+    # Output options
+    sync_parser.add_argument(
+        "--format",
+        dest="sync_format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    sync_parser.add_argument(
+        "--output-mapping",
+        "-m",
+        dest="sync_output_mapping",
+        help="Save analysis mapping to JSON file",
+    )
+    sync_parser.add_argument(
+        "-o",
+        "--output",
+        dest="sync_output",
+        help="Write modified PCB to this file instead of overwriting",
+    )
+
+    # Apply options
+    sync_parser.add_argument(
+        "--dry-run",
+        dest="sync_dry_run",
+        action="store_true",
+        help="Show what would change without modifying files",
+    )
+    sync_parser.add_argument(
+        "--confirm",
+        dest="sync_confirm",
+        action="store_true",
+        help="Actually apply changes (required with --apply)",
+    )
+    sync_parser.add_argument(
+        "--min-confidence",
+        dest="sync_min_confidence",
+        choices=["high", "medium", "low"],
+        default="high",
+        help="Minimum confidence level to apply (default: high)",
+    )
+    sync_parser.add_argument(
+        "--remove-orphans",
+        dest="sync_remove_orphans",
+        action="store_true",
+        help="Remove PCB footprints not present in schematic (with --apply)",
+    )
+    sync_parser.add_argument(
+        "--force",
+        dest="sync_force",
+        action="store_true",
+        help="Force removal of orphans even if they have routed traces",
+    )
+
+
+def _add_run_parser(subparsers) -> None:
+    """Add run subcommand parser for executing Python scripts.
+
+    This command solves the common issue where users install kicad-tools
+    via pipx but cannot run board generation scripts with `python3 script.py`
+    because the kicad_tools module is not available in the system Python.
+    """
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run a Python script using the kicad-tools interpreter",
+        description=(
+            "Execute a Python script using the same Python interpreter that runs kicad-tools. "
+            "This is useful when kicad-tools is installed via pipx, as board generation scripts "
+            "can import kicad_tools modules that would otherwise be unavailable.\n\n"
+            "Example:\n"
+            "  kct run generate_design.py           # Run script\n"
+            "  kct run generate_design.py output/   # Pass arguments to script"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    run_parser.add_argument(
+        "run_script",
+        metavar="SCRIPT",
+        help="Path to Python script to run",
+    )
+    run_parser.add_argument(
+        "run_args",
+        nargs="*",
+        metavar="ARGS",
+        help="Arguments to pass to the script",
+    )
+
+
+def _add_explain_parser(subparsers) -> None:
+    """Add explain subcommand parser for design rule explanations."""
+    explain_parser = subparsers.add_parser(
+        "explain",
+        help="Explain design rules and DRC violations",
+        description=(
+            "Explain design rules with spec references and fix suggestions. "
+            "Can explain individual rules, search for rules, or explain violations "
+            "from a DRC report."
+        ),
+    )
+
+    # Main argument - rule ID
+    explain_parser.add_argument(
+        "explain_rule",
+        nargs="?",
+        metavar="RULE",
+        help="Rule ID to explain (e.g., trace_clearance, via_drill)",
+    )
+
+    # Discovery options
+    explain_parser.add_argument(
+        "--list",
+        "-l",
+        action="store_true",
+        dest="explain_list",
+        help="List all available rule IDs",
+    )
+    explain_parser.add_argument(
+        "--search",
+        "-s",
+        metavar="QUERY",
+        dest="explain_search",
+        help="Search for rules matching a query",
+    )
+
+    # Context values
+    explain_parser.add_argument(
+        "--value",
+        "-v",
+        type=float,
+        dest="explain_value",
+        help="Current/actual value for contextualized explanation",
+    )
+    explain_parser.add_argument(
+        "--required",
+        "-r",
+        type=float,
+        dest="explain_required",
+        help="Required/minimum value",
+    )
+    explain_parser.add_argument(
+        "--unit",
+        "-u",
+        default="mm",
+        dest="explain_unit",
+        help="Unit of measurement (default: mm)",
+    )
+    explain_parser.add_argument(
+        "--net1",
+        dest="explain_net1",
+        help="First net name for context",
+    )
+    explain_parser.add_argument(
+        "--net2",
+        dest="explain_net2",
+        help="Second net name for context",
+    )
+
+    # DRC report integration
+    explain_parser.add_argument(
+        "--drc-report",
+        "-d",
+        metavar="FILE",
+        dest="explain_drc_report",
+        help="Path to DRC report file to explain all violations",
+    )
+
+    # Output format
+    explain_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "tree", "json", "markdown"],
+        default="text",
+        dest="explain_format",
+        help="Output format (default: text)",
+    )
+
+    # Interface/net explanation
+    explain_parser.add_argument(
+        "--net",
+        "-n",
+        metavar="NAME",
+        dest="explain_net",
+        help="Explain constraints for a specific net",
+    )
+    explain_parser.add_argument(
+        "--interface",
+        "-i",
+        dest="explain_interface",
+        help="Specify interface type for net (usb, i2c, spi)",
+    )
+
+
+def _add_detect_mistakes_parser(subparsers) -> None:
+    """Add detect-mistakes subcommand parser for PCB design mistake detection."""
+    mistakes_parser = subparsers.add_parser(
+        "detect-mistakes",
+        help="Detect common PCB design mistakes with educational explanations",
+        description=(
+            "Detect common PCB design mistakes like bypass capacitor placement, "
+            "crystal trace length, differential pair skew, and more. Each mistake "
+            "includes an explanation and fix suggestion."
+        ),
+    )
+
+    # Main argument - PCB file
+    mistakes_parser.add_argument(
+        "mistakes_pcb",
+        nargs="?",
+        metavar="PCB",
+        help="Path to .kicad_pcb file to analyze",
+    )
+
+    # Category filter
+    mistakes_parser.add_argument(
+        "--category",
+        "-c",
+        dest="mistakes_category",
+        choices=[
+            "bypass_capacitor",
+            "crystal_oscillator",
+            "differential_pair",
+            "power_trace",
+            "thermal_management",
+            "emi_shielding",
+            "decoupling",
+            "grounding",
+            "via_placement",
+            "manufacturability",
+            "connectivity",
+            "bom_health",
+        ],
+        help="Only check specific category",
+    )
+
+    # Severity filter
+    mistakes_parser.add_argument(
+        "--severity",
+        "-s",
+        dest="mistakes_severity",
+        choices=["error", "warning", "info"],
+        help="Only show issues of this severity or higher",
+    )
+
+    # Output format
+    mistakes_parser.add_argument(
+        "--format",
+        "-f",
+        dest="mistakes_format",
+        choices=["table", "json", "tree", "summary", "sarif"],
+        default="table",
+        help="Output format (default: table; 'sarif' = SARIF 2.1.0 for CI)",
+    )
+
+    # Issue #6006: evidence-bound waivers, shared sidecar with ``kct check``.
+    mistakes_parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        dest="mistakes_waive",
+        metavar="KEY",
+        help="Record an evidence-bound waiver for the findings with this key (repeatable)",
+    )
+    mistakes_parser.add_argument("--waive-reason", dest="mistakes_waive_reason", default=None)
+    mistakes_parser.add_argument("--waive-reviewer", dest="mistakes_waive_reviewer", default=None)
+    mistakes_parser.add_argument("--waive-issue", dest="mistakes_waive_issue", default=None)
+    mistakes_parser.add_argument(
+        "--waivers",
+        dest="mistakes_waivers",
+        default=None,
+        help="Path to a waivers sidecar (default: auto-discover next to the board)",
+    )
+
+    # Strict mode
+    mistakes_parser.add_argument(
+        "--strict",
+        action="store_true",
+        dest="mistakes_strict",
+        help="Exit with error code on warnings",
+    )
+
+    # List categories
+    mistakes_parser.add_argument(
+        "--list-categories",
+        action="store_true",
+        dest="mistakes_list_categories",
+        help="List available check categories and exit",
+    )
+
+    # Verbose output
+    mistakes_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        dest="mistakes_verbose",
+        help="Show detailed information",
+    )
+
+
+def _add_calibrate_parser(subparsers) -> None:
+    """Add calibrate subcommand parser."""
+    calibrate_parser = subparsers.add_parser(
+        "calibrate",
+        help="Calibrate routing performance settings for your machine",
+    )
+    calibrate_parser.add_argument(
+        "--show",
+        action="store_true",
+        dest="calibrate_show",
+        help="Show current performance configuration without running calibration",
+    )
+    calibrate_parser.add_argument(
+        "--show-gpu",
+        action="store_true",
+        dest="calibrate_show_gpu",
+        help="Show GPU capabilities and current configuration",
+    )
+    calibrate_parser.add_argument(
+        "--gpu",
+        action="store_true",
+        dest="calibrate_gpu",
+        help="Run GPU-specific benchmarks and determine optimal thresholds",
+    )
+    calibrate_parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="calibrate_all",
+        help="Run full calibration including GPU benchmarks",
+    )
+    calibrate_parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        dest="calibrate_benchmark",
+        help="Run full benchmarks with detailed output",
+    )
+    calibrate_parser.add_argument(
+        "--quick",
+        action="store_true",
+        dest="calibrate_quick",
+        help="Run abbreviated calibration (faster but less accurate)",
+    )
+    calibrate_parser.add_argument(
+        "-o",
+        "--output",
+        dest="calibrate_output",
+        help="Output path for configuration file",
+    )
+    calibrate_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        dest="calibrate_format",
+        help="Output format (default: text); see docs/reference/machine-output.md",
+    )
+    calibrate_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="calibrate_json",
+        help="Output configuration as JSON (same as --format json)",
+    )
+    calibrate_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        dest="calibrate_verbose",
+        help="Show detailed progress information",
+    )
+
+
+def _add_board_view_parser(subparsers) -> None:
+    """Add ``board-view`` (issue #6316).
+
+    Declared in the command module, the only place it is declared, so there
+    is no second parser to drift from this one.
+    """
+    from .commands.board_view import add_board_view_parser
+
+    add_board_view_parser(subparsers)
+
+
+def _add_screenshot_parser(subparsers) -> None:
+    """Add screenshot subcommand parser."""
+    screenshot_parser = subparsers.add_parser(
+        "screenshot",
+        help="Capture a PNG screenshot of a KiCad board or schematic",
+    )
+    screenshot_parser.add_argument(
+        "screenshot_input",
+        help="Path to .kicad_pcb or .kicad_sch file",
+    )
+    screenshot_parser.add_argument(
+        "-o",
+        "--output",
+        dest="screenshot_output",
+        help="Output PNG file path (default: <input>.png)",
+    )
+    screenshot_parser.add_argument(
+        "--layers",
+        dest="screenshot_layers",
+        default=None,
+        help=(
+            "Layer specification for PCB screenshots. "
+            "Preset name (default, copper, assembly, front, back) "
+            "or comma-separated layer list"
+        ),
+    )
+    screenshot_parser.add_argument(
+        "--max-size",
+        type=int,
+        dest="screenshot_max_size",
+        default=1568,
+        help="Maximum image dimension in pixels (default: 1568)",
+    )
+    screenshot_parser.add_argument(
+        "--bw",
+        "--black-and-white",
+        action="store_true",
+        dest="screenshot_bw",
+        help="Use black and white rendering",
+    )
+    screenshot_parser.add_argument(
+        "--theme",
+        dest="screenshot_theme",
+        default=None,
+        help="KiCad color theme name",
+    )
+    screenshot_baseline = screenshot_parser.add_mutually_exclusive_group()
+    screenshot_baseline.add_argument(
+        "--baseline-save",
+        dest="screenshot_baseline_save",
+        metavar="DIR",
+        help="Also save the render and a renderer-identity sidecar as a baseline in DIR",
+    )
+    screenshot_baseline.add_argument(
+        "--baseline-compare",
+        dest="screenshot_baseline_compare",
+        metavar="DIR",
+        help="Render the current state and report drift against the baseline in DIR",
+    )
+    add_format_flag(screenshot_parser)
+
+
+def _add_report_parser(subparsers) -> None:
+    """Add report subcommand parser."""
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Generate a Markdown design report",
+    )
+    report_sub = report_parser.add_subparsers(dest="report_command")
+
+    gen_parser = report_sub.add_parser("generate", help="Generate a design report")
+    gen_parser.add_argument(
+        "report_input",
+        help="Path to .kicad_pro or .kicad_pcb file",
+    )
+    gen_parser.add_argument(
+        "--mfr",
+        dest="report_mfr",
+        default="unknown",
+        help="Target manufacturer (default: unknown)",
+    )
+    gen_parser.add_argument(
+        "-o",
+        "--output",
+        dest="report_output",
+        default="reports",
+        help="Output directory for versioned reports (default: reports/)",
+    )
+    gen_parser.add_argument(
+        "--data-dir",
+        dest="report_data_dir",
+        default=None,
+        help="Directory containing pre-collected data/ and figures/ snapshots",
+    )
+    gen_parser.add_argument(
+        "--template",
+        dest="report_template",
+        default=None,
+        help="Path to a custom Jinja2 template file",
+    )
+    gen_parser.add_argument(
+        "--sch",
+        dest="report_sch",
+        default=None,
+        help="Path to root .kicad_sch file (inferred from input if omitted)",
+    )
+    gen_parser.add_argument(
+        "--no-figures",
+        dest="report_no_figures",
+        action="store_true",
+        default=False,
+        help="Skip figure generation (useful when kicad-cli/cairosvg are unavailable)",
+    )
+    gen_parser.add_argument(
+        "--quantity",
+        dest="report_quantity",
+        type=int,
+        default=5,
+        help="Quantity for cost estimation (default: 5)",
+    )
+    gen_parser.add_argument(
+        "--skip-erc",
+        dest="report_skip_erc",
+        action="store_true",
+        help="Skip ERC during auto-collection",
+    )
+    gen_parser.add_argument(
+        "--skip-collect",
+        dest="report_skip_collect",
+        action="store_true",
+        help="Skip auto-collection; generate skeleton report (legacy behavior)",
+    )
+    add_format_flag(gen_parser)
+
+
+def _add_export_parser(subparsers) -> None:
+    """Add export subcommand parser for manufacturing packages."""
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Generate a complete manufacturing package (BOM, CPL, Gerbers, project ZIP, manifest)",
+    )
+    export_parser.add_argument(
+        "export_pcb",
+        help="Path to .kicad_pcb file",
+    )
+    # Issue #6881: choices/help come from export_cmd so the two parsers agree.
+    export_parser.add_argument(
+        "--stackup-id",
+        dest="export_stackup_id",
+        default=None,
+        choices=list(STACKUP_ID_CHOICES),
+        help=STACKUP_ID_HELP,
+    )
+    export_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="export_mfr",
+        default=None,
+        choices=[*get_all_manufacturer_names(), "generic"],
+        help="Target manufacturer (default: the board's project.kct target_fab, else jlcpcb; Issue #6169)",
+    )
+    export_parser.add_argument(
+        "-o",
+        "--output",
+        dest="export_output",
+        default=None,
+        help="Output directory (default: <pcb-dir>/manufacturing/)",
+    )
+    export_parser.add_argument(
+        "--sch",
+        dest="export_sch",
+        default=None,
+        help="Path to .kicad_sch file (auto-detected by default)",
+    )
+    export_parser.add_argument(
+        "--dry-run",
+        dest="export_dry_run",
+        action="store_true",
+        help="Show what would be generated without writing files",
+    )
+    export_parser.add_argument(
+        "--no-report",
+        dest="export_no_report",
+        action="store_true",
+        help="Skip report generation",
+    )
+    export_parser.add_argument(
+        "--no-gerbers",
+        dest="export_no_gerbers",
+        action="store_true",
+        help="Skip Gerber export",
+    )
+    export_parser.add_argument(
+        "--no-bom",
+        dest="export_no_bom",
+        action="store_true",
+        help="Skip BOM generation",
+    )
+    export_parser.add_argument(
+        "--no-cpl",
+        dest="export_no_cpl",
+        action="store_true",
+        help="Skip CPL/pick-and-place generation",
+    )
+    export_parser.add_argument(
+        "--no-project-zip",
+        dest="export_no_project_zip",
+        action="store_true",
+        help="Skip KiCad project ZIP creation",
+    )
+    export_parser.add_argument(
+        "--no-ampacity-rules",
+        dest="export_no_ampacity_rules",
+        action="store_true",
+        help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
+    )
+    export_parser.add_argument(
+        "--auto-lcsc",
+        dest="export_auto_lcsc",
+        action="store_true",
+        default=True,
+        help="Auto-match LCSC part numbers for JLCPCB BOMs (default: enabled)",
+    )
+    export_parser.add_argument(
+        "--no-auto-lcsc",
+        dest="export_no_auto_lcsc",
+        action="store_true",
+        help="Disable LCSC auto-matching",
+    )
+    export_parser.add_argument(
+        "--no-spec",
+        dest="export_no_spec",
+        action="store_true",
+        help="Disable BOM enrichment from .kct project spec",
+    )
+    export_parser.add_argument(
+        "--spec",
+        dest="export_spec",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Use this .kct project spec for BOM enrichment instead of walking up from the "
+            "PCB directory (--no-spec takes precedence; a missing PATH is still an error)"
+        ),
+    )
+    export_parser.add_argument(
+        "--no-merge-lcsc",
+        dest="export_no_merge_lcsc",
+        action="store_true",
+        help=(
+            "Disable merging LCSC part numbers from an existing BOM CSV. By default the "
+            "merge reads <output-dir>/bom_<mfr>.csv, so a new output directory has "
+            "nothing to merge (see --merge-lcsc-from)"
+        ),
+    )
+    export_parser.add_argument(
+        "--merge-lcsc-from",
+        dest="export_merge_lcsc_from",
+        metavar="BOM_CSV",
+        default=None,
+        help=(
+            "Merge LCSC part numbers from this BOM CSV (e.g. the previous revision's "
+            "verified bom_jlcpcb.csv) instead of <output-dir>/bom_<mfr>.csv. "
+            "A missing file is an error; --no-merge-lcsc takes precedence"
+        ),
+    )
+    export_parser.add_argument(
+        "--skip-preflight",
+        dest="export_skip_preflight",
+        action="store_true",
+        help=(
+            "Skip BOM/ERC/LCSC/cosmetic pre-flight validation checks. Does NOT "
+            "suppress the hard connectivity safety floor (net shorts/opens). Use "
+            "--skip-drc-floor to override that too."
+        ),
+    )
+    export_parser.add_argument(
+        "--skip-drc-floor",
+        dest="export_skip_drc_floor",
+        action="store_true",
+        help=(
+            "Disable the connectivity safety floor that blocks export on net "
+            "shorts or unconnected items in a pre-existing DRC report. Only for "
+            "known-safe workarounds."
+        ),
+    )
+    export_parser.add_argument(
+        "--strict-preflight",
+        dest="export_strict_preflight",
+        action="store_true",
+        help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
+    )
+    export_parser.add_argument(
+        "--assembly-tier",
+        dest="export_assembly_tier",
+        default="auto",
+        choices=["auto", "economic", "standard"],
+        help=(
+            "PCBA service tier preflight judges package/pitch limits against "
+            "(Issue #7204): 'auto' (default) reports the cheapest tier the board "
+            "fits; 'economic'/'standard' select a JLCPCB tier. Ignored by fabs "
+            "with a single assembly service"
+        ),
+    )
+    export_parser.add_argument(
+        "--boards",
+        dest="export_boards",
+        type=positive_int,
+        default=5,
+        metavar="N",
+        help=(
+            "Boards in the assembly order (>= 1, default 5 = JLCPCB minimum); "
+            "the bom_lcsc_stock preflight check needs placements-per-board x N "
+            "of each LCSC part in stock (Issue #8121)"
+        ),
+    )
+    export_parser.add_argument(
+        "--allow-unbuildable-bom",
+        dest="export_allow_unbuildable_bom",
+        action="store_true",
+        help=(
+            "Allow export to proceed when the BOM contains refs with no PCB "
+            "footprint (default: block, since the package would be unbuildable). "
+            "Use only for partial/debug exports."
+        ),
+    )
+    export_parser.add_argument(
+        "--skip-drc",
+        dest="export_skip_drc",
+        action="store_true",
+        help="Skip DRC check in pre-flight validation",
+    )
+    export_parser.add_argument(
+        "--skip-erc",
+        dest="export_skip_erc",
+        action="store_true",
+        help="Skip ERC check in pre-flight validation",
+    )
+    export_parser.add_argument(
+        "--drc-report",
+        dest="export_drc_report",
+        default=None,
+        help="Path to pre-existing DRC report file",
+    )
+    export_parser.add_argument(
+        "--erc-report",
+        dest="export_erc_report",
+        default=None,
+        help="Path to pre-existing ERC report file",
+    )
+    export_parser.add_argument(
+        "--keep-versions",
+        dest="export_keep_versions",
+        action="store_true",
+        help="Preserve versioned vN/ report directories (default: flat report/ directory)",
+    )
+    export_parser.add_argument(
+        "--keep-build-artifacts",
+        dest="export_keep_build_artifacts",
+        action="store_true",
+        help="Preserve intermediate report files (markdown, figures, data) in .build/ directory",
+    )
+    export_parser.add_argument(
+        "--keep-gerber-files",
+        dest="export_keep_gerber_files",
+        action="store_true",
+        help="Keep individual gerber/drill files alongside the zip archive",
+    )
+    export_parser.add_argument(
+        "--bom-source",
+        dest="export_bom_source",
+        default="schematic",
+        choices=["schematic", "pcb", "auto"],
+        help=(
+            "Source for BOM data: 'schematic' (default) extracts from .kicad_sch; "
+            "'pcb' extracts from PCB footprints (no schematic needed); "
+            "'auto' uses schematic but falls back to PCB on reference mismatch"
+        ),
+    )
+    export_parser.add_argument(
+        "--vscore-layer",
+        dest="export_vscore_layer",
+        action="append",
+        default=None,
+        metavar="LAYER",
+        help=(
+            "Plot this user layer as a V-score layer (repeatable; Issue #6193). "
+            "For panels whose partial or jump scores the outline geometry "
+            "cannot prove; detected score layers are still added"
+        ),
+    )
+    export_parser.add_argument(
+        "--include-tht",
+        dest="export_include_tht",
+        action="store_true",
+        help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
+    )
+    export_parser.add_argument(
+        "--format",
+        dest="export_format",
+        default="text",
+        choices=["text", "json"],
+        help="Output format for preflight results (default: text)",
+    )
+
+
+def _add_models_parser(subparsers) -> None:
+    """Add the ``models`` parent-subaction parser (Issue #7683)."""
+    from .format_options import add_format_flag
+
+    models_parser = subparsers.add_parser(
+        "models",
+        help="Manage the pinned subset of KiCad's stock 3D models; generate missing bodies",
+        description=(
+            "Fetch and verify the pinned, sha256-checked subset of the KiCad "
+            "3D model library that the pinned toolchain resolves "
+            "${KICAD10_3DMODEL_DIR} against."
+        ),
+    )
+    models_subparsers = models_parser.add_subparsers(dest="models_command", help="Models commands")
+    models_sync = models_subparsers.add_parser(
+        "sync",
+        help="Download and verify the pinned model subset",
+    )
+    models_sync.add_argument(
+        "--sparse",
+        action="store_true",
+        help="Fetch only the manifest's files (the only mode; accepted for clarity)",
+    )
+    add_format_flag(models_sync, dest="models_format")
+    models_status = models_subparsers.add_parser(
+        "status",
+        help="Report whether the local cache holds the full verified subset",
+    )
+    add_format_flag(models_status, dest="models_format")
+    _add_models_generate_parser(models_subparsers)
+
+
+def _add_models_generate_parser(models_subparsers) -> None:
+    """``kct models generate`` / ``kct models families`` (Issue #7687)."""
+    from .format_options import add_format_flag
+
+    gen = models_subparsers.add_parser(
+        "generate",
+        help="Generate a STEP body for a footprint from a parametric family",
+        description=(
+            "Derive a 3D body from a footprint's fab/courtyard outline and pad field "
+            "plus parameters, and write it as STEP with a provenance sidecar. "
+            "Families need the optional CadQuery extra (pip install "
+            "'kicad-tools[models]'); --placeholder writes a courtyard box with no "
+            "extra, which the coverage audit still counts as a gap."
+        ),
+    )
+    gen.add_argument(
+        "models_target",
+        metavar="LIB_ID_OR_FAMILY",
+        help="Footprint lib_id (Library:Name) or a family name (see: kct models families)",
+    )
+    gen.add_argument(
+        "--param",
+        "--params",
+        dest="models_params",
+        action="append",
+        metavar="KEY=VALUE[,KEY=VALUE]",
+        help="Family parameter in mm (repeatable), e.g. --param H=5.0",
+    )
+    gen.add_argument("--family", dest="models_family", help="Force a family for the lib_id")
+    gen.add_argument(
+        "--footprint",
+        dest="models_footprint",
+        metavar="FILE",
+        help="Read the footprint from this .kicad_mod instead of the KiCad libraries",
+    )
+    gen.add_argument(
+        "--pcb",
+        dest="models_pcb",
+        metavar="BOARD",
+        help="Read the footprint as placed on this .kicad_pcb (custom libraries work)",
+    )
+    gen.add_argument("--ref", dest="models_ref", help="Reference designator on --pcb (e.g. L1)")
+    gen.add_argument(
+        "--placeholder",
+        dest="models_placeholder",
+        action="store_true",
+        help="Courtyard-extruded box, no extra needed; audited as 'placeholder'",
+    )
+    gen.add_argument(
+        "-o",
+        "--out",
+        dest="models_out",
+        metavar="DIR",
+        help="Output directory (default: ~/.cache/kicad-tools/generated-3d or $KCT_GENERATED_3D_DIR)",
+    )
+    gen.add_argument(
+        "--name", dest="models_name", help="Output file stem (default: footprint name)"
+    )
+    gen.add_argument(
+        "--register",
+        dest="models_register",
+        action="store_true",
+        help="Record lib_id -> file in <out>/local_models.json",
+    )
+    gen.add_argument(
+        "--attach",
+        dest="models_attach",
+        action="store_true",
+        help="Write into <pcb dir>/3dshapes, register, and attach the body to --pcb",
+    )
+    gen.add_argument(
+        "--backend",
+        dest="models_backend",
+        choices=["builtin", "kicad-library-tools"],
+        default="builtin",
+        help=(
+            "builtin = kicad-tools families (default); kicad-library-tools = run "
+            "KiCad's GPL generator as an external subprocess (--bridge-cmd)"
+        ),
+    )
+    gen.add_argument(
+        "--bridge-cmd",
+        dest="models_bridge_cmd",
+        metavar="TEMPLATE",
+        help=(
+            "Command template for --backend kicad-library-tools, with {target}, "
+            "{out_dir} and {params_json} (default: $KCT_KICAD_LIBRARY_TOOLS_CMD)"
+        ),
+    )
+    add_format_flag(gen, dest="models_format")
+
+    fams = models_subparsers.add_parser(
+        "families",
+        help="List the parametric families and their parameters",
+    )
+    add_format_flag(fams, dest="models_format")
+
+
+def _add_ecosystem_parser(subparsers) -> None:
+    """Add the ecosystem parent-subaction parser (Issue #5839)."""
+    from .format_options import add_format_flag
+
+    ecosystem_parser = subparsers.add_parser(
+        "ecosystem",
+        help="Where kicad-tools sits among related projects",
+        description=(
+            "Query the packaged ecosystem registry: which projects produce the "
+            "files we consume, which overlap our surface, whose license forbids "
+            "code reuse, and what we concluded when we evaluated them. Answers "
+            '"have we already looked at X?" without grepping docs/.'
+        ),
+    )
+    ecosystem_subparsers = ecosystem_parser.add_subparsers(
+        dest="ecosystem_command", help="Ecosystem commands"
+    )
+
+    # ecosystem list
+    eco_list = ecosystem_subparsers.add_parser(
+        "list",
+        help="List tracked projects, optionally filtered",
+    )
+    eco_list.add_argument(
+        "--category",
+        dest="ecosystem_category",
+        help=(
+            "Filter by category: autorouter, design-as-code, agent-interface, "
+            "fabrication, bindings, benchmark"
+        ),
+    )
+    eco_list.add_argument(
+        "--relation",
+        dest="ecosystem_relation",
+        help="Filter by relation: upstream, peer, downstream, reference",
+    )
+    eco_list.add_argument(
+        "--verdict",
+        dest="ecosystem_verdict",
+        help=(
+            "Filter by verdict: complementary, benchmarked, ideas-adopted, "
+            "evaluated-not-adopted, watch"
+        ),
+    )
+    eco_list.add_argument(
+        "--license-compat",
+        dest="ecosystem_license_compat",
+        help=(
+            "Filter by code-reuse compatibility: mit-clean, "
+            "permissive-ideas-only, copyleft-ideas-only, unlicensed, cloud-service"
+        ),
+    )
+    add_format_flag(eco_list, dest="ecosystem_format")
+
+    # ecosystem show
+    eco_show = ecosystem_subparsers.add_parser(
+        "show",
+        help="Show one project in full, with our verdict and evaluation notes",
+    )
+    # Positional: argparse forbids an explicit dest here, so the argument is
+    # named for the dest the handler reads and metavar carries the display.
+    eco_show.add_argument(
+        "ecosystem_project_id",
+        metavar="PROJECT_ID",
+        help="Registry id, e.g. kicadroutingtools (see: kct ecosystem list)",
+    )
+    add_format_flag(eco_show, dest="ecosystem_format")
+
+    # ecosystem where-we-sit
+    eco_where = ecosystem_subparsers.add_parser(
+        "where-we-sit",
+        help="Print our invariants, non-goals and the neighbour map",
+    )
+    add_format_flag(eco_where, dest="ecosystem_format")
+
+
+def _add_agent_guide_parser(subparsers) -> None:
+    """Add the ``agent-guide`` parser (Issue #5960)."""
+    from kicad_tools.agent_surfaces import HARNESSES
+
+    from .format_options import add_format_flag
+
+    guide = subparsers.add_parser(
+        "agent-guide",
+        help="Print the harness-neutral primer for agents using kct",
+        description=(
+            "Print the agent primer shipped in the kicad-tools wheel: the core "
+            "workflow, the --format json contract, the two-engine sign-off rule, "
+            "harness setup and common pitfalls. --harness fills in that "
+            "harness's skill invocation examples; without it, every harness's "
+            "examples are listed."
+        ),
+    )
+    guide.add_argument(
+        "--harness",
+        dest="agent_guide_harness",
+        choices=list(HARNESSES),
+        default=None,
+        help="Show skill invocation examples for this harness only",
+    )
+    add_format_flag(
+        guide,
+        dest="agent_guide_format",
+        help_text=(
+            "Output format (default: %(default)s). json emits "
+            '{"version", "harness", "sections": [{"title", "body"}]}'
+        ),
+    )
+
+
+def _add_skills_parser(subparsers) -> None:
+    """Add the ``skills`` parent-subaction parser (Issue #5950)."""
+    from kicad_tools.agent_skills import DEFAULT_HARNESS, LAYOUTS
+
+    from .format_options import add_format_flag
+
+    skills_parser = subparsers.add_parser(
+        "skills",
+        help="Install the packaged kct agent skills into a project or user dir",
+        description=(
+            "Manage the kct agent skills shipped inside the kicad-tools wheel. "
+            "`kct skills install` renders them for one agent harness and writes "
+            "them where that harness looks (Claude Code: .claude/commands/kct/, "
+            "Codex: .agents/skills/, opencode: .opencode/commands/kct/)."
+        ),
+    )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", help="Skills commands")
+
+    install = skills_subparsers.add_parser(
+        "install",
+        help="Write (or --list / --check) the packaged kct skills",
+        description=(
+            "Render the packaged kct skills for --harness and write them under "
+            "the target directory. Re-running is idempotent. --list and --check "
+            "only read."
+        ),
+    )
+    install.add_argument(
+        "--harness",
+        dest="skills_harness",
+        choices=list(LAYOUTS),
+        default=DEFAULT_HARNESS,
+        help=(
+            "Agent harness to render for (default: %(default)s). claude-code "
+            "writes kct/<name>.md; codex writes kct-<name>/SKILL.md; opencode "
+            "writes kct/<name>.md commands, invoked as /kct/<name>"
+        ),
+    )
+    where = install.add_mutually_exclusive_group()
+    where.add_argument(
+        "--target",
+        dest="skills_target",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Skills root to install into (default: the harness's project dir, "
+            "e.g. .claude/commands; files go under DIR/kct/)"
+        ),
+    )
+    where.add_argument(
+        "--user",
+        dest="skills_user",
+        action="store_true",
+        help=(
+            "Install into the user-level skills dir (e.g. ~/.claude/commands; "
+            "opencode: ~/.config/opencode/commands, honouring "
+            "$OPENCODE_CONFIG_DIR / $XDG_CONFIG_HOME)"
+        ),
+    )
+    mode = install.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--list",
+        dest="skills_list",
+        action="store_true",
+        help="List the packaged skills and their install state; write nothing",
+    )
+    mode.add_argument(
+        "--check",
+        dest="skills_check",
+        action="store_true",
+        help=(
+            "Report drift between installed and packaged skills; exit 1 on "
+            "missing, changed or stale files; write nothing"
+        ),
+    )
+    install.add_argument(
+        "--dry-run",
+        dest="skills_dry_run",
+        action="store_true",
+        help="Show what would be written without writing",
+    )
+    install.add_argument(
+        "--prune",
+        dest="skills_prune",
+        action="store_true",
+        help="Also delete stale kct skill files the package no longer ships",
+    )
+    add_format_flag(install, dest="skills_format")

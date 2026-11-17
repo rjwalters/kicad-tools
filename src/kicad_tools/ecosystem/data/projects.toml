@@ -1,0 +1,1743 @@
+# Canonical ecosystem registry for kicad-tools (Issue #5839).
+#
+# This file records where kicad-tools sits among the projects around it:
+# who produces the files we consume, who overlaps our surface, whose license
+# forbids code reuse, and what we concluded when we evaluated them.
+#
+# THREE RULES, inherited from `benchmarks/external/boards.toml`:
+#
+#   1. NEVER VENDOR. No upstream source, board file or asset is committed to
+#      this repo, for license and repo-size hygiene. This registry holds
+#      facts and verdicts about other projects -- never their code.
+#
+#   2. FACTS ARE HUMAN-RATIFIED. `license`, `stars`, `last_push` and
+#      `last_verified` are written by a human who checked them.
+#      `scripts/ecosystem_refresh.py` *reports* drift and prints an
+#      applicable diff; it never edits this file. Bump `last_verified` only
+#      when you actually re-checked that project.
+#
+#   3. PINS ARE FULL SHAs. `pinned_commit` is a 40-hex commit, never a branch
+#      or tag -- those move, and a moving pin makes a recorded measurement
+#      unreproducible.
+#
+# `license` is the SPDX identifier from the upstream LICENSE file (or the
+# project's own SPDX tag, e.g. in NOTICE) at `last_verified`, or the literal
+# "NONE" when the project commits no LICENSE (which is *not* the same as
+# public domain -- see `license_compat`). It records what a human read, not
+# what the forge's license detector guessed.
+#
+# `upstream_license_detected` (optional) records the detector's answer when
+# it disagrees with `license` for a known, non-substantive reason -- e.g.
+# GitHub reports "NOASSERTION" for a verbatim MIT file it cannot classify, or
+# the deprecated "GPL-3.0" for a GPL-3.0-or-later project. The refresh script
+# treats that exact value as matching `license`, so the weekly drift run does
+# not raise a false `license-changed`; any *other* detected value is still an
+# error. Omit the field when the detector agrees with `license`.
+#
+# `upstream_archived` (optional, YYYY-MM-DD) records the day we acknowledged
+# that the upstream repository is archived. The refresh script reports an
+# archived upstream as an error until the entry sets this, then as info. Set
+# it only after the verdict and summary have been reworded to say so.
+#
+# ORDER IS EDITORIAL. Projects render into the README in the order they
+# appear here, grouped by `category`. The closest peer leads its section.
+# Re-render after any edit: `uv run python scripts/ecosystem_render.py --write`
+#
+# Field reference and the controlled vocabularies for `category`, `relation`,
+# `verdict` and `license_compat`: `src/kicad_tools/ecosystem/models.py`.
+# Human-facing positioning narrative: `docs/ecosystem.md`.
+
+# ---------------------------------------------------------------- autorouters
+
+[projects.kicadroutingtools]
+name = "KiCadRoutingTools"
+slug = "drandyhaas/KiCadRoutingTools"
+repo_url = "https://github.com/drandyhaas/KiCadRoutingTools"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "benchmarked"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python + Rust"
+stars = 488
+last_push = "2026-09-30"
+last_verified = "2026-09-30"
+# The commit benchmarked in docs/research/kicad-routing-tools-comparison.md
+# (VERSION 0.22.1, 2026-09-28). Both benchmark passes used this same commit.
+pinned_commit = "64df3f582e8a862c9289205b5a608466bf21a7ba"
+research_docs = ["docs/research/kicad-routing-tools-comparison.md"]
+summary = """
+the closest peer to `kct route`: octilinear multi-layer A\\* with via \
+insertion, diff pairs, length matching, BGA/QFN fanout and plane pours, \
+shipped as both a KiCad 9/10 action plugin and a CLI. Benchmarked \
+head-to-head against us on eight demo boards under one shared `kicad-cli` \
+referee: it is faster and completes more nets on the sparse and medium \
+boards, while on the dense boards it emits literal shorts where we instead \
+run out of time.\
+"""
+reeval_trigger = """
+A release that fixes the board-07 shorting_items/tracks_crossing failures \
+would make KRT the stronger router across our whole fleet, not just its \
+sparse half -- re-run the benchmark if their changelog claims it.\
+"""
+
+[projects.tracemaker]
+name = "TraceMaker"
+slug = "DingoOz/TraceMaker"
+repo_url = "https://github.com/DingoOz/TraceMaker"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "benchmarked"
+# The LICENSE file is the GPLv3 text; NOTICE carries
+# `SPDX-License-Identifier: GPL-3.0-or-later` and adds a section-7 permission
+# to link NVIDIA's CUDA runtime. GitHub's detector reports the deprecated
+# "GPL-3.0", recorded below so `ecosystem_refresh.py` does not report a
+# phantom `license-changed`.
+license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "C++20 + CUDA"
+stars = 42
+last_push = "2026-10-05"
+last_verified = "2026-10-06"
+# HEAD at our source read for issue #5941 ("Licence: GPL-3.0-or-later with a
+# CUDA linking permission", 2026-10-05).
+#
+# The PCBWorld figures below are from punkfab.com/blog/tracemaker-router
+# (2026-10-05), written by the circuit-skills author, not by TraceMaker's
+# author and not reproduced by us. The post's own two tables disagree on the
+# Freerouting 2.2.4 row (0.75/0.70/0.20 vs 0.73/0.60/0.30), hence "about".
+# Discussion and what it means for our benchmark: issue #5942.
+pinned_commit = "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00"
+# Issue #6352: our independent (ideas-only) test of its min-cost-flow
+# escape-corridor idea -- a null result on this fleet.
+# Issue #6335: first live fixed-placement run on our fleet (one run per board,
+# 600 s cap, TraceMaker 89ff58ca).
+research_docs = [
+  "docs/research/kct-route-escape-flow-experiment.md",
+  "benchmarks/external/fleet_routers/verdict.md",
+]
+summary = """
+C++20/CUDA KiCad 9/10 router that reads and writes `.kicad_pcb` directly \
+and is judged by `kicad-cli` DRC. Octilinear-lattice A\\* with exact \
+legality checks, negotiated rip-up, an 8-variant deterministic portfolio \
+under a `--work` budget, min-cost-flow escape-corridor reservation, a \
+nogood cache, coupled diff-pair search, and a SQLite bandit that learns \
+which variant to pick across runs; the GPU only accelerates cost fields. \
+On PCBWorld D3 the circuit-skills author reports 0.99 / 1.00 / 0.90 clean \
+on the small / medium / large splits, against about 0.7 / 0.7 / 0.2 for \
+Freerouting 2.2.4 -- third-party, single 60 s runs, not reproduced by us, \
+and on PCBench boards TraceMaker was developed against (its own held-out \
+figure is 73-78% clean). Its "clean" also excludes DRC errors already in \
+the input board, looser than our 0-DRC bar. Days old; copyleft, so ideas \
+only, and run only as an external binary.\
+"""
+reeval_trigger = """
+Measured on our fleet (issue #6335, one seed and one run per board, 600 s \
+cap, fixed placement, kicad-cli 10.0.6): 100% completion on boards 00-06 \
+with 0 DRC errors except one `starved_thermal` on 03, but `kct check` \
+reports via-in-pad on 02-06 and 09; it timed out on 07 and left 10 of 124 \
+connections open on 09. Not yet run on a PCBWorld D3 split disjoint from \
+its development set (issues #5942, #6331-#6333). Its portfolio-under-budget \
+and escape/negotiation ideas are tracked in #5947.\
+"""
+
+[projects.freerouting]
+name = "freerouting"
+slug = "freerouting/freerouting"
+repo_url = "https://github.com/freerouting/freerouting"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "complementary"
+license = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Java"
+stars = 2068
+last_push = "2026-10-06"
+last_verified = "2026-10-06"
+summary = """
+the long-standing Specctra DSN/SES autorouter and the baseline most KiCad \
+users try first. Has a headless CLI, but the DSN round-trip is a lossy \
+interchange boundary: it routes a translated view of the board rather than \
+the `.kicad_pcb` itself. We operate on the board file directly, which is \
+what lets LVS and the manufacturing gates run against the same artifact \
+that gets fabricated. PCBWorld's paper reports it as the strongest \
+published rule-based baseline on real boards (Clean Pass 0.80 / 0.78 on \
+D3-A / D3-B). fastroute is a faster Rust port of it with a \
+byte-identical parity mode.\
+"""
+reeval_trigger = """
+If we need freerouting's results as a baseline, run them through \
+fastroute's `--parity` mode: same output, about 4-5x less wall time in \
+its own measurements. Version matters too -- the circuit-skills harness \
+found 2.2.4 stops earlier than 2.1.0 on PCBWorld D3.\
+"""
+
+[projects.fastroute]
+name = "fastroute"
+slug = "parisxmas/fastroute"
+repo_url = "https://github.com/parisxmas/fastroute"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "watch"
+license = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Rust"
+stars = 73
+last_push = "2026-10-06"
+last_verified = "2026-10-06"
+# Release 0.1.7 (2026-10-03), the commit read for issue #5941. HEAD has moved
+# since; re-pin when it is actually re-evaluated. fastroute.baltavista.com is
+# a download page, not a routing service.
+pinned_commit = "e5d52c4544795422b8b28077acc0605fdf11265a"
+summary = """
+Rust port of freerouting: Specctra DSN in, SES out, with a `--parity` \
+mode it claims is byte-identical to Freerouting on its 20 benchmark \
+boards. Its own measurements show about 4-5x less wall time (2102 s vs \
+510 s over those boards, 420 s with PGO) in 20-300 MB instead of 1-2 GB, \
+and it adds fixes for several Freerouting optimizer bugs, multi-start, \
+length tuning, diff pairs and impedance-derived widths. A pcbnew plugin \
+patches the gaps in KiCad's lossy Specctra export (DRU clearances, \
+keepouts, planes). Like freerouting it routes a translated view rather \
+than the board file. Copyleft, so ideas only.\
+"""
+research_docs = ["benchmarks/external/fleet_routers/verdict.md"]
+reeval_trigger = """
+Issue #6335 ran it on our fleet (boards 00-07, 09) at kct 9a1fb50494be: \
+every row is `non-comparable`, so its routing quality is not established; \
+DRC errors appeared on 02, 03, 05, 06, 07 and 09. Re-auditing on main \
+847666c8 (2026-10-15): #6768 excludes the fab-only DRU rules, and #6784 \
+carries edge clearance and `diff_pair_gap` and moves zone and SMD-pad \
+clearances to not-routing. Two loss groups remain. The 22 exemption-scoped \
+net-class clearances on 00-07 are an artifact of the manifest pairing the \
+pre-route .kicad_pro (Default class only) with the routed .kicad_dru; this \
+is not an exporter gap, and PR #6770 / #6765 do not change it (#6800). \
+The diff-pair skew/uncoupled/via-count rules on 03/06 are kept as losses \
+on purpose by #6784, so those boards stay non-comparable. Re-run with a \
+re-frozen manifest once #6800 is decided. \
+If our benchmarks ever need a DSN-based baseline, \
+measure fastroute in place of freerouting -- same algorithms, a fraction of \
+the runtime -- and record whether its plugin's export fixes close the DSN \
+round-trip gaps that keep us on the board file.\
+"""
+
+[projects.orthoroute]
+name = "OrthoRoute"
+slug = "bbenchoff/OrthoRoute"
+repo_url = "https://github.com/bbenchoff/OrthoRoute"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "complementary"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python + CUDA/Metal"
+stars = 411
+last_push = "2026-09-18"
+last_verified = "2026-09-30"
+summary = """
+GPU-accelerated PathFinder routing, with plugin and headless modes. Its \
+author is explicit that it targets a narrow class of very large, dense, \
+highly regular multilayer backplanes and BGA escape patterns and does \
+poorly on typical boards -- the opposite end of the board-size spectrum \
+from our demo fleet.\
+"""
+
+[projects.deeppcb]
+name = "DeepPCB KiCad plugin"
+slug = "instadeepai/deeppcb-kicad-plugin"
+repo_url = "https://github.com/instadeepai/deeppcb-kicad-plugin"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "evaluated-not-adopted"
+license = "Apache-2.0"
+license_compat = "cloud-service"
+language = "Python"
+stars = 66
+last_push = "2026-08-11"
+last_verified = "2026-09-30"
+research_docs = [
+  "benchmarks/external/README.md",
+  "benchmarks/external/results/report.md",
+]
+summary = """
+an open-source plugin in front of a closed, credit-metered cloud router. \
+The plugin is local; the routing is not. It requires an account and API \
+key, so it cannot participate in an offline or air-gapped CI pipeline. \
+DeepPCB's own published benchmark numbers are recorded in \
+`benchmarks/external/boards.toml` for side-by-side comparison.\
+"""
+
+[projects.pingpongshow-autoroute]
+name = "AutoRoute"
+slug = "pingpongshow/AutoRoute"
+repo_url = "https://github.com/pingpongshow/AutoRoute"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Rust"
+stars = 0
+last_push = "2026-09-27"
+last_verified = "2026-09-30"
+summary = """
+Rust negotiated-congestion router with an exact-DRC clearance model, a \
+headless CLI and DSN/SES KiCad integration. Recorded rather than featured: \
+8 commits and no adoption signal yet, so there is nothing stable to \
+measure against.\
+"""
+reeval_trigger = """
+Benchmark it alongside KiCadRoutingTools once it has a tagged release and \
+a non-trivial commit history -- the feature list it advertises overlaps \
+ours closely enough to be worth measuring.\
+"""
+
+[projects.tscircuit-autorouter]
+name = "tscircuit autorouter"
+slug = "tscircuit/tscircuit-autorouter"
+repo_url = "https://github.com/tscircuit/tscircuit-autorouter"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "benchmarked"
+license = "MIT"
+license_compat = "mit-clean"
+language = "TypeScript"
+stars = 85
+last_push = "2026-09-30"
+last_verified = "2026-09-30"
+pinned_commit = "911963b2f539f38140386cb0073332053b2d4582"
+research_docs = ["docs/research/tscircuit-evaluation.md"]
+summary = """
+tscircuit's built-in router (`@tscircuit/capacity-autorouter`): a \
+pipeline of hypergraph / successive-approximation solvers rather than \
+net-by-net A\\*, fed a `SimpleRouteJson` problem instead of a KiCad file. \
+It ships a public benchmark (`dataset-srj18`, derived from real Arduino \
+and Antmicro KiCad boards) and a bug-report-to-fixture workflow. Partly \
+benchmarked against us (Arduino Nano only): SRJ drops netclass width, \
+clearance, zones and keepouts, so its completion is not comparable.\
+"""
+reeval_trigger = """
+Re-run the remaining 15 dataset-srj18 boards once netclasses (`.kicad_pro`) \
+are fetched and SRJ can carry per-net width/clearance; or if tscircuit adds \
+zone/keepout/netclass fields to SimpleRouteJson.\
+"""
+
+[projects.topola]
+name = "Topola"
+repo_url = "https://codeberg.org/topola/topola"
+# Codeberg-hosted (GitHub mirror: mikwielgus/topola). The refresh script
+# cannot poll Codeberg, so these facts are human-maintained. Stars are
+# Codeberg's; last_push is Codeberg's repo `updated_at` (newest commit on the
+# default `develop` branch: 2026-07-02).
+vcs = "other"
+category = "autorouter"
+relation = "peer"
+verdict = "watch"
+# README + LICENSES/MIT.txt (REUSE layout); assets/ are MIT or CC-BY-4.0.
+license = "MIT"
+license_compat = "mit-clean"
+language = "Rust"
+stars = 33
+last_push = "2026-08-09"
+last_verified = "2026-10-06"
+summary = """
+work-in-progress interactive topological (rubber-band) router and \
+autorouter in Rust, funded through NLnet's NGI0 Entrust fund. Routing \
+topologically before committing geometry is a different shape of \
+search from our grid A\\*, and the license is permissive -- but it is \
+pre-release and we have not run it.\
+"""
+reeval_trigger = """
+A tagged release with a headless mode that takes a KiCad board would make \
+it worth benchmarking against `kct route`, particularly on the dense \
+boards where grid search runs out of time.\
+"""
+
+[projects.weaveengine]
+name = "WeaveEngine"
+slug = "c28ba/WeaveEngine"
+repo_url = "https://github.com/c28ba/WeaveEngine"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "ideas-adopted"
+# The LICENSE file is the GPLv3 text; the README's License section declares
+# "version 3 or (at your option) any later version". GitHub's detector reports
+# the deprecated "GPL-3.0", recorded below so `ecosystem_refresh.py` does not
+# report a phantom `license-changed`.
+license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 71
+last_push = "2026-11-15"
+last_verified = "2026-11-16"
+research_docs = ["docs/research/weaveengine-topology-first-evaluation.md"]
+summary = """
+topology-first DSN/SES autorouter: a planar embedding of all nets is chosen \
+jointly before any geometry (which side of every pad and placed trace each \
+connection passes, so crossings are unrepresentable by construction), then \
+traces are drawn as taut clearance-bound curves. The triangulate-and-\
+string-pull half is one we already ship (mesh router, #4267); the \
+transferable delta is the global ordering step -- joint candidate selection, \
+airwire-separation and severance costs, regret ordering -- which our \
+evaluation (#8993) turned into follow-up issues against the epic #5509 \
+ordering class. No diff pairs, length matching, impedance or net-class \
+priority; pours delegated to KiCad; vias are its own documented weak \
+subsystem.\
+"""
+reeval_trigger = """
+A release that demonstrates steady multi-layer completion (its vias story \
+settled) on boards like our dense fleet cases would justify a black-box run \
+through `benchmarks/external/fleet_routers/` as a fourth adapter.\
+"""
+
+# ------------------------------------------------------------ design-as-code
+
+[projects.atopile]
+name = "atopile"
+slug = "atopile/atopile"
+repo_url = "https://github.com/atopile/atopile"
+vcs = "github"
+category = "design-as-code"
+relation = "upstream"
+verdict = "ideas-adopted"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 3964
+last_push = "2026-06-13"
+last_verified = "2026-09-30"
+research_docs = [
+  "docs/research/atopile-research-synthesis.md",
+  "docs/research/faebryk-component-library.md",
+  "docs/research/atopile-constraint-solving.md",
+  "docs/research/atopile-interface-patterns.md",
+  "docs/research/atopile-layout-reuse.md",
+  "docs/research/atopile-lsp-analysis.md",
+  "docs/research/atopile-mcp-analysis.md",
+  "docs/research/atopile-package-registry.md",
+  "docs/research/atopile-error-handling.md",
+]
+summary = """
+a language and compiler for describing boards as code (`.ato`), with \
+constraint solving, a package registry and parametric part selection via \
+its Faebryk library; it emits a netlist and updates a KiCad layout, but \
+deliberately stops at "place and route in KiCad". That is exactly where we \
+start, which makes the two complementary rather than competing. Our MCP \
+server exists because of this evaluation.\
+"""
+
+[projects.skidl]
+name = "SKiDL"
+slug = "devbisme/skidl"
+repo_url = "https://github.com/devbisme/skidl"
+vcs = "github"
+category = "design-as-code"
+relation = "upstream"
+verdict = "complementary"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 1675
+last_push = "2026-09-24"
+last_verified = "2026-09-30"
+summary = """
+the original Python-as-schematic-capture tool: a program describes the \
+circuit and SKiDL emits netlists, XML BOMs and (for KiCad 6-10) editable \
+schematics, with its own ERC. Another upstream producer of the files we \
+consume.\
+"""
+
+[projects.tscircuit]
+name = "tscircuit"
+slug = "tscircuit/tscircuit"
+repo_url = "https://github.com/tscircuit/tscircuit"
+vcs = "github"
+category = "design-as-code"
+relation = "upstream"
+verdict = "evaluated-not-adopted"
+license = "MIT"
+license_compat = "mit-clean"
+language = "TypeScript"
+stars = 2776
+last_push = "2026-09-30"
+last_verified = "2026-10-18"
+# circuit-json-to-kicad@0.0.228 (tscircuit/circuit-json-to-kicad), the converter
+# actually measured by the interop gate. Rendered alongside
+# @tscircuit/core@0.0.2031 = 80ba2c4b07b88113d1e1d9724ffd66ae1d3aaa5e and
+# @tscircuit/footprinter@0.0.429 = d9a981fffab5741178d49b7a070c3b8bd2110398 in
+# the evaluation note's pinned-versions table.
+pinned_commit = "88d363d023a29ac719ef7caf12f3c99efe9adb0a"
+research_docs = ["docs/research/tscircuit-evaluation.md"]
+summary = """
+"React for Electronics" -- circuits described in TypeScript/React and \
+compiled to its own Circuit JSON. Its `circuit-json-to-kicad` converter \
+emits `.kicad_sch`, `.kicad_pcb` (with traces, vias and pours) and \
+`.kicad_pro`, and `kicad-to-circuit-json` reads them back, so it is an \
+upstream producer of the files we consume, like atopile and SKiDL. \
+**Gated and not yet usable as a front end**: five representative designs \
+were run through `kct check --mfr`, LVS and `kicad-cli pcb drc \
+--refill-zones`, before and after re-routing with `kct route`, and all \
+five failed. The blocking defect is that its schematic and PCB \
+converters name the same net differently, so no emitted project can pass \
+LVS at all; vias, netclass and silkscreen defaults also sit below every \
+mainstream fab floor. Our parser reads the files without complaint, and \
+`kct route` produced opens where tscircuit's own autorouter produced \
+shorts. Six upstream defects were recorded with reproducers and \
+re-verified on upstream HEAD (2026-10-18): three confirmed and tracked \
+upstream, two fixed or covered upstream, one not a bug. The relation \
+stays upstream/complementary.\
+"""
+reeval_trigger = """
+Re-run `benchmarks/interop/tscircuit/run_gate.py` when \
+tscircuit/circuit-json-to-kicad#674 (schematic-vs-PCB names for unnamed \
+pin-to-pin nets; the blocker for any LVS pass) is fixed. Also watch \
+circuit-json-to-kicad#665 (+ stacked #666; the package declares no runtime \
+dependencies), circuit-json-to-kicad#550 (pour edge clearance), and \
+tscircuit/footprinter#934 / #935 (explicit-dimension QFN corner pads \
+overlap). Outcomes are recorded in the note (#5878); the kct-side gaps the \
+gate exposed are #5875 and #5876.\
+"""
+
+[projects.component-importer]
+name = "component-importer-for-kicad"
+slug = "robertxdx/component-importer-for-kicad"
+repo_url = "https://github.com/robertxdx/component-importer-for-kicad"
+vcs = "github"
+category = "design-as-code"
+relation = "reference"
+verdict = "evaluated-not-adopted"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 55
+last_push = "2026-08-26"
+last_verified = "2026-09-30"
+research_docs = ["docs/research/component-importer-for-kicad-evaluation.md"]
+summary = """
+evaluated as a vendor-ZIP (SnapEDA / Ultra Librarian) ingestion backend \
+for symbol and footprint import. Verdict was borrow-with-refactor rather \
+than vendor: its headless modules are PyQt6-free and close to the surface \
+we need, but a clean-room re-implementation of roughly 600 LoC plus a \
+`kct ingest-zip` CLI is the smaller change. Not built yet.\
+"""
+
+[projects.circuit-synth]
+name = "circuit-synth"
+slug = "circuit-synth/circuit-synth"
+repo_url = "https://github.com/circuit-synth/circuit-synth"
+vcs = "github"
+category = "design-as-code"
+relation = "upstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 279
+last_push = "2026-03-08"
+last_verified = "2026-10-06"
+summary = """
+Python-defined circuits (`@circuit` functions over KiCad library \
+symbols and footprints) compiled to KiCad projects, built around Claude \
+Code with slash commands for symbol search and design help. Another \
+upstream producer of the files we consume, in the SKiDL mould; no \
+pushes since March 2026, and we have not run its output through our \
+gates.\
+"""
+reeval_trigger = """
+Run one of its example projects through `kct check --mfr`, LVS and \
+`kicad-cli` DRC, as the tscircuit interop gate did; a clean pass would \
+make it a supported front end. Its going quiet for good would retire \
+the entry.\
+"""
+
+[projects.2040-artnode]
+name = "2040-ArtNode"
+slug = "pixeldestrukt/2040-artnode"
+repo_url = "https://github.com/pixeldestrukt/2040-artnode"
+vcs = "github"
+category = "design-as-code"
+relation = "reference"
+verdict = "watch"
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python"
+stars = 0
+last_push = "2026-04-17"
+last_verified = "2026-10-06"
+# The 255-error figure was re-checked for issue #5941 with
+# `kct check --mfr jlcpcb` on
+# artnet-led-controller/artnet-led-controller.kicad_pcb at this commit:
+# 255 errors, 104 of them via_in_pad. The board was fetched to a scratch
+# directory only -- never vendored.
+pinned_commit = "20a8f3294aab4e8419e13fd2a647c7830780a585"
+summary = """
+a Codex-assisted RP2354A Art-Net LED node whose KiCad 9 files come from \
+hand-rolled Python S-expression generators, plus a SKiDL attempt. The \
+4-layer board is placed but carries no traces, and fails \
+`kct check --mfr jlcpcb` with 255 errors, mostly stitching vias dropped \
+onto pads -- a worked example of how hand-rolled generators drift. Not a \
+benchmark candidate: no license and no reference copper.\
+"""
+reeval_trigger = """
+A LICENSE file plus a routed, DRC-clean revision would make it a small \
+real-world 4-layer board worth adding to our external benchmark set.\
+"""
+
+# --------------------------------------------------------- agent interfaces
+
+[projects.zeo]
+name = "Zeo"
+slug = "zeodotdev/zeo"
+repo_url = "https://github.com/zeodotdev/zeo"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "complementary"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "C++"
+stars = 31
+last_push = "2026-06-09"
+last_verified = "2026-09-30"
+summary = """
+a KiCad fork with an integrated AI agent sidebar and MCP server. Takes a \
+complementary approach: live editor manipulation via IPC vs. our offline \
+file-based analysis and optimization.\
+"""
+
+[projects.konnect]
+name = "Konnect"
+slug = "mixelpixx/Konnect"
+repo_url = "https://github.com/mixelpixx/Konnect"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "ideas-adopted"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Rust"
+stars = 1424
+last_push = "2026-10-26"
+last_verified = "2026-10-27"
+upstream_archived = "2026-10-26"
+research_docs = [
+  "docs/research/konnect-connectivity-audit.md",
+  "docs/konnect-item1-toolset-economy-audit.md",
+  "docs/konnect-item8-design-rules-audit.md",
+  "docs/research/konnect-v013-delta.md",
+]
+summary = """
+upstream was archived on 2026-10-26 (read-only, no further releases expected); it continues as \
+Konnect-EDA (Orchis-ai-LLC), which is commercial closed-source software, so there is no source \
+left to audit and no further capability audits are planned. The open replacement is our own \
+clean-room openkonnect, with Konnect-EDA as the closed-source successor. The ideas we adopted stand on their \
+own, and KiCAD-MCP-Server is now our agent-interface reference. A single-binary native KiCad 10 plugin exposing a very large LLM tool \
+surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review \
+and manufacturing. AGPL means no code can move between it and this MIT \
+repo in either direction, so our engagement is capability-level only: we \
+audited its connectivity primitives, its tool-economy design and its \
+design-rule handling against our own surface. Five of its six connectivity \
+primitives we already had; the sixth (near-miss auto-snap repair) was a \
+real gap. Re-checked at v0.13: four new ideas adopted as follow-ups (visual baselines, truth-contract audit, honest-schema CI guard, SES provenance).\
+"""
+
+[projects.openkonnect]
+name = "openkonnect"
+slug = "rjwalters/openkonnect"
+repo_url = "https://github.com/rjwalters/openkonnect"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+last_verified = "2026-10-27"
+summary = """
+our own clean-room project: an MIT-licensed MCP server that lets LLM agents drive a running \
+KiCad 10 over its IPC API, built on kicad-tools. It owns the live-editor surface that kicad-tools \
+deliberately does not, and is the open replacement for Konnect's live-editor tool surface. \
+Its clean-room rules are in its CLEANROOM.md: no Konnect source is read in either repo, and \
+our Konnect audits stay capability-level.\
+"""
+reeval_trigger = """
+If it reaches a tagged release covering the live-editor tools (schematic and board edits over \
+KiCad 10's IPC API), promote it from watch and revisit the live-editor non-goal wording.\
+"""
+
+[projects.copperhead]
+name = "copperhead"
+slug = "copperheadhq/copperhead"
+repo_url = "https://github.com/copperheadhq/copperhead"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "ideas-adopted"
+license = "Apache-2.0"
+# Apache-2.0 is permissive, not copyleft -- but docs/research/copperhead-
+# workflow-ideas.md records the standing decision that Apache-2.0 -> MIT is
+# not a clean copy direction for this tree, so engagement is ideas-only.
+license_compat = "permissive-ideas-only"
+language = "TypeScript"
+stars = 312
+last_push = "2026-09-27"
+last_verified = "2026-09-30"
+research_docs = ["docs/research/copperhead-workflow-ideas.md"]
+summary = """
+"cursor for circuit boards": a natural-language brief drives direct edits \
+to `.kicad_sch` / `.kicad_pcb`, gated by an LLM-free `check` and wrapped \
+in a git snapshot that auto-rolls-back on failure. It does not route, and \
+verifies with `kicad-cli` ERC/DRC only -- no LVS, no manufacturing \
+cross-gate. Its *process* design (design memory as committed artifacts, a \
+constraints registry, a per-run audit trail) is the part worth borrowing. \
+Note: moved from `chouhanindustries/copperhead` since our note was written.\
+"""
+
+[projects.seeed-kicad-mcp]
+name = "Seeed-Studio/kicad-mcp-server"
+slug = "Seeed-Studio/kicad-mcp-server"
+repo_url = "https://github.com/Seeed-Studio/kicad-mcp-server"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "complementary"
+# No LICENSE file is committed at the repo root; the README claims MIT.
+# Absent a LICENSE, treat as all-rights-reserved -- hence `unlicensed`,
+# not `mit-clean`.
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python"
+stars = 135
+last_push = "2026-09-28"
+last_verified = "2026-09-30"
+summary = """
+the closest peer to `kct mcp serve`: an MCP server that reads schematic \
+and PCB files offline (shelling out to `kicad-cli` for validation) to \
+trace pin-level connections and edit designs. Overlaps our read/analyze \
+tools; carries no router, LVS or fab-readiness gates. Its README claims \
+MIT but the repo commits no LICENSE file, so we treat it as \
+all-rights-reserved and copy nothing.\
+"""
+reeval_trigger = """
+If a LICENSE file lands and it is permissive, `license_compat` moves to \
+`mit-clean` and its offline-parsing approach becomes fair game to learn \
+from directly.\
+"""
+
+[projects.circuit-skills]
+name = "circuit-skills"
+slug = "punkfab/circuit-skills"
+repo_url = "https://github.com/punkfab/circuit-skills"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "complementary"
+# No LICENSE file is committed; treat as all-rights-reserved -- ideas only.
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python"
+stars = 9
+last_push = "2026-10-06"
+last_verified = "2026-10-07"
+research_docs = [
+  "docs/research/circuit-skills-evaluation.md",
+  "docs/research/placement_score_calibration.md",
+]
+# The commit read for issue #5941 (22 commits past the previous pin
+# bc1322f9). HEAD has since moved two commits, both placement-only.
+pinned_commit = "f6ed02104137f7b8a1cb9d0bd447dd3a11deccac"
+summary = """
+Claude Code skills for code-driven electronics: ngspice/Falstad circuit \
+simulation, a tscircuit-placement -> KiCad IPC (`kipy`) route-and-DRC \
+loop, board/enclosure fit co-design and 3D renders. Its `route_eval` \
+harness now runs five routing backends on any KiCad board (two \
+Freerouting versions, TraceMaker, the tscircuit router, and an \
+experimental `srj-legal` that has TraceMaker re-route what KiCad's DRC \
+rejects in tscircuit output) and keeps the best, with an optional \
+fastroute backend and a PCBWorld D3 harness; it self-reports 0.98 Clean \
+Pass on D3-A for `srj-legal`, unreproduced by us. Overlaps our `/kct:*` \
+skills, but still assumes the tail is hand-finished in KiCad -- the \
+opposite of our fully automated bar. No LICENSE committed, so ideas \
+only; mining tracked in issue #5886.\
+"""
+reeval_trigger = """
+Once the follow-ups from the #5886 evaluation land (#6043, #6044, \
+#6045), move the verdict to `ideas-adopted`. If a permissive LICENSE \
+file lands, `license_compat` moves accordingly.\
+"""
+
+[projects.kicadmium]
+name = "kicadmium"
+slug = "meawoppl/agent-portal-plugins"
+repo_url = "https://github.com/meawoppl/agent-portal-plugins/tree/main/kicadmium"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+# No LICENSE file covers kicadmium's own code: there is none at the repo
+# root or the top of `kicadmium/`. The LICENSE files that do exist under
+# `kicadmium/` are third-party (`frontend/static/kicad-viewer/three/LICENSE`
+# for three.js, and `skills/kistack/LICENSE`, MIT from American Embedded,
+# LLC), and neither grants rights to kicadmium itself. The Cargo manifests
+# declare `license = "MIT"`, which is a claim, not a grant -- same rule as
+# the Seeed entry. The `kct/` port does carry our own MIT notice as
+# `kct/LICENSE-kicad-tools`, which covers our code, not theirs.
+license = "NONE"
+license_compat = "unlicensed"
+language = "Rust"
+stars = 0
+last_push = "2026-10-06"
+last_verified = "2026-10-06"
+# Commit read for issue #5941; the repo pushes several times a day.
+pinned_commit = "b4d09e680d0611a9473c09871895d8e630f8f8c9"
+summary = """
+an Agent Portal plugin: a single Rust binary that wraps a user's own \
+KiCad install with a browser workbench and agent skills. Its `kct/` \
+crate is a ~137k-line Rust port of kicad-tools taken from our commit \
+`37665de5`, keeping our command names, flags and JSON keys, and it \
+claims parity on several command families. It adds a 101-rule lint \
+engine whose reviewed exceptions go stale when their evidence changes, \
+and porting surfaced four bugs in our code (#5937-#5940). Useful as a \
+second implementation to diff our output against.\
+"""
+reeval_trigger = """
+A committed LICENSE would let us read its lint engine more closely \
+(evidence-bound waivers are tracked in #5946). Once it publishes parity \
+results, a differential run of both `kct` implementations on our fleet \
+would be a cheap bug-finder in both directions.\
+"""
+
+[projects.backplane]
+name = "Backplane"
+slug = "BackplaneWorks/Backplane"
+repo_url = "https://github.com/BackplaneWorks/Backplane"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+# -> "ideas-adopted" once the `kct pcb diff` follow-up (#6417) merges.
+verdict = "complementary"
+# Root LICENSE is MIT. Bundled parts differ: backplane-step2glb embeds
+# OpenCascade via occt-import-js (LGPL-2.1), the Spleen font is BSD-2-Clause,
+# and the companion KiCad fork i2cjak/Backplane_KiCad is GPL-3.0. Only
+# Backplane's own MIT files could move here; we take ideas, not Bend code.
+license = "MIT"
+license_compat = "mit-clean"
+language = "Bend + TypeScript"
+stars = 430
+last_push = "2026-10-13"
+last_verified = "2026-10-12"
+# Commit read for issue #6406; the repo pushes several times a day.
+pinned_commit = "40379b590dc52e00c3ede1b1ebe3133a11e3c4da"
+research_docs = ["docs/research/backplane-kistack-evaluation.md"]
+summary = """
+an agentic KiCad/FreeCAD hub: Claude Code, Codex and others work on a \
+local project while board, schematic and 3D viewers redraw each save in \
+a browser, phone or desktop app. It snapshots the KiCad files after \
+every tool call onto a hidden git ref (private index, never the user's) \
+and compares any two versions as a uuid-keyed removed/changed/added \
+board diff -- geometric only, no DRC or LVS. Agents get the exact \
+`kicad-cli`, the canonical files and the KiStack skills. Its board diff \
+is the idea we lacked for reviewing routing PRs (#6417). \
+Note: moved from `i2cjak/Backplane` since our note was written.\
+"""
+reeval_trigger = """
+When `kct pcb diff` (#6417) lands, move the verdict to `ideas-adopted`. \
+If Backplane adds DRC/LVS-aware diffing or exposes its history as a CLI, \
+re-check whether it can review our routing PRs directly.\
+"""
+
+[projects.kistack]
+name = "KiStack"
+slug = "BackplaneWorks/kistack"
+repo_url = "https://github.com/BackplaneWorks/kistack"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "evaluated-not-adopted"
+# LICENSE is verbatim MIT (American Embedded, LLC); GitHub cannot classify it.
+# skills/export/references/*.md appear transcribed from KiCad's user docs
+# (GPL-3.0-or-later / CC-BY-3.0) -- copy none of them. The same MIT LICENSE
+# is vendored inside kicadmium (skills/kistack/LICENSE).
+license = "MIT"
+upstream_license_detected = "NOASSERTION"
+license_compat = "mit-clean"
+language = "Markdown (agent skills)"
+stars = 397
+last_push = "2026-09-24"
+last_verified = "2026-10-12"
+pinned_commit = "8494dbde095669df081950cbb6b24d08a21e25b0"
+research_docs = ["docs/research/backplane-kistack-evaluation.md"]
+summary = """
+ten human-written KiCad agent skills (553 lines of prose) for \
+schematics, symbols (KLC), footprints (kicad-library-tools), layout, \
+BOM, exports, Gerber review, panelizing and product renders; Backplane \
+and kicadmium both ship it. Overlaps our `/kct:*` skills, but its layout \
+skill tells agents to route by hand and avoid autorouters -- the \
+opposite of our fully automated bar.\
+"""
+reeval_trigger = """
+A layout skill that drives an autorouter plus DRC/LVS gates, or skills \
+that call `kct`, would make it a candidate to recommend alongside ours.\
+"""
+
+[projects.kicad-happy]
+name = "kicad-happy"
+slug = "aklofas/kicad-happy"
+repo_url = "https://github.com/aklofas/kicad-happy"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 1343
+last_push = "2026-10-06"
+last_verified = "2026-10-06"
+summary = """
+agent skills (Claude Code, Codex and others) for design-level review of \
+KiCad projects: power trees computed from feedback dividers, \
+connector-by-connector ESD audits, passive-network checks, SPICE and \
+EMC pre-compliance, plus datasheet and distributor lookups. That is the \
+circuit-level review our `/kct:ee-review` does not yet do; it does not \
+route or gate manufacturing.\
+"""
+reeval_trigger = """
+Compare its review findings with `/kct:ee-review` on two or three of our \
+demo boards; checks it catches that we miss are candidates to port \
+(MIT, with attribution) or re-implement.\
+"""
+
+[projects.kicad-mcp-server]
+name = "KiCAD-MCP-Server"
+slug = "mixelpixx/KiCAD-MCP-Server"
+repo_url = "https://github.com/mixelpixx/KiCAD-MCP-Server"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "complementary"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python + TypeScript"
+stars = 2978
+last_push = "2026-10-26"
+last_verified = "2026-10-27"
+summary = """\
+actively developed again (pushed 2026-10-26) and now our agent-interface \
+reference in place of the archived Konnect. The most-starred KiCad MCP \
+server: ~250 fine-grained tools for project setup, schematic and board \
+editing, Freerouting, DRC/ERC, export, symbol and footprint creation and \
+JLCPCB parts lookup. It is the MIT predecessor of Konnect. Compared \
+tool-by-tool with `kct mcp serve` (pinned 628d320f): a wide imperative \
+editing surface against our narrow session/verification one, so \
+complementary; parts alternatives, symbol library writes and schematic \
+cosmetic lint are worth borrowing under MIT with attribution. Its \
+Freerouting runner is not: we improve our own router rather than add a \
+fallback (#7991).\
+"""
+research_docs = ["docs/research/kicad-mcp-server-evaluation.md"]
+reeval_trigger = """\
+Re-diff the tool catalog if upstream changes its tool architecture, or \
+when the follow-ups #7991, #7992, #7993, #7995 and #7996 land.\
+"""
+
+[projects.kicad-mcp-pro]
+name = "KiCad MCP Pro"
+slug = "oaslananka/kicad-mcp-pro"
+repo_url = "https://github.com/oaslananka/kicad-mcp-pro"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 119
+last_push = "2026-10-06"
+last_verified = "2026-10-06"
+summary = """
+an MCP server for KiCad with staged permission profiles: a default of 24 \
+read-only review tools, a `build` profile for controlled edits, and a \
+`release` profile for human-gated manufacturing export. Those stages map \
+onto our sign-off gates. It is candid that its SI/PI/EMC/thermal tools \
+are first-order estimates rather than sign-off.\
+"""
+reeval_trigger = """
+Look at its profile model when we next touch MCP tool permissions or the \
+sign-off flow; its outcome KPIs (task outcome, corruption, required DRC \
+runs) are also worth comparing with ours once its qualification work \
+publishes results.\
+"""
+
+[projects.kicad-ai-assistant]
+name = "KiCad AI Assistant"
+slug = "paul356/KiCad-AI-Assistant"
+repo_url = "https://github.com/paul356/KiCad-AI-Assistant"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 112
+last_push = "2026-10-15"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a KiCad 10 action plugin that embeds an LLM chat panel inside the editor and \
+exposes a built-in MCP server (also runnable standalone) with schematic and \
+PCB editing, placement, zones and DRC/ERC tools. Live-editor surface, so it \
+sits on the GUI side of our non-goals; read from README only, not run.\
+"""
+reeval_trigger = """
+Diff its PCB-placement and schematic-analysis tool catalog against \
+`kct mcp serve`; being MIT, anything worth having can move with attribution.\
+"""
+
+[projects.kicad-harness]
+name = "kicad-harness"
+slug = "zxkmm/kicad-harness"
+repo_url = "https://github.com/zxkmm/kicad-harness"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 33
+last_push = "2026-10-11"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+an Agent Skill plus a Python tool (`kh`) that gives an agent library \
+lookup, region renders to PNG, DRC/ERC, IPC editing of an open board and \
+datasheet-to-footprint generation; its distinctive idea is a repo the agent \
+is expected to edit and push while using it. AGPL: ideas only, read from \
+README only.\
+"""
+reeval_trigger = """
+Compare its render-and-look loop and footprint-from-datasheet flow with \
+our `/kct:*` skills and `kct` footprint generation; ideas only.\
+"""
+
+[projects.blwfish-kicad-mcp]
+name = "blwfish/kicad-mcp"
+slug = "blwfish/kicad-mcp"
+repo_url = "https://github.com/blwfish/kicad-mcp"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 25
+last_push = "2026-10-12"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+an MCP server (18 domain-router tools, 2,000+ tests) that takes an agent \
+from schematic to placed, Freerouting-routed, zoned and panelized board; \
+its own README recommends Freerouting v2.2.3 for routing. Same end-to-end \
+promise as `kct`, routed through an external router. Read from README only.\
+"""
+reeval_trigger = """
+Re-read if a changelog claims routing completeness or DRC-clean output; \
+the 12-router tool-grouping idea is worth comparing with our MCP tool \
+economy work.\
+"""
+
+[projects.mcp-server-kicad]
+name = "mcp-server-kicad"
+slug = "ProductOfAmerica/mcp-server-kicad"
+repo_url = "https://github.com/ProductOfAmerica/mcp-server-kicad"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 13
+last_push = "2026-10-15"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a 109-tool MCP server that edits KiCad files on disk (schematic capture, \
+PCB layout, libraries, ERC/DRC, exports) with Freerouting for routing and \
+an `auto_place_decoupling_cap` helper. File-based like us. GPL: ideas \
+only, read from README only.\
+"""
+reeval_trigger = """
+Compare its decoupling-cap auto-placement with ours if we ship one; ideas \
+only.\
+"""
+
+[projects.kicad-copilot]
+name = "KiCad Copilot"
+slug = "biosshot/kicad-copilot"
+repo_url = "https://github.com/biosshot/kicad-copilot"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "JavaScript"
+stars = 16
+last_push = "2026-08-23"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a file-oriented MCP server (no IPC, no plugin) for schematic generation, a \
+JavaScript placement DSL with PNG/SVG preview, local routing through \
+`eda-copilot-router` with a managed KiCadRoutingTools backend, simple \
+pours, and integrated kicad-happy analysis. Its router is KRT, which we \
+have already benchmarked, so there is no separate router to measure. \
+Read from README only.\
+"""
+reeval_trigger = """
+Its placement DSL is the one idea worth a second look against \
+`kct place`; a router benchmark is only warranted if it stops wrapping KRT.\
+"""
+
+[projects.kipilot-mcp]
+name = "KiPilot MCP"
+slug = "belaszalontai/kipilot-mcp"
+repo_url = "https://github.com/belaszalontai/kipilot-mcp"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "Apache-2.0"
+license_compat = "permissive-ideas-only"
+language = "Python"
+stars = 11
+last_push = "2026-09-17"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a 135-tool MCP server over KiCad 10's official `kicad-python` IPC API, \
+including export jobs, design-rule access and netlist import. Live-GUI \
+session by design, the opposite of our offline stance. Apache-2.0: ideas \
+only. Read from README only.\
+"""
+reeval_trigger = """
+Re-read only if we add an IPC-backed mode.\
+"""
+
+[projects.traces]
+name = "traces"
+slug = "usetraces/traces"
+repo_url = "https://github.com/usetraces/traces"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python + TypeScript"
+stars = 6
+last_push = "2026-09-08"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+local, bring-your-own-key tooling for KiCad: a semantic component-sourcing \
+MCP server, a KiCad plugin and a `/src` semantic rule-check skill. Sourcing \
+and schematic review, not layout, so it complements `kct` rather than \
+competing. Read from README only.\
+"""
+reeval_trigger = """
+Look at the `/src` semantic rule-check idea if we extend schematic review.\
+"""
+
+[projects.agentic-kicad-skills]
+name = "Agentic KiCad Skills"
+slug = "IxTechCrypto/kicad-skills"
+repo_url = "https://github.com/IxTechCrypto/kicad-skills"
+vcs = "github"
+category = "agent-interface"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 6
+last_push = "2026-10-08"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+modular agent skills (board-regime classifier, high-current, high-speed, \
+RF, datasheet-to-footprint) with verification scripts for KiCad 10. Same \
+shape as our `/kct:*` skills; content is design-rule guidance. Read from \
+README only.\
+"""
+reeval_trigger = """
+Cross-read its regime classifier against `/kct:ee-review` when that skill \
+is next revised.\
+"""
+
+[projects.kicad-llm-plugin]
+name = "kicad-llm-plugin"
+slug = "jasiek/kicad-llm-plugin"
+repo_url = "https://github.com/jasiek/kicad-llm-plugin"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 22
+last_push = "2026-02-06"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a KiCad plugin that sends the schematic to a chosen local or remote LLM \
+and renders a design-review report (fatal flaws, good practice, \
+nice-to-haves). Review only; no editing. Read from README only.\
+"""
+reeval_trigger = """
+None; revisit only if it grows beyond schematic review.\
+"""
+
+[projects.iron-emperor]
+name = "IronEmperor"
+slug = "thehengyao/iron-emperor"
+repo_url = "https://github.com/thehengyao/iron-emperor"
+vcs = "github"
+category = "agent-interface"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 11
+last_push = "2026-06-09"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+an LCSC/JLCPCB-centred generator that turns a plain-language brief into a \
+BOM, KiCad project and 3D-printed enclosure through a multi-agent \
+pipeline. Generator, not a layout tool; its value is parts sourcing. Read \
+from README only.\
+"""
+reeval_trigger = """
+None unless it publishes routed-board results.\
+"""
+
+[projects.kicad-agentic-mcp]
+name = "kicad-agentic-mcp"
+slug = "nevenfo/kicad-agentic-mcp"
+repo_url = "https://github.com/nevenfo/kicad-agentic-mcp"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Rust"
+stars = 5
+last_push = "2026-10-12"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a Rust MCP server and agentic control layer for KiCad 10 that mixes LLM \
+planning with deterministic tools. Days old, AGPL: ideas only. Listed from \
+its description and licence file; README not studied.\
+"""
+reeval_trigger = """
+Re-read once it has a release.\
+"""
+
+[projects.ai-circuit-design-tests]
+name = "ai-circuit-design-tests"
+slug = "devbisme/ai-circuit-design-tests"
+repo_url = "https://github.com/devbisme/ai-circuit-design-tests"
+vcs = "github"
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python"
+stars = 6
+last_push = "2026-10-13"
+last_verified = "2026-10-15"
+research_docs = ["docs/research/reporecon-kicad-ai-sweep.md"]
+summary = """
+a third-party test bench that runs AI KiCad tools (copperhead, kicad-happy, \
+kicad-harness, KiCad AI Assistant, kicad-mcp-pro, kicad-mcp-server, \
+Konnect, skidl-skills) on real design prompts and records transcripts, \
+cost and an executive summary per run. kicad-tools is not among the tools \
+tested; the README invites outside evaluations as issues. No LICENSE: \
+all rights reserved, ideas only.\
+"""
+reeval_trigger = """
+If it adds a kicad-tools run, read the transcript for agent-facing \
+failures; otherwise offer a run (see the research note).\
+"""
+
+# ------------------------------------------------------ fabrication and CI
+
+[projects.kibot]
+name = "KiBot"
+slug = "INTI-CMNB/KiBot"
+repo_url = "https://github.com/INTI-CMNB/KiBot"
+vcs = "github"
+category = "fabrication"
+relation = "peer"
+verdict = "complementary"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 747
+last_push = "2026-09-30"
+last_verified = "2026-09-30"
+summary = """
+the mature, scriptable fabrication- and documentation-output generator for \
+KiCad (gerbers, drill, position, BOM, 3D, plots), with a GitHub Action. \
+Deeper than `kct export` on output *variety* and configuration; it assumes \
+a board that is already routed and signed off, which is the part we \
+automate.\
+"""
+
+[projects.kikit]
+name = "KiKit"
+slug = "yaqwsx/KiKit"
+repo_url = "https://github.com/yaqwsx/KiKit"
+vcs = "github"
+category = "fabrication"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 2038
+last_push = "2026-09-25"
+last_verified = "2026-10-06"
+summary = """
+the standard KiCad panelization tool, as a library, plugin and CLI: \
+regular and oddly-shaped panels, fab-data export from manufacturer \
+presets, stencils, multi-board projects and presentation pages. Overlaps \
+`kct panel` and `kct export`; we have not compared feature or \
+fab-preset coverage.\
+"""
+reeval_trigger = """
+Compare `kct panel` with KiKit's panelization options and its \
+manufacturer presets with our `kct mfr` profiles; MIT, so gaps can be \
+closed with attribution.\
+"""
+
+[projects.kicad-jlcpcb-tools]
+name = "kicad-jlcpcb-tools"
+slug = "Bouni/kicad-jlcpcb-tools"
+repo_url = "https://github.com/Bouni/kicad-jlcpcb-tools"
+vcs = "github"
+category = "fabrication"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 2096
+last_push = "2026-10-04"
+last_verified = "2026-10-06"
+summary = """
+a KiCad plugin that generates JLCPCB Gerbers, drill, BOM and CPL files, \
+and assigns LCSC part numbers to footprints by searching the \
+JLCPCB parts database. A GUI-plugin take on what our JLCPCB export and \
+`/kct:tapeout` BOM checks do headlessly.\
+"""
+reeval_trigger = """
+Check its CPL rotation corrections and part-assignment rules against our \
+JLCPCB export when we next touch BOM/CPL output.\
+"""
+
+[projects.jlcparts]
+name = "jlcparts"
+slug = "yaqwsx/jlcparts"
+repo_url = "https://github.com/yaqwsx/jlcparts"
+vcs = "github"
+category = "fabrication"
+relation = "reference"
+verdict = "watch"
+# MIT covers the code. The catalogue it scrapes is JLCPCB's data, which this
+# license does not cover.
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 837
+last_push = "2026-10-06"
+last_verified = "2026-10-06"
+summary = """
+a parametric-search front end over the JLCPCB/LCSC assembly catalogue, \
+regularly rebuilt. A candidate data source for the LCSC part-number \
+and stock checks in `/kct:tapeout`, if its terms and refresh cadence \
+suit us.\
+"""
+reeval_trigger = """
+When the tapeout BOM check needs offline part data, evaluate its \
+published database against our current LCSC lookup.\
+"""
+
+# ------------------------------------------------------------------ bindings
+
+[projects.kipy]
+name = "kipy"
+repo_url = "https://gitlab.com/kicad/code/kicad-python"
+# GitLab-hosted, and pollable: the numeric-or-path project id below is what
+# `probe_gitlab` URL-encodes. Leaving this `vcs = "other"` is what let the
+# license below go unchecked in the first place.
+vcs = "gitlab"
+slug = "kicad/code/kicad-python"
+category = "bindings"
+relation = "reference"
+verdict = "evaluated-not-adopted"
+# MIT, not GPL-3.0. Issue #5839's seed table said GPL-3.0 -- understandable,
+# since KiCad itself is GPL-3.0 -- but the root LICENSE file of
+# gitlab.com/kicad/code/kicad-python is verbatim MIT ("Permission is hereby
+# granted, free of charge, ..."), its `pyproject.toml` declares
+# `license = "MIT"`, and GitLab's own license detector reports `mit`
+# (all three checked 2026-09-30). Recording GPL here would have been exactly
+# the rot this registry exists to prevent, and would have made the first
+# `ecosystem_refresh.py` run report a phantom error-class `license-changed`.
+#
+# The not-adopted verdict is architectural -- kipy needs a running KiCad --
+# and is unaffected by the license being permissive.
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 19
+last_push = "2026-09-29"
+last_verified = "2026-09-30"
+research_docs = ["docs/research/kipy-ipc-api-evaluation.md"]
+summary = """
+the official KiCad Python bindings (`kicad-python` on PyPI) for the KiCad \
+IPC API. Requires a **running KiCad instance** with the IPC API enabled \
+and a document open in an editor -- every accessor is an RPC to the live \
+editor; there is no offline file-reading path, so it cannot participate in \
+headless/CI workflows.\
+"""
+
+# ----------------------------------------------------------------- benchmark
+
+[projects.pcbworld]
+name = "PCBWorld"
+slug = "LGAI-Research/PCBWorld"
+repo_url = "https://github.com/LGAI-Research/PCBWorld"
+vcs = "github"
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+# BSD-3-Clause for this repo; the `engine/` submodule (PCBWorld-Engine, the
+# modified KiCad) is GPL-3.0, and D3 boards keep their mixed PCBench
+# licenses. With three licenses in play, engagement is ideas-only and boards
+# are fetched by their recipe, never vendored.
+license = "BSD-3-Clause"
+license_compat = "permissive-ideas-only"
+language = "Python"
+stars = 25
+last_push = "2026-09-16"
+last_verified = "2026-10-06"
+# v1.0.1. The Clean Pass figures are Table 3 ("Routing quality on D2, D3-A,
+# and D3-B") of arXiv:2607.05915. They are best-of-5 numbers (single-rollout
+# results are in Table 22), whereas the circuit-skills TraceMaker-vs-
+# Freerouting comparison cited in the tracemaker entry used single runs, so
+# the two sets of figures are not directly comparable.
+pinned_commit = "b3d62f5c37e7528670d112e03d9a90029f23f4f3"
+summary = """
+a Gymnasium environment around KiCad's push-and-shove router, scored by \
+KiCad's own DRC (arXiv:2607.05915). It ships synthetic sets D1/D2 and a \
+recipe to rebuild D3: 679 PCBench boards converted to KiCad 9, keeping \
+their human reference copper. Its headline metric, Clean Pass (fully \
+connected and 0 error-level DRC), matches our bar. Published Clean Pass \
+on D3-A / D3-B (best-of-5): Freerouting 0.80 / 0.78, KiCadRoutingTools 0.74 / 0.20. \
+The most direct public leaderboard for `kct route`.\
+"""
+reeval_trigger = """
+Move to `benchmarked` once `kct route` has been run on D3-A/D3-B and \
+scored with both Clean Pass and our 0-total-DRC bar (issue #5942).\
+"""
+
+[projects.omnilayout]
+name = "OmniLayout / OmniRouting"
+repo_url = "https://omnieda.com"
+vcs = "other"
+category = "benchmark"
+relation = "reference"
+verdict = "ideas-adopted"
+# No license grant of any kind on the published dataset.
+license = "NONE"
+license_compat = "unlicensed"
+last_verified = "2026-09-30"
+research_docs = ["docs/research/omnilayout-recon.md"]
+summary = """
+a published routing benchmark and leaderboard. We adopted its *metric \
+vocabulary and evaluation protocol* -- the sharpest external definition of \
+"routed well" we have found -- and declined the dataset and tooling: no \
+license grant on the data, and the evaluation harness is unpublished.\
+"""
+reeval_trigger = """
+Both papers promise to open-source the benchmark data and evaluation code. \
+If the 1,681-design set lands with an explicit data license, versioned, \
+re-run the recon: the JSON-to-`.kicad_pcb` converter is days of work and \
+those reference routings would be the first human-authored copper we have \
+ever measured against.\
+"""
+
+[projects.pcbschemagen]
+name = "PCBSchemaGen v2"
+slug = "HZou9/PCBSchemaGen_v2"
+repo_url = "https://github.com/HZou9/PCBSchemaGen_v2"
+vcs = "github"
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+# The LICENSE file is verbatim MIT; GitHub's detector reports NOASSERTION
+# (multi-line copyright holder). `upstream_license_detected` records that, so
+# `ecosystem_refresh.py` does not flag a `license-changed` that is not real.
+license = "MIT"
+upstream_license_detected = "NOASSERTION"
+license_compat = "mit-clean"
+language = "Python"
+stars = 12
+last_push = "2026-06-17"
+last_verified = "2026-10-06"
+summary = """
+227 schematic-synthesis tasks (62 hand-written, 165 from public \
+schematics) with a deterministic 5-layer verifier that needs no LLM: \
+ERC invariants, pin-role compatibility, per-IC connection templates, \
+topology motifs and power rules. Tasks are scored as SKiDL designs. A \
+ready-made eval for our schematic generation.\
+"""
+reeval_trigger = """
+Run our schematic generation on a slice of the tasks, converting to the \
+SKiDL form its verifier scores; if the numbers are meaningful, record \
+them and move to `benchmarked`.\
+"""
+
+[projects.pcb-bench]
+name = "PCB-Bench"
+slug = "digailab/PCB-Bench"
+repo_url = "https://github.com/digailab/PCB-Bench"
+vcs = "github"
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python"
+stars = 49
+last_push = "2026-03-03"
+last_verified = "2026-10-06"
+summary = """
+an ICLR 2026 benchmark of LLM knowledge about PCB placement and routing: \
+about 3,700 text questions, about 500 image-and-text questions, and 174 \
+OSHWHub designs to describe from screenshots. It measures what a model \
+knows about layout, not what a tool produces, so it bears on our \
+agent-facing docs rather than on `kct route`. No LICENSE, so ideas only.\
+"""
+reeval_trigger = """
+If we ever measure whether `/kct:*` skills improve an agent's layout \
+reasoning, its Task 1 is a ready baseline (the circuit-skills harness \
+already runs it). A LICENSE would allow using the questions directly.\
+"""
+
+[projects.kipi]
+name = "KiPI"
+slug = "drewsum/KiPI"
+repo_url = "https://github.com/drewsum/KiPI"
+vcs = "github"
+# No "analysis" category exists; "benchmark" (evaluation tooling) is the
+# nearest. Issue #8185.
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 83
+last_push = "2026-11-01"
+last_verified = "2026-11-01"
+pinned_commit = "842b4ce74178f68eceec71c13c82d67368431daf"
+research_docs = ["docs/research/kipi-evaluation.md"]
+summary = """
+a power-integrity analyzer (DC voltage drop and current density, AC PDN \
+impedance, switcher coupled noise) that runs as a KiCad IPC plugin or \
+standalone. No solver CLI, but its DC solver is importable without the GUI \
+and solved one rail of our board 09 in 0.1 s. GPL-3.0: ideas only, no \
+code in either direction.\
+"""
+reeval_trigger = """
+If upstream ships a headless solve command with a stable output schema, or \
+if we decide a DC IR-drop check belongs in `kct check`.\
+"""
+
+# ----------------------------------------------------------------- 3d models
+
+[projects.easyeda2kicad]
+name = "easyeda2kicad"
+slug = "uPesy/easyeda2kicad.py"
+repo_url = "https://github.com/uPesy/easyeda2kicad.py"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "ideas-adopted"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 1714
+last_push = "2026-04-08"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+EasyEDA/LCSC to KiCad converter (symbol, footprint, 3D model), v1.0.1 \
+at our read. AGPL-3.0: ideas only, never copy code. We took its \
+*documented* 3D flow as a design input (model uuid from the footprint \
+SVGNODE; OBJ from `modules.easyeda.com/3dmodel/{uuid}` converted to WRL; \
+STEP passed through from the same bucket).\
+"""
+
+[projects.jlc2kicadlib]
+name = "JLC2KiCadLib"
+slug = "TousstNicolas/JLC2KiCad_lib"
+repo_url = "https://github.com/TousstNicolas/JLC2KiCad_lib"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+stars = 488
+last_push = "2026-09-11"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+generates KiCad symbols, footprints and STEP/WRL models from EasyEDA \
+(v1.3.2, maintenance-only). MIT, so code may move with attribution, but \
+its licence does not grant any rights to the EasyEDA/LCSC content it \
+fetches.\
+"""
+reeval_trigger = """
+Re-evaluate if the epic #7690 JLCPCB-catalog pipeline decides to \
+import EasyEDA models via a library instead of our own fetch code.\
+"""
+
+[projects.kicad-library-tools]
+name = "kicad-library-tools"
+slug = "kicad/libraries/kicad-library-tools"
+repo_url = "https://gitlab.com/kicad/libraries/kicad-library-tools"
+vcs = "gitlab"
+category = "3d-models"
+relation = "upstream"
+verdict = "complementary"
+# Some files are MIT/LGPL, but the project as a whole is GPL-3.0-or-later.
+# GitLab's detector reports "gpl-3.0", recorded below so
+# `ecosystem_refresh.py` does not report a phantom `license-changed`.
+license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python (CadQuery)"
+stars = 80
+last_push = "2026-10-12"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+headless CadQuery generators for KiCad's official 3D packages (DIP, \
+chip R/C/L, diodes, crystals, connectors, QFN/QFP/BGA, terminal blocks). \
+Successor to the archived kicad-packages3D-generator. GPL-3.0-or-later: \
+**run as an external tool only, never import or vendor**.\
+"""
+
+[projects.kicadstepupmod]
+name = "kicadStepUpMod"
+slug = "easyw/kicadStepUpMod"
+repo_url = "https://github.com/easyw/kicadStepUpMod"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "watch"
+# The README says AGPLv3 but no LICENSE file is committed, so `license` is
+# "NONE" per the registry rules, and `unlicensed` (all rights reserved)
+# applies whatever the README claims. Either way: ideas only, no code reuse.
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python (FreeCAD)"
+stars = 696
+last_push = "2026-09-04"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+FreeCAD workbench for aligning 3D models to footprints, the manual \
+analogue of our transform calibration. The README claims AGPLv3 but no \
+LICENSE file is committed (hence `license = "NONE"`); ideas only either way.\
+"""
+reeval_trigger = """
+Re-evaluate if upstream commits a LICENSE file, or if our transform \
+calibration needs a second reference for model-to-footprint alignment.\
+"""
+
+[projects.cq-electronics]
+name = "cq-electronics"
+slug = "sethfischer/cq-electronics"
+repo_url = "https://github.com/sethfischer/cq-electronics"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python (CadQuery)"
+stars = 20
+last_push = "2025-07-22"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+small CadQuery set of electronic-component parts (v0.2.0). MIT, so it \
+is a candidate source of parametric bodies for our own 3D pipeline.\
+"""
+reeval_trigger = """
+Re-evaluate when the 3D pipeline starts generating parametric bodies, \
+to decide whether to depend on it.\
+"""
+
+
+# ---------------------------------------------------------------- positioning
+#
+# Where kicad-tools sits, as data rather than prose repeated in three places.
+# `kct ecosystem where-we-sit` prints these; `docs/ecosystem.md` expands on
+# them; `scripts/ecosystem_render.py` uses neither -- the README block is the
+# project table only.
+
+[positioning]
+# What is true of kicad-tools and is NOT true of most of the registry.
+invariants = [
+  "Offline and file-based: every tool reads and writes `.kicad_sch` / `.kicad_pcb` directly. No running KiCad instance, no IPC, no GUI, no cloud service.",
+  "Machine-readable by default: analysis and query commands emit JSON (`--format json`), because the primary caller is an agent, not a human.",
+  "Verification is two-engine: `kct check --mfr` and `kicad-cli pcb drc --refill-zones` must BOTH report zero errors. Neither alone is sign-off.",
+  "Electrical correctness is gated by LVS, not by DRC alone: copper is compared against the schematic netlist.",
+  "The bar for 'done' is 100% of nets routed with 0 DRC violations and 0 sync drift -- not a partial-reach percentage.",
+]
+
+# What we deliberately do not do. Each line names who does it instead.
+non_goals = [
+  "No GUI and no KiCad fork: the live-editor surface is covered by openkonnect (our clean-room project); Zeo also owns it.",
+  "No schematic-capture language: atopile and SKiDL own design-as-code upstream of us.",
+  "No cloud routing service: DeepPCB owns that trade-off, and it costs offline/air-gapped CI.",
+  "No Specctra DSN/SES round-trip: freerouting and AutoRoute route a translated view; we stay on the board file so LVS and the fab gates see the artifact that ships.",
+  "No breadth-first fabrication output matrix: KiBot is deeper on output variety; we automate getting a board to the point where those outputs are worth generating.",
+]

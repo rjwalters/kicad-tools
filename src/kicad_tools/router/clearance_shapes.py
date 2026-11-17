@@ -1,0 +1,249 @@
+"""Router primitives -> clearance-kernel shapes (Epic #5509, Phase 3).
+
+The kernel (:mod:`kicad_tools.router.clearance_kernel`) deliberately knows
+nothing about the router: it speaks :class:`~clearance_kernel.KSegment` /
+:class:`~clearance_kernel.KVia` / :class:`~clearance_kernel.KPad` value
+objects and answers "how far apart is this copper, edge to edge".  Every
+consumer the epic migrates therefore needs the *same* translation from
+:mod:`kicad_tools.router.primitives` objects into those shapes -- and it has
+to be the same one, or two migrated consumers would disagree about the copper
+rather than about the clearance.
+
+This module is that single translation.  It is the production sibling of the
+conformance harness's ``tests/conformance/adapters/_support.py``: one
+translation, cited from both sides, so a difference between two migrated
+consumers is a difference between two *rule resolutions*, never between two
+readings of the same geometry.
+
+**Rule resolution stays with the caller.**  Nothing here decides what
+``required_mm`` is -- that is the consumer's own (unchanged) logic, and
+Epic #5509's scope guard #1 forbids this phase from touching any rule value.
+The helpers below answer *gaps* and take a requirement the caller resolved.
+
+Layer convention
+----------------
+Layers are compared by :class:`kicad_tools.core.types.CopperLayer` ``value``,
+not by routing-stack index.  Both are consistent integer namings of the same
+layer and the kernel only ever tests them for equality, but mixing the two
+inside one query would be a silent bug -- so every helper here uses ``value``
+and nothing else.  Copper present on every layer (a via barrel, a
+through-hole pad) carries :data:`~clearance_kernel.ALL_LAYERS`.
+"""
+
+from __future__ import annotations
+
+from kicad_tools.router.clearance_kernel import (
+    ALL_LAYERS,
+    CLEARANCE_EPSILON_MM,
+    NO_INTERACTION,
+    KEdge,
+    KPad,
+    KSegment,
+    KShape,
+    KVia,
+    clear,
+    copper_gap,
+    hole_gap,
+    make_pad,
+)
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.primitives import Pad, Segment, Via
+
+__all__ = [
+    "ALL_LAYERS",
+    "CLEARANCE_EPSILON_MM",
+    "NO_INTERACTION",
+    "KEdge",
+    "KPad",
+    "KSegment",
+    "KShape",
+    "KVia",
+    "bbox_shape",
+    "clear",
+    "copper_gap",
+    "gap_deficit",
+    "hole_gap",
+    "overlaps",
+    "pad_kernel_params",
+    "pad_shape",
+    "segment_shape",
+    "shapes_clear",
+    "via_shape",
+]
+
+#: KiCad's default roundrect corner ratio -- the ``make_pad`` signature default.
+#: :func:`pad_shape` never substitutes it for a router pad's missing ratio
+#: (issue #6718); it is only the don't-care argument of a ``rect`` build.
+DEFAULT_ROUNDRECT_RRATIO = 0.25
+
+#: KiCad clamps ``roundrect_rratio`` to ``[0, 0.5]`` (``PAD::SetRoundRectRadiusRatio``).
+_MAX_ROUNDRECT_RRATIO = 0.5
+
+
+def segment_shape(seg: Segment) -> KSegment:
+    """A routed :class:`~primitives.Segment` as kernel copper."""
+    return KSegment(
+        x1=seg.x1,
+        y1=seg.y1,
+        x2=seg.x2,
+        y2=seg.y2,
+        width=seg.width,
+        layer=_layer_value(seg.layer),
+    )
+
+
+def via_shape(via: Via) -> KVia:
+    """A :class:`~primitives.Via` as kernel copper.
+
+    A barrel is copper on every layer it spans.  The kernel's ``KVia`` is
+    implicitly ``ALL_LAYERS``, which is the right model for the through vias
+    the router emits; a caller that needs a blind/buried barrel's layer span
+    must gate on ``via.layers`` itself before asking (the coupled search's
+    ``rail_clear`` does exactly that, mirroring
+    ``Grid3D::trace_stored_vias_clear``).
+    """
+    return KVia(x=via.x, y=via.y, diameter=via.diameter, drill=via.drill)
+
+
+def pad_kernel_params(pad: Pad) -> tuple[str, float]:
+    """The effective ``(shape, rratio)`` the kernel builds ``pad`` from (#6718).
+
+    A ``roundrect`` uses the file's ``pad.roundrect_rratio`` clamped to
+    KiCad's ``[0, 0.5]``; with no ratio (``None``) it degrades to ``rect``.
+    Every other shape passes through with the unused default ratio.  The
+    native authored gate (``cpp_backend`` ``set_pad_authored``) receives the
+    same pair, so Python and C++ measure the same copper.
+    """
+    shape = pad.shape
+    if shape != "roundrect":
+        return shape, DEFAULT_ROUNDRECT_RRATIO
+    file_rratio = getattr(pad, "roundrect_rratio", None)
+    if file_rratio is None:
+        return "rect", DEFAULT_ROUNDRECT_RRATIO
+    return shape, min(max(float(file_rratio), 0.0), _MAX_ROUNDRECT_RRATIO)
+
+
+def pad_shape(pad: Pad) -> KPad:
+    """A :class:`~primitives.Pad` as kernel copper.
+
+    ``pad.rotation`` is the *residual* board-space angle (issue #4910): the
+    ``io.py`` parsers already axis-swap ``width``/``height`` for a pad within
+    1 degree of 90/270, and ``rotation`` carries only what that swap does not
+    absorb.  That is exactly the angle ``make_pad`` wants, because the swapped
+    dimensions plus the residual angle reconstruct the same board-frame
+    rectangle the full angle plus the unswapped dimensions would.
+
+    A through-hole pad is copper on every layer, and its hole is modelled from
+    ``pad.drill`` so hole queries have something to read.
+
+    A ``roundrect`` uses the file's ``pad.roundrect_rratio`` (clamped to
+    KiCad's ``[0, 0.5]``). When the ratio is unknown (``None``) the pad is
+    measured as its rectangle -- conservative, since the rectangle contains
+    every roundrect of the same size. Assuming KiCad's 0.25 default instead
+    would round a small-ratio pad's corners away and hide a real corner
+    near-miss (issue #6718).
+    """
+    shape, rratio = pad_kernel_params(pad)
+    return make_pad(
+        shape,
+        pad.width,
+        pad.height,
+        rratio,
+        pad.rotation,
+        pad.x,
+        pad.y,
+        ALL_LAYERS if pad.through_hole else _layer_value(pad.layer),
+        pad.drill if pad.through_hole else 0.0,
+    )
+
+
+def bbox_shape(
+    bbox: tuple[float, float, float, float],
+    *,
+    layer: int = ALL_LAYERS,
+    drill: float = 0.0,
+) -> KPad:
+    """An axis-aligned copper rectangle as kernel copper (Epic #5509 Phase 4c).
+
+    Some consumers hold a pad's *enclosing axis-aligned box* rather than the
+    pad object itself -- the DRC-nudge repair pass's via-in-pad detector takes
+    ``(min_x, min_y, max_x, max_y)`` from
+    :func:`~kicad_tools.router.drc_nudge._router_pad_bbox`.  A rectangle is a
+    :class:`KPad` whose Minkowski core is its four corners and whose dilation
+    radius is zero, so this is a translation and not a second pad model: the
+    same ``rect`` branch of :func:`~clearance_kernel.make_pad` the exact pad
+    model uses.
+
+    The *footprint* a caller chooses to measure (a real pad outline vs. its
+    enclosing box) stays the caller's own decision -- this helper only moves
+    the arithmetic onto the kernel.
+
+    Args:
+        bbox: ``(min_x, min_y, max_x, max_y)`` in mm, board frame.
+        layer: Copper layer id, :data:`ALL_LAYERS` when the box applies to
+            every layer (a through-hole land, or a caller that has already
+            gated on layer itself).
+        drill: Hole diameter at the box centre, 0 for no hole.
+
+    Returns:
+        The rectangle as a :class:`KPad`; an empty core for a degenerate box,
+        which the kernel reads as :data:`NO_INTERACTION`.
+    """
+    min_x, min_y, max_x, max_y = bbox
+    return make_pad(
+        "rect",
+        max_x - min_x,
+        max_y - min_y,
+        DEFAULT_ROUNDRECT_RRATIO,  # unused by the ``rect`` branch
+        0.0,
+        (min_x + max_x) / 2.0,
+        (min_y + max_y) / 2.0,
+        layer,
+        drill,
+    )
+
+
+def shapes_clear(a: KShape, b: KShape, required_mm: float) -> bool:
+    """``clear`` under the kernel's own epsilon -- re-exported for callers.
+
+    A thin alias so a migrated consumer imports one module rather than two,
+    and so the epsilon it compares under is provably the kernel's.
+    """
+    return clear(a, b, required_mm)
+
+
+def gap_deficit(a: KShape, b: KShape, required_mm: float) -> float:
+    """How far short of ``required_mm`` this pair falls; ``<= 0`` is clear.
+
+    The "deficit" idiom several diff-pair gates already speak
+    (``worst_segment_pad_deficit``, ``segment_via_deficit``), expressed on
+    the kernel's exact gap.  A pair that cannot interact at all (different
+    layers) has an infinite gap and therefore a deficit of ``0.0`` rather
+    than ``-inf``, so callers can keep taking a plain ``max()`` over pads.
+    """
+    gap = copper_gap(a, b)
+    if gap == NO_INTERACTION:
+        return 0.0
+    return required_mm - gap
+
+
+def overlaps(a: KShape, b: KShape) -> bool:
+    """True when the two coppers physically intersect (gap strictly below 0).
+
+    The clearance-free half of the kernel: no requirement, no epsilon, just
+    "does this metal touch that metal".  Used by the coupled constructor's
+    physical-overlap self-check, which asks a short-detection question rather
+    than a clearance question.
+    """
+    return copper_gap(a, b) < 0.0
+
+
+def _layer_value(layer: Layer) -> int:
+    """The integer layer id of a router :class:`~router.layers.Layer`.
+
+    A one-line function on purpose: it is the *only* place this module turns
+    a layer into the integer the kernel compares, so the module docstring's
+    "``value``, never a stack index" convention has a single enforcement
+    point rather than three call sites that each remembered.
+    """
+    return layer.value

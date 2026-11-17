@@ -1,0 +1,2467 @@
+"""Tests for the report generation module."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from kicad_tools.report.generator import ReportGenerator
+from kicad_tools.report.models import ReportData
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+def _full_data(**overrides) -> ReportData:
+    """Return a fully-populated ``ReportData`` instance."""
+    defaults: dict = {
+        "project_name": "TestBoard",
+        "revision": "A",
+        "date": "2026-04-12",
+        "manufacturer": "jlcpcb",
+        "board_stats": {
+            "layer_count": 4,
+            "layer_names": ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+            "footprint_count": 134,
+            "footprint_smd": 60,
+            "footprint_tht": 70,
+            "footprint_other": 4,
+            "net_count": 80,
+            "segment_count": 320,
+            "via_count": 45,
+            "board_width_mm": 200.0,
+            "board_height_mm": 120.0,
+        },
+        "bom_groups": [
+            {
+                "value": "100nF",
+                "footprint": "0402",
+                "qty": 10,
+                "refs": "C1-C10",
+                "mpn": "CL05B104KO5NNNC",
+                "lcsc": "C1525",
+            },
+            {
+                "value": "10k",
+                "footprint": "0402",
+                "qty": 5,
+                "refs": "R1-R5",
+                "mpn": "RC0402FR-0710KL",
+                "lcsc": "C25744",
+            },
+        ],
+        "drc": {
+            "error_count": 0,
+            "warning_count": 2,
+            "blocking_count": 0,
+            "passed": True,
+        },
+        "erc": {
+            "error_count": 0,
+            "warning_count": 1,
+            "passed": True,
+            "details": "",
+        },
+        "audit": {
+            "verdict": "ready",
+            "action_items": [
+                {
+                    "priority": 1,
+                    "description": "Complete routing: 3 nets incomplete",
+                    "command": "kct validate connectivity board.kicad_pcb",
+                },
+                {
+                    "priority": 3,
+                    "description": "Review silkscreen placement",
+                    "command": None,
+                },
+            ],
+        },
+        "net_status": {
+            "total_nets": 61,
+            "complete_count": 58,
+            "completion_percent": 95.5,
+            "incomplete_count": 3,
+            "unrouted_count": 0,
+            "total_unconnected_pads": 5,
+            "incomplete_net_names": ["GND", "SDA", "VCC"],
+        },
+        "cost": {
+            "pcb_cost": 1.20,
+            "component_cost": 0.80,
+            "assembly_cost": 0.50,
+            "total": 2.50,
+            "per_unit": 2.50,
+            "batch_qty": 100,
+            "batch_total": 250.00,
+            "currency": "USD",
+        },
+        "schematic_sheets": [
+            {"name": "Main Sheet", "figure_path": "figures/main_sheet.png"},
+            {"name": "Power", "figure_path": "figures/power.png"},
+        ],
+        "pcb_figures": {
+            "front": "figures/pcb_front.png",
+            "back": "figures/pcb_back.png",
+            "copper": "figures/pcb_copper.png",
+        },
+        "notes": "This is a prototype build.",
+        "tool_version": "0.11.0",
+        "git_hash": "abc1234",
+    }
+    defaults.update(overrides)
+    return ReportData(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# TestTruncateRefs
+# ---------------------------------------------------------------------------
+
+
+class TestTruncateRefs:
+    """Unit tests for the _truncate_refs filter function."""
+
+    def test_short_list_unchanged(self) -> None:
+        """A list with fewer than max_count items is returned unchanged."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        result = _truncate_refs("C1, C2, C3", 10)
+        assert result == "C1, C2, C3"
+
+    def test_exactly_max_count_unchanged(self) -> None:
+        """A list with exactly max_count items is returned unchanged."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = ", ".join([f"R{i}" for i in range(1, 11)])
+        result = _truncate_refs(refs, 10)
+        assert result == refs
+        assert "more" not in result
+
+    def test_over_max_count_truncated(self) -> None:
+        """A list exceeding max_count is truncated with a count suffix."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = ", ".join([f"C{i}" for i in range(1, 61)])
+        result = _truncate_refs(refs, 10)
+        assert "C1, C2" in result
+        assert "... (+50 more)" in result
+        assert "C11" not in result
+
+    def test_empty_string(self) -> None:
+        """Empty string returns empty string without crashing."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        result = _truncate_refs("", 10)
+        assert result == ""
+
+    def test_single_item(self) -> None:
+        """A single item is returned unchanged."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        result = _truncate_refs("U1", 10)
+        assert result == "U1"
+
+    def test_custom_max_count(self) -> None:
+        """Custom max_count is respected."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = "A, B, C, D, E"
+        result = _truncate_refs(refs, 3)
+        assert result == "A, B, C ... (+2 more)"
+
+    def test_default_max_count(self) -> None:
+        """Default max_count of 10 is used when not specified."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = ", ".join([f"D{i}" for i in range(1, 15)])
+        result = _truncate_refs(refs)
+        assert "... (+4 more)" in result
+
+
+# ---------------------------------------------------------------------------
+# TestReportData
+# ---------------------------------------------------------------------------
+
+
+class TestReportData:
+    """Test the ReportData dataclass."""
+
+    def test_full_instantiation(self) -> None:
+        data = _full_data()
+        assert data.project_name == "TestBoard"
+        assert data.revision == "A"
+        assert data.date == "2026-04-12"
+        assert data.manufacturer == "jlcpcb"
+        assert data.board_stats is not None
+        assert data.bom_groups is not None
+        assert data.drc is not None
+        assert data.erc is not None
+        assert data.audit is not None
+        assert data.net_status is not None
+        assert data.cost is not None
+        assert data.schematic_sheets is not None
+        assert data.pcb_figures is not None
+        assert data.notes == "This is a prototype build."
+        assert data.tool_version == "0.11.0"
+        assert data.git_hash == "abc1234"
+
+    def test_defaults(self) -> None:
+        data = ReportData(
+            project_name="Minimal",
+            revision="1",
+            date="2026-01-01",
+            manufacturer="pcbway",
+        )
+        assert data.board_stats is None
+        assert data.bom_groups is None
+        assert data.notes == ""
+        assert data.tool_version == ""
+        assert data.git_hash == ""
+
+
+# ---------------------------------------------------------------------------
+# TestReportGenerator
+# ---------------------------------------------------------------------------
+
+
+class TestReportGenerator:
+    """Test the ReportGenerator class."""
+
+    def test_full_render(self, tmp_path: Path) -> None:
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        assert report_path.exists()
+        content = report_path.read_text(encoding="utf-8")
+
+        # YAML front matter and section headings must appear
+        assert 'title: "TestBoard"' in content
+        assert "## Board Summary" in content
+        assert "## ERC Status" in content
+        assert "## Schematic Overview" in content
+        assert "## PCB Layout" in content
+        assert "## Bill of Materials" in content
+        assert "## DRC Status" in content
+        assert "## Manufacturing Readiness" in content
+        assert "## Routing Status" in content
+        assert "## Cost Estimate" in content
+        assert "## Notes" in content
+
+        # No None literals
+        assert "None" not in content
+
+        # Verify some data rendered
+        assert "jlcpcb" in content
+        assert "100nF" in content
+        assert "PASS" in content
+        assert "READY" in content
+        assert "95.5%" in content
+        # git_hash is written to metadata.json, not the report markdown
+        # assert "abc1234" in content
+
+    def test_partial_data_omits_sections(self, tmp_path: Path) -> None:
+        data = ReportData(
+            project_name="Sparse",
+            revision="1",
+            date="2026-01-01",
+            manufacturer="pcbway",
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+
+        # YAML front matter is always present
+        assert 'title: "Sparse"' in content
+
+        # Optional sections must be absent
+        assert "## Board Summary" not in content
+        assert "## ERC Status" not in content
+        assert "## Schematic Overview" not in content
+        assert "## PCB Layout" not in content
+        assert "## Bill of Materials" not in content
+        assert "## DRC Status" not in content
+        assert "## Manufacturing Readiness" not in content
+        assert "## Routing Status" not in content
+        assert "## Cost Estimate" not in content
+        assert "## Notes" not in content
+
+        # No None literals
+        assert "None" not in content
+
+    def test_immutability_guard(self, tmp_path: Path) -> None:
+        """If the computed next version directory already contains report.md,
+        generate() must raise FileExistsError.
+
+        Simulates a race condition by monkey-patching the version scanner
+        to return a directory that already holds a report.
+        """
+        data = _full_data()
+        gen = ReportGenerator()
+
+        # Generate v1 normally
+        path1 = gen.generate(data, tmp_path)
+        assert path1.exists()
+
+        # Monkey-patch next_version_dir to always return v1 (already has report.md)
+        gen.next_version_dir = staticmethod(lambda output_dir: tmp_path / "v1")  # type: ignore[assignment]
+
+        with pytest.raises(FileExistsError, match="must not be overwritten"):
+            gen.generate(data, tmp_path)
+
+    def test_metadata_written(self, tmp_path: Path) -> None:
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        metadata_path = report_path.parent / "metadata.json"
+        assert metadata_path.exists()
+
+        meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert "timestamp" in meta
+        assert "kicad_tools_version" in meta
+        assert "git_hash" in meta
+        assert "template_sha256" in meta
+
+        # template_sha256 must be a valid hex string
+        sha = meta["template_sha256"]
+        assert len(sha) == 64
+        assert all(c in "0123456789abcdef" for c in sha)
+
+        # Version and hash from data
+        assert meta["kicad_tools_version"] == "0.11.0"
+        assert meta["git_hash"] == "abc1234"
+
+    def test_auto_version_increment(self, tmp_path: Path) -> None:
+        data = _full_data()
+        gen = ReportGenerator()
+
+        p1 = gen.generate(data, tmp_path)
+        p2 = gen.generate(data, tmp_path)
+        p3 = gen.generate(data, tmp_path)
+
+        assert p1.parent.name == "v1"
+        assert p2.parent.name == "v2"
+        assert p3.parent.name == "v3"
+
+    def test_latest_version_dir_no_versions(self, tmp_path: Path) -> None:
+        """Returns None when no vN/ directories exist."""
+        assert ReportGenerator.latest_version_dir(tmp_path) is None
+
+    def test_latest_version_dir_nonexistent_dir(self) -> None:
+        """Returns None when the output directory does not exist."""
+        assert ReportGenerator.latest_version_dir(Path("/nonexistent/dir")) is None
+
+    def test_latest_version_dir_single_version(self, tmp_path: Path) -> None:
+        """Returns the only vN/ directory when there is one."""
+        (tmp_path / "v1").mkdir()
+        result = ReportGenerator.latest_version_dir(tmp_path)
+        assert result is not None
+        assert result.name == "v1"
+
+    def test_latest_version_dir_multiple_versions(self, tmp_path: Path) -> None:
+        """Returns the highest-numbered vN/ directory."""
+        for i in (1, 2, 5, 3):
+            (tmp_path / f"v{i}").mkdir()
+        result = ReportGenerator.latest_version_dir(tmp_path)
+        assert result is not None
+        assert result.name == "v5"
+
+    def test_latest_version_dir_ignores_non_version_dirs(self, tmp_path: Path) -> None:
+        """Non-vN directories are ignored."""
+        (tmp_path / "v1").mkdir()
+        (tmp_path / "report").mkdir()
+        (tmp_path / "data").mkdir()
+        result = ReportGenerator.latest_version_dir(tmp_path)
+        assert result is not None
+        assert result.name == "v1"
+
+    def test_custom_template(self, tmp_path: Path) -> None:
+        template_dir = tmp_path / "custom_templates"
+        template_dir.mkdir()
+        custom_template = template_dir / "custom.md.j2"
+        custom_template.write_text("# {{ project_name }} custom report\n")
+
+        data = _full_data()
+        output_dir = tmp_path / "output"
+        gen = ReportGenerator(template_path=custom_template)
+        report_path = gen.generate(data, output_dir)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "# TestBoard custom report" in content
+
+    def test_cover_block_in_rendered_output(self, tmp_path: Path) -> None:
+        """Rendered markdown contains YAML front matter with project metadata."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # YAML front matter contains the cover metadata
+        assert 'title: "TestBoard"' in content
+        assert "Design Report" in content
+        assert "Rev A" in content
+        assert "jlcpcb" in content
+
+    def test_pcb_figures_in_rendered_output(self, tmp_path: Path) -> None:
+        """When both front and back PCB figures exist, both are in the markdown."""
+        data = _full_data(
+            pcb_figures={
+                "front": "figures/pcb_front.png",
+                "back": "figures/pcb_back.png",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "![PCB Front](figures/pcb_front.png)" in content
+        assert "![PCB Back](figures/pcb_back.png)" in content
+
+    def test_pcb_front_only(self, tmp_path: Path) -> None:
+        """When only front PCB figure exists, only front is rendered."""
+        data = _full_data(
+            pcb_figures={
+                "front": "figures/pcb_front.png",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "![PCB Front](figures/pcb_front.png)" in content
+        assert "PCB Back" not in content
+
+    def test_truncate_refs_many_items(self, tmp_path: Path) -> None:
+        """BOM refs with >10 items are truncated in rendered output."""
+        many_refs = ", ".join([f"C{i}" for i in range(1, 61)])
+        data = _full_data(
+            bom_groups=[
+                {
+                    "value": "100nF",
+                    "footprint": "0402",
+                    "qty": 60,
+                    "refs": many_refs,
+                    "mpn": "CL05B104KO5NNNC",
+                    "lcsc": "C1525",
+                },
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "... (+50 more)" in content
+        assert "C1, C2" in content
+        # The full 60-ref list should NOT appear
+        assert "C60" not in content
+
+    def test_truncate_refs_exact_threshold(self, tmp_path: Path) -> None:
+        """BOM refs with exactly 10 items are NOT truncated."""
+        exact_refs = ", ".join([f"R{i}" for i in range(1, 11)])
+        data = _full_data(
+            bom_groups=[
+                {
+                    "value": "10k",
+                    "footprint": "0402",
+                    "qty": 10,
+                    "refs": exact_refs,
+                    "mpn": "RC0402FR-0710KL",
+                    "lcsc": "C25744",
+                },
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "R10" in content
+        assert "more)" not in content
+
+    def test_truncate_refs_empty_string(self, tmp_path: Path) -> None:
+        """BOM refs with empty string do not crash."""
+        data = _full_data(
+            bom_groups=[
+                {
+                    "value": "DNP",
+                    "footprint": "0402",
+                    "qty": 1,
+                    "refs": "",
+                    "mpn": "",
+                    "lcsc": "",
+                },
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Should render without crash
+        assert "## Bill of Materials" in content
+        assert "DNP" in content
+
+    def test_figure_paths_not_validated(self, tmp_path: Path) -> None:
+        """Figure paths are strings in the output, not validated on disk."""
+        data = _full_data(
+            pcb_figures={
+                "front": "figures/nonexistent.png",
+                "back": "figures/also_missing.png",
+            },
+            schematic_sheets=[
+                {"name": "Ghost", "figure_path": "figures/ghost.png"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "figures/nonexistent.png" in content
+        assert "figures/ghost.png" in content
+
+    def test_empty_notes_omitted(self, tmp_path: Path) -> None:
+        """Empty notes string means no Notes section."""
+        data = _full_data(notes="")
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## Notes" not in content
+
+    def test_nonempty_notes_included(self, tmp_path: Path) -> None:
+        data = _full_data(notes="Ship by Friday.")
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## Notes" in content
+        assert "Ship by Friday." in content
+
+    def test_drc_fail_status(self, tmp_path: Path) -> None:
+        data = _full_data(
+            drc={
+                "error_count": 3,
+                "warning_count": 1,
+                "blocking_count": 2,
+                "passed": False,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "FAIL" in content
+
+    def test_drc_violations_by_type_rendered(self, tmp_path: Path) -> None:
+        """Violations by Type table renders when violations_by_type is present."""
+        data = _full_data(
+            drc={
+                "error_count": 5,
+                "warning_count": 2,
+                "blocking_count": 5,
+                "passed": False,
+                "violations_by_type": {
+                    "clearance_segment_segment": 3,
+                    "edge_clearance_trace": 2,
+                    "silk_over_copper": 2,
+                },
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Violations by Type" in content
+        assert "| Violation Type | Count |" in content
+        assert "| clearance_segment_segment | 3 |" in content
+        assert "| edge_clearance_trace | 2 |" in content
+        assert "| silk_over_copper | 2 |" in content
+
+    def test_drc_violations_by_type_sorted_descending(self, tmp_path: Path) -> None:
+        """Violations by Type rows are sorted by count descending."""
+        data = _full_data(
+            drc={
+                "error_count": 6,
+                "warning_count": 0,
+                "blocking_count": 6,
+                "passed": False,
+                "violations_by_type": {
+                    "footprint_outside_board": 1,
+                    "clearance_segment_segment": 5,
+                    "edge_clearance_trace": 3,
+                },
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Find positions to verify sort order
+        pos_clearance = content.index("clearance_segment_segment")
+        pos_edge = content.index("edge_clearance_trace")
+        pos_footprint = content.index("footprint_outside_board")
+        assert pos_clearance < pos_edge < pos_footprint
+
+    def test_drc_violations_by_type_omitted_when_absent(self, tmp_path: Path) -> None:
+        """Violations by Type table is omitted when key is absent (backward compat)."""
+        data = _full_data(
+            drc={
+                "error_count": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "passed": True,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## DRC Status" in content
+        assert "### Violations by Type" not in content
+
+    def test_drc_violations_by_type_omitted_when_empty(self, tmp_path: Path) -> None:
+        """Violations by Type table is omitted when dict is empty."""
+        data = _full_data(
+            drc={
+                "error_count": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "passed": True,
+                "violations_by_type": {},
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## DRC Status" in content
+        assert "### Violations by Type" not in content
+
+    def test_drc_waived_findings_rendered(self, tmp_path: Path) -> None:
+        """Waived findings get a count row and a per-rule table (issue #8130)."""
+        data = _full_data(
+            drc={
+                "error_count": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "passed": True,
+                "violations_by_type": {"ampacity": 238},
+                "waived_count": 238,
+                "waived_by_rule": {
+                    "ampacity": {"count": 238, "reasons": ["sized by hand"], "issues": ["x#1"]}
+                },
+            }
+        )
+        report_path = ReportGenerator().generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "| Waived | 238 |" in content
+        assert "### Waived Findings" in content
+        assert "| ampacity | 238 | sized by hand | x#1 |" in content
+
+    def test_drc_waived_omitted_when_absent(self, tmp_path: Path) -> None:
+        data = _full_data(
+            drc={"error_count": 0, "warning_count": 0, "blocking_count": 0, "passed": True}
+        )
+        content = ReportGenerator().generate(data, tmp_path).read_text(encoding="utf-8")
+        assert "| Waived |" not in content
+        assert "### Waived Findings" not in content
+
+    def test_erc_pass_status(self, tmp_path: Path) -> None:
+        """ERC section renders PASS when passed is True."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "| Errors | 0 |" in content
+        assert "| Warnings | 0 |" in content
+
+    def test_erc_fail_status(self, tmp_path: Path) -> None:
+        """ERC section renders FAIL when passed is False."""
+        data = _full_data(
+            erc={
+                "error_count": 3,
+                "warning_count": 1,
+                "passed": False,
+                "details": "pin_not_connected (2x), power_pin_not_driven (1x)",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "| Errors | 3 |" in content
+        assert "| Warnings | 1 |" in content
+        assert "FAIL" in content
+        assert "pin_not_connected (2x), power_pin_not_driven (1x)" in content
+
+    def test_erc_skipped_status(self, tmp_path: Path) -> None:
+        """ERC section renders SKIPPED when skipped is True."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "skipped": True,
+                "details": "ERC skipped by user request",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "SKIPPED" in content
+        assert "PASS" not in content.split("## ERC Status")[1].split("##")[0]
+
+    def test_erc_not_run_status(self, tmp_path: Path) -> None:
+        """ERC renders NOT RUN (not PASS/SKIPPED) when it could not run (#7083)."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": False,
+                "skipped": False,
+                "could_not_verify": True,
+                "details": "kicad-cli not installed",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        section = content.split("## ERC Status")[1].split("##")[0]
+        assert "NOT RUN" in section
+        assert "PASS" not in section
+        assert "SKIPPED" not in section
+        assert "FAIL" not in section
+        assert "kicad-cli not installed" in section
+
+    def test_erc_pass_not_affected_by_skipped_false(self, tmp_path: Path) -> None:
+        """ERC renders PASS when skipped is False (explicit)."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "skipped": False,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        erc_section = content.split("## ERC Status")[1].split("##")[0]
+        assert "PASS" in erc_section
+        assert "SKIPPED" not in erc_section
+
+    def test_erc_pass_when_skipped_key_absent(self, tmp_path: Path) -> None:
+        """ERC renders PASS when skipped key is absent (backward compat)."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        erc_section = content.split("## ERC Status")[1].split("##")[0]
+        assert "PASS" in erc_section
+        assert "SKIPPED" not in erc_section
+
+    def test_erc_omitted_when_none(self, tmp_path: Path) -> None:
+        """ERC section is absent when erc is None."""
+        data = _full_data(erc=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" not in content
+
+    def test_erc_details_omitted_when_empty(self, tmp_path: Path) -> None:
+        """ERC details line is not rendered when details is empty."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "**Details**" not in content
+
+    def test_board_summary_full_render(self, tmp_path: Path) -> None:
+        """Board summary section renders all collector-produced fields."""
+        data = _full_data(
+            board_stats={
+                "layer_count": 2,
+                "layer_names": ["F.Cu", "B.Cu"],
+                "footprint_count": 134,
+                "footprint_smd": 60,
+                "footprint_tht": 70,
+                "footprint_other": 4,
+                "net_count": 62,
+                "segment_count": 0,
+                "via_count": 0,
+                "board_width_mm": 200.0,
+                "board_height_mm": 120.0,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" in content
+        # Layers row: count + comma-joined names
+        assert "2 copper (F.Cu, B.Cu)" in content
+        # Footprints row: total with breakdown
+        assert "134 (60 SMD, 70 THT, 4 other)" in content
+        # Nets row
+        assert "| Nets | 62 |" in content
+        # Traces row
+        assert "0 segments" in content
+        # Vias row
+        assert "| Vias | 0 |" in content
+        # Board Size row
+        assert "200.0 x 120.0 mm" in content
+        # No None literals
+        assert "None" not in content
+
+    def test_board_summary_partial_fields(self, tmp_path: Path) -> None:
+        """Omitting footprint breakdown fields renders only total count."""
+        data = _full_data(
+            board_stats={
+                "footprint_count": 42,
+                "net_count": 10,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" in content
+        # Footprint total appears without breakdown
+        assert "| Footprints | 42 |" in content
+        # No SMD/THT breakdown since those fields are absent
+        assert "SMD" not in content
+        assert "THT" not in content
+        # Layers row absent (no layer_count provided)
+        assert "| Layers" not in content
+        # Board Size row absent (no dimensions)
+        assert "Board Size" not in content
+        # No None literals
+        assert "None" not in content
+
+    def test_board_summary_only_layer_count(self, tmp_path: Path) -> None:
+        """board_stats with only layer_count renders just the Layers row."""
+        data = _full_data(
+            board_stats={
+                "layer_count": 6,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" in content
+        assert "6 copper" in content
+        # No other Board Summary rows (use table-row prefix to avoid
+        # matching text from other sections like Routing Status)
+        assert "| Footprints" not in content
+        assert "| Nets |" not in content
+        assert "| Traces" not in content
+        assert "| Vias" not in content
+        assert "| Board Size" not in content
+        # No None literals
+        assert "None" not in content
+
+    def test_board_summary_none_omits_section(self, tmp_path: Path) -> None:
+        """board_stats=None means no Board Summary section."""
+        data = _full_data(board_stats=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" not in content
+
+    def test_action_items_render_with_priority_labels(self, tmp_path: Path) -> None:
+        """Action items render with bold priority labels, not raw dict strings."""
+        data = _full_data(
+            audit={
+                "verdict": "not_ready",
+                "action_items": [
+                    {
+                        "priority": 1,
+                        "description": "Complete routing: 5 nets incomplete",
+                        "command": "kct validate connectivity board.kicad_pcb",
+                    },
+                    {
+                        "priority": 2,
+                        "description": "Fix DRC errors before manufacturing",
+                        "command": "kct drc board.kicad_pcb",
+                    },
+                    {
+                        "priority": 3,
+                        "description": "Review silkscreen placement",
+                        "command": None,
+                    },
+                ],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Priority labels must appear as bold Markdown tags
+        assert "**[CRITICAL]** Complete routing: 5 nets incomplete" in content
+        assert "**[IMPORTANT]** Fix DRC errors before manufacturing" in content
+        assert "**[OPTIONAL]** Review silkscreen placement" in content
+
+        # Raw dict syntax must NOT appear
+        assert "{'priority'" not in content
+        assert "'description'" not in content
+
+        # No None literals (command=None must not render)
+        assert "None" not in content
+
+    def test_action_items_unknown_priority_renders_info(self, tmp_path: Path) -> None:
+        """An action item with an unrecognized priority renders as INFO."""
+        data = _full_data(
+            audit={
+                "verdict": "ready",
+                "action_items": [
+                    {
+                        "priority": 99,
+                        "description": "Some informational note",
+                        "command": None,
+                    },
+                ],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "**[INFO]** Some informational note" in content
+
+    def test_empty_action_items_omits_subsection(self, tmp_path: Path) -> None:
+        """An empty action_items list means no Action Items subsection."""
+        data = _full_data(
+            audit={
+                "verdict": "ready",
+                "action_items": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Manufacturing Readiness" in content
+        assert "### Action Items" not in content
+
+    def test_cost_section_shows_pcb_fabrication_label(self, tmp_path: Path) -> None:
+        """Cost section renders 'PCB Fabrication' label when cost data present."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## Cost Estimate" in content
+        assert "PCB Fabrication" in content
+        assert "~1.2" in content
+
+    def test_cost_section_shows_components_label(self, tmp_path: Path) -> None:
+        """Cost section renders 'Components (estimated)' when component_cost present."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "Components (estimated)" in content
+        assert "~0.8" in content
+
+    def test_cost_section_shows_total_label(self, tmp_path: Path) -> None:
+        """Cost section renders 'Total (estimated)' with bold formatting."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "**Total (estimated)**" in content
+        assert "~2.5" in content
+
+    def test_cost_section_pcb_only_no_components(self, tmp_path: Path) -> None:
+        """When component_cost is None, only PCB Fabrication row appears."""
+        data = _full_data(
+            cost={
+                "pcb_cost": 1.50,
+                "component_cost": None,
+                "assembly_cost": None,
+                "total": 1.50,
+                "per_unit": 1.50,
+                "batch_qty": 10,
+                "batch_total": 15.0,
+                "currency": "USD",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "PCB Fabrication" in content
+        assert "Components (estimated)" not in content
+        assert "Assembly (estimated)" not in content
+
+
+# ---------------------------------------------------------------------------
+# TestImportError
+# ---------------------------------------------------------------------------
+
+
+class TestReportImportError:
+    """Test graceful degradation when jinja2 is absent."""
+
+    def test_import_error_message(self) -> None:
+        """Verify that when jinja2 is absent the module still imports but
+        ReportData and ReportGenerator are not exported."""
+        # Save and remove the real jinja2 module
+        saved = {}
+        for key in list(sys.modules.keys()):
+            if key == "jinja2" or key.startswith("jinja2."):
+                saved[key] = sys.modules.pop(key)
+
+        # Also remove cached report modules so they re-import
+        for key in list(sys.modules.keys()):
+            if "kicad_tools.report" in key:
+                saved[key] = sys.modules.pop(key)
+
+        try:
+            with mock.patch.dict(sys.modules, {"jinja2": None}):
+                import importlib
+
+                mod = importlib.import_module("kicad_tools.report")
+                # Core figure/render exports must always be available
+                assert hasattr(mod, "FigureEntry")
+                assert hasattr(mod, "ReportFigureGenerator")
+                assert hasattr(mod, "render_html")
+                assert hasattr(mod, "render_pdf")
+                # Jinja2-dependent exports must be absent
+                assert not hasattr(mod, "ReportData")
+                assert not hasattr(mod, "ReportGenerator")
+        finally:
+            # Restore all saved modules
+            sys.modules.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# TestReportCLI
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# TestUnwrapEnvelope
+# ---------------------------------------------------------------------------
+
+
+class TestUnwrapEnvelope:
+    """Test the _unwrap_envelope helper."""
+
+    def test_unwraps_standard_envelope(self) -> None:
+        from kicad_tools.cli.report_cmd import _unwrap_envelope
+
+        payload = {
+            "schema_version": 1,
+            "generated_at": "2026-04-12T00:00:00+00:00",
+            "pcb_path": "board.kicad_pcb",
+            "data": {"layer_count": 4},
+        }
+        assert _unwrap_envelope(payload) == {"layer_count": 4}
+
+    def test_returns_flat_dict_unchanged(self) -> None:
+        from kicad_tools.cli.report_cmd import _unwrap_envelope
+
+        flat = {"layer_count": 4, "net_count": 80}
+        assert _unwrap_envelope(flat) == flat
+
+    def test_returns_none_for_null_data(self) -> None:
+        from kicad_tools.cli.report_cmd import _unwrap_envelope
+
+        payload = {
+            "schema_version": 1,
+            "generated_at": "2026-04-12T00:00:00+00:00",
+            "data": None,
+        }
+        assert _unwrap_envelope(payload) is None
+
+
+# ---------------------------------------------------------------------------
+# TestLoadDataDir
+# ---------------------------------------------------------------------------
+
+
+class TestLoadDataDir:
+    """Test the _load_data_dir helper directly."""
+
+    def test_filename_mapping_board_summary(self, tmp_path: Path) -> None:
+        """board_summary.json maps to board_stats field."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "board_summary.json").write_text(
+            json.dumps({"layer_count": 2, "footprint_count": 5})
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert "board_stats" in result
+        # footprint_count is preserved as-is (template uses footprint_count directly)
+        assert result["board_stats"]["footprint_count"] == 5
+
+    def test_filename_mapping_drc_summary(self, tmp_path: Path) -> None:
+        """drc_summary.json maps to drc field."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "drc_summary.json").write_text(json.dumps({"error_count": 0, "passed": True}))
+        result = _load_data_dir(str(tmp_path))
+        assert "drc" in result
+        assert result["drc"]["passed"] is True
+
+    def test_filename_mapping_erc_summary(self, tmp_path: Path) -> None:
+        """erc_summary.json maps to erc field."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "erc_summary.json").write_text(
+            json.dumps({"error_count": 2, "warning_count": 1, "passed": False, "details": "test"})
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert "erc" in result
+        assert result["erc"]["passed"] is False
+        assert result["erc"]["error_count"] == 2
+
+    def test_bom_groups_extraction(self, tmp_path: Path) -> None:
+        """BOM groups list is extracted from the groups key."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "bom.json").write_text(
+            json.dumps(
+                {
+                    "total_components": 3,
+                    "unique_parts": 1,
+                    "dnp_count": 0,
+                    "groups": [{"value": "10k", "qty": 3}],
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert isinstance(result["bom_groups"], list)
+        assert result["bom_groups"][0]["value"] == "10k"
+
+    def test_completion_percent_passed_through(self, tmp_path: Path) -> None:
+        """completion_percent emitted by the collector is passed through as-is."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "net_status.json").write_text(
+            json.dumps({"completion_percent": 95.0, "incomplete_count": 2})
+        )
+        result = _load_data_dir(str(tmp_path))
+        ns = result["net_status"]
+        assert "completion_percent" in ns
+        assert ns["completion_percent"] == 95.0
+
+    def test_envelope_unwrapping(self, tmp_path: Path) -> None:
+        """Enveloped JSON files are unwrapped to their data payload."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "audit.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-12T00:00:00+00:00",
+                    "pcb_path": "board.kicad_pcb",
+                    "data": {"verdict": "ready"},
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert result["audit"]["verdict"] == "ready"
+        # Envelope keys must not leak through
+        assert "schema_version" not in result["audit"]
+
+    def test_missing_files_produce_empty_result(self, tmp_path: Path) -> None:
+        """A data directory with no recognized JSON files returns empty dict."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        result = _load_data_dir(str(tmp_path))
+        assert result == {}
+
+    def test_narrative_json_unpacks_to_fields(self, tmp_path: Path) -> None:
+        """narrative.json unpacks its sub-keys into individual ReportData fields."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "narrative.json").write_text(
+            json.dumps(
+                {
+                    "design_narrative": "A USB audio interface board.",
+                    "functional_blocks": [
+                        {"name": "Power Supply", "filename": "power.kicad_sch"},
+                    ],
+                    "interfaces": [
+                        {"protocol": "I2C", "signals": ["SCL", "SDA"]},
+                    ],
+                    "power_architecture": [
+                        {"rail": "+3V3", "type": "power_symbol"},
+                    ],
+                    "assembly_notes": {
+                        "fine_pitch_count": 1,
+                        "fine_pitch_parts": ["U1"],
+                        "thermal_pad_count": 0,
+                        "polarized_count": 0,
+                        "summary": "1 fine-pitch component",
+                    },
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+
+        assert result["design_narrative"] == "A USB audio interface board."
+        assert len(result["functional_blocks"]) == 1
+        assert result["functional_blocks"][0]["name"] == "Power Supply"
+        assert len(result["interfaces"]) == 1
+        assert result["interfaces"][0]["protocol"] == "I2C"
+        assert len(result["power_architecture"]) == 1
+        assert result["power_architecture"][0]["rail"] == "+3V3"
+        assert result["assembly_notes"]["fine_pitch_count"] == 1
+        # The intermediate _narrative key must not leak
+        assert "_narrative" not in result
+
+    def test_narrative_json_with_envelope(self, tmp_path: Path) -> None:
+        """Envelope-wrapped narrative.json is unwrapped correctly."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "narrative.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-24T00:00:00+00:00",
+                    "pcb_path": "board.kicad_pcb",
+                    "data": {
+                        "design_narrative": "Test narrative.",
+                        "functional_blocks": None,
+                        "interfaces": None,
+                        "power_architecture": None,
+                        "assembly_notes": None,
+                    },
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+
+        assert result["design_narrative"] == "Test narrative."
+        # None sub-keys should not be in result
+        assert "functional_blocks" not in result
+        assert "interfaces" not in result
+        assert "_narrative" not in result
+
+    def test_narrative_null_envelope_skips(self, tmp_path: Path) -> None:
+        """Envelope with data=null narrative skips all narrative fields."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "narrative.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-24T00:00:00+00:00",
+                    "data": None,
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+
+        assert "design_narrative" not in result
+        assert "_narrative" not in result
+
+    def test_null_envelope_skips_section(self, tmp_path: Path) -> None:
+        """An envelope with data=null is skipped (section omitted)."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "board_summary.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-12T00:00:00+00:00",
+                    "data": None,
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert "board_stats" not in result
+
+
+# ---------------------------------------------------------------------------
+# TestReportCLI
+# ---------------------------------------------------------------------------
+
+
+class TestReportCLI:
+    """Test the CLI entry point."""
+
+    def test_help(self) -> None:
+        """kct report generate --help must exit 0."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        with pytest.raises(SystemExit) as exc_info:
+            report_main(["generate", "--help"])
+        assert exc_info.value.code == 0
+
+    def test_report_parser_registered(self) -> None:
+        """The report subcommand must be recognized by the main parser."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["report", "generate", "test.kicad_pro", "--mfr", "jlcpcb"])
+        assert args.command == "report"
+        assert args.report_command == "generate"
+        assert args.report_input == "test.kicad_pro"
+        assert args.report_mfr == "jlcpcb"
+
+    def test_generate_skeleton(self, tmp_path: Path, monkeypatch) -> None:
+        """Calling generate with --skip-collect should produce a skeleton report."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        # .kicad_pro inputs are resolved to a sibling .kicad_pcb that must
+        # exist on disk (stale-test fix, issue #3436 burn-down).
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "test.kicad_pro").write_text("{}")
+        (tmp_path / "test.kicad_pcb").write_text("(kicad_pcb)")
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "test.kicad_pro",
+                "--mfr",
+                "testmfr",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
+        )
+        assert result == 0
+
+        report_path = output_dir / "v1" / "report.md"
+        assert report_path.exists()
+
+        content = report_path.read_text(encoding="utf-8")
+        # The current template emits pandoc YAML front-matter (title:)
+        # rather than a "# <name>" heading / cover-block div.
+        assert 'title: "test"' in content
+        assert "testmfr" in content
+
+    def test_generate_with_data_dir(self, tmp_path: Path) -> None:
+        """Calling generate with --data-dir loads flat JSON files.
+
+        Uses the correct filenames that the collector writes
+        (``board_summary.json``, ``drc_summary.json``) and flat (no envelope)
+        data.  This verifies backward-compatibility with non-enveloped JSON.
+        """
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        # Filenames must match what the collector writes, with collector field names
+        (data_dir / "board_summary.json").write_text(
+            json.dumps({"layer_count": 2, "layer_names": ["F.Cu", "B.Cu"], "net_count": 10})
+        )
+        (data_dir / "drc_summary.json").write_text(
+            json.dumps({"error_count": 0, "warning_count": 0, "blocking_count": 0, "passed": True})
+        )
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "pcbway",
+                "-o",
+                str(output_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert result == 0
+
+        content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
+        assert "## Board Summary" in content
+        assert "## DRC Status" in content
+        assert "PASS" in content
+
+    def test_generate_with_data_dir_envelope(self, tmp_path: Path) -> None:
+        """Envelope-wrapped JSON snapshots render all report sections.
+
+        Writes JSON files using the same envelope format the collector
+        produces (``{schema_version, generated_at, pcb_path, data: {...}}``),
+        verifies that every section renders with the correct values, and
+        exercises the data-dir loading bug fixes from issue #1321:
+
+        1. Envelope unwrapping (all sections)
+        2. Filename mapping (board_summary.json -> board_stats,
+           drc_summary.json -> drc)
+        3. BOM groups extraction (data.groups -> bom_groups list)
+        """
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        def _envelope(data):
+            return {
+                "schema_version": 1,
+                "generated_at": "2026-04-12T00:00:00+00:00",
+                "pcb_path": "board.kicad_pcb",
+                "data": data,
+            }
+
+        # Bug 2: board_summary.json with collector field names
+        (data_dir / "board_summary.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "layer_count": 4,
+                        "footprint_count": 42,
+                        "net_count": 80,
+                        "segment_count": 200,
+                        "via_count": 15,
+                        "board_width_mm": 50.0,
+                        "board_height_mm": 30.0,
+                    }
+                )
+            )
+        )
+
+        # Bug 2: drc_summary.json (not drc.json)
+        (data_dir / "drc_summary.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "error_count": 1,
+                        "warning_count": 2,
+                        "blocking_count": 0,
+                        "passed": False,
+                    }
+                )
+            )
+        )
+
+        # Bug 3: BOM groups nested under "groups" key
+        (data_dir / "bom.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "total_components": 10,
+                        "unique_parts": 2,
+                        "dnp_count": 0,
+                        "groups": [
+                            {
+                                "value": "100nF",
+                                "footprint": "0402",
+                                "qty": 10,
+                                "refs": "C1-C10",
+                                "mpn": "CL05B104KO5NNNC",
+                                "lcsc": "C1525",
+                            },
+                        ],
+                    }
+                )
+            )
+        )
+
+        # Bug 1: audit with envelope
+        (data_dir / "audit.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "verdict": "ready",
+                        "action_items": [
+                            {
+                                "priority": 3,
+                                "description": "Review silkscreen",
+                                "command": None,
+                            },
+                        ],
+                    }
+                )
+            )
+        )
+
+        # net_status: collector now emits completion_percent directly
+        (data_dir / "net_status.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "total_nets": 80,
+                        "complete_count": 76,
+                        "incomplete_count": 4,
+                        "unrouted_count": 2,
+                        "total_unconnected_pads": 5,
+                        "completion_percent": 95.0,
+                        "incomplete_net_names": ["CLK", "MISO", "MOSI", "RST"],
+                    }
+                )
+            )
+        )
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert result == 0
+
+        content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
+
+        # Section headings present
+        assert "## Board Summary" in content
+        assert "## Bill of Materials" in content
+        assert "## DRC Status" in content
+        assert "## Manufacturing Readiness" in content
+        assert "## Routing Status" in content
+
+        # Bug 2: footprint_count renders directly (template uses footprint_count)
+        assert "| Footprints | 42 |" in content
+
+        # Bug 1: board_stats values render (layer_count from envelope)
+        assert "| Layers | 4 copper |" in content
+
+        # Bug 2: DRC values render from drc_summary.json
+        assert "| Errors | 1 |" in content
+        assert "FAIL" in content
+
+        # Bug 3: BOM table rows populated
+        assert "100nF" in content
+        assert "C1525" in content
+
+        # Bug 1: audit renders
+        assert "READY" in content
+        assert "Review silkscreen" in content
+
+        # Routing status: completion_percent renders directly from collector
+        assert "95.0%" in content
+        # New rows in the routing status table
+        assert "| Complete Nets | 76 / 80 |" in content
+        assert "| Incomplete Nets | 4 |" in content
+        assert "| Unconnected Pads | 5 |" in content
+        # Incomplete net names list rendered
+        assert "### Incomplete Nets" in content
+        assert "- CLK" in content
+        assert "- MOSI" in content
+
+    def test_generate_with_data_dir_null_envelope(self, tmp_path: Path) -> None:
+        """An envelope with ``data: null`` (collector failure) omits the section."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        (data_dir / "board_summary.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-12T00:00:00+00:00",
+                    "pcb_path": "board.kicad_pcb",
+                    "data": None,
+                }
+            )
+        )
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert result == 0
+
+        content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
+        # Section should be omitted, not crash
+        assert "## Board Summary" not in content
+
+    def test_data_dir_bypasses_collector(self, tmp_path: Path) -> None:
+        """When --data-dir is provided, ReportDataCollector must not be instantiated."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "board_stats.json").write_text(
+            json.dumps({"layer_count": 2, "component_count": 10})
+        )
+
+        output_dir = tmp_path / "reports"
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=AssertionError("_auto_collect should not be called"),
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                    "--data-dir",
+                    str(data_dir),
+                ]
+            )
+        assert result == 0
+
+    def test_auto_collect_writes_data_and_report_same_version(self, tmp_path: Path) -> None:
+        """Auto-collect should write data into vN/data/ and the report into the same vN/."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+
+        # Mock _auto_collect to simulate writing data into the correct version dir
+        def fake_auto_collect(pcb_path, output_dir, manufacturer, quantity, skip_erc):
+            from kicad_tools.report.generator import ReportGenerator
+
+            version_dir = ReportGenerator.next_version_dir(output_dir)
+            data_dir = version_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "board_stats.json").write_text(
+                json.dumps({"layer_count": 4, "component_count": 42})
+            )
+            from kicad_tools.cli.report_cmd import _load_data_dir
+
+            data_kwargs = _load_data_dir(str(data_dir))
+            return version_dir, data_kwargs
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=fake_auto_collect,
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                ]
+            )
+
+        assert result == 0
+
+        # Data and report must both be under v1
+        assert (output_dir / "v1" / "data" / "board_stats.json").exists()
+        assert (output_dir / "v1" / "report.md").exists()
+
+        # No v2 directory should exist (no version-numbering race)
+        assert not (output_dir / "v2").exists()
+
+    def test_auto_collect_collector_failure_non_fatal(self, tmp_path: Path) -> None:
+        """If collect_all produces no data, the CLI should still return 0."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+
+        # Mock _auto_collect to simulate a collector that produces no data
+        def empty_auto_collect(pcb_path, output_dir, manufacturer, quantity, skip_erc):
+            from kicad_tools.report.generator import ReportGenerator
+
+            version_dir = ReportGenerator.next_version_dir(output_dir)
+            data_dir = version_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return version_dir, {}
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=empty_auto_collect,
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                ]
+            )
+
+        assert result == 0
+        assert (output_dir / "v1" / "report.md").exists()
+
+    def test_new_flags_forwarded_to_collector(self, tmp_path: Path) -> None:
+        """--quantity and --skip-erc must reach _auto_collect correctly."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+        captured = {}
+
+        def capturing_auto_collect(pcb_path, output_dir, manufacturer, quantity, skip_erc):
+            captured["quantity"] = quantity
+            captured["skip_erc"] = skip_erc
+            from kicad_tools.report.generator import ReportGenerator
+
+            version_dir = ReportGenerator.next_version_dir(output_dir)
+            data_dir = version_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return version_dir, {}
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=capturing_auto_collect,
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                    "--quantity",
+                    "50",
+                    "--skip-erc",
+                ]
+            )
+
+        assert result == 0
+        assert captured["quantity"] == 50
+        assert captured["skip_erc"] is True
+
+    def test_skip_collect_produces_skeleton(self, tmp_path: Path) -> None:
+        """--skip-collect must produce a skeleton report without invoking the collector."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=AssertionError("_auto_collect should not be called"),
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                    "--skip-collect",
+                ]
+            )
+
+        assert result == 0
+        report_path = output_dir / "v1" / "report.md"
+        assert report_path.exists()
+
+        content = report_path.read_text(encoding="utf-8")
+        # Skeleton: YAML front matter present, optional data sections absent
+        assert 'title: "board"' in content
+        assert "## Board Summary" not in content
+
+    def test_version_dir_parameter_in_generator(self, tmp_path: Path) -> None:
+        """ReportGenerator.generate() with version_dir writes to the specified directory."""
+        data = _full_data()
+        gen = ReportGenerator()
+
+        custom_dir = tmp_path / "v99"
+        report_path = gen.generate(data, tmp_path, version_dir=custom_dir)
+
+        assert report_path.parent.name == "v99"
+        assert report_path.exists()
+
+        content = report_path.read_text(encoding="utf-8")
+        assert 'title: "TestBoard"' in content
+
+    def test_version_dir_none_auto_increments(self, tmp_path: Path) -> None:
+        """When version_dir is None, generate() auto-increments as before."""
+        data = _full_data()
+        gen = ReportGenerator()
+
+        p1 = gen.generate(data, tmp_path, version_dir=None)
+        p2 = gen.generate(data, tmp_path, version_dir=None)
+
+        assert p1.parent.name == "v1"
+        assert p2.parent.name == "v2"
+
+
+# ---------------------------------------------------------------------------
+# TestReportAutoCollect
+# ---------------------------------------------------------------------------
+
+
+class TestReportAutoCollect:
+    """Tests for the _auto_collect helper function."""
+
+    def test_auto_collect_returns_version_dir_and_data(self, tmp_path: Path) -> None:
+        """_auto_collect should return a (version_dir, data_kwargs) tuple."""
+        from kicad_tools.cli.report_cmd import _auto_collect
+        from kicad_tools.report.collector import ReportDataCollector
+
+        def stub_collect_all(self_collector, data_dir):
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "board_summary.json").write_text(
+                json.dumps({"layer_count": 2, "footprint_count": 5})
+            )
+            return {"board_summary": data_dir / "board_summary.json"}
+
+        with mock.patch.object(ReportDataCollector, "collect_all", stub_collect_all):
+            version_dir, data_kwargs = _auto_collect(
+                pcb_path=Path("test.kicad_pcb"),
+                output_dir=tmp_path / "reports",
+                manufacturer="jlcpcb",
+                quantity=10,
+                skip_erc=True,
+            )
+
+        assert version_dir == tmp_path / "reports" / "v1"
+        assert "board_stats" in data_kwargs
+        assert data_kwargs["board_stats"]["layer_count"] == 2
+
+    def test_auto_collect_next_version_increments(self, tmp_path: Path) -> None:
+        """If v1 already exists, _auto_collect should use v2."""
+        from kicad_tools.cli.report_cmd import _auto_collect
+        from kicad_tools.report.collector import ReportDataCollector
+
+        output_dir = tmp_path / "reports"
+        (output_dir / "v1").mkdir(parents=True)
+
+        def stub_collect_all(self_collector, data_dir):
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return {}
+
+        with mock.patch.object(ReportDataCollector, "collect_all", stub_collect_all):
+            version_dir, _ = _auto_collect(
+                pcb_path=Path("test.kicad_pcb"),
+                output_dir=output_dir,
+                manufacturer="jlcpcb",
+                quantity=5,
+                skip_erc=False,
+            )
+
+        assert version_dir == output_dir / "v2"
+
+
+# ---------------------------------------------------------------------------
+# TestNetClassification - template rendering of net type breakdown
+# ---------------------------------------------------------------------------
+
+
+class TestNetClassification:
+    """Tests for signal/zone/single-pad net classification in report output."""
+
+    def test_signal_completion_primary_metric(self, tmp_path: Path) -> None:
+        """Signal Net Completion renders as the primary metric."""
+        data = _full_data(
+            net_status={
+                "total_nets": 23,
+                "complete_count": 4,
+                "completion_percent": 17.4,
+                "incomplete_count": 19,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 95,
+                "incomplete_net_names": ["GND", "+3.3V", "+3.3VA", "SPI_NSS"],
+                "signal_net_count": 16,
+                "signal_complete_count": 15,
+                "signal_completion_percent": 93.8,
+                "signal_incomplete_net_names": ["MISO"],
+                "zone_connected_count": 3,
+                "zone_connected_nets": ["+3.3V", "+3.3VA", "GND"],
+                "single_pad_count": 4,
+                "single_pad_nets": ["LATCH", "SPI_NSS", "TEST1", "TEST2"],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Signal completion is the primary metric
+        assert "Signal Net Completion" in content
+        assert "93.8%" in content
+        assert "15/16" in content
+        # Overall completion still present
+        assert "Overall Completion" in content
+        assert "17.4%" in content
+
+    def test_zone_connected_nets_section(self, tmp_path: Path) -> None:
+        """Zone-connected nets render with names when present."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 7,
+                "completion_percent": 70.0,
+                "incomplete_count": 3,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 6,
+                "incomplete_net_names": ["GND", "+3.3V", "SDA"],
+                "signal_net_count": 8,
+                "signal_complete_count": 7,
+                "signal_completion_percent": 87.5,
+                "signal_incomplete_net_names": ["SDA"],
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["+3.3V", "GND"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "Zone-Connected Nets" in content
+        assert "- +3.3V" in content
+        assert "- GND" in content
+        # Single-pad section should not appear
+        assert "Single-Pad Nets" not in content
+
+    def test_single_pad_nets_section(self, tmp_path: Path) -> None:
+        """Single-pad nets render when present."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 9,
+                "completion_percent": 90.0,
+                "incomplete_count": 1,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 2,
+                "incomplete_net_names": ["SDA"],
+                "signal_net_count": 7,
+                "signal_complete_count": 6,
+                "signal_completion_percent": 85.7,
+                "signal_incomplete_net_names": ["SDA"],
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 3,
+                "single_pad_nets": ["LATCH", "SPI_NSS", "TEST"],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "Single-Pad Nets" in content
+        assert "3 single-pad nets (no routing needed)" in content
+        # Individual nets should NOT be listed (collapsed to count)
+        assert "- LATCH" not in content
+        # Zone section should not appear
+        assert "### Zone-Connected Nets" not in content
+
+    def test_no_zone_or_single_pad_nets(self, tmp_path: Path) -> None:
+        """When no zone or single-pad nets exist, those sections are omitted."""
+        data = _full_data(
+            net_status={
+                "total_nets": 5,
+                "complete_count": 4,
+                "completion_percent": 80.0,
+                "incomplete_count": 1,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 2,
+                "incomplete_net_names": ["SDA"],
+                "signal_net_count": 5,
+                "signal_complete_count": 4,
+                "signal_completion_percent": 80.0,
+                "signal_incomplete_net_names": ["SDA"],
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Routing Status" in content
+        assert "Signal Net Completion" in content
+        assert "### Zone-Connected Nets" not in content
+        assert "### Single-Pad Nets" not in content
+
+    def test_signal_incomplete_nets_listed(self, tmp_path: Path) -> None:
+        """Unrouted signal nets section shows only signal nets."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 5,
+                "completion_percent": 50.0,
+                "incomplete_count": 5,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 10,
+                "incomplete_net_names": ["GND", "MISO", "MOSI", "SCL", "SDA"],
+                "signal_net_count": 8,
+                "signal_complete_count": 5,
+                "signal_completion_percent": 62.5,
+                "signal_incomplete_net_names": ["MISO", "MOSI", "SCL"],
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["GND", "VCC"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Unrouted Signal Nets" in content
+        assert "- MISO" in content
+        assert "- MOSI" in content
+        assert "- SCL" in content
+        # GND should NOT be in the unrouted signal nets list
+        # (it should be in zone-connected)
+        # GND should appear in zone-connected section
+        assert "### Zone-Connected Nets" in content
+        assert "- GND" in content
+        assert "- VCC" in content
+
+    def test_named_nets_listed_auto_count_shown(self, tmp_path: Path) -> None:
+        """Named nets are listed individually, auto-generated shown as count."""
+        data = _full_data(
+            net_status={
+                "total_nets": 20,
+                "complete_count": 10,
+                "completion_percent": 50.0,
+                "incomplete_count": 10,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 20,
+                "incomplete_net_names": [
+                    "AUDIO_L",
+                    "I2S_DIN",
+                    "Net-(U1-1)",
+                    "Net-(U2-3)",
+                    "unconnected-(C40-2)",
+                ],
+                "signal_net_count": 18,
+                "signal_complete_count": 10,
+                "signal_completion_percent": 55.6,
+                "signal_incomplete_net_names": [
+                    "AUDIO_L",
+                    "I2S_DIN",
+                    "Net-(U1-1)",
+                    "Net-(U2-3)",
+                    "unconnected-(C40-2)",
+                ],
+                "signal_incomplete_named": ["AUDIO_L", "I2S_DIN"],
+                "signal_incomplete_auto_count": 3,
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["GND", "VCC"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Named nets listed individually
+        assert "### Unrouted Signal Nets" in content
+        assert "- AUDIO_L" in content
+        assert "- I2S_DIN" in content
+        # Auto-generated nets shown as count, not listed
+        assert "3 auto-generated component nets" in content
+        assert "Net-(U1-1)" not in content
+        assert "unconnected-(C40-2)" not in content
+
+    def test_only_auto_generated_nets_no_heading(self, tmp_path: Path) -> None:
+        """When all incomplete signals are auto-generated, no named heading appears."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 5,
+                "completion_percent": 50.0,
+                "incomplete_count": 5,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 10,
+                "incomplete_net_names": ["Net-(U1-1)", "Net-(U2-3)"],
+                "signal_net_count": 8,
+                "signal_complete_count": 5,
+                "signal_completion_percent": 62.5,
+                "signal_incomplete_net_names": ["Net-(U1-1)", "Net-(U2-3)"],
+                "signal_incomplete_named": [],
+                "signal_incomplete_auto_count": 2,
+                "zone_connected_count": 2,
+                "zone_connected_nets": ["GND", "VCC"],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # No "Unrouted Signal Nets" heading since named list is empty
+        assert "### Unrouted Signal Nets" not in content
+        # Count line still appears
+        assert "2 auto-generated component nets" in content
+
+    def test_only_named_nets_no_auto_count(self, tmp_path: Path) -> None:
+        """When all incomplete signals are named, no auto count line appears."""
+        data = _full_data(
+            net_status={
+                "total_nets": 10,
+                "complete_count": 7,
+                "completion_percent": 70.0,
+                "incomplete_count": 3,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 6,
+                "incomplete_net_names": ["MISO", "MOSI", "SCL"],
+                "signal_net_count": 10,
+                "signal_complete_count": 7,
+                "signal_completion_percent": 70.0,
+                "signal_incomplete_net_names": ["MISO", "MOSI", "SCL"],
+                "signal_incomplete_named": ["MISO", "MOSI", "SCL"],
+                "signal_incomplete_auto_count": 0,
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Unrouted Signal Nets" in content
+        assert "- MISO" in content
+        assert "- MOSI" in content
+        assert "- SCL" in content
+        assert "auto-generated" not in content
+
+    def test_zero_named_zero_auto_no_section(self, tmp_path: Path) -> None:
+        """When no incomplete signal nets exist, neither section appears."""
+        data = _full_data(
+            net_status={
+                "total_nets": 5,
+                "complete_count": 5,
+                "completion_percent": 100.0,
+                "incomplete_count": 0,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 0,
+                "incomplete_net_names": [],
+                "signal_net_count": 5,
+                "signal_complete_count": 5,
+                "signal_completion_percent": 100.0,
+                "signal_incomplete_net_names": [],
+                "signal_incomplete_named": [],
+                "signal_incomplete_auto_count": 0,
+                "zone_connected_count": 0,
+                "zone_connected_nets": [],
+                "single_pad_count": 0,
+                "single_pad_nets": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Unrouted Signal Nets" not in content
+        assert "### Incomplete Nets" not in content
+        assert "auto-generated" not in content
+
+    def test_backward_compat_old_net_status_keys(self, tmp_path: Path) -> None:
+        """Old net_status dict without new keys still renders correctly."""
+        data = _full_data(
+            net_status={
+                "total_nets": 61,
+                "complete_count": 58,
+                "completion_percent": 95.5,
+                "incomplete_count": 3,
+                "unrouted_count": 0,
+                "total_unconnected_pads": 5,
+                "incomplete_net_names": ["GND", "SDA", "VCC"],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Routing Status" in content
+        assert "95.5%" in content
+        # Signal line should NOT appear (key not present)
+        assert "Signal Net Completion" not in content
+        # Old incomplete nets list should still render
+        assert "### Incomplete Nets" in content
+        assert "- GND" in content
+
+
+# ---------------------------------------------------------------------------
+# TestDesignNarrative - template rendering of narrative sections
+# ---------------------------------------------------------------------------
+
+
+class TestDesignNarrative:
+    """Tests for design narrative, interfaces, power architecture, and assembly notes."""
+
+    def test_design_overview_renders_with_narrative(self, tmp_path: Path) -> None:
+        """Design Overview section renders when design_narrative is provided."""
+        data = _full_data(
+            design_narrative="This board implements a USB audio interface.",
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" in content
+        assert "### Theory of Operation" in content
+        assert "This board implements a USB audio interface." in content
+
+    def test_design_overview_omitted_when_no_data(self, tmp_path: Path) -> None:
+        """Design Overview section is absent when all narrative fields are None."""
+        data = _full_data(
+            design_narrative=None,
+            functional_blocks=None,
+            interfaces=None,
+            power_architecture=None,
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" not in content
+
+    def test_functional_blocks_render(self, tmp_path: Path) -> None:
+        """Functional blocks section renders sheet names."""
+        data = _full_data(
+            functional_blocks=[
+                {"name": "Power Supply", "filename": "power.kicad_sch"},
+                {"name": "Audio DAC", "filename": "audio_dac.kicad_sch"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Functional Blocks" in content
+        assert "**Power Supply**" in content
+        assert "(power.kicad_sch)" in content
+        assert "**Audio DAC**" in content
+
+    def test_interfaces_render(self, tmp_path: Path) -> None:
+        """Communication interfaces table renders detected protocols."""
+        data = _full_data(
+            interfaces=[
+                {"protocol": "I2C", "signals": ["SCL", "SDA"]},
+                {"protocol": "SPI", "signals": ["MISO", "MOSI", "SCK"]},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Communication Interfaces" in content
+        assert "| I2C | SCL, SDA |" in content
+        assert "| SPI | MISO, MOSI, SCK |" in content
+
+    def test_power_architecture_renders_rails_and_regulators(self, tmp_path: Path) -> None:
+        """Power architecture shows rails and regulator table."""
+        data = _full_data(
+            power_architecture=[
+                {"rail": "+3V3", "type": "power_symbol"},
+                {"rail": "+5V", "type": "power_symbol"},
+                {"rail": "GND", "type": "power_symbol"},
+                {"rail": "U3", "type": "regulator", "value": "AMS1117-3.3"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "### Power Architecture" in content
+        assert "+3V3" in content
+        assert "+5V" in content
+        assert "GND" in content
+        assert "| U3 | AMS1117-3.3 |" in content
+
+    def test_power_architecture_rails_only(self, tmp_path: Path) -> None:
+        """Power architecture renders only power rails when no regulators."""
+        data = _full_data(
+            power_architecture=[
+                {"rail": "+3V3", "type": "power_symbol"},
+                {"rail": "GND", "type": "power_symbol"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "**Power Rails**" in content
+        assert "+3V3, GND" in content
+        assert "| Regulator |" not in content
+
+    def test_assembly_notes_render(self, tmp_path: Path) -> None:
+        """Assembly notes section renders component warnings."""
+        data = _full_data(
+            assembly_notes={
+                "fine_pitch_count": 2,
+                "fine_pitch_parts": ["U1", "U3"],
+                "thermal_pad_count": 1,
+                "polarized_count": 5,
+                "summary": "2 fine-pitch components; 1 thermal pad; 5 polarized components",
+            },
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Assembly Notes" in content
+        assert "2 fine-pitch components" in content
+        assert "U1, U3" in content
+        assert "1 thermal pad" in content
+        assert "verify solder paste" in content
+        assert "5 polarized components" in content
+        assert "check orientation" in content
+
+    def test_assembly_notes_omitted_when_none(self, tmp_path: Path) -> None:
+        """Assembly notes section absent when data is None."""
+        data = _full_data(assembly_notes=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Assembly Notes" not in content
+
+    def test_graceful_degradation_sparse_metadata(self, tmp_path: Path) -> None:
+        """When narrative fields have no data, sections gracefully degrade."""
+        data = ReportData(
+            project_name="Sparse",
+            revision="1",
+            date="2026-01-01",
+            manufacturer="pcbway",
+            design_narrative=None,
+            functional_blocks=None,
+            interfaces=None,
+            power_architecture=None,
+            assembly_notes=None,
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" not in content
+        assert "## Assembly Notes" not in content
+        assert "None" not in content
+
+    def test_narrative_only_design_overview(self, tmp_path: Path) -> None:
+        """Design Overview shows just narrative when no blocks/interfaces/power."""
+        data = _full_data(
+            design_narrative="A simple test board.",
+            functional_blocks=None,
+            interfaces=None,
+            power_architecture=None,
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Design Overview" in content
+        assert "### Theory of Operation" in content
+        assert "A simple test board." in content
+        assert "### Functional Blocks" not in content
+        assert "### Communication Interfaces" not in content
+        assert "### Power Architecture" not in content
+
+
+class TestHandSolderTHTSection:
+    """Hand-Solder (THT) Components section rendering (issue #3539)."""
+
+    _THT_ROWS = [
+        {
+            "value": "Conn_01x04",
+            "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+            "qty": 1,
+            "refs": "J1",
+        },
+        {"value": "1k", "footprint": "Resistor_THT:R_Axial", "qty": 3, "refs": "R6, R20, R21"},
+    ]
+
+    def test_section_rendered_with_tht_components(self, tmp_path: Path) -> None:
+        data = _full_data(tht_components=self._THT_ROWS)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Hand-Solder (THT) Components" in content
+        # Total quantity and intent statement
+        assert "4 through-hole components are" in content
+        assert "excluded from the SMT pick-and-place file" in content
+        # Every excluded ref must be listed (assembler needs the full set)
+        assert "J1" in content
+        assert "R6, R20, R21" in content
+        # short_footprint filter strips the library prefix
+        assert "R_Axial" in content
+
+    def test_section_omitted_when_none(self, tmp_path: Path) -> None:
+        data = _full_data(tht_components=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Hand-Solder (THT) Components" not in content
+        assert "hand-soldered" not in content
+
+    def test_section_omitted_when_empty_list(self, tmp_path: Path) -> None:
+        """SMD-only boards (empty exclusion set) must not get a spurious section."""
+        data = _full_data(tht_components=[])
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Hand-Solder (THT) Components" not in content
+
+    def test_singular_phrasing_for_one_component(self, tmp_path: Path) -> None:
+        data = _full_data(
+            tht_components=[
+                {
+                    "value": "SW_Push",
+                    "footprint": "Button_Switch_THT:SW_PUSH_6mm",
+                    "qty": 1,
+                    "refs": "SW1",
+                }
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "1 through-hole component is" in content
+        assert "It appears" in content

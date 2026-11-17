@@ -1,0 +1,456 @@
+"""Independent copper-extracted LVS (issue #3742).
+
+This is the "third leg" of board soundness the external reviewer asked
+for: a netlist-correspondence gate that is independent of the router's
+pad-net labels.  Where :mod:`kicad_tools.lvs.board_lvs` trusts each
+pad's declared ``(net K "NAME")`` child (and so passes a board whose
+router mislabels its own copper), this comparator extracts the
+*physical* pad partition straight from routed copper — via
+:meth:`ConnectivityValidator.extract_pad_partition`, which never reads a
+net label — and diffs that against the schematic partition.
+
+Two failure classes are reported:
+
+* **short** — two pads on *different* schematic nets land in the *same*
+  copper component (copper fuses nets that should be isolated).  This is
+  the board-00 failure mode: ``GND`` shorted to ``LED_ANODE`` because the
+  router wired copper to the wrong pad, even though the pad labels still
+  read correctly.
+* **open** — two pads on the *same* schematic net land in *different*
+  copper components (the net is not fully connected by copper).
+
+The comparator is pure: it returns data, never raises for a mismatch.
+Pads present on only one side (schematic-only or PCB-only) are ignored
+for the partition diff — that asymmetry is the label-based comparator's
+job (:func:`board_lvs.compare_netlists`), and the two checks are meant
+to run side by side.
+
+**Input contract: one identity per schematic net.** The shorts predicate
+is "two distinct schematic net *names* inside one copper component", so it
+is only as sound as the identity the schematic side supplies.  Every pad on
+one schematic net must map to the *same* string, and pads on different nets
+to *different* strings.  Issue #4615 was a violation of the first half:
+``get_net_for_pin()`` derived an unnamed net's auto-generated name from the
+pin being queried, so a k-pad unnamed node presented k distinct identities
+and this comparator dutifully reported C(k, 2) shorts for copper that was
+perfectly correct.  The fix was to make the identity canonical per
+connected component (see
+:func:`kicad_tools.schematic.models.netlist_mixin.auto_net_name`); the
+predicate below was **not** touched, and must not be.
+
+Concretely: do **not** "fix" a false-short report by teaching
+:func:`compare_partitions` to skip, bucket, or normalize auto-generated
+``Net-(...)`` names.  That would make the symptom vanish while silently
+disabling short detection for every unnamed net on every board — two
+adjacent unnamed RC mid-nodes fused by a router error would become
+invisible.  If a short looks false, the identity mapping is wrong; fix it
+upstream.
+
+Vacuity guard (#4005 review): when the schematic binds **zero** pads —
+every pin floats (a PCB-first fixture schematic with no ``(wire ...)``
+elements) or no schematic pin matches a board pad — the partition diff
+can detect neither shorts nor opens, so an empty mismatch list is *no
+evidence*, not a pass.  The comparator refuses to report ``clean=True``
+in that case: it emits a single synthetic mismatch of
+``kind="vacuous"`` (see :data:`VACUOUS_KIND`), making the result dirty.
+
+The contract is deliberately the simplest defensible one: **vacuous iff
+zero bound pads**.  A percentage floor (e.g. "<50% of pads bindable")
+was considered and rejected: any bound pad contributes real, falsifiable
+evidence for the nets it touches, and legitimate boards mix wired power
+nets with PCB-only connector fixtures — a ratio threshold would need an
+arbitrary constant and misfire on those.  Zero bound pads is the unique
+case where the comparator can observe literally nothing.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
+
+# Mismatch ``kind`` emitted by the vacuity guard (#4005 review): the
+# schematic bound zero pads, so the comparator has no evidence and must
+# not report clean.  Additive to the v1 lvs.json schema (a new enum value
+# inside the existing ``copper_mismatches[].kind`` field).
+VACUOUS_KIND = "vacuous"
+
+# Sentinel "net name" carried by the synthetic vacuity mismatch.  Angle
+# brackets keep it out of the legal KiCad net-name space.
+VACUOUS_NET = "<no-schematic-evidence>"
+
+
+@dataclass(frozen=True)
+class CopperLVSMismatch:
+    """A single copper-vs-schematic partition disagreement.
+
+    Attributes:
+        kind: ``"short"`` (different schematic nets fused in copper),
+            ``"open"`` (same schematic net split across copper islands),
+            or ``"vacuous"`` (the schematic bound zero pads, so the
+            comparator has no evidence either way — synthetic guard
+            entry, see :data:`VACUOUS_KIND`).
+        net_a / net_b: The schematic net names involved.  For a short
+            these differ; for an open they are equal; for a vacuous
+            entry both are :data:`VACUOUS_NET`.
+        pad_a / pad_b: The two offending pads (``"REF.PAD"`` form) that
+            witness the mismatch.  For a vacuous entry these carry the
+            evidence counters (``"bound_pads=0"`` / ``"board_pads=N"``)
+            instead of pad ids.
+    """
+
+    kind: str
+    net_a: str
+    net_b: str
+    pad_a: str
+    pad_b: str
+
+
+@dataclass(frozen=True)
+class CopperLVSResult:
+    """Outcome of comparing routed copper against the schematic netlist.
+
+    ``clean`` is ``True`` iff ``mismatches`` is empty.  ``shorts`` and
+    ``opens`` partition the mismatches by kind for convenient reporting.
+
+    ``bound_pad_count`` records how many distinct logical board pins carried a real
+    (non-``None``) schematic net — the amount of evidence the diff was
+    computed from.  ``None`` means the count was not recorded (results
+    hand-built by older callers/tests); results produced by
+    :func:`compare_partitions` always set it.
+    """
+
+    clean: bool
+    mismatches: tuple[CopperLVSMismatch, ...]
+    bound_pad_count: int | None = None
+
+    @property
+    def shorts(self) -> tuple[CopperLVSMismatch, ...]:
+        return tuple(m for m in self.mismatches if m.kind == "short")
+
+    @property
+    def opens(self) -> tuple[CopperLVSMismatch, ...]:
+        return tuple(m for m in self.mismatches if m.kind == "open")
+
+    @property
+    def vacuous(self) -> bool:
+        """True when this result is the vacuity-guard verdict (#4005 review).
+
+        A vacuous result means the schematic bound zero pads, so the
+        comparator observed nothing — ``clean`` is forced ``False`` and
+        the sole mismatch has ``kind="vacuous"``.  Derived from the
+        mismatch list (not stored) so JSON round-trips preserve it.
+        """
+        return any(m.kind == VACUOUS_KIND for m in self.mismatches)
+
+
+def compare_partitions(
+    schematic_net_of_pad: dict[tuple[str, str], str | None],
+    copper_partition: list[frozenset[str]],
+    advisory_net_names: frozenset[str] = frozenset(),
+    *,
+    pad_bindings: dict[str, tuple[str, str]] | None = None,
+) -> CopperLVSResult:
+    """Diff a physical copper partition against a schematic netlist.
+
+    This is the pure core, decoupled from any file IO so it can be unit
+    tested with hand-built inputs.
+
+    Args:
+        schematic_net_of_pad: ``{(ref, pad) -> net_name | None}`` as built
+            by :func:`board_lvs._schematic_pin_to_net`.  ``None`` means the
+            pin is floating in the schematic and is excluded from the diff.
+            **These strings are net identities**: the caller must supply the
+            same string for every pad on one schematic net (including
+            unnamed nets, whose auto-generated names are canonical per
+            connected component).  Splintered identities manufacture false
+            shorts and mask real opens — the identity is the caller's
+            contract to keep, not something this function may paper over
+            (issue #4615).
+        copper_partition: list of ``frozenset`` pad-id groups (``"REF.PAD"``
+            form) from :meth:`ConnectivityValidator.extract_pad_partition`.
+        pad_bindings: Optional explicit occurrence-id -> (reference, pin)
+            mapping from ``extract_pad_occurrences``. Each physical occurrence
+            binds independently, even when several share one schematic pin.
+            Without this mapping, legacy REF.PAD groups remain supported,
+            including repeated logical membership in separate islands.
+            ``bound_pad_count`` continues to count distinct logical pins.
+        advisory_net_names: deprecated compatibility argument, ignored.
+            Every disconnected schematic net reports opens, including nets
+            listed here. A net name or zone ownership cannot prove copper
+            continuity or turn an incomplete board into a clean result (#4982).
+
+    Returns:
+        :class:`CopperLVSResult`.  A short is reported once per offending
+        net pair (the lexicographically smallest pad witnesses are used);
+        an open is reported once per pair of same-net copper islands.
+
+        **Vacuity guard (#4005 review):** if zero pads end up bound (no
+        schematic pin carries a real net AND matches a board pad), the
+        diff has no evidence and the result is NOT clean — it carries a
+        single synthetic ``kind="vacuous"`` mismatch and
+        ``bound_pad_count=0`` instead of a vacuous ``clean=True``.
+    """
+    # Normalize legacy logical groups into distinct occurrences per island.
+    # A repeated REF.PAD across islands must not be overwritten or treated as
+    # a singleton schematic net. Explicit bindings avoid suffix parsing.
+    display: dict[str, str] = {}
+    logical_binding: dict[str, tuple[str, str] | None] = {}
+    if pad_bindings is None:
+        logical_lookup = {f"{ref}.{pad}": (ref, pad) for ref, pad in schematic_net_of_pad}
+        normalized = []
+        for index, comp in enumerate(copper_partition):
+            nodes = set()
+            for offset, logical in enumerate(sorted(comp)):
+                node = f"{index}:{offset}"
+                nodes.add(node)
+                display[node] = logical
+                logical_binding[node] = logical_lookup.get(logical)
+            normalized.append(frozenset(nodes))
+        copper_partition = normalized
+    else:
+        seen: set[str] = set()
+        for comp in copper_partition:
+            for node in comp:
+                if node not in pad_bindings or node in seen:
+                    raise ValueError("Physical pad must have one binding and one copper island")
+                seen.add(node)
+                logical_binding[node] = pad_bindings[node]
+                display[node] = ".".join(pad_bindings[node])
+
+    if pad_bindings is not None and seen != set(pad_bindings):
+        raise ValueError("Every bound physical occurrence must appear in the partition")
+
+    on_board = set().union(*copper_partition) if copper_partition else set()
+    pad_net: dict[str, str] = {}
+    bound_logical: set[tuple[str, str]] = set()
+    for node, binding in logical_binding.items():
+        net = schematic_net_of_pad.get(binding) if binding is not None else None
+        if net is not None:
+            pad_net[node] = net
+            assert binding is not None
+            bound_logical.add(binding)
+
+    # --- Vacuity guard (#4005 review): zero bound pads means the diff
+    #     below can detect neither shorts nor opens, so an empty mismatch
+    #     list would be zero-evidence, not a pass.  Refuse to report clean:
+    #     emit one synthetic ``vacuous`` mismatch so ``clean`` is False and
+    #     every downstream consumer (recipe gate, lvs.json, CI asserters,
+    #     JSON round-trip) sees a dirty result. ---
+    if not pad_net:
+        vacuity = CopperLVSMismatch(
+            kind=VACUOUS_KIND,
+            net_a=VACUOUS_NET,
+            net_b=VACUOUS_NET,
+            pad_a="bound_pads=0",
+            pad_b=f"board_pads={len(on_board)}",
+        )
+        return CopperLVSResult(clean=False, mismatches=(vacuity,), bound_pad_count=0)
+
+    # Map each pad to its copper-component index.
+    comp_of_pad: dict[str, int] = {}
+    for idx, comp in enumerate(copper_partition):
+        for pad_id in comp:
+            comp_of_pad[pad_id] = idx
+
+    mismatches: list[CopperLVSMismatch] = []
+
+    # --- Shorts: within each copper component, every distinct schematic
+    #     net present is a short against every other distinct net there. ---
+    seen_short_pairs: set[tuple[str, str]] = set()
+    for comp in copper_partition:
+        # Net name -> representative (smallest) pad id in this component.
+        net_rep: dict[str, str] = {}
+        for pad_id in sorted(comp, key=lambda node: (display[node], node)):
+            net = pad_net.get(pad_id)
+            if net is None:
+                continue
+            net_rep.setdefault(net, pad_id)
+        nets_here = sorted(net_rep)
+        for i, na in enumerate(nets_here):
+            for nb in nets_here[i + 1 :]:
+                key = (na, nb)
+                if key in seen_short_pairs:
+                    continue
+                seen_short_pairs.add(key)
+                mismatches.append(
+                    CopperLVSMismatch(
+                        kind="short",
+                        net_a=na,
+                        net_b=nb,
+                        pad_a=display[net_rep[na]],
+                        pad_b=display[net_rep[nb]],
+                    )
+                )
+
+    # --- Opens: for each schematic net, the pads carrying it must all live
+    #     in one copper component.  If they span multiple components the net
+    #     is not fully routed (open). ---
+    net_to_pads: dict[str, list[str]] = {}
+    for pad_id, net in pad_net.items():
+        net_to_pads.setdefault(net, []).append(pad_id)
+
+    for net, pads in sorted(net_to_pads.items()):
+        # A single physical occurrence cannot be open. Multiple lands bound
+        # to the same schematic pin must still reach one copper island.  NOTE (#4615): this skip is also why the per-pad auto-naming
+        # bug MASKED opens.  Every unnamed net presented one pad per
+        # identity, so no unnamed net could ever be reported open however
+        # badly it was routed.  With canonical per-component identities they
+        # are visible again; expect genuine new opens on boards that carry
+        # unnamed nets — those are true positives, not a regression.
+        if len(pads) < 2:
+            continue
+        # Group these pads by copper component.
+        comps: dict[int, list[str]] = {}
+        for pad_id in sorted(pads):
+            comps.setdefault(comp_of_pad[pad_id], []).append(pad_id)
+        if len(comps) <= 1:
+            continue
+        # Report one open per pair of distinct islands, using the smallest
+        # pad in each island as the witness.
+        island_reps = [
+            min(members, key=lambda node: (display[node], node)) for members in comps.values()
+        ]
+        island_reps.sort(key=lambda node: (display[node], node))
+        for i in range(len(island_reps) - 1):
+            mismatches.append(
+                CopperLVSMismatch(
+                    kind="open",
+                    net_a=net,
+                    net_b=net,
+                    pad_a=display[island_reps[i]],
+                    pad_b=display[island_reps[i + 1]],
+                )
+            )
+
+    return CopperLVSResult(
+        clean=not mismatches,
+        mismatches=tuple(mismatches),
+        bound_pad_count=len(bound_logical),
+    )
+
+
+def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> CopperLVSResult:
+    """Compare a routed PCB's *copper* against the schematic netlist.
+
+    Loads the schematic partition (label-bound nets, PWR_FLAG-safe) via
+    :func:`board_lvs._schematic_pin_to_net`, extracts the physical copper
+    partition from the PCB via
+    :meth:`ConnectivityValidator.extract_pad_partition`, then diffs them
+    with :func:`compare_partitions`.
+
+    Args:
+        sch_path: Path to a root ``.kicad_sch``.  The full sheet
+            hierarchy is walked via :func:`board_lvs._schematic_pin_to_net`
+            — every ``(sheet ...)`` sub-sheet's pins are bound, not just
+            the root sheet (issue #4099) — so LVS is no longer vacuous on
+            hierarchically-organized designs.
+        pcb_path: Path to a routed ``.kicad_pcb``.
+
+    Returns:
+        :class:`CopperLVSResult`.  Always returned — mismatches are data,
+        not exceptions.  No net is exempted from ``open`` reporting solely
+        because it owns a copper zone (Issue #4982) — see
+        :func:`compare_partitions`' ``advisory_net_names`` docstring for
+        why the old net-wide waiver was removed.
+    """
+    # Import lazily: ConnectivityValidator pulls in the PCB schema stack and
+    # we want ``import kicad_tools.lvs`` to stay cheap.
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    sch_path = Path(sch_path)
+    pcb_path = Path(pcb_path)
+
+    schematic_net_of_pad = _schematic_pin_to_net(sch_path)
+    validator = ConnectivityValidator(pcb_path)
+    copper_partition, pad_bindings = validator.extract_pad_occurrences()
+
+    # Compare actual copper components without exemptions based on net names
+    # or zone ownership (#4982). The #5133 extractor traces separate fill
+    # solids and physical contacts; disconnected pad-bearing islands
+    # must remain visible, including for legacy advisory callers.
+    return compare_partitions(schematic_net_of_pad, copper_partition, pad_bindings=pad_bindings)
+
+
+def result_to_json(result: CopperLVSResult) -> dict:
+    """Serialize a :class:`CopperLVSResult` to a JSON-safe dict.
+
+    Used by the ``python -m kicad_tools.lvs.copper_lvs`` subprocess
+    entrypoint (see :mod:`kicad_tools.lvs.recipe`'s fail-closed gate) so a
+    *fresh* out-of-process comparison can be marshalled back to the parent
+    recipe process for an authoritative, byte-for-byte agreement check.
+    """
+    return {
+        "clean": result.clean,
+        # Additive evidence field (#4005 review): how many board pads carried
+        # a real schematic net.  ``null`` when the producing result predates
+        # the vacuity guard / was hand-built without a count.
+        "bound_pad_count": result.bound_pad_count,
+        "mismatches": [
+            {
+                "kind": m.kind,
+                "net_a": m.net_a,
+                "net_b": m.net_b,
+                "pad_a": m.pad_a,
+                "pad_b": m.pad_b,
+            }
+            for m in result.mismatches
+        ],
+    }
+
+
+def result_from_json(payload: dict) -> CopperLVSResult:
+    """Reconstruct a :class:`CopperLVSResult` from :func:`result_to_json`."""
+    mismatches = tuple(
+        CopperLVSMismatch(
+            kind=m["kind"],
+            net_a=m["net_a"],
+            net_b=m["net_b"],
+            pad_a=m["pad_a"],
+            pad_b=m["pad_b"],
+        )
+        for m in payload.get("mismatches", ())
+    )
+    bound = payload.get("bound_pad_count")
+    return CopperLVSResult(
+        clean=bool(payload["clean"]),
+        mismatches=mismatches,
+        bound_pad_count=int(bound) if bound is not None else None,
+    )
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """CLI/subprocess entrypoint: emit a fresh copper-LVS result as JSON.
+
+    Usage::
+
+        python -m kicad_tools.lvs.copper_lvs <schematic> <routed_pcb>
+
+    Loads both files fresh (a clean interpreter, no in-process recipe
+    state), runs :func:`compare_copper_netlist`, and prints the result via
+    :func:`result_to_json` to stdout as a single JSON object.  This is the
+    authoritative on-disk check the recipe gate compares its in-process
+    result against (issue #3838).
+    """
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="python -m kicad_tools.lvs.copper_lvs",
+        description="Emit a fresh out-of-process copper-LVS result as JSON.",
+    )
+    parser.add_argument("schematic", help="Path to the .kicad_sch (root sheet).")
+    parser.add_argument("routed_pcb", help="Path to the routed .kicad_pcb.")
+    args = parser.parse_args(argv)
+
+    result = compare_copper_netlist(args.schematic, args.routed_pcb)
+    sys.stdout.write(json.dumps(result_to_json(result)))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
+    import sys
+
+    sys.exit(_main())

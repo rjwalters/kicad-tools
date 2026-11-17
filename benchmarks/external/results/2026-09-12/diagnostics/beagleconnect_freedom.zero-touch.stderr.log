@@ -1,0 +1,33 @@
+C++ router backend: available (version 1.0.0) -- timing will be recorded.
+ERROR: 1 footprint(s) / 5 pad(s) outside Edge.Cuts — placement invalid
+       Off-board: SH1
+       Run `kct placement check` for details, or `--allow-offboard` to route anyway.
+WARNING: rule 'diffpair_length_skew' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+WARNING: rule 'diffpair_routing_continuity' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+WARNING: rule 'match_group_length_skew' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+[seed] Seeded global random with --seed 42
+beagleconnect_freedom: 30.2% complete, 0 vias, 0.0mm -> /evidence/cases/beagleconnect_freedom.zero-touch/output/beagleconnect_freedom.zero-touch.json
+
+# External autorouter benchmark results (zero-touch)
+
+| Board | Protocol | Completion | Connections | Vias | Wirelength (mm) | Runtime | Backend | kct check | kicad-cli DRC | Diff pairs | Outcome | Artifact |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| beagleconnect_freedom | zero-touch | 30.2% | 139 of 460 | 0 | 0.00 | 89.3 s (failed) | cpp | not run | 429 | 0/4 | failed | fallback input |
+
+**Measured artifact is fallback input, not router output**
+
+- `beagleconnect_freedom` (zero-touch): the router exited 2 (non-zero) and produced no output file for this attempt -- no routing progress was captured; measuring the pre-route input as fallback -- connectivity, copper and check measurements describe the pre-route input. Runtime measures the routing attempt.
+
+**Notes**
+
+- `beagleconnect_freedom` (zero-touch): seed=42
+- `beagleconnect_freedom` (zero-touch): router exit code: 2
+- `beagleconnect_freedom` (zero-touch): human baseline (pre-rip-up): 2291 segments, 399 vias, 2791.2mm, 25 unrouted pads
+- `beagleconnect_freedom` (zero-touch): router produced no output file for this attempt -- measuring the pre-route (ripped-up) input as fallback; the completion% below reflects pre-existing/trivial connectivity, NOT new routing progress (see route_outcome / pre_route_completion in the JSON report)
+- `beagleconnect_freedom` (zero-touch): DeepPCB published reference: {'airwires': 414}
+
+**Reproduction**
+
+- `beagleconnect_freedom`: https://git.beagleboard.org/beagleconnect/freedom @ `3f99c08de7d81991f95eb2c23f30798a129ffdcf` (kicad-tools `696315f`, protocol `zero-touch`)
+
+markdown report: /evidence/cases/beagleconnect_freedom.zero-touch/output/report.zero-touch.md

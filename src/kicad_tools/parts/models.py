@@ -1,0 +1,399 @@
+"""
+Data models for parts database.
+
+Defines dataclasses for parts, availability, and search results.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .composition import ComposedPart
+
+
+class PartCategory(Enum):
+    """Component categories."""
+
+    RESISTOR = "resistor"
+    CAPACITOR = "capacitor"
+    INDUCTOR = "inductor"
+    DIODE = "diode"
+    TRANSISTOR = "transistor"
+    IC = "ic"
+    CONNECTOR = "connector"
+    CRYSTAL = "crystal"
+    LED = "led"
+    SWITCH = "switch"
+    RELAY = "relay"
+    FUSE = "fuse"
+    OTHER = "other"
+
+
+class PackageType(Enum):
+    """Package mounting type."""
+
+    SMD = "smd"
+    THROUGH_HOLE = "through_hole"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class PartPrice:
+    """Price break for a part."""
+
+    quantity: int
+    unit_price: float  # USD
+    currency: str = "USD"
+
+    @property
+    def total_price(self) -> float:
+        """Total price for this quantity."""
+        return self.quantity * self.unit_price
+
+
+# "lcsc-anonymous" is a live read of LCSC's public API (no JLC credentials);
+# it verifies stock for the dry-run/website legs but never gates ``--upload``,
+# which keeps requiring OpenAPI credentials (Issue #8539).
+LIVE_STOCK_SOURCES = frozenset({"live", "lcsc-anonymous"})
+
+
+@dataclass
+class Part:
+    """
+    A component part from a supplier.
+
+    Represents a part available from LCSC/JLCPCB or similar.
+    """
+
+    # Identification
+    lcsc_part: str  # e.g., "C123456"
+    mfr_part: str = ""  # Manufacturer part number
+    manufacturer: str = ""  # Manufacturer name
+    description: str = ""
+
+    # Classification
+    category: PartCategory = PartCategory.OTHER
+    package: str = ""  # e.g., "0402", "SOIC-8"
+    package_type: PackageType = PackageType.UNKNOWN
+
+    # Specifications (common fields)
+    value: str = ""  # e.g., "10k", "100nF"
+    tolerance: str = ""  # e.g., "1%", "5%"
+    voltage_rating: str = ""  # e.g., "50V"
+    power_rating: str = ""  # e.g., "0.1W"
+    temperature_range: str = ""  # e.g., "-40°C to +85°C"
+
+    # Additional specs stored as dict
+    specs: dict[str, str] = field(default_factory=dict)
+
+    # Stock and pricing
+    stock: int = 0
+    min_order: int = 1
+    prices: list[PartPrice] = field(default_factory=list)
+
+    # JLCPCB assembly info
+    is_basic: bool = False  # JLCPCB basic part (no extra fee)
+    is_preferred: bool = False  # JLCPCB preferred part
+
+    # URLs and references
+    datasheet_url: str = ""
+    product_url: str = ""
+
+    # Cache metadata
+    fetched_at: datetime | None = None
+    stock_source: str = "unknown"
+    snapshot_revision: str | None = None
+    snapshot_at: datetime | None = None
+    read_at: datetime | None = None
+    from_cache: bool = False
+
+    @property
+    def stock_verified(self) -> bool:
+        """Live observation within 24 hours; not a supplier reservation guarantee."""
+        if self.stock_source not in LIVE_STOCK_SOURCES or self.fetched_at is None:
+            return False
+        age = datetime.now(tz=self.fetched_at.tzinfo) - self.fetched_at
+        return timedelta(0) <= age <= timedelta(hours=24)
+
+    def inventory_provenance(self) -> dict:
+        """JSON-safe provenance; read/cache time never replaces observation time."""
+        return {
+            "source": self.stock_source,
+            "observed_at": self.fetched_at.isoformat() if self.fetched_at else None,
+            "snapshot_revision": self.snapshot_revision,
+            "snapshot_at": self.snapshot_at.isoformat() if self.snapshot_at else None,
+            "read_at": self.read_at.isoformat() if self.read_at else None,
+            "from_cache": self.from_cache,
+            "stock_verified": self.stock_verified,
+            "verification_max_age_hours": 24,
+        }
+
+    @property
+    def in_stock(self) -> bool:
+        """Check if part is in stock."""
+        return self.stock > 0
+
+    @property
+    def is_smd(self) -> bool:
+        """Check if part is SMD."""
+        return self.package_type == PackageType.SMD
+
+    @property
+    def best_price(self) -> float | None:
+        """Get lowest unit price available."""
+        if not self.prices:
+            return None
+        return min(p.unit_price for p in self.prices)
+
+    def price_at_quantity(self, qty: int) -> float | None:
+        """Get unit price for a specific quantity."""
+        if not self.prices:
+            return None
+        # Find the price break for this quantity
+        applicable = [p for p in self.prices if p.quantity <= qty]
+        if not applicable:
+            return self.prices[0].unit_price if self.prices else None
+        return max(applicable, key=lambda p: p.quantity).unit_price
+
+    def to_composed(self) -> ComposedPart:
+        """
+        Project this flat supplier ``Part`` into a ``ComposedPart``.
+
+        Creates a minimal Entity with two passive pins (suitable for
+        two-terminal passives).  For ICs / multi-pin parts the caller
+        should replace the entity with a richer definition.
+
+        Returns:
+            A ``ComposedPart`` populated from this part's fields.
+        """
+        from .composition import (
+            ComposedPart,
+            Entity,
+            PinDirection,
+            Unit,
+            UnitPin,
+        )
+
+        # Build a generic two-pin unit as a default
+        unit = Unit(
+            id=f"{self.lcsc_part}-unit",
+            name=self.description or self.lcsc_part,
+            pins=[
+                UnitPin(name="1", number="1", direction=PinDirection.PASSIVE),
+                UnitPin(name="2", number="2", direction=PinDirection.PASSIVE),
+            ],
+        )
+        entity = Entity(
+            id=f"{self.lcsc_part}-entity",
+            name=self.description or self.lcsc_part,
+            units=[unit],
+        )
+
+        # Map Part fields into parametric dict
+        params: dict[str, str] = {}
+        if self.value:
+            params["value"] = self.value
+        if self.tolerance:
+            params["tolerance"] = self.tolerance
+        if self.voltage_rating:
+            params["voltage"] = self.voltage_rating
+        if self.power_rating:
+            params["power"] = self.power_rating
+        if self.temperature_range:
+            params["temperature_range"] = self.temperature_range
+        # Include any extra specs
+        params.update(self.specs)
+
+        tags: list[str] = []
+        if self.category != PartCategory.OTHER:
+            tags.append(self.category.value)
+        if self.is_basic:
+            tags.append("jlcpcb-basic")
+        if self.is_preferred:
+            tags.append("jlcpcb-preferred")
+        if self.package_type == PackageType.SMD:
+            tags.append("smd")
+        elif self.package_type == PackageType.THROUGH_HOLE:
+            tags.append("through-hole")
+
+        return ComposedPart(
+            id=self.lcsc_part,
+            entity=entity,
+            package=self.package,
+            category=self.category.value,
+            mpn=self.mfr_part,
+            manufacturer=self.manufacturer,
+            description=self.description,
+            params=params,
+            tags=tags,
+            lcsc_part=self.lcsc_part,
+            datasheet_url=self.datasheet_url,
+            created_at=self.fetched_at,
+        )
+
+    def __str__(self) -> str:
+        return f"{self.lcsc_part}: {self.description}"
+
+
+@dataclass
+class PartAvailability:
+    """
+    Availability check result for a BOM item.
+
+    Maps a BOM entry to its matched part and availability status.
+    """
+
+    # BOM item info
+    reference: str  # Reference designator (e.g., "U1")
+    value: str  # Value from schematic
+    footprint: str  # Footprint name
+    lcsc_part: str  # LCSC part number from schematic/BOM
+
+    # Match result
+    part: Part | None = None  # Matched part if found
+    matched: bool = False
+    in_stock: bool = False
+    error: str = ""  # Error message if lookup failed
+
+    # Quantity info
+    quantity_needed: int = 1
+    quantity_available: int = 0
+
+    @property
+    def sufficient_stock(self) -> bool:
+        """Check if enough stock for needed quantity."""
+        return (
+            self.part is not None
+            and self.part.stock_verified
+            and self.quantity_available >= self.quantity_needed
+        )
+
+    @property
+    def status(self) -> str:
+        """Human-readable status."""
+        if self.error:
+            return f"Error: {self.error}"
+        if not self.matched:
+            return "Not found"
+        if self.part is not None and not self.part.stock_verified:
+            return "Stock unverified (refresh live inventory)"
+        if not self.in_stock:
+            return "Out of stock"
+        if not self.sufficient_stock:
+            return f"Low stock ({self.quantity_available} available)"
+        return "OK"
+
+
+class BatchLookupResult(dict[str, Part]):
+    """Part mapping with per-part query source; cached/offline is not live stock."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sources: dict[str, str] = {}
+        self.diagnostics: list[str] = []
+
+
+@dataclass
+class LookupResult:
+    """Lookup coverage, distinct from a part's stock observation provenance."""
+
+    part: Part | None = None
+    source: str = "unknown"
+    status: str = "unavailable"
+    diagnostics: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SearchResult:
+    """Result from a parts search."""
+
+    query: str
+    parts: list[Part] = field(default_factory=list)
+    total_count: int = 0
+    page: int = 1
+    page_size: int = 20
+
+    source: str = "unknown"
+    coverage: str = "unknown"
+    diagnostics: list[str] = field(default_factory=list)
+
+    @property
+    def has_more(self) -> bool:
+        """Check if more results available."""
+        return self.total_count > self.page * self.page_size
+
+    def __len__(self) -> int:
+        return len(self.parts)
+
+    def __iter__(self):
+        return iter(self.parts)
+
+
+@dataclass
+class BOMAvailability:
+    """
+    Availability check results for an entire BOM.
+
+    Aggregates availability checks for all BOM items.
+    """
+
+    items: list[PartAvailability] = field(default_factory=list)
+    checked_at: datetime | None = None
+
+    @property
+    def all_available(self) -> bool:
+        """Check if all items are available."""
+        return all(item.sufficient_stock for item in self.items)
+
+    @property
+    def missing_parts(self) -> list[PartAvailability]:
+        """Get items that couldn't be found."""
+        return [item for item in self.items if not item.matched]
+
+    @property
+    def out_of_stock(self) -> list[PartAvailability]:
+        """Get items that are out of stock."""
+        return [
+            item
+            for item in self.items
+            if item.matched
+            and item.part is not None
+            and item.part.stock_verified
+            and not item.in_stock
+        ]
+
+    @property
+    def low_stock(self) -> list[PartAvailability]:
+        """Get items with insufficient stock."""
+        return [
+            item
+            for item in self.items
+            if item.matched
+            and item.part is not None
+            and item.part.stock_verified
+            and item.in_stock
+            and not item.sufficient_stock
+        ]
+
+    @property
+    def available(self) -> list[PartAvailability]:
+        """Get items with sufficient stock."""
+        return [item for item in self.items if item.sufficient_stock]
+
+    def summary(self) -> dict[str, int]:
+        """Get summary counts."""
+        return {
+            "total": len(self.items),
+            "available": len(self.available),
+            "missing": len(self.missing_parts),
+            "out_of_stock": len(self.out_of_stock),
+            "low_stock": len(self.low_stock),
+            "unverified": sum(
+                item.matched and item.part is not None and not item.part.stock_verified
+                for item in self.items
+            ),
+        }

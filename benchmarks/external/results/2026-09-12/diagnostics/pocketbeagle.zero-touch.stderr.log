@@ -1,0 +1,75 @@
+C++ router backend: available (version 1.0.0) -- timing will be recorded.
+/evidence/source/src/kicad_tools/cli/route_cmd.py:14839: UserWarning: Auto-grid: memory budget cap forces grid 0.127mm > clearance/2 (0.075mm) even at max_cells=500,000. Routing may produce clearance violations at fine-pitch pads. Increase max_cells (currently capped at 4,000,000 by the auto-grid retry) or use a looser manufacturer profile.
+  grid_auto_result = auto_select_grid_resolution(
+/evidence/source/src/kicad_tools/router/io.py:1639: UserWarning: Auto-grid: memory budget cap forces grid 0.127mm > clearance/2 (0.075mm) even at max_cells=500,000. Routing may produce clearance violations at fine-pitch pads. Increase max_cells (currently capped at 4,000,000 by the auto-grid retry) or use a looser manufacturer profile.
+  uniform_result = auto_select_grid_resolution(
+Error: Auto-grid selected 0.127mm > clearance/2 (0.075mm) because the memory budget cap (max_cells=500,000) forced a coarser grid.
+The router's own safety rule rejects this grid; routing WILL produce clearance-violating vias/segments (DRC shorts).
+An unrouted net is strictly safer than a short.
+
+Options:
+  1. Enlarge or split the board (fewer cells per mm^2)
+  2. Add routing layers (--auto-layers / --starting-layers)
+  3. Loosen the manufacturer clearance (looser --manufacturer profile or larger --clearance)
+  4. Pass --allow-unsafe-grid (or --force) to route anyway and accept the DRC risk (not recommended)
+
+WARNING: rule 'diffpair_length_skew' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+WARNING: rule 'diffpair_routing_continuity' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+WARNING: rule 'match_group_length_skew' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+[seed] Seeded global random with --seed 42
+  Note: no current-paths sidecar found; declared branch current checks (path_ampacity) are INACTIVE. Pass --current-paths FILE to enable them, or --no-current-paths to silence this.
+
+--- Auto-selecting grid resolution ---
+Multi-Resolution Grid Plan (adaptive)
+  Coarse grid: 0.127mm
+  Fine zones: 22
+    SW1: 0.1000mm (8.0x5.5mm, ~4,400 cells) offset=(0.0551,0.0289)
+    X2: 0.0500mm (14.5x19.5mm, ~113,390 cells) offset=(0.0125,0.0400)
+    R5: 0.0500mm (5.0x5.6mm, ~11,300 cells) offset=(0.0365,0.0075)
+    R4: 0.1000mm (5.6x5.0mm, ~2,850 cells) offset=(0.0492,0.0244)
+    R8: 0.0500mm (5.0x5.6mm, ~11,300 cells) offset=(0.0365,0.0157)
+    R7: 0.0500mm (5.0x5.6mm, ~11,300 cells) offset=(0.0365,0.0273)
+    R6: 0.0500mm (5.0x5.6mm, ~11,300 cells) offset=(0.0365,0.0389)
+    R10: 0.0500mm (5.6x5.0mm, ~11,300 cells) offset=(0.0322,0.0358)
+    R11: 0.0500mm (5.6x5.0mm, ~11,300 cells) offset=(0.0280,0.0314)
+    R9: 0.0500mm (5.0x5.6mm, ~11,300 cells) offset=(0.0409,0.0043)
+    P1: 0.0200mm (47.2x6.5mm, ~771,720 cells) offset=(0.0111,0.0136)
+    P2: 0.0200mm (47.2x6.5mm, ~771,720 cells) offset=(0.0111,0.0136)
+    U3: 0.0635mm (4.8x5.0mm, ~5,925 cells)
+    Y1: 0.1000mm (4.0x7.9mm, ~3,239 cells) offset=(0.0211,0.0794)
+    X1: 0.0250mm (6.7x11.6mm, ~123,888 cells) offset=(0.0000,0.0036)
+    U2: 0.0500mm (6.2x5.3mm, ~13,144 cells) offset=(0.0339,0.0299)
+    C5: 0.1000mm (4.0x5.0mm, ~2,050 cells) offset=(0.0389,0.0322)
+    C6: 0.1000mm (5.7x4.0mm, ~2,337 cells) offset=(0.0523,0.0354)
+    FB1: 0.1000mm (5.7x4.0mm, ~2,337 cells) offset=(0.0805,0.0456)
+    FB2: 0.1000mm (5.7x4.0mm, ~2,337 cells)
+    C7: 0.1000mm (5.0x4.0mm, ~2,050 cells) offset=(0.0571,0.0000)
+    R12: 0.1000mm (5.0x4.0mm, ~2,050 cells) offset=(0.0799,0.0000)
+  Total cell estimate: 2,022,321
+  Uniform fallback would be: 0.127mm
+
+pocketbeagle: 31.8% complete, 0 vias, 0.0mm -> /evidence/cases/pocketbeagle.zero-touch/output/pocketbeagle.zero-touch.json
+
+# External autorouter benchmark results (zero-touch)
+
+| Board | Protocol | Completion | Connections | Vias | Wirelength (mm) | Runtime | Backend | kct check | kicad-cli DRC | Diff pairs | Outcome | Artifact |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pocketbeagle | zero-touch | 31.8% | 94 of 296 | 0 | 0.00 | 1.7 s (failed) | cpp | FAIL (394E / 801W) | 0 | n/a | failed | fallback input |
+
+**Measured artifact is fallback input, not router output**
+
+- `pocketbeagle` (zero-touch): the router exited 1 (non-zero) and produced no output file for this attempt -- no routing progress was captured; measuring the pre-route input as fallback -- connectivity, copper and check measurements describe the pre-route input. Runtime measures the routing attempt.
+
+**Notes**
+
+- `pocketbeagle` (zero-touch): seed=42
+- `pocketbeagle` (zero-touch): router exit code: 1
+- `pocketbeagle` (zero-touch): human baseline (pre-rip-up): 1297 segments, 171 vias, 2561.0mm, 78 unrouted pads
+- `pocketbeagle` (zero-touch): router produced no output file for this attempt -- measuring the pre-route (ripped-up) input as fallback; the completion% below reflects pre-existing/trivial connectivity, NOT new routing progress (see route_outcome / pre_route_completion in the JSON report)
+- `pocketbeagle` (zero-touch): DeepPCB published reference: {'airwires': 290}
+
+**Reproduction**
+
+- `pocketbeagle`: https://github.com/beagleboard/pocketbeagle @ `d793a63f48dd3041e333362d5ec870377d255f89` (kicad-tools `696315f`, protocol `zero-touch`)
+
+markdown report: /evidence/cases/pocketbeagle.zero-touch/output/report.zero-touch.md

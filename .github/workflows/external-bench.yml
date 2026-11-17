@@ -1,0 +1,142 @@
+name: External Benchmark Re-run
+
+# Issue #7669: reproducible re-run of the four published external benchmark
+# cases (pocketbeagle, beagleconnect_freedom, strf zero-touch; strf tuned) on
+# the pinned KiCad container with the C++ router backend built.
+#
+# Dispatch-only and NEVER commits: the reports and provenance are uploaded as
+# an artifact, and a human turns them into a dated collection under
+# benchmarks/external/results/<date>/ via a normal PR (interpretation of the
+# numbers is human-reviewed and bound to the tool commit SHA recorded below).
+# Results are reported as measured, regressions included: a case that fails
+# to route still uploads its report.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Same pinned image as ci.yml (#5682); keep the digest in sync with ci.yml's
+# top-level KICAD_IMAGE so benchmark runs use the toolchain CI verifies.
+env:
+  KICAD_IMAGE: kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec
+
+concurrency:
+  group: external-bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  kicad_pin:
+    name: KiCad image pin (env -> needs bridge)
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+    steps:
+      - id: pin
+        run: echo "image=${KICAD_IMAGE}" >> "$GITHUB_OUTPUT"
+
+  bench:
+    name: Run external benchmark cases
+    needs: kicad_pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0 --memory 12g
+    defaults:
+      run:
+        shell: bash
+    env:
+      SEED: "42"
+      PYTHONHASHSEED: "42"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential jq
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # Same official one-liner as ci.yml's container jobs.
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Record native backend check
+        # Timing is only valid with the C++ backend; this step fails the run
+        # rather than publishing Python-fallback timings.
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out
+          uv run kct build-native --check | tee bench-out/native-check.txt
+          grep -q "C++ backend: available" bench-out/native-check.txt
+
+      - name: Zero-touch protocol (pocketbeagle, beagleconnect_freedom, strf)
+        # A routing failure is a measurement, not a workflow failure: the
+        # report is still written and uploaded.
+        continue-on-error: true
+        run: |
+          uv run kct bench external \
+            --board pocketbeagle --board beagleconnect_freedom --board strf \
+            --seed "$SEED" -v --output-dir bench-out/zero-touch
+
+      - name: Tuned protocol (strf)
+        continue-on-error: true
+        run: |
+          uv run kct bench external --board strf --tuned \
+            --seed "$SEED" -v --output-dir bench-out/tuned
+
+      - name: Write run provenance
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out
+          jq -n \
+            --arg date "$(date -u +%F)" \
+            --arg recorded "$(date -u +%FT%TZ)" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg run "$GITHUB_RUN_ID" \
+            --arg image "$KICAD_IMAGE" \
+            --arg kicad "$(kicad-cli --version)" \
+            --arg python "$(uv run python -c 'import platform; print(platform.python_version())')" \
+            --arg native "$(cat bench-out/native-check.txt 2>/dev/null || true)" \
+            --argjson seed "$SEED" \
+            '{record_type: "external_benchmark_run_provenance", record_version: 1,
+              run_date_utc: $date, recorded_at: $recorded, tool_commit: $commit,
+              ref: $ref, workflow_run_id: $run, kicad_image: $image,
+              kicad_cli: $kicad, python: $python, native_check: $native,
+              seed: $seed}' > bench-out/run-provenance.json
+          git status --porcelain --untracked-files=no > bench-out/tracked-source-status.txt
+
+      - name: Upload reports and provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: external-bench-${{ github.run_id }}
+          # Reports + provenance only; normalized/ and routed/ hold full
+          # copies of third-party board files and are never published.
+          path: |
+            bench-out/run-provenance.json
+            bench-out/tracked-source-status.txt
+            bench-out/native-check.txt
+            bench-out/*/*.json
+            bench-out/*/*.md
+          if-no-files-found: warn

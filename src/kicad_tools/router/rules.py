@@ -1,0 +1,2598 @@
+"""
+Design rules and net class routing parameters.
+
+This module provides:
+- DesignRules: Trace width, clearance, via parameters, and A* costs
+- NetClassRouting: Per-net-class routing preferences
+- Predefined net classes for common use cases
+"""
+
+import logging
+import math
+import re
+import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Literal
+
+from .layers import Layer, LayerStack
+from .pair_protocols import PairProtocol, ProtocolDefaults, parse_protocol, protocol_defaults
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pathlib import Path
+
+    from .clearance_resolver import ClearanceResolver
+    from .pairwise_clearance import PairwiseClearanceTable
+
+logger = logging.getLogger(__name__)
+
+# Allowed values for :attr:`NetClassRouting.route_via`.
+# - ``"pathfinder"`` (default) -- ordinary trace, standard pathfinder routing.
+# - ``"pour"`` -- skip from pathfinder; expect a copper zone/pour to satisfy
+#   the net (e.g. GND, VCC).  When no zone exists, callers fall through to
+#   the existing ``no_zone_nets`` warning path rather than skipping silently.
+# - ``"manual"`` -- skip from pathfinder; designer is responsible for routing
+#   the net by hand (e.g. wide motor-phase traces).  Emits a distinct log
+#   line so the user is not left wondering why the net is unconnected.
+RouteVia = Literal["pathfinder", "pour", "manual"]
+
+
+@dataclass
+class ZoneRules:
+    """Design rules specific to zone (copper pour) handling.
+
+    These parameters control how zones interact with traces, pads, and vias
+    during routing. They mirror KiCad's zone settings.
+
+    Attributes:
+        clearance: Zone-to-trace clearance in mm
+        min_thickness: Minimum copper width within zone in mm
+        thermal_gap: Gap between pad and zone copper for thermal relief in mm
+        thermal_bridge_width: Width of thermal relief spokes in mm
+        thermal_spoke_count: Number of thermal relief spokes (typically 2 or 4)
+        thermal_spoke_angle: Rotation of spoke pattern in degrees (0 or 45)
+        pth_connection: Connection type for PTH pads ("thermal", "solid", "none")
+        smd_connection: Connection type for SMD pads ("thermal", "solid", "none")
+        via_connection: Connection type for vias ("thermal", "solid", "none")
+        remove_islands: Whether to remove isolated copper islands
+        island_min_area: Minimum area for island removal in mm²
+    """
+
+    clearance: float = 0.2  # Zone-to-trace clearance (mm)
+    min_thickness: float = 0.2  # Minimum copper width (mm)
+    thermal_gap: float = 0.3  # Gap for thermal relief (mm)
+    thermal_bridge_width: float = 0.3  # Spoke width (mm)
+    thermal_spoke_count: int = 4  # Number of spokes
+    thermal_spoke_angle: float = 45.0  # Spoke rotation (degrees)
+    pth_connection: str = "thermal"  # PTH pad connection type
+    smd_connection: str = "thermal"  # SMD pad connection type
+    via_connection: str = "solid"  # Via connection type
+    remove_islands: bool = True  # Remove isolated islands
+    island_min_area: float = 0.5  # Minimum island area (mm²)
+
+
+@dataclass(frozen=True)
+class PairGap:
+    """A coupled pair's resolved gap (Issue #6443): see :meth:`DesignRules.pair_gap`.
+
+    Attributes:
+        gap_mm: The gap the pair is laid at and checked against.
+        class_mm: The class's own ``effective_intra_pair_clearance()``.
+        source: What raised the gap above the class value, or ``None`` when
+            the class value stands.
+    """
+
+    gap_mm: float
+    class_mm: float
+    source: str | None = None
+
+    @property
+    def raised(self) -> bool:
+        """Whether a floor raised the gap above the class value."""
+        return self.source is not None
+
+
+@dataclass
+class DesignRules:
+    """Design rules for routing."""
+
+    trace_width: float = 0.2  # mm
+    trace_clearance: float = 0.2  # mm
+    via_drill: float = 0.35  # mm (JLCPCB min is 0.3, use 0.35 for margin)
+    via_diameter: float = 0.7  # mm (0.35 drill + 0.35 annular ring)
+    via_clearance: float = 0.2  # mm
+    min_drill_clearance: float = 0.102  # mm (minimum drill-to-drill spacing, including same-net)
+    # Manufacturer hole-to-hole (drill-to-drill) edge-to-edge floor (Issue #3855).
+    #
+    # Distinct from ``min_drill_clearance`` (the tiny 0.102mm same-net via-MERGE
+    # threshold used by grid.py / pathfinder.py / drc_nudge.py).  This is the
+    # real fab drill-pitch minimum (canonically 0.5mm), consulted by the
+    # via-PLACEMENT guards (diff-pair fan-out, escape, stitching) to reject a
+    # candidate via whose drill would sit within ``min_hole_to_hole`` edge-to-edge
+    # of any existing drill (via OR through-hole pad, ANY net).  Mirrors the
+    # validate-side ``manufacturers.base.DesignRules.min_hole_to_hole_mm`` (#3846)
+    # and the DRC ``hole_to_hole_clearance`` rule (#3842) so the router
+    # pre-check and the DRC post-check agree.  Defaults to 0.5 so behavior is
+    # correct even when no manufacturer profile is threaded in.
+    min_hole_to_hole: float = 0.5  # mm
+    # Minimum gap, drill edge to SMD pad copper edge, for a via that does NOT
+    # overlap the pad (Issue #7296).  The checker's ``via_at_pad_edge`` warning
+    # (Issue #7220) fires when a drill edge sits closer than the fab's
+    # ``min_solder_mask_dam_mm`` to a pad's mask aperture -- no dam is left to
+    # hold the tent.  This is that dam plus the pad's mask expansion; ``None``
+    # takes the dam from :attr:`manufacturer`'s profile (0 when unresolvable).
+    # A drill that overlaps pad copper is the via-in-pad decision, governed by
+    # ``allow_smd_vias``, and is not affected.
+    min_via_pad_edge_gap: float | None = None  # mm
+    grid_resolution: float = 0.1  # mm (routing grid)
+    grid_origin_offset: tuple[float, float] = (
+        0.0,
+        0.0,
+    )  # mm (grid origin shift for mixed-pitch alignment)
+
+    # Manufacturer identifier (Issue #2605)
+    # Used by the escape router (and potentially other consumers) to look up
+    # manufacturer capability flags such as ``via_in_pad_supported`` via
+    # ``mfr_limits.get_mfr_limits()``.  When ``None`` (default), the escape
+    # router behaves as if the manufacturer does NOT support via-in-pad,
+    # preserving pre-#2605 deferred-pin behavior on fine-pitch SSOP/TSSOP.
+    manufacturer: str | None = None
+
+    # The board's AUTHORED minimum clearance (Issue #6443, piece (c)):
+    # ``board.design_settings.rules.min_clearance`` of the input ``.kicad_pro``
+    # (falling back to ``defaults.clearance_min``), as
+    # :func:`~kicad_tools.router.clearance_resolver._read_project_clearances`
+    # parses it.  KiCad holds EVERY copper pair to it -- including a diff
+    # pair's own P and N, as ``clearance`` and as ``diff_pair_gap`` -- so it
+    # floors the coupled gap (:meth:`pair_gap`).  ``None`` (default): the
+    # board declares none, and the pair gap is the class / fab value alone.
+    authored_min_clearance: float | None = None
+
+    # The manufacturer clearance floor for the board's actual stackup (Issue
+    # #6561): :func:`~kicad_tools.router.mfr_limits.resolve_clearance` with the
+    # effective copper layer count and copper weight -- the same
+    # ``get_design_rules(layers, copper_oz).min_clearance_mm`` that ``kct check
+    # --mfr`` enforces and the emitted ``.kicad_dru`` ``Clearance`` rule
+    # carries.  :meth:`pair_gap` floors the coupled gap at it.  ``None``
+    # (default): the stackup is unknown, so :meth:`pair_gap` falls back to the
+    # layer-agnostic ``MfrLimits.min_clearance`` of :attr:`manufacturer`.
+    mfr_clearance_floor: float | None = None
+
+    # The fab-view same-net pad slit-band edge for the board's actual
+    # stackup (Issue #8974): the ``GapBand.detection_edge_mm`` of the
+    # resolved ``pad_spacing`` dfm entry (#9016) -- the same edge
+    # ``cli.stitch_cmd._resolve_mfr_pad_gap_edge`` reads and ``kct check
+    # --mfr`` grades same-net pad copper gaps with.  Like
+    # :attr:`mfr_clearance_floor` this is CALLER-RESOLVED (the caller knows
+    # the board's layer count and copper weight; ``DesignRules`` has no
+    # stackup fields, so an ``__post_init__`` resolution would be
+    # stackup-blind: it could not pick the entry for the board's actual
+    # layer count and copper weight).  Consumers: the escape router's ``_can_place_via`` band
+    # check and the oracle weld's ``same_net_pad_gap_mm``.  ``None``
+    # (default): the stackup is unknown, so the band guard stays off rather
+    # than guessing an edge.
+    same_net_pad_gap_band_edge_mm: float | None = None
+
+    # Fab minimum trace width for the effective layers/copper key (Issue #4700)
+    # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
+    # ``kct check --mfr`` enforces -- NOT the layer/copper-agnostic
+    # ``MfrLimits.min_trace``.  ``load_pcb_for_routing`` raises the built-in /
+    # auto-classified net-class widths (``Differential`` = 0.15mm) to this
+    # value so route cannot emit copper its own check rejects with
+    # ``dimension_trace_width``, and the routing cache keys on it so a run at
+    # one copper weight is never served a route computed at another.  ``None``
+    # (default) preserves pre-#4700 widths and cache keys byte-for-byte.
+    min_trace_width_floor: float | None = None
+
+    # Manufacturer-tier escalation in progress flag (Issue #2891)
+    # When True, the escape router demotes the "Cannot escape ... does not
+    # support via-in-pad" ERROR log (escape.py Issue #2880) to DEBUG level
+    # because the outer ``route_with_mfr_tier_escalation`` wrapper
+    # (route_cmd.py) will recover by switching to a manufacturer tier that
+    # DOES support via-in-pad.  Must be cleared by the wrapper before the
+    # FINAL tier attempt so that, on a fully-exhausted ladder, the ERROR
+    # re-surfaces and the user sees the unfixable constraint.  Threaded
+    # through DesignRules rather than the EscapeRouter constructor to keep
+    # the change surface small (one new field, one read in escape.py,
+    # writes localized to route_cmd.py's escalation wrapper).
+    auto_mfr_tier_in_progress: bool = False
+
+    # Via-in-pad as a LAST-RESORT attach on the lattice engine (Issue #4475,
+    # epic #4465 Phase 3).  Issue #4284 made the lattice engine's
+    # ``LatticePathfinder._via_ok`` admit a same-net via barrel on an SMD pad
+    # whenever the fab tier supports it (``MfrLimits.via_in_pad_supported``),
+    # but that gate is OPPORTUNISTIC: the unified A* search may pick a
+    # via-in-pad site even when an in-layer route or a free-space (off-pad)
+    # via exists elsewhere, simply because it happened to be on the
+    # cheapest path.  When this flag is ``True``, ``_route_impl`` instead
+    # runs a staged search per connection: (a)+(b) in-layer / free-space-via
+    # route with via-in-pad forced OFF regardless of tier; only when that
+    # stage finds no path does (c) retry with via-in-pad admitted -- and
+    # only on a tier where :attr:`manufacturer` supports it (the hard floor
+    # is unconditional: a tier without ``via_in_pad_supported`` never reaches
+    # stage (c), and the connection is declined with an explicit
+    # ``"via-in-pad-tier-unsupported"`` reason instead of a generic
+    # ``"no-path"`` so Phase 4 reporting (epic #4465) can name the real
+    # constraint).  Default ``False`` preserves the pre-#4475 opportunistic
+    # #4284 behavior bit-for-bit -- mirrors the opt-in-by-default-off
+    # semantics of ``--micro-via-in-pad-fallback`` (escape.py / #3118).
+    via_in_pad_last_resort: bool = False
+
+    # Per-component clearance overrides (Issue #1016)
+    # Maps component reference (e.g., "U1") to clearance in mm
+    # Use for fine-pitch ICs where tighter clearance is needed between pins
+    component_clearances: dict[str, float] = field(default_factory=dict)
+
+    # Authored electrical clearance minima, keyed by the loader's integer net
+    # id (Issue #6243).  Resolved from the project's ``.kicad_pro``
+    # ``net_settings`` netclasses by :mod:`kicad_tools.core.project_clearance`
+    # and kept ONLY for nets whose class is stricter than the project's
+    # ``Default`` class -- ``Default`` itself is the board-wide base, which the
+    # fab tier / ``--clearance`` resolution already owns.  These are
+    # designer-authored requirements, deliberately separate from every fab
+    # scalar above: no manufacturer tier, rule relaxation, component relief,
+    # diff-pair partner gap or HV attach-zone waiver lowers them.  Two foreign
+    # nets need ``max(base, floor[a], floor[b])`` -- KiCad's netclass
+    # semantics, which the 36-case kicad-cli oracle in
+    # ``tests/fixtures/project_clearance`` pins.  Empty (the default, and
+    # every board whose project declares only ``Default``) leaves every
+    # consumer byte-identical.
+    net_clearance_floors: dict[int, float] = field(default_factory=dict)
+
+    # Issue #6449: the DESIGNER-authored subset of ``net_clearance_floors``.
+    # Since #6427 the router's own net-class clearances are merged into
+    # ``net_clearance_floors`` too, so every pair gate (committed copper, the
+    # native validator, the optimizer, the census) holds foreign copper to
+    # ``max(class(a), class(b))``.  The lattice search's STATIC pad masks are
+    # the one consumer that must not grow by a router class: #6395 measured
+    # that growing them reshuffles fine-pitch pin fields (board 05's U2 west
+    # field stranded a net), and enforces the pad side of the class pair on
+    # the negotiated copper instead (``lattice/class_pad_repair.py``).  The
+    # loader records the designer-only floors here -- keyed by net id, plus
+    # by net name for pads it neutralised to net 0 -- so the pad masks keep
+    # exactly their pre-#6427 (#6243) growth.  ``None`` (rules built outside
+    # the loader) means every floor is designer-authored.
+    designer_clearance_floors: dict[int, float] | None = None
+    designer_clearance_floors_by_name: dict[str, float] = field(default_factory=dict)
+
+    # Pairwise (net-pair) HV-isolation clearance table (Issue #4431, Phase 1).
+    # Scalar clearance cannot express "far from LV copper, near from own
+    # cluster".  When a ``--voltage-map`` is supplied, the route CLI builds a
+    # :class:`~kicad_tools.router.pairwise_clearance.PairwiseClearanceTable`
+    # (net-pair -> max(dru, IEC creepage @ |ΔV|)) and attaches it here; the
+    # Python post-route validators then reject an HV net that runs too close to
+    # non-HV copper.  ``None`` (default) preserves the scalar path byte-for-byte
+    # -- absent a voltage map NOTHING consults this field.  The search-time halo
+    # widening + C++ validator extension (what actually makes an HV board
+    # converge) are deferred to Phase 2; KiCad netclass-pair export to Phase 3.
+    pairwise_clearance: "PairwiseClearanceTable | None" = None
+
+    # Fine-pitch automatic clearance (Issue #1016)
+    # When set, components with pin pitch below fine_pitch_threshold automatically
+    # use this clearance instead of trace_clearance
+    fine_pitch_clearance: float | None = None
+    # Enforce the authored floor against every foreign pad, including
+    # same-component fine-pitch and NC pads (Issue #5004).
+    strict_pad_clearance: bool = False
+    # Issue #5004: the same-component clearance carve-out
+    # (``RoutingGrid._same_component_carveout_active`` /
+    # ``CppPathfinder._same_component_carveout_eligible``) used to exempt a
+    # FOREIGN pad from clearance checks purely because its component's pin
+    # pitch was below ``fine_pitch_threshold`` -- even when
+    # ``fine_pitch_clearance`` was left unset (the default) and no explicit
+    # per-component relaxation was requested. That silently accepted
+    # sub-clearance copper against NC pads and named signal pads alike; the
+    # router's own acceptance metrics then disagreed with native KiCad DRC.
+    #
+    # With this flag left at its default (``False``), the pitch-only branch
+    # is disabled: the carve-out now only activates where a relaxation was
+    # actually configured or in effect for the component -- an explicit
+    # ``component_clearances`` override, a net-class ``escape_clearance``
+    # override, an applied ``fine_pitch_clearance`` shrink (narrow-channel
+    # guard permitting), or a corridor already relaxed by
+    # ``_relax_same_component_clearance`` (Issue #2452). Those configured
+    # relaxation paths retain their existing exemption behavior. Enforcing
+    # their numerical per-component floors is tracked separately in #5166.
+    #
+    # Set ``True`` to restore the pre-#5004 behaviour (any fine-pitch
+    # component's foreign-net pads are unconditionally exempted) for boards
+    # that relied on the old, looser carve-out and cannot yet configure an
+    # explicit ``fine_pitch_clearance``/``component_clearances`` override.
+    legacy_fine_pitch_carveout: bool = False
+    # mm -- components with pitch < this use fine_pitch_clearance
+    #
+    # Issue #3371 (P_FP1): Raised from 0.8mm -> 1.5mm so 1.27mm-pitch SOIC
+    # packages (UCC27211, LM393, MCP6001-SOIC, and the rest of the SOIC-8
+    # family) qualify for fine-pitch handling.  Industry-standard SOIC was
+    # silently falling through to the default clearance path because of the
+    # old 0.8mm cap; raising the threshold lets the existing per-component
+    # clearance shrink machinery (Issue #1016) cover the SOIC-8 escape
+    # corridor without recipe-side opt-ins.  The 1.5mm value is large enough
+    # to cover 1.27mm SOIC plus tighter pitches (SOP, SSOP, TSSOP) in a
+    # single threshold.  Tightening below 1.27mm is unsafe (it re-excludes
+    # SOIC); going much above 1.5mm starts to capture 1.778mm (70 mil) and
+    # coarser pitches that are not corridor-constrained.
+    fine_pitch_threshold: float = 1.5
+
+    # Trace neck-down configuration (Issue #1018)
+    # When routing to fine-pitch pads, traces can be narrowed near the pad to fit
+    # between adjacent clearance zones. This creates a smooth taper from normal
+    # width to minimum width as the trace approaches the pad.
+    min_trace_width: float | None = None  # Minimum width for neck-down (mm), None = disabled
+    neck_down_distance: float = 1.0  # Distance from pad center where taper begins (mm)
+    neck_down_threshold: float = 0.8  # Only neck-down for pads with pitch < this (mm)
+
+    # Layer preferences
+    preferred_layer: Layer = Layer.F_CU
+    alternate_layer: Layer = Layer.B_CU
+
+    # Costs for A* (tune these for routing style)
+    cost_straight: float = 1.0
+    cost_diagonal: float = 1.414
+    cost_turn: float = 5.0  # Penalty for changing direction (bends)
+    cost_via: float = 10.0  # Penalty for layer change
+    cost_layer_inner: float = 2.0  # Penalty for using inner layers (applied by pathfinder)
+
+    # Via cost cap (Issue #2325)
+    # Caps the total incremental cost of a single via transition to prevent
+    # accumulated additive penalties (inner-layer cost, layer utilization,
+    # corridor deviation, congestion, via impact) from making vias
+    # prohibitively expensive.  The effective cap is ``via_cost_cap_factor *
+    # cost_via``.  Set to 0.0 to disable capping.
+    via_cost_cap_factor: float = 2.0
+
+    # Congestion-aware routing
+    cost_congestion: float = 2.0  # Multiplier for congested regions
+    congestion_threshold: float = 0.3  # Density above which region is congested
+    congestion_grid_size: int = 10  # Cells per congestion region
+
+    # Layer utilization balancing (Issue #2275)
+    # Penalizes routing on heavily-utilized layers to encourage spreading traces
+    # across all available layers.  The cost added per same-layer move or via
+    # transition equals ``fill_ratio * cost_layer_utilization``, where fill_ratio
+    # is the fraction of routable cells already occupied on the target layer.
+    # A value of 5.0 (half of cost_via) makes the router prefer an empty layer
+    # via when the current layer is mostly full.  Set to 0.0 to disable.
+    cost_layer_utilization: float = 5.0
+
+    # Global corridor deviation penalty (Issue #2288)
+    # Penalizes cells outside the corridor assigned by global routing.  The penalty
+    # is applied per-cell during A* expansion to steer the detailed router along
+    # the corridor path established by the two-phase global router.  Set to 0.0
+    # to disable corridor guidance.
+    cost_corridor_deviation: float = 5.0
+
+    # Diff-pair / match-group corridor attractor (Issue #2911)
+    # Cells reserved by ``EscapeRouter._reserve_pair_continuation_corridor`` for
+    # a paired set of nets receive a NEGATIVE cost bonus when the route's net is
+    # in the reservation's owner set.  This complements the corridor reservation
+    # primitive from #2677 (which protects reserved cells against partner-net
+    # vias but does NOT tell the pathfinder to use the reserved layer).  Without
+    # this attractor the main pathfinder treats the reserved channel as just
+    # another empty layer and may not bother diving into the inner corridor at
+    # all -- the board 06 USB3_TX1+/- pair stayed unrouted on top of an
+    # otherwise-vacant reserved corridor.
+    #
+    # The bonus is applied as ``-cost_corridor_attractor`` per cell, capped at
+    # the cell's positive cost so the total g_score never goes negative
+    # (negative costs would corrupt A* admissibility).
+    #
+    # Default value 3.0 rationale (calibrated empirically against board 06):
+    #
+    #   * Comparable to ``cost_straight`` (1.0): one in-corridor step costs
+    #     ``1.0 - min(1.0, 3.0) = 0.0`` (i.e., a clamp to free), so the
+    #     pathfinder is incentivised to enter the corridor but the clamp
+    #     prevents the cell cost from going negative.  The clamp also caps
+    #     the "tar pit" risk -- once inside the corridor the attractor cannot
+    #     compound across cells to produce a negative-cost cycle.
+    #
+    #   * ~30% of ``cost_via`` (10.0): big enough to outweigh a single
+    #     same-layer detour but NOT a needless via.  The pathfinder will
+    #     drop a via to dive into the reserved layer ONLY when the
+    #     surface-layer alternative is genuinely costlier (blocked,
+    #     congested, or a long detour) -- exactly the board 06 USB3_TX1+/-
+    #     case where the surface lane is congested by the BGA escape fan.
+    #
+    #   * Smaller than ``cost_corridor_deviation`` (5.0): a route that
+    #     ALREADY belongs to the global router's corridor should not be
+    #     pulled out of it by the diff-pair attractor -- the two penalty
+    #     systems compose so the global corridor stays the dominant
+    #     directive and the diff-pair attractor refines the layer choice
+    #     within it.
+    #
+    # If a future board surfaces a "tar pit" failure mode (route gets
+    # trapped inside the corridor when it should exit early to reach a pad
+    # outside), lowering to ~1.5 is the recommended first adjustment --
+    # preserves the layer-preference signal without dominating in-corridor
+    # detour costs.  Set to 0.0 to disable the attractor entirely
+    # (reservations still protect against partner vias).
+    cost_corridor_attractor: float = 3.0
+
+    # Corridor penalty decay parameters (Issue #2308)
+    # Controls how quickly the corridor penalty relaxes during negotiated
+    # rip-up iterations, allowing the detailed router to escape suboptimal
+    # global corridors over time.
+    #   effective_penalty = corridor_penalty * max(floor, 1.0 - rate * iteration)
+    # With defaults (rate=0.05, floor=0.3) the floor is reached at iteration 14.
+    corridor_decay_rate: float = 0.05  # per-iteration linear decay
+    corridor_decay_floor: float = 0.3  # minimum multiplier (never decays below this)
+
+    # Rip-up cohort stagnation detection (Issue #2597)
+    # Controls the heuristic that breaks out of the negotiated outer loop
+    # when consecutive iterations rip up the same set of nets without
+    # meaningful overflow progress (e.g. chorus-test-revA pattern
+    # ``ripup=[{A..F}, {A..F}], overflow=[30, 12, 10]`` — strictly decreasing
+    # but each iteration costs ~per-net-timeout × N seconds).
+    #   - ``stagnation_overflow_delta_threshold``: minimum fractional
+    #     overflow improvement required to *avoid* declaring stagnation.
+    #     Default 0.20 (20 %).  Lower values declare stagnation sooner.
+    #   - ``stagnation_jaccard_threshold``: minimum Jaccard similarity
+    #     between consecutive rip-up cohorts to declare stagnation.  Default
+    #     0.8.  A strict subset relationship between cohorts always
+    #     satisfies this criterion regardless of the value.
+    # See ``detect_ripup_stagnation()`` in
+    # ``router.algorithms.negotiated`` for the full heuristic.
+    stagnation_overflow_delta_threshold: float = 0.20
+    stagnation_jaccard_threshold: float = 0.8
+
+    # Crossing-aware routing (Issue #1250)
+    # Penalizes candidate edges that cross already-routed segments on the same layer.
+    # This steers A* toward non-crossing paths while still permitting crossings when
+    # no alternative exists. Default 0.0 disables the feature for backward compatibility.
+    crossing_penalty: float = 0.0  # Additive cost per crossing with a routed segment
+
+    # Zone-specific rules
+    zone_rules: ZoneRules = field(default_factory=ZoneRules)
+
+    # Zone routing costs
+    cost_zone_same_net: float = 0.1  # Low cost - encourage using zone copper
+    cost_zone_clearance: float = 2.0  # Cost near zone boundaries
+
+    # Hard layer constraints (Issue #715)
+    # When set, only these layers are allowed for routing (blocks all others)
+    # Use layer names like ["F.Cu"] for single-layer routing
+    allowed_layers: list[str] | None = None
+
+    # Per-net avoid-layer hardness (Issue #4433)
+    # When True, a net class's ``avoid_layers`` is upgraded from a SOFT cost
+    # bias (``layer_cost_multiplier``) to a HARD constraint -- the avoided
+    # layers are removed from that net's routable set in BOTH backends, so
+    # the search physically refuses to route the net there.  Set by the
+    # ``kct route --strict-layers`` flag.  Default False preserves the
+    # historical soft behaviour for the ampacity-free case.  Nets that also
+    # declare ``target_ampacity`` are hard-blocked regardless of this flag
+    # (an ampacity-bearing net cannot lose copper to a thin inner plane) --
+    # see :meth:`NetClassRouting.hard_avoided_layer_indices`.
+    strict_layers: bool = False
+
+    # Issue #6527: when True (opt-in, default off), the C++ backend's Python
+    # fallback calls ``Router.route_auto`` -- bidirectional A* with a one-way
+    # retry sharing one deadline -- instead of the one-way ``Router.route``.
+    # ``fallback_bidirectional_threshold`` is the Manhattan distance (grid
+    # cells) from which a fallback request goes bidirectional; 0 means every
+    # request without Steiner goals (those always run one-way).  Board 05's
+    # fallback requests are 319-470 cells, under the generic 1000-cell
+    # ``bidirectional_threshold``, which is why that threshold never engaged.
+    fallback_bidirectional: bool = False
+    fallback_bidirectional_threshold: int = 0
+
+    # Bidirectional A* configuration (Issue #964)
+    # Enable parallel frontier exploration for large paths
+    bidirectional_search: bool = True  # Enable bidirectional A* by default
+    bidirectional_threshold: int = 1000  # Min grid cells to enable bidirectional
+    parallel_workers: int = 2  # Number of parallel workers (typically 2 for bidi)
+
+    # Via placement optimization (Issue #1019)
+    # Controls via placement to avoid blocking adjacent nets near fine-pitch ICs
+    via_exclusion_from_fine_pitch: float = 0.0  # mm exclusion zone from fine-pitch pads
+    via_impact_weight: float = (
+        1.0  # Weight for via impact scoring (0=disabled, higher=stronger avoidance)
+    )
+
+    # Sub-grid routing for fine-pitch components (Issue #1109)
+    # When enabled, generates escape segments from off-grid pad centers to the
+    # nearest main-grid points before main routing begins. This allows fine-pitch
+    # ICs (0.5-0.65mm pitch) to be routed without requiring a global fine grid.
+    subgrid_routing: bool = False  # Enable sub-grid escape routing
+    subgrid_escape_radius: int = 3  # Grid cells to search for escape endpoint
+    subgrid_clearance_factor: float = (
+        0.5  # Relaxed clearance multiplier for sub-grid escape Phase 3
+    )
+
+    # Constraint-aware net ordering (Issue #1020)
+    # Routes highly-constrained nets first to give them access to routing resources
+    # before less-constrained nets consume available channels.
+    constraint_ordering_enabled: bool = True  # Enable constraint-aware ordering
+    constraint_fine_pitch_weight: float = 10.0  # Weight for fine-pitch component connections
+    constraint_pad_count_weight: float = 0.5  # Weight for number of pads in net
+    constraint_congestion_weight: float = 5.0  # Weight for nets in congested areas
+
+    # Stitch-via halo for plane-net pads (Issue #2842)
+    # When True (default), the routing grid reserves a clearance halo of radius
+    # ``stitch_via_halo_radius()`` around plane-net pads (``pad.net == 0``) so the
+    # subsequent stitch step can land a via on the pad without colliding with
+    # adjacent signal traces.  The halo only blocks *foreign* nets -- the plane
+    # net itself (net id 0) is unaffected and the existing fine-pitch trace
+    # clearance halo (``_clearance_for_pin_pitch``) is unchanged.  Set to False
+    # for designs that intentionally never stitch (single-layer, no-plane, etc.)
+    # to avoid the small extra clearance reservation.
+    stitch_via_halo: bool = True
+
+    def __post_init__(self) -> None:
+        """Populate ``min_hole_to_hole`` from the manufacturer profile.
+
+        Issue #3855: when a ``manufacturer`` is configured AND the caller left
+        ``min_hole_to_hole`` at its conservative default (0.5), pull the real
+        value from the manufacturer's :class:`MfrLimits` so the router's
+        via-placement guards enforce exactly the fab's drill-pitch floor.  An
+        explicitly-passed non-default ``min_hole_to_hole`` is left untouched,
+        and an unknown manufacturer falls back to the 0.5 default (no raise --
+        manufacturer validation belongs to the CLI layer, not the dataclass).
+
+        Issue #6243: :attr:`net_clearance_floors` is validated here so a
+        malformed authored minimum fails at construction rather than being
+        silently ignored by whichever consumer reads it first.
+        """
+        floors = dict(self.net_clearance_floors)
+        for net, value in floors.items():
+            if (
+                type(net) is not int
+                or net < 0
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"Invalid authored net clearance floor {net!r}: {value!r}")
+        self.net_clearance_floors = floors
+        if self.manufacturer and self.min_hole_to_hole == 0.5:
+            try:
+                from .mfr_limits import get_mfr_limits
+
+                self.min_hole_to_hole = get_mfr_limits(self.manufacturer).min_hole_to_hole
+            except ValueError:
+                # Unknown manufacturer: keep the conservative 0.5 default.
+                pass
+        if self.min_via_pad_edge_gap is None:
+            self.min_via_pad_edge_gap = 0.0
+            if self.manufacturer:
+                try:
+                    from kicad_tools.manufacturers import get_profile
+
+                    self.min_via_pad_edge_gap = float(
+                        get_profile(self.manufacturer).get_design_rules().min_solder_mask_dam_mm
+                    )
+                except (ValueError, KeyError, ImportError, IndexError):
+                    pass
+
+    def pair_gap(self, net_class: "NetClassRouting") -> "PairGap":
+        """The edge-to-edge gap a coupled pair of ``net_class`` is laid at.
+
+        Issue #6443 (piece (c)): ``max(class value, manufacturer minimum,
+        authored board minimum)``.  The class value is
+        :meth:`NetClassRouting.effective_intra_pair_clearance`; the
+        manufacturer minimum is :attr:`mfr_clearance_floor` when the caller
+        resolved it for the board's stackup, else
+        :func:`~kicad_tools.router.mfr_limits.resolve_clearance` of
+        :attr:`manufacturer` with no layer count (the flat
+        ``MfrLimits.min_clearance``; the #4270 lattice clamp, made
+        stackup-aware by #6561); the authored minimum
+        is :attr:`authored_min_clearance`.  A gap below either floor is
+        copper KiCad fails twice per coupled segment pair
+        (``diff_pair_gap_out_of_range`` and ``clearance``), so the class value
+        is honoured only when it already clears both.  The one function every
+        reader of the pair gap goes through, so the router and the emitted
+        ``.kicad_dru`` ``diff_pair_gap`` rule agree by construction.
+        """
+        class_mm = float(net_class.effective_intra_pair_clearance())
+        gap, source = class_mm, None
+        if self.manufacturer:
+            mfr_mm: float | None
+            if self.mfr_clearance_floor is not None:
+                mfr_mm = float(self.mfr_clearance_floor)
+            else:
+                try:
+                    from .mfr_limits import resolve_clearance
+
+                    mfr_mm = resolve_clearance(self.manufacturer)
+                except Exception:
+                    mfr_mm = None
+            if mfr_mm is not None and mfr_mm > gap:
+                gap, source = mfr_mm, f"{self.manufacturer} minimum clearance"
+        authored = self.authored_min_clearance
+        if authored is not None and authored > gap:
+            gap, source = float(authored), "authored board min_clearance"
+        return PairGap(gap_mm=gap, class_mm=class_mm, source=source)
+
+    def authored_floor(self, net: int) -> float:
+        """The authored electrical minimum of ``net`` (0.0 when it has none)."""
+        return self.net_clearance_floors.get(net, 0.0)
+
+    def clearance_for_nets(self, net_a: int, net_b: int, base: float) -> float:
+        """Raise a foreign-net requirement ``base`` to both nets' authored minima.
+
+        Issue #6243.  KiCad resolves a copper-to-copper clearance between two
+        nets as the larger of their two netclass clearances, so the pair needs
+        ``max(base, floor[a], floor[b])``.  Same-net copper is never a
+        clearance obstacle, so it keeps ``base`` untouched.  A net with no
+        authored floor contributes nothing, so an unrelated strict net never
+        widens this pair.
+        """
+        if net_a == net_b or not self.net_clearance_floors:
+            return base
+        return max(
+            base,
+            self.net_clearance_floors.get(net_a, 0.0),
+            self.net_clearance_floors.get(net_b, 0.0),
+        )
+
+    @property
+    def max_net_clearance_floor(self) -> float:
+        """The widest authored minimum (0.0 when none) -- a spatial bound only."""
+        return max(self.net_clearance_floors.values(), default=0.0)
+
+    @property
+    def max_clearance(self) -> float:
+        """Return the maximum clearance across all configured clearance values.
+
+        This is used for conservative R-tree envelope inflation (Issue #2335).
+        The inflated envelopes ensure that any segment within clearance distance
+        of an indexed segment will be returned by an intersection query,
+        eliminating per-query clearance arithmetic.
+
+        The maximum is taken across:
+        - Default trace_clearance
+        - Per-component clearances (component_clearances dict)
+        - Fine-pitch clearance (if configured)
+        - Via clearance
+
+        Returns:
+            Maximum clearance value in mm.
+        """
+        clearances = [self.trace_clearance, self.via_clearance]
+        # Issue #6243: authored per-net minima widen the spatial envelope the
+        # same way the #4431 pairwise matrix does below.  Empty -> no-op.
+        clearances.extend(self.net_clearance_floors.values())
+        if self.component_clearances:
+            clearances.extend(self.component_clearances.values())
+        if self.fine_pitch_clearance is not None:
+            clearances.append(self.fine_pitch_clearance)
+        # Issue #4511 / Epic #4431 Phase 2b: a pairwise (HV-isolation) matrix
+        # can require far wider clearance than any scalar rule.  Fold its widest
+        # requirement into the envelope so the R-tree returns every candidate
+        # the domain-aware search-time blocking kernels must widen against.
+        # Dormant (no voltage map) -> ``pairwise_clearance`` is None and this is
+        # a no-op, so boards without HV pairs inflate exactly as before.
+        pairwise = getattr(self, "pairwise_clearance", None)
+        if pairwise is not None:
+            clearances.append(pairwise.max_required_clearance())
+        return max(clearances)
+
+    def clearance_resolver(
+        self,
+        net_classes: "Mapping[str, NetClassRouting] | None" = None,
+    ) -> "ClearanceResolver":
+        """The one clearance-rule resolver for these design rules (#5645).
+
+        Epic #5509 Phase 2.  Every clearance requirement these rules imply --
+        the scalar :attr:`trace_clearance` base, the trace/via
+        :attr:`via_clearance` asymmetry, the per-class
+        :attr:`NetClassRouting.clearance` overrides and the #4431
+        :attr:`pairwise_clearance` matrix -- is composed by
+        :class:`~kicad_tools.router.clearance_resolver.ClearanceResolver` in
+        one deterministic, order-symmetric precedence rather than re-derived
+        at each call site.
+
+        Construct it **once** per run (it is cheap, but re-deriving it in a
+        hot loop is not) and query it per pair::
+
+            resolver = rules.clearance_resolver(net_class_map)
+            required = resolver.required_mm(
+                net_a="/HV", net_b="/GND", kind_b=CopperKind.VIA
+            )
+
+        Nothing in the shipped search or validation path calls this yet:
+        search-time consumers move onto it in Phase 3 and post-route
+        consumers in Phase 4.  ``kct route``'s board-wide base already
+        resolves through the same module
+        (:func:`~kicad_tools.router.clearance_resolver.resolve_base_clearance`,
+        via ``cli/route_cmd.py``), so :attr:`trace_clearance` is already the
+        project-DRU-aware value by the time it reaches here.
+
+        Args:
+            net_classes: ``{net_name: NetClassRouting}`` as
+                :func:`create_net_class_map` produces it.  ``None`` omits the
+                per-class layer entirely.
+
+        Returns:
+            The resolver.
+        """
+        from .clearance_resolver import ClearanceResolver, ClearanceRuleSet
+
+        return ClearanceResolver(ClearanceRuleSet.from_design_rules(self, net_classes=net_classes))
+
+    def stitch_via_halo_radius(self) -> float:
+        """Return the foreign-net clearance halo to reserve around plane-net pads.
+
+        Issue #2842 -- the stitch pass (``kct stitch``) drops one via per
+        plane-net pad to bond the plane to the surface pin.  A via with
+        diameter ``D`` and trace clearance ``C`` needs ``D/2 + C`` of clear
+        space around the pad center for the via to land without violating
+        clearance.  The router has historically sized its pad clearance halo
+        for *traces* (``_clearance_for_pin_pitch``, ~0.05-0.3 mm depending on
+        pitch), which is too small for a via drop and lets foreign-net
+        traces crowd plane-net pads.  This method returns the larger
+        via-aware radius so :meth:`RoutingGrid._add_pad_unsafe` can reserve
+        the right amount of room for the deferred stitch step.
+
+        The radius is derived from the configured manufacturer when
+        available (``rules.manufacturer`` -> ``MfrLimits.min_via_diameter``
+        + ``trace_clearance``).  When no manufacturer is configured the
+        formula falls back to the stitcher's default 0.45 mm via plus the
+        configured ``trace_clearance`` -- i.e. ``0.225 + trace_clearance``.
+
+        TODO(#2848): once the router's ``--mfr`` flag plumbs the
+        manufacturer profile through to stitch's via-dimension selection,
+        the unmanufactured fallback can be tightened to match whatever the
+        stitcher actually uses.  For now the 0.45 mm default mirrors
+        ``stitch_cmd.py:2400, :2573`` byte-for-byte.
+
+        Returns:
+            Halo radius in mm.  Always at least as large as the standard
+            ``trace_clearance + trace_width/2`` envelope so this never
+            *shrinks* the existing clearance for callers that opt in.
+        """
+        # Default via diameter when no manufacturer profile is available.
+        # Mirrors ``stitch_cmd.py:2400`` (the canonical stitcher default).
+        # TODO(#2848): tighten once stitch consumes mfr-derived via dimensions
+        # from the route step.
+        default_via_diameter = 0.45
+
+        via_diameter = default_via_diameter
+        if self.manufacturer is not None:
+            try:
+                from .mfr_limits import get_mfr_limits
+
+                mfr = get_mfr_limits(self.manufacturer)
+                via_diameter = max(via_diameter, mfr.min_via_diameter)
+            except (ValueError, ImportError):
+                # Unknown manufacturer -> fall back to the conservative default.
+                pass
+
+        via_halo = via_diameter / 2.0 + self.trace_clearance
+
+        # Never shrink below the standard pad-clearance envelope; that
+        # envelope was tuned for trace routing and the via-aware envelope
+        # is strictly a *minimum*.
+        standard_envelope = self.trace_clearance + self.trace_width / 2.0
+        return max(via_halo, standard_envelope)
+
+    def get_clearance_for_component(
+        self,
+        ref: str,
+        pin_pitch: float | None = None,
+        net_class: "NetClassRouting | None" = None,
+    ) -> float:
+        """Get the clearance to use for a specific component.
+
+        Checks for per-component clearance overrides, then for an explicit
+        net-class escape-clearance override (Issue #3371 / P_FP1), then for
+        automatic fine-pitch clearance based on pin pitch, then falls back
+        to the default trace_clearance.
+
+        Issue #2867 -- narrow-channel guard (C++ validator path): this
+        method is the C++ pad-vs-segment validator's clearance source
+        (see ``cpp_backend.py:591`` -> ``clearance_override`` for
+        ``add_pad``).  It is *parallel* to
+        :meth:`RoutingGrid._clearance_for_pin_pitch` which sets the
+        *grid halo* on the Python pathfinder side.  Both layers
+        independently shrink for fine-pitch pads.  PR #2866 (issue
+        #2865) added a narrow-channel guard to the grid-halo path
+        only; this method continued to shrink unconditionally, so the
+        C++ validator still accepted geometrically infeasible
+        through-channel paths under congestion pressure (44
+        ``clearance_pad_segment`` errors on routed board 04).
+
+        Issue #2867 promotes the guard here as well.  When the
+        fine-pitch shrink would produce an inter-pad channel that
+        cannot host a trace at full manufacturer clearance, we decline
+        the shrink and fall back to ``trace_clearance`` so the C++
+        validator (and any other ``clearance_override`` consumer)
+        rejects through-channel routes the same way the grid halo
+        does.  Geometry (mirroring ``_clearance_for_pin_pitch``):
+
+            effective_channel = pin_pitch - 2 * fine_pitch_clearance - trace_width
+            required_channel  = 2 * trace_clearance + trace_width
+
+        When ``effective_channel < required_channel`` the shrunk
+        clearance is infeasible and the default ``trace_clearance`` is
+        used instead.  Explicit per-component overrides
+        (``component_clearances``) bypass the guard -- callers who set
+        an override are asserting they know the geometry is feasible.
+
+        Args:
+            ref: Component reference (e.g., "U1")
+            pin_pitch: Optional pin pitch in mm (for automatic fine-pitch detection)
+            net_class: Optional :class:`NetClassRouting` for the net being routed
+                through this component.  When supplied and the class has an
+                explicit ``escape_clearance`` override set (Issue #3371 / P_FP1),
+                the override wins over the global ``fine_pitch_clearance`` for
+                this component.  Used by the fine-pitch escape pipeline so the
+                escape-region clearance is per-net-class rather than global.
+                Backward-compat: ``None`` (the default) preserves the pre-#3371
+                behaviour.
+
+        Returns:
+            Clearance in mm to use for this component.
+
+        Example:
+            >>> rules = DesignRules(
+            ...     trace_clearance=0.15,
+            ...     component_clearances={"U1": 0.08},
+            ...     fine_pitch_clearance=0.1,
+            ...     fine_pitch_threshold=0.8,
+            ... )
+            >>> rules.get_clearance_for_component("U1")  # Explicit override
+            0.08
+            >>> rules.get_clearance_for_component("U2", pin_pitch=0.65)  # Auto fine-pitch
+            0.1
+            >>> rules.get_clearance_for_component("R1")  # Default
+            0.15
+        """
+        if self.strict_pad_clearance:
+            return max(
+                self.trace_clearance,
+                self.component_clearances.get(ref, self.trace_clearance),
+                (net_class.clearance or self.trace_clearance)
+                if net_class
+                else self.trace_clearance,
+            )
+
+        # Check explicit per-component override first.  Explicit overrides
+        # bypass the narrow-channel guard: the caller is asserting the
+        # geometry is feasible for this specific component.
+        if ref in self.component_clearances:
+            return self.component_clearances[ref]
+
+        # Issue #3371 (P_FP1): per-net-class escape clearance override.
+        # When the calling pathfinder threaded a :class:`NetClassRouting`
+        # whose ``escape_clearance`` is set, prefer that explicit value
+        # over the global ``fine_pitch_clearance``.  The caller is
+        # asserting (and is responsible for verifying) that the geometry
+        # is feasible -- the per-class override is analogous to the
+        # explicit per-component override above and bypasses the
+        # narrow-channel guard for the same reason.
+        if net_class is not None and net_class.escape_clearance is not None:
+            return net_class.escape_clearance
+
+        # Check for automatic fine-pitch clearance
+        if (
+            self.fine_pitch_clearance is not None
+            and pin_pitch is not None
+            and pin_pitch < self.fine_pitch_threshold
+        ):
+            # Issue #2867 narrow-channel guard.  Mirror the grid-halo
+            # check in :meth:`RoutingGrid._clearance_for_pin_pitch` so
+            # the C++ validator (which consumes the value returned
+            # here as ``clearance_override``) does not accept through-
+            # channel routes that DRC will reject as
+            # ``clearance_pad_segment``.  The shrunk fine-pitch
+            # clearance is only sound when a trace centred between
+            # two adjacent pads can satisfy full manufacturer
+            # clearance against both.
+            effective_channel = pin_pitch - 2.0 * self.fine_pitch_clearance - self.trace_width
+            required_channel = 2.0 * self.trace_clearance + self.trace_width
+            if effective_channel >= required_channel:
+                return self.fine_pitch_clearance
+            # Narrow channel -- fine-pitch shrink is geometrically
+            # infeasible.  Fall through to the default clearance so
+            # the validator rejects through-channel routes.
+
+        # Fall back to default clearance
+        return self.trace_clearance
+
+    def should_apply_neck_down(self, ref: str | None, pin_pitch: float | None = None) -> bool:
+        """Determine if neck-down should be applied for a component.
+
+        Neck-down is applied when:
+        1. min_trace_width is configured (feature enabled)
+        2. The component has fine-pitch pins (below neck_down_threshold)
+
+        Args:
+            ref: Component reference (e.g., "U1"), or None for general check
+            pin_pitch: Optional pin pitch in mm (for automatic detection)
+
+        Returns:
+            True if neck-down should be applied, False otherwise.
+
+        Example:
+            >>> rules = DesignRules(
+            ...     trace_width=0.2,
+            ...     min_trace_width=0.1,
+            ...     neck_down_threshold=0.8,
+            ... )
+            >>> rules.should_apply_neck_down("U1", pin_pitch=0.65)  # Fine-pitch
+            True
+            >>> rules.should_apply_neck_down("R1", pin_pitch=1.27)  # Standard pitch
+            False
+            >>> rules.should_apply_neck_down("U2")  # No pitch info, use default
+            False
+        """
+        # Feature must be enabled
+        if self.min_trace_width is None:
+            return False
+
+        # If no pitch info, don't apply neck-down
+        if pin_pitch is None:
+            return False
+
+        # Apply neck-down only for fine-pitch components
+        return pin_pitch < self.neck_down_threshold
+
+    def get_neck_down_width(
+        self,
+        distance_to_pad: float,
+        pin_pitch: float | None = None,
+        base_width: float | None = None,
+    ) -> float:
+        """Calculate trace width based on distance to pad center.
+
+        Creates a smooth linear interpolation from ``base_width`` (or
+        ``trace_width`` when not supplied) down to ``min_trace_width`` as
+        the trace approaches a fine-pitch pad.
+
+        Args:
+            distance_to_pad: Distance from segment point to pad center (mm)
+            pin_pitch: Optional pin pitch in mm (for determining if neck-down applies)
+            base_width: Optional starting (corridor) width to taper from
+                (mm).  When ``None`` falls back to ``self.trace_width``.
+                Issue #3313 wires this for impedance-driven sizing so the
+                taper interpolates from the per-net-class
+                impedance-derived width (e.g. 0.387 mm for a 50 Ω
+                single-ended target on the JLCPCB tier-1 4-layer stackup)
+                down to ``min_trace_width`` (e.g. 0.10 mm manufacturer
+                minimum) instead of the global ``rules.trace_width``.
+                Without this knob, an impedance-resolved class with a
+                wide width would force the pathfinder to ``min()`` the
+                resolved width with the (narrower) corridor default and
+                negate the impedance solver's contribution.
+
+        Returns:
+            Trace width in mm. Returns ``base_width`` (or ``trace_width``)
+            unchanged if:
+            - Neck-down is disabled (min_trace_width is None)
+            - Distance is beyond neck_down_distance
+            - Pin pitch is above neck_down_threshold
+            - The resolved ``base_width`` is already at or below
+              ``min_trace_width`` (no further taper is possible)
+
+        Example:
+            >>> rules = DesignRules(
+            ...     trace_width=0.2,
+            ...     min_trace_width=0.1,
+            ...     neck_down_distance=1.0,
+            ... )
+            >>> rules.get_neck_down_width(2.0)  # Far from pad
+            0.2
+            >>> rules.get_neck_down_width(0.5)  # In taper zone
+            0.15
+            >>> rules.get_neck_down_width(0.0)  # At pad
+            0.1
+            >>> # Impedance-driven base width (Issue #3313):
+            >>> rules.get_neck_down_width(0.0, pin_pitch=0.5, base_width=0.387)
+            0.1
+            >>> rules.get_neck_down_width(0.5, pin_pitch=0.5, base_width=0.387)
+            0.2435
+        """
+        # Resolve the corridor width to taper from.  When the caller does
+        # not supply an explicit base width, fall back to the global
+        # rules.trace_width for pre-#3313 callers.
+        corridor_width = base_width if base_width is not None else self.trace_width
+
+        # Feature disabled
+        if self.min_trace_width is None:
+            return corridor_width
+
+        # Check if this is a fine-pitch situation
+        if pin_pitch is not None and pin_pitch >= self.neck_down_threshold:
+            return corridor_width
+
+        # Beyond taper zone - use normal width
+        if distance_to_pad >= self.neck_down_distance:
+            return corridor_width
+
+        # Degenerate case: the corridor width is already at or below the
+        # manufacturer minimum.  Taper has no work to do; just return the
+        # corridor width unchanged so the caller does not accidentally
+        # widen a trace that was deliberately narrow.
+        if corridor_width <= self.min_trace_width:
+            return corridor_width
+
+        # Linear interpolation from corridor_width to min_trace_width
+        # At distance=0: min_trace_width
+        # At distance=neck_down_distance: corridor_width
+        t = distance_to_pad / self.neck_down_distance
+        return self.min_trace_width + t * (corridor_width - self.min_trace_width)
+
+
+# =============================================================================
+# LAYER-INDEX RESOLUTION (Issue #4587)
+# =============================================================================
+
+# KiCad inner-copper layer names: "In1.Cu" ... "In32.Cu".  The ordinal is the
+# grid index on every KiCad stackup (In1.Cu is always grid layer 1), so this
+# form is resolvable without knowing the board's copper layer count.
+_INNER_COPPER_NAME_RE = re.compile(r"^In(\d+)\.Cu$")
+
+_ACCEPTED_LAYER_FORMS = (
+    'an int grid index (e.g. 0), a numeric string (e.g. "3"), or a KiCad '
+    'copper layer name (e.g. "F.Cu", "In1.Cu", "B.Cu")'
+)
+
+
+class LayerResolutionError(ValueError):
+    """A net-class layer entry could not be resolved to a grid-layer index.
+
+    Issue #4587.  Subclasses :class:`ValueError` so every existing
+    ``except (TypeError, ValueError)`` guard around net-class-map
+    deserialization (notably the ``kct route --net-class-map`` preload)
+    keeps catching it and exiting 1 with a structured message.
+    """
+
+
+def resolve_layer_index(
+    value: object,
+    layer_stack: LayerStack | None = None,
+    *,
+    context: str = "",
+) -> int:
+    """Resolve one ``preferred_layers`` / ``avoid_layers`` entry to a grid index.
+
+    Issue #4587.  ``NetClassRouting.preferred_layers`` / ``avoid_layers`` are
+    declared as ``list[int]`` (grid-layer indices), but hand-authored sidecars
+    routinely spell layers the way KiCad does (``"In1.Cu"``).  Before this
+    resolver, a layer NAME crashed the grid engine deep inside detailed routing
+    (``int('In1.Cu')`` in :meth:`NetClassRouting.hard_avoided_layer_indices`)
+    and was *silently inert* on the soft cost-bias path.  Normalizing once at
+    deserialization fixes both.
+
+    Accepted forms:
+
+    - ``int`` -- already a grid index; returned unchanged (existing integer
+      maps stay byte-for-byte identical).
+    - numeric ``str`` (``"3"``) -- coerced with :func:`int`.
+    - KiCad copper layer name -- resolved against ``layer_stack`` when one is
+      supplied (the canonical, stack-aware path via
+      :meth:`LayerStack.get_layer_by_name`).  Without a stack only the
+      stack-independent names resolve: ``"F.Cu"`` -> ``0`` and ``"In<k>.Cu"``
+      -> ``k``.
+
+    ``"B.Cu"`` is deliberately NOT resolvable without a stack: its grid index
+    is the board's *last* copper index (``3`` on a 4-layer board), not
+    :class:`~kicad_tools.core.types.CopperLayer.B_CU` (``5``).  Guessing would
+    hard-block a non-existent layer -- a silent wrong answer strictly worse
+    than the crash this function replaces.
+
+    Args:
+        value: The raw sidecar entry (int, numeric string, or layer name).
+        layer_stack: The board's stackup, when known.  Required to resolve
+            ``"B.Cu"`` and to reject names absent from the actual stack.
+        context: Human-readable provenance (e.g. ``"net class 'HV' avoid_layers"``)
+            embedded in error messages so a failure names the offending token
+            AND its owner.
+
+    Returns:
+        The grid-layer index.
+
+    Raises:
+        LayerResolutionError: The value is not one of the accepted forms, names
+            a layer absent from ``layer_stack``, or is ``"B.Cu"`` with no stack
+            available.  Never silently dropped HERE: a dropped hard-avoid entry
+            puts an ampacity-bearing net back on a thin inner plane, which is
+            exactly what #4433 exists to prevent.  The ONE sanctioned drop path
+            lives in :func:`_resolve_layer_index_list` (#4685): a well-formed
+            KiCad copper name absent from a *supplied* stack may be dropped
+            there (vacuously satisfied during a layer-subset pass) -- that
+            check runs against the active stack, never by guessing indices.
+    """
+    where = f" ({context})" if context else ""
+
+    # bool is an int subclass -- a JSON ``true`` is not a layer index.
+    if isinstance(value, bool):
+        raise LayerResolutionError(
+            f"invalid layer value {value!r}{where}: expected {_ACCEPTED_LAYER_FORMS}"
+        )
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        token = value.strip()
+        if token.lstrip("-").isdigit():
+            return int(token)
+        if layer_stack is not None:
+            layer_def = layer_stack.get_layer_by_name(token)
+            if layer_def is not None:
+                return layer_def.index
+            available = [lyr.name for lyr in layer_stack.layers]
+            raise LayerResolutionError(
+                f"layer {value!r}{where} is not present in this board's "
+                f"{layer_stack.num_layers}-layer stack (available: {available})"
+            )
+        if token == "F.Cu":
+            return 0
+        inner = _INNER_COPPER_NAME_RE.match(token)
+        if inner is not None:
+            return int(inner.group(1))
+        if token == "B.Cu":
+            raise LayerResolutionError(
+                f"layer 'B.Cu'{where} cannot be resolved without a layer stack: its "
+                "grid index is the board's last copper index (3 on a 4-layer board), "
+                "which depends on the copper layer count. Load the net-class map with "
+                "a layer_stack, or use the numeric grid index."
+            )
+    raise LayerResolutionError(
+        f"invalid layer value {value!r}{where}: expected {_ACCEPTED_LAYER_FORMS}"
+    )
+
+
+def _is_wellformed_copper_layer_name(token: str) -> bool:
+    """True when ``token`` has the shape of a KiCad copper layer name.
+
+    Issue #4685.  These are exactly the shapes :func:`resolve_layer_index`
+    recognizes on its stack-less path (``"F.Cu"``, ``"In<k>.Cu"``) plus
+    ``"B.Cu"``.  A well-formed name that happens to be absent from the ACTIVE
+    stack (``"In1.Cu"`` during a ``--layers 2`` pass) is a valid statement
+    about the physical board, not a typo -- unlike ``"Bogus.Cu"``, which
+    matches none of these shapes and stays a hard error.
+    """
+    return token in ("F.Cu", "B.Cu") or _INNER_COPPER_NAME_RE.match(token) is not None
+
+
+def _resolve_layer_index_list(
+    values: object,
+    layer_stack: LayerStack | None,
+    context: str,
+    *,
+    on_absent: Literal["error", "drop", "drop_warn"] = "error",
+) -> list[int] | None:
+    """Normalize a whole ``preferred_layers`` / ``avoid_layers`` list (#4587).
+
+    ``None`` passes through unchanged (the "unset" sentinel both the soft-cost
+    and hard-avoid paths test for).  Every element is resolved via
+    :func:`resolve_layer_index`, so a mixed ``[3, "In1.Cu"]`` list is accepted
+    and stored as ``[3, 1]`` -- satisfying the ``list[int]`` field annotation.
+
+    Issue #4685: ``on_absent`` selects the policy for a WELL-FORMED KiCad
+    copper layer name (see :func:`_is_wellformed_copper_layer_name`) that is
+    absent from a *supplied* ``layer_stack`` -- e.g. ``"In1.Cu"`` while
+    routing with ``--layers 2``.  A sidecar describes the physical board, not
+    one invocation's layer subset, so layer-subset composition passes (the
+    HV-outer recipe: route HV at ``--layers 2``, everything else at
+    ``--layers 4 --preserve-existing``) must be able to share one sidecar:
+
+    - ``"error"`` (default): raise :class:`LayerResolutionError`, the pre-#4685
+      behavior.  Kept for any future caller that resolves layers where absence
+      IS a misconfiguration.
+    - ``"drop"``: drop the entry silently -- used for ``avoid_layers``, where
+      an absent layer is vacuously satisfied (the grid cannot route there).
+    - ``"drop_warn"``: drop the entry with a one-line warning naming the
+      owning net class and token -- used for ``preferred_layers``, where the
+      preference genuinely cannot be honored.
+
+    The policy NEVER applies to malformed tokens (``"Bogus.Cu"``), integer
+    indices (in or out of range -- integer maps stay byte-identical per the
+    #4587 contract), or when ``layer_stack`` is ``None`` (guessing an index
+    stack-lessly and then dropping would be a silent wrong answer; the
+    stack-less path is unchanged).
+    """
+    if values is None:
+        return None
+    if not isinstance(values, (list, tuple)):
+        raise LayerResolutionError(
+            f"invalid layer list {values!r} ({context}): expected a list of {_ACCEPTED_LAYER_FORMS}"
+        )
+    resolved: list[int] = []
+    for v in values:
+        if on_absent != "error" and layer_stack is not None and isinstance(v, str):
+            token = v.strip()
+            if (
+                not token.lstrip("-").isdigit()
+                and _is_wellformed_copper_layer_name(token)
+                and layer_stack.get_layer_by_name(token) is None
+            ):
+                # Well-formed KiCad copper name, absent from the ACTIVE stack:
+                # the layer is not routable in this pass, so an avoid-constraint
+                # on it is vacuously satisfied and a preference for it cannot
+                # be honored.  Never fatal (#4685).
+                if on_absent == "drop_warn":
+                    logger.warning(
+                        "layer %r (%s) is not present in this board's %d-layer "
+                        "stack; dropping the preference (it cannot be honored "
+                        "in this routing pass)",
+                        v,
+                        context,
+                        layer_stack.num_layers,
+                    )
+                continue
+        resolved.append(resolve_layer_index(v, layer_stack, context=context))
+    return resolved
+
+
+@dataclass
+class LengthConstraint:
+    """Length constraint for timing-critical nets.
+
+    Use cases:
+    - DDR memory buses: Data lines must match clock ±50mil
+    - Differential pairs: P/N must match within 5mil
+    - Parallel buses: All bits should be similar length
+    - Clock distribution: Equal path lengths to all loads
+
+    Attributes:
+        net_id: Net ID this constraint applies to
+        min_length: Minimum required trace length in mm (optional)
+        max_length: Maximum allowed trace length in mm (optional)
+        match_group: Group name for nets that must match lengths (optional)
+        match_tolerance: Tolerance for length matching in mm (default: 0.5mm)
+    """
+
+    net_id: int
+    min_length: float | None = None
+    max_length: float | None = None
+    match_group: str | None = None
+    match_tolerance: float = 0.5  # mm
+
+    def __post_init__(self):
+        """Validate constraint parameters."""
+        if self.min_length is not None and self.max_length is not None:
+            if self.min_length > self.max_length:
+                raise ValueError(
+                    f"min_length ({self.min_length}) cannot be greater than "
+                    f"max_length ({self.max_length})"
+                )
+        if self.match_tolerance < 0:
+            raise ValueError(f"match_tolerance must be non-negative, got {self.match_tolerance}")
+
+    def to_dict(self) -> dict:
+        """Serialize to a JSON-compatible dict.
+
+        Round-trip companion to :meth:`from_dict` -- used by the
+        ``kct check --net-class-map`` sidecar format (Issue #2684).
+        """
+        return {
+            "net_id": self.net_id,
+            "min_length": self.min_length,
+            "max_length": self.max_length,
+            "match_group": self.match_group,
+            "match_tolerance": self.match_tolerance,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LengthConstraint":
+        """Deserialize from a dict produced by :meth:`to_dict`.
+
+        Unknown keys are ignored (forward compatibility); missing keys
+        fall back to dataclass defaults where applicable.
+
+        Raises:
+            TypeError: ``data`` is not a dict.
+            ValueError: The required ``net_id`` field is missing.  Issue
+                #6820: this used to escape as a bare ``KeyError``, which no
+                net-class-map consumer catches, so ``kct check`` printed a
+                traceback for a hand-written ``length_constraint``.
+        """
+        if not isinstance(data, dict):
+            raise TypeError(f"length_constraint must be a dict, got {type(data).__name__}")
+        if "net_id" not in data:
+            raise ValueError(
+                f"length_constraint requires a 'net_id' field; got keys: {sorted(data.keys())}"
+            )
+        return cls(
+            net_id=data["net_id"],
+            min_length=data.get("min_length"),
+            max_length=data.get("max_length"),
+            match_group=data.get("match_group"),
+            match_tolerance=data.get("match_tolerance", 0.5),
+        )
+
+
+def _normalize_pair_protocol(value: object) -> str | None:
+    """Canonical ``PairProtocol`` name of a sidecar's ``pair_protocol`` value.
+
+    Raises ``ValueError`` on an unknown name: a misspelt protocol must not
+    quietly resolve to the generic limits (Issue #6443).
+    """
+    parsed = parse_protocol(value)  # type: ignore[arg-type]
+    return parsed.name if parsed is not None else None
+
+
+@dataclass
+class NetClassRouting:
+    """Routing parameters for a net class."""
+
+    name: str
+    priority: int = 5  # 1=highest, 10=lowest
+    trace_width: float = 0.2  # Override trace width
+    clearance: float = 0.2  # Override clearance
+    # Pad-escape neck-down floor (Issue #4293).  Oversize copper (e.g. 2.6mm
+    # HV_HICUR) carries a large keep-out surcharge that can prevent ANY escape
+    # dogleg from clearing a dense pad field.  When the full-width escape
+    # declines, the lattice engine retries the pad-escape legs at this narrower
+    # legal width and widens back to ``trace_width`` at the first lattice node
+    # (standard heavy-copper neck-down).  ``None`` -> the design-rule floor
+    # (``DesignRules.min_trace_width`` if set, else ``trace_width``); a class
+    # may override with a wider ampacity-driven neck.  Never below the fab min.
+    neck_trace_width: float | None = None
+    via_size: float = 0.6  # Override via diameter
+    cost_multiplier: float = 1.0  # Cost multiplier (lower = prefer this net)
+    length_critical: bool = False  # Must minimize length
+    noise_sensitive: bool = False  # Avoid crossing other nets
+
+    # Zone-related parameters
+    zone_priority: int = 0  # Zone fill priority (higher = fills first)
+    zone_connection: str = "thermal"  # Default connection type ("thermal", "solid", "none")
+    is_pour_net: bool = False  # This net is used for copper pours (e.g., GND, VCC)
+
+    # Routing-intent opt-out (Issue #2772)
+    route_via: RouteVia = "pathfinder"
+    """Declarative routing-intent selector for nets in this class.
+
+    Lets designers opt OUT of the pathfinder declaratively rather than
+    hand-rolling ``skip_nets`` in a custom ``design.py``:
+
+    - ``"pathfinder"`` (default) -- standard pathfinder routing; preserves
+      pre-#2772 behavior for every existing class.
+    - ``"pour"`` -- ``_auto_skip_pour_nets`` skips this net when a zone for
+      it exists in the PCB; otherwise falls through to the existing
+      ``no_zone_nets`` warning path so the user is not left silently
+      unconnected.  ``NET_CLASS_POWER`` flips to this value in #2772 to
+      match the long-standing ``is_pour_net=True`` semantics.
+    - ``"manual"`` -- always skip from the pathfinder; the designer is
+      responsible for laying down the trace by hand (e.g. wide motor-phase
+      traces routed in a custom script).  ``_auto_skip_pour_nets`` emits a
+      distinct log line (``Manual: <names> ...``) so the user sees that the
+      net was deliberately deferred to manual routing rather than dropped.
+
+    Orthogonal to :attr:`is_pour_net`.  The legacy flag continues to drive
+    zone-fill priority and zone-connection inference at the auto-pour layer
+    (``router/auto_pour.py``); the new field drives the pathfinder skip
+    predicate at the CLI layer (``cli/route_cmd.py``).  When both are set
+    on a class, ``route_via`` takes precedence in the skip predicate -- a
+    class with ``is_pour_net=True`` and an explicit ``route_via="pathfinder"``
+    will NOT be auto-skipped, allowing a designer to override the legacy
+    inference for a specific net class.
+
+    Backward-compat: ``NET_CLASS_HIGH_CURRENT_SIGNAL`` deliberately stays
+    at the ``"pathfinder"`` default; its phase outputs (PHASE_A/B/C) are
+    point-to-point traces, not pours, and the per-net timeout pathology
+    that motivated the original framing of this issue is fixed in sibling
+    issues #2768 / #2769, not here.
+    """
+
+    # Layer preference parameters (Issue #625)
+    preferred_layers: list[int] | None = None  # Layer indices to prefer (lower cost)
+    avoid_layers: list[int] | None = None  # Layer indices to avoid (higher cost)
+    layer_cost_multiplier: float = 2.0  # Cost penalty for non-preferred layers
+
+    # Per-class plane-layer opt-in (Issue #6876, ruling on #6824)
+    allow_plane_layers: list[int] | None = None
+    """Reserved plane layers this class may route signal copper on.
+
+    ``--reserve-plane-layers`` (on by default, #5014/#5789) removes every
+    PLANE layer from :attr:`DesignRules.allowed_layers` board-wide.  A class
+    that lists a layer here (KiCad name or grid index; normalized to grid
+    indices by :meth:`from_dict`, exactly like :attr:`avoid_layers`) is
+    exempted from that gate for the named layers only -- every other class
+    stays off the plane.  The check is :func:`layer_permitted`, shared by the
+    grid, C++, lattice, mesh and coupled paths.  Naming a layer that is not
+    reserved is a no-op; a layer that is both opted in and hard-avoided stays
+    blocked (hard avoid wins).  ``None`` (the default) routes exactly as
+    before.
+    """
+
+    # Length constraint parameters (Issue #630)
+    length_constraint: LengthConstraint | None = None  # Length constraint for this net class
+
+    # Fine-pitch escape clearance override (Issue #3371 / P_FP1)
+    escape_clearance: float | None = None
+    """Per-net-class clearance applied within fine-pitch escape regions.
+
+    Issue #3371 / P_FP1 -- when set, this value overrides the global
+    :attr:`DesignRules.trace_clearance` (and the per-component
+    :attr:`DesignRules.fine_pitch_clearance`) for traces escaping a
+    fine-pitch package (typically a 1.27mm-pitch SOIC like the UCC27211
+    or a tighter SSOP/TSSOP/QFN).  The override is *only* applied within
+    a detector-defined escape region near the fine-pitch package; outside
+    the region the per-class :attr:`clearance` (or its absence) controls.
+
+    The geometry trigger and region detection live in
+    :mod:`kicad_tools.router.fine_pitch_escape` (P_FP2); the per-class
+    field declared here is the *data carrier* that downstream consumers
+    (validator, grid halo, C++ pad-segment check) read through
+    :meth:`DesignRules.get_clearance_for_component` once that method is
+    threaded with the ``net_class`` argument (also P_FP1).
+
+    Default is ``None`` for backward compatibility -- existing net
+    classes ignore the field and behave exactly as before.  Phase P_FP1
+    scope is the data + predicate plumbing; P_FP2 wires the trigger and
+    P_FP3 applies the override at the pathfinder boundary.
+
+    Manufacturer-floor guard (Issue #2867 lineage): callers must ensure
+    ``escape_clearance >= mfr_limits.min_clearance``.  The
+    :func:`kicad_tools.router.fine_pitch_escape.get_default_escape_clearance`
+    helper returns the safe default per Q_FP2
+    (``mfr.min_clearance + 0.013`` mm safety margin).
+    """
+
+    # Differential pair within-pair clearance (Issue #2557, Epic #2556 Phase 1A)
+    intra_pair_clearance: float | None = None
+    """Clearance applied to within-pair edges of a differential pair.
+
+    When ``None`` (the default), the accessor :meth:`effective_intra_pair_clearance`
+    falls back to :attr:`clearance`, preserving pre-#2557 single-clearance behavior.
+
+    Callers (in Issue #2559 / Phase 1B) should read this via
+    :meth:`effective_intra_pair_clearance` rather than touching the field
+    directly, since the public ``None`` sentinel encodes "fall back to
+    ``clearance``" rather than a literal zero clearance.
+
+    Phase 1A scope (#2557) is the type-system foundation only; pathfinder /
+    cpp_backend threading is explicitly out of scope and lands in #2559.
+    """
+
+    # Differential pair partner (Issue #2558, Epic #2556 Phase 1B)
+    # When set, declares this net is the positive (or negative) half of a
+    # differential pair whose partner is the named net.  This is the
+    # AUTHORITATIVE source for diff-pair detection -- it overrides KiCad
+    # group declarations and suffix inference.  A one-sided declaration
+    # (only one of the two nets has ``diffpair_partner`` set) is sufficient
+    # to form a pair.  Parallel addition to ``intra_pair_clearance`` from
+    # Phase 1A (#2557).
+    diffpair_partner: str | None = None
+
+    # Differential pair coupled-routing engagement (Issue #2638, Epic #2556 Phase 2E)
+    coupled_routing: bool = False
+    """Opt-in flag for routing this net class's diff pairs via CoupledPathfinder.
+
+    When ``False`` (default), differential pairs whose P or N net belongs to
+    this class fall through to the main routing strategy even when
+    ``--differential-pairs`` is enabled.  Phase 1's ``intra_pair_clearance``
+    still applies to within-pair edges at the pathfinder layer, so a tight
+    intra clearance can be honored without forcing coupled geometry.
+
+    When ``True``, the diff-pair pre-pass / ``route_all_with_diffpairs``
+    dispatch invokes :meth:`CoupledPathfinder` for pairs in this class,
+    subject to the engagement-layer single-ended refusal in
+    :func:`should_engage_coupled` (#2527 lesson -- pin pairs that look
+    diff-pair-ish but are single-ended by spec, like USB-C CC1/CC2 and
+    SBU1/SBU2, are refused at engagement time even when explicitly
+    declared via :attr:`diffpair_partner`).
+
+    Default is ``False`` for backward compatibility with all pre-#2636
+    boards.  ``NET_CLASS_HIGH_SPEED`` was flipped to ``True`` in #2651
+    (Epic #2556 Phase 2.5a) -- it is the canonical HSDI class that
+    consumers opt into via ``high_speed_nets=`` and is the producer-side
+    half of the Phase 2 coupled-routing pipeline.  Other predefined
+    classes (``POWER``, ``HIGH_CURRENT_SIGNAL``, ``CLOCK``, ``AUDIO``,
+    ``DIGITAL``, ``DEBUG``, ``DEFAULT``) keep ``coupled_routing=False``
+    because they carry single-ended signals.
+
+    NOTE -- name collision with the ``use_coupled_routing`` function
+    parameter on :meth:`DiffPairRouter.route_differential_pair`.  The
+    parameter is a runtime dispatch toggle ("call coupled vs independent
+    for this single invocation"); this field is a class-level
+    configuration flag ("nets in this class opt into the coupled
+    engagement path").  Future refactors must not collapse the two.
+    """
+
+    # Target impedance for impedance-driven sizing (Issue #2650, Epic #2556 Phase 3K)
+    target_diff_impedance: float | None = None
+    """Target differential impedance in ohms (e.g. 90 for USB 2.0, 100 for USB
+    3.0 / PCIe / MIPI).
+
+    When set, the router consumes this field via
+    :func:`kicad_tools.router.diffpair_impedance.apply_impedance_driven_sizing`
+    to compute a ``(trace_width, intra_pair_clearance)`` pair from the PCB
+    stackup using :class:`kicad_tools.physics.CoupledLines`.  When ``None``
+    (the default), the per-class ``trace_width`` / ``intra_pair_clearance``
+    literals are used unchanged, preserving pre-Phase-3K behavior.
+
+    Independent of :attr:`target_single_impedance` -- a class may set one,
+    both, or neither.  When both are set, diff-pair nets (those whose
+    :attr:`diffpair_partner` is set OR whose name matches the suffix
+    inference) consume :attr:`target_diff_impedance`; single-ended nets in
+    the same class consume :attr:`target_single_impedance`.
+    """
+
+    target_single_impedance: float | None = None
+    """Target single-ended (characteristic) impedance in ohms.
+
+    Common values: 50 for clocks and most single-ended high-speed signals,
+    75 for video / coaxial-style signals.  When set, the router computes
+    the required ``trace_width`` from the stackup via
+    :func:`kicad_tools.physics.TransmissionLine.width_for_impedance` and
+    overrides :attr:`trace_width`.  When ``None`` (default), the per-class
+    literal is used.
+    """
+
+    net_scope: tuple[str, ...] = ()
+    """Board nets this entry's ``target_ampacity`` applies to (#8527).
+
+    Empty (default) means the target is class-wide.  Set by
+    :func:`~kicad_tools.manufacturers.project_generator.dedupe_net_classes`
+    when only some nets of a class declare the target, so DRU generation emits
+    a net-scoped rule instead of a class-wide ``track_width`` floor.  Not
+    serialized: it is derived from the net-class map, never authored.
+    """
+
+    target_ampacity: float | None = None
+    """Target current-carrying capacity in amps (e.g. 15.0 for a 15 A fused line).
+
+    When set, DRU generation (see
+    :func:`kicad_tools.manufacturers.dru_generator.generate_dru`) derives a
+    net-scoped minimum trace-width rule via
+    :func:`kicad_tools.physics.ampacity.width_for_current`, using the board's
+    :attr:`~kicad_tools.manufacturers.base.DesignRules.outer_copper_oz` /
+    ``inner_copper_oz`` and a default 10 C temperature rise (see
+    ``physics/ampacity.py``).  When ``None`` (the default), no net-scoped
+    width rule is emitted for this class -- byte-for-byte pass-through,
+    matching :attr:`target_single_impedance`'s drift-prevention contract.
+
+    Independent of :attr:`target_single_impedance` /
+    :attr:`target_diff_impedance` -- a class may combine an ampacity floor
+    with an impedance target (e.g. a 15 A single-ended power net with a soft
+    impedance target); the DRU generator emits both rules as separate named
+    rules and lets KiCad's rule engine enforce the tightest (max) width where
+    they overlap.
+    """
+
+    impedance_tolerance_percent: float = 10.0
+    """Allowed deviation (in percent) from the target impedance that the
+    DRC :class:`~kicad_tools.validate.rules.impedance.ImpedanceRule` fires
+    on.
+
+    Mirrors :attr:`kicad_tools.validate.rules.impedance.NetImpedanceSpec.tolerance_percent`
+    (currently 10.0%).  Setting this leaves existing users at no-behavior-change
+    because the rule's default tolerance is also 10.0%.
+    """
+
+    # Differential pair routing-continuity threshold (Issue #2640, Epic #2556 Phase 2G)
+    coupled_continuity_threshold: float | None = None
+    """Minimum coupled-fraction (0.0..1.0) required by the
+    ``diffpair_routing_continuity`` DRC rule for engaged pairs in this class.
+
+    The rule fires when a routed pair's coupled fraction (the share of P's
+    routed length whose nearest point on N is within the coupling window
+    AND parallel within +/-15 degrees) falls below this threshold.
+
+    ``None`` (the default) means "use the rule's module-level default of
+    0.7" -- empirically calibrated against board 03's USB pair, which
+    couples ~60-80% in practice (curator note on #2640).  Setting
+    ``0.9`` is appropriate for high-speed-differential-interface (HSDI)
+    boards demanding tight coupling; setting ``0.5`` accommodates hobby
+    boards with loose coupling expectations.
+
+    Orthogonal to :attr:`diffpair_partner` and to the (Phase 2E)
+    :attr:`coupled_routing` opt-in flag from #2638 -- this is a DRC-side
+    knob that the autorouter consumer reads via
+    :meth:`effective_coupled_continuity_threshold` and passes into
+    :class:`~kicad_tools.validate.rules.diffpair_routing_continuity.DiffPairRoutingContinuityRule`
+    via the ``threshold_map`` constructor argument.
+    """
+
+    # Differential pair length-match skew tolerance (Issue #2647, Epic #2556 Phase 3H)
+    skew_tolerance_mm: float | None = None
+    """Maximum allowed length skew (|L_p - L_n|, in mm) for differential pairs
+    in this class.
+
+    ``None`` (the default) means "use the declared :attr:`pair_protocol`'s
+    value from the defaults table, else the generic 0.5 mm" (Issue #6443).
+    An explicit value here always wins, and is reported as an explicit
+    (error-severity) limit.  Prefer declaring the protocol: the table carries
+    2.5 mm for full-speed USB2 and 1.27 mm for high-speed USB2, each with its
+    source (:mod:`kicad_tools.router.pair_protocols`).
+
+    The :class:`~kicad_tools.router.diffpair_length.DiffPairLengthTracker`
+    measures skew per pair unconditionally (no per-class gate); this field
+    only controls the DRC rule's firing threshold (Phase 3J / Issue J).
+    Phase 3I (serpentine insertion) consumes the accessor to choose which
+    side to lengthen.
+
+    Orthogonal to :attr:`length_critical`, which is a routing-priority hint
+    rather than a skew gate (`length_critical=False` pairs still get
+    measured).
+    """
+
+    # Protocol-aware pair rules (Issue #6443, epic #6441 Phase 1a)
+    pair_protocol: str | None = None
+    """Signalling standard the class's pairs carry, by
+    :class:`~kicad_tools.router.pair_protocols.PairProtocol` name
+    (``"USB2_FS"``, ``"USB2_HS"``, ``"LVDS"``, ...).
+
+    A declared protocol supplies the pair limits the class leaves unset:
+    ``class field > protocol default > generic default``.  ``None`` (the
+    default) keeps the pre-#6443 behaviour exactly -- 0.5 mm skew, no
+    uncoupled-length or via-count limit.  Read it through
+    :meth:`effective_pair_protocol`.
+    """
+
+    data_rate_gbps: float | None = None
+    """The rate this class's pairs actually run at, in Gb/s (Issue #7892).
+
+    ``kct check`` derives each pair's skew budget in ps from its protocol
+    (:mod:`kicad_tools.physics.skew_budget`).  Without this field the budget
+    uses the protocol's maximum rate and is a ``warning``; setting it derives
+    the budget at this rate and makes it an ``error``.  A class with a rate
+    and no identifiable protocol is evaluated at Nyquist (rate / 2)."""
+
+    max_uncoupled_per_terminal_mm: float | None = None
+    """Uncoupled copper allowed at each pair terminal, in mm.  ``None`` ->
+    the protocol default, if any.  Derives the total limit (#6443) and is
+    checked per terminal, outside :attr:`gather_ignore`, by the kct-only
+    per-terminal figure of ``diffpair_uncoupled_length`` (#6615)."""
+
+    gather_ignore: str | float = "courtyard"
+    """The region around each pair terminal whose uncoupled copper the
+    per-terminal check ignores (Issue #6615, epic #6441).
+
+    ``"courtyard"`` (the default): the footprint's courtyard as drawn.  A
+    number ``r``: the courtyard grown by ``r`` mm.  ``"none"``: nothing is
+    ignored.  A footprint with no usable courtyard falls back to its pads'
+    bounding box plus 0.25 mm (IPC-7351 nominal courtyard excess).  See
+    ``docs/guides/diff-pairs/08-uncoupled-length.md``."""
+
+    max_uncoupled_total_mm: float | None = None
+    """Total uncoupled copper allowed per net, in mm (KiCad's
+    ``diff_pair_uncoupled``).  ``None`` -> derived from the per-terminal
+    limit by piece (b).  Data only in piece (a)."""
+
+    max_vias_per_net: int | None = None
+    """Vias allowed on each net of the pair.  ``None`` -> the protocol
+    default, if any.  Data only in piece (a)."""
+
+    chain_skew_tolerance_mm: float | None = None
+    """Maximum skew (mm) across a chain of pairs joined by series elements
+    (Issue #6447): the P-side total minus the N-side total, summed over every
+    pair segment of the chain.  ``None`` (the default) means the chain skew is
+    reported as an ``info`` metric only; a number makes it an ``error`` when
+    exceeded.  Read from the class of the chain's first pair segment."""
+
+    # Match-group declaration (Issue #2687, Epic #2661 Phase 1A)
+    length_match_group: str | None = None
+    """Group name for nets in this class that must arrive length-matched.
+
+    When set, declares this net class's nets are members of the named
+    match group (e.g. ``"DDR_DATA"``, ``"MIPI_CSI_LANE0"``).  Multiple
+    net classes may declare the same group name -- e.g. the lanes of a
+    MIPI bus may live in different per-pair classes that all share a
+    ``length_match_group="MIPI_CSI"``.
+
+    AUTHORITATIVE.  Overrides suffix inference at Phase 1C (#2661).
+
+    Cross-reference: a pre-existing field of the same name lives on a
+    *different* dataclass at
+    :attr:`kicad_tools.reasoning.vocabulary.RoutingPriority.length_match_group`
+    (the reasoning-layer intermediate).  These are NOT in conflict -- they
+    sit on different classes (router-layer vs reasoning-layer).  The
+    reasoning-layer field, where used, maps INTO this router-layer field;
+    it does not duplicate the semantic.  This router-layer field is the
+    AUTHORITATIVE source for downstream routing/measurement consumers.
+
+    Drift-prevention test asserts both fields share type annotation
+    (``str | None``) and default (``None``).  See
+    :class:`tests.test_match_group_declaration.TestDriftPrevention`.
+
+    Phase 1A scope (#2687) is types only; accessor returns the field
+    unchanged.  Phase 1B (#2688) consumes it via ``MatchGroupTracker``;
+    Phase 1C (#2689) integrates with detection; Phase 1D (#2690) wires
+    the producer side.
+    """
+
+    length_match_reference: str | None = None
+    """Reference-selection policy for length-matching within the group.
+
+    Semantics:
+
+    - ``None`` (default) -- use the **longest trace in the group** as the
+      reference (matches the legacy ``tune_match_group`` behavior at
+      ``router/optimizer/serpentine.py:438``).
+    - An **explicit net name** (e.g. ``"DQS_P"``) -- that net is the
+      reference; every other group member is meandered to match its
+      length.  Use this when one trace is hard to perturb (e.g. a DDR
+      strobe whose timing budget can't absorb serpentines).
+    - The **sentinel string** ``"clock"`` -- protocol-aware lookup,
+      deferred to Phase 2/3 (MIPI/HDMI clock-relative case).  Phase 1A
+      accepts the sentinel for forward-compat but does NOT implement
+      protocol resolution.
+
+    Phase 1A scope (#2687) is types only; accessor returns the field
+    unchanged.  Phase 1B (#2688) consumes it via
+    ``MatchGroupTracker.get_reference_length``.
+    """
+
+    length_match_tolerance_mm: float | None = None
+    """Maximum allowed length skew (mm) across members of a match group.
+
+    Mirrors the :attr:`skew_tolerance_mm` pattern (Issue #2647 / Phase 3H)
+    but applies at the match-group level rather than the pair level.
+
+    ``None`` (the default) means "use the rule's module-level default of
+    0.5 mm" -- the same conservative default as :attr:`skew_tolerance_mm`.
+    Setting ``0.1`` is appropriate for tight DDR data-byte groups; setting
+    ``0.5`` accommodates MIPI lane-to-lane skew.
+
+    Phase 1A (#2687) declares the field; Phase 1B (#2688) consumes it via
+    :meth:`MatchGroupTracker.is_within_tolerance`; Phase 2G (#2661 issue G)
+    consumes it via the future ``match_group_length_skew`` DRC rule.
+    """
+
+    # Declared swap group (Issue #5522, Phase 1 of Epic #5511).
+    swap_group: str | None = None
+    """Designer-declared swap group for a within-bundle pin re-assignment.
+
+    When set, declares this net class's nets are members of the named
+    swap group (e.g. ``"DDR_BYTE0"``).  Membership = every net carrying
+    the same ``swap_group`` value; nets that do not carry the key are
+    fixed by omission.  This is a SEPARATE, narrower channel than
+    :attr:`length_match_group`: a match group says "these nets must
+    arrive length-matched" (may include nets whose *pin binding* is
+    fixed, e.g. a DQS strobe); a swap group says "these nets' pad
+    bindings on the secondary component MAY be re-assigned among
+    themselves to reduce facing-row crossings."  Only one channel
+    exists -- there is no separate top-level ``swap_groups`` block.
+
+    DECLARED-ONLY: swappability is never inferred from net names, pin
+    functions, or footprints -- the absence of this key means "fixed",
+    full stop.
+
+    A swap is modelled as pad-to-net RE-BINDING on the secondary
+    reference's pads (the future applicator is
+    :meth:`~kicad_tools.schema.pcb.PCB.assign_net_to_footprint_pad`),
+    NEVER net renaming: match groups, :attr:`diffpair_partner` and
+    :attr:`length_match_reference` are all keyed by net name, and a
+    rename would silently break each of those.
+
+    Phase 1 (#5522) was report-only: :func:`~kicad_tools.router.
+    swap_groups.propose_swap_assignment` computes the crossing-minimising
+    pad permutation and surfaces it as data (``kct net-status --why``,
+    the ``reorder_pins`` delta).  Phase 2a (#5536) added the applicator:
+    a ``reorder_pins`` delta carrying that proposal's ``pad_map`` is now
+    applied by the placement-delta feedback loop (pads re-bound on the
+    PCB *and* on the router's own pad list), kept only on a strict
+    routed-net improvement, and otherwise reverted atomically.
+    """
+
+    def __post_init__(self) -> None:
+        """Reject an unknown :attr:`pair_protocol` where the class is declared.
+
+        Without this a typo such as ``pair_protocol="USB9"`` is only caught
+        when something resolves the class's limits, which can be mid-route
+        (Issue #6443).  The stored value is left as given.
+
+        Raises:
+            ValueError: :attr:`pair_protocol` names no known protocol.
+        """
+        parse_protocol(self.pair_protocol)
+        rate = self.data_rate_gbps
+        if rate is not None and (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not math.isfinite(rate)
+            or rate <= 0
+        ):
+            raise ValueError(
+                f"net class {self.name!r}: data_rate_gbps must be a positive number "
+                f"of Gb/s, got {rate!r}"
+            )
+        gather = self.gather_ignore
+        if isinstance(gather, bool) or not (
+            gather in ("courtyard", "none")
+            or (isinstance(gather, (int, float)) and math.isfinite(gather) and gather >= 0)
+        ):
+            raise ValueError(
+                f"net class {self.name!r}: gather_ignore must be 'courtyard', 'none' "
+                f"or a non-negative radius in mm, got {gather!r}"
+            )
+        if self.coupled_continuity_threshold is not None:
+            warnings.warn(
+                f"net class {self.name!r}: coupled_continuity_threshold is "
+                "deprecated and no longer gates anything: routing continuity is "
+                "an info-only measurement since Issue #6443. Limit the uncoupled "
+                "length instead (pair_protocol, max_uncoupled_total_mm, "
+                "max_uncoupled_per_terminal_mm).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+    def effective_intra_pair_clearance(self) -> float:
+        """Return the clearance to apply to within-pair diff-pair edges.
+
+        Backward-compatible accessor: returns :attr:`clearance` when
+        :attr:`intra_pair_clearance` is unset (``None``), matching pre-#2557
+        single-clearance behavior. Returns the explicit override otherwise.
+        """
+        if self.intra_pair_clearance is not None:
+            return self.intra_pair_clearance
+        return self.clearance
+
+    def hard_avoided_layer_indices(self, strict_layers: bool = False) -> frozenset[int]:
+        """Grid-layer indices this net must NOT be routed on (Issue #4433).
+
+        ``avoid_layers`` is normally a SOFT cost bias (each avoided layer is
+        surcharged by :attr:`layer_cost_multiplier` in the pathfinder), which
+        readily loses to congestion -- a 15 A HV net can still land on a thin
+        inner plane.  This accessor returns the subset of ``avoid_layers`` that
+        must be enforced as a HARD block (the layer is removed from the net's
+        routable set in BOTH backends) when either:
+
+        - a :attr:`target_ampacity` is declared on the class -- an
+          ampacity-bearing net physically cannot lose copper to a 0.5 oz inner
+          plane, so its declared ``avoid_layers`` is auto-hardened; OR
+        - the caller opts in via ``strict_layers`` (the ``kct route
+          --strict-layers`` flag), hardening ``avoid_layers`` for the
+          ampacity-free case.
+
+        Returns an EMPTY set when ``avoid_layers`` is unset/empty, or when
+        neither hardening condition holds -- preserving the pre-#4433 soft
+        default for every existing net class (no ampacity, no ``--strict-layers``
+        => byte-for-byte unchanged routing).
+
+        Args:
+            strict_layers: The board-global opt-in flag (``DesignRules
+                .strict_layers``).  When True, ``avoid_layers`` is hard even
+                without a declared ampacity.
+
+        Returns:
+            Frozen set of grid-layer indices to hard-block for this net.
+        """
+        if not self.avoid_layers:
+            return frozenset()
+        if self.target_ampacity is not None or strict_layers:
+            # Issue #4587: entries are normally already ints (normalized in
+            # ``from_dict``).  A residual string can only reach here when a
+            # class was constructed in-process with layer NAMES; resolve what
+            # is unambiguous and raise an actionable LayerResolutionError
+            # (naming the class and the token) otherwise -- never silently
+            # drop the entry, which would put an ampacity-bearing net back on
+            # the very layer it declared off-limits.
+            return frozenset(
+                resolve_layer_index(
+                    layer,
+                    None,
+                    context=f"net class {self.name!r} avoid_layers",
+                )
+                for layer in self.avoid_layers
+            )
+        return frozenset()
+
+    def effective_coupled_continuity_threshold(self, default: float = 0.7) -> float:
+        """Return the coupled-continuity threshold for the DRC rule.
+
+        Backward-compatible accessor (Issue #2640 / Epic #2556 Phase 2G):
+        returns ``default`` when :attr:`coupled_continuity_threshold` is
+        unset (``None``).  ``default`` mirrors the rule's module-level
+        ``DEFAULT_COUPLED_CONTINUITY_THRESHOLD`` so callers can override
+        the floor consistently without re-importing it.
+
+        Args:
+            default: Fallback value when no per-class threshold is set.
+                Defaults to ``0.7`` (the rule's empirically-calibrated
+                default for the USB_D+/D- pair on board 03).
+
+        Returns:
+            The per-class threshold (in [0.0, 1.0]) if set, else ``default``.
+        """
+        if self.coupled_continuity_threshold is not None:
+            return self.coupled_continuity_threshold
+        return default
+
+    def effective_skew_tolerance(self, default: float = 0.5) -> float:
+        """Return the length-match skew tolerance for diff pairs in this class.
+
+        Resolution (Issue #6443): :attr:`skew_tolerance_mm` if set, else the
+        declared :attr:`pair_protocol`'s value in the protocol defaults table
+        (2.5 mm full-speed USB2, 1.27 mm high-speed USB2, ...), else
+        ``default``.  ``default`` mirrors the DRC rule's module-level
+        ``DEFAULT_SKEW_TOLERANCE_MM``.
+
+        This returns the number only.  For its provenance and the severity
+        of a breach use
+        :func:`kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`,
+        which resolves in the same order.
+
+        Args:
+            default: Fallback value (in mm) when the class sets no skew
+                tolerance and declares no protocol with one.
+
+        Returns:
+            The skew tolerance in mm.
+        """
+        if self.skew_tolerance_mm is not None:
+            return self.skew_tolerance_mm
+        # Issue #6443: a declared protocol supplies the limit before the
+        # generic default does, so every router-side reader agrees with
+        # ``kct check`` (``resolve_pair_thresholds``).
+        row = self.pair_protocol_defaults()
+        if row is not None and row.max_skew_mm is not None:
+            return float(row.max_skew_mm.value)
+        return default
+
+    def effective_pair_protocol(self) -> PairProtocol | None:
+        """Return the declared :class:`PairProtocol`, or ``None``.
+
+        Raises:
+            ValueError: :attr:`pair_protocol` names no known protocol.
+        """
+        return parse_protocol(self.pair_protocol)
+
+    def pair_protocol_defaults(self) -> ProtocolDefaults | None:
+        """Return the defaults-table row of the declared protocol, if any."""
+        return protocol_defaults(self.pair_protocol)
+
+    def effective_length_match_group(self) -> str | None:
+        """Return the match-group name for this net class.
+
+        Backward-compatible accessor (Issue #2687 / Epic #2661 Phase 1A):
+        returns :attr:`length_match_group` directly.  Provided for API
+        uniformity with :meth:`effective_intra_pair_clearance` /
+        :meth:`effective_skew_tolerance`; no fallback chain is needed
+        because ``None`` already means "no group".
+        """
+        return self.length_match_group
+
+    def effective_length_match_reference(self) -> str | None:
+        """Return the reference-selection policy for length-matching.
+
+        Backward-compatible accessor (Issue #2687 / Epic #2661 Phase 1A):
+        returns :attr:`length_match_reference` directly.  ``None`` means
+        "use longest in group"; an explicit net name means "use this net
+        as the reference"; the sentinel ``"clock"`` is reserved for
+        Phase 2/3 protocol-aware resolution.
+        """
+        return self.length_match_reference
+
+    def effective_length_match_tolerance(self, default: float = 0.5) -> float:
+        """Return the match-group length-skew tolerance (mm).
+
+        Backward-compatible accessor (Issue #2687 / Epic #2661 Phase 1A):
+        returns ``default`` when :attr:`length_match_tolerance_mm` is
+        unset (``None``).  Mirrors the :meth:`effective_skew_tolerance`
+        pattern so the future ``match_group_length_skew`` DRC rule
+        (Phase 2G) can override the floor consistently.
+
+        Args:
+            default: Fallback value (in mm) when no per-class tolerance
+                is set.  Defaults to ``0.5`` to mirror the diff-pair
+                :meth:`effective_skew_tolerance` default; the future
+                Phase 2G rule's ``DEFAULT_MATCH_GROUP_TOLERANCE_MM``
+                constant should equal this byte-for-byte.
+
+        Returns:
+            The per-class tolerance in mm if set, else ``default``.
+        """
+        if self.length_match_tolerance_mm is not None:
+            return self.length_match_tolerance_mm
+        return default
+
+    def to_dict(self) -> dict:
+        """Serialize this :class:`NetClassRouting` to a JSON-compatible dict.
+
+        Issue #2684 / Epic #2556 Phase 2.5c-cli.  The round-trip wire
+        format for the ``kct check --net-class-map <path>`` sidecar.  All
+        fields the diff-pair validate rules consume are preserved:
+
+        - ``coupled_routing`` (Phase 2E / #2638 -- gates engagement)
+        - ``coupled_continuity_threshold`` (Phase 2G / #2640)
+        - ``skew_tolerance_mm`` (Phase 3H / #2647)
+        - ``pair_protocol`` / ``max_uncoupled_per_terminal_mm`` /
+          ``max_uncoupled_total_mm`` / ``max_vias_per_net`` (#6443)
+        - ``gather_ignore`` (#6615)
+        - ``diffpair_partner`` (Phase 1B / #2558)
+        - ``target_diff_impedance`` (Phase 3K / #2650)
+        - ``target_single_impedance`` (Phase 3K / #2650)
+        - ``target_ampacity`` (#4216, Part 1 of #4215)
+        - ``intra_pair_clearance`` (Phase 1A / #2557)
+        - ``escape_clearance`` (Issue #3371 / P_FP1)
+        - ``length_match_group`` / ``length_match_reference`` /
+          ``length_match_tolerance_mm`` (Phase 1A / #2687, Epic #2661)
+        - ``swap_group`` (Phase 1 / #5522, Epic #5511)
+
+        Nested ``LengthConstraint`` is serialized via its own
+        :meth:`LengthConstraint.to_dict` (``None`` is preserved as ``None``).
+
+        Round-trip property (Issue #2684 AC: byte-equivalent round-trip):
+        for any ``nc: NetClassRouting``,
+        ``NetClassRouting.from_dict(nc.to_dict()) == nc`` holds.
+
+        Drift-prevention: the
+        :class:`tests.test_net_class_serialization.TestDriftPrevention`
+        suite asserts ``{f.name for f in fields(NetClassRouting)}`` equals
+        the literal key set returned here, so any future field addition
+        to the dataclass is forced to update this method (and
+        :meth:`from_dict`) in the same commit.
+        """
+        return {
+            "name": self.name,
+            "priority": self.priority,
+            "trace_width": self.trace_width,
+            "neck_trace_width": self.neck_trace_width,
+            "clearance": self.clearance,
+            "via_size": self.via_size,
+            "cost_multiplier": self.cost_multiplier,
+            "length_critical": self.length_critical,
+            "noise_sensitive": self.noise_sensitive,
+            "zone_priority": self.zone_priority,
+            "zone_connection": self.zone_connection,
+            "is_pour_net": self.is_pour_net,
+            "route_via": self.route_via,
+            "preferred_layers": (
+                list(self.preferred_layers) if self.preferred_layers is not None else None
+            ),
+            "avoid_layers": (list(self.avoid_layers) if self.avoid_layers is not None else None),
+            "allow_plane_layers": (
+                list(self.allow_plane_layers) if self.allow_plane_layers is not None else None
+            ),
+            "layer_cost_multiplier": self.layer_cost_multiplier,
+            "length_constraint": (
+                self.length_constraint.to_dict() if self.length_constraint is not None else None
+            ),
+            "escape_clearance": self.escape_clearance,
+            "intra_pair_clearance": self.intra_pair_clearance,
+            "diffpair_partner": self.diffpair_partner,
+            "coupled_routing": self.coupled_routing,
+            "target_diff_impedance": self.target_diff_impedance,
+            "target_single_impedance": self.target_single_impedance,
+            "target_ampacity": self.target_ampacity,
+            "impedance_tolerance_percent": self.impedance_tolerance_percent,
+            "coupled_continuity_threshold": self.coupled_continuity_threshold,
+            "skew_tolerance_mm": self.skew_tolerance_mm,
+            "pair_protocol": getattr(self.pair_protocol, "name", self.pair_protocol),
+            "data_rate_gbps": self.data_rate_gbps,
+            "max_uncoupled_per_terminal_mm": self.max_uncoupled_per_terminal_mm,
+            "max_uncoupled_total_mm": self.max_uncoupled_total_mm,
+            "max_vias_per_net": self.max_vias_per_net,
+            "chain_skew_tolerance_mm": self.chain_skew_tolerance_mm,
+            "gather_ignore": self.gather_ignore,
+            "length_match_group": self.length_match_group,
+            "length_match_reference": self.length_match_reference,
+            "length_match_tolerance_mm": self.length_match_tolerance_mm,
+            "swap_group": self.swap_group,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, layer_stack: LayerStack | None = None) -> "NetClassRouting":
+        """Deserialize from a dict produced by :meth:`to_dict`.
+
+        Tolerates missing optional keys (falls back to dataclass defaults)
+        and ignores unknown keys (forward compatibility).  The only
+        required field is ``name``.
+
+        Issue #4587: ``preferred_layers`` / ``avoid_layers`` may be spelled as
+        KiCad layer names (``"In1.Cu"``) as well as grid indices; both are
+        normalized to ``list[int]`` here via :func:`resolve_layer_index`, so
+        every downstream consumer (the soft cost bias in the pathfinder AND
+        the hard-avoid set in both grid backends) sees indices only.  Pass
+        ``layer_stack`` to resolve names against the board's actual stackup --
+        required for ``"B.Cu"``, whose index depends on the layer count.
+
+        Issue #4685: a well-formed KiCad copper name absent from the supplied
+        stack (``"In1.Cu"`` while routing ``--layers 2``) is NOT fatal: it is
+        dropped -- silently for ``avoid_layers`` (vacuously satisfied: the
+        grid has no such layer to route on) and with a one-line warning for
+        ``preferred_layers`` (the preference cannot be honored).  This lets
+        the two passes of a layer-subset composition recipe share one sidecar.
+        Malformed tokens (``"Bogus.Cu"``) remain fatal.
+
+        Round-trip property: see :meth:`to_dict`.  Names normalize to ints on
+        the way in and ``to_dict`` emits ints, so the round trip is idempotent.
+
+        Args:
+            data: The serialized mapping.
+            layer_stack: Optional board stackup used to resolve layer names.
+
+        Raises:
+            ValueError: ``name`` is missing.
+            LayerResolutionError: A layer entry cannot be resolved.
+        """
+        if "name" not in data:
+            raise ValueError(
+                "NetClassRouting.from_dict requires a 'name' field; got keys: "
+                f"{sorted(data.keys())}"
+            )
+        length_constraint_data = data.get("length_constraint")
+        length_constraint = (
+            LengthConstraint.from_dict(length_constraint_data)
+            if length_constraint_data is not None
+            else None
+        )
+        return cls(
+            name=data["name"],
+            priority=data.get("priority", 5),
+            trace_width=data.get("trace_width", 0.2),
+            neck_trace_width=data.get("neck_trace_width"),
+            clearance=data.get("clearance", 0.2),
+            via_size=data.get("via_size", 0.6),
+            cost_multiplier=data.get("cost_multiplier", 1.0),
+            length_critical=data.get("length_critical", False),
+            noise_sensitive=data.get("noise_sensitive", False),
+            zone_priority=data.get("zone_priority", 0),
+            zone_connection=data.get("zone_connection", "thermal"),
+            is_pour_net=data.get("is_pour_net", False),
+            route_via=data.get("route_via", "pathfinder"),
+            preferred_layers=_resolve_layer_index_list(
+                data.get("preferred_layers"),
+                layer_stack,
+                f"net class {data['name']!r} preferred_layers",
+                on_absent="drop_warn",
+            ),
+            avoid_layers=_resolve_layer_index_list(
+                data.get("avoid_layers"),
+                layer_stack,
+                f"net class {data['name']!r} avoid_layers",
+                on_absent="drop",
+            ),
+            allow_plane_layers=_resolve_layer_index_list(
+                data.get("allow_plane_layers"),
+                layer_stack,
+                f"net class {data['name']!r} allow_plane_layers",
+                on_absent="drop",
+            ),
+            layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
+            length_constraint=length_constraint,
+            escape_clearance=data.get("escape_clearance"),
+            intra_pair_clearance=data.get("intra_pair_clearance"),
+            diffpair_partner=data.get("diffpair_partner"),
+            coupled_routing=data.get("coupled_routing", False),
+            target_diff_impedance=data.get("target_diff_impedance"),
+            target_single_impedance=data.get("target_single_impedance"),
+            target_ampacity=data.get("target_ampacity"),
+            impedance_tolerance_percent=data.get("impedance_tolerance_percent", 10.0),
+            coupled_continuity_threshold=data.get("coupled_continuity_threshold"),
+            skew_tolerance_mm=data.get("skew_tolerance_mm"),
+            pair_protocol=_normalize_pair_protocol(data.get("pair_protocol")),
+            data_rate_gbps=data.get("data_rate_gbps"),
+            max_uncoupled_per_terminal_mm=data.get("max_uncoupled_per_terminal_mm"),
+            max_uncoupled_total_mm=data.get("max_uncoupled_total_mm"),
+            max_vias_per_net=data.get("max_vias_per_net"),
+            chain_skew_tolerance_mm=data.get("chain_skew_tolerance_mm"),
+            gather_ignore=data.get("gather_ignore", "courtyard"),
+            length_match_group=data.get("length_match_group"),
+            length_match_reference=data.get("length_match_reference"),
+            length_match_tolerance_mm=data.get("length_match_tolerance_mm"),
+            swap_group=data.get("swap_group"),
+        )
+
+
+# =============================================================================
+# PREDEFINED NET CLASSES
+# =============================================================================
+
+NET_CLASS_POWER = NetClassRouting(
+    name="Power",
+    priority=1,
+    trace_width=0.5,
+    clearance=0.2,
+    via_size=0.8,
+    cost_multiplier=0.8,
+    zone_priority=10,  # Fill power zones first
+    zone_connection="solid",  # Direct connection for power
+    is_pour_net=True,  # Power nets often have pours
+    # Issue #2772: declarative routing-intent matches the long-standing
+    # ``is_pour_net=True`` semantics -- power nets should be satisfied by a
+    # copper zone (or fall through to the no-zone warning path) rather than
+    # consumed by the pathfinder.
+    route_via="pour",
+)
+
+# High-current signal nets such as motor phase outputs (PHASE_A/B/C),
+# coil drives, and stepper/solenoid returns.  These need POWER-tier
+# routing priority so they get first pick of routing corridors before
+# ordinary signals consume them, but they must NOT be poured: a phase
+# output is point-to-point from the half-bridge FETs to the load and
+# pouring it as a copper plane couples switching noise into nearby
+# traces and breaks the per-trace current path.
+#
+# Trace width is wider than digital signals (default 0.4mm) to handle
+# motor currents but narrower than full POWER (0.5mm) since these are
+# typically routed individually per-phase rather than as bus rails.
+NET_CLASS_HIGH_CURRENT_SIGNAL = NetClassRouting(
+    name="HighCurrentSignal",
+    priority=1,  # Same tier as POWER so motor phases route early
+    trace_width=0.4,
+    clearance=0.2,
+    via_size=0.8,
+    cost_multiplier=0.85,  # Prefer over normal signals, slightly less than power
+    is_pour_net=False,  # Critical: phase outputs must NOT be poured
+)
+
+NET_CLASS_CLOCK = NetClassRouting(
+    name="Clock",
+    priority=2,
+    trace_width=0.2,
+    clearance=0.2,
+    cost_multiplier=0.9,
+    length_critical=True,
+)
+
+NET_CLASS_HIGH_SPEED = NetClassRouting(
+    name="HighSpeed",
+    priority=2,
+    trace_width=0.2,
+    clearance=0.15,
+    intra_pair_clearance=0.075,  # Issue #2559 / Epic #2556 Phase 1C
+    cost_multiplier=0.85,
+    length_critical=True,
+    coupled_routing=True,  # Issue #2651 / Epic #2556 Phase 2.5a: producer-side flip
+)
+
+NET_CLASS_AUDIO = NetClassRouting(
+    name="Audio",
+    priority=3,
+    trace_width=0.2,
+    clearance=0.15,
+    cost_multiplier=1.0,
+    noise_sensitive=True,
+)
+
+# Issue #3171 (Phase 3: analog-aware routing).  The ``kct route
+# --analog-nets`` / ``--auto-analog`` flags inject this class onto the
+# router's name-pattern-classified ``net_class_map`` for designer-named (or
+# auto-detected) analog nets.  It *boosts* ``NET_CLASS_AUDIO``:
+#
+#   * ``priority=2`` (vs Audio's 3 and Digital's 4) so listed analog nets
+#     sort ahead of ordinary digital signals in ``_get_net_priority`` and get
+#     first pick of routing corridors before channels congest.
+#   * ``cost_multiplier=0.85`` (< 1.0) so the pathfinder applies a shorter-
+#     path bias to these nets (keeps noise-sensitive analog runs short).
+#   * ``noise_sensitive=True`` (carry-over from Audio).
+#
+# ``trace_width``/``clearance`` deliberately stay at the digital defaults --
+# width/impedance sizing is a separate concern (out of scope for Phase 3).
+# Critically this class is NOT a pour net (``is_pour_net=False``,
+# ``route_via="pathfinder"`` default); the injection helper additionally
+# refuses to overwrite any net whose existing class is a pour net (e.g.
+# ``GNDA``) so a pour/ground net is never forced into the pathfinder.
+NET_CLASS_ANALOG = NetClassRouting(
+    name="Analog",
+    priority=2,
+    trace_width=0.2,
+    clearance=0.15,
+    cost_multiplier=0.85,
+    noise_sensitive=True,
+)
+
+NET_CLASS_DIGITAL = NetClassRouting(
+    name="Digital",
+    priority=4,
+    trace_width=0.2,
+    clearance=0.15,
+    cost_multiplier=1.0,
+)
+
+NET_CLASS_DEBUG = NetClassRouting(
+    name="Debug",
+    priority=5,
+    trace_width=0.2,
+    clearance=0.15,
+    cost_multiplier=1.2,  # Route last, less important
+)
+
+NET_CLASS_DEFAULT = NetClassRouting(
+    name="Default",
+    priority=10,
+    trace_width=0.2,
+    clearance=0.2,
+    cost_multiplier=1.0,
+)
+
+
+def allowed_plane_layer_indices(net_class: object) -> frozenset[int]:
+    """Grid indices a net class opted in to via ``allow_plane_layers`` (#6876).
+
+    Entries are normally ints (``NetClassRouting.from_dict`` normalizes them).
+    A residual layer *name* from an in-process construction is resolved the
+    stack-less way (``"F.Cu"`` -> 0, ``"In<k>.Cu"`` -> k); one that cannot be
+    resolved without a stack (``"B.Cu"``) is left to :func:`layer_permitted`,
+    which also matches by name.  ``None`` / a class without the field / an
+    empty list -> empty set (the pre-#6876 behaviour).
+    """
+    opted = getattr(net_class, "allow_plane_layers", None)
+    if not opted:
+        return frozenset()
+    out: set[int] = set()
+    for entry in opted:
+        try:
+            out.add(resolve_layer_index(entry, None))
+        except LayerResolutionError:
+            continue
+    return frozenset(out)
+
+
+def layer_permitted(
+    rules: object,
+    net_class: object,
+    layer_idx: int,
+    layer_name: str,
+) -> bool:
+    """The ``rules.allowed_layers`` gate, widened by the class's opt-in (#6876).
+
+    ``DesignRules.allowed_layers`` is the board-wide hard layer gate
+    (``--reserve-plane-layers`` populates it with every non-PLANE layer).  A
+    net class may exempt itself, for the named layers only, through
+    :attr:`NetClassRouting.allow_plane_layers`.  This is the ONE predicate
+    every layer-permission path consults (grid pathfinder, C++ seed filter
+    and per-call routable widening, lattice, mesh, and the coupled pair
+    filter), so the opt-in cannot be honoured by one engine and ignored by
+    another (the #6865 gap).
+
+    Hard ``avoid_layers`` filtering is NOT folded in here: callers keep
+    applying it separately, so a layer that is both opted in and hard-avoided
+    stays blocked.
+
+    Args:
+        rules: The active :class:`DesignRules` (or anything exposing
+            ``allowed_layers``; ``None`` / missing -> no gate).
+        net_class: The net's :class:`NetClassRouting`, or ``None``.
+        layer_idx: Grid-layer index being tested.
+        layer_name: KiCad name of that layer (``"In2.Cu"``).
+
+    Returns:
+        True when the layer may carry this net's copper.
+    """
+    allowed = getattr(rules, "allowed_layers", None)
+    if allowed is None or layer_name in allowed:
+        return True
+    opted = getattr(net_class, "allow_plane_layers", None)
+    if not opted:
+        return False
+    return layer_idx in allowed_plane_layer_indices(net_class) or layer_name in opted
+
+
+def create_net_class_map(
+    power_nets: list[str] | None = None,
+    clock_nets: list[str] | None = None,
+    high_speed_nets: list[str] | None = None,
+    audio_nets: list[str] | None = None,
+    debug_nets: list[str] | None = None,
+) -> dict[str, NetClassRouting]:
+    """Create a net class mapping from net name lists.
+
+    Args:
+        power_nets: List of power net names (e.g., ["+5V", "+3.3V", "GND"])
+        clock_nets: List of clock net names (e.g., ["MCLK", "BCLK"])
+        high_speed_nets: List of high-speed signal nets (e.g., ["SPI_CLK"])
+        audio_nets: List of audio signal nets (e.g., ["AUDIO_L", "AUDIO_R"])
+        debug_nets: List of debug/low-priority nets (e.g., ["SWDIO", "NRST"])
+
+    Returns:
+        Dict mapping net names to NetClassRouting objects
+    """
+    net_class_map: dict[str, NetClassRouting] = {}
+
+    if power_nets:
+        for net in power_nets:
+            net_class_map[net] = NET_CLASS_POWER
+
+    if clock_nets:
+        for net in clock_nets:
+            net_class_map[net] = NET_CLASS_CLOCK
+
+    if high_speed_nets:
+        for net in high_speed_nets:
+            net_class_map[net] = NET_CLASS_HIGH_SPEED
+
+    if audio_nets:
+        for net in audio_nets:
+            net_class_map[net] = NET_CLASS_AUDIO
+
+    if debug_nets:
+        for net in debug_nets:
+            net_class_map[net] = NET_CLASS_DEBUG
+
+    return net_class_map
+
+
+def net_class_map_to_dict(
+    net_class_map: dict[str, NetClassRouting],
+) -> dict[str, dict]:
+    """Serialize a ``{net_name: NetClassRouting}`` map to a JSON-compatible dict.
+
+    Issue #2684.  The wire format for the ``kct check --net-class-map``
+    sidecar JSON.  Each entry is serialized via :meth:`NetClassRouting.to_dict`.
+    """
+    return {net: nc.to_dict() for net, nc in net_class_map.items()}
+
+
+def net_class_map_from_dict(
+    data: dict[str, dict],
+    layer_stack: LayerStack | None = None,
+) -> dict[str, NetClassRouting]:
+    """Deserialize a ``{net_name: NetClassRouting}`` map from a JSON-shaped dict.
+
+    Round-trip companion to :func:`net_class_map_to_dict`.  Each entry
+    is deserialized via :meth:`NetClassRouting.from_dict`.
+
+    Top-level keys whose name starts with an underscore (``_``) are
+    reserved for in-band documentation/provenance and are skipped: they
+    are never turned into routed nets.  This lets a hand-authored sidecar
+    self-document without a sibling README, e.g. a ``_comment`` string or
+    a ``_meta`` dict block (issue #4248).  Because KiCad net names do not
+    start with ``_`` in practice, this cannot shadow a real net entry.
+    The ``spatial_keepouts`` key is likewise reserved (issue #4605): it
+    carries per-rule-area net-class filters for KiCad keepout rule areas
+    and is parsed by the route CLI, not by this deserializer.  The
+    ``non_hv_nets`` key is reserved too (issue #8278): explicit "not
+    mains/HV" declarations read by the HV isolation vacuity guard.
+
+    Args:
+        data: Mapping of ``net_name -> NetClassRouting-dict``.  Must be a
+            dict; non-``_``-prefixed values must each be a dict.  Any
+            ``_``-prefixed key is ignored regardless of its value type.
+        layer_stack: Optional board stackup (issue #4587) forwarded to
+            :meth:`NetClassRouting.from_dict` so ``preferred_layers`` /
+            ``avoid_layers`` spelled as KiCad layer names resolve against the
+            board's ACTUAL copper indices (``"B.Cu"`` -> ``3`` on a 4-layer
+            board).  Defaults to ``None``, which keeps every existing caller
+            working unchanged for integer-valued maps.
+
+    Raises:
+        ValueError: If any (non-``_``-prefixed) entry is malformed
+            (missing 'name' field), or -- as
+            :class:`LayerResolutionError` -- if a layer entry cannot be
+            resolved; the message names the offending token AND the owning
+            net-class key.
+        TypeError: If ``data`` is not a dict, or if a non-``_``-prefixed
+            entry is not a dict.
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"net_class_map_from_dict expects a dict, got {type(data).__name__}")
+    result: dict[str, NetClassRouting] = {}
+    for net_name, entry in data.items():
+        if isinstance(net_name, str) and net_name.startswith("_"):
+            continue  # reserved for in-band documentation (_comment, _meta, ...)
+        if net_name == "non_hv_nets":
+            # Issue #8278: reserved block -- explicit per-net "not mains/HV"
+            # declarations for the HV vacuity guard, parsed by
+            # kicad_tools.creepage.engine.non_hv_nets_from_dict (never a net).
+            continue
+        if net_name == "spatial_keepouts":
+            # Issue #4605: reserved block -- per-rule-area net-class filters
+            # for KiCad keepout rule areas, parsed by the route CLI (never a
+            # net entry).  Skipped here so every sidecar consumer that only
+            # wants net classes keeps working.
+            continue
+        if not isinstance(entry, dict):
+            raise TypeError(
+                f"net_class_map entry for {net_name!r} must be a dict, got {type(entry).__name__}"
+            )
+        try:
+            result[net_name] = NetClassRouting.from_dict(entry, layer_stack=layer_stack)
+        except LayerResolutionError as e:
+            # Re-raise with the owning sidecar key so the CLI preload message
+            # names both the bad token and the net it belongs to (#4587).
+            raise LayerResolutionError(f"net-class entry {net_name!r}: {e}") from e
+        except (TypeError, ValueError) as e:
+            # Issue #6820: name the owning entry for every malformed-entry
+            # error (e.g. a ``length_constraint`` without ``net_id``), not just
+            # layer-resolution ones, so the user can find it in the sidecar.
+            raise type(e)(f"net-class entry {net_name!r}: {e}") from e
+    return result
+
+
+def net_class_map_from_path(
+    path: "str | Path",
+    *,
+    pcb_text: str | None = None,
+    pcb_path: "str | Path | None" = None,
+    layer_stack: LayerStack | None = None,
+) -> dict[str, "NetClassRouting"]:
+    """Load a ``--net-class-map`` JSON sidecar the way EVERY consumer must.
+
+    Canonical loader (issue #4683).  The #4587 hardening made an unresolvable
+    layer token (``"B.Cu"``, whose grid index depends on the board's copper
+    count) a hard :class:`LayerResolutionError` inside
+    :func:`net_class_map_from_dict` -- but only ``kct route`` was updated to
+    pass a layer stack.  Every other consumer (``kct creepage``, ``kct check``,
+    ``kct zones hv-keepout``, ``kct audit``) kept calling
+    ``net_class_map_from_dict(data)`` bare, so the SAME sidecar that routed a
+    board was rejected by the sign-off gates that validate the router's output.
+    This function is the single place that pairs "parse the sidecar" with
+    "resolve the board's layer stack" so a future consumer cannot recreate the
+    divergence: the invariant is *any sidecar accepted by one consumer is
+    accepted by all of them* (see also #4404, the same bug class for
+    ``_comment`` keys).
+
+    Stack resolution precedence:
+
+    1. ``layer_stack`` -- an already-resolved stack (e.g. ``kct route``'s
+       ``--layers``-flag table) is used as-is.
+    2. ``pcb_text`` -- raw ``.kicad_pcb`` contents, fed to
+       :func:`kicad_tools.router.io.detect_layer_stack`.
+    3. ``pcb_path`` -- read best-effort, then detected as in (2).
+
+    Stack resolution is best-effort (mirroring ``route_cmd``'s preload): if
+    the board cannot be read or detection fails, the map is still parsed with
+    ``layer_stack=None`` -- stack-independent tokens (``"F.Cu"``,
+    ``"In<k>.Cu"``) resolve, and ``"B.Cu"`` fails loud with an actionable
+    message rather than a silent wrong index.
+
+    Args:
+        path: Path to the sidecar JSON file.
+        pcb_text: Optional raw ``.kicad_pcb`` contents for stack detection.
+        pcb_path: Optional path to the board file for stack detection
+            (read best-effort; ignored when ``pcb_text`` is given).
+        layer_stack: Optional pre-resolved stack; wins over both of the above.
+
+    Returns:
+        The parsed ``{net_name: NetClassRouting}`` map.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+        json.JSONDecodeError: If the sidecar is not valid JSON.
+        TypeError: If the sidecar structure is not a dict-of-dicts.
+        ValueError: If an entry is malformed, or -- as
+            :class:`LayerResolutionError` -- if a layer token cannot be
+            resolved against the (possibly absent) stack.
+    """
+    import json
+    from pathlib import Path as _Path
+
+    sidecar_path = _Path(path)
+    if not sidecar_path.exists():
+        raise FileNotFoundError(f"net-class-map file not found: {sidecar_path}")
+    data = json.loads(sidecar_path.read_text())
+
+    stack = layer_stack
+    if stack is None:
+        # Function-scope import: router.io imports router.rules at module
+        # level, so a top-level import here would be circular.
+        from .io import detect_layer_stack
+
+        text = pcb_text
+        if text is None and pcb_path is not None:
+            try:
+                text = _Path(pcb_path).read_text()
+            except OSError:
+                text = None
+        if text is not None:
+            try:
+                stack = detect_layer_stack(text)
+            except (KeyError, OSError, ValueError):
+                stack = None
+
+    try:
+        return net_class_map_from_dict(data, layer_stack=stack)
+    except (TypeError, ValueError) as e:
+        # Issue #6820: prefix the sidecar path so a CLI error names the file
+        # as well as the entry.  ``type(e)`` keeps ``LayerResolutionError``
+        # (a ``ValueError``) distinguishable for callers that care.
+        raise type(e)(f"{sidecar_path}: {e}") from e
+
+
+# Threshold for classifying a 2-pin signal net as "simple" (short) vs "complex" (long).
+# Nets with a bounding-box diagonal below this value (in mm) are considered simple and
+# are routed before longer/multi-pin nets within the same priority class.  This gives
+# short connections first access to routing channels.
+SIMPLE_NET_THRESHOLD_MM: float = 10.0
+
+# Default net class map with common net names.
+#
+# Issue #3524: this is a module-level singleton shared by reference across
+# every Autorouter/Pathfinder/BlockRouter constructed without an explicit
+# ``net_class_map``.  It used to be a plain dict, and any consumer that
+# wrote into its aliased ``self.net_class_map`` (impedance synthesis,
+# diff-pair partner wiring, matrix layer preferences, test setup code)
+# silently polluted the defaults for every later caller in the same
+# process -- which surfaced as order-dependent failures under pytest-xdist.
+# It is now wrapped in a read-only ``MappingProxyType`` so any in-place
+# mutation raises ``TypeError`` immediately; consumers that need a mutable
+# map must take a copy (``dict(DEFAULT_NET_CLASS_MAP)``), which the router
+# constructors now do.
+DEFAULT_NET_CLASS_MAP: Mapping[str, NetClassRouting] = MappingProxyType(
+    create_net_class_map(
+        power_nets=["+5V", "+3.3V", "+3.3VA", "+1.8V", "VCC", "VDD", "GND", "GNDA", "PGND"],
+        clock_nets=["CLK", "MCLK", "BCLK", "LRCLK", "SCK"],
+        audio_nets=["AUDIO_L", "AUDIO_R", "I2S_DIN", "I2S_DOUT"],
+        debug_nets=["SWDIO", "SWCLK", "NRST", "TDI", "TDO", "TCK", "TMS"],
+    )
+)

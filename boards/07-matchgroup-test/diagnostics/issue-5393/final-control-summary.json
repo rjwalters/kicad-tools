@@ -1,0 +1,268 @@
+{
+  "ddr-only": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "2eeb258cecbe9727a5a3e11ea7d398f21b89d5f8a912d00b6be47c62f626b905",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "DQ3",
+        "GND",
+        "MIPI_CLK_N",
+        "MIPI_CLK_P",
+        "MIPI_DAT0_N",
+        "MIPI_DAT0_P",
+        "MIPI_DAT1_N",
+        "MIPI_DAT1_P",
+        "TMDS_D0_N",
+        "TMDS_D0_P",
+        "TMDS_D1_N",
+        "TMDS_D1_P",
+        "TMDS_D2_N",
+        "TMDS_D2_P"
+      ],
+      "ddr_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 6,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      }
+    },
+    "refilled": {
+      "sha256": "3bee6f86fec7c1d9a1d345282f80a45ae6c434d4d5531eb29fdf97fcfbc2bdbd",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "DQ3",
+        "GND",
+        "MIPI_CLK_N",
+        "MIPI_CLK_P",
+        "MIPI_DAT0_N",
+        "MIPI_DAT0_P",
+        "MIPI_DAT1_N",
+        "MIPI_DAT1_P",
+        "TMDS_D0_N",
+        "TMDS_D0_P",
+        "TMDS_D1_N",
+        "TMDS_D1_P",
+        "TMDS_D2_N",
+        "TMDS_D2_P"
+      ],
+      "ddr_open_nets": [
+        "DQ3"
+      ],
+      "native_violation_types": {
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      }
+    }
+  },
+  "restored-dm0": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "5177d920022dbfd1fe406c9e54782c6016269ac2131f580e2a6e0a32a06c046e",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7",
+        "GND",
+        "MIPI_CLK_N",
+        "MIPI_CLK_P",
+        "MIPI_DAT0_N",
+        "MIPI_DAT0_P",
+        "MIPI_DAT1_N",
+        "MIPI_DAT1_P"
+      ],
+      "ddr_open_nets": [
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7"
+      ],
+      "native_violation_types": {
+        "track_dangling": 63,
+        "hole_to_hole": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      }
+    },
+    "refilled": {
+      "sha256": "6ed471d128315ffa5181c3e9542268bc9af19aac5a79d8514d12a1af034cddd4",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7",
+        "GND",
+        "MIPI_CLK_N",
+        "MIPI_CLK_P",
+        "MIPI_DAT0_N",
+        "MIPI_DAT0_P",
+        "MIPI_DAT1_N",
+        "MIPI_DAT1_P"
+      ],
+      "ddr_open_nets": [
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7"
+      ],
+      "native_violation_types": {
+        "track_dangling": 62,
+        "isolated_copper": 1,
+        "hole_to_hole": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      }
+    }
+  },
+  "restored-dqsn": {
+    "saved_refilled_components_equal": false,
+    "saved": {
+      "sha256": "4d2e66102b320a7359ab090b3ff4454ffdb9a8a000ce1fd8c113fb0aa0eab3fa",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "+1V8",
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7",
+        "GND",
+        "MIPI_CLK_N",
+        "MIPI_CLK_P",
+        "MIPI_DAT0_N",
+        "MIPI_DAT0_P",
+        "MIPI_DAT1_N",
+        "MIPI_DAT1_P"
+      ],
+      "ddr_open_nets": [
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7"
+      ],
+      "native_violation_types": {
+        "track_dangling": 63,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      }
+    },
+    "refilled": {
+      "sha256": "d147d5a19435f02894b439b4508d733e42d0b43a73234abaffe10aff3997e016",
+      "pad_count": 244,
+      "all_open_nets": [
+        "+1V2",
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7",
+        "GND",
+        "MIPI_CLK_N",
+        "MIPI_CLK_P",
+        "MIPI_DAT0_N",
+        "MIPI_DAT0_P",
+        "MIPI_DAT1_N",
+        "MIPI_DAT1_P"
+      ],
+      "ddr_open_nets": [
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ5",
+        "DQ6",
+        "DQ7"
+      ],
+      "native_violation_types": {
+        "track_dangling": 62,
+        "isolated_copper": 1,
+        "lib_footprint_issues": 6,
+        "text_thickness": 4,
+        "text_height": 4,
+        "silk_over_copper": 5
+      }
+    }
+  }
+}

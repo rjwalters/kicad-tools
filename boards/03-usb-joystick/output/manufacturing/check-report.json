@@ -1,0 +1,285 @@
+{
+  "file": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "pcb_sha256": "94005ce497b8c968fd655d6c954de033bc6751c52248421c3e79cfc47a907e96",
+  "layers": 4,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 10,
+    "waived": 0,
+    "rules_checked": 76,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "diffpair_clearance_intra": 2,
+      "diffpair_length_skew": 2,
+      "diffpair_routing_continuity": 2,
+      "diffpair_uncoupled_length": 2,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
+    },
+    "passed": true,
+    "stale_waivers": 0
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
+      "location": [
+        123.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 7.4,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.224 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.2243,
+      "required_value": 2.5,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_length_skew||USB_D+,USB_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.137 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.1374,
+      "required_value": 2.5,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_length_skew||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- routing continuity 32.7% below threshold 70.0% (info only; see diffpair_uncoupled_length)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.3265,
+      "required_value": 0.7,
+      "items": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_routing_continuity|USB_D+,USB_D-|USB_D+,USB_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 100.0% of its length (>= 70.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 1.0,
+      "required_value": 0.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_routing_continuity||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_D+/USB_D- uncoupled length 9.325 mm (P 9.325, N 9.325) within limit 19.050 mm = 6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 9.3249,
+      "required_value": 19.05,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_D+/USB_D- worst per-terminal uncoupled length 1.696 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "location": null,
+      "layer": null,
+      "actual_value": 1.6964,
+      "required_value": 6.35,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- uncoupled length 0.955 mm (P 0.955, N 0.818) within limit 12.700 mm = 6.35 mm x 2 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.9553,
+      "required_value": 12.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "diffpair_uncoupled_length",
+      "type": "diffpair_uncoupled_length",
+      "severity": "info",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- worst per-terminal uncoupled length 0.800 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.8004,
+      "required_value": 6.35,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": null
+    }
+  ],
+  "mask_copper_assessments": [],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "0 errors, 0 warnings; reviewed 0.45 mm pad-hole floor"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 129,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
+    },
+    "overall": "PASSED",
+    "schematic_missing": false
+  },
+  "fabrication_overrides": {
+    "min_hole_to_hole_mm": 0.45,
+    "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
+    "reason": "Published pad-hole minimum; matches reviewed geometry (GCT USB4085-GF-A stock 0.40mm PTH contacts on 0.85mm pitch, actual hole-edge spacing 0.45mm). Native KiCad DRC at this floor reports zero hole_to_hole findings on the routed board.",
+    "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
+    "suppressed_findings": 0
+  },
+  "usb_geometry": {
+    "lengths_mm": {
+      "USB_D+": 15.790877515751076,
+      "USB_D-": 15.790877515751076,
+      "USB_MCU_D+": 3.9356328834891876,
+      "USB_MCU_D-": 3.7982796662062412
+    },
+    "common_coupled_mm": 4.070927124746197,
+    "branch_skew_mm": 0.0
+  }
+}

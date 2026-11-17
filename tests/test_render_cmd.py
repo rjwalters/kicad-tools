@@ -1,0 +1,849 @@
+"""Tests for the kct render CLI command (Epic #3674, Phase 1).
+
+These tests mock out the kicad-cli subprocess calls so they can run in any
+environment without a live KiCad installation.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from kicad_tools.cli import render_cmd
+from kicad_tools.cli.render_cmd import (
+    COVERAGE_FILE,
+    RENDER_OUTPUTS,
+    _discover_boards,
+    _parse_version,
+)
+from kicad_tools.cli.render_cmd import (
+    main as render_main,
+)
+
+
+def _make_board(root: Path, name: str, pcb_name: str | None = None) -> Path:
+    """Create a board directory with an output/ dir and optional PCB file."""
+    board = root / name
+    output = board / "output"
+    output.mkdir(parents=True)
+    if pcb_name is not None:
+        (output / pcb_name).write_text("(kicad_pcb)")
+    return board
+
+
+@pytest.fixture
+def fake_kicad(monkeypatch):
+    """Make kicad-cli appear available and stub render helpers to write files.
+
+    The 2D export helper creates the requested SVG and the 3D render helper the
+    requested PNG (both non-empty), returning a successful KiCadCLIResult, so the
+    command exercises its full path without a live KiCad.
+    """
+    from kicad_tools.cli.runner import KiCadCLIResult
+
+    fake_cli = Path("/usr/bin/kicad-cli")
+
+    monkeypatch.setattr(render_cmd, "find_kicad_cli", lambda: fake_cli)
+    monkeypatch.setattr(render_cmd, "get_kicad_version", lambda *a, **k: "8.0.6")
+
+    calls: dict[str, list] = {"svg": [], "render": []}
+
+    def fake_svg(pcb_path, output_path, layers, **kwargs):
+        Path(output_path).write_bytes(b"<svg></svg>")
+        calls["svg"].append((Path(pcb_path), Path(output_path), list(layers)))
+        return KiCadCLIResult(success=True, output_path=Path(output_path))
+
+    def fake_render(pcb_path, output_path, side="front", **kwargs):
+        Path(output_path).write_bytes(b"PNG3D")
+        calls["render"].append((Path(pcb_path), Path(output_path), side))
+        return KiCadCLIResult(success=True, output_path=Path(output_path))
+
+    monkeypatch.setattr(render_cmd, "run_pcb_export_svg", fake_svg)
+    monkeypatch.setattr(render_cmd, "run_pcb_render", fake_render)
+
+    return calls
+
+
+# --------------------------------------------------------------------------
+# Version parsing
+# --------------------------------------------------------------------------
+
+
+class TestParseVersion:
+    def test_simple(self):
+        assert _parse_version("8.0.6") == (8, 0, 6)
+
+    def test_two_component(self):
+        assert _parse_version("9.0") == (9, 0, 0)
+
+    def test_extra_text(self):
+        assert _parse_version("KiCad 8.0.4 release build") == (8, 0, 4)
+
+    def test_rc_suffix(self):
+        assert _parse_version("8.0.4-rc1") == (8, 0, 4)
+
+    def test_none(self):
+        assert _parse_version(None) is None
+
+    def test_unparseable(self):
+        assert _parse_version("nightly") is None
+
+
+# --------------------------------------------------------------------------
+# Board discovery
+# --------------------------------------------------------------------------
+
+
+class TestDiscoverBoards:
+    def test_single_board_dir(self, tmp_path):
+        board = _make_board(tmp_path, "01-foo", "foo.kicad_pcb")
+        assert _discover_boards(board) == [board]
+
+    def test_root_with_multiple_boards(self, tmp_path):
+        b1 = _make_board(tmp_path, "00-a", "a.kicad_pcb")
+        b2 = _make_board(tmp_path, "01-b", "b.kicad_pcb")
+        assert _discover_boards(tmp_path) == [b1, b2]
+
+    def test_nested_grouping_dir(self, tmp_path):
+        # boards/external/<board>/output  — one level of grouping
+        b = _make_board(tmp_path / "external", "softstart", "s.kicad_pcb")
+        assert b in _discover_boards(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# kicad-cli-not-found handling
+# --------------------------------------------------------------------------
+
+
+class TestKicadCliMissing:
+    def test_not_found_returns_1(self, tmp_path, monkeypatch, capsys):
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+        monkeypatch.setattr(render_cmd, "find_kicad_cli", lambda: None)
+        rc = render_main([str(tmp_path)])
+        assert rc == 1
+        assert "kicad-cli not found" in capsys.readouterr().err
+
+    def test_missing_path_returns_1(self, tmp_path, capsys):
+        rc = render_main([str(tmp_path / "does-not-exist")])
+        assert rc == 1
+        assert "path not found" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Output path contract
+# --------------------------------------------------------------------------
+
+
+class TestOutputPathContract:
+    def test_writes_exact_filenames(self, tmp_path, fake_kicad):
+        board = _make_board(tmp_path, "01-vd", "vd.kicad_pcb")
+        rc = render_main([str(board)])
+        assert rc == 0
+
+        renders = board / "output" / "renders"
+        for fname in RENDER_OUTPUTS.values():
+            assert (renders / fname).exists(), f"missing {fname}"
+        # Exactly the four contracted files, nothing else.
+        assert sorted(p.name for p in renders.iterdir()) == sorted(
+            [*RENDER_OUTPUTS.values(), COVERAGE_FILE]
+        )
+
+    def test_filenames_are_exactly_the_contract(self):
+        assert RENDER_OUTPUTS == {
+            "pcb-front": "pcb-front.svg",
+            "pcb-back": "pcb-back.svg",
+            "3d-front": "3d-front.png",
+            "3d-back": "3d-back.png",
+        }
+
+
+# --------------------------------------------------------------------------
+# Help text accuracy (regression guard for #3937)
+# --------------------------------------------------------------------------
+
+
+class TestHelpText:
+    """Pin the `--help` text so it matches the real output contract.
+
+    The 2D layer plots are written as ``.svg`` via ``kicad-cli pcb export svg``
+    and only the 3D renders are ``.png`` (via ``kicad-cli pcb render``). The
+    help text used to promise ``.png`` for the 2D plots and named the stale
+    ``pcb export png`` subcommand; these assertions catch that regression.
+    """
+
+    def _render_subaction(self):
+        """Return the argparse action for the ``render`` subcommand.
+
+        We inspect the parser structure directly rather than the rendered
+        ``--help`` text because argparse line-wraps the description, which would
+        split the filename globs (e.g. ``{pcb-\\nfront,pcb-back}.svg``) and make
+        substring assertions brittle.
+        """
+        from argparse import _SubParsersAction
+
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        for action in parser._actions:
+            if isinstance(action, _SubParsersAction):
+                return action.choices["render"], action._choices_actions
+        raise AssertionError("no subparsers action found")
+
+    def test_standalone_help_mentions_svg_for_2d(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            render_main(["--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "SVG" in out
+        # The standalone description must not call the 2D plots plain "PNGs".
+        assert "2D layer plots (SVGs)" in out
+
+    def test_subparser_description_names_export_svg_not_png(self):
+        render_parser, _ = self._render_subaction()
+        desc = render_parser.description
+        assert "kicad-cli pcb export svg" in desc
+        assert "kicad-cli pcb export png" not in desc
+
+    def test_subparser_description_2d_outputs_are_svg(self):
+        render_parser, _ = self._render_subaction()
+        desc = render_parser.description
+        assert "{pcb-front,pcb-back}.svg" in desc
+        assert "{3d-front,3d-back}.png" in desc
+        # The old glob promised .png for the 2D plots — must be gone.
+        assert "{pcb-front,pcb-back,3d-front,3d-back}.png" not in desc
+
+    def test_subparser_help_line_mentions_svg_not_png(self):
+        _, choices_actions = self._render_subaction()
+        render_help = next(a.help for a in choices_actions if a.dest == "render")
+        assert "SVG" in render_help
+        assert "3D PNGs" in render_help
+
+
+# --------------------------------------------------------------------------
+# Routed PCB preference / fallback
+# --------------------------------------------------------------------------
+
+
+class TestPcbSelection:
+    def test_prefers_routed_pcb(self, tmp_path, fake_kicad):
+        board = _make_board(tmp_path, "01-vd", "vd.kicad_pcb")
+        (board / "output" / "vd_routed.kicad_pcb").write_text("(kicad_pcb)")
+
+        rc = render_main([str(board)])
+        assert rc == 0
+
+        # Every helper should have been called with the routed PCB.
+        used = {call[0].name for call in fake_kicad["svg"]}
+        assert used == {"vd_routed.kicad_pcb"}
+
+    def test_falls_back_to_unrouted(self, tmp_path, fake_kicad):
+        board = _make_board(tmp_path, "00-led", "led.kicad_pcb")
+        rc = render_main([str(board)])
+        assert rc == 0
+        used = {call[0].name for call in fake_kicad["svg"]}
+        assert used == {"led.kicad_pcb"}
+
+
+# --------------------------------------------------------------------------
+# --no-3d
+# --------------------------------------------------------------------------
+
+
+class TestNo3d:
+    def test_skips_3d_renders(self, tmp_path, fake_kicad):
+        board = _make_board(tmp_path, "01-vd", "vd.kicad_pcb")
+        rc = render_main([str(board), "--no-3d"])
+        assert rc == 0
+
+        renders = board / "output" / "renders"
+        assert (renders / "pcb-front.svg").exists()
+        assert (renders / "pcb-back.svg").exists()
+        assert not (renders / "3d-front.png").exists()
+        assert not (renders / "3d-back.png").exists()
+        # The 3D render helper was never called.
+        assert fake_kicad["render"] == []
+
+
+# --------------------------------------------------------------------------
+# --format json
+# --------------------------------------------------------------------------
+
+
+class TestJsonOutput:
+    def test_emits_valid_json_with_per_board_status(self, tmp_path, fake_kicad, capsys):
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+        _make_board(tmp_path, "01-b", "b.kicad_pcb")
+
+        rc = render_main([str(tmp_path), "--format", "json"])
+        assert rc == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert "boards" in payload
+        names = {entry["board"] for entry in payload["boards"]}
+        assert names == {"00-a", "01-b"}
+        for entry in payload["boards"]:
+            assert entry["status"] == "ok"
+            assert set(entry["outputs"]) == set(RENDER_OUTPUTS)
+
+
+# --------------------------------------------------------------------------
+# 3D render command flags (issue #3702): logical front/back -> oblique
+# top/bottom views, not kicad-cli's edge-on native front/back.
+# --------------------------------------------------------------------------
+
+
+class TestRenderObliqueFlags:
+    _RUNNER = "kicad_tools.cli.runner"
+
+    def _capture_cmd(self, tmp_path: Path, side: str):
+        from kicad_tools.cli.runner import run_pcb_render
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        out = tmp_path / f"3d-{side}.png"
+
+        def fake_run(cmd, *args, **kwargs):
+            out.write_bytes(b"PNG3D")
+            fake_run.cmd = cmd
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{self._RUNNER}.subprocess.run", side_effect=fake_run):
+            res = run_pcb_render(
+                pcb,
+                out,
+                side=side,
+                kicad_cli=Path("/usr/bin/kicad-cli"),
+            )
+
+        assert res.success
+        return fake_run.cmd
+
+    def test_front_uses_oblique_top_view(self, tmp_path):
+        cmd = self._capture_cmd(tmp_path, "front")
+        assert cmd[cmd.index("--side") + 1] == "top"
+        assert "--rotate" in cmd
+        assert cmd[cmd.index("--rotate") + 1] == "-70,0,0"
+        assert "--perspective" in cmd
+        # The native edge-on "front" must NOT be emitted.
+        assert "front" not in cmd
+
+    def test_back_uses_oblique_bottom_view(self, tmp_path):
+        cmd = self._capture_cmd(tmp_path, "back")
+        assert cmd[cmd.index("--side") + 1] == "bottom"
+        assert "--rotate" in cmd
+        assert cmd[cmd.index("--rotate") + 1] == "70,0,0"
+        assert "--perspective" in cmd
+        assert "back" not in cmd
+
+    def test_native_side_passes_through_without_rotate(self, tmp_path):
+        # Callers passing a native kicad-cli side get a straight-on view.
+        cmd = self._capture_cmd(tmp_path, "top")
+        assert cmd[cmd.index("--side") + 1] == "top"
+        assert "--rotate" not in cmd
+        assert "--perspective" not in cmd
+
+
+# --------------------------------------------------------------------------
+# 3D model path environment plumbing (bare-board gallery renders): footprint
+# (model "${KICADn_3DMODEL_DIR}/...") refs must resolve for every KiCad
+# release var name, so run_pcb_render injects the detected model dir into
+# the subprocess environment for any name not already set.
+# --------------------------------------------------------------------------
+
+
+class TestRender3DModelEnv:
+    _RUNNER = "kicad_tools.cli.runner"
+
+    def _run_and_capture_kwargs(self, tmp_path: Path, monkeypatch, model_dir):
+        import kicad_tools.cli.runner as runner
+
+        monkeypatch.setattr(runner, "find_kicad_3dmodel_dir", lambda *a, **k: model_dir)
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        out = tmp_path / "3d-front.png"
+
+        captured: dict = {}
+
+        def fake_run(cmd, *args, **kwargs):
+            out.write_bytes(b"PNG3D")
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{self._RUNNER}.subprocess.run", side_effect=fake_run):
+            res = runner.run_pcb_render(
+                pcb, out, side="front", kicad_cli=Path("/usr/bin/kicad-cli")
+            )
+        assert res.success
+        return captured
+
+    def test_injects_all_version_vars(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import KICAD_3DMODEL_ENV_VARS
+
+        model_dir = tmp_path / "3dmodels"
+        model_dir.mkdir()
+        for var in KICAD_3DMODEL_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, model_dir)
+        env = captured["kwargs"]["env"]
+        assert env is not None
+        for var in KICAD_3DMODEL_ENV_VARS:
+            assert env[var] == str(model_dir)
+
+    def test_existing_env_var_not_overridden(self, tmp_path, monkeypatch):
+        model_dir = tmp_path / "3dmodels"
+        model_dir.mkdir()
+        monkeypatch.setenv("KICAD9_3DMODEL_DIR", "/custom/models")
+
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, model_dir)
+        env = captured["kwargs"]["env"]
+        assert env["KICAD9_3DMODEL_DIR"] == "/custom/models"
+        assert env["KICAD10_3DMODEL_DIR"] == str(model_dir)
+
+    def test_no_model_dir_inherits_environment(self, tmp_path, monkeypatch):
+        # With no KiCad model dir AND the LCSC cache var already set, there is
+        # nothing to inject, so the env is inherited as-is (None).
+        monkeypatch.setenv("KCT_LCSC_3D_DIR", str(tmp_path / "lcsc"))
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, None)
+        assert captured["kwargs"]["env"] is None
+
+    def test_no_model_dir_still_injects_lcsc_cache_var(self, tmp_path, monkeypatch):
+        # No KiCad model dir, but the LCSC cache var is unset: inject its
+        # default so committed ${KCT_LCSC_3D_DIR} refs still resolve at render.
+        monkeypatch.delenv("KCT_LCSC_3D_DIR", raising=False)
+        captured = self._run_and_capture_kwargs(tmp_path, monkeypatch, None)
+        env = captured["kwargs"]["env"]
+        assert env is not None
+        assert "KCT_LCSC_3D_DIR" in env
+
+    def test_find_kicad_3dmodel_dir_env_wins(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import find_kicad_3dmodel_dir
+
+        model_dir = tmp_path / "envmodels"
+        model_dir.mkdir()
+        monkeypatch.setenv("KICAD10_3DMODEL_DIR", str(model_dir))
+        assert find_kicad_3dmodel_dir() == model_dir
+
+    def test_find_kicad_3dmodel_dir_derived_from_cli_prefix(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import (
+            KICAD_3DMODEL_ENV_VARS,
+            find_kicad_3dmodel_dir,
+        )
+
+        for var in KICAD_3DMODEL_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+        prefix = tmp_path / "prefix"
+        (prefix / "bin").mkdir(parents=True)
+        models = prefix / "share" / "kicad" / "3dmodels"
+        models.mkdir(parents=True)
+        assert find_kicad_3dmodel_dir(prefix / "bin" / "kicad-cli") == models
+
+    def test_find_kicad_3dmodel_dir_derived_from_macos_bundle(self, tmp_path, monkeypatch):
+        from kicad_tools.cli.runner import (
+            KICAD_3DMODEL_ENV_VARS,
+            find_kicad_3dmodel_dir,
+        )
+
+        for var in KICAD_3DMODEL_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+        contents = tmp_path / "KiCad.app" / "Contents"
+        (contents / "MacOS").mkdir(parents=True)
+        models = contents / "SharedSupport" / "3dmodels"
+        models.mkdir(parents=True)
+        assert find_kicad_3dmodel_dir(contents / "MacOS" / "kicad-cli") == models
+
+
+# --------------------------------------------------------------------------
+# Edge cases
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Direct .kicad_pcb file mode (issue #4145)
+# --------------------------------------------------------------------------
+
+
+class TestFilePathMode:
+    """`kct render path/to/board.kicad_pcb` renders a single PCB directly."""
+
+    def _make_pcb(self, root: Path, name: str = "board.kicad_pcb") -> Path:
+        pcb = root / name
+        pcb.write_text("(kicad_pcb)")
+        return pcb
+
+    def test_bare_file_writes_to_sibling_renders_dir(self, tmp_path, fake_kicad):
+        # A .kicad_pcb not inside any output/ dir renders to <pcb-dir>/renders/.
+        pcb = self._make_pcb(tmp_path)
+        rc = render_main([str(pcb)])
+        assert rc == 0
+
+        renders = tmp_path / "renders"
+        for fname in RENDER_OUTPUTS.values():
+            assert (renders / fname).exists(), f"missing {fname}"
+        assert sorted(p.name for p in renders.iterdir()) == sorted(
+            [*RENDER_OUTPUTS.values(), COVERAGE_FILE]
+        )
+        # The exact PCB file passed was rendered (no discovery).
+        assert {call[0] for call in fake_kicad["svg"]} == {pcb}
+
+    def test_output_flag_overrides_default_dir(self, tmp_path, fake_kicad):
+        pcb = self._make_pcb(tmp_path)
+        custom = tmp_path / "custom" / "dir"
+        rc = render_main([str(pcb), "-o", str(custom)])
+        assert rc == 0
+
+        for fname in RENDER_OUTPUTS.values():
+            assert (custom / fname).exists(), f"missing {fname}"
+        # Nothing landed in the default location.
+        assert not (tmp_path / "renders").exists()
+
+    def test_long_output_flag(self, tmp_path, fake_kicad):
+        pcb = self._make_pcb(tmp_path)
+        custom = tmp_path / "out"
+        rc = render_main([str(pcb), "--output", str(custom)])
+        assert rc == 0
+        assert (custom / "pcb-front.svg").exists()
+
+    def test_wrong_extension_errors(self, tmp_path, fake_kicad, capsys):
+        bad = tmp_path / "board.txt"
+        bad.write_text("not a pcb")
+        rc = render_main([str(bad)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Expected .kicad_pcb file" in err
+        assert "board.txt" in err
+
+    def test_nonexistent_file_errors(self, tmp_path, fake_kicad, capsys):
+        rc = render_main([str(tmp_path / "missing.kicad_pcb")])
+        assert rc == 1
+        assert "path not found" in capsys.readouterr().err
+
+    def test_no_3d_writes_only_svgs(self, tmp_path, fake_kicad):
+        pcb = self._make_pcb(tmp_path)
+        rc = render_main([str(pcb), "--no-3d"])
+        assert rc == 0
+
+        renders = tmp_path / "renders"
+        assert (renders / "pcb-front.svg").exists()
+        assert (renders / "pcb-back.svg").exists()
+        assert not (renders / "3d-front.png").exists()
+        assert not (renders / "3d-back.png").exists()
+        assert fake_kicad["render"] == []
+
+    def test_json_uses_pcb_stem_as_board_name(self, tmp_path, fake_kicad, capsys):
+        pcb = self._make_pcb(tmp_path, "softstart_revb.kicad_pcb")
+        rc = render_main([str(pcb), "--format", "json"])
+        assert rc == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert "boards" in payload
+        assert len(payload["boards"]) == 1
+        entry = payload["boards"][0]
+        assert entry["board"] == "softstart_revb"
+        assert entry["status"] == "ok"
+        assert set(entry["outputs"]) == set(RENDER_OUTPUTS)
+
+
+class TestEdgeCases:
+    def test_board_without_pcb_is_non_fatal(self, tmp_path, fake_kicad, capsys):
+        # output/ exists but contains no .kicad_pcb at all.
+        _make_board(tmp_path, "00-empty", pcb_name=None)
+        rc = render_main([str(tmp_path)])
+        assert rc == 0
+        assert "SKIP" in capsys.readouterr().err
+
+    def test_render_failure_reports_error_and_exits_1(self, tmp_path, monkeypatch, fake_kicad):
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        board = _make_board(tmp_path, "01-vd", "vd.kicad_pcb")
+
+        def failing(pcb_path, output_path, *a, **k):
+            return KiCadCLIResult(success=False, stderr="boom")
+
+        monkeypatch.setattr(render_cmd, "run_pcb_export_svg", failing)
+        monkeypatch.setattr(render_cmd, "run_pcb_render", failing)
+
+        rc = render_main([str(board)])
+        assert rc == 1
+
+    def test_old_kicad_version_blocks_3d(self, tmp_path, fake_kicad, monkeypatch, capsys):
+        monkeypatch.setattr(render_cmd, "get_kicad_version", lambda *a, **k: "8.0.2")
+        board = _make_board(tmp_path, "01-vd", "vd.kicad_pcb")
+        rc = render_main([str(board)])
+        assert rc == 1
+        assert "8.0.4" in capsys.readouterr().err
+
+    def test_old_kicad_version_allows_2d_with_no_3d(self, tmp_path, fake_kicad, monkeypatch):
+        monkeypatch.setattr(render_cmd, "get_kicad_version", lambda *a, **k: "8.0.2")
+        board = _make_board(tmp_path, "01-vd", "vd.kicad_pcb")
+        rc = render_main([str(board), "--no-3d"])
+        assert rc == 0
+
+
+class TestMissingModelDiagnostics:
+    @pytest.mark.parametrize("directory_mode", [False, True])
+    def test_missing_bodies_are_partial_even_when_native_render_succeeds(
+        self, tmp_path, fake_kicad, capsys, directory_mode
+    ):
+        board = _make_board(tmp_path, "05-board", "board.kicad_pcb")
+        pcb = board / "output/board.kicad_pcb"
+        source = """(kicad_pcb
+          (footprint "TSSOP" (property "Reference" "U2")
+            (model "missing-tssop.step"))
+          (module "HVSSOP" (fp_text reference "U3")
+            (model "missing-hvssop.step")))"""
+        pcb.write_text(source)
+        rc = render_main([str(board if directory_mode else pcb), "--format", "json"])
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)["boards"][0]
+        assert rc == 1
+        assert result["status"] == "partial"
+        assert len(result["outputs"]) == 4
+        check = result["model_check"]
+        assert check["status"] == "failed"
+        assert check["checked_models"] == 2
+        assert [m["reference"] for m in check["unresolved_models"]] == ["U2", "U3"]
+        assert all(m["reason"] == "model file not found" for m in check["unresolved_models"])
+        assert "missing-tssop.step" in result["errors"][0]
+        assert pcb.read_text() == source
+        assert captured.err == ""
+
+    def test_bare_footprints_are_partial_with_a_reason_each(self, tmp_path, fake_kicad, capsys):
+        # Issue #7682: footprints with no (model ...) used to pass with 0 checked.
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (footprint "R:R" (property "Reference" "R1"))'
+            ' (footprint "R:R" (property "Reference" "R2"))'
+            ' (footprint "MountingHole:MH" (property "Reference" "H1")))'
+        )
+        assert render_main([str(pcb), "--format", "json"]) == 1
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        check = result["model_check"]
+        assert result["status"] == "partial"
+        assert check["status"] == "failed"
+        assert check["coverage"]["covered"] == 0 and check["coverage"]["total"] == 2
+        assert [m["reference"] for m in check["uncovered_models"]] == ["R1", "R2"]
+        assert all(m["class"] == "no_ref" for m in check["uncovered_models"])
+        assert len([e for e in result["errors"] if "no_ref" in e]) == 2
+
+    def test_allow_incomplete_models_downgrades_to_warning(self, tmp_path, fake_kicad, capsys):
+        # Issue #7689: exploratory runs keep the images and exit 0; coverage
+        # is still reported.
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "R:R" (property "Reference" "R1")))')
+        args = [str(pcb), "--allow-incomplete-models", "--format", "json"]
+        assert render_main(args) == 0
+        check = json.loads(capsys.readouterr().out)["boards"][0]["model_check"]
+        assert check["status"] == "allowed_incomplete"
+        assert check["coverage"]["percent"] == 0.0
+
+    def test_exempt_footprints_do_not_fail(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "MountingHole:MH" (property "Reference" "H1")))')
+        assert render_main([str(pcb), "--format", "json"]) == 0
+        check = json.loads(capsys.readouterr().out)["boards"][0]["model_check"]
+        assert check["status"] == "passed"
+
+    def test_coverage_summary_written_next_to_renders(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "R:R" (property "Reference" "R1")))')
+        render_main([str(pcb), "--allow-incomplete-models", "--format", "json"])
+        summary = json.loads((tmp_path / "renders" / "model-coverage.json").read_text())
+        assert summary["total"] == 1 and summary["covered"] == 0
+
+    def test_models_flag_selects_audit_environment(self, tmp_path, fake_kicad, monkeypatch, capsys):
+        seen: list[str] = []
+        real = render_cmd.audit_pcb_models
+
+        def spy(pcb_path, *, env, **kwargs):
+            seen.append(env)
+            return real(pcb_path, env="host", **kwargs)
+
+        monkeypatch.setattr(render_cmd, "audit_pcb_models", spy)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "MountingHole:MH" (property "Reference" "H1")))')
+        render_main([str(pcb), "--models", "pinned", "--format", "json"])
+        render_main([str(pcb), "--models", "host", "--format", "json"])
+        assert seen == ["pinned", "host"]
+
+    def test_default_models_follow_pinned_sync(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(render_cmd, "resolve_pinned_model_dir", lambda: None)
+        assert render_cmd.default_model_set() == "host"
+        monkeypatch.setattr(render_cmd, "resolve_pinned_model_dir", lambda: tmp_path)
+        assert render_cmd.default_model_set() == "pinned"
+
+    def test_text_names_component_and_model(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (footprint "x" (property "Reference" "U2") (model "absent.step")))'
+        )
+        assert render_main([str(pcb)]) == 1
+        assert "3D model U2: model file not found: absent.step" in capsys.readouterr().err
+
+    def test_no_3d_does_not_inspect_models(self, tmp_path, fake_kicad, monkeypatch, capsys):
+        def unexpected(*args):
+            raise AssertionError("2D must not inspect models")
+
+        monkeypatch.setattr(render_cmd, "inspect_pcb_models", unexpected)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "x" (model "absent.step")))')
+        assert render_main([str(pcb), "--no-3d", "--format", "json"]) == 0
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        assert result["status"] == "ok"
+        assert result["model_check"]["status"] == "not_run"
+        assert len(result["outputs"]) == 2
+        assert fake_kicad["render"] == []
+
+    def test_paths_use_render_environment_and_project_directory(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import runner
+
+        model_dir = tmp_path / "library"
+        model_dir.mkdir()
+        (model_dir / "part.step").touch()
+        (tmp_path / "local.step").touch()
+        monkeypatch.setenv("KICAD9_3DMODEL_DIR", str(model_dir))
+        monkeypatch.setenv("CUSTOM_MODELS", "${KICAD9_3DMODEL_DIR}")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("""(kicad_pcb (footprint "x" (property "Reference" "U1")
+          (model "${KICAD9_3DMODEL_DIR}/part.step")
+          (model "$(CUSTOM_MODELS)/part.step")
+          (model "${KIPRJMOD}/local.step")
+          (model "local.step" (hide no))
+          (model "missing.step" (hide yes))))""")
+        assert runner.inspect_pcb_models(pcb) == {
+            "status": "passed",
+            "checked_models": 4,
+            "unresolved_models": [],
+        }
+
+    def test_unknown_variable_and_directory_are_not_models(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import runner
+
+        monkeypatch.delenv("NONEXISTENT_MODEL_ROOT", raising=False)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("""(kicad_pcb (footprint "x" (property "Reference" "U1")
+          (model "${NONEXISTENT_MODEL_ROOT}/part.step") (model ".")))""")
+        missing = runner.inspect_pcb_models(pcb)["unresolved_models"]
+        assert missing[0]["reason"] == "unresolved path variable"
+        assert missing[0]["resolved_path"] is None
+        assert missing[1]["reason"] == "model file not found"
+
+    def test_inspection_failure_cannot_report_complete(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(not_a_board)")
+        assert render_main([str(pcb), "--format", "json"]) == 1
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        assert result["status"] == "partial"
+        assert result["model_check"]["status"] == "failed"
+        assert "inspection failed" in result["errors"][0]
+
+    def test_native_configured_paths_and_environment_precedence(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import runner
+
+        config = tmp_path / "config/10.0"
+        config.mkdir(parents=True)
+        models = tmp_path / "models"
+        models.mkdir()
+        (models / "part.step").touch()
+        (config / "kicad_common.json").write_text(
+            json.dumps({"environment": {"vars": {"PRIVATE_MODELS": str(models)}}})
+        )
+        monkeypatch.setenv("KICAD_CONFIG_HOME", str(config.parent))
+        monkeypatch.delenv("PRIVATE_MODELS", raising=False)
+        monkeypatch.setattr(runner, "get_kicad_version", lambda *a: "10.0.6")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "x" (model "${PRIVATE_MODELS}/part.step")))')
+        assert runner.inspect_pcb_models(pcb)["status"] == "passed"
+        monkeypatch.setenv("PRIVATE_MODELS", str(tmp_path / "absent"))
+        missing = runner.inspect_pcb_models(pcb)["unresolved_models"]
+        assert missing[0]["reason"] == "model file not found"
+        assert missing[0]["resolved_path"] == str(tmp_path / "absent/part.step")
+
+
+class TestBoardMetricsCoverage:
+    def test_model_coverage_attached_from_render_summary(self, tmp_path):
+        # Issue #7689: board.json carries the coverage `kct render` recorded.
+        from kicad_tools.cli.board_metrics_cmd import _attach_render_paths
+
+        (tmp_path / "renders").mkdir()
+        (tmp_path / "renders" / "model-coverage.json").write_text(
+            json.dumps({"env": "pinned", "covered": 3, "total": 4, "percent": 75.0, "counts": {}})
+        )
+        metrics: dict = {}
+        _attach_render_paths(metrics, tmp_path)
+        assert metrics["model_coverage"] == {
+            "env": "pinned",
+            "covered": 3,
+            "total": 4,
+            "percent": 75.0,
+        }
+
+    def test_no_summary_means_no_field(self, tmp_path):
+        from kicad_tools.cli.board_metrics_cmd import _attach_render_paths
+
+        metrics: dict = {}
+        _attach_render_paths(metrics, tmp_path)
+        assert "model_coverage" not in metrics
+
+
+# --------------------------------------------------------------------------
+# Pinned toolchain routing (#7810)
+# --------------------------------------------------------------------------
+
+
+class TestPinnedToolchain:
+    def test_json_reports_kicad_cli_version(self, tmp_path, fake_kicad, capsys, monkeypatch):
+        monkeypatch.delenv("KCT_KICAD_DOCKER", raising=False)
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+        assert render_main([str(tmp_path), "--format", "json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["kicad_cli_version"] == "8.0.6"
+        assert "docker_image" not in payload
+
+    def test_docker_env_runs_inside_evidence_toolchain(
+        self, tmp_path, fake_kicad, capsys, monkeypatch
+    ):
+        import contextlib
+
+        monkeypatch.setenv("KCT_KICAD_DOCKER", "1")
+        seen: dict = {}
+
+        @contextlib.contextmanager
+        def fake_toolchain(mounts=(), *, required_version="x"):
+            seen["entered"] = True
+            seen["required_version"] = required_version
+            yield None
+            seen["exited"] = True
+
+        monkeypatch.setattr(render_cmd, "evidence_toolchain", fake_toolchain)
+        monkeypatch.setattr(render_cmd, "docker_image", lambda: "kicad/kicad:10.0.6")
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+
+        assert render_main([str(tmp_path), "--format", "json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert seen == {"entered": True, "required_version": None, "exited": True}
+        assert payload["docker_image"] == "kicad/kicad:10.0.6"
+
+    def test_docker_env_without_docker_exits_1(self, tmp_path, fake_kicad, capsys, monkeypatch):
+        import contextlib
+
+        from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+
+        monkeypatch.setenv("KCT_KICAD_DOCKER", "1")
+
+        @contextlib.contextmanager
+        def broken(mounts=(), *, required_version=None):
+            raise KiCadEnvironmentError("KCT_KICAD_DOCKER=1 but docker is not on PATH")
+            yield
+
+        monkeypatch.setattr(render_cmd, "evidence_toolchain", broken)
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+        assert render_main([str(tmp_path)]) == 1
+        assert "docker is not on PATH" in capsys.readouterr().err

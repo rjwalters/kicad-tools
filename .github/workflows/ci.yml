@@ -1,0 +1,3216 @@
+name: CI
+
+# Main-branch runs (Issue #5986; 2AMLogic/2am docs/ci.md "Default-branch
+# runs"): main is NOT verified on every merge any more. A PR already ran the
+# suite on its own head, so main runs on a schedule against the NEWEST main
+# commit and skips the merges in between (~20 merges/day x ~47 job-min each
+# was ~935 job-min/day on main, most of it on the self-hosted `kicad` slots).
+#   - hourly (minute 17 of every hour except 04): the full main verification,
+#     skipped (every job, via the `kicad_pin` job's `skip` output) when the
+#     newest main commit already has a successful non-PR CI run;
+#   - nightly ("17 4 * * *", Issue #5743): the same full verification, never
+#     skipped, so the from-scratch routing regressions run at least daily even
+#     on a day with no merges;
+#   - workflow_dispatch: an on-demand full verification, never skipped (the
+#     daily release gate in scripts/release_plan.py dispatches one when the
+#     SHA it gates has no main run yet).
+# Every non-`pull_request` event is therefore a "main verification run", and
+# the job gates below test `github.event_name != 'pull_request'` (never
+# `== 'push'`, which would now silently skip them). A break that only appears
+# after merging is found up to one window later and may span several merges.
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 0-3,5-23 * * *"
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Single source of truth for every KiCad container this workflow runs (#5682).
+# Docker Hub moved the floating kicad/kicad:10.0 tag from 10.0.5 to 10.0.6 on
+# 2026-09-22 with no repo-visible signal, silently changing measured native
+# behaviour and skipping every step after the native mask-to-copper gate
+# (#5678). The digest below is the exact build kicad/kicad:10.0 resolved to
+# when this pin landed (== 10.0.6), so pinning changes nothing today -- it
+# only makes the *next* tag move a deliberate, reviewable PR. Bump procedure
+# (native-gate re-qualification + QUALIFIED_NATIVE_VERSIONS update in the same
+# change): docs/contributing/kicad-image-pin.md.
+#
+# Why an `env:` plus a bridge job rather than `${{ env.KICAD_IMAGE }}` at each
+# `container.image`: GitHub does not allow the `env` context in
+# jobs.<job_id>.container.image (only github/inputs/matrix/needs/strategy/vars
+# -- "Unrecognized named-value: 'env'" otherwise), and this workflow is not a
+# reusable workflow, so `inputs` is unavailable too. The `kicad_pin` job below
+# republishes this one literal into the `needs` context the container jobs CAN
+# reference, keeping the digest to this single line.
+env:
+  KICAD_IMAGE: kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec
+
+# One live run per ref (2AMLogic/2am#29, 2026-09-11). PR branches: a new push
+# cancels the run it supersedes -- a third of the ~370 daily runs were
+# superseded and still ran all 18 jobs to completion. main: a running
+# verification is never cancelled, but GitHub keeps only the newest PENDING
+# run per group, so main runs collapse to "one running, one waiting" (the
+# waiting one replaced by a newer one) instead of a deep queue of stale main
+# runs. Scheduled runs (hourly and nightly) share the `nightly` key; a
+# workflow_dispatch run on main lands in the `ci` key. Since Issue #5986 main
+# runs come from the schedule above, not from every merge.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Bridge job (#5682): republishes the workflow-level KICAD_IMAGE env value
+  # (the single digest source of truth above) into the `needs` context, since
+  # `container.image` cannot reference the `env` context directly. Runs on
+  # every event with no `if:` gate -- including main verification runs, where
+  # the PR-only `changes` job below is skipped -- so the 12 container jobs
+  # always resolve a non-empty image.
+  #
+  # It also publishes `skip` (Issue #5986): 'true' only on the HOURLY
+  # schedule when the commit being verified (the newest main) already has a
+  # successful non-PR CI run, so the hour exits after this job and the
+  # cheap, unconditional `lint`. Every other job gates on
+  # `needs.kicad_pin.outputs.skip != 'true'`. Never set on
+  # pull_request, the nightly cron or workflow_dispatch. Fail-open: if the
+  # lookup itself errors, `skip` stays 'false' and the full run proceeds.
+  kicad_pin:
+    name: KiCad image pin (env -> needs bridge)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+      skip: ${{ steps.green.outputs.skip || 'false' }}
+    steps:
+      - name: Publish KICAD_IMAGE into the needs context
+        id: pin
+        run: echo "image=${KICAD_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip the hourly run if newest main is already verified
+        id: green
+        if: github.event_name == 'schedule' && github.event.schedule != '17 4 * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          # A successful run of any non-pull_request event (an earlier hourly
+          # run, the nightly, a dispatch) on this exact SHA already verified
+          # it. PR runs never count: their head is not the merge commit and
+          # they skip jobs through the `changes` filter.
+          if n="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success&per_page=100" \
+                --jq "[.workflow_runs[] | select(.event != \"pull_request\" and .id != ${GITHUB_RUN_ID})] | length")"; then
+            :
+          else
+            echo "::warning::could not query earlier CI runs; running the full suite (fail-open)"
+            n=0
+          fi
+          if [ "${n:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Newest main ${GITHUB_SHA} already has ${n} successful CI run(s); skipping this hourly run." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Detect whether a PR touches anything CI can act on. 55 of the last 60 PRs
+  # touched src/ or tests/ (measured 2026-09-11, 2AMLogic/2am#29), and every
+  # board job legitimately depends on the router source, so this is NOT a
+  # per-job path map -- it is a single "docs/site/agent-config only?" gate
+  # that spares the ~8% of PRs which change only content the full
+  # ~115 job-minutes. Main verification runs (schedule / workflow_dispatch)
+  # always run everything. If detection itself fails, every job runs
+  # (fail-open), so a broken filter can only cost minutes, never a false
+  # green. Content contracts still run in lint.
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      board00: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board00 == 'true') }}
+      board06: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board06 == 'true') }}
+      board07: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board07 == 'true') }}
+      site: ${{ steps.site.outputs.site }}
+    steps:
+      # Issue #5366: a single combined `!(a|b|c|...)` extglob only excludes
+      # one path segment below each alternative (picomatch/extglob
+      # semantics) -- nested paths like `.loom/docs/lease-record.md` fell
+      # through and were misclassified as `code`, incorrectly triggering
+      # the full suite (observed live on PR #5365). dorny/paths-filter's own
+      # README documents the fix: `predicate-quantifier: every` plus one
+      # negated (`!pattern`) list item per exclusion, so EVERY pattern must
+      # independently agree the file isn't excluded. Do not collapse this
+      # back into one combined extglob -- see
+      # scripts/ci/verify_changes_filter.mjs (run in the `lint` job) for the
+      # regression coverage this depends on.
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '!docs/**'
+              - '!site/**'
+              - '!.claude/**'
+              - '!.loom/**'
+              - '!.github/ISSUE_TEMPLATE/**'
+              - '!**/*.md'
+              - '!LICENSE'
+              - '!.gitignore'
+              - '!.gitattributes'
+
+      # Issue #5743: per-board path filters. A board job runs when (a) any
+      # non-board code path changed ("shared": same exclusions as `code`
+      # minus the eight CI'd board directories, so src/**, pyproject.toml,
+      # uv.lock, scripts/**, tests/**, this workflow, boards/08+, ... all
+      # count and every board still runs -- no coverage loss), or (b) that
+      # board's own directory changed. Default `some` quantifier here, so
+      # these are separate steps from the `every` step above.
+      # Issue #5743 item 4 (operator ruling 2026-10-17): boards 01-05 no
+      # longer run on pull requests at all (main verification runs only),
+      # so only board 00/06/07 need a per-board output. Their directories
+      # stay excluded from `shared` so a board-01-only PR still does not
+      # trigger boards 00/06.
+      - uses: dorny/paths-filter@v4
+        id: boards
+        with:
+          filters: |
+            board00:
+              - 'boards/00-simple-led/**'
+            board06:
+              - 'boards/06-diffpair-test/**'
+            board07:
+              - 'boards/07-matchgroup-test/**'
+
+      - uses: dorny/paths-filter@v4
+        id: shared
+        with:
+          predicate-quantifier: every
+          filters: |
+            shared:
+              - '!docs/**'
+              - '!site/**'
+              - '!.claude/**'
+              - '!.loom/**'
+              - '!.github/ISSUE_TEMPLATE/**'
+              - '!**/*.md'
+              - '!LICENSE'
+              - '!.gitignore'
+              - '!.gitattributes'
+              - '!boards/00-simple-led/**'
+              - '!boards/01-voltage-divider/**'
+              - '!boards/02-charlieplex-led/**'
+              - '!boards/03-usb-joystick/**'
+              - '!boards/04-stm32-devboard/**'
+              - '!boards/05-bldc-motor-controller/**'
+              - '!boards/06-diffpair-test/**'
+              - '!boards/07-matchgroup-test/**'
+
+      # Issue #7665: the website under site/ has its own test/check/build/
+      # check-links suite. `code` excludes site/**, so it needs its own
+      # output. Default `some` quantifier (any listed path), which is why this
+      # is a separate step from the `every` steps above. The data inputs are
+      # the files the site renders (benchmark results, board readiness,
+      # the board JSON schema doc), the package files the homepage reads its
+      # facts from (site/src/data/projectFactSources.ts, issue #8101), and the
+      # README/docs it links into (anchors and paths are tested).
+      - uses: dorny/paths-filter@v4
+        id: site
+        with:
+          filters: |
+            site:
+              - 'site/**'
+              - 'benchmarks/external/results/**'
+              - 'boards/*/output/readiness.json'
+              - 'docs/**'
+              - 'README.md'
+              - 'pyproject.toml'
+              - 'src/kicad_tools/agent_surfaces.py'
+              - 'src/kicad_tools/mcp/tools/registry.py'
+              - 'src/kicad_tools/agent_skills/kct/**'
+
+  # Issue #7665: run the website's own checks. Dependabot /site bumps are
+  # ordinary pull_request events, so they trigger this via the `site` filter.
+  # Same fail-open shape as the other jobs: always on schedule/dispatch, and
+  # on a failed `changes` job. Making this a *required* check is a repo-admin
+  # branch-protection action; the check name is "Site (test, check, build,
+  # links)". check-links runs without --external (no network in CI).
+  site:
+    name: Site (test, check, build, links)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.site == 'true' || needs.changes.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies (lockfile)
+        run: npm --prefix site ci --no-audit --no-fund
+
+      - name: Site tests
+        run: npm --prefix site test
+
+      - name: Astro check
+        run: npm --prefix site run check
+
+      - name: Site build
+        run: npm --prefix site run build
+
+      - name: Check internal links
+        run: npm --prefix site run check-links
+
+  lint:
+    # Deliberately unconditional (no `needs`/`if`): the content contracts must
+    # run on every event, so even an hourly run that skips everything else
+    # (#5986) still runs this cheap job (tests/test_content_contract_gate.py).
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # Issue #3464: continue-on-error was removed from both steps below.
+      # It made the "Lint & Format" check always green regardless of
+      # ruff's exit code, hiding ~860 lint errors / ~510 unformatted files
+      # on main. The repo-wide format/lint burn-down landed alongside this
+      # gate flip (512 files reformatted, ~725 errors auto-fixed, 8 F821
+      # defects fixed manually). A residual set of risky rules is baselined
+      # in pyproject.toml [tool.ruff.lint] ignore with burn-down tracked by
+      # #3663. These steps now GATE: if red, run `uv run ruff format .` and
+      # `uv run ruff check . --fix` -- do NOT re-add continue-on-error.
+      - name: Check formatting
+        run: uv run ruff format . --check
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check documentation and agent-content contracts
+        run: bash scripts/ci/check-content-contracts.sh
+
+      # Issue #5366: gate the `changes` job's filter the same way ruff/mypy
+      # gate lint/typecheck -- ubuntu-latest ships Node, so no setup-node
+      # step is needed. picomatch@2.3.1 / js-yaml@4.1.0 are the exact
+      # versions dorny/paths-filter@v4 (pinned to
+      # ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d) bundles per its own
+      # package-lock.json -- installed ephemerally (--no-save
+      # --no-package-lock; node_modules/ is gitignored) rather than adding a
+      # standing Node dependency surface to the repo.
+      - name: Install changes-filter verification deps
+        run: npm install --no-save --no-package-lock --no-audit --no-fund picomatch@2.3.1 js-yaml@4.1.0
+
+      - name: Verify Detect Changes filter (issue #5366)
+        run: node scripts/ci/verify_changes_filter.mjs
+
+  typecheck:
+    name: Type Check
+    needs: kicad_pin
+    if: needs.kicad_pin.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # Issue #3512: the `Run mypy` step used to carry continue-on-error: true,
+      # so the Type Check job was green regardless of mypy's exit code and
+      # type rot accumulated invisibly (1512 errors in 269 files on main as of
+      # 2026-06-13). Fixing all of them in one PR is infeasible, so this gate
+      # mirrors the routed-pcb-drc-check allowlist pattern: a committed
+      # baseline (.github/mypy-baseline.txt) records the known errors, and the
+      # wrapper script fails the job ONLY on NEW errors beyond the baseline.
+      # This catches regressions immediately while the existing debt is burned
+      # down. As the baseline shrinks toward 0, this step should eventually be
+      # replaced by a bare `uv run mypy src/`. Do NOT re-add continue-on-error
+      # or pad the baseline to silence a new error -- fix the type error.
+      - name: Run mypy (baseline-gated)
+        run: uv run python scripts/ci/check_mypy_baseline.py
+
+  test:
+    name: Test
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    # GitHub-hosted for every event (Issue #6013). It used to run on a
+    # self-hosted runner for main pushes and same-repo PRs, where it took
+    # ~30 min; on ubuntu-latest every step runs ~2.2x slower (#5747), so the
+    # full bulk pool could not fit. The fix is to run less here, not to run
+    # it on bigger hardware: tests listed in tests/ci_extended.txt (>= 3 s
+    # each in a measured run, ~72% of the bulk pool's test-time) carry the
+    # `ci_extended` marker, are deselected below, and run in the
+    # "Test (extended)" job on main verification runs (hourly/nightly
+    # schedule and workflow_dispatch, #5986).
+    runs-on: ubuntu-latest
+    env:
+      # Pin -n auto's worker count at GitHub-hosted parity (4 vCPU) so memory
+      # stays bounded (the self-hosted container is not CPU-pinned and would
+      # otherwise see every host core).
+      PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
+      # Issue #5501: bound the number of native KiCad processes across the
+      # whole job.
+      #
+      # Attribution (PR #5503's observer, run 35099894489, re-derived with
+      # scripts/ci/analyze_native_observations.py): the bulk pool launched 857
+      # native processes -- all attributed to an owning test and worker --
+      # spread across 50+ modules, so isolating modules cannot fix it. Sampled
+      # peak RSS was 2.31 GiB median / 2.66 GiB max; the pool reached 4-way
+      # native overlap and drove memory.current and memory.peak to the full
+      # 12 GiB with 209 memory.events.max events. 15% of those launches came
+      # from a descendant process rather than the worker itself, which is why
+      # the gate installs in kicad_tools/__init__.py as well as conftest.
+      #
+      # Original choice of 1 (#5501/#5524): the CONSTRAINT_MEMCG kill recorded
+      # for PR #5499 had three concurrent natives (2.36 + 2.36 + 1.66 =
+      # 6.38 GiB). A bound of 1 caps native anon at 2.66 GiB, 3.7 GiB below
+      # that. Measured cost at the time (--simulate-bound, same run): +257 s on
+      # the bulk group, longest single slot wait 4.8 s, worst single test
+      # +23.1 s -- this is the regression #5616 (+19.4% Test job median,
+      # +26.6% Run-tests step median) pinned to this bound.
+      #
+      # Revised to 2 (Issue #5616): re-running --simulate-bound 1/2/3/4
+      # against the same archived run 35099894489 evidence shows the added
+      # wall time drops steeply and non-linearly with one extra slot: bound=1
+      # +257 s, bound=2 +12 s (worst single test +2.0 s, longest wait 1.4 s),
+      # bound=3 +1 s, bound=4 ~0 s (the run's own observed max concurrency).
+      # Memory-wise, bound=3 or 4 would let native anon reach 3x/4x 2.66 GiB
+      # (7.98/10.64 GiB) -- at or above the two only concrete distress points
+      # on record (the 6.38 GiB #5499 oom_kill and this run's own ~7.0 GiB
+      # 209-event ceiling-pressure moment), i.e. exactly the magnitude that
+      # has already produced one confirmed cgroup kill. Bound=2 caps native
+      # anon at 2 x 2.66 GiB = 5.32 GiB and, just as importantly, makes the
+      # specific 3-way overlap that produced the #5499 kill structurally
+      # impossible (never more than 2 native processes can hold a slot at
+      # once) -- so it recovers ~95% of the added wall time (257 s -> 12 s)
+      # while remaining strictly below both known distress configurations.
+      # Sampled RSS is a lower bound and is never treated as cgroup usage;
+      # the cgroup counters are audited separately by the step below, and
+      # this PR opts diagnostics on so that audit runs against a live bound=2
+      # job before merge.
+      #
+      # #5624 (merged the same day as this change, after the #5616
+      # measurement window closed) independently excludes `kicad-cli
+      # --help`/`--version` capability probes from ever taking a permit --
+      # those were previously ~2 of every 3 permit acquisitions in the common
+      # post-route fill path (#5603) and inflated queue contention for the
+      # real, board-loading launches this gate actually protects against.
+      # That fix and this bound increase are additive, not alternatives: the
+      # post-merge remeasurement this issue's acceptance criteria call for
+      # should be read against a cohort that has both.
+      #
+      # Nothing here alters the memory limit, worker count, selections or
+      # assertions.
+      #
+      # Issue #5572 -- the one thing that estimate got wrong. Waiting for a
+      # slot is wall-clock time inside the waiting test, and pytest-timeout
+      # charged it to that test's budget, so a test's effective deadline became
+      # its own work plus a queue wait for a shared resource. The ">30 s
+      # already has an override" audit above did not cover the tests that sat
+      # just under it, and marking the observed offenders (#5556/#5573) only
+      # moved the failure to the next-heaviest native-using test.
+      #
+      # Decision (option 1 of #5572): the gate now gives the measured wait back
+      # to the armed pytest-timeout deadline instead of raising --timeout for
+      # every test in the job (option 2) or chasing the next offender with
+      # another marker (option 3). The tradeoff is explicit: a blanket raise
+      # would have multiplied hang-detection latency -- the reason the cap is
+      # 60 s at all (#2794) -- across ~8000 tests that never queue, whereas the
+      # credit is paid only by tests that actually waited, is exactly the
+      # measured wait, and is capped per test by
+      # KCT_NATIVE_SLOT_CREDIT_SECONDS (default 120 s). Worst-case detection
+      # latency for a hung test is therefore bounded at 60 s + 120 s, the same
+      # ceiling option 2 would have set globally, and the deadline still
+      # measures the test's own work. Subprocess timeouts are untouched.
+      # Issue #6716: the credit is applied DURING the wait (before every poll
+      # sleep), not once a permit arrives -- crediting afterwards let SIGALRM
+      # fire inside the queue wait, killing tests that were merely queued.
+      # See src/kicad_tools/native_concurrency.py "Timeout credit".
+      KCT_NATIVE_MAX_CONCURRENCY: "2"
+      # Explicit diagnostic opt-in only; PR body is evaluated, never passed
+      # into shell or retained. Pushes/absent markers leave the wrapper inert.
+      KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
+      KCT_OBSERVER_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    # Issue #5747/#6013/#5768: one hosted runner, so one budget. Measured
+    # 2026-10-10 over the 25 most recent successful PR `Test` jobs (workflow
+    # runs 37873727836..38095351857; reproduce with `gh run list --workflow
+    # ci.yml --event pull_request --status success` then `gh run view <run>
+    # --json jobs`): end to end min 31m22s, median 53m37s, p90 55m30s, max
+    # 56m41s (16 of 25 took over 50 min; the fast ones are a bimodal tail,
+    # not a target). Newest five (run/job): 38095351857/114340019801 55m30s,
+    # 38083225866/114304283760 54m56s, 38080252788/114295530259 32m30s,
+    # 38071430743/114269508068 53m52s, 38013132377/114097451692 54m01s.
+    # `Run tests` was 21m13s-38m29s of that across those five.
+    #
+    # Re-measured 2026-10-18 (Issue #7327; job started_at..completed_at):
+    # PR runs 2026-10-17 max 68.3m (n=6), PR runs 2026-10-18 median 55.6m /
+    # max 74.3m (n=8, run 39159276578), main runs 2026-10-18 median 66.2m /
+    # max 71.6m (n=8). `Run tests` was 28.8-57.0m. The worst case now sits
+    # ~1% under the limit, so the old ~33% headroom is gone. This is a dated
+    # snapshot, not a budget: re-measure before relying on it.
+    #
+    # A run killed by the timeout is absent from a success-only cohort, so
+    # the real tail is longer than measured, and a killed run leaves no
+    # pytest summary. The final "Report job time budget" step warns at 80%
+    # of the limit (and writes the slowest tests to the step summary) so
+    # creep shows up on the PR that causes it.
+    #
+    # Raised 75 -> 120 on 2026-10-20 as a STOPGAP (operator ruling Q28 = 1 on
+    # #5240): runs were being cancelled at ~1h15m in `Run tests` with zero
+    # failures (e.g. run 39384875895, 39404353472), forcing hour-long
+    # re-runs on every PR. Sharding/streamlining the job is still the real
+    # fix and stays open on #5240; do not treat 120 as headroom to spend.
+    # Keep TIMEOUT_MINUTES in "Report job time budget" equal to this value
+    # (tests/test_ci_native_observer_workflow.py enforces it). A hung test is
+    # bounded by pytest's own --timeout=60 long before this fires; this
+    # ceiling only guards a whole-job stall.
+    timeout-minutes: 120
+    # Issue #3436: run inside the official KiCad 10 container (same image
+    # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
+    # are NOT used). The container provides what dozens of tests need and
+    # the bare runner lacks:
+    # - /usr/share/kicad/symbols + /usr/share/kicad/footprints at KiCad 10
+    #   (ubuntu noble's kicad-symbols/kicad-footprints universe packages
+    #   are KiCad-7-era: no Device:Q_NMOS, different LM393 unit structure,
+    #   stale footprint pad definitions -- ~40 test failures/errors)
+    # - kicad-cli 10 for the DRC/ERC-backed tests (board-02 baseline's
+    #   "DRC PASSED" parsing, pipeline ERC/zones steps)
+    # All of these failures were previously invisible because the Test
+    # step had continue-on-error.
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # On the runner this is a sibling container of the runner's own, created by
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 12g (6 GB
+      # SIGKILLed kicad-cli under four xdist workers, 2026-09-11; a
+      # GitHub-hosted VM has 16 GB).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      # The 12 GiB cap stays on hosted (a 16 GB VM): the native-concurrency
+      # bound and the workload audit are calibrated against this cgroup
+      # (#5501, #5616).
+      options: --user 0:0 --memory 12g
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the smoke job).
+        shell: bash
+    steps:
+      - name: Record job start time
+        # Issue #7327: input for the final "Report job time budget" step.
+        run: echo "KCT_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below; nodejs for
+        # executing workflow JavaScript regression tests.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential nodejs jq
+          kicad-cli --version
+
+      - name: Install pinned actionlint
+        # Issue #8098: tests/install/test_install_kct.py
+        # ::test_upgrade_workflow_passes_actionlint lints the vendored
+        # kct-upgrade workflow and skipped here because actionlint was not
+        # on PATH. Pinned version + committed sha256 (same curl pattern as
+        # uv; no third-party setup action inside the container). A failed
+        # download or checksum fails the job; KCT_REQUIRE_ACTIONLINT (set on
+        # "Run tests") turns a missing binary into a test failure, not a skip.
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          dir="$(mktemp -d)"
+          curl -fsSL -o "$dir/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  $dir/$tarball" | sha256sum -c -
+          tar -xzf "$dir/$tarball" -C "$dir" actionlint
+          install -m 0755 "$dir/actionlint" /usr/local/bin/actionlint
+          actionlint -version
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history + tags: the release repo-introspection tests
+          # (`*_against_this_repo`) need a reachable v* tag, which a default
+          # shallow, tagless checkout does not provide (they would skip).
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Trust the workspace for git
+        # The job runs as root (--user 0:0) over a checkout owned by the
+        # runner's uid, so git refuses the repo ("dubious ownership") and the
+        # repo-introspecting release tests (test_release_plan/test_release_tag
+        # `*_against_this_repo`) could only skip. actions/checkout's own
+        # safe.directory entry lives in a temporary HOME and is removed
+        # afterwards, so persist one for the rest of the job.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # Official one-liner instead of setup-uv: avoids action-host
+        # coupling inside the container (mirrors the smoke job).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        # Pin the interpreter via uv (parity with the other jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        # Issue #3436: `uv sync` does NOT build the native extension (see
+        # repo CLAUDE.md "Routing performance: build the C++ backend
+        # first"). Without it, router tests fall back to pure Python
+        # (10-100x slower) and the --timeout=60 reaper kills tests that
+        # pass comfortably with the C++ backend -- another failure class
+        # that continue-on-error used to hide. Mirrors the equivalent
+        # step in the routing-regression jobs below.
+        run: uv run kct build-native
+
+      - name: Run clearance conformance corpus
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+        # Epic #5509 Phase 1c: the kicad-cli-vs-consumers corpus behind
+        # docs/clearance-conformance.md. Moved out of the bulk pool for the
+        # same reason as the stitch (#5417) and zone (#5452) steps above --
+        # every item launches its own kicad-cli, and four xdist workers doing
+        # that concurrently is what exhausted the 12 GiB cgroup before. The
+        # matching `--ignore=tests/conformance` in "Run tests" below is what
+        # keeps the suite from running twice; without it this step is pure
+        # added wall time.
+        #
+        # No `-n`: the corpus is small (one item per seed, six smoke seeds)
+        # and kicad-cli fan-out is exactly the thing being avoided.
+        # --timeout=120 rather than the pool's 60 because a refilled item
+        # costs three kicad-cli invocations (refill, then DRC, plus the as-is
+        # DRC it is compared against); items are parametrised per seed, never
+        # batched, so no single item approaches even that.
+        #
+        # --basetemp doubles as the artifact source: the determinism test
+        # (test_corpus.test_report_regenerates_byte_identically) renders the
+        # conformance table into its tmp_path twice, so the generated tables
+        # land in the retained diagnostics without a second corpus run.
+        run: |
+          mkdir -p "$RUNNER_TEMP/conformance"
+          python3 scripts/ci/run_observed.py conformance -- uv run pytest tests/conformance -o addopts= --benchmark-disable --timeout=120 -m "not slow" \
+            --basetemp "$RUNNER_TEMP/conformance/pytest" \
+            --junitxml "$RUNNER_TEMP/conformance/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/conformance/pytest.log"
+
+      - name: Retain clearance conformance evidence
+        # always(), not failure(): this suite is *report-only* by design --
+        # every consumer row is a non-strict xfail, so a green step is exactly
+        # when the measured disagreements are worth reading. Retaining only on
+        # failure would discard the evidence in the case the epic cares about.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: clearance-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/conformance/
+            docs/clearance-conformance.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Run Board05 manufacturing regression
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+        # The redesigned board has over 8,000 segments. Run its single full
+        # DRC report without competing xdist workers, retaining the test's
+        # 120-second subprocess cap and every manufacturing assertion.
+        run: python3 scripts/ci/run_observed.py board05 -- uv run pytest tests/test_board_05_drc_allowlist.py -o addopts= --benchmark-disable --timeout=60 -m "not slow"
+
+      - name: Run native mask-to-copper gate
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+          KCT_MASK_NATIVE_PYTHON: '["/usr/bin/python3"]'
+        run: python3 scripts/ci/run_observed.py mask-copper -- uv run --frozen python scripts/ci/check_mask_copper_native.py --artifacts "$RUNNER_TEMP/mask-copper-native"
+
+      - name: Retain native mask diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: mask-copper-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mask-copper-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Run native physical-stitch acceptance
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+        # Issue #5417: four concurrent KiCad refills exhausted the Test
+        # container's 12 GiB cgroup. Keep every physical assertion and the
+        # existing timeout, but run this module without competing workers.
+        run: |
+          mkdir -p "$RUNNER_TEMP/stitch-physical-native"
+          python3 scripts/ci/run_observed.py stitch -- uv run pytest tests/test_stitch_physical_completion.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+            --basetemp "$RUNNER_TEMP/stitch-physical-native/pytest" \
+            --junitxml "$RUNNER_TEMP/stitch-physical-native/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/stitch-physical-native/pytest.log"
+
+      - name: Retain native physical-stitch diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: stitch-physical-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stitch-physical-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Run native zone acceptance
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+        # Issue #5452: native zone refills were OOM-killed in the 12 GiB
+        # Test cgroup while competing with other pytest workers. Retain
+        # every test and timeout, but run these modules without that pool.
+        run: |
+          mkdir -p "$RUNNER_TEMP/zone-native"
+          python3 scripts/ci/run_observed.py zones -- uv run pytest tests/test_zones_cmd.py tests/test_zones_hv_keepout.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+            --basetemp "$RUNNER_TEMP/zone-native/pytest" \
+            --junitxml "$RUNNER_TEMP/zone-native/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/zone-native/pytest.log"
+
+      - name: Retain native zone diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: zone-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/zone-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Run tests
+        # Issue #3436: continue-on-error was removed from this step. It
+        # made the job green regardless of pytest's exit code, hiding 162
+        # failures + 30 errors on main (run 27235563106) and rendering CI,
+        # Judges, and the merge queue blind to test regressions. This step
+        # now gates: if it is red, fix the tests -- do NOT re-add
+        # continue-on-error. Known-broken tests must be xfail'd with a
+        # tracking issue instead.
+        # Match the Board 07 jobs: both are gated on vars.BOARD_07_CI_ENABLED.
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+          BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
+          # Issue #8098: the actionlint test fails instead of skipping here.
+          KCT_REQUIRE_ACTIONLINT: "1"
+        run: |
+          test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py --ignore=tests/test_stitch_physical_completion.py --ignore=tests/test_zones_cmd.py --ignore=tests/test_zones_hv_keepout.py --ignore=tests/conformance)
+          if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
+            test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
+          fi
+          python3 scripts/ci/run_observed.py bulk -- uv run pytest -n auto -rfEsx -o addopts= --benchmark-disable --timeout=60 -m "not slow and not ci_extended" --durations=30 --junitxml "$RUNNER_TEMP/junit/bulk.xml" "${test_args[@]}"
+
+      - name: Retain test timings
+        # Input for scripts/ci/update_ci_extended.py (Issue #6013).
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-bulk-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/junit/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Audit native workload observations
+        # Issue #5501: when the observations exist, assert what they show --
+        # no cgroup OOM/OOM-kill event, no gate fallback to an unbounded
+        # launch, and no group exceeding KCT_NATIVE_MAX_CONCURRENCY. Run
+        # against the retained pre-fix baseline this fails on the bulk group
+        # (observed native concurrency 4), so a green result here is evidence
+        # rather than a lucky retry. Additive gate: it can only add failures.
+        if: ${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}
+        run: |
+          python3 scripts/ci/analyze_native_observations.py "$RUNNER_TEMP/native-observer" \
+            --max-concurrency "$KCT_NATIVE_MAX_CONCURRENCY" \
+            --simulate-bound 1 --simulate-bound 2 --simulate-bound 4 \
+            --json "$RUNNER_TEMP/native-observer/attribution.json"
+
+      - name: Retain native workload observations
+        if: ${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-workload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-observer/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Report job time budget
+        # Issue #7327: report-only (never fails). Warns past 80% of
+        # timeout-minutes so creep is visible before a bare timeout kill.
+        if: ${{ always() }}
+        env:
+          TIMEOUT_MINUTES: "120"
+        run: |
+          now=$(date +%s)
+          start="${KCT_JOB_START:-$now}"
+          used_min=$(( (now - start) / 60 ))
+          limit_min="$TIMEOUT_MINUTES"
+          threshold=$(( limit_min * 80 / 100 ))
+          {
+            echo "### Test job time budget"
+            echo ""
+            echo "Elapsed: ${used_min} of ${limit_min} min (warn at ${threshold} min)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if (( used_min >= threshold )); then
+            echo "::warning::Test job used ${used_min} of ${limit_min} min (over 80% of timeout-minutes); see #5240 for sharding"
+          fi
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY" || true
+          import os, glob
+          import xml.etree.ElementTree as ET
+          rows = []
+          for f in glob.glob(os.path.join(os.environ.get("RUNNER_TEMP", "."), "junit", "*.xml")):
+              for tc in ET.parse(f).getroot().iter("testcase"):
+                  rows.append((float(tc.get("time") or 0), tc.get("classname", ""), tc.get("name", "")))
+          rows.sort(reverse=True)
+          if rows:
+              print("\n#### Slowest 15 tests (bulk junit)\n")
+              print("| seconds | test |\n|---|---|")
+              for t, c, n in rows[:15]:
+                  print(f"| {t:.1f} | `{c}.{n}` |")
+          PY
+
+
+  test-extended:
+    # Issue #6013: the slow tail of the bulk pool. "Test" deselects every test
+    # listed in tests/ci_extended.txt so it fits a GitHub-hosted runner on
+    # every PR; this job runs exactly those tests, in the same KiCad
+    # container with the same native-concurrency bound and per-test timeout,
+    # on main verification runs (hourly/nightly schedule and dispatch, #5986).
+    # Never on pull requests: a PR gets the fast subset, and the newest main
+    # gets full coverage on every scheduled run.
+    name: Test (extended)
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    runs-on: ubuntu-latest
+    env:
+      PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
+      # Same bound and rationale as the "Test" job (#5501, #5616, #5572).
+      KCT_NATIVE_MAX_CONCURRENCY: "2"
+    # ~3,900 test-seconds in the measured run; ~2.2x on hosted over 4
+    # workers is ~36 min, plus setup.
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0 --memory 12g
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential nodejs
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+        with:
+          # Same as "Test": the release repo-introspection tests need tags.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Run ci_extended tests
+        # The tests tests/ci_extended.txt marks: the slow tail of the bulk
+        # pool that "Test" deselects. Same container, same native-concurrency
+        # bound, same per-test timeout.
+        run: |
+          uv run pytest -n auto -rfEsx -o addopts= --benchmark-disable --timeout=60 -m "ci_extended and not slow" \
+            --junitxml "$RUNNER_TEMP/junit/extended.xml"
+
+      - name: Retain test timings
+        # Input for scripts/ci/update_ci_extended.py, which regenerates
+        # tests/ci_extended.txt from measured CI times.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-extended-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/junit/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  cpp-build-check:
+    # Issue #2501: catch source/.so drift by rebuilding the C++ extension
+    # from a clean checkout and asserting the version-guard reports the
+    # backend as available. If anyone changes cpp/ source without bumping
+    # ROUTER_CPP_BUILD_VERSION (or vice versa) the import-time guard will
+    # fall back to Python and fail this check with an actionable message.
+    name: C++ Build Check
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
+
+      # Note: deliberately NOT using actions/setup-python here. That action
+      # exports Python_ROOT_DIR=/opt/hostedtoolcache/Python/.../x64, which is
+      # sticky for cmake's find_package(Python ...) — even after activating
+      # the uv venv with `source .venv/bin/activate`, cmake locates the
+      # tool-cache Python (which has no nanobind) instead of the venv's
+      # Python with nanobind installed. We rely on uv to manage the Python
+      # version (pinned via .python-version / pyproject) and create the venv.
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Install Python dependencies
+        # Pin Python via uv (parity with the other jobs that use
+        # actions/setup-python with python-version: "3.12"). uv will install
+        # the requested interpreter into its managed cache and create
+        # .venv from it.
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Install nanobind
+        run: uv pip install nanobind
+
+      - name: Clean any committed .so artifacts
+        run: bash scripts/build-cpp.sh clean
+
+      - name: Build C++ extension from source
+        run: |
+          source .venv/bin/activate
+          # Belt-and-suspenders: explicitly point cmake at the venv Python in
+          # case any future runner image starts setting Python_ROOT_DIR.
+          export Python_ROOT_DIR="$PWD/.venv"
+          unset Python2_ROOT_DIR Python3_ROOT_DIR
+          bash scripts/build-cpp.sh build
+
+      - name: Verify version-guard reports backend available
+        run: |
+          uv run python -c "
+          from kicad_tools.router.cpp_backend import (
+              is_cpp_available,
+              get_cpp_unavailable_reason,
+              _REQUIRED_CPP_BUILD_VERSION,
+              router_cpp,
+          )
+          if not is_cpp_available():
+              raise SystemExit(
+                  f'C++ backend unavailable after clean rebuild: '
+                  f'{get_cpp_unavailable_reason()}'
+              )
+          actual = getattr(router_cpp, 'BUILD_VERSION', None)
+          if actual != _REQUIRED_CPP_BUILD_VERSION:
+              raise SystemExit(
+                  f'BUILD_VERSION mismatch after clean rebuild: '
+                  f'compiled={actual!r} required={_REQUIRED_CPP_BUILD_VERSION!r}. '
+                  f'Did you forget to bump ROUTER_CPP_BUILD_VERSION in both '
+                  f'cpp/include/types.hpp and cpp_backend.py?'
+              )
+          print(f'C++ backend OK: BUILD_VERSION={actual}')
+          "
+
+      - name: Smoke test C++ router
+        run: |
+          uv run pytest tests/test_router_cpp_backend.py::TestCppBuildVersionGuard -v --no-cov
+
+  windows-smoke:
+    # Issue #6894: nothing else in CI runs on Windows, so an unguarded
+    # Unix-only import (resource, fcntl, signal.SIGKILL, os.fork, ...) at
+    # module level would break `kct` there unnoticed, as #6739 did. This job
+    # only installs, runs the CLI help, imports every router/cli module, and
+    # (issue #7478) does one real atomic write + PCB.save; it does not run the
+    # test suite. Advisory: not a required check.
+    name: Windows Smoke
+    needs: [changes, kicad_pin]
+    # Issue #7327: main runs (schedule/workflow_dispatch) gate on
+    # `!= 'pull_request'`, never `== 'push'` (no push trigger since #5986).
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: CLI help
+        shell: bash
+        run: |
+          uv run kct --help
+          uv run kct route --help
+
+      - name: Import every router and cli module
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import importlib
+          import pkgutil
+          import sys
+          import traceback
+
+          import kicad_tools.cli
+          import kicad_tools.router
+
+          # Modules excluded because they need a real Windows port, never
+          # silently: map module name -> tracking issue.
+          EXCLUDED = {}
+
+          failures = []
+          count = 0
+          for pkg in (kicad_tools.router, kicad_tools.cli):
+              names = [pkg.__name__] + [
+                  m.name
+                  for m in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + ".")
+              ]
+              for name in names:
+                  if name in EXCLUDED:
+                      print(f"SKIP {name}: {EXCLUDED[name]}")
+                      continue
+                  count += 1
+                  try:
+                      importlib.import_module(name)
+                  except BaseException:
+                      failures.append((name, traceback.format_exc()))
+
+          print(f"imported {count - len(failures)}/{count} modules")
+          for name, tb in failures:
+              print(f"::error::import failed: {name}")
+              print(tb)
+          sys.exit(1 if failures else 0)
+          PY
+
+      # Issue #7478: atomic_write_text fsynced a read-only handle, which
+      # Windows rejects (EBADF), so every PCB.save failed there while imports
+      # and --help stayed green. POSIX tests can only emulate that; this step
+      # does a real write on the Windows runner.
+      - name: Real atomic write and PCB save
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          from kicad_tools.core.atomic_write import atomic_write_text
+          from kicad_tools.schema.pcb import PCB
+
+          d = Path(tempfile.mkdtemp())
+          p = d / "x.kicad_pcb"
+          atomic_write_text(p, "x")
+          assert p.read_text() == "x", p.read_text()
+          assert not (d / "x.kicad_pcb.tmp").exists(), sorted(d.iterdir())
+
+          b = d / "board.kicad_pcb"
+          b.write_text('(kicad_pcb\n  (version 20240108)\n  (generator "test")\n)\n')
+          PCB.load(b).save(b)
+          assert "kicad_pcb" in b.read_text()
+          assert not (d / "board.kicad_pcb.tmp").exists(), sorted(d.iterdir())
+          PCB.load(b)
+          print("atomic write + PCB.save OK:", sorted(x.name for x in d.iterdir()))
+          PY
+
+  kicad-cli-smoke:
+    name: kicad-cli Round-trip Smoke
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Separate job: a regression gate that PCB files emitted by kicad-tools'
+    # writers are loadable by kicad-cli. Two writer bugs (unquoted
+    # generator_version, embedded kct_marking subfield) shipped to main and
+    # broke every demo board's manufacturing export — this gate prevents
+    # that class of regression from re-landing.
+    #
+    # Uses the official kicad/kicad:10.0 Docker image rather than installing
+    # KiCad via apt+PPA. Earlier attempts to install from
+    # ppa:kicad/kicad-9.0-releases on ubuntu-latest were unreliable: both
+    # api.launchpad.net and ppa.launchpadcontent.net failed back-to-back from
+    # the Azure GitHub runner, and apt then silently fell back to KiCad 7
+    # from noble/universe — producing confusing "DRC produced no output"
+    # errors instead of an attributable infrastructure failure. The official
+    # container ships kicad-cli 10 already and is immune to Launchpad outages.
+    #
+    # The image was bumped from kicad/kicad:9.0 to kicad/kicad:10.0 alongside
+    # the source-side PCB format upgrade (version 20240108 → 20260206,
+    # generator_version 9.0 → 10.0) in PR #2716. KiCad 9 cannot load files
+    # in the new format, so the smoke gate has to track the writer.
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # Run as root so uv/pip installs go to the system site-packages and
+      # actions/checkout can write into $GITHUB_WORKSPACE without permission
+      # juggling.
+      options: --user 0:0
+    defaults:
+      run:
+        # The kicad/kicad:10.0 image links /bin/sh to dash, which does not
+        # support `set -o pipefail`. GitHub Actions invokes each step with
+        # `sh -e {0}` by default, so our `set -euo pipefail` headers fail
+        # immediately with `set: Illegal option -o pipefail` and exit code 2
+        # before any of the actual setup runs. Force bash for all run steps
+        # in this job so the pipefail option is recognised.
+        shell: bash
+    steps:
+      # The kicad/kicad image is Ubuntu-based and ships Python 3 + git, but
+      # we install ca-certificates and curl defensively in case the image
+      # variant we land on is missing one of them (uv's installer needs curl,
+      # and HTTPS pulls need ca-certificates).
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+          # Sanity: the container should have kicad-cli 10 already.
+          # Use a permissive regex anchored to either the start of the line
+          # or whitespace so we still match if `kicad-cli --version` prefixes
+          # its output (e.g., `KiCad 10.0.x`) instead of emitting the bare
+          # version string.
+          kicad-cli --version | tee /tmp/kicad-cli-version
+          grep -qE '(^|[[:space:]])10\.' /tmp/kicad-cli-version || {
+            echo "::error::pinned KiCad container ($KICAD_IMAGE) does not provide kicad-cli 10.x"
+            exit 1
+          }
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # setup-uv should work inside the container, but installing via
+        # the official one-liner avoids any action-host coupling and keeps
+        # the install deterministic across image refreshes.
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # uv installs to ~/.local/bin by default; surface it for later steps.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Run kicad-cli round-trip smoke tests
+        run: uv run pytest tests/test_kicad_cli_roundtrip.py -v --no-cov
+
+  routed-pcb-drc-check:
+    # Issue #2546: validate every committed `*_routed.kicad_pcb` touched by a
+    # PR via `kct check --mfr jlcpcb --errors-only`. Closes the safety-net gap
+    # that allowed PR #2538 to ship with 5 DRC errors despite a "0 errors"
+    # claim at merge time.
+    #
+    # The ORDINARY-board path (below) is pure-Python DRC (no kicad-cli, no
+    # Docker container) so it piggybacks on the same cheap ubuntu-latest + uv
+    # pattern as lint/typecheck. File detection is in-job (no `paths:` filter)
+    # so the check is safe to mark as a required status check on branch
+    # protection -- it always runs and short-circuits to green on PRs that
+    # don't touch routed PCBs.
+    #
+    # Issue #5349: Board04 (and any future board dispatched through a native
+    # validator -- see scripts/ci/select_routed_pcbs.py's
+    # NATIVE_BOARD_RELATIVE_PATH) is a SEPARATE, conditional path: its
+    # reviewed paid-drill validator requires a working native `kicad-cli` for
+    # strict ERC, which bare ubuntu-latest does not provide. Rather than
+    # containerizing the whole job (which would make every PR pay the
+    # container-pull cost, even the ~common case that touches no routed
+    # PCB), only the conditional "Run native paid-drill validation" step
+    # below spins up `kicad/kicad:10.0` via `docker run`, and only when
+    # `scripts/ci/select_routed_pcbs.py` determined a native-requiring board
+    # was genuinely selected.
+    #
+    # File selection previously diffed the STALE `github.event.pull_request
+    # .base.sha` (fixed at webhook-delivery time) against the checked-out
+    # merge commit -- if `main` advanced between the webhook firing and the
+    # job running, that stale SHA was still an ancestor of the merge commit,
+    # so the three-dot diff silently widened to include every commit merged
+    # into `main` in between (PR #4955: a compiler-only PR spuriously
+    # selected all eight routed boards). `select_routed_pcbs.py` instead
+    # derives the base from the checked-out merge commit's own first parent
+    # (verified against its second parent matching the actual PR head) --
+    # see that module's docstring for the full provenance argument, including
+    # the main-run full-scan handling and the git-failure-vs-empty-
+    # match distinction (a `git diff` failure must fail the job, never
+    # masquerade as a green "no files" result).
+    #
+    # A per-board allowlist (`.github/routed-drc-tolerance.yml`) grandfathers
+    # in known-broken boards (currently boards 03 and 05) at their CURRENT
+    # error counts. The gate is "allowed minus epsilon" -- regressions still
+    # fail, but the gate can land before every board reaches 0 errors.
+    name: Routed PCB DRC Check
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Need history for `select_routed_pcbs.py`'s base resolution
+          # (default fetch-depth: 1 makes revision/parent lookups fail with
+          # "unknown revision").
+          fetch-depth: 0
+
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "latest"
+          # setup-uv >=5 auto-enables the Actions cache on hosted runners
+          # (and >=9 no longer prunes it before upload); keep the pre-v5
+          # no-cache behavior these jobs were written against.
+          enable-cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Identify modified routed PCBs
+        id: changed
+        # scripts/ci/select_routed_pcbs.py is dependency-free (stdlib only)
+        # so it can run via plain `python3` here, BEFORE `uv sync` below --
+        # mirrors the ordering of the pre-#5349 inline-bash version, which
+        # also ran ahead of dependency installation.
+        run: |
+          set -euo pipefail
+          args=(--event-name "${{ github.event_name }}" --sha "${{ github.sha }}")
+          # pull_request: diff against the merge commit's first parent.
+          # schedule / workflow_dispatch (main verification runs, #5986): no
+          # before/after pair exists and the run covers a batch of merges, so
+          # the selector scans every routed PCB in the tree (no extra args).
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            args+=(--pr-head-sha "${{ github.event.pull_request.head.sha }}")
+          fi
+          python3 scripts/ci/select_routed_pcbs.py "${args[@]}" --github-output "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        if: steps.changed.outputs.ordinary_files != ''
+        run: uv sync --frozen --extra dev
+
+      - name: Run kct check on each modified routed PCB
+        if: steps.changed.outputs.ordinary_files != ''
+        run: |
+          set -euo pipefail
+          # Pass each file as a separate arg; the helper handles the
+          # allowlist comparison and emits ::error:: annotations. Only
+          # ORDINARY (non-native-requiring) boards reach this step -- see
+          # scripts/ci/select_routed_pcbs.py.
+          mapfile -t files <<< "${{ steps.changed.outputs.ordinary_files }}"
+          # Filter out empty lines (mapfile preserves trailing newline).
+          args=()
+          for f in "${files[@]}"; do
+            [ -n "$f" ] && args+=("$f")
+          done
+          uv run python scripts/ci/check_routed_drc_internal.py "${args[@]}"
+
+      - name: Run native paid-drill validation (Board04)
+        if: steps.changed.outputs.native_files != ''
+        # Runs scripts/ci/check_routed_drc_internal.py's paid-drill dispatch INSIDE
+        # the official kicad/kicad:10.0 container (same image used by the
+        # `test` / `kicad-cli-smoke` / `diffpair-routing-regression` /
+        # `matchgroup-routing-regression` jobs) via a single `docker run`
+        # step, rather than making the whole job a container job -- see the
+        # job-level comment above for why. scripts/ci/run_native_routed_drc.sh
+        # installs its own uv + dependencies inside the container; it does
+        # NOT depend on the "Install dependencies" step above (which is
+        # gated on `ordinary_files`, not `native_files`, and may not have
+        # run).
+        run: |
+          set -euo pipefail
+          mapfile -t files <<< "${{ steps.changed.outputs.native_files }}"
+          args=()
+          for f in "${files[@]}"; do
+            [ -n "$f" ] && args+=("$f")
+          done
+          docker run --rm \
+            -v "$PWD:$PWD" -w "$PWD" \
+            --user 0:0 \
+            "$KICAD_IMAGE" \
+            bash scripts/ci/run_native_routed_drc.sh "${args[@]}"
+
+  model-coverage-report:
+    # Issue #7682: fleet 3D model coverage REPORT, never a gate.  Audits every
+    # board's PCB under the host and pinned resolution environments and uploads
+    # model-coverage.json.  `continue-on-error` keeps a failure here from ever
+    # failing the build; do not add this job to any required check.
+    name: 3D Model Coverage Report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "latest"
+          enable-cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Cache pinned KiCad 3D model subset
+        # Issue #7683: the digest-verified subset `kct models sync` fetches
+        # (~14 MB).  Keyed on the manifest, so a tag/ref change refetches and
+        # otherwise the sync below is a zero-network no-op.
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/kct-3dmodels
+          key: kct-3dmodels-${{ hashFiles('src/kicad_tools/data/kicad-3dmodels/manifest.json') }}
+
+      - name: Sync pinned 3D model subset
+        # A gitlab.com outage must not skip the report below; it then records
+        # a "not synced" pinned summary instead.
+        continue-on-error: true
+        env:
+          KCT_KICAD_3DMODEL_CACHE: ${{ runner.temp }}/kct-3dmodels
+        run: uv run kct models sync --sparse
+
+      - name: Write model-coverage.json
+        env:
+          KCT_KICAD_3DMODEL_CACHE: ${{ runner.temp }}/kct-3dmodels
+        run: uv run python scripts/ci/model_coverage_report.py -o model-coverage.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: model-coverage
+          path: model-coverage.json
+
+  diffpair-routing-regression:
+    # Issue #5743 (operator ruling 2026-10-02): this job runs on main
+    # verification runs only (since #5986: the hourly/nightly schedule and
+    # workflow_dispatch), NOT on pull requests. It was
+    # measured at ~10.5 min median / 0 failures in 35 PR runs and board-06-
+    # end-to-end already re-routes board 06 from scratch with the same seed and
+    # the same check_diffpair_coverage.py gate, so the per-PR copy was ~22% of
+    # self-hosted slot time. The job and its assertions are unchanged; a
+    # routing-algorithm regression is still caught within one schedule window.
+    # Nothing `needs:` this job, so skipping it on PRs gates nothing.
+    #
+    # Original rationale (Issue #2660 / Epic #2556 Phase 4N): re-route board 06
+    # (the diff-pair testbench) from scratch on every run and verify that
+    #   (a) every blocking DRC finding is listed by identity (rule + pair/net,
+    #       open tracker) in the gate script and every listed entry still
+    #       fires; the count outside that allowance must be 0 (#7367; no
+    #       entry in .github/routed-drc-tolerance.yml); AND
+    #   (b) each of the three diff-pair DRC rules
+    #       (diffpair_clearance_intra, diffpair_routing_continuity,
+    #       diffpair_length_skew) was actually exercised against an engaged
+    #       pair -- i.e., the per-rule counter in the DRC summary is
+    #       non-zero for each rule_id.
+    #
+    # This job is the algorithmic-regression counterpart to the
+    # `routed-pcb-drc-check` job above.  That job is diff-driven (only fires
+    # when a PR touches a committed *_routed.kicad_pcb file), which catches
+    # regressions in *committed* PCB files but does NOT catch regressions in
+    # the routing algorithm itself -- e.g., if Phase 2E's coupled engagement
+    # accidentally flips `coupled_routing=False`, the diff-driven gate stays
+    # green because no committed PCB was touched.  This from-scratch job
+    # re-routes board 06 every run so the gate catches algorithmic
+    # regressions even when no committed PCB is modified.
+    #
+    # PR #2552 (merged) introduced the diff-driven precedent this job
+    # extends; this is the "always-run" counterpart for diff-pair coverage.
+    #
+    # Determinism: the gate uses `--seed 42` (Issue #2589 / Phase 3X.2)
+    # forwarded into `generate_design.py --seed` so the re-route is
+    # reproducible.  Without `--seed` the router uses os.urandom-derived
+    # entropy and produces different output run-to-run, which would
+    # generate false-positive failures on a loaded CI runner.
+    #
+    # Parametric over board name (matrix.board): board 03 can be added
+    # cheaply once #2589's non-determinism work fully closes and #2513
+    # (USB-C blockers) clears.  Today board 03 is omitted because its
+    # NetClassRouting declarations do not yet exercise coupled_routing.
+    #
+    # The synthetic fixture retains the final historical18-error pair-quality
+    # baseline (#4019). New physical errors fail independently; active board06
+    # remains at zero. See .github/routed-drc-tolerance.yml for provenance.
+    #
+    # IMPORTANT (branch-protection note): adding this job to the list of
+    # *required* status checks on `main` is a separate repo-admin action.
+    # The PR landing this job calls that out explicitly so the human
+    # approver can flip the GitHub setting after merge.  Until then the
+    # job runs on every PR but is advisory -- its failure does not block
+    # the merge button.
+    name: Diff-Pair Routing Regression
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    # GitHub-hosted for every event (Issue #6013); the fork-run measurement
+    # in #5747 has this job well inside its timeout on ubuntu-latest.
+    runs-on: ubuntu-latest
+    # Issue #3509: run inside the official KiCad 10 container (same image
+    # as the test + kicad-cli-smoke jobs).  The board 06 recipe's pour
+    # pipeline (zone fill -> stitch -> pour-connectivity repair -> re-fill
+    # -> copper-union audit) shells out to ``kct zones fill``, which is
+    # backed by kicad-cli.  On the bare ubuntu-latest runner kicad-cli
+    # does not exist, so EVERY fill invocation failed with rc=1
+    # ("kicad-cli not found"), all 5 pour zones stayed zero-fill, and the
+    # repair loop was left trying to do a copper plane's job with discrete
+    # vias/bridges -- the non-converging "FAIL while the gate is green"
+    # trap from PR #3506's run 27343006197.  The container provides
+    # kicad-cli 10 so the fills actually run, matching the local artifact-
+    # refresh environment.  The gate also asserts the pour audit verdict
+    # now (see scripts/ci/check_diffpair_coverage.py + the board recipe's
+    # REQUIRE_POUR_CONNECTIVITY contract), so a future fill regression
+    # fails the job instead of rotting in the log.
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # On the runner this is a sibling container of the runner's own, created by
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 8g (same shape as
+      # Board 06: one board, one router run, kicad-cli DRC).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the test job).
+        shell: bash
+    # Issue #2660 acceptance criterion #5: wall-clock <= 5 min on
+    # ubuntu-latest.  Originally a 10-minute safety-net ceiling, bumped
+    # to 15 minutes per PR #3141 Judge feedback (2026-05-27):
+    # board 06's USB3 SS BGA-49 escape runs through CoupledPathfinder,
+    # which has NO C++ backend (the C++ extension only covers per-net
+    # A*, not the diff-pair coupled-routing path), so the ~2-3 min C++
+    # build + ~9-10 min Python coupled routing exceeds the prior 10-min
+    # ceiling.  If the typical run creeps above 5 minutes, move to a
+    # nightly schedule per the epic's runtime guidance.
+    #
+    # Issue #3413 (phase 3): 15 -> 20 min.  The run pays for the
+    # overflow-silent rescue work inside the negotiated loop plus a
+    # bounded (<= 90s) post-route correction pass on the timed-out
+    # exit.  Local M-series wall is ~17 min; the 2-core ubuntu runner
+    # needs the extra headroom.  Also closes #3477 (sub-minute margin
+    # under the prior 15-min ceiling; option 1 -- ceiling bump -- was
+    # its preferred fix).
+    #
+    # Issue #3413 (phases 4-6): the recipe's negotiated budget is now
+    # 360s (the phase-3 A/B that rejected 360s pre-dates the
+    # tightly-coupled width re-solve; see the budget rationale in
+    # boards/06-diffpair-test/generate_design.py).
+    #
+    # Issue #3413 (phases 4-6, ceiling re-calibration): 20 -> 30 min.
+    # The phases-4-6 prediction that "total wall does not grow" was
+    # falsified by the first CI run on the new recipe (PR #3506, run
+    # 27341578234, killed at the 20-min ceiling).  CI-empirical
+    # arithmetic on the 2-core ubuntu runner:
+    #
+    #   setup + board generation            ~0:45
+    #   coupled diff-pair pre-phase          6:00  (9 pairs x 60s
+    #                                              per-pair budget,
+    #                                              all deferred)
+    #   negotiated loop                      6:05  (360s budget; banked
+    #                                              21/21 overflow=2 and
+    #                                              restored it)
+    #   post-route pipeline                 >7:15 when killed
+    #     (optimize + nudge + solo pair repair + zone gen + first fill
+    #      + stitch + up to 3 rounds of pour repair / re-fill /
+    #      copper-union audit + DRC + mfg export + gate-side checks)
+    #
+    # The pre-#3413-phase-4 recipe's post-route tail took ~3.7 min on
+    # CI (main runs 27341166410 / 27330851929: 14m22s / 14m29s total);
+    # the new fill/repair/audit rounds roughly double-to-triple it, so
+    # the typical run lands ~22-25 min.  All in-loop work is internally
+    # budgeted (per-pair 60s, negotiated 360s, repair loop capped at 3
+    # rounds), so 30 min gives ~20-30% headroom over the worst expected
+    # wall without masking a genuine hang.
+    #
+    # Issue #3509 re-measure note: moving into the kicad/kicad:10.0
+    # container adds ~1-2 min (image pull + apt prerequisites) but the
+    # zone fills now succeed, so the pour-repair loop converges instead
+    # of grinding its full round budget against unfillable zero-fill
+    # zones (the pre-#3509 runs burned ~2.2 min on 3 futile rounds).
+    # Prior green run wall: 20m42s (run 27343006197); ceiling kept at
+    # 30 min.
+    timeout-minutes: 30
+    # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
+    #
+    #   * LATENCY: #3089 landed a per-pair wall-clock budget plumbed
+    #     through ``DifferentialPairConfig.per_pair_timeout`` (now
+    #     60.0s for board 06, see #3144 for why the budget was doubled).
+    #     The re-route COMPLETES in ~9-12 min wall-clock (vs the prior
+    #     10-min+ stall on the USB3 SS BGA-49 escape at J3/J4).  See
+    #     ``boards/06-diffpair-test/generate_design.py``.
+    #   * QUALITY: #3115 (PR #3140) landed a partner-aware A* heuristic
+    #     for ``CoupledPathfinder._heuristic`` that eliminated the
+    #     817-error ``diffpair_clearance_intra`` cluster from the
+    #     legacy Manhattan-sum heuristic.
+    #   * DETERMINISM: #3144 fixed the A* tie-break defect in
+    #     ``CoupledNode`` / ``AStarNode`` (Python + C++) and switched
+    #     board 06 from a wall-clock budget classifier to an iteration
+    #     budget classifier, eliminating the timing-dependent
+    #     coupled-vs-deferred bucket drift that previously caused
+    #     CI runs to vary 35-43 errors on the same input + seed.
+    #   * RESIDUAL: 1 ``diffpair_clearance_intra`` on USB2_D+/USB2_D-
+    #     at the USB-C source footprint is a STRUCTURAL geometric
+    #     constraint (the A6/B6 D+ pads and A7/B7 D- pads form
+    #     mandatory diagonal crossovers due to USB-C reversibility
+    #     pad mirroring).  No spacing-widening at any grid resolution
+    #     can resolve it; it is documented as an allowlist residual
+    #     in ``.github/routed-drc-tolerance.yml``.
+    #
+    # Issue #3144: strict M-F gate is now re-enabled (soft-fail
+    # removed).  Two changes made the strict gate viable:
+    #
+    #   1. A* tie-break fix in Python ``CoupledNode`` and C++
+    #      ``AStarNode`` adds a monotonic insertion counter as the
+    #      secondary sort key, so equal-f_score nodes pop in a
+    #      deterministic, insertion-order-preserving order.
+    #   2. Per-pair iteration budget (new
+    #      ``DifferentialPairConfig.per_pair_max_iterations``) replaces
+    #      the wall-clock budget as the primary classifier of which
+    #      pairs the coupled pathfinder gives up on.  The iteration
+    #      budget is independent of CPU speed, so a slow 2-core CI
+    #      runner classifies the same pairs as a fast multi-core
+    #      development machine.
+    strategy:
+      # Don't abort the matrix on a single board failure -- each board
+      # is independent and reviewers want all annotations at once.
+      fail-fast: false
+      matrix:
+        board:
+          - boards/06-diffpair-test
+        # Future: add boards/03-usb-joystick here once #2589 stabilises
+        # its router determinism and #2513 (USB-C blockers) clears.
+    steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.  The
+        # ``kicad-cli --version`` probe makes a missing/broken kicad-cli
+        # fail THIS step with an attributable error instead of surfacing
+        # later as zero-fill pour zones (Issue #3509).
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # Official one-liner instead of setup-uv: avoids action-host
+        # coupling inside the container (mirrors the test + smoke jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        # Pin the interpreter via uv (parity with the sibling jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        # `uv sync` does NOT build the native extension (see repo CLAUDE.md
+        # "Routing performance: build the C++ backend first").  Without
+        # this step board 06 routing falls back to pure Python which is
+        # 10-100x slower and reliably blows past the 10-min job timeout
+        # (Issue #3097 / PR #3141 Judge feedback, 2026-05-25).
+        run: uv run kct build-native
+
+      - name: Re-route board + check diff-pair coverage
+        # Issue #3144: pin PYTHONHASHSEED so the Python interpreter's
+        # ``hash()`` returns the same values run-to-run.  CPython
+        # default behaviour is to randomise string hashes on every
+        # startup, which causes ``set[str]`` / ``dict[str, ...]``
+        # iteration order to vary -- a subtle non-determinism source
+        # in any upstream code path that iterates over a string-keyed
+        # collection.  The Phase 1 code-walk did not find such a path
+        # in the per-pair router itself, but pinning the seed is a
+        # cheap, broadly applicable belt-and-braces measure.  ``42``
+        # matches the ``--seed`` argument for consistency.
+        #
+        # PYTHONUNBUFFERED: stdout to the Actions log pipe is
+        # block-buffered (8 KiB) by default, so when run 27341578234
+        # hit the job ceiling mid-post-route the log went silent for
+        # 7+ minutes after "Restoring iteration N state" -- every
+        # post-route step's output was sitting in the buffer (or in a
+        # ``capture_output=True`` child) when the runner killed the
+        # process.  Unbuffered output makes the next timeout
+        # attributable to a specific pipeline step.
+        env:
+          PYTHONHASHSEED: "42"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_diffpair_coverage.py \
+            "${{ matrix.board }}" \
+            --seed 42
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Runs ONLY when the re-route/check step above failed.  The board's
+        # re-route output lives in a git-ignored `regression-output/`
+        # directory (see scripts/ci/board_recipe_artifacts.py
+        # recipe_output_dir) that is otherwise discarded when the job ends
+        # -- the motivating incident (#5044 / PR #5045) needed a full
+        # ~30-minute re-route to diagnose a Board07 failure because CI
+        # artifacts were unavailable (run 34524705221: total_count 0).
+        # `if: failure()` (not `always()`) is deliberate: this is a hard
+        # gate, not a warn-only job, so uploading on every green run is
+        # needless churn -- see nightly-ship-ready.yml for the `always()`
+        # counterpart pattern this mirrors for a warn-only job.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "regression-output=${{ matrix.board }}/regression-output" \
+            --job diffpair-routing-regression \
+            --board "${{ matrix.board }}" \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python ${{ matrix.board }}/generate_design.py ${{ matrix.board }}/regression-output --step route --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        # Bounded, explicit: only the staging dir this job's collection
+        # step just populated (never repo-root, `.venv`, or `.git`).  The
+        # name distinguishes board + job + commit + run so the four jobs'
+        # bundles never collide within one workflow run's Artifacts tab.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-diffpair-routing-regression-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
+
+  matchgroup-routing-regression:
+    # Board 07 CI is enabled via the repository variable vars.BOARD_07_CI_ENABLED
+    # (#5097 suspension ended; #5164).
+    needs: [changes, kicad_pin]
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
+    # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
+    # N-trace match-group testbench, #2724 Phase 3L) from scratch on
+    # every PR and verify that
+    #   (a) every blocking DRC finding is listed by identity (rule + pair/net,
+    #       open tracker) in the gate script and every listed entry still
+    #       fires; the count outside that allowance must be 0 (#7367; no
+    #       entry in .github/routed-drc-tolerance.yml); AND
+    #   (b) the match_group_length_skew DRC rule (#2702, Phase 2G; producer
+    #       wiring #2710 Phase 2.5G) was actually exercised against a
+    #       declared group -- i.e., the per-rule counter in the DRC
+    #       summary is non-zero for rule_id "match_group_length_skew".
+    #
+    # This job is a SIBLING to diffpair-routing-regression (board 06),
+    # not a matrix-extension.  Per the issue #2726 curator decision
+    # (2026-05-11), sibling structure was chosen because:
+    #
+    #   1. Minimal blast radius -- a match-group regression PR cannot
+    #      accidentally break the diff-pair gate and vice versa.
+    #   2. The diff-pair coverage script's DIFFPAIR_RULE_IDS tuple is
+    #      hardcoded to three rule_ids; the match-group gate asserts a
+    #      different (currently single) rule_id.  A dedicated script
+    #      (check_matchgroup_coverage.py) is cleaner than parametrising
+    #      check_diffpair_coverage.py with a --rules flag.
+    #   3. Per-job timeout budgets are independent (each gets a fresh
+    #      10-min ceiling -- matrix-extension would share the budget).
+    #   4. The existing job name "Diff-Pair Routing Regression" is a
+    #      branch-protection check name; renaming requires repo-admin
+    #      action.  A sibling job is purely additive to branch protection.
+    #
+    # This job is the algorithmic-regression counterpart to the
+    # routed-pcb-drc-check job above for the match-group rule, mirroring
+    # what diffpair-routing-regression does for the diff-pair rules.
+    #
+    # Determinism: the gate uses `--seed 42` (Issue #2589 / Phase 3X.2)
+    # forwarded into `generate_design.py --seed` so the re-route is
+    # reproducible.  Without `--seed` the router uses os.urandom-derived
+    # entropy and produces different output run-to-run, which would
+    # generate false-positive failures on a loaded CI runner.
+    #
+    # Sidecar: check_matchgroup_coverage.py threads the board's
+    # output/net_class_map.json (emitted by generate_design.write_sidecar
+    # in Phase 3L scaffolding) into `kct check --net-class-map` per the
+    # #2692 pattern.  Without the sidecar the match_group_length_skew
+    # rule degrades to a no-op and the assertion-of-engagement check
+    # would fail with "rule not exercised".
+    #
+    # The synthetic fixture retains the final historical 8-error baseline
+    # (#4007), with at most one match-group error. New physical errors fail
+    # independently; the active SDRAM release keeps zero tolerance.
+    #
+    # IMPORTANT (branch-protection note): adding this job to the list of
+    # *required* status checks on `main` is a separate repo-admin action.
+    # The PR landing this job calls that out explicitly so the human
+    # approver can flip the GitHub setting after merge.  Until then the
+    # job runs on every PR but is advisory -- its failure does not block
+    # the merge button.
+    name: Match-Group Routing Regression
+    runs-on: ubuntu-latest
+    # Issue #3617 (sibling of board 06's #3509): run inside the official
+    # KiCad 10 container (same image as the test + kicad-cli-smoke +
+    # diffpair-routing-regression jobs).  The board 07 recipe's pour
+    # pipeline (zone fill -> stitch -> pour-connectivity repair -> re-fill
+    # -> copper-union audit) shells out to ``kct zones fill``, which is
+    # backed by kicad-cli.  On the bare ubuntu-latest runner kicad-cli does
+    # not exist, so every fill invocation fails and the pour zones stay
+    # zero-fill -- the same "dead pour" trap board 06 closed in PR #3615.
+    # The container provides kicad-cli 10 so the fills actually run,
+    # matching the local artifact-refresh environment.  The gate now
+    # asserts the pour audit verdict (see scripts/ci/check_matchgroup_coverage.py
+    # + the board recipe's REQUIRE_POUR_CONNECTIVITY contract), so a future
+    # fill regression fails the job instead of rotting in the log.
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the test job).
+        shell: bash
+    # Board 07 routing consumes ~10-12 min in CI; the prior bare-runner
+    # green wall was ~12-13 min (run 27433067590).  Issue #3617 re-measure:
+    # moving into the kicad/kicad:10.0 container adds ~1-2 min (image pull +
+    # apt prerequisites) and the recipe now performs real zone fills +
+    # pour-repair rounds, so the prior 15-min ceiling leaves no headroom.
+    # Bumped 15 -> 20 to match the container + fill re-measure (same value
+    # PR #3625 sets for issue #3620's container move of this job).
+    #
+    # Issue #3923 (PR #3956) re-measure: the resume-fallback NARROWING
+    # (case-1 repeat-only + always-fall-back on case-2) is required to fix
+    # two real regressions the earlier broad skip introduced -- the
+    # USB-joystick 6/16 net floor and the board-07 GND pad U1.24 pour
+    # stranding.  Restoring those necessary Python fallbacks (the first
+    # case-1 exhaustion of every net + every case-2, plus the untouched
+    # initial-search FAILURE_NO_PATH grind like DQ4) adds wall time back to
+    # this board's negotiated rip-up loop.  Locally the full route is ~11-12
+    # min (688s), comfortably inside budget and NET-FASTER than the pre-#3923
+    # full-grind baseline (805s).  On the 2-core CI runner the pure-Python
+    # fallback runs ~2x slower, so run 28862990993's matchgroup job clipped
+    # exactly 20m03s and was killed at the wall (no headroom), even though the
+    # earlier pre-narrowing run completed the same job in ~14m and only failed
+    # the pour gate.  Bumped 20 -> 30 to give the runner-variance headroom the
+    # 20-min ceiling lacked.  This is PARITY with the sibling
+    # diffpair-routing-regression job (also timeout-minutes: 30) rather than a
+    # special exception, and does NOT weaken any correctness gate -- the pour
+    # connectivity + DRC allowlist floors are unchanged.
+    #
+    # Issue #4468 (epic #3438 Phase 3) re-measure: the board-07 route step now
+    # performs up to THREE full negotiated passes -- the baseline pass plus the
+    # two ``--placement-delta-feedback-budget 2`` probes, each granted its own
+    # 600 s budget so a probe's re-route is compared against the baseline on
+    # equal terms.  Measured locally solo: 27m05s vs ~16 min for the loop-off
+    # recipe.  Bumped 30 -> 90 for the extra passes plus 2-core-runner
+    # variance; this is a WALL-CLOCK allowance, not a correctness threshold --
+    # the pour connectivity gate and the DRC allowlist floor are unchanged
+    # (the floor was RE-MEASURED at 8 on the delta-loop artifact, the same
+    # value the committed floor already carries, and 2 better than a loop-off
+    # local regen).  90 min matches the precedent already set by
+    # board-05-routing-regression.
+    #
+    # Issue #6448 (slice 1): the recipe now routes on the lattice engine
+    # (``--route-engine lattice --strategy basic``) with the placement-delta
+    # loop off, so the route step is ONE lattice pass (~1 min locally).  The
+    # allowance is left at 90 min; it is a wall-clock ceiling, not a gate.
+    timeout-minutes: 90
+    # Issue #3146 closure: the matrix-scoped soft-fail
+    # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
+    # that PR #3145 installed pending matchgroup-routing
+    # determinism work has been removed.  Determinism for board 07
+    # rests on three coordinated pieces:
+    #   1. C++ + Python A* tie-break:
+    #      ``AStarNode::operator>`` (``router/cpp/include/types.hpp``)
+    #      and ``AStarNode.__lt__`` (``router/pathfinder.py``) compare
+    #      on ``(f_score, seq)`` where ``seq`` is a monotonic
+    #      insertion counter assigned at heap-push time.  This was
+    #      landed by PR #3192 (Issue #3144 -- CoupledPathfinder /
+    #      board 06) and is the upstream determinism guarantee that
+    #      also makes board 07's negotiated A* main pass stable.
+    #      This PR (closing #3146) inherits that fix and adds the
+    #      board-07-side closure pieces below; it does not re-touch
+    #      the comparator.
+    #   2. PYTHONHASHSEED pinned to "42" in
+    #      ``boards/07-matchgroup-test/generate_design.py`` when
+    #      it spawns the ``kct route`` subprocess AND at the workflow
+    #      step env below, eliminating string-keyed dict/set iteration
+    #      drift between runners.
+    #   3. CI step below builds the C++ backend (matching the
+    #      diffpair-routing-regression job) so board 07 routes
+    #      against the same fast path locally and in CI -- the
+    #      10-100x slowdown of the pure-Python fallback was a major
+    #      contributor to wall-clock budget classification drift.
+    strategy:
+      # Don't abort the matrix on a single board failure -- each board
+      # is independent and reviewers want all annotations at once.
+      fail-fast: false
+      matrix:
+        board:
+          - boards/07-matchgroup-test
+        # Future: additional N-trace testbenches (e.g., a board with
+        # only the cascade-budget edge case, or a board exercising
+        # length_match_reference=pace-car semantics) can be added
+        # cheaply once they exist.
+    steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.  The
+        # ``kicad-cli --version`` probe makes a missing/broken kicad-cli
+        # fail THIS step with an attributable error instead of surfacing
+        # later as zero-fill pour zones (Issue #3617).
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # Official one-liner instead of setup-uv: avoids action-host
+        # coupling inside the container (mirrors the test + smoke +
+        # diffpair-routing-regression jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        # Pin the interpreter via uv (parity with the sibling jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        # Issue #3146: ``uv sync`` does NOT build the native extension
+        # (see repo CLAUDE.md "Routing performance: build the C++ backend
+        # first").  Without this step board 07 routing falls back to pure
+        # Python which is 10-100x slower; with a 2-core runner and 600s
+        # outer / 30s per-net budgets, the slowdown was the dominant source
+        # of the cross-platform DRC variance reported in PR #3145 (27 local
+        # vs 48 CI).  Mirrors the equivalent step in the
+        # diffpair-routing-regression job above.
+        run: uv run kct build-native
+
+      - name: Re-route board + check match-group coverage
+        # Issue #3146: ``PYTHONHASHSEED`` pinned at the workflow-step
+        # level so any string-keyed dict/set iteration in the outer
+        # ``check_matchgroup_coverage.py`` (and in the
+        # ``generate_design.py`` subprocess it spawns) is reproducible
+        # across runner environments.  The board 07 ``generate_design.py``
+        # also re-pins it on its own ``kct route`` subprocess for the
+        # local-CLI case, but pinning here covers the CI path end-to-end.
+        # PYTHONUNBUFFERED makes a timeout attributable to a specific
+        # pipeline step instead of going silent in a block-buffered pipe
+        # (the diffpair job's #3413 lesson).
+        env:
+          PYTHONHASHSEED: "42"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_matchgroup_coverage.py \
+            "${{ matrix.board }}" \
+            --seed 42
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of the diffpair-routing-regression collection step; see
+        # its comment for the #5044/#5045 rationale.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "regression-output=${{ matrix.board }}/regression-output" \
+            --job matchgroup-routing-regression \
+            --board "${{ matrix.board }}" \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python ${{ matrix.board }}/generate_design.py ${{ matrix.board }}/regression-output --step route --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board07-matchgroup-routing-regression-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
+
+  board-00-end-to-end:
+    # Issue #3751: regenerate board 00 ("simple-led", the canonical
+    # "Hello World" fixture) from its recipe (boards/00-simple-led/
+    # generate_design.py) on every PR and assert that the resulting
+    # artifacts cross the manufacturability bar.  This is the PR-time
+    # complement to ``tests/test_board_00_simple_led.py::TestBoard00SimpleLed``
+    # (which is @pytest.mark.slow and only runs nightly via
+    # ``slow-tests.yml``) and the recipe-side regression gate that
+    # ``routed-pcb-drc-check`` cannot provide -- the diff-driven DRC
+    # gate only fires when a PR touches the committed *_routed.kicad_pcb,
+    # so a recipe bug that produces a wrong-but-still-DRC-clean PCB (the
+    # exact failure mode of #3747's D1 polarity bug) goes undetected.
+    #
+    # What the gate does:
+    #   1. Re-run ``generate_design.py`` against a clean tmp directory.
+    #   2. Run ``kct check`` on the routed PCB; require ``Overall: PASSED``
+    #      (DRC + ERC + LVS + Manifest sub-checks all PASSED -- the meta
+    #      contract from #3750).
+    #   3. Re-emit board.json via ``kct board-metrics`` against the regen
+    #      output and assert ``status: ok``, ``drc_violations: 0``,
+    #      ``lvs_clean: true`` -- the public contract the demo gallery
+    #      (#3749) consumes.
+    #
+    # The gate intentionally does NOT diff the regenerated artifacts
+    # against the committed ``output/`` tree (the original AC's step 7):
+    # copper UUIDs, segment ordering, and generator timestamps are
+    # nondeterministic, so a naive byte-diff would false-positive on
+    # every PR.  Netlist equivalence is already covered by LVS; component
+    # placement and routing topology need a semantic comparator that is
+    # out of scope for this issue.
+    #
+    # Runner setup mirrors the ``test`` job: official kicad/kicad:10.0
+    # container so kicad-cli is present (the recipe's ``run_erc()`` and
+    # the meta ``ERC`` sub-check both shell out to kicad-cli; on a bare
+    # ubuntu-latest runner the ERC step is silently skipped and the gate
+    # defeats itself).  The C++ backend build is required per CLAUDE.md
+    # ("Routing performance: build the C++ backend first") -- without it
+    # the router falls back to pure Python (10-100x slower) and risks
+    # missing the 15-minute ceiling.
+    #
+    # IMPORTANT (branch-protection note): adding this job to the list of
+    # *required* status checks on ``main`` is a separate repo-admin
+    # action.  The PR landing this job calls that out explicitly so the
+    # human approver can flip the GitHub setting after merge.  Until then
+    # the job runs on every PR but is advisory -- its failure does not
+    # block the merge button.  Same pattern as
+    # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
+    name: Board 00 End-to-End
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board00 == 'true' || needs.changes.result == 'failure') }}
+    runs-on: ubuntu-latest
+    # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
+    # the C++ backend build is ~2 min, ``kct export`` + ``kct check`` +
+    # ``kct board-metrics`` add ~30s total, and the gate-side asserter
+    # is sub-second.  15 min leaves >2x headroom on a slow 2-core
+    # ubuntu runner without masking a hang.
+    timeout-minutes: 15
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the test job).
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.  The
+        # ``kicad-cli --version`` probe makes a missing/broken kicad-cli
+        # fail THIS step with an attributable error instead of surfacing
+        # later as a silently-skipped ERC sub-check.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # Official one-liner instead of setup-uv: avoids action-host
+        # coupling inside the container (mirrors the test + smoke jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        # Pin the interpreter via uv (parity with the sibling jobs that
+        # use actions/setup-python with python-version: "3.12"); the
+        # container image's own Python version is irrelevant.  ``--extra
+        # dev`` is required because ``kct check`` imports ``shapely`` for
+        # the geometry-based DRC rules (see the [project.optional-dependencies]
+        # dev block in pyproject.toml for the ``shapely>=2.0`` pin).
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        # ``uv sync`` does NOT build the native extension (see repo
+        # CLAUDE.md "Routing performance: build the C++ backend first").
+        # Without this step the recipe's routing step falls back to pure
+        # Python which is 10-100x slower.
+        run: uv run kct build-native
+
+      - name: Regenerate board 00 from recipe (clean tmp directory)
+        # The recipe's main() accepts an optional output directory as
+        # argv[1] (boards/00-simple-led/generate_design.py:944-947); we
+        # point it at a tmp directory so the gate never touches the
+        # committed boards/00-simple-led/output/ tree.  Exits non-zero
+        # if any of ERC/DRC/LVS/MFG fail OR run_lvs() raises
+        # BoardNetlistMismatch -- the polarity-class regression the gate
+        # is designed to catch.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board00-ci
+          mkdir -p /tmp/board00-ci
+          uv run python boards/00-simple-led/generate_design.py /tmp/board00-ci
+
+      - name: Assert kct check Overall PASSED on regenerated routed PCB
+        # The meta sub-check pattern from #3750: DRC + ERC + LVS +
+        # Manifest must ALL be PASSED for ``Overall: PASSED`` and exit
+        # 0.  No ``--allow-incomplete`` -- the recipe just wrote
+        # manufacturing/manifest.json, so Manifest is fresh.  ``tee``
+        # surfaces the full output in the log AND lets the grep gate
+        # the build on the exact "Overall: PASSED" line (defence in
+        # depth against future verdict-string renames).
+        run: |
+          set -euo pipefail
+          uv run kct check /tmp/board00-ci/simple_led_routed.kicad_pcb \
+            | tee /tmp/board00-ci/check.out
+          grep -qE '^Overall:[[:space:]]+PASSED' /tmp/board00-ci/check.out
+
+      - name: Emit board.json via kct board-metrics
+        # board.json is NOT written by the recipe -- it's the public
+        # data contract emitted by the ``kct board-metrics`` aggregator
+        # (src/kicad_tools/cli/board_metrics_cmd.py) that the demo
+        # gallery (#3749) consumes.  The command expects a board-layout
+        # directory in the standard ``<board_dir>/output/`` shape, so
+        # we mirror the tmp regen into that shape and point the command
+        # at it.  This validates the same contract a downstream demo-
+        # site build would.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board00-staging
+          mkdir -p /tmp/board00-staging/00-simple-led/output
+          cp -r /tmp/board00-ci/. /tmp/board00-staging/00-simple-led/output/
+          uv run kct board-metrics /tmp/board00-staging/00-simple-led
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # Gate on the RAW total_unconnected_pads of the freshly-routed PCB.
+        # A floating power/plane pad (e.g. a VCC pin with no track and no
+        # reachable pour) passes DRC/LVS/router "N/N nets" but is
+        # electrically broken -- and blocking_incomplete_count would
+        # name-exclude it (power/plane nets), so this gate uses the raw
+        # count instead (see scripts/ci/check_net_status.py). Board 05 is
+        # intentionally NOT gated here; it keeps its own dedicated
+        # check_board_05_blocking.py gate (#3775/#3766/#3829).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board00-ci/simple_led_routed.kicad_pcb
+
+      - name: Assert artifacts + lvs.json + board.json fields
+        # The gate-side asserter: presence of every required artifact,
+        # lvs.json clean=true, and board.json drc_violations=0 / lvs_clean=true.
+        # Fresh recipe output remains readiness=unverified and status=partial;
+        # this routing gate does not manufacture a release-readiness verdict.  Sibling of scripts/ci/check_routed_drc.py;
+        # see its docstring for the GitHub-Actions annotation contract.
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --routing-only \
+            /tmp/board00-staging/00-simple-led
+
+  board-01-end-to-end:
+    # Issue #3762: same end-to-end gate as ``board-00-end-to-end``, applied
+    # to board 01 ("voltage-divider").  Board 01 is verified clean on both
+    # the copper-extracted and label-based LVS comparators, so its recipe
+    # now runs ``write_lvs_report(..., require_clean=True)`` and emits
+    # ``output/lvs.json``.  This job regenerates the board, asserts
+    # ``kct check`` Overall PASSED, emits board.json, and asserts
+    # lvs.json clean=true + board.json lvs_clean=true via the generalized
+    # ``scripts/ci/check_board_00_e2e.py`` asserter (parametrized with
+    # ``--stem voltage_divider``).  See the board-00 job above for the
+    # full rationale on container choice, the C++ backend build, and the
+    # advisory (non-required-check) status until a repo admin flips the
+    # branch-protection setting.
+    name: Board 01 End-to-End
+    needs: [changes, kicad_pin]
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 01 from recipe (clean tmp directory)
+        # The recipe exits non-zero if ERC/DRC/LVS fail OR write_lvs_report
+        # raises BoardNetlistMismatch -- board 01 hard-gates on both
+        # comparators (require_clean=True).
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board01-ci
+          mkdir -p /tmp/board01-ci
+          uv run python boards/01-voltage-divider/generate_design.py /tmp/board01-ci
+
+      - name: Assert kct check Overall PASSED on regenerated routed PCB
+        run: |
+          set -euo pipefail
+          uv run kct check /tmp/board01-ci/voltage_divider_routed.kicad_pcb \
+            | tee /tmp/board01-ci/check.out
+          grep -qE '^Overall:[[:space:]]+PASSED' /tmp/board01-ci/check.out
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board01-staging
+          mkdir -p /tmp/board01-staging/01-voltage-divider/output
+          cp -r /tmp/board01-ci/. /tmp/board01-staging/01-voltage-divider/output/
+          uv run kct board-metrics /tmp/board01-staging/01-voltage-divider
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board01-ci/voltage_divider_routed.kicad_pcb
+
+      - name: Assert artifacts + lvs.json + board.json fields
+        # Reuse the generalized board-00 asserter with --stem so it derives
+        # board 01's artifact names (voltage_divider*.kicad_{sch,pcb}).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem voltage_divider \
+            --routing-only \
+            /tmp/board01-staging/01-voltage-divider
+
+  board-02-end-to-end:
+    # Issue #3783: same full end-to-end gate as ``board-00-end-to-end`` /
+    # ``board-01-end-to-end``, applied to board 02 ("charlieplex-led").
+    # This job was deferred in #3779 because a fresh regen produced a
+    # spurious copper short (NODE_B<->NODE_C) — a layer-agnostic copper-LVS
+    # extractor false-positive on a legal via-less F.Cu/B.Cu crossover.
+    # With the layer-aware ``_build_segment_chains`` fix (this PR), a fresh
+    # board-02 regen is copper-LVS clean (Overall: PASSED), so the full
+    # e2e gate (regen → ``kct check`` Overall PASSED → board.json status:ok
+    # / drc_violations:0 / lvs_clean:true) is now green and added here.
+    # See the board-00 job above for the full rationale on container choice,
+    # the C++ backend build, and the advisory (non-required-check) status
+    # until a repo admin flips the branch-protection setting.
+    name: Board 02 End-to-End
+    needs: [changes, kicad_pin]
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Issue #3799: pin PYTHONHASHSEED so the board-02 regen is
+      # reproducible across runner environments (mirrors board-03/06/07).
+      # The recipe ALSO pins it on the route subprocess, but pinning it at
+      # the job level covers the whole regen pipeline (schematic + zone +
+      # LVS) for belt-and-suspenders determinism.
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 02 from recipe (clean tmp directory)
+        # The recipe exits non-zero if ERC/DRC/LVS fail OR write_lvs_report
+        # raises BoardNetlistMismatch -- board 02 hard-gates on both the
+        # copper-extracted and label-based comparators (require_clean=True).
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board02-ci
+          mkdir -p /tmp/board02-ci
+          uv run python boards/02-charlieplex-led/generate_design.py /tmp/board02-ci
+
+      - name: Assert kct check Overall PASSED on regenerated routed PCB
+        run: |
+          set -euo pipefail
+          uv run kct check /tmp/board02-ci/charlieplex_3x3_routed.kicad_pcb \
+            | tee /tmp/board02-ci/check.out
+          grep -qE '^Overall:[[:space:]]+PASSED' /tmp/board02-ci/check.out
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board02-staging
+          mkdir -p /tmp/board02-staging/02-charlieplex-led/output
+          cp -r /tmp/board02-ci/. /tmp/board02-staging/02-charlieplex-led/output/
+          uv run kct board-metrics /tmp/board02-staging/02-charlieplex-led
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board02-ci/charlieplex_3x3_routed.kicad_pcb
+
+      - name: Assert artifacts + lvs.json + board.json fields
+        # Reuse the generalized board-00 asserter with --stem so it derives
+        # board 02's artifact names (charlieplex_3x3*.kicad_{sch,pcb}).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem charlieplex_3x3 \
+            --routing-only \
+            /tmp/board02-staging/02-charlieplex-led
+
+  board-03-end-to-end:
+    # Issue #3795 (#3780 Part 2): LVS-ONLY end-to-end gate for board 03
+    # ("usb-joystick"), graduated out of ``ADVISORY_LVS_BOARDS``.  Board 03's
+    # recipe now runs ``write_lvs_report(..., require_clean=True,
+    # run_copper=True, run_label=False)`` -- a HARD copper-LVS gate.  A fresh
+    # clean-room regen routes fully and regenerates copper-clean (0 shorts /
+    # 0 opens, verified 2/2 runs), so this job is GREEN.
+    #
+    # This uses the asserter's ``--lvs-only`` mode (like boards 06/07), NOT
+    # the full e2e asserter (boards 00/01/02).  Board 03 carries 4 advisory
+    # ``via_in_pad`` DRC residuals (the recipe prints ``DRC: PASS``; the
+    # board is not in ``.github/routed-drc-tolerance.yml``), so board-metrics
+    # classifies it ``status: partial`` / ``drc_violations: 4``.  The full
+    # asserter hard-asserts ``status: ok`` / ``drc_violations: 0`` and would
+    # FAIL on those advisories; ``--lvs-only`` asserts only artifact presence
+    # + ``lvs.json clean=true`` (+ ``board.json lvs_clean=true``), which is
+    # the meaningful copper-LVS gate.
+    #
+    # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
+    # during regen, and per CLAUDE.md a missing native extension makes routing
+    # multi-minute-per-net.  Board 03's recipe takes only an output-dir arg
+    # (no ``--step`` / ``--seed``); it routes fully and exits 0.
+    #
+    # Advisory until a repo admin adds it to branch protection (same as the
+    # board 00/01/02/06/07 e2e jobs).
+    name: Board 03 End-to-End (LVS-only)
+    needs: [changes, kicad_pin]
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 03 from recipe (clean tmp directory)
+        # Board 03's recipe takes only an output-dir argument and routes
+        # fully (no --step / --seed).  It regenerates copper-LVS clean and
+        # exits 0.  write_lvs_report(require_clean=True) writes lvs.json and
+        # raises on any copper short/open; the LVS-only asserter below is the
+        # gate.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board03-ci
+          mkdir -p /tmp/board03-ci
+          uv run python boards/03-usb-joystick/generate_design.py \
+            /tmp/board03-ci 2>&1 | tee /tmp/board03-recipe.log
+          test -f /tmp/board03-ci/lvs.json
+          test -f /tmp/board03-ci/usb_joystick.kicad_sch
+          test -f /tmp/board03-ci/usb_joystick_routed.kicad_pcb
+
+      - name: Independent copper-LVS re-check (out-of-process, issue #3840)
+        # Re-run compare_copper_netlist in a process the CI job controls (NOT
+        # the recipe) on the REGENERATED schematic + routed PCB, and assert
+        # clean.  This does NOT read lvs.json, so it catches a copper short/
+        # open even if a future recipe change mis-wrote lvs.json or skipped
+        # the fresh check.  The subprocess entrypoint (python -m
+        # kicad_tools.lvs.copper_lvs) was added in #3838; the asserter
+        # (check_copper_lvs.py) maps clean->0, dirty->2, malformed->1.
+        run: |
+          set -euo pipefail
+          uv run python -m kicad_tools.lvs.copper_lvs \
+            /tmp/board03-ci/usb_joystick.kicad_sch \
+            /tmp/board03-ci/usb_joystick_routed.kicad_pcb \
+            > /tmp/board03-copper.json
+          uv run python scripts/ci/check_copper_lvs.py /tmp/board03-copper.json
+
+      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
+        # Validate the REGENERATED routed PCB's DRC out-of-process against the
+        # per-board allowlist (.github/routed-drc-tolerance.yml).  Board 03 has
+        # NO tolerance entry (strict 0-blocking gate) but DOES carry a
+        # jlcpcb-tier1 manufacturers: override; check_routed_drc.py keys both
+        # off the repo-relative path, so the fresh PCB MUST be staged over the
+        # committed path for the override + strict-0 gate to resolve.  This is
+        # the SAME tolerance mechanism the board-04 job and the
+        # routed-pcb-drc-check job use, so it never double-fails on
+        # already-grandfathered errors.  No git restore is needed: the CI
+        # checkout is a throwaway workspace (mirrors the board-04 job).
+        run: |
+          set -euo pipefail
+          cp /tmp/board03-ci/usb_joystick_routed.kicad_pcb \
+            boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
+          uv run python scripts/ci/check_routed_drc.py \
+            boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board03-staging
+          mkdir -p /tmp/board03-staging/03-usb-joystick/output
+          cp -r /tmp/board03-ci/. /tmp/board03-staging/03-usb-joystick/output/
+          uv run kct board-metrics /tmp/board03-staging/03-usb-joystick
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # THIS is the board from the #4531 repro: PR #4525 committed a
+        # board-03 artifact with J2.1 (VCC) floating -- no track, no
+        # reachable pour -- and all 16 CI checks passed. This raw
+        # total_unconnected_pads gate is the assertion that would have
+        # red-lighted that break (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board03-ci/usb_joystick_routed.kicad_pcb
+
+      - name: Assert artifacts + lvs.json clean (LVS-only)
+        # --lvs-only: assert artifact presence + lvs.json clean=true +
+        # board.json lvs_clean=true, but NOT status:ok / drc_violations:0
+        # (board 03 carries 4 advisory via_in_pad DRC residuals ->
+        # status='partial').
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem usb_joystick \
+            --lvs-only \
+            /tmp/board03-staging/03-usb-joystick
+
+      - name: Collect failed Board03 routing bundle (#5359)
+        if: failure()
+        run: |
+          set -euo pipefail
+          # The collector is stdlib-only: retain partial output even if uv
+          # dependency installation failed. Missing inputs are recorded.
+          python3 scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/board03-failed-bundle \
+            --source "board03-ci=/tmp/board03-ci" \
+            --source "recipe.log=/tmp/board03-recipe.log" \
+            --source "board03-copper.json=/tmp/board03-copper.json" \
+            --source "board.json=/tmp/board03-staging/03-usb-joystick/output/board.json" \
+            --job board-03-end-to-end \
+            --board boards/03-usb-joystick \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "uv run python boards/03-usb-joystick/generate_design.py /tmp/board03-ci" \
+            --python-version "$(.venv/bin/python --version 2>&1 || true)" \
+            --kicad-version "$(kicad-cli --version 2>&1 || true)"
+
+      - name: Upload failed Board03 routing bundle (#5359)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board03-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/board03-failed-bundle/
+          retention-days: 14
+
+  board-06-end-to-end:
+    # Issue #3779 (LVS re-enabled by #4012): end-to-end LVS gate for board
+    # 06 ("diffpair-test").  The fixture schematic is now FULLY WIRED
+    # (#4012: generate_schematic.py synthesizes PCB-native-pad symbols and
+    # emits a wire stub + global label for all 198 pins), so both LVS
+    # comparators carry real evidence: copper binds 198/198 pads and the
+    # label comparator agrees pin-for-pin.  The recipe hard-gates on both
+    # (``write_lvs_report(..., require_clean=True)``, boards 00-02 style)
+    # and emits ``lvs.json``; this job asserts:
+    #
+    # * a fresh out-of-process copper-LVS re-check on the REGENERATED
+    #   schematic+PCB pair is clean (``check_copper_lvs.py``, no flags);
+    # * ``lvs.json`` reports ``clean: true`` and ``board.json`` carries
+    #   ``lvs_clean: true`` (``check_board_00_e2e.py --lvs-only``).
+    #
+    # (History: before #4012 the schematic had ZERO wires, the copper
+    # comparator bound 0 pins, and this job asserted the #4006
+    # vacuity-guard verdict + lvs.json ABSENT.  #4012 wired the schematic,
+    # graduating the job to the true LVS gate #4004 originally intended.)
+    #
+    # This job does NOT replace the ``diffpair-routing-regression`` job
+    # (which keeps its allowlist-based DRC coverage gate on the ``--step
+    # route`` re-route).  Board 06 carries identity-allowed DRC *quality*
+    # residuals (check_diffpair_coverage.py DIFFPAIR_FIXTURE_ALLOWED_FINDINGS:
+    # diff-pair length-skew pairs, #7367), so ``--lvs-only`` skips the ``status:ok``
+    # / ``drc_violations:0`` assertions -- but all 21 nets route to
+    # completion, which is exactly what the copper-LVS clean assertion
+    # proves (no opens, no shorts).
+    #
+    # Advisory until a repo admin adds it to branch protection (same as the
+    # board 00/01 e2e jobs).
+    name: Board 06 End-to-End (LVS)
+    needs: [changes, kicad_pin]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board06 == 'true' || needs.changes.result == 'failure') }}
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    # GitHub-hosted for every event (Issue #6013); the fork-run measurement
+    # in #5747 has this job well inside its timeout on ubuntu-latest.
+    runs-on: ubuntu-latest
+    # The measured recipe takes 28m; allow the independent synthetic/LVS,
+    # plane-net and artifact gates to finish within the whole-job deadline.
+    # Internal routing budgets and all validation gates remain unchanged.
+    timeout-minutes: 35
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # On the runner this is a sibling container of the runner's own, created by
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 8g (passed at 6 GB;
+      # headroom, since the cap SIGKILLs rather than swaps).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 06 from recipe (--step all, clean tmp directory)
+        # The recipe hard-gates on LVS (#4012: require_clean=True on both
+        # comparators), so a copper open/short or label divergence exits
+        # non-zero -- tolerate the exit code (|| true) and let the explicit
+        # asserters below be the gate (a dirty regen leaves lvs.json with
+        # clean=false, which check_board_00_e2e.py --lvs-only rejects; an
+        # aborted recipe also fails the manifest presence check).
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board06-ci
+          mkdir -p /tmp/board06-ci
+          uv run python boards/06-diffpair-test/generate_design.py \
+            /tmp/board06-ci --step all --seed 42 || true
+          test -f /tmp/board06-ci/lvs.json
+          test -f /tmp/board06-ci/diffpair_test.kicad_sch
+          test -f /tmp/board06-ci/diffpair_test_routed.kicad_pcb
+
+      - name: Copper-LVS clean re-check (out-of-process, #3838/#4012)
+        # Re-run compare_copper_netlist in a process the CI job controls (NOT
+        # the recipe) on the REGENERATED schematic + routed PCB.  Board 06's
+        # schematic is fully wired (#4012: 198/198 pads bound), so the honest
+        # verdict is a genuinely-evidenced clean -- the plain assertion also
+        # rejects a vacuous result (the #4006 guard forces clean=false when
+        # zero pins bind, so a schematic wiring regression fails here too).
+        # Entrypoint from #3838.
+        run: |
+          set -euo pipefail
+          uv run python -m kicad_tools.lvs.copper_lvs \
+            /tmp/board06-ci/diffpair_test.kicad_sch \
+            /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
+            > /tmp/board06-copper.json
+          uv run python scripts/ci/check_copper_lvs.py /tmp/board06-copper.json
+
+      - name: Independent synthetic routing gate (matching PCB and sidecars)
+        # Preserve the regenerated bundle's routing context. The active release
+        # has a different circuit and must retain its zero-error acceptance.
+        # Historical pair/group baselines never permit new physical errors.
+        run: |
+          set -euo pipefail
+          mkdir -p boards/06-diffpair-test/regression-output
+          cp -a /tmp/board06-ci/. boards/06-diffpair-test/regression-output/
+          uv run python scripts/ci/check_diffpair_coverage.py \
+            boards/06-diffpair-test --skip-route --seed 42
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board06-staging
+          mkdir -p /tmp/board06-staging/06-diffpair-test/output
+          cp -r /tmp/board06-ci/. /tmp/board06-staging/06-diffpair-test/output/
+          uv run kct board-metrics /tmp/board06-staging/06-diffpair-test
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board06-ci/diffpair_test_routed.kicad_pcb
+
+      - name: Assert artifacts + LVS clean (#4012)
+        # --lvs-only: assert lvs.json clean=true + board.json lvs_clean=true,
+        # but NOT status:ok / drc_violations:0 (board 06 carries allowlisted
+        # DRC quality residuals -> status='partial').
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem diffpair_test \
+            --lvs-only \
+            /tmp/board06-staging/06-diffpair-test
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of the diffpair-routing-regression collection step (see
+        # its comment for the #5044/#5045 rationale). Collects the
+        # regenerated schematic+PCB+lvs.json tree, the out-of-process
+        # copper-LVS re-check, and board.json -- but NOT the
+        # /tmp/board06-staging tree wholesale, since it is mostly a copy of
+        # board06-ci (board.json is the only addition), keeping the bundle
+        # bounded.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "board06-ci=/tmp/board06-ci" \
+            --source "board06-copper.json=/tmp/board06-copper.json" \
+            --source "board.json=/tmp/board06-staging/06-diffpair-test/output/board.json" \
+            --job board-06-end-to-end \
+            --board boards/06-diffpair-test \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python boards/06-diffpair-test/generate_design.py /tmp/board06-ci --step all --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
+
+  board-07-end-to-end:
+    # Board 07 CI is enabled via the repository variable vars.BOARD_07_CI_ENABLED
+    # (#5097 suspension ended; #5164).
+    needs: [changes, kicad_pin]
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
+    # Issue #3779: end-to-end gate for board 07 ("matchgroup-test").  The
+    # fixture schematic is FULLY WIRED (#4012: 244/244 pads bound), so the
+    # copper comparator carries real evidence.  Issue #7557 moved U4's TMDS
+    # balls to its J2-facing outer column, and the seed-42 re-route now
+    # reaches 31/31 signal nets (TMDS_D0_N, the last known open, routes), so
+    # this job graduated from the known-opens contract to plain LVS-clean:
+    #
+    # * ``check_copper_lvs.py`` (no flags) on a fresh out-of-process
+    #   re-check: any open or short fails;
+    # * ``check_net_status.py`` (no ``--known-open-nets``): any unconnected
+    #   pad on a gated net fails;
+    # * ``check_board_00_e2e.py --lvs-only``: lvs.json ``clean: true`` and
+    #   board.json ``lvs_clean: true``.
+    #
+    # (Before #7557 the job asserted exactly 1 known open, TMDS_D0_N; before
+    # #4012 the schematic bound 0 pins and the #4006 vacuity guard masked the
+    # real opens behind a "LVS not run" verdict.)
+    #
+    # Issue #4468 (epic #3438 Phase 3) added the classifier-driven
+    # placement-delta feedback loop to this board's route step and
+    # measured it: the set was UNCHANGED at 5 then (since shrunk to
+    # TMDS_D0_N, #7552, and emptied by #7557).  The loop does find a
+    # reach-improving move (a 2 mm translate of U3 closes MIPI_DAT0_N,
+    # 26/31 -> 27/31) but refuses it because it also raises the router's
+    # clearance-violation count -- see boards/07-matchgroup-test/README.md
+    # 'Placement-delta feedback' for the per-probe measurements.  Never
+    # reintroduce a known-opens list to absorb a regression.
+    #
+    # NEW, ADDITIVE gate -- does NOT replace the
+    # ``matchgroup-routing-regression`` job.  Board 07 carries identity-allowed
+    # DRC residuals (check_matchgroup_coverage.py, #7367), so no
+    # Overall: PASSED / status:ok / drc_violations:0 assertions apply.
+    # Advisory until a repo admin adds it to branch protection.
+    name: Board 07 End-to-End (LVS clean)
+    runs-on: ubuntu-latest
+    # Issue #4468: the route step now performs up to THREE full negotiated
+    # passes (the baseline pass plus the two
+    # ``--placement-delta-feedback-budget 2`` probes, each granted its own
+    # 600 s budget so a probe is compared against the baseline on equal
+    # terms) instead of one.  Measured locally solo: 27m05s vs ~16 min for
+    # the loop-off recipe.  This is a wall-clock allowance, NOT a
+    # correctness threshold -- every gate below is unchanged (the known-open
+    # set and the DRC allowlist floor both hold).  90 min matches the
+    # precedent set by ``board-05-routing-regression``.  Issue #6448: the
+    # recipe now runs one lattice pass with the loop off (~1 min locally);
+    # the ceiling is left unchanged.
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
+        # The recipe still exits non-zero on its allowlisted DRC residuals
+        # (skew/impedance, #7550/#7349/#7619) -- tolerate it (|| true).
+        # The asserters below are the gate.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board07-ci
+          mkdir -p /tmp/board07-ci
+          uv run python boards/07-matchgroup-test/generate_design.py \
+            /tmp/board07-ci --step all --seed 42 || true
+          test -f /tmp/board07-ci/lvs.json
+          test -f /tmp/board07-ci/matchgroup_test.kicad_sch
+          test -f /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
+
+      - name: Copper-LVS clean re-check (out-of-process, #3838/#7557)
+        # Re-run compare_copper_netlist in a process the CI job controls (NOT
+        # the recipe) on the REGENERATED schematic + routed PCB.  Board 07's
+        # schematic is fully wired (#4012: 244/244 pads bound) and, since
+        # #7557, every signal net routes: any open, short or vacuous verdict
+        # fails the gate.  Entrypoint from #3838.
+        run: |
+          set -euo pipefail
+          uv run python -m kicad_tools.lvs.copper_lvs \
+            /tmp/board07-ci/matchgroup_test.kicad_sch \
+            /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
+            > /tmp/board07-copper.json
+          uv run python scripts/ci/check_copper_lvs.py \
+            /tmp/board07-copper.json
+
+      - name: Independent synthetic routing gate (matching PCB and sidecars)
+        # Preserve the regenerated bundle's routing context. The active release
+        # has a different circuit and must retain its zero-error acceptance.
+        # Historical pair/group baselines never permit new physical errors.
+        run: |
+          set -euo pipefail
+          mkdir -p boards/07-matchgroup-test/regression-output
+          cp -a /tmp/board07-ci/. boards/07-matchgroup-test/regression-output/
+          uv run python scripts/ci/check_matchgroup_coverage.py \
+            boards/07-matchgroup-test --skip-route --seed 42
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board07-staging
+          mkdir -p /tmp/board07-staging/07-matchgroup-test/output
+          cp -r /tmp/board07-ci/. /tmp/board07-staging/07-matchgroup-test/output/
+          uv run kct board-metrics /tmp/board07-staging/07-matchgroup-test
+
+      - name: Assert net completion (#4531, no known opens since #7557)
+        # Raw total_unconnected_pads gate (scripts/ci/check_net_status.py):
+        # every signal net routes since #7557, so no net is excluded.
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
+
+      - name: Assert artifacts + lvs.json clean (LVS-only, #7557)
+        # --lvs-only: artifact presence + lvs.json clean=true + board.json
+        # lvs_clean=true.  No status/drc_violations assertions (allowlisted
+        # DRC residuals -> status='partial').
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem matchgroup_test \
+            --lvs-only \
+            /tmp/board07-staging/07-matchgroup-test
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of board-06-end-to-end's collection step; see its comment
+        # for the #5044/#5045 rationale and why /tmp/board07-staging is not
+        # collected wholesale.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "board07-ci=/tmp/board07-ci" \
+            --source "board07-copper.json=/tmp/board07-copper.json" \
+            --source "board.json=/tmp/board07-staging/07-matchgroup-test/output/board.json" \
+            --job board-07-end-to-end \
+            --board boards/07-matchgroup-test \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python boards/07-matchgroup-test/generate_design.py /tmp/board07-ci --step all --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board07-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
+
+  board-05-routing-regression:
+    # Issue #3822: blocking-net baseline gate for board 05 ("bldc-motor-
+    # controller").  Board 05 is the only demo board whose routing changes
+    # CANNOT be validated on the local macOS host: an unmodified host regen of
+    # the recipe/seed/backend reaches fewer nets than the Linux CI router.
+    # Because of that divergence there was no validation path for board-05
+    # routing work (#3775, #3766) -- this job provides one by regenerating +
+    # re-routing board 05 INSIDE the CI container and hard-asserting
+    # blocking_incomplete_count == 0.
+    #
+    # THE GATE IS ZERO (issue #7547).  A fresh CI regen of board 05 measured
+    # blocking_incomplete_count = 0 (blocking nets: none) in every main run
+    # that reached the gate from 2026-10-18 to 2026-10-19 -- 12 runs, e.g.
+    # 39137057066, 39201331009, 39313274747, 39339125038 (four runs on
+    # 2026-10-18 failed in the regen step and never reached the gate).  The
+    # previous bound of 7 (one net above the Phase-5 CI ceiling of 6, issue
+    # #4479; ISENSE_A-/B-/C-, PHASE_A/B/C on commit 2de4089a, CI run
+    # 30666373355) would have hidden up to 7 regressions, so it is gone: ANY
+    # blocking incomplete net now fails the job.  If a net must be tolerated
+    # again, list it by name with an open tracker (identity-keyed, see
+    # scripts/ci/identity_allowance.py, #7359) -- do not restore a bare count.
+    # The gate is a hard assertion (no continue-on-error).
+    #
+    # Unlike boards 00-03/06/07, board 05 has NO committed output/lvs.json on
+    # origin/main, so the --lvs-only e2e asserter is not reusable.  The
+    # acceptance criterion is a blocking-net baseline, so this job uses a
+    # dedicated gate (scripts/ci/check_board_05_blocking.py) built on
+    # NetStatusAnalyzer.blocking_incomplete_count (which mirrors the
+    # check_routed_drc advisory/plane-residual filtering).
+    #
+    # The --max-blocking threshold defaults to 0 (issue #7547) and is passed
+    # explicitly below.
+    #
+    # Pre-#7547 history (the bound was 11, then 7 after Phase 5, #4479):
+    # Issue #3836: the wall-clock re-route was nondeterministic at 9-10 blocking
+    # (observed main=9, PR #3835 branch=10 twice, identical router code); a
+    # default of 9 sat exactly on the boundary and red-lighted unrelated PRs, so
+    # it was loosened to 11 (10 + 1).
+    # Issue #3887 (SUPERSEDED by #3894): migrated board 05's main pass + rescue
+    # loop from the --per-net-timeout wall-clock cutoff to a fixed per-net
+    # ITERATION budget, claiming determinism; that claim did not hold up on CI.
+    # Issue #3894: REVERTED #3887's iteration budget back to the wall-clock
+    # recipe (--per-net-timeout 60 / --timeout 900); #3887's budget did LESS
+    # total routing work and REGRESSED the count to 12-15.  Per #3822 the
+    # CI-measured blocking_incomplete_count is authoritative, so the threshold
+    # is only tightened on CI-measured evidence (as here for Phase 5).
+    #
+    # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
+    # during regen, and per CLAUDE.md a missing native extension makes routing
+    # multi-minute-per-net.  Board 05's recipe is named design.py (NOT
+    # generate_design.py) and takes ONLY an output-dir positional arg (no
+    # --step / --seed); it routes PARTIAL by design and may exit non-zero, so
+    # tolerate a non-zero recipe exit (|| true) and let the blocking-net gate
+    # be the assertion.
+    #
+    # CI-VALIDATED ONLY: do NOT expect this job to pass on the macOS host
+    # (host routes board 05 to ~11 blocking, a fresh CI re-route to 9-10).
+    # Advisory until a repo admin adds it to branch protection (same as the
+    # board 00/01/02/03/06/07 e2e jobs).
+    #
+    # TIMEOUT (90 min): board 05 is the heaviest re-route in the matrix.  The
+    # recipe re-routes 36 nets from scratch AND runs the per-net rescue loop
+    # (Issues #3471/#3474), which re-routes each partially-connected net at
+    # ~2-7 min apiece.  The first attempt at timeout-minutes: 30 (mirrored from
+    # board-03) was CANCELED mid-rescue ("The operation was canceled") after
+    # processing only HALL_A + 3 ISENSE nets, so the gate never produced a
+    # verdict.  The run was on track for ~45-55 min wall-clock, so the budget
+    # is set generously to 90 min to let the full route + rescue loop + gate
+    # run to completion and emit a REAL blocking-net count.  With the timeout
+    # raised, the run completed and MEASURED 6 blocking nets with Phase 5 active
+    # (down from the pre-Phase-5 9-10); current main measures 0, so the gate
+    # is == 0 -- see the floor note above.  This is
+    # intentionally higher than every other job (next-highest is the 45-min
+    # Test job) because no other job runs the board-05 rescue loop from clean.
+    name: Board 05 Routing Regression (blocking == 0)
+    needs: [changes, kicad_pin]
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Compute weekly jlcparts catalog cache key
+        # Issue #8255: the recipe's ``kct export --strict-preflight`` really
+        # evaluates the BOM's LCSC stock (#8163) and aborts with "Stock not
+        # verified" when neither the parts cache nor the offline jlcparts
+        # catalog exists.  The catalog is refreshed at most weekly.
+        id: catalog_key
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache jlcparts offline catalog
+        # Footprint: ~1.9 GB per weekly entry, no restore-keys, against the
+        # 10 GB repo cache cap -- revisit if more catalog consumers appear.
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/kicad-tools/jlcparts.sqlite3
+          key: jlcparts-catalog-${{ steps.catalog_key.outputs.week }}
+
+      - name: Sync jlcparts offline catalog (stock source for --strict-preflight)
+        # Deliberately NOT ``|| true`` / continue-on-error: --strict-preflight
+        # stays strict for real exports, so a failed sync must fail this job
+        # loudly instead of surfacing later as a missing routed board.  On a
+        # cache hit this is a no-op (``sync_catalog`` skips an existing file).
+        # Note: the catalog is an unpinned, unchecksummed third-party scrape
+        # (yaqwsx/jlcparts on GitHub Pages) of live JLC stock, so this job's
+        # pass/fail now also depends on weekly stock data, not only routing.
+        run: uv run kct parts sync-catalog
+
+      - name: Regenerate + route board 05 from recipe (clean tmp directory)
+        # Board 05's recipe is design.py (NOT generate_design.py) and takes
+        # only an output-dir positional arg.  It routes PARTIAL by design and
+        # may exit non-zero, so tolerate that (|| true); the blocking-net gate
+        # below is the real assertion.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board05-ci
+          mkdir -p /tmp/board05-ci
+          uv run python boards/05-bldc-motor-controller/design.py \
+            /tmp/board05-ci || true
+          test -f /tmp/board05-ci/bldc_controller_routed.kicad_pcb
+
+      - name: Assert blocking-net baseline (== 0)
+        # Hard gate: fails the job (exit 2) if blocking_incomplete_count > 0.
+        # Every main run that reached this step on 2026-10-18..19 measured 0
+        # (issue #7547), matching the committed 0-blocking artifact (PR #4003),
+        # so the old Phase-5 bound of 7 (#4479) is retired.  A LOCAL macOS run
+        # may report blocking nets -- the documented host-vs-CI divergence
+        # (#3822), not a job defect.  No continue-on-error: this stays a hard
+        # gate.
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_05_blocking.py \
+            --max-blocking 0 \
+            /tmp/board05-ci/bldc_controller_routed.kicad_pcb
+
+  board-04-end-to-end:
+    # Issue #3839: end-to-end gate for board 04 ("stm32-devboard").  Two
+    # board-04 gaps shipped regressions undetected: (1) the recipe's main()
+    # success gate omitted the already-computed drc_success / copper-LVS
+    # verdict (fixed in generate_design.py this PR), and (2) board 04 had NO
+    # clean-room regen+validate CI job at all (boards 00/01/02 run the full
+    # asserter, 03/06/07 the --lvs-only asserter, 05 a blocking-net baseline;
+    # 04 was absent).  This job closes (2): it regenerates board 04 inside the
+    # CI container and validates the FRESH artifact OUT-OF-PROCESS against
+    # (a) the DRC allowlist and (b) copper-LVS.
+    #
+    # Board 04 has a committed output/lvs.json (clean: true), so this reuses
+    # the board-03 --lvs-only asserter pattern (NOT the full asserter: board 04
+    # carries 2 grandfathered hole_to_hole_clearance drills + 1 advisory
+    # connectivity finding, so board-metrics classifies it status:partial /
+    # drc_violations:2, which the full status:ok / drc_violations:0 assertion
+    # would FAIL).
+    #
+    # DRC is ALLOWLIST-AWARE: the fresh routed PCB is staged over the
+    # repo-relative committed path and checked with scripts/ci/check_routed_drc.py,
+    # which keys tolerance off that path -- so the 2 known sub-0.5mm drills
+    # (.github/routed-drc-tolerance.yml: 2; board-layout fix tracked in #3847)
+    # are tolerated while a 3rd (NEW) blocking error fails the gate.  The
+    # connectivity finding is advisory (DRCChecker.ADVISORY_RULE_IDS), excluded
+    # from the gate count.
+    #
+    # RECIPE EXIT IS NOT GATED (|| true).  Board 04's route is subject to the
+    # same documented host-vs-CI router divergence as board 05 (#3822): a fresh
+    # regen may land a PARTIAL route (route_pcb returns False -> recipe exits 1)
+    # even though the resulting artifact is DRC-within-allowlist and copper-LVS
+    # clean (verified: a fresh host regen with a 9-net partial route still
+    # produces 2 drills + 0 shorts/0 opens).  The OUT-OF-PROCESS DRC + LVS
+    # asserters below are therefore the real gate -- they validate the RESULT,
+    # not the recipe's nondeterministic exit code.  This keeps the job GREEN on
+    # the current board while still catching a real DRC/LVS regression.
+    #
+    # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
+    # during regen, and per CLAUDE.md a missing native extension makes routing
+    # multi-minute-per-net.  Board 04's recipe (generate_design.py) takes only
+    # an output-dir positional arg (no --step / --seed).
+    #
+    # Advisory until a repo admin adds it to branch protection (same as the
+    # board 00/01/02/03/05/06/07 e2e jobs).
+    #
+    # TIMEOUT (45 min): board 04 re-routes ~9 signal nets + stitch + tie +
+    # quantize + fill.  Fewer nets than board 05's 36-net rescue loop (which
+    # needs 90 min), so 45 min leaves comfortable headroom over board 03's
+    # 30 min for the LQFP-48 escape work.
+    name: Board 04 End-to-End (LVS-only + DRC allowlist)
+    needs: [changes, kicad_pin]
+    # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
+    # runs only -- boards 01-05 do not run on pull requests; boards 00
+    # and 06 are the PR-side representatives. See the `changes` job.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 04 from recipe (clean tmp directory)
+        # Board 04's recipe takes only an output-dir argument.  Its route is
+        # subject to the documented host-vs-CI router divergence (#3822) and may
+        # land a PARTIAL route (recipe exits 1) even though the resulting
+        # artifact is DRC-within-allowlist + copper-LVS clean, so tolerate a
+        # non-zero recipe exit (|| true) -- the out-of-process DRC + LVS
+        # asserters below are the real gate.  write_lvs_report(require_clean=True)
+        # still RAISES on an actual copper short/open, so a genuine LVS
+        # regression aborts the recipe before this step succeeds.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board04-ci
+          mkdir -p /tmp/board04-ci
+          uv run python boards/04-stm32-devboard/generate_design.py \
+            /tmp/board04-ci || true
+          test -f /tmp/board04-ci/lvs.json
+          test -f /tmp/board04-ci/stm32_devboard_routed.kicad_pcb
+
+      - name: Assert fresh DRC strict-0 (recipe-vs-artifact now converged)
+        # This step gates the FRESH regen (the recipe's output).  Since #4408
+        # the recipe reproduces a strict-0 board, so the fresh regen and the
+        # committed artifact have CONVERGED:
+        #
+        #   * The COMMITTED artifact is strict-0.  Its 0.350mm drill pair was
+        #     originally re-spaced artifact-only in #4017 (the NRST in-pad via
+        #     nudged 0.5mm east + re-bonded to pad U2.7 with an F.Cu stub).
+        #   * The FRESH regen is NOW strict-0 too: #4408 back-ported that fix
+        #     into the recipe as a generic, mfr-floor-driven hole-to-hole
+        #     relocation post-pass (``relocate_drill_clearance_step``), so the
+        #     router-stacked 0.350mm pair is relocated by construction every
+        #     regen -- no artifact patching.
+        #
+        # Both artifacts resolve to the same repo-relative path and now both
+        # measure strict-0, so this gate drops ``--allow`` entirely (default
+        # tolerance 0).  ANY blocking error -- a re-introduced hole-to-hole
+        # pair or a new rule -- fails this gate (exit 2), which is exactly the
+        # regression guard #4408 asked for.
+        run: |
+          set -euo pipefail
+          # Stage the fresh routed PCB over the repo-relative committed path:
+          # check_routed_drc.py keys the jlcpcb-tier1 mfr override off the
+          # path's repo-relative form (relative_to(cwd)), so the fresh artifact
+          # MUST live at the committed path for the jlcpcb-tier1 override to
+          # resolve.  The blocking-error tolerance for THIS invocation is now
+          # strict-0 (default), matching the committed artifact.  No cleanup is
+          # needed afterwards: the CI checkout is a
+          # throwaway workspace discarded when the job ends, nothing downstream
+          # reads the committed PCB, and (per #3854 review) the previous
+          # ``git checkout -- ...`` restore aborted the step with exit 128
+          # ("detected dubious ownership") because the kicad/kicad:10.0
+          # container runs as root over a checkout owned by another uid -- which
+          # SKIPPED the board-metrics + --lvs-only asserter steps below under
+          # ``set -euo pipefail``.  Every other board e2e job already avoids any
+          # git usage here; this matches that pattern.
+          # The reviewed-process validator checks matching constraints and
+          # manifest freshness as well as copper. Preserve the entire fresh
+          # bundle and its mtimes instead of mixing a new PCB with old evidence.
+          cp -a /tmp/board04-ci/. boards/04-stm32-devboard/output/
+          uv run python scripts/ci/check_routed_drc_internal.py \
+            boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board04-staging
+          mkdir -p /tmp/board04-staging/04-stm32-devboard/output
+          cp -r /tmp/board04-ci/. /tmp/board04-staging/04-stm32-devboard/output/
+          uv run kct board-metrics /tmp/board04-staging/04-stm32-devboard
+
+      - name: Assert plane-net completion (no floating pads, #4531)
+        # See board-00's step: raw total_unconnected_pads gate; catches a
+        # floating power/plane pad that blocking_incomplete_count would
+        # name-exclude (scripts/ci/check_net_status.py).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_net_status.py \
+            /tmp/board04-ci/stm32_devboard_routed.kicad_pcb
+
+      - name: Assert artifacts + lvs.json clean (LVS-only)
+        # --lvs-only: assert artifact presence + lvs.json clean=true +
+        # board.json lvs_clean=true, but NOT status:ok / drc_violations:0
+        # (board 04 carries 2 allowlisted drills + 1 advisory connectivity ->
+        # status='partial').
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem stm32_devboard \
+            --lvs-only \
+            /tmp/board04-staging/04-stm32-devboard

@@ -1,0 +1,496 @@
+"""
+Board render command for kicad-tools CLI.
+
+Generates per-board visual artifacts for downstream consumers (e.g. the
+kicad-tools.org demo gallery, Epic #3674):
+
+- 2D layer plots (front + back: copper + silkscreen + edge cuts) via
+  ``kicad-cli pcb export svg`` (KiCad 10 removed the raster ``png`` export).
+- 3D ray-traced renders (front + back) via ``kicad-cli pcb render``.
+
+Outputs are written to a fixed, documented path under each board's output
+directory so the site build and CI can consume them without board-specific
+logic:
+
+    boards/<id>/output/renders/pcb-front.svg   # 2D front layer plot
+    boards/<id>/output/renders/pcb-back.svg    # 2D back layer plot
+    boards/<id>/output/renders/3d-front.png    # 3D ray-traced front
+    boards/<id>/output/renders/3d-back.png     # 3D ray-traced back
+
+The routed PCB (``*_routed.kicad_pcb``) is preferred; the command falls back
+to the unrouted ``*.kicad_pcb`` when no routed artifact exists.
+
+Before 3D rendering, referenced model files are checked using native configured
+paths, the render environment, and the PCB directory. Unresolved models identify
+their component and path in text diagnostics and JSON ``model_check``. Images
+are retained, but incomplete model coverage reports ``partial`` and exits
+nonzero unless ``--allow-incomplete-models`` is given. ``--models pinned|host``
+selects the model set the audit resolves against (default ``pinned`` once
+``kct models sync`` has populated it, else ``host``). The per-board coverage
+summary is also written to ``renders/model-coverage.json`` for the site build.
+``--no-3d`` skips this check. File availability does not validate geometry.
+
+This command only writes image files — it makes no assumptions about hosting
+or any website. Generated renders are git-ignored build artifacts.
+
+``kicad-cli pcb render`` requires KiCad 8.0.4 or newer and a display (use a
+virtual framebuffer such as ``xvfb-run`` on headless CI).
+
+Usage:
+    kct render boards/01-voltage-divider          # render one board
+    kct render boards/                             # render all boards under a root
+    kct render path/to/board.kicad_pcb             # render a single PCB file directly
+    kct render path/to/board.kicad_pcb -o out/dir  # ... to a custom output dir
+    kct render boards/01-voltage-divider --no-3d   # skip 3D (headless CI)
+    kct render boards/01-voltage-divider --format json
+
+When the positional argument is a ``.kicad_pcb`` file (rather than a board or
+root directory), that PCB is rendered directly and its four artifacts are
+written to ``<pcb-dir>/renders/`` by default, or to the directory given with
+``-o/--output``. Directory/root scanning behavior (and its
+``boards/<id>/output/renders/`` output path) is unchanged.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from kicad_tools.cli.export_cmd import _find_pcb_for_export
+from kicad_tools.cli.kicad_toolchain import (
+    KiCadEnvironmentError,
+    docker_fallback_enabled,
+    docker_image,
+    evidence_toolchain,
+)
+from kicad_tools.cli.runner import (
+    find_kicad_cli,
+    get_kicad_version,
+    inspect_pcb_models,
+    run_pcb_export_svg,
+    run_pcb_render,
+)
+from kicad_tools.pcb.model_audit import audit_pcb_models, resolve_pinned_model_dir
+
+# Minimum KiCad version required for `kicad-cli pcb render`.
+MIN_RENDER_VERSION = (8, 0, 4)
+
+# Layer presets for the 2D plots (copper + silkscreen + board outline).
+# KiCad 8+ accepts the long `F.Silkscreen` / `B.Silkscreen` canonical names.
+FRONT_LAYERS = ["F.Cu", "F.Silkscreen", "Edge.Cuts"]
+BACK_LAYERS = ["B.Cu", "B.Silkscreen", "Edge.Cuts"]
+
+# Output file names (fixed contract for downstream consumers).
+RENDER_OUTPUTS = {
+    "pcb-front": "pcb-front.svg",
+    "pcb-back": "pcb-back.svg",
+    "3d-front": "3d-front.png",
+    "3d-back": "3d-back.png",
+}
+
+# Coverage summary consumed by ``kct board-metrics`` (board.json ``model_coverage``).
+COVERAGE_FILE = "model-coverage.json"
+
+MODEL_SETS = ("pinned", "host")
+
+
+def default_model_set() -> str:
+    """``pinned`` when the pinned model set is synced, else ``host``."""
+    return "pinned" if resolve_pinned_model_dir() is not None else "host"
+
+
+def _parse_version(version: str | None) -> tuple[int, int, int] | None:
+    """Parse a KiCad version string like '8.0.6' into a (8, 0, 6) tuple.
+
+    Returns None if the version can't be parsed. Extra build metadata after
+    the first three numeric components is ignored.
+    """
+    if not version:
+        return None
+    # The `kicad-cli version` output may include extra words; grab the first
+    # token that looks like a dotted version.
+    for token in version.replace(",", " ").split():
+        parts = token.split(".")
+        nums: list[int] = []
+        for part in parts[:3]:
+            # Strip any trailing non-digits (e.g. "0rc1").
+            digits = ""
+            for ch in part:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            if not digits:
+                break
+            nums.append(int(digits))
+        if len(nums) >= 2:
+            while len(nums) < 3:
+                nums.append(0)
+            return (nums[0], nums[1], nums[2])
+    return None
+
+
+def _discover_boards(root: Path) -> list[Path]:
+    """Discover board directories under *root*.
+
+    A "board directory" is one that contains an ``output/`` subdirectory.
+    If *root* itself is a board directory it is returned as the single board.
+    Otherwise each immediate child board directory (sorted) is returned,
+    recursing one level into ``external/`` style grouping directories.
+    """
+    if (root / "output").is_dir():
+        return [root]
+
+    boards: list[Path] = []
+    for child in sorted(p for p in root.iterdir() if p.is_dir()):
+        if (child / "output").is_dir():
+            boards.append(child)
+        else:
+            # One level of grouping (e.g. boards/external/<board>/output).
+            for grandchild in sorted(p for p in child.iterdir() if p.is_dir()):
+                if (grandchild / "output").is_dir():
+                    boards.append(grandchild)
+    return boards
+
+
+def _render_pcb(
+    pcb_path: Path,
+    renders_dir: Path,
+    *,
+    name: str,
+    do_3d: bool,
+    kicad_cli: Path | None,
+    quiet: bool,
+    models: str = "host",
+    allow_incomplete: bool = False,
+) -> dict:
+    """Write the four render artifacts for *pcb_path* into *renders_dir*.
+
+    Shared by both directory-scanning mode (``_render_board``) and the direct
+    ``.kicad_pcb`` file mode. Returns a status dict for JSON output.
+
+    Status entries:
+        board: label used in status output
+        pcb: resolved PCB path
+        status: "ok" | "partial" | "error"
+        outputs: {name: path} for files written
+        errors: list of error strings
+    """
+    result: dict = {
+        "board": name,
+        "pcb": str(pcb_path),
+        "status": "skipped",
+        "outputs": {},
+        "errors": [],
+        "model_check": {"status": "not_run", "checked_models": 0, "unresolved_models": []},
+    }
+
+    renders_dir.mkdir(parents=True, exist_ok=True)
+
+    written: dict[str, str] = {}
+    errors: list[str] = []
+
+    # --- 2D layer plots ---
+    plots = [
+        ("pcb-front", FRONT_LAYERS),
+        ("pcb-back", BACK_LAYERS),
+    ]
+    for key, layers in plots:
+        out = renders_dir / RENDER_OUTPUTS[key]
+        res = run_pcb_export_svg(pcb_path, out, layers, kicad_cli=kicad_cli)
+        if res.success:
+            written[key] = str(out)
+        else:
+            errors.append(f"{key}: {res.stderr.strip()}")
+
+    # --- 3D ray-traced renders ---
+    if do_3d:
+        try:
+            report = audit_pcb_models(pcb_path, env=models, kicad_cli=kicad_cli)
+            result["model_check"] = inspect_pcb_models(pcb_path, kicad_cli, report=report)
+            for missing in result["model_check"]["unresolved_models"]:
+                errors.append(
+                    f"3D model {missing['reference']}: {missing['reason']}: {missing['model']}"
+                )
+            # Issue #7682: footprints with no usable model (no_ref, hidden_only,
+            # placeholder, ...) are invisible to the ref walk above; they make
+            # the check ``partial`` rather than ``passed``.
+            result["model_check"]["coverage"] = report.summary()
+            reported = {m["reference"] for m in result["model_check"]["unresolved_models"]}
+            gaps = [g for g in report.gaps if g.reference not in reported]
+            result["model_check"]["uncovered_models"] = [g.to_dict() for g in gaps]
+            for gap in gaps:
+                errors.append(f"3D model {gap.reference}: {gap.klass}: {gap.reason}")
+            if gaps and result["model_check"]["status"] == "passed":
+                result["model_check"]["status"] = "partial"
+            (renders_dir / COVERAGE_FILE).write_text(
+                json.dumps(report.summary(), indent=2) + "\n", encoding="utf-8"
+            )
+            # Issue #7689: incomplete coverage fails the render unless the
+            # caller opted into exploratory output.
+            incomplete = result["model_check"]["status"] in ("failed", "partial")
+            if incomplete and allow_incomplete:
+                result["model_check"]["status"] = "allowed_incomplete"
+                result["model_check"]["incomplete_allowed"] = True
+            elif result["model_check"]["status"] == "partial":
+                result["model_check"]["status"] = "failed"
+        except (OSError, ValueError, RuntimeError) as exc:
+            result["model_check"]["status"] = "failed"
+            errors.append(f"3D model inspection failed: {exc}")
+        renders = [
+            ("3d-front", "front"),
+            ("3d-back", "back"),
+        ]
+        for key, side in renders:
+            out = renders_dir / RENDER_OUTPUTS[key]
+            res = run_pcb_render(pcb_path, out, side=side, kicad_cli=kicad_cli)
+            if res.success:
+                written[key] = str(out)
+            else:
+                errors.append(f"{key}: {res.stderr.strip()}")
+
+    result["outputs"] = written
+    result["errors"] = errors
+
+    expected = 2 + (2 if do_3d else 0)
+    if len(written) == expected and not errors:
+        result["status"] = "ok"
+    elif written:
+        result["status"] = "partial"
+    else:
+        result["status"] = "error"
+
+    if not quiet:
+        for key in written:
+            print(f"  {name}: wrote {written[key]}")
+        for err in errors:
+            print(f"  {name}: ERROR {err}", file=sys.stderr)
+
+    return result
+
+
+def _render_board(
+    board_dir: Path,
+    *,
+    do_3d: bool,
+    kicad_cli: Path | None,
+    quiet: bool,
+    models: str = "host",
+    allow_incomplete: bool = False,
+) -> dict:
+    """Render a single board directory (``boards/<id>/output/`` convention).
+
+    Resolves the PCB inside ``<board_dir>/output/`` and writes artifacts to
+    ``<board_dir>/output/renders/``. Returns a status dict for JSON output.
+    """
+    name = board_dir.name
+
+    output_dir = board_dir / "output"
+    pcb_path = _find_pcb_for_export(output_dir) if output_dir.is_dir() else None
+    if pcb_path is None:
+        # Non-fatal skip — board has no PCB to render yet.
+        result: dict = {
+            "board": name,
+            "pcb": None,
+            "status": "skipped",
+            "outputs": {},
+            "errors": ["no .kicad_pcb found"],
+        }
+        if not quiet:
+            print(f"  {name}: SKIP (no .kicad_pcb found)", file=sys.stderr)
+        return result
+
+    return _render_pcb(
+        pcb_path,
+        output_dir / "renders",
+        name=name,
+        do_3d=do_3d,
+        kicad_cli=kicad_cli,
+        quiet=quiet,
+        models=models,
+        allow_incomplete=allow_incomplete,
+    )
+
+
+def run_render(args: argparse.Namespace) -> int:
+    """Execute the render command. Returns a process exit code.
+
+    With ``KCT_KICAD_DOCKER=1`` the run executes inside the pinned evidence
+    toolchain so ``find_kicad_cli()`` resolves the Docker shim instead of a
+    host kicad-cli (#7810).  Renders are not readiness evidence, so the
+    pinned *version* is not enforced; the version that ran is reported in the
+    ``--format json`` output instead.
+    """
+    if not docker_fallback_enabled():
+        return _run_render(args, None)
+    root = Path(args.path)
+    mounts = [root if root.is_dir() else root.parent]
+    output = getattr(args, "output", None)
+    if output:
+        mounts.append(Path(output))
+    try:
+        with evidence_toolchain(mounts, required_version=None):
+            return _run_render(args, docker_image())
+    except KiCadEnvironmentError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _render_json(boards: list[dict], kicad_cli: Path, image: str | None) -> str:
+    """Serialize *boards* with the kicad-cli version (and image) that rendered them."""
+    payload: dict = {"kicad_cli_version": get_kicad_version(kicad_cli)}
+    if image:
+        payload["docker_image"] = image
+    payload["boards"] = boards
+    return json.dumps(payload, indent=2)
+
+
+def _run_render(args: argparse.Namespace, image: str | None) -> int:
+    root = Path(args.path)
+    if not root.exists():
+        print(f"Error: path not found: {root}", file=sys.stderr)
+        return 1
+
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        print(
+            "Error: kicad-cli not found. Install KiCad 8.0.4+ from https://www.kicad.org/download/",
+            file=sys.stderr,
+        )
+        return 1
+
+    do_3d = not args.no_3d
+    models = getattr(args, "models", None) or default_model_set()
+    if models not in MODEL_SETS:
+        print(f"Error: --models must be one of {', '.join(MODEL_SETS)}", file=sys.stderr)
+        return 1
+    allow_incomplete = bool(getattr(args, "allow_incomplete_models", False))
+
+    # Version guard for 3D rendering (`pcb render` needs KiCad 8.0.4+).
+    if do_3d:
+        version = get_kicad_version(kicad_cli)
+        parsed = _parse_version(version)
+        if parsed is not None and parsed < MIN_RENDER_VERSION:
+            min_str = ".".join(str(n) for n in MIN_RENDER_VERSION)
+            print(
+                f"Error: 3D render requires KiCad {min_str}+ "
+                f"(found {version}). Re-run with --no-3d to skip 3D renders.",
+                file=sys.stderr,
+            )
+            return 1
+
+    output = getattr(args, "output", None)
+
+    # --- Direct .kicad_pcb file mode ---
+    # When the positional arg is a file, render it directly (no board/output
+    # discovery). Output goes to -o/--output if given, else <pcb-dir>/renders/.
+    if root.is_file():
+        if root.suffix != ".kicad_pcb":
+            print(f"Error: Expected .kicad_pcb file, got: {root.name}", file=sys.stderr)
+            print(
+                "Hint: Provide a .kicad_pcb file or a directory containing one.",
+                file=sys.stderr,
+            )
+            return 1
+
+        renders_dir = Path(output) if output else root.parent / "renders"
+        result = _render_pcb(
+            root,
+            renders_dir,
+            name=root.stem,
+            do_3d=do_3d,
+            kicad_cli=kicad_cli,
+            quiet=args.format == "json",
+            models=models,
+            allow_incomplete=allow_incomplete,
+        )
+        if args.format == "json":
+            print(_render_json([result], kicad_cli, image))
+        return (
+            1 if result["status"] == "error" or result["model_check"]["status"] == "failed" else 0
+        )
+
+    boards = _discover_boards(root)
+    if not boards:
+        print(f"Error: no board directories found under {root}", file=sys.stderr)
+        return 1
+
+    results = [
+        _render_board(
+            b,
+            do_3d=do_3d,
+            kicad_cli=kicad_cli,
+            quiet=args.format == "json",
+            models=models,
+            allow_incomplete=allow_incomplete,
+        )
+        for b in boards
+    ]
+
+    if args.format == "json":
+        print(_render_json(results, kicad_cli, image))
+
+    # Incomplete model coverage also fails, even if images were produced. Boards
+    # skipped for lack of a PCB are a non-fatal condition (exit 0).
+    has_error = any(
+        r["status"] == "error" or r.get("model_check", {}).get("status") == "failed"
+        for r in results
+    )
+    return 1 if has_error else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point for the ``kct render`` command (standalone invocation)."""
+    parser = argparse.ArgumentParser(
+        prog="kct render",
+        description=(
+            "Render per-board 2D layer plots (SVGs) and 3D ray-traced PNGs into "
+            "boards/<id>/output/renders/."
+        ),
+    )
+    parser.add_argument(
+        "path",
+        help="Board directory, a root containing board directories, or a .kicad_pcb file",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "Output directory for a single .kicad_pcb file "
+            "(default: <pcb-dir>/renders/). Ignored in directory/root scanning mode."
+        ),
+    )
+    parser.add_argument(
+        "--no-3d",
+        action="store_true",
+        help="Skip 3D ray-traced renders (for headless CI without a display)",
+    )
+    parser.add_argument(
+        "--models",
+        choices=MODEL_SETS,
+        default=None,
+        help=(
+            "3D model set the coverage audit resolves against (default: pinned "
+            "when synced via `kct models sync`, else host)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-incomplete-models",
+        action="store_true",
+        help="Downgrade incomplete 3D model coverage to a warning (exploratory use)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    args = parser.parse_args(argv)
+    return run_render(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

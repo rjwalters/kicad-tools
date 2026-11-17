@@ -1,0 +1,451 @@
+---
+title: "{{ project_name }}"
+subtitle: "Design Report"
+author: "kicad-tools {{ tool_version }}"
+date: "Rev {{ revision }} | {{ date }} | {{ manufacturer }}"
+geometry: "margin=1in"
+fontsize: 11pt
+colorlinks: true
+header-includes:
+  - \usepackage{longtable}
+  - \usepackage{booktabs}
+  - \usepackage{array}
+  - \usepackage{float}
+---
+
+{% if board_stats %}
+## Board Summary
+
+| Property | Value |
+|----------|-------|
+{% if board_stats.layer_count is defined and board_stats.layer_count is not none %}
+| Layers | {{ board_stats.layer_count }} copper{% if board_stats.layer_names is defined and board_stats.layer_names %} ({{ board_stats.layer_names | join(", ") }}){% endif %} |
+{% endif %}
+{% if board_stats.footprint_count is defined and board_stats.footprint_count is not none %}
+| Footprints | {{ board_stats.footprint_count }}{% if board_stats.footprint_smd is defined %} ({{ board_stats.footprint_smd }} SMD, {{ board_stats.footprint_tht | default(0) }} THT, {{ board_stats.footprint_other | default(0) }} other){% endif %} |
+{% endif %}
+{% if board_stats.net_count is defined and board_stats.net_count is not none %}
+| Nets | {{ board_stats.net_count }} |
+{% endif %}
+{% if board_stats.segment_count is defined and board_stats.segment_count is not none %}
+| Traces | {{ board_stats.segment_count }} segments |
+{% endif %}
+{% if board_stats.via_count is defined and board_stats.via_count is not none %}
+| Vias | {{ board_stats.via_count }} |
+{% endif %}
+{% if board_stats.board_width_mm is defined and board_stats.board_width_mm is not none and board_stats.board_height_mm is defined and board_stats.board_height_mm is not none %}
+| Board Size | {{ board_stats.board_width_mm }} x {{ board_stats.board_height_mm }} mm |
+{% endif %}
+
+{% endif %}
+{% if stackup %}
+## Stackup
+
+| Layer | Type | Thickness (mm) | Material |
+|-------|------|----------------|----------|
+{% for layer in stackup %}
+| {{ layer.name }} | {{ layer.type }} | {{ layer.thickness_mm }} | {{ layer.material | default("--", true) }} |
+{% endfor %}
+
+{% endif %}
+{% if design_narrative or functional_blocks or interfaces or power_architecture %}
+## Design Overview
+
+{% if design_narrative %}
+### Theory of Operation
+
+{{ design_narrative }}
+
+{% endif %}
+{% if functional_blocks %}
+### Functional Blocks
+
+{% for block in functional_blocks %}
+- **{{ block.name }}**{% if block.filename %} ({{ block.filename }}){% endif %}
+
+{% endfor %}
+{% endif %}
+{% if interfaces %}
+### Communication Interfaces
+
+| Protocol | Signals |
+|----------|---------|
+{% for iface in interfaces %}
+| {{ iface.protocol }} | {{ iface.signals | join(", ") }} |
+{% endfor %}
+
+{% endif %}
+{% if power_architecture %}
+### Power Architecture
+
+{% set power_symbols = power_architecture | selectattr('type', 'equalto', 'power_symbol') | list %}
+{% set regulators = power_architecture | selectattr('type', 'equalto', 'regulator') | list %}
+{% if power_symbols %}
+**Power Rails**: {{ power_symbols | map(attribute='rail') | join(", ") }}
+
+{% endif %}
+{% if regulators %}
+| Regulator | Device |
+|-----------|--------|
+{% for reg in regulators %}
+| {{ reg.rail }} | {{ reg.value | default("", true) }} |
+{% endfor %}
+
+{% endif %}
+{% endif %}
+{% endif %}
+{% if assembly_notes %}
+## Assembly Notes
+
+{{ assembly_notes.summary }}
+
+{% if assembly_notes.fine_pitch_count is defined and assembly_notes.fine_pitch_count > 0 %}
+- **Fine-pitch components**: {{ assembly_notes.fine_pitch_count }}{% if assembly_notes.fine_pitch_parts %} ({{ assembly_notes.fine_pitch_parts | join(", ") }}){% endif %}
+
+{% endif %}
+{% if assembly_notes.thermal_pad_count is defined and assembly_notes.thermal_pad_count > 0 %}
+- **Thermal pads**: {{ assembly_notes.thermal_pad_count }} -- verify solder paste apertures
+{% endif %}
+{% if assembly_notes.polarized_count is defined and assembly_notes.polarized_count > 0 %}
+- **Polarized components**: {{ assembly_notes.polarized_count }} -- check orientation markings
+{% endif %}
+{% if assembly_notes.bottom_side_count is defined and assembly_notes.bottom_side_count > 0 %}
+- **Bottom-side parts**: {{ assembly_notes.bottom_side_count }}{% if assembly_notes.bottom_side_parts %} ({{ assembly_notes.bottom_side_parts | join(", ") }}{% if assembly_notes.bottom_side_count > assembly_notes.bottom_side_parts | length %}, ...{% endif %}){% endif %} -- double-sided assembly
+{% endif %}
+
+{% endif %}
+{% if tht_components %}
+## Hand-Solder (THT) Components
+
+{% set tht_total = tht_components | sum(attribute='qty') %}
+The following {{ tht_total }} through-hole component{{ 's are' if tht_total != 1 else ' is' }} **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. {{ 'They appear' if tht_total != 1 else 'It appears' }} in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+{% for item in tht_components %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) }} |
+{% endfor %}
+
+{% endif %}
+{% if off_board and off_board.assemblies %}
+## Off-board Assemblies
+
+The following subsystems are part of the design but are **not placed on
+the PCB** -- they connect through board connectors and are assembled by
+hand (DNP for fab assembly).
+
+{% for asm in off_board.assemblies %}
+### {{ asm.name }}
+
+{% if asm.description %}
+{{ asm.description }}
+
+{% endif %}
+| Property | Value |
+|----------|-------|
+{% if asm.connector %}
+| Board connector | {{ asm.connector }} |
+{% endif %}
+{% if asm.part %}
+| Part | {{ asm.part }} |
+{% endif %}
+{% if asm.qty %}
+| Quantity | {{ asm.qty }} |
+{% endif %}
+{% if asm.voltage %}
+| Voltage | {{ asm.voltage }} |
+{% endif %}
+{% if asm.capacitance %}
+| Capacitance | {{ asm.capacitance }} |
+{% endif %}
+{% if asm.assembly %}
+| Assembly | {{ asm.assembly | replace("_", " ") }} (DNP for fab assembly) |
+{% endif %}
+
+{% if asm.wiring %}
+**Wiring**: {{ asm.wiring }}
+
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if erc %}
+## ERC Status
+
+| Metric | Count |
+|--------|-------|
+| Errors | {{ erc.error_count | default(0) }} |
+| Warnings | {{ erc.warning_count | default(0) }} |
+
+**Status**: {% if erc.could_not_verify | default(false) %}NOT RUN{% elif erc.skipped | default(false) %}SKIPPED{% elif erc.passed | default(true) %}PASS{% else %}FAIL{% endif %}
+{% if erc.details %}
+ -- {{ erc.details }}
+{% endif %}
+
+{% endif %}
+{% if schematic_sheets %}
+
+\newpage
+
+## Schematic Overview
+
+{% for sheet in schematic_sheets %}
+### {{ sheet.name }}
+
+![{{ sheet.name }}]({{ sheet.figure_path }})
+
+{% endfor %}
+{% endif %}
+{% if pcb_figures %}
+
+\newpage
+
+## PCB Layout
+
+{% if pcb_figures.front is defined and pcb_figures.front %}
+![PCB Front]({{ pcb_figures.front }})
+{% endif %}
+
+{% if pcb_figures.back is defined and pcb_figures.back %}
+![PCB Back]({{ pcb_figures.back }})
+{% endif %}
+
+{% if pcb_figures.copper is defined and pcb_figures.copper %}
+### Copper
+
+![PCB Copper]({{ pcb_figures.copper }})
+
+{% endif %}
+{% if pcb_figures.assembly is defined and pcb_figures.assembly %}
+### Assembly
+
+![Assembly]({{ pcb_figures.assembly }})
+
+{% endif %}
+{% endif %}
+{% if pcb_layer_figures %}
+
+\newpage
+
+## Copper Layers
+
+{% for layer in pcb_layer_figures %}
+### {{ layer.name }}
+
+![{{ layer.name }}]({{ layer.figure_path }})
+
+{% endfor %}
+{% endif %}
+{% if bom_groups %}
+
+\newpage
+
+## Bill of Materials
+
+{% set has_mpn = bom_groups | selectattr('mpn', 'defined') | selectattr('mpn') | list | length > 0 %}
+{% set has_lcsc = bom_groups | selectattr('lcsc', 'defined') | selectattr('lcsc') | list | length > 0 %}
+{% if has_mpn and has_lcsc %}
+| Value | Package | Qty | References | MPN | LCSC |
+|-------|---------|-----|------------|-----|------|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.mpn | default("", true) }} | {{ item.lcsc | default("", true) }} |
+{% endfor %}
+{% elif has_lcsc %}
+| Value | Package | Qty | References | LCSC |
+|-------|---------|-----|------------|------|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.lcsc | default("", true) }} |
+{% endfor %}
+{% elif has_mpn %}
+| Value | Package | Qty | References | MPN |
+|-------|---------|-----|------------|-----|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.mpn | default("", true) }} |
+{% endfor %}
+{% else %}
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} |
+{% endfor %}
+{% endif %}
+
+{% endif %}
+{% if drc %}
+
+\newpage
+
+## DRC Status{% if drc.manufacturer is defined and drc.manufacturer %} (`--mfr {{ drc.manufacturer }}` rules){% endif %}
+
+
+| Metric | Count |
+|--------|-------|
+| Errors | {{ drc.error_count | default(0) }} |
+{% if drc.native_error_count is defined and drc.native_error_count is not none %}
+| Errors: kct (`--mfr {{ drc.manufacturer | default("?", true) }}` rules) | {{ drc.native_error_count }} |
+{% if drc.geometric_error_count is defined and drc.geometric_error_count is not none %}
+| Errors: kicad-cli (geometric) | {{ drc.geometric_error_count }} |
+{% else %}
+| Errors: kicad-cli (geometric) | not run |
+{% endif %}
+{% endif %}
+| Warnings | {{ drc.warning_count | default(0) }} |
+| Blocking | {{ drc.blocking_count | default(0) }} |
+{% if drc.waived_count is defined and drc.waived_count %}
+| Waived | {{ drc.waived_count }} |
+{% endif %}
+
+**Status**: {% if drc.passed | default(false) %}PASS{% else %}FAIL{% endif %}
+
+{% if drc.geometric_error_count is defined and drc.geometric_error_count %}
+
+*The two engines run independently and one defect can be reported by both (e.g. an undersized via drill), so Blocking is their sum, not a count of distinct defects.*
+{% endif %}
+
+{% if drc.violations_by_type is defined and drc.violations_by_type %}
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+{% for vtype, count in drc.violations_by_type | dictsort(by='value', reverse=true) %}
+| {{ vtype }} | {{ count }} |
+{% endfor %}
+{% endif %}
+
+{% if drc.waived_by_rule is defined and drc.waived_by_rule %}
+### Waived Findings
+
+*Counted in Violations by Type above but excluded from Errors and Blocking (waivers sidecar).*
+
+| Rule | Waived | Reason | Issue |
+|------|--------|--------|-------|
+{% for rule, info in drc.waived_by_rule | dictsort %}
+| {{ rule }} | {{ info.count }} | {{ info.reasons | join("; ") }} | {{ info.issues | join(", ") }} |
+{% endfor %}
+{% endif %}
+
+{% endif %}
+{% if audit %}
+
+\newpage
+
+## Manufacturing Readiness
+
+**Verdict**: {{ audit.verdict | default("unknown") | upper }}
+
+{% if audit.action_items is defined and audit.action_items %}
+### Action Items
+
+{% for item in audit.action_items %}
+- **[{{ {1: 'CRITICAL', 2: 'IMPORTANT', 3: 'OPTIONAL'}.get(item.priority, 'INFO') }}]** {{ item.description }}
+{% endfor %}
+{% endif %}
+
+{% endif %}
+{% if analog_components %}
+## Analog Components
+
+{{ analog_components | length }} analog-sensitive component{{ 's' if analog_components | length != 1 else '' }} detected -- manual layout review recommended.
+
+| Reference | Value | Reason |
+|-----------|-------|--------|
+{% for comp in analog_components %}
+| {{ comp.reference | default("", true) }} | {{ comp.value | default("", true) }} | {{ comp.reason | default("", true) }} |
+{% endfor %}
+
+{% endif %}
+{% if net_status %}
+
+\newpage
+
+## Routing Status
+
+| Metric | Value |
+|--------|-------|
+{% if net_status.signal_completion_percent is defined %}
+| Signal Net Completion | {{ net_status.signal_completion_percent }}% ({{ net_status.signal_complete_count }}/{{ net_status.signal_net_count }}) |
+{% endif %}
+| Overall Completion | {{ net_status.completion_percent | default(0) }}% |
+| Complete Nets | {{ net_status.complete_count | default(0) }} / {{ net_status.total_nets | default(0) }} |
+{% if net_status.zone_connected_count is defined and net_status.zone_connected_count > 0 %}
+| Zone-Connected Nets | {{ net_status.zone_connected_count }} |
+{% endif %}
+{% if net_status.single_pad_count is defined and net_status.single_pad_count > 0 %}
+| Single-Pad Nets | {{ net_status.single_pad_count }} (no routing needed) |
+{% endif %}
+| Incomplete Nets | {{ net_status.incomplete_count | default(0) }} |
+| Unconnected Pads | {{ net_status.total_unconnected_pads | default(0) }} |
+
+{% if net_status.zone_connected_nets is defined and net_status.zone_connected_nets %}
+### Zone-Connected Nets
+
+{% for net in net_status.zone_connected_nets %}
+- {{ net }}
+{% endfor %}
+
+{% endif %}
+{% if net_status.single_pad_count is defined and net_status.single_pad_count > 0 %}
+### Single-Pad Nets
+
+{{ net_status.single_pad_count }} single-pad net{{ 's' if net_status.single_pad_count != 1 else '' }} (no routing needed) -- not listed individually.
+
+{% endif %}
+{% if net_status.signal_incomplete_named is defined and net_status.signal_incomplete_named %}
+### Unrouted Signal Nets
+
+{% for net in net_status.signal_incomplete_named %}
+- {{ net }}
+{% endfor %}
+
+{% endif %}
+{% if net_status.signal_incomplete_auto_count is defined and net_status.signal_incomplete_auto_count > 0 %}
+{{ net_status.signal_incomplete_auto_count }} auto-generated component nets (`Net-(...)` / `unconnected-(...)`) not listed individually.
+
+{% elif net_status.signal_incomplete_net_names is defined and net_status.signal_incomplete_net_names %}
+{# Backward-compatible fallback for data generated before the named/auto split #}
+### Unrouted Signal Nets
+
+{% for net in net_status.signal_incomplete_net_names %}
+- {{ net }}
+{% endfor %}
+
+{% elif net_status.incomplete_net_names is defined and net_status.incomplete_net_names %}
+### Incomplete Nets
+
+{% for net in net_status.incomplete_net_names %}
+- {{ net }}
+{% endfor %}
+
+{% endif %}
+
+{% endif %}
+{% if cost %}
+## Cost Estimate
+
+| Metric | Per Board (estimated) |
+|--------|-------|
+{% if cost.pcb_cost is defined and cost.pcb_cost is not none %}
+| PCB Fabrication | ~{{ cost.pcb_cost }} {{ cost.currency | default("USD") }} |
+{% endif %}
+{% if cost.component_cost is defined and cost.component_cost is not none %}
+| Components (estimated) | ~{{ cost.component_cost }} {{ cost.currency | default("USD") }} |
+{% endif %}
+{% if cost.assembly_cost is defined and cost.assembly_cost is not none %}
+| Assembly (estimated) | ~{{ cost.assembly_cost }} {{ cost.currency | default("USD") }} |
+{% endif %}
+{% if cost.total is defined and cost.total is not none %}
+| **Total (estimated)** | **~{{ cost.total }} {{ cost.currency | default("USD") }}** |
+{% endif %}
+{% if cost.batch_qty is defined and cost.batch_qty is not none %}
+| Batch Quantity | {{ cost.batch_qty }} |
+{% endif %}
+{% if cost.batch_total is defined and cost.batch_total is not none %}
+| Batch Total (estimated) | ~{{ cost.batch_total }} {{ cost.currency | default("USD") }} |
+{% endif %}
+
+{% endif %}
+{% if notes %}
+## Notes
+
+{{ notes }}
+
+{% endif %}

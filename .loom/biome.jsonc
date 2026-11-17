@@ -1,0 +1,41 @@
+{
+  // Loom-managed nested Biome configuration (issue #6031).
+  //
+  // Everything under `.loom/` is machine-managed Loom payload: shipped scripts
+  // and role prompts, installer-generated JSON stamps (`config.json`,
+  // `install-metadata.json`), and ephemeral runtime state (`worktrees/`,
+  // `sweep-checkpoint/`). None of it is authored -- or formatted -- by the
+  // consumer repository, so a repo-wide `biome check .` used to fail on files
+  // the consumer never wrote:
+  //
+  //   * `.loom/scripts/experiments/judge-fanout-workflow.js` is a Claude Code
+  //     Workflow script. Workflow scripts run in a VM that permits top-level
+  //     `await` and top-level `return`; standard ECMAScript forbids the latter,
+  //     so Biome reports a hard `parse` error ("Illegal return statement outside
+  //     of a function") that no formatter/linter option can suppress -- not even
+  //     `formatter.formatWithErrors`.
+  //   * `.loom/config.json` and `.loom/install-metadata.json` are emitted with
+  //     2-space indentation by the installer and the daemon. Any consumer whose
+  //     Biome config differs (Biome's own default is tabs) gets a format diff on
+  //     every single run.
+  //
+  // Biome 2.x discovers nested configuration files, so a `"root": false` config
+  // placed inside Loom's own directory takes `.loom/` out of the consumer's lint
+  // surface WITHOUT the installer having to edit a consumer-owned file.
+  // `.biomeignore` is not an option -- Biome 2.x dropped it (verified against
+  // Biome 2.5.8: a `.biomeignore` listing `.loom/` changes nothing).
+  //
+  // Scope: this excludes ONLY `.loom/`. Consumer-authored files everywhere else
+  // in the repository are linted exactly as before.
+  //
+  // Known limitation: Biome 1.x has no nested-configuration support and will
+  // ignore this file. A consumer still on 1.x needs an explicit `files.ignore`
+  // entry for `.loom/` in their own config.
+  "root": false,
+  "files": {
+    // A negation-only `includes` list excludes every path under this directory,
+    // including this file itself -- so the config never reports a format diff
+    // against whatever indentation the consumer happens to prefer.
+    "includes": ["!**"]
+  }
+}

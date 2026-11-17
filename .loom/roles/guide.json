@@ -1,0 +1,9 @@
+{
+  "name": "Triage",
+  "description": "Keeps the backlog healthy: tier labels, orphan verification, unblocking, epic tracking, living docs",
+  "suggestedModel": "sonnet",
+  "suggestedWorkerType": "claude",
+  "toolPolicy": {
+    "allowedCapabilities": []
+  }
+}

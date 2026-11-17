@@ -1,0 +1,682 @@
+"""
+Pick-and-place (CPL) file generator for assembly services.
+
+Exports component placement data in manufacturer-specific formats.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from kicad_tools.exceptions import ConfigurationError
+
+if TYPE_CHECKING:
+    from ..schema.pcb import Footprint
+
+
+@dataclass
+class PlacementData:
+    """Component placement data extracted from PCB."""
+
+    reference: str
+    value: str
+    footprint: str
+    x: float  # mm from origin
+    y: float  # mm from origin
+    rotation: float  # degrees
+    layer: str  # F.Cu or B.Cu
+
+
+@dataclass
+class PnPExportConfig:
+    """Configuration for pick-and-place export."""
+
+    # Coordinate system adjustments
+    x_offset: float = 0.0
+    y_offset: float = 0.0
+    mirror_x: bool = False
+    mirror_y: bool = False
+
+    # Origin handling
+    use_aux_origin: bool = True  # Use auxiliary axis origin
+
+    # Filtering
+    include_dnp: bool = False
+    exclude_tht: bool = False  # Exclude through-hole components from CPL
+    top_only: bool = False
+    bottom_only: bool = False
+
+    # Rotation adjustment (some assemblers have different 0° reference)
+    rotation_offset: float = 0.0
+
+
+class PnPFormatter(ABC):
+    """Abstract base class for pick-and-place formatters."""
+
+    manufacturer_id: str = ""
+    manufacturer_name: str = ""
+
+    def __init__(
+        self,
+        config: PnPExportConfig | None = None,
+        rotation_corrections: dict[str, float] | None = None,
+    ):
+        self.config = config or PnPExportConfig()
+        self.rotation_corrections: dict[str, float] = rotation_corrections or {}
+
+    @abstractmethod
+    def format(self, placements: list[PlacementData]) -> str:
+        """Format placement data to manufacturer-specific format."""
+        pass
+
+    @abstractmethod
+    def get_headers(self) -> list[str]:
+        """Get column headers for this format."""
+        pass
+
+    def apply_transforms(self, placement: PlacementData) -> PlacementData:
+        """Apply coordinate transforms and per-footprint rotation corrections.
+
+        When ``rotation_corrections`` is populated (e.g. from a
+        manufacturer preset), the footprint name is matched against the
+        correction database and the corresponding offset is added to the
+        component rotation **before** the global ``rotation_offset``.
+        """
+        from kicad_tools.manufacturers.base import match_rotation_correction
+
+        x = placement.x + self.config.x_offset
+        y = placement.y + self.config.y_offset
+
+        if self.config.mirror_x:
+            x = -x
+        if self.config.mirror_y:
+            y = -y
+
+        # Per-footprint rotation correction
+        fp_correction = match_rotation_correction(placement.footprint, self.rotation_corrections)
+
+        rotation = (placement.rotation + fp_correction + self.config.rotation_offset) % 360
+
+        return PlacementData(
+            reference=placement.reference,
+            value=placement.value,
+            footprint=placement.footprint,
+            x=x,
+            y=y,
+            rotation=rotation,
+            layer=placement.layer,
+        )
+
+    def filter_placements(self, placements: list[PlacementData]) -> list[PlacementData]:
+        """Filter placements based on config."""
+        result = placements
+
+        if self.config.top_only:
+            result = [p for p in result if p.layer == "F.Cu"]
+        elif self.config.bottom_only:
+            result = [p for p in result if p.layer == "B.Cu"]
+
+        return result
+
+
+class JLCPCBPnPFormatter(PnPFormatter):
+    """Pick-and-place formatter for JLCPCB assembly service.
+
+    JLCPCB's Economic and Standard PCBA tiers both offer through-hole
+    assembly, so through-hole components are included in the CPL by default
+    (issue #7239).  Pass ``PnPExportConfig(exclude_tht=True)`` to leave them
+    out.
+    """
+
+    manufacturer_id = "jlcpcb"
+    manufacturer_name = "JLCPCB"
+
+    def __init__(
+        self,
+        config: PnPExportConfig | None = None,
+        rotation_corrections: dict[str, float] | None = None,
+    ):
+        if config is None:
+            config = PnPExportConfig(exclude_tht=False)
+        super().__init__(config, rotation_corrections)
+
+    def get_headers(self) -> list[str]:
+        """JLCPCB CPL column headers."""
+        return ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+
+    def format(self, placements: list[PlacementData]) -> str:
+        """
+        Format CPL for JLCPCB.
+
+        JLCPCB expects:
+        - Designator: Reference designator
+        - Val: Component value
+        - Package: Footprint name
+        - Mid X: X coordinate in mm
+        - Mid Y: Y coordinate in mm
+        - Rotation: Rotation in degrees
+        - Layer: Top or Bottom
+        """
+        filtered = self.filter_placements(placements)
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for placement in sorted(filtered, key=lambda p: p.reference):
+            transformed = self.apply_transforms(placement)
+            layer = "Top" if transformed.layer == "F.Cu" else "Bottom"
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.value,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}mm",
+                    f"{transformed.y:.4f}mm",
+                    f"{transformed.rotation:.1f}",
+                    layer,
+                ]
+            )
+
+        return output.getvalue()
+
+
+class PCBWayPnPFormatter(PnPFormatter):
+    """Pick-and-place formatter for PCBWay assembly service."""
+
+    manufacturer_id = "pcbway"
+    manufacturer_name = "PCBWay"
+
+    def get_headers(self) -> list[str]:
+        """PCBWay CPL column headers."""
+        return [
+            "Designator",
+            "Footprint",
+            "Mid X",
+            "Mid Y",
+            "Ref X",
+            "Ref Y",
+            "Pad X",
+            "Pad Y",
+            "Layer",
+            "Rotation",
+            "Comment",
+        ]
+
+    def format(self, placements: list[PlacementData]) -> str:
+        """
+        Format CPL for PCBWay.
+
+        PCBWay expects more detailed placement info.
+        """
+        filtered = self.filter_placements(placements)
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for placement in sorted(filtered, key=lambda p: p.reference):
+            transformed = self.apply_transforms(placement)
+            layer = "T" if transformed.layer == "F.Cu" else "B"
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}",
+                    f"{transformed.y:.4f}",
+                    f"{transformed.x:.4f}",  # Ref X same as Mid X
+                    f"{transformed.y:.4f}",  # Ref Y same as Mid Y
+                    f"{transformed.x:.4f}",  # Pad X
+                    f"{transformed.y:.4f}",  # Pad Y
+                    layer,
+                    f"{transformed.rotation:.1f}",
+                    transformed.value,
+                ]
+            )
+
+        return output.getvalue()
+
+
+class SeeedPnPFormatter(PnPFormatter):
+    """Pick-and-place formatter for Seeed Fusion assembly service."""
+
+    manufacturer_id = "seeed"
+    manufacturer_name = "Seeed Fusion"
+
+    def get_headers(self) -> list[str]:
+        """Seeed Fusion CPL column headers."""
+        return ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+
+    def format(self, placements: list[PlacementData]) -> str:
+        """
+        Format CPL for Seeed Fusion.
+
+        Seeed Fusion accepts a standard CSV pick-and-place format
+        with millimetre coordinates and Top/Bottom layer designation.
+        """
+        filtered = self.filter_placements(placements)
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for placement in sorted(filtered, key=lambda p: p.reference):
+            transformed = self.apply_transforms(placement)
+            layer = "Top" if transformed.layer == "F.Cu" else "Bottom"
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.value,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}mm",
+                    f"{transformed.y:.4f}mm",
+                    f"{transformed.rotation:.1f}",
+                    layer,
+                ]
+            )
+
+        return output.getvalue()
+
+
+class GenericPnPFormatter(PnPFormatter):
+    """Generic pick-and-place formatter."""
+
+    manufacturer_id = "generic"
+    manufacturer_name = "Generic"
+
+    def get_headers(self) -> list[str]:
+        """Generic CPL column headers."""
+        return ["Ref", "Val", "Package", "PosX", "PosY", "Rot", "Side"]
+
+    def format(self, placements: list[PlacementData]) -> str:
+        """Format CPL in generic CSV format."""
+        filtered = self.filter_placements(placements)
+
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(self.get_headers())
+
+        for placement in sorted(filtered, key=lambda p: p.reference):
+            transformed = self.apply_transforms(placement)
+            side = "top" if transformed.layer == "F.Cu" else "bottom"
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.value,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}",
+                    f"{transformed.y:.4f}",
+                    f"{transformed.rotation:.1f}",
+                    side,
+                ]
+            )
+
+        return output.getvalue()
+
+
+# Registry of available formatters
+PNP_FORMATTERS: dict[str, type[PnPFormatter]] = {
+    "jlcpcb": JLCPCBPnPFormatter,
+    "pcbway": PCBWayPnPFormatter,
+    "seeed": SeeedPnPFormatter,
+    "generic": GenericPnPFormatter,
+}
+
+
+def get_pnp_formatter(
+    manufacturer: str,
+    config: PnPExportConfig | None = None,
+    rotation_corrections: dict[str, float] | None = None,
+) -> PnPFormatter:
+    """
+    Get pick-and-place formatter for a manufacturer.
+
+    Args:
+        manufacturer: Manufacturer ID (jlcpcb, pcbway, generic)
+        config: Export configuration
+        rotation_corrections: Per-footprint rotation corrections (pattern -> degrees).
+            When provided, these are applied during ``apply_transforms()``.
+
+    Returns:
+        PnPFormatter for the specified manufacturer
+
+    Raises:
+        ValueError: If manufacturer is not supported
+    """
+    formatter_class = PNP_FORMATTERS.get(manufacturer.lower())
+    if formatter_class is None:
+        available = list(PNP_FORMATTERS.keys())
+        raise ConfigurationError(
+            f"Unknown manufacturer: {manufacturer}",
+            context={"manufacturer": manufacturer, "available": available},
+            suggestions=[f"Use one of: {', '.join(available)}"],
+        )
+    return formatter_class(config, rotation_corrections)
+
+
+def is_through_hole_footprint(footprint: Footprint) -> bool:
+    """Identify components needing through-hole soldering for assembly export.
+
+    Generated/legacy footprints may omit their assembly attribute. Numbered
+    plated through-hole pads still require soldering, even on a footprint
+    marked SMD. Thermal vias sharing a numbered SMD land, unnumbered
+    mechanical holes, and NPTH alignment pegs do not require lead insertion.
+    An explicit through-hole attribute remains authoritative without pads.
+    """
+    pads = getattr(footprint, "pads", ())
+    smd_numbers = {pad.number for pad in pads if pad.type == "smd" and pad.number}
+    return getattr(footprint, "attr", "") == "through_hole" or any(
+        pad.type in ("thru_hole", "through_hole")
+        and bool(pad.number)
+        and pad.number not in smd_numbers
+        for pad in pads
+    )
+
+
+def _tht_centroid_offset(fp: Footprint) -> tuple[float, float]:
+    """Board-frame offset (Y down) from a THT footprint origin to its pad-bbox centre.
+
+    JLCPCB defines CPL Mid X / Mid Y as the component centroid, but KiCad
+    through-hole footprints (pin headers, terminal blocks) usually put the
+    origin on pin 1, so the raw origin lands e.g. 8.89 mm off a 1x8 header
+    (issue #7433).  Surface-mount parts are untouched: their origins already
+    follow the placement-file convention.  Only numbered pads count, so
+    unnumbered NPTH pegs/mounting holes do not skew the centre.
+    """
+    if not is_through_hole_footprint(fp):
+        return (0.0, 0.0)
+    from ..core.geometry import rotate_pad_offset
+
+    xs: list[float] = []
+    ys: list[float] = []
+    for pad in getattr(fp, "pads", ()):
+        if not pad.number:
+            continue
+        rx, ry = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+        w, h = pad.size
+        # pad.rotation is absolute; a quarter turn swaps the extents.
+        if round(pad.rotation / 90.0) % 2:
+            w, h = h, w
+        xs += [rx - w / 2, rx + w / 2]
+        ys += [ry - h / 2, ry + h / 2]
+    if not xs:
+        return (0.0, 0.0)
+    return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+
+
+def _pos_frame_xy(
+    fp: Footprint,
+    config: PnPExportConfig,
+    aux_origin: tuple[float, float] | None,
+) -> tuple[float, float]:
+    """Footprint origin in KiCad's ``pcb export pos`` frame (Y up).
+
+    Matches ``kicad-cli pcb export pos`` with ``--use-drill-file-origin``
+    when ``config.use_aux_origin`` is set (the frame the package's Gerbers
+    and drill files use), and without it otherwise.  Works from the
+    sheet-absolute position so it is independent of Edge.Cuts detection.
+    """
+    # ``Footprint.position`` is board-relative (sheet coordinates minus the
+    # board origin used by Edge.Cuts detection); ``Footprint.sheet_position``
+    # adds that origin back, giving the absolute ``(at ...)`` value KiCad's
+    # ``pcb export pos`` and the aux/drill origin are measured in.  The two
+    # differ only for parsed PCB footprints with a non-zero board origin.
+    # Footprint-like objects (the public export entry points accept them)
+    # carry no board origin, so ``position`` is already the absolute value
+    # and is the correct fallback.
+    sheet_pos = getattr(fp, "sheet_position", None)
+    xa, ya = sheet_pos if sheet_pos is not None else fp.position
+    dx, dy = _tht_centroid_offset(fp)
+    xa, ya = xa + dx, ya + dy
+    if config.use_aux_origin:
+        aux_x, aux_y = aux_origin or (0.0, 0.0)
+        return xa - aux_x, aux_y - ya
+    return xa, -ya
+
+
+def extract_placements(
+    footprints: list[Footprint],
+    config: PnPExportConfig | None = None,
+    aux_origin: tuple[float, float] | None = None,
+) -> list[PlacementData]:
+    """
+    Extract placement data from PCB footprints.
+
+    Coordinates are emitted in the frame of ``kicad-cli pcb export pos``:
+    sheet-absolute, Y up, relative to the aux (drill/place) origin when
+    ``config.use_aux_origin`` is True (the default).
+
+    Args:
+        footprints: List of Footprint objects from PCB
+        config: Optional export config for filtering (exclude_tht, include_dnp)
+        aux_origin: Aux axis origin (sheet mm); ``None`` means (0, 0)
+
+    Returns:
+        List of PlacementData for assembly
+    """
+    config = config or PnPExportConfig()
+    placements = []
+    for fp in footprints:
+        # Skip footprints excluded from position files
+        if getattr(fp, "exclude_from_pos_files", False):
+            continue
+
+        # Skip DNP (Do Not Place) footprints unless explicitly included
+        if not config.include_dnp and getattr(fp, "dnp", False):
+            continue
+
+        # Skip through-hole footprints when exclude_tht is enabled
+        if config.exclude_tht and is_through_hole_footprint(fp):
+            continue
+
+        x, y = _pos_frame_xy(fp, config, aux_origin)
+        placements.append(
+            PlacementData(
+                reference=fp.reference,
+                value=fp.value,
+                footprint=fp.name,
+                x=x,
+                y=y,
+                rotation=fp.rotation,
+                layer=fp.layer,
+            )
+        )
+
+    return placements
+
+
+def _ref_sort_key(reference: str) -> tuple[str, int, str]:
+    """Natural sort key for reference designators (R6 before R20)."""
+    match = re.match(r"([A-Za-z_]*)(\d*)(.*)", reference)
+    if match is None:  # pragma: no cover - regex always matches
+        return (reference, -1, "")
+    prefix, digits, rest = match.groups()
+    return (prefix, int(digits) if digits else -1, rest)
+
+
+def extract_tht_exclusions(
+    footprints: list[Footprint],
+    config: PnPExportConfig | None = None,
+    aux_origin: tuple[float, float] | None = None,
+) -> list[PlacementData]:
+    """Return the through-hole placements the CPL's THT filter drops.
+
+    These are the components an SMT-only assembler must hand-solder
+    (or wave/selective-solder): they are present on the board and in
+    the BOM, but :func:`extract_placements` omits them from the
+    pick-and-place file when ``config.exclude_tht`` is enabled.
+
+    The same pre-filters as :func:`extract_placements` apply
+    (``exclude_from_pos_files``, DNP), so the returned set is exactly
+    the difference between the unfiltered and THT-filtered CPLs.
+
+    Args:
+        footprints: List of Footprint objects from PCB
+        config: Effective export config.  When ``exclude_tht`` is
+            False (or config is None), no parts are excluded from the
+            CPL, so this returns an empty list.
+        aux_origin: Aux axis origin (sheet mm), as for :func:`extract_placements`
+
+    Returns:
+        PlacementData for each excluded THT component, in natural
+        reference order (R6 before R20).
+    """
+    config = config or PnPExportConfig()
+    if not config.exclude_tht:
+        return []
+
+    excluded = []
+    for fp in footprints:
+        if getattr(fp, "exclude_from_pos_files", False):
+            continue
+        if not config.include_dnp and getattr(fp, "dnp", False):
+            continue
+        if not is_through_hole_footprint(fp):
+            continue
+
+        x, y = _pos_frame_xy(fp, config, aux_origin)
+        excluded.append(
+            PlacementData(
+                reference=fp.reference,
+                value=fp.value,
+                footprint=fp.name,
+                x=x,
+                y=y,
+                rotation=fp.rotation,
+                layer=fp.layer,
+            )
+        )
+
+    return sorted(excluded, key=lambda p: _ref_sort_key(p.reference))
+
+
+def group_tht_exclusions(placements: list[PlacementData]) -> list[dict]:
+    """Group excluded THT placements for report/README presentation.
+
+    Groups by (value, footprint) and returns BOM-style rows::
+
+        [{"value": ..., "footprint": ..., "qty": N, "refs": "D1, D2"}]
+
+    Rows are ordered by the natural sort key of each group's first
+    reference, and references within a row are naturally sorted.
+    """
+    groups: dict[tuple[str, str], list[str]] = {}
+    for p in placements:
+        groups.setdefault((p.value, p.footprint), []).append(p.reference)
+
+    rows = []
+    for (value, footprint), refs in groups.items():
+        refs_sorted = sorted(refs, key=_ref_sort_key)
+        rows.append(
+            {
+                "value": value,
+                "footprint": footprint,
+                "qty": len(refs_sorted),
+                "refs": ", ".join(refs_sorted),
+            }
+        )
+
+    rows.sort(key=lambda row: _ref_sort_key(row["refs"].split(", ")[0]))
+    return rows
+
+
+def get_aux_origin(pcb_path: str | Path) -> tuple[float, float]:
+    """Read auxiliary axis origin from PCB setup section.
+
+    The auxiliary axis origin is set by the user in KiCad (Place -> Drill/Place
+    File Origin) and is used as the coordinate reference for manufacturing
+    output files (Gerbers, drill files, pick-and-place).
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file
+
+    Returns:
+        Tuple (x, y) of the auxiliary origin in mm, or (0.0, 0.0) if not set.
+    """
+    from ..schema.pcb import PCB
+
+    pcb = PCB.load(pcb_path)
+    setup = pcb.setup
+    return _aux_origin_of(setup)
+
+
+def _aux_origin_of(setup: object | None) -> tuple[float, float]:
+    """Aux origin from a PCB setup, (0, 0) when missing or malformed."""
+    origin = getattr(setup, "aux_axis_origin", None)
+    if not origin or len(origin) != 2:
+        return (0.0, 0.0)
+    return (float(origin[0]), float(origin[1]))
+
+
+def export_pnp(
+    footprints: list[Footprint],
+    manufacturer: str = "generic",
+    config: PnPExportConfig | None = None,
+    pcb_path: str | Path | None = None,
+    rotation_corrections: dict[str, float] | None = None,
+    aux_origin: tuple[float, float] | None = None,
+) -> str:
+    """
+    Export pick-and-place file.
+
+    Coordinates are in the frame of ``kicad-cli pcb export pos``: sheet
+    absolute, Y up, relative to the aux origin when ``config.use_aux_origin``
+    is True -- the same frame as the Gerbers/drill files in the package.
+
+    Args:
+        footprints: List of Footprint objects from PCB
+        manufacturer: Manufacturer ID
+        config: Export configuration
+        pcb_path: Optional path to the .kicad_pcb file. When provided and
+            ``aux_origin`` is not, the auxiliary axis origin is read from it.
+        rotation_corrections: Per-footprint rotation corrections
+            (pattern -> degrees).  When provided, these are applied
+            during formatting via ``PnPFormatter.apply_transforms()``.
+        aux_origin: Aux axis origin (sheet mm).  Overrides ``pcb_path``;
+            with neither, (0, 0) is used (KiCad's default).
+
+    Returns:
+        Formatted CPL as CSV string
+    """
+    # Resolve the effective config through the formatter FIRST so
+    # manufacturer defaults (e.g., a fab that defaults to exclude_tht=True)
+    # apply regardless of which branch below runs.  The formatter is the
+    # single source of truth for the effective config; synthesizing a
+    # config here would silently drop those defaults (issue #3618).
+    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
+    config = formatter.config
+
+    if aux_origin is None and pcb_path is not None and config.use_aux_origin:
+        aux_origin = get_aux_origin(pcb_path)
+
+    placements = extract_placements(footprints, formatter.config, aux_origin)
+    return formatter.format(placements)
+
+
+def count_rotation_corrections(
+    footprints: list[Footprint],
+    manufacturer: str = "generic",
+    config: PnPExportConfig | None = None,
+    rotation_corrections: dict[str, float] | None = None,
+) -> int:
+    """Count CPL placements whose rotation is shifted by a per-footprint correction.
+
+    Uses the same effective config and placement filters as :func:`export_pnp`
+    (THT/DNP/layer filtering), so the count covers exactly the rows written to
+    the CPL where ``match_rotation_correction`` is non-zero.
+    """
+    from kicad_tools.manufacturers.base import match_rotation_correction
+
+    if not rotation_corrections:
+        return 0
+    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
+    placements = formatter.filter_placements(extract_placements(footprints, formatter.config))
+    return sum(
+        1 for p in placements if match_rotation_correction(p.footprint, rotation_corrections) != 0
+    )

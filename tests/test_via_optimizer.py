@@ -1,0 +1,566 @@
+"""Tests for via optimization in post-routing cleanup."""
+
+import pytest
+
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.optimizer import (
+    LayerConnectivityError,
+    OptimizationConfig,
+    TraceOptimizer,
+)
+from kicad_tools.router.optimizer.via_optimizer import (
+    ViaContext,
+    ViaOptimizationConfig,
+    ViaOptimizationStats,
+    ViaOptimizer,
+    optimize_route_vias,
+)
+from kicad_tools.router.primitives import Route, Segment, Via
+
+
+class TestViaOptimizationConfig:
+    """Test ViaOptimizationConfig defaults and options."""
+
+    def test_default_config(self):
+        config = ViaOptimizationConfig()
+        assert config.enabled is True
+        assert config.max_detour_factor == 1.5
+        assert config.via_pair_threshold == 2.0
+
+    def test_disabled_config(self):
+        config = ViaOptimizationConfig(enabled=False)
+        assert config.enabled is False
+
+
+class TestViaOptimizationStats:
+    """Test ViaOptimizationStats calculations."""
+
+    def test_vias_removed(self):
+        stats = ViaOptimizationStats(
+            vias_before=10,
+            vias_after=6,
+            vias_removed_single=2,
+            vias_removed_pairs=2,
+        )
+        assert stats.vias_removed == 4
+
+    def test_via_reduction_percent(self):
+        stats = ViaOptimizationStats(vias_before=10, vias_after=6)
+        # Stats track before/after, but reduction is calculated from removed
+        stats.vias_removed_single = 4
+        assert stats.via_reduction_percent == 40.0
+
+    def test_no_vias_reduction(self):
+        stats = ViaOptimizationStats(vias_before=0, vias_after=0)
+        assert stats.via_reduction_percent == 0.0
+
+
+class TestViaContext:
+    """Test ViaContext helper class."""
+
+    def test_from_layer(self):
+        via = Via(
+            x=10.0,
+            y=20.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        ctx = ViaContext(via=via, via_index=0, segments_before=[], segments_after=[])
+        assert ctx.from_layer == Layer.F_CU
+        assert ctx.to_layer == Layer.B_CU
+
+
+class TestViaOptimizerBasic:
+    """Basic via optimizer tests."""
+
+    def test_empty_route(self):
+        optimizer = ViaOptimizer()
+        route = Route(net=1, net_name="Net1", segments=[], vias=[])
+        result = optimizer.optimize_route(route)
+        assert result.vias == []
+        assert result.segments == []
+
+    def test_route_with_no_vias(self):
+        optimizer = ViaOptimizer()
+        segments = [
+            Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1),
+            Segment(x1=10, y1=0, x2=10, y2=10, width=0.2, layer=Layer.F_CU, net=1),
+        ]
+        route = Route(net=1, net_name="Net1", segments=segments, vias=[])
+        result = optimizer.optimize_route(route)
+        assert len(result.vias) == 0
+        assert len(result.segments) == 2
+
+    def test_disabled_optimization(self):
+        config = ViaOptimizationConfig(enabled=False)
+        optimizer = ViaOptimizer(config=config)
+
+        via = Via(x=5, y=5, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+
+        result = optimizer.optimize_route(route)
+        assert len(result.vias) == 1
+
+
+class TestViaPairElimination:
+    """Test via pair (down-up) elimination."""
+
+    def test_identify_via_pair(self):
+        optimizer = ViaOptimizer()
+
+        # Via1: F.Cu -> B.Cu, Via2: B.Cu -> F.Cu (a pair)
+        via1 = Via(x=0, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via2 = Via(x=1, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+
+        ctx1 = ViaContext(via=via1, via_index=0, segments_before=[], segments_after=[])
+        ctx2 = ViaContext(via=via2, via_index=1, segments_before=[], segments_after=[])
+
+        assert optimizer._is_via_pair(ctx1, ctx2) is True
+
+    def test_not_a_via_pair(self):
+        optimizer = ViaOptimizer()
+
+        # Both vias go same direction - not a pair
+        via1 = Via(x=0, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via2 = Via(x=1, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+
+        ctx1 = ViaContext(via=via1, via_index=0, segments_before=[], segments_after=[])
+        ctx2 = ViaContext(via=via2, via_index=1, segments_before=[], segments_after=[])
+
+        assert optimizer._is_via_pair(ctx1, ctx2) is False
+
+
+class TestSameLayerPath:
+    """Test same-layer path finding."""
+
+    def test_direct_path_found(self):
+        optimizer = ViaOptimizer()
+
+        # No collision checker - direct path always works
+        path = optimizer._find_same_layer_path(
+            x1=0, y1=0, x2=5, y2=0, layer=Layer.F_CU, width=0.2, net=1, max_detour=10.0
+        )
+
+        assert path is not None
+        assert len(path) == 1
+        assert path[0].x1 == 0
+        assert path[0].y1 == 0
+        assert path[0].x2 == 5
+        assert path[0].y2 == 0
+        assert path[0].layer == Layer.F_CU
+
+    def test_path_too_long(self):
+        optimizer = ViaOptimizer()
+
+        # Distance is 10, max_detour is 5 - should fail
+        path = optimizer._find_same_layer_path(
+            x1=0, y1=0, x2=10, y2=0, layer=Layer.F_CU, width=0.2, net=1, max_detour=5.0
+        )
+
+        assert path is None
+
+
+class TestBuildViaContexts:
+    """Test building via context from route."""
+
+    def test_segments_connected_to_via(self):
+        optimizer = ViaOptimizer()
+
+        # Segment ends at via position on from_layer
+        seg_before = Segment(x1=0, y1=0, x2=5, y2=5, width=0.2, layer=Layer.F_CU, net=1)
+        # Segment starts at via position on to_layer
+        seg_after = Segment(x1=5, y1=5, x2=10, y2=5, width=0.2, layer=Layer.B_CU, net=1)
+        via = Via(x=5, y=5, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg_before, seg_after], vias=[via])
+
+        contexts = optimizer._build_via_contexts(route)
+
+        assert len(contexts) == 1
+        ctx = contexts[0]
+        assert ctx.via == via
+        assert len(ctx.segments_before) == 1
+        assert len(ctx.segments_after) == 1
+        assert ctx.segments_before[0] == seg_before
+        assert ctx.segments_after[0] == seg_after
+
+
+class TestIntegrationWithTraceOptimizer:
+    """Test via optimization integration with TraceOptimizer."""
+
+    def test_trace_optimizer_includes_via_optimization(self):
+        config = OptimizationConfig(minimize_vias=True)
+        optimizer = TraceOptimizer(config=config)
+
+        # Create a simple route with a via
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+
+        result = optimizer.optimize_route(route)
+
+        # Via optimizer ran (segments may have been modified)
+        assert isinstance(result, Route)
+
+    def test_via_optimization_disabled(self):
+        config = OptimizationConfig(minimize_vias=False)
+        optimizer = TraceOptimizer(config=config)
+
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+
+        result = optimizer.optimize_route(route)
+
+        # Via should remain unchanged
+        assert len(result.vias) == 1
+
+    def test_get_via_stats(self):
+        config = OptimizationConfig(minimize_vias=True)
+        optimizer = TraceOptimizer(config=config)
+
+        # Reset stats
+        optimizer.reset_via_stats()
+
+        # Optimize a route with vias
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route = Route(net=1, net_name="Net1", segments=[seg1], vias=[via])
+        optimizer.optimize_route(route)
+
+        stats = optimizer.get_via_stats()
+        assert "vias_before" in stats
+        assert "vias_after" in stats
+        assert "vias_removed" in stats
+
+
+class TestOptimizeRouteViasFunction:
+    """Test the convenience function."""
+
+    def test_optimize_route_vias(self):
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[seg1], vias=[])
+
+        optimized, stats = optimize_route_vias(route)
+
+        assert isinstance(optimized, Route)
+        assert isinstance(stats, ViaOptimizationStats)
+
+
+class TestOptimizationStatsIntegration:
+    """Test OptimizationStats via fields."""
+
+    def test_stats_has_via_fields(self):
+        from kicad_tools.router.optimizer.config import OptimizationStats
+
+        stats = OptimizationStats(
+            segments_before=10,
+            segments_after=8,
+            vias_before=5,
+            vias_after=3,
+        )
+
+        assert stats.vias_before == 5
+        assert stats.vias_after == 3
+        assert stats.via_reduction == 40.0
+
+
+class TestLayerConnectivityValidation:
+    """Test layer connectivity validation."""
+
+    def test_valid_route_with_via(self):
+        """Route with proper via at layer transition is valid."""
+        optimizer = ViaOptimizer()
+
+        # Segment on F.Cu ending at (5, 0)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        # Via at (5, 0) connecting F.Cu to B.Cu
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        # Segment on B.Cu starting at (5, 0)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 0
+
+    def test_invalid_route_missing_via(self):
+        """Route with layer transition but no via is invalid."""
+        optimizer = ViaOptimizer()
+
+        # Segment on F.Cu ending at (5, 0)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        # Segment on B.Cu starting at (5, 0) - but no via!
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 1
+        assert errors[0].point == (5.0, 0.0)
+        assert errors[0].from_layer == Layer.F_CU
+        assert errors[0].to_layer == Layer.B_CU
+
+    def test_single_layer_route_is_valid(self):
+        """Route with no layer transitions needs no vias."""
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 0
+
+    def test_error_string_representation(self):
+        """LayerConnectivityError has useful string representation."""
+        error = LayerConnectivityError(
+            point=(5.0, 10.0),
+            from_layer=Layer.F_CU,
+            to_layer=Layer.B_CU,
+        )
+
+        error_str = str(error)
+        assert "5.0000" in error_str
+        assert "10.0000" in error_str
+        assert "F_CU" in error_str
+        assert "B_CU" in error_str
+
+    def test_multiple_transitions_all_validated(self):
+        """All layer transitions in a route are validated."""
+        optimizer = ViaOptimizer()
+
+        # Route: F.Cu -> B.Cu -> F.Cu with two vias
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=10, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=10, y1=0, x2=15, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1, via2])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 0
+
+    def test_missing_second_via_detected(self):
+        """Missing via in multi-transition route is detected."""
+        optimizer = ViaOptimizer()
+
+        # Route: F.Cu -> B.Cu -> F.Cu but only first via present
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        # Missing via2 at (10, 0)
+        seg3 = Segment(x1=10, y1=0, x2=15, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 1
+        assert errors[0].point == (10.0, 0.0)
+
+
+class TestOptimizationWithValidation:
+    """Test that optimization validates and restores on failure."""
+
+    def test_optimization_preserves_valid_route(self):
+        """Valid optimization results are kept."""
+        optimizer = ViaOptimizer()
+
+        # Simple route with via that can't be optimized (no alternative path)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        result = optimizer.optimize_route(route)
+
+        # Verify route is still valid after optimization
+        errors = optimizer.validate_layer_connectivity(result)
+        assert len(errors) == 0
+
+    def test_stats_updated_correctly_on_valid_optimization(self):
+        """Stats are correct when optimization is applied."""
+        optimizer = ViaOptimizer()
+        optimizer.reset_stats()
+
+        # Simple route that stays valid
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        optimizer.optimize_route(route)
+
+        stats = optimizer.get_stats()
+        assert stats.vias_before == 1
+        # Via count after depends on whether optimization was applied
+        assert stats.vias_after >= 0
+
+
+class TestViaConnectivityPreservation:
+    """Test that via minimization preserves multi-layer pad connectivity."""
+
+    def test_required_via_not_removed_when_pads_on_both_layers(self):
+        """A via connecting pads on F.Cu and B.Cu must not be removed.
+
+        Scenario: pad on F.Cu at (0,0) -- seg F.Cu --> via at (5,0) -- seg B.Cu --> pad on B.Cu at (10,0).
+        The via is the only connection between layers; removing it disconnects
+        the B.Cu pad.  The optimizer must keep it.
+        """
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        result = optimizer.optimize_route(route)
+
+        # The via MUST be retained -- removing it would disconnect the B.Cu pad.
+        assert len(result.vias) == 1, "Required via was removed, breaking layer connectivity"
+
+    def test_redundant_via_still_removed_when_pads_on_same_layer(self):
+        """A via between same-layer pads is redundant and should be removed.
+
+        Scenario: pad on F.Cu at (0,0) -- seg F.Cu --> via at (1,0) -- seg B.Cu --> via at (2,0) -- seg F.Cu --> pad at (3,0).
+        The down-up via pair is redundant because both endpoints are on F.Cu.
+        Vias are placed within the via_pair_threshold (2.0 mm).
+        """
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=1, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=1, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=1, y1=0, x2=2, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=2, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=2, y1=0, x2=3, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1, via2])
+        result = optimizer.optimize_route(route)
+
+        # Both vias should be removable (via pair elimination).
+        assert len(result.vias) < 2, "Redundant via pair was not removed"
+
+    def test_partial_via_removal_with_three_vias(self):
+        """In a route with 3 vias, only redundant ones should be removed.
+
+        Scenario: F.Cu pad -> via1(F->B) -> B.Cu segment -> via2(B->F) -> F.Cu segment -> via3(F->B) -> B.Cu pad.
+        via1+via2 form a redundant pair (down-up), but via3 is required for
+        the B.Cu pad.  Only via1+via2 should be removed.
+        """
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=2, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=2, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=2, y1=0, x2=4, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=4, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=4, y1=0, x2=8, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via3 = Via(x=8, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg4 = Segment(x1=8, y1=0, x2=12, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(
+            net=1,
+            net_name="Net1",
+            segments=[seg1, seg2, seg3, seg4],
+            vias=[via1, via2, via3],
+        )
+        result = optimizer.optimize_route(route)
+
+        # via3 must be kept (connects to B.Cu pad at (12,0))
+        assert len(result.vias) >= 1, "All vias removed -- B.Cu pad disconnected"
+
+        # Check layer connectivity is valid
+        errors = optimizer.validate_layer_connectivity(result)
+        assert len(errors) == 0, f"Layer connectivity errors: {errors}"
+
+
+class TestEndpointsPreservedAfterViaMinimization:
+    """Test that _endpoints_preserved guard in TraceOptimizer catches via-induced disconnects."""
+
+    def test_trace_optimizer_preserves_multi_layer_connectivity(self):
+        """TraceOptimizer.optimize_route must not break multi-layer pad connectivity.
+
+        This is the end-to-end test through TraceOptimizer, verifying that
+        the _endpoints_preserved guard runs after via minimization.
+        """
+        config = OptimizationConfig(minimize_vias=True)
+        optimizer = TraceOptimizer(config=config)
+
+        # Pad on F.Cu at (0,0), pad on B.Cu at (10,0), connected by via at (5,0)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        result = optimizer.optimize_route(route)
+
+        # The via must remain -- the B.Cu pad would be disconnected without it
+        assert len(result.vias) >= 1, (
+            "TraceOptimizer removed required via, breaking layer connectivity"
+        )
+
+
+class TestViaRemovalKeepsPadAndZoneTies:
+    """Issue #8215: via removal must not strand pad or pour connections."""
+
+    @staticmethod
+    def _stub_route():
+        # F.Cu trace -> via at (5,0) -> short B.Cu stub ending at a zone-tied via.
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=6, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=6, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=6, y1=0, x2=11, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        return Route(net=1, net_name="GND", segments=[seg1, seg2, seg3], vias=[via, via2])
+
+    def test_pair_removed_without_context(self):
+        result = ViaOptimizer().optimize_route(self._stub_route())
+        assert len(result.vias) == 0
+
+    def test_zone_tied_via_retained(self):
+        opt = ViaOptimizer()
+        opt.set_connection_context(zone_layers_by_net={1: {Layer.B_CU}})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 2
+
+    def test_pad_anchor_on_other_layer_retained(self):
+        opt = ViaOptimizer()
+        opt.set_connection_context(anchors_by_net={1: [(6.0, 0.0, (Layer.B_CU,))]})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 2
+
+    def test_unrelated_same_net_pad_does_not_block_removal(self):
+        opt = ViaOptimizer()
+        opt.set_connection_context(anchors_by_net={1: [(50.0, 50.0, (Layer.F_CU,))]})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 0
+
+    def test_tht_anchor_with_copper_on_one_layer_does_not_block_removal(self):
+        opt = ViaOptimizer()
+        # THT pad at the route end: F.Cu has copper there, B.Cu does not.
+        opt.set_connection_context(anchors_by_net={1: [(11.0, 0.0, (Layer.F_CU, Layer.B_CU))]})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 0
+
+    @pytest.mark.parametrize("zone_layer", [Layer.IN1_CU, Layer.IN2_CU])
+    def test_inner_plane_pour_retains_through_vias(self, zone_layer):
+        # A router via is a through via: its barrel touches every inner plane.
+        opt = ViaOptimizer()
+        opt.set_connection_context(zone_layers_by_net={1: {zone_layer}})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 2
+
+    def test_micro_via_span_short_of_pour_does_not_block_removal(self):
+        route = self._stub_route()
+        route.segments[1].layer = Layer.IN1_CU
+        route.vias[0].layers = (Layer.F_CU, Layer.IN1_CU)
+        route.vias[1].layers = (Layer.IN1_CU, Layer.F_CU)
+        for v in route.vias:
+            v.is_micro = True
+        opt = ViaOptimizer()
+        opt.set_connection_context(zone_layers_by_net={1: {Layer.B_CU}})
+        result = opt.optimize_route(route)
+        assert len(result.vias) == 0

@@ -1,0 +1,2569 @@
+"""
+Pre-flight validation checklist for manufacturing export.
+
+Validates PCB design readiness before generating manufacturing packages.
+Each check returns OK/WARN/FAIL status. Any FAIL blocks the export.
+
+Example::
+
+    checker = PreflightChecker(
+        pcb_path="board.kicad_pcb",
+        schematic_path="board.kicad_sch",
+        manufacturer="jlcpcb",
+    )
+    results = checker.run_all()
+    for r in results:
+        print(f"[{r.status}] {r.name}: {r.message}")
+
+    if checker.has_failures(results):
+        print("Export blocked!")
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+from .pnp import _ref_sort_key, is_through_hole_footprint
+
+if TYPE_CHECKING:
+    from ..drc.violation import DRCViolation
+    from ..manufacturers.base import AssemblyCapabilities, ManufacturerProfile
+    from ..schema.pcb import PCB
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PreflightResult:
+    """Result of a single pre-flight check."""
+
+    name: str
+    status: Literal["OK", "WARN", "FAIL"]
+    message: str
+    details: str = ""
+    # Optional machine-readable record (Issue #8807): ``bom_lcsc_stock`` stores
+    # its per-part observations so a later ``--verify`` can re-evaluate them.
+    data: dict | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        d: dict = {
+            "name": self.name,
+            "status": self.status,
+            "message": self.message,
+        }
+        if self.details:
+            d["details"] = self.details
+        if self.data is not None:
+            d["data"] = self.data
+        return d
+
+
+def _describe_drc_finding(v: DRCViolation) -> str:
+    """One-line description of a DRC finding for preflight ``details``.
+
+    KiCad's ``unconnected_items`` description is a generic "Missing
+    connection between items", so opens also name the items they join.
+    """
+    from ..drc.violation import ViolationType
+
+    text = f"{v.type_str}: {v.message}"
+    if v.type == ViolationType.UNCONNECTED_ITEMS and v.items:
+        text += f" ({' / '.join(v.items[:2])})"
+    return text
+
+
+def report_source_mismatch(
+    recorded_source: str | None,
+    target: Path | str | None,
+    *,
+    require_suffix: str | None = None,
+) -> str | None:
+    """Return the report's recorded source basename when it names another file.
+
+    A DRC/ERC report records which board/schematic it was generated for
+    (kicad-cli ``source``, kct-check ``file``, the text-report header).  A
+    report generated for a *different* file -- e.g. the ``*_routed.kicad_pcb``
+    sibling's ``drc_report.json`` sitting next to the unrouted board -- is no
+    evidence about the file being exported (issue #7091).
+
+    Only basenames are compared: recorded sources may be absolute paths from
+    another host or cwd-relative (#6532), and may use either path separator.
+
+    Args:
+        recorded_source: The source path recorded inside the report.
+        target: The file the caller is checking (PCB or schematic).
+        require_suffix: When given, only compare if the recorded source ends
+            with this suffix (case-insensitive).  ``ERCReport.source_file``
+            falls back to the report's *own* path when the JSON has no
+            ``source``, so the ERC caller passes ``".kicad_sch"`` to avoid
+            mistaking that fallback for a recorded source.
+
+    Returns:
+        The recorded source's basename when it differs from ``target``'s,
+        else ``None`` (match, no recorded source, or nothing to compare).
+    """
+    if not recorded_source or target is None:
+        return None
+    recorded_name = re.split(r"[\\/]", recorded_source.strip())[-1]
+    if not recorded_name:
+        return None
+    if require_suffix is not None and not recorded_name.lower().endswith(require_suffix.lower()):
+        return None
+    target_name = Path(target).name
+    if recorded_name == target_name:
+        return None
+    return recorded_name
+
+
+# Relative tolerance: JLCPCB publishes finished 0.5 oz inner copper as 0.0152 mm
+# (0.434 oz at 0.035 mm/oz), https://jlcpcb.com/impedance.  15% still keeps
+# 0.5 / 1 / 2 oz distinct.
+_COPPER_OZ_REL_TOL = 0.15
+
+
+def _oz_close(a: float, b: float) -> bool:
+    return abs(a - b) <= _COPPER_OZ_REL_TOL * b
+
+
+def _fmt_oz(oz: float | None) -> str:
+    return "n/a" if oz is None else f"{oz:g} oz"
+
+
+def resolve_ordered_copper(pcb: PCB, manufacturer: str) -> dict:
+    """Compare the board's declared stackup copper with what the fab provides.
+
+    Issue #7209: the ampacity gate reads copper weight from the board stackup,
+    while the order is built from the fab profile.  This reconciles the two.
+
+    Returns a dict with ``layers``, ``stackup_outer_oz`` / ``stackup_inner_oz``
+    (``None`` when the board declares no usable stackup), ``profile_options``
+    (list of ``[outer, inner]`` the fab offers for this layer count),
+    ``ordered_outer_oz`` / ``ordered_inner_oz`` (the matched option, else
+    ``None``) and ``status``: ``match`` | ``mismatch`` | ``undeclared`` |
+    ``unknown``.  Never raises.
+    """
+    info: dict = {
+        "layers": None,
+        "stackup_outer_oz": None,
+        "stackup_inner_oz": None,
+        "profile_options": [],
+        "ordered_outer_oz": None,
+        "ordered_inner_oz": None,
+        "status": "unknown",
+    }
+    try:
+        from ..manufacturers import get_profile
+        from ..physics.stackup import Stackup
+
+        layers = len(pcb.copper_layers)
+        info["layers"] = layers
+        profile = get_profile(manufacturer)
+        options = profile.copper_options(layers)
+        info["profile_options"] = [list(o) for o in options]
+        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+    except Exception as e:  # noqa: BLE001 - preflight must not crash on a stackup quirk
+        logger.debug("Could not resolve stackup copper: %s", e)
+        return info
+
+    if not options:
+        return info  # profile has no entry for this layer count: nothing to compare
+    if derived is None or (derived[0] is None and derived[1] is None):
+        # Profile default applies: the first entry is what gets ordered.
+        info["ordered_outer_oz"], info["ordered_inner_oz"] = options[0]
+        info["status"] = "undeclared"
+        return info
+
+    outer, inner = derived
+    info["stackup_outer_oz"], info["stackup_inner_oz"] = outer, inner
+    for opt_outer, opt_inner in options:
+        outer_ok = outer is None or _oz_close(outer, opt_outer)
+        # opt_inner == 0 means the profile entry has no inner layers (2-layer).
+        inner_ok = inner is None or opt_inner <= 0 or _oz_close(inner, opt_inner)
+        if outer_ok and inner_ok:
+            info["ordered_outer_oz"], info["ordered_inner_oz"] = opt_outer, opt_inner
+            info["status"] = "match"
+            return info
+    info["status"] = "mismatch"
+    return info
+
+
+# ---------------------------------------------------------------------------
+# Assembly package/pitch parsing (Issue #7204)
+# ---------------------------------------------------------------------------
+
+# KiCad chip lib ids carry imperial and metric codes: ``R_0402_1005Metric``.
+# The imperial code is 4-6 digits so ``R_008004_0201Metric`` (008004) parses.
+_CHIP_METRIC_RE = re.compile(r"_(\d{4,6})_(\d{4})Metric", re.IGNORECASE)
+# Pitch token in KiCad lib ids: ``LQFP-48_7x7mm_P0.5mm``.
+_PITCH_RE = re.compile(r"_P(\d+(?:\.\d+)?)mm", re.IGNORECASE)
+# BGA-style packages: BGA, WLCSP and bare CSP tokens (``CSP-BGA``).  LFCSP is a
+# leadframe (QFN-like) package, so a CSP preceded by a letter does not match.
+_BGA_RE = re.compile(r"BGA|WLCSP|(?<![A-Za-z])CSP", re.IGNORECASE)
+
+# Imperial chip code -> body length in mm (the leading digits of the metric
+# code: 0402 imperial == 1005 metric == 1.0 mm long).
+_IMPERIAL_CHIP_LENGTH_MM = {
+    "01005": 0.4,
+    "0201": 0.6,
+    "0402": 1.0,
+    "0603": 1.6,
+    "0805": 2.0,
+    "1206": 3.2,
+    "1210": 3.2,
+    "2010": 5.0,
+    "2512": 6.3,
+}
+_PITCH_EPS = 1e-6
+# Pitch comparisons allow 0.01 mm: lib-id pitches are nominal metric values
+# and some fabs quote limits in mil (FlashPCB's "20 mil" = 0.508 mm is meant
+# to admit 0.5 mm-pitch QFPs), so a sub-0.01 mm gap is a unit-rounding
+# artefact, not a capability difference.
+_PITCH_TOLERANCE_MM = 0.01
+
+
+@dataclass(frozen=True)
+class _AssemblyRequirement:
+    """One placement constraint a CPL part puts on the assembly service."""
+
+    reference: str
+    kind: Literal["package", "ic_pitch", "bga_pitch"]
+    value: float  # chip body length (package) or pitch, in mm
+    label: str  # e.g. "0201" or "0.35 mm"
+    measured: bool = False  # pitch measured from pads, not read from lib id
+
+    def fits(self, tier: AssemblyCapabilities) -> bool:
+        if self.kind == "package":
+            if not tier.min_package:
+                return True
+            min_len = _IMPERIAL_CHIP_LENGTH_MM.get(tier.min_package)
+            return min_len is None or self.value >= min_len - _PITCH_EPS
+        if self.kind == "bga_pitch":
+            return (
+                bool(tier.supports_bga)
+                and self.value >= tier.min_bga_pitch_mm - _PITCH_TOLERANCE_MM
+            )
+        return self.value >= tier.min_component_pitch_mm - _PITCH_TOLERANCE_MM
+
+    def describe(self) -> str:
+        what = {"package": "package", "ic_pitch": "pin pitch", "bga_pitch": "BGA pitch"}
+        text = f"{self.reference} {what[self.kind]} {self.label}"
+        return text + " (measured)" if self.measured else text
+
+
+def _measured_pitch_mm(pads) -> float | None:
+    """Minimum centre spacing between same-size copper SMD pads.
+
+    Fallback for lib ids without a ``_P<pitch>mm`` token.  Stacked/coincident
+    pads (< 0.05 mm apart) and paste-only apertures are ignored.  Returns
+    ``None`` for parts with fewer than 4 such pads (chips, SOT-23).
+    """
+    copper = [
+        p
+        for p in pads
+        if getattr(p, "type", "") == "smd"
+        and any(str(layer).endswith(".Cu") for layer in (getattr(p, "layers", None) or ()))
+    ]
+    if len(copper) < 4:
+        return None
+    best: float | None = None
+    for i, a in enumerate(copper):
+        for b in copper[i + 1 :]:
+            if (round(a.size[0], 3), round(a.size[1], 3)) != (
+                round(b.size[0], 3),
+                round(b.size[1], 3),
+            ) and (round(a.size[0], 3), round(a.size[1], 3)) != (
+                round(b.size[1], 3),
+                round(b.size[0], 3),
+            ):
+                continue
+            d = ((a.position[0] - b.position[0]) ** 2 + (a.position[1] - b.position[1]) ** 2) ** 0.5
+            if d < 0.05:
+                continue
+            if best is None or d < best:
+                best = d
+    return best
+
+
+def _requirements_for_footprint(reference: str, lib_id: str, pads) -> list[_AssemblyRequirement]:
+    """Derive package/pitch requirements from a footprint's lib id (or pads)."""
+    reqs: list[_AssemblyRequirement] = []
+    fp_name = lib_id.split(":", 1)[-1]
+    chip = _CHIP_METRIC_RE.search(fp_name)
+    if chip:
+        imperial, metric = chip.group(1), chip.group(2)
+        reqs.append(_AssemblyRequirement(reference, "package", int(metric[:2]) / 10.0, imperial))
+        return reqs
+
+    is_bga = bool(_BGA_RE.search(fp_name))
+    # The "minimum IC pin spacing" limit is about ICs: connector libraries
+    # (FFC/FPC, headers) are not judged against it.
+    is_connector = lib_id.lower().startswith("connector")
+    if is_connector and not is_bga:
+        return reqs
+    kind: Literal["ic_pitch", "bga_pitch"] = "bga_pitch" if is_bga else "ic_pitch"
+    pitch_match = _PITCH_RE.search(fp_name)
+    if pitch_match:
+        pitch = float(pitch_match.group(1))
+        reqs.append(_AssemblyRequirement(reference, kind, pitch, f"{pitch:g} mm"))
+        return reqs
+    measured = _measured_pitch_mm(pads)
+    if measured is not None:
+        reqs.append(
+            _AssemblyRequirement(reference, kind, measured, f"{measured:.2f} mm", measured=True)
+        )
+    return reqs
+
+
+@dataclass
+class PreflightConfig:
+    """Configuration for which pre-flight checks to run."""
+
+    skip_all: bool = False
+    skip_drc: bool = False
+    skip_erc: bool = False
+
+    # When True, disables the connectivity safety floor -- the hard abort on
+    # net shorts / connectivity errors read from a pre-existing DRC report
+    # that fires even when ``skip_all`` is set.  This is an explicit escape
+    # hatch for extraordinary, known-safe workarounds; it should almost never
+    # be used because shipping a shorted board is not safe.  See
+    # ``ManufacturingPackage._check_drc_safety_floor``.
+    skip_drc_floor: bool = False
+
+    # Paths to pre-existing report files (avoids re-running kicad-cli)
+    drc_report_path: str | Path | None = None
+    erc_report_path: str | Path | None = None
+
+    # When True, a DRC/ERC report recorded for a different PCB/schematic is a
+    # FAIL instead of a WARN (issue #7091).  ``ManufacturingPackage`` sets this
+    # from ``strict_preflight`` so strict exports never ship on a verdict that
+    # was computed for another board.
+    strict_report_source: bool = False
+
+    # PCBA service tier the package/pitch limits are judged against (Issue
+    # #7204): ``"auto"`` (default) judges against the fab's cheapest tier and
+    # reports the cheapest tier the board fits; a tier name (``"economic"``,
+    # ``"standard"``; matched case-insensitively against the tier's leading
+    # word) judges against that tier.  Fabs without published tiers ignore it.
+    assembly_tier: str = "auto"
+
+    # Boards ordered, for the ``bom_lcsc_stock`` check (Issue #8121): each
+    # assigned LCSC part needs ``placements per board x order_boards`` in
+    # stock.  Defaults to JLCPCB's minimum PCBA order.
+    order_boards: int = 5
+
+    # LCSC catalog ids the operator holds in their own parts inventory
+    # (Issue #8807).  Upper-case; excluded from the stock shortfall verdict and
+    # listed as "held in operator inventory, not stock-verified".  Explicit
+    # only: never inferred.
+    inventory_covered: frozenset[str] = frozenset()
+
+
+def parse_inventory_covered(raw: str | Iterable[str] | None) -> frozenset[str]:
+    """Parse ``--inventory-covered`` ids: comma-separated, upper-cased, blanks dropped."""
+    if raw is None:
+        return frozenset()
+    parts = (
+        raw.split(",") if isinstance(raw, str) else [p for chunk in raw for p in chunk.split(",")]
+    )
+    return frozenset(p.strip().upper() for p in parts if p.strip())
+
+
+def _describe_stock_record(rec: dict, boards: int) -> str:
+    needed = int(rec["per_board"]) * boards
+    if rec.get("verified"):
+        when = "live"
+    else:
+        age = rec.get("age_days")
+        when = f"unverified {rec.get('source', 'unknown')}" + (
+            f", {age}d old" if age is not None else ""
+        )
+    return f"needs {needed}, stock {rec['stock']} ({when})"
+
+
+def evaluate_lcsc_stock(
+    data: dict, boards: int, covered: frozenset[str], strict: bool
+) -> PreflightResult:
+    """Judge recorded per-part stock observations (Issue #8807).
+
+    The one verdict function behind both ``kct export``/``readiness --generate``
+    (via ``_check_bom_lcsc_stock``) and ``readiness --verify`` (which re-runs it
+    on the manifest's recorded ``data``), so a shortfall reads identically in
+    both.  ``data`` holds ``parts`` (resolved LCSC ids with ``refs``,
+    ``per_board``, ``stock``, ``verified``, ``source``, ``age_days``) and
+    ``unresolved`` (ids in neither the cache nor the catalog).
+    """
+    name = "bom_lcsc_stock"
+    boards = max(1, int(boards))
+    parts = sorted(data.get("parts", []), key=lambda r: r["lcsc"])
+    unresolved = sorted(data.get("unresolved", []))
+    covered = frozenset(c.upper() for c in covered)
+    in_bom = {r["lcsc"] for r in parts} | set(unresolved)
+
+    live_short: list[str] = []
+    soft_short: list[str] = []
+    held: list[str] = []
+    not_short: list[str] = []
+    for rec in parts:
+        is_short = rec["stock"] < int(rec["per_board"]) * boards
+        if rec["lcsc"] in covered:
+            if is_short:
+                held.append(rec["lcsc"])
+            else:
+                not_short.append(rec["lcsc"])
+            continue
+        if not is_short:
+            continue
+        refs = sorted(rec["refs"])
+        shown = ",".join(refs[:3]) + ("..." if len(refs) > 3 else "")
+        entry = f"{shown} -> {rec['lcsc']}: {_describe_stock_record(rec, boards)}"
+        (live_short if rec.get("verified") else soft_short).append(entry)
+    held.extend(u for u in unresolved if u in covered)
+    unused = sorted(covered - in_bom)
+
+    def _fmt(entries: list[str]) -> str:
+        suffix = f" (and {len(entries) - 5} more)" if len(entries) > 5 else ""
+        return "; ".join(entries[:5]) + suffix
+
+    notes: list[str] = []
+    if held:
+        notes.append("held in operator inventory, not stock-verified: " + ", ".join(sorted(held)))
+    if not_short:
+        notes.append(
+            "inventory-covered but not short (stale --inventory-covered entry): "
+            + ", ".join(sorted(not_short))
+        )
+    if unused:
+        notes.append("inventory-covered but not in the BOM: " + ", ".join(unused))
+    note_text = "; ".join(notes)
+    stale = bool(not_short or unused)
+
+    def _result(
+        status: Literal["OK", "WARN", "FAIL"], message: str, details: str
+    ) -> PreflightResult:
+        if note_text:
+            details = f"{details}; {note_text}" if details else note_text
+        return PreflightResult(
+            name=name, status=status, message=message, details=details, data=data
+        )
+
+    order = f"{boards} board(s)"
+    if live_short:
+        return _result(
+            "FAIL",
+            f"{len(live_short)} LCSC part(s) lack live stock for {order}"
+            + (f"; {len(soft_short)} more short on unverified stock" if soft_short else ""),
+            _fmt(live_short + soft_short),
+        )
+    if soft_short:
+        return _result(
+            "FAIL" if strict else "WARN",
+            f"{len(soft_short)} LCSC part(s) show insufficient stock for {order} "
+            f"on unverified data (stale cache/offline catalog)"
+            + (" (strict preflight)" if strict else ""),
+            _fmt(soft_short),
+        )
+    checked = len(parts)
+    uncovered_unresolved = [u for u in unresolved if u not in covered]
+    if checked == 0 and uncovered_unresolved:
+        return _result(
+            "FAIL" if strict else "WARN",
+            f"Stock not verified: {len(uncovered_unresolved)} assigned LCSC number(s) found in "
+            f"neither the parts cache nor the offline catalog"
+            + (" (strict preflight)" if strict else ""),
+            ", ".join(uncovered_unresolved[:10]),
+        )
+    return _result(
+        "WARN" if stale else "OK",
+        f"{checked} LCSC part(s) have recorded stock for {order}"
+        + (f"; {len(held)} held in operator inventory" if held else ""),
+        "",
+    )
+
+
+class PreflightChecker:
+    """
+    Run pre-flight validation checks before manufacturing export.
+
+    Validates PCB file integrity, schematic availability, board outline,
+    component footprints, BOM fields, DRC status, and board dimensions.
+
+    Example::
+
+        checker = PreflightChecker(
+            pcb_path="board.kicad_pcb",
+            schematic_path="board.kicad_sch",
+            manufacturer="jlcpcb",
+        )
+        results = checker.run_all()
+        if checker.has_failures(results):
+            print("Cannot proceed with export")
+    """
+
+    # Fab *families* whose standard assembly service is SMT-only.
+    #
+    # Compared against ``self._fab_family`` (NOT the raw ``--mfr`` value):
+    # capability tiers such as ``jlcpcb-tier1`` share the parent fab's
+    # assembly service and CPL format, so they must inherit the parent's
+    # THT policy.  See ``get_fab_family()`` and issue #3497.
+    #
+    # Currently empty: JLCPCB's assembly capability page lists
+    # "(SMT/Thru-hole)" for both its Economic and Standard PCBA tiers
+    # (https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+    # 2026-10-18), so JLCPCB CPLs include THT parts (issue #7239).  Add a fab
+    # family here to make it auto-exclude THT again.
+    _SMT_ONLY_MANUFACTURERS: set[str] = set()
+
+    @classmethod
+    def fab_excludes_tht(cls, manufacturer: str) -> bool:
+        """True when *manufacturer*'s fab family auto-excludes THT from the CPL.
+
+        Public read of the SMT-only fab-family set, so callers outside
+        preflight (e.g. ``kct readiness``) share this single source of truth
+        without reaching into the private attribute.  Capability tiers
+        resolve to their parent fab family (``jlcpcb-tier1`` -> ``jlcpcb``).
+        """
+        from ..manufacturers import get_fab_family
+
+        return get_fab_family(manufacturer.lower()) in cls._SMT_ONLY_MANUFACTURERS
+
+    def __init__(
+        self,
+        pcb_path: str | Path,
+        schematic_path: str | Path | None = None,
+        manufacturer: str = "jlcpcb",
+        output_dir: str | Path | None = None,
+        config: PreflightConfig | None = None,
+        exclude_tht: bool | None = None,
+        bom_source: str = "schematic",
+        parts_cache=None,
+        parts_catalog=None,
+        merge_lcsc: bool = True,
+        merge_lcsc_from: str | Path | None = None,
+    ):
+        self.pcb_path = Path(pcb_path)
+        # LCSC merge source, mirroring AssemblyConfig (issue #8260).
+        self._merge_lcsc = merge_lcsc
+        self._merge_lcsc_from = Path(merge_lcsc_from) if merge_lcsc_from else None
+        self.schematic_path = Path(schematic_path) if schematic_path else None
+        self.manufacturer = manufacturer.lower()
+        self.output_dir = Path(output_dir) if output_dir else None
+        self.config = config or PreflightConfig()
+        self._bom_source = bom_source
+        # Optional injected PartsCache for LCSC value validation
+        # (default: lazily constructed in _check_bom_lcsc_values).
+        self._parts_cache = parts_cache
+        # Optional injected JlcpartsCatalog (offline fallback for parts the
+        # cache does not know, issue #7166).  Default: the catalog file that
+        # sits beside the parts cache's ``parts.db``.
+        self._parts_catalog = parts_catalog
+
+        # Resolve the fab *family* once.  Export-format concerns (BOM/CPL
+        # formatters, THT policy) are properties of the physical fab, not of
+        # a capability tier: ``jlcpcb-tier1`` -> ``jlcpcb``.  The CPL writer
+        # already resolves the family (``assembly.py`` -> ``get_fab_family``),
+        # so preflight must use the same key or its THT predictions desync
+        # from the file that actually ships (issue #4591).  DRC limits keep
+        # using the *full* manufacturer ID -- see ``_get_manufacturer_limits``.
+        try:
+            from ..manufacturers import get_fab_family
+
+            self._fab_family = get_fab_family(self.manufacturer)
+        except Exception:  # pragma: no cover - defensive; resolver is pure
+            self._fab_family = self.manufacturer
+
+        # Determine THT exclusion: explicit override, or default per fab family
+        if exclude_tht is not None:
+            self._exclude_tht = exclude_tht
+        else:
+            self._exclude_tht = self._fab_family in self._SMT_ONLY_MANUFACTURERS
+
+        # Lazy-loaded objects
+        self._pcb = None
+        self._bom = None
+        self._assembly_profile_cache: ManufacturerProfile | None = None
+        self._assembly_profile_resolved = False
+
+    def run_all(self) -> list[PreflightResult]:
+        """Run all applicable pre-flight checks.
+
+        Returns:
+            List of PreflightResult, one per check.
+        """
+        if self.config.skip_all:
+            return []
+
+        results: list[PreflightResult] = []
+
+        # Always check PCB file first -- most other checks depend on it
+        results.append(self._check_pcb_parseable())
+
+        # Schematic check (needed for BOM/CPL)
+        results.append(self._check_schematic_exists())
+
+        # Schematic footprint completeness (fail-loud before export).
+        # A footprint-less schematic symbol can never be placed/assembled,
+        # so this is a hard gate (issue #3866).
+        if self.schematic_path and self.schematic_path.exists():
+            results.append(self._check_schematic_footprints())
+
+        # Board outline
+        if self._pcb is not None:
+            results.append(self._check_board_outline_closed())
+            results.append(self._check_footprints_present())
+            results.append(self._check_board_dimensions())
+            results.append(self._check_drill_holes())
+            results.append(self._check_stackup_copper())
+
+        # THT-in-CPL warning
+        if self._pcb is not None:
+            results.append(self._check_tht_in_cpl())
+
+        # Assembly-capability checks against the fab's PCBA service tier(s)
+        # (Issue #7204).  Skipped entirely for PCB-only fabs (no assembly).
+        if self._pcb is not None and self._assembly_tiers():
+            results.append(self._check_bottom_side_in_cpl())
+            results.append(self._check_assembly_package_limits())
+
+        # BOM checks: run if schematic is available OR bom_source is "pcb"/"auto"
+        can_load_bom = (
+            self.schematic_path and self.schematic_path.exists()
+        ) or self._bom_source in ("pcb", "auto")
+        if can_load_bom:
+            results.append(self._check_bom_fields())
+            results.append(self._check_bom_lcsc_values())
+            results.append(self._check_bom_lcsc_stock())
+            results.append(self._check_bom_footprint_match())
+            if self._pcb is not None:
+                results.append(self._check_bom_cpl_match())
+
+        # DRC check
+        if not self.config.skip_drc:
+            results.append(self._check_drc())
+
+        # ERC check
+        if not self.config.skip_erc:
+            results.append(self._check_erc())
+
+        return results
+
+    @staticmethod
+    def has_failures(results: list[PreflightResult]) -> bool:
+        """Check if any result is a FAIL."""
+        return any(r.status == "FAIL" for r in results)
+
+    @staticmethod
+    def has_warnings(results: list[PreflightResult]) -> bool:
+        """Check if any result is a WARN."""
+        return any(r.status == "WARN" for r in results)
+
+    # ------------------------------------------------------------------
+    # Individual checks
+    # ------------------------------------------------------------------
+
+    def _check_pcb_parseable(self) -> PreflightResult:
+        """Verify the PCB file exists and can be parsed."""
+        if not self.pcb_path.exists():
+            return PreflightResult(
+                name="pcb_file",
+                status="FAIL",
+                message=f"PCB file not found: {self.pcb_path}",
+            )
+
+        try:
+            from ..schema.pcb import PCB
+
+            self._pcb = PCB.load(str(self.pcb_path))
+            return PreflightResult(
+                name="pcb_file",
+                status="OK",
+                message="PCB file parsed successfully",
+                details=f"Footprints: {self._pcb.footprint_count}",
+            )
+        except Exception as e:
+            return PreflightResult(
+                name="pcb_file",
+                status="FAIL",
+                message=f"PCB file could not be parsed: {e}",
+            )
+
+    def _check_schematic_exists(self) -> PreflightResult:
+        """Check that the schematic file exists (needed for BOM/CPL).
+
+        When ``bom_source`` is ``"pcb"``, the schematic is not required
+        for BOM generation, so a missing schematic is downgraded to an
+        informational OK status instead of WARN.
+        """
+        if self.schematic_path is None:
+            # Try auto-detection using shared find_schematic logic
+            from kicad_tools.report.utils import find_schematic
+
+            auto_sch = find_schematic(self.pcb_path)
+            if auto_sch is not None:
+                self.schematic_path = auto_sch
+                return PreflightResult(
+                    name="schematic_file",
+                    status="OK",
+                    message=f"Schematic auto-detected: {auto_sch.name}",
+                )
+            if self._bom_source == "pcb":
+                return PreflightResult(
+                    name="schematic_file",
+                    status="OK",
+                    message="No schematic file (BOM sourced from PCB footprints)",
+                )
+            return PreflightResult(
+                name="schematic_file",
+                status="WARN",
+                message="No schematic file specified or auto-detected; BOM/CPL generation may fail",
+            )
+
+        if not self.schematic_path.exists():
+            if self._bom_source == "pcb":
+                return PreflightResult(
+                    name="schematic_file",
+                    status="OK",
+                    message=f"Schematic not found: {self.schematic_path.name} (BOM sourced from PCB footprints)",
+                )
+            return PreflightResult(
+                name="schematic_file",
+                status="WARN",
+                message=f"Schematic file not found: {self.schematic_path}",
+                details="BOM and CPL generation will be skipped",
+            )
+
+        return PreflightResult(
+            name="schematic_file",
+            status="OK",
+            message=f"Schematic file found: {self.schematic_path.name}",
+        )
+
+    def _check_schematic_footprints(self) -> PreflightResult:
+        """Fail loud when a component is genuinely missing a footprint.
+
+        Walks the schematic hierarchy via the shared
+        ``iter_missing_footprint_symbols`` predicate (same power/DNP skip
+        rules as ``sch validate``) to find symbols with a blank or ``~``
+        schematic Footprint field, then **reconciles each one against the
+        routed PCB**.
+
+        Unlike the pure-schematic ``sch validate`` gate (which has no PCB
+        to consult), this is an *export* gate running on a routed PCB that
+        is about to be manufactured. A blank schematic Footprint field is
+        only a real, export-blocking defect when the component will not be
+        built — i.e. it is absent from the PCB, or present on the PCB but
+        itself missing a footprint. A schematic-blank field whose component
+        IS placed on the PCB with a concrete footprint is manufacturable
+        and must NOT block export (e.g. generators that build the PCB with
+        footprints but never write them back into the schematic — see
+        board-05 and #3869). Without this reconciliation, a footprint-less
+        symbol could silently drop out of the PCB and its nets never route
+        (issue #3866).
+        """
+        if self.schematic_path is None:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="OK",
+                message="No schematic to check for missing footprints",
+            )
+
+        try:
+            from kicad_tools.cli.sch_footprint_common import (
+                iter_missing_footprint_symbols,
+            )
+
+            sch_missing = [
+                sym for _node, sym, _sch in iter_missing_footprint_symbols(self.schematic_path)
+            ]
+        except Exception as e:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="WARN",
+                message=f"Could not check schematic footprints: {e}",
+            )
+
+        if not sch_missing:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="OK",
+                message="All schematic symbols have a footprint assigned",
+            )
+
+        # Reconcile against the PCB: a schematic-blank footprint is only an
+        # export blocker when the component is not actually built. Map each
+        # PCB footprint reference to whether it carries a concrete library
+        # footprint name.
+        pcb_fp_has_name: dict[str, bool] = {}
+        if self._pcb is not None:
+            for fp in self._pcb.footprints:
+                ref = (getattr(fp, "reference", "") or "").strip()
+                if not ref:
+                    continue
+                has_name = bool((getattr(fp, "name", "") or "").strip())
+                # A reference appearing more than once is footprinted if any
+                # instance carries a name.
+                pcb_fp_has_name[ref] = pcb_fp_has_name.get(ref, False) or has_name
+
+        genuinely_missing: list[str] = []
+        reconciled: list[str] = []
+        for sym in sch_missing:
+            ref = (getattr(sym, "reference", "") or "").strip()
+            label = ref or (getattr(sym, "lib_id", "") or "")
+            if self._pcb is None:
+                # No PCB to reconcile against -- fall back to the
+                # schematic-only judgement (fail loud).
+                genuinely_missing.append(label)
+                continue
+            if ref and pcb_fp_has_name.get(ref):
+                # Placed on the PCB with a footprint -> manufacturable.
+                reconciled.append(label)
+            else:
+                # Absent from the PCB, or on the PCB without a footprint.
+                genuinely_missing.append(label)
+
+        if genuinely_missing:
+            refs = ", ".join(genuinely_missing[:10])
+            suffix = (
+                f" (and {len(genuinely_missing) - 10} more)" if len(genuinely_missing) > 10 else ""
+            )
+            return PreflightResult(
+                name="schematic_footprints",
+                status="FAIL",
+                message=(
+                    f"{len(genuinely_missing)} component(s) missing a footprint "
+                    "on the PCB (not manufacturable)"
+                ),
+                details=(
+                    f"References: {refs}{suffix}. "
+                    "These components are absent from the PCB or placed without "
+                    "a footprint. Run "
+                    "`kct sch assign-footprints <schematic> --assign-missing` "
+                    "to auto-assign standard parts; unknown parts must be "
+                    "assigned by hand before export."
+                ),
+            )
+
+        # Every schematic-blank symbol is placed on the PCB with a
+        # footprint -> manufacturable. Surface the reconciliation as OK.
+        detail = ""
+        if reconciled:
+            shown = ", ".join(reconciled[:10])
+            suffix = f" (and {len(reconciled) - 10} more)" if len(reconciled) > 10 else ""
+            detail = (
+                f"{len(reconciled)} symbol(s) have a blank schematic Footprint "
+                f"field but are placed on the PCB with a footprint: {shown}{suffix}"
+            )
+        return PreflightResult(
+            name="schematic_footprints",
+            status="OK",
+            message="All components have a footprint on the PCB",
+            details=detail,
+        )
+
+    def _check_board_outline_closed(self) -> PreflightResult:
+        """Verify the board outline on Edge.Cuts is a closed polygon."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="board_outline",
+                status="FAIL",
+                message="Cannot check board outline: PCB not loaded",
+            )
+
+        outline = self._pcb.get_board_outline()
+        if not outline:
+            # Distinguish "no Edge.Cuts content" from "content but not extractable"
+            edge_cuts_count = sum(
+                1
+                for item in self._pcb.graphic_items
+                if hasattr(item, "layer") and item.layer == "Edge.Cuts"
+            )
+            if edge_cuts_count > 0:
+                message = (
+                    f"Edge.Cuts layer has {edge_cuts_count} graphic element(s) "
+                    "but no closed board outline could be extracted"
+                )
+            else:
+                message = "No board outline found on Edge.Cuts layer"
+            return PreflightResult(
+                name="board_outline",
+                status="FAIL",
+                message=message,
+                details="A closed board outline is required for manufacturing",
+            )
+
+        # Check if outline is closed (first point ~= last point)
+        if len(outline) < 3:
+            return PreflightResult(
+                name="board_outline",
+                status="FAIL",
+                message="Board outline has fewer than 3 points",
+                details=f"Found {len(outline)} points; a valid outline needs at least 3",
+            )
+
+        first = outline[0]
+        last = outline[-1]
+        closed = self._pcb._points_close(first, last)
+
+        if not closed:
+            return PreflightResult(
+                name="board_outline",
+                status="FAIL",
+                message="Board outline is not closed",
+                details=(
+                    f"Gap between first point ({first[0]:.3f}, {first[1]:.3f}) "
+                    f"and last point ({last[0]:.3f}, {last[1]:.3f})"
+                ),
+            )
+
+        return PreflightResult(
+            name="board_outline",
+            status="OK",
+            message=f"Board outline is closed ({len(outline)} points)",
+        )
+
+    def _check_footprints_present(self) -> PreflightResult:
+        """Check that all components have footprints."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="footprints",
+                status="FAIL",
+                message="Cannot check footprints: PCB not loaded",
+            )
+
+        count = self._pcb.footprint_count
+        if count == 0:
+            return PreflightResult(
+                name="footprints",
+                status="WARN",
+                message="No footprints found in PCB",
+                details="The board has no placed components",
+            )
+
+        # Check for footprints with empty or placeholder footprint names
+        missing_name = []
+        for fp in self._pcb.footprints:
+            if not fp.name or fp.name.strip() == "":
+                missing_name.append(fp.reference)
+
+        if missing_name:
+            refs = ", ".join(missing_name[:10])
+            suffix = f" (and {len(missing_name) - 10} more)" if len(missing_name) > 10 else ""
+            return PreflightResult(
+                name="footprints",
+                status="WARN",
+                message=f"{len(missing_name)} footprint(s) missing library footprint name",
+                details=f"References: {refs}{suffix}",
+            )
+
+        return PreflightResult(
+            name="footprints",
+            status="OK",
+            message=f"All {count} footprints have library footprint names",
+        )
+
+    def _check_board_dimensions(self) -> PreflightResult:
+        """Check that board dimensions are within manufacturer limits."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="board_dimensions",
+                status="FAIL",
+                message="Cannot check dimensions: PCB not loaded",
+            )
+
+        size = self._board_size_mm()
+        if size is None:
+            return PreflightResult(
+                name="board_dimensions",
+                status="WARN",
+                message="Cannot determine board dimensions: no outline found",
+            )
+        width, height = size
+
+        # Get manufacturer limits
+        max_w, max_h = self._get_manufacturer_limits()
+
+        details = f"Board size: {width:.2f} x {height:.2f} mm"
+
+        if width > max_w or height > max_h:
+            return PreflightResult(
+                name="board_dimensions",
+                status="FAIL",
+                message=f"Board exceeds manufacturer limits ({max_w:.0f} x {max_h:.0f} mm)",
+                details=details,
+            )
+
+        if width < 5.0 or height < 5.0:
+            return PreflightResult(
+                name="board_dimensions",
+                status="WARN",
+                message="Board is very small (< 5 mm on one side)",
+                details=details,
+            )
+
+        return PreflightResult(
+            name="board_dimensions",
+            status="OK",
+            message=f"Board dimensions within limits ({width:.2f} x {height:.2f} mm)",
+        )
+
+    def _board_size_mm(self) -> tuple[float, float] | None:
+        """Board outline bounding box (width, height) in mm, or ``None``."""
+        if self._pcb is None:
+            return None
+        try:
+            outline = self._pcb.get_board_outline()
+        except Exception:
+            return None
+        if not outline:
+            return None
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        return (max(xs) - min(xs), max(ys) - min(ys))
+
+    def _check_drill_holes(self) -> PreflightResult:
+        """Check that the board has drill holes (vias or through-hole pads)."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="drill_holes",
+                status="FAIL",
+                message="Cannot check drill holes: PCB not loaded",
+            )
+
+        via_count = 0
+        th_pad_count = 0
+
+        # Count vias
+        try:
+            vias = list(self._pcb.vias)
+            via_count = len(vias)
+        except (AttributeError, TypeError):
+            pass
+
+        # Count through-hole pads on footprints
+        for fp in self._pcb.footprints:
+            for pad in fp.pads:
+                if pad.type in ("thru_hole", "through_hole"):
+                    th_pad_count += 1
+
+        total = via_count + th_pad_count
+
+        if total == 0:
+            # A board with no drill holes is unusual but not necessarily wrong
+            return PreflightResult(
+                name="drill_holes",
+                status="WARN",
+                message="No drill holes found (no vias or through-hole pads)",
+                details="Verify this is an all-SMD design with no mounting holes",
+            )
+
+        return PreflightResult(
+            name="drill_holes",
+            status="OK",
+            message=f"Drill holes present ({via_count} vias, {th_pad_count} TH pads)",
+        )
+
+    def _check_stackup_copper(self) -> PreflightResult:
+        """Fail when the stackup's copper weight is not one the fab order provides (#7209)."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="stackup_copper",
+                status="OK",
+                message="No PCB loaded; stackup copper not reconciled",
+            )
+        info = resolve_ordered_copper(self._pcb, self.manufacturer)
+        status = info["status"]
+        if status == "match":
+            return PreflightResult(
+                name="stackup_copper",
+                status="OK",
+                message=(
+                    f"Stackup copper matches the {self.manufacturer} order "
+                    f"(outer {_fmt_oz(info['ordered_outer_oz'])}, "
+                    f"inner {_fmt_oz(info['ordered_inner_oz'])})"
+                ),
+            )
+        if status == "mismatch":
+            offered = "; ".join(
+                f"outer {_fmt_oz(o)} / inner {_fmt_oz(i)}" for o, i in info["profile_options"]
+            )
+            return PreflightResult(
+                name="stackup_copper",
+                status="FAIL",
+                message=(
+                    f"Board stackup declares outer {_fmt_oz(info['stackup_outer_oz'])} / "
+                    f"inner {_fmt_oz(info['stackup_inner_oz'])} copper, which "
+                    f"{self.manufacturer} does not provide for {info['layers']} layers"
+                ),
+                details=(
+                    f"Profile offers: {offered}. The ampacity gate trusts the stackup, so "
+                    "the board could pass on copper nobody orders. Correct the stackup to an "
+                    "offered build, or, if the fab does offer this copper, add the "
+                    "option to the manufacturer profile's design_rules."
+                ),
+            )
+        return PreflightResult(
+            name="stackup_copper",
+            status="OK",
+            message="No usable stackup copper to reconcile; profile default copper applies",
+        )
+
+    def _check_tht_in_cpl(self) -> PreflightResult:
+        """Warn when THT components are present on a board targeting an SMT-only assembler."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="WARN",
+                message="Cannot check THT components: PCB not loaded",
+            )
+
+        tht_refs = [
+            fp.reference
+            for fp in self._pcb.footprints
+            if is_through_hole_footprint(fp)
+            and not getattr(fp, "exclude_from_pos_files", False)
+            and not getattr(fp, "dnp", False)
+        ]
+
+        if not tht_refs:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="OK",
+                message="No through-hole components in CPL-eligible footprints",
+            )
+
+        refs = ", ".join(sorted(tht_refs)[:10])
+        suffix = f" (and {len(tht_refs) - 10} more)" if len(tht_refs) > 10 else ""
+
+        if self._exclude_tht:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="OK",
+                message=f"{len(tht_refs)} through-hole component(s) excluded from CPL",
+                details=f"THT references: {refs}{suffix}",
+            )
+
+        if self._fab_family in self._SMT_ONLY_MANUFACTURERS:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="WARN",
+                message=(
+                    f"{len(tht_refs)} through-hole component(s) in CPL "
+                    f"for SMT-only assembler ({self.manufacturer})"
+                ),
+                details=f"THT references: {refs}{suffix}; use --include-tht to keep them or they will be auto-excluded",
+            )
+
+        return PreflightResult(
+            name="tht_in_cpl",
+            status="OK",
+            message=f"{len(tht_refs)} through-hole component(s) included in CPL",
+            details=f"THT references: {refs}{suffix}",
+        )
+
+    # ------------------------------------------------------------------
+    # Assembly-capability checks (Issue #7204)
+    # ------------------------------------------------------------------
+
+    def _assembly_profile(self) -> ManufacturerProfile | None:
+        """The manufacturer profile, or ``None`` when it cannot be resolved."""
+        if not self._assembly_profile_resolved:
+            self._assembly_profile_resolved = True
+            try:
+                from ..manufacturers import get_profile
+
+                self._assembly_profile_cache = get_profile(self.manufacturer)
+            except Exception:
+                self._assembly_profile_cache = None
+        return self._assembly_profile_cache
+
+    def _assembly_tiers(self) -> list[AssemblyCapabilities]:
+        """The fab's PCBA service tiers, cheapest first (``[]`` = PCB-only)."""
+        profile = self._assembly_profile()
+        if profile is None:
+            return []
+        return profile.get_assembly_tiers()
+
+    def _is_tiered(self) -> bool:
+        """Whether the fab publishes more than one PCBA service tier."""
+        profile = self._assembly_profile()
+        return bool(profile is not None and profile.assembly_tiers)
+
+    def _fab_display_name(self) -> str:
+        profile = self._assembly_profile()
+        return profile.name if profile is not None else self.manufacturer
+
+    def _selected_tier(self) -> tuple[int, str]:
+        """Index of the tier to judge against, plus a note for ``details``.
+
+        ``auto`` (and any unmatched name) selects the cheapest tier.
+        """
+        requested = (self.config.assembly_tier or "auto").strip().lower()
+        if requested == "auto":
+            return 0, ""
+        tiers = self._assembly_tiers()
+        if not self._is_tiered():
+            return 0, (
+                f"{self._fab_display_name()} publishes a single assembly service; "
+                f"--assembly-tier {requested} ignored"
+            )
+        for idx, tier in enumerate(tiers):
+            name = (tier.tier_name or "").lower()
+            if name == requested or name.split(" ")[0] == requested:
+                return idx, ""
+        names = ", ".join((t.tier_name or "?").split(" ")[0].lower() for t in tiers)
+        return 0, f"unknown assembly tier '{requested}' (choices: auto, {names}); using auto"
+
+    def _cpl_footprints(self) -> list:
+        """Footprints that land in the CPL (same filter as ``extract_placements``)."""
+        if self._pcb is None:
+            return []
+        return [
+            fp
+            for fp in self._pcb.footprints
+            if not getattr(fp, "exclude_from_pos_files", False)
+            and not getattr(fp, "dnp", False)
+            and not (self._exclude_tht and is_through_hole_footprint(fp))
+        ]
+
+    def _check_bottom_side_in_cpl(self) -> PreflightResult:
+        """Flag bottom-side CPL parts and the assembly tier they require.
+
+        Always WARN (never FAIL), even under ``--strict-preflight`` or an
+        explicit ``--assembly-tier``: double-sided placement is a cost and
+        service-tier decision, not an unbuildable board.
+        """
+        name = "bottom_side_in_cpl"
+        bottom = sorted(
+            (fp.reference for fp in self._cpl_footprints() if fp.layer == "B.Cu"),
+            key=_ref_sort_key,
+        )
+        if not bottom:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No bottom-side components in CPL (single-sided assembly)",
+            )
+
+        refs = ", ".join(bottom[:10])
+        suffix = f" (and {len(bottom) - 10} more)" if len(bottom) > 10 else ""
+        details = f"Bottom-side references: {refs}{suffix}"
+        fab = self._fab_display_name()
+        tiers = self._assembly_tiers()
+        need = next((t for t in tiers if t.supports_double_sided), None)
+        count = f"{len(bottom)} bottom-side component(s)"
+
+        if need is None:
+            message = f"{count}: {fab}'s assembly service does not list double-sided placement"
+        elif self._is_tiered():
+            terms = ["double-sided"]
+            if need.requires_rails_and_fiducials:
+                terms.append("edge rails + fiducials required")
+            if need.min_build_days:
+                terms.append(f">={need.min_build_days}-day build")
+            message = f"{count}: requires {fab} {need.display_name} ({'; '.join(terms)})"
+        else:
+            message = f"{count}: double-sided assembly (two placement passes, higher cost)"
+
+        size = self._board_size_mm()
+        if need is not None and need.min_board_size_mm and size is not None:
+            board = sorted(size)
+            minimum = sorted(need.min_board_size_mm)
+            if board[0] < minimum[0] or board[1] < minimum[1]:
+                min_w, min_h = need.min_board_size_mm
+                message += (
+                    f"; board is {size[0]:.1f}x{size[1]:.1f} mm, below "
+                    f"{need.display_name}'s {min_w:g}x{min_h:g} mm single-PCB "
+                    "minimum: panelize (`kct panel`)"
+                )
+
+        return PreflightResult(name=name, status="WARN", message=message, details=details)
+
+    def _assembly_requirements(self) -> list[_AssemblyRequirement]:
+        """Package/pitch requirements of every CPL part (lib id first, then measured)."""
+        reqs: list[_AssemblyRequirement] = []
+        for fp in self._cpl_footprints():
+            lib_id = getattr(fp, "name", "") or ""
+            ref = getattr(fp, "reference", "") or lib_id
+            reqs.extend(_requirements_for_footprint(ref, lib_id, getattr(fp, "pads", ())))
+        return reqs
+
+    def _check_assembly_package_limits(self) -> PreflightResult:
+        """Compare chip package size and IC/BGA pitch against the PCBA tier(s).
+
+        Within the selected tier -> OK.  Beyond it but within a costlier tier
+        -> WARN naming the tier needed.  Beyond every tier the fab offers ->
+        FAIL (no service at that fab can place it), except for pitches that
+        were *measured* from pads rather than read from the lib id, which cap
+        at WARN because the measurement is a heuristic.
+        """
+        name = "assembly_package_limits"
+        tiers = self._assembly_tiers()
+        tiered = self._is_tiered()
+        fab = self._fab_display_name()
+        selected_idx, note = self._selected_tier()
+        selected = tiers[selected_idx]
+        auto = (self.config.assembly_tier or "auto").strip().lower() == "auto"
+
+        reqs = self._assembly_requirements()
+        impossible: list[_AssemblyRequirement] = []
+        needs: dict[int, list[_AssemblyRequirement]] = {}
+        required_idx = 0
+        for req in reqs:
+            idx = next((i for i, t in enumerate(tiers) if req.fits(t)), None)
+            if idx is None:
+                impossible.append(req)
+                continue
+            required_idx = max(required_idx, idx)
+            if idx > selected_idx:
+                needs.setdefault(idx, []).append(req)
+
+        def _limits(tier: AssemblyCapabilities) -> str:
+            parts = []
+            if tier.min_package:
+                parts.append(f"min package {tier.min_package}")
+            parts.append(f"IC pitch {tier.min_component_pitch_mm:g} mm")
+            parts.append(f"BGA pitch {tier.min_bga_pitch_mm:g} mm")
+            return ", ".join(parts)
+
+        def _join(items: list[_AssemblyRequirement]) -> str:
+            shown = "; ".join(r.describe() for r in items[:10])
+            if len(items) > 10:
+                shown += f" (and {len(items) - 10} more)"
+            return shown
+
+        detail_lines: list[str] = []
+        if note:
+            detail_lines.append(note)
+        detail_lines.append(f"{len(reqs)} package/pitch requirement(s) checked")
+
+        if impossible:
+            hard = [r for r in impossible if not r.measured]
+            detail_lines.append(f"Beyond every {fab} assembly tier: {_join(impossible)}")
+            for idx in sorted(needs):
+                detail_lines.append(f"Needs {tiers[idx].display_name}: {_join(needs[idx])}")
+            best = tiers[-1]
+            where = f"{fab} {best.display_name}" if tiered else f"{fab} assembly"
+            return PreflightResult(
+                name=name,
+                status="FAIL" if hard else "WARN",
+                message=(
+                    f"{len(impossible)} part(s) beyond {where} limits ({_limits(best)})"
+                    + ("" if hard else "; pitch measured from pads, verify")
+                ),
+                details="; ".join(detail_lines),
+            )
+
+        if needs:
+            top = max(needs)
+            flagged = [r for idx in sorted(needs) for r in needs[idx]]
+            detail_lines.append(f"Parts: {_join(flagged)}")
+            if auto:
+                message = (
+                    f"Cheapest {fab} tier that fits: {tiers[top].display_name} "
+                    f"({len(flagged)} part(s) beyond {selected.display_name} limits: "
+                    f"{_limits(selected)})"
+                )
+            else:
+                message = (
+                    f"{len(flagged)} part(s) beyond {fab} {selected.display_name} limits; "
+                    f"requires {tiers[top].display_name}"
+                )
+            return PreflightResult(
+                name=name, status="WARN", message=message, details="; ".join(detail_lines)
+            )
+
+        if tiered:
+            if auto:
+                message = (
+                    f"All placed packages fit {fab} {tiers[required_idx].display_name} "
+                    f"({_limits(tiers[required_idx])})"
+                )
+            else:
+                message = (
+                    f"All placed packages within {fab} {selected.display_name} limits "
+                    f"({_limits(selected)})"
+                )
+        else:
+            message = f"All placed packages within {fab} assembly limits ({_limits(selected)})"
+        return PreflightResult(
+            name=name, status="OK", message=message, details="; ".join(detail_lines)
+        )
+
+    def _check_bom_fields(self) -> PreflightResult:
+        """Check that BOM items have required fields for manufacturing."""
+        try:
+            bom = self._load_bom()
+        except Exception as e:
+            return PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message=f"Could not extract BOM: {e}",
+            )
+
+        if not bom.items:
+            return PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM has no items",
+            )
+
+        # Check for items missing footprint
+        missing_fp = [item for item in bom.items if not item.footprint and not item.is_virtual]
+        # Check for items missing value
+        missing_val = [item for item in bom.items if not item.value and not item.is_virtual]
+        # Check for LCSC part numbers (warn only)
+        missing_lcsc = [
+            item for item in bom.items if not item.lcsc and not item.is_virtual and not item.dnp
+        ]
+
+        issues: list[str] = []
+        # Informational notes that do NOT constitute a problem (e.g. missing
+        # LCSC fields that the spec overlay will populate).  Kept separate so
+        # they never inflate the problem count or force a WARN status.
+        notes: list[str] = []
+        status: Literal["OK", "WARN", "FAIL"] = "OK"
+
+        if missing_fp:
+            refs = ", ".join(item.reference for item in missing_fp[:5])
+            issues.append(f"{len(missing_fp)} item(s) missing footprint: {refs}")
+            status = "FAIL"
+
+        if missing_val:
+            refs = ", ".join(item.reference for item in missing_val[:5])
+            issues.append(f"{len(missing_val)} item(s) missing value: {refs}")
+            if status != "FAIL":
+                status = "WARN"
+
+        if missing_lcsc:
+            total = len([i for i in bom.items if not i.is_virtual and not i.dnp])
+            # Preflight loads a *raw* BOM (Step 0) before the assembly
+            # pipeline applies the spec overlay (Step 1).  Items whose LCSC
+            # will be populated from the project ``.kct`` spec are not
+            # genuinely missing -- warning about them here produces a false
+            # positive (issue #3926).  Resolve which refs the spec covers and
+            # only warn about the genuinely-unresolved remainder.
+            spec_lcsc_refs = self._spec_lcsc_refs()
+            unresolved = [item for item in missing_lcsc if item.reference not in spec_lcsc_refs]
+            resolvable = len(missing_lcsc) - len(unresolved)
+
+            if unresolved:
+                msg = f"{len(unresolved)}/{total} active item(s) missing LCSC part number"
+                if resolvable:
+                    msg += f" ({resolvable} resolvable from spec)"
+                issues.append(msg)
+                if status != "FAIL":
+                    status = "WARN"
+            elif resolvable:
+                # Every missing-LCSC item is covered by the spec overlay:
+                # record an informational note instead of a false WARN.
+                notes.append(f"{resolvable} active item(s) will receive LCSC from spec overlay")
+
+        if not issues:
+            active_count = len([i for i in bom.items if not i.is_virtual])
+            return PreflightResult(
+                name="bom_fields",
+                status="OK",
+                message=f"All {active_count} BOM items have required fields",
+                details="; ".join(notes),
+            )
+
+        return PreflightResult(
+            name="bom_fields",
+            status=status,
+            message=f"BOM field issues: {len(issues)} problem(s)",
+            details="; ".join(issues + notes),
+        )
+
+    def check_bom_lcsc_values(self) -> PreflightResult:
+        """Run the ``bom_lcsc_values`` check on its own (Issue #7260).
+
+        The same check :meth:`run_all` runs, for callers that only need the
+        LCSC value/package verdict (the MCP ``validate_assembly_bom`` tool).
+        Loads the PCB first, when it parses, so the IC package-family /
+        pin-count clause (#7166) sees the board's footprints.
+        """
+        if self._pcb is None and self.pcb_path.exists():
+            with contextlib.suppress(Exception):
+                from ..schema.pcb import PCB
+
+                self._pcb = PCB.load(str(self.pcb_path))  # type: ignore[assignment]
+        return self._check_bom_lcsc_values()
+
+    def _check_bom_lcsc_values(self) -> PreflightResult:
+        """Validate assigned LCSC parts against known value AND package.
+
+        For every active BOM item that HAS an LCSC number, look the part
+        up in the local parts cache, falling back to the offline jlcparts
+        catalog (read-only; no network, nothing written to the cache).
+        When the part is known and its parametric value clearly disagrees
+        with the BOM row value (e.g. 100nF part on a 16nF row -- issue
+        #3590), its chip package disagrees with the row's footprint (an
+        0402 part on 0805 footprints -- issue #3597), or its IC package
+        family / pin count disagrees with the PCB footprint (a SOT-25-5
+        part on a SOT-23-6 footprint -- issue #7166), the check FAILS.
+
+        Items whose part is in neither source cannot be validated.  They
+        are counted separately and turn the result into a WARN that names
+        them (issue #7166): "not checked" must never read as "checked and
+        fine".  The WARN never blocks export, even under
+        ``--strict-preflight`` -- a fresh CI runner has an empty cache.
+
+        A known part on a ``PinHeader_RxC`` / ``PinSocket_RxC`` footprint
+        whose record states no readable pin count (or conflicting ones) is
+        ``unverified`` too (issue #7446), tagged with its reason.  By default
+        it joins the same WARN.  Under ``strict_report_source`` (set from
+        ``--strict-preflight``, as for the #7091 report-source check) it is a
+        FAIL: unlike a cache miss it is a deterministic fact about the part
+        record, and the check that matters -- does a 2-pin part sit on an
+        8-pin header? -- never ran.  Parts missing from the cache stay WARN
+        even under strict.
+        """
+        try:
+            bom = self._load_bom()
+            items = self._items_with_spec_overlay(bom)
+        except Exception as e:
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=f"Could not extract BOM: {e}",
+            )
+
+        cache = self._parts_cache
+        if cache is None:
+            try:
+                from ..parts.cache import PartsCache
+
+                cache = PartsCache()
+            except Exception as e:
+                return PreflightResult(
+                    name="bom_lcsc_values",
+                    status="WARN",
+                    message=f"Parts cache unavailable for LCSC value validation: {e}",
+                )
+
+        catalog = self._parts_catalog
+        if catalog is None:
+            with contextlib.suppress(Exception):
+                from ..parts.jlcparts_catalog import CATALOG_FILENAME, JlcpartsCatalog
+
+                catalog = JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
+
+        from .lcsc_value_check import verify_lcsc_assignment
+
+        # PCB pad numbers per reference, for the IC pin-count check.  A
+        # reference carried by more than one footprint is ambiguous: give it
+        # no pads (the check then falls back to the footprint name).
+        pads_by_ref: dict[str, list[str] | None] = {}
+        if self._pcb is not None:
+            for fp in self._pcb.footprints:
+                pads = [str(p.number) for p in fp.pads]
+                pads_by_ref[fp.reference] = None if fp.reference in pads_by_ref else pads
+
+        from .lcsc_value_check import UNVERIFIED_HEADER_REASONS
+
+        mismatches: list[str] = []
+        unverified: list[str] = []
+        header_unverified: list[str] = []
+        sources: set[str] = set()
+        exemptions = self._spec_exemptions()
+        exempt_seen: dict[str, tuple[str, str]] = {}
+        exempt_conflicts: list[str] = []
+        bom_refs = {i.reference for i in items}
+        stale_exempt = sorted(r for r in exemptions if r not in bom_refs)
+        assigned = 0
+        for item in items:
+            if item.is_virtual or item.dnp:
+                continue
+            if not item.lcsc:
+                if item.reference in exemptions:
+                    exempt_seen[item.reference] = exemptions[item.reference]
+                continue
+            assigned += 1
+            verdict = verify_lcsc_assignment(
+                cache,
+                catalog,
+                item.lcsc,
+                item.value,
+                item.reference,
+                footprint=item.footprint,
+                pad_numbers=pads_by_ref.get(item.reference),
+            )
+            if verdict.source:
+                sources.add(verdict.source)
+            if item.reference in exemptions:
+                if (
+                    verdict.status == "unverified"
+                    and verdict.reason not in UNVERIFIED_HEADER_REASONS
+                ):
+                    # Declared non-LCSC part carrying a number no source knows:
+                    # accepted, but recorded (issue #8261).  This is the ONLY
+                    # verdict an exemption softens.
+                    assigned -= 1
+                    exempt_seen[item.reference] = exemptions[item.reference]
+                    continue
+                # A real LCSC part is on the BOM row: spec and BOM disagree.
+                # Record the conflict, then judge the part like any other ref
+                # -- an exemption must never hide a wrong part (#8113) or a
+                # strict header FAIL (issue #8261 review).
+                ex_cat, ex_why = exemptions[item.reference]
+                exempt_conflicts.append(f"{item.reference} -> {item.lcsc} [{ex_cat}: {ex_why}]")
+            if verdict.status == "unverified":
+                if verdict.reason in UNVERIFIED_HEADER_REASONS:
+                    entry = f"{item.reference} -> {item.lcsc} ({verdict.reason})"
+                    header_unverified.append(entry)
+                    unverified.append(entry)
+                else:
+                    unverified.append(f"{item.reference} -> {item.lcsc}")
+                continue
+            if verdict.mismatch is not None:
+                mismatches.append(
+                    f"{item.reference} ({item.value}) -> {item.lcsc}: "
+                    f"{verdict.mismatch.describe()} [{verdict.source}]"
+                )
+
+        conflict_note = (
+            f"; {len(exempt_conflicts)} ref(s) declared exempt in the spec carry a "
+            f"verifiable LCSC part on the BOM (spec and BOM disagree)"
+            if exempt_conflicts
+            else ""
+        )
+        if mismatches:
+            shown = "; ".join(mismatches[:5])
+            suffix = f" (and {len(mismatches) - 5} more)" if len(mismatches) > 5 else ""
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="FAIL",
+                message=(
+                    f"{len(mismatches)} BOM item(s) assigned an LCSC part "
+                    f"whose value or package does not match the BOM row" + conflict_note
+                ),
+                details=f"{shown}{suffix}"
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
+            )
+
+        if not assigned:
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="OK",
+                message="No assigned LCSC parts to validate"
+                + (f"; {len(exempt_seen)} declared exempt" if exempt_seen else ""),
+                details=self._exempt_suffix(exempt_seen, [], stale_exempt, lead=True),
+            )
+
+        verified = assigned - len(unverified)
+        against = " and ".join(sorted(sources)) or "no source"
+        if header_unverified and self.config.strict_report_source:
+            shown = ", ".join(header_unverified[:8])
+            n_hdr = len(header_unverified)
+            suffix = f" (and {n_hdr - 8} more)" if n_hdr > 8 else ""
+            others = len(unverified) - n_hdr
+            also = f"; {others} more unverifiable (not in parts cache or offline catalog)"
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="FAIL",
+                message=(
+                    f"{n_hdr} pin header/socket part(s): pin count not verifiable "
+                    f"(strict preflight){also if others else ''}" + conflict_note
+                ),
+                details=f"pin count not verifiable: {shown}{suffix}"
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
+            )
+        if unverified:
+            shown = ", ".join(unverified[:8])
+            suffix = f" (and {len(unverified) - 8} more)" if len(unverified) > 8 else ""
+            not_found = len(unverified) - len(header_unverified)
+            why = [
+                f"{n} {text}"
+                for n, text in (
+                    (not_found, "not in parts cache or offline catalog"),
+                    (len(header_unverified), "header part(s) with pin count not verifiable"),
+                )
+                if n
+            ]
+            reasons = (
+                "not in parts cache or offline catalog"
+                if not header_unverified
+                else "header part(s) with pin count not verifiable"
+                if not not_found
+                else "; ".join(why)
+            )
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=(
+                    f"{verified} of {assigned} assigned item(s) verified ({against}); "
+                    f"{len(unverified)} unverifiable ({reasons})" + conflict_note
+                ),
+                details=f"unverified: {shown}{suffix}"
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
+            )
+
+        if exempt_conflicts:
+            # Every part checked out, but the spec declares refs exempt that
+            # carry a verifiable LCSC part: never a clean OK (issue #8261).
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=(
+                    f"{assigned} of {assigned} assigned item(s) verified against {against}; "
+                    f"no LCSC value/package mismatches" + conflict_note
+                ),
+                details=self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt, lead=True),
+            )
+
+        return PreflightResult(
+            name="bom_lcsc_values",
+            status="OK",
+            message=(
+                f"{assigned} of {assigned} assigned item(s) verified against {against}; "
+                f"no LCSC value/package mismatches"
+                + (f"; {len(exempt_seen)} declared exempt" if exempt_seen else "")
+            ),
+            details=self._exempt_suffix(exempt_seen, [], stale_exempt, lead=True),
+        )
+
+    def check_bom_lcsc_stock(self) -> PreflightResult:
+        """Run the ``bom_lcsc_stock`` check on its own (Issue #8121)."""
+        return self._check_bom_lcsc_stock()
+
+    def _check_bom_lcsc_stock(self) -> PreflightResult:
+        """Flag assigned LCSC parts whose recorded stock cannot cover the order.
+
+        Required stock per LCSC number is its placements per board (summed
+        over references) times ``config.order_boards``.  Read-only like
+        :meth:`_check_bom_lcsc_values`: it consults the local parts cache and
+        the offline catalog and never touches the network.  Parts in neither
+        source are left to ``bom_lcsc_values`` and not repeated here.
+
+        A shortfall on a live-verified observation (``Part.stock_verified``)
+        is a FAIL.  On any other observation (stale cache, offline catalog,
+        unknown source) it is a WARN -- a legacy cache row with no stock info
+        also reads ``stock=0`` -- escalated to FAIL under
+        ``strict_report_source`` (``--strict-preflight``).
+        """
+        name = "bom_lcsc_stock"
+        boards = max(1, int(self.config.order_boards))
+        try:
+            bom = self._load_bom()
+            items = self._items_with_spec_overlay(bom)
+        except Exception as e:
+            return PreflightResult(name=name, status="WARN", message=f"Could not extract BOM: {e}")
+
+        cache = self._parts_cache
+        if cache is None:
+            try:
+                from ..parts.cache import PartsCache
+
+                cache = PartsCache()
+            except Exception as e:
+                return PreflightResult(
+                    name=name,
+                    status="WARN",
+                    message=f"Parts cache unavailable for LCSC stock check: {e}",
+                )
+        catalog = self._parts_catalog
+        if catalog is None:
+            with contextlib.suppress(Exception):
+                from ..parts.jlcparts_catalog import CATALOG_FILENAME, JlcpartsCatalog
+
+                catalog = JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
+
+        from .lcsc_value_check import verify_lcsc_assignment
+
+        exemptions = self._spec_exemptions()
+        refs_by_lcsc: dict[str, list[str]] = {}
+        for item in items:
+            if item.is_virtual or item.dnp or not item.lcsc:
+                continue
+            if item.reference in exemptions and (
+                verify_lcsc_assignment(cache, catalog, item.lcsc, "", item.reference).part is None
+            ):
+                continue  # declared non-LCSC part with an unknown number (issue #8261)
+            # An exempt ref with a real, known part still ships it: check its stock.
+            refs_by_lcsc.setdefault(item.lcsc, []).append(item.reference)
+
+        if not refs_by_lcsc and not self.config.inventory_covered:
+            return PreflightResult(
+                name=name,
+                status="OK",
+                message="No assigned LCSC parts to check stock for",
+                data={
+                    "order_boards": boards,
+                    "inventory_covered": [],
+                    "strict": bool(self.config.strict_report_source),
+                    "parts": [],
+                    "unresolved": [],
+                },
+            )
+
+        records: list[dict] = []
+        unresolved: list[str] = []
+        for lcsc, refs in sorted(refs_by_lcsc.items()):
+            verdict = verify_lcsc_assignment(cache, catalog, lcsc, "", refs[0])
+            if verdict.part is None:
+                unresolved.append(lcsc)  # not in any source: also reported by bom_lcsc_values
+                continue
+            part = verdict.part
+            age_days = None
+            if part.fetched_at is not None:
+                now = datetime.now(tz=part.fetched_at.tzinfo)
+                age_days = max(0, (now - part.fetched_at).days)
+            records.append(
+                {
+                    "lcsc": lcsc,
+                    "refs": sorted(refs),
+                    "per_board": len(refs),
+                    "stock": part.stock,
+                    "verified": bool(part.stock_verified),
+                    "source": part.stock_source,
+                    "age_days": age_days,
+                }
+            )
+        data = {
+            "order_boards": boards,
+            "inventory_covered": sorted(self.config.inventory_covered),
+            "strict": bool(self.config.strict_report_source),
+            "parts": records,
+            "unresolved": unresolved,
+        }
+        return evaluate_lcsc_stock(
+            data,
+            boards,
+            frozenset(c.upper() for c in self.config.inventory_covered),
+            bool(self.config.strict_report_source),
+        )
+
+    def _check_bom_footprint_match(self) -> PreflightResult:
+        """Check that BOM component count matches PCB footprint count."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="bom_pcb_match",
+                status="WARN",
+                message="Cannot check BOM/PCB match: PCB not loaded",
+            )
+
+        try:
+            bom = self._load_bom()
+        except Exception as e:
+            return PreflightResult(
+                name="bom_pcb_match",
+                status="WARN",
+                message=f"Cannot check BOM/PCB match: {e}",
+            )
+
+        # BOM references (non-virtual, non-DNP)
+        bom_refs = {item.reference for item in bom.items if not item.is_virtual and not item.dnp}
+
+        # PCB footprint references.  Footprints that declare themselves absent
+        # from the BOM (``exclude_from_bom``) or board-only (``board_only``),
+        # e.g. fiducials, are intentionally not in the BOM, so they are not
+        # orphans.  Only the orphan (PCB-not-BOM) side is relaxed: a BOM ref
+        # is matched against *every* footprint, so it never FAILs because of
+        # attributes.
+        pcb_refs = {fp.reference for fp in self._pcb.footprints}
+        orphan_candidates = {
+            fp.reference
+            for fp in self._pcb.footprints
+            if not (fp.exclude_from_bom or "board_only" in fp.attr_flags)
+        }
+
+        in_bom_not_pcb = bom_refs - pcb_refs
+        in_pcb_not_bom = orphan_candidates - bom_refs
+
+        issues: list[str] = []
+        status: Literal["OK", "WARN", "FAIL"] = "OK"
+
+        if in_bom_not_pcb:
+            # Unplaced components cannot be assembled -- this is a hard failure
+            status = "FAIL"
+            refs = ", ".join(sorted(in_bom_not_pcb)[:10])
+            issues.append(f"{len(in_bom_not_pcb)} in BOM but not on PCB: {refs}")
+        if in_pcb_not_bom:
+            # Orphaned footprints may be intentional (mounting holes, test points)
+            if status != "FAIL":
+                status = "WARN"
+            refs = ", ".join(sorted(in_pcb_not_bom)[:10])
+            issues.append(f"{len(in_pcb_not_bom)} on PCB but not in BOM: {refs}")
+
+        if issues:
+            return PreflightResult(
+                name="bom_pcb_match",
+                status=status,
+                message="BOM/PCB reference mismatch",
+                details="; ".join(issues),
+            )
+
+        return PreflightResult(
+            name="bom_pcb_match",
+            status="OK",
+            message=f"BOM and PCB references match ({len(bom_refs)} components)",
+        )
+
+    def _check_bom_cpl_match(self) -> PreflightResult:
+        """Check that BOM references match CPL-eligible PCB footprints.
+
+        The CPL (pick-and-place) file is generated from PCB footprints with
+        filtering applied: DNP components, footprints excluded from position
+        files, and (when targeting SMT-only assemblers) through-hole
+        components are omitted.  This check compares the set of active BOM
+        references against the CPL-eligible footprint references so that
+        assembly mismatches are caught before export.
+        """
+        if self._pcb is None:
+            return PreflightResult(
+                name="bom_cpl_match",
+                status="WARN",
+                message="Cannot check BOM/CPL match: PCB not loaded",
+            )
+
+        try:
+            bom = self._load_bom()
+        except Exception as e:
+            return PreflightResult(
+                name="bom_cpl_match",
+                status="WARN",
+                message=f"Cannot check BOM/CPL match: {e}",
+            )
+
+        # BOM references (non-virtual, non-DNP) -- same filter as _check_bom_footprint_match
+        bom_refs = {item.reference for item in bom.items if not item.is_virtual and not item.dnp}
+
+        # CPL-eligible footprint references -- mirrors extract_placements() in pnp.py
+        cpl_refs = set()
+        tht_excluded_refs = set()
+        dnp_excluded_refs = set()
+        for fp in self._pcb.footprints:
+            if getattr(fp, "exclude_from_pos_files", False):
+                continue
+            if getattr(fp, "dnp", False):
+                dnp_excluded_refs.add(fp.reference)
+                continue
+            if self._exclude_tht and is_through_hole_footprint(fp):
+                tht_excluded_refs.add(fp.reference)
+                continue
+            cpl_refs.add(fp.reference)
+
+        # THT-excluded and DNP-excluded components are expected mismatches
+        in_bom_not_cpl = bom_refs - cpl_refs - tht_excluded_refs - dnp_excluded_refs
+        in_cpl_not_bom = cpl_refs - bom_refs
+
+        issues: list[str] = []
+        if in_bom_not_cpl:
+            refs = ", ".join(sorted(in_bom_not_cpl)[:10])
+            suffix = f" (and {len(in_bom_not_cpl) - 10} more)" if len(in_bom_not_cpl) > 10 else ""
+            issues.append(f"{len(in_bom_not_cpl)} in BOM but not in CPL: {refs}{suffix}")
+        if in_cpl_not_bom:
+            refs = ", ".join(sorted(in_cpl_not_bom)[:10])
+            suffix = f" (and {len(in_cpl_not_bom) - 10} more)" if len(in_cpl_not_bom) > 10 else ""
+            issues.append(f"{len(in_cpl_not_bom)} in CPL but not in BOM: {refs}{suffix}")
+
+        if issues:
+            return PreflightResult(
+                name="bom_cpl_match",
+                status="FAIL",
+                message="BOM/CPL reference mismatch",
+                details="; ".join(issues),
+            )
+
+        info_parts = [f"{len(cpl_refs)} components"]
+        if tht_excluded_refs:
+            info_parts.append(f"{len(tht_excluded_refs)} THT excluded")
+        if dnp_excluded_refs:
+            info_parts.append(f"{len(dnp_excluded_refs)} DNP excluded")
+
+        return PreflightResult(
+            name="bom_cpl_match",
+            status="OK",
+            message=f"BOM and CPL references match ({', '.join(info_parts)})",
+        )
+
+    def _check_drc(self) -> PreflightResult:
+        """Check DRC status from a pre-existing report file."""
+        report_path = self.config.drc_report_path
+        # Issue #7190: only an auto-discovered report must prove it was
+        # generated for this PCB's content; an explicit --drc-report is the
+        # caller's assertion and stays trusted.
+        auto_discovered = report_path is None
+
+        if report_path is None:
+            # Try to find a DRC report next to the PCB
+            auto_path = self.pcb_path.parent / "drc_report.json"
+            if not auto_path.exists():
+                auto_path = self.pcb_path.parent / "drc_report.txt"
+            if auto_path.exists():
+                report_path = auto_path
+            else:
+                return PreflightResult(
+                    name="drc",
+                    status="WARN",
+                    message="No DRC report found; run kicad-cli or kct check first",
+                    details="Use --drc-report to specify a report file, or --skip-drc to skip",
+                )
+
+        report_path = Path(report_path)
+        if not report_path.exists():
+            return PreflightResult(
+                name="drc",
+                status="WARN",
+                message=f"DRC report not found: {report_path}",
+            )
+
+        # Issue #6724: an empty report (kicad-cli killed before writing it)
+        # parses as zero findings; it is not evidence of a clean DRC.
+        if report_path.stat().st_size == 0:
+            return PreflightResult(
+                name="drc",
+                status="WARN",
+                message=f"DRC report is empty: {report_path}",
+                details="kicad-cli may have been killed or crashed; re-run DRC",
+            )
+
+        try:
+            from ..drc.report import DRCReport
+
+            report = DRCReport.load(report_path)
+
+            # Issue #7091: a report generated for a different PCB (e.g. the
+            # ``*_routed`` sibling's report auto-discovered next to the
+            # unrouted board) is not evidence for this board -- treat it like
+            # a missing report.
+            other = report_source_mismatch(report.pcb_name, self.pcb_path)
+            if other is not None:
+                return PreflightResult(
+                    name="drc",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
+                    message=f"DRC report is for {other}, not {self.pcb_path.name}",
+                    details=(
+                        f"{report_path} was generated for another board; re-run DRC "
+                        "on this PCB or pass --drc-report"
+                    ),
+                )
+
+            # Issue #7153: a kct-check report records the manufacturer/tier
+            # whose rules produced it.  A report built for other rules (a
+            # board's ``jlcpcb-tier1`` report read by a ``--mfr jlcpcb``
+            # run) is not evidence for this run's rule set.
+            mfr_mismatch = self._drc_report_manufacturer_mismatch(report)
+
+            error_count = report.error_count
+            warning_count = report.warning_count
+            # Issue #7091: since #4498 KiCad's ``unconnected_items`` (opens)
+            # live outside ``violations``/``error_count``; count the
+            # error-severity ones explicitly so an unrouted board FAILs.
+            open_errors = report.connectivity_errors()
+
+            if error_count > 0 or open_errors:
+                errors = report.errors
+                if open_errors:
+                    message = (
+                        f"DRC has {error_count} error(s), {len(open_errors)} unconnected item(s)"
+                    )
+                else:
+                    message = f"DRC has {error_count} error(s)"
+                # List the first few findings from both collections.
+                if errors and open_errors:
+                    shown = [*errors[:3], *open_errors[:3]]
+                else:
+                    shown = [*errors, *open_errors][:5]
+                details = "; ".join(_describe_drc_finding(v) for v in shown)
+                if mfr_mismatch is not None:
+                    details = f"{details}; {mfr_mismatch[0]}" if details else mfr_mismatch[0]
+                return PreflightResult(
+                    name="drc",
+                    status="FAIL",
+                    message=message,
+                    details=details,
+                )
+
+            if mfr_mismatch is not None:
+                message, details = mfr_mismatch
+                return PreflightResult(
+                    name="drc",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
+                    message=message,
+                    details=details,
+                )
+
+            # Issue #7190: a passing verdict counts only when the report is
+            # bound to this PCB's content.  Checked here, on the pass branch,
+            # so an unbound report with errors still FAILs above.
+            if auto_discovered:
+                unbound = self._unbound_report_result(
+                    "drc", report_path, self.pcb_path, report.pcb_sha256
+                )
+                if unbound is not None:
+                    return unbound
+
+            if warning_count > 0:
+                return PreflightResult(
+                    name="drc",
+                    status="WARN",
+                    message=f"DRC passed with {warning_count} warning(s)",
+                )
+
+            return PreflightResult(
+                name="drc",
+                status="OK",
+                message="DRC: 0 errors, 0 warnings",
+            )
+        except Exception as e:
+            return PreflightResult(
+                name="drc",
+                status="WARN",
+                message=f"Could not parse DRC report: {e}",
+            )
+
+    def _drc_report_manufacturer_mismatch(self, report) -> tuple[str, str] | None:
+        """Return ``(message, details)`` when the DRC report's rules differ.
+
+        Compares the report's recorded manufacturer with this run's, both
+        resolved to canonical ids.  Capability tiers are NOT folded into
+        their fab family: ``jlcpcb-tier1`` and ``jlcpcb`` check different
+        rules, so a tier difference is a mismatch (issue #7153).  Reports
+        without a recorded manufacturer (kicad-cli) are never a mismatch.
+        """
+        report_mfr = getattr(report, "manufacturer", None)
+        if not report_mfr:
+            return None
+        from ..manufacturers import canonical_manufacturer_id
+
+        report_id = canonical_manufacturer_id(report_mfr)
+        run_id = canonical_manufacturer_id(self.manufacturer)
+        if report_id == run_id:
+            return None
+
+        message = f"DRC report was generated for {report_id}, not {run_id}"
+        parts = [f"its 0-error verdict was computed against {report_id} rules"]
+        overrides = getattr(report, "fabrication_overrides", None)
+        if overrides:
+            option = overrides.get("paid_factory_option")
+            note = "it also applied a board fabrication_overrides block"
+            if option:
+                note += f" ({option})"
+            parts.append(note)
+        parts.append(
+            f"re-run DRC with --mfr {run_id}, or export with --mfr {report_id} to match the report"
+        )
+        return message, "; ".join(parts)
+
+    def _check_erc(self) -> PreflightResult:
+        """Check ERC status from a pre-existing report file."""
+        report_path = self.config.erc_report_path
+        auto_discovered = report_path is None  # Issue #7190, see _check_drc
+
+        if report_path is None:
+            # Try to find an ERC report next to the schematic
+            search_dir = self.schematic_path.parent if self.schematic_path else self.pcb_path.parent
+            auto_path = search_dir / "erc_report.json"
+            if not auto_path.exists():
+                auto_path = search_dir / "erc_report.txt"
+            if auto_path.exists():
+                report_path = auto_path
+            else:
+                return PreflightResult(
+                    name="erc",
+                    status="WARN",
+                    message="No ERC report found; run kicad-cli first",
+                    details="Use --erc-report to specify a report file, or --skip-erc to skip",
+                )
+
+        report_path = Path(report_path)
+        if not report_path.exists():
+            return PreflightResult(
+                name="erc",
+                status="WARN",
+                message=f"ERC report not found: {report_path}",
+            )
+
+        # Issue #6724: an empty report (kicad-cli killed before writing it)
+        # parses as zero findings; it is not evidence of a clean ERC.
+        if report_path.stat().st_size == 0:
+            return PreflightResult(
+                name="erc",
+                status="WARN",
+                message=f"ERC report is empty: {report_path}",
+                details="kicad-cli may have been killed or crashed; re-run ERC",
+            )
+
+        try:
+            from ..erc.report import ERCReport
+
+            report = ERCReport.load(report_path)
+
+            # Issue #7091: a report recorded for a different schematic is not
+            # evidence for this one.  ``require_suffix`` skips the fallback
+            # where ``source_file`` is the report's own path (no ``source``).
+            other = report_source_mismatch(
+                report.source_file, self.schematic_path, require_suffix=".kicad_sch"
+            )
+            if other is not None and self.schematic_path is not None:
+                return PreflightResult(
+                    name="erc",
+                    status="FAIL" if self.config.strict_report_source else "WARN",
+                    message=f"ERC report is for {other}, not {self.schematic_path.name}",
+                    details=(
+                        f"{report_path} was generated for another schematic; re-run "
+                        "ERC on this schematic or pass --erc-report"
+                    ),
+                )
+
+            error_count = report.error_count
+            warning_count = report.warning_count
+
+            if error_count > 0:
+                errors = report.errors
+                return PreflightResult(
+                    name="erc",
+                    status="FAIL",
+                    message=f"ERC has {error_count} error(s)",
+                    details="; ".join(f"{v.type_str}: {v.description}" for v in errors[:5]),
+                )
+
+            # Issue #7190: same pass-branch binding rule as _check_drc.
+            if auto_discovered:
+                unbound = self._unbound_report_result(
+                    "erc",
+                    report_path,
+                    self._erc_report_schematic(report_path, report.source_file),
+                    report.schematic_sha256,
+                )
+                if unbound is not None:
+                    return unbound
+
+            if warning_count > 0:
+                return PreflightResult(
+                    name="erc",
+                    status="WARN",
+                    message=f"ERC passed with {warning_count} warning(s)",
+                )
+
+            return PreflightResult(
+                name="erc",
+                status="OK",
+                message="ERC: 0 errors, 0 warnings",
+            )
+        except Exception as e:
+            return PreflightResult(
+                name="erc",
+                status="WARN",
+                message=f"Could not parse ERC report: {e}",
+            )
+
+    def _erc_report_schematic(self, report_path: Path, recorded_source: str) -> Path | None:
+        """The schematic an auto-discovered ERC report should be bound to.
+
+        The configured schematic when known; otherwise the ``.kicad_sch``
+        the report names, looked up beside the report.
+        """
+        if self.schematic_path is not None:
+            return Path(self.schematic_path)
+        name = re.split(r"[\\/]", (recorded_source or "").strip())[-1]
+        if not name.lower().endswith(".kicad_sch"):
+            return None
+        candidate = report_path.parent / name
+        return candidate if candidate.is_file() else None
+
+    def _unbound_report_result(
+        self,
+        name: str,
+        report_path: Path,
+        source_path: Path | None,
+        recorded_hash: str | None,
+    ) -> PreflightResult | None:
+        """Downgrade a passing auto-discovered report that is not content-bound.
+
+        Issue #7190: a ``drc_report.json``/``erc_report.json`` found beside
+        the board says nothing about which *version* of the board it checked
+        (a git checkout resets mtimes).  It may pass the board only when it
+        is bound (see :mod:`kicad_tools.drc.report_binding`):
+
+        * ``MISMATCH`` (records a different hash: the file changed since the
+          report was generated) is FAIL under ``strict_report_source``, else
+          WARN -- the same shape as the #7091/#7153 mismatch returns;
+        * ``UNHASHED`` (no hash, no readiness provenance) is WARN even when
+          strict, matching #7091's missing-report policy.
+
+        Returns ``None`` when the report is bound.
+        """
+        from ..drc.report_binding import BindingStatus, binding_status
+
+        status = binding_status(
+            report_path, source_path, recorded_hash, hierarchical=(name == "erc")
+        )
+        if status is BindingStatus.BOUND:
+            return None
+
+        label = name.upper()
+        # Issue #6532: the details land in committed manifests; never record
+        # an absolute host path there.
+        from ..cli.check_cmd import portable_report_path
+
+        shown = portable_report_path(report_path)
+        if name == "drc":
+            target, key, rerun = (
+                "PCB",
+                "pcb_sha256",
+                "re-run kct check --output or pass --drc-report",
+            )
+        else:
+            target, key, rerun = (
+                "schematic",
+                "schematic_sha256",
+                "re-run kct build's ERC step or pass --erc-report",
+            )
+
+        if status is BindingStatus.MISMATCH:
+            return PreflightResult(
+                name=name,
+                status="FAIL" if self.config.strict_report_source else "WARN",
+                message=(
+                    f"{label} report is not bound to this {target} "
+                    "(stale: content changed since it was generated)"
+                ),
+                details=(
+                    f"{shown} records a {key} that differs from the current "
+                    f"{target}'s; its verdict describes an older version -- {rerun}"
+                ),
+            )
+        return PreflightResult(
+            name=name,
+            status="WARN",
+            message=f"{label} report is not bound to this {target} (unhashed); {rerun}",
+            details=(
+                f"{shown} records no {key} and no output/readiness.json records it "
+                f"as produced from this {target}, so its verdict is not evidence for the "
+                f"current {target}"
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _spec_lcsc_refs(self) -> set[str]:
+        """Return references whose LCSC will be populated by the spec overlay.
+
+        Preflight (Step 0) inspects a *raw* BOM, but the assembly pipeline
+        (Step 1) applies the project ``.kct`` spec overlay before shipping
+        the BOM.  This helper mirrors the overlay's ref resolution so that
+        ``_check_bom_fields`` can tell which "missing LCSC" items will in
+        fact be filled in from the spec, and avoid a false-positive warning
+        (issue #3926).
+
+        Only references that both (a) match a spec ``bom_entries`` entry and
+        (b) carry a non-empty ``lcsc`` value in that entry are returned --
+        an entry with only an MPN does not resolve the LCSC gap.
+
+        The lookup is best-effort: if no spec file is found or it cannot be
+        parsed, an empty set is returned so the check falls back to its
+        original (warn-on-missing) behaviour.
+        """
+        try:
+            from .bom_spec_overlay import expand_ref_range, find_spec_file
+
+            spec_file = find_spec_file(self.pcb_path.parent)
+            if spec_file is None:
+                return set()
+
+            from ..spec.parser import load_spec
+
+            spec = load_spec(spec_file)
+            if not spec.bom_entries:
+                return set()
+
+            refs: set[str] = set()
+            for entry in spec.bom_entries:
+                if not entry.lcsc:
+                    continue
+                for ref in expand_ref_range(entry.ref):
+                    refs.add(ref)
+            return refs
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Spec LCSC resolution failed (ignoring): %s", e)
+            return set()
+
+    def _spec_exemptions(self) -> dict[str, tuple[str, str]]:
+        """Refs the ``.kct`` spec declares deliberately non-LCSC (issue #8261).
+
+        Best-effort like the overlay: no/invalid spec means no exemptions.
+        """
+        try:
+            from .bom_spec_overlay import declared_exemptions, find_spec_file
+
+            spec_file = find_spec_file(self.pcb_path.parent)
+            if spec_file is None:
+                return {}
+            from ..spec.parser import load_spec
+
+            spec = load_spec(spec_file)
+            return declared_exemptions(spec.bom_entries) if spec.bom_entries else {}
+        except Exception as e:
+            logger.debug("Spec exemption lookup failed (ignoring): %s", e)
+            return {}
+
+    @classmethod
+    def _exempt_suffix(
+        cls,
+        exempt_seen: dict[str, tuple[str, str]],
+        conflicts: list[str],
+        stale: list[str],
+        lead: bool = False,
+    ) -> str:
+        """Details text for declared exemptions, conflicts and stale refs (#8261)."""
+        parts: list[str] = []
+        if exempt_seen:
+            parts.append(cls._format_exempt(exempt_seen))
+        if conflicts:
+            parts.append("exempt ref carries a verifiable LCSC part: " + "; ".join(conflicts))
+        if stale:
+            parts.append("stale exemption (no such ref): " + ", ".join(stale))
+        text = " | ".join(parts)
+        return text if lead or not text else f" | {text}"
+
+    @staticmethod
+    def _format_exempt(exempt_seen: dict[str, tuple[str, str]]) -> str:
+        return "exempt (declared): " + "; ".join(
+            f"{ref} [{cat}: {why}]" for ref, (cat, why) in sorted(exempt_seen.items())
+        )
+
+    def _items_with_spec_overlay(self, bom) -> list:
+        """Return copies of ``bom.items`` with the ``.kct`` overlay and CSV merge applied.
+
+        Mirrors the assembly export (issues #7180, #8154) so ``bom_lcsc_values``
+        and ``bom_lcsc_stock`` validate the parts the written BOM actually
+        carries: schematic fields, then the ``.kct`` LCSC/MPN overlay, then
+        LCSC numbers merged from an existing ``bom_<fab>.csv`` in
+        ``output_dir``.  Works on copies: the cached BOM other checks read
+        (e.g. ``bom_fields``) is left untouched.  Best-effort -- a missing or
+        malformed spec/CSV is logged and skipped, matching the export pipeline.
+        """
+        import copy
+
+        items = [copy.copy(i) for i in bom.items]
+        spec_refs: set[str] = set()
+        exempt_refs: set[str] = set()
+        try:
+            from .bom_spec_overlay import (
+                apply_spec_overlay,
+                declared_exemptions,
+                find_spec_file,
+                resolved_refs,
+            )
+
+            spec_file = find_spec_file(self.pcb_path.parent)
+            if spec_file is not None:
+                from ..spec.parser import load_spec
+
+                spec = load_spec(spec_file)
+                if spec.bom_entries:
+                    spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
+                    exempt_refs = set(declared_exemptions(spec.bom_entries))
+        except Exception as e:
+            logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
+
+        # Existing-CSV merge (issue #8154).  parts_cache=None keeps this
+        # read-only and avoids value/package filtering dropping a number the
+        # export will in fact write.
+        if self.output_dir is not None:
+            try:
+                from .assembly import AssemblyConfig
+                from .bom_formats import (
+                    apply_existing_lcsc_assignments,
+                    read_existing_lcsc_assignments,
+                )
+
+                cfg = AssemblyConfig()
+                if self._merge_lcsc:
+                    csv_path = self._merge_lcsc_from or (
+                        self.output_dir / cfg.bom_filename.format(manufacturer=self._fab_family)
+                    )
+                    if csv_path.is_file():
+                        existing = read_existing_lcsc_assignments(csv_path)
+                        if existing:
+                            apply_existing_lcsc_assignments(
+                                [
+                                    i
+                                    for i in items
+                                    if i.reference not in exempt_refs
+                                    and not (i.reference in spec_refs and i.mpn and not i.lcsc)
+                                ],
+                                existing,
+                                parts_cache=None,
+                            )
+            except Exception as e:
+                logger.warning("BOM CSV merge failed in preflight (continuing without): %s", e)
+        return items
+
+    def _load_bom(self):
+        """Load and cache BOM data.
+
+        Respects the ``bom_source`` setting: when set to ``"pcb"`` or
+        ``"auto"`` (with no usable schematic), the BOM is extracted
+        from PCB footprints instead of schematic symbols.
+        """
+        if self._bom is not None:
+            return self._bom
+
+        if self._bom_source == "pcb":
+            from ..schema.bom import extract_bom_from_pcb
+
+            self._bom = extract_bom_from_pcb(str(self.pcb_path))
+            return self._bom
+
+        if self._bom_source == "auto":
+            # Try schematic first, fall back to PCB
+            if self.schematic_path and self.schematic_path.exists():
+                from ..schema.bom import backfill_footprints_from_pcb, extract_bom
+
+                self._bom = extract_bom(str(self.schematic_path))
+                # Mirror the BOM CSV pipeline: back-fill blank footprints
+                # from the PCB so the schematic-only preflight check sees
+                # the same footprint metadata that ships in the BOM CSV.
+                # Best-effort -- bom_fields will still flag any real gaps.
+                with contextlib.suppress(Exception):
+                    backfill_footprints_from_pcb(self._bom.items, self.pcb_path)
+            else:
+                from ..schema.bom import extract_bom_from_pcb
+
+                self._bom = extract_bom_from_pcb(str(self.pcb_path))
+            return self._bom
+
+        # Default: schematic source
+        if self.schematic_path is None or not self.schematic_path.exists():
+            raise FileNotFoundError("Schematic file not available for BOM extraction")
+
+        from ..schema.bom import backfill_footprints_from_pcb, extract_bom
+
+        self._bom = extract_bom(str(self.schematic_path))
+        # Mirror the BOM CSV pipeline: back-fill blank footprints from the
+        # PCB so the preflight bom_fields check matches what is actually
+        # written to bom_<manufacturer>.csv (spec-overlay-style schematics
+        # leave instance-level Footprint properties blank).
+        # Best-effort -- bom_fields will still flag any real gaps.
+        with contextlib.suppress(Exception):
+            backfill_footprints_from_pcb(self._bom.items, self.pcb_path)
+        return self._bom
+
+    def _get_manufacturer_limits(self) -> tuple[float, float]:
+        """Get max board dimensions for the configured manufacturer.
+
+        Returns:
+            Tuple of (max_width_mm, max_height_mm).
+        """
+        try:
+            from ..manufacturers import get_profile
+
+            profile = get_profile(self.manufacturer)
+            rules = profile.get_design_rules(layers=2)
+            return (rules.max_board_width_mm, rules.max_board_height_mm)
+        except Exception:
+            # Fall back to generous defaults
+            return (400.0, 500.0)

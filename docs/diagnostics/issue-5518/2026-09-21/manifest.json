@@ -1,0 +1,50 @@
+{
+  "issue": 5518,
+  "collected_at": "2026-09-21T11:11:24Z",
+  "git_sha": "63c43938e92bd36a614b72c37074ed5a25ad298a",
+  "files": {
+    "README.md": "57770049f7163ee97b417bf9580e015ff0e02e8eb8be959d1e1a51c33d90bfb0",
+    "captured-scripts.tar.gz": "cbc402b886a7ed5de7d9f3391c53e9e4aa4a43b92e90d00e72c6dafed880c8f4",
+    "drc-summary.json": "d674804b4fadc3d275ffe99966b626df3650b630c512a02e335f5588ecafbf75",
+    "witness-board05.json": "69fe294d30bfd2782555bb33561e19bd61acf8411c7f335ec8d090dcd6fde897",
+    "witness-board06.json": "79e89cd8f91e7f3f904e6cfde80c89554ae2badde75bac801f554633280a4f43",
+    "witness-board07.json": "6155e847a36384434d3da8306720556a22e5759b5051c66e397aa11be20d77ad"
+  },
+  "provenance": {
+    "issue": 5518,
+    "run_date": "2026-09-21",
+    "git_sha": "37171ac08263f973bdad5df349f8f8c9c8f80086",
+    "branch_base": "origin/main @ 37171ac0 (perf(ci): exclude kicad-cli --help/--version probes from the native permit gate (#5624))",
+    "pr_5497": {
+      "head_sha": "74a9dc8ad7de2790781f738b4d392437974089b1",
+      "merge_sha": "9a4c58bebc9700c77b3e9d5c0c9cb07b29e2beb0",
+      "merged_at": "2026-09-16T19:05:00Z",
+      "default_flip_sha": "af4909495c8e917e8ef9e3a8160dca97025d5c4a",
+      "default_flip_note": "#5497 merged with CppPathfinder.route(clear_avoidance_after_connection=False) default-off; #5609 (af490949) later flipped the default to True on main. The option-ON arm below is therefore plain main; the option-OFF control forces the kwarg False via the captured harness."
+    },
+    "kct_build_native_check": "all three backends available (router_cpp 1.0.0 build 42, placement_cpp 2.1.0, drc_cpp 1.0.0) -- full output in README",
+    "kicad_cli": "10.0.6 (/opt/homebrew/bin/kicad-cli)",
+    "host": "robb-studio (macOS 27.0, arm64, 28 cores); local runs only. Boards were run sequentially, but the board-06 OFF arm ran concurrently with other worktrees' board-06 jobs on the same host -- its wall times are not comparable with the ON arm's.",
+    "wall_time_seconds": {
+      "board05_run1": 911,
+      "board05_run2": 917,
+      "board05_run3": 910,
+      "board05_run4": 910,
+      "board06_on_1": 677,
+      "board06_on_2": 657,
+      "board06_off_1": "INCOMPLETE -- 09:04:59Z to 10:50:25Z (6326 s), SIGTERM RC=143, still inside the pure-Python A* fallback on net 5/5 USB3_RX1-; no routed artifact, no harness capture. See README 'Incomplete work'.",
+      "board06_off_2": "INCOMPLETE -- 09:05:09Z to 10:50:25Z (6316 s), SIGTERM RC=143, same disposition as off_1",
+      "board07_run1": 2428,
+      "board07_run2": 2435,
+      "board05_offline_replay_run3_attempt1_explicit_stack_sig_gnd_pwr_sig": 823.5,
+      "board05_offline_replay_run3_attempt2_explicit_stack_all_sig": 830.1,
+      "board05_offline_replay_run4_attempt1_explicit_stack_sig_gnd_pwr_sig": 1379.6,
+      "board05_offline_replay_run3_attempt1_default_stack": 26.3,
+      "board05_offline_replay_run3_attempt2_default_stack": 14.4,
+      "board05_offline_replay_run4_attempt1_default_stack": 25.8,
+      "_replay_note": "Six offline replays: three with the attempt's layer stack passed explicitly and three earlier ones at the loader's default stack. All six return identical per-pad verdicts. The explicit-stack replays are 30-50x slower because the raster is rebuilt for the named stack.",
+      "_note": "Board wall times are END-START from the drivers' .times files (RC in the same file). Board-05 runs all exit RC=1 (route deadline); board-07 runs exit RC=1 (recipe --timeout 2400)."
+    },
+    "notes": "git diff --stat of the run tree was empty for every arm (harness installed via PYTHONPATH sitecustomize only)."
+  }
+}

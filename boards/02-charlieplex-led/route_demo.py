@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Route the real ATtiny85 board using the revision-B deterministic recipe.
+
+Routes both supply rails explicitly, applies reviewed escape-via corrections,
+and requires native DRC before manufacturing export.
+"""
+
+import contextlib
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# Add src to path for development (ensures source version is used)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+
+from kicad_tools.dev import warn_if_stale
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
+
+# Warn if running source scripts with stale pipx install
+warn_if_stale()
+
+
+def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
+    """Run DRC on the PCB using kct check for consistent results.
+
+    Uses kct check as a subprocess to ensure the same DRC rules
+    are applied as when running kct check manually.
+
+    Returns:
+        Tuple of (success, error_count, warning_count)
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            capture_output=True,
+            text=True,
+        )
+
+        # Parse the output to extract error/warning counts
+        error_count = 0
+        warning_count = 0
+        for line in result.stdout.split("\n"):
+            if "Errors:" in line:
+                with contextlib.suppress(ValueError):
+                    error_count = int(line.split(":")[-1].strip())
+            elif "Warnings:" in line:
+                with contextlib.suppress(ValueError):
+                    warning_count = int(line.split(":")[-1].strip())
+
+        return result.returncode == 0, error_count, warning_count
+
+    except Exception as e:
+        print(f"  Warning: DRC check failed: {e}")
+        return False, -1, -1
+
+
+def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
+    """Regenerate the manufacturing bundle so ``kct fleet status`` stays fresh.
+
+    Issue #3264: ``kct fleet status`` flags a board ``ship_ready=false``
+    with the ``"artifacts stale"`` blocker whenever the routed PCB is
+    newer than ``output/manufacturing/manifest.json``.  Re-running
+    ``route_demo.py`` always rewrites the routed PCB, so the demo must
+    also regenerate the manufacturing bundle to keep the manifest current
+    (mirrors what ``generate_design.py:export_manufacturing_bundle()``
+    already does at the end of the full design flow).
+
+    ``kct export`` runs the standard JLCPCB recipe (gerbers + drill + BOM
+    + CPL + report.{md,pdf} + manifest.json).  ``--skip-preflight`` skips
+    the strict pre-flight DRC/ERC gate so the bundle is produced even for
+    boards that ship with allowlisted tolerances; for clean boards (like
+    board 02 post-#3207) it is harmless.
+    """
+    print("\n" + "=" * 60)
+    print("Exporting manufacturing bundle (Issue #3264)...")
+    print("=" * 60)
+
+    mfg_dir = output_dir / "manufacturing"
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "export",
+        str(routed_path),
+        "--output",
+        str(mfg_dir),
+        "--mfr",
+        "jlcpcb",
+        "--skip-preflight",
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n")[-15:]:
+            print(f"   {line}")
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Error: {result.stderr}")
+        return False
+    manifest = mfg_dir / "manifest.json"
+    if manifest.exists():
+        print(f"\n   Manifest: {manifest}")
+        return True
+    print("\n   WARNING: manifest.json not produced")
+    return False
+
+
+def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
+    """Extract ``Nets routed: N/M`` (or equivalent) from ``kct route`` output.
+
+    ``kct route`` emits a summary block of the form::
+
+        Nets routed: 8/10
+        ...
+
+    Returns ``(routed, total)`` or ``None`` if no match.
+    """
+    import re
+
+    for pattern in (
+        r"Nets routed:\s+(\d+)/(\d+)",
+        r"Routed\s+(\d+)/(\d+)\s+nets",
+        r"(\d+)/(\d+)\s+nets\s+complete",
+    ):
+        m = re.search(pattern, stdout)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def main():
+    """Run the routing demo via ``kct route`` (matching generate_design.py)."""
+    # Parse arguments
+    demo_dir = Path(__file__).parent
+    default_input = "charlieplex_3x3.kicad_pcb"
+    default_output = "charlieplex_3x3_routed.kicad_pcb"
+
+    if len(sys.argv) > 1 and Path(sys.argv[1]).is_dir():
+        # ``kct build -o <dir>`` passes the output directory as the sole
+        # positional argument (matching generate_design.py's output_dir
+        # contract). Derive the input/output PCB filenames within it.
+        output_dir = Path(sys.argv[1])
+        input_path = output_dir / default_input
+        output_path = output_dir / default_output
+    else:
+        # Standalone invocation: positional args are file paths resolved
+        # against this script's directory.
+        input_pcb = sys.argv[1] if len(sys.argv) > 1 else f"output/{default_input}"
+        output_pcb = sys.argv[2] if len(sys.argv) > 2 else f"output/{default_output}"
+        input_path = demo_dir / input_pcb
+        output_path = demo_dir / output_pcb
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not input_path.exists():
+        print(f"Error: Input PCB not found: {input_path}")
+        print("Run generate_pcb.py first to create the PCB file.")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("Charlieplex LED Grid Autorouting Demo")
+    print("=" * 60)
+    print(f"\nInput:  {input_path}")
+    print(f"Output: {output_path}")
+
+    # This matches ``generate_design.py:route_pcb()`` exactly.
+    skip_nets = []  # Revision B routes both power rails explicitly.
+
+    # Same recipe as ``boards/02-charlieplex-led/generate_design.py:route_pcb()``.
+    # Keeping these two recipes byte-identical is the whole point of Issue #3207:
+    # the in-process ``router.route_all()`` path drifted from the orchestrator
+    # path and silently regressed board 02 to 4/8 nets + 6 DRC errors.  This
+    # subprocess invocation re-uses the same code path that ``kct build``,
+    # ``kct route``, and the canonical board-05 / board-07 recipes use.
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli.route_cmd",
+        str(input_path),
+        "--output",
+        str(output_path),
+        "--strategy",
+        "negotiated",
+        "--iterations",
+        "30",
+        # Issue #3799: route under an ITERATION budget instead of the
+        # per-net WALL-CLOCK cutoff so the seed-42 route is byte-identical
+        # (UUID-normalized) across machines.  --seed only seeds Python's
+        # global random; it does NOT control the per-net A* deadline checked
+        # in the C++ loop.  On a loaded machine that wall-clock budget fires
+        # mid-search and the net lands less copper -- same seed, different
+        # copper.  --deterministic-budget (#3538) disables the per-net
+        # wall-clock cutoff and pins a fixed node-expansion backstop.
+        # --timeout below is retained only as a SAFETY backstop -- raised
+        # from 240 to 900 (Issue #5587: 240s fired on a contended host even
+        # under --deterministic-budget, reintroducing host-load dependence
+        # via the outer wall-clock stage deadline).
+        # This MUST stay in sync with generate_design.py:route_pcb()
+        # (Issue #3207 no-drift guard,
+        # tests/test_board02_route_demo_recipe.py).
+        "--deterministic-budget",
+        "--timeout",
+        "900",
+        "--seed",
+        "42",
+        "--no-auto-pour",
+        "--no-auto-layers",
+        "--grid",
+        "0.1",
+        # Issue #3112: pass the manufacturer through so the post-route
+        # ``drc_verify_and_nudge`` sweep can consult ``via_in_pad_supported``
+        # and slide any same-net via-in-pad escape vias off the offending pad.
+        # The default jlcpcb profile does NOT support via-in-pad, so this is
+        # the case that exercises the sweep.
+        "--manufacturer",
+        "jlcpcb",
+    ]
+
+    print("\n--- Routing via `kct route` (orchestrator path) ---")
+    print(f"  Skipping nets: {skip_nets}")
+    print(f"  Command: {' '.join(cmd)}")
+
+    # ``kct route`` streams its own progress output; do NOT capture it.
+    # It returns 0 on full success and a non-zero code on partial routing
+    # (in which case it still writes the partially-routed PCB).  We capture
+    # stdout for net-count parsing by tee-ing through subprocess.PIPE.
+    # Issue #3799: pin PYTHONHASHSEED for the route subprocess so any
+    # string-keyed dict/set iteration in the negotiated router is
+    # reproducible across runner environments (CPython randomizes string
+    # hashing per-process otherwise).  Combined with --seed 42 +
+    # --deterministic-budget this makes the full pipeline deterministic,
+    # mirroring generate_design.py:route_pcb().
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = "42"
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    # Echo subprocess output so users can see routing progress, errors, etc.
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+
+    if not output_path.exists():
+        print(
+            f"\nERROR: `kct route` did not produce {output_path} (exit code {result.returncode})",
+            file=sys.stderr,
+        )
+        return 1
+
+    from finalize_routing import finalize_routing
+
+    if not finalize_routing(output_path):
+        print("Native DRC failed after revision-B layout corrections; export stopped.")
+        return 1
+
+    # Parse the routed-net summary so the demo can print a final tally.
+    parsed = _parse_routed_net_count(result.stdout)
+    routed, total = parsed if parsed is not None else (None, None)
+
+    # Issue #3264: regenerate the manufacturing bundle so its
+    # ``manifest.json`` mtime is newer than the freshly-routed PCB.
+    # Otherwise ``kct fleet status`` reports ``ship_ready=false`` with
+    # blocker ``"artifacts stale"`` even though the route succeeded.
+    # This mirrors the post-route step in
+    # ``generate_design.py:export_manufacturing_bundle()``.
+    mfg_success = export_manufacturing_bundle(output_path, output_path.parent)
+
+    # Run DRC validation on the routed output.
+    print("\n--- DRC Validation ---")
+    drc_passed, drc_errors, drc_warnings = run_drc(output_path)
+    if drc_passed:
+        print("  DRC PASSED")
+    else:
+        if drc_errors > 0:
+            print(f"  Errors:   {drc_errors}")
+        if drc_warnings > 0:
+            print(f"  Warnings: {drc_warnings}")
+        print(f"\n  Run 'kct check {output_path}' for full details")
+
+    # Summary
+    print("\n" + "=" * 60)
+    if parsed is None:
+        print("WARNING: Could not parse routed-net count from `kct route` output")
+        all_nets_routed = result.returncode == 0
+    else:
+        all_nets_routed = routed == total
+        print(f"Nets routed: {routed}/{total}")
+
+    # Issue #7746: one shared PipelineGateResult drives the printed verdict
+    # and the exit code (Issue #3912), including the ``kct export`` leg.
+    # ``run_drc`` (kct check) is threaded in as a supplemental DRC verdict.
+    gate = evaluate_pipeline_gate(
+        output_path,
+        route_ok=all_nets_routed,
+        route_allowance=0,
+        export_ok=mfg_success,
+        supplemental_drc_ok=drc_passed,
+        supplemental_reason=("kct check reported error-level DRC findings (see DRC output above)"),
+    )
+    for line in gate.summary_lines():
+        print(line)
+    print("=" * 60)
+
+    return 0 if gate.passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

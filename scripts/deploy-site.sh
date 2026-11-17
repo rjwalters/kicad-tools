@@ -1,0 +1,502 @@
+#!/usr/bin/env bash
+#
+# deploy-site.sh — manual, one-command deploy of the kicad-tools.org demo
+# gallery (Epic #3674, Phase 3) to Cloudflare Pages.
+#
+# This replaces the former CI auto-deploy workflow
+# (.github/workflows/gallery-deploy.yml).  The team deploys MANUALLY via a
+# locally authenticated `wrangler` instead of GitHub Actions, so no Cloudflare
+# secrets live in the repository or in CI.  Two auth paths are supported:
+#   * a scoped Cloudflare Pages API token in CLOUDFLARE_API_TOKEN.  If that is
+#     unset, the script auto-loads one from the operator's local credentials
+#     file (~/.cloudflare/rjwalters/pages-rjwalters.env) when it exists; or
+#   * interactive OAuth via `wrangler login` (no token needed).
+#
+# Pipeline (mirrors the old workflow, kept linear so data/render/build are
+# independent of the deploy step).  Renders run BEFORE board-metrics so the
+# freshly generated PNGs are on disk when board-metrics records their paths
+# into board.json — otherwise a fresh deploy (no pre-existing renders) yields
+# board.json without a `renders` field and the site shows placeholders.
+#   1. renders     -- `kct render boards/` per-board PNGs  (3D via xvfb-run)
+#   2. board.json  -- `kct board-metrics --all`           (non-fatal)
+#   3. site build  -- `npm --prefix site ci && run build`  (prebuild stages
+#                     renders + manufacturing files into site/public/); then
+#                     tracked renders rewritten by step 1 are restored so the
+#                     tree is clean at upload (Issue #8220)
+#   4. deploy      -- `wrangler pages deploy site/dist` (guarded: asserts the
+#                     authenticated Cloudflare account before uploading)
+#   5. verify      -- fetch every deployed board asset (PCB, renders, and
+#                     manufacturing downloads incl. kicad_project.zip) and
+#                     diff its SHA-256 against the copy just built in step 3
+#                     (Issue #5318: the live site silently served a
+#                     pre-repair Board05 PCB -- AND the same stale bytes via
+#                     the downloadable project ZIP -- for weeks because
+#                     nothing checked this -- see scripts/lib/site-verify.sh).
+#                     Skipped for --preview (dynamic URL) and --no-verify.
+#
+# Generated artifacts (board.json, renders, site/public/boards/, site/dist/)
+# are all git-ignored and never committed.
+#
+# Custom domain: kicad-tools.org is live and is the public URL.  The deployed
+# bytes are verified against https://kicad-tools.org by default; override the
+# verification target with KCT_SITE_BASE_URL (e.g.
+# KCT_SITE_BASE_URL=https://kicad-tools.pages.dev to check the default Pages
+# hostname instead).
+#
+# Usage:
+#   ./scripts/deploy-site.sh [--no-deploy] [--preview] [--no-3d] [--no-verify] [--help]
+#
+#   --no-deploy   Run metrics + render + build only; skip the wrangler deploy
+#                 (and therefore step 5 -- verification needs a deploy to check).
+#   --preview     Deploy to a non-main preview branch (omit `--branch main`;
+#                 wrangler auto-names the preview by the current branch).
+#                 Step 5 is skipped: the preview URL is dynamic.
+#   --no-3d       Skip 3D renders (skip xvfb-run; useful on machines without X).
+#   --no-verify   Skip step 5 (deployed-artifact verification). Use sparingly --
+#                 this is the check that catches issue #5318 recurring.
+#   --help        Show this help and exit.
+#
+# Prerequisites (the script warns clearly if any are missing):
+#   uv        -- required (board metrics + renders)
+#   node/npm  -- required (Astro build)
+#   wrangler  -- required unless --no-deploy (authenticate via CLOUDFLARE_API_TOKEN
+#                or run `wrangler login` once)
+#   kicad-cli -- optional; if absent, renders are skipped and the site serves
+#                placeholder thumbnails (warn-then-continue, not an abort)
+#   curl      -- required for step 5 (deployed-artifact verification); if
+#                absent, step 5 is skipped with a warning rather than failing
+#                the whole deploy
+#
+# Cloudflare account guard (deploy path only):
+#   Before deploying, the script asserts the authenticated wrangler account ID
+#   matches the expected personal account, which is pinned below as a SHA-256
+#   digest rather than a literal ID.  This prevents a
+#   stray work account left logged in from receiving the deploy.  Override the
+#   expected ID via the EXPECTED_CLOUDFLARE_ACCOUNT_ID env var if needed.  The
+#   guard is skipped entirely under --no-deploy (build-only needs no wrangler).
+
+set -euo pipefail
+
+# --- Locate the repo root so the script works from any cwd -----------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# --- Logging helpers -------------------------------------------------------
+info()  { printf '\033[0;34m[deploy]\033[0m %s\n' "$*"; }
+warn()  { printf '\033[0;33m[deploy] WARNING:\033[0m %s\n' "$*" >&2; }
+err()   { printf '\033[0;31m[deploy] ERROR:\033[0m %s\n' "$*" >&2; }
+
+usage() {
+  sed -n '2,/^set -euo pipefail/p' "${BASH_SOURCE[0]}" \
+    | sed -e 's/^# \{0,1\}//' -e '/^set -euo pipefail/d'
+}
+
+# --- Cloudflare account guard ----------------------------------------------
+# Expected Cloudflare account for kicad-tools deploys, pinned as a SHA-256
+# digest rather than a literal account ID: this is a public repo, and an
+# account identifier is a fact about our infrastructure that does not need
+# publishing.  The account ID is 128 bits of hex, so the digest does not
+# expose it to brute force.  A deploy recently landed on the WRONG account (a
+# stray work account left logged in), so the guard below refuses to deploy
+# unless the authenticated wrangler account matches.
+#
+# Override with EXPECTED_CLOUDFLARE_ACCOUNT_ID (compared literally) or
+# EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256.
+EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256="${EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256:-04e8eb2a99d37a555c87220b1d4cd1c018afbe5b65360bdd2224eb8e9f6b69c2}"
+
+# sha256_of VALUE -- portable digest helper (sha256sum on Linux, shasum on macOS)
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# --- Deployed-artifact verification (Issue #5318) ---------------------------
+# Shared with the standalone scripts/verify-site-deployment.sh; see
+# scripts/lib/site-verify.sh for what/why. Provides sha256_of_file() and
+# verify_deployed_assets().
+# shellcheck source=lib/site-verify.sh
+source "${SCRIPT_DIR}/lib/site-verify.sh"
+
+# assert_cloudflare_account WRANGLER_CMD...
+#   Checks the explicit account ID (or falls back to `wrangler whoami`)
+#   against the identity pin. With an explicit target, Pages listing must
+#   authenticate successfully and expose the existing kicad-tools project.
+assert_cloudflare_account() {
+  local whoami_out account_id
+
+  # A scoped Pages token need not have User Details or Account Read access.
+  # Its explicit target is authenticated below through Pages project listing.
+  account_id="${CLOUDFLARE_ACCOUNT_ID:-}"
+  if [ -n "${account_id}" ]; then
+    info "Verifying explicitly configured Cloudflare deploy account..."
+  else
+    info "Verifying Cloudflare deploy target (wrangler whoami)..."
+    if ! whoami_out="$("$@" whoami 2>&1)"; then
+      err "Could not run 'wrangler whoami' (not logged in?). Output:"
+      printf '%s\n' "${whoami_out}" >&2
+      err "Refusing to deploy. Set a scoped Pages token in CLOUDFLARE_API_TOKEN, or"
+      err "run 'wrangler logout && wrangler login' to the"
+      err "correct personal Cloudflare account, then re-run this script."
+      exit 1
+    fi
+
+    # `wrangler whoami` prints the account ID as a 32-hex token in a table; it is
+    # the only 32-hex value in the output (OAuth tokens are not printed).  Grab
+    # the first such token.
+    account_id="$(printf '%s\n' "${whoami_out}" | grep -oiE '[0-9a-f]{32}' | head -n1 || true)"
+
+    if [ -z "${account_id}" ]; then
+      err "Could not parse a Cloudflare account ID from 'wrangler whoami'."
+      err "Are you logged in? Output was:"
+      printf '%s\n' "${whoami_out}" >&2
+      err "Refusing to deploy. Set a scoped Pages token in CLOUDFLARE_API_TOKEN, or"
+      err "run 'wrangler logout && wrangler login' to the"
+      err "correct personal Cloudflare account, then re-run this script."
+      exit 1
+    fi
+  fi
+
+  local account_sha
+  if ! account_sha="$(sha256_of "${account_id}")"; then
+    err "Neither sha256sum nor shasum found -- cannot verify the Cloudflare account."
+    err "Refusing to deploy rather than skipping the identity guard."
+    exit 1
+  fi
+
+  local matches="no"
+  if [ -n "${EXPECTED_CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+    [ "${account_id}" = "${EXPECTED_CLOUDFLARE_ACCOUNT_ID}" ] && matches="yes"
+  else
+    [ "${account_sha}" = "${EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256}" ] && matches="yes"
+  fi
+
+  if [ "${matches}" != "yes" ]; then
+    err "WRONG Cloudflare account! Refusing to deploy."
+    err "  authenticated account sha256: ${account_sha:0:12}..."
+    err "  expected account sha256:      ${EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256:0:12}..."
+    err "Wrangler uses whatever account is globally logged in — a stray work"
+    err "account would receive this deploy (or silently create a duplicate"
+    err "project on the wrong account)."
+    err "Fix: use a scoped Pages token for the intended account in CLOUDFLARE_API_TOKEN,"
+    err "or run 'wrangler logout && wrangler login' and authenticate to the"
+    err "correct personal Cloudflare account, then"
+    err "re-run this script. To intentionally target a different account, set"
+    err "EXPECTED_CLOUDFLARE_ACCOUNT_ID to its ID."
+    exit 1
+  fi
+
+  info "Cloudflare account matches the configured identity pin."
+
+  # Scoped credentials must reach the exact existing project. OAuth retains
+  # the first-deploy warning when the project has not been created yet.
+  local projects
+  if projects="$("$@" pages project list 2>&1)"; then
+    if ! printf '%s\n' "${projects}" | grep -Eq '(^|[[:space:]│|])kicad-tools([[:space:]│|]|$)'; then
+      if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+        err "Configured account does not expose the existing kicad-tools Pages project. Refusing to deploy."
+        exit 1
+      fi
+      warn "'kicad-tools' Pages project not found in 'wrangler pages project list'."
+      warn "If this is the first deploy, wrangler will create it; otherwise"
+      warn "double-check you're on the right account."
+    fi
+  else
+    if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+      err "Could not authenticate Pages access to the configured account. Refusing to deploy."
+      exit 1
+    fi
+    warn "Could not list Pages projects ('wrangler pages project list' failed);"
+    warn "continuing — wrangler will report any project issues at deploy time."
+  fi
+}
+
+# --- Clean-tree helpers (Issue #8220) ----------------------------------------
+# Step 1 (`kct render`) rewrites tracked, opt-in-committed renders under
+# boards/*/output/renders/.  Left dirty, wrangler warns about uncommitted
+# changes and the Pages deployment's commit hash no longer describes what was
+# uploaded.  The build (Step 3) has already staged the FRESH renders into
+# site/public/ by then, so restoring the tracked files afterwards leaves the
+# published bytes unchanged.  Only the render pathspecs are touched, so
+# unrelated operator changes are never clobbered.
+RENDER_PATHSPECS=('boards/*/output/renders/*' 'boards/*/*/output/renders/*')
+
+# in_git_worktree -- true when REPO_ROOT is inside a git work tree
+in_git_worktree() {
+  git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+# restore_tracked_renders -- git-checkout tracked render files that the render
+# step modified; logs each restored path.  No-op outside git or when clean.
+restore_tracked_renders() {
+  in_git_worktree || return 0
+  local changed
+  changed="$(git -C "${REPO_ROOT}" diff --name-only -- "${RENDER_PATHSPECS[@]}")"
+  [ -n "${changed}" ] || return 0
+  info "Restoring tracked renders rewritten by Step 1 (fresh bytes are already staged in site/public/):"
+  printf '%s\n' "${changed}" | sed 's/^/  /'
+  # Check out the exact changed paths: a pathspec that matches no tracked file
+  # (e.g. no nested boards/*/*/ layout) makes `git checkout` error out.
+  printf '%s\n' "${changed}" | tr '\n' '\0' \
+    | xargs -0 git -C "${REPO_ROOT}" checkout --
+}
+
+# warn_if_dirty_tree -- warn-level (never fails) list of uncommitted paths.
+warn_if_dirty_tree() {
+  in_git_worktree || return 0
+  local dirty
+  dirty="$(git -C "${REPO_ROOT}" status --porcelain)"
+  [ -n "${dirty}" ] || return 0
+  warn "Working tree is not clean; the deployment commit hash may not describe what was built:"
+  printf '%s\n' "${dirty}" | sed 's/^/  /' >&2
+}
+
+# --- Parse flags -----------------------------------------------------------
+NO_DEPLOY=0
+PREVIEW=0
+NO_3D=0
+NO_VERIFY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-deploy) NO_DEPLOY=1 ;;
+    --preview)   PREVIEW=1 ;;
+    --no-3d)     NO_3D=1 ;;
+    --no-verify) NO_VERIFY=1 ;;
+    -h|--help)   usage; exit 0 ;;
+    *)
+      err "Unknown argument: $1"
+      echo "Run '$0 --help' for usage." >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+cd "${REPO_ROOT}"
+
+# If the tree is already dirty, say so once now and skip the end-of-run check
+# (those changes are the operator's, not the deploy's).
+TREE_DIRTY_AT_START=0
+if in_git_worktree && [ -n "$(git -C "${REPO_ROOT}" status --porcelain)" ]; then
+  TREE_DIRTY_AT_START=1
+  warn_if_dirty_tree
+fi
+
+# --- Prerequisite checks ---------------------------------------------------
+MISSING=0
+
+if ! command -v uv >/dev/null 2>&1; then
+  err "'uv' not found — required for board metrics + renders. Install: https://astral.sh/uv"
+  MISSING=1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  err "'npm' (Node.js) not found — required to build the Astro site. Install Node 22+."
+  MISSING=1
+fi
+
+if [ "${NO_DEPLOY}" -eq 0 ]; then
+  if ! command -v wrangler >/dev/null 2>&1 && ! command -v npx >/dev/null 2>&1; then
+    err "'wrangler' (and 'npx') not found — required to deploy. Authenticate via CLOUDFLARE_API_TOKEN or 'wrangler login' once, or pass --no-deploy."
+    MISSING=1
+  fi
+fi
+
+if [ "${MISSING}" -ne 0 ]; then
+  err "Missing required prerequisites (see above). Aborting."
+  exit 1
+fi
+
+# kicad-cli is OPTIONAL: if absent, skip renders and let the site fall back to
+# placeholder-board.svg.  board-metrics does not need kicad-cli.
+#
+# Renderer selection (Issue #7810): the 3D coverage gate audits against the
+# pinned model set, so renders should come from the pinned Docker kicad-cli too.
+# Honour an explicit KCT_KICAD_DOCKER=1; when it is unset and docker is
+# available, opt in.  An explicit KCT_KICAD_DOCKER=0 keeps the host kicad-cli.
+# With the Docker shim a host kicad-cli is not required.
+SKIP_RENDERS=0
+# "Usable" means the daemon answers, not just that the binary exists: a stopped
+# Docker Desktop would otherwise fail every render and publish stale images.
+docker_usable() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+if [ "${KCT_KICAD_DOCKER:-}" = "1" ] && ! docker_usable; then
+  err "KCT_KICAD_DOCKER=1 but Docker is not installed or not running; start Docker or unset KCT_KICAD_DOCKER."
+  exit 1
+fi
+if [ -z "${KCT_KICAD_DOCKER:-}" ]; then
+  if docker_usable; then
+    export KCT_KICAD_DOCKER=1
+  elif command -v docker >/dev/null 2>&1; then
+    warn "docker installed but not running; falling back to host kicad-cli."
+  fi
+fi
+if [ "${KCT_KICAD_DOCKER:-}" = "1" ]; then
+  info "Renderer: pinned Docker kicad-cli (KCT_KICAD_DOCKER=1)."
+elif command -v kicad-cli >/dev/null 2>&1; then
+  info "Renderer: host kicad-cli (not the pinned release)."
+else
+  warn "'kicad-cli' not found (and no usable Docker) — skipping board renders. The site will serve placeholder thumbnails."
+  SKIP_RENDERS=1
+fi
+
+# --- Step 1: renders -------------------------------------------------------
+# Renders MUST run before board-metrics: board-metrics records render image
+# paths into board.json based on the PNGs that exist on disk when it runs, so
+# the renders have to be generated first or a fresh deploy produces board.json
+# without a `renders` field (placeholder thumbnails everywhere).
+if [ "${SKIP_RENDERS}" -eq 1 ]; then
+  info "Step 1/5: skipping renders (kicad-cli absent)."
+else
+  info "Step 1/5: rendering board images (uv run kct render boards/)"
+  rendered=0
+
+  # Prefer 3D (2D + 3D) unless --no-3d.  The 3D pass (kicad-cli pcb render)
+  # needs a display, so wrap it in xvfb-run when available to give it a virtual
+  # framebuffer on headless machines.
+  #
+  # `kct render` audits 3D model coverage against the pinned model set (when
+  # synced via `kct models sync`, else the host's; Issue #7689) and exits
+  # non-zero on any non-exempt footprint without a body.  That is a publish
+  # gate, not a display problem: it aborts the deploy instead of falling back
+  # to 2D.  Any other 3D failure still falls back to 2D-only below.
+  if [ "${NO_3D}" -eq 0 ]; then
+    render_json="$(mktemp)"
+    render_cmd=(uv run kct render boards/ --format json)
+    if command -v xvfb-run >/dev/null 2>&1; then
+      render_cmd=(xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" "${render_cmd[@]}")
+    fi
+    if "${render_cmd[@]}" >"${render_json}"; then
+      info "Renders complete (2D + 3D)."
+      rendered=1
+    else
+      incomplete="$(python3 -I - "${render_json}" <<'PY'
+import json, sys
+
+try:
+    boards = json.load(open(sys.argv[1]))["boards"]
+except (OSError, ValueError, KeyError):
+    sys.exit(0)
+for b in boards:
+    check = b.get("model_check", {})
+    if check.get("status") != "failed":
+        continue
+    pct = (check.get("coverage") or {}).get("percent")
+    print(f"  {b['board']}: coverage {pct}%")
+    for m in check.get("unresolved_models", []) + check.get("uncovered_models", []):
+        print(f"    {m.get('reference')}: {m.get('reason')}")
+PY
+)"
+      rm -f "${render_json}"
+      if [ -n "${incomplete}" ]; then
+        printf '%s\n' "${incomplete}" >&2
+        err "Incomplete 3D model coverage; refusing to publish. Sync the pinned set (kct models sync) or fix the boards."
+        exit 1
+      fi
+      warn "3D render failed; falling back to 2D-only."
+    fi
+    rm -f "${render_json}"
+  fi
+
+  # 2D-only path: requested via --no-3d, or used as the fallback when 3D failed.
+  if [ "${rendered}" -eq 0 ]; then
+    info "Rendering 2D-only (uv run kct render boards/ --no-3d)"
+    if uv run kct render boards/ --no-3d; then
+      info "2D renders complete."
+    else
+      err "2D render failed; refusing to publish stale renders. Fix the render error or pass --no-deploy."
+      exit 1
+    fi
+  fi
+fi
+
+# --- Step 2: board.json metrics (non-fatal) --------------------------------
+# Runs AFTER renders so board-metrics captures the freshly generated PNG paths
+# into board.json (`renders` field).  A metrics regression must not block the
+# deploy; the site tolerates a board without board.json.
+info "Step 2/5: generating board metrics (uv run kct board-metrics --all)"
+uv run kct board-metrics --all || warn "board-metrics returned non-zero; continuing (site tolerates missing board.json)."
+
+# --- Step 3: build the Astro site ------------------------------------------
+# `prebuild` (site/scripts/copy-renders.mjs) runs automatically before `build`
+# and stages renders + manufacturing files from boards/<id>/output/ into
+# site/public/.  No manual copy step needed.
+info "Step 3/5: building the Astro site (npm --prefix site ci && run build)"
+npm --prefix site ci
+npm --prefix site run build
+info "Site built to site/dist/."
+restore_tracked_renders
+
+# --- Step 4: deploy --------------------------------------------------------
+if [ "${NO_DEPLOY}" -eq 1 ]; then
+  info "Step 4/5: --no-deploy set; skipping Cloudflare Pages deploy."
+  info "Done. Build is in site/dist/ (not deployed)."
+  [ "${TREE_DIRTY_AT_START}" -eq 1 ] || warn_if_dirty_tree
+  exit 0
+fi
+
+# Prefer a directly installed wrangler; fall back to npx.
+if command -v wrangler >/dev/null 2>&1; then
+  WRANGLER=(wrangler)
+else
+  WRANGLER=(npx wrangler)
+fi
+
+# Prefer the operator's scoped, chezmoi-managed Pages credentials when no
+# token was explicitly supplied. Keep tokens out of logs and the repository.
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "${HOME}/.cloudflare/rjwalters/pages-rjwalters.env" ]; then
+  info "Loading scoped Cloudflare Pages credentials."
+  set -a
+  # shellcheck disable=SC1091
+  source "${HOME}/.cloudflare/rjwalters/pages-rjwalters.env"
+  set +a
+fi
+
+# Guard against deploying to the wrong Cloudflare account (aborts on mismatch
+# or not-logged-in).  Only reached on the deploy path — --no-deploy exits above.
+assert_cloudflare_account "${WRANGLER[@]}"
+
+if [ "${PREVIEW}" -eq 1 ]; then
+  info "Step 4/5: deploying PREVIEW to Cloudflare Pages (wrangler auto-names the branch)."
+  # Omit --branch so wrangler auto-names the preview by the current branch.
+  "${WRANGLER[@]}" pages deploy site/dist --project-name kicad-tools
+else
+  info "Step 4/5: deploying PRODUCTION (branch main) to Cloudflare Pages."
+  "${WRANGLER[@]}" pages deploy site/dist --project-name kicad-tools --branch main
+fi
+
+info "Deploy complete. The deployed URL is printed above by wrangler."
+[ "${TREE_DIRTY_AT_START}" -eq 1 ] || warn_if_dirty_tree
+
+# --- Step 5: verify the deploy actually took (Issue #5318) ------------------
+# A successful `wrangler pages deploy` exit code is NOT proof the public site
+# now serves the bytes we just built -- see scripts/lib/site-verify.sh for the
+# incident this closes. Skipped for --preview (the preview URL is dynamic,
+# printed by wrangler above, and not derivable here) and --no-verify.
+if [ "${PREVIEW}" -eq 1 ]; then
+  info "Step 5/5: skipping deployed-artifact verification (--preview: URL is dynamic, see above)."
+elif [ "${NO_VERIFY}" -eq 1 ]; then
+  info "Step 5/5: skipping deployed-artifact verification (--no-verify set)."
+elif ! command -v curl >/dev/null 2>&1; then
+  warn "Step 5/5: 'curl' not found — cannot verify the deployed site matches what was just built."
+  warn "Manually confirm the public board asset(s) before trusting this deploy, or install curl and re-run './scripts/verify-site-deployment.sh' once it's available."
+else
+  info "Step 5/5: verifying deployed board asset(s) match the just-built site..."
+  base_url="${KCT_SITE_BASE_URL:-https://kicad-tools.org}"
+  if ! verify_deployed_assets "${base_url}" "${REPO_ROOT}/site/dist/boards"; then
+    err "Deployed-artifact verification FAILED (see mismatches above)."
+    err "The Cloudflare Pages deploy command reported success, but the"
+    err "publicly served board asset(s) do not match what was just built --"
+    err "exactly the stale-publication failure mode from issue #5318."
+    err "Wait a bit for CDN propagation and re-run:"
+    err "  ./scripts/verify-site-deployment.sh --base-url ${base_url}"
+    err "before considering this deploy complete."
+    exit 1
+  fi
+fi

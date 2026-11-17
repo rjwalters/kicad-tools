@@ -1,0 +1,2259 @@
+"""Pure Python DRC checker.
+
+This module provides the main DRCChecker class that performs Design Rule
+Checks on PCB designs without requiring kicad-cli.
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
+
+from kicad_tools.manufacturers import DesignRules, get_profile
+
+from .rules.ampacity import AmpacityRule
+from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
+from .rules.connectivity import ConnectivityRule
+from .rules.copper_sliver import CopperSliverRule
+from .rules.courtyard import CourtyardOverlapRule
+from .rules.dangling_copper import DanglingCopperRule
+from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
+from .rules.diffpair_length_skew import DiffPairLengthSkewRule
+from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
+from .rules.diffpair_uncoupled_length import DiffPairUncoupledLengthRule
+from .rules.edge import EdgeClearanceRule
+from .rules.impedance import ImpedanceRule
+from .rules.match_group_length_skew import MatchGroupLengthSkewRule
+from .rules.path_ampacity import PathAmpacityRule
+from .rules.placement import FootprintOutsideBoardRule
+from .rules.pour_slot import PourSlotRule
+from .rules.redundant_copper import RedundantCopperRule
+from .rules.reinforcement_courtyard import ReinforcementCourtyardRule
+from .rules.reinforcement_incomplete import ReinforcementIncompleteRule
+from .rules.silkscreen import check_all_silkscreen
+from .rules.via_in_pad import ViaInPadRule
+from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
+from .violations import DRCResults, DRCViolation
+
+if TYPE_CHECKING:
+    from .rules.physical_gap import FabGapPolicy
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping, Sequence
+    from pathlib import Path
+
+    from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.rules import NetClassRouting
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.filters import ViolationFilter
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment, MaskCopperRequest
+    from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
+
+
+def canonical_source_text(raw: bytes, path: Path | None = None) -> str:
+    """Render saved ``.kicad_pcb`` bytes exactly as :meth:`PCB.load` would hold them.
+
+    ``PCB.load()`` does not keep its parsed tree byte-identical to the file it
+    came from.  A KiCad 10 "name-only net" board -- inline ``(net "SWCLK")``
+    references with no top-level ``(net N "name")`` table, which is what
+    ``kicad-cli pcb drc --save-board`` writes -- has that table **synthesized
+    into** ``PCB._sexp`` during construction
+    (:meth:`PCB._synthesize_net_table`).  Comparing the loaded object against a
+    plain re-parse of the same bytes therefore always differs: zero net
+    declarations on the file side versus one per net on the object side (issue
+    #5814 -- 0 vs 3 on the net-tie fixture, 0 vs 80 on a real board).  A
+    mutation guard built on a plain re-parse rejects boards nobody edited.
+
+    Running the saved bytes back through ``PCB`` puts **both** sides of such a
+    comparison through the same normalization, so a genuine in-memory edit --
+    the only thing the guard exists to catch -- stays the sole remaining
+    difference.
+
+    Args:
+        raw: The saved source bytes to canonicalize.
+        path: Optional path the bytes were read from, passed through to ``PCB``
+            so canonicalization sees the same construction arguments
+            ``PCB.load()`` used.
+
+    Returns:
+        The serialized, load-normalized S-expression text for ``raw``.
+
+    Raises:
+        ValueError: If ``raw`` cannot be decoded, parsed, or built into a
+            ``PCB``.  Callers guarding a saved source fail closed on this
+            rather than treating an unreadable file as unchanged.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    try:
+        return PCB(parse_string(raw.decode()), path=path)._sexp.to_string()
+    except ValueError:
+        # Both failure modes worth distinguishing already subclass ValueError
+        # (UnicodeDecodeError for undecodable bytes, ParseError for malformed
+        # S-expressions) and carry a usable message -- pass them through.
+        raise
+    except Exception as exc:  # pragma: no cover - defensive, fails closed
+        raise ValueError(f"Could not canonicalize PCB source bytes: {exc}") from exc
+
+
+class DRCChecker:
+    """Pure Python DRC checker for PCB validation.
+
+    Validates PCB designs against manufacturer design rules without
+    requiring kicad-cli to be installed.
+
+    Example:
+        >>> from kicad_tools.schema.pcb import PCB
+        >>> from kicad_tools.validate import DRCChecker
+        >>>
+        >>> pcb = PCB.load("board.kicad_pcb")
+        >>> checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+        >>> results = checker.check_all()
+        >>>
+        >>> if results.passed:
+        ...     print("DRC passed!")
+        >>> else:
+        ...     for violation in results.errors:
+        ...         print(f"{violation.severity}: {violation.message}")
+
+    Attributes:
+        pcb: The PCB being checked
+        design_rules: Design rules from the manufacturer profile
+        manufacturer: Manufacturer ID string
+        layers: Number of PCB layers
+    """
+
+    def __init__(
+        self,
+        pcb: PCB,
+        manufacturer: str = "jlcpcb",
+        layers: int = 4,
+        copper_oz: float = 1.0,
+        suppress_library: bool = False,
+        net_class_map: dict[str, NetClassRouting] | None = None,
+        warn_on_inactive_skew_rules: bool = True,
+        verbose: bool = False,
+        emit_measurements: bool = False,
+        courtyard_waivers: CourtyardWaivers | None = None,
+        strict_connectivity: bool = True,
+        copper_oz_outer: float | None = None,
+        copper_oz_inner: float | None = None,
+        declared_spec_currents: list[str] | None = None,
+        current_path_specs: Sequence[CurrentPathSpec] | None = None,
+        reinforcement_wires: Sequence[dict] | None = None,
+        reinforcement_waived_nets: Iterable[str] | None = None,
+        mask_copper_request: MaskCopperRequest | None = None,
+        physical_copper_gap_mm: float | None = None,
+        fab_view: bool = False,
+        fab_view_copper_oz: float | None = None,
+        fab_view_gap_policy: FabGapPolicy | None = None,
+        authored_min_clearance_mm: float | None = None,
+        require_routing_policy: bool = False,
+        routing_policy_defer_pair_vias: bool = True,
+        strict_copper: bool = True,
+    ) -> None:
+        """Initialize the DRC checker.
+
+        Args:
+            pcb: The PCB to check
+            manufacturer: Manufacturer ID (e.g., "jlcpcb", "oshpark")
+            layers: Number of PCB layers (2, 4, 6, etc.)
+            copper_oz: Copper weight in oz
+            suppress_library: If True, suppress silkscreen warnings for
+                footprints originating from standard KiCad libraries
+            net_class_map: Optional ``{net_name: NetClassRouting}`` map
+                (the autorouter convention).  When provided, the
+                differential-pair routing continuity rule (Phase 2.5b /
+                Issue #2652) re-derives the engagement state from the
+                PCB + map and runs the rule with the resulting
+                ``engaged_pairs`` set + per-pair threshold map.  When
+                omitted, the rule degrades to a no-op (graceful
+                standalone-``kct check`` behaviour).
+            warn_on_inactive_skew_rules: When True (default), the three
+                sidecar-gated skew rules
+                (``match_group_length_skew``, ``diffpair_length_skew``,
+                ``diffpair_routing_continuity``) emit a one-time stderr
+                warning when they degrade to a no-op because
+                ``net_class_map`` is ``None``.  This makes the "silently
+                passes without a sidecar" failure mode visible on *every*
+                invocation surface -- not just the ``kct check`` CLI
+                entry point, which prints its own up-front warning
+                (Issue #3917 Defect 3).  The CLI passes ``False`` here to
+                avoid duplicating its own warning.
+            verbose: When True, the sidecar-gated skew / continuity rules
+                emit advisory ``info``-severity findings that carry the
+                measured per-pair / per-group values even when the pair /
+                group passes, so ``kct check --verbose`` surfaces the
+                measurements on a clean board (Issue #3917 AC5).
+            emit_measurements: When True, the sidecar-gated skew /
+                continuity rules emit the same advisory ``info``-severity
+                measurement findings regardless of ``verbose``.  This lets
+                a caller collect the measured per-pair / per-group values
+                (for a measurement-summary table) at default verbosity
+                without flooding the ``--verbose`` info stream (Issue
+                #3924 AC1).  The ``kct check`` CLI sets this True so it can
+                render a concise measurement summary after the violation
+                table.
+            courtyard_waivers: Optional loaded
+                :class:`~kicad_tools.validate.rules.courtyard_waivers.CourtyardWaivers`.
+                When provided, ``check_courtyard_overlap`` emits ``waived=True``
+                findings for overlapping courtyard pairs that match a waiver
+                entry (instead of blocking errors), and an ``info`` "unused
+                waiver" finding for entries naming an absent component.  When
+                omitted, every overlap is a blocking error (Issue #4137).
+            strict_connectivity: When True (the default since Issue #4673,
+                matching the ``kct net-status`` default flipped by Issue
+                #4557), ``check_connectivity`` decides segment↔segment /
+                segment↔pad / segment↔via unions by real geometric copper
+                contact (shapely polygon intersection) instead of the legacy
+                0.01mm endpoint-proximity tolerance, matching KiCad's
+                connectivity semantics (Issue #4176).  A net whose copper the
+                legacy model over-connects (reported "complete" while
+                ``kicad-cli pcb drc`` finds it unconnected) then correctly
+                fires the connectivity rule, and the legacy model's
+                endpoint-proximity false opens on poured boards disappear.
+                Pass False (``kct check --legacy-connectivity``) to opt back
+                into the legacy tolerance model.  Strict mode requires
+                shapely (a core dependency since #3824) and fails loud if it
+                is missing.
+            copper_oz_outer: Optional override for the *ampacity* gate's
+                outer-layer (F.Cu / B.Cu) copper weight in oz (Issue #4326).
+                When provided, replaces ``design_rules.outer_copper_oz``
+                after the manufacturer preset is loaded, letting the CLI
+                honor the board's declared ``(setup (stackup ...))`` copper
+                weight (or an explicit keyed ``--copper outer=..``) without
+                repointing the preset's min-trace-width / clearance rules.
+                ``None`` leaves the preset default in place.
+            copper_oz_inner: Optional override for the *ampacity* gate's
+                inner-layer (In*.Cu) copper weight in oz (Issue #4326).
+                Same semantics as ``copper_oz_outer`` for
+                ``design_rules.inner_copper_oz``.
+            current_path_specs: Optional declared branch-specific
+                current-path intents (Issue #4980,
+                :class:`~kicad_tools.router.current_paths.CurrentPathSpec`).
+                When provided, :meth:`check_path_ampacity` wires
+                :class:`~kicad_tools.validate.rules.path_ampacity
+                .PathAmpacityRule` to verify each declared branch resolves,
+                is unambiguous, and meets IPC-2221 width for its OWN
+                declared current -- independent of :attr:`net_class_map`'s
+                whole-net ``target_ampacity``. ``None`` (the default)
+                degrades to a clean no-op, matching every other
+                sidecar-optional rule in this class.
+
+            authored_min_clearance_mm: The board's own authored minimum
+                clearance (``.kicad_pro`` ``rules.min_clearance``), or
+                ``None``.  Floors the within-pair gap that
+                ``diffpair_clearance_intra`` enforces, matching
+                ``DesignRules.pair_gap()`` in the router (Issue #6575).
+            require_routing_policy: When True, ``routing_policy`` reports
+                every sensitive net class (``length_critical``,
+                ``noise_sensitive``, ``length_match_group`` or
+                ``diffpair_partner``) that declares neither
+                ``max_vias_per_net`` nor ``length_constraint.max_length``
+                (Issue #6044).  Off by default.
+            routing_policy_defer_pair_vias: When True (default),
+                ``routing_policy`` leaves the via cap of engaged diff-pair
+                nets to ``diffpair_uncoupled_length`` so it is not reported
+                twice.  Pass False when that category does not run.
+            strict_copper: When True (default), a heavier-than-1oz outer
+                weight with no profile entry raises
+                ``UnsupportedCopperWeightError`` instead of silently using
+                1 oz floors (Issue #8836).  Only pass False from a caller
+                that applies the DFM threshold table's fail-closed
+                ``incomplete`` verdict right after construction
+                (``kct check``, Issue #8839).
+
+        Raises:
+            ValueError: If manufacturer ID is not recognized
+        """
+        self.authored_min_clearance_mm = authored_min_clearance_mm
+        self.mask_copper_request = mask_copper_request
+        # Opt-in heuristic width-consistency audit: ``None`` keeps it out of
+        # check_all(); set to a (possibly empty) dict of
+        # WidthConsistencyRule options to include it.
+        self.width_consistency_options: dict[str, object] | None = None
+        self.pcb = pcb
+        self.manufacturer = manufacturer
+        self.layers = layers
+        self.copper_oz = copper_oz
+        self.suppress_library = suppress_library
+        self.net_class_map = net_class_map
+        # Issue #7206: currents the project spec declares (labels only); drives
+        # ``ampacity: unknown`` coverage when no net carries ``target_ampacity``.
+        self.declared_spec_currents = list(declared_spec_currents or [])
+        # Set by :meth:`check_impedance`; read by ``kct check`` coverage.
+        self.impedance_unmeasured_pairs: list[tuple[str, str]] = []
+        # Issue #7206 (F3): declared nets whose copper pour could not be
+        # rated by ``check_ampacity`` -- ``{net: reason}`` for coverage.
+        self.ampacity_unmeasured_nets: dict[str, str] = {}
+        # Issue #8924: set by :meth:`check_mask_to_copper`; read by ``kct
+        # check`` coverage so the ``mask_to_copper`` row can report the
+        # assessment's own ``coverage`` instead of an unconditional
+        # ``checked``.  ``None`` until the check runs.
+        self.mask_copper_assessment: MaskCopperAssessment | None = None
+        # Issue #6044: ``routing_policy`` options.  ``require_routing_policy``
+        # makes a sensitive net class with no declared policy an error
+        # (``kct check --require-routing-policy``).  With
+        # ``routing_policy_defer_pair_vias`` (the default) the via cap of an
+        # engaged diff-pair net is left to ``diffpair_uncoupled_length``, so
+        # it is not reported twice; the CLI clears it when that category is
+        # deselected.
+        self.require_routing_policy = require_routing_policy
+        self.routing_policy_defer_pair_vias = routing_policy_defer_pair_vias
+        self.courtyard_waivers = courtyard_waivers
+        # Issue #4980: declared branch-specific current-path intents, kept
+        # as a plain list so ``check_path_ampacity`` degrades to an empty
+        # no-op when omitted (mirrors PathAmpacityRule's own ``None``/empty
+        # contract).
+        self.current_path_specs: list[CurrentPathSpec] = (
+            list(current_path_specs) if current_path_specs else []
+        )
+        # Issue #8746: wire records (gauge source) and nets whose ampacity
+        # waiver cites reinforcement, for ``reinforcement_incomplete``.
+        self.reinforcement_wires: list[dict] = list(reinforcement_wires or [])
+        self.reinforcement_waived_nets: frozenset[str] = frozenset(reinforcement_waived_nets or ())
+        # Issue #4176: when True, the connectivity rule decides segment /
+        # pad / via unions by real geometric copper contact (shapely polygon
+        # intersection) instead of the legacy 0.01mm endpoint-proximity
+        # tolerance, matching KiCad.  Default True since Issue #4673 (the
+        # #4557 strict-default flip extended from net-status to kct check);
+        # pass False to opt back into the legacy tolerance model.
+        self.strict_connectivity = strict_connectivity
+        self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
+        self.verbose = verbose
+        if physical_copper_gap_mm is not None:
+            import math
+
+            if not math.isfinite(physical_copper_gap_mm) or physical_copper_gap_mm <= 0:
+                raise ValueError("Physical copper gap must be finite and positive")
+        self.physical_copper_gap_mm = physical_copper_gap_mm
+        # Issue #8843: net-agnostic "fab view" (JLCDFM-style) passes, enabled
+        # by the CLI under ``--mfr jlcpcb``.  ``fab_view_copper_oz`` is the
+        # *declared* outer copper weight (None = unknown -> mask-bridge check
+        # fails closed rather than assuming 1 oz).  ``fab_view_gap_policy``
+        # (issue #8938) carries the resolved stackup's ``dfm_thresholds`` gap
+        # bands; ``None`` under ``fab_view`` fails closed to an ``info``
+        # ``physical_copper_gap_incomplete`` finding rather than guessing.
+        self.fab_view = fab_view
+        self.fab_view_copper_oz = fab_view_copper_oz
+        self.fab_view_gap_policy = fab_view_gap_policy
+        self.emit_measurements = emit_measurements
+        # The skew / continuity rules surface their measured info findings
+        # when either the user asked for --verbose OR a caller wants the
+        # measurement summary (Issue #3924 AC1).
+        self._emit_skew_info = verbose or emit_measurements
+        # Dedup guard so the per-rule INACTIVE warning fires at most once
+        # per rule per checker instance (Issue #3917).
+        self._inactive_skew_warned: set[str] = set()
+
+        # Load manufacturer profile and design rules
+        profile = get_profile(manufacturer)
+        # Strict by default (Issue #8836) so every caller fails closed on an
+        # unsupported copper weight; ``kct check`` opts out via
+        # ``strict_copper=False`` because ``_apply_dfm_table`` yields the
+        # ``incomplete`` verdict instead (Issue #8839).
+        self.design_rules: DesignRules = profile.get_design_rules(
+            layers, copper_oz, strict=strict_copper
+        )
+
+        # Issue #4326: override the ampacity copper weights ONLY.
+        #
+        # ``copper_oz_outer`` / ``copper_oz_inner`` let the CLI repoint the
+        # IPC-2221 ampacity gate at the board's declared ``(setup (stackup
+        # ...))`` copper weights (or an explicit keyed ``--copper
+        # outer=..,inner=..``) without disturbing the preset's
+        # min-trace-width / clearance rules, which stay governed by
+        # ``copper_oz`` / ``--mfr`` as before.  ``get_design_rules`` may
+        # return a shared preset instance, so replace() a copy rather than
+        # mutating the registry in place.
+        if copper_oz_outer is not None or copper_oz_inner is not None:
+            self.design_rules = replace(
+                self.design_rules,
+                outer_copper_oz=(
+                    copper_oz_outer
+                    if copper_oz_outer is not None
+                    else self.design_rules.outer_copper_oz
+                ),
+                inner_copper_oz=(
+                    copper_oz_inner
+                    if copper_oz_inner is not None
+                    else self.design_rules.inner_copper_oz
+                ),
+            )
+
+    # The canonical ordered list of bound-method names that
+    # :meth:`check_all` invokes.  Exposed as a class attribute so the CLI
+    # dispatcher (``cli/check_cmd.py::run_selected_checks``) can assert
+    # at test time that its category dict is a superset of every check
+    # ``check_all`` runs (regression test for Issue #3046 -- the CLI used
+    # to silently omit ``check_via_in_pad`` and ``check_all`` used to
+    # omit ``check_pad_grid_alignment``).
+    #
+    # Adding a new ``check_X`` method to this class therefore requires
+    # updating exactly two places: this tuple AND the ``check_methods``
+    # dict in ``cli/check_cmd.py``.  The regression test in
+    # ``tests/test_check_cmd_coverage.py`` enforces the second half.
+    CHECK_ALL_METHODS: tuple[str, ...] = (
+        "check_ampacity",
+        "check_path_ampacity",
+        "check_reinforcement_incomplete",
+        "check_wire_run_courtyard_overlap",
+        "check_clearances",
+        "check_physical_copper_gap",
+        "check_connectivity",
+        "check_connector_access",
+        "check_segment_zone_clearances",
+        "check_via_zone_clearances",
+        "check_copper_slivers",
+        "check_courtyard_overlap",
+        "check_dangling_copper",
+        "check_pour_slot",
+        "check_redundant_copper",
+        "check_diffpair_clearance_intra",
+        "check_diffpair_length_skew",
+        "check_diffpair_routing_continuity",
+        "check_diffpair_uncoupled_length",
+        "check_dimensions",
+        "check_edge_clearances",
+        "check_impedance",
+        "check_isolated_copper",
+        "check_match_group_length_skew",
+        "check_routing_policy",
+        "check_silkscreen",
+        "check_solder_mask_pads",
+        "check_mask_to_copper",
+        "check_mask_negative_expansion",
+        "check_mask_multi_segment",
+        "check_footprint_placement",
+        "check_netlist",
+        "check_pin1_markers",
+        "check_fiducials",
+        "check_sharp_trace_corner",
+        "check_missing_plated_hole",
+        "check_board_id",
+        "check_single_pad_nets",
+        "check_pad_grid_alignment",
+        "check_thermal_asymmetry",
+        "check_via_in_pad",
+        "check_via_type_capability",
+        "check_tht_smd_spacing",
+        "check_via_under_body",
+        "check_width_consistency",
+        "check_zero_length_segments",
+        "check_zones",
+    )
+
+    # Per-rule severity classification (Issue #3044).
+    #
+    # Rules listed here are *advisory* -- they run in every entry point
+    # and their violations appear in JSON / table output, but downstream
+    # gating consumers (``ManufacturingAudit._check_drc``, ``kct export``
+    # preflight) MUST NOT treat them as blocking, because a sibling
+    # status field already classifies the same defect with finer-grained
+    # logic (e.g., ``ConnectivityStatus`` distinguishes zone-bridged
+    # incomplete nets from genuinely-unrouted nets).  All other rules
+    # default to ``blocking`` severity.
+    #
+    # This replaces the per-call-site hardcoded ``rule_id == "X"`` filter
+    # that PR #3060 used as a one-off workaround in ``auditor.py:761``.
+    # When adding a new rule whose severity differs from "blocking",
+    # update this set in ONE place; ``ManufacturingAudit._check_drc``
+    # (and any future advisory-aware consumers) will pick it up via the
+    # :meth:`is_advisory_rule` classifier.
+    #
+    # The standalone ``kct check`` CLI does NOT consult this set --
+    # advisory rules still surface their errors to CI consumers; only
+    # gating verdicts (audit / export readiness) filter on it.
+    ADVISORY_RULE_IDS: frozenset[str] = frozenset({"connectivity"})
+
+    @classmethod
+    def is_advisory_rule(cls, rule_id: str) -> bool:
+        """Return True iff ``rule_id`` is classified as advisory.
+
+        Advisory rules are reported by every DRC entry point but do not
+        count toward manufacturability-blocking verdicts.  See
+        :attr:`ADVISORY_RULE_IDS` for the rationale and the current set.
+        """
+        return rule_id in cls.ADVISORY_RULE_IDS
+
+    # Reporting-category taxonomy (Issue #3803).
+    #
+    # ``kct check`` historically folded routing-intent / quality findings
+    # (``connectivity``, diff-pair skew/continuity, ``copper_sliver``,
+    # ``ampacity``, silk) into the same undifferentiated "DRC violations"
+    # count as fabrication-blocking copper/clearance defects.  Because
+    # ``connectivity`` and the diff-pair rules emit ``severity="error"``,
+    # they inflate the headline exactly like a real short -- so
+    # "N DRC violations" could not be trusted to mean "N fab-blocking
+    # copper defects".
+    #
+    # This map classifies every rule_id into one of two *reporting*
+    # buckets so the CLI can render a per-bucket headline.  The category
+    # names mirror the wording of the native ``ViolationCategory``
+    # taxonomy (``drc/violation.py``) for cross-report consistency.
+    #
+    # IMPORTANT: this is a PRESENTATION-ONLY axis and is deliberately
+    # ORTHOGONAL to :attr:`ADVISORY_RULE_IDS` (the *gating* advisory set,
+    # which stays ``{"connectivity"}``).  Classifying a rule as
+    # ``advisory-quality`` here does NOT change any gate verdict, exit
+    # code, or severity -- only how the finding is grouped in the human
+    # report.  Do not derive :meth:`is_advisory_rule` from this map.
+    CATEGORY_MANUFACTURING: str = "manufacturing"
+    CATEGORY_ADVISORY: str = "advisory-quality"
+
+    # Single source of truth: rule_id -> reporting category.  Adding a
+    # rule requires exactly one edit here.  Dynamically-suffixed subtypes
+    # (e.g. ``clearance_pad_segment``, built via ``f"clearance_{suffix}"``
+    # in ``rules/clearance.py``) are covered by the prefix fallback in
+    # :meth:`category_for_rule`, so this map need only list canonical ids.
+    RULE_CATEGORY: dict[str, str] = {
+        # ---- Advisory / quality: routing-intent & non-fab-blocking. ----
+        "connectivity": CATEGORY_ADVISORY,
+        "ampacity": CATEGORY_ADVISORY,
+        # Branch-specific current-path ampacity (Issue #4980/#5124): same
+        # presentation bucket as its whole-net sibling "ampacity" above --
+        # a routing-intent finding, not a fab-blocking copper/clearance
+        # defect. Deliberately NOT in ADVISORY_RULE_IDS (see below): an
+        # under-width declared branch is a real thermal/fire hazard and
+        # MUST still block gating consumers.
+        "path_ampacity": CATEGORY_ADVISORY,
+        # Buttress-wire completeness (Issue #8746): errors only on nets whose
+        # ampacity waiver cites reinforcement, so it is not fab-bucket noise.
+        "reinforcement_incomplete": CATEGORY_ADVISORY,
+        "wire_run_courtyard_overlap": CATEGORY_ADVISORY,
+        # Connector mating / edge-access (Issue #4613): mechanical
+        # accessibility advisories, not fab-blocking copper defects.
+        # Explicit entries are REQUIRED -- category_for_rule defaults
+        # unknown ids to the fab-blocking Manufacturing bucket.
+        "connector_edge_access": CATEGORY_ADVISORY,
+        "connector_edge_distance": CATEGORY_ADVISORY,
+        # Via under package body: an inspection / rework advisory, not a
+        # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
+        # prefix fallback would file it under Manufacturing.
+        "via_under_body": CATEGORY_ADVISORY,
+        # JLCDFM mask warnings (Issue #8847): fab-DFM advisories.
+        "mask_negative_expansion": CATEGORY_ADVISORY,
+        "mask_multi_segment": CATEGORY_ADVISORY,
+        # 3D model coverage (Issue #7682): a documentation/render advisory,
+        # never fab-blocking.
+        "model_coverage": CATEGORY_ADVISORY,
+        # Thermal asymmetry / via drill at pad edge (Issue #7220): soldering-
+        # yield advisories (tombstoning, PTH barrel fill, via tent wicking),
+        # not fab-blocking.  Explicit entries REQUIRED -- unknown ids default
+        # to Manufacturing and ``via_at_pad_edge`` would match the ``via``
+        # prefix fallback.
+        "thermal_asymmetry": CATEGORY_ADVISORY,
+        "via_at_pad_edge": CATEGORY_ADVISORY,
+        "copper_sliver": CATEGORY_ADVISORY,
+        # Trace width-consistency audit: heuristic routing-quality triage
+        # (width islands / unexplained neck-downs), never fab-blocking.
+        # Explicit entries are REQUIRED: category_for_rule defaults unknown
+        # ids to the fab-blocking Manufacturing bucket.
+        "width_consistency": CATEGORY_ADVISORY,
+        "width_island": CATEGORY_ADVISORY,
+        "width_transition": CATEGORY_ADVISORY,
+        # Dangling copper (Issue #4680): warning-severity routing-quality
+        # advisories (antenna stubs / under-bonded vias), mirroring
+        # KiCad's default severity -- never fab-blocking.  Explicit
+        # entries are REQUIRED: ``track_dangling`` has no prefix rule and
+        # ``via_dangling`` would fall into the fab-blocking ``via``
+        # prefix.  ``dangling_copper`` is the rule-class id used only for
+        # bookkeeping, listed for coherence with its violation ids.
+        "dangling_copper": CATEGORY_ADVISORY,
+        "track_dangling": CATEGORY_ADVISORY,
+        "via_dangling": CATEGORY_ADVISORY,
+        # Redundant copper (Issue #8218): warning-only advisories for
+        # avoidable copper (duplicates, fragment runs, detours, off-centre
+        # via ends).  Explicit entries keep them out of fab-blocking prefixes.
+        "pour_slot": CATEGORY_ADVISORY,
+        "redundant_copper": CATEGORY_ADVISORY,
+        "redundant_copper_duplicate": CATEGORY_ADVISORY,
+        "redundant_copper_fragments": CATEGORY_ADVISORY,
+        "redundant_copper_detour": CATEGORY_ADVISORY,
+        "redundant_copper_staircase": CATEGORY_ADVISORY,
+        "redundant_copper_via_offcentre": CATEGORY_ADVISORY,
+        # Isolated copper (Issue #4680, second slice): orphaned zone-fill
+        # islands.  Warning-severity quality advisory mirroring KiCad's
+        # default severity (project_generator.py pins it to "warning") --
+        # floating pour copper is an EMC/cosmetic concern, never
+        # fab-blocking.
+        "isolated_copper": CATEGORY_ADVISORY,
+        # Schematic field-geometry legibility lint (Issue #4595):
+        # warning-severity readability advisories on the resolved sibling
+        # schematic -- never fab-blocking.  Explicit entries are REQUIRED:
+        # category_for_rule defaults unknown ids to the fab-blocking
+        # Manufacturing bucket and there is no "sch" prefix fallback.
+        "sch_field_offset": CATEGORY_ADVISORY,
+        "sch_field_overlap": CATEGORY_ADVISORY,
+        # Wire crossing a symbol body (Issue #7996): cosmetic advisory.
+        "sch_wire_through_symbol": CATEGORY_ADVISORY,
+        # Doc-drift lint (Issue #4540): INFO-severity documentation
+        # staleness advisories (kct:doc-pin markers vs machine ground
+        # truth) -- never fab-blocking.  Explicit entries are REQUIRED:
+        # category_for_rule defaults unknown ids to the fab-blocking
+        # Manufacturing bucket and there is no "doc" prefix fallback.
+        "doc_drift_stale_pin": CATEGORY_ADVISORY,
+        "doc_drift_unresolvable_pin": CATEGORY_ADVISORY,
+        "impedance": CATEGORY_ADVISORY,
+        "diffpair_routing_continuity": CATEGORY_ADVISORY,
+        "match_group_length_skew": CATEGORY_ADVISORY,
+        # Pin-1 / polarity silkscreen markers: assembly-legibility
+        # advisories, not fab-blocking.  Explicit entries REQUIRED -- there
+        # is no "pin1" prefix fallback, so they would default to the
+        # Manufacturing bucket.
+        "pin1_marker_missing": CATEGORY_ADVISORY,
+        "pin1_marker_obscured": CATEGORY_ADVISORY,
+        # Assembly-prep advisories (Issue #8532); explicit like pin1 above.
+        "fiducials_missing": CATEGORY_ADVISORY,
+        # JLCDFM geometry parity (Issue #8840); explicit like the above.
+        "sharp_trace_corner": CATEGORY_ADVISORY,
+        "missing_plated_hole": CATEGORY_ADVISORY,
+        "board_id_missing": CATEGORY_ADVISORY,
+        "silk_over_copper": CATEGORY_ADVISORY,
+        "silk_hole_overlap": CATEGORY_ADVISORY,
+        # Silk inside a graphic mask opening (#8861): an error, fab-blocking.
+        "silk_over_mask_opening": CATEGORY_MANUFACTURING,
+        "silk_edge_clearance": CATEGORY_ADVISORY,
+        # Coverage advisory for silk primitives the geometry model does not
+        # cover (Issue #5811).  Explicit entry REQUIRED -- category_for_rule
+        # defaults unknown ids to the fab-blocking Manufacturing bucket.
+        "silk_geometry_unmodeled": CATEGORY_ADVISORY,
+        "silkscreen_line_width": CATEGORY_ADVISORY,
+        "silkscreen_over_pad": CATEGORY_ADVISORY,
+        "silkscreen_text_height": CATEGORY_ADVISORY,
+        "silkscreen_text_thickness": CATEGORY_ADVISORY,
+        "silk_ref_obscured": CATEGORY_ADVISORY,
+        # Missing courtyard (Issue #7204): an assembly-review warning (a
+        # missing input to the overlap check), not a fab-blocking defect.
+        "courtyard_missing": CATEGORY_ADVISORY,
+        # ---- Manufacturing DRC: fab-blocking copper/clearance/hole/
+        #      edge/mask/drill/geometry. -----------------------------
+        "clearance": CATEGORY_MANUFACTURING,
+        "clearance_net0_bridge": CATEGORY_MANUFACTURING,
+        "clearance_pad_zone": CATEGORY_MANUFACTURING,
+        "clearance_segment_zone": CATEGORY_MANUFACTURING,
+        "clearance_via_zone": CATEGORY_MANUFACTURING,
+        "edge_clearance": CATEGORY_MANUFACTURING,
+        "edge_clearance_pad": CATEGORY_MANUFACTURING,
+        "edge_clearance_pad_hole": CATEGORY_MANUFACTURING,
+        "edge_clearance_trace": CATEGORY_MANUFACTURING,
+        "edge_clearance_via": CATEGORY_MANUFACTURING,
+        "edge_clearance_zone": CATEGORY_MANUFACTURING,
+        "hole_to_hole_clearance": CATEGORY_MANUFACTURING,
+        "solder_mask_clearance": CATEGORY_MANUFACTURING,
+        "solder_mask_pad": CATEGORY_MANUFACTURING,
+        "via_in_pad": CATEGORY_MANUFACTURING,
+        # Issue #5009: process-eligibility findings, distinct from the
+        # base ``via_in_pad`` capability-absent case above -- both are
+        # fab-blocking manufacturing defects.
+        "via_in_pad_process_missing": CATEGORY_MANUFACTURING,
+        "via_in_pad_process_ineligible": CATEGORY_MANUFACTURING,
+        # Issue #6518: blind/buried/micro via on a profile that cannot build it.
+        "via_type_unsupported": CATEGORY_MANUFACTURING,
+        "min_pad_size": CATEGORY_MANUFACTURING,
+        "pth_annular_ring": CATEGORY_MANUFACTURING,
+        "pad_grid": CATEGORY_MANUFACTURING,
+        "dimensions": CATEGORY_MANUFACTURING,
+        "dimension_trace_width": CATEGORY_MANUFACTURING,
+        "dimension_via_diameter": CATEGORY_MANUFACTURING,
+        "dimension_via_drill": CATEGORY_MANUFACTURING,
+        "dimension_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #5875: the same fab-blocking failures as the four
+        # ``dimension_*`` ids above, caught from the ``.kicad_pro``
+        # netclass *declaration* before any copper exists.  Explicit
+        # entries REQUIRED -- ``category_for_rule``'s unknown-id default
+        # happens to be Manufacturing too, but the three ``netclass_*``
+        # via ids would otherwise rely on that default silently.
+        "netclass_track_width": CATEGORY_MANUFACTURING,
+        "netclass_clearance": CATEGORY_MANUFACTURING,
+        "netclass_via_diameter": CATEGORY_MANUFACTURING,
+        "netclass_via_drill": CATEGORY_MANUFACTURING,
+        "netclass_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #7292: project.kct requirements vs the routed board.
+        "spec_conformance_dimensions": CATEGORY_MANUFACTURING,
+        "spec_conformance_layers": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_trace": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_via": CATEGORY_MANUFACTURING,
+        "spec_conformance_min_drill": CATEGORY_MANUFACTURING,
+        "spec_conformance_target_fab": CATEGORY_MANUFACTURING,
+        # Issue #6249: authored netclass clearance on routed copper -- the
+        # same defect class kicad-cli reports as a netclass clearance error.
+        "netclass_clearance_copper": CATEGORY_MANUFACTURING,
+        "netclass_clearance_unsupported": CATEGORY_MANUFACTURING,
+        "footprint_outside_board": CATEGORY_MANUFACTURING,
+        "single_pad_net": CATEGORY_MANUFACTURING,
+        "net_undeclared": CATEGORY_MANUFACTURING,
+        "zone_fill": CATEGORY_MANUFACTURING,
+        "zone_fill_disabled": CATEGORY_MANUFACTURING,
+        # Pair rules whose findings block ``manufacturable`` when the limit is
+        # cited or explicit (maintainer decision on #6443, 2026-10-13): the
+        # same findings reach kicad-cli as errors through the routed
+        # ``.kicad_dru``, so they are fab-blocking, not advisory.  An
+        # ``uncited`` limit is a warning.  Explicit entries are REQUIRED: the
+        # ``diffpair`` prefix fallback below is advisory.
+        "diffpair_clearance_intra": CATEGORY_MANUFACTURING,
+        "diffpair_length_skew": CATEGORY_MANUFACTURING,
+        "diffpair_uncoupled_length": CATEGORY_MANUFACTURING,
+        "zone_no_net": CATEGORY_MANUFACTURING,
+        "zone_unfilled": CATEGORY_MANUFACTURING,
+    }
+
+    # Prefix fallbacks for dynamically-suffixed rule_id families so a new
+    # subtype is categorized without a map edit.  The first matching
+    # prefix wins, so the advisory prefixes (which are more specific
+    # netlist/quality families) are checked before the broad
+    # ``clearance`` manufacturing prefix.
+    _CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
+        ("diffpair", CATEGORY_ADVISORY),
+        ("match_group", CATEGORY_ADVISORY),
+        ("silk", CATEGORY_ADVISORY),
+        ("edge_clearance", CATEGORY_MANUFACTURING),
+        ("clearance", CATEGORY_MANUFACTURING),
+        ("dimension", CATEGORY_MANUFACTURING),
+        ("zone", CATEGORY_MANUFACTURING),
+        ("via", CATEGORY_MANUFACTURING),
+        ("hole", CATEGORY_MANUFACTURING),
+        ("drill", CATEGORY_MANUFACTURING),
+        ("solder_mask", CATEGORY_MANUFACTURING),
+        ("pth_", CATEGORY_MANUFACTURING),
+    )
+
+    @classmethod
+    def category_for_rule(cls, rule_id: str) -> str:
+        """Return the reporting category for ``rule_id``.
+
+        One of :attr:`CATEGORY_MANUFACTURING` (fabrication-blocking
+        copper / clearance / hole / edge / mask / drill defects) or
+        :attr:`CATEGORY_ADVISORY` (routing-intent & quality findings such
+        as connectivity completion, diff-pair skew, copper slivers,
+        ampacity, silk).
+
+        Classification is resolved from the explicit :attr:`RULE_CATEGORY`
+        map first, then a prefix fallback for dynamically-suffixed
+        subtypes, and finally defaults to
+        :attr:`CATEGORY_MANUFACTURING`.  The manufacturing default is
+        deliberate: an unrecognized rule surfaces in the fab-blocking
+        bucket rather than being silently hidden among advisory findings.
+
+        This is a presentation-only classifier; see :attr:`RULE_CATEGORY`
+        for why it must not alter any gate verdict.
+        """
+        category = cls.RULE_CATEGORY.get(rule_id)
+        if category is not None:
+            return category
+        for prefix, prefix_category in cls._CATEGORY_PREFIXES:
+            if rule_id.startswith(prefix):
+                return prefix_category
+        return cls.CATEGORY_MANUFACTURING
+
+    def _absolutize(self, results: DRCResults) -> DRCResults:
+        """Rewrite violation locations from board-relative to sheet-absolute.
+
+        Every DRC rule that inspects :class:`~kicad_tools.schema.pcb.PCB`
+        geometry (pad/footprint positions, segment endpoints, via
+        positions, zone-polygon vertices) reads those attributes *after*
+        :meth:`PCB._detect_board_origin` has subtracted ``board_origin``
+        from them in place -- an internal, board-relative frame the
+        connectivity / zone-generation code relies on (see the
+        ``PCB.board_origin`` docstring).  The rules therefore build
+        ``DRCViolation.location`` in that board-relative frame.
+
+        Users, the KiCad GUI, and ``kicad-cli pcb drc`` all speak
+        sheet-absolute coordinates (the literal ``(at ...)`` values in the
+        ``.kicad_pcb`` file).  This helper adds ``board_origin`` back to
+        each violation's ``location`` exactly once so ``kct check`` reports
+        the same coordinates a human would see when clicking the defect in
+        KiCad -- fixing the per-board offset described in issue #4025.
+
+        Applied by every rule-backed ``check_*`` method.  It is deliberately
+        NOT applied to :meth:`check_pad_grid_alignment`, whose locations
+        come from :func:`router.io.load_pads_for_analysis` parsing the raw
+        ``.kicad_pcb`` text directly and are already sheet-absolute (adding
+        ``board_origin`` there would double-shift them).
+
+        Args:
+            results: A rule's board-relative :class:`DRCResults`.
+
+        Returns:
+            The same ``results`` object with each ``location`` shifted to
+            sheet-absolute coordinates.  Violations with ``location=None``
+            are left untouched.
+        """
+        ox, oy = getattr(self.pcb, "board_origin", (0.0, 0.0))
+        if ox == 0.0 and oy == 0.0:
+            # No offset to apply -- board is already at the sheet origin.
+            return results
+        shifted: list[DRCViolation] = []
+        for v in results.violations:
+            changes: dict = {}
+            if v.location is not None:
+                lx, ly = v.location
+                changes["location"] = (round(lx + ox, 3), round(ly + oy, 3))
+            closest = getattr(v, "closest_locations", None)
+            if closest:
+                changes["closest_locations"] = tuple(
+                    (round(cx + ox, 3), round(cy + oy, 3)) for cx, cy in closest
+                )
+            shifted.append(replace(v, **changes) if changes else v)
+        results.violations = shifted
+        return results
+
+    def check_all(
+        self,
+        filters: list[ViolationFilter] | None = None,
+        pad_grid_auto_derive: bool = False,
+    ) -> DRCResults:
+        """Run all DRC checks.
+
+        Args:
+            filters: Optional list of :class:`ViolationFilter` rules.  When
+                provided, matching violations are suppressed or reclassified
+                and the ``suppressed_count`` field is populated.
+            pad_grid_auto_derive: When ``True``, the ``pad_grid`` check
+                derives its tolerance from the board's pad-offset
+                histogram instead of the fixed 0.05 mm default -- the
+                same policy ``kct check`` applies by default (issue
+                #3061).  Defaults to ``False`` to preserve the existing
+                Python-API behaviour; gating consumers that must agree
+                with ``kct check`` (e.g. ``ManufacturingAudit``) opt in
+                so report and CLI verdicts cannot drift (issue #3497).
+
+        Returns:
+            DRCResults containing all violations found (after filtering,
+            if filters are provided).
+        """
+        results = DRCResults()
+
+        # Run each category of checks (order matches CHECK_ALL_METHODS).
+        for method_name in self.CHECK_ALL_METHODS:
+            if method_name == "check_mask_to_copper" and self.mask_copper_request is None:
+                continue
+            if method_name == "check_width_consistency" and self.width_consistency_options is None:
+                continue
+            method = getattr(self, method_name)
+            if method_name == "check_pad_grid_alignment":
+                results.merge(method(auto_derive_threshold=pad_grid_auto_derive))
+            else:
+                results.merge(method())
+
+        # Apply filters if provided
+        if filters:
+            from kicad_tools.validate.filters import FilterEngine
+
+            engine = FilterEngine(filters)
+            filter_result = engine.apply(results.violations)
+            results.suppressed_count += filter_result.ignored_count
+            results.violations = filter_result.kept
+
+        return results
+
+    def check_physical_copper_gap(self) -> DRCResults:
+        """Opt-in net-independent slit preflight on unioned copper geometry.
+
+        Issue #8938: under the fab view the severity bands come from the
+        resolved stackup's ``dfm_thresholds`` entry (the CLI resolves it into
+        ``fab_view_gap_policy``); with no resolved policy the pass fails
+        closed to an ``info`` ``physical_copper_gap_incomplete`` finding
+        instead of severity-grading gaps from assumed edges.
+        """
+        from .rules import physical_gap
+
+        if self.physical_copper_gap_mm is not None:
+            # Explicit --physical-copper-gap wins: single threshold, all errors.
+            return self._absolutize(
+                physical_gap.check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm)
+            )
+        if not self.fab_view:
+            return DRCResults()
+        results = DRCResults()
+        if self.fab_view_gap_policy is None:
+            results.add(
+                DRCViolation(
+                    "physical_copper_gap_incomplete",
+                    # Info, mirroring the mask-bridge fail-closed shape: a
+                    # stackup with no DFM entry already drives the verdict to
+                    # incomplete upstream (_apply_dfm_table), so this must not
+                    # invent a blocking finding from an unknown band.
+                    "info",
+                    "Fab-view copper gap check incomplete: no DFM threshold "
+                    "entry for this stackup (gap severity bands unknown)",
+                )
+            )
+        else:
+            results.merge(
+                physical_gap.check_physical_copper_gap_fab_view(self.pcb, self.fab_view_gap_policy)
+            )
+        # Issue #8843: plus the 2 oz pad mask-bridge check (fails closed on
+        # unknown weight), independent of the gap bands.
+        results.merge(physical_gap.check_pad_mask_bridge(self.pcb, self.fab_view_copper_oz))
+        return self._absolutize(results)
+
+    def check_tht_smd_spacing(self, via_drill_mm: float | None = None) -> DRCResults:
+        """THT pad / anchor via to SMD pad spacing (Issue #8843); fab-view (jlcpcb) only.
+
+        ``via_drill_mm`` overrides the drill diameter at which a via starts
+        being judged like a THT component pad; ``None`` uses the rule's
+        calibrated :data:`~.rules.tht_smd_spacing.ANCHOR_DRILL_MM` default.
+        Before Issue #8914 this method called the rule with no arguments at
+        all, which pinned the old ``include_vias=False`` default on every
+        ``kct check`` run and made the via arm unreachable.
+        """
+        if not self.fab_view:
+            return DRCResults()
+        from .rules.tht_smd_spacing import ANCHOR_DRILL_MM, check_tht_smd_spacing
+
+        return self._absolutize(
+            check_tht_smd_spacing(
+                self.pcb,
+                via_drill_mm=ANCHOR_DRILL_MM if via_drill_mm is None else via_drill_mm,
+            )
+        )
+
+    def check_clearances(self) -> DRCResults:
+        """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
+
+        Validates spacing between copper elements on the same layer
+        but different nets against the manufacturer's minimum clearance.
+
+        Returns:
+            DRCResults containing clearance violations
+        """
+        rule = ClearanceRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_segment_zone_clearances(self) -> DRCResults:
+        """Check track segments against foreign-net zone fill copper.
+
+        Validates each segment against the committed ``filled_polygon``
+        geometry of zones on a *different* net and the same layer,
+        flagging both copper overlap (a hard short) and sub-clearance
+        gaps.  Closes the Issue #3527 gap: a trace routed straight
+        through a stale foreign fill was invisible to every other rule
+        (segment-vs-segment / segment-vs-pad / segment-vs-via spacing
+        never consult zone fills), so ``kct check`` certified boards
+        whose committed copper shorts two nets together (found by PR
+        #3526's judge on board 05: PWR_LED through +3V3 fill).
+
+        Returns:
+            DRCResults containing ``clearance_segment_zone`` violations
+            (severity error, blocking).
+        """
+        rule = SegmentZoneClearanceRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_via_zone_clearances(self) -> DRCResults:
+        """Check vias and pads against foreign-net zone fill copper.
+
+        The sibling of :meth:`check_segment_zone_clearances`.  Validates
+        each via barrel (on every layer it spans) and each pad against
+        the committed ``filled_polygon`` geometry of zones on a
+        *different* net and the same layer, flagging both copper overlap
+        (a hard short) and sub-clearance gaps.  Closes the Issue #3556
+        residual gap: a via dropped sub-clearance to (or through) a stale
+        foreign pour was invisible to ``kct check`` because
+        ``clearance_segment_zone`` only inspected track segments, and the
+        other clearance rules never consult zone fills.
+
+        Returns:
+            DRCResults containing ``clearance_via_zone`` and
+            ``clearance_pad_zone`` violations (severity error, blocking).
+        """
+        rule = ViaZoneClearanceRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_copper_slivers(self) -> DRCResults:
+        """Check copper layers for thin slivers via a morphological open.
+
+        Unions all filled-zone copper (and track copper) per layer and
+        runs ``buffer(-r).buffer(r)`` with ``r = min_trace_width_mm / 2``;
+        the residual ``original - opened`` regions are copper slivers
+        narrower than the manufacturer's minimum reproducible copper
+        width.  Closes the Issue #3843 gap: ``kicad-cli pcb drc`` flags
+        ``copper_sliver`` defects (16 on the softstart board) but no kct
+        rule inspected the *internal width* of a single copper region --
+        every existing copper rule measures the gap between two distinct
+        features, never the thickness of one region.
+
+        Slivers are a fab-process advisory (an under/over-etch hazard,
+        not a guaranteed short), so violations are ``severity="warning"``
+        to match ``kicad-cli`` and avoid turning a soft fab note into a
+        hard CI gate.  Has its own CLI category (``copper_sliver``) so
+        the morphology pass can be skipped on very large pours via
+        ``--skip copper_sliver``.
+
+        Returns:
+            DRCResults containing ``copper_sliver`` warnings.
+        """
+        rule = CopperSliverRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_courtyard_overlap(self) -> DRCResults:
+        """Check that footprint courtyards do not overlap on the same side.
+
+        Reads the true ``F.CrtYd`` / ``B.CrtYd`` polygon geometry from each
+        footprint (not the pads-bbox approximation in
+        :mod:`kicad_tools.placement.analyzer`) and flags pairs of footprints
+        on the same board side whose courtyards intersect with positive area.
+
+        Overlapping pairs matched by a loaded ``.courtyard_waivers.json``
+        entry (passed via the ``courtyard_waivers`` constructor kwarg) are
+        emitted with ``waived=True`` -- visible and counted in
+        ``waived_count`` but excluded from ``error_count`` so the gate passes.
+        A courtyard that cannot be resolved to a polygon emits an ``info``
+        finding rather than being silently skipped, and a waiver naming a
+        component absent from the board emits an ``info`` "unused waiver"
+        finding (Issue #4137).  A non-exempt footprint with no courtyard at
+        all emits a ``courtyard_missing`` warning (Issue #7204).
+
+        Returns:
+            DRCResults containing ``courtyards_overlap`` findings (error or
+            waived) plus advisory info findings.
+        """
+        rule = CourtyardOverlapRule(waivers=self.courtyard_waivers)
+        return self._absolutize(rule.check(self.pcb))
+
+    def check_connectivity(self) -> DRCResults:
+        """Check that every multi-pad net is fully connected.
+
+        Loads the netlist via
+        :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` and
+        emits one error per net whose pads are not all connected through
+        traces, vias, or filled copper zones.  Single-pad nets are out
+        of scope (handled by :meth:`check_single_pad_nets`).
+
+        See Issue #3041: previously ``kct check`` reported ``DRC PASS``
+        on PCBs with unrouted nets because no rule cross-referenced the
+        netlist against actual copper connectivity.  This rule closes
+        that gap so partial-route boards fail DRC with a clear, per-net
+        diagnostic.
+
+        Returns:
+            DRCResults containing one error per incomplete or unrouted
+            multi-pad net (severity error).
+        """
+        rule = ConnectivityRule(strict=self.strict_connectivity)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_dangling_copper(self) -> DRCResults:
+        """Check for dangling track ends and under-bonded vias.
+
+        Closes the Issue #4680 gap: ``kicad-cli pcb drc`` flags
+        ``track_dangling`` (traces with a free end -- unterminated
+        antennas on clock nets, abandoned route stubs) and
+        ``via_dangling`` (vias bonding copper on fewer than two layers),
+        but no kct rule tested endpoint termination -- a kct-only
+        workflow saw 0 of 69 such findings on the reporting board.
+
+        Both are routing-quality advisories, so violations are
+        ``severity="warning"`` to match kicad-cli's default severities
+        and avoid turning a soft quality note into a hard CI gate.  Has
+        its own CLI category (``dangling_copper``) so the geometric pass
+        can be skipped via ``--skip dangling_copper``.
+
+        Returns:
+            DRCResults containing ``track_dangling`` and ``via_dangling``
+            warnings.
+        """
+        rule = DanglingCopperRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_pour_slot(self, netclass_clearances: Mapping[str, float] | None = None) -> DRCResults:
+        """Report parallel tracks too close for the zone fill (Issue #8435).
+
+        Own CLI category (``pour_slot``) so ``--skip pour_slot`` works.
+        ``netclass_clearances`` maps net name to authored netclass clearance.
+        """
+        rule = PourSlotRule(netclass_clearances)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_redundant_copper(self) -> DRCResults:
+        """Report avoidable copper (Issue #8218).
+
+        Warns on exact-duplicate segments, runs of very short segments,
+        long detours and track ends off a same-net via centre.  Own CLI
+        category (``redundant_copper``) so ``--skip redundant_copper`` works.
+        """
+        rule = RedundantCopperRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_diffpair_clearance_intra(self) -> DRCResults:
+        """Check within-pair clearance for differential pairs.
+
+        Validates that segments belonging to a detected differential pair
+        maintain at least the per-class ``intra_pair_clearance`` edge-to-edge
+        spacing.  Within-pair edges are *allowed* to be tighter than the
+        inter-pair manufacturer minimum (that's the whole point of diff-pair
+        coupling), but they must still respect the intra threshold.
+
+        Diff-pair detection uses the suffix-inference matcher in
+        ``router/diffpair`` (USB_D+/USB_D-, HDMI_D0_P/HDMI_D0_N, etc.).
+        Single-ended refusal patterns (``USB_CC1``/``USB_CC2``,
+        ``SBU1``/``SBU2``) are correctly excluded per #2558.
+
+        The threshold per pair is the gap the router lays (Issue #6575):
+        ``DesignRules.pair_gap(nc).gap_mm`` =
+        ``max(class intra_pair_clearance, manufacturer min, authored board
+        min)`` when the pair's class is in ``net_class_map``, otherwise
+        ``max(manufacturer min_clearance_mm, authored_min_clearance_mm)``.
+        With neither a class nor an authored minimum this is the
+        manufacturer ``min_clearance_mm``.
+
+        See Issue #2560 / Epic #2556 Phase 1D.
+
+        Returns:
+            DRCResults containing intra-pair clearance violations.
+        """
+
+        probe = DiffPairClearanceIntraRule()
+        authored = self.authored_min_clearance_mm
+        fallback = max(self.design_rules.min_clearance_mm, authored or 0.0)
+        router_rules = None
+        class_map = self.net_class_map
+        if class_map:
+            from kicad_tools.router.rules import DesignRules as RouterDesignRules
+
+            router_rules = RouterDesignRules(
+                manufacturer=self.manufacturer,
+                authored_min_clearance=authored,
+                # Issue #6561: the same stackup-aware fab floor this check
+                # enforces (and the no-class ``fallback`` above uses), not the
+                # layer-agnostic ``MfrLimits.min_clearance``.
+                mfr_clearance_floor=self.design_rules.min_clearance_mm,
+            )
+        names = {net.number: net.name for net in self.pcb.nets.values()}
+        threshold_map: dict[tuple[int, int], float] = {}
+        for key in probe._build_diff_pair_set(self.pcb):
+            nc = None
+            if router_rules is not None and class_map:
+                for nid in key:
+                    nc = class_map.get(names.get(nid, ""))
+                    if nc is not None:
+                        break
+            if nc is not None and router_rules is not None:
+                threshold_map[key] = router_rules.pair_gap(nc).gap_mm
+            else:
+                threshold_map[key] = fallback
+
+        rule = DiffPairClearanceIntraRule(intra_pair_clearance_map=threshold_map)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def _warn_inactive_skew_rule(self, rule_name: str) -> None:
+        """Emit a one-time stderr warning that a skew rule is inactive.
+
+        Issue #3917 Defect 3: the three sidecar-gated rules
+        (``match_group_length_skew``, ``diffpair_length_skew``,
+        ``diffpair_routing_continuity``) degrade to silent no-ops when the
+        checker was built without a ``net_class_map``.  The ``kct check``
+        CLI prints an up-front warning, but *direct* ``DRCChecker``
+        instantiations (the build pipeline, embedded post-route checks)
+        bypass it entirely.  Emitting the warning here makes the
+        degradation visible on every invocation surface.
+
+        Guarded by ``warn_on_inactive_skew_rules`` (the CLI disables it to
+        avoid double-warning) and deduplicated per rule per instance.
+        """
+        if not self.warn_on_inactive_skew_rules:
+            return
+        if rule_name in self._inactive_skew_warned:
+            return
+        self._inactive_skew_warned.add(rule_name)
+        print(
+            f"WARNING: rule {rule_name!r} is INACTIVE without a net-class-map "
+            "sidecar and will silently pass; supply a net-class-map sidecar "
+            "to validate length-match skew.",
+            file=sys.stderr,
+        )
+
+    def check_diffpair_length_skew(self) -> DRCResults:
+        """Check routed-length skew for engaged differential pairs.
+
+        Validates that engaged pairs (per Epic #2556 Phase 2E, #2638)
+        have a length skew ``|L_p - L_n|`` within their per-class
+        ``skew_tolerance_mm`` (default 0.5 mm).  An "engaged" pair is
+        one whose net class has ``coupled_routing == True`` AND which
+        passed the engagement-layer single-ended refusal check.
+
+        Phase 2.5c (Issue #2675) wires the producer side: when this
+        checker was constructed with a ``net_class_map``, the per-pair
+        skew is re-derived from the routed PCB by
+        :func:`~kicad_tools.validate.diffpair_skew.derive_skew_data`
+        (sister of
+        :func:`~kicad_tools.validate.diffpair_engagement.derive_engagement_state`)
+        and threaded into the rule along with the engagement state.
+        Re-running detection + length-from-PCB-segments on the routed
+        PCB is idempotent given the same net classes and physical
+        routing -- this avoids needing to persist length / skew
+        metadata in the PCB schema.
+
+        When invoked from the standalone ``kct check`` CLI (no
+        ``net_class_map``), no skew data is available, so the rule is
+        a conservative no-op (preserves the AC #4 graceful-degradation
+        contract -- mirrors the
+        :meth:`check_diffpair_routing_continuity` behaviour).
+
+        Phase 3J is **independent of Phase 3I** (serpentine insertion):
+        the rule fires on routed-as-found geometry regardless of
+        whether the tuner ran.  This is the
+        "validator-for-externally-routed-boards" use case (Freerouting,
+        KiCad's own router, manual layout) where the kicad-tools tuner
+        never runs but the board still needs its skew validated.
+
+        See Issue #2649 / Epic #2556 Phase 3J (the rule itself); Issue
+        #2675 / Epic #2556 Phase 2.5c (this producer wiring).
+
+        Returns:
+            :class:`DRCResults` containing length-skew violations.
+            Empty on standalone ``kct check`` invocations (no router
+            context to supply ``skew_data``).
+        """
+        from kicad_tools.validate.diffpair_engagement import derive_engagement_state
+        from kicad_tools.validate.diffpair_skew import derive_chain_skew, derive_pair_skews
+
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_length_skew")
+
+        # Issue #7892: each pair is measured in length and in time (per-layer
+        # delay from the board's stackup) and judged against the derived ps
+        # budget of ``physics.skew_budget`` -- the one source of skew limits
+        # for this check.  Pairs with nothing to derive from keep the #6443
+        # millimetre resolution (class field > protocol default > generic).
+        measurements = derive_pair_skews(
+            self.pcb,
+            self.net_class_map,
+            num_copper_layers=self.layers,
+        )
+        engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
+        rule = DiffPairLengthSkewRule(
+            engaged_pairs=engaged_pairs,
+            emit_info=self._emit_skew_info,
+            chains=derive_chain_skew(self.pcb, self.net_class_map, num_copper_layers=self.layers),
+            measurements=measurements,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_diffpair_routing_continuity(self) -> DRCResults:
+        """Check routing continuity for engaged differential pairs.
+
+        Validates that engaged pairs (per Epic #2556 Phase 2E, #2638)
+        stay coupled (parallel and within the coupling window) for the
+        per-class ``coupled_continuity_threshold`` fraction of their
+        routed length.  An "engaged" pair is one whose net class has
+        ``coupled_routing == True`` AND which passed the engagement-layer
+        single-ended refusal check.
+
+        Phase 2.5b (Issue #2652) wires the producer side: when this
+        checker was constructed with a ``net_class_map``, the engagement
+        state is re-derived from the routed PCB by
+        :func:`~kicad_tools.validate.diffpair_engagement.derive_engagement_state`
+        and threaded into the rule.  Re-running
+        :func:`should_engage_coupled` on the routed PCB's detected pairs
+        is idempotent given the same net classes -- this avoids needing
+        to persist engagement metadata in the PCB schema.
+
+        When invoked from the standalone ``kct check`` CLI (no
+        ``net_class_map``), no engaged-pairs set is available, so the
+        rule is a conservative no-op (preserves the AC #4 graceful-
+        degradation contract).
+
+        See Issue #2640 / Epic #2556 Phase 2G (the rule itself); Issue
+        #2652 / Epic #2556 Phase 2.5b (this producer wiring).
+
+        Returns:
+            DRCResults containing routing-continuity violations.  Empty
+            on standalone ``kct check`` invocations (no engaged set).
+        """
+        from kicad_tools.validate.diffpair_engagement import derive_engagement_state
+
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_routing_continuity")
+
+        engaged_pairs, threshold_map = derive_engagement_state(self.pcb, self.net_class_map)
+        rule = DiffPairRoutingContinuityRule(
+            engaged_pairs=engaged_pairs,
+            threshold_map=threshold_map,
+            emit_info=self._emit_skew_info,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_diffpair_uncoupled_length(self) -> DRCResults:
+        """Check uncoupled length and via count for engaged differential pairs.
+
+        Issue #6443 (P1 piece (b) of epic #6441).  For each engaged pair the
+        larger of the two nets' uncoupled lengths (the figure KiCad's
+        ``diff_pair_uncoupled`` checks, see
+        :mod:`~kicad_tools.validate.rules.diffpair_uncoupled_length`) is held
+        to ``max_uncoupled_total_mm`` of the class, or the protocol's
+        per-terminal allowance x the components on the net; each net's via
+        count is held to ``max_vias_per_net``.  Limits and severities come
+        from the same resolver as the skew check
+        (:func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`).
+
+        A pair whose names KiCad does not recognise gets one ``info`` line
+        saying its limit is kct-only (KiCad's native check cannot see it).
+
+        Like the other pair rules this is a no-op without a ``net_class_map``.
+        """
+        from kicad_tools.manufacturers.netclass_dru import is_coupled_diff_pair
+        from kicad_tools.validate.diffpair_engagement import (
+            derive_engagement_state,
+            resolve_pair_thresholds,
+        )
+
+        if self.net_class_map is None:
+            self._warn_inactive_skew_rule("diffpair_uncoupled_length")
+        engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
+        names = {n.number: n.name for n in self.pcb.nets.values() if n.name}
+        limits = {}
+        kct_only = {}
+        for a, b in engaged_pairs:
+            na, nb = names.get(a), names.get(b)
+            if not na or not nb:
+                continue
+            limits[(a, b)] = resolve_pair_thresholds(self.net_class_map, na, nb)
+            if not (is_coupled_diff_pair(na, nb) or is_coupled_diff_pair(nb, na)):
+                kct_only[(a, b)] = f"KiCad does not recognise {na}/{nb} as a differential pair"
+        rule = DiffPairUncoupledLengthRule(
+            engaged_pairs=engaged_pairs,
+            limits=limits,
+            emit_info=self._emit_skew_info,
+            kct_only=kct_only,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_dimensions(self) -> DRCResults:
+        """Check dimension rules (trace width, via drill, annular ring).
+
+        Validates:
+        - Minimum trace width
+        - Minimum via drill diameter
+        - Minimum via outer diameter
+        - Minimum annular ring
+        - Drill-to-drill clearance
+
+        Returns:
+            DRCResults containing dimension violations
+        """
+        from .rules.dimensions import DimensionRules
+
+        rule = DimensionRules()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_edge_clearances(self) -> DRCResults:
+        """Check edge clearance rules (copper-to-board-edge).
+
+        Validates that all copper elements (traces, pads, zones) and holes
+        (vias, through-hole pads) maintain minimum clearance from the board
+        edge as specified by manufacturer design rules.
+
+        Returns:
+            DRCResults containing edge clearance violations
+        """
+        rule = EdgeClearanceRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_ampacity(self) -> DRCResults:
+        """Check routed trace widths against per-net ampacity targets.
+
+        Wires :class:`~kicad_tools.validate.rules.ampacity.AmpacityRule`
+        into the standalone DRC pipeline (Issue #4217, Part 3 of #4215).
+        For each net whose class declares a
+        :attr:`~kicad_tools.router.rules.NetClassRouting.target_ampacity`,
+        the rule derives the IPC-2221 minimum trace width via
+        :func:`kicad_tools.physics.ampacity.width_for_current` — the same
+        function and copper-weight / layer split
+        :func:`kicad_tools.manufacturers.dru_generator.generate_dru` uses,
+        so the check and the emitted ``.kicad_dru`` rule agree — and
+        flags any routed segment narrower than that floor.
+
+        Ampacity targets are **declarative**: they come from the
+        ``kct check --net-class-map`` sidecar (the same mechanism
+        :meth:`check_impedance` and :meth:`check_match_group_length_skew`
+        consume).  When ``self.net_class_map is None`` (standalone
+        ``kct check`` with no sidecar), the derived spec map is empty and
+        the rule is a clean no-op — matching the graceful-degradation
+        contract those sibling checks already establish.
+
+        This rule is intentionally NOT in
+        :attr:`ADVISORY_RULE_IDS`: an under-width high-current trace is a
+        real thermal/fire hazard and MUST block gating consumers
+        (``ManufacturingAudit``, ``kct export`` preflight), unlike
+        ``connectivity``.
+
+        Returns:
+            DRCResults containing per-segment ampacity errors.  Empty when
+            no net declares a target (the standalone-CLI common case).
+        """
+        from .ampacity_specs import derive_ampacity_specs
+
+        specs = derive_ampacity_specs(self.net_class_map)
+        rule = AmpacityRule(specs=specs)
+        results = rule.check(self.pcb, self.design_rules)
+        self.ampacity_unmeasured_nets = dict(rule.unmeasured_pour_nets)
+        return self._absolutize(results)
+
+    def check_path_ampacity(self) -> DRCResults:
+        """Check declared branch-specific current paths (Issue #4980/#5124).
+
+        Wires :class:`~kicad_tools.validate.rules.path_ampacity
+        .PathAmpacityRule` into the standalone DRC pipeline. Unlike
+        :meth:`check_ampacity` (one ``target_ampacity`` scalar per whole
+        net), each declared
+        :class:`~kicad_tools.router.current_paths.CurrentPathSpec` is a
+        physical copper *branch* identified by stable ``RefDes.pad``
+        endpoints, checked against its OWN declared current -- this is
+        what makes a net with a 15 A trunk and a milliamp Kelvin sense tap
+        checkable at all without either starving the trunk or forcing the
+        sense tap's fine-pitch pad to the trunk's width.
+
+        Branch-specific current paths are **declarative** (the ``kct
+        check --current-paths`` sidecar, auto-discovered next to the board
+        mirroring ``--net-class-map``'s convention -- see
+        :func:`kicad_tools.router.current_paths.discover_current_paths_sidecar`).
+        When :attr:`current_path_specs` is empty (no sidecar), the rule is
+        a clean no-op, matching :meth:`check_ampacity`'s graceful
+        degradation contract.
+
+        This rule is intentionally NOT in :attr:`ADVISORY_RULE_IDS`: an
+        under-width or unresolved (fails-closed) high-current trunk branch
+        is a real thermal/fire hazard and MUST block gating consumers,
+        exactly like :meth:`check_ampacity`.
+
+        Returns:
+            DRCResults with an ``error`` per under-width segment on a
+            resolved path, an ``error`` per unresolved/ambiguous
+            (fail-closed) declared path, and a ``warning`` per segment of
+            a declared net not covered by any resolved path. Empty when no
+            path is declared.
+        """
+        rule = PathAmpacityRule(specs=self.current_path_specs)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_reinforcement_incomplete(self) -> DRCResults:
+        """Verify reinforced runs are buildable (Issue #8746, #8741 slice 4b).
+
+        Active only when a current-paths file declares a
+        ``reinforcement_eligible`` path; otherwise a clean no-op. Findings are
+        errors on nets whose ampacity waiver cites reinforcement
+        (:data:`~kicad_tools.validate.rules.reinforcement_incomplete
+        .REINFORCEMENT_REASON_RE`), warnings elsewhere.
+        """
+        rule = ReinforcementIncompleteRule(
+            specs=self.current_path_specs,
+            wires=self.reinforcement_wires,
+            waived_nets=self.reinforcement_waived_nets,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_wire_run_courtyard_overlap(self) -> DRCResults:
+        """Flag wire runs / end holes that collide with component courtyards (#8820).
+
+        Active only when a current-paths file declares a
+        ``reinforcement_eligible`` path; otherwise a clean no-op. Findings
+        are errors.
+        """
+        rule = ReinforcementCourtyardRule(
+            specs=self.current_path_specs,
+            wires=self.reinforcement_wires,
+            waived_nets=self.reinforcement_waived_nets,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_impedance(self) -> DRCResults:
+        """Check trace widths against target impedance specifications.
+
+        Wires the dormant :class:`ImpedanceRule` (already implemented in
+        ``validate/rules/impedance.py``) into the standalone DRC pipeline
+        per Issue #2650 (Epic #2556 Phase 3K).  The rule was previously
+        registered in :class:`~kicad_tools.drc.violation.ViolationType`
+        (``IMPEDANCE = "impedance"``) and exported from
+        ``validate.rules.__init__`` but was never reachable from
+        ``kct check`` because no ``DRCChecker`` method invoked it.
+
+        Single-ended impedance is **declarative / opt-in** (Issue #3157).
+        When invoked from the standalone CLI without a ``net_class_map``,
+        the rule's built-in single-ended *name-pattern heuristics*
+        (``.*CLK$`` / ``.*MCLK$`` / ``.*ETH.*`` -> 50Ω) are suppressed:
+        slow I2S / DAC clock nets on low-speed audio boards (``DAC_CLK``,
+        ``BCLK``, ``MCLK``, ``I2S_LRCLK``) match those patterns but need
+        no controlled impedance, and on a 4-layer board with an explicit
+        stackup the heuristics produced 32 false-positive impedance
+        errors on chorus-test.
+
+        When the checker is constructed with a ``net_class_map`` (the
+        ``kct check --net-class-map`` sidecar, Issue #2684), a single-ended
+        :class:`~kicad_tools.validate.rules.impedance.NetImpedanceSpec` is
+        derived from each net class's
+        :attr:`~kicad_tools.router.rules.NetClassRouting.target_single_impedance`
+        and passed as an **explicit** ``specs=`` list.  Explicit specs
+        bypass the heuristic-suppression gate and always evaluate, so a
+        net declared 50Ω single-ended still gets checked and fires when
+        its width is wrong.  This mirrors the producer-side wiring already
+        used by :meth:`check_match_group_length_skew` (Issue #2710).
+
+        Diff-pair impedance (Issue #7293) is evaluated on coupled segments
+        only: declared ``target_diff_impedance`` (errors above 20 %) and the
+        built-in diff name-pattern defaults (capped at warning).  A matched
+        pair with nothing judged is recorded in
+        :attr:`impedance_unmeasured_pairs` for ``kct check`` coverage.
+
+        Returns:
+            DRCResults containing impedance violations.  Empty when no
+            traces match any spec (the standalone-CLI common case for
+            boards without declared controlled-impedance nets).
+        """
+        detected_pairs = self._impedance_detected_pairs()
+        if self.net_class_map is None:
+            # No router context -> no declared single-ended impedance.
+            # The rule's SE name-pattern heuristics stay suppressed
+            # (Issue #3157); diff-pair defaults resolve internally.
+            rule = ImpedanceRule(detected_pairs=detected_pairs)
+        else:
+            from kicad_tools.validate.impedance_specs import (
+                default_diff_impedance_specs,
+                derive_diff_impedance_specs,
+                derive_single_ended_impedance_specs,
+            )
+
+            # Order matters: ``_find_matching_spec`` returns the first match.
+            # Declared single-ended, declared differential, then the
+            # advisory diff-only defaults (a map replaces the default list,
+            # so board 03's USB pair would otherwise never be judged).
+            # Explicit specs bypass the single-ended heuristic gate; the
+            # SE heuristics are deliberately not appended.
+            specs = [
+                *derive_single_ended_impedance_specs(self.net_class_map),
+                *derive_diff_impedance_specs(self.net_class_map),
+                *default_diff_impedance_specs(),
+            ]
+            rule = ImpedanceRule(specs=specs, detected_pairs=detected_pairs)
+        results = self._absolutize(rule.check(self.pcb, self.design_rules))
+        # Post-run signal for coverage: pairs that matched a differential
+        # spec but had no judged segment (Issue #7293).
+        self.impedance_unmeasured_pairs = list(rule.unmeasured_pairs)
+        return results
+
+    def _impedance_detected_pairs(self) -> list:
+        """Differential pairs for the impedance rule (Issue #7293).
+
+        Declared ``diffpair_partner`` entries win; otherwise the layered
+        detector falls back to net-name suffix inference.
+        """
+        from kicad_tools.router.diffpair_detection import (
+            build_synth_routing,
+            detect_diff_pairs,
+        )
+
+        net_names = {num: net.name for num, net in self.pcb.nets.items() if net.name}
+        if not net_names:
+            return []
+        synth_routing, net_to_class = build_synth_routing(self.net_class_map or {})
+        detected = detect_diff_pairs(
+            net_names,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            kicad_groups=getattr(self.pcb, "kicad_diff_pair_groups", None),
+        )
+        return [d.pair for d in detected]
+
+    def check_match_group_length_skew(self) -> DRCResults:
+        """Check routed-length skew for declared N-trace match groups.
+
+        Validates that declared / detected
+        :class:`~kicad_tools.router.match_group_length.MatchGroup`
+        instances have a per-group length skew (``max(L) - min(L)``
+        across the group's members) within their per-class
+        :attr:`~kicad_tools.router.rules.NetClassRouting.length_match_tolerance_mm`
+        (default 0.5 mm).  N>=3 generalization of
+        :meth:`check_diffpair_length_skew` for bus-style groups (DDR
+        DQ-strobe, MIPI CSI lanes, TMDS).
+
+        **Independent of Phase 2E** (the N-trace tuner, Issue #2700):
+        the rule fires on routed-as-found geometry regardless of
+        whether the v2 tuner ran.  This is the explicit "validator-
+        for-externally-routed-boards" use case (Freerouting / KiCad's
+        own router / manual layout) where ``kicad_tools.router`` never
+        runs but the board still needs its match-group skew validated.
+
+        Phase 2.5G (Issue #2710) wires the producer side: when this
+        checker was constructed with a ``net_class_map``, the per-group
+        skew is re-derived from the routed PCB by
+        :func:`~kicad_tools.validate.match_group_skew.derive_group_skew_data`
+        (sister of
+        :func:`~kicad_tools.validate.diffpair_skew.derive_skew_data`)
+        and threaded into the rule along with the detected groups list
+        and the per-group threshold map.  Re-running detection + length-
+        from-PCB-segments on the routed PCB is idempotent given the
+        same net classes and physical routing -- this avoids needing to
+        persist length / skew metadata in the PCB schema.
+
+        When invoked from the standalone ``kct check`` CLI (no
+        ``net_class_map``), no skew data is available, so the rule is
+        a conservative no-op (preserves the AC #1 graceful-degradation
+        contract -- mirrors the
+        :meth:`check_diffpair_length_skew` behaviour).
+
+        See Issue #2702 / Epic #2661 Phase 2G (the rule itself); Issue
+        #2710 / Epic #2661 Phase 2.5G (this producer wiring).
+
+        Returns:
+            :class:`DRCResults` containing match-group length-skew
+            violations.  Empty on standalone ``kct check`` invocations
+            (no router context to supply ``group_skew_data``).
+        """
+        if self.net_class_map is None:
+            # Graceful-no-op: no router context -> no skew data to
+            # validate.  Matches the standalone-``kct check`` contract.
+            self._warn_inactive_skew_rule("match_group_length_skew")
+            rule = MatchGroupLengthSkewRule()
+        else:
+            from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+            group_skew_data, tracker_match_groups, threshold_map = derive_group_skew_data(
+                self.pcb,
+                self.net_class_map,
+                num_copper_layers=self.layers,
+            )
+            rule = MatchGroupLengthSkewRule(
+                group_skew_data=group_skew_data,
+                tracker_match_groups=tracker_match_groups,
+                threshold_map=threshold_map,
+                emit_info=self._emit_skew_info,
+            )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def routing_policy_deferred_via_nets(self) -> set[str]:
+        """Nets whose via cap ``diffpair_uncoupled_length`` already enforces.
+
+        Issue #6044: an engaged pair whose resolved pair limits carry a
+        ``max_vias_per_net`` (from the class or the protocol default) is
+        held to it by the pair rule, so ``routing_policy`` skips the via
+        check of both its nets.
+
+        Issue #6820: only a pair the pair rule actually measures (straight
+        track on BOTH nets, :func:`pair_is_measured`) is deferred.  The pair
+        rule skips a half-routed pair outright, so deferring it silently
+        dropped the cap -- ``routing_policy`` now evaluates it itself.
+        """
+        if self.net_class_map is None or not self.routing_policy_defer_pair_vias:
+            return set()
+        from kicad_tools.validate.diffpair_engagement import (
+            derive_engagement_state,
+            resolve_pair_thresholds,
+        )
+        from kicad_tools.validate.rules.diffpair_uncoupled_length import pair_is_measured
+
+        engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
+        names = {n.number: n.name for n in self.pcb.nets.values() if n.name}
+        deferred: set[str] = set()
+        for a, b in engaged_pairs:
+            na, nb = names.get(a), names.get(b)
+            if not na or not nb:
+                continue
+            if resolve_pair_thresholds(self.net_class_map, na, nb).max_vias_per_net is None:
+                continue
+            if not pair_is_measured(self.pcb, a, b):
+                continue  # the pair rule skips it: routing_policy must check it
+            deferred.update((na, nb))
+        return deferred
+
+    def check_routing_policy(self) -> DRCResults:
+        """Hold nets to their declared via cap and maximum routed length.
+
+        Issue #6044.  Reads ``max_vias_per_net`` and
+        ``length_constraint.max_length`` from each net's net-class-map
+        entry (see :mod:`~kicad_tools.validate.rules.routing_policy`).
+        Limits fire only where declared; with ``require_routing_policy``
+        a sensitive class without either limit is an error.  A no-op
+        without a ``net_class_map``.
+        """
+        from .rules.routing_policy import RoutingPolicyRule
+
+        if not self.net_class_map:
+            return DRCResults()
+        rule = RoutingPolicyRule(
+            self.net_class_map,
+            require_policy=self.require_routing_policy,
+            deferred_via_nets=self.routing_policy_deferred_via_nets(),
+            num_copper_layers=self.layers or len(self.pcb.copper_layers),
+            emit_info=self._emit_skew_info,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_silkscreen(self) -> DRCResults:
+        """Check silkscreen rules.
+
+        Validates:
+        - Minimum silkscreen line width (``silkscreen_line_width``)
+        - Minimum silkscreen text height (``silkscreen_text_height``)
+        - Silkscreen overlapping exposed pads -- legacy centroid heuristic
+          (``silkscreen_over_pad``)
+        - Silkscreen text/graphics over pad mask apertures -- geometric shapely
+          check (``silk_over_copper``)
+        - Silkscreen text/graphics over other silkscreen -- geometric shapely
+          check (``silk_overlap``)
+        - Silkscreen text/graphics too close to the board edge -- geometric
+          shapely check (``silk_edge_clearance``)
+
+        The three geometric checks count **one violation per colliding pair**,
+        matching ``kicad-cli pcb drc`` so the two engines can referee each other
+        (#4612).
+
+        Returns:
+            DRCResults containing silkscreen violations
+        """
+        return self._absolutize(
+            check_all_silkscreen(
+                self.pcb, self.design_rules, suppress_library=self.suppress_library
+            )
+        )
+
+    def check_pin1_markers(self) -> DRCResults:
+        """Check that polarized footprints carry a visible pin-1 marker.
+
+        Flags ICs, diodes, LEDs, polarized capacitors and connectors whose
+        silkscreen has no element next to pad 1 that points at it
+        (``pin1_marker_missing``), or whose only such marks are hidden under
+        the package body / on pad copper (``pin1_marker_obscured``).
+        Warning severity, advisory category.  Tune selection and radius
+        through :class:`~kicad_tools.validate.rules.pin1_marker.Pin1MarkerRule`
+        directly; waive individual footprints via ``.kct_waivers.json``.
+
+        Returns:
+            DRCResults containing pin-1 marker findings (one per footprint).
+        """
+        from .rules.pin1_marker import Pin1MarkerRule
+
+        rule = Pin1MarkerRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_sharp_trace_corner(self) -> DRCResults:
+        """Warn on acute trace corners (``sharp_trace_corner``, Issue #8840)."""
+        from .rules.sharp_trace_corner import SharpTraceCornerRule
+
+        return self._absolutize(SharpTraceCornerRule().check(self.pcb, self.design_rules))
+
+    def check_missing_plated_hole(self) -> DRCResults:
+        """Warn on co-located top/bottom SMD pads with no hole (Issue #8840)."""
+        from .rules.missing_plated_hole import MissingPlatedHoleRule
+
+        return self._absolutize(MissingPlatedHoleRule().check(self.pcb, self.design_rules))
+
+    def check_fiducials(self) -> DRCResults:
+        """Warn when a populated side has fewer than 3 global fiducials (``fiducials_missing``)."""
+        from .rules.fiducials import FiducialsRule
+
+        return self._absolutize(FiducialsRule().check(self.pcb, self.design_rules))
+
+    def check_board_id(self) -> DRCResults:
+        """Warn when no silkscreen text names the board revision (``board_id_missing``)."""
+        from .rules.board_id import BoardIdRule
+
+        return self._absolutize(BoardIdRule().check(self.pcb, self.design_rules))
+
+    def check_mask_to_copper(self) -> DRCResults:
+        """Run the explicitly requested native, immutable-source exposure check."""
+
+        import hashlib
+
+        from .mask_copper import (
+            MaskCopperAssessment,
+            MaskCopperRequest,
+            assessment_results,
+            check_mask_to_copper,
+        )
+
+        request = self.mask_copper_request or MaskCopperRequest()
+        try:
+            if self.pcb.path is None:
+                assessment = MaskCopperAssessment(
+                    reasons=["Mask geometry requires a saved source PCB"]
+                )
+            else:
+                raw = self.pcb.path.read_bytes()
+                # Both sides go through PCB's own load-time normalization, so a
+                # freshly loaded name-only-net board is not mistaken for an
+                # edited one (issue #5814); see canonical_source_text().
+                if self.pcb._sexp.to_string() != canonical_source_text(raw, self.pcb.path):
+                    assessment = MaskCopperAssessment(
+                        coverage="incomplete",
+                        reasons=["PCB object differs from current source bytes"],
+                    )
+                else:
+                    assessment = check_mask_to_copper(
+                        self.pcb.path, request.policy, request.intents, **request.native_options
+                    )
+                    if (
+                        assessment.binding
+                        and assessment.binding.source_sha256 != hashlib.sha256(raw).hexdigest()
+                    ):
+                        assessment.coverage = "incomplete"
+                        assessment.reasons.append("Source changed after checker object validation")
+        except (OSError, ValueError) as exc:
+            assessment = MaskCopperAssessment(coverage="incomplete", reasons=[str(exc)])
+        # Issue #8924: the assessment's own ``coverage`` is only knowable after
+        # the run, and ``assessment_results`` flattens it into findings.  Stash
+        # it so ``kct check``'s coverage loop can downgrade the row (the same
+        # post-hoc pattern as ``impedance_unmeasured_pairs`` / #7293 and
+        # ``ampacity_unmeasured_nets`` / #7206 F3).  Every path above assigns
+        # ``assessment``, so this is never stale when the method ran.
+        self.mask_copper_assessment = assessment
+        return assessment_results(assessment)
+
+    def check_solder_mask_pads(self) -> DRCResults:
+        """Check solder mask and pad dimension rules.
+
+        Validates:
+        - Solder mask expansion meets manufacturer minimum clearance
+        - Minimum pad size for manufacturability
+        - PTH pad annular ring
+
+        Returns:
+            DRCResults containing solder mask and pad violations
+        """
+        from .rules.solder_mask import SolderMaskPadRules
+
+        rule = SolderMaskPadRules()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def _mask_opening_findings(self, which: str) -> DRCResults:
+        from .rules.mask_expansion import check_mask_openings
+
+        snapshot, _reason = self.mask_geometry_snapshot()
+        if snapshot is None:
+            return DRCResults()
+        return self._absolutize(check_mask_openings(snapshot, self.pcb, which))
+
+    def mask_geometry_snapshot(self) -> tuple[Any, str | None]:
+        """Cached ``(snapshot, None)`` or ``(None, reason)`` when unavailable.
+
+        The snapshot is read from the saved source file, so a checker built
+        from an unsaved or modified PCB object reports coverage as unknown
+        rather than a clean pass (Issue #8847).
+        """
+        cached: tuple[Any, str | None] | None = getattr(self, "_mask_snapshot_cache", None)
+        if cached is not None:
+            return cached
+        from .mask_geometry import inspect_mask_geometry
+
+        path = getattr(self.pcb, "path", None)
+        try:
+            if path is None:
+                result: tuple[Any, str | None] = (None, "no_saved_source_pcb")
+            else:
+                snap = inspect_mask_geometry(path)
+                if snap.complete:
+                    result = (snap, None)
+                else:
+                    feats = sorted({u["feature"] for u in snap.unsupported})
+                    result = (snap, "incomplete:mask_geometry (" + ", ".join(feats) + ")")
+        except (OSError, ValueError, ImportError) as exc:
+            result = (None, f"mask_geometry_unavailable: {exc}")
+        self._mask_snapshot_cache = result
+        return result
+
+    def check_mask_negative_expansion(self) -> DRCResults:
+        """Warn on mask openings smaller than their pad (Issue #8847).
+
+        Pure geometry on the source-bound mask snapshot; default-on and
+        independent of the opt-in ``mask_to_copper`` native path.  Zero
+        expansion is not flagged; a per-pad override wins over the board value.
+        """
+        return self._mask_opening_findings("negative")
+
+    def check_mask_multi_segment(self) -> DRCResults:
+        """Warn when one mask opening is several disjoint pieces (Issue #8847)."""
+        return self._mask_opening_findings("multi")
+
+    def check_footprint_placement(self) -> DRCResults:
+        """Check that footprints are placed inside the board outline.
+
+        Uses a point-in-polygon test on each footprint's centroid to
+        detect components placed entirely outside the Edge.Cuts boundary.
+
+        Returns:
+            DRCResults containing placement violations
+        """
+        rule = FootprintOutsideBoardRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_connector_access(self) -> DRCResults:
+        """Check that panel-entry connectors can reach a board edge.
+
+        Issue #4613.  Flags rigid-plug, horizontal-mating connector
+        families (audio jacks, USB receptacles, barrel jacks, RJ jacks,
+        card edges -- per KiCad library naming) whose courtyard is too
+        far from every ``Edge.Cuts`` segment for a mating plug to reach
+        (``connector_edge_access``, warning severity).  Additionally
+        emits an info-severity per-connector distance inventory
+        (``connector_edge_distance``) under the same measurement/verbose
+        gate the skew rules use, so ``--format json`` / ``--verbose``
+        consumers get the full connector-to-edge table.
+
+        Returns:
+            DRCResults containing connector edge-access findings.
+        """
+        from .rules.connector_access import ConnectorEdgeAccessRule
+
+        rule = ConnectorEdgeAccessRule(emit_inventory=self.verbose or self.emit_measurements)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_netlist(self) -> DRCResults:
+        """Check for pads referencing undeclared nets.
+
+        Validates that every pad net name appears in the board-level
+        net declarations.  Pads whose net name was never declared
+        indicate a stale or incomplete netlist import.
+
+        Returns:
+            DRCResults containing netlist integrity warnings
+        """
+        from .rules.netlist import NetlistRule
+
+        rule = NetlistRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_single_pad_nets(self) -> DRCResults:
+        """Check for signal nets that are connected to only one pad.
+
+        A declared signal net with exactly one pad assignment is
+        structurally unroutable and almost always indicates a missing
+        footprint or schematic/PCB drift.  Pour nets (POWER/GROUND) are
+        silently allowed because a single test point or pour-only net
+        is a legitimate design pattern.
+
+        Returns:
+            DRCResults containing single-pad-net errors.
+        """
+        from .rules.single_pad_net import SinglePadNetRule
+
+        rule = SinglePadNetRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_via_in_pad(self) -> DRCResults:
+        """Check for vias placed inside SMD pads without an eligible process.
+
+        Issue #5009: fires when the active manufacturer profile's
+        ``via_in_pad_supported=False`` (the original #2635 behavior,
+        default for ``jlcpcb``, ``oshpark``, ``seeed``, ``flashpcb``),
+        AND when ``via_in_pad_supported=True`` but no eligible
+        :class:`~kicad_tools.manufacturers.fabrication_process.FabricationProcess`
+        is declared (``via_in_pad_process_id`` unset/unknown) or the
+        board's actual via geometry does not meet the declared process's
+        published requirements.  A bare capability flag is not
+        sufficient on its own to suppress a via-in-pad finding.
+
+        Returns:
+            DRCResults containing ``via_in_pad`` /
+            ``via_in_pad_process_missing`` / ``via_in_pad_process_ineligible``
+            violations (one per offending via/pad pair).  Empty only
+            when every in-pad via satisfies a declared, eligible process
+            (e.g. JLCPCB Capability Plus's 4+ layer POFV process).  Also
+            ``via_at_pad_edge`` warnings (issue #7220).
+        """
+        # Issue #7220: ``kct check`` also reports the advisory
+        # ``via_at_pad_edge`` warning (drill closer than the fab's minimum
+        # solder-mask dam to the pad's mask aperture).
+        rule = ViaInPadRule(report_pad_edge=True)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_width_consistency(self, **options: object) -> DRCResults:
+        """Audit trace width consistency (width islands, unexplained neck-downs).
+
+        A geometric routing-quality heuristic, not an ampacity check: it
+        reports short constant-width runs bounded by narrower copper
+        (``width_island``) and width changes on two-terminal routes that
+        no nearby other-net clearance explains (``width_transition``).
+        Warning severity by default.  Opt-in, like ``check_mask_to_copper``:
+        :meth:`check_all` skips it unless :attr:`width_consistency_options`
+        is set, and ``kct check`` skips it unless requested with ``--only
+        width_consistency``, so this heuristic does not change the verdict
+        of existing boards or of gates that count warnings.  Explicit
+        ``options`` override :attr:`width_consistency_options`.  See
+        :class:`~kicad_tools.validate.rules.width_consistency.WidthConsistencyRule`
+        for the model and the keyword ``options`` it accepts.
+
+        Returns:
+            DRCResults containing ``width_island`` / ``width_transition``
+            findings.
+        """
+        from .rules.width_consistency import WidthConsistencyRule
+
+        merged = {**(self.width_consistency_options or {}), **options}
+        rule = WidthConsistencyRule(**merged)  # type: ignore[arg-type]
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_via_type_capability(self) -> DRCResults:
+        """Check blind, buried and micro vias against the profile's capabilities.
+
+        Issue #6518: errors (rule_id ``via_type_unsupported``, manufacturing
+        category) on every ``(via blind|buried ...)`` when the profile's
+        ``blind_buried_vias_supported`` is ``False`` and every
+        ``(via micro ...)`` when ``micro_vias_supported`` is ``False``.
+        Through vias never trigger it.
+
+        Returns:
+            DRCResults with one ``via_type_unsupported`` violation per via.
+        """
+        from .rules.via_type_capability import ViaTypeCapabilityRule
+
+        rule = ViaTypeCapabilityRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_via_under_body(self) -> DRCResults:
+        """Check for vias hidden under QFN/DFN/SON/LGA package bodies.
+
+        Flags vias whose copper overlaps the Fab (or courtyard fallback)
+        body outline of a bottom-terminated package, except
+        thermal vias inside the footprint's own exposed pad on its net.
+        Warning severity, advisory category.  Tune selection or severity
+        through :class:`~kicad_tools.validate.rules.via_under_body.ViaUnderBodyRule`
+        directly; waive individual findings via ``.kct_waivers.json``.
+
+        Returns:
+            DRCResults containing ``via_under_body`` violations (one per
+            offending via/footprint pair).
+        """
+        from .rules.via_under_body import ViaUnderBodyRule
+
+        rule = ViaUnderBodyRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_thermal_asymmetry(self) -> DRCResults:
+        """Check for thermally asymmetric passives and solid multi-plane PTH pins.
+
+        Issue #7220: flags a 2-pad SMD R/C/L whose one terminal is tied solid
+        to its own-layer zone fill while the other reaches copper only through
+        a thermal relief or a trace (tombstoning risk), and a PTH pin tied
+        solid to zone fill on two or more layers (barrel-fill risk).  Uses the
+        committed fill geometry and the effective connect mode (pad
+        ``zone_connect`` override, then the zone's ``connect_pads``).  Warning
+        severity, advisory category.  See
+        :class:`~kicad_tools.validate.rules.thermal_asymmetry.ThermalAsymmetryRule`.
+
+        Returns:
+            DRCResults containing ``thermal_asymmetry`` warnings.
+        """
+        from .rules.thermal_asymmetry import ThermalAsymmetryRule
+
+        rule = ThermalAsymmetryRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_zero_length_segments(self) -> DRCResults:
+        """Check for zero-length copper trace segments (issue #4651).
+
+        Zero-length segments are always routing artifacts: the advisory
+        routing-quality metrics (#4623) count and exclude them; this
+        rule reports each one as a per-segment warning (with net, layer
+        and position) so they become actionable and waivable via the
+        central ``.kct_waivers.json`` mechanism (#4417).  Uses the same
+        detection tolerance as the analysis module so the advisory
+        stanza's ``zero_length_count`` and this rule's finding count
+        always agree.
+
+        Returns:
+            DRCResults containing one ``zero_length_segment`` warning
+            per zero-length segment.
+        """
+        from .rules.zero_length_segment import ZeroLengthSegmentRule
+
+        rule = ZeroLengthSegmentRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_zones(self) -> DRCResults:
+        """Check zone fill rules (unfilled zones, disabled fill, unassigned nets).
+
+        Validates that all copper zones have been filled with polygon data
+        and are assigned to a net. Unfilled zones break power/ground
+        connectivity.
+
+        Returns:
+            DRCResults containing zone fill violations
+        """
+        rule = ZoneFillRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_isolated_copper(self) -> DRCResults:
+        """Check committed zone-fill islands for isolation (Issue #4680).
+
+        Closes the second half of the #4680 gap: ``kicad-cli pcb drc``
+        flags ``isolated_copper`` (zone-fill islands connected to
+        nothing -- 199 of the 268 findings a kct-only workflow missed on
+        the reporting board), but no kct rule examined the committed
+        ``filled_polygon`` copper for orphaned islands.
+
+        Detection consumes only *committed* fill polygons (this repo's
+        copper source of truth); with no committed fills the rule
+        degrades silently rather than presenting "0 isolated" as a
+        clean bill (``check_zones`` owns the unfilled-zone warning).
+        Findings are ``severity="warning"`` (KiCad default-severity
+        parity) and classified advisory-quality for reporting.  Has its
+        own CLI category (``isolated_copper``) so the geometric pass can
+        be skipped via ``--skip isolated_copper``.
+
+        The predicate is KiCad's own since #4729: an island is isolated
+        iff its transitive same-net copper cluster (fills, tracks, arcs
+        and via barrels) contains **no pad** -- so an island held only
+        by pad-less copper is reported, matching kicad-cli.  Remaining
+        divergences are listed in the *Known divergences* section of
+        :mod:`kicad_tools.validate.rules.zone_fill`.
+
+        Returns:
+            DRCResults containing one ``isolated_copper`` warning per
+            orphaned fill island.
+        """
+        rule = IsolatedCopperRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_pad_grid_alignment(
+        self,
+        grid_resolution: float = 0.1,
+        threshold: float | None = None,
+        auto_derive_threshold: bool = False,
+        aggregate: bool = True,
+    ) -> DRCResults:
+        """Check that every pad aligns to the router grid.
+
+        Off-grid pads cause routing failures (``PADS_OFF_GRID``) deep
+        inside the autorouter; running this check at PCB-write time
+        produces a much earlier and more actionable error.  See
+        :func:`kicad_tools.router.preflight.check_pad_grid_alignment`
+        for the underlying implementation.
+
+        Args:
+            grid_resolution: Router grid resolution in mm (default ``0.1``,
+                matching the ``Autorouter`` and ``KCT_ROUTE_GRID`` default).
+            threshold: Maximum L2 deviation considered "on-grid", in mm.
+                When ``None`` and ``auto_derive_threshold`` is ``False``,
+                defaults to
+                :data:`kicad_tools.router.preflight.DEFAULT_PAD_GRID_TOLERANCE_MM`
+                (``0.05`` mm), chosen to clear stock KiCad library footprints
+                whose pads sit 0.03-0.05 mm off the 0.1 mm grid by design.
+                Genuine placement errors at >= 0.06 mm still flag.  An
+                explicit ``threshold`` always wins over
+                ``auto_derive_threshold``.
+            auto_derive_threshold: When ``True`` and ``threshold`` is
+                ``None``, derive the threshold per-board from the
+                pad-offset histogram (issue #3061).  Defaults to
+                ``False`` so the Python API preserves PR #3057 behaviour;
+                ``kct check`` opts in by default.
+            aggregate: When ``True`` (the default), collapse the per-pad
+                warnings into one aggregated ``pad_grid`` warning per
+                component reference (issue #3941).  A fixed-pitch footprint
+                such as an LQFP-48 whose 0.5 mm pitch places all 48 pads off
+                the 0.1 mm router grid thus emits a single warning instead
+                of 47+.  When ``False`` (the ``--verbose`` path), emit one
+                warning per off-grid pad, preserving the full per-pad detail.
+
+        Returns:
+            :class:`DRCResults` with ``pad_grid`` warnings.  When
+            ``aggregate=True`` there is one warning per component reference
+            (with a pad count and representative example); when
+            ``aggregate=False`` there is one warning per off-grid pad.
+            Empty when all pads align.
+        """
+        from kicad_tools.router.preflight import (
+            PreflightOffGridPad,
+            check_pad_grid_alignment,
+        )
+
+        results = DRCResults()
+
+        # The preflight needs the PCB file path -- it re-parses the file
+        # using load_pads_for_analysis() to get absolute pad coordinates
+        # with footprint rotation handled correctly.
+        if self.pcb.path is None:
+            # Cannot run without a backing file (in-memory PCBs can't be
+            # checked because the underlying parser operates on text).
+            results.rules_checked += 1
+            return results
+
+        report = check_pad_grid_alignment(
+            self.pcb.path,
+            grid_resolution=grid_resolution,
+            threshold=threshold,
+            clearance=self.design_rules.min_clearance_mm,
+            auto_derive_threshold=auto_derive_threshold,
+        )
+
+        results.rules_checked += 1
+
+        def _emit_per_pad(pads: list[PreflightOffGridPad]) -> None:
+            for pad in pads:
+                message = pad.message(report.grid_resolution, report.suggested_grid)
+                ref_label = pad.label
+                results.add(
+                    DRCViolation(
+                        rule_id="pad_grid",
+                        severity="warning",
+                        message=message,
+                        location=(pad.x, pad.y),
+                        actual_value=pad.offset_mm,
+                        required_value=report.threshold,
+                        items=(ref_label,) if ref_label else (),
+                    )
+                )
+
+        if not aggregate:
+            # ``--verbose`` path: preserve the full per-pad detail.
+            _emit_per_pad(report.off_grid_pads)
+            return results
+
+        # Default path: collapse each component's off-grid pads into a
+        # single aggregated warning (issue #3941).  A single-pad group keeps
+        # the original per-pad message so the common case is unchanged.
+        for ref, pads in report.grouped_by_ref().items():
+            if len(pads) == 1:
+                _emit_per_pad(pads)
+                continue
+
+            example = max(pads, key=lambda p: p.offset_mm)
+            max_offset = example.offset_mm
+            fp_name = example.footprint_name
+            count = len(pads)
+
+            if report.suggested_grid is not None:
+                message = (
+                    f"{ref}: {count} pads off-grid by up to "
+                    f"{max_offset:.3f}mm (grid {report.grid_resolution}mm"
+                    + (f", footprint {fp_name}" if fp_name else "")
+                    + ").\n"
+                    f"  Example: pad {example.label} at "
+                    f"({example.x:.3f}, {example.y:.3f}).\n"
+                    f"  Suggested fix: round pad positions OR set finer router "
+                    f"grid ({report.suggested_grid}mm would align all pads).\n"
+                    f"  Use --verbose for per-pad detail."
+                )
+            else:
+                message = (
+                    f"{ref}: {count} pads off-grid by up to "
+                    f"{max_offset:.3f}mm (grid {report.grid_resolution}mm"
+                    + (f", footprint {fp_name}" if fp_name else "")
+                    + ").\n"
+                    f"  Example: pad {example.label} at "
+                    f"({example.x:.3f}, {example.y:.3f}).\n"
+                    f"  Suggested fix: round pad positions to the router grid "
+                    f"(footprint pitch may not align to "
+                    f"{report.grid_resolution}mm).\n"
+                    f"  Use --verbose for per-pad detail."
+                )
+
+            results.add(
+                DRCViolation(
+                    rule_id="pad_grid",
+                    severity="warning",
+                    message=message,
+                    location=(example.x, example.y),
+                    actual_value=max_offset,
+                    required_value=report.threshold,
+                    items=(ref,) if ref else (),
+                )
+            )
+        return results
+
+    def __repr__(self) -> str:
+        return (
+            f"DRCChecker(manufacturer={self.manufacturer!r}, "
+            f"layers={self.layers}, copper_oz={self.copper_oz})"
+        )

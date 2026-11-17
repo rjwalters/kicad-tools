@@ -1,0 +1,1130 @@
+"""Board 02 (charlieplex-led) manufacturability baseline regression guard.
+
+This test pins the **measured manufacturable** state of the
+boards/02-charlieplex-led example board against the routing + DRC
+pipeline as of June 2026 (post-Wave-3 router fixes: PRs #3247 / #3248
+/ #3250 / and the #3214 route_demo subprocess port from #3207).
+
+Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
+``kct route --backend cpp``):
+
+- **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
+- **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
+- **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
+- **Deterministic output**: 22 routes / 20 vias / 315.15mm total
+  length identical across seeds 42/43/44 -- this small 2-layer board
+  has fully converged.  (315.21mm before the Issue #8901 re-baseline:
+  #8831 lets ``compress_staircase`` absorb a staircase's trailing
+  monotone legs, so the replacement swallows three more segments -- see
+  the #8901 note in
+  ``test_routing_output_deterministic_across_seeds``.)  (316.39mm before
+  the Issue #8505 re-baseline, which stopped emitting a shared
+  pad-to-via stub twice.)  (316.57mm before the Issue #8502 re-baseline:
+  #8387 cuts optimizer chains at interior vias, which re-shortens
+  NODE_A's leg past its through-via; no other net moved -- see the
+  #8502 note in ``test_routing_output_deterministic_across_seeds``.)  (26 vias / 323.06mm before the Issue #6315
+  re-baseline, which resolves pad clearance cells by exact geometry, so
+  traces pass a neighbour pin's halo on the same layer instead of
+  changing layer around it.)  (24 vias / 321.75mm before the Issue #6272
+  re-baseline, which made every trace-vs-via gate resolve
+  ``max(trace_clearance, via_clearance)`` in both insertion orders: a
+  trace routed past an earlier foreign via is now held to the 0.20 mm
+  via floor the reverse order already met, so copper that squeezed past
+  a barrel now changes layer instead (+2 vias, +1.31 mm).  Routes (22) and reach
+  (8/8) are UNCHANGED and DRC stays clean -- see the #6272 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (24 vias / 321.46mm before the 2026-10-01
+  #5854 re-baseline, which switched the POST-ROUTE trace optimizer's
+  two collision checkers to the clearance kernel: their pad gate stops
+  comparing two already-grown raster halos and measures the exact
+  edge-to-edge gap instead, so a different subset of the optimizer's
+  shortcut candidates survives.  Routes (22), vias (24) and reach
+  (8/8) are UNCHANGED -- see the #5854 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (24 vias / 322.39mm before the 2026-10-01
+  #5661 re-baseline, which switched the SEARCH-time halo refinement to
+  the clearance kernel and retired its ``max(required, via_clearance)``
+  widening for trace-vs-via pairs: A* stops refusing legal candidates
+  the commit gates accept, so a slightly shorter solution is reachable.
+  Reach is UNCHANGED at 8/8 and vias at 24 -- see the #5661 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (23 vias / 322.77mm before the 2026-09-22
+  #5660 re-baseline, which switched the grid halo from a Chebyshev
+  square to the clearance kernel's exact disc: strictly less copper
+  is marked, so one escape via that the square's diagonal corner had
+  fenced off is now reachable by trace.  Reach is UNCHANGED at 8/8 --
+  see the #5660 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (327.93mm before the 2026-09-10 #5009
+  re-baseline: ``jlcpcb-tier1`` 2-layer declares no orderable via-in-pad
+  process, so the #3112 via-in-pad sweep now relocates the escape vias
+  off the SMT lands they clipped -- same 22 routes / 24 vias / 8/8
+  reach.  See "SCOPE OF THE CLEANLINESS CLAIM" in
+  ``test_routing_output_deterministic_across_seeds`` for exactly which
+  DRC engine and which manufacturer profile that measurement covers --
+  the first revision of this note overstated it and CI refuted it.)
+  The 2026-09-15 local halo-coverage refinement (#5410, ff96e855)
+  measures 226 segments and 326.73mm across all three macOS seeds.
+  Their emitted copper geometry is identical; all 34 pad occurrences
+  preserve geometry/net membership, and physical copper connectivity
+  matches the input PCB's net assignments. Native KiCad 10.0.6
+  refill/all-track DRC reports zero violations/unconnected items for
+  each retained output. The
+  source-bound pre-refinement 7138c685/native30 control reproduces
+  230/328.71 with the same clean audits; NODE_C is 1.981623mm shorter.
+  Evidence: .loom/sweep-checkpoint/evidence/pr-5425-board02/.
+  The earlier 2026-09-15 physical via-clearance repair (#5410) measured
+  230 segments on macOS (228 on Linux CI), 328.71mm, and unchanged
+  routes/vias/reach. All three macOS seeds pass native KiCad 10.0.6
+  DRC with zero violations and unconnected items. A source-bound
+  ccb58825 control reproduces the previous clean 260/328.80 baseline.
+  The 2026-09-14 integration with main measured 260 segments and
+  328.80mm on the historical fixture. Seeds 42/43/44 retain 8/8 reach
+  and pass native DRC with zero violations and unconnected items.
+  Restoring the pre-integration nudge module on the integrated source
+  gives the same metrics: this delta is outside the nudge repair.
+  Segment count was 295 on macOS-arm64 as of the earlier re-baseline
+  (274 as of the 2026-08-11 #4732 measurement, down from 476;
+  routes/vias/length/reach
+  are byte-identical, only the collinear resplit count moved -- see the
+  #4732 note in ``test_routing_output_deterministic_across_seeds``).
+  Segment count is platform- and KiCad-version-sensitive collinear
+  resplitting at identical geometry and is NOT itself a
+  manufacturability signal; it is guarded by a loose band while the
+  exact routes/vias/length pins and the cross-seed equality assertion
+  are the real regression + determinism guards (see the #3545 PLATFORM
+  NOTE in ``test_routing_output_deterministic_across_seeds``).
+  (397/328.16mm
+  before the 2026-07-09 sheet-centering translation of the unrouted
+  artifact -- kct pcb center-on-sheet; 387 segments
+  before the #3545 static-halo rip-up survival; 193/325.08mm before
+  the #3532 45-degree pad-tail doglegs; 299/325.55 before the #3436
+  burn-down straightening (#3203/#3510); 206/324.92 before the #3438
+  rip-up parity fix; 155/324.66 before the #3433 collision-checker
+  scoping; see the re-baseline notes below.)
+
+**Re-verified 2026-06-07** on current main (issue #3292):
+- Includes Wave 6/7 PRs #3286 (board-04 NRST refresh), #3288 (plane-net
+  classifier narrowing), #3290 (2L stitch when GND pour is cross-layer).
+- All 3 cpp seeds (42/43/44) still produce bit-perfect
+  22/155/24/324.66mm output, 8/8 nets, DRC PASS at jlcpcb-tier1.
+- ``kct fleet status`` reports ``ship_ready=YES`` for board 02.
+
+**Re-verified 2026-06-08** on current main (issue #3334) at HEAD 21076e6c:
+- Covers all Wave 9 router PRs landed since the #3292 re-verification:
+  #3300 (escape width), #3322 (power-rail alias + per-segment retry),
+  #3323 (A* flat arrays), #3324 (layer_to_index goal layer fix),
+  #3326 (trace-width-by-impedance), #3328 (board-edge-aware multi-row
+  escape), #3329 (deterministic Segment/Via/Zone UUIDs under seed=N),
+  #3330 (diff-pair centerline overlap rejection), #3332 (BGA-49 /
+  budget-exit diff-pair priority).
+- Board 02 has no impedance net classes (the #3326 trace-width-by-
+  impedance path does not engage), no diff pairs (#3330/#3332 inactive),
+  no multi-row connectors (#3328 inactive), and no escape-width-affected
+  topology -- so most Wave 9 changes are no-ops on this board.
+- All 3 cpp seeds (42/43/44) still produce bit-perfect
+  22/155/24/324.66mm output, 8/8 nets, DRC PASS at jlcpcb-tier1.
+- ``kct fleet status`` reports ``ship_ready=YES`` for board 02, manifest
+  ``fresh`` (no artifact refresh needed -- the routed PCB and manifest
+  from the #3292 verification round remain byte-identical).
+
+**Re-baselined 2026-06-09** for Issue #3433 (collision-checker
+overflow-tolerance scoping):
+- #3433 scoped ``GridCollisionChecker``'s ``ignore_overflow`` tolerance
+  to GENUINELY overused cells (``usage_count > 1``).  Board 02 finishes
+  with residual overflow, so the post-route trace optimizer previously
+  ran in blanket-tolerant mode and compressed staircases ACROSS clean
+  foreign-net traces (the same mechanism that committed board-04's
+  -0.200 mm SWCLK/SWO overlaps).  With the tolerance scoped, those
+  compressions are correctly declined and more staircase segments are
+  retained: 155 -> 206 segments.  Routes (22), vias (24) and reach
+  (8/8) are unchanged; total length moves +0.26 mm (324.66 -> 324.92).
+  DRC still passes at jlcpcb-tier1 across all 3 seeds.
+- This also CONVERGES local (no rtree -> grid checker) behavior with
+  rtree-equipped environments (vector checker), whose exact narrow
+  phase never honored the blanket tolerance for foreign segments.
+- All 3 cpp seeds (42/43/44) produce bit-perfect 22/206/24/324.92mm
+  output, 8/8 nets, DRC PASS at jlcpcb-tier1.
+
+Board 02 is the smallest non-trivial routing target in the repo
+(~37mm x ~22mm, 10 nets, 34 pads).  The 4 NODE_x charlieplex matrix
+nets connect to 4-6 LEDs each in an interleaved pattern -- per
+Issue #2432 this is uniquely hostile to the python backend (which
+gets 6/8 = 75%), but the cpp backend's negotiated congestion router
+handles it cleanly.
+
+The acceptance criteria pinned by this test:
+
+1. CPP routing achieves >= 8/8 signal nets routed (100% reach).
+   Regression to 7 or below indicates a foundational A* / negotiated-
+   loop regression on small dense topologies -- bisect against
+   PRs #3248 (Euclidean via-clearance), #3250 (sub-cell pad-margin),
+   and #3247 (auto-fix budget) first.
+2. DRC reports 0 errors at jlcpcb-tier1 profile (the consumer
+   manufacturer target).  Any non-zero clearance violation count here
+   signals a regression in the negotiated loop's clearance handling
+   OR a regression in the post-route auto-fix sweep.
+3. Output determinism: routes/segments/vias counts stable across
+   seeds 42/43/44 (the convergence claim).  This is the bit-perfect
+   property recorded above; a non-trivial drift indicates a
+   determinism regression (seed plumbing, hash-set iteration order,
+   etc.).
+
+History:
+
+- **PR #3036**: closed the original NODE_x routing gap by aligning
+  U1 pads to the 0.1mm router grid (Issue #2917 / #2933).
+- **PR #3102 + PR #3121**: same-net via-in-pad nudge sweep
+  (Issue #3112) -- moves escape vias off LED pads so the jlcpcb
+  ``via_in_pad`` rule passes.
+- **PR #3163** (Issue #3147): auto-export mfg bundle from the
+  ``generate_design.py`` recipes so fleet status reads ``ship_ready``.
+- **PR #3214** (Issue #3207): replace bare ``router.route_all()`` in
+  ``route_demo.py`` with subprocess ``kct route`` matching the
+  ``generate_design.py:route_pcb()`` recipe; established the 8/8 floor
+  for the demo path.
+- **PR #3247** (Issue #3238): reserve auto-fix budget + structured
+  skip signal.
+- **PR #3248** (Issue #3232 sibling): Euclidean via-clearance kernel.
+- **PR #3250** (Issue #3233): ``_add_pad_unsafe`` sub-cell pad-metal
+  margin closure.
+
+Related ongoing work:
+
+- Issue #2432: charlieplex NODE_x nets stall on python backend.  This
+  test pins cpp-backend reach only; python backend regression is
+  tracked separately.
+
+Runs unconditionally (no slow gate) -- board 02 routing completes in
+~6 s wall-clock, which is well within ``pnpm check:ci`` budget.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  These
+# tests route real boards (often via subprocess) and comfortably beat
+# 60s alone, but under full-suite xdist CPU contention the wall-clock
+# reaper killed them spuriously.  The marker overrides the CLI default
+# with a contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(900)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "02-charlieplex-led"
+UNROUTED_PCB = BOARD_DIR / "output" / "charlieplex_3x3.kicad_pcb"
+
+# Acceptance criteria for the post-Wave-3 baseline.
+REQUIRED_SIGNAL_NETS_ROUTED = 8  # all 4 LINE_x + 4 NODE_x signal nets
+REQUIRED_SIGNAL_NETS_TOTAL = 8
+
+# Issue #3724 (June 15 2026): tightened 4 -> 0.  The 4 grandfathered
+# ``clearance_pad_zone`` findings added by #3556 (3x GND pads overlapping
+# the VCC F.Cu fill + 1x VCC pad overlapping the GND B.Cu fill, all
+# sub-0.01mm at the U1 DIP-8 cluster) were stale-pour-carve copper from
+# before the final pad geometry settled.  ``kct zones fill`` regenerated
+# the VCC/GND pours against the final trace + pad set (refill-only, no
+# copper re-route, the #3712 antipad clearance re-carves the pad antipads),
+# clearing all 4.  The copper-union pour audit confirms GND and VCC each
+# remain ONE connected copper component after the refill (no stranded
+# pads / split fills) and kicad-cli ``unconnected_items`` stays 0.  Both
+# the committed-PCB tolerance entry (.github/routed-drc-tolerance.yml) and
+# this ceiling are now 0 -- the board is honestly manufacturable.  The
+# board's reach + determinism baseline is unchanged (8/8, bit-perfect
+# across seeds).
+MAX_DRC_ERRORS = 0  # strict 0 gate after #3724 zone refill
+GRANDFATHERED_DRC_RULES = {"clearance_pad_zone"}
+
+
+def _parse_routed_signal_nets(stdout: str) -> tuple[int, int] | None:
+    """Extract the canonical ``Nets routed: N/M`` line from kct route output.
+
+    Board 02 has 10 named nets (LINE_A-D + NODE_A-D + GND + VCC), but
+    GND is in the skip list (auto-poured into a zone) and VCC is a
+    single-pad net handled implicitly, so the router-summary ``Nets
+    routed: N/M`` line shows 8/8 for the signal-net topology when fully
+    routed.
+
+    Returns ``(routed, total)`` or ``None`` if no match found.
+    """
+    # The canonical line emitted by the layer-escalation summary is the
+    # final one and the most reliable.
+    pattern = re.compile(r"Nets routed:\s+(\d+)/(\d+)")
+    matches = pattern.findall(stdout)
+    if matches:
+        # Take the last occurrence (final summary, after any iteration logs).
+        last = matches[-1]
+        return int(last[0]), int(last[1])
+    return None
+
+
+def _parse_drc_status(stdout: str) -> bool | None:
+    """Return True if the kct route output reports ``DRC PASSED``.
+
+    Returns False on explicit ``DRC FAILED``, None if neither is found.
+    """
+    if "DRC PASSED" in stdout:
+        return True
+    if "DRC FAILED" in stdout:
+        return False
+    return None
+
+
+def _parse_drc_error_rules(stdout: str) -> dict[str, int] | None:
+    """Extract the post-route DRC **error** count + per-rule breakdown.
+
+    ``kct route`` emits a ``--- DRC Validation ---`` block of the form::
+
+        --- DRC Validation ---
+          ...
+          Errors:   4
+            - clearance_pad_zone: Short: pad on net 'GND' overlaps ...
+            - clearance_pad_zone: Short: pad on net 'GND' overlaps ...
+            ...
+
+    When the board has **zero** errors but some non-error (advisory)
+    findings, ``kct route`` omits the ``Errors:`` headline entirely and
+    instead prints only a ``Warnings: N`` block (issue #3843/#3830 added
+    the WARNING-severity ``copper_sliver`` rule, which surfaces a handful
+    of ~0.04mm residual copper ribbons on board 02's committed fill --
+    these are the committed-fill-vs-kicad-cli-refill divergence, tracked
+    behavior, not errors).  We treat that warnings-only block as a clean
+    **0-error** result so the strict 0-ERROR ceiling still passes.
+
+    We parse the ``Errors:`` headline count and tally the per-rule
+    breakdown ONLY from the ``- <rule_id>:`` lines in the ERROR section
+    (warning lines must NOT inflate the error tally).  Returns a dict
+    mapping ``rule_id -> count`` (with the synthetic key ``"__total__"``
+    set to the headline error count) or ``None`` if no DRC Validation
+    block was found at all.
+
+    Used by ``test_drc_clean_at_jlcpcb_tier1`` to allow ONLY the
+    grandfathered #3556 ``clearance_pad_zone`` findings through while
+    still failing on any other (or excess) ERROR.
+    """
+    err_match = re.search(r"Errors:\s+(\d+)", stdout)
+    if err_match is None:
+        # No ``Errors:`` headline.  If the DRC block ran at all (it emits
+        # a ``Warnings:`` headline when error-free but advisory-bearing),
+        # treat it as a strict 0-error result.  copper_sliver and any
+        # other WARNING-severity findings live here and must NOT count as
+        # errors -- so we return an empty error breakdown, not None.
+        if re.search(r"Warnings:\s+(\d+)", stdout) is not None:
+            return {"__total__": 0}
+        return None
+    total = int(err_match.group(1))
+    # Per-rule lines look like ``    - clearance_pad_zone: <message>``.
+    # Scope the tally to the ERROR section only: start at the ``Errors:``
+    # headline and stop at the next ``Warnings:`` headline (or end of
+    # text), so WARNING-severity rules (e.g. copper_sliver) listed under a
+    # trailing ``Warnings:`` block never inflate the error breakdown.
+    error_section = stdout[err_match.end() :]
+    warn_match = re.search(r"^\s*Warnings:\s+\d+", error_section, re.MULTILINE)
+    if warn_match is not None:
+        error_section = error_section[: warn_match.start()]
+    rule_counts: dict[str, int] = {}
+    for rule_id in re.findall(r"^\s+-\s+([a-z][a-z_]+):", error_section, re.MULTILINE):
+        rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
+    rule_counts["__total__"] = total
+    return rule_counts
+
+
+def _parse_drc_error_lines(stdout: str) -> list[str]:
+    """Return the full ``- <rule>: <message>`` lines of the ERROR section."""
+    err_match = re.search(r"Errors:\s+(\d+)", stdout)
+    if err_match is None:
+        return []
+    section = stdout[err_match.end() :]
+    warn_match = re.search(r"^\s*Warnings:\s+\d+", section, re.MULTILINE)
+    if warn_match is not None:
+        section = section[: warn_match.start()]
+    return [m.strip() for m in re.findall(r"^\s+-\s+[a-z][a-z_]+:.*$", section, re.MULTILINE)]
+
+
+@pytest.fixture(scope="module")
+def unrouted_pcb_path() -> Path:
+    """Verify the committed unrouted board 02 PCB exists for the route run."""
+    if not UNROUTED_PCB.exists():
+        pytest.skip(
+            f"Board 02 unrouted PCB not found at {UNROUTED_PCB!s}; "
+            "regenerate via `uv run python boards/02-charlieplex-led/generate_pcb.py`."
+        )
+    return UNROUTED_PCB
+
+
+#: Marker ``kct route`` prints when its ``kicad-cli version`` probe failed
+#: and the post-route native zone refill was therefore skipped.
+_ZONE_FILL_SKIPPED_MARKER = "Zone fill: skipped (kicad-cli not installed)"
+
+#: Extra route attempts allowed when the run was degraded by the environment.
+_MAX_ENV_RETRIES = 2
+
+
+def _env_degradation(stdout: str) -> str | None:
+    """Return a description if the run lost its zone refill to a failed probe.
+
+    Issue #5905: a single fresh process, with router ``--seed 42`` and
+    ``PYTHONHASHSEED`` unset/42/43/45 all reaching 0 errors, once printed
+    this marker even though ``kicad-cli`` was installed (the
+    ``find_kicad_cli`` probe has a 5s timeout and is memoised).  Without
+    the native refill the committed GND/VCC pour is never re-carved
+    around the routed copper and ``connectivity`` reports a stranded GND
+    pad -- an environment artefact, not a router regression.
+    """
+    if _ZONE_FILL_SKIPPED_MARKER in stdout and shutil.which("kicad-cli"):
+        return (
+            "kct route skipped the native zone refill ('kicad-cli not "
+            "installed') although kicad-cli is on PATH -- the kicad-cli "
+            "probe failed transiently"
+        )
+    return None
+
+
+@pytest.fixture(scope="module")
+def route_stdout(unrouted_pcb_path: Path) -> str:
+    """Run the canonical route once; retry only environment-degraded runs.
+
+    A run whose zone refill was skipped by a transient ``kicad-cli`` probe
+    failure (see ``_env_degradation``) is re-run up to ``_MAX_ENV_RETRIES``
+    times.  Any other outcome -- including a genuine DRC error on a
+    healthy run -- is returned untouched so the assertions see it.
+    """
+    stdout = ""
+    for _attempt in range(_MAX_ENV_RETRIES + 1):
+        stdout = _route_board02_once(unrouted_pcb_path)
+        if _env_degradation(stdout) is None:
+            break
+    return stdout
+
+
+def _route_board02_once(unrouted_pcb_path: Path) -> str:
+    """Run the canonical ``kct route`` invocation for board 02 once per module.
+
+    Mirrors the recipe in ``boards/02-charlieplex-led/generate_design.py``
+    (``route_pcb()`` at line ~528) and ``route_demo.py`` (subprocess
+    invocation post-PR #3214) but routes to a tmpdir so it never
+    overwrites the committed artifact.
+
+    Uses ``--backend cpp`` (the production default) with seed 42 for
+    deterministic reproduction.  The bit-perfect-across-seeds property
+    is checked separately by ``test_routing_output_deterministic``.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        pcb_copy = Path(td) / "charlieplex_3x3.kicad_pcb"
+        shutil.copy2(unrouted_pcb_path, pcb_copy)
+        output_path = Path(td) / "charlieplex_3x3_routed.kicad_pcb"
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "route",
+            str(pcb_copy),
+            "--output",
+            str(output_path),
+            "--seed",
+            "42",
+            "--manufacturer",
+            "jlcpcb-tier1",
+            "--backend",
+            "cpp",
+            "--timeout",
+            "300",
+            "--auto-fix",
+            "--auto-fix-passes",
+            "2",
+        ]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=480,
+            check=False,
+        )
+        # Exit codes from cli/route_cmd.py:
+        #   0 = full route + DRC clean
+        #   2 = partial routing below --min-completion
+        #   3 = >= min-completion but DRC violations remain
+        # The current baseline reaches 0; any other code is a regression.
+        # Codes 1 and 5 are fatal (crash / unhandled exception).
+        if proc.returncode in (1, 5):
+            pytest.fail(
+                f"kct route returned fatal exit code {proc.returncode}\n"
+                f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
+                f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+            )
+        return proc.stdout
+
+
+class TestBoard02ManufacturableBaseline:
+    """Pin the post-Wave-3 manufacturable baseline for board 02.
+
+    Runs ``kct route --backend cpp`` as a subprocess (the production
+    invocation path) and asserts the measured reach + DRC profile
+    match the documented baseline.
+    """
+
+    def test_all_signal_nets_routed(self, route_stdout: str) -> None:
+        """All 8 multi-pad signal nets must reach 100% connectivity.
+
+        The cpp backend's negotiated congestion router achieves 8/8
+        on this board's interleaved charlieplex topology.  A
+        regression below 8 would indicate one of:
+        - A regression in the negotiated rip-up loop in
+          ``router/core.py`` (the iteration-1-best-restoration path
+          in particular -- board 02 hits the
+          ``best-metric early-stop`` branch after 3 iterations).
+        - A regression in PR #3248's Euclidean via-clearance kernel
+          (more lateral via-escape conflicts on a dense board).
+        - A regression in PR #3250's ``_add_pad_unsafe`` sub-cell
+          pad-metal margin fix (the U1 DIP-8 cluster is the tightest
+          on this board).
+        - A regression in PR #3247's auto-fix budget reservation
+          (this board exercises auto-fix on the dense NODE_x
+          interleaving).
+
+        The python backend currently reaches only 6/8 on this board
+        (Issue #2432); this test pins the cpp path only.
+        """
+        parsed = _parse_routed_signal_nets(route_stdout)
+        assert parsed is not None, (
+            "Could not find 'Nets routed: N/M' line in kct route output. "
+            "Last 2000 chars:\n"
+            f"{route_stdout[-2000:]}"
+        )
+        routed, total = parsed
+        assert total == REQUIRED_SIGNAL_NETS_TOTAL, (
+            f"Board 02 signal-net total changed from "
+            f"{REQUIRED_SIGNAL_NETS_TOTAL} to {total}.  If this is "
+            "intentional (e.g. a new signal net added to the design), "
+            "update REQUIRED_SIGNAL_NETS_TOTAL in this test and the "
+            "baseline-measurement notes in the module docstring."
+        )
+        assert routed >= REQUIRED_SIGNAL_NETS_ROUTED, (
+            f"Board 02 cpp routing regressed to {routed}/"
+            f"{REQUIRED_SIGNAL_NETS_TOTAL} (expected >= "
+            f"{REQUIRED_SIGNAL_NETS_ROUTED}/{REQUIRED_SIGNAL_NETS_TOTAL}). "
+            "See the docstring history for bisect targets."
+        )
+
+    def test_drc_clean_at_jlcpcb_tier1(self, route_stdout: str) -> None:
+        """The post-route DRC sweep is clean (strict ``MAX_DRC_ERRORS`` = 0).
+
+        ``kct route`` runs ``drc_verify_and_nudge`` after routing
+        (see ``router/drc_nudge.py:1513``) and reports the per-rule
+        DRC error breakdown in its ``--- DRC Validation ---`` block.
+
+        Through Wave 3 (PRs #3247-#3250) this board was clean (0 errors);
+        issue #3556 added ``clearance_pad_zone`` (pad copper vs foreign-net
+        zone fill), which surfaced 4 stale-pour-carve shorts at the U1
+        DIP-8 cluster.  Issue #3724 (zone refill after routing) burned
+        those down, so ``MAX_DRC_ERRORS`` is 0 and nothing is tolerated
+        in practice.  ``GRANDFATHERED_DRC_RULES`` is retained only so a
+        regression is reported as "cluster grew" vs "new rule"; Board 02
+        has no entry in ``.github/routed-drc-tolerance.yml`` and must not
+        get one.  The test FAILS on:
+        - any NEW rule in the error breakdown (bisect PRs #3247-#3250), OR
+        - ANY error (> ``MAX_DRC_ERRORS``).
+
+        Issue #5905: a lone ``connectivity`` error (GND pad stranded) was
+        observed once in 9 fresh-process runs of the exact historical
+        fixture; it coincided with ``Zone fill: skipped (kicad-cli not
+        installed)`` (transient probe failure) and not with
+        ``PYTHONHASHSEED`` (44 failed once, passed twice; unset/42/43/45
+        passed).  The fixture re-runs such environment-degraded runs.
+
+        Issue #3843/#3830 (June 20 2026): the new WARNING-severity
+        ``copper_sliver`` rule surfaces a handful of ~0.04mm residual
+        copper ribbons on board 02's committed fill (the
+        committed-fill-vs-kicad-cli-refill divergence -- tracked behavior,
+        not errors).  Because the board now has 0 errors but some
+        warnings, ``kct route`` prints a ``Warnings: N`` block with NO
+        ``Errors:`` headline and no ``DRC PASSED`` line.
+        ``_parse_drc_error_rules`` treats that warnings-only block as a
+        strict 0-ERROR result, and the error-section scoping keeps
+        copper_sliver (and any other WARNING) out of the error breakdown,
+        so the strict ``MAX_DRC_ERRORS`` (0) ceiling is preserved.
+        """
+        # If the route happened to land perfectly clean (e.g. after the
+        # pour-carve burn-down), the CLI prints ``DRC PASSED`` and no
+        # error block -- accept that as the strict-clean outcome.
+        if _parse_drc_status(route_stdout) is True:
+            return
+
+        rule_counts = _parse_drc_error_rules(route_stdout)
+        assert rule_counts is not None, (
+            "Could not find a 'DRC PASSED' status or an 'Errors: N' count "
+            "in kct route output -- the DRC step may have crashed before "
+            "emitting a status.  Last 2000 chars:\n"
+            f"{route_stdout[-2000:]}"
+        )
+
+        total = rule_counts.pop("__total__")
+        findings = _parse_drc_error_lines(route_stdout)
+        degraded = _env_degradation(route_stdout)
+        finding_report = (
+            "Exact ERROR findings:\n  " + "\n  ".join(findings)
+            if findings
+            else "No per-finding ERROR lines parsed."
+        ) + (f"\nEnvironment note: {degraded}" if degraded else "")
+        unexpected = {
+            rule: count
+            for rule, count in rule_counts.items()
+            if rule not in GRANDFATHERED_DRC_RULES
+        }
+        assert not unexpected, (
+            "Board 02 post-route DRC at jlcpcb-tier1 has NEW (non-"
+            f"grandfathered) error rule(s): {sorted(unexpected)}.  Only "
+            f"{sorted(GRANDFATHERED_DRC_RULES)} (#3556 stale-pour-carve) is "
+            "tolerated.  A new rule means a real regression -- check the "
+            "negotiated loop's clearance handling or the auto-fix sweep "
+            "(Issue #3238 / PR #3247).\n"
+            f"{finding_report}\n"
+            f"Last 2000 chars:\n{route_stdout[-2000:]}"
+        )
+        assert total <= MAX_DRC_ERRORS, (
+            f"Board 02 post-route DRC at jlcpcb-tier1 has {total} errors; "
+            f"the #3556 grandfathered ceiling is {MAX_DRC_ERRORS} "
+            "clearance_pad_zone stale-pour-carve shorts.  The cluster grew "
+            "-- either a clearance regression added foreign-net pad-in-pour "
+            "overlaps, or the pour geometry drifted.  Inspect the U1 DIP-8 "
+            "cluster.\n"
+            f"{finding_report}\n"
+            f"Last 2000 chars:\n{route_stdout[-2000:]}"
+        )
+
+
+def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> None:
+    """The cpp-backend routing output is bit-perfect across seeds 42/43/44.
+
+    This pins the convergence claim made in the module docstring:
+    board 02 is small and the negotiated congestion router converges
+    fully, so different seeds produce identical route geometries
+    (same segment count, same via count, same total length).
+
+    A failure here means one of:
+    - Determinism regressed (e.g. a non-deterministic data structure
+      iteration order introduced by a future PR).
+    - The convergence assumption is no longer valid (e.g. router logic
+      now picks different but equally-good solutions per seed).
+
+    The latter is not necessarily a bug, but the test will catch it
+    so we can decide intentionally whether to relax the assertion.
+    """
+    seeds = [42, 43, 44]
+    results: dict[int, tuple[int, int, int, float]] = {}
+
+    for seed in seeds:
+        with tempfile.TemporaryDirectory() as td:
+            pcb_copy = Path(td) / "charlieplex_3x3.kicad_pcb"
+            shutil.copy2(unrouted_pcb_path, pcb_copy)
+            output_path = Path(td) / "charlieplex_3x3_routed.kicad_pcb"
+            cmd = [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "route",
+                str(pcb_copy),
+                "--output",
+                str(output_path),
+                "--seed",
+                str(seed),
+                "--manufacturer",
+                "jlcpcb-tier1",
+                "--backend",
+                "cpp",
+                "--timeout",
+                "300",
+                "--auto-fix",
+                "--auto-fix-passes",
+                "2",
+            ]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=480,
+                check=False,
+            )
+            if proc.returncode in (1, 5):
+                pytest.fail(
+                    f"kct route returned fatal exit code "
+                    f"{proc.returncode} on seed {seed}\n"
+                    f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
+                    f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+                )
+            stdout = proc.stdout
+
+            routes_m = re.search(r"Routes created:\s+(\d+)", stdout)
+            segments_m = re.search(r"Segments:\s+(\d+)", stdout)
+            vias_m = re.search(r"Vias:\s+(\d+)", stdout)
+            length_m = re.search(r"Total length:\s+([\d.]+)mm", stdout)
+            assert all([routes_m, segments_m, vias_m, length_m]), (
+                f"Could not parse route summary metrics for seed {seed}. "
+                f"Last 2000 chars:\n{stdout[-2000:]}"
+            )
+            assert routes_m is not None
+            assert segments_m is not None
+            assert vias_m is not None
+            assert length_m is not None
+            results[seed] = (
+                int(routes_m.group(1)),
+                int(segments_m.group(1)),
+                int(vias_m.group(1)),
+                float(length_m.group(1)),
+            )
+
+    # Reference values from the documented baseline (seed 42).
+    ref = results[seeds[0]]
+    for seed in seeds[1:]:
+        assert results[seed] == ref, (
+            f"Board 02 routing output diverged across seeds: "
+            f"seed {seeds[0]}={ref} vs seed {seed}={results[seed]}.  "
+            "This means either (a) determinism regressed (a future PR "
+            "introduced a non-deterministic data-structure iteration "
+            "order) or (b) the convergence assumption is no longer "
+            "valid (the router now picks different but equally-good "
+            "solutions per seed).  Inspect recent router changes "
+            "before relaxing the assertion."
+        )
+
+    # Exact baseline numbers (re-baselined 2026-06-11 for Issue #3545:
+    # static foreign-pad halo cells now SURVIVE rip-up -- pre-fix the
+    # unmark erased them, letting later iterations route through pad
+    # clearance halos -- and the negotiated A* treats them as
+    # non-negotiable.  Routes, vias, total length and reach are
+    # UNCHANGED (22 routes, 24 vias, 328.16mm, full reach, 0 DRC at
+    # jlcpcb tier-1); the +10 segment delta (387 -> 397) is collinear
+    # re-splitting from the restored halo cells shifting merge
+    # boundaries -- the same harmless mode the stale-venv NOTE below
+    # documents.  All 3 cpp seeds (42/43/44) bit-perfect at
+    # (22, 397, 24, 328.16), measured in a uv.lock-synced venv.
+    #
+    # PLATFORM NOTE (#3545): the SEGMENT count -- and only the segment
+    # count -- diverges between macOS-arm64 (397) and CI Linux-x86_64
+    # (399) at identical routes/vias/length/reach and exact cross-seed
+    # equality on both platforms.  The collinear-merge pass gates each
+    # merge on a float collision probe of the merged candidate
+    # (optimizer/algorithms.py merge_collinear -> path_is_clear), and
+    # with #3545 those probes now graze static pad-halo boundaries where
+    # libm/FMA rounding differs across platforms, flipping two
+    # borderline merges.  Same harmless splitting mode as the stale-venv
+    # 507-segment NOTE below: identical geometry, different collinear
+    # segmentation.  We therefore pin routes/vias/length EXACTLY (these
+    # are the regression-sensitive metrics) and allow the segment count
+    # a narrow documented band.  The cross-seed equality assertion above
+    # remains exact, so within-platform determinism regressions are
+    # still caught; only the platform-dependent resplit is tolerated.
+    #
+    # Prior pin (22, 387, 24, 328.16), re-baselined 2026-06-11 for
+    # Issue #3532: 45-degree quantization of the pad-tail emitters.
+    # Off-grid pad
+    # tails are now emitted as exact two-leg doglegs instead of a single
+    # skewed segment (+1 segment per off-grid tail), and the pull-tight
+    # pass declines moves that would skew chain neighbours off the
+    # 45-degree set (fewer post-merge eliminations).  Routes, vias and
+    # reach are UNCHANGED (22 routes, 24 vias, full reach);
+    # deterministic across seeds and 0-DRC (the manufacturable-baseline
+    # tests in this file still pass, and the new
+    # tests/test_fleet_45_census.py enforces 0 off-angle segments on
+    # committed artifacts).  Re-measured 2026-06-11 after rebasing onto
+    # the #3436 burn-down pin of (22, 193, 24, 325.08) -- which carried
+    # the #3203 per-pad channel-budget fix and #3510 grid-re-marking
+    # straightening -- all 3 cpp seeds (42/43/44) produce bit-perfect
+    # (22, 387, 24, 328.16): the dogleg splits plus the
+    # quantization-gated pull-tight account for the segment/length
+    # delta vs the straightened pin.  NOTE: measure in a venv synced to
+    # uv.lock (`uv sync --extra dev`, what CI uses) -- a stale local
+    # venv reproducibly reported 507 segments at the SAME 328.16mm
+    # total length (identical geometry, different collinear-segment
+    # splitting).  Prior pins: (22, 193, 24, 325.08)
+    # re-baselined 2026-06-11 for Issue #3436; (22, 299, 24, 325.55)
+    # re-baselined 2026-06-10 for Issue #3438; (22, 206, 24, 324.92)
+    # for Issue #3433; (22, 155, 24, 324.66) re-verified 2026-06-07.
+    # Pinning these catches "all-seeds drift identically" regressions
+    # that the cross-seed equality check above would silently allow
+    # (e.g. a router cost-function tweak that improves all seeds in
+    # lockstep -- still a measurable regression vs the PR #3265 baseline).
+    # Re-baselined 2026-07-09 for the sheet-centering PR (kct pcb
+    # center-on-sheet): the committed unrouted artifact was rigidly
+    # translated by (+23.5, -40) mm to center the board in the A4
+    # sheet's usable drawing area.  Routing the board at the new
+    # absolute position converges to (22, 393, 24, 327.93) on
+    # macOS-arm64 -- same 22 routes / 24 vias / full 8/8 reach and
+    # DRC 0 at jlcpcb-tier1, with a -0.23 mm length and -4 segment
+    # delta from grid-relative pad alignment at the new absolute
+    # coordinates.  Prior pin (22, 397, 24, 328.16), #3545 era.
+    #
+    # Re-baselined 2026-09-10 for Issue #5009 (via-in-pad fabrication
+    # process eligibility).  ``jlcpcb-tier1``'s 2-layer configurations
+    # advertise ``via_in_pad_supported: true`` but declare NO orderable
+    # via-in-pad process -- JLCPCB's POFV process publishes a 4-layer
+    # minimum -- so the router's #3112 same-net via-in-pad sweep, which
+    # used to no-op on the bare capability flag, now runs on this board
+    # and slides the escape vias off the SMT lands they were clipping
+    # (offsets +-0.4..0.6 mm against 1.0 x 1.3 mm lands).  Routes (22),
+    # vias (24) and reach (8/8) are UNCHANGED; total length moves
+    # +1.30 mm (327.93 -> 329.23) and the segment count moves 274 -> 295,
+    # still inside the documented platform band below.  This is a
+    # manufacturability IMPROVEMENT, not a regression: those drills
+    # previously broke into solder lands.
+    # Prior pin (22, 274-segment-era, 24, 327.93).
+    #
+    # SCOPE OF THE CLEANLINESS CLAIM (corrected 2026-09-11, #5009 review
+    # pass 3 -- the first revision of this note claimed the board was
+    # "strictly DRC-clean" outright, and CI refuted it):
+    #   * VERIFIED, in CI on the PR head: this module's own gate --
+    #     ``kct route --manufacturer jlcpcb-tier1`` reports 0 DRC errors
+    #     (``test_drc_clean_at_jlcpcb_tier1`` passes, and not via the
+    #     #3556 grandfathering allowance) with the pins below matching
+    #     bit-for-bit across seeds 42/43/44.  That is the PURE-PYTHON
+    #     checker at the tier1 profile.
+    #   * NOT COVERED by that claim: the LIVE board
+    #     (``boards/02-charlieplex-led``), which its recipe routes at the
+    #     plain ``jlcpcb`` profile and gates with the CONTAINERIZED
+    #     ``kicad-cli pcb drc`` in the "Board 02 End-to-End" job.  The
+    #     first #5009 revision of the sweep left that path with 2 native
+    #     DRC errors (a relocated via 0.073 mm from a foreign-net track,
+    #     and the net demotion that followed) -- the destination
+    #     validation in ``drc_nudge._via_destination_blocked`` is what
+    #     fixes it.  Re-verified locally after that fix with kicad-cli
+    #     10.0.1: 12/12 nets, 0 native violations, 0 unconnected items,
+    #     ``kct check`` 0 errors / 0 warnings, label- and copper-LVS PASS.
+    #   The two engines and the two profiles are separate claims; CI's
+    #   containerized run is authoritative for both.  Do not restate
+    #   either as a blanket "the board is DRC-clean".
+    EXPECTED_ROUTES = 22
+    #
+    # Re-baselined 2026-09-22 for Issue #5660 (Epic #5509 Phase 3a:
+    # grid halo marking switched to the clearance kernel).  The halo's
+    # *reach* is untouched -- ``radius_cells`` is still exactly what
+    # every caller computed before -- but its *shape* changes from the
+    # Chebyshev square to the kernel's exact disc, so the marked cell
+    # set becomes a strict SUBSET of the previous one: cells near the
+    # square's diagonal corners, at up to ``sqrt(2) * r`` where the
+    # geometry only asks for ``r``, stop being blocked.
+    #
+    # Seeds 42/43/44 all yield (22, 227, 23, 322.77), bit-identical
+    # across seeds.  Routes (22) and reach (8/8) are UNCHANGED, which
+    # is the AC the epic's scope guard #2 asks for; vias move 24 -> 23
+    # and length 326.73 -> 322.77 (-3.96 mm) because one escape that
+    # previously had to drop through a via now has a lateral path
+    # through cells the square was over-blocking.  Fewer vias and less
+    # copper on unchanged reach is an improvement, not a regression --
+    # and it cannot be under-blocking, because a subset of the
+    # previously-marked cells cannot mark anything new.
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors
+    # at the tier1 profile on this output (same scope caveat as the
+    # "SCOPE OF THE CLEANLINESS CLAIM" note: pure-Python checker at
+    # jlcpcb-tier1; CI's containerized kicad-cli run is authoritative
+    # for the live board).
+    # Prior pin (22, 226-segment-era, 24, 326.73).
+    #
+    # Re-baselined 2026-09-23 for Issue #5673 (the #5660 follow-up): the
+    # via-drop hole-to-hole predicate now applies the fab drill floor
+    # (``rules.min_hole_to_hole``, 0.5 mm) to a SAME-NET pair too, instead
+    # of the 0.102 mm ``min_drill_clearance`` via-merge threshold.  Until
+    # #5660 the Chebyshev square's diagonal excess happened to keep
+    # same-net vias apart; the exact disc withdrew that accident and this
+    # very board shipped two VCC vias 0.428 mm drill-to-drill
+    # (``hole_to_hole_clearance ... at (137.90, 86.75)``, the Board 02
+    # End-to-End regression).  With the floor stated rather than inherited
+    # from the raster, seeds 42/43/44 all yield (22, 229, 24, 322.39):
+    # routes (22) and reach (8/8) UNCHANGED, vias 23 -> 24 and length
+    # 322.77 -> 322.39 (-0.38 mm) because the rejected drop is replaced by
+    # a legal pair.  Verified end-to-end: a full
+    # ``boards/02-charlieplex-led/generate_design.py`` regen reports
+    # ``DRC: PASS`` / ``LVS: PASS`` / ``Overall: PASS`` with zero
+    # ``hole_to_hole_clearance`` violations (it reported one before).
+    # Prior pin (22, 227-segment-era, 23, 322.77).
+    # Issue #6272: 24 -> 26 -- see the #6272 note under EXPECTED_LENGTH.
+    # Issue #6315: 26 -> 20 -- see the #6315 note under EXPECTED_LENGTH.
+    EXPECTED_VIAS = 20
+    # Re-measured at ff96e855 after local halo-coverage refinement:
+    # seeds 42/43/44 yield (22, 226, 24, 326.73), identical copper
+    # geometry, 34 preserved/bound pads, and zero native refill/all-track
+    # violations or unconnected items. Pre-refinement 7138c685/native30
+    # reproduces (22, 230, 24, 328.71) with the same clean audits;
+    # the physical delta is a 1.981623mm shorter NODE_C route.
+    # Retained evidence: .loom/sweep-checkpoint/evidence/pr-5425-board02/.
+    # Keep exact length and cross-seed guards; no tolerance changes.
+    #
+    # Re-baselined 2026-10-01 for Issue #5661 (Epic #5509 Phase 3b: the
+    # SEARCH-time halo refinement switched to the clearance kernel).  The
+    # ``max(required, via_clearance)`` widening a trace candidate's
+    # requirement against a stored via used to carry -- in
+    # ``RouteHaloGeometry.clear`` and in
+    # ``Grid3D::route_trace_geometry_clear`` -- is retired: the pair is now
+    # held to the clearance it actually resolves, which is the same number
+    # the commit-time validator applies to it.  So A* stops refusing
+    # candidates its own commit gates accept and a marginally shorter
+    # solution becomes reachable.  Seeds 42/43/44 all yield
+    # (22, 224, 24, 321.46), bit-identical across seeds.  Routes (22),
+    # vias (24) and reach (8/8) are UNCHANGED -- the epic's scope guard #2
+    # -- and length moves 322.39 -> 321.46 (-0.93 mm).  Less copper on
+    # unchanged reach and an unchanged via count is an improvement, not a
+    # regression, and it cannot be an under-rejection: the requirement the
+    # search now applies is the commit validator's own, not a looser one.
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors at the
+    # tier1 profile on this output (same scope caveat as the "SCOPE OF THE
+    # CLEANLINESS CLAIM" note: pure-Python checker at jlcpcb-tier1; CI's
+    # containerized kicad-cli run is authoritative for the live board).
+    # Prior pin (22, 229-segment-era, 24, 322.39).
+    #
+    # Re-baselined 2026-10-01 for Issue #5854 (Epic #5509 Phase 4a: the
+    # POST-ROUTE trace optimizer's two ``CollisionChecker`` implementations
+    # switched to the clearance kernel).  Their pad gate used to be the
+    # raster: a pad's blocked footprint is its metal grown by the pad's own
+    # clearance halo AND the candidate is grown again by
+    # ``width / 2 + trace_clearance``, so shortcuts up to roughly twice the
+    # real requirement from a pad were refused.  The gate now measures the
+    # exact edge-to-edge gap (at the per-component requirement the grid
+    # resolved for that pad, with the #2842 stitch-via reservation kept as a
+    # floor for plane-net pads -- PR #5874 review), so a different subset of
+    # ``merge_collinear`` / ``compress_staircase`` / ``convert_45_corners`` /
+    # ``pull_tight`` candidates survives.  Seeds 42/43/44 all yield
+    # (22, 219, 24, 321.75), bit-identical across seeds.  Routes (22), vias
+    # (24) and reach (8/8) are UNCHANGED -- the epic's scope guard #2 -- and
+    # length moves 321.46 -> 321.75 (+0.29 mm, +0.09%).  Length is not
+    # monotone in the number of accepted shortcuts: the passes run in
+    # sequence per net, so accepting a different early candidate changes
+    # which later chamfer/pull-tight moves are reachable.  It cannot be an
+    # under-rejection: every requirement the gate applies is the one the
+    # grid already resolved for that pair, and the two directions this
+    # revision changed (the per-component requirement, the stitch-via floor)
+    # both refuse MORE than a flat ``trace_clearance`` would.
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors at the
+    # tier1 profile on this output (same scope caveat as the "SCOPE OF THE
+    # CLEANLINESS CLAIM" note: pure-Python checker at jlcpcb-tier1; CI's
+    # containerized kicad-cli run is authoritative for the live board), and
+    # CI's "Board 02 End-to-End" / "Routed PCB DRC Check" jobs pass on this
+    # output.  Prior pin (22, 224-segment-era, 24, 321.46).
+    #
+    # Re-baselined for Issue #6272 (trace/via clearance independent of
+    # insertion order).  Every trace-vs-via gate -- Python and native,
+    # search and commit, plus negotiated revalidation -- now resolves
+    # ``max(trace_clearance, via_clearance)``.  At ``jlcpcb-tier1`` this
+    # board routes with a trace floor below the 0.20 mm ``via_clearance``,
+    # so a trace laid past an EARLIER foreign via used to be held to the
+    # trace floor alone, while a via dropped beside an earlier trace met
+    # the 0.20 mm via floor.  The trace-after-via order now meets the same
+    # 0.20 mm.  Seeds 42/43/44 all yield (22, 213, 26, 323.06),
+    # bit-identical across seeds.  Routes (22) and reach (8/8) are
+    # UNCHANGED; vias move 24 -> 26 and length 321.75 -> 323.06 (+1.31 mm)
+    # because copper that previously squeezed past a barrel inside the via
+    # floor now changes layer or detours instead.  This is the stricter
+    # direction by construction (no requirement was lowered), and
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors at the
+    # tier1 profile on this output.  Prior pin (22, 219-segment-era, 24,
+    # 321.75).
+    #
+    # Re-baselined for Issue #6315 (pad clearance cells resolved by exact
+    # geometry).  The native A* no longer treats a foreign pad's clearance
+    # halo as copper: a cell blocked only by pad copper + clearance is
+    # passable exactly when the swept step clears every foreign pad (and
+    # stored copper) at the net's own width and clearance, and a halo shared
+    # by two nets' pads is owned by the nearer pad instead of whichever pad
+    # was added first.  Traces that used to change layer to get around a
+    # neighbour pin's halo now pass it on the same layer: seeds 42/43/44 all
+    # yield (22, 189, 20, 320.62) -- routes (22) and reach UNCHANGED, vias
+    # 26 -> 20, length 323.06 -> 320.62 (-2.44 mm), and
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors.
+    # Prior pin (22, 213-segment-era, 26, 323.06).
+    #
+    # Re-baselined 2026-11-03 for Issue #8255 (detour shortening, #8230/#8217):
+    # ``kct route`` now shortens detouring trace chains in the optimizer.
+    # Seeds 42/43/44 all yield (22, 169, 20, 317.27) -- routes (22) and vias
+    # (20) UNCHANGED, length 320.62 -> 317.27 (-3.35 mm).  Attributed by
+    # reverting only #8230's src changes (cli/route_cmd.py and
+    # router/optimizer/{algorithms,config,trace}.py): the old 320.62 pin then
+    # passes again.  Shortening can only reduce length.
+    #
+    # Re-baselined 2026-11-04 for Issue #8361 (#8253, atomic 45-degree
+    # chamfer): seeds 42/43/44 all yield (22, 83, 20, 316.57) -- routes (22),
+    # vias (20) and via positions UNCHANGED, length 317.27 -> 316.57
+    # (-0.70 mm), segments 169 -> 83.  #8253 made each ``convert_corners_45``
+    # chamfer atomic, so NODE_D's optimized geometry no longer fails
+    # ``optimize_route``'s endpoint-preservation guard and is no longer
+    # reverted to the raw 112-segment router staircase.  The whole delta is
+    # in NODE_D; nets 1-7 are identical per net and layer.  Prior pin
+    # (22, 169, 20, 317.27).
+    #
+    # Re-baselined 2026-11-05 for Issue #8502 (#8386 / PR #8387, chains cut
+    # at interior vias): seeds 42/43/44 all yield (22, 80, 20, 316.39) --
+    # routes (22), vias (20) and via positions UNCHANGED, length
+    # 316.57 -> 316.39 (-0.18 mm), segments 83 -> 80.  Per-net diff at seed
+    # 42 (trace.py at 73fa8f3c2^ vs main): only NODE_A moved (88.894 ->
+    # 88.722 mm); LINE_A-D and NODE_B-D are identical per net.  NODE_A's
+    # F.Cu chain from the pad stub at (132.5, 98.0) to (139.5, 78.0) used to
+    # run past its through-via at (133.465, 97.4); it is now cut there and
+    # the via-to-(139.5, 78.0) leg is re-shortened (23.46 -> 22.10 mm of
+    # unique copper, -1.36 mm).  The net delta is only -0.18 mm because the
+    # split leaves the 1.18 mm pad-to-via stub (132.5, 98.0) -> (133.0,
+    # 97.5) -> (133.465, 97.4) emitted TWICE (two identical F.Cu segments,
+    # absent before #8387), and the reported total counts both copies.  The
+    # fix for that duplication (#8505) should re-pin to ~315.21.  Attributed
+    # by reverting only 73fa8f3c2's src/kicad_tools/router/optimizer/trace.py
+    # change: the old 316.57 pin then passes again.  Prior pin (22, 83, 20, 316.57).
+    # Re-baselined 2026-11-06 for Issue #8505: two NODE_A routes both start
+    # from the same pad and carry the same 1.18 mm pad-to-via stub; each was
+    # optimized alone and kept its own copy, so the stub was emitted twice and
+    # counted twice.  ``optimize_routes_grid_synced`` now drops a segment a
+    # same-net route already kept.  Routes (22), vias (20) UNCHANGED, length
+    # 316.57 -> 315.21.  Prior pin 316.39 (#8502 / #8387).
+    #
+    # Re-baselined 2026-11-13 for Issue #8901 (#8831, commit b132392b9):
+    # ``compress_staircase`` now tries a longer *monotone* run before the
+    # strict two-direction one, so a staircase's trailing legs that keep
+    # descending the same diagonal are absorbed into the <=2-segment
+    # replacement instead of being left in place.  Seeds 42/43/44 all yield
+    # (22, 77, 20, 315.15) -- routes (22) and vias (20) UNCHANGED, length
+    # 315.21 -> 315.15 (-0.06 mm), segments 80 -> 77.  Absorbing a leg can
+    # only shorten the chain, so the direction is the expected one.
+    # Attributed by reverse-applying only b132392b9's
+    # src/kicad_tools/router/optimizer/algorithms.py change (no later commit
+    # touches that file): the old 315.21 pin then passes again, and restoring
+    # it reproduces 315.15.  Which net moved was NOT diffed per net.
+    # Prior pin (22, 80, 20, 315.21) (#8505).
+    EXPECTED_LENGTH = 315.15
+    # Re-baselined 2026-09-14 for Issue #5201: the escape router
+    # (``EscapeRouter.via_in_pad_supported``) previously resolved
+    # via-in-pad eligibility from the bare ``MfrLimits`` capability
+    # boolean, which is ``True`` on EVERY ``jlcpcb-tier1`` layer
+    # configuration -- including this 2-layer board, whose POFV process
+    # actually requires 4+ layers.  It now resolves through
+    # ``kicad_tools.router.via_in_pad_eligibility.resolve_process`` (the
+    # same board-context-aware predicate #5009 gave the drc_nudge repair
+    # sweep), so the escape router itself no longer believes in-pad
+    # placement is legal here and takes the correct non-in-pad escape
+    # path on its first pass instead of relying on the post-route repair
+    # sweep to relocate a via it should never have placed. Routes (22),
+    # vias (24) and reach (8/8) are UNCHANGED and the board is still
+    # DRC-clean at jlcpcb-tier1 with zero errors
+    # (``test_drc_clean_at_jlcpcb_tier1`` above, no new grandfathered
+    # allowance); total length moves +0.01mm (329.23 -> 329.24), still
+    # bit-perfect across seeds 42/43/44.  Prior pin (22, 274-segment-era,
+    # 24, 329.23).
+    # Re-baselined 2026-07-14 for Issue #4196: the macOS-arm64 segment
+    # count drifted from 393 to 476 (a +83 delta) while routes (22),
+    # vias (24), total length (327.93mm) and reach (8/8) stayed
+    # BYTE-IDENTICAL to the 2026-07-09 sheet-centering pin -- i.e. the
+    # geometric solution the router converges to is unchanged; only the
+    # collinear-segment SPLITTING count moved, and only in the
+    # finer-splitting direction (more segments), the same benign mode
+    # every prior PLATFORM NOTE entry documents.  Verified deterministic:
+    # two independent local runs (and cross-seed 42/43/44) all produced
+    # bit-identical 476-segment output, so this is a stale platform band,
+    # NOT genuine nondeterminism.  CI Linux-x86_64 still lands in the
+    # historical ~390-399 window (this test is GREEN in CI on the same
+    # commit), so the band is WIDENED -- not moved -- to comfortably cover
+    # BOTH platforms' deterministic values: the Linux ~390-399 side and
+    # the macOS-arm64 476 side, with a small margin above 476.  The
+    # segment count is a router-internal collinear-splitting artifact with
+    # no manufacturability meaning on its own; the exact routes/vias/length
+    # pins above and the cross-seed equality assertion earlier are the real
+    # regression + determinism guards, so this band is intentionally loose.
+    # See the #3545 PLATFORM NOTE above for the macOS-arm64 vs
+    # Linux-x86_64 collinear-merge float-rounding divergence mechanism.
+    #
+    # Re-baselined 2026-08-11 for Issue #4732 (post-nudge collinear
+    # consolidation): macOS-arm64 drops 476 -> 274 segments while routes
+    # (22), vias (24), total length (327.93mm) and reach (8/8) stay
+    # BYTE-IDENTICAL -- again the benign collinear-resplit axis, this
+    # time in the coarser direction.  The new pass merges every maximal
+    # run of collinear degree-2 segments, which is exactly the axis the
+    # #3545/#4196 PLATFORM NOTES describe as platform-divergent: the
+    # macOS-vs-Linux gap came from ``merge_collinear``'s float collision
+    # probe vetoing a different subset of merges on each platform, and
+    # the consolidation pass recovers *all* of those vetoed merges on
+    # both.  So the band is expected to NARROW and largely converge
+    # across platforms rather than split further; it is set around the
+    # measured 274 with generous room for whatever residual divergence
+    # survives.  If CI Linux-x86_64 lands outside it, widen the band --
+    # the routes/vias/length pins above are what would signal a real
+    # regression, and they are untouched.
+    # #5410: retain the existing band. Local halo refinement measures
+    # macOS 226 / Linux CI 224; exact routes/vias/length are pinned above.
+    # #5660: retain the band unchanged -- the kernel-disc halo measures
+    # 227 on Linux-x86_64, comfortably inside it.
+    # #5661: retain the band unchanged -- the kernel-backed search-time
+    # refinement measures 224 on Linux-x86_64, also inside it.
+    # #5854: the band's LOWER bound is widened 220 -> 212.  The kernel-backed
+    # post-route optimizer measures 219 on Linux-x86_64 (local and CI agree,
+    # bit-identical across seeds 42/43/44) -- just under the old floor, in the
+    # COARSER direction this band has always been loose about: the optimizer
+    # merging one more collinear run is exactly the "change in collinear
+    # segmentation" the assertion message below names, and the exact
+    # routes/vias/length pins above are what would signal a real regression.
+    # Widened rather than moved, so both platforms' deterministic values stay
+    # covered (macOS-arm64 last measured 226 at #5410).
+    # #6315: the LOWER bound is widened 212 -> 180.  Six fewer vias remove
+    # the layer-change segment breaks around them: macOS-arm64 measures 189,
+    # bit-identical across seeds 42/43/44 (the coarser direction again; the
+    # exact routes/vias/length pins above are the regression guard).
+    # #8255 (detour shortening, #8230): the LOWER bound is widened 180 -> 150.
+    # Collapsing detouring chains removes segments (189 -> 169 observed).
+    # #8253 (atomic chamfer, #8361): the LOWER bound is widened 150 -> 60.
+    # NODE_D no longer falls back to the raw staircase (169 -> 83 observed).
+    # #8387 (chains cut at interior vias, #8502): 83 -> 80 observed, band unchanged.
+    EXPECTED_SEGMENTS_RANGE = (60, 240)
+    got_routes, got_segments, got_vias, got_length = ref
+    exact = (got_routes, got_vias, got_length)
+    expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)
+    assert exact == expected_exact, (
+        f"Board 02 routing baseline drifted: got "
+        f"(routes, vias, length)={exact}, expected {expected_exact} "
+        f"(full tuple {ref}). This is consistent across seeds (so no "
+        "determinism regression), but a real router-output change.  "
+        "Investigate the router PRs landed since 2026-06-07 (see PR "
+        "#3265 baseline log) and decide whether the change is desired "
+        "-- if yes, update the EXPECTED_* pins here AND the docstring "
+        "baseline."
+    )
+    lo, hi = EXPECTED_SEGMENTS_RANGE
+    assert lo <= got_segments <= hi, (
+        f"Board 02 segment count {got_segments} outside the documented "
+        f"platform band [{lo}, {hi}] (macOS-arm64: 226 post-#5410 / "
+        "Linux: 219 post-#5854; macOS-arm64: 189 post-#6315; "
+        "pre-#4732 it was 476 on macOS-arm64 / ~390-399 on Linux-x86_64 -- "
+        "see PLATFORM NOTE above and the #4196 / #4732 re-baselines).  "
+        "Routes/vias/length matched the exact pin, so this is a change in "
+        "collinear segmentation -- investigate merge_collinear/path_is_clear "
+        "and the #4732 consolidation pass before widening the band.  "
+        "NOTE: segment count is "
+        "platform/KiCad-version-sensitive and is NOT itself a "
+        "manufacturability signal; the exact routes/vias/length pins and "
+        "the cross-seed equality check are the real guards."
+    )
+
+
+class TestEnvDegradationHelpers:
+    """Cheap regression coverage for the #5905 diagnostics (no routing)."""
+
+    def test_skipped_zone_fill_with_kicad_cli_is_degraded(self, monkeypatch) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/kicad-cli")
+        assert _env_degradation(f"x\n  {_ZONE_FILL_SKIPPED_MARKER}\n") is not None
+
+    def test_skipped_zone_fill_without_kicad_cli_is_not_degraded(self, monkeypatch) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        assert _env_degradation(f"  {_ZONE_FILL_SKIPPED_MARKER}\n") is None
+
+    def test_clean_run_is_not_degraded(self) -> None:
+        assert _env_degradation("  Zone fill: complete\n") is None
+
+    def test_error_lines_named_and_warnings_excluded(self) -> None:
+        out = (
+            "--- DRC Validation ---\n  Errors:   1\n    - connectivity: Net 'GND' "
+            "is partially routed at (152.30, 108.30)\n  Warnings: 2\n"
+            "    - pin1_marker_missing: D1 ...\n"
+        )
+        assert _parse_drc_error_lines(out) == [
+            "- connectivity: Net 'GND' is partially routed at (152.30, 108.30)"
+        ]
+        assert _parse_drc_error_lines("  Warnings: 3\n") == []

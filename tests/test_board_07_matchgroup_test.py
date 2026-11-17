@@ -1,0 +1,1666 @@
+"""Regression tests for ``boards/07-matchgroup-test/`` (Epic #2661 Phase 3L).
+
+These tests pin the on-disk artifacts produced by the match-group
+testbench board so future changes to:
+
+- the router (match-group consumer code)
+- the validator (match_group_length_skew DRC rule)
+- the match-group detector (Phase 1C)
+- the match-group tracker (Phase 1B)
+
+cannot silently drop any of the Phase 1A-2G features the board
+exercises.
+
+The board's role is exactly this regression coverage --- it is not
+a working device.  See ``boards/07-matchgroup-test/README.md`` for
+the testbench rationale.
+
+Acceptance criteria covered (see issue #2724):
+
+- AC#1: routed PCB exists and is a valid KiCad 10 PCB
+  (``(version 20260206)`` + ``(generator_version "10.0")``)
+- AC#3: PCB contains at least 4 declared match groups (DDR data byte,
+  MIPI CSI, HDMI TMDS, ADDR bus) with the expected per-group net counts
+- AC#4: file is regeneratable deterministically (modulo UUIDs)
+- AC#5: ``boards/README.md`` lists board 07 in its status table
+- AC#6: ``test_phase_features_exercised`` enumerates the net-class
+  settings and asserts each Phase 1-2 feature is engaged
+- AC#7 (partial): ``MatchGroupTracker`` is queryable on at least
+  the DDR_DATA_BYTE_0 group post-route.  The "post-pass skew strictly
+  less than pre-pass skew" check is deferred until Phase 3H (#2723)
+  lands ``apply_match_group_tuning`` -- today the route step measures
+  but does not tune.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import re
+import shutil
+import subprocess
+import sys
+from contextlib import redirect_stdout
+from pathlib import Path
+
+import pytest
+
+# =============================================================================
+# Module loading helpers
+# =============================================================================
+# The board's helper scripts live in ``boards/07-matchgroup-test/`` and are
+# not part of the installed ``kicad_tools`` package.  We load them via
+# ``importlib`` so the tests can inspect the canonical ``NETS`` /
+# ``DIFFPAIRS`` / match-group dicts and the ``build_net_class_map``
+# function without touching ``sys.path``.
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BOARD_DIR = REPO_ROOT / "boards" / "07-matchgroup-test"
+OUTPUT_DIR = BOARD_DIR / "regression-fixture"
+
+
+def _load_module(name: str, path: Path):
+    """Load a board script as a module from its absolute path."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module {name!r} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def generate_pcb_mod():
+    """Load ``boards/07-matchgroup-test/generate_pcb.py`` as a module."""
+    return _load_module("board_07_generate_pcb", BOARD_DIR / "generate_pcb.py")
+
+
+@pytest.fixture(scope="module")
+def generate_design_mod(generate_pcb_mod):
+    """Load ``boards/07-matchgroup-test/generate_design.py`` as a module."""
+    sys.modules["generate_pcb"] = generate_pcb_mod
+    sch_path = BOARD_DIR / "generate_schematic.py"
+    sch_mod = _load_module("board_07_generate_schematic", sch_path)
+    sys.modules["generate_schematic"] = sch_mod
+    return _load_module("board_07_generate_design", BOARD_DIR / "generate_design.py")
+
+
+# =============================================================================
+# AC#1 + AC#3: routed PCB exists and contains the expected match-group nets
+# =============================================================================
+
+
+class TestRoutedPcbArtifact:
+    """The committed routed PCB is the test fixture (AC#1, AC#3)."""
+
+    @pytest.fixture
+    def routed_pcb_text(self) -> str:
+        routed = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+        assert routed.exists(), (
+            f"Routed PCB artifact missing: {routed}.\n"
+            "Re-run: python boards/07-matchgroup-test/generate_design.py"
+        )
+        return routed.read_text()
+
+    def test_routed_pcb_is_kicad10_format(self, routed_pcb_text: str) -> None:
+        """AC#1: routed PCB is valid KiCad 10 format.
+
+        Asserts both the version marker and the generator_version
+        marker exactly as PR #2716 made canonical.
+        """
+        assert routed_pcb_text.startswith("(kicad_pcb")
+        assert "(version 20260206)" in routed_pcb_text, (
+            "AC#1: routed PCB must use KiCad 10 (version 20260206). "
+            "If the PCB pre-dates PR #2716, regenerate with the current "
+            "kicad-tools install."
+        )
+        assert '(generator_version "10.0")' in routed_pcb_text, (
+            "AC#1: routed PCB must declare generator_version 10.0 (PR #2716)."
+        )
+
+    def test_routed_pcb_declares_4layer_stackup(self, routed_pcb_text: str) -> None:
+        """AC#1 corollary: stackup is the 4-layer JLCPCB tier-1 layout.
+
+        Layer index assertions check by name only -- the literal
+        numeric index varies between PCB generators (the legacy
+        in-process route_pcb emits 0/1/2/31, while the modern
+        ``kct route`` subprocess pipeline (Issue #2991) emits a
+        different but equivalent numbering 0/4/6/2 per KiCad 10
+        conventions).  The board's stackup *identity* is what matters
+        for downstream zone-layer assignment; both numberings
+        round-trip through ``PCB.load()``.
+        """
+        for layer_name in ('"F.Cu" signal', '"In1.Cu" signal', '"In2.Cu" signal', '"B.Cu" signal'):
+            assert layer_name in routed_pcb_text, (
+                f"4-layer JLCPCB tier-1 stackup requires layer {layer_name!r} -- "
+                f"see board comment header re: F.Cu / In1.Cu (GND) / In2.Cu (PWR) / B.Cu."
+            )
+
+    @pytest.mark.parametrize(
+        "net_name",
+        [
+            # DDR data byte (10 nets: DQ0-7 + DM0 + DQS pair)
+            "DQ0",
+            "DQ1",
+            "DQ2",
+            "DQ3",
+            "DQ4",
+            "DQ5",
+            "DQ6",
+            "DQ7",
+            "DM0",
+            "DQS_P",
+            "DQS_N",
+            # MIPI CSI (3 pairs = 6 nets)
+            "MIPI_CLK_P",
+            "MIPI_CLK_N",
+            "MIPI_DAT0_P",
+            "MIPI_DAT0_N",
+            "MIPI_DAT1_P",
+            "MIPI_DAT1_N",
+            # HDMI TMDS (3 pairs = 6 nets)
+            "TMDS_D0_P",
+            "TMDS_D0_N",
+            "TMDS_D1_P",
+            "TMDS_D1_N",
+            "TMDS_D2_P",
+            "TMDS_D2_N",
+            # ADDR bus (8 nets)
+            "A0",
+            "A1",
+            "A2",
+            "A3",
+            "A4",
+            "A5",
+            "A6",
+            "A7",
+        ],
+    )
+    def test_routed_pcb_declares_each_match_group_net(
+        self, routed_pcb_text: str, net_name: str
+    ) -> None:
+        """AC#3: every declared match-group net appears in the PCB."""
+        pattern = re.compile(rf'\(net \d+ "{re.escape(net_name)}"\)')
+        assert pattern.search(routed_pcb_text), f"Net '{net_name}' not found in routed PCB"
+
+    def test_per_group_net_counts(self, generate_pcb_mod) -> None:
+        """AC#3: per-group net counts are 10/6/6/8 = 30 group-member nets."""
+        # DDR data byte: 9 singles + 1 diff pair = 11 nets total (9 + 2)
+        ddr_singles = generate_pcb_mod.DDR_DATA_BYTE_0_SINGLES
+        ddr_pairs = generate_pcb_mod.DDR_DATA_BYTE_0_PAIRS
+        ddr_total = len(ddr_singles) + 2 * len(ddr_pairs)
+        assert ddr_total == 11, (
+            f"DDR_DATA_BYTE_0 expected 9 singles + 1 pair (11 nets total), "
+            f"got {len(ddr_singles)} singles + {len(ddr_pairs)} pairs = {ddr_total}"
+        )
+
+        mipi_pairs = generate_pcb_mod.MIPI_CSI_LANES_PAIRS
+        assert len(mipi_pairs) == 3, f"MIPI_CSI_LANES expected 3 pairs, got {len(mipi_pairs)}"
+
+        hdmi_pairs = generate_pcb_mod.HDMI_TMDS_LANES_PAIRS
+        assert len(hdmi_pairs) == 3, f"HDMI_TMDS_LANES expected 3 pairs, got {len(hdmi_pairs)}"
+
+        addr_singles = generate_pcb_mod.ADDR_BUS_SINGLES
+        assert len(addr_singles) == 8, f"ADDR_BUS expected 8 singles, got {len(addr_singles)}"
+
+        # Total group member nets = 11 + 6 + 6 + 8 = 31 (issue spec says ~30)
+        total_group_nets = ddr_total + 2 * len(mipi_pairs) + 2 * len(hdmi_pairs) + len(addr_singles)
+        # Issue spec: "10/6/6/8 = 30 group-member nets" -- this counts the
+        # DDR group as 10 (9 singles + 1 PAIR counted as 1 entry, not 2 nets).
+        # We assert >=30 to match the spec's lower bound.
+        assert total_group_nets >= 30, (
+            f"Total match-group nets {total_group_nets} < 30 (issue spec lower bound)"
+        )
+
+
+# =============================================================================
+# AC#3 + AC#6: each Phase 1-2 feature is engaged on at least one group
+# =============================================================================
+
+
+class TestPhaseFeatureCoverage:
+    """The net-class map exercises every Phase 1A-2G feature.
+
+    This is the keystone test for AC#6: it asserts that
+    ``build_net_class_map()`` (the single source of truth shared
+    between the autorouter, the JSON sidecar, and the test) declares
+    each Phase 1-2 match-group feature on at least one group.
+    """
+
+    @pytest.fixture
+    def net_class_map(self, generate_design_mod):
+        return generate_design_mod.build_net_class_map()
+
+    def test_phase1a_length_match_group_engaged(self, net_class_map) -> None:
+        """Phase 1A: at least 4 distinct match groups are declared."""
+        groups = {
+            nc.length_match_group
+            for nc in net_class_map.values()
+            if nc.length_match_group is not None
+        }
+        assert len(groups) >= 4, (
+            f"Phase 1A: only {len(groups)} distinct match groups declared "
+            f"({groups}). Expected >=4 (DDR_DATA_BYTE_0, MIPI_CSI_LANES, "
+            f"HDMI_TMDS_LANES, ADDR_BUS)."
+        )
+        expected = {"DDR_DATA_BYTE_0", "MIPI_CSI_LANES", "HDMI_TMDS_LANES", "ADDR_BUS"}
+        assert expected.issubset(groups), (
+            f"Phase 1A: missing expected groups. Got {groups}, expected superset of {expected}."
+        )
+
+    def test_phase1a_length_match_reference_engaged(self, net_class_map) -> None:
+        """Phase 1A: at least one class sets ``length_match_reference``.
+
+        AC#6: pace-car semantic must be exercised on at least one
+        group.  ADDR_BUS uses ``length_match_reference="A0"`` to
+        exercise the explicit-reference path.
+        """
+        engaged = [
+            (net, nc) for net, nc in net_class_map.items() if nc.length_match_reference is not None
+        ]
+        assert engaged, (
+            "Phase 1A: no net class declares length_match_reference. "
+            "Expected at least ADDR_BUS to set this (pace-car semantic)."
+        )
+
+    def test_phase1a_length_match_tolerance_engaged(self, net_class_map) -> None:
+        """Phase 1A: at least one class sets ``length_match_tolerance_mm``."""
+        engaged = [
+            (net, nc)
+            for net, nc in net_class_map.items()
+            if nc.length_match_tolerance_mm is not None
+        ]
+        assert engaged, (
+            "Phase 1A: no net class declares length_match_tolerance_mm. "
+            "Expected DDR/MIPI/HDMI/ADDR all set this."
+        )
+        # Sanity-check values cover both tight (DDR/MIPI) and loose (ADDR) tiers.
+        tolerances = {nc.length_match_tolerance_mm for _, nc in engaged}
+        assert min(tolerances) <= 0.1, (
+            f"Phase 1A: tightest tolerance {min(tolerances)} > 0.1mm. "
+            "Expected DDR / MIPI to set tight (<=0.1mm) tolerance."
+        )
+        assert max(tolerances) >= 0.5, (
+            f"Phase 1A: loosest tolerance {max(tolerances)} < 0.5mm. "
+            "Expected ADDR_BUS to set commodity (>=0.5mm) tolerance."
+        )
+
+    def test_phase3h_skew_budget_on_pair_members(self, net_class_map) -> None:
+        """Pair members within match groups are judged on within-pair skew.
+
+        AC#6: the DQS pair, MIPI lanes, and HDMI lanes all have diff-pair
+        members.  Issue #7894: each declares ``pair_protocol`` so the
+        diff-pair-level DRC rule fires at its derived ps budget alongside
+        the group-level rule.  Issue #7913: none sets a hand-set
+        ``skew_tolerance_mm`` cap; the derived budget is the only limit.
+        """
+        protocols = {
+            nc.name: nc.pair_protocol
+            for net, nc in net_class_map.items()
+            if net.endswith(("_P", "_N")) and nc.coupled_routing
+        }
+        assert protocols == {
+            "DDR_DQS": "DDR_DQS_CK",
+            "MIPI_CSI_LANES": "MIPI_DPHY",
+            "HDMI_TMDS_LANES": "HDMI_TMDS",
+        }
+        caps = {
+            nc.name: nc.skew_tolerance_mm
+            for nc in net_class_map.values()
+            if nc.skew_tolerance_mm is not None
+        }
+        assert caps == {}
+
+    def test_protocol_diversity_in_tolerances(self, net_class_map) -> None:
+        """At least three distinct ``length_match_tolerance_mm`` values are used.
+
+        AC#6 wants demonstrable diversity: tight DDR/MIPI/HDMI,
+        loose ADDR.  A single value would technically pass the "at
+        least one" assertions above but would fail to actually
+        exercise tolerance as a discriminating axis.
+        """
+        tolerances = {
+            nc.length_match_tolerance_mm
+            for nc in net_class_map.values()
+            if nc.length_match_tolerance_mm is not None
+        }
+        assert len(tolerances) >= 3, (
+            f"Phase 1A diversity: only {len(tolerances)} distinct tolerance "
+            f"value(s) declared ({tolerances}). Expected >=3 (e.g. DDR=0.1, "
+            f"MIPI=0.05, ADDR=0.5)."
+        )
+
+
+# =============================================================================
+# AC#4: deterministic regeneration (modulo UUIDs)
+# =============================================================================
+
+
+class TestDeterministicGeneration:
+    """``generate_pcb.generate_pcb()`` is deterministic modulo UUIDs."""
+
+    def test_generate_pcb_emits_stable_non_uuid_content(self, generate_pcb_mod) -> None:
+        """AC#4: regenerating produces byte-identical output up to UUIDs."""
+        first = generate_pcb_mod.generate_pcb()
+        second = generate_pcb_mod.generate_pcb()
+
+        uuid_pattern = re.compile(r'"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"')
+        first_stripped = uuid_pattern.sub('"UUID"', first)
+        second_stripped = uuid_pattern.sub('"UUID"', second)
+
+        assert first_stripped == second_stripped, (
+            "generate_pcb() is not deterministic modulo UUIDs --- "
+            "two invocations produced different non-UUID content"
+        )
+
+    def test_sidecar_geometry_meets_impedance_at_authored_gap(
+        self, generate_design_mod, tmp_path
+    ) -> None:
+        """The routing/check sidecar must describe compact, physical pairs."""
+        from kicad_tools.physics import CoupledLines
+        from kicad_tools.physics.stackup import Stackup
+
+        classes = generate_design_mod.build_net_class_map(preserve_authored_gap=True)
+        sidecar = generate_design_mod.write_sidecar(classes, tmp_path)
+        serialized = json.loads(sidecar.read_text())
+        physics = CoupledLines(Stackup.jlcpcb_4layer())
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N", "DQS_P", "DQS_N"):
+            cls = classes[name]
+            # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
+            # the authored 0.10 mm gap is the minimum.  Issue #7319: the DDR
+            # strobe pair is sized the same way.
+            assert cls.target_diff_impedance == pytest.approx(100.0)
+            assert cls.trace_width == pytest.approx(0.225)
+            assert cls.intra_pair_clearance == pytest.approx(0.135)
+            assert cls.clearance == pytest.approx(0.10)
+            assert cls.trace_width >= 0.15
+            actual = physics.edge_coupled_microstrip(
+                cls.trace_width, cls.intra_pair_clearance, "F.Cu"
+            ).zdiff
+            assert actual == pytest.approx(
+                cls.target_diff_impedance, rel=cls.impedance_tolerance_percent / 100
+            )
+            assert serialized[name]["intra_pair_clearance"] == cls.intra_pair_clearance
+            assert serialized[name]["trace_width"] == cls.trace_width
+            assert serialized[name]["coupled_routing"] is True
+            assert serialized[name]["coupled_continuity_threshold"] == 0.85
+
+        # Sizing must not invent a target or alter unrelated routing geometry.
+        # Issue #7319: DQS now carries an authored 100 ohm target; sizing
+        # changes only its width and gap.
+        from dataclasses import replace
+
+        authored_dqs = generate_design_mod.ddr_dqs_pair_net_class()
+        assert (
+            replace(
+                classes["DQS_P"],
+                trace_width=authored_dqs.trace_width,
+                intra_pair_clearance=authored_dqs.intra_pair_clearance,
+            )
+            == authored_dqs
+        )
+        assert classes["DQ0"] == generate_design_mod.ddr_data_byte_0_net_class()
+        assert classes["A0"] == generate_design_mod.addr_bus_net_class()
+
+    def test_default_build_net_class_map_meets_impedance_at_authored_gap(
+        self, generate_design_mod
+    ) -> None:
+        """Issue #4969: the DEFAULT call must not regress to the naive width.
+
+        ``build_net_class_map()``'s default ``preserve_authored_gap=True``
+        is what ``route_pcb`` (the board's main pipeline), the committed
+        sidecar, and every CI validator that derives the map in-process
+        (``build_net_class_map_for_board`` in
+        ``scripts/ci/net_class_map_resolver.py`` /
+        ``check_diffpair_coverage.py`` / ``check_matchgroup_coverage.py``)
+        all actually call.  Before #4969 the default resolved MIPI/HDMI to
+        the raw declared ``trace_width=0.15`` mm, which models to ~127.6
+        ohm at the authored 0.10mm gap -- outside the classes' 10%
+        tolerance of the 100 ohm target, and inconsistent with the
+        committed sidecar. Pinning the DEFAULT call (no explicit
+        ``preserve_authored_gap`` argument) here -- rather than only the
+        opt-in path exercised above -- is what actually guards against the
+        generator and the committed sidecar silently diverging again.
+        """
+        from kicad_tools.physics import CoupledLines
+        from kicad_tools.physics.stackup import Stackup
+
+        classes = generate_design_mod.build_net_class_map()
+        physics = CoupledLines(Stackup.jlcpcb_4layer())
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N", "DQS_P", "DQS_N"):
+            cls = classes[name]
+            # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
+            # the authored 0.10 mm gap is the minimum.
+            assert cls.trace_width == pytest.approx(0.225)
+            assert cls.intra_pair_clearance == pytest.approx(0.135)
+            actual = physics.edge_coupled_microstrip(
+                cls.trace_width, cls.intra_pair_clearance, "F.Cu"
+            ).zdiff
+            assert actual == pytest.approx(
+                cls.target_diff_impedance, rel=cls.impedance_tolerance_percent / 100
+            ), (
+                f"{name}: default build_net_class_map() resolved trace_width="
+                f"{cls.trace_width}mm, modeling to {actual:.3f} ohm -- outside "
+                f"the {cls.impedance_tolerance_percent:g}% tolerance of "
+                f"{cls.target_diff_impedance:g} ohm at the authored "
+                f"{cls.intra_pair_clearance:g}mm gap."
+            )
+
+
+# =============================================================================
+# AC#5: boards/README.md lists board 07
+# =============================================================================
+
+
+class TestBoardsReadmeUpdated:
+    """``boards/README.md`` references board 07 (AC#5)."""
+
+    def test_boards_readme_lists_board_07(self) -> None:
+        readme = REPO_ROOT / "boards" / "README.md"
+        assert readme.exists(), f"boards/README.md missing: {readme}"
+        text = readme.read_text()
+        assert "07-matchgroup-test" in text or "07 |" in text or "| 07 |" in text, (
+            "AC#5: boards/README.md must list board 07 in its status table."
+        )
+        # Reference to Epic #2661 should appear near the board 07 row.
+        assert "#2661" in text, "AC#5: boards/README.md should cite Epic #2661 in board 07's row."
+
+
+# =============================================================================
+# AC#3 + sidecar: net_class_map.json round-trips through the serializer
+# =============================================================================
+
+
+class TestNetClassMapSidecar:
+    """Phase 3M sidecar is emitted and parses cleanly."""
+
+    def test_sidecar_exists_and_is_json(self) -> None:
+        """The sidecar JSON is committed alongside the routed PCB."""
+        sidecar = OUTPUT_DIR / "net_class_map.json"
+        assert sidecar.exists(), (
+            f"Phase 3M sidecar missing: {sidecar}. Re-run "
+            "``python boards/07-matchgroup-test/generate_design.py`` "
+            "to emit it.  Without the sidecar, ``kct check "
+            "--net-class-map`` cannot exercise match_group_length_skew "
+            "on the standalone routed PCB."
+        )
+        data = json.loads(sidecar.read_text())
+        assert isinstance(data, dict), "Sidecar must be a JSON object"
+        assert len(data) > 0, "Sidecar must declare at least one net class"
+
+    def test_sidecar_carries_match_group_declarations(self) -> None:
+        """Sidecar entries carry the ``length_match_group`` field (Phase 1A)."""
+        sidecar = OUTPUT_DIR / "net_class_map.json"
+        if not sidecar.exists():
+            pytest.skip("sidecar not present")
+        data = json.loads(sidecar.read_text())
+
+        groups_seen: set[str] = set()
+        for _net, entry in data.items():
+            grp = entry.get("length_match_group")
+            if grp is not None:
+                groups_seen.add(grp)
+
+        expected = {"DDR_DATA_BYTE_0", "MIPI_CSI_LANES", "HDMI_TMDS_LANES", "ADDR_BUS"}
+        assert expected.issubset(groups_seen), (
+            f"Phase 3M sidecar missing match-group declarations.  "
+            f"Got {groups_seen}, expected superset of {expected}."
+        )
+
+
+# =============================================================================
+# AC#7 (partial): match-group tracker is queryable post-route
+# =============================================================================
+
+
+class TestMatchGroupTrackerQueryable:
+    """The ``MatchGroupTracker`` is populated on the routed PCB.
+
+    This is the partial AC#7 check.  The full AC#7 statement requires
+    "post-pass skew strictly less than pre-pass skew for at least one
+    group" -- but that requires the Phase 3H (#2723) tuning step which
+    hasn't landed.  Until #2723, the route step measures skew (this
+    test) but does not actively reduce it.
+    """
+
+    def test_tracker_query_path_exists(self) -> None:
+        """The MatchGroupTracker class exposes ``get_all_skews``.
+
+        This is a smoke check that the API surface AC#7 references is
+        importable.  Once #2723 lands, a real "before vs after tuning"
+        comparison test can replace this skeleton.
+        """
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        tracker = MatchGroupTracker()
+        skews = tracker.get_all_skews()
+        assert isinstance(skews, dict), (
+            "MatchGroupTracker.get_all_skews() must return a dict (per Phase 1B contract)."
+        )
+
+    def test_phase3h_tuning_dependency_documented(self) -> None:
+        """Sanity check: route_pcb body has a TODO for Phase 3H wiring.
+
+        This anchors the expectation that when #2723 lands, the
+        ``apply_match_group_tuning`` call is added in the marked
+        spot in ``boards/07-matchgroup-test/generate_design.py``.
+        """
+        gd_path = BOARD_DIR / "generate_design.py"
+        text = gd_path.read_text()
+        assert "TODO Phase 3H (#2723)" in text, (
+            "generate_design.py must carry a TODO marker pointing at #2723 "
+            "so the eventual tuning-step wiring is easy to find."
+        )
+
+
+# =============================================================================
+# Issue #4007: ADDR_BUS via-inclusive skew must AGREE with the tuner at PASS
+# (supersedes the pre-#4007 #3915 tests that pinned a large residual skew)
+# =============================================================================
+
+
+class TestAddrBusViaInclusiveSkew:
+    """Pin the tuner/checker agreement restored by Issue #4007.
+
+    History
+    -------
+    Issue #3915 wired ``board_thickness_mm`` / ``num_copper_layers`` into
+    ``derive_group_skew_data`` so vias contribute their drilled length to a
+    member's routed length, and the ``DRCChecker`` callsite passes both.
+    On the 4-layer board 07 the ADDR_BUS group's via-carrying members
+    (A4/A6) traverse extra vias relative to A0, so that wiring is load-
+    bearing: without it the drilled length is invisible in the via-blind
+    path.
+
+    Issue #4007 completed the picture.  The route-side tuner (#3931) always
+    modelled standard (non-micro) vias as full-stack **through**-vias --
+    because KiCad promotes them to through-holes on the post-route
+    zone-fill re-save -- but the via-inclusive skew *measurement* was still
+    treating them as short blind segments.  That producer/consumer mismatch
+    left a spurious ~1.069 mm via-inclusive residual on ADDR_BUS: the tuner
+    reported PASS (it had already compensated the copper against the full
+    drilled length) while ``kct check`` reported a 0.5 mm-tolerance
+    violation.  #4007 measures standard vias as through-vias too, so the
+    two agree: ADDR_BUS's via-inclusive skew collapses to ~0.0015 mm and
+    the checker no longer fires.
+
+    These tests exercise the committed routed artifact + its
+    ``net_class_map.json`` sidecar directly.  They pin the post-#4007
+    invariant (tuner and checker agree, ADDR_BUS is within tolerance) while
+    retaining a #3915-style guard that a standard via still contributes its
+    full drilled length to the measurement -- so a genuine
+    ``board_thickness_mm`` / ``num_copper_layers`` regression is still
+    caught.
+    """
+
+    @pytest.fixture
+    def routed_pcb(self):
+        from kicad_tools.schema.pcb import PCB
+
+        routed = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+        assert routed.exists(), (
+            f"Routed PCB artifact missing: {routed}.\n"
+            "Re-run: python boards/07-matchgroup-test/generate_design.py"
+        )
+        return PCB.load(str(routed))
+
+    @pytest.fixture
+    def net_class_map_from_sidecar(self):
+        from kicad_tools.router.rules import NetClassRouting
+
+        sidecar = OUTPUT_DIR / "net_class_map.json"
+        if not sidecar.exists():
+            pytest.skip("net_class_map.json sidecar not present")
+        data = json.loads(sidecar.read_text())
+        return {net: NetClassRouting(**entry) for net, entry in data.items()}
+
+    def test_addr_bus_via_inclusive_skew_is_the_kicad_cli_figure(
+        self, routed_pcb, net_class_map_from_sidecar
+    ) -> None:
+        """#4007: 4-layer via-inclusive ADDR_BUS skew is WITHIN tolerance.
+
+        With standard vias measured as full-stack through-vias (the
+        checker default, ``blind_buried_supported=False``) the tuner's
+        copper compensation lines up with the drilled length it was
+        compensating against, so the via-inclusive residual collapses to
+        ~0.0015 mm -- comfortably inside the group's 0.5 mm tolerance.
+
+        This is the exact inversion of the pre-#4007 property: the old
+        tests asserted ``skew > 0.5`` (a ~1.069 mm residual); #4007 makes
+        the tuner and the measurement agree, so the residual is now
+        sub-tolerance.  A regression that re-introduces the producer/
+        consumer mismatch would push this back above 0.5 mm and fail here.
+        """
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        skew_seen, _, _ = derive_group_skew_data(
+            routed_pcb,
+            net_class_map_from_sidecar,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        assert "ADDR_BUS" in skew_seen, (
+            "ADDR_BUS group should be measured on the fully-routed board 07 artifact"
+        )
+        # Issue #6730: the committed regression fixture was re-tuned in place
+        # with ``kct retune-lengths --group ADDR_BUS`` (nets A4/A6 only; all
+        # other copper preserved).  It was 1.0998 mm apart before (kicad-cli
+        # measures a via by the layers it connects); it is now 0.0169 mm,
+        # well inside the 0.5 mm tolerance, by both our checker and
+        # kicad-cli (see ``test_addr_bus_lengths_match_kicad_cli``).
+        assert skew_seen["ADDR_BUS"] == pytest.approx(0.0169, abs=0.002)
+        assert skew_seen["ADDR_BUS"] <= 0.5
+
+    def test_standard_via_still_contributes_stackup_span(
+        self, routed_pcb, net_class_map_from_sidecar
+    ) -> None:
+        """#3915 guard: the drilled via length is still VISIBLE in the metric.
+
+        Retains the #3915 wiring guard through the #4007 rebaseline.  The
+        durable property is that a standard via still adds its full-stack
+        drilled length to the measurement: turning the via contribution ON
+        (``board_thickness_mm`` / ``num_copper_layers``) must move ADDR_BUS
+        by roughly the drilled length relative to the via-BLIND path.
+
+        Post-#4007 the sign flips relative to #3915's framing -- the tuner
+        deliberately over-balances the copper so that *adding* the drilled
+        length brings the group into balance -- so the via-inclusive skew is
+        now SMALLER than the via-blind skew.  Either way the two must differ
+        by a substantial margin; a ~0 gap means the ``board_thickness_mm`` /
+        ``num_copper_layers`` wiring was dropped at the producer seam and the
+        via length went uncounted.
+        """
+        from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+        skew_blind, _, _ = derive_group_skew_data(routed_pcb, net_class_map_from_sidecar)
+        skew_via, _, _ = derive_group_skew_data(
+            routed_pcb,
+            net_class_map_from_sidecar,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        assert "ADDR_BUS" in skew_blind
+        # Issue #6725: the stackup comes from the board itself, so the
+        # ``board_thickness_mm`` / ``num_copper_layers`` arguments cannot make
+        # the via contribution appear or vanish -- both calls agree.
+        assert skew_via["ADDR_BUS"] == pytest.approx(skew_blind["ADDR_BUS"])
+        # And the via IS counted: dropping every via's span from the measurement
+        # would move the group skew by far more than a micron.
+        from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+
+        sample_net = next(n for n in routed_pcb.nets.values() if n.name == "A4")
+        planar = sum(
+            ((s.end[0] - s.start[0]) ** 2 + (s.end[1] - s.start[1]) ** 2) ** 0.5
+            for s in routed_pcb.segments_in_net(sample_net.number)
+        )
+        measured = DiffPairLengthTracker.measure_net_from_pcb(routed_pcb, sample_net.number)
+        assert abs(measured - planar) > 0.2, "vias stopped contributing stackup span"
+
+    def test_checker_reports_no_addr_bus_violation_on_four_layer_board(
+        self, routed_pcb, net_class_map_from_sidecar
+    ) -> None:
+        """#4007: DRCChecker(layers=4) and the tuner AGREE -- no ADDR_BUS fire.
+
+        End-to-end through the checker callsite: with standard vias measured
+        as full-stack through-vias, the 4-layer / 1.6 mm ADDR_BUS
+        via-inclusive skew is within the 0.5 mm tolerance, so
+        ``kct check`` no longer raises the match-group length-skew
+        violation.  This is the whole point of #4007 -- the checker now
+        agrees with the route-side tuner at PASS, eliminating the
+        0.000-vs-1.069 mm split.
+        """
+        from kicad_tools.validate.checker import DRCChecker
+
+        checker = DRCChecker(
+            routed_pcb,
+            manufacturer="jlcpcb",
+            layers=4,
+            net_class_map=net_class_map_from_sidecar,
+        )
+        results = checker.check_match_group_length_skew()
+
+        addr_violations = [v for v in results.violations if "ADDR_BUS" in v.message]
+        # Issue #6730: the retuned fixture holds ADDR_BUS inside the 0.5 mm
+        # tolerance, so ``kct check`` reports no violation.
+        assert addr_violations == []
+
+    @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
+    def test_addr_bus_lengths_match_kicad_cli(self, routed_pcb, tmp_path) -> None:
+        """Issue #6725: per-net lengths agree with kicad-cli within 1 micron.
+
+        ``kicad-cli`` is asked for every net's length through a custom DRC
+        ``length`` rule; the A0..A7 address nets (two pads each, so the DRC
+        figure is the whole net) must equal ``kct check``'s measurement.
+        """
+        from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+
+        board = tmp_path / "board.kicad_pcb"
+        shutil.copy(OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb", board)
+        (tmp_path / "board.kicad_dru").write_text(
+            "(version 1)\n"
+            "(rule len (constraint length (max 0.001mm)) (condition \"A.NetName != ''\"))\n"
+        )
+        out = tmp_path / "drc.json"
+        subprocess.run(
+            [
+                "kicad-cli",
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--severity-all",
+                "-o",
+                str(out),
+                str(board),
+            ],
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+        if not out.exists():
+            pytest.skip("kicad-cli produced no DRC report")
+        by_name = {n.name: n.number for n in routed_pcb.nets.values()}
+        wanted = {f"A{i}" for i in range(8)}
+        actual: dict[str, float] = {}
+        for violation in json.loads(out.read_text()).get("violations", []):
+            m = re.search(r"actual ([0-9.]+) mm", violation.get("description", ""))
+            names = {
+                g.group(1)
+                for item in violation.get("items", [])
+                if (g := re.search(r"\[(.*?)\] of", item.get("description", "")))
+            }
+            if m and len(names) == 1 and (name := names.pop()) in wanted:
+                actual[name] = float(m.group(1))
+        if not actual:
+            pytest.skip("kicad-cli reported no length for the ADDR nets")
+        assert set(actual) == wanted
+        for name, kicad_len in actual.items():
+            ours = DiffPairLengthTracker.measure_net_from_pcb(routed_pcb, by_name[name])
+            assert ours == pytest.approx(kicad_len, abs=1e-3), name
+
+
+# =============================================================================
+# Sanity: net-count budget and diff-pair partner consistency
+# =============================================================================
+
+
+class TestNetCountBudget:
+    """The board has the budgeted ~33 nets the issue describes."""
+
+    def test_net_count_within_budget(self, generate_pcb_mod) -> None:
+        """Nets dict has approximately 33 nets (30..36 acceptable range).
+
+        Per issue #2724:
+            ``10 + 6 + 6 + 8 = 30 group-member nets + 3 power = ~33 total``
+        """
+        nets = generate_pcb_mod.NETS
+        signal_nets = [n for n in nets if n != ""]
+        count = len(signal_nets)
+        assert 30 <= count <= 36, f"Net count {count} out of approved budget [30, 36]"
+
+    def test_seven_diffpairs_declared(self, generate_pcb_mod) -> None:
+        """At least 7 diff pairs declared (DQS + 3 MIPI + 3 HDMI = 7)."""
+        diffpairs = generate_pcb_mod.DIFFPAIRS
+        assert len(diffpairs) >= 7, f"Expected at least 7 diff pairs declared, got {len(diffpairs)}"
+
+    def test_diffpair_partner_consistency(self, generate_pcb_mod) -> None:
+        """Each declared pair has its partner net in NETS."""
+        nets = generate_pcb_mod.NETS
+        diffpairs = generate_pcb_mod.DIFFPAIRS
+        for p_name, n_name in diffpairs.items():
+            assert p_name in nets, f"Diff pair positive net {p_name!r} not in NETS"
+            assert n_name in nets, f"Diff pair negative net {n_name!r} not in NETS"
+
+
+# =============================================================================
+# Issue #4557: genuine-open guard under the strict-by-default flip
+# =============================================================================
+
+
+def test_generated_j1_faces_mipi_receiver(generate_pcb_mod, tmp_path):
+    """The repaired source rotates both pad row positions and copper angles."""
+    from kicad_tools.schema.pcb import PCB
+
+    path = tmp_path / "generated.kicad_pcb"
+    path.write_text(generate_pcb_mod.generate_pcb(mipi_source_rotation=-90))
+    board = PCB.load(path)
+    connector = board.get_footprint("J1")
+    assert connector.rotation == -90
+    assert all(pad.rotation == -90 for pad in connector.pads)
+    for index, net in enumerate(
+        ["MIPI_CLK_P", "MIPI_CLK_N", "MIPI_DAT0_P", "MIPI_DAT0_N", "MIPI_DAT1_P", "MIPI_DAT1_N"]
+    ):
+        number = str(index + 1)
+        assert board.get_pad_position("J1", number) == pytest.approx((15, 52.5 + index))
+        assert next(p for p in connector.pads if p.number == number).net_name == net
+
+
+class TestDefaultNetStatusGenuineOpens:
+    """The DEFAULT ``NetStatusAnalyzer`` path still reports board 07's real opens.
+
+    Issue #4557 flipped the analyzer default to strict (real copper
+    geometry).  The flip removes board 06's 16 FALSE opens but must not mask
+    board 07's GENUINE opens (#3438). The 2026-09-09 targeted MIPI repair
+    closes MIPI_DAT0_N; the other four remain. No ``strict`` argument may appear in these tests:
+    they pin the default code path consumers actually hit.
+    """
+
+    # The four remaining opens on the repaired committed artifact.
+    EXPECTED_OPEN_NETS = {"DQ3", "DQ4", "TMDS_D0_N", "TMDS_D1_N"}
+
+    @pytest.fixture(scope="class")
+    def default_result(self):
+        pytest.importorskip("shapely")
+        routed = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+        if not routed.exists():
+            pytest.skip(f"Routed PCB artifact missing: {routed}")
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        # Default construction -- no strict kwarg (issue #4557).
+        return NetStatusAnalyzer(routed).analyze()
+
+    def test_genuine_opens_still_reported(self, default_result) -> None:
+        open_nets = {n.net_name for n in default_result.incomplete} | {
+            n.net_name for n in default_result.unrouted
+        }
+        assert open_nets == self.EXPECTED_OPEN_NETS, (
+            f"Default (strict) connectivity must keep reporting board 07's 4 "
+            f"genuine opens (#3438) -- the #4557 default flip must not mask "
+            f"real opens.  Expected {sorted(self.EXPECTED_OPEN_NETS)}, got "
+            f"{sorted(open_nets)}.  Fewer nets here WITHOUT a router "
+            f"improvement on the committed artifact means the connectivity "
+            f"model started over-connecting; more means a regression."
+        )
+
+
+@pytest.mark.parametrize("hole_clearance", [0.25, 0.3])
+def test_archived_pad_drill_repair_rejects_unsafe_filled_copper(
+    generate_design_mod, tmp_path, hole_clearance
+):
+    """Reject the archived moves into filled copper without publishing partial repair."""
+    import shutil
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    source = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+    original = source.read_bytes()
+    candidate = tmp_path / source.name
+    shutil.copy2(source, candidate)
+    pcb = PCB.load(candidate)
+    # CI stitching selected these alternate +1V8 sites. Together with the
+    # archived signal escapes, they reproduce all seven reported pad cuts.
+    for uid, xy in [
+        ("0de3e62a-2521-486b-a847-963011236afa", (85.19, 56.27)),
+        ("91bd6227-0458-43fc-9f1b-5cec0fbfdb8c", (83.73, 56.47)),
+    ]:
+        via = next(v for v in pcb.vias if v.uuid == uid)
+        assert pcb.relocate_via(via, xy)
+    pcb.save(candidate)
+    candidate.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {"board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}}}
+        )
+    )
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert len(ViaInPadRule().check(pcb, rules).violations) == 7
+    # Five signal-via targets approach existing foreign zone fill within
+    # approximately 0.09-0.181 mm of their drills, below either project floor. The old
+    # seven-move expectation predated the generic filled-copper guard.
+    before = candidate.read_bytes()
+    with pytest.raises(RuntimeError, match="hole-to-copper to filled zone"):
+        generate_design_mod._relocate_pad_drills(candidate)
+    assert candidate.read_bytes() == before
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("hole_clearance", [0.25, 0.3])
+def test_pad_drill_wrapper_uses_shared_project_floor(generate_design_mod, tmp_path, hole_clearance):
+    """A legal compact relocation succeeds; the stricter project rejects atomically."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    source = REPO_ROOT / "tests/fixtures/via_relocation/hole_floor.kicad_pcb"
+    candidate = tmp_path / source.name
+    # Copper gap passes both manufacturer floors; drill gap is 0.27 mm.
+    candidate.write_text(source.read_text().replace("10.4421", "10.47"))
+    candidate.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {"board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}}}
+        )
+    )
+    before = candidate.read_bytes()
+    pcb = PCB.load(candidate)
+    identities = [(v.uuid, v.net_number, v.size, v.drill) for v in pcb.vias]
+    if hole_clearance == 0.3:
+        with pytest.raises(RuntimeError, match="hole-to-copper"):
+            generate_design_mod._relocate_pad_drills(candidate)
+        assert candidate.read_bytes() == before
+        return
+    assert generate_design_mod._relocate_pad_drills(candidate) == 1
+    after = PCB.load(candidate)
+    assert [(v.uuid, v.net_number, v.size, v.drill) for v in after.vias] == identities
+    from shapely.geometry import LineString, Point
+
+    via = after.vias[0]
+    foreign = [s for s in after.segments if s.net_number != via.net_number]
+    distance_to_copper = min(
+        Point(via.position).distance(LineString([s.start, s.end])) - s.width / 2 for s in foreign
+    )
+    assert distance_to_copper - via.drill / 2 == pytest.approx(0.27)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert distance_to_copper - via.size / 2 >= rules.min_clearance_mm
+    assert not ViaInPadRule().check(after, rules).violations
+    assert any(s.end == after.vias[0].position for s in after.segments)
+    assert generate_design_mod._relocate_pad_drills(candidate) == 0
+
+
+@pytest.mark.parametrize("obstruct_extension", [False, True])
+def test_power_stub_uses_safe_alternate_escape(generate_design_mod, tmp_path, obstruct_extension):
+    """The fresh seed42 U4.E4 stub cannot slide toward its neighboring drill."""
+    import math
+
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    pcb = PCB.load(OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb")
+    via = next(v for v in pcb.vias if v.uuid == "0de3e62a-2521-486b-a847-963011236afa")
+    original = (85.19, 56.27)
+    assert pcb.relocate_via(via, original)
+    pcb.add_trace((83.82, 56.27), original, width=0.2, layer="F.Cu", net="+1V8")
+    blocker = pcb.add_via(84.52, 55.85, size=0.6, drill=0.2, net="+1V8")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    result = relocate_in_pad_vias(pcb, rules, nets={"+1V8"})
+    assert len(result.skipped) == 1
+    assert "hole-to-hole" in result.skipped[0].reason
+    old_segments = [(s.uuid, s.start, s.end) for s in pcb.segments]
+    if obstruct_extension:
+        pcb.add_trace((85.4, 56.0), (85.4, 56.5), width=0.2, layer="F.Cu", net="GND")
+    fixed = generate_design_mod._extend_blocked_power_stubs(pcb, rules, result)
+    if obstruct_extension:
+        assert fixed == 0
+        assert via.position == original
+        assert result.skipped
+        return
+    assert fixed == 1
+    assert not result.skipped
+    assert via.position[0] > original[0]
+    assert via.position[1] == pytest.approx(original[1])
+    assert math.dist(via.position, blocker.position) - (via.drill + blocker.drill) / 2 >= (
+        rules.min_hole_to_hole_mm
+    )
+    assert [(s.uuid, s.start, s.end) for s in pcb.segments[: len(old_segments)]] == old_segments
+    stub = pcb.segments[-1]
+    assert stub.start == original and stub.end == via.position
+    assert stub.width == 0.2 and stub.layer == "F.Cu" and stub.net_number == via.net_number
+    assert not [v for v in ViaInPadRule().check(pcb, rules).violations if "+1V8" in v.nets]
+    uuids = [v.uuid for v in pcb.vias] + [s.uuid for s in pcb.segments]
+    assert len(set(uuids)) == len(uuids)
+
+
+# =============================================================================
+# Declared swap-group proposal (issue #5522, Phase 1 of Epic #5511)
+# =============================================================================
+#
+# The committed ``regression-fixture/net_class_map.json`` sidecar declares
+# ``swap_group: "DDR_BYTE0"`` on DQ0-DQ7 (the only permitted edit to this
+# fixture -- the ``.kicad_pcb`` files themselves are never touched).
+# ``matchgroup_test_routed.kicad_pcb`` (NOT the unrouted ``matchgroup_test
+# .kicad_pcb``, which has no reachable ``reorder_pins`` rung) has DQ3/DQ4
+# ``placement_bound`` / ``self_crossing_bundle`` with a VERIFIED reversal
+# between U1 and U2, so both nets' diagnoses carry a computed
+# ``swap_proposal``.
+
+
+class TestSwapGroupProposalOnRoutedFixture:
+    @pytest.fixture
+    def routed_pcb_path(self) -> Path:
+        path = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+        assert path.exists(), f"Routed PCB artifact missing: {path}"
+        return path
+
+    @pytest.fixture
+    def net_class_map(self):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        sidecar = OUTPUT_DIR / "net_class_map.json"
+        assert sidecar.exists(), f"Sidecar missing: {sidecar}"
+        return net_class_map_from_path(sidecar)
+
+    def test_sidecar_declares_swap_group_on_dq0_dq7_only(self, net_class_map) -> None:
+        declared = {name for name, nc in net_class_map.items() if nc.swap_group}
+        assert declared == {f"DQ{i}" for i in range(8)}
+        for name in declared:
+            assert net_class_map[name].swap_group == "DDR_BYTE0"
+        # DM0/DQS_P/DQS_N are real ``DDR_DATA_BYTE_0`` match-group members
+        # but are NOT declared swappable -- they must stay fixed.
+        for undeclared in ("DM0", "DQS_P", "DQS_N"):
+            assert net_class_map[undeclared].swap_group is None
+
+    def test_dq3_dq4_measure_28_to_0_and_55_to_3(self, routed_pcb_path, net_class_map) -> None:
+        """The curated measured figures: swap-group-only 28 -> 0 crossings;
+        whole ``DDR_DATA_BYTE_0`` match group (11 nets) 55 -> 3, with the
+        residual attributed to the undeclared, fixed DM0/DQS_P/DQS_N."""
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+        result = classify_stuck_nets(routed_pcb_path, net_class_map=net_class_map)
+        for net_name in ("DQ3", "DQ4"):
+            d = next(x for x in result.diagnoses if x.net_name == net_name)
+            assert d.topology == "self_crossing_bundle"
+            proposal = d.swap_proposal
+            assert proposal is not None, f"{net_name}: expected a swap_proposal"
+            assert proposal.swap_group == "DDR_BYTE0"
+            assert proposal.target_ref == "U2"
+            assert proposal.crossings_before == 28
+            assert proposal.crossings_after == 0
+            assert proposal.group_crossings_before == 55
+            assert proposal.group_crossings_after == 3
+            assert set(proposal.fixed_members) == {"DM0", "DQS_P", "DQS_N"}
+            # The measured pad_map from the curator's re-measurement.
+            assert proposal.pad_map == {
+                "1": "DQ7",
+                "2": "DQ6",
+                "3": "DQ5",
+                "4": "DQ4",
+                "8": "DQ3",
+                "9": "DQ2",
+                "10": "DQ1",
+                "11": "DQ0",
+            }
+
+    def test_no_swap_group_declared_means_no_proposal(self, routed_pcb_path) -> None:
+        """The AC guard: no declaration -> no proposal, even on a verified
+        reversal (declared-only, never inferred)."""
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+        result = classify_stuck_nets(routed_pcb_path)
+        for net_name in ("DQ3", "DQ4"):
+            d = next(x for x in result.diagnoses if x.net_name == net_name)
+            assert d.swap_proposal is None
+            assert "swap_proposal" not in d.to_dict()
+
+    def test_classification_does_not_mutate_the_committed_pcb(
+        self, routed_pcb_path, net_class_map
+    ) -> None:
+        """Report-only (issue #5522 guard): classifying with a swap_group
+        declaration never touches the on-disk PCB -- no footprint, pad or
+        net is mutated anywhere."""
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+        before = routed_pcb_path.read_bytes()
+        classify_stuck_nets(routed_pcb_path, net_class_map=net_class_map)
+        after = routed_pcb_path.read_bytes()
+        assert before == after
+
+    def test_placement_delta_from_diagnosis_carries_the_proposal(
+        self, routed_pcb_path, net_class_map
+    ) -> None:
+        """The proposal reaches the ``reorder_pins`` delta and round-trips
+        via ``PlacementDelta.to_dict`` / ``from_dict`` (the
+        ``_placement_delta.json`` artifact contract)."""
+        from kicad_tools.router.placement_delta import PlacementDelta, deltas_from_result
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets_from_pcb
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(routed_pcb_path))
+        result = classify_stuck_nets_from_pcb(pcb, net_class_map=net_class_map)
+        deltas = deltas_from_result(pcb, result, include_endpoint_alignment=False)
+        reorder_deltas = [
+            d for d in deltas if d.kind == "reorder_pins" and d.net_name in ("DQ3", "DQ4")
+        ]
+        assert reorder_deltas, "expected an appended reorder_pins delta for DQ3/DQ4"
+        for delta in reorder_deltas:
+            assert delta.pad_map
+            assert delta.crossings_before == 28
+            assert delta.crossings_after == 0
+            reloaded = PlacementDelta.from_dict(json.loads(json.dumps(delta.to_dict())))
+            assert reloaded == delta
+
+    def test_why_json_output_surfaces_the_proposal(self, routed_pcb_path) -> None:
+        """``kct net-status --why --format json`` auto-discovers the
+        committed sidecar (no new flag) and surfaces the proposal."""
+        from kicad_tools.cli.net_status_cmd import output_why
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            output_why(routed_pcb_path, "json")
+        data = json.loads(buf.getvalue())
+        dq_nets = {n["net_name"]: n for n in data["nets"] if n["net_name"] in ("DQ3", "DQ4")}
+        assert dq_nets, "expected DQ3/DQ4 in the --why output"
+        for net in dq_nets.values():
+            assert "swap_proposal" in net
+            assert net["swap_proposal"]["swap_group"] == "DDR_BYTE0"
+
+
+# =============================================================================
+# Committed placement-delta write-back (issue #5537, Epic #5511 Phase 2b)
+# =============================================================================
+#
+# Phase 1 (#5522) got the declared swap group's ``pad_map`` as far as a
+# REPORT.  This phase makes it durable for a generator-owned board: the
+# reviewed ``regression-fixture/placement_delta.json`` is replayed into BOTH
+# generated views, so a full regen carries the re-assignment and schematic /
+# PCB still agree pad-for-pad (the invariant copper-LVS checks).
+#
+# Replay is opt-in (``--placement-delta PATH``).  Without it the recipe emits
+# the authored netlist unchanged -- the committed fixture artifacts are NOT
+# regenerated by this change, and the historical witness they encode (the
+# #3438 open set, the routed-DRC allowlist, the angle census) is untouched.
+
+COMMITTED_DELTA = OUTPUT_DIR / "placement_delta.json"
+
+#: The measured U2 re-binding carried by the committed artifact.  Pinned here
+#: independently of the JSON so a silent edit to either side fails.
+EXPECTED_U2_PAD_MAP = {
+    "1": "DQ7",
+    "2": "DQ6",
+    "3": "DQ5",
+    "4": "DQ4",
+    "8": "DQ3",
+    "9": "DQ2",
+    "10": "DQ1",
+    "11": "DQ0",
+}
+
+_UUID_RE = re.compile(r'"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"')
+
+
+def _strip_uuids(text: str) -> str:
+    return _UUID_RE.sub('"UUID"', text)
+
+
+@pytest.fixture(scope="module")
+def generate_schematic_mod():
+    """Load ``boards/07-matchgroup-test/generate_schematic.py`` as a module."""
+    return _load_module("board_07_generate_schematic", BOARD_DIR / "generate_schematic.py")
+
+
+class TestCommittedPlacementDeltaWriteBack:
+    @pytest.fixture
+    def pad_overrides(self) -> dict[str, dict[str, str]]:
+        from kicad_tools.router.placement_delta import load_placement_deltas, pad_map_overrides
+
+        return pad_map_overrides(load_placement_deltas(COMMITTED_DELTA))
+
+    @pytest.fixture
+    def net_class_map(self):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        return net_class_map_from_path(OUTPUT_DIR / "net_class_map.json")
+
+    def test_committed_artifact_carries_the_measured_swap(self, pad_overrides) -> None:
+        """The artifact replays the #5522 measurement, not a hand-authored
+        guess: same target, same pad map, same crossing evidence as
+        ``test_dq3_dq4_measure_28_to_0_and_55_to_3`` pins."""
+        from kicad_tools.router.placement_delta import load_placement_deltas
+
+        assert COMMITTED_DELTA.exists(), f"committed delta artifact missing: {COMMITTED_DELTA}"
+        deltas = load_placement_deltas(COMMITTED_DELTA)
+        assert {d.net_name for d in deltas} == {"DQ3", "DQ4"}
+        for delta in deltas:
+            assert delta.kind == "reorder_pins"
+            assert delta.target_ref == "U2"
+            assert delta.pad_map == EXPECTED_U2_PAD_MAP
+            assert delta.crossings_before == 28
+            assert delta.crossings_after == 0
+        # Both diagnoses describe the SAME re-binding, so they merge.
+        assert pad_overrides == {"U2": EXPECTED_U2_PAD_MAP}
+
+    def test_swap_moves_only_declared_swap_group_members(
+        self, pad_overrides, net_class_map
+    ) -> None:
+        """Only DQ0-DQ7 (the declared ``DDR_BYTE0`` members) are re-bound.
+        DM0/DQS_P/DQS_N are match-group siblings but NOT declared swappable,
+        and the ADDR_BUS group is untouched -- so neither group's authored
+        length-match geometry is perturbed by the re-binding."""
+        moved = set(pad_overrides["U2"].values())
+        assert moved == {f"DQ{i}" for i in range(8)}
+        for name in moved:
+            assert net_class_map[name].swap_group == "DDR_BYTE0"
+        assert not moved & {"DM0", "DQS_P", "DQS_N"}
+        assert not any(name.startswith("A") for name in moved)
+
+    def test_pcb_rebinding_is_byte_minimal(self, generate_pcb_mod, pad_overrides) -> None:
+        """Exactly the 8 named U2 pads change; every other byte (geometry,
+        layers, ordering, other footprints) is preserved."""
+        base = _strip_uuids(generate_pcb_mod.generate_pcb()).splitlines()
+        swapped = _strip_uuids(
+            generate_pcb_mod.generate_pcb(pad_overrides=pad_overrides)
+        ).splitlines()
+        assert len(base) == len(swapped)
+        changed = [(a, b) for a, b in zip(base, swapped, strict=True) if a != b]
+        assert len(changed) == 8, f"expected 8 re-bound pads, got {len(changed)}"
+        for _, after in changed:
+            pad = re.search(r'\(pad "([^"]+)"', after).group(1)
+            net = re.search(r'\(net \d+ "([^"]+)"\)', after).group(1)
+            assert EXPECTED_U2_PAD_MAP[pad] == net
+
+    def test_replay_is_deterministic(self, generate_pcb_mod, pad_overrides) -> None:
+        """Replay is a recorded re-binding, not a search: a second run is
+        byte-identical modulo UUIDs."""
+        first = _strip_uuids(generate_pcb_mod.generate_pcb(pad_overrides=pad_overrides))
+        second = _strip_uuids(generate_pcb_mod.generate_pcb(pad_overrides=pad_overrides))
+        assert first == second
+
+    def test_schematic_and_pcb_agree_after_the_swap(
+        self, generate_pcb_mod, generate_schematic_mod, pad_overrides, tmp_path
+    ) -> None:
+        """The LVS invariant, measured with the comparator's own PCB reader:
+        zero (ref, pad) disagreements between the re-bound schematic netlist
+        and the re-bound board."""
+        from kicad_tools.lvs.board_lvs import _pcb_pin_to_net
+
+        pcb_path = tmp_path / "swapped.kicad_pcb"
+        pcb_path.write_text(generate_pcb_mod.generate_pcb(pad_overrides=pad_overrides))
+        board = _pcb_pin_to_net(pcb_path)
+        schematic = generate_schematic_mod.effective_pin_nets(pad_overrides)
+
+        mismatches = [
+            (ref, pad, net)
+            for ref, pads in schematic.items()
+            for pad, net in pads.items()
+            if board.get((ref, pad)) != net
+        ]
+        assert mismatches == []
+        assert len(board) == sum(len(p) for p in schematic.values()) == 244
+        # ... and the swap really is present on both sides.
+        for pad, net in EXPECTED_U2_PAD_MAP.items():
+            assert board[("U2", pad)] == net
+            assert schematic["U2"][pad] == net
+
+    def test_no_delta_path_leaves_the_authored_netlist_alone(
+        self, generate_pcb_mod, generate_schematic_mod, tmp_path
+    ) -> None:
+        """The regression guard (#4053/#4051 precedent): with no committed
+        delta applied, both views emit the authored assignment and still
+        agree pad-for-pad."""
+        from kicad_tools.lvs.board_lvs import _pcb_pin_to_net
+
+        pcb_path = tmp_path / "authored.kicad_pcb"
+        pcb_path.write_text(generate_pcb_mod.generate_pcb())
+        board = _pcb_pin_to_net(pcb_path)
+        schematic = generate_schematic_mod.effective_pin_nets()
+
+        assert schematic == generate_schematic_mod.PIN_NETS
+        assert [
+            (ref, pad)
+            for ref, pads in schematic.items()
+            for pad, net in pads.items()
+            if board.get((ref, pad)) != net
+        ] == []
+        # The historical U2 assignment: DQ0..DQ3 on pads 1-4, DQ4..DQ7 on 8-11.
+        for pad, net in zip(
+            ("1", "2", "3", "4", "8", "9", "10", "11"), [f"DQ{i}" for i in range(8)], strict=True
+        ):
+            assert board[("U2", pad)] == net
+
+    def test_rationale_only_delta_changes_no_pin(
+        self, generate_pcb_mod, generate_schematic_mod, tmp_path
+    ) -> None:
+        """Edge case from the AC: a delta with no ``pad_map`` (undeclared
+        swap group -> rationale only) must not move a single pin."""
+        from kicad_tools.router.placement_delta import load_placement_deltas, pad_map_overrides
+
+        artifact = tmp_path / "placement_delta.json"
+        artifact.write_text(
+            json.dumps(
+                {
+                    "applied": [
+                        {
+                            "net_name": "DQ3",
+                            "target_ref": "U2",
+                            "kind": "reorder_pins",
+                            "dx": 0.0,
+                            "dy": 0.0,
+                            "rotation_delta": 0.0,
+                            "source_action": "reorder_pins",
+                            "rationale": "re-order pins to un-cross the byte",
+                            "confidence": "medium",
+                        }
+                    ],
+                    "proposed": [],
+                    "reverted": [],
+                }
+            )
+        )
+        overrides = pad_map_overrides(load_placement_deltas(artifact))
+        assert overrides == {}
+        assert _strip_uuids(generate_pcb_mod.generate_pcb(pad_overrides=overrides)) == _strip_uuids(
+            generate_pcb_mod.generate_pcb()
+        )
+        assert generate_schematic_mod.effective_pin_nets(overrides) == (
+            generate_schematic_mod.PIN_NETS
+        )
+
+    @pytest.mark.parametrize(
+        "overrides, match",
+        [
+            ({"U9": {"1": "DQ7"}}, "not on this board"),
+            ({"U2": {"99": "DQ7"}}, "no net-bound pad"),
+            ({"U2": {"1": "NOT_A_NET"}}, "undeclared net"),
+        ],
+    )
+    def test_stale_artifact_fails_loud_on_the_pcb(self, generate_pcb_mod, overrides, match) -> None:
+        """A stale delta must fail the build, never silently emit the
+        unswapped board."""
+        with pytest.raises(KeyError, match=match):
+            generate_pcb_mod.generate_pcb(pad_overrides=overrides)
+
+    @pytest.mark.parametrize(
+        "overrides, match",
+        [
+            ({"U9": {"1": "DQ7"}}, "unknown component"),
+            ({"U2": {"99": "DQ7"}}, "unknown pad"),
+        ],
+    )
+    def test_stale_artifact_fails_loud_on_the_schematic(
+        self, generate_schematic_mod, overrides, match
+    ) -> None:
+        with pytest.raises(KeyError, match=match):
+            generate_schematic_mod.effective_pin_nets(overrides)
+
+    def test_recipe_step_pcb_applies_the_delta_and_reports_it(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        """End-to-end through the recipe's own CLI: ``--placement-delta``
+        re-binds the generated board and writes the change report naming the
+        swap and its crossing-count delta."""
+        from kicad_tools.lvs.board_lvs import _pcb_pin_to_net
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "generate_design.py",
+                str(tmp_path),
+                "--step",
+                "pcb",
+                "--placement-delta",
+                str(COMMITTED_DELTA),
+            ],
+        )
+        assert generate_design_mod.main() == 0
+
+        board = _pcb_pin_to_net(tmp_path / "matchgroup_test.kicad_pcb")
+        for pad, net in EXPECTED_U2_PAD_MAP.items():
+            assert board[("U2", pad)] == net
+
+        report = (tmp_path / generate_design_mod.PLACEMENT_DELTA_REPORT_NAME).read_text()
+        assert "U2" in report
+        assert "reorder_pins" in report
+        assert "crossings 28 -> 0" in report
+        assert "pad 1 -> DQ7" in report
+        assert str(COMMITTED_DELTA) in report
+
+    def test_recipe_step_pcb_without_a_delta_is_unchanged(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["generate_design.py", str(tmp_path), "--step", "pcb"])
+        assert generate_design_mod.main() == 0
+        assert not (tmp_path / generate_design_mod.PLACEMENT_DELTA_REPORT_NAME).exists()
+
+        from kicad_tools.lvs.board_lvs import _pcb_pin_to_net
+
+        board = _pcb_pin_to_net(tmp_path / "matchgroup_test.kicad_pcb")
+        assert board[("U2", "1")] == "DQ0"
+        assert board[("U2", "11")] == "DQ7"
+
+    def test_committed_delta_points_at_the_fixture_it_was_measured_on(
+        self, generate_design_mod
+    ) -> None:
+        """The artifact lives beside the routed board and the sidecar that
+        produced it, and documents its own provenance."""
+        payload = json.loads(COMMITTED_DELTA.read_text())
+        assert set(payload) >= {"applied", "proposed", "reverted"}
+        assert (OUTPUT_DIR / "net_class_map.json").exists()
+        assert (OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb").exists()
+        assert "#5537" in payload["note"]
+        # The recipe names the same reviewed artifact it documents.
+        assert generate_design_mod.COMMITTED_PLACEMENT_DELTA.resolve() == COMMITTED_DELTA.resolve()
+
+    def test_missing_delta_artifact_fails_the_recipe_loudly(
+        self, generate_design_mod, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """A recipe pointed at a missing/wrong artifact must not silently
+        generate the unswapped board."""
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "generate_design.py",
+                str(tmp_path),
+                "--step",
+                "pcb",
+                "--placement-delta",
+                str(tmp_path / "does-not-exist.json"),
+            ],
+        )
+        assert generate_design_mod.main() == 1
+        assert "cannot read placement delta" in capsys.readouterr().err
+        assert not (tmp_path / "matchgroup_test.kicad_pcb").exists()
+
+
+# =============================================================================
+# Issue #5536 (Epic #5511 Phase 2a): the DDR repro's reversed-geometry mode
+# =============================================================================
+
+
+@pytest.fixture(scope="module")
+def ddr_repro_mod():
+    """Load ``boards/07-matchgroup-test/ddr_bundle_isolation_repro.py``."""
+    return _load_module("board_07_ddr_repro", BOARD_DIR / "ddr_bundle_isolation_repro.py")
+
+
+class TestDdrReversedGeometryMode:
+    """The reversed mode's proposal + application, without routing.
+
+    The reach measurement itself (9/11 before, 11/11 after) needs a real
+    negotiated routing pass and lives in the script; these tests pin the
+    parts that make that measurement meaningful and are cheap to re-check:
+    the geometry really is reversed, the proposal is declared-only, and
+    applying it lands the production rebinding on the router.
+    """
+
+    @staticmethod
+    def _by_ref(router, ref):
+        return sorted((pad for pad in router.all_pads if pad.ref == ref), key=lambda pad: pad.y)
+
+    def test_reversed_build_inverts_every_facing_pair(self, ddr_repro_mod):
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True, reversed_secondary=True, declare_swap_group=True
+        )
+        u1 = [pad.net_name for pad in self._by_ref(router, "U1")]
+        u2 = [pad.net_name for pad in self._by_ref(router, "U2")]
+        assert u1 == ddr_repro_mod.ROW_NETS
+        assert u2 == list(reversed(ddr_repro_mod.ROW_NETS))
+
+    def test_declared_proposal_zeroes_the_crossings(self, ddr_repro_mod):
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True, reversed_secondary=True, declare_swap_group=True
+        )
+        assignment, pad_map = ddr_repro_mod.propose_swap(router)
+        # 11 nets fully reversed == every pair crosses == C(11, 2).
+        assert assignment.crossings_before == 55
+        assert assignment.crossings_after == 0
+        # The middle pad of an odd-length reversal is already in place, so it
+        # is absent from the map (non-identity entries only).
+        assert len(pad_map) == len(ddr_repro_mod.ROW_NETS) - 1
+        assert pad_map["1"] == "DQ0"
+
+    def test_undeclared_group_is_never_swapped(self, ddr_repro_mod):
+        """Declared-only: no ``swap_group`` on the net class => no proposal."""
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True, reversed_secondary=True, declare_swap_group=False
+        )
+        assert ddr_repro_mod.propose_swap(router) is None
+
+    def test_applying_the_proposal_re_co_orients_the_rows(self, ddr_repro_mod):
+        router, net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True,
+            reversed_secondary=True,
+            declare_swap_group=True,
+            single_layer=True,
+            channel_walls=True,
+        )
+        _assignment, pad_map = ddr_repro_mod.propose_swap(router)
+        assert ddr_repro_mod.apply_swap(router, pad_map) == len(pad_map)
+
+        # Every net's two pads now sit at the same y -- no crossings left.
+        by_net: dict[int, set[float]] = {}
+        for pad in router.all_pads:
+            by_net.setdefault(pad.net, set()).add(round(pad.y, 6))
+        assert all(len(ys) == 1 for net, ys in by_net.items() if net in set(net_ids))
+        # ...and the router's own net membership followed the rebinding.
+        for net_id in net_ids:
+            assert len(router.nets[net_id]) == 2
+
+    def test_apply_swap_reinstalls_the_channel_walls(self, ddr_repro_mod):
+        """The walls must still be standing after the swap's grid reset.
+
+        Issue #5555: ``_reset_for_new_trial`` used to drop ``add_obstacle``
+        keepouts, so the harness re-installed them by hand; the router now
+        replays them itself.  Either way this assertion is what makes the
+        reach measurement meaningful, so it stays.
+        """
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True,
+            reversed_secondary=True,
+            declare_swap_group=True,
+            single_layer=True,
+            channel_walls=True,
+        )
+        _assignment, pad_map = ddr_repro_mod.propose_swap(router)
+        ddr_repro_mod.apply_swap(router, pad_map)
+
+        from kicad_tools.router.layers import Layer
+
+        grid = router.grid
+        layer_index = grid.layer_to_index(Layer.F_CU.value)
+        # A point well inside the lower wall must still be blocked.
+        gx, gy = grid.world_to_grid(ddr_repro_mod.BOARD_W / 2.0, 5.0)
+        assert grid.cell_at(layer_index, gy, gx).blocked is True
+
+
+# =============================================================================
+# Issue #6285: routing frame carries the project sidecars
+# =============================================================================
+
+
+class TestRoutingFrameSidecars:
+    def test_frame_sees_project_clearance_rules(self, generate_design_mod, tmp_path):
+        from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+        src = tmp_path / "board.kicad_pcb"
+        src.write_text("(kicad_pcb)")
+        shutil_src = BOARD_DIR / "output" / "matchgroup_test.kicad_pro"
+        (tmp_path / "board.kicad_pro").write_text(shutil_src.read_text())
+        frame = tmp_path / "board_routing_frame.kicad_pcb"
+        frame.write_text("(kicad_pcb)")
+        written = generate_design_mod.copy_project_sidecars(src, frame)
+        assert written == [tmp_path / "board_routing_frame.kicad_pro"]
+        assert not (tmp_path / "board_routing_frame.kicad_dru").exists()
+        rules = read_declared_clearance_rules(frame)
+        assert rules.project_min_clearance_mm == pytest.approx(0.15)
+
+    def test_no_sidecars_is_noop(self, generate_design_mod, tmp_path):
+        src = tmp_path / "a.kicad_pcb"
+        src.write_text("x")
+        assert generate_design_mod.copy_project_sidecars(src, tmp_path / "f.kicad_pcb") == []
+
+
+# =============================================================================
+# Issue #5333: the recipe routes the pairs coupled (``--differential-pairs``)
+# =============================================================================
+
+
+class TestRecipeRoutesPairsCoupled:
+    """The committed recipe's ``kct route`` argv carries ``--differential-pairs``
+    with the seed and stage budgets unchanged (issue #5333)."""
+
+    def _route_argv(self, generate_design_mod, tmp_path, monkeypatch) -> list[str]:
+        monkeypatch.setattr(sys, "argv", ["generate_design.py", str(tmp_path), "--step", "pcb"])
+        assert generate_design_mod.main() == 0
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            captured.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 1)
+
+        monkeypatch.setattr(generate_design_mod.subprocess, "run", fake_run)
+        generate_design_mod.route_pcb(
+            tmp_path / "matchgroup_test.kicad_pcb", tmp_path / "matchgroup_test_routed.kicad_pcb"
+        )
+        routes = [c for c in captured if "route" in c and "--strategy" in c]
+        assert len(routes) == 1, captured
+        return routes[0]
+
+    def test_default_recipe_passes_differential_pairs(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        assert generate_design_mod.USE_DIFFERENTIAL_PAIRS is True
+        argv = self._route_argv(generate_design_mod, tmp_path, monkeypatch)
+        assert argv.count("--differential-pairs") == 1
+
+    def test_budgets_and_seed_unchanged(self, generate_design_mod, tmp_path, monkeypatch) -> None:
+        argv = self._route_argv(generate_design_mod, tmp_path, monkeypatch)
+
+        def value(flag: str) -> str:
+            return argv[argv.index(flag) + 1]
+
+        assert value("--seed") == "42"
+        assert value("--search-timeout") == "600"
+        # Issue #6448: the placement-delta loop is off on lattice, so the
+        # derived total is one search stage plus the postprocess reserve.
+        assert value("--timeout") == "1200"
+        assert "--placement-delta-feedback" not in argv
+        assert "--deterministic-budget" in argv
+
+    def test_recipe_routes_on_the_lattice_engine(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        """Issue #6448 slice 1: board 07 ships on the lattice pair path.
+
+        The lattice engine rejects ``--strategy negotiated`` (#4280), so the
+        recipe must pair it with ``--strategy basic``, and the grid-only
+        placement-delta loop must stay off so no grid copper is spliced in.
+        """
+        argv = self._route_argv(generate_design_mod, tmp_path, monkeypatch)
+
+        def value(flag: str) -> str:
+            return argv[argv.index(flag) + 1]
+
+        assert value("--route-engine") == "lattice"
+        assert value("--strategy") == "basic"
+        assert generate_design_mod.PLACEMENT_DELTA_FEEDBACK is False
+        for flag in ("--tighten-diffpair-gap", "--length-match-groups"):
+            assert flag in argv
+
+    def test_stale_routed_sidecars_are_removed_before_routing(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        """A fixture copy of the routed ``.kicad_pro`` / ``.kicad_dru`` (the
+        match-group gate's ``regression-output``) made ``kct route`` refuse to
+        write its own sidecars and skip the pour oracle (issue #5333)."""
+        monkeypatch.setattr(sys, "argv", ["generate_design.py", str(tmp_path), "--step", "pcb"])
+        assert generate_design_mod.main() == 0
+        routed = tmp_path / "matchgroup_test_routed.kicad_pcb"
+        stale = [routed.with_suffix(".kicad_pro"), routed.with_suffix(".kicad_dru")]
+        for path in stale:
+            path.write_text("stale fixture copy\n")
+        seen: list[bool] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            seen.append(any(path.exists() for path in stale))
+            return subprocess.CompletedProcess(cmd, 1)
+
+        monkeypatch.setattr(generate_design_mod.subprocess, "run", fake_run)
+        generate_design_mod.route_pcb(tmp_path / "matchgroup_test.kicad_pcb", routed)
+        assert seen and seen[0] is False

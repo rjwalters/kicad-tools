@@ -1,0 +1,1980 @@
+"""Tests for the zones CLI command, focusing on the fill subcommand."""
+
+import shutil
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.cli.zones_cmd import main
+from kicad_tools.drc.geometric import SavedFillCheck
+
+# Patch targets -- _run_fill imports from .runner at call time, so we patch
+# the names in the runner module itself.
+_FIND_CLI = "kicad_tools.cli.runner.find_kicad_cli"
+_RUN_FILL = "kicad_tools.cli.runner.run_fill_zones"
+_CHECK_SAVED_FILL = "kicad_tools.drc.geometric.check_saved_fill"
+_SUBPROCESS_RUN = "kicad_tools.cli.runner.subprocess.run"
+_HAS_FILL_ZONES = "kicad_tools.cli.runner._kicad_cli_has_fill_zones"
+_DRC_SUPPORTS_REFILL = "kicad_tools.cli.runner._kicad_drc_supports_refill"
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+FIXTURE_PCB = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+
+
+@pytest.fixture
+def tmp_pcb(tmp_path: Path) -> Path:
+    """Copy the multilayer_zones fixture to a temp dir so tests can write."""
+    dest = tmp_path / "board.kicad_pcb"
+    shutil.copy2(FIXTURE_PCB, dest)
+    return dest
+
+
+@pytest.fixture
+def _mock_no_kicad_cli():
+    """Patch find_kicad_cli to return None (kicad-cli not available)."""
+    with patch(_FIND_CLI, return_value=None):
+        yield
+
+
+@pytest.fixture
+def _mock_kicad_cli():
+    """Patch find_kicad_cli to return a fake path."""
+    with patch(_FIND_CLI, return_value=Path("/usr/bin/kicad-cli")):
+        yield
+
+
+# ---------------------------------------------------------------------------
+# Test: overlap warnings in add and batch subcommands
+# ---------------------------------------------------------------------------
+
+
+class TestAddOverlapWarnings:
+    """Verify overlap warnings are surfaced in zones add."""
+
+    def test_add_no_warning_different_layer(self, tmp_pcb, capsys):
+        """zones add on a unique layer produces no warning."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "B.Cu",
+                "--priority",
+                "1",
+                "-o",
+                str(tmp_pcb),
+            ]
+        )
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "overlap warning" not in captured.err
+
+
+class TestAddValidation:
+    """`kct zones add` rejects unknown nets and invalid/unavailable copper
+    layers with a nonzero exit and no artifact mutation (#4907).
+    """
+
+    def test_unknown_net_rejected(self, tmp_pcb, capsys):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "DOES_NOT_EXIST", "--layer", "B.Cu"],
+        )
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "DOES_NOT_EXIST" in captured.err
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_unknown_net_rejected_json(self, tmp_pcb, capsys):
+        import json
+
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "DOES_NOT_EXIST",
+                "--layer",
+                "B.Cu",
+                "--format",
+                "json",
+            ],
+        )
+        assert ret == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert "DOES_NOT_EXIST" in payload["error"]
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_known_net_still_works(self, tmp_pcb):
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "B.Cu", "-o", str(tmp_pcb)],
+        )
+        assert ret == 0
+
+    def test_invalid_layer_spelling_rejected(self, tmp_pcb, capsys):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "NotALayer"],
+        )
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "NotALayer" in captured.err
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_non_copper_layer_rejected(self, tmp_pcb, capsys):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "F.SilkS"],
+        )
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "copper" in captured.err
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_valid_inner_layer_on_multilayer_board(self, tmp_pcb):
+        """multilayer_zones.kicad_pcb declares In1.Cu/In2.Cu -- must succeed."""
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "In1.Cu", "-o", str(tmp_pcb)],
+        )
+        assert ret == 0
+
+    def test_dry_run_rejects_without_writing(self, tmp_pcb):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "NotALayer", "--dry-run"],
+        )
+        assert ret == 1
+        assert tmp_pcb.read_bytes() == original_bytes
+
+
+class TestBatchOverlapWarnings:
+    """Verify overlap warnings are surfaced in zones batch."""
+
+    def test_batch_carves_same_layer_zones_and_promotes_warning_count(self, tmp_pcb, capsys):
+        """zones batch carves same-layer batch zones and surfaces warning count.
+
+        Post-#4167: the two batch nets (GND, +3V3) both on F.Cu no longer
+        100%-overlap -- they receive area-based descending priorities and
+        carved, geometrically-disjoint outlines.  The residual overlap
+        warning here is against a *pre-existing* +5V zone already in the
+        fixture (not a batch-internal conflict), and the warning count is
+        promoted into the final summary line rather than only appearing in
+        scrolled-back stderr.
+        """
+        ret = main(
+            [
+                "batch",
+                str(tmp_pcb),
+                "--power-nets",
+                "GND:F.Cu,+3V3:F.Cu",
+                "-o",
+                str(tmp_pcb),
+            ]
+        )
+        # Non-zero only on hard ValueError; a residual overlap warning
+        # against a pre-existing zone is not fatal.
+        assert ret == 0
+        captured = capsys.readouterr()
+
+        # The two batch zones are carved (bounded to their pad clusters),
+        # so the batch summary reports the count of remaining zero-copper
+        # warnings -- the failure is now non-silent.
+        assert "with zero-copper overlap warning" in captured.out
+
+        # Both batch zones were carved (bounded), not full-board rectangles.
+        assert "GND on F.Cu" in captured.out
+        assert "+3V3 on F.Cu" in captured.out
+        assert "(carved)" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Test: fill subcommand appears in help
+# ---------------------------------------------------------------------------
+
+
+class TestFillSubcommandPresence:
+    """Verify the fill subcommand is registered."""
+
+    def test_fill_in_zones_help(self, capsys):
+        """The fill subcommand should appear in `zones --help` output."""
+        # main() with no args prints help and returns 0
+        ret = main([])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "fill" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Test: missing input file
+# ---------------------------------------------------------------------------
+
+
+class TestFillMissingFile:
+    """Verify error when input file does not exist."""
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_missing_pcb_returns_1(self, capsys):
+        ret = main(["fill", "/nonexistent/board.kicad_pcb"])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "File not found" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Test: kicad-cli not found
+# ---------------------------------------------------------------------------
+
+
+class TestFillNoKicadCli:
+    """Verify error when kicad-cli is not installed."""
+
+    @pytest.mark.usefixtures("_mock_no_kicad_cli")
+    def test_no_kicad_cli_returns_1(self, tmp_pcb, capsys):
+        ret = main(["fill", str(tmp_pcb)])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "kicad-cli not found" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Test: --dry-run does not invoke run_fill_zones
+# ---------------------------------------------------------------------------
+
+
+class TestFillDryRun:
+    """Verify --dry-run prints info but does not call run_fill_zones."""
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_dry_run_does_not_fill(self, tmp_pcb, capsys):
+        with patch(_RUN_FILL) as mock_fill:
+            ret = main(["fill", str(tmp_pcb), "--dry-run"])
+            assert ret == 0
+            mock_fill.assert_not_called()
+        captured = capsys.readouterr()
+        assert "Would fill zones in" in captured.out
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_dry_run_shows_net_filter(self, tmp_pcb, capsys):
+        with patch(_RUN_FILL):
+            ret = main(["fill", str(tmp_pcb), "--dry-run", "--net", "GND"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "GND" in captured.out
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_dry_run_shows_output_path(self, tmp_pcb, tmp_path, capsys):
+        out = tmp_path / "filled.kicad_pcb"
+        with patch(_RUN_FILL):
+            ret = main(["fill", str(tmp_pcb), "--dry-run", "-o", str(out)])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert str(out) in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Test: successful fill delegates to run_fill_zones
+# ---------------------------------------------------------------------------
+
+
+class TestFillSuccess:
+    """Verify a successful fill invocation."""
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_fill_calls_run_fill_zones(self, tmp_pcb, capsys):
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        mock_result = KiCadCLIResult(
+            success=True,
+            output_path=tmp_pcb,
+            stdout="",
+            stderr="",
+            return_code=0,
+        )
+        with (
+            patch(_RUN_FILL, return_value=mock_result) as mock_fill,
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
+        ):
+            ret = main(["fill", str(tmp_pcb)])
+            assert ret == 0
+            mock_fill.assert_called_once()
+            call_args = mock_fill.call_args
+            assert call_args[0][0] == tmp_pcb  # pcb_path
+            assert call_args[0][1] is None  # output_path (in-place)
+        captured = capsys.readouterr()
+        assert "Zones filled" in captured.out
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_fill_with_output_path(self, tmp_pcb, tmp_path):
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        out = tmp_path / "filled.kicad_pcb"
+        mock_result = KiCadCLIResult(
+            success=True,
+            output_path=out,
+            stdout="",
+            stderr="",
+            return_code=0,
+        )
+        with (
+            patch(_RUN_FILL, return_value=mock_result) as mock_fill,
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
+        ):
+            ret = main(["fill", str(tmp_pcb), "-o", str(out)])
+            assert ret == 0
+            call_args = mock_fill.call_args
+            assert call_args[0][1] == out
+
+
+# ---------------------------------------------------------------------------
+# Test: fill failure propagates error
+# ---------------------------------------------------------------------------
+
+
+class TestFillFailure:
+    """Verify errors from kicad-cli are reported."""
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_fill_failure_returns_1(self, tmp_pcb, capsys):
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        mock_result = KiCadCLIResult(
+            success=False,
+            stderr="kicad-cli crashed",
+            return_code=1,
+        )
+        with patch(_RUN_FILL, return_value=mock_result):
+            ret = main(["fill", str(tmp_pcb)])
+            assert ret == 1
+        captured = capsys.readouterr()
+        assert "kicad-cli crashed" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Test: --net filter note
+# ---------------------------------------------------------------------------
+
+
+class TestFillNetFilter:
+    """Verify --net filter behavior (not supported by kicad-cli)."""
+
+    @pytest.mark.usefixtures("_mock_kicad_cli")
+    def test_net_filter_prints_note(self, tmp_pcb, capsys):
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        mock_result = KiCadCLIResult(success=True, output_path=tmp_pcb, return_code=0)
+        with (
+            patch(_RUN_FILL, return_value=mock_result),
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
+        ):
+            ret = main(["fill", str(tmp_pcb), "--net", "GND"])
+            assert ret == 0
+        captured = capsys.readouterr()
+        assert "--net filter is not supported" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Test: run_fill_zones function in runner.py
+# ---------------------------------------------------------------------------
+
+
+class TestRunFillZones:
+    """Unit tests for the run_fill_zones runner function."""
+
+    def test_no_kicad_cli_returns_failure(self):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with patch(_FIND_CLI, return_value=None):
+            result = run_fill_zones(Path("/some/board.kicad_pcb"))
+        assert result.success is False
+        assert "kicad-cli not installed" in result.stderr
+
+    def test_file_not_found_error(self):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(
+                _SUBPROCESS_RUN,
+                side_effect=FileNotFoundError("not found"),
+            ),
+        ):
+            result = run_fill_zones(
+                Path("/some/board.kicad_pcb"),
+                kicad_cli=Path("/usr/bin/kicad-cli"),
+            )
+        assert result.success is False
+        assert "kicad-cli not found" in result.stderr
+
+    def test_subprocess_error(self, tmp_pcb):
+        import subprocess
+
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(
+                _SUBPROCESS_RUN,
+                side_effect=subprocess.SubprocessError("boom"),
+            ),
+        ):
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+        assert result.success is False
+        assert "Failed to fill zones" in result.stderr
+
+
+class TestRunFillZonesNative:
+    """Unit tests for the native fill-zones path (future KiCad versions)."""
+
+    def test_uses_native_when_available(self, tmp_pcb):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=True),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+        assert result.success is True
+        # The fill is the first subprocess call (post-fill thermal remediation,
+        # issue #3729, adds trailing DRC calls).
+        cmd = mock_run.call_args_list[0][0][0]
+        assert cmd[0] == "/usr/bin/kicad-cli"
+        assert cmd[1:3] == ["pcb", "fill-zones"]
+        assert str(tmp_pcb) == cmd[-1]
+
+    def test_native_with_output(self, tmp_pcb, tmp_path):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        out = tmp_path / "filled.kicad_pcb"
+        with (
+            patch(_HAS_FILL_ZONES, return_value=True),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+        assert result.success is True
+        # The fill is the first subprocess call (issue #3729 adds trailing DRC).
+        cmd = mock_run.call_args_list[0][0][0]
+        assert "--output" in cmd
+        idx = cmd.index("--output")
+        assert cmd[idx + 1] == str(out)
+
+    def test_native_nonzero_return_code_is_failure(self, tmp_pcb):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=True),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="zone fill error")
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+        assert result.success is False
+        assert "zone fill error" in result.stderr
+
+
+class TestRunFillZonesDRCFallback:
+    """Unit tests for the DRC-based zone fill fallback (KiCad 8/9/10)."""
+
+    def test_drc_fallback_runs_drc_command(self, tmp_pcb, tmp_path):
+        """When fill-zones is unavailable, run_fill_zones uses DRC."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        # Create a fake DRC report so the success check passes
+        def fake_run(cmd, **kwargs):
+            # The DRC command writes a report to the --output path
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        cmd = mock_run.call_args[0][0]
+        assert cmd[1:3] == ["pcb", "drc"]
+        assert str(tmp_pcb) == cmd[-1]
+
+    def test_drc_fallback_with_output_copies_input(self, tmp_pcb, tmp_path):
+        """When output_path is set, input is copied and DRC runs on the copy."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        assert result.output_path == out
+        # The copy should exist (made from the source PCB)
+        assert out.exists()
+        # DRC should have been run on the copy, not the original
+        cmd = mock_run.call_args[0][0]
+        assert str(out) == cmd[-1]
+
+    def test_drc_violations_do_not_cause_failure(self, tmp_pcb):
+        """DRC exit code != 0 due to violations is still a fill success."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text(
+                '{"violations": [{"type": "clearance", "severity": "error"}]}'
+            )
+            # Non-zero exit code because of DRC violations
+            return MagicMock(returncode=5, stdout="", stderr="DRC violations found")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run),
+        ):
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        # Fill succeeded even though DRC found violations
+        assert result.success is True
+
+    def test_drc_no_report_is_failure(self, tmp_pcb):
+        """If DRC produces no report file, the fill is treated as failure."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            # DRC fails to produce a report
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="DRC execution error")
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is False
+
+    def test_drc_report_cleaned_up(self, tmp_pcb, tmp_path):
+        """The temporary DRC report file is cleaned up after fill."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        created_reports = []
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            created_reports.append(report_path)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run),
+        ):
+            run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        # Every temp DRC report (the fill report plus any from the post-fill
+        # thermal remediation in issue #3729) must be cleaned up.
+        assert len(created_reports) >= 1
+        for report in created_reports:
+            assert not Path(report).exists()
+
+    def test_kicad8_no_refill_flags(self, tmp_pcb):
+        """KiCad 8/9: DRC command should NOT include --refill-zones."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        cmd = mock_run.call_args[0][0]
+        assert "--refill-zones" not in cmd
+        assert "--save-board" not in cmd
+
+    def test_kicad10_includes_refill_flags(self, tmp_pcb):
+        """KiCad 10+: DRC command should include --refill-zones --save-board."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=True),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        # Inspect the fill DRC (first call); issue #3729 adds trailing calls.
+        cmd = mock_run.call_args_list[0][0][0]
+        assert "--refill-zones" in cmd
+        assert "--save-board" in cmd
+
+    def test_drc_fallback_preserves_net_count(self, tmp_pcb, tmp_path):
+        """Net declarations survive DRC fallback even when kicad-cli strips them."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_net_count = input_pcb.net_count
+        assert input_net_count > 1, "Fixture must have named nets for this test"
+
+        def fake_run_strips_nets(cmd, **kwargs):
+            """Simulate kicad-cli stripping net declarations from the PCB."""
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            # Read the target PCB (last arg), strip net declarations,
+            # and write it back -- mimicking kicad-cli's broken behaviour.
+            target = Path(cmd[-1])
+            content = target.read_text()
+            import re
+
+            # Remove all (net N "name") top-level declarations but keep
+            # the rest (zones, segments, etc.) intact.  Replace with a
+            # single (net 0 "") to simulate kicad-cli's output.
+            content = re.sub(r'\n\t\(net \d+ "[^"]*"\)', "", content)
+            # Ensure at least the empty net 0 exists (kicad-cli always writes it)
+            content = content.replace('(net 0 "")', '(net 0 "")', 1)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+        assert output_pcb.net_count == input_net_count
+
+    def test_drc_fallback_preserves_nets_inplace(self, tmp_pcb):
+        """Net declarations are restored when DRC modifies the PCB in place."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_net_count = input_pcb.net_count
+        input_net_names = {n.name for n in input_pcb.nets.values()}
+
+        def fake_run_strips_nets(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            import re
+
+            content = re.sub(r'\n\t\(net \d+ "[^"]*"\)', "", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(tmp_pcb))
+        assert output_pcb.net_count == input_net_count
+        output_net_names = {n.name for n in output_pcb.nets.values()}
+        assert output_net_names == input_net_names
+
+    def test_drc_fallback_noop_when_nets_intact(self, tmp_pcb, tmp_path):
+        """Restoration is a no-op when kicad-cli keeps nets intact."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_net_count = input_pcb.net_count
+
+        def fake_run_keeps_nets(cmd, **kwargs):
+            """Simulate kicad-cli that does NOT strip nets."""
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            # Don't modify the PCB at all -- nets stay intact.
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+        assert output_pcb.net_count == input_net_count
+
+    def test_drc_fallback_preserves_net_names(self, tmp_pcb, tmp_path):
+        """Individual net names (GND, +3V3, +5V) are preserved after restoration."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_nets = {n.number: n.name for n in input_pcb.nets.values()}
+
+        def fake_run_strips_nets(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            import re
+
+            content = re.sub(r'\n\t\(net \d+ "[^"]*"\)', "", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+        output_nets = {n.number: n.name for n in output_pcb.nets.values()}
+        assert output_nets == input_nets
+
+    def test_drc_fallback_only_net0_noop(self, tmp_path):
+        """A PCB with only net 0 should not trigger restoration."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        # Create a minimal PCB with only the default net 0
+        pcb = PCB.create(width=50, height=50)
+        pcb_path = tmp_path / "minimal.kicad_pcb"
+        pcb.save(str(pcb_path))
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run),
+        ):
+            result = run_fill_zones(pcb_path, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(pcb_path))
+        # Should still have net 0 at minimum
+        assert output_pcb.net_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Test: per-element net assignment preservation through zone fill
+# ---------------------------------------------------------------------------
+
+
+class TestPadNetPreservation:
+    """Tests for per-element (pad, segment, via) net assignment preservation."""
+
+    def test_drc_fallback_preserves_pad_nets(self, tmp_pcb, tmp_path):
+        """Pad net assignments are restored when kicad-cli zeroes them out."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        # Collect original pad net assignments
+        input_pad_nets = {}
+        for fp in input_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    input_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert len(input_pad_nets) > 0, "Fixture must have pads with net assignments"
+
+        def fake_run_strips_pad_nets(cmd, **kwargs):
+            """Simulate kicad-cli zeroing out inline (net N) on pads."""
+            import re
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            # Zero out inline (net N "name") inside pads to (net 0 "")
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_pad_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        # Verify pad net assignments were restored
+        output_pad_nets = {}
+        for fp in output_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    output_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert output_pad_nets == input_pad_nets
+
+    def test_drc_fallback_preserves_segment_nets(self, tmp_pcb, tmp_path):
+        """Segment net assignments are restored when kicad-cli zeroes them."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_seg_nets = {
+            seg.uuid: seg.net_number for seg in input_pcb.segments if seg.net_number != 0
+        }
+        assert len(input_seg_nets) > 0, "Fixture must have segments with nets"
+
+        def fake_run_strips_element_nets(cmd, **kwargs):
+            """Simulate kicad-cli zeroing out (net N) on segments."""
+            import re
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            # Zero out all inline net references: (net N) -> (net 0)
+            # and (net N "name") -> (net 0 "")
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_seg_nets = {
+            seg.uuid: seg.net_number for seg in output_pcb.segments if seg.net_number != 0
+        }
+        assert output_seg_nets == input_seg_nets
+
+    def test_drc_fallback_preserves_via_nets(self, tmp_pcb, tmp_path):
+        """Via net assignments are restored when kicad-cli zeroes them."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_via_nets = {via.uuid: via.net_number for via in input_pcb.vias if via.net_number != 0}
+        assert len(input_via_nets) > 0, "Fixture must have vias with nets"
+
+        def fake_run_strips_element_nets(cmd, **kwargs):
+            """Simulate kicad-cli zeroing out (net N) on vias."""
+            import re
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_via_nets = {
+            via.uuid: via.net_number for via in output_pcb.vias if via.net_number != 0
+        }
+        assert output_via_nets == input_via_nets
+
+    def test_drc_fallback_noop_when_element_nets_intact(self, tmp_pcb, tmp_path):
+        """Element net restoration is a no-op when nets are not stripped."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_pad_nets = {}
+        for fp in input_pcb.footprints:
+            for pad in fp.pads:
+                input_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+
+        def fake_run_keeps_nets(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_pad_nets = {}
+        for fp in output_pcb.footprints:
+            for pad in fp.pads:
+                output_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert output_pad_nets == input_pad_nets
+
+
+# ---------------------------------------------------------------------------
+# Test: KiCad 10 net format (net "name") without number
+# ---------------------------------------------------------------------------
+
+
+class TestKiCad10NetFormat:
+    """Tests for handling KiCad 10's (net "name") format without net numbers."""
+
+    def test_snapshot_handles_name_only_net_format(self, tmp_path):
+        """_snapshot_element_nets captures pads with (net "name") format."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        # Write a minimal PCB with KiCad 10 name-only net format
+        pcb_content = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net "GND")
+\t(net "+3V3")
+\t(footprint "Package:R_0402"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "+3V3"))
+\t)
+\t(segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+)
+"""
+        pcb_path = tmp_path / "kicad10.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        snapshot = _snapshot_element_nets(pcb_path)
+
+        # Pads should be keyed by reference:pad_number
+        assert "R1:1" in snapshot
+        assert "R1:2" in snapshot
+        # Segment should be keyed by geometry
+        assert any(k.startswith("seg:") for k in snapshot)
+
+    def test_restore_handles_name_only_net_in_output(self, tmp_path):
+        """_restore_net_declarations restores nets when output has (net "name") format
+        that was zeroed out."""
+        from kicad_tools.cli.runner import _restore_net_declarations, _snapshot_element_nets
+
+        # Original PCB with name-only nets
+        original_content = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net "GND")
+\t(net "+3V3")
+\t(footprint "Package:R_0402"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "+3V3"))
+\t)
+)
+"""
+        original_path = tmp_path / "original.kicad_pcb"
+        original_path.write_text(original_content)
+
+        # Snapshot before "DRC"
+        from kicad_tools.cli.runner import _snapshot_net_declarations
+
+        net_nodes = _snapshot_net_declarations(original_path)
+        element_nets = _snapshot_element_nets(original_path)
+
+        assert len(element_nets) == 2  # Two pads with nonzero nets
+
+        # Simulate kicad-cli output that zeroed out pad nets
+        zeroed_content = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net "GND")
+\t(net "+3V3")
+\t(footprint "Package:R_0402"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-new")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid-new"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t)
+)
+"""
+        target_path = tmp_path / "target.kicad_pcb"
+        target_path.write_text(zeroed_content)
+
+        # Restore should succeed despite UUID change (keys are reference-based)
+        _restore_net_declarations(target_path, net_nodes, element_nets)
+
+        # Verify restoration
+        result_content = target_path.read_text()
+        assert '(net "GND")' in result_content or '(net 1 "GND")' in result_content
+        assert '(net "+3V3")' in result_content or '(net 2 "+3V3")' in result_content
+
+    def test_snapshot_canonicalizes_name_only_to_number_format(self, tmp_path):
+        """_snapshot_element_nets canonicalizes net format per element type.
+
+        - Pads: (net "name") -> (net N "name")  (dual-atom valid for pads)
+        - Segments: (net "name") -> (net N)       (numeric-only for KiCad 9)
+        """
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        # PCB with number-format headers but name-only inline refs (KiCad 10)
+        pcb_content = """\
+(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net 1 "GND")
+\t(net 2 "VCC")
+\t(footprint "TestFP"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "VCC"))
+\t)
+\t(segment (start 99 100) (end 101 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+)
+"""
+        pcb_path = tmp_path / "kicad10_canonical.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        snapshot = _snapshot_element_nets(pcb_path)
+
+        # Verify pad snapshots are canonicalized to (net N "name")
+        assert "R1:1" in snapshot
+        pad1_net = snapshot["R1:1"][0]
+        assert pad1_net.get_int(0) == 1
+        assert pad1_net.get_string(1) == "GND"
+
+        assert "R1:2" in snapshot
+        pad2_net = snapshot["R1:2"][0]
+        assert pad2_net.get_int(0) == 2
+        assert pad2_net.get_string(1) == "VCC"
+
+        # Verify segment snapshot is canonicalized to numeric-only (net N)
+        # Segments use numeric_only=True because KiCad 9 rejects dual-atom
+        # format on segments/vias.
+        seg_keys = [k for k in snapshot if k.startswith("seg:")]
+        assert len(seg_keys) == 1
+        seg_net = snapshot[seg_keys[0]][0]
+        assert seg_net.get_int(0) == 1
+        assert seg_net.get_string(1) is None
+
+    def test_restore_writes_number_format_for_kicad10_input(self, tmp_path):
+        """After snapshot+restore cycle, net format matches element type.
+
+        Pads: (net N "name") — dual-atom valid for pads.
+        Segments/vias: (net N) — numeric-only required by KiCad 9.
+        """
+        from kicad_tools.cli.runner import (
+            _restore_net_declarations,
+            _snapshot_element_nets,
+            _snapshot_net_declarations,
+        )
+
+        # KiCad 10 PCB with number headers but name-only inline refs
+        original_content = """\
+(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net 1 "GND")
+\t(net 2 "VCC")
+\t(footprint "TestFP"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "VCC"))
+\t)
+\t(segment (start 99 100) (end 101 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+)
+"""
+        original_path = tmp_path / "original.kicad_pcb"
+        original_path.write_text(original_content)
+
+        net_nodes = _snapshot_net_declarations(original_path)
+        element_nets = _snapshot_element_nets(original_path)
+
+        # Simulate kicad-cli zeroing out nets
+        zeroed_content = """\
+(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net 1 "GND")
+\t(net 2 "VCC")
+\t(footprint "TestFP"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-new")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid-new"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t)
+\t(segment (start 99 100) (end 101 100) (width 0.25) (layer "F.Cu") (net 0) (uuid "seg-new"))
+)
+"""
+        target_path = tmp_path / "target.kicad_pcb"
+        target_path.write_text(zeroed_content)
+
+        _restore_net_declarations(target_path, net_nodes, element_nets)
+
+        # Verify the restored file uses (net N "name") format, not (net "name")
+        from kicad_tools.core.sexp_file import load_pcb as load_pcb_sexp
+
+        output_sexp = load_pcb_sexp(str(target_path))
+
+        # Check pads
+        for fp_node in (c for c in output_sexp.children if c.name == "footprint"):
+            for pad_node in (c for c in fp_node.children if c.name == "pad"):
+                net_node = pad_node.get("net")
+                if net_node is not None:
+                    net_num = net_node.get_int(0)
+                    if net_num and net_num != 0:
+                        # Should have both number and name
+                        net_name = net_node.get_string(1)
+                        assert net_name is not None, (
+                            f'Restored net node should have (net N "name") format, '
+                            f"got number={net_num} but no name"
+                        )
+
+        # Check segments — must be numeric-only (net N) for KiCad 9
+        for child in output_sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                if net_node is not None:
+                    net_num = net_node.get_int(0)
+                    if net_num and net_num != 0:
+                        net_name = net_node.get_string(1)
+                        assert net_name is None, (
+                            f"Restored segment net should have (net N) format "
+                            f"(numeric-only), got trailing name {net_name!r}"
+                        )
+
+    def test_pad_from_sexp_name_only_format(self):
+        """Pad.from_sexp handles (net "name") without a number."""
+        from kicad_tools.schema.pcb import Pad
+        from kicad_tools.sexp import parse_string
+
+        sexp_text = '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))'
+        sexp = parse_string(sexp_text)
+        pad = Pad.from_sexp(sexp)
+        assert pad is not None
+        assert pad.net_name == "GND"
+        assert pad.net_number == 0  # No number in (net "name") format
+
+    def test_pad_from_sexp_traditional_format(self):
+        """Pad.from_sexp handles (net N "name") traditional format."""
+        from kicad_tools.schema.pcb import Pad
+        from kicad_tools.sexp import parse_string
+
+        sexp_text = '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))'
+        sexp = parse_string(sexp_text)
+        pad = Pad.from_sexp(sexp)
+        assert pad is not None
+        assert pad.net_name == "GND"
+        assert pad.net_number == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: UUID regeneration resilience
+# ---------------------------------------------------------------------------
+
+
+class TestUUIDRegenerationResilience:
+    """Tests that net restoration works when kicad-cli regenerates UUIDs."""
+
+    def test_pad_restoration_survives_uuid_change(self, tmp_pcb, tmp_path):
+        """Pad nets are restored even when kicad-cli regenerates footprint UUIDs."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_pad_nets = {}
+        for fp in input_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    input_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert len(input_pad_nets) > 0
+
+        def fake_run_regen_uuids(cmd, **kwargs):
+            """Simulate kicad-cli zeroing nets AND regenerating all UUIDs."""
+            import re
+            import uuid
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            # Zero out all inline net references
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            # Regenerate all UUIDs
+            content = re.sub(
+                r'\(uuid "([^"]+)"\)',
+                lambda m: f'(uuid "{uuid.uuid4()}")',
+                content,
+            )
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_pad_nets = {}
+        for fp in output_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    output_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert output_pad_nets == input_pad_nets
+
+    def test_segment_restoration_survives_uuid_change(self, tmp_pcb, tmp_path):
+        """Segment nets are restored via geometry keys even when UUIDs change."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        # Key segments by their geometry (start, end, layer) for comparison
+        input_seg_nets = {}
+        for seg in input_pcb.segments:
+            if seg.net_number != 0:
+                geo_key = (seg.start, seg.end, seg.layer)
+                input_seg_nets[geo_key] = seg.net_number
+        assert len(input_seg_nets) > 0
+
+        def fake_run_regen_uuids(cmd, **kwargs):
+            """Simulate kicad-cli zeroing nets AND regenerating all UUIDs."""
+            import re
+            import uuid
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            content = re.sub(
+                r'\(uuid "([^"]+)"\)',
+                lambda m: f'(uuid "{uuid.uuid4()}")',
+                content,
+            )
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_seg_nets = {}
+        for seg in output_pcb.segments:
+            if seg.net_number != 0:
+                geo_key = (seg.start, seg.end, seg.layer)
+                output_seg_nets[geo_key] = seg.net_number
+        assert output_seg_nets == input_seg_nets
+
+    def test_via_restoration_survives_uuid_change(self, tmp_pcb, tmp_path):
+        """Via nets are restored via geometry keys even when UUIDs change."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_via_nets = {}
+        for via in input_pcb.vias:
+            if via.net_number != 0:
+                geo_key = (via.position, via.size, tuple(via.layers))
+                input_via_nets[geo_key] = via.net_number
+        assert len(input_via_nets) > 0
+
+        def fake_run_regen_uuids(cmd, **kwargs):
+            """Simulate kicad-cli zeroing nets AND regenerating all UUIDs."""
+            import re
+            import uuid
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            content = re.sub(
+                r'\(uuid "([^"]+)"\)',
+                lambda m: f'(uuid "{uuid.uuid4()}")',
+                content,
+            )
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_via_nets = {}
+        for via in output_pcb.vias:
+            if via.net_number != 0:
+                geo_key = (via.position, via.size, tuple(via.layers))
+                output_via_nets[geo_key] = via.net_number
+        assert output_via_nets == input_via_nets
+
+
+# ---------------------------------------------------------------------------
+# Integration test: requires kicad-cli
+# ---------------------------------------------------------------------------
+
+
+def _kicad_cli_available() -> bool:
+    """Check whether kicad-cli is installed and can run ``pcb drc``."""
+    import subprocess
+
+    cli = find_kicad_cli()
+    if cli is None:
+        return False
+    try:
+        result = subprocess.run(
+            [str(cli), "pcb", "drc", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(
+    not _kicad_cli_available(),
+    reason=(
+        "find_kicad_cli() found no kicad-cli install (checked PATH and common install "
+        "locations), or its 'pcb drc' subcommand is unavailable"
+    ),
+)
+class TestFillIntegration:
+    """Integration tests that actually run kicad-cli to fill zones.
+
+    Uses ``kicad-cli pcb drc`` which fills zones as a side effect.
+    These tests are skipped when kicad-cli is not installed.
+    """
+
+    def test_fill_zones_on_fixture(self, tmp_pcb, tmp_path):
+        """Fill zones on the multilayer fixture and check output has filled_polygon."""
+        out = tmp_path / "filled_board.kicad_pcb"
+        # This fixture already has ~14 unconnected items, and the saved-vs-refilled
+        # count differs by one between kicad-cli releases (14 vs 13 on CI's pinned
+        # toolchain, 14 vs 14 on 10.0.6).  The post-fill saved-fill check (Issue
+        # #8053) is covered in test_saved_fill_connectivity_6078.py; this test is
+        # only about the fill itself.
+        with patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)):
+            ret = main(["fill", str(tmp_pcb), "-o", str(out)])
+        assert ret == 0
+        assert out.exists()
+        content = out.read_text()
+        assert "filled_polygon" in content
+
+
+# ---------------------------------------------------------------------------
+# Test: region/island boundary parsing helpers (Slice 1 of #3807)
+# ---------------------------------------------------------------------------
+
+
+class TestParseBbox:
+    """Unit tests for the --bbox parse helper."""
+
+    def test_valid_bbox_returns_corner_polygon(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        assert parse_bbox("10,10,40,30") == [
+            (10.0, 10.0),
+            (40.0, 10.0),
+            (40.0, 30.0),
+            (10.0, 30.0),
+        ]
+
+    def test_bbox_tolerates_whitespace(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        assert parse_bbox(" 10 , 10 , 40 , 30 ") == [
+            (10.0, 10.0),
+            (40.0, 10.0),
+            (40.0, 30.0),
+            (10.0, 30.0),
+        ]
+
+    def test_bbox_wrong_arity_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="expected 4"):
+            parse_bbox("10,10,40")
+
+    def test_bbox_non_numeric_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="numeric"):
+            parse_bbox("a,b,c,d")
+
+    def test_bbox_min_ge_max_x_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="MINX"):
+            parse_bbox("40,10,10,30")
+
+    def test_bbox_min_ge_max_y_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="MINY"):
+            parse_bbox("10,30,40,30")
+
+
+class TestParseRegion:
+    """Unit tests for the --region parse helper."""
+
+    def test_valid_region_round_trips(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        assert parse_region("10,10;40,10;40,30;10,30") == [
+            (10.0, 10.0),
+            (40.0, 10.0),
+            (40.0, 30.0),
+            (10.0, 30.0),
+        ]
+
+    def test_region_too_few_points_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        with pytest.raises(ValueError, match="at least 3"):
+            parse_region("10,10;40,10")
+
+    def test_region_bad_point_arity_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        with pytest.raises(ValueError, match="X,Y"):
+            parse_region("10,10;40;40,30")
+
+    def test_region_non_numeric_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        with pytest.raises(ValueError, match="numeric"):
+            parse_region("10,10;a,b;40,30")
+
+
+# ---------------------------------------------------------------------------
+# Test: --bbox / --region flow through `zones add` to the zone polygon
+# ---------------------------------------------------------------------------
+
+
+class TestAddRegionBoundary:
+    """Verify region flags produce a zone with the requested polygon."""
+
+    def test_bbox_dry_run_emits_requested_rectangle(self, tmp_pcb, capsys):
+        """--bbox produces a polygon matching the requested rectangle."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--bbox",
+                "10,10,40,30",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        # The four rectangle corners appear in the generated polygon, and the
+        # zone reports a 4-point boundary (not the full board outline).
+        assert "(xy 10 10)" in out
+        assert "(xy 40 10)" in out
+        assert "(xy 40 30)" in out
+        assert "(xy 10 30)" in out
+        assert "Boundary:    4 points" in out
+
+    def test_region_dry_run_round_trips_polygon(self, tmp_pcb, capsys):
+        """--region produces a polygon matching the requested points."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--region",
+                "5,5;45,5;45,35;25,35;5,35",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        assert "(xy 5 5)" in out
+        assert "(xy 45 5)" in out
+        assert "(xy 25 35)" in out
+        assert "Boundary:    5 points" in out
+
+    def test_bbox_on_inner_layer(self, tmp_pcb, capsys):
+        """--bbox works on an inner copper layer."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "In1.Cu",
+                "--bbox",
+                "12,12,20,20",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        assert "(xy 12 12)" in out
+        assert "Boundary:    4 points" in out
+
+    def test_no_region_flag_uses_board_outline(self, tmp_pcb, capsys):
+        """Omitting region flags preserves full-board-outline behavior."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        # Board outline produces a polygon; it should not be the tiny island
+        # rectangle and should have a boundary point count.
+        assert "Boundary:" in out
+        assert "(polygon" in out
+
+    def test_invalid_bbox_returns_1_without_traceback(self, tmp_pcb, capsys):
+        """Malformed --bbox returns non-zero with a clear error message."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--bbox",
+                "10,10,40",
+                "--dry-run",
+            ]
+        )
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "Error:" in err
+        assert "expected 4" in err
+
+    def test_invalid_bbox_min_ge_max_returns_1(self, tmp_pcb, capsys):
+        """--bbox with min>=max returns non-zero with a clear message."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--bbox",
+                "40,10,10,30",
+                "--dry-run",
+            ]
+        )
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "MINX" in err
+
+    def test_bbox_and_region_mutually_exclusive(self, tmp_pcb):
+        """argparse rejects supplying both --bbox and --region."""
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "add",
+                    str(tmp_pcb),
+                    "--net",
+                    "GND",
+                    "--layer",
+                    "F.Cu",
+                    "--bbox",
+                    "10,10,40,30",
+                    "--region",
+                    "10,10;40,10;40,30",
+                    "--dry-run",
+                ]
+            )
+
+    def test_bbox_documented_in_add_help(self, capsys):
+        """--bbox flag and its coordinate frame are documented in help."""
+        with pytest.raises(SystemExit):
+            main(["add", "--help"])
+        out = capsys.readouterr().out
+        assert "--bbox" in out
+        assert "sheet-absolute" in out
+
+
+# ---------------------------------------------------------------------------
+# Test: default output is in-place (issue #4166)
+# ---------------------------------------------------------------------------
+
+
+def _zone_keys(pcb_path: Path) -> set[tuple[str, str]]:
+    """Return the set of (net_name, layer) tuples for all zones in a PCB."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(pcb_path))
+    return {(z.net_name, z.layer) for z in pcb.zones}
+
+
+class TestAddInPlaceDefault:
+    """`zones add` with no -o overwrites the input in place (issue #4166)."""
+
+    def test_add_no_output_modifies_input(self, tmp_pcb):
+        """No -o writes the new zone back into the input file itself."""
+        before = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") not in before
+
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret == 0
+
+        after = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") in after
+
+    def test_add_no_output_does_not_create_side_file(self, tmp_pcb):
+        """No <stem>_zones.kicad_pcb side file is created (old behavior)."""
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret == 0
+
+        side_file = tmp_pcb.with_stem(tmp_pcb.stem + "_zones")
+        assert not side_file.exists()
+
+
+class TestAddChainedAccumulates:
+    """Two sequential in-place `zones add` calls accumulate both zones.
+
+    Regression test for the compounding data-loss bug: previously each call
+    read the pristine input and wrote the same side file, so the second call
+    silently discarded the first zone.
+    """
+
+    def test_two_sequential_adds_keep_both_zones(self, tmp_pcb):
+        ret1 = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret1 == 0
+        ret2 = main(["add", str(tmp_pcb), "--net", "SCL", "--layer", "In1.Cu"])
+        assert ret2 == 0
+
+        keys = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") in keys  # first add survived the second
+        assert ("SCL", "In1.Cu") in keys  # second add landed too
+
+
+class TestAddExplicitOutputUnaffected:
+    """Explicit -o still writes the side file and leaves the input untouched."""
+
+    def test_explicit_output_writes_target_leaves_input_unchanged(self, tmp_pcb, tmp_path):
+        out = tmp_path / "with_zones.kicad_pcb"
+        original_bytes = tmp_pcb.read_bytes()
+        before = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") not in before
+
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu", "-o", str(out)])
+        assert ret == 0
+
+        # Input is byte-for-byte unchanged.
+        assert tmp_pcb.read_bytes() == original_bytes
+        # Target got the new zone.
+        assert ("SDA", "F.Cu") in _zone_keys(out)
+
+
+class TestBatchInPlaceDefault:
+    """`zones batch` with no -o overwrites the input in place (issue #4166)."""
+
+    def test_batch_no_output_modifies_input(self, tmp_pcb):
+        before = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") not in before
+
+        ret = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu"])
+        assert ret == 0
+
+        assert ("SDA", "F.Cu") in _zone_keys(tmp_pcb)
+
+    def test_batch_no_output_does_not_create_side_file(self, tmp_pcb):
+        ret = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu"])
+        assert ret == 0
+
+        side_file = tmp_pcb.with_stem(tmp_pcb.stem + "_zones")
+        assert not side_file.exists()
+
+    def test_batch_explicit_output_leaves_input_unchanged(self, tmp_pcb, tmp_path):
+        out = tmp_path / "batched.kicad_pcb"
+        original_bytes = tmp_pcb.read_bytes()
+
+        ret = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu", "-o", str(out)])
+        assert ret == 0
+
+        assert tmp_pcb.read_bytes() == original_bytes
+        assert ("SDA", "F.Cu") in _zone_keys(out)
+
+
+class TestBatchChainedWithAdd:
+    """Cross-subcommand accumulation: batch (in place) then add (in place)."""
+
+    def test_batch_then_add_accumulates(self, tmp_pcb):
+        ret1 = main(["batch", str(tmp_pcb), "--power-nets", "SDA:F.Cu"])
+        assert ret1 == 0
+        ret2 = main(["add", str(tmp_pcb), "--net", "SCL", "--layer", "In1.Cu"])
+        assert ret2 == 0
+
+        keys = _zone_keys(tmp_pcb)
+        assert ("SDA", "F.Cu") in keys  # from batch, survived the add
+        assert ("SCL", "In1.Cu") in keys  # from add
+
+
+class TestAddFillPipeline:
+    """The pipeline hole from issue #4166: add (in place) then fill (in place)
+    operate on the same file, so fill sees the zones add just wrote."""
+
+    def test_fill_targets_the_same_file_add_wrote(self, tmp_pcb):
+        ret = main(["add", str(tmp_pcb), "--net", "SDA", "--layer", "F.Cu"])
+        assert ret == 0
+        assert ("SDA", "F.Cu") in _zone_keys(tmp_pcb)
+
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        mock_result = KiCadCLIResult(success=True, output_path=tmp_pcb, return_code=0)
+        with (
+            patch(_FIND_CLI, return_value=Path("/usr/bin/kicad-cli")),
+            patch(_RUN_FILL, return_value=mock_result) as mock_fill,
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
+        ):
+            fill_ret = main(["fill", str(tmp_pcb)])
+        assert fill_ret == 0
+        # fill operated on the same file the (in-place) add wrote to, and
+        # no side output path was passed (None => overwrite input).
+        call_args = mock_fill.call_args
+        assert call_args[0][0] == tmp_pcb
+        assert call_args[0][1] is None
+
+
+class TestZonesParserHelpConsistency:
+    """Both parser definitions document the in-place default for add/batch."""
+
+    def test_zones_cmd_add_help_documents_in_place(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["add", "--help"])
+        out = capsys.readouterr().out
+        assert "overwrite input" in out
+        assert "_zones" not in out  # old side-file suffix removed
+
+    def test_zones_cmd_batch_help_documents_in_place(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["batch", "--help"])
+        out = capsys.readouterr().out
+        assert "overwrite input" in out
+
+    def test_top_level_parser_add_batch_help_documents_in_place(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        help_text = parser.format_help()  # smoke: parser builds without error
+        assert isinstance(help_text, str)
+
+        # Inspect the add/batch -o help strings directly on the built parser.
+        for sub in ("add", "batch"):
+            found = False
+            for action in _iter_zones_subparser_actions(parser, sub):
+                if action.option_strings and "-o" in action.option_strings:
+                    assert "overwrite input" in (action.help or "")
+                    assert "_zones" not in (action.help or "")
+                    found = True
+            assert found, f"no -o option found for zones {sub}"
+
+
+def _iter_zones_subparser_actions(parser, sub_name):
+    """Yield argparse actions for the `zones <sub_name>` subparser."""
+    import argparse
+
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction) and "zones" in action.choices:
+            zones = action.choices["zones"]
+            for zaction in zones._actions:
+                if isinstance(zaction, argparse._SubParsersAction) and sub_name in zaction.choices:
+                    yield from zaction.choices[sub_name]._actions
+
+
+class TestRelieveAndAsymmetryWarning:
+    """Issue #8659."""
+
+    def test_relieve_in_zones_help(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["--help"])
+        assert "relieve" in capsys.readouterr().out
+
+    def test_relieve_runs_revisit_loop(self, tmp_pcb, capsys):
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(
+                "kicad_tools.cli.runner.relieve_solid_overrides", return_value=tmp_pcb
+            ) as relieve,
+            patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[5, 2]),
+        ):
+            rc = main(["relieve", str(tmp_pcb)])
+        assert rc == 0
+        relieve.assert_called_once()
+        assert "thermal_asymmetry: 5 -> 2" in capsys.readouterr().out
+
+    def test_fill_warns_when_asymmetry_rises(self, tmp_pcb, capsys):
+        result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
+        check = SavedFillCheck(ran=True, regressions=[], note="")
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(_RUN_FILL, return_value=result),
+            patch(_CHECK_SAVED_FILL, return_value=check),
+            patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[1, 4]),
+        ):
+            main(["fill", str(tmp_pcb)])
+        assert "thermal_asymmetry findings rose 1 -> 4" in capsys.readouterr().err
+
+    def test_fill_silent_when_asymmetry_flat(self, tmp_pcb, capsys):
+        result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
+        check = SavedFillCheck(ran=True, regressions=[], note="")
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(_RUN_FILL, return_value=result),
+            patch(_CHECK_SAVED_FILL, return_value=check),
+            patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[3, 3]),
+        ):
+            main(["fill", str(tmp_pcb)])
+        assert "rose" not in capsys.readouterr().err

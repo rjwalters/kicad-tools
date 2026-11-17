@@ -1,0 +1,1225 @@
+"""Route one KiCad-reported missing link against fixed copper (Issue #5785).
+
+The oracle completion loop (:mod:`kicad_tools.router.oracle_completion`)
+first tries to weld a stranded pour pad into its plane with a via.  When no
+via site reaches the plane -- a fine-pitch IC pin whose only via sites sit in
+the plane's clearance pullback, a pad on a layer the pour never covers -- the
+link has to be *routed*: copper from one end of the link to the other, around
+everything already on the board.
+
+:func:`route_link` is that router.  It is deliberately small and
+self-contained, because a link is short and the board is otherwise finished:
+
+* a uniform multi-layer grid over the link's bounding box plus a margin,
+  aligned on the link's first endpoint so a pad's own axis is a grid line;
+* every other net's copper (pads, tracks, vias, arcs and unnetted copper
+  pads), inflated by ``clearance + trace_width / 2``, blocks a cell; the
+  board outline (inset by the edge clearance) bounds the grid;
+* other nets' **zone fills** do not block -- KiCad refills a pour around new
+  copper -- but cost extra per mm, so a link prefers not to carve a plane;
+* a layer change is a through via, allowed only where the via clears foreign
+  copper on every layer, every existing drill by the hole-to-hole rule, and
+  every pad (no via-in-pad);
+* the search starts on the cells inside endpoint A's copper and ends on any
+  cell inside endpoint B's copper, so the new copper bonds to both;
+* the result is simplified to straight runs and then **checked exactly**
+  against the foreign copper with shapely -- grid quantisation can never leak
+  a sub-clearance segment into the board.
+
+Credit: KiCadRoutingTools routes oracle links with a dedicated plane-join
+router (``py_router/plane_region_connector.py:route_plane_connection_wide``,
+https://github.com/drandyhaas/KiCadRoutingTools, MIT).  This module follows the
+same idea -- a small dedicated A* for a single missing link -- on our own PCB
+model; no KRT code is copied.
+
+All coordinates here are the :class:`~kicad_tools.schema.pcb.PCB` model's
+board-relative millimetres.  :func:`append_link_route` adds the board origin
+back when it writes the copper into the file.
+"""
+
+from __future__ import annotations
+
+import heapq
+import math
+import re
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
+
+__all__ = [
+    "LinkRoute",
+    "LinkRouteRules",
+    "LinkTerminal",
+    "append_link_route",
+    "append_link_routes",
+    "collapse_link_route",
+    "explain_link_failure",
+    "padless_components",
+    "route_link",
+    "route_link_via",
+]
+
+#: Route endpoints land at least this far inside the terminal copper (mm).
+_TERMINAL_INSET = 0.03
+
+_DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+
+
+@dataclass(frozen=True)
+class LinkRouteRules:
+    """Geometry and cost knobs for :func:`route_link` (all mm)."""
+
+    trace_width: float = 0.2
+    clearance: float = 0.2
+    via_size: float = 0.6
+    via_drill: float = 0.3
+    hole_to_hole: float = 0.5
+    edge_clearance: float = 0.5
+    grid: float = 0.05
+    margin: float = 4.0
+    via_cost: float = 2.0
+    foreign_fill_cost: float = 4.0
+    max_cells: int = 1_500_000
+    #: Issue #8974: the fab-view same-net pad slit-band edge (mm) -- the
+    #: ``GapBand.detection_edge_mm`` (#9016) of the resolved stackup's
+    #: ``pad_spacing`` dfm entry, resolved by the caller (``kct route`` threads
+    #: ``DesignRules.same_net_pad_gap_band_edge_mm`` onto the weld's rules).
+    #: A link via whose annulus parks inside ``(0, edge)`` beside its own
+    #: SMD pad is rejected and the search walks on.  ``0`` (default) keeps
+    #: the guard off.
+    same_net_pad_gap_mm: float = 0.0
+    #: Issue #6374: per-neighbour-net clearance (net number -> mm), the
+    #: ``max(class(link net), class(neighbour))`` rule the grid router applies
+    #: (``io._get_pair_clearance``).  ``clearance`` stays the floor: a net
+    #: mapped below it (or absent) keeps ``clearance``.  ``None`` keeps the
+    #: single-scalar behaviour exactly.
+    clearance_by_net: Mapping[int, float] | None = None
+    #: Issue #8573: ``AttachZone`` regions (as built by
+    #: ``pairwise_clearance.build_attach_zones``) inside which the map-derived
+    #: floor of a net in ``attach_relax_nets`` relaxes to ``clearance`` -- the
+    #: same waiver ``kct creepage --waive-attach-zone`` applies.  Copper of such
+    #: a net outside the zone keeps its full floor.  ``net_names`` maps net
+    #: number -> name for the zone's name-keyed test.
+    attach_zones: Sequence[Any] = ()
+    attach_relax_nets: frozenset[int] = frozenset()
+    net_names: Mapping[int, str] | None = None
+
+    def clearance_for(self, net_number: int) -> float:
+        """Clearance this link must keep from copper on ``net_number``."""
+        if self.clearance_by_net is None:
+            return self.clearance
+        return max(self.clearance, self.clearance_by_net.get(net_number, self.clearance))
+
+    def clearance_parts(
+        self, link_net_name: str, net_number: int, layer: str, geom: Any
+    ) -> list[tuple[Any, float]]:
+        """``geom`` (foreign copper of ``net_number`` on ``layer``) split by clearance.
+
+        Normally ``[(geom, clearance_for(net))]``.  The part of the copper that
+        lies inside an attach zone shared by the link net and ``net_number``
+        gets only the base ``clearance`` when the net's floor is map-derived.
+        """
+        full = self.clearance_for(net_number)
+        if (
+            not self.attach_zones
+            or net_number not in self.attach_relax_nets
+            or full <= self.clearance
+            or not self.net_names
+            or net_number not in self.net_names
+            or not link_net_name
+        ):
+            return [(geom, full)]
+        from shapely.geometry import box  # type: ignore[import-untyped]
+
+        from .pairwise_clearance import _norm_net_key
+
+        a, b = _norm_net_key(link_net_name), _norm_net_key(self.net_names[net_number])
+        parts: list[tuple[Any, float]] = []
+        rest = geom
+        for z in self.attach_zones:
+            if a not in z.net_names or b not in z.net_names:
+                continue
+            if not (z.covers_layer(a, layer) and z.covers_layer(b, layer)):
+                continue
+            zbox = box(z.min_x, z.min_y, z.max_x, z.max_y)
+            inside = rest.intersection(zbox)
+            if not inside.is_empty:
+                parts.append((inside, self.clearance))
+                rest = rest.difference(zbox)
+        if not rest.is_empty:
+            parts.append((rest, full))
+        return parts
+
+
+@dataclass
+class LinkTerminal:
+    """One end of a link: the same-net copper the route must bond to.
+
+    ``layers`` maps each copper layer name the item exists on to its
+    board-relative shapely geometry there.
+    """
+
+    label: str
+    point: tuple[float, float]
+    layers: dict[str, Any]
+
+
+@dataclass
+class LinkRoute:
+    """Copper that closes one link."""
+
+    net_number: int
+    net_name: str
+    width: float
+    via_size: float
+    via_drill: float
+    segments: list[tuple[float, float, float, float, str]] = field(default_factory=list)
+    vias: list[tuple[float, float]] = field(default_factory=list)
+
+    def capsules(self) -> list[tuple[float, float, float, float, float]]:
+        """``(x1, y1, x2, y2, half_width)`` per segment and via (board-relative)."""
+        caps = [(x1, y1, x2, y2, self.width / 2) for x1, y1, x2, y2, _layer in self.segments]
+        caps.extend((x, y, x, y, self.via_size / 2) for x, y in self.vias)
+        return caps
+
+
+# ---------------------------------------------------------------------------
+# Board copper model
+# ---------------------------------------------------------------------------
+
+
+def _copper_layer_names(pcb: PCB) -> list[str]:
+    layers = pcb.copper_layers
+    names = [getattr(layer, "name", str(layer)) for layer in layers]
+    return names or ["F.Cu", "B.Cu"]
+
+
+def _pad_layers(pad_layers: list[str], copper: list[str]) -> list[str]:
+    out: list[str] = []
+    for layer in copper:
+        for spec in pad_layers:
+            if spec == layer or spec == "*.Cu" or (spec == "F&B.Cu" and layer in ("F.Cu", "B.Cu")):
+                out.append(layer)
+                break
+    return out
+
+
+def _pad_geometry(fp: Any, pad: Any) -> Any:
+    """Board-relative copper outline of a footprint pad (un-eroded)."""
+    from shapely.geometry import LineString, Point, Polygon
+
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    ox, oy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+    cx, cy = fp.position[0] + ox, fp.position[1] + oy
+    w, h = pad.size
+    if w <= 0 or h <= 0:
+        return Point(cx, cy)
+    # A pad's (at x y angle) carries its ABSOLUTE board angle (issue #3902);
+    # KiCad's negated-angle convention maps the local box into the board.
+    a = math.radians(-(getattr(pad, "rotation", 0.0) or 0.0))
+    ca, sa = math.cos(a), math.sin(a)
+
+    def to_board(lx: float, ly: float) -> tuple[float, float]:
+        return (cx + lx * ca - ly * sa, cy + lx * sa + ly * ca)
+
+    shape = (getattr(pad, "shape", "") or "").lower()
+    if shape in ("circle", "oval"):
+        radius = min(w, h) / 2
+        half = abs(w - h) / 2
+        if half <= 0:
+            return Point(cx, cy).buffer(radius)
+        ends = [(-half, 0.0), (half, 0.0)] if w >= h else [(0.0, -half), (0.0, half)]
+        return LineString([to_board(*e) for e in ends]).buffer(radius)
+    return Polygon(
+        [
+            to_board(-w / 2, -h / 2),
+            to_board(w / 2, -h / 2),
+            to_board(w / 2, h / 2),
+            to_board(-w / 2, h / 2),
+        ]
+    )
+
+
+@dataclass
+class _Item:
+    net: int
+    layers: dict[str, Any]
+    is_pad: bool = False
+    drill: float = 0.0
+
+
+@dataclass
+class _BoardModel:
+    copper: list[str]
+    items: list[_Item]
+    drills: list[tuple[float, float, float]]
+    pad_geoms: list[Any]
+    fills: dict[str, list[tuple[int, Any]]]
+    outline: Any
+
+
+def _build_model(pcb: PCB) -> _BoardModel:
+    from shapely.geometry import LineString, Point, Polygon
+
+    copper = _copper_layer_names(pcb)
+    items: list[_Item] = []
+    drills: list[tuple[float, float, float]] = []
+    pad_geoms: list[Any] = []
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if (getattr(pad, "type", "") or "") == "np_thru_hole":
+                drill = float(getattr(pad, "drill", 0.0) or 0.0)
+                if drill > 0:
+                    geom = _pad_geometry(fp, pad)
+                    c = geom.centroid
+                    drills.append((c.x, c.y, drill))
+                continue
+            layers = _pad_layers(list(getattr(pad, "layers", []) or []), copper)
+            if not layers:
+                continue
+            geom = _pad_geometry(fp, pad)
+            pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
+            pad_geoms.append(geom)
+            items.append(
+                _Item(
+                    int(getattr(pad, "net_number", 0) or 0),
+                    dict.fromkeys(layers, geom),
+                    True,
+                    pad_drill,
+                )
+            )
+            drill = pad_drill
+            if drill > 0:
+                c = geom.centroid
+                drills.append((c.x, c.y, drill))
+    for seg in pcb.segments:
+        if seg.layer not in copper:
+            continue
+        line = LineString([seg.start, seg.end]) if seg.start != seg.end else Point(seg.start)
+        items.append(_Item(seg.net_number, {seg.layer: line.buffer(seg.width / 2)}))
+    for arc in getattr(pcb, "arcs", []) or []:
+        layer = getattr(arc, "layer", None)
+        pts = [
+            p
+            for p in (
+                getattr(arc, "start", None),
+                getattr(arc, "mid", None),
+                getattr(arc, "end", None),
+            )
+            if p
+        ]
+        if layer in copper and len(pts) >= 2:
+            width = float(getattr(arc, "width", 0.2) or 0.2)
+            items.append(
+                _Item(
+                    int(getattr(arc, "net_number", 0) or 0),
+                    {layer: LineString(pts).buffer(width / 2)},
+                )
+            )
+    for via in pcb.vias:
+        disk = Point(via.position).buffer((via.size or 0.0) / 2)
+        items.append(_Item(via.net_number, dict.fromkeys(copper, disk)))
+        if via.drill:
+            drills.append((via.position[0], via.position[1], float(via.drill)))
+    fills: dict[str, list[tuple[int, Any]]] = {}
+    for zone in pcb.zones:
+        polys = getattr(zone, "filled_polygons", None) or []
+        layers = getattr(zone, "filled_polygon_layers", None) or []
+        for idx, pts in enumerate(polys):
+            if len(pts) < 3:
+                continue
+            layer = layers[idx] if idx < len(layers) else getattr(zone, "layer", None)
+            if layer not in copper:
+                continue
+            poly = Polygon(pts)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if not poly.is_empty:
+                fills.setdefault(layer, []).append((zone.net_number, poly))
+    outline_pts = pcb.get_board_outline()
+    outline = Polygon(outline_pts) if len(outline_pts) >= 3 else None
+    if outline is not None and not outline.is_valid:
+        outline = outline.buffer(0)
+    return _BoardModel(copper, items, drills, pad_geoms, fills, outline)
+
+
+def terminal_for_pad(pcb: PCB, ref: str, pad_number: str) -> LinkTerminal | None:
+    """The copper of footprint pad ``ref.pad_number`` as a :class:`LinkTerminal`."""
+    copper = _copper_layer_names(pcb)
+    fp = pcb.get_footprint(ref)
+    if fp is None:
+        return None
+    for pad in fp.pads:
+        if str(pad.number) == str(pad_number):
+            layers = _pad_layers(list(getattr(pad, "layers", []) or []), copper)
+            if not layers:
+                return None
+            geom = _pad_geometry(fp, pad)
+            c = geom.centroid
+            return LinkTerminal(f"{ref}.{pad_number}", (c.x, c.y), dict.fromkeys(layers, geom))
+    return None
+
+
+def terminal_at_copper(
+    pcb: PCB, net_number: int, point: tuple[float, float], layer: str | None, kind: str
+) -> LinkTerminal | None:
+    """The same-net via or track KiCad anchored a link end at (board-relative)."""
+    from shapely.geometry import LineString, Point
+
+    copper = _copper_layer_names(pcb)
+    probe = Point(point)
+    if kind == "via":
+        best = None
+        for via in pcb.vias:
+            if via.net_number != net_number:
+                continue
+            d = probe.distance(Point(via.position))
+            if d <= max((via.size or 0) / 2, 0.05) and (best is None or d < best[0]):
+                best = (d, via)
+        if best is None:
+            return None
+        via = best[1]
+        disk = Point(via.position).buffer((via.size or 0.0) / 2)
+        return LinkTerminal("via", via.position, dict.fromkeys(copper, disk))
+    if kind == "track":
+        for seg in pcb.segments:
+            if seg.net_number != net_number or (layer and seg.layer != layer):
+                continue
+            line = LineString([seg.start, seg.end]) if seg.start != seg.end else Point(seg.start)
+            if line.distance(probe) <= seg.width / 2 + 1e-3:
+                return LinkTerminal("track", point, {seg.layer: line.buffer(seg.width / 2)})
+    return None
+
+
+def net_components(model: _BoardModel, net_number: int) -> list[dict[str, Any]]:
+    """Copper islands of one net, KiCad-style, as ``{layer: geometry}`` dicts.
+
+    Nodes are the net's pads, tracks, vias and zone-fill islands; two nodes
+    join when their copper intersects on a layer they share.  Sorted largest
+    first by total copper area, so ``[0]`` is the main body of the net.
+    """
+    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+    nodes: list[dict[str, Any]] = [dict(it.layers) for it in model.items if it.net == net_number]
+    for layer, fills in model.fills.items():
+        nodes.extend({layer: poly} for net, poly in fills if net == net_number)
+    parent = list(range(len(nodes)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for layer in model.copper:
+        idx = [i for i, n in enumerate(nodes) if layer in n]
+        if len(idx) < 2:
+            continue
+        geoms = [nodes[i][layer] for i in idx]
+        tree = STRtree(geoms)
+        left, right = tree.query(geoms, predicate="intersects")
+        for li_, ri_ in zip(left, right, strict=True):
+            a, b = find(idx[int(li_)]), find(idx[int(ri_)])
+            if a != b:
+                parent[a] = b
+    groups: dict[int, list[int]] = {}
+    for i in range(len(nodes)):
+        groups.setdefault(find(i), []).append(i)
+    comps: list[dict[str, Any]] = []
+    for members in groups.values():
+        per_layer: dict[str, list[Any]] = {}
+        for i in members:
+            for layer, geom in nodes[i].items():
+                per_layer.setdefault(layer, []).append(geom)
+        comps.append({layer: unary_union(gs) for layer, gs in per_layer.items()})
+    comps.sort(key=lambda c: -sum(g.area for g in c.values()))
+    return comps
+
+
+def padless_components(
+    model: _BoardModel, net_number: int, comps: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Copper islands of ``net_number`` that contain no pad, largest first.
+
+    KiCad reports a ``Zone <-> Zone`` unconnected item when a filled island
+    that carries no pad of its own floats free of the rest of the net (the
+    zone outline anchor says nothing about *which* island).  Those are the
+    islands to bond: pour fragments - possibly with a dangling stub - that no
+    pad or plane reaches.
+    """
+    pads = [it for it in model.items if it.net == net_number and getattr(it, "is_pad", False)]
+    out = []
+    if comps is None:
+        comps = net_components(model, net_number)
+    if len(comps) < 2:
+        return []
+    for comp in comps:
+        if any(
+            layer in comp and comp[layer].intersects(g)
+            for pad in pads
+            for layer, g in pad.layers.items()
+        ):
+            continue
+        out.append(comp)
+    return out
+
+
+def component_terminals(
+    comp: dict[str, Any], others: list[dict[str, Any]], label: str
+) -> tuple[LinkTerminal, LinkTerminal] | None:
+    """Terminals joining ``comp`` to the union of ``others`` at their closest approach."""
+    from shapely.ops import nearest_points, unary_union
+
+    if not others:
+        return None
+    rest: dict[str, list[Any]] = {}
+    for other in others:
+        for layer, geom in other.items():
+            rest.setdefault(layer, []).append(geom)
+    rest_u = {layer: unary_union(gs) for layer, gs in rest.items()}
+    a_all = unary_union(list(comp.values()))
+    b_all = unary_union(list(rest_u.values()))
+    pa, pb = nearest_points(a_all, b_all)
+    return (
+        LinkTerminal(f"{label}:island", (pa.x, pa.y), comp),
+        LinkTerminal(f"{label}:rest", (pb.x, pb.y), rest_u),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+
+def route_link(
+    pcb: PCB,
+    net_number: int,
+    net_name: str,
+    a: LinkTerminal,
+    b: LinkTerminal,
+    rules: LinkRouteRules,
+    *,
+    model: _BoardModel | None = None,
+    allowed_layers: Collection[str] | None = None,
+) -> LinkRoute | None:
+    """Route copper from terminal ``a`` to terminal ``b`` on net ``net_number``.
+
+    Returns ``None`` when no clearance-legal route exists inside the search
+    window (or the window would exceed ``rules.max_cells``).
+
+    ``allowed_layers`` (Issue #8310) restricts the link to those copper
+    layers: tracks and vias keep off every other layer, and a terminal only
+    bonds on an allowed layer.  ``None`` keeps every layer.
+    """
+    import numpy as np
+    import shapely
+    from shapely.geometry import Point, box
+    from shapely.ops import unary_union
+
+    model = model or _build_model(pcb)
+    copper = model.copper
+    g = rules.grid
+    half_w = rules.trace_width / 2
+
+    (ax, ay), (bx, by) = a.point, b.point
+    x0, x1 = min(ax, bx) - rules.margin, max(ax, bx) + rules.margin
+    y0, y1 = min(ay, by) - rules.margin, max(ay, by) + rules.margin
+    if model.outline is not None:
+        ob = model.outline.bounds
+        x0, y0, x1, y1 = max(x0, ob[0]), max(y0, ob[1]), min(x1, ob[2]), min(y1, ob[3])
+    # Align the grid on A's anchor (snapped to 0.01 mm, the precision the PCB
+    # writer keeps) so the written copper is exactly the copper checked here.
+    gx0, gy0 = round(ax, 2), round(ay, 2)
+    ix0 = math.floor((x0 - gx0) / g)
+    iy0 = math.floor((y0 - gy0) / g)
+    nx = int(math.ceil((x1 - gx0) / g)) - ix0 + 1
+    ny = int(math.ceil((y1 - gy0) / g)) - iy0 + 1
+    nl = len(copper)
+    if nx <= 1 or ny <= 1 or nx * ny * nl > rules.max_cells:
+        return None
+    xs = np.round(gx0 + (ix0 + np.arange(nx)) * g, 2)
+    ys = np.round(gy0 + (iy0 + np.arange(ny)) * g, 2)
+    gx, gy = np.meshgrid(xs, ys, indexing="ij")
+    flat_x, flat_y = gx.ravel(), gy.ravel()
+    window = box(xs[0] - 1.0, ys[0] - 1.0, xs[-1] + 1.0, ys[-1] + 1.0)
+
+    def mask_of(geom: Any) -> Any:
+        if geom is None or geom.is_empty:
+            return np.zeros(nx * ny, dtype=bool)
+        shapely.prepare(geom)
+        return shapely.intersects_xy(geom, flat_x, flat_y).reshape(nx, ny)
+
+    # Foreign copper per layer, grouped by the clearance it demands (Issue
+    # #6374: ``rules.clearance_for(net)``).  Without a per-net map there is
+    # exactly one group at ``rules.clearance`` -- the historical behaviour.
+    foreign_by_layer: dict[str, list[tuple[Any, float]]] = {}
+    blocked = np.zeros((nl, nx, ny), dtype=bool)
+    fill_cost = np.ones((nl, nx, ny), dtype=float)
+    inside = None
+    if model.outline is not None:
+        inside = mask_of(model.outline.buffer(-(rules.edge_clearance + half_w)))
+    for li, layer in enumerate(copper):
+        by_clearance: dict[float, list[Any]] = {}
+        for it in model.items:
+            if it.net != net_number and layer in it.layers and it.layers[layer].intersects(window):
+                for part, c in rules.clearance_parts(net_name, it.net, layer, it.layers[layer]):
+                    by_clearance.setdefault(c, []).append(part)
+        groups = [(unary_union(geoms), c) for c, geoms in sorted(by_clearance.items())]
+        foreign_by_layer[layer] = groups
+        for foreign, c in groups:
+            blocked[li] |= mask_of(foreign.buffer(c + half_w + 0.005))
+        if inside is not None:
+            blocked[li] |= ~inside
+        if allowed_layers is not None and layer not in allowed_layers:
+            blocked[li] = True
+        fills = [
+            poly
+            for net, poly in model.fills.get(layer, [])
+            if net != net_number and poly.intersects(window)
+        ]
+        if fills:
+            fill_cost[li][mask_of(unary_union(fills))] = rules.foreign_fill_cost
+
+    # Via legality: clear of foreign copper on every layer, of every pad
+    # (no via-in-pad), of every drill by the hole-to-hole rule.
+    via_bad = np.zeros((nx, ny), dtype=bool)
+    for groups in foreign_by_layer.values():
+        for foreign, c in groups:
+            via_bad |= mask_of(foreign.buffer(c + rules.via_size / 2 + 0.005))
+    pads_here = [p for p in model.pad_geoms if p.intersects(window)]
+    if pads_here:
+        via_bad |= mask_of(unary_union(pads_here).buffer(rules.via_size / 2 + 0.05))
+    # Issue #8974: the fab-view same-net slit band.  The all-pads mask above
+    # bans via-in-pad on every net; what it does not constrain is the
+    # annulus of a via seated JUST outside its own SMD pad -- two wedges of
+    # air beside the connecting stub that ``physical_copper_gap`` grades as
+    # errors even same-net (#8938).  The banned ring is the region form of
+    # the shared ``same_net_pad_gap_acceptable`` predicate
+    # (``same_net_pad_gap_band_ring``, per-pad bbox rings) -- one band
+    # definition feeds both this mask and the point re-checks (#8974
+    # review: no second band copy).  The A* walks on to the next node
+    # exactly as any other illegal seat.
+    band_edge_mm = float(getattr(rules, "same_net_pad_gap_mm", 0.0) or 0.0)
+    if band_edge_mm > 0:
+        from .via_clearance import same_net_pad_gap_band_ring
+
+        own_pad_boxes = [
+            next(iter(it.layers.values())).bounds
+            for it in model.items
+            if it.is_pad and it.net == net_number and it.drill <= 0
+            if next(iter(it.layers.values())).intersects(window)
+        ]
+        if own_pad_boxes:
+            band_ring = unary_union(
+                [same_net_pad_gap_band_ring(b, rules.via_size, band_edge_mm) for b in own_pad_boxes]
+            )
+            via_bad |= mask_of(band_ring)
+    drill_disks = [
+        # Issue #6671: + the slack the board writer's 0.01 mm rounding can eat.
+        Point(dx, dy).buffer(
+            dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
+        )
+        for dx, dy, dd in model.drills
+        if window.distance(Point(dx, dy)) < 2.0
+    ]
+    if drill_disks:
+        via_bad |= mask_of(unary_union(drill_disks))
+    if inside is not None:
+        via_bad |= ~mask_of(model.outline.buffer(-(rules.edge_clearance + rules.via_size / 2)))
+
+    def terminal_mask(t: LinkTerminal) -> Any:
+        m = np.zeros((nl, nx, ny), dtype=bool)
+        for li, layer in enumerate(copper):
+            if layer in t.layers:
+                geom = t.layers[layer]
+                # Keep endpoints strictly inside the copper they bond to (KiCad
+                # joins a track to a pad by its END POINT, not by overlap).
+                inset = geom.buffer(-_TERMINAL_INSET)
+                m[li] = mask_of(geom if inset.is_empty else inset) & ~blocked[li]
+        return m
+
+    # Inner layers that carry a pour are plane layers: a link may drop a via
+    # into one (that is how a stranded pad reaches its plane) but never runs
+    # a track along it.
+    plane_layer = [
+        li
+        for li, layer in enumerate(copper)
+        if layer not in ("F.Cu", "B.Cu") and model.fills.get(layer)
+    ]
+    is_plane = [li in plane_layer for li in range(nl)]
+
+    start = terminal_mask(a)
+    goal = terminal_mask(b)
+    if not start.any() or not goal.any():
+        return None
+
+    # A* over (layer, i, j).
+    inf = float("inf")
+    dist = np.full((nl, nx, ny), inf)
+    parent: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+    heap: list[tuple[float, float, int, int, int]] = []
+
+    def h(i: int, j: int) -> float:
+        return math.hypot(xs[i] - bx, ys[j] - by)
+
+    for li, i, j in zip(*np.nonzero(start), strict=True):
+        dist[li, i, j] = 0.0
+        heapq.heappush(heap, (h(i, j), 0.0, int(li), int(i), int(j)))
+
+    found: tuple[int, int, int] | None = None
+    while heap:
+        _f, d, li, i, j = heapq.heappop(heap)
+        if d > dist[li, i, j]:
+            continue
+        if goal[li, i, j]:
+            found = (li, i, j)
+            break
+        for di, dj in [] if is_plane[li] else _DIRS:
+            ni, nj = i + di, j + dj
+            if not (0 <= ni < nx and 0 <= nj < ny) or blocked[li, ni, nj]:
+                continue
+            step = g * (math.sqrt(2.0) if di and dj else 1.0)
+            # Diagonal moves must not cut a blocked corner.
+            if di and dj and (blocked[li, i + di, j] or blocked[li, i, j + dj]):
+                continue
+            nd = d + step * 0.5 * (fill_cost[li, i, j] + fill_cost[li, ni, nj])
+            if nd < dist[li, ni, nj]:
+                dist[li, ni, nj] = nd
+                parent[(li, ni, nj)] = (li, i, j)
+                heapq.heappush(heap, (nd + h(ni, nj), nd, li, ni, nj))
+        if not via_bad[i, j]:
+            for nli in range(nl):
+                if nli == li or blocked[nli, i, j]:
+                    continue
+                nd = d + rules.via_cost
+                if nd < dist[nli, i, j]:
+                    dist[nli, i, j] = nd
+                    parent[(nli, i, j)] = (li, i, j)
+                    heapq.heappush(heap, (nd + h(i, j), nd, nli, i, j))
+    if found is None:
+        return None
+    if dist[found] == 0.0:
+        return None  # the two terminals already touch on the grid: nothing to add
+
+    path = [found]
+    while path[-1] in parent:
+        path.append(parent[path[-1]])
+    path.reverse()
+
+    route = LinkRoute(
+        net_number=net_number,
+        net_name=net_name,
+        width=rules.trace_width,
+        via_size=rules.via_size,
+        via_drill=rules.via_drill,
+    )
+    # Split into per-layer runs; a layer change is a via at that cell.
+    runs: list[tuple[int, list[tuple[int, int]]]] = []
+    for li, i, j in path:
+        if runs and runs[-1][0] == li:
+            runs[-1][1].append((i, j))
+        else:
+            if runs:
+                route.vias.append((float(xs[i]), float(ys[j])))
+            runs.append((li, [(i, j)]))
+    legal_area = (
+        model.outline.buffer(-(rules.edge_clearance + half_w))
+        if model.outline is not None
+        else None
+    )
+    for li, cells in runs:
+        pts = _simplify(cells)
+        xy = [(float(xs[i]), float(ys[j])) for i, j in pts]
+        xy = _shortcut(xy, foreign_by_layer.get(copper[li], []), half_w, legal_area)
+        for (x_a, y_a), (x_b, y_b) in zip(xy, xy[1:], strict=False):
+            if (x_a, y_a) == (x_b, y_b):
+                continue  # Issue #8417: never emit a zero-length track
+            route.segments.append((x_a, y_a, x_b, y_b, copper[li]))
+
+    # Exact check: grid quantisation must never leak a sub-clearance segment.
+    if _route_violates_foreign(route, foreign_by_layer, half_w):
+        return None
+    return route
+
+
+def _route_violates_foreign(
+    route: LinkRoute,
+    foreign_by_layer: dict[str, list[tuple[Any, float]]],
+    half_w: float,
+) -> bool:
+    """True if any segment or via of ``route`` is too close to foreign copper.
+
+    A segment with ``start == end`` is measured as a disc of the trace width
+    (a point buffered by ``half_w``), exactly like a real track, so a
+    degenerate segment lying on foreign copper is rejected (Issue #8417).
+    """
+    from shapely.geometry import LineString, Point
+
+    for x_a, y_a, x_b, y_b, layer in route.segments:
+        shape = (
+            Point(x_a, y_a) if (x_a, y_a) == (x_b, y_b) else LineString([(x_a, y_a), (x_b, y_b)])
+        )
+        for foreign, c in foreign_by_layer.get(layer, []):
+            if shape.distance(foreign) < c + half_w - 1e-4:
+                return True
+    for vx, vy in route.vias:
+        p = Point(vx, vy)
+        for groups in foreign_by_layer.values():
+            for foreign, c in groups:
+                if p.distance(foreign) < c + route.via_size / 2 - 1e-4:
+                    return True
+    return False
+
+
+def route_clears_floors(route: LinkRoute, model: _BoardModel, rules: LinkRouteRules) -> bool:
+    """True if ``route`` keeps every per-net floor of ``rules`` (Issue #8573).
+
+    An exact re-check of finished geometry -- e.g. the output of
+    :func:`collapse_link_route`, which merges segments without a clearance
+    oracle -- against the same foreign-copper groups :func:`route_link` used.
+    """
+    from shapely.ops import unary_union
+
+    by_layer: dict[str, list[tuple[Any, float]]] = {}
+    for layer in model.copper:
+        by_c: dict[float, list[Any]] = {}
+        for it in model.items:
+            if it.net != route.net_number and layer in it.layers:
+                for part, c in rules.clearance_parts(
+                    route.net_name, it.net, layer, it.layers[layer]
+                ):
+                    by_c.setdefault(c, []).append(part)
+        by_layer[layer] = [(unary_union(g), c) for c, g in sorted(by_c.items())]
+    return not _route_violates_foreign(route, by_layer, route.width / 2)
+
+
+def _via_site_blocker(
+    model: _BoardModel, net_number: int, site: tuple[float, float], rules: LinkRouteRules
+) -> str | None:
+    """Why a through via cannot sit at ``site`` (board-relative), or ``None``.
+
+    The same legality :func:`route_link` applies to its own vias: clear of
+    foreign copper on every layer, of every pad, of every drill and of the
+    board edge.
+    """
+    from shapely.geometry import Point
+
+    p = Point(site)
+    for it in model.items:
+        if it.net == net_number:
+            continue
+        link_name = (rules.net_names or {}).get(net_number, "")
+        for layer, geom in it.layers.items():
+            for part, c in rules.clearance_parts(link_name, it.net, layer, geom):
+                need = c + rules.via_size / 2
+                if p.distance(part) < need - 1e-4:
+                    return f"via site is {p.distance(part):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
+    for geom in model.pad_geoms:
+        if p.distance(geom) < rules.via_size / 2 + 0.05 - 1e-4:
+            return "via site is inside or against a pad (no via-in-pad)"
+    # Issue #8974: the same-net slit band route_link's mask enforces -- a
+    # seat whose annulus parks inside ``(0, band_edge_mm)`` beside its own
+    # SMD pad is a fab-view ``physical_copper_gap`` error even same-net.
+    # The shared point predicate decides (bboxes, one band definition with
+    # the mask's ring and every other producer); seats with a smaller gap
+    # are already rejected by the no-via-in-pad loop above, which fires
+    # first (#8974 review: no second band copy).
+    band_edge_mm = float(getattr(rules, "same_net_pad_gap_mm", 0.0) or 0.0)
+    if band_edge_mm > 0:
+        from .via_clearance import same_net_pad_gap_acceptable
+
+        own_pad_boxes = [
+            next(iter(it.layers.values())).bounds
+            for it in model.items
+            if it.is_pad and it.net == net_number and it.drill <= 0
+        ]
+        if not same_net_pad_gap_acceptable(p.x, p.y, rules.via_size, own_pad_boxes, band_edge_mm):
+            return (
+                f"via site annulus sits inside the {band_edge_mm:.2f} mm "
+                f"fab-view slit band beside its own SMD pad (#8974)"
+            )
+    for dx, dy, dd in model.drills:
+        need = dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
+        if p.distance(Point(dx, dy)) < need - 1e-4:
+            return "via site violates the hole-to-hole rule against an existing drill"
+    if model.outline is not None and not model.outline.buffer(
+        -(rules.edge_clearance + rules.via_size / 2)
+    ).covers(p):
+        return "via site is too close to the board edge"
+    return None
+
+
+def route_link_via(
+    pcb: PCB,
+    net_number: int,
+    net_name: str,
+    a: LinkTerminal,
+    b: LinkTerminal,
+    via_at: tuple[float, float],
+    rules: LinkRouteRules,
+    *,
+    model: _BoardModel | None = None,
+    allowed_layers: Collection[str] | None = None,
+) -> LinkRoute | None:
+    """Route ``a`` -> forced via at ``via_at`` -> ``b`` (Issue #8310).
+
+    The search is split in two legs, each a :func:`route_link` call from a
+    terminal to the via's own copper, so every rule ``route_link`` applies
+    holds on both legs.  Returns ``None`` if the site is illegal or either leg
+    has no route.  ``via_at`` is board-relative (snapped to the 0.01 mm the
+    board writer keeps).
+    """
+    from shapely.geometry import Point
+
+    model = model or _build_model(pcb)
+    site = (round(via_at[0], 2), round(via_at[1], 2))
+    if _via_site_blocker(model, net_number, site, rules) is not None:
+        return None
+    layers = [layer for layer in model.copper if allowed_layers is None or layer in allowed_layers]
+    if len(layers) < 2:
+        return None  # a via needs two layers it may connect
+    disk = Point(site).buffer(rules.via_size / 2)
+    vt = LinkTerminal("via", site, dict.fromkeys(layers, disk))
+    leg1 = route_link(pcb, net_number, net_name, a, vt, rules, model=model, allowed_layers=layers)
+    leg2 = route_link(pcb, net_number, net_name, vt, b, rules, model=model, allowed_layers=layers)
+    if leg1 is None or leg2 is None:
+        return None
+    return LinkRoute(
+        net_number=net_number,
+        net_name=net_name,
+        width=rules.trace_width,
+        via_size=rules.via_size,
+        via_drill=rules.via_drill,
+        segments=leg1.segments + leg2.segments,
+        vias=[*leg1.vias, site, *leg2.vias],
+    )
+
+
+def explain_link_failure(
+    pcb: PCB,
+    net_number: int,
+    a: LinkTerminal,
+    b: LinkTerminal,
+    rules: LinkRouteRules,
+    *,
+    model: _BoardModel | None = None,
+    allowed_layers: Collection[str] | None = None,
+) -> dict[str, Any]:
+    """Why a link did not route (Issue #8310): a terminal fault or a blocker.
+
+    Returns ``{"reason": str}``, plus ``"blocker"`` when foreign copper is the
+    cause: the item nearest the straight ``a``-``b`` line -- net, layer, its
+    distance and the clearance it must keep.  The straight line is a
+    diagnostic yardstick, not the router's path.
+    """
+    from shapely.geometry import LineString, Point
+
+    model = model or _build_model(pcb)
+    for label, t in (("A", a), ("B", b)):
+        usable = [la for la in t.layers if allowed_layers is None or la in allowed_layers]
+        if not usable:
+            return {"reason": f"endpoint {label} ({t.label}) has no copper on the allowed layers"}
+    line = LineString([a.point, b.point]) if a.point != b.point else Point(a.point)
+    half_w = rules.trace_width / 2
+    best: tuple[float, dict[str, Any]] | None = None
+    near: list[tuple[float, str, int, Any, float]] = []  # corridor candidates
+    for it in model.items:
+        if it.net == net_number:
+            continue
+        need = rules.clearance_for(it.net) + half_w
+        for layer, geom in it.layers.items():
+            if allowed_layers is not None and layer not in allowed_layers:
+                continue
+            d = line.distance(geom)
+            near.append((d, layer, it.net, geom, rules.clearance_for(it.net)))
+            slack = d - need
+            if best is None or slack < best[0]:
+                name = getattr(pcb.nets.get(it.net), "name", "") or f"net {it.net}"
+                best = (
+                    slack,
+                    {
+                        "net": name,
+                        "layer": layer,
+                        "kind": "pad" if it.is_pad else "copper",
+                        "distance_mm": round(d, 3),
+                        "required_mm": round(need, 3),
+                    },
+                )
+    out: dict[str, Any] = {"reason": "no clearance-legal route inside the search window"}
+    if best is not None:
+        out["blocker"] = best[1]
+    bound = _corridor_bound(pcb, rules, near, line)
+    if bound is not None:
+        out["corridor"] = bound
+        out["reason"] = (
+            f"corridor too narrow: {bound['net_a']} and {bound['net_b']} ({bound['layer']}) "
+            f"are {bound['gap_mm']:.3f} mm apart but the link needs "
+            f">= {bound['required_mm']:.3f} mm "
+            f"({bound['clearance_a_mm']:.3f} + {bound['clearance_b_mm']:.3f} clearance "
+            f"+ {rules.trace_width:.3f} width)"
+        )
+    return out
+
+
+def _crosses_line(across: Any, link_line: Any) -> bool:
+    """True when ``across`` is more perpendicular than parallel to ``link_line``."""
+    (ax, ay), (bx, by) = across.coords[0], across.coords[-1]
+    (lx1, ly1), (lx2, ly2) = link_line.coords[0], link_line.coords[-1]
+    ux, uy = bx - ax, by - ay
+    vx, vy = lx2 - lx1, ly2 - ly1
+    nu, nv = math.hypot(ux, uy), math.hypot(vx, vy)
+    if nu == 0 or nv == 0:
+        return False
+    return bool(abs(ux * vx + uy * vy) / (nu * nv) < 0.5)
+
+
+def _corridor_bound(
+    pcb: PCB,
+    rules: LinkRouteRules,
+    near: list[tuple[float, str, int, Any, float]],
+    link_line: Any,
+) -> dict[str, Any] | None:
+    """The geometric bound when two foreign items flank the link too tightly (#8546).
+
+    Two foreign conductors on one layer, both near the straight a-b line and on
+    opposite sides of it, leave a corridor of ``gap``.  The track fits only if
+    ``gap >= clearance_a + clearance_b + width``; when it does not, no router
+    could succeed on that layer and the bound is a better answer than "no route".
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points
+
+    best: tuple[float, dict[str, Any]] | None = None
+    cand = sorted(near, key=lambda t: t[0])[:16]
+    for i, (da, la, na, ga, ca) in enumerate(cand):
+        for db, lb, nb, gb, cb in cand[i + 1 :]:
+            if la != lb or na == nb:
+                continue
+            # Flanking means the connecting segment runs across the link, not along it.
+            p1, p2 = nearest_points(ga, gb)
+            across = LineString([p1, p2]) if p1 != p2 else None
+            if across is None or not _crosses_line(across, link_line):
+                continue
+            required = ca + cb + rules.trace_width
+            gap = ga.distance(gb)
+            if gap >= required - 1e-9 or da > required or db > required:
+                continue
+            slack = gap - required
+            if best is None or slack < best[0]:
+                name = lambda n: getattr(pcb.nets.get(n), "name", "") or f"net {n}"  # noqa: E731
+                best = (
+                    slack,
+                    {
+                        "layer": la,
+                        "net_a": name(na),
+                        "net_b": name(nb),
+                        "gap_mm": round(gap, 3),
+                        "required_mm": round(required, 3),
+                        "clearance_a_mm": round(ca, 3),
+                        "clearance_b_mm": round(cb, 3),
+                    },
+                )
+    return best[1] if best else None
+
+
+def _octilinear(p: tuple[float, float], q: tuple[float, float]) -> bool:
+    dx, dy = abs(q[0] - p[0]), abs(q[1] - p[1])
+    return dx < 1e-6 or dy < 1e-6 or abs(dx - dy) < 1e-6
+
+
+def _shortcut(
+    pts: list[tuple[float, float]],
+    foreign: Sequence[tuple[Any, float]],
+    half_width: float,
+    legal_area: Any,
+) -> list[tuple[float, float]]:
+    """Merge staircase corners: jump to the farthest vertex reachable by one
+    legal octilinear segment.  Endpoints (and so terminal contact) are kept.
+
+    The A* grid breaks cost ties arbitrarily, so a diagonal run often comes
+    out as a zig-zag of grid-step segments.  Each candidate shortcut is
+    re-checked exactly against the foreign copper and the board outline.
+    ``foreign`` is ``(geometry, clearance)`` groups: a shortcut must keep
+    ``clearance + half_width`` from each group's copper (Issue #6374).
+    """
+    from shapely.geometry import LineString
+
+    if len(pts) <= 2:
+        return pts
+    out = [pts[0]]
+    k = 0
+    while k < len(pts) - 1:
+        nxt = k + 1
+        for m in range(len(pts) - 1, k + 1, -1):
+            if not _octilinear(pts[k], pts[m]):
+                continue
+            line = LineString([pts[k], pts[m]])
+            if any(line.distance(geom) < c + half_width - 1e-4 for geom, c in foreign):
+                continue
+            if legal_area is not None and not legal_area.covers(line):
+                continue
+            nxt = m
+            break
+        out.append(pts[nxt])
+        k = nxt
+    return out
+
+
+def _simplify(cells: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Keep only the cells where the move direction changes."""
+    if len(cells) <= 2:
+        return list(cells) if len(cells) == 2 else [cells[0], cells[0]]
+    out = [cells[0]]
+    for prev, cur, nxt in zip(cells, cells[1:], cells[2:], strict=False):
+        if (cur[0] - prev[0], cur[1] - prev[1]) != (nxt[0] - cur[0], nxt[1] - cur[1]):
+            out.append(cur)
+    out.append(cells[-1])
+    return out
+
+
+def append_link_route(pcb_path: Path, route: LinkRoute, origin: tuple[float, float]) -> None:
+    """Write ``route``'s segments and vias into the board file.
+
+    ``origin`` is the PCB model's ``board_origin``: the route is in
+    board-relative coordinates and the file is absolute.
+    """
+    append_link_routes(pcb_path, [route], origin)
+
+
+def append_link_routes(
+    pcb_path: Path, routes: Sequence[LinkRoute], origin: tuple[float, float]
+) -> None:
+    """Write several routes into the board file with ONE load and ONE save.
+
+    The result is byte-identical to calling :func:`append_link_route` once per
+    route in the same order: each call only appends nodes to the document
+    tail, and the serializer is a fixed point of load/save.  A board-03
+    oracle attempt commits ~20 routes, and each separate load+save of the
+    ~750 KB file cost ~0.4 s (Issue #5911).
+    """
+    if not routes:
+        return
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+
+    # Issue #8523: write copper in the board's own net dialect.
+    name_only = _board_is_name_only(pcb_path)
+    doc = load_pcb(pcb_path)
+    for route in routes:
+        _append_route_nodes(doc, route, origin, name_only=name_only)
+    save_pcb(doc, pcb_path)
+
+
+_NAME_ONLY_NET_RE = re.compile(r'\(net\s+"')
+
+
+def _board_is_name_only(pcb_path: Path) -> bool:
+    """True when the board uses KiCad-10 ``(net "name")`` refs (same test as #4416).
+
+    A numeric ``(net N "name")`` table always has a digit after ``(net``, so a
+    quoted-first ref appears only on name-based boards.
+    """
+    try:
+        return bool(_NAME_ONLY_NET_RE.search(Path(pcb_path).read_text()))
+    except OSError:
+        return False
+
+
+def collapse_link_route(route: LinkRoute) -> LinkRoute:
+    """Return a copy of ``route`` with collinear runs and staircases merged (#8523).
+
+    Reuses the ``merge_collinear`` + ``compress_staircase`` passes from #8397,
+    per consecutive same-layer run.  Vias and endpoints are preserved.  No
+    clearance oracle is available here; callers gate the result with DRC.
+    """
+    from dataclasses import replace
+
+    from .optimizer.algorithms import compress_staircase, merge_collinear
+    from .optimizer.config import OptimizationConfig
+    from .primitives import Segment
+
+    cfg = OptimizationConfig()
+    out: list[tuple[float, float, float, float, str]] = []
+    i = 0
+    segs = route.segments
+    via_r = route.via_size / 2.0 + 1e-6
+    tol = 1e-6
+
+    def _in_via(x: float, y: float) -> bool:
+        return any(math.hypot(x - vx, y - vy) <= via_r for vx, vy in route.vias)
+
+    def _breaks_after(k: int) -> bool:
+        # A run must stay one contiguous chain: ``compress_staircase`` joins the
+        # first start to the last end and would bridge a gap (e.g. the two legs
+        # of ``route_link_via``, which touch the via disk at different points)
+        # and strand the via with no track end point inside it.  Vias are
+        # always run boundaries so their incident end points survive.
+        a, b = segs[k], segs[k + 1]
+        if a[4] != b[4]:
+            return True
+        if abs(a[2] - b[0]) > tol or abs(a[3] - b[1]) > tol:
+            return True
+        return _in_via(a[2], a[3]) or _in_via(b[0], b[1])
+
+    while i < len(segs):
+        j = i + 1
+        while j < len(segs) and not _breaks_after(j - 1):
+            j += 1
+        layer = segs[i][4]
+        run = [
+            Segment(x1, y1, x2, y2, route.width, layer, route.net_number, route.net_name)  # type: ignore[arg-type]
+            for x1, y1, x2, y2, _l in segs[i:j]
+        ]
+        run = compress_staircase(merge_collinear(run, cfg), cfg)
+        run = merge_collinear(run, cfg)
+        out.extend((s.x1, s.y1, s.x2, s.y2, layer) for s in run)
+        i = j
+    return replace(route, segments=out, vias=list(route.vias))
+
+
+def _append_route_nodes(
+    doc: Any, route: LinkRoute, origin: tuple[float, float], name_only: bool = False
+) -> None:
+    from kicad_tools.cli.stitch_cmd import _stitch_uuid
+    from kicad_tools.sexp.builders import fmt, segment_node, via_node
+
+    ox, oy = origin
+    net_name = route.net_name if name_only and route.net_name else None
+    for x_a, y_a, x_b, y_b, layer in route.segments:
+        # Issue #8495: compare after the rounding ``segment_node`` applies, so a
+        # sub-resolution sliver is not serialized as a zero-length segment.
+        if (fmt(x_a + ox), fmt(y_a + oy)) == (fmt(x_b + ox), fmt(y_b + oy)):
+            continue
+        doc.append(
+            segment_node(
+                start_x=x_a + ox,
+                start_y=y_a + oy,
+                end_x=x_b + ox,
+                end_y=y_b + oy,
+                width=route.width,
+                layer=layer,
+                net=route.net_number,
+                net_name=net_name,
+                uuid_str=_stitch_uuid("oracle-seg", x_a, y_a, x_b, y_b, layer, route.net_number),
+            )
+        )
+    for vx, vy in route.vias:
+        doc.append(
+            via_node(
+                x=vx + ox,
+                y=vy + oy,
+                size=route.via_size,
+                drill=route.via_drill,
+                layers=("F.Cu", "B.Cu"),
+                net=route.net_number,
+                net_name=net_name,
+                uuid_str=_stitch_uuid("oracle-via", vx, vy, route.net_number),
+            )
+        )

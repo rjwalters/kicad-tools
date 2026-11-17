@@ -1,0 +1,2496 @@
+"""Clearance rule implementation for DRC checks.
+
+Validates minimum spacing between copper elements (traces, pads, vias)
+on the same layer but different nets.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from itertools import product
+from typing import TYPE_CHECKING
+
+from kicad_tools._shapely import has_shapely, require_shapely
+from kicad_tools.core.geometry import (
+    point_to_segment_distance as _point_to_segment_distance,
+)
+from kicad_tools.core.geometry import (
+    rotate_pad_offset as _rotate_pad_offset,
+)
+from kicad_tools.core.geometry import (
+    segment_to_segment_distance as _segment_to_segment_distance,
+)
+from kicad_tools.core.geometry import (
+    segments_intersect as _segments_intersect,
+)
+from kicad_tools.core.layers import via_spans_layer as _via_spans_layer
+
+from ..clearance_shapes import (
+    KSegment,
+    KShape,
+    KVia,
+)
+from ..clearance_shapes import (
+    copper_gap as _kernel_copper_gap,
+)
+from ..clearance_shapes import (
+    make_pad as _kernel_make_pad,
+)
+from ..clearance_shapes import (
+    pad_shape as _kernel_pad_shape,
+)
+from ..copper_refs import Origin, board_origin, segment_ref, via_ref
+from ..spatial import candidate_pairs
+from ..violations import DRCResults, DRCViolation
+from .base import DRC_TOLERANCE, DRCRule
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via
+
+
+# Floating-point tolerance for detecting segment-endpoint / via-center
+# co-location (0.1 micron).  The router's in-pad escape places the inner-
+# layer segment endpoint at *exactly* the via center (router invariant --
+# see ``_try_in_pad_escape`` in ``src/kicad_tools/router/escape.py``).
+# However, when a different net's escape segment happens to terminate at
+# the same coordinates (e.g. a neighboring pad's escape segment landing on
+# top of a fine-pitch in-pad via center after pitch-aware placement), the
+# clearance check sees a "segment endpoint at via center on a different
+# net" pair and reports a false-positive ``clearance_segment_via``
+# violation -- the segment endpoint is conceptually the via, not a piece
+# of trace copper at that exact point.  An epsilon of 1e-4 mm (matching
+# ``_CLEARANCE_EPSILON_MM`` in ``edge.py``) is far below any real-world
+# manufacturing precision but well above IEEE-754 representation error
+# for the router's coordinate space, so it suppresses the modeling
+# artifact without masking real near-misses.  See Issue #2706.
+_COLOCATION_EPSILON_MM = 1e-4
+
+
+#: Sentinel for "this element's shapely copper geometry has not been built
+#: yet".  ``None`` is a legitimate *result* (``_element_to_shapely_geom``
+#: returns it for a degenerate zero-radius element), so the memo slots below
+#: cannot use ``None`` to mean "unset".
+_GEOM_UNSET = object()
+
+#: Issue #5240: when ``False``, the shapely copper geometry of every element
+#: is rebuilt from scratch on every pair -- the exhaustive pre-memoisation
+#: behaviour.  Kept reachable so the equivalence tests can run the same corpus
+#: both ways and assert the emitted violations are identical (the oracle
+#: pattern PR #5641 established for ``_PRUNE_BY_BOUNDS``).  Production always
+#: leaves this ``True``; the memo is a pure allocation saving.
+_MEMOIZE_COPPER_GEOM = True
+
+
+@dataclass
+class CopperElement:
+    """A copper element for clearance checking.
+
+    Provides a unified interface for segments, pads, and vias
+    to simplify distance calculations.
+    """
+
+    element_type: str  # "segment", "pad", "via"
+    layer: str
+    net_number: int
+    # For segments: (start_x, start_y, end_x, end_y, width)
+    # For pads/vias: (center_x, center_y, width, height)
+    geometry: tuple[float, ...]
+    # Reference for violation reporting
+    reference: str
+    # Net name for violation output (empty string for unconnected/net 0)
+    net_name: str = ""
+    # For vias: the layer names explicitly declared on the via (the
+    # endpoint pair, e.g. ("F.Cu", "B.Cu")).  A through-via barrel is
+    # physical copper on every layer it SPANS, so the element is
+    # collected on inner layers too (issue #3487) -- but via-via and
+    # pad-via pairs are only evaluated on explicitly-declared layers to
+    # avoid re-reporting the same geometric pair on every spanned layer
+    # (the endpoint-layer scan already covers them).
+    explicit_layers: tuple[str, ...] = ()
+    # For pads: a precomputed shapely polygon of the TRUE copper outline
+    # (roundrect/oval honored) in board coordinates.  When two elements
+    # both carry a polygon -- or one polygon plus one circular via -- the
+    # clearance is computed via exact shapely geometry instead of the
+    # analytic axis-aligned-rectangle formulas, which over-approximate
+    # rounded corners and produce phantom sub-10um shorts (issue #3826).
+    # ``None`` for segments and vias (which use the analytic disc path).
+    polygon: object | None = None
+    pad_type: str = ""
+    source_pad: Pad | None = None
+    # Owning ``Footprint`` OBJECT for pads (``None`` for segments/vias).  The
+    # object-specific SMD pad floor is a placement constraint, so it must be
+    # able to tell package-internal pad geometry from pads the designer
+    # positioned relative to one another -- see ``_check_layer``.
+    #
+    # This deliberately holds the footprint *object* rather than its
+    # ``reference`` string: references are not guaranteed unique (or even
+    # present).  A bare board or a synthesized fixture can carry several
+    # footprints whose reference is "", and two footprints sharing a blank or
+    # duplicated reference would compare equal and silently suppress a REAL
+    # different-footprint violation.  Identity comparison ("is this the same
+    # placed footprint?") is exactly the question the floor needs answered.
+    source_footprint: Footprint | None = None
+    # For pads: the raw ``pad.shape`` string (``"rect"``, ``"roundrect"``,
+    # ``"oval"``/``"obround"``, ``"circle"``, ...).  Used to scope the
+    # segment-vs-pad polygon path (issue #4985) to shapes whose true
+    # outline actually diverges from the AABB rectangle -- ``roundrect``
+    # and non-square ``oval``/``obround`` -- so plain ``rect`` pads keep
+    # the existing analytic AABB behaviour unchanged.  ``""`` for
+    # segments and vias.
+    pad_shape: str = ""
+    # Issue #5240: lazily-memoised shapely copper geometry.  A clearance
+    # sweep asks the same element for its copper shape once per candidate
+    # PAIR it takes part in -- on board 06's routed artifact that is 4,059
+    # segment buffers across 169 distinct segments and 8,922 pad/via
+    # geometry builds across 270 distinct elements -- and the shape is a
+    # pure function of the element's (immutable, never reassigned) geometry
+    # fields, so the rebuild is redundant work, not a different answer.
+    #
+    # ``compare=False`` / ``repr=False`` keep ``__eq__`` and ``__repr__``
+    # byte-identical to the pre-memo dataclass, so nothing that compares or
+    # prints elements can observe the cache.
+    _seg_geom_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
+    _pad_geom_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
+    # Epic #5509 Phase 4d: the element's shared-clearance-kernel shape, memoised
+    # for exactly the reason the two caches above are -- a sweep asks the same
+    # element for it once per candidate pair it takes part in, and it is a pure
+    # function of fields that are assigned once at construction.
+    _kernel_shape_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
+
+    @classmethod
+    def from_segment(cls, seg: Segment, origin: Origin = (0.0, 0.0)) -> CopperElement:
+        """Create from a PCB segment.
+
+        ``origin`` is the board origin, so the geometry-based ``reference``
+        (Issue #6088) is in sheet coordinates; see
+        :mod:`kicad_tools.validate.copper_refs`.
+        """
+        return cls(
+            element_type="segment",
+            layer=seg.layer,
+            net_number=seg.net_number,
+            geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
+            # Issue #6088: geometry, not the (unseeded-random) UUID.
+            reference=segment_ref(seg, origin),
+            net_name=seg.net_name if seg.net_number != 0 else "",
+        )
+
+    @classmethod
+    def from_pad(cls, pad: Pad, footprint: Footprint) -> CopperElement:
+        """Create from a PCB pad with footprint context."""
+        # Transform pad position from footprint-local to board coordinates
+        abs_x, abs_y = _transform_pad_position(pad, footprint)
+        # Transform pad dimensions to axis-aligned bounding box (retained
+        # for the AABB-bounds fast path / location reporting).
+        width, height = _transform_pad_dimensions(pad, footprint)
+        # Build the TRUE copper outline (roundrect/oval honored) so the
+        # pad-pad clearance path can use exact geometry instead of the
+        # over-approximating analytic AABB formulas (issue #3826).
+        polygon = _pad_polygon(pad, footprint)
+        return cls(
+            element_type="pad",
+            layer="*",  # Pads can span multiple layers
+            net_number=pad.net_number,
+            geometry=(abs_x, abs_y, width, height),
+            reference=f"{footprint.reference}-{pad.number}",
+            net_name=pad.net_name if pad.net_number != 0 else "",
+            polygon=polygon,
+            pad_type=pad.type,
+            source_pad=pad,
+            source_footprint=footprint,
+            pad_shape=pad.shape,
+        )
+
+    @classmethod
+    def from_via(cls, via: Via, origin: Origin = (0.0, 0.0)) -> CopperElement:
+        """Create from a PCB via (``origin``: see :meth:`from_segment`)."""
+        return cls(
+            element_type="via",
+            layer="*",  # Vias span multiple layers
+            net_number=via.net_number,
+            geometry=(via.position[0], via.position[1], via.size, via.size),
+            reference=via_ref(via, origin),
+            net_name=via.net_name if via.net_number != 0 else "",
+            explicit_layers=tuple(via.layers),
+        )
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        """Enclose both analytic and polygon shapes used by exact predicates."""
+        if self.element_type == "segment":
+            x1, y1, x2, y2, width = self.geometry
+            radius = width / 2
+            return (
+                min(x1, x2) - radius,
+                min(y1, y2) - radius,
+                max(x1, x2) + radius,
+                max(y1, y2) + radius,
+            )
+        x, y, width, height = self.geometry
+        if self.polygon is None or abs(width - height) < 0.001:
+            width = height = max(width, height)
+        bounds = (x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+        if self.polygon is not None and not self.polygon.is_empty:  # type: ignore[attr-defined]
+            px1, py1, px2, py2 = self.polygon.bounds  # type: ignore[attr-defined]
+            bounds = (
+                min(bounds[0], px1),
+                min(bounds[1], py1),
+                max(bounds[2], px2),
+                max(bounds[3], py2),
+            )
+        return bounds
+
+    def kernel_shape(self) -> KShape:
+        """This element as a shared-clearance-kernel shape (Epic #5509 Phase 4d).
+
+        The single translation ``kct check``'s pair-distance predicates go
+        through, so every one of them measures the same copper.  Memoised on the
+        element (see ``_kernel_shape_cache``).
+
+        Every shape is emitted on
+        :data:`~kicad_tools.router.clearance_kernel.ALL_LAYERS`: the caller
+        (:meth:`ClearanceRule._check_layer`) has already resolved layer
+        interaction by scanning one copper layer at a time, so a second layer
+        test inside the kernel could only ever be a second opinion about a
+        question that is already answered.
+
+        A **pad** is built from its ``source_pad`` / ``source_footprint`` -- the
+        board-file objects -- so it gets the exact Minkowski pad model Phase 1b
+        ported *from* this module's :func:`_pad_polygon`, local size and
+        absolute rotation included.  An element synthesised without those (a
+        hand-built fixture, which is how several regression tests drive these
+        predicates) falls back to its axis-aligned ``geometry`` with no
+        rotation: for an unrotated pad that AABB *is* the pad's own box, so the
+        fallback is exact there and merely inherits the fixture's own
+        approximation otherwise.
+        """
+        cached = self._kernel_shape_cache
+        if cached is not _GEOM_UNSET:
+            return cached  # type: ignore[return-value]
+        shape = self._build_kernel_shape()
+        self._kernel_shape_cache = shape
+        return shape
+
+    def _build_kernel_shape(self) -> KShape:
+        """Build the kernel shape without consulting the memo."""
+        if self.element_type == "segment":
+            x1, y1, x2, y2, width = self.geometry
+            return KSegment(x1=x1, y1=y1, x2=x2, y2=y2, width=width)
+        cx, cy, width, height = self.geometry
+        if self.element_type == "via":
+            # ``from_via`` records ``(size, size)``, so either dimension is the
+            # copper diameter.  The barrel's drill is not carried on the element
+            # (no hole predicate in this rule family reads it from here), so the
+            # copper-only via is the right model.
+            return KVia(x=cx, y=cy, diameter=max(width, height), drill=0.0)
+        if self.source_pad is not None and self.source_footprint is not None:
+            return _kernel_pad_shape(self.source_pad, self.source_footprint)
+        if self.polygon is None:
+            # A pad element with neither board-file provenance nor a
+            # precomputed outline has no shape information beyond its AABB, and
+            # this module has always resolved that the same conservative way:
+            # :meth:`bounds` widens such a pad to ``max(w, h)`` on both axes and
+            # :func:`_build_pad_copper_geom` hands the exact predicates the disc
+            # of radius ``max(w, h) / 2``.  Modelling it as the AABB *rectangle*
+            # here instead would make the kernel verdict narrower than the
+            # broad-phase bounds that gate it -- an under-rejection the
+            # broad/narrow parity check in ``test_boundary_violation_fields``
+            # exists to catch.  Keep the disc, so one model answers both phases.
+            diameter = max(width, height)
+            return _kernel_make_pad("circle", diameter, diameter, 0.25, 0.0, cx, cy)
+        return _kernel_make_pad(
+            self.pad_shape or "rect",
+            width,
+            height,
+            0.25,
+            0.0,
+            cx,
+            cy,
+        )
+
+    def on_layer(self, layer: str) -> bool:
+        """Check if this element is on the specified layer."""
+        if self.layer == "*":
+            return True  # Pads and vias span multiple layers
+        return self.layer == layer
+
+
+def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, float]:
+    """Transform pad position from footprint-local to board coordinates.
+
+    Uses KiCad's negated-angle pad rotation convention (see
+    :func:`kicad_tools.core.geometry.rotate_pad_offset`).
+    """
+    # Rotate pad position around footprint origin (KiCad convention)
+    local_x, local_y = pad.position
+    rotated_x, rotated_y = _rotate_pad_offset(local_x, local_y, footprint.rotation)
+
+    # Translate to board coordinates
+    abs_x = footprint.position[0] + rotated_x
+    abs_y = footprint.position[1] + rotated_y
+
+    return abs_x, abs_y
+
+
+def _transform_pad_dimensions(pad: Pad, footprint: Footprint) -> tuple[float, float]:
+    """Transform pad dimensions to axis-aligned bounding box in board coordinates.
+
+    For rectangular pads, when the footprint is rotated, the pad's effective
+    width and height in board coordinates change. This function computes the
+    axis-aligned bounding box dimensions of the rotated pad.
+
+    For cardinal rotations (90°, 270°), this simply swaps width and height.
+    For arbitrary rotations, this computes the axis-aligned bounding box.
+
+    Args:
+        pad: The pad whose dimensions to transform
+        footprint: The footprint containing the pad (provides rotation)
+
+    Returns:
+        Tuple of (width, height) representing the axis-aligned bounding box
+    """
+    width, height = pad.size
+
+    # pad.rotation is stored in the ABSOLUTE board frame (KiCad already folds
+    # footprint.rotation into each pad's angle -- see Pad.rotation and issue
+    # #3902), so it IS the pad shape's board-frame orientation. Do NOT add
+    # footprint.rotation on top of it. Kept in sync with _pad_polygon so the
+    # AABB fast path and the true-geometry polygon agree.
+    total_rotation = getattr(pad, "rotation", 0.0)
+
+    # Normalize rotation to [0, 360)
+    total_rotation = total_rotation % 360
+
+    # For cardinal rotations, we can simply swap dimensions
+    if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
+        return height, width
+    elif abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
+        return width, height
+
+    # For arbitrary rotations, compute the axis-aligned bounding box
+    # of the rotated rectangle (sign doesn't matter since we use abs values)
+    angle_rad = math.radians(total_rotation)
+    cos_a = abs(math.cos(angle_rad))
+    sin_a = abs(math.sin(angle_rad))
+
+    # The bounding box of a rotated rectangle
+    new_width = width * cos_a + height * sin_a
+    new_height = width * sin_a + height * cos_a
+
+    return new_width, new_height
+
+
+def _pad_polygon(pad: Pad, footprint: Footprint):
+    """Return a shapely polygon of a pad's copper in board coordinates.
+
+    Unlike :func:`_transform_pad_dimensions` (which returns only an
+    axis-aligned bounding box and therefore over-approximates rounded
+    corners), this builds the *true* copper outline honoring
+    ``pad.shape``:
+
+    * ``circle`` (and ``oval``/``obround`` with ``w == h``) -> exact disc.
+    * ``oval`` / ``obround`` -> stadium / capsule (rectangle core with
+      semicircular caps on the minor axis).
+    * ``roundrect`` -> rectangle with rounded corners of radius
+      ``roundrect_rratio * min(w, h)`` (KiCad default ratio 0.25).
+    * ``rect`` (and any unknown shape) -> exact rectangle, with no
+      over-approximation.
+
+    The polygon is built around the origin from the pad's *local* size,
+    rotated by the negative of the pad's ABSOLUTE angle (``pad.rotation`` --
+    which already includes ``footprint.rotation`` per KiCad's file convention,
+    issue #3902). KiCad's board-coordinate forward transform negates the
+    stored angle, whereas Shapely uses the usual positive-angle matrix.
+    The result is translated to the pad's absolute board position. Modeling the
+    rounded geometry instead of an AABB removes the sub-10-micron phantom
+    corner overlaps that KiCad's true geometry never sees (issue #3826).
+
+    Returns ``None`` for degenerate (non-positive) sizes so callers can
+    skip them.
+    """
+    require_shapely("pad clearance geometry")
+    import shapely
+    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+    from shapely.geometry import Point
+
+    cx, cy = _transform_pad_position(pad, footprint)
+    w, h = pad.size  # LOCAL size -- the rotation below orients the polygon
+    if w <= 0 or h <= 0:
+        return None
+
+    # pad.rotation is stored in the ABSOLUTE board frame (it already includes
+    # footprint.rotation per KiCad's file convention -- see Pad.rotation and
+    # issue #3902), so it is the pad shape's board-frame orientation directly.
+    total_rot = getattr(pad, "rotation", 0.0)
+    shape = pad.shape
+
+    if shape == "circle" or (shape in ("oval", "obround") and abs(w - h) < 1e-6):
+        # Symmetric disc -- rotation and the (origin) translate are no-ops
+        # on a circle, so build it directly at the board position.
+        return Point(cx, cy).buffer(min(w, h) / 2.0)
+
+    if shape in ("oval", "obround"):
+        # Stadium / capsule: a core rectangle shrunk by the minor
+        # half-axis on the long dimension, buffered by that radius so the
+        # short ends become true semicircles.
+        r = min(w, h) / 2.0
+        if w >= h:
+            core = shapely.box(-(w / 2.0 - r), 0.0, (w / 2.0 - r), 0.0)
+        else:
+            core = shapely.box(0.0, -(h / 2.0 - r), 0.0, (h / 2.0 - r))
+        poly = core.buffer(r)
+    elif shape == "roundrect":
+        rr = getattr(pad, "roundrect_rratio", 0.25)
+        r = rr * min(w, h)
+        if r <= 0:
+            poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
+        else:
+            inner = shapely.box(-(w / 2.0 - r), -(h / 2.0 - r), (w / 2.0 - r), (h / 2.0 - r))
+            poly = inner.buffer(r, join_style=1)  # round joins -> rounded corners
+    else:  # "rect" and any unknown shape -> exact rectangle (no over-approx)
+        poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
+
+    # Match KiCad's forward transform, without adding footprint rotation a
+    # second time. AABB/cardinal tests cannot detect the sign error (#5227).
+    poly = rotate(poly, -total_rot, origin=(0, 0), use_radians=False)
+    return translate(poly, cx, cy)
+
+
+# _point_to_segment_distance and _segment_to_segment_distance are imported
+# from kicad_tools.core.geometry (consolidated in #2349).
+
+
+# Geometric-coupling corroboration thresholds for the diff-pair
+# clearance-skip exemption (Issue #4178).
+#
+# A pair suffix-inferred as differential (``FOO+``/``FOO-``) is only
+# exempted from the generic same-layer ClearanceRule when there is
+# CORROBORATING evidence it was actually routed *as* a coupled
+# differential pair -- i.e. its two nets run parallel and closely spaced
+# over a meaningful length.  Bare name-suffix inference is NOT sufficient:
+# current-sense Kelvin pairs (``ISENSE_A+``/``ISENSE_A-``) and indicator
+# pairs carry ``+``/``-`` names but route to separate destinations and are
+# NOT intentionally coupled, so a genuine same-layer short between them
+# must still be flagged (kicad-cli has no diff-pair heuristic and would
+# flag it).  See Issue #4178.
+#
+# ``_COUPLING_MAX_GAP_MM``: the maximum edge-to-edge gap at which two
+# opposite-net segments count as "coupled" at a sample point.  A real
+# controlled-impedance diff pair couples at ~0.1-0.3 mm; we allow a
+# generous ceiling so tighter-than-inter-clearance pairs (the whole point
+# of the exemption) still qualify while a Kelvin pair fanned out to
+# separate pads does not.
+_COUPLING_MAX_GAP_MM = 0.5
+# ``_COUPLING_MIN_PARALLEL_LEN_MM``: the two nets must run parallel (within
+# ``_COUPLING_ANGLE_TOL_DEG``) and within ``_COUPLING_MAX_GAP_MM`` for at
+# least this cumulative length before the pair is treated as coupled.  A
+# Kelvin sense pair may briefly parallel near a shared connector but does
+# not maintain coupling; a routed diff pair does.
+_COUPLING_MIN_PARALLEL_LEN_MM = 1.0
+# ``_COUPLING_ANGLE_TOL_DEG``: two segments count as parallel when their
+# direction vectors differ by at most this angle (mod 180 deg).
+_COUPLING_ANGLE_TOL_DEG = 20.0
+
+
+def _segments_are_coupled(
+    seg_a: Segment,
+    seg_b: Segment,
+    max_gap_mm: float,
+    angle_tol_deg: float,
+) -> float:
+    """Return the coupled overlap length (mm) of two opposite-net segments.
+
+    Two segments are "coupled" over the portion where they run parallel
+    (direction vectors within ``angle_tol_deg``) and their edge-to-edge
+    gap stays below ``max_gap_mm``.  The returned value approximates the
+    length of that coupled run -- 0.0 when the segments are not parallel
+    or never come within ``max_gap_mm``.
+
+    The parallel-overlap length is estimated by projecting ``seg_b``'s
+    endpoints onto ``seg_a`` and measuring the overlap of the two
+    endpoint spans along ``seg_a``'s axis; the gap gate uses the
+    minimum edge-to-edge distance between the segments (a conservative
+    proxy -- a real coupled pair keeps a roughly constant small gap).
+    """
+    ax1, ay1 = seg_a.start
+    ax2, ay2 = seg_a.end
+    bx1, by1 = seg_b.start
+    bx2, by2 = seg_b.end
+
+    adx, ady = ax2 - ax1, ay2 - ay1
+    bdx, bdy = bx2 - bx1, by2 - by1
+    a_len = math.hypot(adx, ady)
+    b_len = math.hypot(bdx, bdy)
+    if a_len < 1e-9 or b_len < 1e-9:
+        return 0.0
+
+    # Parallelism: angle between direction vectors (mod 180 deg).
+    cos_theta = abs(adx * bdx + ady * bdy) / (a_len * b_len)
+    cos_theta = max(-1.0, min(1.0, cos_theta))
+    angle = math.degrees(math.acos(cos_theta))
+    if angle > angle_tol_deg:
+        return 0.0
+
+    # Edge-to-edge gap gate (center-line distance minus both half-widths).
+    center_dist = _segment_to_segment_distance(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
+    half_w = (seg_a.width + seg_b.width) / 2.0
+    gap = center_dist - half_w
+    if gap > max_gap_mm:
+        return 0.0
+
+    # Parallel-overlap length: project seg_b endpoints onto seg_a's axis.
+    ux, uy = adx / a_len, ady / a_len
+    t_b1 = (bx1 - ax1) * ux + (by1 - ay1) * uy
+    t_b2 = (bx2 - ax1) * ux + (by2 - ay1) * uy
+    lo = max(0.0, min(t_b1, t_b2))
+    hi = min(a_len, max(t_b1, t_b2))
+    overlap = hi - lo
+    return overlap if overlap > 0.0 else 0.0
+
+
+def _pair_is_geometrically_coupled(pcb: PCB, net_a: int, net_b: int) -> bool:
+    """Return ``True`` when two nets are routed as a coupled diff pair.
+
+    Corroborating evidence for the diff-pair clearance-skip exemption
+    (Issue #4178): the two nets must have segments that run parallel and
+    closely spaced (< ``_COUPLING_MAX_GAP_MM``) for a cumulative length of
+    at least ``_COUPLING_MIN_PARALLEL_LEN_MM`` on a shared copper layer.
+
+    Distinguishes a genuine routed differential pair (intentionally
+    coupled, must stay exempt) from a coincidentally ``+``/``-``-named
+    single-ended pair such as a Kelvin current-sense pair (routes to
+    separate destinations, must be clearance-checked).
+    """
+    coupled_len = 0.0
+    for layer in pcb.copper_layers:
+        segs_a: list[Segment] = []
+        segs_b: list[Segment] = []
+        for seg in pcb.segments_on_layer(layer.name):
+            if seg.net_number == net_a:
+                segs_a.append(seg)
+            elif seg.net_number == net_b:
+                segs_b.append(seg)
+        if not segs_a or not segs_b:
+            continue
+        segments = segs_a + segs_b
+        use_spatial = has_shapely()
+        bounds = (
+            [
+                (
+                    math.nextafter(min(seg.start[0], seg.end[0]) - seg.width / 2, -math.inf),
+                    math.nextafter(min(seg.start[1], seg.end[1]) - seg.width / 2, -math.inf),
+                    math.nextafter(max(seg.start[0], seg.end[0]) + seg.width / 2, math.inf),
+                    math.nextafter(max(seg.start[1], seg.end[1]) + seg.width / 2, math.inf),
+                )
+                for seg in segments
+            ]
+            if use_spatial
+            else []
+        )
+        pairs: Iterable[tuple[Segment, Segment]]
+        if (
+            not use_spatial
+            or any(
+                seg.width < 0
+                or not all(math.isfinite(value) for value in (*seg.start, *seg.end, seg.width))
+                for seg in segments
+            )
+            or any(not math.isfinite(value) for bound in bounds for value in bound)
+        ):
+            # Keep the existing exact behavior for malformed geometry that
+            # cannot be represented by a finite spatial-index envelope.
+            pairs = product(segs_a, segs_b)
+        else:
+            # Full copper bounds include each half-width. Expand by the
+            # unchanged gap limit, then retain only opposite-net candidates.
+            # The shared broad phase preserves the exhaustive A/B order;
+            # only guaranteed zero contributions disappear from the sum.
+            split = len(segs_a)
+            pairs = (
+                (segments[i], segments[j])
+                for i, j in candidate_pairs(bounds, math.nextafter(_COUPLING_MAX_GAP_MM, math.inf))
+                if i < split <= j
+            )
+        for sa, sb in pairs:
+            coupled_len += _segments_are_coupled(
+                sa,
+                sb,
+                _COUPLING_MAX_GAP_MM,
+                _COUPLING_ANGLE_TOL_DEG,
+            )
+            if coupled_len >= _COUPLING_MIN_PARALLEL_LEN_MM:
+                return True
+    return False
+
+
+def _build_diff_pair_set(
+    pcb: PCB,
+    declared_pairs: set[tuple[int, int]] | None = None,
+) -> set[tuple[int, int]]:
+    """Return ``{(min_net_id, max_net_id)}`` for pairs safe to exempt.
+
+    Used by :class:`ClearanceRule` to skip same-pair segment-segment edges
+    that are instead validated by ``DiffPairClearanceIntraRule`` against
+    the per-class ``intra_pair_clearance`` threshold (see Issue #2560 /
+    Epic #2556 Phase 1D).
+
+    Issue #4178 hardening: bare name-suffix inference (``FOO+``/``FOO-``)
+    is NO LONGER sufficient on its own to exempt a pair from the generic
+    same-layer clearance check.  Current-sense Kelvin pairs
+    (``ISENSE_A+``/``ISENSE_A-``) and indicator pairs are ``+``/``-``-named
+    but are NOT differential signals -- they route to separate
+    destinations and a genuine same-layer short between them must be
+    flagged (``kicad-cli`` has no diff-pair heuristic and would flag it).
+    A suffix-inferred pair is therefore only exempted when there is
+    CORROBORATING evidence it was actually routed/declared as a coupled
+    differential pair:
+
+    * an explicit declaration in ``declared_pairs`` (net-class-map /
+      router ``DifferentialPairConfig`` engagement, resolved by the
+      caller to net-number tuples), OR
+    * geometric coupling: the two nets run parallel and closely spaced
+      over a meaningful length (see :func:`_pair_is_geometrically_coupled`).
+
+    Legitimate coupled diff pairs (real ``USB_D+``/``USB_D-`` routed close
+    together) still satisfy the geometric test and stay exempt, so no
+    false positives are introduced for real differential pairs.
+    """
+    from kicad_tools.router.diffpair import detect_differential_pairs
+
+    declared = declared_pairs or set()
+    pairs: set[tuple[int, int]] = set()
+    net_names = {net.number: net.name for net in pcb.nets.values()}
+    for diff_pair in detect_differential_pairs(net_names):
+        p_id = diff_pair.positive.net_id
+        n_id = diff_pair.negative.net_id
+        if p_id == 0 or n_id == 0:
+            continue
+        key = (p_id, n_id) if p_id <= n_id else (n_id, p_id)
+        # Require corroborating evidence beyond the name suffix before
+        # exempting the pair from the generic clearance check (#4178).
+        if key in declared or _pair_is_geometrically_coupled(pcb, p_id, n_id):
+            pairs.add(key)
+    return pairs
+
+
+def _calculate_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float, float]:
+    """Edge-to-edge clearance between two copper elements, from the shared kernel.
+
+    Epic #5509 Phase 4d: the *verdict* -- the signed gap ``_check_layer``
+    compares against the requirement -- is
+    :func:`kicad_tools.router.clearance_kernel.copper_gap` on the two elements'
+    :meth:`CopperElement.kernel_shape` values, for every one of the four pair
+    kinds.  ``kct check`` is the consumer the kernel's exact polygon pad model
+    was ported *from* (Phase 1b ported :func:`_pad_polygon`), so for the pairs
+    this module already measured exactly -- pad-vs-pad, pad-vs-via and
+    segment-vs-roundrect/oval pad -- the kernel is the same model and the answer
+    is unchanged.  It replaces three *approximations* this dispatch used to keep
+    for the remaining branches, all of which disagreed with ``kicad-cli``:
+
+    * a **rotated** ``rect`` pad against a segment was measured against its
+      axis-aligned bounding box, which over-reports copper at the corners the
+      pad does not occupy -- an over-rejection (the ``roundrect-corner-gap``
+      failure mode, measured on three of twenty-three conformance seeds);
+    * a **square** ``rect`` pad against a segment was modelled as the disc of
+      radius ``max(w, h) / 2``, which is the *inscribed* circle and therefore
+      under-reports copper at the pad's four corners -- an under-rejection;
+    * the analytic AABB fallbacks for pad-vs-pad / pad-vs-via, reachable when an
+      element carries no shapely polygon.
+
+    Two things the kernel deliberately does not answer stay here, because they
+    are *reporting*, not predicates:
+
+    **Location.**  Where to point the operator is unchanged per pair kind (see
+    :func:`_report_location`); the kernel answers distances, not witnesses.
+
+    **Overlap magnitude.**  ``copper_gap`` is a Minkowski distance, so for
+    copper that already overlaps it saturates at ``-(corner_radius + half
+    width)`` rather than reporting how deeply the two shapes interpenetrate --
+    and for two sharp-cornered rectangles it saturates at exactly ``0.0``.  The
+    verdict is the same either way (``<= 0`` is below any positive
+    requirement), but ``0.0`` would lose the ``SHORT: ...`` promotion
+    :meth:`ClearanceRule._create_violation` keys off a negative value (#3909).
+    So on the pair kinds whose pre-kernel dispatch reported interpenetration
+    rather than a saturated distance -- and *only* those, see
+    :func:`_overlap_depth_applies` -- the reported magnitude is refined by
+    :func:`_overlap_depth`, this module's existing intersection-bounding-box
+    convention.  Every other pair kind's kernel gap already equals, saturation
+    included, the number the retired dispatch produced, so refining it would be
+    a behaviour change rather than a preserved one (#5881).
+
+    Returns:
+        Tuple of (clearance_mm, location_x, location_y).
+    """
+    gap = _kernel_copper_gap(elem1.kernel_shape(), elem2.kernel_shape())
+
+    if gap <= 0.0 and _overlap_depth_applies(elem1, elem2):
+        depth = _overlap_depth(elem1, elem2)
+        if depth is not None:
+            gap = depth
+
+    loc_x, loc_y = _report_location(elem1, elem2)
+    return gap, loc_x, loc_y
+
+
+def _report_location(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float]:
+    """Where a violation between these two elements is reported.
+
+    Unchanged from the pre-kernel dispatch, pair kind by pair kind, so switching
+    the *distance* to the kernel cannot move a violation's reported position:
+
+    * segment-vs-segment: the mean of the four endpoints.
+    * segment-vs-pad/via: the pad or via centre.
+    * pad/via-vs-pad/via: the midpoint of the two closest points when exact
+      shapely geometry is available for both (what :func:`_polygon_pair_clearance`
+      reported), else the midpoint of the two centres.
+    """
+    t1, t2 = elem1.element_type, elem2.element_type
+
+    if t1 == "segment" and t2 == "segment":
+        x1, y1, x2, y2, _ = elem1.geometry
+        x3, y3, x4, y4, _ = elem2.geometry
+        return (x1 + x2 + x3 + x4) / 4, (y1 + y2 + y3 + y4) / 4
+
+    if t1 == "segment":
+        cx, cy = elem2.geometry[0], elem2.geometry[1]
+        return cx, cy
+    if t2 == "segment":
+        cx, cy = elem1.geometry[0], elem1.geometry[1]
+        return cx, cy
+
+    if elem1.polygon is not None or elem2.polygon is not None:
+        witness = _polygon_pair_witness(elem1, elem2)
+        if witness is not None:
+            return witness
+
+    x1, y1 = elem1.geometry[0], elem1.geometry[1]
+    x2, y2 = elem2.geometry[0], elem2.geometry[1]
+    return (x1 + x2) / 2, (y1 + y2) / 2
+
+
+def _overlap_depth_applies(elem1: CopperElement, elem2: CopperElement) -> bool:
+    """Whether this pair kind reports interpenetration rather than distance.
+
+    The pre-kernel dispatch used the intersection-bounding-box convention
+    (:func:`_overlap_depth`) on exactly two pair kinds, and an analytic signed
+    distance everywhere else:
+
+    * **segment vs pad** -- only when the pad carried a true outline whose shape
+      diverges from its AABB (``_segment_circle_clearance``'s guard:
+      ``polygon is not None and pad_shape in _POLYGON_DIVERGENT_SHAPES``).  A
+      plain ``rect``/``circle``/square pad went to the analytic branch, whose
+      answer for a centreline that crosses the pad boundary is ``-half_width``
+      -- precisely what ``copper_gap`` saturates to, so refining it would
+      *replace* a preserved value with a different one (#5881: a hand-computed
+      ``-0.01`` became ``-0.02``).
+    * **pad/via vs pad/via** -- whenever either element carried a polygon
+      (``_circle_circle_clearance``'s ``_polygon_pair_clearance`` path).  Real
+      board pads always do, so this is the branch that keeps the ``SHORT:``
+      promotion alive for two overlapping sharp-cornered rectangles, whose
+      Minkowski gap saturates at exactly ``0.0``.
+
+    Segment-vs-segment and via-vs-via pairs never used it: their kernel gap is a
+    true signed distance already.
+    """
+    t1, t2 = elem1.element_type, elem2.element_type
+    if t1 == "segment" or t2 == "segment":
+        if t1 == t2:
+            return False
+        other = elem2 if t1 == "segment" else elem1
+        return other.polygon is not None and other.pad_shape in _POLYGON_DIVERGENT_SHAPES
+    return elem1.polygon is not None or elem2.polygon is not None
+
+
+def _overlap_depth(elem1: CopperElement, elem2: CopperElement) -> float | None:
+    """Negative interpenetration magnitude for overlapping copper, or ``None``.
+
+    This module's long-standing convention (``_polygon_pair_clearance``,
+    ``_segment_polygon_clearance``): approximate the penetration by the largest
+    dimension of the intersection's bounding box -- monotonic in overlap and
+    always ``< 0``, which is all the DRC gate and the ``SHORT:`` promotion need.
+
+    ``None`` when the two coppers do not actually overlap by positive area (a
+    grazing touch, whose correct clearance is the ``0.0`` the kernel reported)
+    or when no shapely geometry could be built for one of them.
+    """
+    if not has_shapely():
+        return None
+    geom1 = _copper_geom_for_overlap(elem1)
+    geom2 = _copper_geom_for_overlap(elem2)
+    if geom1 is None or geom2 is None:
+        return None
+    inter = geom1.intersection(geom2)
+    if inter.is_empty or inter.area <= 0:
+        return None
+    minx, miny, maxx, maxy = inter.bounds
+    return -float(max(maxx - minx, maxy - miny))
+
+
+def _copper_geom_for_overlap(elem: CopperElement):
+    """A shapely footprint of this element's copper, for the overlap refinement.
+
+    Segments buffer their centreline; pads and vias use the memoised pad/via
+    geometry.  A pad synthesised without a precomputed ``polygon`` falls back to
+    dilating the kernel shape's own Minkowski ``core`` by its ``corner_radius``
+    (the same ``KPad`` the pair-distance verdict already used -- not a second,
+    independently-tessellated outline), so the refinement is available for
+    every pad rather than only the ones built from a board file.  ``core`` is
+    always a valid 1-, 2- or 4-vertex ring when non-empty (see
+    :func:`kicad_tools.router.clearance_kernel.make_pad`'s construction), and a
+    ``corner_radius`` of exactly 0 only ever pairs with the 4-vertex case, so
+    the un-dilated ``base`` returned there is already a proper polygon.
+    """
+    if elem.element_type == "segment":
+        return _segment_copper_geom(elem)
+    geom = _element_to_shapely_geom(elem)
+    if geom is not None:
+        return geom
+    from shapely.geometry import LineString, Point, Polygon
+
+    from ..clearance_shapes import KPad as _KPad
+
+    shape = elem.kernel_shape()
+    if not isinstance(shape, _KPad) or not shape.core:
+        return None
+    core = shape.core
+    if len(core) == 1:
+        base = Point(core[0])
+    elif len(core) == 2:
+        base = LineString(core)
+    else:
+        base = Polygon(core)
+    if shape.corner_radius > 0:
+        return base.buffer(shape.corner_radius, quad_segs=64)
+    return base
+
+
+def _polygon_pair_witness(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float] | None:
+    """Midpoint of the closest points of two pad/via copper shapes, if available."""
+    if not has_shapely():
+        return None
+    geom1 = _element_to_shapely_geom(elem1)
+    geom2 = _element_to_shapely_geom(elem2)
+    if geom1 is None or geom2 is None:
+        return None
+    inter = geom1.intersection(geom2)
+    if not inter.is_empty and inter.area > 0:
+        minx, miny, maxx, maxy = inter.bounds
+        return (minx + maxx) / 2.0, (miny + maxy) / 2.0
+    from shapely.ops import nearest_points
+
+    p1, p2 = nearest_points(geom1, geom2)
+    return (p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0
+
+
+def _segment_segment_clearance(
+    seg1: CopperElement, seg2: CopperElement
+) -> tuple[float, float, float]:
+    """Calculate clearance between two trace segments.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    x1, y1, x2, y2, w1 = seg1.geometry
+    x3, y3, x4, y4, w2 = seg2.geometry
+
+    # Distance between segment centerlines
+    center_dist = _segment_to_segment_distance(x1, y1, x2, y2, x3, y3, x4, y4)
+
+    # Subtract half-widths to get edge-to-edge clearance
+    clearance = center_dist - (w1 / 2) - (w2 / 2)
+
+    # Location is midpoint of the two segments' midpoints
+    loc_x = (x1 + x2 + x3 + x4) / 4
+    loc_y = (y1 + y2 + y3 + y4) / 4
+
+    return clearance, loc_x, loc_y
+
+
+# Pad shapes whose true copper outline (``_pad_polygon``) diverges from
+# the axis-aligned bounding box (``_transform_pad_dimensions``) enough to
+# matter for clearance: ``roundrect`` corners are cut back by
+# ``roundrect_rratio``, and non-square ``oval``/``obround`` pads are a
+# stadium, not a rectangle.  ``rect`` (and any unrecognized shape) keeps
+# the existing analytic AABB path unchanged -- see issue #4985.
+_POLYGON_DIVERGENT_SHAPES = frozenset({"roundrect", "oval", "obround"})
+
+
+def _segment_circle_clearance(
+    seg: CopperElement, circle: CopperElement
+) -> tuple[float, float, float]:
+    """Calculate clearance between a segment and a pad/via.
+
+    For circular obstacles (vias and square pads) the distance is
+    ``centerline_distance - seg_half_width - radius`` which models the
+    obstacle as a disc.
+
+    For rectangular pads, the previous "treat as a disc of radius
+    ``max(w, h) / 2``" approach was overly conservative -- a 0.5 x 1.2 mm
+    USB pad became a 1.2 mm-diameter disc, manufacturing 0.35 mm of
+    phantom inflation along the pad's narrow axis and flagging
+    ``clearance_pad_segment`` violations against traces that actually
+    cleared the rectangle by hundreds of microns.  Issue #2781 traced
+    the post-route DRC over-emission directly to this approximation
+    (commit 6ec0344c fixed the analogous bug for pad-to-pad clearance
+    but did not visit segment-to-pad).  Use axis-aligned rectangle
+    geometry for rectangular pads, mirroring ``_rect_circle_clearance``.
+
+    For pads whose true copper outline diverges from that bounding
+    box -- ``roundrect`` and ``oval``/``obround`` shapes -- the AABB
+    rectangle over-approximates the corners the copper doesn't actually
+    occupy, which reports tighter-than-actual clearance for a rotated
+    roundrect SMD pad (issue #4985, the segment-vs-pad analogue of
+    #3826's pad-vs-pad/pad-vs-zone fix).  When the pad carries a
+    precomputed true-geometry polygon (``CopperElement.polygon``, built
+    by ``_pad_polygon``), route the clearance calculation through that
+    polygon instead of the AABB rectangle.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    x1, y1, x2, y2, seg_width = seg.geometry
+    cx, cy, w, h = circle.geometry
+    seg_half = seg_width / 2
+
+    # Shape-aware copper geometry takes precedence over AABB dimensions:
+    # a rotated non-square pad can have a square AABB without being a disc.
+    poly_clearance = None
+    if circle.polygon is not None and circle.pad_shape in _POLYGON_DIVERGENT_SHAPES:
+        poly_clearance = _segment_polygon_clearance(seg, circle)
+
+    if poly_clearance is not None:
+        clearance = poly_clearance
+    elif circle.element_type == "via" or abs(w - h) < 0.001:
+        # Preserve the legacy analytic fallback when no eligible polygon exists.
+        radius = max(w, h) / 2
+        center_dist = _point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+        clearance = center_dist - seg_half - radius
+    else:
+        # Signed centerline distance retains negative clearance on overlap.
+        center_dist = _rect_segment_centerline_distance(cx, cy, w, h, x1, y1, x2, y2)
+        clearance = center_dist - seg_half
+
+    # Location is at the pad/via center (sufficient for repair tooling
+    # and human readability; the previous behaviour also reported the
+    # pad center).
+    return clearance, cx, cy
+
+
+def _segment_copper_geom(seg: CopperElement):
+    """Return (and memoise) a segment's shapely copper footprint.
+
+    The footprint is the segment centerline buffered by half the trace
+    width -- a pure function of ``seg.geometry``, which is assigned once in
+    :meth:`CopperElement.from_segment` and never reassigned.  A clearance
+    sweep asks for it once per candidate pair the segment takes part in, so
+    without the memo the identical buffer is rebuilt tens of times per
+    segment (Issue #5240).
+
+    Shapely geometries are immutable, so handing the same object to every
+    caller is indistinguishable from handing each an equal fresh copy.
+    """
+    if _MEMOIZE_COPPER_GEOM:
+        cached = seg._seg_geom_cache
+        if cached is not _GEOM_UNSET:
+            return cached
+
+    require_shapely("pad-segment clearance geometry")
+    from shapely.geometry import LineString, Point
+
+    x1, y1, x2, y2, seg_width = seg.geometry
+    seg_half = seg_width / 2.0
+
+    if x1 == x2 and y1 == y2:
+        # Degenerate (zero-length) segment -- treat as a point.
+        line_geom = Point(x1, y1)
+    else:
+        line_geom = LineString([(x1, y1), (x2, y2)])
+
+    geom = line_geom.buffer(seg_half) if seg_half > 0 else line_geom
+    if _MEMOIZE_COPPER_GEOM:
+        seg._seg_geom_cache = geom
+    return geom
+
+
+def _segment_polygon_clearance(seg: CopperElement, circle: CopperElement) -> float | None:
+    """Signed segment-to-pad clearance using the pad's true copper polygon.
+
+    Mirrors ``_polygon_pair_clearance``'s overlap/distance approach --
+    intersection-area penetration depth when the segment's copper
+    (buffered to its trace width) overlaps the pad, otherwise exact
+    edge-to-edge distance -- but for a trace segment against a pad's
+    true outline (roundrect/oval honored, see ``_pad_polygon``) rather
+    than the pad's axis-aligned bounding box.  Used so
+    ``clearance_pad_segment`` doesn't over-report phantom violations
+    against the rounded-off corners of a roundrect pad (issue #4985).
+
+    Returns ``None`` when the pad has no polygon, so the caller falls
+    back to the analytic AABB-rectangle path.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    pad_poly = circle.polygon
+    if pad_poly is None:
+        return None
+
+    seg_geom = _segment_copper_geom(seg)
+
+    inter = seg_geom.intersection(pad_poly)
+    if not inter.is_empty and inter.area > 0:
+        # Real area overlap: most-negative clearance.  Approximate the
+        # penetration depth by the largest dimension of the
+        # intersection's bounding box, matching
+        # ``_polygon_pair_clearance``'s convention -- monotonic in
+        # overlap and always < 0, which is all the DRC gate needs (a
+        # real short).
+        minx, miny, maxx, maxy = inter.bounds
+        return -float(max(maxx - minx, maxy - miny))
+
+    # Disjoint, or merely touching at a point/edge (zero-area
+    # intersection).  ``distance`` is 0 for a touch, which is the
+    # correct edge-to-edge clearance.
+    return float(seg_geom.distance(pad_poly))
+
+
+def _rect_segment_centerline_distance(
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> float:
+    """Signed centerline distance between an axis-aligned rectangle and a segment.
+
+    Returns the minimum distance from the segment's centerline to the
+    rectangle.  The sign convention matches ``_rect_circle_clearance``:
+
+    - **Positive** -- segment is entirely outside the rectangle.
+    - **Zero**     -- segment touches/crosses the rectangle boundary.
+    - **Negative** -- segment centerline lies inside the rectangle; the
+      magnitude is the smallest perpendicular distance from a segment
+      endpoint to the nearest rectangle edge (i.e. how far the segment
+      would need to move to escape the rectangle).
+
+    The negative branch is what allows the DRC checker to flag
+    "trace runs through pad" defects with a meaningful depth indicator
+    (e.g. ``actual_value = -1.355mm`` on board 05's U1.5 TO-263 GND tab
+    -- a real router defect that the old conservative-disc check
+    correctly flagged but with a distorted magnitude).
+
+    Args:
+        cx, cy: Center of rectangle.
+        w, h: Width and height of rectangle.
+        x1, y1: Segment start.
+        x2, y2: Segment end.
+
+    Returns:
+        Signed centerline-to-rectangle distance in millimetres.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    half_w = w / 2
+    half_h = h / 2
+    left = cx - half_w
+    right = cx + half_w
+    bot = cy - half_h
+    top = cy + half_h
+
+    def _inside(px: float, py: float) -> bool:
+        return left <= px <= right and bot <= py <= top
+
+    p1_in = _inside(x1, y1)
+    p2_in = _inside(x2, y2)
+
+    if p1_in and p2_in:
+        # Whole centerline inside rect -- return negative depth equal to
+        # the deepest point's signed distance to the nearest rect edge.
+        #
+        # For an axis-aligned rectangle the depth function along a
+        # straight segment is piecewise linear (the min of four linear
+        # functions, one per rect edge), so its maximum is attained at
+        # an endpoint or at one of the kinks where two adjacent edges
+        # tie.  The deepest kinks lie on the rectangle's two interior
+        # diagonals from the centre, which a horizontally or
+        # vertically axis-aligned segment crosses at predictable
+        # parametric ``t`` values.  Rather than enumerate cases, we
+        # sample the segment at 33 uniformly spaced points (including
+        # both endpoints) and return the most negative depth -- well
+        # over-sampled for DRC reporting purposes, and ``O(1)``.
+        def _signed_depth(px: float, py: float) -> float:
+            gap_x = max(px - right, left - px)
+            gap_y = max(py - top, bot - py)
+            # gap_x <= 0 and gap_y <= 0 when (px, py) is inside the rect.
+            return max(gap_x, gap_y)
+
+        # Deepest = most negative signed_depth along the segment.
+        deepest = min(_signed_depth(x1, y1), _signed_depth(x2, y2))
+        steps = 32
+        dx = x2 - x1
+        dy = y2 - y1
+        for i in range(1, steps):
+            t = i / steps
+            d = _signed_depth(x1 + t * dx, y1 + t * dy)
+            if d < deepest:
+                deepest = d
+        return deepest
+
+    if p1_in != p2_in:
+        # Endpoint straddles the boundary -- centerline crosses an edge.
+        return 0.0
+
+    # Both endpoints outside.  Check whether the segment crosses any of
+    # the four rectangle edges; if so the centerline touches the
+    # boundary (distance 0).
+    rect_edges = (
+        (left, bot, right, bot),
+        (right, bot, right, top),
+        (right, top, left, top),
+        (left, top, left, bot),
+    )
+    for ex1, ey1, ex2, ey2 in rect_edges:
+        if _segments_intersect(x1, y1, x2, y2, ex1, ey1, ex2, ey2):
+            return 0.0
+
+    # No crossing -- the closest approach is either an endpoint of the
+    # segment to the rectangle or a corner of the rectangle to the
+    # segment.  Both are non-negative.
+    def _point_to_rect(px: float, py: float) -> float:
+        closest_x = max(left, min(px, right))
+        closest_y = max(bot, min(py, top))
+        return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+    candidates = [
+        _point_to_rect(x1, y1),
+        _point_to_rect(x2, y2),
+    ]
+    for corner_x, corner_y in (
+        (left, bot),
+        (right, bot),
+        (right, top),
+        (left, top),
+    ):
+        candidates.append(_point_to_segment_distance(corner_x, corner_y, x1, y1, x2, y2))
+
+    return min(candidates)
+
+
+def _element_to_shapely_geom(elem: CopperElement):
+    """Return a shapely geometry for a pad/via copper element.
+
+    Pads carry a precomputed ``polygon`` (true outline).  Vias (and any
+    element without a polygon) are represented as a circle buffered around
+    their center using the AABB diameter.  Returns ``None`` if no geometry
+    can be built.
+
+    Memoised per element (Issue #5240): the result is a pure function of
+    ``elem.polygon`` / ``elem.geometry``, both assigned once at construction
+    and never reassigned, while a clearance sweep asks for it once per
+    candidate pair the element takes part in.
+    """
+    if not _MEMOIZE_COPPER_GEOM:
+        return _build_pad_copper_geom(elem)
+
+    cached = elem._pad_geom_cache
+    if cached is not _GEOM_UNSET:
+        return cached
+
+    geom = _build_pad_copper_geom(elem)
+    elem._pad_geom_cache = geom
+    return geom
+
+
+def _build_pad_copper_geom(elem: CopperElement):
+    """Build a pad/via shapely geometry without consulting the memo."""
+    if elem.polygon is not None:
+        return elem.polygon
+    from shapely.geometry import Point
+
+    x, y, w, h = elem.geometry
+    radius = max(w, h) / 2.0
+    if radius <= 0:
+        return None
+    return Point(x, y).buffer(radius)
+
+
+def _polygon_pair_clearance(
+    c1: CopperElement, c2: CopperElement
+) -> tuple[float, float, float] | None:
+    """Exact shapely clearance between two pad/via copper shapes.
+
+    Used when at least one element carries a true pad polygon.  Returns
+    ``(clearance_mm, loc_x, loc_y)`` with the standard sign convention
+    (negative when the shapes overlap), or ``None`` if a geometry could
+    not be built (caller falls back to the analytic path).
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    require_shapely("pad-pad clearance geometry")
+    g1 = _element_to_shapely_geom(c1)
+    g2 = _element_to_shapely_geom(c2)
+    if g1 is None or g2 is None:
+        return None
+
+    inter = g1.intersection(g2)
+    if not inter.is_empty and inter.area > 0:
+        # Real area overlap: most-negative clearance.  Approximate the
+        # penetration depth by the largest dimension of the
+        # intersection's bounding box -- monotonic in overlap and always
+        # < 0, which is all the DRC gate needs (a real short).
+        minx, miny, maxx, maxy = inter.bounds
+        depth = max(maxx - minx, maxy - miny)
+        clearance = -depth
+        loc_x = (minx + maxx) / 2.0
+        loc_y = (miny + maxy) / 2.0
+        return clearance, loc_x, loc_y
+
+    # Disjoint, or merely touching at a point/edge (zero-area
+    # intersection).  ``distance`` is 0 for a touch, which is the correct
+    # edge-to-edge clearance.
+    dist = g1.distance(g2)
+    from shapely.ops import nearest_points
+
+    p1, p2 = nearest_points(g1, g2)
+    loc_x = (p1.x + p2.x) / 2.0
+    loc_y = (p1.y + p2.y) / 2.0
+    return dist, loc_x, loc_y
+
+
+def _circle_circle_clearance(c1: CopperElement, c2: CopperElement) -> tuple[float, float, float]:
+    """Calculate clearance between two pads/vias.
+
+    When either element carries a precomputed pad polygon (roundrect /
+    oval / rect pads), the clearance is computed with exact shapely
+    geometry so rounded corners are not over-approximated as a bounding
+    box (which produced phantom sub-10um pad-pad shorts -- issue #3826).
+    The analytic disc/AABB path below is retained for the common via-via
+    case (pure circles), where it is exact and avoids per-pair shapely
+    overhead.
+
+    For vias (circular), uses circle-to-circle distance.
+    For rectangular pads, uses axis-aligned rectangle-to-rectangle distance.
+    For mixed (rect pad to via), uses rect-to-circle distance.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    x1, y1, w1, h1 = c1.geometry
+    x2, y2, w2, h2 = c2.geometry
+
+    # Exact-geometry path: when at least one element is a pad with a true
+    # copper polygon, use shapely so rounded corners are modeled
+    # faithfully.  A circular via (no polygon) is represented as a
+    # buffered point; this keeps pad-via and pad-pad pairs exact.
+    if c1.polygon is not None or c2.polygon is not None:
+        result = _polygon_pair_clearance(c1, c2)
+        if result is not None:
+            return result
+
+    # Check if elements are circular (vias or square pads)
+    is_circular_1 = c1.element_type == "via" or abs(w1 - h1) < 0.001
+    is_circular_2 = c2.element_type == "via" or abs(w2 - h2) < 0.001
+
+    if is_circular_1 and is_circular_2:
+        # Both circular: use circle-to-circle distance
+        r1 = w1 / 2
+        r2 = w2 / 2
+        center_dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        clearance = center_dist - r1 - r2
+    elif not is_circular_1 and not is_circular_2:
+        # Both rectangular: use rectangle-to-rectangle distance
+        clearance = _rect_rect_clearance(x1, y1, w1, h1, x2, y2, w2, h2)
+    else:
+        # Mixed: rectangle to circle
+        if is_circular_1:
+            # c1 is circle, c2 is rect
+            clearance = _rect_circle_clearance(x2, y2, w2, h2, x1, y1, w1 / 2)
+        else:
+            # c1 is rect, c2 is circle
+            clearance = _rect_circle_clearance(x1, y1, w1, h1, x2, y2, w2 / 2)
+
+    # Location is midpoint between centers
+    loc_x = (x1 + x2) / 2
+    loc_y = (y1 + y2) / 2
+
+    return clearance, loc_x, loc_y
+
+
+def _rect_rect_clearance(
+    cx1: float,
+    cy1: float,
+    w1: float,
+    h1: float,
+    cx2: float,
+    cy2: float,
+    w2: float,
+    h2: float,
+) -> float:
+    """Calculate clearance between two axis-aligned rectangles.
+
+    Args:
+        cx1, cy1: Center of rectangle 1
+        w1, h1: Width and height of rectangle 1
+        cx2, cy2: Center of rectangle 2
+        w2, h2: Width and height of rectangle 2
+
+    Returns:
+        Edge-to-edge clearance (negative if overlapping)
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    # Gap in each axis (distance between edges)
+    gap_x = abs(cx2 - cx1) - (w1 + w2) / 2
+    gap_y = abs(cy2 - cy1) - (h1 + h2) / 2
+
+    if gap_x >= 0 and gap_y >= 0:
+        # Rectangles separated in both axes - corner-to-corner distance
+        return math.sqrt(gap_x * gap_x + gap_y * gap_y)
+    elif gap_x >= 0:
+        # Overlap in Y, separated in X - edge-to-edge in X direction
+        return gap_x
+    elif gap_y >= 0:
+        # Overlap in X, separated in Y - edge-to-edge in Y direction
+        return gap_y
+    else:
+        # Overlap in both axes - return least negative (closest to separating)
+        return max(gap_x, gap_y)
+
+
+def _rect_circle_clearance(
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    circle_x: float,
+    circle_y: float,
+    radius: float,
+) -> float:
+    """Calculate clearance between an axis-aligned rectangle and a circle.
+
+    Args:
+        cx, cy: Center of rectangle
+        w, h: Width and height of rectangle
+        circle_x, circle_y: Center of circle
+        radius: Radius of circle
+
+    Returns:
+        Edge-to-edge clearance (negative if overlapping)
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
+    # Find the closest point on the rectangle to the circle center
+    half_w = w / 2
+    half_h = h / 2
+
+    # Clamp circle center to rectangle bounds
+    closest_x = max(cx - half_w, min(circle_x, cx + half_w))
+    closest_y = max(cy - half_h, min(circle_y, cy + half_h))
+
+    # Distance from closest point to circle center
+    dist = math.sqrt((circle_x - closest_x) ** 2 + (circle_y - closest_y) ** 2)
+
+    # Clearance is distance minus radius
+    return dist - radius
+
+
+def _layer_min_clearance(design_rules: DesignRules, layer_name: str) -> float:
+    """Same-layer clearance floor for ``layer_name`` (Issue #8836).
+
+    Outer layers (``F.Cu`` / ``B.Cu``) use ``min_clearance_mm``; inner layers
+    use ``min_inner_clearance_mm`` when the profile sets one (e.g. JLCPCB 2 oz
+    outer vs 0.5 oz inner), matching the ``(layer inner)`` rule the DRU
+    generator emits.
+    """
+    inner = getattr(design_rules, "min_inner_clearance_mm", None)
+    if (
+        isinstance(inner, (int, float))
+        and not isinstance(inner, bool)
+        and layer_name not in ("F.Cu", "B.Cu")
+    ):
+        return float(inner)
+    return float(design_rules.min_clearance_mm)
+
+
+class ClearanceRule(DRCRule):
+    """Check minimum clearance between copper elements.
+
+    Validates that spacing between traces, pads, and vias on the same
+    layer but different nets meets the manufacturer's minimum clearance
+    requirement.
+
+    Differential-pair within-pair edges (segment-to-segment edges where
+    both segments belong to the P/N halves of a detected diff pair) are
+    skipped here -- they are validated by
+    :class:`~kicad_tools.validate.rules.diffpair_clearance_intra.DiffPairClearanceIntraRule`
+    against the per-class ``intra_pair_clearance`` (which is allowed to
+    be tighter than the manufacturer's ``min_clearance_mm``).  Without
+    this skip users would see double violations on every diff-pair edge
+    that's tighter than inter-pair clearance, making the new rule
+    actively unhelpful.  See Issue #2560 / Epic #2556 Phase 1D.
+
+    The skip is segment-to-segment only -- pad and via clearances are
+    enforced inter-pair regardless of diff-pair membership, matching the
+    scope of the new rule (segments only).
+    """
+
+    rule_id = "clearance"
+    name = "Copper Clearance"
+    description = "Validates minimum spacing between copper elements"
+
+    def check(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+    ) -> DRCResults:
+        """Check clearance rules on all copper layers.
+
+        Args:
+            pcb: The PCB to check
+            design_rules: Design rules from the manufacturer profile
+
+        Returns:
+            DRCResults containing any clearance violations found
+        """
+        results = DRCResults()
+
+        # Build the diff-pair set once for the whole board (suffix
+        # inference is cheap; we scan the net table once).  Used to
+        # skip same-pair segment-segment edges that the new
+        # DiffPairClearanceIntraRule validates against a tighter
+        # per-class threshold.  See Issue #2560.
+        diff_pair_set = _build_diff_pair_set(pcb)
+
+        # Process each copper layer
+        for layer in pcb.copper_layers:
+            layer_name = layer.name
+            min_clearance = _layer_min_clearance(design_rules, layer_name)
+            violations = self._check_layer(
+                pcb,
+                layer_name,
+                min_clearance,
+                diff_pair_set,
+                design_rules.min_smd_pad_clearance_mm,
+            )
+            for v in violations:
+                results.add(v)
+
+            # Net-0 bridge detection (Issue #3816).  The pairwise loop in
+            # ``_check_layer`` deliberately skips net 0 to avoid flooding
+            # false positives on legitimate unconnected copper (e.g.
+            # board 04's 31 net-0 QFP pins).  That skip masks a genuine
+            # short class: a piece of stray net-0 copper that physically
+            # bridges two different ASSIGNED nets.  Detect that explicitly
+            # as a connectivity property of net-0 copper islands.
+            for v in self._check_net0_bridges(pcb, layer_name, min_clearance):
+                results.add(v)
+
+        from .factory_clearance import check_pth_hole_clearance
+
+        results.merge(check_pth_hole_clearance(pcb, design_rules))
+
+        # Count rules checked (one per layer)
+        results.rules_checked += len(pcb.copper_layers)
+
+        return results
+
+    def _check_layer(
+        self,
+        pcb: PCB,
+        layer_name: str,
+        min_clearance: float,
+        diff_pair_set: set[tuple[int, int]] | None = None,
+        min_smd_pad_clearance: float | None = None,
+    ) -> list[DRCViolation]:
+        """Check clearance on a single copper layer.
+
+        Args:
+            pcb: The PCB being checked.
+            layer_name: Layer to scan.
+            min_clearance: Manufacturer's minimum inter-pair clearance.
+            diff_pair_set: Optional set of ``(min_net_id, max_net_id)``
+                tuples identifying detected differential pairs.  When
+                provided, segment-to-segment edges between the two
+                halves of a pair are skipped (delegated to
+                ``DiffPairClearanceIntraRule``).  See Issue #2560.
+        """
+        violations: list[DRCViolation] = []
+        if diff_pair_set is None:
+            diff_pair_set = set()
+
+        # Collect all copper elements on this layer
+        elements = self._collect_elements(pcb, layer_name)
+
+        # Broad phase only: all reporting and exact predicates remain below.
+        bounds = [element.bounds() for element in elements]
+        # Include the strongest applicable floor before exact pair scoping.
+        search_clearance = max(0.0, min_clearance, min_smd_pad_clearance or 0.0)
+        for i, j in candidate_pairs(bounds, search_clearance + DRC_TOLERANCE):
+            elem1, elem2 = elements[i], elements[j]
+            # Skip if same net (same net elements can touch)
+            if elem1.net_number == elem2.net_number:
+                continue
+
+            # Skip net 0 (unconnected) elements
+            if elem1.net_number == 0 or elem2.net_number == 0:
+                continue
+
+            # Vias are collected on every copper layer their barrel
+            # spans (issue #3487) so SEGMENT-via conflicts on inner
+            # layers are caught.  Pairs of layer-spanning elements
+            # (via-via, pad-via) have layer-independent geometry and
+            # are already evaluated on the via's explicitly-declared
+            # endpoint layers -- re-running them on each spanned
+            # inner layer would only duplicate the same report, so
+            # restrict non-segment pairs to declared layers.
+            if elem1.element_type != "segment" and elem2.element_type != "segment":
+                if (
+                    elem1.element_type == "via"
+                    and elem1.explicit_layers
+                    and layer_name not in elem1.explicit_layers
+                ) or (
+                    elem2.element_type == "via"
+                    and elem2.explicit_layers
+                    and layer_name not in elem2.explicit_layers
+                ):
+                    continue
+
+            # Skip same-pair segment-to-segment edges -- they are
+            # validated by DiffPairClearanceIntraRule against a
+            # tighter per-class threshold.  Pad/via combinations
+            # remain in scope here (issue #2560 scopes the new
+            # rule to segments only).
+            if (
+                elem1.element_type == "segment"
+                and elem2.element_type == "segment"
+                and diff_pair_set
+            ):
+                key = (
+                    (elem1.net_number, elem2.net_number)
+                    if elem1.net_number <= elem2.net_number
+                    else (elem2.net_number, elem1.net_number)
+                )
+                if key in diff_pair_set:
+                    continue
+
+            # Skip segment/via pairs where the segment endpoint
+            # coincides with the via center.  The router's in-pad
+            # escape places segment endpoints exactly at via centers
+            # (router invariant); when a neighboring net's escape
+            # segment terminates at the same coordinates as a
+            # cross-net in-pad via, the geometric distance is zero
+            # and the rule reports a spurious "negative clearance"
+            # violation at the via center.  The Via schema has no
+            # ``in_pad`` flag (dropped at serialization), so the
+            # detection is geometric.  See Issue #2706 and the
+            # ``_COLOCATION_EPSILON_MM`` constant above.
+            if {elem1.element_type, elem2.element_type} == {"segment", "via"}:
+                seg = elem1 if elem1.element_type == "segment" else elem2
+                via = elem2 if elem1.element_type == "segment" else elem1
+                sx1, sy1, sx2, sy2, _ = seg.geometry
+                vx, vy, _, _ = via.geometry
+                if (
+                    math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
+                    or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
+                ):
+                    continue
+
+            # Calculate clearance
+            clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
+
+            # Check against minimum
+            required = min_clearance
+            # The factory SMD pad floor constrains copper the DESIGNER
+            # places: it is a placement/layout limit, not a statement
+            # about a package's internal geometry.  Two pads of the SAME
+            # footprint are fixed by the component vendor and no
+            # placement or routing change can move them -- and stock
+            # library packages routinely sit under this floor: the
+            # diagonal corner gap between adjacent pad rows of
+            # ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` is 0.1414 mm (board
+            # 06's U3, pads 24/36 and 25/37), which JLCPCB fabricates
+            # routinely.  Applying the floor there would declare every
+            # fine-pitch QFP/QFN unmanufacturable, so restrict it to
+            # pads from different footprints.  Compared by IDENTITY, not
+            # by reference string -- see ``CopperElement.source_footprint``.
+            if (
+                elem1.pad_type == elem2.pad_type == "smd"
+                and elem1.source_footprint is not elem2.source_footprint
+            ):
+                required = max(required, min_smd_pad_clearance or 0)
+            if clearance + DRC_TOLERANCE < required:
+                violation = self._create_violation(
+                    elem1, elem2, clearance, required, layer_name, loc_x, loc_y
+                )
+                violations.append(violation)
+
+        return violations
+
+    def _collect_elements(self, pcb: PCB, layer_name: str) -> list[CopperElement]:
+        """Collect all copper elements on a layer."""
+        elements: list[CopperElement] = []
+        origin = board_origin(pcb)
+
+        # Add segments on this layer
+        for seg in pcb.segments_on_layer(layer_name):
+            elements.append(CopperElement.from_segment(seg, origin))
+
+        # Add pads that are on this layer
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if layer_name in pad.layers or "*.Cu" in pad.layers:
+                    elements.append(CopperElement.from_pad(pad, fp))
+
+        # Add vias whose barrel passes through this layer.  KiCad
+        # declares only the endpoint pair on the via (a through-via on a
+        # 4-layer board reads ``(layers "F.Cu" "B.Cu")``), but the barrel
+        # is physical copper on EVERY layer it spans -- including inner
+        # layers that never appear in ``via.layers``.  The previous
+        # ``layer_name in via.layers`` test silently skipped barrel-vs-
+        # inner-layer-segment conflicts (issue #3487: three real shorts
+        # on the softstart board were invisible to ``kct check``).
+        for via in pcb.vias:
+            if _via_spans_layer(via.layers, layer_name):
+                elements.append(CopperElement.from_via(via, origin))
+
+        return elements
+
+    def _elements_touch(self, a: CopperElement, b: CopperElement) -> bool:
+        """Return ``True`` when two copper elements are electrically joined.
+
+        "Touch" means the edge-to-edge clearance is at or below the
+        co-location epsilon (overlapping copper, or coincident within
+        manufacturing-irrelevant float noise).  Used both to group net-0
+        copper into islands and to decide whether an island contacts an
+        assigned net.
+
+        The router's in-pad escape places an inner-layer segment endpoint
+        at *exactly* a via center (router invariant), so a net-0 segment
+        endpoint coinciding with a via center is a modeling artifact, not
+        a real copper join -- mirror the suppression in ``_check_layer``
+        (Issue #2706) so it does not fabricate an island/contact edge.
+        """
+        if {a.element_type, b.element_type} == {"segment", "via"}:
+            seg = a if a.element_type == "segment" else b
+            via = b if a.element_type == "segment" else a
+            sx1, sy1, sx2, sy2, _ = seg.geometry
+            vx, vy, _, _ = via.geometry
+            if (
+                math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
+                or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
+            ):
+                return False
+
+        clearance, _, _ = _calculate_clearance(a, b)
+        return clearance <= _COLOCATION_EPSILON_MM
+
+    def _check_net0_bridges(
+        self,
+        pcb: PCB,
+        layer_name: str,
+        min_clearance: float,
+    ) -> list[DRCViolation]:
+        """Flag net-0 copper that electrically bridges two assigned nets.
+
+        A net-0 copper element (stray fill / unassigned router copper) is
+        only a defect when it touches copper of **two or more distinct
+        assigned (nonzero) nets** at once -- that is a short between those
+        nets carried by a piece of copper that itself has no net.  A net-0
+        element touching zero or one assigned net is legitimate
+        unconnected copper (unused pads, NPTH, test points) and must NOT
+        fire; that is exactly why the base pairwise loop skips net 0.
+
+        Algorithm (connectivity, not full DRC):
+
+        1. Split this layer's copper into net-0 elements and assigned-net
+           elements.
+        2. Union-find net-0 elements that touch each other into islands
+           (so a cluster of adjacent net-0 QFP pins is a single island,
+           which is harmless if it contacts < 2 assigned nets).
+        3. For each island, collect the set of distinct assigned net
+           numbers whose copper any island member touches.
+        4. Emit one ``clearance_net0_bridge`` error per island whose set
+           has >= 2 distinct nets, naming the two bridged nets.
+
+        See Issue #3816.
+        """
+        elements = self._collect_elements(pcb, layer_name)
+        net0 = [e for e in elements if e.net_number == 0]
+        assigned = [e for e in elements if e.net_number != 0]
+
+        if not net0 or not assigned:
+            # No net-0 copper, or no assigned copper for it to bridge.
+            return []
+
+        # --- 2. Group net-0 elements into touching islands (union-find). ---
+        parent = list(range(len(net0)))
+
+        def _find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def _union(i: int, j: int) -> None:
+            ri, rj = _find(i), _find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        for i in range(len(net0)):
+            for j in range(i + 1, len(net0)):
+                if self._elements_touch(net0[i], net0[j]):
+                    _union(i, j)
+
+        islands: dict[int, list[int]] = {}
+        for i in range(len(net0)):
+            islands.setdefault(_find(i), []).append(i)
+
+        # --- 3/4. For each island, find distinct assigned nets it touches. ---
+        violations: list[DRCViolation] = []
+        for members in islands.values():
+            touched: dict[int, CopperElement] = {}
+            contact_elem: CopperElement | None = None
+            for idx in members:
+                n0 = net0[idx]
+                for a in assigned:
+                    if a.net_number in touched:
+                        continue
+                    if self._elements_touch(n0, a):
+                        touched[a.net_number] = a
+                        if contact_elem is None:
+                            contact_elem = n0
+
+            if len(touched) >= 2:
+                violations.append(
+                    self._create_net0_bridge_violation(
+                        net0[members[0]] if contact_elem is None else contact_elem,
+                        list(touched.values()),
+                        min_clearance,
+                        layer_name,
+                    )
+                )
+
+        return violations
+
+    def _create_net0_bridge_violation(
+        self,
+        net0_elem: CopperElement,
+        bridged: list[CopperElement],
+        required: float,
+        layer: str,
+    ) -> DRCViolation:
+        """Build the ``clearance_net0_bridge`` short violation.
+
+        Names the first two bridged assigned nets (deterministically
+        sorted by net number) and locates the violation at the bridging
+        net-0 element.
+        """
+        bridged_sorted = sorted(bridged, key=lambda e: e.net_number)
+        a, b = bridged_sorted[0], bridged_sorted[1]
+        name_a = a.net_name or f"net{a.net_number}"
+        name_b = b.net_name or f"net{b.net_number}"
+
+        # Locate at the net-0 element's representative point.
+        gx = net0_elem.geometry
+        if net0_elem.element_type == "segment":
+            loc_x = (gx[0] + gx[2]) / 2
+            loc_y = (gx[1] + gx[3]) / 2
+        else:
+            loc_x, loc_y = gx[0], gx[1]
+
+        return DRCViolation(
+            rule_id="clearance_net0_bridge",
+            severity="error",
+            message=(
+                f"Net-0 copper ({net0_elem.reference}) bridges nets "
+                f"{name_a} and {name_b} (stray-copper short)"
+            ),
+            location=(round(loc_x, 3), round(loc_y, 3)),
+            layer=layer,
+            actual_value=0.0,
+            required_value=required,
+            items=(net0_elem.reference, a.reference, b.reference),
+            nets=(name_a, name_b),
+        )
+
+    def _create_violation(
+        self,
+        elem1: CopperElement,
+        elem2: CopperElement,
+        actual: float,
+        required: float,
+        layer: str,
+        loc_x: float,
+        loc_y: float,
+    ) -> DRCViolation:
+        """Create a DRC violation for a clearance issue.
+
+        A *negative* ``actual`` means the two copper geometries physically
+        overlap — that is an electrical short, not a borderline clearance
+        violation.  In that case the message is promoted to a net-named
+        ``SHORT: ...`` string at default verbosity (issue #3909) so an
+        operator sees the same actionable signal ``kicad-cli`` emits
+        ("Items shorting two nets (A and B)"), instead of a net-anonymous
+        "Segment to via clearance -0.188mm < minimum ..." line that only
+        surfaces the nets under ``--verbose``.
+        """
+        # Determine rule ID suffix based on element types
+        types = sorted([elem1.element_type, elem2.element_type])
+        rule_suffix = f"{types[0]}_{types[1]}"
+
+        net_a = elem1.net_name
+        net_b = elem2.net_name
+        if actual < 0 and net_a and net_b and net_a != net_b:
+            # Physical copper overlap between two distinct named nets: this is
+            # an electrical short, not a borderline clearance miss.  Promote
+            # the message to a net-named ``SHORT: ...`` line so it is visible
+            # at default verbosity (issue #3909).  ``rule_id`` is kept as the
+            # plain ``clearance_<suffix>`` so existing exact-rule_id filters
+            # and the ``ViolationType.from_string`` alias table stay stable.
+            message = (
+                f"SHORT: '{net_a}' and '{net_b}' copper overlaps by "
+                f"{-actual:.3f}mm ({elem1.element_type} to {elem2.element_type})"
+            )
+        else:
+            message = (
+                f"{elem1.element_type.title()} to {elem2.element_type} clearance "
+                f"{actual:.3f}mm < minimum {required:.3f}mm"
+            )
+
+        return DRCViolation(
+            rule_id=f"clearance_{rule_suffix}",
+            severity="error",
+            message=message,
+            location=(round(loc_x, 3), round(loc_y, 3)),
+            layer=layer,
+            actual_value=round(actual, 4),
+            required_value=required,
+            items=(elem1.reference, elem2.reference),
+            nets=(net_a, net_b),
+        )
+
+
+@dataclass
+class _ZoneFill:
+    """One filled polygon of a zone, resolved to a net and a layer."""
+
+    net_number: int
+    net_name: str
+    layer: str
+    polygon: object  # shapely (Multi)Polygon
+    source_clearance: float = 0.0
+    source_zone_id: str = ""
+    source_zone_index: int = -1
+
+
+def _repair_fill_polygon(poly):
+    """Repair an invalid fill ring, preserving every copper lobe.
+
+    Stale fills can carry self-touching outlines (KiCad traces knockout
+    holes through the exterior ring) or, in the worst case, genuinely
+    self-intersecting bowtie rings.  ``buffer(0)`` re-nodes the former
+    losslessly but silently *drops* the negatively-wound lobe of a
+    bowtie -- and dropped copper is exactly the copper this rule exists
+    to check, so a real short under that lobe would be masked (Issue
+    #3560).  ``shapely.make_valid`` instead keeps all lobes as a
+    MultiPolygon.
+
+    ``make_valid`` may return a GeometryCollection when part of the
+    outline collapses to zero-area linework; only the polygonal
+    components are copper, so extract those (an empty Polygon is
+    returned if nothing polygonal survives, which callers skip via
+    ``is_empty``).
+    """
+    from shapely import make_valid
+    from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
+
+    repaired = make_valid(poly)
+    if isinstance(repaired, (Polygon, MultiPolygon)):
+        return repaired
+    polys: list[Polygon] = []
+    if isinstance(repaired, GeometryCollection):
+        for geom in repaired.geoms:
+            if isinstance(geom, Polygon):
+                polys.append(geom)
+            elif isinstance(geom, MultiPolygon):
+                polys.extend(geom.geoms)
+    # Pure linework / points (fully degenerate outline) -> no copper.
+    if not polys:
+        return Polygon()
+    if len(polys) == 1:
+        return polys[0]
+    return MultiPolygon(polys)
+
+
+def _collect_zone_fills(
+    pcb: PCB, *, include_unassigned: bool = False
+) -> dict[str, list[_ZoneFill]]:
+    """Group every zone's filled polygons by copper layer, resolving nets.
+
+    Shared by :class:`SegmentZoneClearanceRule` and
+    :class:`ViaZoneClearanceRule` so segment-vs-fill and via/pad-vs-fill
+    clearance both consult the *same* committed ``filled_polygon`` copper
+    (this repo's source of truth -- issues #3482/#3523/#3527).
+
+    Zones whose net cannot be resolved to a nonzero net number are
+    skipped (keepout/rule areas have no fills anyway; a zone with no net
+    has no foreign-net relationship to enforce).  Invalid fill rings are
+    repaired with :func:`_repair_fill_polygon` (``make_valid``) so every
+    copper lobe survives -- ``buffer(0)`` silently drops bowtie lobes and
+    a real short under a dropped lobe would be masked (Issue #3560).
+
+    Args:
+        pcb: The PCB whose zones to collect.
+        include_unassigned: Include net-0 physical copper for hole checks;
+            default electrical clearance callers retain their existing scope.
+
+    Returns:
+        Mapping of copper-layer name -> list of :class:`_ZoneFill`, each
+        carrying the resolved net number/name and a shapely (Multi)Polygon.
+    """
+    from shapely.geometry import Polygon
+
+    name_to_number = {net.name: net.number for net in pcb.nets.values() if net.name}
+    number_to_name = {net.number: net.name for net in pcb.nets.values()}
+
+    fills_by_layer: dict[str, list[_ZoneFill]] = {}
+    for zone_index, zone in enumerate(pcb.zones):
+        net_number = zone.net_number
+        if net_number == 0 and zone.net_name:
+            # KiCad 9 name-only ``(net "X")`` format -- resolve by name.
+            net_number = name_to_number.get(zone.net_name, 0)
+        if net_number == 0 and not include_unassigned:
+            continue
+        net_name = zone.net_name or number_to_name.get(net_number, "")
+        for i, points in enumerate(zone.filled_polygons):
+            if len(points) < 3:
+                continue
+            poly = Polygon(points)
+            if not poly.is_valid:
+                # make_valid keeps every copper lobe (buffer(0)
+                # drops bowtie lobes -- see _repair_fill_polygon).
+                poly = _repair_fill_polygon(poly)
+            if poly.is_empty:
+                continue
+            layer = zone.filled_polygon_layer(i)
+            if not layer:
+                continue
+            fills_by_layer.setdefault(layer, []).append(
+                _ZoneFill(
+                    net_number=net_number,
+                    net_name=net_name,
+                    layer=layer,
+                    polygon=poly,
+                    source_clearance=getattr(zone, "clearance", 0.0),
+                    source_zone_id=getattr(zone, "uuid", ""),
+                    source_zone_index=zone_index,
+                )
+            )
+    return fills_by_layer
+
+
+class SegmentZoneClearanceRule(DRCRule):
+    """Check track segments against foreign-net zone fill copper.
+
+    This repo's convention (issues #3482/#3523) treats committed
+    ``filled_polygon`` data as the copper source of truth for
+    connectivity analysis, so it must also be the source of truth for
+    clearance/short checks.  Before this rule, ``kct check`` validated
+    segment-vs-segment, segment-vs-pad, and segment-vs-via spacing but
+    never compared a segment to the *fill* copper of another net's zone
+    -- a trace routed straight through a stale foreign fill (a hard
+    manufacturing short) sailed through every gate.  PR #3526's judge
+    found exactly that on board 05: a PWR_LED segment crossing ~3.1 mm
+    of +3V3 fill with zero blocking violations reported.  See Issue
+    #3527.
+
+    Two violation flavours, both ``rule_id="clearance_segment_zone"``
+    and severity ``error`` (blocking):
+
+    - **Short**: the segment's copper overlaps the fill polygon
+      (edge-to-edge clearance < 0).  ``actual_value`` is the negative
+      overlap depth.
+    - **Clearance**: the copper gap is positive but below the
+      manufacturer's ``min_clearance_mm``.
+
+    Same-net segment/fill pairs are skipped (a trace inside its own
+    pour is legal and common).  Segments and zones on net 0 are
+    skipped, matching :class:`ClearanceRule` (no net identity -> no
+    foreign-net determination).
+
+    Performance: fill polygons are loaded into one shapely ``STRtree``
+    per layer; each segment only visits fills whose bounding box
+    intersects its inflated bbox, and all distance math is exact
+    shapely C geometry (no centerline sampling), so the rule is safe
+    to run inside CI gates on large boards.
+
+    Epic #5509 Phase 4d scope note: this rule (and its sibling
+    :class:`ViaZoneClearanceRule`) is named in issue #5857's group-18 file
+    list but is **not** switched to call
+    :func:`kicad_tools.router.clearance_kernel.copper_gap` with a whole
+    :class:`~kicad_tools.router.clearance_kernel.KZonePoly`.  That call
+    exists (:func:`kicad_tools.validate.clearance_shapes.zone_shape` builds
+    exactly this shape), but the kernel's own module docstring is explicit
+    that handing a whole pour to ``copper_gap`` walks every edge of every
+    ring in pure Python -- the reason group 6 (the fixed-copper predicate)
+    needed its own indexed ``copper_gap_ring_edge`` primitive instead of a
+    plain kernel call.  This rule already gets the identical *exact*
+    geometry from GEOS's own distance algorithm, behind a per-layer
+    ``STRtree`` of whole fill polygons -- faster than an indexed Python
+    per-edge walk would be, not just simpler.  Routing it through the kernel
+    would trade a working fast path for a slow one with no accuracy gain, so
+    it stays on shapely.
+    """
+
+    rule_id = "clearance_segment_zone"
+    name = "Segment to Zone Fill Clearance"
+    description = "Validates track segments against foreign-net zone fill copper"
+
+    def check(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+    ) -> DRCResults:
+        """Check all segments against foreign-net zone fills.
+
+        Args:
+            pcb: The PCB to check
+            design_rules: Design rules from the manufacturer profile
+
+        Returns:
+            DRCResults containing segment-vs-zone-fill shorts and
+            clearance violations
+        """
+        # shapely is a core dependency (issue #3824).  Guard up front so a
+        # broken/partial install fails with an actionable install hint
+        # instead of a raw ``ModuleNotFoundError`` deep inside the geometry
+        # query -- this rule is the one that catches the very shorts a
+        # missing shapely would otherwise let through silently.
+        require_shapely("zone-vs-segment clearance DRC")
+
+        results = DRCResults()
+        results.rules_checked = 1
+
+        fills_by_layer = self._collect_fills(pcb)
+        if not fills_by_layer:
+            return results
+
+        import shapely
+        from shapely import STRtree
+        from shapely.geometry import LineString
+
+        origin = board_origin(pcb)
+
+        for layer, fills in fills_by_layer.items():
+            min_clearance = _layer_min_clearance(design_rules, layer)
+            tree = STRtree([f.polygon for f in fills])
+            for seg in pcb.segments_on_layer(layer):
+                if seg.net_number == 0:
+                    continue
+                half_w = seg.width / 2.0
+                line = LineString([seg.start, seg.end])
+                # Inflate the segment bbox by everything that could
+                # matter: its own half-width plus the required gap.
+                margin = half_w + min_clearance
+                minx, miny, maxx, maxy = line.bounds
+                query_box = shapely.box(minx - margin, miny - margin, maxx + margin, maxy + margin)
+                for idx in tree.query(query_box):
+                    fill = fills[int(idx)]
+                    if fill.net_number == seg.net_number:
+                        continue
+                    violation = self._check_pair(
+                        seg, line, half_w, fill, min_clearance, layer, origin
+                    )
+                    if violation is not None:
+                        results.add(violation)
+
+        return results
+
+    def _collect_fills(self, pcb: PCB) -> dict[str, list[_ZoneFill]]:
+        """Group zone fill polygons by copper layer, resolving zone nets.
+
+        Thin wrapper over the module-level :func:`_collect_zone_fills`
+        helper, shared with :class:`ViaZoneClearanceRule` so both rules
+        consume the same fill geometry (same net-resolution and
+        invalid-ring repair semantics).
+        """
+        return _collect_zone_fills(pcb)
+
+    def _check_pair(
+        self,
+        seg: Segment,
+        line: object,
+        half_w: float,
+        fill: _ZoneFill,
+        min_clearance: float,
+        layer: str,
+        origin: Origin = (0.0, 0.0),
+    ) -> DRCViolation | None:
+        """Check one segment against one foreign fill polygon."""
+        from shapely.ops import nearest_points
+
+        poly = fill.polygon
+        centerline_dist = line.distance(poly)  # type: ignore[attr-defined]
+        seg_net = seg.net_name if seg.net_number != 0 else ""
+        seg_ref = segment_ref(seg, origin)
+        zone_ref = f"ZoneFill-{fill.net_name}" if fill.net_name else "ZoneFill"
+
+        if centerline_dist == 0.0:
+            # Centerline touches or enters the fill copper: hard short.
+            # Depth = how far inside the fill the overlap's representative
+            # point sits, plus the trace half-width.
+            intersection = line.intersection(poly)  # type: ignore[attr-defined]
+            if intersection.is_empty:
+                # Grazing contact with no overlap length -- still a
+                # zero-clearance touch.
+                rep = nearest_points(line, poly)[0]
+                depth = 0.0
+            else:
+                rep = intersection.representative_point()
+                depth = poly.boundary.distance(rep)  # type: ignore[attr-defined]
+            clearance = -(depth + half_w)
+            return DRCViolation(
+                rule_id=self.rule_id,
+                severity="error",
+                message=(
+                    f"Short: segment on net '{seg_net}' overlaps zone fill of net "
+                    f"'{fill.net_name}' on {layer} (overlap depth "
+                    f"{depth + half_w:.3f}mm)"
+                ),
+                location=(round(rep.x, 3), round(rep.y, 3)),
+                layer=layer,
+                actual_value=round(clearance, 4),
+                required_value=min_clearance,
+                items=(seg_ref, zone_ref),
+                nets=(seg_net, fill.net_name),
+            )
+
+        clearance = centerline_dist - half_w
+        if clearance + DRC_TOLERANCE >= min_clearance:
+            return None
+
+        p_line, p_poly = nearest_points(line, poly)
+        loc_x = (p_line.x + p_poly.x) / 2.0
+        loc_y = (p_line.y + p_poly.y) / 2.0
+        if clearance < 0:
+            # Centerline outside the fill but the trace copper (width)
+            # overlaps the fill edge: still a short.
+            message = (
+                f"Short: segment on net '{seg_net}' copper overlaps zone fill of "
+                f"net '{fill.net_name}' on {layer} by {-clearance:.3f}mm"
+            )
+        else:
+            message = (
+                f"Segment to zone fill clearance {clearance:.3f}mm < minimum "
+                f"{min_clearance:.3f}mm (net '{seg_net}' vs zone net "
+                f"'{fill.net_name}')"
+            )
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="error",
+            message=message,
+            location=(round(loc_x, 3), round(loc_y, 3)),
+            layer=layer,
+            actual_value=round(clearance, 4),
+            required_value=min_clearance,
+            items=(seg_ref, zone_ref),
+            nets=(seg_net, fill.net_name),
+        )
+
+
+class ViaZoneClearanceRule(DRCRule):
+    """Check vias and pads against foreign-net zone fill copper.
+
+    The sibling of :class:`SegmentZoneClearanceRule`.  That rule closed
+    the segment-vs-fill gap (Issue #3527), but vias and pads were still
+    never compared to the committed ``filled_polygon`` copper of another
+    net's zone -- so a via dropped sub-clearance to (or straight through)
+    a stale foreign pour shipped uncaught: KiCad's own DRC flags the
+    overlap, but every project gate stayed green because the strict CI
+    gate runs ``kct check`` and ``kct check`` had no via/pad-vs-fill term.
+    This is the exact failure class that motivated Issue #3556 (a surgical
+    trace move on board 06 left copper 0.0347 mm from an un-refilled GND
+    pour) -- but for the round copper of a via barrel rather than a track.
+
+    A through-via barrel is physical copper on **every** layer it spans,
+    so each via is checked against the fills on all spanned copper layers
+    (via :func:`kicad_tools.core.layers.via_spans_layer`), matching the
+    all-layer treatment :class:`ClearanceRule` already applies to
+    segment-vs-via pairs (Issue #3487).  Pads are checked on each copper
+    layer they declare.
+
+    Two violation flavours, both severity ``error`` (blocking):
+
+    - **Short**: the via/pad copper overlaps the fill polygon
+      (edge-to-edge clearance < 0).  ``actual_value`` is the negative
+      overlap depth.
+    - **Clearance**: the copper gap is positive but below the
+      manufacturer's ``min_clearance_mm``.
+
+    Same-net pairs are skipped (a via stitching its own pour is legal).
+    Net-0 vias/pads/zones are skipped, matching the sibling rule.
+
+    The rule_id is ``clearance_via_zone`` for vias and ``clearance_pad_zone``
+    for pads, so the existing strict CI gate (which counts every blocking
+    ``clearance_*`` violation ``kct check`` reports) picks them up with no
+    allowlist surgery.
+    """
+
+    rule_id = "clearance_via_zone"
+    name = "Via/Pad to Zone Fill Clearance"
+    description = "Validates vias and pads against foreign-net zone fill copper"
+
+    def check(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+    ) -> DRCResults:
+        """Check all vias and pads against foreign-net zone fills.
+
+        Args:
+            pcb: The PCB to check
+            design_rules: Design rules from the manufacturer profile
+
+        Returns:
+            DRCResults containing via/pad-vs-zone-fill shorts and
+            clearance violations.
+        """
+        # shapely is a core dependency (issue #3824).  Guard up front so a
+        # broken/partial install fails with an actionable install hint
+        # instead of a raw ``ModuleNotFoundError`` deep inside the geometry
+        # query.
+        require_shapely("zone-vs-via/pad clearance DRC")
+
+        results = DRCResults()
+        results.rules_checked = 1
+
+        fills_by_layer = _collect_zone_fills(pcb)
+        if not fills_by_layer:
+            return results
+
+        import shapely
+        from shapely import STRtree
+        from shapely.geometry import Point
+
+        origin = board_origin(pcb)
+
+        for layer, fills in fills_by_layer.items():
+            min_clearance = _layer_min_clearance(design_rules, layer)
+            tree = STRtree([f.polygon for f in fills])
+
+            # --- Vias: a barrel is copper on every layer it spans. ---
+            for via in pcb.vias:
+                if via.net_number == 0:
+                    continue
+                if not _via_spans_layer(via.layers, layer):
+                    continue
+                radius = via.size / 2.0
+                if radius <= 0:
+                    continue
+                shape = Point(via.position).buffer(radius)
+                ref = via_ref(via, origin)
+                self._query_and_check(
+                    tree,
+                    fills,
+                    shape,
+                    radius,
+                    via.net_number,
+                    via.net_name,
+                    ref,
+                    min_clearance,
+                    layer,
+                    results,
+                    shapely,
+                )
+
+            # --- Pads: checked on each copper layer they declare. ---
+            for fp in pcb.footprints:
+                for pad in fp.pads:
+                    if pad.net_number == 0:
+                        continue
+                    if not _pad_on_layer(pad, layer):
+                        continue
+                    # Build the TRUE pad copper outline (roundrect/oval
+                    # honored) rather than an axis-aligned bounding box so
+                    # rounded corners do not produce phantom sub-10um
+                    # shorts against foreign-net fills (issue #3826).
+                    shape = _pad_polygon(pad, fp)
+                    if shape is None:
+                        continue
+                    ref = f"{fp.reference}-{pad.number}"
+                    self._query_and_check(
+                        tree,
+                        fills,
+                        shape,
+                        0.0,  # the box already models the full pad copper
+                        pad.net_number,
+                        pad.net_name,
+                        ref,
+                        min_clearance,
+                        layer,
+                        results,
+                        shapely,
+                        rule_id="clearance_pad_zone",
+                        kind="pad",
+                    )
+
+        return results
+
+    def _query_and_check(
+        self,
+        tree: object,
+        fills: list[_ZoneFill],
+        shape: object,
+        inflate: float,
+        net_number: int,
+        net_name: str,
+        ref: str,
+        min_clearance: float,
+        layer: str,
+        results: DRCResults,
+        shapely_mod: object,
+        rule_id: str = "clearance_via_zone",
+        kind: str = "via",
+    ) -> None:
+        """Query the fill STRtree for one via/pad shape and emit violations."""
+        minx, miny, maxx, maxy = shape.bounds  # type: ignore[attr-defined]
+        margin = inflate + min_clearance
+        query_box = shapely_mod.box(  # type: ignore[attr-defined]
+            minx - margin, miny - margin, maxx + margin, maxy + margin
+        )
+        for idx in tree.query(query_box):  # type: ignore[attr-defined]
+            fill = fills[int(idx)]
+            if fill.net_number == net_number:
+                continue
+            violation = self._check_shape(
+                shape, net_number, net_name, ref, fill, min_clearance, layer, rule_id, kind
+            )
+            if violation is not None:
+                results.add(violation)
+
+    def _check_shape(
+        self,
+        shape: object,
+        net_number: int,
+        net_name: str,
+        ref: str,
+        fill: _ZoneFill,
+        min_clearance: float,
+        layer: str,
+        rule_id: str,
+        kind: str,
+    ) -> DRCViolation | None:
+        """Check one via/pad copper shape against one foreign fill polygon."""
+        poly = fill.polygon
+        net_label = net_name if net_number != 0 else ""
+        zone_ref = f"ZoneFill-{fill.net_name}" if fill.net_name else "ZoneFill"
+
+        # The shape already models the full copper footprint (via barrel
+        # disc / pad box), so a positive shape-to-polygon distance IS the
+        # edge-to-edge clearance -- no half-width subtraction needed.
+        dist = shape.distance(poly)  # type: ignore[attr-defined]
+
+        if dist > 0:
+            clearance = dist
+            if clearance + DRC_TOLERANCE >= min_clearance:
+                return None
+            from shapely.ops import nearest_points
+
+            p_shape, p_poly = nearest_points(shape, poly)
+            loc_x = (p_shape.x + p_poly.x) / 2.0
+            loc_y = (p_shape.y + p_poly.y) / 2.0
+            message = (
+                f"{kind.title()} to zone fill clearance {clearance:.3f}mm < "
+                f"minimum {min_clearance:.3f}mm (net '{net_label}' vs zone net "
+                f"'{fill.net_name}')"
+            )
+            return DRCViolation(
+                rule_id=rule_id,
+                severity="error",
+                message=message,
+                location=(round(loc_x, 3), round(loc_y, 3)),
+                layer=layer,
+                actual_value=round(clearance, 4),
+                required_value=min_clearance,
+                items=(ref, zone_ref),
+                nets=(net_label, fill.net_name),
+            )
+
+        # dist == 0: the copper overlaps (or grazes) the fill -- hard short.
+        intersection = shape.intersection(poly)  # type: ignore[attr-defined]
+        if intersection.is_empty:
+            from shapely.ops import nearest_points
+
+            rep = nearest_points(shape, poly)[0]
+            depth = 0.0
+        else:
+            rep = intersection.representative_point()
+            depth = poly.boundary.distance(rep)  # type: ignore[attr-defined]
+        clearance = -depth
+        return DRCViolation(
+            rule_id=rule_id,
+            severity="error",
+            message=(
+                f"Short: {kind} on net '{net_label}' overlaps zone fill of net "
+                f"'{fill.net_name}' on {layer} (overlap depth {depth:.3f}mm)"
+            ),
+            location=(round(rep.x, 3), round(rep.y, 3)),
+            layer=layer,
+            actual_value=round(clearance, 4),
+            required_value=min_clearance,
+            items=(ref, zone_ref),
+            nets=(net_label, fill.net_name),
+        )
+
+
+def _pad_on_layer(pad: Pad, layer: str) -> bool:
+    """Return True if a pad's copper exists on ``layer``.
+
+    Pads declare layers like ``["F.Cu", "F.Mask"]`` (SMD) or
+    ``["*.Cu", "*.Mask"]`` (through-hole).  The ``*.Cu`` wildcard means
+    every copper layer, so a through-hole pad is copper on ``layer``.
+    """
+    pad_layers = pad.layers
+    if "*.Cu" in pad_layers:
+        return True
+    return layer in pad_layers

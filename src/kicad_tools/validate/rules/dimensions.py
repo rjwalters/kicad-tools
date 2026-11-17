@@ -1,0 +1,296 @@
+"""Dimension DRC rules for trace width, via drill, and annular ring.
+
+This module implements dimension validation rules that check minimum sizes
+for traces, vias, and annular rings against manufacturer design rules.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from kicad_tools.core.geometry import rotate_pad_offset
+
+from ..clearance_shapes import KVia as _KVia
+from ..clearance_shapes import hole_gap as _kernel_hole_gap
+from ..violations import DRCResults, DRCViolation
+from .base import DRC_TOLERANCE, DRCRule
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.schema.pcb import PCB
+
+
+class DimensionRules(DRCRule):
+    """Check dimension rules for traces and vias.
+
+    Validates:
+    - Minimum trace width
+    - Minimum via drill diameter
+    - Minimum via outer diameter
+    - Minimum annular ring (via outer - via drill) / 2
+    - Drill-to-drill clearance (hole edge to hole edge)
+    """
+
+    rule_id = "dimensions"
+    name = "Dimension Rules"
+    description = "Check trace width, via drill, and annular ring dimensions"
+
+    def check(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+    ) -> DRCResults:
+        """Check all dimension rules.
+
+        Args:
+            pcb: The PCB to check
+            design_rules: Design rules from the manufacturer profile
+
+        Returns:
+            DRCResults containing dimension violations
+        """
+        results = DRCResults()
+
+        # Check trace widths
+        self._check_trace_widths(pcb, design_rules, results)
+
+        # Check via dimensions
+        self._check_via_dimensions(pcb, design_rules, results)
+
+        # Check drill-to-drill clearance
+        self._check_drill_clearance(pcb, design_rules, results)
+
+        # 5 rule categories checked
+        results.rules_checked = 5
+
+        return results
+
+    def _check_trace_widths(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+        results: DRCResults,
+    ) -> None:
+        """Check minimum trace width for all segments."""
+        min_width = design_rules.min_trace_width_mm
+
+        for segment in pcb.segments:
+            if segment.width + DRC_TOLERANCE < min_width:
+                # Get net name if available
+                net = pcb.get_net(segment.net_number)
+                net_name = net.name if net else f"net:{segment.net_number}"
+
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_trace_width",
+                        severity="error",
+                        message=(f"Trace width {segment.width:.3f}mm < minimum {min_width:.3f}mm"),
+                        location=segment.start,
+                        layer=segment.layer,
+                        actual_value=segment.width,
+                        required_value=min_width,
+                        items=(net_name,),
+                    )
+                )
+
+    def _check_via_dimensions(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+        results: DRCResults,
+    ) -> None:
+        """Check via drill, diameter, and annular ring."""
+        min_drill = design_rules.min_via_drill_mm
+        min_diameter = design_rules.min_via_diameter_mm
+        min_annular = design_rules.min_annular_ring_mm
+
+        for via in pcb.vias:
+            # Get net name for items list
+            net = pcb.get_net(via.net_number)
+            net_name = net.name if net else f"net:{via.net_number}"
+
+            # Issue #3118: skip the standard min-via floors for vias
+            # tagged as micro vias.  The schema :class:`Via` carries
+            # ``via_type == "micro"`` when parsed from ``(via micro
+            # ...)`` (round-trip preserved by #3124/#3126); the router
+            # primitive :class:`Via` carries ``is_micro=True`` when
+            # emitted by :meth:`EscapeRouter._try_in_pad_escape`'s
+            # micro-via fallback or by ``kct stitch --micro-via``.
+            # Accept either tag so the exemption survives both
+            # parse-from-file (validate against a routed PCB) and
+            # direct-from-router (validate on an in-memory PCB) call
+            # sites.  These vias are intentionally smaller than the
+            # manufacturer's standard via floor; jlcpcb-tier1's
+            # published Capability+ supports 0.1 mm drill / 0.2 mm OD
+            # comfortably so a flat exemption matches the process the
+            # manufacturer ships.  Annular ring is still computed off
+            # the via's own dimensions, but the check is skipped here
+            # too -- the geometric reasoning for micro-via annular
+            # rings (with laser-drilled holes) differs from standard
+            # through-hole annular floors.
+            if getattr(via, "via_type", None) == "micro" or getattr(via, "is_micro", False):
+                continue
+
+            # Check drill diameter
+            if via.drill + DRC_TOLERANCE < min_drill:
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_via_drill",
+                        severity="error",
+                        message=(f"Via drill {via.drill:.3f}mm < minimum {min_drill:.3f}mm"),
+                        location=via.position,
+                        layer=via.layers[0] if via.layers else None,
+                        actual_value=via.drill,
+                        required_value=min_drill,
+                        items=(net_name,),
+                    )
+                )
+
+            # Check via outer diameter
+            if via.size + DRC_TOLERANCE < min_diameter:
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_via_diameter",
+                        severity="error",
+                        message=(f"Via diameter {via.size:.3f}mm < minimum {min_diameter:.3f}mm"),
+                        location=via.position,
+                        layer=via.layers[0] if via.layers else None,
+                        actual_value=via.size,
+                        required_value=min_diameter,
+                        items=(net_name,),
+                    )
+                )
+
+            # Check annular ring: (outer diameter - drill) / 2
+            annular_ring = (via.size - via.drill) / 2
+            if annular_ring + DRC_TOLERANCE < min_annular:
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_annular_ring",
+                        severity="error",
+                        message=(
+                            f"Annular ring {annular_ring:.3f}mm < minimum {min_annular:.3f}mm"
+                        ),
+                        location=via.position,
+                        layer=via.layers[0] if via.layers else None,
+                        actual_value=annular_ring,
+                        required_value=min_annular,
+                        items=(net_name,),
+                    )
+                )
+
+    def _check_drill_clearance(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+        results: DRCResults,
+    ) -> None:
+        """Check drill-to-drill (hole-to-hole) clearance.
+
+        Uses min_hole_to_hole_mm as the minimum edge-to-edge distance between
+        drill holes. This is a dedicated fab spec (canonically 0.5 mm),
+        distinct from min_clearance_mm (copper trace/space). It applies to
+        both vias and through-hole pads.
+        """
+        min_clearance = design_rules.min_hole_to_hole_mm
+
+        # Collect all drill holes: vias + through-hole pads
+        # Each entry: (position, drill_diameter, item_description,
+        #              footprint_reference, net_name)
+        # footprint_reference is "" for vias (no footprint context)
+        drills: list[tuple[tuple[float, float], float, str, str, str]] = []
+
+        # Add vias
+        for via in pcb.vias:
+            net = pcb.get_net(via.net_number)
+            # Unconnected vias carry net_number == 0, a single canonical no-net
+            # sentinel (schema/pcb.py: self._nets[0] = Net(0, "")), so this
+            # fallback yields the identical "net:0" string for *every* floating
+            # via -- distinct floating endpoints collide on it. The
+            # net-relationship classifier (check_cmd._net_relationship, #4127)
+            # is floating-aware and treats such collisions as different-net.
+            net_name = net.name if net else f"net:{via.net_number}"
+            drills.append((via.position, via.drill, net_name, "", net_name))
+
+        # Add through-hole pads from footprints
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.type == "thru_hole" and pad.drill > 0:
+                    # Pad position is stored footprint-local and must be
+                    # rotated by the footprint orientation before translating
+                    # to board coordinates (KiCad's negated-angle convention;
+                    # see core.geometry.rotate_pad_offset, issue #3739). A
+                    # naive add ignores rotation and produces phantom
+                    # hole-to-hole violations on rotated/flipped footprints
+                    # (issue #4044).
+                    rotated_x, rotated_y = rotate_pad_offset(
+                        pad.position[0], pad.position[1], fp.rotation
+                    )
+                    abs_x = fp.position[0] + rotated_x
+                    abs_y = fp.position[1] + rotated_y
+                    # As with vias above, every floating pad has net_number == 0
+                    # and net_name == "", so this fallback produces the same
+                    # "net:0" placeholder for all of them (they collide, not
+                    # distinct per-pad IDs). check_cmd._net_relationship is
+                    # floating-aware and classifies any such pair as
+                    # different-net (#4127).
+                    net_name = pad.net_name if pad.net_name else f"net:{pad.net_number}"
+                    drills.append(
+                        (
+                            (abs_x, abs_y),
+                            pad.drill,
+                            f"{fp.reference}-{pad.number}:{net_name}",
+                            fp.reference,
+                            net_name,
+                        )
+                    )
+
+        # Check all pairs for clearance.  Epic #5509 Phase 4d: the edge-to-edge
+        # distance is the shared clearance kernel's ``hole_gap`` between two
+        # drill-only ``KVia`` shapes (``diameter=0`` -- these are holes, not
+        # copper barrels) -- identical arithmetic to the retired
+        # ``center_distance - drill1/2 - drill2/2`` (two circular holes, so
+        # there was no approximation here to fix), kept on the kernel for the
+        # dedup.
+        for i, (pos1, drill1, item1, fp_ref1, net1) in enumerate(drills):
+            hole1 = _KVia(x=pos1[0], y=pos1[1], diameter=0.0, drill=drill1)
+            for pos2, drill2, item2, fp_ref2, net2 in drills[i + 1 :]:
+                hole2 = _KVia(x=pos2[0], y=pos2[1], diameter=0.0, drill=drill2)
+                edge_distance = _kernel_hole_gap(hole1, hole2)
+
+                if edge_distance + DRC_TOLERANCE < min_clearance:
+                    # Downgrade to warning when both holes belong to the
+                    # same footprint (e.g. dense connector pads).  These
+                    # are intentional by design and should not block builds.
+                    same_footprint = fp_ref1 != "" and fp_ref1 == fp_ref2
+                    severity = "warning" if same_footprint else "error"
+                    message_prefix = "(same-footprint) " if same_footprint else ""
+
+                    # Use midpoint as violation location
+                    mid_x = (pos1[0] + pos2[0]) / 2
+                    mid_y = (pos1[1] + pos2[1]) / 2
+
+                    results.add(
+                        DRCViolation(
+                            # Issue #4353: the emitted rule_id is
+                            # ``hole_to_hole_clearance`` (was
+                            # ``dimension_drill_clearance``) so the report
+                            # label matches the "Hole-to-hole clearance ..."
+                            # message text below.  The old id still parses via
+                            # the backwards-compat alias in
+                            # ``ViolationType.from_string``.
+                            rule_id="hole_to_hole_clearance",
+                            severity=severity,
+                            message=(
+                                f"{message_prefix}Hole-to-hole clearance "
+                                f"{edge_distance:.3f}mm < "
+                                f"minimum {min_clearance:.3f}mm"
+                            ),
+                            location=(mid_x, mid_y),
+                            layer=None,  # Drills span multiple layers
+                            actual_value=edge_distance,
+                            required_value=min_clearance,
+                            items=(item1, item2),
+                            nets=(net1, net2),
+                        )
+                    )

@@ -1,0 +1,2704 @@
+"""
+Zone generator for creating copper pour zones on PCBs.
+
+This module provides a high-level API for generating copper pour zones,
+with automatic board outline detection and sensible defaults for power nets.
+
+Outline allocator (#2771, #3043, #3240)
+---------------------------------------
+
+In addition to the layer/priority allocator (:func:`_assign_layers_for_pour_nets`),
+this module owns the *outline* allocator (:func:`_compute_pour_outlines`).
+The outline allocator runs after layer assignment and decides whether each
+zone should use the full board outline (when it is the only zone on its
+layer) or a per-net bounding region derived from that net's pads (when it
+shares a layer with another zone).
+
+This is the fix for the "all power nets share F.Cu with identical board
+outlines, so the highest-priority zone wins everything" failure documented
+in #2771.  Earlier issues #2410 / #2041 / #2593 made the priorities
+distinct, which silenced the warning, but distinct priorities alone do not
+produce real copper for the losing zones -- the outlines have to be
+geometrically disjoint for KiCad's fill resolver to award copper to more
+than one zone on a shared layer.
+
+The original PR #2771 only computed each net's bbox independently and
+relied on pad-cluster separation to keep the bboxes disjoint.  On real
+boards where power-net pads are *spatially interleaved* (e.g. board 06's
+``+3V3``/``+1V8``/``+1V2`` cluster on a BGA), the bboxes overlap and the
+silent-override returns.  Issue #3043 extended the allocator with a
+second pass that *subtracts higher-priority bboxes from lower-priority
+outlines* (using Shapely's polygon difference).
+
+Issue #3240 reported a remaining gap: when a lower-priority net's pads
+sit fully *inside* a higher-priority net's bbox, the Shapely difference
+returns empty and the legacy fallback returned the raw bbox -- producing
+zero copper for the failing net.  The fix adds:
+
+* A pad-safe-bbox fallback (tight 0.3 mm margin around the failing net's
+  own pads) used when the standard carve returns empty.
+* A "subtrahend downgrade" rule: the higher-priority net is allowed to
+  yield space by using its own pad-safe bbox (instead of the full
+  inflated raw bbox) whenever the raw bbox would over-claim a
+  lower-priority sibling's region.
+* :class:`ZonePartitionError` raised when neither fallback can produce
+  disjoint outlines (e.g. truly coincident pad layouts), so the user
+  sees an actionable error instead of a silent zero-copper failure.
+
+Pre-existing zones on the pour layer (#5590)
+--------------------------------------------
+
+Both allocators originally saw only the nets the caller asked to pour.
+A zone that already exists in the PCB file (e.g. board 03's hand-authored
+``VCC`` pour on ``In2.Cu``) never entered ``pour_nets`` -- callers like
+:func:`kicad_tools.router.auto_pour.auto_pour_if_missing` filter nets
+that already have zones -- so a newly auto-poured zone landing on that
+same layer tied the incumbent's priority and kept the full-board
+outline.  KiCad's fill resolver then awarded the whole contested region
+to one of the two zones, tie-breaking on the zone UUID: the loser was
+left with pad-halo slivers or nothing at all.
+
+Issue #5590 feeds the pre-existing zone inventory back into both
+allocators (:func:`_existing_zone_priority_by_layer`):
+
+* **Priority stagger** -- new zones on an incumbent-occupied layer are
+  assigned priorities strictly above the incumbents' maximum, so the
+  fill order no longer depends on the UUID tie-break.
+* **Carved outline** -- an incumbent makes the layer "shared" for
+  :func:`_compute_pour_outlines`, so the new zone gets its per-net pad
+  bbox instead of the full board outline.  The incumbent's polygon is
+  deliberately NOT subtracted from the new outline: incumbents are
+  frequently full-board planes, and subtracting one would empty every
+  carve.  Instead the (now higher-priority) new zone claims its own pad
+  region and the incumbent fills the rest of the layer.
+
+Measured on board 03 (KiCad 10.0.5, both UUID orderings): the old
+allocation gave ``VCC`` 0.289 mm² / ``VBUS`` 4624 mm² on one UUID branch
+and ``VCC`` 4627 mm² / ``VBUS`` **0** mm² on the other; the stagger+carve
+allocation gives ``VCC`` 4180 mm² / ``VBUS`` 420 mm² identically on both
+branches.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+import uuid as uuid_module
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from kicad_tools.core.layers import is_declared_copper_layer, validate_copper_layer
+from kicad_tools.core.sexp_file import save_pcb, verify_pcb_write
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp import SExp, parse_file
+from kicad_tools.sexp.builders import zone_node
+
+if TYPE_CHECKING:
+    from kicad_tools.router.net_class import NetClass
+
+
+def _zone_uuid_factory() -> str:
+    """Generate a zone UUID, honoring the router primitives toggle.
+
+    Issue #3272.  Delegated to the router primitives module so that
+    ``enable_deterministic_uuids(True)`` (set inside
+    :func:`Autorouter.route_all_negotiated` whenever ``seed`` is
+    supplied) makes ZONE UUIDs deterministic too -- not just segment /
+    via UUIDs.  Without this, board 06's smoke harness still observed
+    file-level diffs on the trailing zone block even when all routed
+    segments matched.  The import is deferred to call time so module
+    load order between :mod:`kicad_tools.zones.generator` and
+    :mod:`kicad_tools.router.primitives` is irrelevant.
+
+    .. note::
+
+       Since Issue #5578 :class:`GeneratedZone` no longer uses this
+       factory by default -- it derives a **content-addressed** UUID via
+       :func:`_content_zone_uuid` instead, which is reproducible even when
+       the router's toggle has not been flipped on yet (auto-pour runs
+       *before* ``route_all_negotiated``).  This factory is kept for
+       callers that explicitly want a stochastic / RNG-tracked zone UUID.
+    """
+    try:
+        from kicad_tools.router.primitives import (
+            is_deterministic_uuids_enabled,
+        )
+    except Exception:  # pragma: no cover - defensive
+        return str(uuid_module.uuid4())
+    if is_deterministic_uuids_enabled():
+        import random as _random
+
+        return str(uuid_module.UUID(int=_random.getrandbits(128), version=4))
+    return str(uuid_module.uuid4())
+
+
+# Fixed, arbitrary namespace for content-addressed zone UUIDs (Issue #5578).
+# Its VALUE carries no meaning, but it must never change: it is one of the
+# inputs to every generated zone's UUID, and a zone's UUID is what KiCad
+# tie-breaks on when two equal-priority zones share a layer.  Re-rolling it
+# would renumber every generated zone on every board AND could flip which of
+# board 03's two In2.Cu pours gets starved (see :func:`_content_zone_uuid`),
+# so treat it as a pinned constant, not a tunable.
+_ZONE_UUID_NAMESPACE = uuid_module.UUID("6c5a2e30-9cfc-5b1d-b2b3-6a0f1fbba1c4")
+
+
+def _content_zone_uuid(key: str) -> str:
+    """Derive a zone UUID deterministically from the zone's own content.
+
+    Issue #5578.  A generated zone's UUID is not cosmetic: KiCad's zone
+    ordering (and therefore which of two *equal-priority, same-layer*
+    overlapping zones wins the contested copper) tie-breaks on it.  Board
+    03 ships a hand-authored ``VCC`` pour on ``In2.Cu`` and ``kct route``
+    auto-pours a ``VBUS`` zone onto the same layer at the same priority;
+    with a random :func:`uuid.uuid4` the two sorted in a different order on
+    roughly every third run, and the whole ``In2.Cu`` fill flipped with it
+    (measured: ``VBUS uuid e4c41fb8-...`` -> ``VCC`` 4 islands / ``VBUS``
+    1 island, versus ``VBUS uuid 18329af8-...`` -> ``VCC`` **0** islands /
+    ``VBUS`` 4 islands, on two boards otherwise identical byte-for-byte).
+
+    Deriving the UUID from ``key`` with :func:`uuid.uuid5` makes it a pure
+    function of the zone: the same board always produces the same zone
+    UUID, with or without ``--seed``, and regardless of whether the
+    router's ``enable_deterministic_uuids`` toggle (Issue #3272) happens to
+    be latched on yet.  That matters because ``auto_pour_if_missing`` runs
+    *before* ``route_all_negotiated`` ever flips that toggle, so the
+    #3272 mechanism never covered this call site.
+
+    ``uuid5`` is SHA-1-based and emits a version-5 UUID; KiCad only
+    requires the canonical 8-4-4-4-12 hex shape, which this satisfies.
+
+    .. warning::
+
+       This makes the outcome *reproducible*, not *fair*: with two zones
+       still sharing a layer and a priority, one of them is still starved
+       of most of its copper -- the generator already warns about that in
+       :meth:`ZoneGenerator._check_overlap`, and fixing it needs a
+       priority / outline-partition change that is deliberately out of
+       #5578's scope and tracked in #5590.
+       ``tests/test_pour_fill_determinism_5578.py``
+       asserts board 03's two ``In2.Cu`` pours both end up with copper, so
+       a future change to this derivation cannot silently flip the board
+       into the zero-copper branch.
+    """
+    return str(uuid_module.uuid5(_ZONE_UUID_NAMESPACE, key))
+
+
+#: Minimum fraction of a lower-priority zone's own boundary area that must
+#: remain *outside* the higher-priority zone's boundary for the overlap to
+#: be considered safe (Issue #5590).  When the loser retains at least this
+#: much exclusive territory, KiCad's fill resolver leaves it real copper
+#: (its exclusive region plus clearance halos around its own pads) and no
+#: "zero copper" warning is emitted.  Calibrated against live KiCad 10.0.5
+#: fills: board 03's fixed VCC/VBUS shape retains 91% exclusive territory
+#: and both zones fill, while a legacy inset-frame shape retains ~1.2% and
+#: the loser ends up with slivers only.  Equal-priority overlaps always
+#: warn regardless -- the UUID tie-break makes them non-deterministic.
+_OVERLAP_EXCLUSIVE_AREA_MIN_RATIO = 0.05
+
+
+@dataclass
+class ZoneOverlapWarning:
+    """Warning about overlapping zones on the same layer.
+
+    Attributes:
+        new_net: Net name of the zone being added
+        existing_net: Net name of the existing zone that overlaps
+        layer: The shared copper layer
+        message: Human-readable warning message
+    """
+
+    new_net: str
+    existing_net: str
+    layer: str
+    message: str
+
+
+class ZonePartitionError(RuntimeError):
+    """Raised when the outline allocator cannot produce disjoint per-net outlines.
+
+    Indicates that two or more zones sharing a layer would receive zero
+    copper because no carved-out outline can be derived for one of them.
+    This typically happens when a lower-priority net's pads sit fully
+    inside the higher-priority net's bounding region and even a tight
+    pad-bbox fallback would still overlap.
+
+    The error message lists the failing net, the layer, and the
+    higher-priority nets that fully cover it, together with suggested
+    remediations (e.g., move the failing net to another layer, shrink
+    the per-net margin, or accept routing the net as traces).
+    """
+
+    def __init__(
+        self,
+        failing_net: str,
+        layer: str,
+        covering_nets: list[str],
+        suggestion: str | None = None,
+    ):
+        self.failing_net = failing_net
+        self.layer = layer
+        self.covering_nets = list(covering_nets)
+        covering_list = ", ".join(self.covering_nets) if self.covering_nets else "(none)"
+        msg = (
+            f"Auto-pour: zone '{failing_net}' on {layer} would receive ZERO copper "
+            f"because its pad region is fully covered by higher-priority zones "
+            f"({covering_list}). "
+        )
+        if suggestion:
+            msg += suggestion
+        else:
+            msg += (
+                "Suggested fixes: (a) move one of the conflicting nets to a different "
+                "copper layer via manual zone assignment, (b) reduce the per-net pour "
+                "margin (currently ~1.5 mm), or (c) accept that this net should be "
+                "routed as traces rather than zone-filled."
+            )
+        super().__init__(msg)
+
+
+@dataclass
+class ZoneConfig:
+    """Configuration for a copper pour zone.
+
+    Attributes:
+        net: Net name (e.g., "GND", "+3.3V")
+        layer: Copper layer (e.g., "B.Cu", "F.Cu")
+        priority: Zone fill priority (higher = fills later, on top)
+        clearance: Clearance to other nets in mm
+        min_thickness: Minimum copper thickness in mm
+        thermal_gap: Thermal relief gap in mm
+        thermal_bridge_width: Thermal relief spoke width in mm
+        pad_connection: Zone-level pad-to-zone connection mode. Defaults to
+            ``""`` (thermal relief at the zone level), which pairs with the
+            **selective** per-pad policy (issue #3729): pads too small to
+            host the 2 thermal spokes KiCad's DRC requires get a per-pad
+            solid override while larger pads keep thermal relief.  Set
+            ``"yes"`` for the #3728 blanket-solid behavior, or
+            ``"thru_hole_only"`` / ``"no"`` for the other KiCad modes.
+            See :func:`kicad_tools.sexp.builders.zone_node` for the full
+            set of accepted modes.
+        boundary: Custom boundary polygon, or None for board outline
+    """
+
+    net: str
+    layer: str
+    priority: int = 0
+    clearance: float = 0.3
+    min_thickness: float = 0.25
+    thermal_gap: float = 0.3
+    thermal_bridge_width: float = 0.4
+    pad_connection: str = ""
+    boundary: list[tuple[float, float]] | None = None
+
+
+@dataclass
+class GeneratedZone:
+    """A generated zone ready for insertion.
+
+    Attributes:
+        config: The zone configuration used
+        net_number: Resolved net number
+        boundary: The actual boundary polygon used
+        uuid: Generated UUID for the zone
+    """
+
+    config: ZoneConfig
+    net_number: int
+    boundary: list[tuple[float, float]]
+    # Issue #5578: the UUID is derived from the zone's own content rather
+    # than drawn from an RNG.  The predecessor (Issue #3272) deferred to
+    # the router primitives' deterministic-UUID toggle, which covers zones
+    # created *during* a seeded route -- but ``kct route``'s auto-pour runs
+    # BEFORE ``route_all_negotiated`` flips that toggle, so it still got a
+    # fresh ``uuid.uuid4()`` every run.  On a board with two equal-priority
+    # zones on one layer that random UUID decides which zone KiCad starves,
+    # making the pour fill itself non-reproducible.  See
+    # :func:`_content_zone_uuid`.  Callers may still pass an explicit UUID
+    # (e.g. to preserve an existing zone's identity).
+    uuid: str = ""
+    # Issue #6989: write ``(net "NAME")`` on a KiCad-10 name-only board, so a
+    # generated pour does not mix numeric ids into a board that has none.
+    name_only: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.uuid:
+            self.uuid = _content_zone_uuid(self.content_key())
+
+    def content_key(self) -> str:
+        """Stable identity string for this zone (Issue #5578).
+
+        Covers everything that distinguishes one generated zone from
+        another on the same board: the net (by name *and* number), the
+        copper layer, the fill priority, and the boundary polygon at
+        nanometre resolution.  Two zones that agree on all of those are
+        the same zone; anything else derives a different UUID.
+        """
+        pts = ";".join(f"{x:.6f},{y:.6f}" for x, y in (self.boundary or ()))
+        return "|".join(
+            (
+                self.config.net,
+                str(self.net_number),
+                self.config.layer,
+                str(self.config.priority),
+                pts,
+            )
+        )
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression node for this zone."""
+        return zone_node(
+            self.net_number,
+            self.config.net,
+            self.config.layer,
+            self.boundary,
+            self.uuid,
+            self.config.priority,
+            self.config.min_thickness,
+            self.config.clearance,
+            self.config.thermal_gap,
+            self.config.thermal_bridge_width,
+            self.config.pad_connection,
+            name_only=self.name_only,
+        )
+
+
+def _declared_copper_layer_names(pcb: PCB) -> list[str]:
+    """Canonically named copper layers the board's layer table declares."""
+    return [
+        declared.name
+        for declared in pcb.layers.values()
+        if is_declared_copper_layer(declared.name, declared.type)
+    ]
+
+
+class ZoneGenerator:
+    """High-level zone generator for PCB copper pours.
+
+    Provides an easy-to-use API for adding zones to PCB files with:
+    - Automatic board outline detection for zone boundaries
+    - Net name to net number resolution
+    - Sensible defaults for power net zones (thermal relief, etc.)
+
+    Example::
+
+        gen = ZoneGenerator.from_pcb("board.kicad_pcb")
+
+        # Add ground plane using board outline as boundary
+        gen.add_zone(net="GND", layer="B.Cu", priority=1)
+
+        # Add power plane with lower priority
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+
+        # Generate zones and save
+        gen.save("board_with_zones.kicad_pcb")
+    """
+
+    def __init__(
+        self,
+        pcb: PCB,
+        doc: SExp | None = None,
+        edge_clearance: float | None = None,
+    ):
+        """Initialize zone generator.
+
+        Args:
+            pcb: Parsed PCB object
+            doc: Raw S-expression document (for modification)
+            edge_clearance: If set, inset the auto-derived board outline
+                by this many mm so zone copper does not extend to the
+                board edge.  Only affects the automatic board-outline
+                boundary; explicit ``boundary`` arguments to
+                :meth:`add_zone` are never modified.
+        """
+        self._pcb = pcb
+        self._doc = doc
+        self._edge_clearance = edge_clearance
+        self._zones: list[GeneratedZone] = []
+        self._warnings: list[ZoneOverlapWarning] = []
+        self._board_outline: list[tuple[float, float]] | None = None
+        self._applied = False
+
+    @classmethod
+    def from_pcb(
+        cls,
+        path: str | Path,
+        edge_clearance: float | None = None,
+    ) -> ZoneGenerator:
+        """Load PCB and create zone generator.
+
+        Args:
+            path: Path to .kicad_pcb file
+            edge_clearance: Optional edge clearance in mm (see
+                :meth:`__init__` for details).
+
+        Returns:
+            ZoneGenerator instance
+        """
+        path = Path(path)
+        pcb = PCB.load(str(path))
+        doc = parse_file(path)
+        return cls(pcb, doc, edge_clearance=edge_clearance)
+
+    @property
+    def pcb(self) -> PCB:
+        """The loaded PCB object."""
+        return self._pcb
+
+    @property
+    def board_outline(self) -> list[tuple[float, float]]:
+        """Get board outline polygon in sheet-absolute coordinates.
+
+        Uses cached outline if available, otherwise extracts from PCB.
+        Falls back to a default rectangle if no Edge.Cuts layer found.
+
+        When *edge_clearance* was set at construction time, the outline
+        is inset by that distance using Shapely's ``buffer(-clearance)``
+        so that zone copper does not extend to the board edge.
+
+        Zone boundaries written to the PCB file must be in sheet-absolute
+        coordinates. ``get_board_outline()`` returns board-relative coords,
+        so we add the board origin back.
+
+        Note: this property is the source of the sheet-absolute ``boundary``
+        argument passed to ``_check_overlap()``. Since PR #2753 normalized
+        ``Zone.polygon`` to board-relative coordinates on load, the overlap
+        comparison must reconcile the two frames; ``_check_overlap()`` does
+        so by shifting ``existing.polygon`` by the board origin before
+        computing the AABB intersection (see #2759).
+        """
+        if self._board_outline is None:
+            outline = self._pcb.get_board_outline()
+            if outline:
+                # Convert board-relative back to sheet-absolute for PCB output
+                ox, oy = self._pcb.board_origin
+                if ox != 0.0 or oy != 0.0:
+                    outline = [(x + ox, y + oy) for x, y in outline]
+                self._board_outline = outline
+            else:
+                # Fallback: create outline from board bounds
+                self._board_outline = self._estimate_board_bounds()
+
+            # Apply edge clearance inset if configured
+            if self._edge_clearance and self._edge_clearance > 0:
+                try:
+                    self._board_outline = self._inset_polygon(
+                        self._board_outline, self._edge_clearance
+                    )
+                except ImportError:
+                    # Shapely unavailable -- use pure-Python rect fallback
+                    # for axis-aligned rectangular outlines (covers the
+                    # majority of hobby/demo boards).
+                    if self._is_axis_aligned_rect(self._board_outline):
+                        self._board_outline = self._inset_rect(
+                            self._board_outline, self._edge_clearance
+                        )
+                    else:
+                        import warnings
+
+                        warnings.warn(
+                            "shapely is required for edge_clearance inset "
+                            "on non-rectangular board outlines "
+                            "(install with: pip install kicad-tools[geometry]). "
+                            "Zone boundary will use exact board outline.",
+                            stacklevel=2,
+                        )
+        return self._board_outline
+
+    @staticmethod
+    def _is_axis_aligned_rect(
+        coords: list[tuple[float, float]],
+    ) -> bool:
+        """Check whether *coords* form an axis-aligned rectangle.
+
+        Returns ``True`` when the polygon has exactly 4 unique vertices
+        whose bounding box matches the vertex coordinates (i.e. all
+        corners sit at the extremes of the bounding box).  Handles
+        closed polygons where the first point is repeated at the end.
+        """
+        # Strip closing duplicate if present
+        if len(coords) == 5 and coords[0] == coords[-1]:
+            coords = coords[:4]
+        if len(coords) != 4:
+            return False
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        # Width and height must be positive
+        if x_max - x_min < 1e-6 or y_max - y_min < 1e-6:
+            return False
+        # Every vertex must be at a corner of the bounding box
+        corners = {(x_min, y_min), (x_min, y_max), (x_max, y_min), (x_max, y_max)}
+        return all((round(x, 6), round(y, 6)) in corners for x, y in coords)
+
+    @staticmethod
+    def _inset_rect(
+        coords: list[tuple[float, float]],
+        distance: float,
+    ) -> list[tuple[float, float]]:
+        """Shrink an axis-aligned rectangle inward by *distance* mm.
+
+        Pure-Python fallback that does not require Shapely.  Returns the
+        original coordinates unchanged if the inset would collapse the
+        rectangle (width or height < 2 * distance).  Handles closed
+        polygons where the first point is repeated at the end.
+        """
+        # Strip closing duplicate if present
+        if len(coords) == 5 and coords[0] == coords[-1]:
+            coords = coords[:4]
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+
+        new_x_min = x_min + distance
+        new_x_max = x_max - distance
+        new_y_min = y_min + distance
+        new_y_max = y_max - distance
+
+        # Collapsed -- fall back to original
+        if new_x_min >= new_x_max or new_y_min >= new_y_max:
+            return coords
+
+        return [
+            (round(new_x_min, 6), round(new_y_min, 6)),
+            (round(new_x_max, 6), round(new_y_min, 6)),
+            (round(new_x_max, 6), round(new_y_max, 6)),
+            (round(new_x_min, 6), round(new_y_max, 6)),
+        ]
+
+    @staticmethod
+    def _inset_polygon(
+        coords: list[tuple[float, float]],
+        distance: float,
+    ) -> list[tuple[float, float]]:
+        """Shrink a polygon inward by *distance* mm using Shapely.
+
+        If the inset collapses the polygon (e.g. very thin peninsulas),
+        returns the original coordinates unchanged.
+        """
+        from shapely.geometry import Polygon
+
+        poly = Polygon(coords)
+        inset = poly.buffer(-distance)
+
+        if inset.is_empty:
+            # Collapsed polygon -- fall back to original
+            return coords
+
+        # buffer() may return a MultiPolygon if thin regions collapse;
+        # keep only the largest polygon.
+        if inset.geom_type == "MultiPolygon":
+            inset = max(inset.geoms, key=lambda g: g.area)
+
+        # Extract exterior coordinates (Shapely repeats the first point
+        # at the end; drop the duplicate).
+        exterior_coords = list(inset.exterior.coords)
+        if len(exterior_coords) > 1 and exterior_coords[0] == exterior_coords[-1]:
+            exterior_coords = exterior_coords[:-1]
+
+        return [(round(x, 6), round(y, 6)) for x, y in exterior_coords]
+
+    def _estimate_board_bounds(self) -> list[tuple[float, float]]:
+        """Estimate board bounds from component positions.
+
+        Used as fallback when no Edge.Cuts outline is found.
+        """
+        min_x, min_y = float("inf"), float("inf")
+        max_x, max_y = float("-inf"), float("-inf")
+
+        for fp in self._pcb.footprints:
+            x, y = fp.position
+            # Add some padding around components
+            min_x = min(min_x, x - 5)
+            min_y = min(min_y, y - 5)
+            max_x = max(max_x, x + 5)
+            max_y = max(max_y, y + 5)
+
+        # Ensure we have valid bounds
+        if min_x == float("inf"):
+            # No footprints, use a default size
+            return [(0, 0), (100, 0), (100, 100), (0, 100)]
+
+        return [
+            (min_x, min_y),
+            (max_x, min_y),
+            (max_x, max_y),
+            (min_x, max_y),
+        ]
+
+    def get_net_number(self, net_name: str) -> int:
+        """Get net number by name.
+
+        Args:
+            net_name: Net name (e.g., "GND", "+3.3V")
+
+        Returns:
+            Net number, or 0 if not found
+
+        Raises:
+            ValueError: If net name not found
+        """
+        net = self._pcb.get_net_by_name(net_name)
+        if net is None:
+            raise ValueError(f"Net '{net_name}' not found in PCB")
+        return net.number
+
+    @property
+    def warnings(self) -> list[ZoneOverlapWarning]:
+        """Overlap warnings generated during zone addition."""
+        return self._warnings
+
+    @staticmethod
+    def _boundaries_overlap(
+        boundary_a: list[tuple[float, float]],
+        boundary_b: list[tuple[float, float]],
+    ) -> bool:
+        """Check whether two boundary polygons overlap.
+
+        Uses Shapely's exact polygon intersection when available so the
+        outline allocator's carved-out (concave) polygons are correctly
+        recognised as disjoint when their AABBs still overlap (#3043).
+        Falls back to a conservative AABB-overlap test when Shapely is
+        not installed.
+
+        Returns:
+            True if the boundaries overlap with positive area.
+        """
+        if not boundary_a or not boundary_b:
+            return False
+
+        # Prefer exact intersection via Shapely so the disjoint-but-AABB-
+        # overlapping case (carved-out outlines from ``_compute_pour_outlines``)
+        # does not trigger a spurious warning.
+        try:
+            from shapely.geometry import Polygon
+
+            poly_a = Polygon(boundary_a)
+            poly_b = Polygon(boundary_b)
+            if not poly_a.is_valid or not poly_b.is_valid:
+                # Fall through to AABB on degenerate input.
+                raise ValueError("invalid polygon")
+            return poly_a.intersection(poly_b).area > 1e-9
+        except (ImportError, ValueError):
+            pass
+
+        a_xs = [p[0] for p in boundary_a]
+        a_ys = [p[1] for p in boundary_a]
+        b_xs = [p[0] for p in boundary_b]
+        b_ys = [p[1] for p in boundary_b]
+
+        # Axis-aligned bounding-box overlap test (conservative fallback).
+        return not (
+            max(a_xs) <= min(b_xs)
+            or max(b_xs) <= min(a_xs)
+            or max(a_ys) <= min(b_ys)
+            or max(b_ys) <= min(a_ys)
+        )
+
+    @staticmethod
+    def _boundary_loser_retains_copper(
+        loser: list[tuple[float, float]],
+        winner: list[tuple[float, float]],
+    ) -> bool:
+        """Would the lower-priority zone keep meaningful exclusive copper?
+
+        Issue #5590.  When two same-layer zones have *distinct* priorities,
+        KiCad's fill resolver awards the overlapping region to the
+        higher-priority zone, but the lower-priority zone still fills its
+        own boundary minus the winner's fill.  The loser is only actually
+        starved when its boundary is (almost) fully covered by the
+        winner's -- otherwise it keeps an exclusive region plus the
+        clearance halos around its own pads.
+
+        Measured on board 03 (KiCad 10.0.5): a ``VBUS`` pad-bbox zone at
+        priority 1 over the full-board ``VCC`` zone at priority 0 leaves
+        ``VCC`` 4180 of its 4627 mm² boundary area (91%) as exclusive
+        territory, and both zones fill with real copper; the legacy
+        warning text ("existing zone will get zero copper") was simply
+        false in that shape.
+
+        Returns True when the loser's boundary retains at least
+        :data:`_OVERLAP_EXCLUSIVE_AREA_MIN_RATIO` of its own area outside
+        the winner's boundary.  Conservative when Shapely is unavailable
+        (returns False so the caller keeps warning) and for degenerate
+        polygons (zero-area loser cannot retain anything).
+        """
+        if not loser or not winner:
+            return False
+        try:
+            from shapely.geometry import Polygon
+
+            loser_poly = Polygon(loser)
+            winner_poly = Polygon(winner)
+            if not loser_poly.is_valid or not winner_poly.is_valid:
+                return False
+            if loser_poly.area <= 1e-9:
+                return False
+            exclusive = loser_poly.difference(winner_poly).area
+            # bool() pins the untyped-Shapely comparison to the declared
+            # return type (mypy no-any-return).
+            return bool(exclusive >= _OVERLAP_EXCLUSIVE_AREA_MIN_RATIO * loser_poly.area)
+        except ImportError:
+            # No exact geometry available: assume covered (warn), matching
+            # the conservative legacy behaviour.
+            return False
+
+    def _check_overlap(
+        self,
+        net: str,
+        layer: str,
+        priority: int,
+        boundary: list[tuple[float, float]],
+    ) -> list[ZoneOverlapWarning]:
+        """Check for overlapping zones on the same layer.
+
+        Checks both existing PCB zones and zones already queued in
+        this generator.
+
+        Coordinate frames:
+            * ``boundary`` is sheet-absolute (sourced from
+              :attr:`board_outline`, which converts the board-relative
+              outline back to sheet-absolute for PCB output -- see PR #2753).
+            * ``existing.polygon`` is board-relative on PCBs loaded via
+              :class:`PCB` (see ``_detect_board_origin`` in
+              ``schema/pcb.py``).  We add the board origin so both polygons
+              live in the same frame before the AABB intersection test.
+            * Queued zones (``self._zones``) already carry sheet-absolute
+              boundaries because :meth:`add_zone` derives them from
+              :attr:`board_outline` (or accepts a caller-supplied boundary
+              in the same frame), so no conversion is required there.
+
+        Returns:
+            List of overlap warnings (empty if no overlaps detected).
+        """
+        warnings: list[ZoneOverlapWarning] = []
+        ox, oy = self._pcb.board_origin
+
+        # Check against existing zones in the PCB
+        for existing in self._pcb.zones:
+            if existing.layer != layer:
+                continue
+            if existing.net_name == net:
+                continue  # Same net on same layer is fine (e.g. re-run)
+
+            # Bring the board-relative existing polygon (post-PR-2753
+            # invariant) into the sheet-absolute frame used by ``boundary``
+            # so the AABB intersection test works for non-zero-origin boards.
+            if ox != 0.0 or oy != 0.0:
+                existing_boundary = [(x + ox, y + oy) for x, y in existing.polygon]
+            else:
+                existing_boundary = existing.polygon
+            if self._boundaries_overlap(boundary, existing_boundary):
+                if priority == existing.priority:
+                    # Equal priority: KiCad tie-breaks on the zone UUID, so
+                    # the outcome is non-deterministic -- always warn
+                    # (Issue #5590's core hazard).
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"existing zone '{existing.net_name}' (priority {existing.priority}). "
+                        f"The new zone will get zero copper because the existing zone "
+                        f"has equal or higher priority."
+                    )
+                elif priority < existing.priority:
+                    if self._boundary_loser_retains_copper(boundary, existing_boundary):
+                        # Distinct priorities + the new zone keeps exclusive
+                        # territory: both zones receive real copper (#5590).
+                        continue
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"existing zone '{existing.net_name}' (priority {existing.priority}). "
+                        f"The new zone will get zero copper because the existing zone "
+                        f"has equal or higher priority."
+                    )
+                else:
+                    if self._boundary_loser_retains_copper(existing_boundary, boundary):
+                        # The existing zone keeps exclusive territory -- the
+                        # higher-priority newcomer only claims the contested
+                        # region (#5590's stagger+carve allocation).
+                        continue
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"existing zone '{existing.net_name}' (priority {existing.priority}). "
+                        f"The existing zone will get zero copper."
+                    )
+                warnings.append(
+                    ZoneOverlapWarning(
+                        new_net=net,
+                        existing_net=existing.net_name,
+                        layer=layer,
+                        message=msg,
+                    )
+                )
+
+        # Check against queued zones in this generator
+        for queued in self._zones:
+            if queued.config.layer != layer:
+                continue
+            if queued.config.net == net:
+                continue
+
+            if self._boundaries_overlap(boundary, queued.boundary):
+                if priority == queued.config.priority:
+                    # Equal priority: KiCad tie-breaks on the zone UUID, so
+                    # the outcome is non-deterministic -- always warn
+                    # (Issue #5590's core hazard), same as the existing-zone
+                    # loop above.
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
+                        f"The new zone will get zero copper because the other zone "
+                        f"has equal or higher priority."
+                    )
+                elif priority < queued.config.priority:
+                    if self._boundary_loser_retains_copper(boundary, queued.boundary):
+                        # Distinct priorities + the new, lower-priority zone
+                        # keeps exclusive territory: both zones receive real
+                        # copper (#5590 / #5618 -- the queued-vs-queued mirror
+                        # of the existing-zone loop's `<` arm).
+                        continue
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
+                        f"The new zone will get zero copper because the other zone "
+                        f"has equal or higher priority."
+                    )
+                else:
+                    if self._boundary_loser_retains_copper(queued.boundary, boundary):
+                        # Queued sibling keeps exclusive territory (#5590).
+                        continue
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
+                        f"The other zone will get zero copper."
+                    )
+                warnings.append(
+                    ZoneOverlapWarning(
+                        new_net=net,
+                        existing_net=queued.config.net,
+                        layer=layer,
+                        message=msg,
+                    )
+                )
+
+        return warnings
+
+    def add_zone(
+        self,
+        net: str,
+        layer: str,
+        priority: int = 0,
+        clearance: float = 0.3,
+        min_thickness: float = 0.25,
+        thermal_gap: float = 0.3,
+        thermal_bridge_width: float = 0.4,
+        pad_connection: str = "",
+        boundary: list[tuple[float, float]] | None = None,
+    ) -> GeneratedZone:
+        """Add a copper pour zone.
+
+        Checks for overlapping zones on the same layer and emits warnings
+        to stderr if conflicts are detected.
+
+        Args:
+            net: Net name (e.g., "GND", "+3.3V")
+            layer: Copper layer (e.g., "B.Cu", "F.Cu", "In1.Cu")
+            priority: Zone fill priority (higher = fills later)
+            clearance: Clearance to other nets in mm
+            min_thickness: Minimum copper thickness in mm
+            thermal_gap: Thermal relief gap in mm
+            thermal_bridge_width: Thermal relief spoke width in mm
+            pad_connection: Zone-level pad-to-zone connection mode (default
+                ``""``: thermal relief at the zone level, paired with the
+                selective per-pad solid policy of issue #3729).  See
+                :class:`ZoneConfig` and
+                :func:`kicad_tools.sexp.builders.zone_node`.
+            boundary: Custom boundary polygon, or None for board outline
+
+        Returns:
+            GeneratedZone object
+
+        Raises:
+            ValueError: If net not found in PCB, or layer is not a valid,
+                board-declared copper layer.
+        """
+        # Resolve net number (raises ValueError for an undeclared net)
+        # before any mutation-adjacent state is built, so a rejected call
+        # leaves both the queued-zone list and the PCB untouched.
+        net_number = self.get_net_number(net)
+
+        # Reject unknown/non-copper/disabled-on-this-board layers before
+        # the zone is queued (Issue #4907).
+        validate_copper_layer(layer, _declared_copper_layer_names(self._pcb))
+
+        config = ZoneConfig(
+            net=net,
+            layer=layer,
+            priority=priority,
+            clearance=clearance,
+            min_thickness=min_thickness,
+            thermal_gap=thermal_gap,
+            thermal_bridge_width=thermal_bridge_width,
+            pad_connection=pad_connection,
+            boundary=boundary,
+        )
+
+        # Use board outline if no boundary specified
+        actual_boundary = boundary if boundary is not None else self.board_outline
+
+        # Check for overlapping zones on the same layer
+        overlap_warnings = self._check_overlap(net, layer, priority, actual_boundary)
+        for warning in overlap_warnings:
+            self._warnings.append(warning)
+            print(f"WARNING: {warning.message}", file=sys.stderr)
+
+        zone = GeneratedZone(
+            config=config,
+            net_number=net_number,
+            boundary=actual_boundary,
+            name_only=bool(getattr(self._pcb, "_net_name_only_dialect", False)),
+        )
+        # Issue #5578: content-addressed UUIDs are deterministic, so two
+        # genuinely identical zones queued on one generator would collide.
+        # KiCad resolves board items by UUID, so disambiguate with a
+        # deterministic, position-derived discriminator rather than falling
+        # back to an RNG (which would reintroduce the non-determinism this
+        # derivation exists to remove).
+        zone.uuid = self._deduplicate_zone_uuid(zone)
+
+        self._zones.append(zone)
+        return zone
+
+    def _deduplicate_zone_uuid(self, zone: GeneratedZone) -> str:
+        """Return a UUID for *zone* that no already-queued or on-board zone is using.
+
+        Issue #5578.  Re-derives from ``content_key()`` with a ``#<n>``
+        suffix until the result is free.  Deterministic by construction:
+        the suffix depends only on how many identical zones precede this
+        one in the queue plus how many already sit on the loaded board,
+        both of which are themselves deterministic.
+        """
+        taken = {existing.uuid for existing in self._zones}
+        taken.update(existing.uuid for existing in self._pcb.zones if existing.uuid)
+        candidate = zone.uuid
+        suffix = 1
+        while candidate in taken:
+            candidate = _content_zone_uuid(f"{zone.content_key()}#{suffix}")
+            suffix += 1
+        return candidate
+
+    def add_ground_plane(
+        self,
+        layer: str = "B.Cu",
+        priority: int = 1,
+        **kwargs,
+    ) -> GeneratedZone:
+        """Add a ground plane zone.
+
+        Convenience method for adding GND zones with appropriate defaults.
+
+        Args:
+            layer: Copper layer (default: "B.Cu" for bottom layer ground)
+            priority: Zone priority (default: 1, higher than power)
+            **kwargs: Additional arguments passed to add_zone()
+
+        Returns:
+            GeneratedZone object
+        """
+        return self.add_zone(net="GND", layer=layer, priority=priority, **kwargs)
+
+    def add_power_plane(
+        self,
+        net: str,
+        layer: str = "F.Cu",
+        priority: int = 0,
+        **kwargs,
+    ) -> GeneratedZone:
+        """Add a power plane zone.
+
+        Convenience method for adding power net zones.
+
+        Args:
+            net: Power net name (e.g., "+3.3V", "+5V", "VCC")
+            layer: Copper layer (default: "F.Cu" for top layer)
+            priority: Zone priority (default: 0, lower than ground)
+            **kwargs: Additional arguments passed to add_zone()
+
+        Returns:
+            GeneratedZone object
+        """
+        return self.add_zone(net=net, layer=layer, priority=priority, **kwargs)
+
+    @property
+    def zones(self) -> list[GeneratedZone]:
+        """List of zones to be generated."""
+        return self._zones
+
+    def generate_sexp(self) -> str:
+        """Generate S-expression string for all zones.
+
+        Returns:
+            S-expression string for inserting into PCB file
+        """
+        if not self._zones:
+            return ""
+
+        parts = []
+        for zone in self._zones:
+            parts.append(zone.to_sexp_node().to_string(indent=1))
+
+        return "\n".join(parts)
+
+    def apply(self) -> None:
+        """Apply zones to the loaded document.
+
+        Modifies the internal document by appending zone definitions.
+        Call save() after this to write changes to disk.
+
+        Safe to call multiple times -- zones are only appended once.
+        """
+        if not self._doc:
+            raise ValueError("No document loaded - use from_pcb() to load a PCB")
+
+        if self._applied:
+            return
+
+        for zone in self._zones:
+            self._doc.append(zone.to_sexp_node())
+
+        self._applied = True
+
+    def save(self, output_path: str | Path | None = None) -> Path:
+        """Save PCB with generated zones and verify persistence.
+
+        Args:
+            output_path: Output file path
+
+        Returns:
+            Path to the output file
+
+        Raises:
+            WriteVerificationError: If zones are missing from the written file.
+        """
+        if not self._doc:
+            raise ValueError("No document loaded - use from_pcb() to load a PCB")
+
+        # Apply zones if not already applied
+        self.apply()
+
+        if output_path is None:
+            raise ValueError("Output path required")
+
+        output_path = Path(output_path)
+        save_pcb(self._doc, output_path)
+
+        # Post-write verification: re-read and confirm zones are present
+        if self._zones:
+            verify_pcb_write(output_path, expected_zones=len(self._zones))
+
+        return output_path
+
+    def get_statistics(self) -> dict:
+        """Get statistics about generated zones.
+
+        Returns:
+            Dictionary with zone generation statistics
+        """
+        return {
+            "zone_count": len(self._zones),
+            "zones": [
+                {
+                    "net": z.config.net,
+                    "layer": z.config.layer,
+                    "priority": z.config.priority,
+                    "boundary_points": len(z.boundary),
+                }
+                for z in self._zones
+            ],
+        }
+
+
+def parse_power_nets(spec: str) -> list[tuple[str, str]]:
+    """Parse power nets specification string.
+
+    Parses format: "NET1:LAYER1,NET2:LAYER2,..."
+    e.g., "GND:B.Cu,+3.3V:F.Cu"
+
+    Args:
+        spec: Power nets specification string
+
+    Returns:
+        List of (net_name, layer) tuples
+
+    Raises:
+        ValueError: If format is invalid
+    """
+    if not spec or not spec.strip():
+        return []
+
+    result = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+
+        if ":" not in item:
+            raise ValueError(
+                f"Invalid power net format: '{item}'. Expected 'NET:LAYER' (e.g., 'GND:B.Cu')"
+            )
+
+        parts = item.split(":", 1)
+        net_name = parts[0].strip()
+        layer = parts[1].strip()
+
+        if not net_name:
+            raise ValueError(f"Empty net name in: '{item}'")
+        if not layer:
+            raise ValueError(f"Empty layer in: '{item}'")
+
+        result.append((net_name, layer))
+
+    return result
+
+
+def _order_ground_nets_canonically(
+    ground_nets: Sequence[tuple[str, NetClass]],
+) -> list[tuple[str, NetClass]]:
+    """Order ground nets so the canonical "system ground" is first.
+
+    The canonical ground (assigned to the most-preferred layer/priority,
+    e.g. ``In1.Cu`` on a 4-layer board) is selected by:
+
+    1. Exact name match ``GND`` if present.
+    2. Else, alphabetical first.
+
+    Note: the issue's curator notes mention pin count as a tie-breaker
+    proxy for "system ground", but pin counts are not available at this
+    layer of the API (the function receives only ``(name, NetClass)``
+    pairs).  Falling back to alphabetical ordering keeps the assignment
+    deterministic and reproducible across runs without an API change.
+    The remaining grounds are emitted in alphabetical order so the same
+    set of split-ground nets always produces the same layer assignment.
+    """
+    if not ground_nets:
+        return []
+
+    # Stable alphabetical order first
+    sorted_nets = sorted(ground_nets, key=lambda nc: nc[0])
+
+    # Promote exact "GND" to head if present
+    for i, (name, _) in enumerate(sorted_nets):
+        if name == "GND":
+            return [sorted_nets[i]] + sorted_nets[:i] + sorted_nets[i + 1 :]
+    return sorted_nets
+
+
+def _existing_zone_priority_by_layer(
+    pcb: PCB,
+    pour_net_names: set[str] | None = None,
+) -> dict[str, int]:
+    """Map copper layer -> highest zone priority among pre-existing pours.
+
+    Issue #5590: the layer/priority and outline allocators only ever saw
+    the nets they were asked to pour, so a zone already authored into the
+    PCB file (e.g. board 03's hand-authored ``VCC`` pour on ``In2.Cu``)
+    was invisible to them.  A newly auto-poured zone landing on that
+    layer then tied the incumbent's priority and kept the full-board
+    outline, leaving KiCad's UUID tie-break to decide which zone starves.
+
+    Zones without a net name (rule areas / keepouts) are skipped: they
+    fill no copper for a net, so zone priority is irrelevant to them.
+    Nets in *pour_net_names* are skipped because the caller is (re)pouring
+    them -- with ``replace_existing=True`` their old zones are already
+    stripped from the file, and additively they are not incumbents to
+    yield to.
+
+    Args:
+        pcb: Loaded PCB object whose ``zones`` inventory to scan.
+        pour_net_names: Net names the current call is creating zones for.
+
+    Returns:
+        Dict mapping layer name -> maximum ``priority`` among that
+        layer's pre-existing zones.  Layers without incumbents are
+        absent.
+    """
+    by_layer: dict[str, int] = {}
+    for zone in pcb.zones:
+        if not zone.net_name:
+            continue
+        if pour_net_names and zone.net_name in pour_net_names:
+            continue
+        by_layer[zone.layer] = max(by_layer.get(zone.layer, 0), zone.priority)
+    return by_layer
+
+
+def _existing_zone_nets_by_layer(
+    pcb: PCB,
+    pour_net_names: set[str] | None = None,
+) -> dict[str, set[str]]:
+    """Map copper layer -> names of nets owning pre-existing pours (#6402)."""
+    by_layer: dict[str, set[str]] = {}
+    for zone in pcb.zones:
+        if not zone.net_name:
+            continue
+        if pour_net_names and zone.net_name in pour_net_names:
+            continue
+        by_layer.setdefault(zone.layer, set()).add(zone.net_name)
+    return by_layer
+
+
+def _assign_layers_for_pour_nets(
+    copper_layer_count: int,
+    pour_nets: list[tuple[str, NetClass]],
+    existing_zone_priority_by_layer: dict[str, int] | None = None,
+    plane_rank: Mapping[str, tuple[float, ...]] | None = None,
+) -> list[tuple[str, str, int]]:
+    """Assign layers and priorities for pour nets based on board stackup.
+
+    Single-ground designs (the common case):
+
+    - 2-layer: GROUND -> ``B.Cu`` priority 1; first POWER -> ``F.Cu`` with
+      a descending priority scheme so multiple power nets coexist.
+    - 4-layer: GROUND -> ``In1.Cu`` priority 1; first POWER -> ``In2.Cu``
+      priority 0; additional POWER -> ``F.Cu`` with non-zero priorities.
+      With ``plane_rank`` (Issue #6714) "first" is the power net feeding
+      the most footprints, the first one listed on a tie.
+
+    Split-ground designs (mixed-signal boards with multiple distinct
+    ``NetClass.GROUND`` nets, e.g. ``GNDA`` + ``GNDD``):
+
+    - 2-layer: each ground gets ``B.Cu`` with a *distinct* descending
+      priority (canonical first).  True plane separation is impossible
+      on a 2-layer stack; the priority distinction is the best the
+      generator can do.  The router still emits its overlap warning so
+      the user knows to migrate to a 4-layer stack.
+    - 4-layer: the first two grounds split across the two inner layers
+      (``In1.Cu`` and ``In2.Cu``, both priority 1), giving each ground
+      domain a dedicated plane.  Power must move to ``F.Cu`` because
+      both inner layers are now reserved for ground planes.  Additional
+      grounds (>2) fall back to ``B.Cu`` with distinct descending
+      priorities and a stderr warning is emitted -- >2 ground domains
+      are unusual and require manual stackup planning.
+
+    Canonical-ground selection (which ground gets the "best" slot):
+
+    1. Exact net name ``GND`` if present.
+    2. Else, alphabetical first.
+
+    See ``_order_ground_nets_canonically`` for the full rule.
+
+    Incumbent-zone priority stagger (#5590):
+
+    When *existing_zone_priority_by_layer* reports pre-existing zones on
+    a layer this function assigns a new pour to, every new priority on
+    that layer is shifted above the incumbents' maximum.  Equal
+    priorities on a shared layer make KiCad's fill resolver tie-break on
+    the zone UUID, which starves one zone non-deterministically; a
+    strictly-higher new priority makes the allocation deterministic.
+    The relative ordering among the new zones (descending schemes above)
+    is preserved by adding a uniform per-layer offset.
+
+    Args:
+        copper_layer_count: Number of copper layers (2, 4, 6, etc.)
+        pour_nets: List of (net_name, NetClass) tuples
+        existing_zone_priority_by_layer: Layer -> max priority among
+            pre-existing zones on the board (see
+            :func:`_existing_zone_priority_by_layer`).  ``None``/empty
+            preserves the legacy behaviour.
+        plane_rank: Issue #6714 -- per-net sort key (larger = needs the
+            plane more, see :func:`_power_plane_rank`) that picks which
+            POWER net gets the one inner power plane on a 4+ layer
+            single-ground board.  The highest-ranked power net takes
+            ``In2.Cu``; ties keep the ``pour_nets`` order, and every other
+            power net keeps its relative order on ``F.Cu``.  ``None`` (or a
+            net missing from the map, which ranks lowest) keeps the legacy
+            rule: the first power net in ``pour_nets`` takes the plane.
+
+    Returns:
+        List of (net_name, layer, priority) tuples.  Every ground-class
+        net has a *distinct* (layer, priority) pair so no ground zone
+        gets silently overridden to zero copper, and every new zone on
+        an incumbent-occupied layer strictly outranks the incumbent.
+    """
+    from kicad_tools.router.net_class import NetClass
+
+    ground_nets_raw = [(n, c) for n, c in pour_nets if c == NetClass.GROUND]
+    power_nets = [(n, c) for n, c in pour_nets if c != NetClass.GROUND]
+
+    # Canonicalize ground ordering so split-ground assignment is stable.
+    ground_nets = _order_ground_nets_canonically(ground_nets_raw)
+    split_ground = len(ground_nets) > 1
+
+    if split_ground:
+        ground_names = ", ".join(n for n, _ in ground_nets)
+        print(
+            f"Auto-pour: split-ground detected ({ground_names}) "
+            f"-- assigning distinct layers/priorities so each ground "
+            f"domain receives copper",
+            file=sys.stderr,
+        )
+
+    assignments: list[tuple[str, str, int]] = []
+
+    if copper_layer_count >= 4:
+        # 4+ layer board: use inner layers for power/ground planes
+        if not split_ground:
+            # Common case: single ground on In1.Cu, power tree on In2.Cu/F.Cu
+            for net_name, _ in ground_nets:
+                assignments.append((net_name, "In1.Cu", 1))
+
+            if len(power_nets) == 1:
+                # Single power net gets its own inner layer
+                assignments.append((power_nets[0][0], "In2.Cu", 0))
+            else:
+                if plane_rank and len(power_nets) > 1:
+                    # Issue #6714: the plane goes to the rail feeding the
+                    # most parts, not to whichever power net the classifier
+                    # listed first (that is net-number order).  On board 06rf the
+                    # 5-pad local VBUS_USB (net 1) took In2.Cu once #6686
+                    # made it a pour, pushing the board-wide +3V3 onto a
+                    # carved F.Cu outline that boxed connector pads in.
+                    plane_idx = max(
+                        range(len(power_nets)),
+                        key=lambda k: (plane_rank.get(power_nets[k][0], ()), -k),
+                    )
+                    power_nets = [power_nets[plane_idx]] + [
+                        pn for k, pn in enumerate(power_nets) if k != plane_idx
+                    ]
+                # Multiple power nets: first gets In2.Cu, rest go on F.Cu
+                # with decreasing priorities so they don't fully override each other.
+                # NOTE: Full-board overlapping zones on the same layer still produce
+                # zero-copper for lower-priority zones.  The overlap warning will
+                # fire, prompting the user to use smaller boundaries or `zones split`.
+                for i, (net_name, _) in enumerate(power_nets):
+                    if i == 0:
+                        assignments.append((net_name, "In2.Cu", 0))
+                    else:
+                        assignments.append((net_name, "F.Cu", i))
+        else:
+            # Split-ground: dedicate both inner layers to ground domains.
+            # First two grounds get In1.Cu and In2.Cu (both priority 1 --
+            # they are on distinct layers so there is no overlap conflict).
+            assignments.append((ground_nets[0][0], "In1.Cu", 1))
+            assignments.append((ground_nets[1][0], "In2.Cu", 1))
+
+            # >2 grounds: spill to B.Cu with distinct descending priorities
+            # and warn the user.
+            extra_grounds = ground_nets[2:]
+            if extra_grounds:
+                extra_names = ", ".join(n for n, _ in extra_grounds)
+                print(
+                    f"WARNING: more than 2 ground domains ({extra_names}) "
+                    f"-- placing on B.Cu with distinct priorities; "
+                    f"manual stackup planning recommended for >2 ground domains",
+                    file=sys.stderr,
+                )
+                for i, (net_name, _) in enumerate(extra_grounds):
+                    # Descending priorities starting from len(extra) so they
+                    # are distinct on the same layer.
+                    assignments.append((net_name, "B.Cu", len(extra_grounds) - i))
+
+            # Power moves to F.Cu because both inner layers are reserved.
+            # 1 power net -> F.Cu priority 0 (matches single-power semantics
+            # of "highest plane priority" being zero).  N power nets get
+            # distinct descending priorities so multiple power planes
+            # coexist on F.Cu.
+            if len(power_nets) == 1:
+                assignments.append((power_nets[0][0], "F.Cu", 0))
+            else:
+                for i, (net_name, _) in enumerate(power_nets):
+                    assignments.append((net_name, "F.Cu", len(power_nets) - i))
+    else:
+        # 2-layer board
+        if not split_ground:
+            for net_name, _ in ground_nets:
+                assignments.append((net_name, "B.Cu", 1))
+        else:
+            # Split-ground on 2-layer: distinct descending priorities on B.Cu.
+            # Plane separation is impossible on this stackup; the priority
+            # distinction at least prevents the silent zero-copper bug.
+            for i, (net_name, _) in enumerate(ground_nets):
+                assignments.append((net_name, "B.Cu", len(ground_nets) - i))
+
+        for i, (net_name, _) in enumerate(power_nets):
+            assignments.append((net_name, "F.Cu", len(power_nets) - i))
+
+    # Incumbent-zone priority stagger (Issue #5590): shift every new
+    # priority on an incumbent-occupied layer strictly above the
+    # incumbents' maximum so KiCad's fill resolver never falls back to
+    # the UUID tie-break for the pair.  A uniform per-layer offset keeps
+    # the distinct descending schemes above intact.
+    if existing_zone_priority_by_layer:
+        staggered_layers: dict[str, int] = {}
+        for idx, (net_name, layer, priority) in enumerate(assignments):
+            incumbent_max = existing_zone_priority_by_layer.get(layer)
+            if incumbent_max is None:
+                continue
+            # Floor the offset at 1 so a negative-priority incumbent (or a
+            # zero-priority one, the common case) still yields a new
+            # priority of at least original+1.
+            offset = max(incumbent_max + 1, 1)
+            assignments[idx] = (net_name, layer, priority + offset)
+            staggered_layers[layer] = offset
+        for layer, offset in sorted(staggered_layers.items()):
+            print(
+                f"Auto-pour: layer {layer} already hosts zone(s) up to priority "
+                f"{existing_zone_priority_by_layer[layer]}; new pour(s) assigned "
+                f"priority {offset}+ above them so both zones receive copper "
+                f"(issue #5590)",
+                file=sys.stderr,
+            )
+
+    return assignments
+
+
+# ---------------------------------------------------------------------------
+# Outline allocator (#2771)
+# ---------------------------------------------------------------------------
+
+# Default per-net margin around the pad bounding box, in mm.  1.5 mm gives
+# enough copper around each pad cluster for thermal relief and trace exits
+# without aggressively encroaching on neighbouring nets.  Empirically chosen
+# during the curator analysis of board 05.
+DEFAULT_POUR_BBOX_MARGIN_MM = 1.5
+
+# Tight pad-only margin used as a *fallback* when the normal carve pass
+# (#3043) would leave a zone with zero copper.  At 0.3 mm it just clears
+# typical KiCad fill rules around the pads themselves -- enough to give
+# the lower-priority net *some* copper, while staying inside the inflated
+# bbox of higher-priority neighbours (which use the 1.5 mm default).  See
+# issue #3240 for the failure shape this addresses.
+PAD_SAFE_MARGIN_MM = 0.3
+
+# Default side length of the fallback square emitted when a net has only a
+# single pad (or all its pads coincide).  Slightly larger than the margin
+# alone so single-pad nets still receive a usable copper patch.
+SINGLE_PAD_FALLBACK_SIDE_MM = 4.0
+
+
+def _power_plane_rank(pcb: PCB, net_name: str) -> tuple[float, ...]:
+    """How strongly ``net_name`` needs a full inner plane (Issue #6714).
+
+    ``(distinct footprints carrying a pad of the net,)``: a rail feeding
+    many parts across the board is what a plane is for, while a net local to
+    one or two parts (a connector's ``VBUS``) is served by a carved
+    outer-layer outline.  Footprints with no reference (or a ``#``
+    power-symbol stand-in) are ignored, as in
+    :func:`_net_pad_positions_absolute`.
+
+    Deliberately the footprint count ONLY, so a tie keeps the listed order:
+    on board 07rf ``+1V2`` and ``+1V8`` both feed 5 parts, and breaking that
+    tie by pad spread or pad count moved the plane to ``+1V8`` and stranded
+    a ``+1V2`` BGA ball on the F.Cu pour (0 -> 2 open pour links).
+    """
+    refs = {
+        fp.reference
+        for fp in pcb.footprints
+        if fp.reference
+        and not fp.reference.startswith("#")
+        and any(pad.net_name == net_name for pad in fp.pads)
+    }
+    return (float(len(refs)),)
+
+
+def _net_pad_positions_absolute(
+    pcb: PCB,
+    net_name: str,
+) -> list[tuple[float, float]]:
+    """Return sheet-absolute (x, y) positions of every pad on ``net_name``.
+
+    ``Footprint.position`` is board-relative after :meth:`PCB._detect_board_origin`,
+    so we add the board origin back to produce coordinates in the same frame
+    as :pyattr:`ZoneGenerator.board_outline` (which is the frame expected by
+    ``add_zone(boundary=)``).
+
+    Pads with ``net_number == 0`` (the implicit "no net" pad) are skipped
+    even if they happen to share a name with the requested net.  Footprints
+    whose reference designator is empty or begins with ``#`` (KiCad's
+    convention for power-symbol stand-ins like ``#PWR01``) are also skipped
+    because they have no physical pads on the board.
+    """
+    ox, oy = pcb.board_origin
+    positions: list[tuple[float, float]] = []
+
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+
+        fp_x, fp_y = fp.position
+        # KiCad applies the footprint orientation as a NEGATED angle vs standard
+        # CCW math (verified vs pcbnew 10.0.1, issue #3739); this matches
+        # PCB.get_pad_position / core.geometry.rotate_pad_offset, the canonical
+        # local->world transform used throughout the codebase.
+        rot_rad = math.radians(-fp.rotation)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        for pad in fp.pads:
+            # ``Pad.net_name`` is authoritative (matches the netlist exactly);
+            # ``net_number`` may be zero on freshly-imported PCBs that have
+            # not been routed yet, so name comparison is the safe predicate.
+            if pad.net_name != net_name:
+                continue
+            # Skip the implicit no-net pad (net_number 0 with empty name).
+            if not pad.net_name:
+                continue
+
+            px, py = pad.position
+            rx = px * cos_r - py * sin_r
+            ry = px * sin_r + py * cos_r
+            # Footprint position is board-relative -> add board origin to get
+            # sheet-absolute coordinates.
+            positions.append((fp_x + rx + ox, fp_y + ry + oy))
+
+    return positions
+
+
+def _bbox_polygon(
+    positions: list[tuple[float, float]],
+    margin_mm: float,
+) -> list[tuple[float, float]] | None:
+    """Build an axis-aligned bounding box polygon around ``positions``.
+
+    Returns ``None`` if ``positions`` is empty.  When all positions
+    coincide (e.g. a single-pad net), returns a small square of side
+    :data:`SINGLE_PAD_FALLBACK_SIDE_MM` centered on the point so the
+    resulting zone still has non-zero area.
+
+    The returned polygon is in the same coordinate frame as ``positions``.
+    """
+    if not positions:
+        return None
+
+    xs = [p[0] for p in positions]
+    ys = [p[1] for p in positions]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+
+    # Single-pad (or zero-extent) fallback: emit a small square centered on
+    # the pad cluster so the zone is non-degenerate.
+    if x_max - x_min < 1e-6 and y_max - y_min < 1e-6:
+        half = SINGLE_PAD_FALLBACK_SIDE_MM / 2.0
+        cx, cy = x_min, y_min
+        return [
+            (round(cx - half, 6), round(cy - half, 6)),
+            (round(cx + half, 6), round(cy - half, 6)),
+            (round(cx + half, 6), round(cy + half, 6)),
+            (round(cx - half, 6), round(cy + half, 6)),
+        ]
+
+    x_min -= margin_mm
+    x_max += margin_mm
+    y_min -= margin_mm
+    y_max += margin_mm
+
+    return [
+        (round(x_min, 6), round(y_min, 6)),
+        (round(x_max, 6), round(y_min, 6)),
+        (round(x_max, 6), round(y_max, 6)),
+        (round(x_min, 6), round(y_max, 6)),
+    ]
+
+
+def _clip_polygon_to_outline(
+    polygon: list[tuple[float, float]],
+    outline: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Clip ``polygon`` to the interior of ``outline``.
+
+    Both polygons are in the same coordinate frame (sheet-absolute).  Uses
+    Shapely if available for an exact intersection; falls back to a pure
+    AABB clip when Shapely is missing or the intersection collapses.  When
+    everything fails, returns the original polygon unchanged -- KiCad
+    happily ignores zone copper that lands outside the board edge, so an
+    unclipped polygon still produces correct fills (just with a larger
+    bounding region on disk than necessary).
+    """
+    if not polygon or not outline:
+        return polygon
+
+    # Try Shapely first for accurate intersection with arbitrary outlines.
+    try:
+        from shapely.geometry import Polygon
+
+        clipped = Polygon(polygon).intersection(Polygon(outline))
+        if clipped.is_empty:
+            return polygon
+        if clipped.geom_type == "MultiPolygon":
+            clipped = max(clipped.geoms, key=lambda g: g.area)
+        if clipped.geom_type != "Polygon":
+            return polygon
+        coords = list(clipped.exterior.coords)
+        if len(coords) > 1 and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) < 3:
+            return polygon
+        return [(round(x, 6), round(y, 6)) for x, y in coords]
+    except ImportError:
+        pass
+
+    # Pure-Python fallback: AABB clip (correct for rectangular outlines,
+    # conservative for everything else).
+    out_xs = [p[0] for p in outline]
+    out_ys = [p[1] for p in outline]
+    ox_min, ox_max = min(out_xs), max(out_xs)
+    oy_min, oy_max = min(out_ys), max(out_ys)
+
+    poly_xs = [p[0] for p in polygon]
+    poly_ys = [p[1] for p in polygon]
+    px_min = max(min(poly_xs), ox_min)
+    px_max = min(max(poly_xs), ox_max)
+    py_min = max(min(poly_ys), oy_min)
+    py_max = min(max(poly_ys), oy_max)
+
+    if px_min >= px_max or py_min >= py_max:
+        return polygon
+
+    return [
+        (round(px_min, 6), round(py_min, 6)),
+        (round(px_max, 6), round(py_min, 6)),
+        (round(px_max, 6), round(py_max, 6)),
+        (round(px_min, 6), round(py_max, 6)),
+    ]
+
+
+def _compute_pour_outlines(
+    pcb: PCB,
+    assignments: list[tuple[str, str, int]],
+    board_outline: list[tuple[float, float]],
+    margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
+    occupied_layers: Collection[str] | None = None,
+    skipped_out: list[ZonePartitionError] | None = None,
+    incumbent_nets_by_layer: dict[str, set[str]] | None = None,
+) -> dict[str, list[tuple[float, float]] | None]:
+    """Compute per-net pour outlines for the given layer assignments.
+
+    For each ``(net_name, layer, priority)`` in ``assignments``:
+
+    * If this is the only zone on its layer, return ``None`` so the caller
+      uses the default ``board_outline``.  This preserves the GND
+      return-path plane on 4-layer stackups (where GND sits alone on
+      ``In1.Cu``) and on 2-layer stackups (where GND sits alone on
+      ``B.Cu``).
+    * If two or more zones share a layer, compute a bounding-box outline
+      around the net's pads, inflated by ``margin_mm``, then clip to
+      ``board_outline`` so the zone never extends past the board edge.
+      A second pass (#3043) then subtracts higher-priority bboxes from
+      lower-priority outlines so the resulting polygons are
+      **geometrically disjoint** even when pad clusters are spatially
+      interleaved (as on board 06, where ``+3V3``/``+1V8``/``+1V2`` all
+      feed the same BGA region).
+
+    A layer listed in *occupied_layers* (Issue #5590: it already hosts a
+    pre-existing zone the caller is not re-pouring) counts toward the
+    "shared layer" test, so the new zone gets its carved pad-bbox outline
+    instead of the full board outline.  The incumbent's own polygon is
+    deliberately NOT subtracted from the new outline: incumbents are
+    frequently full-board planes (board 03's ``VCC`` pour on ``In2.Cu``),
+    and subtracting one would empty every carve and raise
+    :class:`ZonePartitionError`.  Instead the caller staggers the new
+    zone's priority above the incumbent (see
+    :func:`_assign_layers_for_pour_nets`), so the fill resolver awards
+    the new zone its pad region deterministically and the incumbent
+    fills the rest of the layer.
+
+    Without the disjoint-carve pass, real boards routinely produce raw
+    bboxes that overlap each other.  KiCad's fill resolver would then
+    silently award the entire overlap to the highest-priority zone and
+    the lower-priority siblings would receive zero copper despite being
+    declared in the file.  The carve makes per-zone copper deterministic
+    regardless of priority ordering -- each zone receives the region
+    delineated by its own pad bbox minus any higher-priority sibling.
+
+    The returned polygons are in the same coordinate frame as
+    ``board_outline`` -- sheet-absolute, which is the frame expected by
+    :meth:`ZoneGenerator.add_zone`'s ``boundary=`` argument (post-PR-#2753).
+
+    Args:
+        pcb: Loaded PCB object (used to look up pad positions).
+        assignments: Output of :func:`_assign_layers_for_pour_nets`.
+        board_outline: Sheet-absolute board outline polygon.  Used as the
+            clipping mask and returned as ``None`` for sole-zone layers
+            (the caller falls back to ``board_outline`` via
+            :pyattr:`ZoneGenerator.board_outline`).
+        margin_mm: Margin around the pad bounding box, in mm.  Defaults to
+            :data:`DEFAULT_POUR_BBOX_MARGIN_MM` (1.5 mm).
+        occupied_layers: Layers that already host pre-existing zones
+            (Issue #5590).  Each such layer is treated as shared even
+            when only one new zone lands on it.
+        incumbent_nets_by_layer: Layer -> names of nets owning pre-existing
+            zones on that layer (Issue #6402).  A newly allocated
+            bounding-box outline on such a layer is carved so it does not
+            cover the incumbent nets' pads (see
+            :func:`_carve_incumbent_pads`); otherwise the island cuts those
+            pads off from the incumbent plane (board 03's VBUS island
+            swallowing VCC's U1/C1 on ``In2.Cu``).
+        skipped_out: Opt-in degrade-gracefully collector (Issue #5864).
+            When a list is supplied, a net whose outline cannot be made
+            disjoint is **skipped** instead of aborting the whole
+            allocation: the :class:`ZonePartitionError` that would have
+            been raised is appended here and the net is left out of the
+            returned mapping entirely (so the caller can tell it apart
+            from a ``None`` "use the full board outline" entry).  When
+            ``None`` (the default) the error is raised, preserving the
+            actionable hard-failure contract ``kct zones`` / ``kct build``
+            rely on.
+
+    Returns:
+        Dict mapping ``net_name`` -> polygon (or ``None`` for default).
+        Nets recorded in *skipped_out* are absent from the mapping.
+    """
+    # Count zones per layer so we know which assignments share a layer.
+    # Incumbent-occupied layers (#5590) count as already hosting a zone.
+    layer_counts: dict[str, int] = {}
+    for _, layer, _ in assignments:
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
+    if occupied_layers:
+        for layer in layer_counts:
+            if layer in occupied_layers:
+                layer_counts[layer] += 1
+
+    outlines: dict[str, list[tuple[float, float]] | None] = {}
+
+    # First pass: compute the raw bbox AND a tighter pad-safe bbox for
+    # every shared-layer zone.  The pad-safe bbox is a fallback used when
+    # the carve subtraction would leave a zone with zero area; it tracks
+    # the actual pads with a minimal margin so even a fully-covered
+    # lower-priority net can still receive *some* copper around its own
+    # pads (issue #3240).
+    raw_bboxes: dict[str, list[tuple[float, float]] | None] = {}
+    pad_safe_bboxes: dict[str, list[tuple[float, float]] | None] = {}
+    for net_name, layer, _ in assignments:
+        if layer_counts[layer] < 2:
+            # Sole zone on its layer -- keep the full board outline so
+            # ground/return planes stay continuous.
+            outlines[net_name] = None
+            continue
+
+        positions = _net_pad_positions_absolute(pcb, net_name)
+        bbox = _bbox_polygon(positions, margin_mm)
+        if bbox is None:
+            # No pads found for this net.  Fall back to the full board
+            # outline -- it will still overlap siblings, but at least the
+            # zone is created.  This path is unusual (net classified as
+            # power/ground but has no physical pads) and only happens for
+            # ERC-marker leakage that the upstream filter missed.
+            outlines[net_name] = None
+            continue
+
+        raw_bboxes[net_name] = _clip_polygon_to_outline(bbox, board_outline)
+
+        # Pad-safe bbox: tight margin around the same pad positions.  Used
+        # as the carve fallback when the normal subtraction returns empty.
+        pad_safe = _bbox_polygon(positions, PAD_SAFE_MARGIN_MM)
+        if pad_safe is not None:
+            pad_safe_bboxes[net_name] = _clip_polygon_to_outline(pad_safe, board_outline)
+
+    # Second pass (#3043): for each layer that hosts multiple zones, subtract
+    # higher-priority zone bboxes from lower-priority zones so the final
+    # outlines are *geometrically disjoint*.  Without this, the bboxes can
+    # spatially overlap (typical of real boards where power-net pads are
+    # interleaved rather than clustered), and KiCad's fill resolver would
+    # silently award the entire overlap to the highest-priority zone.
+    #
+    # KiCad zone-priority convention: HIGHER priority value WINS the overlap
+    # region.  So we sort highest-first and subtract each zone's bbox from
+    # the lower-priority zones that follow.
+    by_layer: dict[str, list[tuple[str, int]]] = {}
+    for net_name, layer, priority in assignments:
+        if layer_counts[layer] < 2:
+            continue
+        if net_name not in raw_bboxes:
+            continue
+        by_layer.setdefault(layer, []).append((net_name, priority))
+
+    for layer, nets_on_layer in by_layer.items():
+        # Sort highest priority first -- those zones "win" the overlap.
+        nets_on_layer.sort(key=lambda np: np[1], reverse=True)
+
+        # Issue #3240 fix: when a high-priority net's RAW bbox (inflated
+        # by 1.5 mm) fully contains the pad clusters of lower-priority
+        # siblings, the legacy carve subtraction empties those siblings
+        # and they receive zero copper.  The cleanest disambiguation is
+        # to use the higher-priority net's PAD-SAFE bbox (tight 0.3 mm
+        # margin around the pads) as the subtrahend whenever the raw bbox
+        # would over-claim space that lower-priority siblings need.
+        #
+        # Strategy:
+        # 1. Each net's final outline starts as its raw bbox.
+        # 2. For each lower-priority sibling, if subtracting the
+        #    higher-priority RAW bbox would empty the sibling, we
+        #    instead subtract the higher-priority PAD-SAFE bbox.  KiCad
+        #    zones do not support holes in the outline, so we cannot
+        #    carve the higher-priority zone to make room; instead we
+        #    SHRINK its outline to the pad-safe bbox in the contested
+        #    region.
+        # 3. After the shrink decision, run the standard carve pass with
+        #    each net's "effective subtrahend" (raw or pad-safe).
+        #
+        # Note that this means the highest-priority zone may end up with
+        # a SMALLER (pad-safe) outline than its raw bbox -- but it still
+        # covers its own pads, and now the lower-priority siblings can
+        # claim the area between the pad clusters.
+
+        # Step 1: for each net, decide its "effective outline subtrahend"
+        # used when carving lower-priority siblings.  Default = raw bbox.
+        # If the raw bbox fully covers any lower-priority sibling's
+        # pad-safe bbox, the raw bbox over-claims space the sibling needs.
+        #
+        # Issue #3443: the legacy fix (#3240) collapsed the over-claiming
+        # net's entire outline to its tight 0.3 mm pad-safe bbox.  On
+        # board 05 the highest-priority pour (+24V) over-claims a sibling
+        # (+5V) whose pads sit *interleaved in the middle* of the +24V pad
+        # span, so +24V was uniformly shrunk to pad-safe -- including at
+        # its own exclusive extremes where the HS-MOSFET drain tabs
+        # (Q1/Q3/Q5) live.  That starved the thermal-stitch halo around
+        # those tabs of copper (issue #2901 AC #4 regressed).
+        #
+        # The narrower, geometry-correct disambiguation is to carve only
+        # the contested region out of the over-claiming net's RAW bbox:
+        #
+        #     effective_outline = raw - union(lower siblings' pad-safe bboxes)
+        #
+        # When the contested siblings touch or cross the net's bbox edge
+        # (the common case -- interleaved power rails on a shared layer),
+        # this difference is a single hole-free concave ("staircase")
+        # polygon that keeps the full raw margin at the net's exclusive
+        # extremes while yielding the inter-pad region to the siblings.
+        # Both the net's own outline AND its carving subtrahend use this
+        # polygon, so the disjoint-carve invariant is preserved (no
+        # silent overlap that the fill resolver would award away).
+        #
+        # KiCad zone outlines cannot carry holes, so when a sibling sits
+        # *strictly interior* (the difference would need a hole) we fall
+        # back to the #3240 pad-safe bbox -- the lower sibling still
+        # survives, just without the larger extreme-edge copper.
+        effective_subtrahend: dict[str, list[tuple[float, float]] | None] = {}
+        for idx, (net_name, _priority) in enumerate(nets_on_layer):
+            raw = raw_bboxes.get(net_name)
+            if raw is None:
+                continue
+            pad_safe = pad_safe_bboxes.get(net_name)
+            over_claims = False
+            lower_pad_safes: list[list[tuple[float, float]]] = []
+            for lower_name, _lower_pri in nets_on_layer[idx + 1 :]:
+                lower_pad_safe = pad_safe_bboxes.get(lower_name)
+                if lower_pad_safe is None:
+                    continue
+                lower_pad_safes.append(lower_pad_safe)
+                # Would subtracting RAW from lower_pad_safe leave empty?
+                test = _subtract_polygon(lower_pad_safe, raw)
+                if test is None:
+                    # Yes: the raw bbox over-claims this lower sibling's
+                    # pad region.  The raw bbox is too greedy and we must
+                    # carve the contested region out of it.
+                    over_claims = True
+
+            if not over_claims:
+                effective_subtrahend[net_name] = raw
+                continue
+
+            # Carve ALL lower siblings' pad-safe bboxes out of the RAW
+            # bbox.  Subtracting the full set (not just the enclosed
+            # sibling) preserves the disjoint-carve invariant AND tends to
+            # produce a hole-free result: a sibling that crosses the net's
+            # bbox edge "opens" what would otherwise be an interior hole
+            # into a concave staircase notch, which KiCad can represent.
+            # This keeps the over-claiming net's full raw margin at its
+            # exclusive extremes -- where board 05's HS-MOSFET drain tabs
+            # (Q1/Q3/Q5) sit -- instead of collapsing the whole outline to
+            # the tight pad-safe bbox the way #3240 did (issue #3443).
+            lower_union = None
+            for poly in lower_pad_safes:
+                lower_union = _union_polygons(lower_union, poly)
+            carved_raw = _subtract_polygon(raw, lower_union) if lower_union is not None else None
+            if carved_raw is not None:
+                # Hole-free staircase difference: keeps the raw extremes.
+                effective_subtrahend[net_name] = carved_raw
+            elif pad_safe is not None:
+                # The difference would need a hole (a sibling sits strictly
+                # interior with no edge-crossing neighbour to open it), or
+                # Shapely is unavailable: fall back to the #3240 pad-safe
+                # bbox so the lower sibling still survives.
+                effective_subtrahend[net_name] = pad_safe
+            else:
+                effective_subtrahend[net_name] = raw
+
+        # Step 2: accumulate winners_union from EFFECTIVE subtrahends,
+        # not raw bboxes.  Each net's own outline is also clipped against
+        # the running winners_union.
+        winners_union = None
+        winners_so_far: list[str] = []
+        for net_name, _ in nets_on_layer:
+            current = raw_bboxes[net_name]
+
+            # The net's own outline: start with its raw bbox, but if its
+            # effective subtrahend was reduced (carved staircase or, as a
+            # last resort, the pad-safe bbox) because the raw bbox was too
+            # greedy, use that reduced polygon so the net's own outline
+            # matches what we subtract from siblings (disjoint invariant).
+            self_outline = effective_subtrahend.get(net_name) or current
+
+            # Subtract higher-priority effective subtrahends from this
+            # net's outline.
+            if winners_union is None:
+                final_outline = self_outline
+            else:
+                carved = _subtract_polygon(self_outline, winners_union)
+                final_outline = carved  # may be None
+
+            if final_outline is not None:
+                outlines[net_name] = final_outline
+            else:
+                # Carve emptied the self-outline.  Try the strict pad-safe
+                # bbox of this net (in case self_outline was already the
+                # pad-safe bbox, this is redundant but cheap).
+                pad_safe = pad_safe_bboxes.get(net_name)
+                if pad_safe is None:
+                    unsatisfiable = ZonePartitionError(
+                        failing_net=net_name,
+                        layer=layer,
+                        covering_nets=list(winners_so_far),
+                        suggestion=(
+                            f"Net '{net_name}' has no physical pads on the "
+                            f"board; remove it from the pour-net list or "
+                            f"add the pads it needs."
+                        ),
+                    )
+                    if skipped_out is None:
+                        raise unsatisfiable
+                    # Issue #5864: degrade instead of aborting -- record the
+                    # skip and move on so the remaining nets on this layer
+                    # still receive their carved outlines.  The net is left
+                    # out of ``outlines`` and out of ``winners_union`` (it
+                    # gets no zone, so it claims no copper).
+                    skipped_out.append(unsatisfiable)
+                    continue
+
+                if winners_union is None:
+                    outlines[net_name] = pad_safe
+                else:
+                    pad_carved = _subtract_polygon(pad_safe, winners_union)
+                    if pad_carved is not None:
+                        outlines[net_name] = pad_carved
+                    else:
+                        # Numerical edge case: tiny but positive non-overlap
+                        # area below Shapely's empty-threshold.
+                        non_overlap_area = _polygon_area_simple(pad_safe) - _polygon_overlap_area(
+                            pad_safe, winners_union
+                        )
+                        if non_overlap_area > 1e-6:
+                            outlines[net_name] = pad_safe
+                        else:
+                            unsatisfiable = ZonePartitionError(
+                                failing_net=net_name,
+                                layer=layer,
+                                covering_nets=list(winners_so_far),
+                            )
+                            if skipped_out is None:
+                                raise unsatisfiable
+                            # Issue #5864: see the no-pads branch above.
+                            skipped_out.append(unsatisfiable)
+                            continue
+
+            # Use the EFFECTIVE subtrahend (raw or pad-safe) for the
+            # winners union, so lower-priority siblings can claim the
+            # space the higher-priority net yielded.
+            subtrahend_for_winners = effective_subtrahend.get(net_name) or current
+            winners_union = _union_polygons(winners_union, subtrahend_for_winners)
+            winners_so_far.append(net_name)
+
+    # Issue #6402: keep bounding-box islands off the incumbent pours' pads.
+    if incumbent_nets_by_layer:
+        for net_name, layer, _ in assignments:
+            incumbents = incumbent_nets_by_layer.get(layer)
+            outline = outlines.get(net_name)
+            if not incumbents or outline is None:
+                continue
+            incumbent_pads: list[tuple[float, float, float]] = []
+            for inc in sorted(incumbents - {net_name}):
+                incumbent_pads.extend(_net_pad_extents_absolute(pcb, inc))
+            own_pads = _net_pad_positions_absolute(pcb, net_name)
+            outlines[net_name] = _carve_incumbent_pads(outline, own_pads, incumbent_pads)
+
+    return outlines
+
+
+def _net_pad_extents_absolute(
+    pcb: PCB,
+    net_name: str,
+) -> list[tuple[float, float, float]]:
+    """Return ``(x, y, half_extent)`` for every pad on ``net_name`` (Issue #6402).
+
+    Positions are sheet-absolute, matching :func:`_net_pad_positions_absolute`
+    (same footprint/pad iteration order).  ``half_extent`` is half the pad's
+    larger dimension: a rotation-agnostic, conservative radius for the pad
+    body, so a square of that half-size centred on the pad always covers it.
+    """
+    positions = _net_pad_positions_absolute(pcb, net_name)
+    halves: list[float] = []
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        for pad in fp.pads:
+            if pad.net_name != net_name or not pad.net_name:
+                continue
+            size = getattr(pad, "size", None) or (0.0, 0.0)
+            halves.append(max(float(size[0]), float(size[1])) / 2.0)
+    if len(halves) != len(positions):  # defensive: never misalign
+        halves = [0.0] * len(positions)
+    return [(x, y, h) for (x, y), h in zip(positions, halves, strict=True)]
+
+
+# Issue #6402: copper keep-out beyond an incumbent pour's pad body when
+# carving a newly auto-poured island off it.  The incumbent's fill must reach
+# the pad neighbourhood with room for a stitch via: the higher-priority
+# island's zone clearance (~0.3 mm) plus a via (~0.6 mm) plus a little fill.
+# A carve narrower than ``2 * clearance + min_thickness`` admits no fill at
+# all, which is how a 0.6 mm notch stranded board 03's F1.2 via on a sliver.
+INCUMBENT_PAD_KEEPOUT_MM = 1.0
+
+# Minimum neck width the carved island must keep so its own fill still joins
+# every own pad (2 x the auto-pour zone's 0.25 mm min_thickness, rounded up).
+CARVE_MIN_NECK_MM = 0.6
+
+
+def _carve_incumbent_pads(
+    outline: list[tuple[float, float]],
+    own_pads: list[tuple[float, float]] | list[tuple[float, float, float]],
+    incumbent_pads: list[tuple[float, float]] | list[tuple[float, float, float]],
+    keepout_mm: float = INCUMBENT_PAD_KEEPOUT_MM,
+) -> list[tuple[float, float]]:
+    """Carve *outline* so it does not cover *incumbent_pads* (Issue #6402).
+
+    Each incumbent pad (``(x, y)`` or ``(x, y, half_extent)``) inside the
+    outline becomes a square blocker covering its body plus ``keepout_mm``.
+    KiCad outlines cannot carry holes, so an interior blocker is opened to
+    the outline edge by a straight channel of the blocker's own width --
+    wide enough for the incumbent pour's fill to flow through it to the pad.
+    Each pad's channel takes the shortest direction that keeps every own pad
+    covered.  If no carve is valid, the outline is shrunk to the own pads'
+    tight neighbourhood and carved again; failing that it is returned
+    unchanged (never worse than before).
+
+    A result is valid when it is one hole-free polygon that still contains
+    every own pad and does not split into pieces when eroded by half of
+    :data:`CARVE_MIN_NECK_MM` (so its own fill still joins the own pads).
+    """
+    try:
+        from shapely.geometry import MultiPolygon, Point, Polygon, box
+        from shapely.ops import unary_union
+    except ImportError:
+        return outline
+
+    def _xyh(p) -> tuple[float, float, float]:
+        return (float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0)
+
+    own = [_xyh(p) for p in own_pads]
+    base = Polygon(outline)
+    if not base.is_valid or base.is_empty:
+        return outline
+
+    blockers = []
+    for p in incumbent_pads:
+        x, y, h = _xyh(p)
+        r = h + keepout_mm
+        # Stop short of the island's own pads (Chebyshev distance: the
+        # blocker is a square), but always clear the pad body itself.
+        for ox, oy, _ in own:
+            gap = max(abs(ox - x), abs(oy - y)) - PAD_SAFE_MARGIN_MM
+            r = min(r, max(h + PAD_SAFE_MARGIN_MM, gap))
+        blk = box(x - r, y - r, x + r, y + r)
+        if blk.intersects(base):
+            blockers.append((x, y, r, blk))
+    if not blockers:
+        return outline
+
+    def _parts(geom) -> list:
+        if geom is None or geom.is_empty:
+            return []
+        if isinstance(geom, MultiPolygon):
+            return [g for g in geom.geoms if g.area > 1e-9]
+        return [geom] if isinstance(geom, Polygon) else []
+
+    def _own_piece(geom):
+        """The single piece of *geom* holding every own pad, else ``None``.
+
+        Pieces without own pads are orphan copper and are dropped.
+        """
+        for piece in _parts(geom):
+            grown = piece.buffer(1e-6)
+            if all(grown.contains(Point(x, y)) for x, y, _ in own):
+                return piece
+        return None
+
+    def _necks_ok(piece) -> bool:
+        """Own pads stay joined after eroding away necks < CARVE_MIN_NECK_MM."""
+        cores = _parts(piece.buffer(-CARVE_MIN_NECK_MM / 2.0))
+        if not cores:
+            return False
+        homes = set()
+        for x, y, _ in own:
+            pt = Point(x, y)
+            best = min(range(len(cores)), key=lambda i: cores[i].distance(pt))
+            if cores[best].distance(pt) > CARVE_MIN_NECK_MM:
+                return False
+            homes.add(best)
+        return len(homes) <= 1
+
+    def _usable(geom):
+        piece = _own_piece(geom)
+        if piece is None or not piece.is_valid or not _necks_ok(piece):
+            return None
+        return piece
+
+    def _carve(region):
+        cut = unary_union([blk for *_, blk in blockers])
+        minx, miny, maxx, maxy = region.bounds
+        over = 1.0
+        # Open every enclosed blocker to the edge, nearest feasible side first.
+        for _ in range(len(blockers)):
+            piece = _usable(region.difference(cut))
+            if piece is None:
+                return None
+            if not piece.interiors:
+                return piece
+            holes = [Polygon(ring) for ring in piece.interiors]
+            enclosed = [b for b in blockers if any(h.contains(Point(b[0], b[1])) for h in holes)]
+            if not enclosed:
+                return None
+            x, y, r, _blk = enclosed[0]
+            options = [
+                (y - miny, box(x - r, miny - over, x + r, y)),  # toward min y
+                (maxy - y, box(x - r, y, x + r, maxy + over)),  # toward max y
+                (x - minx, box(minx - over, y - r, x, y + r)),  # toward min x
+                (maxx - x, box(x, y - r, maxx + over, y + r)),  # toward max x
+            ]
+            for _dist, channel in sorted(options, key=lambda o: o[0]):
+                trial = unary_union([cut, channel])
+                if _usable(region.difference(trial)) is not None:
+                    cut = trial
+                    break
+            else:
+                return None
+        piece = _usable(region.difference(cut))
+        return piece if piece is not None and not piece.interiors else None
+
+    result = _carve(base)
+    if result is None:
+        own_box = _bbox_polygon([(x, y) for x, y, _ in own], PAD_SAFE_MARGIN_MM)
+        if own_box is not None:
+            shrunk = Polygon(own_box).intersection(base)
+            if isinstance(shrunk, Polygon) and not shrunk.is_empty:
+                result = _carve(shrunk)
+    if result is None:
+        return outline
+    coords = [(float(cx), float(cy)) for cx, cy in result.exterior.coords[:-1]]
+    return coords if len(coords) >= 3 else outline
+
+
+def _polygon_area_simple(polygon: list[tuple[float, float]] | None) -> float:
+    """Shoelace polygon area (mm²); 0 for None/degenerate input."""
+    if not polygon or len(polygon) < 3:
+        return 0.0
+    area = 0.0
+    n = len(polygon)
+    for i in range(n):
+        x0, y0 = polygon[i]
+        x1, y1 = polygon[(i + 1) % n]
+        area += x0 * y1 - x1 * y0
+    return abs(area) / 2.0
+
+
+def _union_polygons(
+    a: list[tuple[float, float]] | None,
+    b: list[tuple[float, float]] | None,
+):
+    """Return the Shapely union of two polygons (or None inputs).
+
+    Returns a Shapely geometry (Polygon or MultiPolygon) so subsequent
+    operations can use it directly.  When Shapely is unavailable, returns
+    ``None`` -- callers should fall back to leaving outlines unchanged.
+    """
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError:
+        return None
+
+    geoms = []
+    for poly in (a, b):
+        if poly is None:
+            continue
+        if hasattr(poly, "geom_type"):
+            geoms.append(poly)
+        else:
+            geoms.append(Polygon(poly))
+    if not geoms:
+        return None
+    return unary_union(geoms)
+
+
+def _subtract_polygon(
+    minuend: list[tuple[float, float]],
+    subtrahend,
+) -> list[tuple[float, float]] | None:
+    """Return ``minuend - subtrahend`` as a hole-free polygon, or ``None`` on failure.
+
+    ``subtrahend`` may be a list of ``(x, y)`` tuples or a Shapely geometry
+    (the latter is what ``_union_polygons`` returns).  KiCad zones do not
+    natively support polygon holes in the *outline* (single-contour
+    polygons only).  This function therefore returns ``None`` in any of
+    these failure cases:
+
+    * The difference is empty (minuend fully covered by subtrahend).
+    * The result is a MultiPolygon (multiple disjoint pieces -- only
+      the largest is returned to avoid silently dropping copper area).
+    * The result is a Polygon WITH interior holes (KiCad can't represent
+      the hole, and just using the exterior would silently overlap the
+      subtrahend -- precisely the issue #3240 failure mode).
+    * Shapely is unavailable.
+
+    Returning ``None`` lets the caller decide -- try a pad-safe fallback
+    or raise ``ZonePartitionError``.  The legacy behavior of returning
+    the un-carved minuend silently let the zone-priority resolver award
+    the entire region to higher-priority siblings, producing zero copper
+    for the failing net (issue #3240).
+
+    For the MultiPolygon case, we keep only the largest piece (a
+    pragmatic compromise -- KiCad zones can be defined multiple times
+    for the same net to cover multiple regions, but the current API
+    emits one zone per (net, layer) tuple).
+    """
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        # Shapely unavailable: caller decides whether to keep the raw
+        # minuend (legacy behavior) or treat as failure.
+        return None
+
+    minuend_poly = Polygon(minuend)
+    if hasattr(subtrahend, "geom_type"):
+        sub_geom = subtrahend
+    else:
+        sub_geom = Polygon(subtrahend)
+
+    diff = minuend_poly.difference(sub_geom)
+
+    if diff.is_empty:
+        # The minuend was completely covered by higher-priority zones.
+        # Returning None lets the caller try a pad-safe fallback or raise
+        # an actionable ZonePartitionError -- the legacy ``return fallback``
+        # path silently produced zero-copper zones (issue #3240).
+        return None
+
+    if diff.geom_type == "MultiPolygon":
+        # Keep only the largest piece -- KiCad zone outlines are single
+        # polygons.  Smaller fragments are lost, but the dominant region
+        # is preserved.
+        diff = max(diff.geoms, key=lambda g: g.area)
+
+    if diff.geom_type != "Polygon":
+        return None
+
+    # Issue #3240: if the result has interior holes, the exterior ring
+    # alone overlaps the subtrahend (the hole is in the contested area).
+    # Returning the exterior would silently re-create the zero-copper bug
+    # -- KiCad would render the full exterior, which overlaps the
+    # subtrahend and gets zero copper from the priority resolver.  Signal
+    # failure so the caller can fall back to a pad-safe bbox that lives
+    # strictly outside the subtrahend.
+    if list(diff.interiors):
+        return None
+
+    coords = list(diff.exterior.coords)
+    if len(coords) > 1 and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    if len(coords) < 3:
+        return None
+
+    return [(round(x, 6), round(y, 6)) for x, y in coords]
+
+
+def _polygon_overlap_area(
+    a: list[tuple[float, float]],
+    b,
+) -> float:
+    """Return the intersection area (mm²) of two polygons.
+
+    ``b`` may be a list of ``(x, y)`` tuples or a Shapely geometry.
+    Returns ``0.0`` if either operand is missing/invalid or Shapely is
+    not available.
+    """
+    if a is None or b is None:
+        return 0.0
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        return 0.0
+    try:
+        poly_a = Polygon(a)
+        if hasattr(b, "geom_type"):
+            poly_b = b
+        else:
+            poly_b = Polygon(b)
+        if not poly_a.is_valid or not poly_b.is_valid:
+            return 0.0
+        return poly_a.intersection(poly_b).area
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def assign_batch_zone_priorities_and_outlines(
+    pcb: PCB,
+    board_outline: list[tuple[float, float]],
+    net_layer_pairs: list[tuple[str, str]],
+    margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
+) -> dict[tuple[str, str], tuple[int, list[tuple[float, float]] | None]]:
+    """Assign priorities + carved outlines for explicit ``(net, layer)`` pairs.
+
+    This is the ``zones batch`` counterpart to
+    :func:`_assign_layers_for_pour_nets` + :func:`_compute_pour_outlines`.
+    Unlike the auto-pour path, the caller supplies an explicit layer per
+    net (the whole point of ``--power-nets 'A:F.Cu,B:F.Cu,...'``), so this
+    function does **not** derive layers from :class:`NetClass`.  It only
+    derives, *within each user-specified layer group*:
+
+    * **Priority** -- by ascending pad-cluster bbox area (smallest area =>
+      highest priority, the KiCad idiom where small/nested zones must fill
+      on top of the larger zones they sit inside, or they get zero copper).
+      Ties (equal area, e.g. two single-pad nets) break deterministically
+      by net name (alphabetical) so output is stable across runs/platforms.
+    * **Outline** -- via the existing :func:`_compute_pour_outlines` carve
+      machinery (issue #3043/#3240), so overlapping same-layer zones receive
+      geometrically disjoint outlines instead of full-board rectangles that
+      100%-overlap and zero each other out.
+
+    Behavior is a **no-op** for any layer hosting exactly one net: that net
+    keeps the full board outline (``None``) and its legacy priority (1 for
+    GND-named nets, 0 otherwise), so existing non-overlapping ``zones batch``
+    usages are byte-identical to pre-fix behavior (issue #4167).
+
+    Args:
+        pcb: Loaded PCB object (used to look up pad positions).
+        board_outline: Sheet-absolute board outline polygon (clip mask).
+        net_layer_pairs: The user-specified ``(net_name, layer)`` pairs, in
+            input order.  Duplicate ``(net, layer)`` entries are de-duped.
+        margin_mm: Margin around each pad bbox, in mm.
+
+    Returns:
+        Dict mapping ``(net_name, layer)`` -> ``(priority, outline)`` where
+        ``outline`` is ``None`` for sole-zone layers (caller falls back to
+        the board outline) or a carved polygon for shared-layer zones.  The
+        key is the ``(net, layer)`` pair -- *not* the net name alone -- so a
+        net appearing on multiple layers (e.g. a GND plane shared on
+        ``F.Cu`` and sole on ``B.Cu``) gets the correct per-layer outline:
+        full board on the layer where it is sole, carved on the layer where
+        it overlaps siblings (issue #4167 regression fix).
+
+    Raises:
+        ZonePartitionError: If carving cannot produce disjoint copper for
+            some net on a shared layer (fully-coincident pad clusters).
+    """
+    # Group nets by their user-specified layer, preserving input order and
+    # de-duplicating exact (net, layer) repeats.
+    seen: set[tuple[str, str]] = set()
+    layer_groups: dict[str, list[str]] = {}
+    for net_name, layer in net_layer_pairs:
+        key = (net_name, layer)
+        if key in seen:
+            continue
+        seen.add(key)
+        layer_groups.setdefault(layer, []).append(net_name)
+
+    def _legacy_priority(net_name: str) -> int:
+        return 1 if net_name.upper() in ("GND", "GNDA", "GNDD") else 0
+
+    # Build the result keyed by (net, layer) -- NOT net name alone.  A net
+    # can legitimately appear on multiple layers (e.g. a GND plane shared on
+    # F.Cu and sole on B.Cu); keying by net name alone made the two layers
+    # collide on one dict entry, so the last-written (priority, outline) was
+    # wrongly applied to both add_zone calls -- silently giving the
+    # sole-layer instance a carved strip instead of the full board outline
+    # (issue #4167 regression).
+    result: dict[tuple[str, str], tuple[int, list[tuple[float, float]] | None]] = {}
+
+    for layer, nets in layer_groups.items():
+        if len(nets) < 2:
+            # Sole zone on this layer: unchanged behavior -- full board
+            # outline, legacy priority, no carve.
+            net_name = nets[0]
+            priority = _legacy_priority(net_name)
+            result[(net_name, layer)] = (priority, None)
+            continue
+
+        # >= 2 nets share this layer.  Compute each net's pad-cluster bbox
+        # area, then assign descending priority by ascending area (smallest
+        # area => highest priority).  Deterministic alphabetical tiebreak.
+        areas: dict[str, float] = {}
+        for net_name in nets:
+            positions = _net_pad_positions_absolute(pcb, net_name)
+            bbox = _bbox_polygon(positions, margin_mm)
+            areas[net_name] = _polygon_area_simple(bbox)
+
+        # Sort by (area ascending, name ascending); smallest area gets the
+        # highest priority number.  Assign priorities len(nets)..1 so they
+        # are distinct and strictly descending by area.
+        ordered = sorted(nets, key=lambda n: (areas[n], n))
+        n = len(ordered)
+        priorities: dict[str, int] = {}
+        for rank, net_name in enumerate(ordered):
+            # rank 0 = smallest area => highest priority.
+            priorities[net_name] = n - rank
+
+        # Carve outlines for THIS layer group only.  Because the group is a
+        # single layer, its net names are unique, so _compute_pour_outlines'
+        # net-name-keyed return dict cannot collide across layers even when
+        # the same net also lives on a different layer's group.
+        assignments = [(net_name, layer, priorities[net_name]) for net_name in nets]
+        outlines = _compute_pour_outlines(pcb, assignments, board_outline, margin_mm)
+        for net_name in nets:
+            result[(net_name, layer)] = (
+                priorities[net_name],
+                outlines.get(net_name),
+            )
+
+    return result
+
+
+def auto_create_zones_for_pour_nets(
+    pcb_path: str | Path,
+    pour_nets: list[tuple[str, NetClass]],
+    edge_clearance: float | None = None,
+    replace_existing: bool = False,
+    skipped_out: list[ZonePartitionError] | None = None,
+) -> int:
+    """Create zones for power and ground nets on a PCB.
+
+    Loads the PCB, creates zone definitions for each pour net, and saves
+    the modified PCB in place.  Layer assignment is stackup-aware:
+
+    For 2-layer boards:
+    - GROUND nets get a zone on B.Cu with priority 1
+    - POWER nets get zones on F.Cu with descending priorities
+      (first power net gets highest priority) so overlapping zones
+      on the same layer coexist without undefined fill order
+
+    For 4-layer boards:
+    - GROUND nets get a zone on In1.Cu with priority 1
+    - First POWER net gets a zone on In2.Cu with priority 0
+    - Additional POWER nets get zones on F.Cu with distinct
+      non-zero priorities
+
+    Split-ground designs (multiple distinct GROUND-class nets, e.g.
+    ``GNDA`` + ``GNDD``) get special handling so each ground domain
+    receives its own copper plane:
+
+    - 4-layer: the two grounds split across ``In1.Cu`` and ``In2.Cu``
+      (both priority 1), and POWER moves to ``F.Cu`` since both inner
+      layers are now reserved.  Canonical ground (``GND`` if present,
+      else alphabetical first) is placed on ``In1.Cu``.
+    - 2-layer: each ground gets ``B.Cu`` with a distinct descending
+      priority.  True plane separation is impossible on this stackup.
+    - >2 grounds: extras spill to ``B.Cu`` with distinct priorities;
+      a stderr warning is emitted recommending manual stackup planning.
+
+    See ``_assign_layers_for_pour_nets`` for full assignment rules.
+
+    Geometric outline partition (#2771)
+    -----------------------------------
+
+    After the layer/priority allocator runs, the **outline allocator**
+    (:func:`_compute_pour_outlines`) decides whether each zone uses the
+    full board outline or a per-net bounding region:
+
+    * Zones that are the *only* zone on their layer (e.g. ``GND`` on
+      ``B.Cu`` for a single-ground 2-layer board, or ``GND`` on
+      ``In1.Cu`` for a 4-layer board) keep the full board outline.  This
+      preserves the return-path plane that signals need to cross without
+      gaps.
+    * Zones that *share* a layer with one or more other zones (e.g. the
+      ``+5V`` / ``+3.3V`` / ``PWR_LED`` cluster on F.Cu of a 2-layer
+      board) get a bounding box around their own pads (with a 1.5 mm
+      default margin), clipped to the board outline.
+
+    Without this geometric partition, distinct priorities (added in
+    #2410) are insufficient -- KiCad's fill resolver awards the entire
+    shared region to the highest-priority zone, so siblings receive zero
+    copper despite the file containing a zone definition for each
+    (see #2771 for the board 05 reproduction).
+
+    Pre-existing zones on the pour layer (#5590)
+    -------------------------------------------
+
+    Zones already authored into the PCB file (hand-authored pours the
+    caller's idempotency filter excluded from ``pour_nets``) are treated
+    as layer occupants by both allocators: new zones landing on such a
+    layer receive priorities strictly above the incumbent's maximum and
+    a carved per-net pad-bbox outline instead of the full board outline.
+    The incumbent zone itself is never modified.  This replaces the old
+    equal-priority full-board collision whose outcome KiCad decided by
+    zone-UUID tie-break (one zone starved, non-deterministically).
+
+    Nested pad clusters (#3240)
+    ---------------------------
+
+    The carve pass (#3043) handles spatially-separated pad clusters
+    correctly.  Issue #3240 reported a different failure shape: when
+    a lower-priority net's pads sit fully *inside* the higher-priority
+    net's inflated bbox (chorus-test-revA case where ``+5V`` and
+    ``+3.3VA`` pads cluster inside the ``+3.3V`` bbox), the carve
+    subtraction returns empty and the legacy fallback was to return
+    the raw bbox -- which silently overlapped the higher-priority zone
+    and got zero copper from the fill resolver.
+
+    The fix has two pieces:
+
+    1. The higher-priority zone's effective subtrahend is *downgraded*
+       to its pad-safe bbox (a tight 0.3 mm margin around its pads
+       only) whenever its raw bbox would over-claim space that a
+       lower-priority sibling needs.  The higher-priority zone keeps
+       its pad-adjacent copper; the lower-priority siblings get the
+       inter-pad regions.
+    2. When even the pad-safe carve cannot produce a disjoint outline
+       (e.g. truly coincident pad layouts), the allocator raises
+       :class:`ZonePartitionError` naming the failing net, the layer,
+       and the higher-priority nets that cover it.  This replaces the
+       previous silent "zone exists but receives zero copper" behavior
+       with an actionable error.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file (modified in place)
+        pour_nets: List of (net_name, NetClass) tuples identifying
+            which nets need zones
+        edge_clearance: Optional edge clearance in mm.  When set, the
+            auto-derived board outline is inset by this distance so that
+            zone copper does not extend to the board edge.  The same
+            inset is applied to the per-net bounding outlines so they
+            also stay inside the inset board.
+        replace_existing: When ``True``, drop any pre-existing zone whose
+            net is in ``pour_nets`` BEFORE creating the new zones, so the
+            board ends with exactly one zone per ``(net, layer)``.  This
+            is the idempotent counterpart to :func:`auto_pour_if_missing`
+            (which skips nets that already have zones): callers that want
+            to assert their OWN authoritative outline/inset over whatever
+            an earlier step (e.g. ``kct route``'s internal auto-pour) left
+            behind use this flag instead of stacking a second, overlapping
+            zone on top.  Issue #3818: two same-net, same-layer,
+            same-priority zones make KiCad's fill resolver award the whole
+            shared region to one of them non-deterministically, so the
+            *other* zone fills to ZERO ``filled_polygon`` regions -- a
+            spurious "dead pour" the copper-union audit flags on a fraction
+            of re-routes (the board-07 match-group CI flake).  Default
+            ``False`` preserves the historical additive behaviour for every
+            other caller.
+        skipped_out: Opt-in degrade-gracefully collector (Issue #5864).
+            When a list is supplied, a pour net the outline allocator
+            cannot satisfy is **skipped** (no zone created for it) and
+            the :class:`ZonePartitionError` describing it is appended
+            here, instead of aborting the whole call.  The remaining
+            pour nets still get their zones.  ``kct route``'s internal
+            auto-pour passes a list so one unsatisfiable net degrades to
+            a warning rather than killing the route; ``kct zones`` /
+            ``kct build`` leave it ``None`` and keep the hard error.
+
+    Returns:
+        Number of zones created (excluding any net recorded in
+        *skipped_out*).
+
+    Raises:
+        ZonePartitionError: When the outline allocator cannot produce
+            disjoint per-net outlines and at least one zone would
+            receive zero copper (issue #3240) -- unless *skipped_out*
+            was supplied, in which case the failing net is skipped and
+            recorded there instead (issue #5864).
+    """
+    pcb_path = Path(pcb_path)
+
+    # Issue #3818: when the caller is asserting its authoritative pour
+    # outline (replace_existing=True), strip any zone already present for
+    # these nets first so we never stack a second, overlapping same-net
+    # same-layer zone on top of one a prior step left behind (e.g. the
+    # internal auto-pour ``kct route`` runs).  Done before the generator
+    # loads the file so the new zones are the only ones for these nets.
+    if replace_existing:
+        from kicad_tools.router.auto_pour import _remove_zones_for_nets
+
+        _remove_zones_for_nets(pcb_path, {name for name, _ in pour_nets})
+
+    gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=edge_clearance)
+
+    # Issue #7708: a pre-KiCad-6 board spells its copper layers ``Top`` /
+    # ``VDD`` / ``Bottom``.  ``PCB.copper_layers`` counts them (type-based),
+    # so the allocator would plan ``In1.Cu`` pours that ``add_zone`` then
+    # rejects -- aborting the whole route.  Zones can only be authored on
+    # canonically named layers, so skip the pour (the nets stay routable).
+    if not _declared_copper_layer_names(gen.pcb):
+        print(
+            f"WARNING: {pcb_path}: no canonically named copper layers declared "
+            f"(legacy layer names?); skipping auto-pour for {len(pour_nets)} "
+            "net(s). Upgrade the board with 'kicad-cli pcb upgrade' to enable pours.",
+            file=sys.stderr,
+        )
+        return 0
+
+    copper_layer_count = len(gen.pcb.copper_layers)
+    # Issue #5590: surface zones already authored into the PCB file to
+    # both allocators.  Without this, a pre-existing same-layer zone
+    # (e.g. board 03's hand-authored VCC pour on In2.Cu) was invisible:
+    # the new zone tied its priority, kept the full-board outline, and
+    # KiCad's UUID tie-break decided which zone starved.
+    existing_by_layer = _existing_zone_priority_by_layer(gen.pcb, {name for name, _ in pour_nets})
+    assignments = _assign_layers_for_pour_nets(
+        copper_layer_count,
+        pour_nets,
+        existing_by_layer,
+        plane_rank={name: _power_plane_rank(gen.pcb, name) for name, _ in pour_nets},
+    )
+
+    # Outline allocator (#2771): compute per-net bounding outlines for any
+    # layer that hosts more than one zone.  Sole-layer zones (typically
+    # ground) get ``None`` so :meth:`ZoneGenerator.add_zone` falls back to
+    # the full ``board_outline`` and keeps the return-path plane continuous.
+    # Incumbent-occupied layers (#5590) count as shared, so a new zone on
+    # such a layer gets its carved pad-bbox outline instead.
+    skipped_before = len(skipped_out) if skipped_out is not None else 0
+    pour_outlines = _compute_pour_outlines(
+        gen.pcb,
+        assignments,
+        gen.board_outline,
+        occupied_layers=existing_by_layer.keys() if existing_by_layer else None,
+        skipped_out=skipped_out,
+        incumbent_nets_by_layer=_existing_zone_nets_by_layer(
+            gen.pcb, {name for name, _ in pour_nets}
+        ),
+    )
+
+    # Issue #5864: nets the allocator could not satisfy are absent from
+    # ``pour_outlines`` entirely.  They must NOT fall through to
+    # ``add_zone(boundary=None)`` -- that would hand the net the full
+    # board outline, which is exactly the silent zero-copper overlap the
+    # allocator refused to emit.  Skip them instead.
+    unsatisfiable_nets = (
+        {err.failing_net for err in skipped_out[skipped_before:]}
+        if skipped_out is not None
+        else set()
+    )
+
+    count = 0
+    for net_name, layer, priority in assignments:
+        if net_name in unsatisfiable_nets:
+            continue
+        gen.add_zone(
+            net=net_name,
+            layer=layer,
+            priority=priority,
+            boundary=pour_outlines.get(net_name),
+        )
+        count += 1
+
+    if count > 0:
+        gen.save(pcb_path)
+
+    return count

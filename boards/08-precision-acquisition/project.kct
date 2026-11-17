@@ -1,0 +1,20 @@
+kct_version: '1.0'
+project:
+  name: Four-channel precision acquisition
+  revision: A
+  created: 2026-09-10
+  author: ''
+  description: Four-channel ADS131M04IPWR acquisition with a socketed Pico H USB host.
+    Pin/package interface and nominal 8 kSPS transfer budget checked; analog
+    circuitry, procurement and PCB implementation pending.
+intent:
+  summary: Four simultaneous differential channels with USB streaming and a continuous
+    ground reference; demonstrate analog filtering, clock and return-path placement.
+requirements:
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 4
+decisions: []
+progress:
+  phase: concept

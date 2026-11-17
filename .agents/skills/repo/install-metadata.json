@@ -1,0 +1,10 @@
+{
+  "version": "0.26.1",
+  "commit": "ed65f9a",
+  "tag": "v0.26.1",
+  "layout_version": 2,
+  "dev": false,
+  "filtered": false,
+  "guardHookInstalled": false,
+  "commands": ["all","audit","branches","browser","decide","deps","docs","followups","gitignore","handoff","help","host-optimize","links","optimize-ci","org-policy","orphans","readme","release","remote","reset","scrub","sudo","tidy","update-tools"]
+}

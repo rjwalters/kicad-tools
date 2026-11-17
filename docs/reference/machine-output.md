@@ -1,0 +1,636 @@
+# Machine output: the canonical `--format json` idiom
+
+> Design note for issue #4543 (copperhead workflow survey #4520, idea 6).
+> Inventory measured against `fa98ac8b` (2026-08-07) with
+> `scripts/audit_machine_output.py`; re-run that script to refresh the counts.
+
+## Decision
+
+**The canonical machine-output spelling for every `kct` subcommand is
+`--format json`** — a `--format` choice flag whose choices include `json`
+(commonly `{text,json}`; richer commands add `table`, `summary`, `csv`,
+`markdown`, …).
+
+The boolean `--json` flag is a **legacy alias**. Where it already shipped it
+is kept working forever (backward compatibility: no flag is ever removed or
+repurposed), documented with help text `"... (same as --format json)"`. New
+commands must NOT add `--json`; they add `--format` with a `json` choice.
+
+Rationale (from the audit below): `--format` already dominated the user-facing
+surface 124 : 2 (plus 8 passthrough `--json` subparsers), every recent
+machine-output addition chose it (`sch tidy` #4654, `check` families #4656,
+`pcb add-3d-models` #4660, `net-status` #4557), and a choice flag is strictly
+more extensible than a boolean — `table`/`summary`/`csv`/`markdown` variants
+already exist across the tree and a boolean `--json` cannot grow.
+
+### Precedence rule
+
+When a command carries both spellings, **either flag requesting JSON wins**.
+The two flags cannot conflict, because `--json` only ever means
+`--format json`. `kct <cmd> --json --format json` is valid and equivalent to
+either flag alone.
+
+### Shared machinery
+
+`src/kicad_tools/cli/format_options.py` provides the helpers commands should
+use:
+
+- `add_format_flag(parser)` — declare the canonical `--format` choice flag.
+- `add_legacy_json_flag(parser)` — declare the `--json` alias (only for
+  commands that already shipped it).
+- `normalize_format_alias(args)` — call once after `parse_args`; reconciles
+  the two spellings so downstream code can keep checking a single attribute
+  (`args.json` or `args.format`, whichever it historically used).
+- `wants_json(args)` — one-shot predicate that checks both spellings without
+  mutating the namespace.
+- `stdout_to_stderr_when(active)` — context manager that captures stdout
+  written inside it and replays it on stderr while *active*. Wrap any region
+  that calls code the command does not own (third-party libraries, the
+  negotiated router, subprocess drivers, progress ledgers) so their chatter
+  cannot corrupt the single-document contract. Introduced per-module in batch
+  5, copied twice in batch 6, promoted here in batch 7 rather than making a
+  fourth copy.
+
+The mechanical sweep that adds `--format json` to the prose-only backlog
+below is issue **#4674** and should build on these helpers.
+
+## Inventory (as of `fa98ac8b`, 199 leaf subcommands)
+
+Measured by programmatic introspection of the real argparse tree
+(`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
+
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 | b5 | b6 | b7 |
+|---|---|---|---|---|---|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 | 184 | 189 | **192** |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 | 2 | 2 | 2 |
+| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 | 0 | 0 | 0 |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 | 13 | 8 | **5 (all exempt / deferred)** |
+
+The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
+`spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
+add/batch/fill/hv-keepout` (4), `benchmark run/compare` (2) -- and added the
+`json` choice to `benchmark report`, closing the `format-nojson` bucket.
+
+The second batch swept the 16 mutating `sch` leaves.
+
+The third batch finished the four families that already spoke JSON on most
+of their leaves but still had prose-only holdouts -- `datasheet` (3), `lib`
+(3), `parts` (2), `pcb` (2).
+
+The fourth batch swept the environment/integration singles -- `config`,
+`ipc status/connect/push-routes`, `mcp setup` (5) -- finishing the `ipc`
+family outright and finishing `mcp` (`mcp serve` is exempt).
+
+The fifth batch swept the board-artifact producers -- `board-metrics`,
+`create-pcb`, `panel`, `report generate`, `screenshot` (5).
+
+The sixth batch swept the board-improvement / rule-derivation drivers --
+`optimize-placement`, `optimize-traces`, `route-auto`, `reason`,
+`creepage-export-rules` (5).
+
+The seventh and final batch swept the multi-stage orchestrators -- `build`,
+`pipeline`, `stitch` (3). **The #4674 backlog is now empty**: the 4 leaves
+still in the audit's `prose-only` bucket are the 4 documented exemptions.
+The route workstream has since exposed its existing `--format` through `kct
+route` (which, since #7017, hands its argv straight to `route_cmd`'s parser);
+its staged output still has the qualification described below.
+`tests/test_format_json_sweep_orchestrators.py` pins that bucket against
+exactly that list, so a new prose-only leaf fails a test rather than silently
+re-opening the backlog.
+
+Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
+alongside the existing `--json` on both commands (outer parser, forwarding
+shim, and inner parser), and did the same for the 7 `footprint generate`
+shape subparsers (`soic/qfp/qfn/chip/sot/dip/pin-header`) plus the
+passthrough's top-level `--list --json` — the de-facto `--json` surfaces that
+bypass `parser.py` entirely (`cli/__init__.py` hands raw argv to
+`footprint_generate.main`).
+
+Note on `kct placement refine`: its `--json` is a **JSON API mode** flag
+(read commands from stdin, write JSON responses to stdout), not a plain
+output format. `--format json` selects the same machine interface for the
+session; the alias is still exact — the two spellings are equivalent — but
+the help text says "JSON API mode" rather than "output format".
+
+### Inner-only / dead surfaces (documented, not user-facing)
+
+The CLI has a two-layer architecture: `parser.py` defines the user-facing
+tree, and `commands/*.py` shims re-serialize parsed args into standalone
+inner-module parsers. Some inner `--json`/`--format` flags are therefore not
+reachable through `kct`:
+
+- `sch_symbol_info.py` `--json` — inner only; the user-facing `kct sch info`
+  contract is `--format {text,json}`, translated by `commands/schematic.py`.
+- `mfr.py` `mfr rules --json` — **retired** (first #4674 batch): the flag was
+  a dead surface, unreachable through `kct` because the shim rebuilds
+  `sub_argv` from outer args and the outer `kct mfr rules` had no
+  machine-output flag. `kct mfr rules --format json` is now wired end-to-end
+  (outer parser → shim → inner parser) and the inner `--json` boolean was
+  removed rather than aliased — it never shipped on any reachable surface.
+- `route_cmd.py` `--format` — reachable through `kct route` since #5348. Since
+  #7017 `kct route` is a passthrough (`cli/__init__.py` hands its raw argv to
+  `route_cmd.main`, like `footprint generate`), so every `route_cmd` flag is
+  user-facing; the audit resolves the `route` stub to `route_cmd._route_parser`
+  (`parser.resolve_passthrough`). See "Routing output" below for the scope of
+  its structured diagnostics.
+
+## Classification of the 72 prose-only subcommands
+
+This issue owns the exemption classification; implementing the machine paths
+is the separate mechanical sweep **#4674**.
+
+### Exempt — no machine-output flag warranted (4)
+
+| Command | Why exempt |
+|---|---|
+| `interactive` | Interactive REPL session; no single machine payload to emit. |
+| `mcp serve` | Long-running server; the machine contract *is* the MCP protocol. |
+| `run` | Executes a user-supplied Python script with kct's interpreter; stdout belongs to the script — the wrapper must not impose a format. |
+| `footprint generate` (outer stub) | Argv passthrough; the real machine surface lives on the passthrough shape subparsers, which have `--format json` as of #4543. |
+
+### Routing output — structured diagnostics with staged progress
+
+`kct route --format json` now reaches the existing routing-diagnostics formatter.
+For boards with placement-invalid nets, the final attempt summary also contains
+`placement_disposition`, including early outcomes. This flag controls diagnostic
+payloads; routing progress and all strategy paths are not yet normalized to the
+general single-document stdout contract. Callers must not treat parser flag
+coverage alone as proof that the entire stream is one JSON document. See the
+[route reference](cli.md#routing-around-invalid-placement) for disposition scope.
+
+Every `kct route --format json` code path that finishes routing prints the
+same document -- `summary` (with `nets_requested`, `nets_routed` and the single
+final `summary.verdict`), `successful_routes`, `failed_routes`, `suggestions`
+and `placement_disposition` -- whether layer escalation is on or off
+(`--no-auto-layers`), quiet or not, and for every `--strategy` (Issue #6277).
+Only runs that never built a router (dry runs, early validation exits) fall back
+to the minimal `{"exit_code", "verdict"}` document, and a run killed by
+`--timeout` prints no document.
+
+The document also carries a `grid` object -- the routing grid the run
+actually built (Issue #6875):
+
+| Key | Meaning |
+|-----|---------|
+| `requested_mm` | Pitch asked for: the explicit `--grid` value, or the `--grid auto` selection |
+| `used_mm` | Pitch actually routed on |
+| `cols`, `rows`, `layers`, `cells` | Grid dimensions; `cells = cols * rows * layers` |
+| `selection` | `"explicit"` (`--grid 0.1`) or `"auto"` (`--grid auto`) |
+| `coarsened` | `true` only when the adaptive cell cap replaced the requested pitch (never for `kct route` since #6741) |
+| `coarsened_reason` | Why it was coarsened, else `null` |
+
+The text output's `Grid:` line names the same pitch and selection
+(`Grid: 0.1mm pitch (explicit), 501x401x2 = 401,802 cells`). An explicit grid
+whose cell count would pass the backend's ceiling (20,000,000 cells on Python,
+100,000,000 on C++, counted at the largest layer count the run would try) stops
+with an error before routing; `--force` routes at the requested pitch anyway.
+
+`summary.verdict` is `"success"` (exit 0), `"unverified"` (exit 10) or
+`"failed"` (any other non-zero exit). `"unverified"` means the post-route DRC
+and/or the stranded-pour check did not complete: `--timeout` ran out, or
+kicad-cli crashed, was killed or hit its per-call DRC timeout (Issue #6724).
+The board is saved but not verified, so run `kct check` on it before
+manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
+[`kct route` exit-code ladder](cli.md#kct-route-ladder)).
+
+Every default route also builds a report-only `RoutingPlan` (tile-level
+demand/capacity/overflow from the tile-based global-routing pass) written
+as a `<output_stem>.routing_plan.json` sidecar and surfaced under the
+`routing_plan` key in `--format json` output when built -- dense-package
+boards via the two-phase global pass, every other board via the plan
+stage `route_all_negotiated` runs up front (Issue #5520). Pass
+`--no-routing-plan` to suppress both the stage and the key. See
+[`routing-plan.md`](routing-plan.md) for the schema (Epic #5510 Phase 1).
+
+### Sweep backlog for #4674 — should gain `--format {text,json}`
+
+Read-only/reporting commands should emit their report as JSON; mutating
+commands should emit a JSON change-summary (precedent: `kct sch tidy`,
+`kct sch cleanup-wires`, `kct pcb sync-netlist` all do).
+
+**Done (first #4674 batch, 24 surfaces):** `mfr list/info/rules/compare/`
+`export-dru/apply-rules/validate`, `spec init/validate/status/decide/check`,
+`placement fix/nudge/snap/align/distribute`, `zones add/batch/fill/`
+`hv-keepout`, `benchmark run/compare`, plus the `json` choice on
+`benchmark report` (the former `format-nojson` holdout).
+`tests/test_format_json_sweep.py` guards these surfaces.
+
+**Done (second #4674 batch, 16 surfaces):** the mutating `sch` family --
+`add-bypass-cap`, `add-component`, `add-junction`, `add-label`,
+`add-no-connect`, `add-pull-resistor`, `add-wire`, `disconnect`,
+`insert-inline`, `reconnect-pin`, `replace`, `set-footprint`,
+`set-label-direction`, `set-reference`, `set-symbol-property`, `set-value`.
+
+Unlike the grouped families, each of these lives in its own inner module, so
+they share one wrapper -- `src/kicad_tools/cli/sch_json.py` -- rather than 16
+hand-written JSON writers. It brackets the existing prose implementation:
+in JSON mode the prose is captured and discarded, the inner module's
+`record(...)` / `append(...)` calls accumulate the per-command change
+summary, and exactly one document is printed. Captured stderr is replayed
+after the document (and becomes the `error` value when the exit code is
+non-zero), so the exit codes and the diagnostics both survive unchanged.
+The shared envelope is:
+
+```json
+{
+  "command": "add-junction",
+  "schematic": "board.kicad_sch",
+  "dry_run": true,
+  "success": true
+}
+```
+
+plus the command's own keys (e.g. `changed` / `not_found` / `files_modified`
+for the `set-*` batch commands, `planned` / `placed` for the `add-*`
+placement commands). `commands/schematic.py`'s own "file not found" guard
+runs before any inner module, so it emits the same `{"error": ...}` document
+itself. `tests/test_format_json_sweep_sch.py` guards these 16 surfaces
+(outer flag, both shim shapes, emission, determinism, error documents, and
+that `--dry-run` still writes nothing).
+
+**Done (third #4674 batch, 10 surfaces):** the prose-only holdouts inside
+four families whose other leaves already spoke JSON --
+`datasheet cache/convert/download`, `lib create-symbol-lib/`
+`create-footprint-lib/generate-footprint`, `parts cache/sync-catalog`,
+`pcb export-dsn/import-ses`. Each emits one document keyed by `command`
+plus that command's own summary (`cleared` / `action` for the two cache
+commands, `layers`/`nets`/`components`/`omissions` for `export-dsn`,
+`wires`/`vias` for `import-ses`, `path`/`file_size_bytes`/`source` for
+`download`). Three details worth reusing:
+
+- The three `lib` commands are **unimplemented placeholders** that exit 2.
+  Under JSON the non-implementation *is* the payload
+  (`{"implemented": false, "error": ..., "tracking_issue": ...}`) so a
+  caller can tell "not implemented" from a crash without scraping stderr;
+  the exit code is unchanged.
+- `datasheet convert` writes markdown to stdout when no `-o` is given, so
+  in JSON mode it carries the conversion under a `markdown` key; with
+  `-o` it reports `output` and omits `markdown`.
+- `parts cache` is the one swept surface whose *inner* parser has its own
+  subparsers. Its per-action subparsers declare `--format` with
+  `argparse.SUPPRESS` as the default, so an unspecified flag on the
+  action cannot clobber the value parsed by the `cache` parser
+  (`kct parts cache --format json stats` and
+  `kct parts cache stats --format json` both resolve to json).
+
+`commands/pcb.py`'s shared "file not found" guard runs before every `pcb`
+handler, so — like the `sch` shim in batch 2 — it now emits the same
+`{"error": ...}` document; that closes the hole for the ~20 `pcb` leaves
+that already had `--format json`. `tests/test_format_json_sweep_families.py`
+guards these 10 surfaces.
+
+**Done (fourth #4674 batch, 5 surfaces):** the environment/integration
+singles — the leaves that report on or configure `kct`'s *surroundings*
+rather than a board file: `config`, `ipc status/connect/push-routes`,
+`mcp setup`. This finishes the `ipc` family outright and finishes `mcp`
+(`mcp serve` is exempt, above). Shapes:
+
+| Command | Document |
+|---|---|
+| `config` | `{"command": "config", "action": "show"\|"paths"\|"init"\|"get"\|"set", …}` — `show` carries `sections` (`{section: {key: {value, source}}}`) plus `native_backends` (`{backend: {available, version}}`); `paths` carries `project_config`/`user_config` (`{path, exists}`, project also `search_filenames`); `init` carries `path`/`scope`/`created`; `get` carries `key`/`section`/`option`/`value`/`source`; `set` carries the same plus `applied: false` and the `toml` snippet to paste |
+| `ipc status` | `{"command": "status", "socket", "connected", "kicad_version", "instances", "open_documents", "success"}` |
+| `ipc connect` | `{"command": "connect", "socket", "connected", "kicad_version", "success"}` |
+| `ipc push-routes` | `{"command": "push-routes", "pcb", "net_filter", "tracks", "vias", "dry_run", "pushed", "success"}` (`socket` once resolved) |
+| `mcp setup` | `{"command": "setup", "client", "config_path", "dry_run", "written", "replaced", "server", "success"}`; `--client codex\|opencode` (#5953) also carry `unchanged` (re-run was a no-op, so `written` is false), `server_name` (`"kct"`) and, for opencode, `opencode_schema` (`"v2"`\|`"v1"`); `--client claude-code` (#6418) carries `scope` (`"user"`\|`"project"`), `method` (`"claude-cli"`\|`"json-merge"`), `unchanged`, `server_name` (`"kicad-tools"`), `legacy_config` (path of a stale `~/.claude/mcp.json` entry, else null) and `cli_error` (why the `claude` CLI route fell back, else null); an unparseable existing config yields `success: false` plus `error`, exit 1 |
+
+Two conventions this batch establishes for the remaining long tail:
+
+- **`set`-style commands that only *advise*** (`kct config set` prints the
+  TOML to paste rather than writing it) must say so structurally —
+  `"applied": false` — so a machine caller cannot mistake exit 0 for a
+  persisted change.
+- **Text-mode prose is preserved verbatim**, including the several `ipc`
+  failure paths that print *without* an `Error:` prefix. The shared
+  `_fail(...)` helper in `commands/ipc.py` takes a `text_lines` override
+  for exactly that reason; copy it rather than normalizing prose in a
+  formatting-only batch.
+
+`kct ipc push-routes` reaches its "PCB parser not available." branch for
+every existing board, because it imports `kicad_tools.pcb.parser` — a
+module that has never existed (dead since #2363). The JSON path turns that
+into a visible `{"error": …, "success": false}` document; the underlying
+wiring bug is tracked separately in #4788 and is out of scope for this
+sweep. `tests/test_format_json_sweep_env.py` guards these 5 surfaces and is
+written to pass both before and after #4788 is fixed.
+
+**Done (fifth #4674 batch, 5 surfaces):** the board-artifact producers — the
+singles that turn a board or schematic into a *file on disk*:
+`board-metrics`, `create-pcb`, `panel`, `report generate`, `screenshot`.
+Shapes:
+
+| Command | Document |
+|---|---|
+| `board-metrics` | `{"command": "board-metrics", "mode": "single"\|"all", "dry_run", "boards": [{"slug", "status", "output_path", "metrics"}], "success"}` — `metrics` is the board's full `board.json`; `output_path` is `null` under `--dry-run` |
+| `create-pcb` | `{"command": "create-pcb", "schematic", "output", "board": {width_mm, height_mm, layers}, "components_found", "placement": {skipped, placed, failed[], warnings[]}, "nets": {assigned, missing_footprints[]}, "summary", "dry_run", "saved", "success"}` |
+| `panel` | `{"command": "panel", "input", "output", "grid": {rows, cols, spacing_mm, spacing_x_mm, spacing_y_mm}, "board_count", "tabs", "cut_method", "vcut_layer", "tab_width_mm", "tab_count", "frame", "frame_space_mm", "vscore_clearance_mm", "vscore_clearance_source", "mfr", "vscore_supported", "warnings", "tooling_holes", "fiducials", "success"}` (`vcut_layer`, `vscore_clearance_mm`, `vscore_clearance_source` and `mfr` are `null` unless `--cut vcut`; `vscore_clearance_source` is `"cli"` for `--vscore-clearance`, `"fab"` for the resolved fab profile's published figure, or `"unsourced_default"` when that fab publishes none; `mfr` is the resolved fab profile (`null` with an explicit `--vscore-clearance` and no `--mfr`); `spacing_mm` is the resolved gap -- 0 for a butted V-cut panel -- or `null` when the two axes differ; `frame_space_mm` is `null` without `--frame`; `vscore_supported` is `false` when the resolved fab's docs say it offers no V-scoring (e.g. `oshpark`; `warnings` then also carries a message suggesting `--cut mousebite`), otherwise `null`; `warnings` lists gapped V-cut seams, copper too close to a score line and that unsupported-fab notice) |
+| `report generate` | `{"command": "generate", "input", "manufacturer", "output_dir", "project_name", "report_path", "pdf_path", "data_source": "auto-collect"\|"data-dir"\|"skeleton", "figures": {generated, skipped_reason}, "success"}` |
+| `screenshot` | `{"command": "screenshot", "input", "output", "width_px", "height_px", "layers_rendered", "success"}` -- `--baseline-save DIR` replaces the render keys with `baseline: {saved, sidecar, renderer: {kicad_cli, cairosvg}, options, width_px, height_px}`; `--baseline-compare DIR` (issue #6912) emits `{"command", "input", "baseline", "status": "identical"\|"changed", "drift_fraction", "changed_pixels", "total_pixels", "success"}`, or `status: "renderer_mismatch"` with `differences: [{field, baseline, current}]`, no drift keys, `success: false` and a non-zero exit when the baseline's renderer versions, render options or dimensions differ; a missing/corrupt baseline is the usual `{"error", "success": false}` |
+| `board-view overview\|net\|layers\|crop` (issue #6316) | `{"command": "board-view", "view", "input", "output", "net", "units": "mm", "frame": "board-relative"\|"sheet-absolute", "board_origin_mm": [x, y], "frame_note", "window_mm": [x0, y0, x1, y1], "width_px", "height_px", "px_per_mm", "pad_labels_drawn", "title", "color_key", "pours_drawn": false, "unfinished_net_count", "missing_link_count", "missing_links": {net: [{"from", "to", "from_mm", "to_mm", "length_mm"}]}, "pour_advisory": [{"net", "open_connections", "islands", "zone_layers"}], "caveat", "success"}` — every coordinate is in `frame`; `board_origin_mm` is the sheet position of the board-relative (0, 0), so sheet-absolute = board-relative + origin; `missing_links` holds exactly the nets `kct check`'s connectivity rule reports, one entry per open connection; `pour_advisory` holds the pour nets that rule treats as advisory (no link); `outline_error` appears only when the board outline could not be read |
+| `board-view list` | the same document without the image keys (`output`, `window_mm`, `width_px`, `height_px`, `px_per_mm`, `pad_labels_drawn`, `title`, `color_key`, `pours_drawn`); JSON is this view's default format |
+
+Three conventions this batch adds:
+
+- **The envelope is not the artifact.** `board-metrics` already printed a
+  JSON *artifact* (`board.json`) under `--dry-run`; `--format json` wraps a
+  distinct run envelope around it (`boards[].metrics`) rather than
+  overloading the artifact's schema, and text mode still prints the bare
+  artifact. A command whose normal output is already JSON should do the
+  same — the document describes the *run*, the artifact keeps its own
+  contract. `metrics.generated_at` is the one deliberately volatile field
+  (it belongs to the board.json contract), so determinism is asserted
+  modulo that key.
+- **Producers say whether they produced.** Anything that can run without
+  writing (`--dry-run`) reports it structurally: `saved`/`output_path`
+  rather than exit 0 alone.
+- **Third-party stdout chatter must be diverted, not trusted.**
+  `report generate` calls into a data collector, a figure generator, and
+  WeasyPrint — the last of which prints a multi-line "install my native
+  libraries" banner *on stdout* when they are missing, which would corrupt
+  the single-document contract on any machine without them. A
+  `stdout_to_stderr_when(as_json)` context manager captures those regions
+  and replays them on stderr; reach for it in any leaf that calls
+  third-party code it does not own. It started as a per-module private
+  helper here and was promoted in the seventh batch — import the shared
+  `format_options.stdout_to_stderr_when` rather than making a new copy.
+
+`tests/test_format_json_sweep_artifacts.py` guards these 5 surfaces.
+
+**Done (sixth #4674 batch, 5 surfaces):** the board-improvement /
+rule-derivation drivers — the singles that take an existing board and derive
+an improvement or an enforceable rule set from it: `optimize-placement`,
+`optimize-traces`, `route-auto`, `reason`, `creepage-export-rules`. Shapes:
+
+| Command | Document |
+|---|---|
+| `optimize-placement` | `{"command": "optimize-placement", "pcb", "output", "strategy", "seed_method", "max_iterations", "board": {width_mm, height_mm, components, nets}, "mode": "evaluate"\|"optimize", "scores": {…}, "feasible", "infeasible_detail", "iterations", "wall_time_s", "interrupted", "overlaps_remaining", "allow_infeasible", "dry_run", "saved", "written_to", "success"}` — `scores` is `{"current": …}` under `--dry-run` and `{"initial", "final"}` otherwise; each score is `{total, feasible, breakdown}` with the breakdown taken straight off the cost dataclass. The `--dry-run` document additionally carries `"wirelength_estimators": {centre_anchored_mm, pad_anchored_mm, delta_mm, delta_pct, scored, pads_available, pad_count}` — the same layout measured both ways (issue #4831 M5); `scored` names the one the objective used (`--pad-anchored-wirelength` switches it), the other is report-only and `delta_pct` is `null` when the centre-anchored estimate is 0. Both documents carry `"decoupling": [{net, cap, pin, distance_mm}, …]` — each decoupling cap's assigned IC supply pin and its distance in the scored (`--dry-run`) or written placement, empty when the board has no cap/supply-pin structure or the `decoupling` weight is 0 (issue #6020). Under `--route-check` the optimize document also carries `"route_check": {enabled, budget, stages: [{stage, skipped, accepted, incumbent, candidate, note}], routes_run, route_wall_time_s, accepted_stage, warnings}`; each `incumbent`/`candidate` is `{nets_routed, nets_requested, completion, drc_errors, exit_code, wall_time_s, reproducible, error}`, and `route_wall_time_s` / `wall_time_s` are volatile. The key is absent without the flag (issue #6234). The optimize document also carries `"snap_silk_repair"`: `null` when the decoupling snap moved nothing, else `{affected, moved, unresolved: [{reference, status, reason}], error}` — the references whose silkscreen text was re-anchored after the snap, and any it had to leave in place (issue #6256) |
+| `optimize-traces` | `{"command": "optimize-traces", "pcb", "output", "net_filter", "net_pattern", "optimizations": {merge_collinear, eliminate_zigzags, convert_45_corners, remove_jogs, compress_staircase, pull_tight, shorten_detours, chamfer_size_mm}, "drc_aware", "manufacturer", "layers", "copper_oz", "stats": {nets_optimized, nets_rolled_back, segments_before, segments_after, segment_reduction_pct, corners_before, corners_after, length_before_mm, length_after_mm, length_reduction_pct, drc_errors_before, drc_errors_after, nets_touched: [net], per_net: [{net, segments_before, segments_after, length_before_mm, length_after_mm, rolled_back, changed}]}, "dry_run", "saved", "written_to", "success"}` — with `--voltage-map` the document also carries `voltage_map` and `creepage_skipped: [{net_a, net_b, count}]` (issue #8300); `stats.per_net` has one entry per optimized net; `stats.nets_touched` lists the nets whose geometry actually changed (`changed` per net; issue #8299); `-v/--verbose` prints the same data as a per-net table in text mode (issue #7065) |
+| `route-auto` | `{"command": "route-auto", "pcb", "output", "strategy", "dry_run", "nets": [...], "nets_requested", "nets_routed", "success"}` — one `nets[]` entry per requested net in request order: routed entries carry `success`/`partial`/`strategy_used`/`metrics`/`segments_written`/`warnings`/`pads_connected`/`pads_total`/`error`/`alternative_strategies` (plus `rolled_back`/`rolled_back_to_pass` when a regressing pass was undone -- such an entry reports `success: false`, and `resumed: true` for a net skipped because the `--resume` checkpoint already completed it, Issue #5945; a partial or failed entry also carries `unrouted` + `unrouted_diagnosis`, the `kct route` congested/blocked/unclassified schema, unless `--diagnose-unrouted-budget 0`, Issue #6001), `--dry-run` entries carry the preview (`would_route`, `via_drill_mm` + `via_drill_source`, …). Under `--lint-gate` the document also carries `lint_gate` (below) and, on a rollback, every routed entry reports `success: false` with `lint_gate_rolled_back: true` |
+| `reason` | `{"command": "reason", "pcb", "output", "dry_run", "warnings", "drc": {ran, source, …}, "board": {…}, "mode": "prompt"\|"analyze"\|"export-state"\|"auto-route", …, "success"}` — plus the mode's own payload: `prompt`, `analysis`, `state` + `state_output`, or `auto_route` (`attempted`/`routed`/`nets[]`) with `saved`/`written_to` |
+| `creepage-export-rules` | `{"command": "creepage-export-rules", "project", "pcb", "dru", "voltage_map", "standard", "pollution_degree", "material_group", "hv_threshold_v", "dru_floor_mm", "domains", "net_domains", "nets_assigned", "rules": [{name, condition, min_mm}], "bridging_exemptions", "dru_block", "dry_run", "written", "skipped_reason", "success"}` — `dru_block` is carried only on the `--dry-run` path (mirroring the prose that prints it instead of writing it) |
+
+### `kct creepage` pair rows: the `witness` object
+
+Every conductor and board-edge row of `kct creepage --format json` carries a
+`witness` key (Issue #8301), always on (no flag). It names where the row's
+measured distance was taken:
+
+```json
+"witness": {
+  "point_a_mm": [x, y],
+  "point_b_mm": [x, y],
+  "item_a": "R1.1",
+  "item_b": "segment:949b22c8-…"
+}
+```
+
+- **Coordinates** are board millimetres rounded to 4 decimals. The points are
+  straight-line closest points (`nearest_points`), so
+  `|point_a_mm - point_b_mm|` equals the row's `clearance_mm` to within
+  rounding. On a slot-detour row (`creepage_mm` > `clearance_mm`) they mark
+  the clearance gap, **not** the detour path.
+- **Item labels** name the copper item nearest each point on the row's layer:
+  a pad is `REF.pin`; otherwise `segment:<uuid>`, `via:<uuid>` or
+  `zone:<uuid>`. When the uuid is missing the label is the bare kind
+  (`segment`, `via`, `zone`). A board-edge row's `item_b` is `Edge.Cuts`.
+- **Which pair each row reports:**
+  - main rows: the binding layer's pair;
+  - the extra `board` row added for a waived minimum (Issue #8232): the
+    winning masked variant, so it does not name the waived pair (a
+    `same_footprint` row `D6.1->D6.2` and its extra `board` row can name
+    different items);
+  - `attach_zone` rows: the gating pair behind the row's own
+    `clearance_mm` / `creepage_mm`; `residual_witness_mm` is unchanged and is
+    still the residual midpoint.
+- An item can sit a few µm from its point (the masked-variant boundary of the
+  #8232 difference geometry), so the label is the right item to inspect, not a
+  containment guarantee.
+
+The table output is unchanged by default; `--witness` adds a
+`x,y item_a -> item_b` column to both table renderers. With `witness` removed,
+the JSON is identical to the pre-#8301 shape.
+
+### `--lint-gate` verdict (`kct route`, `kct route-auto`)
+
+With `--lint-gate` (Issue #6054) the command's single document gains
+`lint_gate: {status, reason, strict, summary, introduced, rejected_board,
+output_restored, waivers}`. `status` is `pass`, `rolled_back` (routing
+introduced blocking findings), `error` (the routed board could not be linted;
+also rolled back) or `skipped` (no routed board was written). `summary` and
+`introduced` are the `kct check --diff` shapes, over the merged `kct check` +
+`kct detect-mistakes` findings. On a rollback `exit_code` (when present) is 3
+and `success` (when present) is `false`. The two lint runs write nothing to
+stdout.
+
+### Physical power completion
+
+`kct stitch board.kicad_pcb --net GND --complete --via-size 0.6 --drill 0.3 --format json` uses the shared
+`kicad_tools.stitching.complete_power_connections` transaction. Omit `--net` to
+select the board's plane nets. It requires Shapely and native KiCad 10; choose the
+CLI with `--kicad-cli` and a new evidence directory with `--evidence-dir`.
+
+Success has `success_scope: "physical_power_connections"`, `success: true`,
+`exit_code: 0`, `target_nets`, integer `vias_added`, `output_sha256`, and
+`evidence_dir`. Every target pad must belong to one physical component after
+native refill, with no native target-net opens. Existing pad bonds and routed
+copper survive, different-net pad components are rejected, and final native
+violation/open identities may not exceed the saved input's no-refill baseline.
+Existing unrelated findings remain visible; `--drc-strict` requires zero findings.
+This is not complete manufacturing or circuit signoff.
+
+Failure returns nonzero with `success: false` and an error naming the retained
+evidence directory. The input PCB remains unchanged. Evidence includes full
+`saved`, `before` (native refill), `proposed`, and `candidate` (native refill)
+boards, authored constraints, native commands/reports, pad components, hashes,
+and proposal diagnostics. A refill-only success promotes the measured filled
+bytes even if it adds no via. Reusing an evidence directory is refused. Acceptance evidence is persisted before
+PCB promotion. If only the final status update fails after promotion, success
+includes `evidence_finalization_error`; the retained `accepted` record still
+identifies the validated candidate and output hash. Unique staging and a sibling
+commit lock serialize cooperating stitch publishers. Source bytes and context
+are checked again after evidence persistence, immediately before promotion;
+a detected concurrent edit is preserved and causes rejection. KiCad lock
+checks are advisory, so this is not an atomic comparison against arbitrary
+noncooperating editors. A retained `.stitch.lock` requires inspection before
+manual removal; lock-cleanup failures after a successful commit are reported
+as `publisher_lock_cleanup_error`.
+
+Run completion in the original project directory: `--output`, dry runs, blanket,
+thermal and micro-via modes are not supported by this transaction. Native
+project/rules and project-local footprint libraries are preserved; unresolved
+or escaping relative library paths are refused with evidence. Installed library
+availability findings remain part of the native report. Ordinary stitching keeps
+its documented `geometry` scope and does not claim physical power completion.
+
+Three conventions this batch adds or reinforces:
+
+- **A mode with no single-document form is refused, not half-emitted.**
+  `kct reason --interactive` is a stdin/stdout dialogue; combining it with
+  `--format json` emits `{"error": …}` and exits 2 rather than pretending
+  to have a payload. Prefer this over silently ignoring the flag when only
+  *part* of a command is interactive (a whole-command exemption belongs in
+  the table above instead).
+- **Volatile fields are named, not hidden.** `optimize-placement` reports
+  `wall_time_s`; like `board-metrics`'s `generated_at` it is the one field
+  determinism is asserted modulo.
+- **The `stdout_to_stderr_when` diversion is now the standard treatment**
+  (third use, after `report generate`): `route-auto` and `reason --auto-route`
+  drive the negotiated router, whose per-iteration progress log goes to
+  **stdout**. It is captured and replayed on stderr so the JSON stream stays
+  parseable. Any leaf that calls the router, a collector or third-party code
+  needs it.
+
+`tests/test_format_json_sweep_drivers.py` guards these 5 surfaces.
+
+**Done (seventh #4674 batch, 3 surfaces — the last):** the multi-stage
+orchestrators — the leaves that drive many other commands to completion:
+`build`, `pipeline`, `stitch`. Shapes:
+
+| Command | Document |
+|---|---|
+| `build` | `{"command": "build", "spec", "project_dir", "output_dir", "mfr", "step", "dry_run", "force", "schematic", "pcb", "routed_pcb", "manufacturing_output", "steps": [{step, success, message, output_file, elapsed_s}], "counts": {total, succeeded, failed}, "wall_time_s", "exit_code", "success"}` |
+| `pipeline` | `{"command": "pipeline", "input", "pcb", "project", "schematic", "mfr", "layers", "layer_count", "step", "dry_run", "force", "best_effort", "steps": [{step, success, skipped, warning, message}], "counts": {total, succeeded, skipped, warnings}, "commit": {requested, created}, "exit_code", "success"}` |
+| `stitch` | `{"command": "stitch", "pcb", "output", "mode": "stitch"\|"blanket"\|"thermal", "target_nets", "nets_auto_detected", "manufacturer", "via_size_mm", "drill_mm", "detected_layers", "stackup_inferred_nets", "fallback_nets", "strict_model_error", "pads_found", "already_connected", "vias_added": [...], "vias_added_count", "micro_vias_placed", "traces_added": {total, straight, dogleg, extended_escape}, "via_in_pad_filtered", "hole_to_hole_rejected", "connectivity_fallback": [...], "needs_routed_fanout": [...], "pads_skipped": [...], "obstacle_breakdown", "dry_run", "saved", "drc": {requested, strict, ran, status, passed, error_count, warning_count, unconnected_item_count, reason}, "success_scope": "geometry", "exit_code", "success"}` |
+
+Three conventions this batch adds or reinforces:
+
+- **Stitch geometry and native DRC have separate verdicts.** `success` retains
+  its geometry meaning (vias placed or pads already connected), explicitly
+  identified by `success_scope: "geometry"`. `--drc` remains diagnostic and
+  does not change the geometry exit code. `--drc-strict` implies `--drc` and
+  exits nonzero unless native DRC has zero errors, warnings and unconnected
+  items. Both flags check unchanged boards. Dry runs skip DRC and cannot pass
+  the strict gate. The JSON `exit_code` always matches the process exit code.
+  `drc.ran` means execution and report parsing succeeded; `status` is `passed`,
+  `failed` (findings), or `not_run`. `passed` and all three counts are null when
+  no report was parsed, with `reason` explaining absence, execution/parsing
+  failure or dry-run skipping. A passed DRC is not full manufacturing signoff.
+- **The document is the complete ledger, not the prose's excerpt.** `stitch`'s
+  text summary caps via lists at 10 entries and skipped-pad lists at 5 (`...
+  (N more)`); the JSON document carries every entry, because a machine caller
+  must not have to re-run with different flags to see the pads a run could not
+  place. `len(vias_added) == vias_added_count` is asserted in the tests.
+  Each via's `layers` describes its physical barrel span; standard vias use
+  `["F.Cu", "B.Cu"]`. The separate `target_layer` records the requested or
+  inferred plane contact (for example `"In2.Cu"`). An inner-plane target does
+  not request a blind via. Explicit micro-vias retain their adjacent-layer span.
+- **A multi-step run reports the ledger, not just the verdict.** All three
+  emit one entry per executed step with that step's own classification —
+  including `pipeline`'s `skipped` / `warning` axes, which its exit code
+  cannot express (exit 2 means "best-effort partial", not "which step").
+  `build` names `elapsed_s` / `wall_time_s` as volatile (the `board-metrics`
+  `generated_at` treatment) so determinism is asserted modulo them. All three
+  also carry `exit_code` alongside `success`, so a caller reading a captured
+  document never has to correlate it with a separately recorded `$?`.
+- **The `stdout_to_stderr_when` diversion is now shared machinery.** It was
+  copied into three CLI modules across batches 5-6; rather than making a
+  fourth copy, this batch promoted it to
+  `format_options.py::stdout_to_stderr_when` and repointed the three existing
+  call sites. All three orchestrators need it — the rich `Console` /
+  `Progress` ledger, every generator script's streamed stdout, and the
+  kicad-cli DRC pass all write to stdout.
+
+One drive-by fix this batch had to make: `kct build`'s success/failure verdict
+was computed *inside* the `if not args.quiet:` summary block, so
+`kct build --quiet` exited 0 even when a step failed. That could not ship
+alongside a document whose `"success": false` would then contradict its own
+exit code, so the verdict is hoisted out of the guard (prose unchanged).
+
+`tests/test_format_json_sweep_orchestrators.py` guards these 3 surfaces, the
+promoted helper, and the now-closed backlog.
+
+
+### Exact-grid wire-stub repair
+
+`kct sch fix-wire-stubs design.kicad_sch [--dry-run] [--format text|json]`
+repairs the root schematic and its child sheets. The default applies repairs;
+`--dry-run` previews them without writing. JSON uses the envelope above and
+adds `planned`, `applied`, and `skipped` arrays. Each action identifies the
+sheet, wire UUID, endpoint index (0=start, 1=end), original endpoints, target
+pin, target position, axis, and grid-step count. Skipped actions include a
+`reason`; a preview always has an empty `applied` array.
+
+Only existing exact-grid detector findings qualify. Repairs must extend a
+straight wire outward toward a uniquely nearest pin with no intervening
+connections or competing extensions. Ambiguous findings remain unchanged.
+Missing sheets, unresolved library definitions, and unsupported multi-unit or
+alternate-body pin geometry fail before any file is written. Repeated references
+to one child file are processed once, using that
+file's embedded library definitions. Unchanged files are never rewritten.
+
+
+## Findings: the shared, versioned locator shape
+
+`kct check`, `kct drc`, `kct detect-mistakes` and `kct net-status`
+(`--format json`) carry a top-level `schema_version` (int, currently `1`) and a
+`findings` array; the MCP `measure_clearance` result carries the same two keys
+(Issue #8015). Each entry follows
+`src/kicad_tools/data/schemas/finding.schema.json`:
+
+| field | meaning |
+|---|---|
+| `rule_id`, `severity`, `message` | what was found |
+| `refs` | reference designators involved (`["U1", "C5"]`) |
+| `pads` | `REF.PAD` strings (`["U1.3"]`); the owning refs are also in `refs` |
+| `nets` | net names |
+| `point` | `[x, y]` mm or `null` |
+| `bbox` | `[x0, y0, x1, y1]` mm or `null` (set when a finding has two or more locations) |
+| `layer` | layer name or `null` |
+| `waived` | acknowledged by a waiver |
+
+**Coordinate frame.** `point`/`bbox` are millimetres in the KiCad *file*
+frame (y grows downward), the frame KiCad displays. Verified per emitter:
+`kct check` and `kct drc` already report file-frame coordinates;
+`detect-mistakes` measures on the loaded board (board-relative, Edge.Cuts
+origin subtracted), so its adapter adds the board origin back. The legacy
+`mistakes[].location` key is left unchanged (board-relative); use `findings`.
+`kct net-status` (`PadInfo.position`) and `measure_clearance` (`location`) are
+also board-relative -- both read the loaded `PCB` -- so their adapters add
+`PCB.board_origin` back too; the legacy `unconnected_pads[].position` and
+`location` keys stay board-relative. Checked on a board whose Edge.Cuts starts
+at (100, 100) with `U1` at `(at 115 115)`: `kct detect-mistakes --format json`
+reports `mistakes[].location == [15.0, 15.0]` and `findings[].point ==
+[115.0, 115.0]`. `PCB.board_origin` is the Edge.Cuts minimum corner;
+`setup.aux_axis_origin` plays no part in the loader's frame, so it does not
+shift any finding.
+
+`kct net-status` emits one finding per incomplete / unrouted net
+(`net_status.incomplete`, `net_status.unrouted`; `point` is the first
+unconnected pad, `bbox` spans two or more, `severity` is `info` for
+plane/pour-advisory nets and `error` otherwise) and one `net_status.stranded`
+finding per net with copper reaching no pad (`point` is `null`). Complete nets
+emit nothing. `measure_clearance` emits one `measure_clearance.clearance`
+finding when `passes_rules` is false (`point`/`layer` at the closest approach,
+`refs`/`pads` from the two closest elements) and an empty `findings` array
+otherwise.
+
+**Compatibility policy.** Additive fields keep the same `schema_version`.
+A renamed, removed or retyped field, or a changed meaning, bumps
+`schema_version`; the previous version is documented here for one minor
+release. Existing per-command keys (`violations`, `mistakes`, ...) are
+unaffected by this model. `kct net-status` and the MCP `measure_clearance`
+adapters are not yet part of the model.
+
+## Interop note (survey idea 7)
+
+A stable machine-output contract is the enabling precondition for external
+agents (e.g. copperhead) delegating routing/DRC/LVS/tapeout to `kct`: with
+`--format json` canonical, an orchestrator can invoke any covered subcommand
+and parse a predictable payload instead of scraping prose. As of #4674's
+seventh batch the prose-only backlog is closed, so the contract now holds:
+**covered commands emit a single JSON document on stdout**, with the four
+exemptions and the staged `route` diagnostics qualification above. `route` now
+accepts the flag through both entry points, but its parser coverage does not
+establish that stronger whole-stream contract. No separate issue tracks idea 7; it rode
+on this note plus #4674.
+
+## Rules for new commands
+
+1. Machine output = `--format` with a `json` choice. Never a new `--json`.
+2. Reuse `format_options.py` helpers; call `normalize_format_alias` right
+   after `parse_args` if the command carries the legacy alias.
+3. If the command goes through a `commands/*.py` shim, forward `--format`
+   explicitly and keep the outer/inner parsers in sync (see
+   `tests/test_cli_parser_drift.py` for the bug class this prevents).
+4. JSON goes to stdout as a single document; human/progress chatter goes to
+   stderr or is suppressed in JSON mode.

@@ -1,0 +1,3089 @@
+#!/bin/bash
+# claude-wrapper.sh - Resilient Claude CLI wrapper with retry logic
+#
+# This wrapper script handles transient API failures from the Claude CLI
+# by implementing exponential backoff retry logic. It's designed for use
+# with autonomous agents in Loom terminals.
+#
+# Features:
+# - Pre-flight checks (CLI availability, API reachability)
+# - Error pattern detection for known transient failures
+# - Exponential backoff with configurable parameters
+# - Graceful shutdown via stop signal file
+# - Working directory recovery (handles deleted worktrees)
+# - Detailed logging for debugging
+#
+# Usage:
+#   ./claude-wrapper.sh [claude arguments]
+#   ./claude-wrapper.sh --dangerously-skip-permissions
+#
+# Environment Variables:
+#   LOOM_MAX_RETRIES       - Maximum retry attempts (default: 5)
+#   LOOM_INITIAL_WAIT      - Initial wait time in seconds (default: 60)
+#   LOOM_MAX_WAIT          - Maximum wait time in seconds (default: 1800 = 30min)
+#   LOOM_BACKOFF_MULTIPLIER - Backoff multiplier (default: 2)
+#   LOOM_TERMINAL_ID       - Terminal ID for stop signal (optional)
+#   LOOM_WORKSPACE         - Workspace path for stop signal (optional)
+#   LOOM_AUTH_CACHE_TTL    - Auth cache TTL in seconds (default: 120)
+#   LOOM_AUTH_CACHE_STALE_LOCK_THRESHOLD - Stale lock cleanup threshold in seconds (default: 90)
+#   LOOM_AUTH_CACHE_LOCK_WAIT - Max time to wait for lock holder in seconds (default: 60)
+#   LOOM_NODE_BIN          - Absolute path to `node` for the MCP pre-flight
+#                            (issue #5032). Optional: the pre-flight resolves
+#                            node/npm from an ordered explicit candidate list
+#                            (PATH, then /opt/homebrew/bin, /usr/local/bin, …)
+#                            because launchd jobs and `ssh host 'cmd'` shells
+#                            never source the login profile.
+#   LOOM_NPM_BIN           - Absolute path to `npm`, same resolution rules.
+#   LOOM_PNPM_BIN          - Absolute path to `pnpm`, same resolution rules
+#                            (used for MCP self-repair when the package's own
+#                            "packageManager" field or a tracked pnpm-lock.yaml
+#                            resolves it to pnpm, issue #6779).
+#   LOOM_MODEL             - Model to pass as `claude --model <value>` (issue
+#                            #3477). An explicit `--model` in the wrapper args
+#                            always wins. The flag is appended once before the
+#                            retry loop, so every retry attempt reuses the SAME
+#                            model (re-consulting policy on retry is strategy B
+#                            of #3477 and intentionally out of scope). When
+#                            neither is set, NO --model flag is emitted.
+
+set -euo pipefail
+
+# Self-reap the wrapper's own process GROUP at exit (Issue #6192): this is the
+# primary daemon-dispatch path (dispatch.rs appends `--use-wrapper` by
+# default), and unlike `spawn-claude.sh`'s plain `exec claude`, this script
+# already runs `claude` as a managed foreground/background child (never
+# exec-replaces itself) — so it is the natural, low-risk place to sweep any
+# child it leaves behind (a build tool stuck in disk-wait, a detached `tail`
+# still holding its output pipe, etc.) once IT exits, for ANY reason: a normal
+# retry-loop exit, an exhausted-retries failure, or an external kill (SIGTERM
+# — the daemon's own #4980 group-kill hits this process too, since it is a
+# process-group member). This is bound to THIS process's own exit only — a
+# daemon restart never signals this already-running tree, so it cannot
+# interfere with sweeps surviving daemon restarts (the deliberate design that
+# motivated #6192's careful scoping).
+#
+# The library is only SOURCED here; the trap itself is installed by
+# `_wrapper_exit_cleanup` (defined next to `clear_retry_state` below) at the
+# two `trap ... EXIT` sites this script already had. That indirection is
+# load-bearing: bash keeps exactly ONE EXIT trap, so installing a second one
+# here would be silently replaced by `main()`'s own EXIT trap a moment later
+# and never fire.
+_reap_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/reap-process-group.sh"
+if [[ -f "$_reap_lib" ]]; then
+    # shellcheck source=lib/reap-process-group.sh
+    source "$_reap_lib"
+fi
+
+# Configuration with environment variable overrides
+MAX_RETRIES="${LOOM_MAX_RETRIES:-5}"
+INITIAL_WAIT="${LOOM_INITIAL_WAIT:-60}"
+MAX_WAIT="${LOOM_MAX_WAIT:-1800}"  # 30 minutes
+MULTIPLIER="${LOOM_BACKOFF_MULTIPLIER:-2}"
+
+# Output monitor configuration
+# How long to wait after detecting an API error pattern before killing claude
+API_ERROR_IDLE_TIMEOUT="${LOOM_API_ERROR_IDLE_TIMEOUT:-60}"
+
+# Auth cache configuration
+# Short-TTL file cache to prevent concurrent `claude auth status` calls
+# from overwhelming the auth endpoint when multiple agents start simultaneously.
+# 300s is safe because auth tokens have much longer lifetimes; if auth was valid
+# 5 minutes ago it is still valid now.  See issue #3109.
+AUTH_CACHE_TTL="${LOOM_AUTH_CACHE_TTL:-300}"  # seconds (was 120, raised to reduce contention)
+# Max time a single auth check cycle can take: 15s timeout × 3 retries + backoff (2+5+10) ≈ 62s
+AUTH_CACHE_STALE_LOCK_THRESHOLD="${LOOM_AUTH_CACHE_STALE_LOCK_THRESHOLD:-90}"  # seconds
+AUTH_CACHE_LOCK_WAIT="${LOOM_AUTH_CACHE_LOCK_WAIT:-10}"  # seconds (was 60, reduced to fail fast)
+# Extended TTL for lock-contention fallback: when the lock is held AND the cache
+# is expired but younger than this threshold, use the stale cached result instead
+# of blocking.  Prevents the cascading 60s-per-agent delay pattern.  See #3109.
+AUTH_CACHE_GRACE_TTL="${LOOM_AUTH_CACHE_GRACE_TTL:-600}"  # seconds
+
+# Startup health monitor configuration
+# How long (seconds) to watch early output for MCP/plugin failures
+STARTUP_MONITOR_WINDOW="${LOOM_STARTUP_MONITOR_WINDOW:-90}"
+# Grace period (seconds) after detecting startup failure before killing.
+# The monitor polls every 2s within this window for loom MCP connection.
+STARTUP_GRACE_PERIOD="${LOOM_STARTUP_GRACE_PERIOD:-20}"
+
+# Terminal identification for stop signals
+TERMINAL_ID="${LOOM_TERMINAL_ID:-}"
+# Note: WORKSPACE may fail if CWD is invalid at startup - recover_cwd handles this.
+# Fallback is /tmp, NOT $HOME (issue #3980): $HOME is outside the daemon's TCC-safe
+# working-set contract (workspace roots + .loom + .claude* + /private/tmp) and
+# landing a spawned `claude` child there triggers macOS folder-access prompts for
+# Desktop/Documents/Downloads/Photos/Music/iCloud on an unsigned launchd binary.
+WORKSPACE="${LOOM_WORKSPACE:-$(pwd 2>/dev/null || echo "/tmp")}"
+
+# Python interpreter — still used by several NON-token helpers further down
+# this script (auth-status caching, MCP config parsing). The token-path
+# account-rotation calls (mark-bad / re-select, #3738) were cut over to the
+# native `loom-daemon tokens` CLI in issue #4228 (epic #4081 Phase 2) and no
+# longer consult this variable.
+LOOM_PYTHON="${LOOM_PYTHON:-python3}"
+# The account name whose OAuth token is currently exported. spawn-claude.sh
+# exports LOOM_TOKEN_NAME before exec'ing this wrapper; when the wrapper is
+# invoked directly (token pre-set by some other caller) it is derived by
+# content-matching the token against the pool at rotation time.
+ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
+
+# Directory of this script — used to source the shared error classifier and
+# to locate the native `loom-daemon` binary for the mark-bad / re-select
+# calls (#3738, cut over to `loom-daemon tokens` in #4228).
+_WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the shared error classifier so the wrapper's account-exhaustion
+# detection stays byte-identical to spawn-claude's classification — the two
+# patterns must NOT drift (issue #3738). Resolved relative to this script so it
+# works from both the installed .loom/scripts copy and the tracked
+# defaults/scripts source. If absent (older install), every classifier below
+# takes its DEGRADED path — the same hand-rolled fallback regexes, which since
+# #8037 live in `loom-daemon retry-classify` alongside the library path rather
+# than inline here. Since #11208 the library itself delegates to
+# `loom-daemon classify-error` when a binary resolves, so these predicates
+# consume native classifications without any change to this file.
+if [[ -f "${_WRAPPER_DIR}/lib/classify-error.sh" ]]; then
+    # shellcheck source=lib/classify-error.sh
+    # shellcheck disable=SC1091
+    source "${_WRAPPER_DIR}/lib/classify-error.sh"
+fi
+
+# Source the shared loom-daemon binary resolver (issue #4228) so account
+# rotation's mark-bad / re-select calls resolve the SAME binary
+# probe-tokens.sh / spawn-claude.sh do: $LOOM_DAEMON_BIN -> `loom-daemon` on
+# PATH -> build-output-relative candidates under the repo. If absent (older
+# install mid-resync), rotate_exhausted_account / reselect_account_no_mark
+# fail soft (return 1, same observable behavior as a Python selection error).
+# Since #8037 it also provides `loom_resolve_self_daemon_bin` — a DIFFERENT
+# resolution, for the binary that IMPLEMENTS the ported classifiers rather than
+# the installed one this wrapper drives; without it they take their documented
+# fail-safes (see the retry-classification section below).
+if [[ -f "${_WRAPPER_DIR}/lib/locate-daemon-bin.sh" ]]; then
+    # shellcheck source=lib/locate-daemon-bin.sh
+    # shellcheck disable=SC1091
+    source "${_WRAPPER_DIR}/lib/locate-daemon-bin.sh"
+fi
+
+# Whether --dangerously-skip-permissions was passed (detected in main())
+SKIP_PERMISSIONS_MODE=false
+
+# Global state for signal-handler log flush (issue #2586).
+# When tmux kill-session sends SIGHUP, the wrapper needs to append any
+# tee-captured output to the log file before dying.  These globals are set
+# in run_with_retry() and read by the _flush_output_on_signal() handler.
+_FLUSH_TEMP_OUTPUT=""       # Path to tee-captured temp output file
+_FLUSH_LOG_FILE=""          # Path to the agent log file
+_FLUSH_PRE_LOG_LINES=0     # Log file line count before CLI started
+
+# Retry state file for external observability (see issue #2296).
+# When TERMINAL_ID is set, the wrapper writes its retry/backoff state to this
+# file so agent-wait-bg.sh and the shepherd can distinguish "wrapper retrying"
+# from "claude actively working".
+RETRY_STATE_DIR="${WORKSPACE}/.loom/retry-state"
+RETRY_STATE_FILE=""
+if [[ -n "${TERMINAL_ID}" ]]; then
+    RETRY_STATE_FILE="${RETRY_STATE_DIR}/${TERMINAL_ID}.json"
+fi
+
+# Sidecar exit code file for shepherd visibility (issue #2737).
+# When agent-wait returns 0 (shell idle, no claude process), the wrapper's
+# actual exit code is lost.  This file preserves it so run_worker_phase()
+# can detect failures that agent-wait missed.
+_EXIT_CODE_SIDECAR=""
+if [[ -n "${TERMINAL_ID}" ]]; then
+    _EXIT_CODE_SIDECAR="${WORKSPACE}/.loom/exit-codes/${TERMINAL_ID}.exit"
+fi
+
+# Write the wrapper's exit code to the sidecar file.  Called on every exit
+# path (normal, pre-flight failure, signal kill) so the shepherd always has
+# the real exit code regardless of how the tmux session ended.
+_write_exit_sidecar() {
+    local code="${1:-1}"
+    if [[ -n "${_EXIT_CODE_SIDECAR}" ]]; then
+        mkdir -p "$(dirname "${_EXIT_CODE_SIDECAR}")" 2>/dev/null || true
+        echo "${code}" > "${_EXIT_CODE_SIDECAR}" 2>/dev/null || true
+    fi
+}
+
+# #10830: keep the pinned session id as a shell variable for the retry check in
+# run_with_retry, but stop exporting it, so the claude CLI (and every Bash call
+# it makes) never inherits it.
+export -n LOOM_CLAUDE_SESSION_ID
+
+# Logging helpers
+log_info() {
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [INFO] $*" >&2
+}
+
+log_warn() {
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [WARN] $*" >&2
+}
+
+log_error() {
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [ERROR] $*" >&2
+}
+
+# Check whether pipe-pane already captured the CLI output by comparing
+# content fingerprints.  Normalizes both the new log portion and probe
+# lines from captured output by stripping non-alphanumeric chars, then
+# checks for substring match.  Handles garbled pipe-pane output where
+# terminal control characters are interleaved with actual text.  #2590.
+_pipe_pane_captured_content() {
+    local _pp_temp="$1" _pp_log="$2" _pp_growth="$3"
+    [[ $_pp_growth -le 0 ]] && return 1
+    local _pp_log_norm
+    _pp_log_norm=$(tail -n "$_pp_growth" "$_pp_log" 2>/dev/null | LC_ALL=C tr -cd '[:alnum:]' | head -c 5000)
+    [[ ${#_pp_log_norm} -lt 10 ]] && return 1
+    local _pp_probe
+    while IFS= read -r _pp_probe; do
+        _pp_probe=$(LC_ALL=C tr -cd '[:alnum:]' <<< "$_pp_probe")
+        [[ ${#_pp_probe} -lt 12 ]] && continue
+        [[ "$_pp_log_norm" == *"$_pp_probe"* ]] && return 0
+    done < <(grep -v '^[[:space:]]*$' "$_pp_temp" 2>/dev/null | grep -v '^#' | tail -20 | head -5)
+    return 1
+}
+
+# Flush tee-captured output to the log file on signal (issue #2586).
+# Called via trap when tmux kill-session sends SIGHUP/SIGTERM.  Without
+# this, the fallback append logic (lines after the CLI invocation) never
+# executes because the process is killed before reaching it.
+#
+# Uses sentinel detection, content fingerprinting, and a conservative
+# line-count ratio to decide whether pipe-pane already captured output.
+# See #2582, #2590.
+_flush_output_on_signal() {
+    # Only flush if we have the required state
+    if [[ -z "$_FLUSH_TEMP_OUTPUT" ]] || [[ ! -s "$_FLUSH_TEMP_OUTPUT" ]]; then
+        return
+    fi
+    if [[ -z "$_FLUSH_LOG_FILE" ]]; then
+        return
+    fi
+
+    if [[ -f "$_FLUSH_LOG_FILE" ]]; then
+        local _post_lines
+        _post_lines=$(wc -l < "$_FLUSH_LOG_FILE" 2>/dev/null || echo "0")
+        local _growth=$(( _post_lines - _FLUSH_PRE_LOG_LINES ))
+        local _temp_lines
+        _temp_lines=$(wc -l < "$_FLUSH_TEMP_OUTPUT" 2>/dev/null || echo "0")
+        local _needs_append=true
+        # Tier 1: If log contains the CLI start sentinel with content after
+        # it, pipe-pane was working — no fallback append needed.
+        # Unanchored match handles garbled pipe-pane output.  #2582, #2590.
+        if grep -q "CLAUDE_CLI_START" "$_FLUSH_LOG_FILE" 2>/dev/null; then
+            local _lines_after_sentinel
+            _lines_after_sentinel=$(sed -n '/CLAUDE_CLI_START/,$p' "$_FLUSH_LOG_FILE" 2>/dev/null | wc -l)
+            if [[ $_lines_after_sentinel -gt 1 ]]; then
+                _needs_append=false
+            fi
+        fi
+        # Tier 2: Content fingerprint — check if distinctive text from
+        # captured output already appears in the new log portion.  #2590.
+        if [[ "$_needs_append" == "true" ]] && \
+           _pipe_pane_captured_content "$_FLUSH_TEMP_OUTPUT" "$_FLUSH_LOG_FILE" "$_growth"; then
+            _needs_append=false
+        fi
+        # Tier 3: Conservative line-count ratio as safety net.  #2582.
+        if [[ "$_needs_append" == "true" ]] && \
+           [[ $_growth -lt $(( _temp_lines / 4 )) ]]; then
+            cat "$_FLUSH_TEMP_OUTPUT" >> "$_FLUSH_LOG_FILE" 2>/dev/null || true
+        fi
+    else
+        # Log file doesn't exist yet - create it with the captured output
+        cat "$_FLUSH_TEMP_OUTPUT" > "$_FLUSH_LOG_FILE" 2>/dev/null || true
+    fi
+
+    # Clean up temp file
+    rm -f "$_FLUSH_TEMP_OUTPUT" 2>/dev/null || true
+    _FLUSH_TEMP_OUTPUT=""
+
+    # Write sidecar exit code (1 = killed by signal) so the shepherd
+    # detects this wasn't a clean exit.  See issue #2737.
+    _write_exit_sidecar 1
+}
+
+# Write retry state to a JSON file for external observability (issue #2296).
+# Called when entering backoff or starting a new attempt so the shepherd
+# and agent-wait-bg.sh can see what the wrapper is doing.
+write_retry_state() {
+    if [[ -z "${RETRY_STATE_FILE}" ]]; then
+        return
+    fi
+    local status="$1"
+    local attempt="$2"
+    local last_error="${3:-}"
+    local next_retry_at="${4:-}"
+
+    mkdir -p "${RETRY_STATE_DIR}"
+    cat > "${RETRY_STATE_FILE}" <<EOJSON
+{
+  "status": "${status}",
+  "attempt": ${attempt},
+  "max_retries": ${MAX_RETRIES},
+  "last_error": $(printf '%s' "${last_error}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""'),
+  "next_retry_at": "${next_retry_at}",
+  "terminal_id": "${TERMINAL_ID}",
+  "updated_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+EOJSON
+}
+
+# Remove the retry state file on exit (success or permanent failure).
+clear_retry_state() {
+    if [[ -n "${RETRY_STATE_FILE}" ]] && [[ -f "${RETRY_STATE_FILE}" ]]; then
+        rm -f "${RETRY_STATE_FILE}"
+    fi
+}
+
+# The wrapper's single EXIT handler (Issue #6192). Bash keeps exactly ONE EXIT
+# trap, so the #6192 self-reap has to be folded into the handler this script
+# already installs rather than added as a second `trap ... EXIT` — a second
+# one would silently replace the retry-state cleanup (or be replaced by it,
+# depending on order) instead of composing with it.
+#
+# Order matters: clear the retry state FIRST (cheap, and the thing a retrying
+# supervisor reads), then reap. The reap TERM-then-KILLs, with a 2s grace
+# window in between, so putting it first would delay the state cleanup by
+# seconds on every single wrapper exit.
+_wrapper_exit_cleanup() {
+    clear_retry_state
+    if declare -F loom_reap_own_process_group >/dev/null 2>&1; then
+        loom_reap_own_process_group "claude-wrapper"
+    fi
+}
+
+# Recover from deleted working directory
+# This handles the case where the agent's worktree is deleted while it's running
+# (e.g., by loom-clean, merge-pr.sh, or agent-destroy.sh)
+#
+# NOTE (issue #3980): $HOME is deliberately NOT a recovery target. The daemon's
+# TCC-safe working-set contract is workspace roots + .loom + .claude* +
+# /private/tmp — $HOME is outside it. Landing a spawned `claude` child (and any
+# subsequent relative-path tool calls it makes) in $HOME risks macOS folder-access
+# prompts for Desktop/Documents/Downloads/Photos/Music/iCloud under launchd, where
+# the daemon is its own TCC-responsible process (unlike the old nohup-from-terminal
+# model, which silently inherited the terminal app's grants). /tmp is TCC-safe and
+# serves the same "always exists, always cd-able" purpose.
+recover_cwd() {
+    # Check if current directory is still valid
+    if pwd &>/dev/null 2>&1; then
+        return 0  # CWD is fine, nothing to do
+    fi
+
+    log_warn "Working directory deleted, attempting recovery..."
+
+    # Try WORKSPACE first (set by agent-spawn.sh, may point to repo root)
+    if [[ -n "${WORKSPACE:-}" ]] && [[ -d "$WORKSPACE" ]]; then
+        if cd "$WORKSPACE" 2>/dev/null; then
+            log_info "Recovered to workspace: $WORKSPACE"
+            return 0
+        fi
+    fi
+
+    # Try to find git root (may fail if CWD context is completely gone)
+    local git_root
+    if git_root=$(git rev-parse --show-toplevel 2>/dev/null) && [[ -d "$git_root" ]]; then
+        if cd "$git_root" 2>/dev/null; then
+            log_info "Recovered to git root: $git_root"
+            return 0
+        fi
+    fi
+
+    # Last resort: /tmp (TCC-safe; see NOTE above — never $HOME)
+    if cd /tmp 2>/dev/null; then
+        log_warn "Recovered to /tmp (all other recovery paths failed)"
+        return 0
+    fi
+
+    log_error "Failed to recover working directory - all recovery paths failed"
+    return 1
+}
+
+# Check if stop signal exists (graceful shutdown support)
+check_stop_signal() {
+    # Global stop signal for all agents
+    if [[ -f "${WORKSPACE}/.loom/stop-daemon" ]]; then
+        log_info "Global stop signal detected (.loom/stop-daemon)"
+        return 0
+    fi
+
+    # Per-terminal stop signal
+    if [[ -n "${TERMINAL_ID}" && -f "${WORKSPACE}/.loom/stop-agent-${TERMINAL_ID}" ]]; then
+        log_info "Agent stop signal detected (.loom/stop-agent-${TERMINAL_ID})"
+        return 0
+    fi
+
+    return 1
+}
+
+# Resolve the ordered list of MCP config candidate directories for
+# pre-flight (#4349). In worktrees, WORKSPACE may point to the worktree
+# itself, whose own .mcp.json (if any) can dangle after that worktree's
+# mcp-loom build is deleted (e.g. a stale/half-removed worktree left
+# registered — the #4349 incident); the git common directory (the primary
+# checkout, where mcp-loom always actually lives, per scripts/setup-mcp.sh)
+# is the durable fallback candidate. Emits one directory per line, in
+# priority order: WORKSPACE first (if it carries its own .mcp.json), then
+# the git common directory's repo root (if distinct and it also carries a
+# .mcp.json). Emits nothing when neither candidate has a .mcp.json — that is
+# the #4230 non-fatal "no MCP configured" case, handled by the caller.
+mcp_candidate_workspaces() {
+    local -a candidates=()
+
+    if [[ -f "${WORKSPACE}/.mcp.json" ]]; then
+        candidates+=("${WORKSPACE}")
+    fi
+
+    local common_dir repo_root
+    if common_dir=$(git -C "${WORKSPACE}" rev-parse --git-common-dir 2>/dev/null); then
+        # common_dir is the .git dir; parent is the repo root
+        repo_root=$(cd "${common_dir}/.." 2>/dev/null && pwd)
+        if [[ -n "${repo_root}" ]] && [[ -f "${repo_root}/.mcp.json" ]]; then
+            local already_listed="" c
+            for c in ${candidates[@]+"${candidates[@]}"}; do
+                [[ "${c}" == "${repo_root}" ]] && already_listed=1
+            done
+            [[ -z "${already_listed}" ]] && candidates+=("${repo_root}")
+        fi
+    fi
+
+    if [[ ${#candidates[@]} -gt 0 ]]; then
+        printf '%s\n' "${candidates[@]}"
+    fi
+    # Always return success — an empty candidate list is a valid, expected
+    # outcome (#4230), not an error. A bare `false`-valued last test above
+    # would otherwise propagate as this function's exit status and trip
+    # `set -e` at any future direct (non-pipeline) call site.
+    return 0
+}
+
+# Resolve workspace root for MCP config lookup (back-compat single-candidate
+# form — the highest-priority candidate from mcp_candidate_workspaces, or
+# WORKSPACE itself when no candidate has a .mcp.json).
+resolve_mcp_workspace() {
+    local first
+    first=$(mcp_candidate_workspaces | head -n1)
+    if [[ -n "${first}" ]]; then
+        echo "${first}"
+    else
+        echo "${WORKSPACE}"
+    fi
+}
+
+# Protocol-level MCP health check (#5032 follow-up, issue #143 / 2am#307).
+#
+# Starts the candidate entry point, sends a standard MCP `initialize`
+# JSON-RPC request over its stdin, and checks stdout for a well-formed
+# JSON-RPC response (matching id, with a `result` or `error` field). This
+# replaces a prior implementation that grepped stderr for the literal string
+# "running on stdio" — that string is mcp-loom's OWN startup banner
+# (~/GitHub/loom/mcp-loom/src/index.ts), not part of the MCP protocol itself.
+# Any MCP server that doesn't happen to print that exact banner (e.g.
+# squad's `dist/mcp.js`, which prints nothing on a clean start) false-
+# negatived unconditionally under the old check, regardless of actual
+# health. A protocol-level handshake is used instead of extending the old
+# check into a banner-string allowlist, since an allowlist just breaks again
+# for the next MCP server implementation that doesn't emit a banner.
+#
+# Args: $1 = path to the MCP server entry point (e.g. dist/index.js)
+#       $2 = node binary to invoke it with
+# Reads MCP_SERVER_ENV (set by _check_mcp_candidate): the server's declared
+# `.mcp.json` `env` as K=V words, merged over the inherited env via `env` the
+# way Claude Code launches it (#10870). Values are never logged.
+# The handshake bound is LOOM_MCP_PREFLIGHT_TIMEOUT seconds (default 15; a
+# non-numeric or non-positive value falls back to the default) — a healthy
+# server can take ~4 s on a loaded host, so a 5 s cap failed it spuriously.
+# Sets (for the caller to log on failure): MCP_SMOKE_TEST_STDOUT,
+# MCP_SMOKE_TEST_STDERR, MCP_SMOKE_TEST_TIMED_OUT (1 if `timeout` fired, else 0),
+# MCP_SMOKE_TEST_TIMEOUT_SECS (the bound that was applied).
+# Returns: 0 if a valid JSON-RPC initialize response was observed, 1 otherwise.
+_mcp_smoke_test() {
+    local mcp_entry="$1"
+    local node_bin="$2"
+
+    local init_request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"loom-mcp-preflight","version":"1.0.0"}}}'
+
+    local smoke_timeout="${LOOM_MCP_PREFLIGHT_TIMEOUT:-15}"
+    if ! [[ "${smoke_timeout}" =~ ^[0-9]+$ ]] || [[ "${smoke_timeout}" -le 0 ]]; then
+        smoke_timeout=15
+    fi
+    MCP_SMOKE_TEST_TIMEOUT_SECS="${smoke_timeout}"
+    MCP_SMOKE_TEST_TIMED_OUT=0
+
+    local tmp_stdout tmp_stderr
+    tmp_stdout=$(mktemp)
+    tmp_stderr=$(mktemp)
+
+    # PIPESTATUS[1] is `timeout`'s exit status (124 = the bound fired). Capture
+    # it instead of discarding it with `|| true`.
+    local smoke_rc=0
+    printf '%s\n' "${init_request}" | timeout "${smoke_timeout}" env ${MCP_SERVER_ENV[@]+"${MCP_SERVER_ENV[@]}"} \
+        "${node_bin}" "${mcp_entry}" >"${tmp_stdout}" 2>"${tmp_stderr}" || smoke_rc=${PIPESTATUS[1]}
+    if [[ "${smoke_rc}" -eq 124 ]]; then
+        MCP_SMOKE_TEST_TIMED_OUT=1
+    fi
+
+    MCP_SMOKE_TEST_STDOUT=$(cat "${tmp_stdout}")
+    MCP_SMOKE_TEST_STDERR=$(cat "${tmp_stderr}")
+    rm -f "${tmp_stdout}" "${tmp_stderr}"
+
+    # A healthy MCP server responds to `initialize` with a JSON-RPC 2.0
+    # message carrying the same id (1) and either a `result` or `error`
+    # field, per the MCP/JSON-RPC spec — true regardless of whether the
+    # implementation also happens to print a stderr startup banner.
+    printf '%s' "${MCP_SMOKE_TEST_STDOUT}" | python3 -c "
+import json, sys
+for line in sys.stdin.read().splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(obj, dict) and obj.get('jsonrpc') == '2.0' and obj.get('id') == 1 and ('result' in obj or 'error' in obj):
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null
+}
+
+# Attempt MCP pre-flight for ONE candidate workspace directory: extract the
+# entry point from ${1}/.mcp.json, ensure it exists (rebuilding if
+# missing/stale), and smoke-test it. Split out of check_mcp_server so the
+# latter can iterate an ordered candidate list and fall back to the next
+# candidate on a real failure (#4349), rather than hard-failing on the
+# first candidate's broken bundle.
+#
+# Return codes distinguish "not a real candidate" from "a real, configured
+# candidate that is unhealthy" — only the latter should make an
+# all-candidates-failed case a hard failure rather than a #4230-style skip:
+#   0 = healthy candidate (pre-flight for this candidate passes)
+#   1 = real but unhealthy candidate (entry missing & unrebuildable, or the
+#       smoke test still fails after a rebuild attempt)
+#   2 = not a real candidate (mcp.json present but no parseable entry point)
+_check_mcp_candidate() {
+    local mcp_workspace="$1"
+    local mcp_config="${mcp_workspace}/.mcp.json"
+
+    # Extract the server name, entry point, and declared `env` (#10870) from
+    # .mcp.json as NUL-delimited fields: name, args[-1], then K=V per env key.
+    # NUL framing keeps values with spaces/quotes/newlines intact — no eval.
+    # Use timeout to prevent hanging on resource-contended systems (see issue #2472).
+    local field mcp_entry mcp_name mcp_fields=()
+    while IFS= read -r -d '' field; do mcp_fields+=("${field}"); done < <(timeout 10 python3 -c "
+import json, sys
+for name, srv in json.load(open(sys.argv[1])).get('mcpServers', {}).items():
+    if srv.get('args'):
+        env = [k + '=' + (v if isinstance(v, str) else json.dumps(v)) for k, v in (srv.get('env') or {}).items() if k.isidentifier()]
+        sys.stdout.write('\0'.join([name, str(srv['args'][-1])] + env) + '\0')
+        break
+" "${mcp_config}" 2>/dev/null || true)
+    mcp_name="${mcp_fields[0]:-}" mcp_entry="${mcp_fields[1]:-}"
+
+    if [[ -z "${mcp_entry}" ]]; then
+        log_warn "Could not extract MCP entry point from ${mcp_config} - not a usable pre-flight candidate"
+        return 2
+    fi
+    MCP_SERVER_ENV=("${mcp_fields[@]:2}")
+    log_info "MCP pre-flight: smoke-testing server '${mcp_name}' (${mcp_entry}) from ${mcp_config}"
+
+    # Check if the entry point file exists
+    if [[ ! -f "${mcp_entry}" ]]; then
+        log_warn "MCP entry point missing: ${mcp_entry}"
+        if _try_mcp_rebuild "${mcp_entry}"; then
+            return 0
+        fi
+        return 1
+    fi
+
+    # Staleness check: a bundle older than any file under the sibling src/ tree
+    # is startable but lacks recent fixes (a smoke test passes on it silently).
+    # Rebuild before the smoke test. This mirrors the predicate in
+    # scripts/setup-mcp.sh (the one-shot .mcp.json generator) exactly so the two
+    # gates cannot drift (issue #4043).
+    #
+    # Rebuild failure here is FATAL for this candidate (#5032). The original
+    # design treated it as non-fatal ("an otherwise-startable bundle") and fell
+    # through to the smoke test below — but that assumption does not survive an
+    # actual rebuild failure: a bundle that cannot be rebuilt from its own
+    # sources is not otherwise-startable, and the smoke test then runs against
+    # the same known-broken dist and is guaranteed to fail. Aborting instead
+    # matches the missing-entry-point path above and lets check_mcp_server fall
+    # back to the next candidate immediately with an actionable message.
+    local mcp_src mcp_pkg_dir
+    mcp_pkg_dir="$(dirname "$(dirname "${mcp_entry}")")"
+    mcp_src="${mcp_pkg_dir}/src"
+    if [[ -d "${mcp_src}" ]] && \
+       [[ -n "$(find "${mcp_src}" -type f -newer "${mcp_entry}" -print -quit 2>/dev/null)" ]]; then
+        log_warn "MCP bundle is stale (src newer than dist) - rebuilding: ${mcp_entry}"
+        if _try_mcp_rebuild "${mcp_entry}"; then
+            # Rebuild succeeded and already re-verified the smoke test.
+            return 0
+        fi
+        log_error "MCP rebuild for stale bundle failed - aborting this candidate (${mcp_config})"
+        log_error "Repair manually: cd ${mcp_pkg_dir} && npm ci && npm run build"
+        return 1
+    fi
+
+    # Smoke test: start the MCP server and perform a protocol-level handshake
+    # (see _mcp_smoke_test above) rather than grepping for a server-specific
+    # startup banner. `node` is resolved via explicit candidate paths, not a
+    # bare PATH lookup: a non-login ssh session / launchd job never sources
+    # the login profile, so /opt/homebrew/bin is not on PATH (#5032, same
+    # reasoning as #4875).
+    local node_bin
+    node_bin="$(_locate_node_tool node)" || node_bin="node"
+    [[ -n "${node_bin}" ]] || node_bin="node"
+
+    if _mcp_smoke_test "${mcp_entry}" "${node_bin}"; then
+        log_info "MCP server health check passed (${mcp_config})"
+        return 0
+    fi
+
+    # MCP server failed to start - log the error
+    log_warn "MCP server health check failed (${mcp_config})"
+    if [[ -n "${MCP_SMOKE_TEST_STDERR}" ]]; then
+        log_warn "MCP stderr: ${MCP_SMOKE_TEST_STDERR}"
+    fi
+    if [[ -n "${MCP_SMOKE_TEST_STDOUT}" ]]; then
+        log_warn "MCP stdout: ${MCP_SMOKE_TEST_STDOUT}"
+    fi
+
+    # A pure handshake timeout on an entry point that exists and is not stale
+    # is a slow start, not a broken bundle: a rebuild cannot fix it, and its
+    # "cannot rebuild" error would hide the real cause.
+    if [[ "${MCP_SMOKE_TEST_TIMED_OUT}" -eq 1 ]]; then
+        log_error "MCP smoke test timed out after ${MCP_SMOKE_TEST_TIMEOUT_SECS}s (${mcp_config}) - skipping rebuild; raise LOOM_MCP_PREFLIGHT_TIMEOUT if the host is loaded"
+        return 1
+    fi
+
+    # Attempt rebuild and retry
+    if _try_mcp_rebuild "${mcp_entry}"; then
+        return 0
+    fi
+    return 1
+}
+
+# Pre-flight check: verify an MCP server can start.
+# Iterates the ordered candidate list from mcp_candidate_workspaces (#4349):
+# WORKSPACE's own .mcp.json first, falling back to the git common
+# directory's .mcp.json when the first candidate's bundle is missing and
+# unrebuildable (e.g. a broken/half-deleted worktree). The session only
+# hard-fails when NO candidate config is healthy AND at least one candidate
+# was a real, parseable config (preserving the #4230 skip when every
+# candidate is unparseable or absent).
+check_mcp_server() {
+    local -a candidates=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] && candidates+=("${line}")
+    done < <(mcp_candidate_workspaces)
+
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        # Non-fatal skip. Absent .mcp.json (in WORKSPACE and, for a worktree,
+        # the git common dir) is now the NORMAL, healthy state under
+        # user-scope `loom` registration (#4230, epic #3835 Phase 3c): the
+        # loom server is machine-level, not project-scoped, so there is no
+        # per-repo config to smoke-test here. This skip must NOT be promoted
+        # to a failure — doing so would spuriously fail every migrated repo.
+        log_warn "MCP config not found at ${WORKSPACE}/.mcp.json (or the git common dir) - skipping MCP pre-flight (expected under user-scope loom, #4230)"
+        return 0
+    fi
+
+    local saw_real_candidate=0
+    local idx=0
+    local candidate rc
+    for candidate in "${candidates[@]}"; do
+        idx=$((idx + 1))
+        # Capture the return code without letting a non-zero result trip
+        # `set -e` (a bare failing statement would abort the whole script
+        # instead of falling through to the next candidate).
+        rc=0
+        _check_mcp_candidate "${candidate}" || rc=$?
+        if [[ ${rc} -eq 0 ]]; then
+            if [[ ${idx} -gt 1 ]]; then
+                log_warn "MCP pre-flight: falling back to ${candidate}/.mcp.json (candidate #1 was unusable)"
+            fi
+            return 0
+        elif [[ ${rc} -eq 1 ]]; then
+            saw_real_candidate=1
+        fi
+        # rc == 2 (unparseable): not a real candidate, keep trying the rest.
+    done
+
+    if [[ ${saw_real_candidate} -eq 0 ]]; then
+        log_warn "No candidate MCP config had a parseable entry point - skipping MCP pre-flight (expected under user-scope loom, #4230)"
+        return 0
+    fi
+
+    log_error "MCP pre-flight failed for all ${#candidates[@]} candidate config(s): ${candidates[*]}"
+    return 1
+}
+
+# Check global MCP configurations from ~/.claude.json for missing binaries.
+# This is a warning-only pre-flight check — missing global MCPs cause agent
+# sessions to fail with "1 MCP server failed" before any useful work is done.
+# We log clear warnings but never abort: global MCPs are outside Loom's
+# control and the binary may simply need to be rebuilt.
+check_global_mcp_configs() {
+    local global_config="${HOME}/.claude.json"
+    if [[ ! -f "${global_config}" ]]; then
+        return 0  # No global config — nothing to validate
+    fi
+
+    # Parse mcpServers from ~/.claude.json.
+    # First line is a presence sentinel: "__HAS_LOOM__=1" or "__HAS_LOOM__=0"
+    # (emitted whenever the file parses as JSON, regardless of whether any
+    # servers are configured), so we can detect a missing `loom` entry even
+    # when mcpServers is absent or empty — not just validate entries that
+    # already exist. Every subsequent line is one server: "name|command|args0"
+    # Falls through silently (no sentinel, no server lines) on malformed JSON
+    # or missing python3, preserving the prior warn-only, never-abort contract.
+    local server_info
+    server_info=$(python3 - "${global_config}" 2>/dev/null <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    servers = cfg.get('mcpServers', {})
+    print(f"__HAS_LOOM__={1 if 'loom' in servers else 0}")
+    for name, srv in servers.items():
+        command = srv.get('command', '')
+        args = srv.get('args', [])
+        args0 = args[0] if args else ''
+        print(f"{name}|{command}|{args0}")
+except Exception:
+    pass
+PYEOF
+)
+
+    if [[ -z "${server_info}" ]]; then
+        return 0
+    fi
+
+    # Presence check (acceptance criterion #1): warn — but never abort — when
+    # the machine-level `loom` MCP registration (#4230) is absent, instead of
+    # silently relying on a possibly-stale repo-local .mcp.json.
+    if [[ "${server_info}" == *$'\n'* ]]; then
+        local first_line="${server_info%%$'\n'*}"
+    else
+        local first_line="${server_info}"
+    fi
+    if [[ "${first_line}" == "__HAS_LOOM__=0" ]]; then
+        log_warn "⚠ No 'loom' entry in ~/.claude.json mcpServers — user-scope MCP registration (#4230) is missing"
+        log_warn "Fix: re-run scripts/install-loom.sh (or 'loom update') to register the machine-level 'loom' MCP server; see CLAUDE.md § MCP hooks"
+    fi
+    server_info="${server_info#*$'\n'}"
+
+    if [[ -z "${server_info}" || "${server_info}" == "__HAS_LOOM__="* ]]; then
+        return 0
+    fi
+
+    local warned=false
+    while IFS='|' read -r server_name cmd args0; do
+        [[ -z "${server_name}" ]] && continue
+
+        # Check command: absolute path must exist on disk; otherwise must be in PATH.
+        if [[ -n "${cmd}" ]]; then
+            if [[ "${cmd}" == /* ]]; then
+                if [[ ! -f "${cmd}" ]]; then
+                    log_warn "⚠ Global MCP '${server_name}': command not found at ${cmd} — agent sessions will fail"
+                    warned=true
+                fi
+            elif ! command -v "${cmd}" &>/dev/null; then
+                log_warn "⚠ Global MCP '${server_name}': command '${cmd}' not found in PATH — agent sessions will fail"
+                warned=true
+            fi
+        fi
+
+        # Check args[0] if it looks like an absolute file path.
+        if [[ -n "${args0}" && "${args0}" == /* ]]; then
+            if [[ ! -f "${args0}" ]]; then
+                log_warn "⚠ Global MCP '${server_name}': binary not found at ${args0} — agent sessions will fail"
+                warned=true
+            fi
+        fi
+    done <<< "${server_info}"
+
+    if [[ "${warned}" == "true" ]]; then
+        log_warn "Fix missing MCP binaries or remove entries from ~/.claude.json to prevent agent session failures"
+    fi
+
+    return 0  # Always succeed — this is a warning-only check
+}
+
+# Warn — but never abort — when the current workspace is not marked trusted
+# in ~/.claude.json (issue #5314). Claude Code silently ignores every
+# `permissions.allow` entry in an untrusted workspace's `.claude/settings.json`
+# and only says so on a line buried inside the session transcript ("Ignoring
+# N permissions.allow entries ... this workspace has not been trusted"),
+# which is easy to miss in a headless sweep log. This is a sibling of
+# check_global_mcp_configs (#5033) above: same warn-only, non-aborting
+# contract, same ~/.claude.json read.
+#
+# Provisioning (`loom-daemon workspace add`, and transitively `fleet
+# add-worker` / `loom migrate`, which both shell out to it) is the primary
+# fix — it seeds the trust bit at registration time. This check exists for
+# the residual cases provisioning cannot cover: a workspace spawned into
+# without ever having been registered, or a `~/.claude.json` edited/reset
+# after registration.
+#
+# Scoped to the `claude` runtime only: `hasTrustDialogAccepted` is a
+# Claude-Code-CLI-specific concept with no equivalent in the other runtime
+# adapters' (`spawn-codex.sh` / `spawn-aider.sh` / `spawn-generic.sh`) config
+# surfaces, so this check has no reason to run for them.
+check_workspace_trust() {
+    local global_config="${HOME}/.claude.json"
+    local workspace="${WORKSPACE}"
+
+    if [[ ! -f "${global_config}" ]]; then
+        log_warn "⚠ ~/.claude.json not found — workspace '${workspace}' is not marked trusted; permissions.allow entries will be silently ignored until it is registered (loom-daemon workspace add ${workspace}) or the trust dialog is accepted interactively once"
+        return 0
+    fi
+
+    # Emits "1" (trusted), "0" (present but not trusted / missing entry), or
+    # nothing on unparseable JSON / missing python3 — mirrors
+    # check_global_mcp_configs's silent-fallthrough-on-malformed-input
+    # contract so a broken ~/.claude.json never turns this into a false
+    # warning (or a crash).
+    local trusted
+    trusted=$(python3 - "${global_config}" "${workspace}" 2>/dev/null <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    entry = cfg.get('projects', {}).get(sys.argv[2], {})
+    print('1' if entry.get('hasTrustDialogAccepted') is True else '0')
+except Exception:
+    pass
+PYEOF
+)
+
+    if [[ "${trusted}" == "0" ]]; then
+        log_warn "⚠ Workspace '${workspace}' is not trusted in ~/.claude.json (projects[\"${workspace}\"].hasTrustDialogAccepted != true) — permissions.allow entries will be silently ignored"
+        log_warn "Fix: loom-daemon workspace add ${workspace}  (or accept the trust dialog interactively once)"
+    fi
+
+    return 0  # Always succeed — this is a warning-only check
+}
+
+# Ordered explicit candidate directories for the node toolchain (#5032).
+# claude-wrapper.sh runs from launchd jobs and `ssh host 'cmd'` non-login
+# shells that never source the login profile, so /opt/homebrew/bin (Apple
+# Silicon Homebrew) et al are NOT on PATH and a bare `command -v npm` lookup
+# fails even on a host where npm is perfectly well installed. Mirrors the
+# explicit-candidate-list pattern lib/locate-daemon-bin.sh established for the
+# same class of bug (#4875) rather than inventing a second approach.
+_LOOM_NODE_TOOL_DIRS=(
+    /opt/homebrew/bin
+    /usr/local/bin
+    /usr/bin
+    /opt/local/bin
+    /snap/bin
+)
+
+# _locate_node_tool <node|npm|pnpm> -> echoes an absolute path, or nothing
+# (rc 1). Precedence: $LOOM_NODE_BIN / $LOOM_NPM_BIN / $LOOM_PNPM_BIN override
+# -> PATH -> the explicit candidate list above -> nvm-style versioned installs
+# (newest first, pnpm only — pnpm is not installed under nvm's own tree, but a
+# corepack-shimmed pnpm can land next to a per-version node install there).
+_locate_node_tool() {
+    local tool="$1"
+    local override=""
+    case "${tool}" in
+        node) override="${LOOM_NODE_BIN:-}" ;;
+        npm)  override="${LOOM_NPM_BIN:-}" ;;
+        pnpm) override="${LOOM_PNPM_BIN:-}" ;;
+    esac
+
+    if [[ -n "${override}" && -x "${override}" ]]; then
+        echo "${override}"
+        return 0
+    fi
+
+    if command -v "${tool}" >/dev/null 2>&1; then
+        command -v "${tool}"
+        return 0
+    fi
+
+    local dir candidate
+    for dir in "${_LOOM_NODE_TOOL_DIRS[@]}" "${HOME}/.local/bin" "${HOME}/.volta/bin"; do
+        candidate="${dir}/${tool}"
+        if [[ -x "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    local nvm_root="${NVM_DIR:-${HOME}/.nvm}"
+    if [[ -d "${nvm_root}/versions/node" ]]; then
+        while IFS= read -r candidate; do
+            [[ -z "${candidate}" ]] && continue
+            if [[ -x "${candidate}" ]]; then
+                echo "${candidate}"
+                return 0
+            fi
+        done < <(ls -1d "${nvm_root}"/versions/node/*/bin/"${tool}" 2>/dev/null | sort -r)
+    fi
+
+    return 1
+}
+
+# Render the search list for a "tool not found" error message. Mirrors
+# _locate_node_tool's precedence exactly, kept side by side so the two cannot
+# drift (same discipline as loom_daemon_bin_search_paths).
+_node_tool_search_paths() {
+    local tool="$1"
+    case "${tool}" in
+        node) echo "\$LOOM_NODE_BIN" ;;
+        npm)  echo "\$LOOM_NPM_BIN" ;;
+        pnpm) echo "\$LOOM_PNPM_BIN" ;;
+    esac
+    echo "${tool} on \$PATH"
+    local dir
+    for dir in "${_LOOM_NODE_TOOL_DIRS[@]}" "${HOME}/.local/bin" "${HOME}/.volta/bin"; do
+        echo "${dir}/${tool}"
+    done
+    echo "${NVM_DIR:-${HOME}/.nvm}/versions/node/*/bin/${tool}"
+}
+
+# Resolve which package manager an MCP server's dependency tree is actually
+# managed with — from the package's OWN declaration, never from which
+# lockfile a self-repair run happened to leave lying around (#6779). A prior
+# `npm ci` self-repair against a pnpm-managed package leaves an untracked
+# package-lock.json as pure residue; trusting "package-lock.json present"
+# alone made that residue re-trigger the same wrong-manager self-repair on
+# every subsequent run — pnpm install -> judged unusable -> npm ci -> fresh
+# untracked package-lock.json -> repeat.
+#
+# Precedence:
+#   1. package.json's own "packageManager" field (e.g. "pnpm@11.20.0" -> pnpm)
+#   2. Whichever manager-specific lockfile the package's OWN git history
+#      tracks (pnpm-lock.yaml / yarn.lock beat an untracked package-lock.json)
+#   3. Whichever manager-specific lockfile merely exists on disk, still
+#      preferring pnpm-lock.yaml / yarn.lock over package-lock.json — an
+#      untracked package-lock.json is exactly the self-inflicted residue this
+#      function exists to stop trusting
+#   4. npm (unchanged default when nothing above resolves)
+#
+# Echoes exactly one of: pnpm, yarn, npm
+_mcp_resolve_package_manager() {
+    local pkg_dir="$1"
+    local pkg_json="${pkg_dir}/package.json"
+
+    if [[ -f "${pkg_json}" ]]; then
+        # `timeout` is not present on a bare macOS install; degrade to a
+        # direct call rather than hanging the caller.
+        local -a _py=()
+        if command -v timeout >/dev/null 2>&1; then
+            _py=(timeout 10 "${LOOM_PYTHON}")
+        else
+            _py=("${LOOM_PYTHON}")
+        fi
+
+        local declared
+        declared=$("${_py[@]}" -c "
+import json, sys
+try:
+    with open('${pkg_json}') as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)
+pm = cfg.get('packageManager')
+if isinstance(pm, str) and pm:
+    print(pm.split('@')[0].strip())
+" 2>/dev/null || echo "")
+        case "${declared}" in
+            pnpm|yarn|npm)
+                echo "${declared}"
+                return 0
+                ;;
+        esac
+    fi
+
+    # No explicit declaration — prefer a lockfile the package's own git
+    # history tracks over one that merely exists (the untracked-residue case).
+    local lock manager
+    for lock in pnpm-lock.yaml yarn.lock; do
+        if [[ -f "${pkg_dir}/${lock}" ]] && \
+           git -C "${pkg_dir}" ls-files --error-unmatch "${lock}" >/dev/null 2>&1; then
+            case "${lock}" in
+                pnpm-lock.yaml) echo "pnpm" ;;
+                yarn.lock)      echo "yarn" ;;
+            esac
+            return 0
+        fi
+    done
+
+    # Nothing tracked (not a git repo, or the tracked lockfile disagrees with
+    # what's on disk) — fall back to raw presence, pnpm/yarn still ranked
+    # ahead of package-lock.json so an untracked residue file never outranks
+    # a real pnpm/yarn lockfile.
+    if [[ -f "${pkg_dir}/pnpm-lock.yaml" ]]; then
+        echo "pnpm"
+        return 0
+    fi
+    if [[ -f "${pkg_dir}/yarn.lock" ]]; then
+        echo "yarn"
+        return 0
+    fi
+
+    echo "npm"
+}
+
+# True (rc 0) when <pkg_dir>/node_modules is missing, empty, or a broken
+# half-install — i.e. mechanically repairable by the resolved package
+# manager's install command rather than a genuine build-source error (#5032).
+#
+# "Broken half-install" is the laptop-host root cause: node_modules existed and
+# was non-empty, but node_modules/@modelcontextprotocol/sdk was an EMPTY
+# directory, so `npm run build` died with MODULE_NOT_FOUND exactly like a real
+# source error. Checking that every declared dependency resolves to a directory
+# containing its own package.json catches that case for an npm-shaped tree; a
+# `require` failure for a dependency the package never declared is correctly
+# NOT treated as repairable.
+_mcp_node_modules_unusable() {
+    local pkg_dir="$1"
+    local node_modules="${pkg_dir}/node_modules"
+
+    if [[ ! -d "${node_modules}" ]]; then
+        return 0
+    fi
+    if [[ -z "$(ls -A "${node_modules}" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    # A pnpm-managed tree is a symlink farm rooted at node_modules/.pnpm (or,
+    # under node-linker=hoisted, a flat tree pnpm itself wrote and records in
+    # node_modules/.modules.yaml) — not the npm-shaped
+    # "every declared dep flattened straight into node_modules/<dep>/" layout
+    # the walk below assumes. Re-deriving usability the npm way against a
+    # correctly-installed pnpm tree is exactly what converted a healthy
+    # install into "unusable" and triggered `npm ci` on it (#6779). Trust
+    # pnpm's own install bookkeeping instead.
+    if [[ "$(_mcp_resolve_package_manager "${pkg_dir}")" == "pnpm" ]]; then
+        if [[ -d "${node_modules}/.pnpm" ]] && \
+           [[ -n "$(ls -A "${node_modules}/.pnpm" 2>/dev/null)" ]]; then
+            return 1
+        fi
+        if [[ -f "${node_modules}/.modules.yaml" ]]; then
+            return 1
+        fi
+        return 0
+    fi
+
+    # `timeout` is not present on a bare macOS install; degrade to a direct
+    # call rather than losing the half-install detection entirely.
+    local -a _py=()
+    if command -v timeout >/dev/null 2>&1; then
+        _py=(timeout 10 "${LOOM_PYTHON}")
+    else
+        _py=("${LOOM_PYTHON}")
+    fi
+
+    local deps
+    deps=$("${_py[@]}" -c "
+import json, sys
+try:
+    with open('${pkg_dir}/package.json') as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)
+for section in ('dependencies', 'devDependencies'):
+    for name in (cfg.get(section) or {}):
+        print(name)
+" 2>/dev/null || echo "")
+
+    local dep
+    while IFS= read -r dep; do
+        [[ -z "${dep}" ]] && continue
+        if [[ ! -f "${node_modules}/${dep}/package.json" ]]; then
+            return 0
+        fi
+    done <<< "${deps}"
+
+    return 1
+}
+
+# After a self-repair reports SUCCESS but the follow-up build still fails, the
+# raw error is often as unhelpful as `sh: tsc: command not found` — accurate,
+# but it leaves the two very different explanations (a devDependency's binary
+# never actually installed vs. the build ran under the wrong package manager
+# for a devDependency the OTHER manager would have provided) for an operator
+# to rediscover from scratch every time (#6779). Name both candidate causes
+# instead of only surfacing the raw tool-not-found line.
+# $1 = path to a file holding the build's combined stdout+stderr
+# $2 = the package manager the build actually ran with (pnpm|yarn|npm)
+_mcp_build_failure_hint() {
+    local build_log="$1"
+    local manager="$2"
+
+    if grep -qE 'command not found|not recognized as an internal or external command' \
+        "${build_log}" 2>/dev/null; then
+        log_error "Likely cause: a devDependency's binary is missing from node_modules/.bin (partial install), or the build ran under the wrong package manager (resolved: ${manager}) for what this package actually declares. Check package.json's \"packageManager\" field and re-run '${manager} install' by hand."
+    fi
+}
+
+# Attempt to rebuild the MCP server and re-verify.
+#
+# Before running the build, self-repair a missing/empty/half-installed
+# node_modules with the resolved package manager's install command when its
+# own lockfile is present (#5032) — without a lockfile that install command
+# cannot run at all, so fall straight through to the build and let it report
+# the error. The manager is chosen once, up front, by
+# _mcp_resolve_package_manager (#6779) — never by which lockfile happens to
+# be sitting on disk, since a prior wrong-manager self-repair can itself leave
+# a stray lockfile behind.
+_try_mcp_rebuild() {
+    local mcp_entry="$1"
+
+    # Derive the package directory from the entry point
+    # e.g., /path/to/mcp-loom/dist/index.js -> /path/to/mcp-loom
+    local mcp_dir
+    mcp_dir=$(dirname "$(dirname "${mcp_entry}")")
+
+    if [[ ! -f "${mcp_dir}/package.json" ]]; then
+        log_error "MCP package directory not found at ${mcp_dir} - cannot rebuild"
+        return 1
+    fi
+
+    local manager
+    manager="$(_mcp_resolve_package_manager "${mcp_dir}")"
+
+    local mgr_bin node_bin node_dir
+    mgr_bin="$(_locate_node_tool "${manager}")" || mgr_bin=""
+    if [[ -z "${mgr_bin}" ]]; then
+        log_error "${manager} not found - cannot rebuild the MCP bundle at ${mcp_dir}"
+        log_error "Searched: $(_node_tool_search_paths "${manager}" | tr '\n' ' ')"
+        case "${manager}" in
+            pnpm) log_error "Set \$LOOM_PNPM_BIN to an absolute pnpm path, or install pnpm." ;;
+            yarn) log_error "Set \$LOOM_NODE_BIN to an absolute node path and ensure yarn is on PATH, or install yarn." ;;
+            *)    log_error "Set \$LOOM_NPM_BIN to an absolute npm path, or install node." ;;
+        esac
+        return 1
+    fi
+    # A package-manager shim execs `node`; a minimal PATH breaks it even once
+    # the manager itself is resolved, so put the resolved node's directory on
+    # PATH for the build subshells.
+    node_bin="$(_locate_node_tool node)" || node_bin=""
+    node_dir=""
+    [[ -n "${node_bin}" ]] && node_dir="$(dirname "${node_bin}")"
+
+    log_info "Attempting MCP server rebuild in ${mcp_dir} (package manager: ${manager})..."
+
+    local -a install_cmd=() build_cmd=()
+    local lockfile repair_hint
+    case "${manager}" in
+        pnpm)
+            install_cmd=(install --frozen-lockfile)
+            build_cmd=(run build)
+            lockfile="pnpm-lock.yaml"
+            repair_hint="cd ${mcp_dir} && pnpm install --frozen-lockfile && pnpm run build"
+            ;;
+        *)
+            # yarn falls through to the npm-shaped commands below rather than
+            # gaining its own self-repair path — #6779's acceptance criteria
+            # only require pnpm parity; a package declaring yarn without an
+            # npm lockfile simply reports "cannot self-repair" exactly like
+            # the pre-existing npm-without-lockfile case, and still attempts
+            # the build (unchanged behavior from before this fix).
+            install_cmd=(ci)
+            build_cmd=(run build)
+            lockfile="package-lock.json"
+            repair_hint="cd ${mcp_dir} && npm ci && npm run build"
+            ;;
+    esac
+
+    # Self-repair: an unusable dependency tree plus the manager's own lockfile
+    # is mechanically fixable — run the install command first.
+    if _mcp_node_modules_unusable "${mcp_dir}"; then
+        if [[ -f "${mcp_dir}/${lockfile}" ]]; then
+            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} - running '${manager} ${install_cmd[*]}' (self-repair)"
+            if ( set -o pipefail
+                 cd "${mcp_dir}" && PATH="${node_dir:+${node_dir}:}${PATH}" \
+                     "${mgr_bin}" "${install_cmd[@]}" 2>&1 | tail -5 ) >&2; then
+                log_info "${manager} ${install_cmd[*]} completed - dependency tree repaired"
+            else
+                # No network / corrupted lockfile / registry auth failure.
+                # Abort loudly: running the build on the same broken tree
+                # would only produce a confusing MODULE_NOT_FOUND.
+                log_error "${manager} ${install_cmd[*]} failed in ${mcp_dir} - cannot repair the MCP dependency tree"
+                log_error "Repair manually: ${repair_hint}"
+                return 1
+            fi
+        else
+            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} but no ${lockfile} - cannot self-repair with '${manager} ${install_cmd[*]}'"
+        fi
+    fi
+
+    # Run the build (suppressing verbose output), capturing the full combined
+    # output to a scratch file so a failure can be classified below without
+    # re-running the build.
+    local build_log
+    build_log=$(mktemp)
+    if ( set -o pipefail
+         cd "${mcp_dir}" && PATH="${node_dir:+${node_dir}:}${PATH}" \
+             "${mgr_bin}" "${build_cmd[@]}" 2>&1 | tee "${build_log}" | tail -5 ) >&2; then
+        log_info "MCP rebuild completed"
+        rm -f "${build_log}"
+    else
+        log_error "MCP rebuild failed"
+        _mcp_build_failure_hint "${build_log}" "${manager}"
+        rm -f "${build_log}"
+        log_error "Repair manually: ${repair_hint}"
+        return 1
+    fi
+
+    # Re-check after rebuild
+    if [[ ! -f "${mcp_entry}" ]]; then
+        log_error "MCP entry point still missing after rebuild: ${mcp_entry}"
+        return 1
+    fi
+
+    [[ -n "${node_bin}" ]] || node_bin="node"
+
+    if _mcp_smoke_test "${mcp_entry}" "${node_bin}"; then
+        log_info "MCP server health check passed after rebuild"
+        return 0
+    fi
+
+    log_error "MCP server still fails after rebuild"
+    if [[ -n "${MCP_SMOKE_TEST_STDERR}" ]]; then
+        log_error "MCP stderr after rebuild: ${MCP_SMOKE_TEST_STDERR}"
+    fi
+    if [[ -n "${MCP_SMOKE_TEST_STDOUT}" ]]; then
+        log_error "MCP stdout after rebuild: ${MCP_SMOKE_TEST_STDOUT}"
+    fi
+    return 1
+}
+
+# Pre-flight check: verify Claude CLI is available
+check_cli_available() {
+    if ! command -v claude &>/dev/null; then
+        log_error "Claude CLI not found in PATH"
+        log_error "Install with: npm install -g @anthropic-ai/claude-code"
+        return 1
+    fi
+    log_info "Claude CLI found: $(command -v claude)"
+    return 0
+}
+
+# --- Auth cache helpers ---
+# Prevent concurrent `claude auth status` calls from overwhelming the auth
+# endpoint when multiple agents start simultaneously (thundering-herd protection).
+# Cache is user-scoped and short-lived; any failure falls through to a direct call.
+
+# Return a random integer in [1, max] using $RANDOM (portable bash).
+# Used to add jitter and desynchronize concurrent agents.
+_auth_jitter() {
+    local max="${1:-5}"
+    echo $(( (RANDOM % max) + 1 ))
+}
+
+_auth_cache_file() {
+    echo "/tmp/claude-auth-cache-$(id -u).json"
+}
+
+_auth_lock_dir() {
+    echo "/tmp/claude-auth-cache-$(id -u).lock"
+}
+
+# Acquire the cache lock (non-blocking).
+# Returns 0 if acquired, 1 if another process holds it.
+# Cleans up stale locks older than AUTH_CACHE_STALE_LOCK_THRESHOLD first.
+_auth_cache_lock() {
+    local lock_dir
+    lock_dir=$(_auth_lock_dir)
+
+    # Clean up stale locks (process that created it likely died)
+    if [[ -d "${lock_dir}" ]]; then
+        local lock_age=0
+        if [[ "$(uname)" == "Darwin" ]]; then
+            lock_age=$(( $(date +%s) - $(stat -f '%m' "${lock_dir}" 2>/dev/null || echo "0") ))
+        else
+            lock_age=$(( $(date +%s) - $(stat -c '%Y' "${lock_dir}" 2>/dev/null || echo "0") ))
+        fi
+        if [[ "${lock_age}" -gt "${AUTH_CACHE_STALE_LOCK_THRESHOLD}" ]]; then
+            log_info "Removing stale auth cache lock (age: ${lock_age}s, threshold: ${AUTH_CACHE_STALE_LOCK_THRESHOLD}s)"
+            rmdir "${lock_dir}" 2>/dev/null || true
+        fi
+    fi
+
+    # Atomic lock acquisition via mkdir
+    mkdir "${lock_dir}" 2>/dev/null
+}
+
+# Release the cache lock.
+_auth_cache_unlock() {
+    local lock_dir
+    lock_dir=$(_auth_lock_dir)
+    rmdir "${lock_dir}" 2>/dev/null || true
+}
+
+# Read cached auth output if it exists and is within TTL.
+# On success, echoes the cached auth JSON output and returns 0.
+# Returns 1 if cache is missing, corrupt, or expired.
+#
+# Optional argument: $1 = TTL override (defaults to AUTH_CACHE_TTL).
+# Callers can pass AUTH_CACHE_GRACE_TTL when willing to accept slightly stale
+# data to avoid lock contention.  See issue #3109.
+_auth_cache_read() {
+    local ttl="${1:-${AUTH_CACHE_TTL}}"
+    local cache_file
+    cache_file=$(_auth_cache_file)
+
+    if [[ ! -f "${cache_file}" ]]; then
+        return 1
+    fi
+
+    # Parse cache: extract time, exit_code, and output
+    local cache_time cache_exit cached_output
+    cache_time=$(python3 -c "import json,sys; d=json.load(open('${cache_file}')); print(d['time'])" 2>/dev/null) || return 1
+    cache_exit=$(python3 -c "import json,sys; d=json.load(open('${cache_file}')); print(d['exit_code'])" 2>/dev/null) || return 1
+
+    # Check TTL
+    local now
+    now=$(date +%s)
+    local age=$(( now - cache_time ))
+    if [[ "${age}" -gt "${ttl}" ]]; then
+        return 1
+    fi
+
+    # Only use cache if the original call succeeded
+    if [[ "${cache_exit}" -ne 0 ]]; then
+        return 1
+    fi
+
+    # Extract the output field
+    cached_output=$(python3 -c "import json,sys; print(json.load(open('${cache_file}'))['output'])" 2>/dev/null) || return 1
+    echo "${cached_output}"
+    return 0
+}
+
+# Write auth output to the cache file.
+# Arguments: $1 = auth JSON output, $2 = exit code
+_auth_cache_write() {
+    local output="$1"
+    local exit_code="$2"
+    local cache_file
+    cache_file=$(_auth_cache_file)
+    local now
+    now=$(date +%s)
+
+    printf '%s' "${output}" | python3 -c "
+import json, sys
+data = {
+    'time': ${now},
+    'exit_code': ${exit_code},
+    'output': sys.stdin.read()
+}
+with open('${cache_file}', 'w') as f:
+    json.dump(data, f)
+" 2>/dev/null || true
+}
+
+# Pre-flight check: verify authentication status
+# Uses `claude auth status --json` to confirm the CLI is logged in.
+# When CLAUDE_CONFIG_DIR is set, passes it through so the check uses
+# the same config the session will use.
+check_auth_status() {
+    local auth_output
+    local auth_exit_code
+
+    # --- Step 1: Try cache first ---
+    local cached_output
+    if cached_output=$(_auth_cache_read); then
+        local logged_in
+        logged_in=$(echo "${cached_output}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('loggedIn', False))" 2>/dev/null || echo "")
+        if [[ "${logged_in}" == "True" ]]; then
+            log_info "Authentication check passed (cached)"
+            return 0
+        fi
+        # Cache says not logged in — fall through to fresh check
+    fi
+
+    # --- Step 2: Try to acquire lock for fresh check ---
+    local lock_acquired=false
+    if _auth_cache_lock; then
+        lock_acquired=true
+    else
+        # Another process is refreshing the cache.
+        # First, check if we have a recently-expired-but-still-trustworthy cached
+        # result (within AUTH_CACHE_GRACE_TTL).  Auth tokens have long lifetimes so
+        # a result from a few minutes ago is almost certainly still valid.  Using the
+        # grace TTL avoids the cascading delay pattern where N agents each wait 60s
+        # for the lock holder.  See issue #3109.
+        if cached_output=$(_auth_cache_read "${AUTH_CACHE_GRACE_TTL}"); then
+            local logged_in
+            logged_in=$(echo "${cached_output}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('loggedIn', False))" 2>/dev/null || echo "")
+            if [[ "${logged_in}" == "True" ]]; then
+                log_info "Authentication check passed (grace-TTL cache, lock held by another process)"
+                return 0
+            fi
+        fi
+
+        # No usable grace cache — wait briefly for the lock holder to finish
+        log_info "Auth cache lock held by another process, waiting up to ${AUTH_CACHE_LOCK_WAIT}s..."
+        local wait_elapsed=0
+        while [[ "${wait_elapsed}" -lt "${AUTH_CACHE_LOCK_WAIT}" ]]; do
+            sleep 2
+            wait_elapsed=$((wait_elapsed + 2))
+            if cached_output=$(_auth_cache_read); then
+                local logged_in
+                logged_in=$(echo "${cached_output}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('loggedIn', False))" 2>/dev/null || echo "")
+                if [[ "${logged_in}" == "True" ]]; then
+                    log_info "Authentication check passed (cached, after ${wait_elapsed}s wait)"
+                    return 0
+                fi
+            fi
+        done
+        # Still stale — fall through to direct check with jitter to desynchronize
+        local jitter
+        jitter=$(_auth_jitter 5)
+        log_info "Auth cache still stale after ${AUTH_CACHE_LOCK_WAIT}s wait, proceeding with direct check (jitter: ${jitter}s)"
+        sleep "${jitter}"
+    fi
+
+    # --- Step 3: Existing retry logic (with cache write on success) ---
+    local max_retries=3
+    local -a backoff_seconds=(2 5 10)
+
+    for (( attempt=1; attempt<=max_retries; attempt++ )); do
+        auth_exit_code=0
+
+        # Refresh lock mtime so other processes don't consider it stale
+        # while we're still actively retrying
+        if [[ "${lock_acquired}" == "true" ]]; then
+            touch "$(_auth_lock_dir)" 2>/dev/null || true
+        fi
+
+        # Unset CLAUDECODE to avoid nested-session guard when running inside
+        # a Claude Code session (e.g., during testing or shepherd-spawned builds).
+        # Use timeout to prevent hanging after a long first attempt leaves
+        # auth in a bad state (see issue #2472).
+        auth_output=$(timeout 15 bash -c 'CLAUDECODE="" claude auth status --json 2>&1') || auth_exit_code=$?
+
+        # timeout exits with 124 when the command times out
+        if [[ "${auth_exit_code}" -eq 124 ]]; then
+            if (( attempt < max_retries )); then
+                local backoff=${backoff_seconds[$((attempt - 1))]}
+                local jitter
+                jitter=$(_auth_jitter 3)
+                backoff=$((backoff + jitter))
+                log_info "Authentication check timed out (attempt ${attempt}/${max_retries}), retrying in ${backoff}s (includes ${jitter}s jitter)..."
+                sleep "${backoff}"
+                continue
+            fi
+            log_warn "Authentication check timed out after ${max_retries} attempts"
+            [[ "${lock_acquired}" == "true" ]] && _auth_cache_unlock
+            return 1
+        fi
+
+        if [[ "${auth_exit_code}" -ne 0 ]]; then
+            log_warn "Authentication check command failed (exit ${auth_exit_code})"
+            log_warn "Output: ${auth_output}"
+            if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+                log_warn "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}"
+                log_warn "Run: CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR} claude auth login"
+            else
+                log_warn "Run: claude auth login"
+            fi
+            [[ "${lock_acquired}" == "true" ]] && _auth_cache_unlock
+            return 1
+        fi
+
+        # Write successful result to cache (best-effort)
+        _auth_cache_write "${auth_output}" "${auth_exit_code}"
+
+        # Parse the loggedIn field from JSON output
+        local logged_in
+        logged_in=$(echo "${auth_output}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('loggedIn', False))" 2>/dev/null || echo "")
+
+        if [[ "${logged_in}" != "True" ]]; then
+            log_warn "Authentication check failed: not logged in"
+            if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+                log_warn "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}"
+                log_warn "Run: CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR} claude auth login"
+            else
+                log_warn "Run: claude auth login"
+            fi
+            [[ "${lock_acquired}" == "true" ]] && _auth_cache_unlock
+            return 1
+        fi
+
+        log_info "Authentication check passed (logged in)"
+        [[ "${lock_acquired}" == "true" ]] && _auth_cache_unlock
+        return 0
+    done
+
+    # Should not reach here, but guard against it
+    log_warn "Authentication check failed after ${max_retries} attempts"
+    [[ "${lock_acquired}" == "true" ]] && _auth_cache_unlock
+    return 1
+}
+
+# Pre-flight check: verify API is reachable
+# Uses a lightweight HEAD request to api.anthropic.com
+check_api_reachable() {
+    local timeout=10
+
+    # Try curl first (most common)
+    if command -v curl &>/dev/null; then
+        if curl --silent --head --max-time "${timeout}" https://api.anthropic.com/ &>/dev/null; then
+            log_info "API endpoint reachable (curl)"
+            return 0
+        fi
+    fi
+
+    # Fallback to nc (netcat)
+    if command -v nc &>/dev/null; then
+        if nc -z -w "${timeout}" api.anthropic.com 443 2>/dev/null; then
+            log_info "API endpoint reachable (nc)"
+            return 0
+        fi
+    fi
+
+    log_warn "Could not verify API reachability (continuing anyway)"
+    return 0  # Don't fail on network check - let Claude CLI handle it
+}
+
+# --- Retry / rotation classification (ported to Rust in #8037, #8138) -------
+#
+# Six predicates decide whether a sweep retries, rotates to another account,
+# marks a credential dead, or dies, and how long it waits between attempts:
+# is_transient_error, is_account_exhaustion, is_account_auth_dead,
+# is_account_session_limit, is_mcp_error and calculate_wait_time. All six are
+# now `loom-daemon retry-classify` (loom-daemon/src/retry_classify/); what is
+# left here is the argv that asks it, plus each one's fail-safe when it cannot
+# be asked. The evidence that the move preserved behaviour is
+# defaults/scripts/tests/test-claude-wrapper-retry.sh (#8032), whose assertions
+# were written against the pre-port shell and run unchanged against the port.
+#
+# What deliberately did NOT move INTO THIS FILE'S LOGIC: `classify_error` and
+# `classification_is_transient`. Those belong to lib/classify-error.sh, which
+# every runtime adapter sources and which is, per #4501, the fleet's single
+# source of truth for whether a category is retryable. A second copy of that
+# deny-list here would recreate the exact defect #4501 fixed — two
+# independent verdict systems printing contradictory conclusions about one
+# failure. So the classifier still answers WHAT this failure is (and, since
+# #11208, does so natively via `loom-daemon classify-error` whenever a daemon
+# binary resolves — the library delegates and falls back to its in-file
+# tables; from this file's point of view nothing changed); the port owns WHAT
+# THE WRAPPER DOES about it.
+#
+# #8138 moved a seventh across the same boundary, for the same reason: the
+# `[model-class:...]` scoping decision (#8058) that rotate_exhausted_account
+# applies to its own .bad_tokens mark. It does not choose BETWEEN remedies, it
+# narrows the one is_account_exhaustion already chose, which is squarely "what
+# the wrapper does about it" — and it consults `classify_error` exactly as the
+# six above do, through the same --classification flag.
+#
+# Both of the library's modes moved together (#8032): when classify-error.sh
+# was sourced the category travels with the question, and when it was not,
+# --classification is OMITTED — the absence of the flag is how the degraded
+# path is selected, and the port then applies the same hand-rolled fallback
+# regexes this file used to carry inline.
+
+# The loom-daemon that IMPLEMENTS retry-classify — NOT $LOOM_DAEMON_BIN /
+# loom_locate_daemon_bin, which name the installed daemon this wrapper DRIVES
+# for token-pool operations and which may be an older release with no
+# retry-classify subcommand at all. That is #7977's category error, and
+# lib/locate-daemon-bin.sh carries both resolutions side by side so the
+# distinction is unmissable.
+#
+# Resolved once per process. The empty string is a resolved answer ("none"),
+# which is why the _RESOLVED flag is a separate variable rather than an
+# emptiness test.
+_RETRY_CLASSIFY_BIN=""
+_RETRY_CLASSIFY_BIN_RESOLVED=""
+_retry_classify_bin() {
+    if [[ -z "${_RETRY_CLASSIFY_BIN_RESOLVED}" ]]; then
+        _RETRY_CLASSIFY_BIN_RESOLVED=1
+        if declare -F loom_resolve_self_daemon_bin >/dev/null 2>&1; then
+            _RETRY_CLASSIFY_BIN="$(loom_resolve_self_daemon_bin)"
+        fi
+    fi
+    [[ -n "${_RETRY_CLASSIFY_BIN}" ]]
+}
+
+# _retry_classify <subcommand> <output> <exit_code> [extra_args...]
+#
+# Asks the delegate one question. Sets _RETRY_CLASSIFY_OUT to its stdout and
+# returns its verdict:
+#   0  the predicate holds
+#   1  it does not
+#   3  it could not be asked — no binary resolved, or one predating the port
+#      (clap answers an unknown subcommand with exit 2, and a SIGPIPE'd feed
+#      with 141). Neither may be read as a confident "no", so every caller maps
+#      3 to its own documented fail-safe instead.
+#
+# The child transcript travels on stdin, never in argv: it is routinely
+# megabytes of CLI output, which argv cannot hold.
+#
+# `--classification` is attached here, uniformly, whenever classify-error.sh is
+# sourced — including for `mcp-error`, which has no library path and ignores it.
+# One argv shape for every predicate is worth more than eliding a `classify_error`
+# call. Its ABSENCE is what selects the degraded arm, which is why it is not
+# spelled as an empty value; and the library counts as available only when BOTH
+# functions are defined, since they come from the same file and a half-sourced
+# library is not a state that occurs.
+#
+# Anything after <exit_code> is passed through to the subcommand verbatim, for
+# the one flag that is NOT part of the shared shape: `model-class --model`
+# (#8138). It is deliberately not hoisted into the uniform argv above — a
+# `retry-classify` binary predating #8138 rejects an unknown argument outright
+# (clap exits 2), so sending `--model` to all seven subcommands would turn a
+# routine version skew into a fail-safe verdict for the OTHER six. Attached only
+# to the subcommand that such a binary does not have either, it costs nothing:
+# the whole invocation already falls to rc 3.
+_RETRY_CLASSIFY_OUT=""
+_retry_classify() {
+    local subcommand="$1" output="$2" exit_code="$3" rc=0 args=("${@:4}")
+    _RETRY_CLASSIFY_OUT=""
+    _retry_classify_bin || return 3
+    if declare -F classify_error >/dev/null 2>&1 \
+       && declare -F classification_is_transient >/dev/null 2>&1; then
+        local category
+        category="$(classify_error "${output}" "${exit_code}")"
+        args+=(--classification "${category}")
+        # The deny-list verdict travels WITH the category: classify-error.sh
+        # owns it (#4501), the port consumes it.
+        if classification_is_transient "${category}"; then args+=(--classification-transient); fi
+    fi
+    _RETRY_CLASSIFY_OUT="$(printf '%s\n' "${output}" \
+        | "${_RETRY_CLASSIFY_BIN}" retry-classify "${subcommand}" --stdin \
+              --exit-code "${exit_code}" ${args[@]+"${args[@]}"} 2>/dev/null)" || rc=$?
+    [[ "${rc}" -le 1 ]] || rc=3
+    return "${rc}"
+}
+
+# A predicate whose fail-safe is FALSE. Used by every rotation predicate below:
+# each of their remedies (mark-bad, re-select) needs the very loom-daemon that
+# did not resolve, so with no verdict there is no remedy to route to either —
+# the attempt falls through to the retry path, which fails safe on its own.
+_retry_classify_bool() {
+    local rc=0
+    _retry_classify "$@" || rc=$?
+    [[ "${rc}" -eq 0 ]]
+}
+
+# The category `is_transient_error` last derived its verdict from, exported so
+# the caller's log line can name the SAME verdict it acted on (issue #4501).
+# Initialized here so `set -u` is safe even if a caller reads it before the
+# first classification.
+_LAST_ERROR_CLASSIFICATION="UNCLASSIFIED"
+
+# Detect if error output indicates a transient/retryable error.
+#
+# Issue #4501: this predicate USED to carry its own array of transient phrasings,
+# entirely disjoint from `classify-error.sh`'s pattern tables. That made the
+# retry decision and the printed classification two independent verdict systems,
+# which produced this self-contradicting permanent-death block on a live host:
+#
+#   [ERROR] Non-transient error detected - not retrying
+#   [ERROR] exit_code=1 classification=RECOVERABLE
+#
+# The verdict is derived from `classify_error`'s category via the shared
+# `classification_is_transient` deny-list, so the two can never disagree again.
+# Notable consequences, all intentional:
+#   * An UNRECOGNIZED non-zero exit is retried (the catch-all category is
+#     RECOVERABLE) instead of dying on attempt 1 — bounded by MAX_RETRIES and
+#     exponential backoff.
+#   * Genuinely terminal categories (TOKEN_EXPIRED, CWD_DELETED, MODEL_REFUSAL,
+#     FATAL, TIMEOUT) are still NOT retried.
+#   * The wrapper's own RATE_LIMIT_ABORT sentinel is NOT transient and outranks
+#     any category — rotation consumes it first, and reaching here means
+#     rotation was capped or the pool was empty, so retrying would only hit the
+#     same limit.
+# The ordering and the degraded fallback now live in
+# `loom_daemon::retry_classify::is_transient`.
+#
+# Unlike the rotation predicates, its fail-safe when the delegate cannot be
+# asked is TRUE (retry a non-zero exit, bounded by MAX_RETRIES): refusing to
+# retry is the failure mode this policy has twice been bitten by (#4255,
+# #4501), while an over-retry costs only a bounded backoff. The one thing the
+# pre-port shell logged that this does not is a separate "classify-error.sh not
+# sourced" warning — the retry line below now names `classification=UNCLASSIFIED`
+# in that case, which says the same thing at the point of the decision.
+is_transient_error() {
+    local output="$1" exit_code="${2:-1}" rc=0
+
+    _retry_classify transient "${output}" "${exit_code}" || rc=$?
+    if [[ "${rc}" -ge 2 ]]; then
+        _LAST_ERROR_CLASSIFICATION="UNCLASSIFIED"
+        log_warn "loom-daemon retry-classify unavailable — treating a non-zero exit as transient (bounded by MAX_RETRIES)"
+        [[ "${exit_code}" -ne 0 ]]
+        return
+    fi
+    _LAST_ERROR_CLASSIFICATION="${_RETRY_CLASSIFY_OUT:-UNCLASSIFIED}"
+    [[ "${rc}" -ne 0 ]] || log_info "Transient error (classification=${_LAST_ERROR_CLASSIFICATION}) - retrying"
+    return "${rc}"
+}
+
+# Issue #4255: emit a structured, self-diagnosing block when the wrapper gives
+# up on a child PERMANENTLY (a non-transient error, or the retry budget
+# exhausted). Before this, a daemon-dispatched sweep that died left only the
+# child's raw output — often the single opaque line `Execution error` — in
+# `.loom/logs/sweep-issue-<N>.log`, with no exit code, no error classification,
+# and no stderr context, so every forensic pass had to guess. This records the
+# exit code, the `classify-error.sh` verdict, and the tail of the captured
+# stdout+stderr so a permanent death is diagnosable straight from the sweep log.
+#
+#   log_permanent_death <exit_code> <output> [reason]
+LOOM_DEATH_TAIL_LINES="${LOOM_DEATH_TAIL_LINES:-20}"
+log_permanent_death() {
+    local exit_code="$1"
+    local output="$2"
+    local reason="${3:-permanent failure}"
+
+    # Prefer the verdict the retry loop ACTED on (#4501). Both call sites reach
+    # here right after `is_transient_error` classified this exact
+    # `(output, exit_code)` pair, so reusing its cached category is equivalent by
+    # construction *and* removes the last way the printed classification could
+    # differ from the one the retry decision used (e.g. the wrapper's own
+    # RATE_LIMIT_ABORT sentinel, which classify_error would report as the generic
+    # RECOVERABLE). Falls back to a fresh classification for a direct caller.
+    local classification="${_LAST_ERROR_CLASSIFICATION:-UNCLASSIFIED}"
+    if [[ "${classification}" == "UNCLASSIFIED" ]] && declare -F classify_error >/dev/null 2>&1; then
+        classification="$(classify_error "${output}" "${exit_code}" 2>/dev/null || echo "UNCLASSIFIED")"
+    fi
+
+    local tail_text
+    tail_text="$(printf '%s\n' "${output}" | tail -n "${LOOM_DEATH_TAIL_LINES}")"
+
+    log_error "=== claude-wrapper: permanent death (${reason}) ==="
+    log_error "exit_code=${exit_code} classification=${classification}"
+    log_error "stderr/stdout tail (last ${LOOM_DEATH_TAIL_LINES} lines):"
+    # Emit the tail as discrete log lines so timestamps and the [ERROR] prefix
+    # bracket the captured block in the sweep log.
+    while IFS= read -r _line; do
+        log_error "  | ${_line}"
+    done <<< "${tail_text}"
+    log_error "=== end permanent-death diagnostics ==="
+}
+
+# --- Account rotation on usage/session-limit exhaustion (issue #3738) ---
+#
+# When the active OAuth account hits a session / weekly / usage limit, the
+# right response is NOT to die (the historical behaviour: the RATE_LIMIT_ABORT
+# sentinel was classified fatal, killing the whole worker) and NOT to burn a
+# transient-backoff retry against the same, now-exhausted account. Instead we
+# mark the account exhausted, re-run Loom token selection (which now skips it),
+# and retry on a fresh account WITHOUT consuming a MAX_RETRIES attempt. The
+# pool is finite and each rotation marks one account bad, so this terminates:
+# when selection reports no eligible account we emit a distinct
+# ACCOUNT_POOL_EXHAUSTED sentinel and exit non-zero.
+
+# Return 0 if the captured output indicates the active account is exhausted.
+# The wrapper's own RATE_LIMIT_ABORT sentinel IS exhaustion — the mirror of it
+# not being transient — regardless of what any classifier makes of the text.
+# Otherwise the shared classifier's verdict decides: TOKEN_EXHAUSTED, and
+# MODEL_CREDITS_EXHAUSTED (#5687) alongside it. The latter is a distinct
+# category so the in-session sweep orchestrator can name the signature it
+# downgrades models on, but on THIS (subprocess-supervision) path there is no
+# per-call model knob, so the response is byte-identical: rotate, and mark this
+# account exhausted. Falls back to the hand-rolled regex (kept in lockstep with
+# #4501's per-model ceiling and #5687's credits family) when classify-error.sh
+# was not sourced — see `loom_daemon::retry_classify::is_account_exhaustion`,
+# which now carries both arms and the exit-code conjunction on the fallback.
+is_account_exhaustion() { _retry_classify_bool account-exhaustion "$1" "${2:-1}"; }
+
+# --- Account rotation on an auth-dead (401 / invalid-bearer-token) credential
+# (issue #6030) ---
+#
+# Observed 2026-08-11 on a fleet host: a wave of daemon-dispatched children
+# died within minutes, each ending in
+#   [ERROR]   | Failed to authenticate. API Error: 401 Invalid bearer token
+# This is a DIFFERENT failure class from `is_account_exhaustion` above — an
+# exhausted account recovers on its own once its quota window resets; an
+# auth-dead one (a revoked/invalid OAuth token) fails EVERY dispatch forever
+# until a human re-authenticates it. Before this, a 401-invalid-bearer death
+# matched no `classify_error` category (see `lib/classify-error.sh`'s #6030
+# comment), so it fell through to the RECOVERABLE catch-all: the wrapper
+# retried the same dead credential with backoff until MAX_RETRIES, then died
+# with `classification=RECOVERABLE` — never marking the account bad, so the
+# NEXT spawn could select the exact same auth-dead account again with no
+# memory of the failure.
+#
+# Return 0 if the captured output indicates the active account's credential is
+# dead (needs re-authentication), not merely out of quota.
+# TOKEN_EXPIRED on the library path; on the degraded path the same hand-rolled
+# pattern this function used to carry (including #6614's JSON-envelope and
+# revoked-token phrasings), conjoined with a non-zero exit. Both arms live in
+# `loom_daemon::retry_classify::is_account_auth_dead`.
+is_account_auth_dead() { _retry_classify_bool auth-dead "$1" "${2:-1}"; }
+
+# Echo a short human phrase describing why the account was considered
+# auth-dead (used as the .bad_tokens reason string and the rotation log line).
+_auth_dead_phrase() {
+    local output="$1"
+    local m
+    # Kept in lockstep with `lib/classify-error.sh`'s TOKEN_EXPIRED pattern.
+    # `authentication_error` appears bare (no `401` prefix, no quotes) so the
+    # JSON-enveloped 401 of #6614 yields a clean phrase for the `.bad_tokens`
+    # reason string instead of falling through to the generic default — grep
+    # returns the LEFTMOST match, so the quoted `"type":"` wrapper is never
+    # captured with it. #11205's Claude Code phrasings name themselves too.
+    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been |was )?revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired|OAuth access token is invalid|OAuth session expired|401 Invalid API key" | head -1)"
+    echo "${m:-401/invalid credential}"
+}
+
+# Return 0 if the captured output indicates a concurrent-session-limit fault
+# (#3947): the active account is healthy but cannot start another simultaneous
+# session right now. This is a capacity signal from per-token session stacking,
+# NOT quota exhaustion — the caller re-selects a different account WITHOUT
+# marking the current one bad. Defers to the shared classifier's distinct
+# SESSION_LIMIT category, with an inline regex fallback if the lib wasn't sourced.
+is_account_session_limit() { _retry_classify_bool session-limit "$1" "${2:-1}"; }
+
+# Re-select a DIFFERENT rotation account WITHOUT marking the current one bad
+# (#3947). Used for concurrent-session-limit faults: the account isn't broken,
+# it just can't take another simultaneous session, so we spread to a sibling
+# and retry. Advances the rotation cursor (native `loom-daemon tokens select`,
+# cut over from `loom_tools.tokens.select` in issue #4228) so a healthy
+# sibling is preferred over re-picking the saturated account. Returns 0 when a
+# new token was exported, 1 when selection yielded nothing (including "no
+# loom-daemon binary resolved" — the same observable failure a broken Python
+# selector used to produce).
+reselect_account_no_mark() {
+    _proxied_launch && { _proxy_rotate concurrent-session && return 0 || return 1; }
+    local ws daemon_bin
+    ws="$(_resolve_token_workspace)"
+    daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "${ws}" || true)"
+    if [[ -z "${daemon_bin}" ]]; then
+        log_warn "No loom-daemon binary resolved — cannot re-select an OAuth account"
+        return 1
+    fi
+    _select_rotation_account "${ws}" "${daemon_bin}" || return 1
+    log_info "Re-selected OAuth account → '${ACTIVE_TOKEN_NAME}' after concurrent-session limit (token NOT marked bad)"
+    return 0
+}
+
+# Run Loom token selection (which skips bad-marked accounts) and export the
+# pick into CLAUDE_CODE_OAUTH_TOKEN / LOOM_TOKEN_NAME / ACTIVE_TOKEN_NAME. The
+# shared tail of all three rotation helpers (one call site, so the #8146
+# `env -u LOOM_ROLE` invariant has exactly one place to hold). Returns 1 when
+# selection yields nothing.
+#
+# #8058: scope selection to the model class this wrapper is running, so an
+# account bad-marked only for another class stays eligible. The helper emits
+# nothing when LOOM_MODEL is unset or the resolved daemon binary predates
+# `--model`, which is why the expansion is deliberately unquoted (it is either
+# two words or none) and why a missing helper -- an older
+# lib/locate-daemon-bin.sh mid-resync -- degrades to plain selection. The class
+# comes from LOOM_MODEL, not from an explicit `--model` in this wrapper's own
+# args: the daemon path sets both (spawn-claude.sh exports LOOM_MODEL and
+# appends the flag), and on the rare path where they disagree a mismatch costs
+# at most one extra rotation -- never a wrong mark, since marking is gated
+# separately by `retry-classify model-class`.
+# #8146: `env -u LOOM_ROLE` is load-bearing here, not hygiene. `tokens select
+# --role` reads LOOM_ROLE straight from the environment (clap `env =`), and the
+# role runner exports it into every spawn, so leaving it set would hand this
+# call the prompt-cache affinity key -- which names the very account we are
+# rotating AWAY from. reselect_account_no_mark does not bad-mark, so that
+# account is still a candidate; affinity would re-pick it every time and burn
+# the retry budget on the same limit. The two bad-marking paths already exclude
+# the failed account, but unsetting keeps the invariant true end-to-end and
+# stops a rotation re-recording the affinity key.
+_select_rotation_account() {
+    local ws="$1" daemon_bin="$2" sel_output _sel_rc
+    set +e
+    # shellcheck disable=SC2046
+    sel_output="$(env -u LOOM_ROLE "${daemon_bin}" tokens select --workspace "${ws}" --export $(declare -F loom_daemon_model_select_flag >/dev/null 2>&1 && loom_daemon_model_select_flag "${daemon_bin}" "${LOOM_MODEL:-}" || true) 2>/dev/null)"
+    _sel_rc=$?
+    set -e
+    [[ ${_sel_rc} -eq 0 && -n "${sel_output}" ]] || return 1
+    # `--export` emits shell-evalable `export CLAUDE_CODE_OAUTH_TOKEN=...` /
+    # `export LOOM_TOKEN_NAME=...` lines (issue #4228).
+    eval "${sel_output}"
+    [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || return 1
+    ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
+}
+
+# --- Proxied launch (#8818) ---
+# Under the Claude credential egress proxy (#8697) this wrapper runs inside a
+# container whose token pool is masked and whose CLAUDE_CODE_OAUTH_TOKEN is a
+# per-launch `loom-placeholder-…`, so `tokens mark-bad` / `tokens select` here
+# would lose the mark and find no account. Instead the HOST rotates:
+# `worker proxy-rotate` asks the proxy to bad-mark this launch's current
+# account (the request carries only a reason from a fixed vocabulary -- never an
+# account, credential or upstream) and swap a fresh credential in behind the
+# SAME placeholder, so the retry needs no new value. It prints only
+# `export LOOM_TOKEN_NAME=…` for attribution. `$2` non-empty narrows an
+# exhaustion mark to the host's model class (#8058).
+# requires-daemon: worker optional   #8818 — only on the opt-in proxied path; an in-container binary predating `worker proxy-rotate` fails the rotation exactly as before this change (ACCOUNT_POOL_EXHAUSTED), never an unproxied fallback.
+_proxied_launch() { [[ "${CLAUDE_CODE_OAUTH_TOKEN:-}" == loom-placeholder-* ]]; }
+_proxy_rotate() {
+    local daemon_bin out
+    daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "$(_resolve_token_workspace)" || true)"
+    if [[ -z "${daemon_bin}" ]]; then
+        log_warn "No loom-daemon binary resolved — cannot ask the host proxy to rotate the OAuth account"
+        return 1
+    fi
+    out="$("${daemon_bin}" worker proxy-rotate --reason "$1" ${2:+--model-scoped})" || return 1
+    eval "${out}"
+    ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
+    log_info "Host-side proxy rotated OAuth account → '${ACTIVE_TOKEN_NAME}' (reason=$1; credential never entered this container)"
+}
+
+# Echo a short human phrase describing why the account was considered
+# exhausted (used as the .bad_tokens reason string).
+_exhaustion_phrase() {
+    local output="$1"
+    if echo "${output}" | grep -q "RATE_LIMIT_ABORT"; then
+        echo "usage/plan limit modal (RATE_LIMIT_ABORT)"
+        return
+    fi
+    local m
+    # Kept in lockstep with the classifier's TOKEN_EXHAUSTED regex so the
+    # rotation log line quotes the phrase that actually fired — including the
+    # per-model "reached your <model> limit" ceiling added in #4501 (which
+    # names the constrained model, e.g. "reached your Fable 5 limit") and the
+    # per-model-tier credit exhaustion added in #5687 ("out of usage credits").
+    m="$(echo "${output}" | grep -ioE "hit your ([^[:space:]]+[[:space:]]+){0,3}limit|monthly usage limit|out of extra usage|used 100% of your weekly limit|reached your ([^[:space:]]+[[:space:]]+){0,3}limit|out of (usage |extra |plan )?credits|no (usage |extra |plan )?credits (remaining|left)|insufficient (usage |plan )?credits" | head -1)"
+    echo "${m:-usage limit}"
+}
+
+# Resolve the workspace whose .loom/tokens/ holds the account pool. Mirrors
+# spawn-claude.sh: LOOM_WORKSPACE wins, else the canonical repo root (so a
+# worktree shares the main checkout's token pool), else the wrapper's WORKSPACE.
+_resolve_token_workspace() {
+    if [[ -n "${LOOM_WORKSPACE:-}" ]]; then
+        printf '%s\n' "${LOOM_WORKSPACE}"
+        return
+    fi
+    local gcd
+    if gcd="$(git rev-parse --git-common-dir 2>/dev/null)"; then
+        [[ "${gcd}" = /* ]] || gcd="$(cd "${gcd}" && pwd 2>/dev/null || echo "${gcd}")"
+        printf '%s\n' "$(dirname "${gcd}")"
+        return
+    fi
+    printf '%s\n' "${WORKSPACE}"
+}
+
+# Fallback identification of the active account when LOOM_TOKEN_NAME is unset:
+# content-match the exported token against .loom/tokens/*.token. Deterministic
+# (exact content compare) — deliberately avoids lean-genius's `ls -t | head -1`
+# mtime heuristic, which mispicks the wrong account under concurrent spawns.
+_derive_token_name() {
+    local ws="$1" tok="$2"
+    [[ -n "${tok}" ]] || return 1
+    local tokens_dir="${ws}/.loom/tokens" f content
+    [[ -d "${tokens_dir}" ]] || return 1
+    for f in "${tokens_dir}"/*.token; do
+        [[ -e "${f}" ]] || continue
+        content="$(cat "${f}" 2>/dev/null)"
+        if [[ "${content}" == "${tok}" ]]; then
+            basename "${f}" .token
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Mark the active account exhausted in .loom/tokens/.bad_tokens, then re-run
+# Loom token selection (which now skips it) and re-export
+# CLAUDE_CODE_OAUTH_TOKEN. Reuses the existing Loom primitives via the native
+# `loom-daemon tokens mark-bad` / `tokens select` CLI (cut over from
+# `loom_tools.tokens.bad_tokens.mark_bad` + `loom_tools.tokens.select` in
+# issue #4228) rather than reimplementing lean-genius's raw file-glob.
+# Returns 0 on success (a new account is exported), 1 when the pool has no
+# eligible account left (or no loom-daemon binary resolves).
+#
+# `$2` / `$3` (optional, issue #8058) are the captured child output and its exit
+# code. They are read positionally at the mark-bad call below rather than copied
+# into locals, so this function gains no lines: `retry-classify model-class`
+# needs them to decide whether the death was scoped to ONE model class, and if
+# so the `.bad_tokens` entry is scoped to `$LOOM_MODEL`'s class instead of
+# blocking the account outright. Omitted, or unscopable, yields the pre-#8058
+# account-wide mark unchanged.
+rotate_exhausted_account() {
+    local reason="$1"
+    # Proxied (#8818): the host marks + swaps. "session limit" picks the 5h
+    # window's shorter hold (#7522); the scope flag mirrors the mark below.
+    _proxied_launch && { _proxy_rotate "$(grep -qi 'session limit' <<<"${reason}" && echo session-window || echo usage-limit)" "$(_retry_classify model-class "${2:-}" "${3:-1}" --model "${LOOM_MODEL:-}" && printf '%s' "${_RETRY_CLASSIFY_OUT}" || true)" && return 0 || return 1; }
+    local ws daemon_bin
+    ws="$(_resolve_token_workspace)"
+    daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "${ws}" || true)"
+
+    if [[ -z "${ACTIVE_TOKEN_NAME}" ]]; then
+        ACTIVE_TOKEN_NAME="$(_derive_token_name "${ws}" "${CLAUDE_CODE_OAUTH_TOKEN:-}" || true)"
+    fi
+
+    if [[ -z "${daemon_bin}" ]]; then
+        log_warn "No loom-daemon binary resolved — cannot mark '${ACTIVE_TOKEN_NAME:-unknown}' bad or re-select"
+        return 1
+    fi
+
+    if [[ -n "${ACTIVE_TOKEN_NAME}" ]]; then
+        # The `[model-class:...]` suffix (#8058) still rides inside the existing
+        # free-form reason field, so `tokens mark-bad` needs no new flag and
+        # ${daemon_bin} -- the INSTALLED daemon, possibly an old release -- is
+        # unaffected by this. What computes the suffix is the SELF daemon
+        # (#8138, `retry-classify model-class`), reached through the same
+        # _retry_classify bridge as every other rotation predicate: rc 3 (no
+        # implementation resolved, or one predating the subcommand) leaves
+        # _RETRY_CLASSIFY_OUT empty, which is the pre-#8058 account-wide mark.
+        # `$2`/`$3` are this function's optional output / exit-code arguments;
+        # see the header.
+        if "${daemon_bin}" tokens mark-bad "${ACTIVE_TOKEN_NAME}" \
+            --reason "exhausted: ${reason}$(_retry_classify model-class "${2:-}" "${3:-1}" --model "${LOOM_MODEL:-}" && printf '%s' "${_RETRY_CLASSIFY_OUT}" || true)" --workspace "${ws}" >/dev/null 2>&1; then
+            log_info "Marked account '${ACTIVE_TOKEN_NAME}' exhausted in .bad_tokens (${reason})"
+        else
+            log_warn "Could not record '${ACTIVE_TOKEN_NAME}' in .bad_tokens (continuing to re-select)"
+        fi
+    else
+        log_warn "Active account name unknown — cannot mark it bad; re-selecting anyway"
+    fi
+
+    _select_rotation_account "${ws}" "${daemon_bin}" || return 1
+    log_info "Rotated OAuth account → '${ACTIVE_TOKEN_NAME}' (token tail=…${CLAUDE_CODE_OAUTH_TOKEN: -4})"
+    return 0
+}
+
+# Mark the active account auth-dead in .loom/tokens/.bad_tokens (issue #6030),
+# then re-run Loom token selection (which now skips it) and re-export
+# CLAUDE_CODE_OAUTH_TOKEN. Structurally identical to [rotate_exhausted_account]
+# above, but marks the entry with an "auth-dead: ..." reason instead of
+# "exhausted: ..." — `bad_tokens::auth_reason_regex` classifies that as
+# `BadReasonClass::Auth` (permanent; clears only via `loom-daemon tokens
+# unblock`), NOT `BadReasonClass::Exhaustion` (which would let the entry
+# silently expire on the exhaustion cooldown and readmit a still-broken
+# credential into rotation). Returns 0 on success (a new account is exported),
+# 1 when the pool has no eligible account left (or no loom-daemon binary
+# resolves).
+rotate_auth_dead_account() {
+    local reason="$1"
+    _proxied_launch && { _proxy_rotate auth-dead && return 0 || return 1; }
+    local ws daemon_bin
+    ws="$(_resolve_token_workspace)"
+    daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "${ws}" || true)"
+
+    if [[ -z "${ACTIVE_TOKEN_NAME}" ]]; then
+        ACTIVE_TOKEN_NAME="$(_derive_token_name "${ws}" "${CLAUDE_CODE_OAUTH_TOKEN:-}" || true)"
+    fi
+
+    if [[ -z "${daemon_bin}" ]]; then
+        log_warn "No loom-daemon binary resolved — cannot mark '${ACTIVE_TOKEN_NAME:-unknown}' bad or re-select"
+        return 1
+    fi
+
+    if [[ -n "${ACTIVE_TOKEN_NAME}" ]]; then
+        if "${daemon_bin}" tokens mark-bad "${ACTIVE_TOKEN_NAME}" \
+            --reason "auth-dead: ${reason}" --workspace "${ws}" >/dev/null 2>&1; then
+            log_info "Marked account '${ACTIVE_TOKEN_NAME}' auth-dead in .bad_tokens (${reason}) — needs re-authentication (loom-daemon tokens unblock ${ACTIVE_TOKEN_NAME})"
+        else
+            log_warn "Could not record '${ACTIVE_TOKEN_NAME}' in .bad_tokens (continuing to re-select)"
+        fi
+    else
+        log_warn "Active account name unknown — cannot mark it bad; re-selecting anyway"
+    fi
+
+    _select_rotation_account "${ws}" "${daemon_bin}" || return 1
+    log_info "Rotated OAuth account → '${ACTIVE_TOKEN_NAME}' (token tail=…${CLAUDE_CODE_OAUTH_TOKEN: -4})"
+    return 0
+}
+
+# Check if error output specifically indicates an MCP/plugin failure.
+# Used to map exhausted-retry exits to exit code 7 so the Python retry
+# layer can recognize MCP failures even when the wrapper's own retries
+# are exhausted.  See issue #2746.
+#
+# It matches on OUTPUT ALONE — no exit-code conjunction, unlike the three
+# account predicates above. The exit code passed below is accepted and ignored
+# by the delegate, kept only so every predicate is invoked the same way.
+is_mcp_error() { _retry_classify_bool mcp-error "$1" 1; }
+
+# Monitor output file for API errors during execution.
+# If an API error pattern is detected and no new output arrives within
+# API_ERROR_IDLE_TIMEOUT seconds, sends SIGINT to the claude process.
+# This handles the "agent waits for 'try again' input" scenario.
+#
+# Arguments: $1 = output file path, $2 = PID file path to write monitor PID
+start_output_monitor() {
+    local output_file="$1"
+    local monitor_pid_file="$2"
+
+    (
+        trap 'exit 0' TERM INT
+        local last_size=0
+        local error_detected_at=0
+
+        while true; do
+            sleep 5 &
+            wait $! || exit 0
+
+            # Exit if output file is gone (session ended)
+            if [[ ! -f "${output_file}" ]]; then
+                break
+            fi
+
+            local current_size
+            current_size=$(wc -c < "${output_file}" 2>/dev/null || echo "0")
+
+            if [[ "${current_size}" -ne "${last_size}" ]]; then
+                # New output arrived - check for API error patterns
+                local tail_content
+                tail_content=$(tail -c 2000 "${output_file}" 2>/dev/null || echo "")
+
+                # Check for CLI usage/plan limit prompt (interactive prompt
+                # that blocks headless sessions).  Normalize text by stripping
+                # non-alphanumeric chars to handle TUI garbling, then match
+                # the distinctive prompt text.
+                local normalized
+                normalized=$(echo "${tail_content}" | LC_ALL=C tr -cd '[:alnum:]')
+                if echo "${normalized}" | grep -qi "Stopandwaitforlimittoreset" 2>/dev/null; then
+                    log_warn "Output monitor: CLI usage/plan limit prompt detected — killing claude"
+                    echo "# RATE_LIMIT_ABORT" >&2
+                    pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                    break
+                fi
+
+                # Check for 100% weekly usage limit banner (see issue #2859).
+                # "You've used 100% of your weekly limit · resets ..." normalizes
+                # to "Youveused100ofyourweeklylimit...".  Unlike the plan-limit
+                # prompt, this does NOT show an interactive modal — the CLI just
+                # keeps spinning indefinitely.  Kill immediately and write the
+                # RATE_LIMIT_ABORT sentinel so the shepherd classifies this as
+                # non-retryable (same as the plan-limit case).
+                if echo "${normalized}" | grep -qi "Youveused100ofyourweeklylimit" 2>/dev/null; then
+                    log_warn "Output monitor: Claude weekly usage limit exhausted (100%) — killing claude"
+                    echo "# RATE_LIMIT_ABORT" >&2
+                    pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                    break
+                fi
+
+                local found_error=false
+                for pattern in "500 Internal Server Error" "Rate limit exceeded" \
+                    "overloaded" "temporarily unavailable" "503 Service" \
+                    "502 Bad Gateway" "No messages returned" \
+                    "PreToolUse.*hook error"; do
+                    if echo "${tail_content}" | grep -qi "${pattern}" 2>/dev/null; then
+                        found_error=true
+                        break
+                    fi
+                done
+
+                if [[ "${found_error}" == "true" ]]; then
+                    if [[ "${error_detected_at}" -eq 0 ]]; then
+                        error_detected_at=$(date +%s)
+                        log_warn "Output monitor: API error pattern detected, watching for idle..."
+                    fi
+                else
+                    # New non-error output - reset detection
+                    error_detected_at=0
+                fi
+                last_size="${current_size}"
+            elif [[ "${error_detected_at}" -gt 0 ]]; then
+                # No new output since error was detected
+                local now
+                now=$(date +%s)
+                local idle_time=$((now - error_detected_at))
+                if [[ "${idle_time}" -ge "${API_ERROR_IDLE_TIMEOUT}" ]]; then
+                    log_warn "Output monitor: No new output for ${idle_time}s after API error - sending SIGINT to claude"
+                    # Find and signal the claude process (child of this wrapper's shell)
+                    pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                    break
+                fi
+            fi
+        done
+    ) &
+    echo $! > "${monitor_pid_file}"
+}
+
+# Stop the background output monitor
+stop_output_monitor() {
+    local monitor_pid_file="$1"
+    if [[ -f "${monitor_pid_file}" ]]; then
+        local pid
+        pid=$(cat "${monitor_pid_file}" 2>/dev/null || echo "")
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+            kill "${pid}" 2>/dev/null || true
+            wait "${pid}" 2>/dev/null || true
+        fi
+        rm -f "${monitor_pid_file}"
+    fi
+}
+
+# Monitor early CLI output for MCP/plugin startup failures.
+# If the CLI starts with failed MCP servers or plugins, it often runs in a
+# degraded state (stuck in thinking loops with no meaningful tool calls) rather
+# than crashing.  This monitor watches the first STARTUP_MONITOR_WINDOW seconds
+# of output for failure indicators and kills the CLI session so the retry loop
+# can restart it cleanly.
+#
+# When all project MCP servers (from .mcp.json) connect successfully, only
+# global plugin/MCP failures remain.  Since these won't self-resolve on
+# restart (e.g. rust-analyzer-lsp in worktrees), the session is allowed to
+# continue rather than wasting retries.  See issue #2721.
+#
+# Arguments: $1 = output file path, $2 = PID file path to write monitor PID
+start_startup_monitor() {
+    local output_file="$1"
+    local monitor_pid_file="$2"
+
+    (
+        trap 'exit 0' TERM INT
+        local check_interval=2
+        local elapsed=0
+
+        while [[ "${elapsed}" -lt "${STARTUP_MONITOR_WINDOW}" ]]; do
+            sleep "${check_interval}" &
+            wait $! || exit 0
+            elapsed=$((elapsed + check_interval))
+
+            # Exit if output file is gone (session ended)
+            if [[ ! -f "${output_file}" ]]; then
+                break
+            fi
+
+            # Check first 50 lines for startup failure patterns
+            local head_content
+            head_content=$(head -50 "${output_file}" 2>/dev/null || echo "")
+
+            if [[ -z "${head_content}" ]]; then
+                continue
+            fi
+
+            # Check for CLI usage/plan limit prompt in early output.
+            # The limit prompt often appears within seconds of startup.
+            local head_normalized
+            head_normalized=$(echo "${head_content}" | LC_ALL=C tr -cd '[:alnum:]')
+            if echo "${head_normalized}" | grep -qi "Stopandwaitforlimittoreset" 2>/dev/null; then
+                log_warn "Startup monitor: CLI usage/plan limit prompt detected — killing claude"
+                echo "# RATE_LIMIT_ABORT" >&2
+                pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                break
+            fi
+            # Check for 100% weekly usage limit in early output (see issue #2859).
+            if echo "${head_normalized}" | grep -qi "Youveused100ofyourweeklylimit" 2>/dev/null; then
+                log_warn "Startup monitor: Claude weekly usage limit exhausted (100%) — killing claude"
+                echo "# RATE_LIMIT_ABORT" >&2
+                pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                break
+            fi
+
+            local found_failure=false
+            local matched_pattern=""
+            for pattern in \
+                "MCP server failed" \
+                "MCP servers failed" \
+                "plugins failed"; do
+                if echo "${head_content}" | grep -qi "${pattern}" 2>/dev/null; then
+                    found_failure=true
+                    matched_pattern="${pattern}"
+                    break
+                fi
+            done
+
+            if [[ "${found_failure}" == "true" ]]; then
+                log_info "Startup monitor: detected '${matched_pattern}' in early output"
+
+                # Poll for loom MCP connection within the grace period.
+                # Check BEFORE sleeping so that if the MCP connected before
+                # the failure was noticed (common case — MCP init ~1-3s,
+                # first output check at ~2s) we skip the delay entirely.
+                # See issue #2660 for why single-shot was insufficient.
+                # See issue #2763 for check_interval reduction (5s → 2s).
+                # If all project MCPs connected, the session is allowed to
+                # continue (global plugin failures won't self-resolve).
+                # Otherwise, we kill the session to avoid a degraded state
+                # where injected commands are not processed (see #2652).
+                local poll_interval=2
+                local grace_elapsed=0
+                local loom_connected=false
+                # Claude Code writes debug logs to ~/.claude/debug/latest regardless
+                # of CLAUDE_CONFIG_DIR.  The per-agent config dir never has a debug/
+                # subdirectory populated by Claude Code itself.  Check the global
+                # debug log as the authoritative source.  See issue #2835.
+                local global_debug_log="${HOME}/.claude/debug/latest"
+                local agent_debug_log="${CLAUDE_CONFIG_DIR:-}/debug/latest"
+                local debug_log="${global_debug_log}"
+                # Prefer per-agent dir if it has a populated debug log (future-proof).
+                if [[ -L "${agent_debug_log}" || -f "${agent_debug_log}" ]]; then
+                    debug_log="${agent_debug_log}"
+                fi
+                # Record when we started monitoring (epoch seconds).  Used below to
+                # reject debug log hits from previous sessions: ~/.claude/debug/latest
+                # is a symlink that may still point to the prior session's log while
+                # the new (failing) session hasn't written its own log yet.  Accepting
+                # a stale "Successfully connected" line causes the monitor to
+                # incorrectly conclude "global-plugin-only failure, proceed" when
+                # loom actually failed at runtime.  See issue #2911.
+                local monitor_start_time
+                monitor_start_time=$(date +%s)
+                # Track whether the debug log was ever fresh (vs always stale/
+                # concurrent).  Used below to distinguish "loom confirmed absent"
+                # from "loom status unknown due to stale log".  See issue #3031.
+                local debug_log_ever_fresh=false
+
+                while [[ "${grace_elapsed}" -lt "${STARTUP_GRACE_PERIOD}" ]]; do
+                    # Session ended on its own — nothing to kill
+                    if [[ ! -f "${output_file}" ]]; then
+                        loom_connected=true  # not a failure, just exited
+                        break
+                    fi
+
+                    # Check if the critical "loom" MCP server connected.
+                    # Re-evaluate debug_log each iteration: the symlink may update
+                    # as new debug sessions start.
+                    if [[ -L "${global_debug_log}" || -f "${global_debug_log}" ]]; then
+                        debug_log="${global_debug_log}"
+                    fi
+                    if [[ -L "${debug_log}" || -f "${debug_log}" ]]; then
+                        # Resolve the symlink to the actual file so we can check its mtime.
+                        local resolved_debug_log
+                        resolved_debug_log=$(readlink -f "${debug_log}" 2>/dev/null || echo "${debug_log}")
+
+                        # Guard against stale logs: only trust a debug log that was
+                        # created/modified at or after this monitoring session started.
+                        # This prevents misclassifying "global-plugin-only" when the
+                        # symlink still points to the previous session's successful log.
+                        # See issue #2911.
+                        local debug_log_mtime=0
+                        if [[ -f "${resolved_debug_log}" ]]; then
+                            if [[ "$(uname)" == "Darwin" ]]; then
+                                debug_log_mtime=$(stat -f '%m' "${resolved_debug_log}" 2>/dev/null || echo "0")
+                            else
+                                debug_log_mtime=$(stat -c '%Y' "${resolved_debug_log}" 2>/dev/null || echo "0")
+                            fi
+                        fi
+                        local debug_log_is_fresh=false
+                        if [[ "${debug_log_mtime}" -ge "${monitor_start_time}" ]]; then
+                            debug_log_is_fresh=true
+                        fi
+
+                        if [[ "${debug_log_is_fresh}" == "true" ]]; then
+                            debug_log_ever_fresh=true
+                            # Fast-path: if loom is explicitly listed as failed in the
+                            # current session's debug log, kill immediately without waiting
+                            # for the full grace period.  See issue #2911.
+                            if grep -q 'MCP server "loom".*[Cc]onnection failed\|MCP server "loom".*[Ff]ailed to connect' \
+                               "${resolved_debug_log}" 2>/dev/null; then
+                                log_warn "Startup monitor: debug log confirms loom MCP failed to connect — killing session immediately"
+                                pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                                break 2  # Break out of both while loops
+                            fi
+
+                            if grep -q 'MCP server "loom": Successfully connected' \
+                               "${resolved_debug_log}" 2>/dev/null; then
+                                loom_connected=true
+                                break
+                            fi
+                        fi
+                        # Debug log is stale (from a previous session) — do not trust
+                        # "Successfully connected" hits; keep polling until the new
+                        # session writes its own log or the grace period expires.
+                    fi
+
+                    # Sleep AFTER checking so the first iteration is instant
+                    sleep "${poll_interval}" &
+                    wait $! || exit 0
+                    grace_elapsed=$((grace_elapsed + poll_interval))
+                done
+
+                if [[ "${loom_connected}" == "true" ]]; then
+                    # Check if ALL project MCP servers (from .mcp.json)
+                    # connected.  If they did, the only failures are from
+                    # global MCP servers or plugins (e.g. rust-analyzer-lsp,
+                    # swift-lsp) which won't self-resolve on restart.
+                    # Killing the session would just waste retries.
+                    # See issue #2721.
+                    local all_project_ok=true
+                    local mcp_json="${WORKSPACE}/.mcp.json"
+                    # Resolve the debug log path once more for the project-MCP check.
+                    local resolved_debug_log_final
+                    resolved_debug_log_final=$(readlink -f "${debug_log}" 2>/dev/null || echo "${debug_log}")
+                    if [[ -f "${mcp_json}" ]] && command -v jq &>/dev/null; then
+                        local server_names
+                        server_names=$(jq -r '.mcpServers // {} | keys[]' "${mcp_json}" 2>/dev/null)
+                        for srv in ${server_names}; do
+                            if ! grep -q "MCP server \"${srv}\": Successfully connected" "${resolved_debug_log_final}" 2>/dev/null; then
+                                all_project_ok=false
+                                log_warn "Startup monitor: project MCP server '${srv}' did not connect"
+                                break
+                            fi
+                        done
+                    elif [[ ! -f "${mcp_json}" ]]; then
+                        # No project .mcp.json at all. Under user-scope `loom`
+                        # registration (#4230, epic #3835 Phase 3c) the loom
+                        # server is machine-level (registered via `claude mcp add
+                        # --scope user`), not project-scoped, so there are NO
+                        # project MCP servers to verify beyond loom — and loom
+                        # already connected (loom_connected==true above). So this
+                        # is the healthy user-scope path: continue. Killing here
+                        # (the pre-#4230 conservative behavior) would wedge every
+                        # no-.mcp.json repo in a pointless restart loop.
+                        log_info "Startup monitor: no project .mcp.json (user-scope loom server) and loom connected — continuing"
+                        all_project_ok=true
+                    else
+                        # .mcp.json present but jq missing — can't enumerate the
+                        # project MCPs it declares. Fall back to conservative kill
+                        # behavior (see issue #2652).
+                        all_project_ok=false
+                    fi
+
+                    if [[ "${all_project_ok}" == "true" ]]; then
+                        log_info "Startup monitor: only global plugin/MCP failures detected, project MCPs OK — continuing"
+                        break
+                    else
+                        log_warn "Startup monitor: project MCP failure detected — killing session for clean restart (see issue #2652)"
+                    fi
+                else
+                    # Build informative kill message: identify which MCP(s) actually
+                    # failed rather than always blaming loom.  See issue #3031.
+                    local _mcp_fail_lines="" _failed_mcps="" _fail_detail=""
+                    if [[ -n "${resolved_debug_log:-}" ]] && [[ -f "${resolved_debug_log}" ]]; then
+                        _mcp_fail_lines=$(grep -E 'MCP server "[^"]+".*([Cc]onnection [Ff]ailed|[Ff]ailed to connect)' \
+                            "${resolved_debug_log}" 2>/dev/null || true)
+                        if [[ -n "${_mcp_fail_lines}" ]]; then
+                            _failed_mcps=$(printf '%s\n' "${_mcp_fail_lines}" | \
+                                grep -oE 'MCP server "[^"]+"' | grep -oE '"[^"]+"' | \
+                                tr -d '"' | grep -v '^loom$' | sort -u | head -3 | \
+                                tr '\n' ',' | sed 's/,$//')
+                            _fail_detail=$(printf '%s\n' "${_mcp_fail_lines%%$'\n'*}" | \
+                                grep -oE 'Cannot find module[^;|]*|ENOENT[^;|]*|spawn ENOENT[^;|]*' | \
+                                head -1 | sed 's/[[:space:]]*$//' | cut -c1-80 || true)
+                        fi
+                    fi
+                    if [[ "${debug_log_ever_fresh}" == "false" ]]; then
+                        if [[ -n "${_failed_mcps}" ]]; then
+                            log_warn "Startup monitor: loom MCP not confirmed (debug log stale/concurrent); '${_failed_mcps}' also failed — killing degraded session"
+                        else
+                            log_warn "Startup monitor: loom MCP not confirmed after ${STARTUP_GRACE_PERIOD}s (debug log stale/concurrent) — killing degraded session"
+                        fi
+                    elif [[ -n "${_failed_mcps}" ]]; then
+                        local _detail_suffix=""
+                        [[ -n "${_fail_detail}" ]] && _detail_suffix=" — ${_fail_detail}"
+                        log_warn "Startup monitor: '${_failed_mcps}' MCP failed${_detail_suffix} — loom not confirmed — killing degraded session"
+                    else
+                        log_warn "Startup monitor: loom MCP not connected after ${STARTUP_GRACE_PERIOD}s — killing degraded session"
+                    fi
+                fi
+                pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                break
+            fi
+        done
+    ) &
+    echo $! > "${monitor_pid_file}"
+}
+
+# Calculate wait time with exponential backoff:
+# INITIAL_WAIT * MULTIPLIER^(attempt-1), capped at MAX_WAIT. With the fleet
+# defaults that is 60/120/240/480/960/1800 — the curve that decides how hard a
+# rate-limited fleet hammers the API, which is why it is pinned to the second
+# rather than "improved" (see `loom_daemon::retry_classify::calculate_wait_time`).
+#
+# The one fail-safe here that is not a boolean: the caller needs a NUMBER, so an
+# unaskable curve answers with the ceiling. Guessing downward would make a host
+# with no loom-daemon retry HARDER than any host with one, at exactly the moment
+# the API is already refusing work.
+calculate_wait_time() {
+    local attempt="$1" rc=0 wait_time=""
+    if _retry_classify_bin; then
+        wait_time="$("${_RETRY_CLASSIFY_BIN}" retry-classify wait-time \
+            --attempt "${attempt}" --initial-wait "${INITIAL_WAIT}" \
+            --multiplier "${MULTIPLIER}" --max-wait "${MAX_WAIT}" 2>/dev/null)" || rc=$?
+    fi
+    [[ "${rc}" -eq 0 && -n "${wait_time}" ]] || wait_time="${MAX_WAIT}"
+    echo "${wait_time}"
+}
+
+# Format seconds as human-readable duration
+format_duration() {
+    local seconds="$1"
+    local minutes=$((seconds / 60))
+    local remaining=$((seconds % 60))
+
+    if [[ "${minutes}" -gt 0 ]]; then
+        echo "${minutes}m ${remaining}s"
+    else
+        echo "${seconds}s"
+    fi
+}
+
+# _run_via_script <temp_output_file> <cmd...>
+#
+# Runs <cmd...> under script(1) so a TTY-attached retry attempt preserves
+# interactive mode, capturing output to <temp_output_file>. util-linux
+# script(1) and BSD/macOS script(1) take their arguments in incompatible
+# orders. The BSD form `script -q FILE cmd args...` makes util-linux parse
+# the command's own flags as script's, so an agent launched with
+# --dangerously-skip-permissions dies instantly with "script: unrecognized
+# option" and the retry ladder in run_with_retry then burns every attempt on
+# a failure that will never clear.
+#
+# Extracted into its own function (issue #4192) so tests can exercise the
+# calling-convention selection directly, without needing a real TTY on
+# stdin to reach it through run_with_retry's `[ -t 0 ]` branch.
+_run_via_script() {
+    local temp_output="$1"
+    shift
+    if script --version 2>/dev/null | grep -q util-linux; then
+        # util-linux `script -c` exits 0 regardless of the child's exit
+        # status unless `-e`/`--return` is passed, and the retry/error-
+        # classification ladder in run_with_retry keys off `exit_code` --
+        # so `-e` is required, not optional, or every Linux-side claude
+        # failure would silently report success.
+        #
+        # util-linux `script -c` also runs the `-c` string via $SHELL
+        # (falling back to /bin/sh). The `printf '%q'` quoting below is
+        # bash-specific ($'...' ANSI-C strings for newlines/specials), which
+        # dash (/bin/sh on Debian/Ubuntu) cannot parse, and claude args can
+        # contain newlines (prompts). Pin the executing shell to bash for
+        # this one invocation so the quoting round-trips.
+        SHELL=/bin/bash script -q -e -c "$(printf '%q ' "$@")" "${temp_output}"
+    else
+        script -q "${temp_output}" "$@"
+    fi
+}
+
+# Main retry loop with exponential backoff
+run_with_retry() {
+    local attempt=1 exit_code=0
+    local output=""
+    # Account-rotation bookkeeping (#3738). Rotations do NOT consume a
+    # MAX_RETRIES attempt; this independent cap is a loop guard for the
+    # pathological case where the active account can't be identified and marked
+    # bad, so re-selection could otherwise keep returning it forever.
+    local rotations=0
+    local max_rotations="${LOOM_MAX_ACCOUNT_ROTATIONS:-20}"
+    # Concurrent-session-limit bookkeeping (#3947). Distinct from account
+    # rotation: a session-limit fault is a *capacity* signal (the account is
+    # healthy but cannot start another simultaneous session), so we re-select a
+    # DIFFERENT account WITHOUT marking the current one bad and retry. Bounded by
+    # its own cap so a fully-saturated pool doesn't spin forever.
+    local session_limit_retries=0
+    local max_session_limit_retries="${LOOM_MAX_SESSION_LIMIT_RETRIES:-10}"
+
+    # Recover CWD if it was deleted before we started
+    if ! recover_cwd; then
+        log_error "Cannot proceed - working directory recovery failed"
+        return 1
+    fi
+
+    log_info "Starting Claude CLI with resilient wrapper"
+    log_info "Configuration: max_retries=${MAX_RETRIES}, initial_wait=${INITIAL_WAIT}s, max_wait=${MAX_WAIT}s, multiplier=${MULTIPLIER}x"
+
+    while [[ "${attempt}" -le "${MAX_RETRIES}" ]]; do
+        # Recover CWD if it was deleted during previous attempt or backoff
+        if ! recover_cwd; then
+            log_error "Cannot proceed - working directory recovery failed"
+            return 1
+        fi
+
+        # Check for stop signal before each attempt
+        if check_stop_signal; then
+            log_info "Stop signal detected - exiting gracefully"
+            return 0
+        fi
+
+        log_info "Attempt ${attempt}/${MAX_RETRIES}: Starting Claude CLI"
+        # #10830: spawn-claude.sh pins `--session-id` (LOOM_CLAUDE_SESSION_ID), and
+        # Claude refuses a second launch with an id whose transcript exists
+        # ("Session ID ... is already in use"). Once it does, every retry resumes
+        # the same session instead, which also keeps the id the daemon recorded.
+        compgen -G "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/${LOOM_CLAUDE_SESSION_ID:-none}.jsonl" >/dev/null && set -- "${@/#--session-id/--resume}"
+        write_retry_state "running" "${attempt}"
+
+        # Run Claude CLI, capturing both stdout and stderr
+        # We need to capture output while also displaying it in real-time
+        # Use a temp file to capture output for error detection
+        local temp_output
+        temp_output=$(mktemp)
+
+        # Start background output monitor to detect API errors during execution
+        local monitor_pid_file
+        monitor_pid_file=$(mktemp)
+
+        # Start startup health monitor to detect MCP/plugin failures in early output
+        local startup_monitor_pid_file
+        startup_monitor_pid_file=$(mktemp)
+
+        # Run claude with all arguments passed to wrapper
+        # Three execution modes for Claude CLI:
+        #
+        # 1. Slash command prompt detected (e.g., "/loom:judge 2434"):
+        #    Use --print mode for reliable one-shot execution.  Interactive mode
+        #    (script -q) can be blocked by onboarding/promotional dialogs that
+        #    require user interaction before the prompt is processed. (Issue #2438)
+        #    Note: Claude Code 2.1+ uses `/loom:<role>` for subdirectory commands;
+        #    detection below works for any slash-prefixed argument (see #3345).
+        #
+        # 2. No prompt, TTY available (autonomous agents):
+        #    Use macOS `script` to preserve TTY so Claude CLI sees isatty(stdout) = true.
+        #    A plain pipe (`| tee`) would replace stdout with a pipe fd, causing Claude
+        #    to switch to non-interactive --print mode.
+        #
+        # 3. No prompt, no TTY (spawned from Claude Code's Bash tool):
+        #    Run claude directly with tee for error detection.
+        start_output_monitor "${temp_output}" "${monitor_pid_file}"
+        start_startup_monitor "${temp_output}" "${startup_monitor_pid_file}"
+        # Write sentinel marker so _is_low_output_session() in the shepherd can
+        # distinguish wrapper pre-flight output from actual Claude CLI output.
+        # The "# " prefix means it is also filtered as a header line.
+        echo "# CLAUDE_CLI_START" >&2
+        echo "# LOOM_CLI_START runtime=claude" >&2
+        set +e  # Temporarily disable errexit to capture exit code
+        unset CLAUDECODE  # Prevent nested session guard from blocking subprocess
+        # Export per-agent config dir if set (for session isolation)
+        if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+            export CLAUDE_CONFIG_DIR
+        fi
+        if [[ -n "${TMPDIR:-}" ]]; then
+            export TMPDIR
+        fi
+        # Detect slash command prompt in arguments (e.g., "/loom:judge 2434").
+        # On-demand workers spawned by the shepherd receive a slash command
+        # as a positional prompt argument.  This flag is used for log-capture
+        # heuristics (fallback append when pipe-pane misses output).
+        # Note: we do NOT switch to --print mode for slash commands because
+        # --print treats "/role" as a skill-definition print (exits with 0s
+        # duration, no actual work).  Interactive mode (script -q) is safe
+        # because CLAUDE_CONFIG_DIR isolation ensures onboarding is complete.
+        # Regression from #2537, fixed in #2608.  Detection matches any
+        # slash-prefixed argument so both bare and namespaced forms work
+        # (see #3345 for the Claude Code 2.1+ namespacing requirement).
+        _has_slash_cmd=false
+        for _arg in "$@"; do
+            case "$_arg" in
+                --*|-*) ;;  # Skip flags
+                /*) _has_slash_cmd=true; break ;;
+            esac
+        done
+
+        # Record log file line count before CLI runs so we can detect whether
+        # pipe-pane captured the output (avoids duplicate appends).  Issue #2569.
+        local _pre_log_lines=0
+        local _log_file=""
+        if [[ "$_has_slash_cmd" == "true" && -n "${TERMINAL_ID:-}" ]]; then
+            _log_file="${WORKSPACE}/.loom/logs/loom-${TERMINAL_ID}.log"
+            if [[ -f "$_log_file" ]]; then
+                _pre_log_lines=$(wc -l < "$_log_file")
+            fi
+        fi
+
+        # Wire up the signal handler for log flush on kill (issue #2586).
+        # When tmux kill-session sends SIGHUP/SIGTERM, the normal fallback
+        # append code (after the CLI invocation) never executes.  The signal
+        # handler ensures captured output is flushed to the log file.
+        _FLUSH_TEMP_OUTPUT="${temp_output}"
+        _FLUSH_LOG_FILE="${_log_file}"
+        _FLUSH_PRE_LOG_LINES="${_pre_log_lines}"
+        trap _flush_output_on_signal SIGHUP SIGTERM
+
+        if [ -t 0 ]; then
+            # No prompt, TTY available - use script to preserve interactive mode
+            _run_via_script "${temp_output}" claude "$@"
+            exit_code=$?
+        else
+            # No TTY (socket/pipe) - run claude directly, tee output for error detection
+            log_info "No TTY available, running claude directly (non-interactive mode)"
+            claude "$@" 2>&1 | tee "${temp_output}"
+            exit_code=${PIPESTATUS[0]}
+        fi
+        set -e
+        stop_output_monitor "${monitor_pid_file}"
+        stop_output_monitor "${startup_monitor_pid_file}"
+
+        # CLI exited normally — clear signal handler globals and restore
+        # the default trap so the fallback append below handles flushing
+        # instead of the signal handler (avoids double-flushing).
+        _FLUSH_TEMP_OUTPUT=""
+        _FLUSH_LOG_FILE=""
+        _FLUSH_PRE_LOG_LINES=0
+        trap _wrapper_exit_cleanup EXIT
+
+        output=$(cat "${temp_output}")
+
+        # In --print mode, pipe-pane may not flush before session exit.
+        # Append captured output to the log file so log-based heuristics
+        # (_is_low_output_session, _is_mcp_failure) have content to analyze
+        # and post-mortem debugging is possible.  See issue #2550.
+        # Only append if pipe-pane did NOT already capture sufficient output.
+        # Three-tier detection: sentinel, content fingerprint, line-count.
+        # See #2569, #2582, #2590.
+        if [[ "$_has_slash_cmd" == "true" && -n "${TERMINAL_ID:-}" ]]; then
+            if [[ -n "$_log_file" && -f "$_log_file" && -s "${temp_output}" ]]; then
+                local _post_log_lines
+                _post_log_lines=$(wc -l < "$_log_file")
+                local _log_growth=$(( _post_log_lines - _pre_log_lines ))
+                local _temp_lines
+                _temp_lines=$(wc -l < "${temp_output}")
+                local _needs_append=true
+                # Tier 1: If the log contains the CLI start sentinel with
+                # content after it, pipe-pane captured the output.
+                # Unanchored match handles garbled pipe-pane.  #2582, #2590.
+                if grep -q "CLAUDE_CLI_START" "$_log_file" 2>/dev/null; then
+                    local _lines_after_sentinel
+                    _lines_after_sentinel=$(sed -n '/CLAUDE_CLI_START/,$p' "$_log_file" | wc -l)
+                    if [[ $_lines_after_sentinel -gt 1 ]]; then
+                        _needs_append=false
+                    fi
+                fi
+                # Tier 2: Content fingerprint — normalize text and check if
+                # distinctive output already appears in the log.  #2590.
+                if [[ "$_needs_append" == "true" ]] && \
+                   _pipe_pane_captured_content "${temp_output}" "$_log_file" "$_log_growth"; then
+                    _needs_append=false
+                fi
+                # Tier 3: Conservative line-count ratio as safety net.  #2582.
+                if [[ "$_needs_append" == "true" ]] && \
+                   [[ $_log_growth -lt $(( _temp_lines / 4 )) ]]; then
+                    cat "${temp_output}" >> "$_log_file"
+                fi
+            fi
+        fi
+
+        rm -f "${temp_output}"
+
+        # Check exit code
+        if [[ "${exit_code}" -eq 0 ]]; then
+            log_info "Claude CLI completed successfully"
+            clear_retry_state
+            return 0
+        fi
+
+        log_warn "Claude CLI exited with code ${exit_code}"
+
+        # Concurrent-session-limit fault (#3947) → the active account is healthy
+        # but cannot start another simultaneous session. Re-select a DIFFERENT
+        # account WITHOUT marking this one bad (a capacity fault must not poison
+        # .bad_tokens and shrink the healthy pool) and retry the SAME attempt.
+        # Checked BEFORE is_account_exhaustion so the "session limit" wording is
+        # handled as a capacity signal, not quota exhaustion. Bounded by its own
+        # cap; when exhausted it falls through to the transient-backoff path
+        # (which retries on the next tick without poisoning the token).
+        if is_account_session_limit "${output}" "${exit_code}"; then
+            session_limit_retries=$((session_limit_retries + 1))
+            if [[ "${session_limit_retries}" -le "${max_session_limit_retries}" ]]; then
+                log_warn "Concurrent-session limit hit on '${ACTIVE_TOKEN_NAME:-?}' — backing off stacking for this account and re-selecting (attempt ${attempt}/${MAX_RETRIES} NOT consumed)"
+                if reselect_account_no_mark; then
+                    write_retry_state "running" "${attempt}"
+                    # Brief backoff so a different account's session frees up /
+                    # the cursor spreads load before retrying the same attempt.
+                    sleep "${LOOM_SESSION_LIMIT_BACKOFF:-5}"
+                    continue
+                fi
+                log_warn "Concurrent-session limit hit but re-selection found no alternate account — falling through to transient backoff"
+            else
+                log_warn "Concurrent-session-limit retry cap (${max_session_limit_retries}) reached — falling through to transient backoff (token still NOT marked bad)"
+            fi
+        fi
+
+        # Account exhaustion (session / weekly / usage limit) → rotate to a
+        # different account and retry WITHOUT consuming a MAX_RETRIES attempt
+        # (#3738). Rotation is not transient backoff: charging it against
+        # MAX_RETRIES could burn the whole retry budget before every account
+        # gets a fair shot. Terminates when the pool has no eligible account,
+        # with a distinct ACCOUNT_POOL_EXHAUSTED sentinel (not the generic
+        # "Max retries exceeded" path below).
+        if is_account_exhaustion "${output}" "${exit_code}"; then
+            rotations=$((rotations + 1))
+            if [[ "${rotations}" -gt "${max_rotations}" ]]; then
+                log_error "Account rotation cap (${max_rotations}) exceeded — aborting to avoid a loop"
+                echo "# ACCOUNT_POOL_EXHAUSTED" >&2
+                clear_retry_state
+                return 1
+            fi
+            local _exh_phrase
+            _exh_phrase="$(_exhaustion_phrase "${output}")"
+            log_warn "Account exhaustion detected (${_exh_phrase}) — rotating account (attempt ${attempt}/${MAX_RETRIES} NOT consumed)"
+            if rotate_exhausted_account "${_exh_phrase}" "${output}" "${exit_code}"; then
+                write_retry_state "running" "${attempt}"
+                # Retry the SAME attempt number on the fresh account.
+                continue
+            fi
+            log_error "Whole account pool exhausted — every account is marked bad or rate-limited."
+            # `loom-daemon tokens unblock`, not the retired Python `loom-tokens`
+            # console script: epic #4081 Phase 4 (#4557) deleted the package that
+            # provided it, so naming it here would be dead-end recovery advice.
+            log_error "Retry after the soonest account reset, or run 'loom-daemon tokens unblock <name>'."
+            echo "# ACCOUNT_POOL_EXHAUSTED" >&2
+            clear_retry_state
+            return 1
+        fi
+
+        # Auth-dead account (401 invalid/expired bearer token — issue #6030) →
+        # this credential needs re-authentication, not another attempt on the
+        # SAME account and not the transient-backoff path below (TOKEN_EXPIRED
+        # is terminal per `classification_is_transient`, so without this branch
+        # the wrapper would just die here). Mark the account bad with a reason
+        # distinct from exhaustion ("auth-dead: ...", not "exhausted: ...") so
+        # it stays excluded permanently (until an operator re-authenticates and
+        # runs `tokens unblock`) rather than timing back into rotation on the
+        # exhaustion cooldown, then rotate to a healthy account and retry the
+        # SAME attempt WITHOUT consuming a MAX_RETRIES slot — one dead
+        # credential no longer takes the whole dispatch down with it. Shares
+        # the `rotations`/`max_rotations` cap with the exhaustion path above:
+        # both consume the same finite account pool.
+        if is_account_auth_dead "${output}" "${exit_code}"; then
+            rotations=$((rotations + 1))
+            if [[ "${rotations}" -gt "${max_rotations}" ]]; then
+                log_error "Account rotation cap (${max_rotations}) exceeded — aborting to avoid a loop"
+                echo "# ACCOUNT_POOL_EXHAUSTED" >&2
+                clear_retry_state
+                return 1
+            fi
+            local _auth_phrase
+            _auth_phrase="$(_auth_dead_phrase "${output}")"
+            log_warn "Auth-dead account detected (${_auth_phrase}) — marking bad and rotating account (attempt ${attempt}/${MAX_RETRIES} NOT consumed)"
+            if rotate_auth_dead_account "${_auth_phrase}"; then
+                write_retry_state "running" "${attempt}"
+                # Retry the SAME attempt number on the fresh account.
+                continue
+            fi
+            log_error "Whole account pool exhausted or auth-dead — every account is marked bad or rate-limited."
+            log_error "Re-authenticate the affected account(s), then run 'loom-daemon tokens unblock <name>'."
+            echo "# ACCOUNT_POOL_EXHAUSTED" >&2
+            clear_retry_state
+            return 78  # EX_CONFIG: no alternate account (#10294)
+        fi
+
+        # Check if this is a transient error worth retrying
+        if ! is_transient_error "${output}" "${exit_code}"; then
+            # Name the classification the decision was derived from (#4501) so
+            # this line and log_permanent_death's `classification=` below always
+            # agree — they now come from the same `classify_error` call.
+            log_error "Non-transient error detected (classification=${_LAST_ERROR_CLASSIFICATION:-UNCLASSIFIED}) - not retrying"
+            # Issue #4255: structured permanent-death diagnostics (exit code +
+            # classification + stderr tail) in place of a bare `Output: ...`.
+            log_permanent_death "${exit_code}" "${output}" "non-transient error"
+            clear_retry_state
+            return "${exit_code}"
+        fi
+
+        # Check for stop signal before waiting
+        if check_stop_signal; then
+            log_info "Stop signal detected - exiting gracefully"
+            return 0
+        fi
+
+        # Calculate backoff wait time
+        local wait_time
+        wait_time=$(calculate_wait_time "${attempt}")
+
+        if [[ "${attempt}" -lt "${MAX_RETRIES}" ]]; then
+            log_warn "Transient error detected. Waiting $(format_duration "${wait_time}") before retry..."
+
+            # Truncate error output for the retry state file (first 200 chars)
+            local error_snippet="${output:0:200}"
+            local next_retry_ts
+            next_retry_ts=$(date -u -v+"${wait_time}"S '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                || date -u -d "+${wait_time} seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                || echo "")
+            write_retry_state "backoff" "${attempt}" "${error_snippet}" "${next_retry_ts}"
+
+            # Sleep with periodic stop signal checks
+            local elapsed=0
+            while [[ "${elapsed}" -lt "${wait_time}" ]]; do
+                if check_stop_signal; then
+                    log_info "Stop signal detected during backoff - exiting gracefully"
+                    return 0
+                fi
+                sleep 5
+                elapsed=$((elapsed + 5))
+            done
+
+            log_info "Backoff complete, retrying..."
+        fi
+
+        attempt=$((attempt + 1))
+    done
+
+    log_error "Max retries (${MAX_RETRIES}) exceeded"
+    # Issue #4255: structured permanent-death diagnostics (exit code +
+    # classification + stderr tail) so an exhausted-retry death is diagnosable
+    # from the sweep log instead of only a bare `Last error: ...` line.
+    log_permanent_death "${exit_code}" "${output}" "max retries (${MAX_RETRIES}) exceeded"
+    clear_retry_state
+
+    # When the last failure was MCP-related, exit with code 7 so the
+    # Python retry layer (run_phase_with_retry) can recognise and retry
+    # the MCP failure instead of treating it as a generic error.
+    # See issue #2746.
+    if is_mcp_error "${output}"; then
+        log_info "Last failure was MCP-related — exiting with code 7"
+        return 7
+    fi
+    return 1
+}
+
+# Run pre-flight checks
+run_preflight_checks() {
+    log_info "Running pre-flight checks..."
+
+    if ! check_cli_available; then
+        return 1
+    fi
+
+    check_api_reachable  # Non-fatal, just logs
+
+    if [[ -n "${LOOM_SHEPHERD_TASK_ID:-}" ]]; then
+        log_info "Skipping auth pre-flight (shepherd subprocess, task=${LOOM_SHEPHERD_TASK_ID})"
+    elif ! check_auth_status; then
+        if [[ "${SKIP_PERMISSIONS_MODE}" == "true" ]]; then
+            log_warn "Authentication pre-flight check failed (non-fatal in --dangerously-skip-permissions mode)"
+        else
+            log_error "Authentication pre-flight check failed"
+            # Write sentinel so the shepherd can distinguish auth failures from
+            # generic low-output sessions and avoid futile retries.  See issue #2508.
+            echo "# AUTH_PREFLIGHT_FAILED" >&2
+            return 1
+        fi
+    fi
+
+    log_info "Running MCP server pre-flight check..."
+    if ! check_mcp_server; then
+        log_error "MCP server pre-flight check failed"
+        # Write sentinel so the shepherd can distinguish MCP pre-flight failures
+        # from generic low-output sessions.  Mirrors AUTH_PREFLIGHT_FAILED.
+        # See issue #2706.
+        echo "# MCP_PREFLIGHT_FAILED" >&2
+        return 1
+    fi
+    log_info "MCP server pre-flight check passed"
+
+    # Warn about missing global MCP binaries from ~/.claude.json (issue #3033).
+    # This is non-fatal: warnings are logged but pre-flight always succeeds.
+    check_global_mcp_configs
+
+    # Warn about an untrusted workspace surfacing only inside sweep transcripts
+    # (issue #5314). Non-fatal, same as the check above.
+    check_workspace_trust
+
+    log_info "All pre-flight checks passed"
+    return 0
+}
+
+# --- Headless-session marker for the Stop guard (issue #6645) ---
+#
+# `guard-background-subagents.sh` blocks a stop that would orphan a background
+# child. That block is correct in headless `-p` mode (ending the turn kills the
+# process) and a pure false positive in an interactive session (children
+# survive the turn boundary and their completion notifications arrive on a
+# later turn), so the guard must be able to tell the two apart.
+#
+# The guard's primary signal is the owning `claude` process's own argv. This
+# export is the defense-in-depth belt for the dispatch path `loom-daemon`
+# actually uses: the daemon spawns THIS script directly, not `spawn-claude.sh`,
+# so the identical export in `spawn-claude.sh` does not cover a
+# daemon-dispatched sweep. Env vars exported here are inherited by `claude` and,
+# in turn, by its hook subprocesses (verified live on 2026-08-22: a Stop hook's
+# environment carries the full harness environment, including `CLAUDE_PID`).
+#
+# Set ONLY when print mode is actually requested. This script deliberately runs
+# slash-command agents in INTERACTIVE mode under `script -q` rather than
+# `--print` (see the `_has_slash_cmd` note in run_with_retry, #2608), and those
+# sessions must NOT be marked headless -- they would inherit exactly the
+# friction #6645 removes. Anything this function cannot positively identify as
+# print mode is left unmarked, which is safe: the guard's own fail-closed
+# default already resolves an unmarked, unclassifiable session to headless.
+export_headless_session_marker() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -p | --print | --print=*)
+                export LOOM_HEADLESS_SESSION=1
+                log_info "Session mode: headless print mode -- LOOM_HEADLESS_SESSION=1 (#6645)"
+                return 0
+                ;;
+        esac
+    done
+    return 0
+}
+
+# Main entry point
+main() {
+    # Ensure retry state file is cleaned up on exit (normal or abnormal)
+    trap _wrapper_exit_cleanup EXIT
+
+    log_info "Claude wrapper starting"
+    log_info "Arguments: $*"
+    log_info "Workspace: ${WORKSPACE}"
+    [[ -n "${TERMINAL_ID}" ]] && log_info "Terminal ID: ${TERMINAL_ID}"
+
+    # Observability for OAuth-token rotation (issue #3236).  Log a single
+    # masked line so post-mortem debugging can confirm which spawn path was
+    # used (env-token vs Keychain) without leaking secret material to logs.
+    if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        local _tok_len=${#CLAUDE_CODE_OAUTH_TOKEN}
+        local _tok_tail="${CLAUDE_CODE_OAUTH_TOKEN: -4}"
+        log_info "OAuth auth mode: env-token (CLAUDE_CODE_OAUTH_TOKEN set, len=${_tok_len}, tail=…${_tok_tail})"
+    else
+        log_info "OAuth auth mode: keychain (CLAUDE_CODE_OAUTH_TOKEN not set)"
+    fi
+
+    # Detect --dangerously-skip-permissions flag (automated agent mode)
+    for arg in "$@"; do
+        if [[ "$arg" == "--dangerously-skip-permissions" ]]; then
+            SKIP_PERMISSIONS_MODE=true
+            break
+        fi
+    done
+    if [[ "${SKIP_PERMISSIONS_MODE}" == "true" ]]; then
+        log_info "Skip-permissions mode: ON (--dangerously-skip-permissions detected)"
+    fi
+    if [[ -n "${CLAUDECODE:-}" ]]; then
+        log_warn "CLAUDECODE is set (value='${CLAUDECODE}') — nested session guard may trigger"
+    fi
+
+    # Run pre-flight checks
+    if ! run_preflight_checks; then
+        _write_exit_sidecar 1
+        exit 1
+    fi
+
+    # Check for stop signal before starting
+    if check_stop_signal; then
+        log_info "Stop signal already present - exiting without starting"
+        _write_exit_sidecar 0
+        exit 0
+    fi
+
+    # Model selection (issue #3477, Phase 1).
+    # Precedence: explicit `--model` in args > LOOM_MODEL env > nothing
+    # (session/CLI default — no --model flag emitted at all). The flag is
+    # appended ONCE here, before run_with_retry, so all retry attempts
+    # invoke `claude "$@"` with the same model (retries never re-consult
+    # model policy — that is strategy B of #3477, out of scope).
+    local _has_model_arg=false
+    for arg in "$@"; do
+        case "$arg" in
+            --model|--model=*)
+                _has_model_arg=true
+                break
+                ;;
+        esac
+    done
+    if [[ -n "${LOOM_MODEL:-}" ]]; then
+        if [[ "${_has_model_arg}" == "false" ]]; then
+            set -- "$@" --model "${LOOM_MODEL}"
+            log_info "Model: ${LOOM_MODEL} (from LOOM_MODEL)"
+        else
+            log_info "Explicit --model in args wins over LOOM_MODEL='${LOOM_MODEL}'"
+        fi
+    fi
+
+    # Headless-session marker for the Stop guard (issue #6645). Must run
+    # BEFORE run_with_retry so the export is in place for every attempt.
+    export_headless_session_marker "$@"
+
+    # Run Claude with retry logic
+    log_info "Pre-flight complete, launching Claude CLI..."
+    run_with_retry "$@"
+    exit_code=$?
+
+    _write_exit_sidecar "${exit_code}"
+    log_info "Claude wrapper exiting with code ${exit_code}"
+    exit "${exit_code}"
+}
+
+# Run main with all script arguments.
+#
+# CLAUDE_WRAPPER_SOURCE_ONLY lets a test harness `source` this file to reach
+# its function definitions (e.g. _run_via_script, issue #4192) without
+# triggering the full CLI entry point. Unset/any other value preserves
+# exact current behavior -- main always runs.
+if [[ "${CLAUDE_WRAPPER_SOURCE_ONLY:-}" != "1" ]]; then
+    main "$@"
+fi

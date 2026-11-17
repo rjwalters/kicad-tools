@@ -1,0 +1,480 @@
+WARNING: path_ampacity is INACTIVE without --current-paths and will silently pass. No sidecar was found at any of:
+  /tmp/b07d/validation/checked.current_paths.json
+  /tmp/b07d/validation/current_paths.json
+  /tmp/b07d/validation/output/checked.current_paths.json
+  /tmp/b07d/validation/output/current_paths.json
+  /tmp/b07d/output/checked.current_paths.json
+  /tmp/b07d/output/current_paths.json
+Pass one explicitly with --current-paths, or place it at one of the paths above, to validate declared branch current paths.
+{
+  "file": "checked.kicad_pcb",
+  "manufacturer": "jlcpcb",
+  "pcb_sha256": "47e077d26764b4abb4ba9595ddcea4e36817829186f497741b271906bc132a0b",
+  "layers": 6,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 7,
+    "waived": 0,
+    "rules_checked": 78,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "match_group_length_skew": 4,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
+    },
+    "passed": true,
+    "stale_waivers": 0,
+    "coverage_checked": 34,
+    "coverage_skipped": 7,
+    "coverage_unknown": [],
+    "coverage_blocking_unknown": []
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        75.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:5217f485d76520e5"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        110.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": "ev2:097c94ba8e2c8dfa"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        133.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J3"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J3||F.Cu",
+      "evidence_hash": "ev2:e4e464a579b643f0"
+    },
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_ADDRESS' (14 members) length-skew 2.452 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 2.4517,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_ADDRESS"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_ADDRESS||",
+      "evidence_hash": "ev2:1cd8eb904fabe169"
+    },
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_BYTE0' (9 members) length-skew 0.104 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.1037,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_BYTE0"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_BYTE0||",
+      "evidence_hash": "ev2:46e2542923d01026"
+    },
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_BYTE1' (9 members) length-skew 2.842 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 2.8415,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_BYTE1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_BYTE1||",
+      "evidence_hash": "ev2:daf3952efb450c5b"
+    },
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_COMMAND' (6 members) length-skew 0.949 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.9494,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_COMMAND"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "match_group_length_skew|SDRAM_COMMAND||",
+      "evidence_hash": "ev2:b690ac97df137fac"
+    }
+  ],
+  "mask_copper_assessments": [],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "78 rules checked, 0 error(s), 0 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 216,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "NOT RUN",
+      "detail": "no manufacturing bundle; run `kct export` first"
+    },
+    "overall": "INCOMPLETE",
+    "schematic_missing": false
+  },
+  "routing_quality": {
+    "total_segments": 8771,
+    "nets_with_copper": 55,
+    "segments_per_net": 159.47272727272727,
+    "zero_length_count": 0,
+    "median_length_mm": 0.07071067811865073,
+    "fragment_count": 7346,
+    "fragment_fraction": 0.8375327784745183,
+    "orthogonal_count": 4494,
+    "diagonal_45_count": 4277,
+    "off_axis_count": 0,
+    "staircase_step_count": 12,
+    "staircase_fraction": 0.0013681450233724774
+  },
+  "coverage": {
+    "ampacity": {
+      "status": "skipped:no_declared_targets",
+      "state": "skipped",
+      "reason": "no_declared_targets",
+      "blocking": true
+    },
+    "clearance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connectivity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connector_access": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "copper_sliver": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "courtyard_overlap": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dangling_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "diffpair_clearance_intra": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_routing_continuity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dimensions": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "doc_drift": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "edge": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "impedance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "isolated_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "mask_to_copper": {
+      "status": "skipped:opt_in:--mask-copper-config",
+      "state": "skipped",
+      "reason": "opt_in:--mask-copper-config",
+      "blocking": true
+    },
+    "match_group_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_clearance_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_floor": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netlist": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "pad_grid": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "path_ampacity": {
+      "status": "skipped:no_declared_current_paths",
+      "state": "skipped",
+      "reason": "no_declared_current_paths",
+      "blocking": true
+    },
+    "physical_copper_gap": {
+      "status": "skipped:opt_in:--physical-copper-gap",
+      "state": "skipped",
+      "reason": "opt_in:--physical-copper-gap",
+      "blocking": true
+    },
+    "pin1_marker": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
+    "sch_fields": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "segment_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "silkscreen": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "single_pad_net": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "solder_mask": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "spec_conformance": {
+      "status": "skipped:no_project_kct",
+      "state": "skipped",
+      "reason": "no_project_kct",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_under_body": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "width_consistency": {
+      "status": "skipped:opt_in:--only",
+      "state": "skipped",
+      "reason": "opt_in:--only",
+      "blocking": false
+    },
+    "zero_length_segment": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "zones": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    }
+  },
+  "verdict": "incomplete",
+  "exit_code": 2
+}DRC-constraint sidecars updated: /tmp/b07d/validation/checked.kicad_pro, /tmp/b07d/validation/checked.kicad_dru
+

@@ -1,0 +1,1493 @@
+"""Tests for scripts/install-kct.sh (Installer MVP, issue #4055).
+
+These drive a throwaway ``git init``-ed target repo through the installer's
+dry-run, real path-mode install, idempotent re-run, skill-selection, and
+loom-coexistence paths (see the issue's Acceptance / Test Plan).
+
+Hermeticity: the tests stub ``uv`` with a fake on PATH that emulates
+``uv add``'s pyproject/[tool.uv.sources] write-back. This keeps the suite
+network-free and fast in CI while still exercising the installer's real
+idempotency logic (existing-dependency detection, marker-block replacement,
+metadata emission) against the resulting pyproject content -- exactly the
+"git-mode dep addition asserted on pyproject content rather than resolved"
+approach the issue calls for.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+from kicad_tools.agent_surfaces import PLACEHOLDER_RE, render
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INSTALLER = REPO_ROOT / "scripts" / "install-kct.sh"
+SKILLS_SRC = REPO_ROOT / ".claude" / "commands" / "kct"
+CI_GATES_SRC = REPO_ROOT / "scripts" / "ci"
+
+# The three portable CI gates vendored into the consumer's .kct/ci/ (#4056).
+# Must stay in sync with CI_GATE_FILES in scripts/install-kct.sh.
+VENDORED_CI_GATES = (
+    "check_copper_lvs.py",
+    "check_routed_drc.py",
+    "net_class_map_resolver.py",
+)
+
+
+# --- fake uv -----------------------------------------------------------------
+# Emulates just enough of `uv add <path> --editable --frozen` to write the
+# dependency + [tool.uv.sources] path entry the installer's idempotency logic
+# reads back. No venv, no network, no resolution.
+FAKE_UV = r"""#!/usr/bin/env bash
+set -euo pipefail
+# We only implement: uv add <path-or-name> [--editable] [--frozen] [--git URL]
+#                    [--tag T] [--rev R]
+[[ "${1:-}" == "add" ]] || { echo "fake-uv: only 'add' is stubbed" >&2; exit 2; }
+shift
+PKG=""
+IS_GIT=false
+GIT_URL=""
+PIN=""
+PATH_SRC=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --editable|--frozen) shift ;;
+    --git) IS_GIT=true; GIT_URL="$2"; shift 2 ;;
+    --tag|--rev) PIN="$2"; shift 2 ;;
+    -*) shift ;;
+    *) PKG="$1"; shift ;;
+  esac
+done
+PYPROJECT="pyproject.toml"
+[[ -f "$PYPROJECT" ]] || { echo "fake-uv: no pyproject.toml" >&2; exit 1; }
+
+python3 - "$PYPROJECT" "$PKG" "$IS_GIT" "$GIT_URL" "$PIN" <<'PYEOF'
+import re, sys
+pyproject, pkg, is_git, git_url, pin = sys.argv[1:6]
+text = open(pyproject).read()
+
+# 1. Ensure "kicad-tools" is in [project.dependencies] exactly once.
+if '"kicad-tools"' not in text and '"kicad-tools ' not in text:
+    m = re.search(r'(dependencies\s*=\s*\[)(.*?)(\])', text, re.S)
+    if m:
+        head, body, tail = m.groups()
+        entry = '\n    "kicad-tools",'
+        text = text[:m.start()] + head + body.rstrip() + entry + "\n" + tail + text[m.end():]
+
+# 2. Compute the [tool.uv.sources] entry line.
+if is_git == "true":
+    key = "tag" if pin else "rev"  # test passes tag by convention
+    src = f'kicad-tools = {{ git = "{git_url}", {key} = "{pin}" }}'
+else:
+    # path mode: pkg is an absolute path; record it verbatim (installer
+    # resolves it back to absolute, so verbatim absolute is fine for the test).
+    src = f'kicad-tools = {{ path = "{pkg}", editable = true }}'
+
+if "[tool.uv.sources]" in text:
+    # replace any existing kicad-tools = line, else append under the table.
+    lines = text.splitlines()
+    out, in_sources, replaced = [], False, False
+    for ln in lines:
+        if ln.strip() == "[tool.uv.sources]":
+            in_sources = True
+            out.append(ln)
+            continue
+        if in_sources and ln.strip().startswith("kicad-tools"):
+            out.append(src)
+            replaced = True
+            continue
+        if in_sources and ln.startswith("[") and ln.strip() != "[tool.uv.sources]":
+            if not replaced:
+                out.append(src)
+                replaced = True
+            in_sources = False
+        out.append(ln)
+    if not replaced:
+        out.append(src)
+    text = "\n".join(out) + "\n"
+else:
+    text = text.rstrip() + f"\n\n[tool.uv.sources]\n{src}\n"
+
+open(pyproject, "w").write(text)
+PYEOF
+"""
+
+
+@pytest.fixture
+def fake_uv_env(tmp_path: Path) -> dict[str, str]:
+    """A PATH-front-loaded env whose ``uv`` is the stub above."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    uv = bindir / "uv"
+    uv.write_text(FAKE_UV)
+    uv.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+    return env
+
+
+@pytest.fixture
+def target_repo(tmp_path: Path) -> Path:
+    """A throwaway git repo with a minimal uv-style pyproject + CLAUDE.md."""
+    target = tmp_path / "board-repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    (target / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "board-repo"\n'
+        'version = "0.1.0"\n'
+        'requires-python = ">=3.10"\n'
+        "dependencies = []\n"
+    )
+    (target / "CLAUDE.md").write_text("# Board Repo\n\nExisting content stays.\n")
+    # Seed a loom skill to prove the installer never touches it.
+    loom = target / ".claude" / "commands" / "loom"
+    loom.mkdir(parents=True)
+    (loom / "seed.md").write_text("LOOM SEED — DO NOT TOUCH\n")
+    return target
+
+
+def run_installer(
+    target: Path, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(INSTALLER), *args, str(target)],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env=env,
+    )
+
+
+def _snapshot(target: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(target)): p.read_text(errors="replace")
+        for p in target.rglob("*")
+        if p.is_file() and ".git" not in p.parts
+    }
+
+
+# --- dry-run: writes nothing -------------------------------------------------
+
+
+def test_dry_run_writes_nothing(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert _snapshot(target_repo) == before, "dry-run must not modify any file"
+    assert not (target_repo / ".kct").exists()
+    assert not (target_repo / ".claude" / "commands" / "kct").exists()
+    assert "dry-run" in result.stdout
+
+
+# --- real path-mode install --------------------------------------------------
+
+
+def test_path_install_produces_all_artifacts(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+
+    # Dependency + path source in pyproject.
+    pyproject = (target_repo / "pyproject.toml").read_text()
+    assert '"kicad-tools"' in pyproject
+    assert "[tool.uv.sources]" in pyproject
+    assert "path" in pyproject.split("[tool.uv.sources]", 1)[1]
+
+    # Vendored skills are the source with its harness-neutral placeholders
+    # rendered for Claude Code (issue #5954); the installer's sed rules must
+    # agree exactly with kicad_tools.agent_surfaces.render. README.md and
+    # help.md are the always-vendored meta files (help.md is the introspective
+    # help skill).
+    for name in ("README.md", "help.md", "ee-review.md", "tapeout.md"):
+        dst = target_repo / ".claude" / "commands" / "kct" / name
+        assert dst.exists()
+        source = (SKILLS_SRC / name).read_text(encoding="utf-8")
+        assert dst.read_text(encoding="utf-8") == render(source, "claude-code")
+        assert not PLACEHOLDER_RE.search(dst.read_text(encoding="utf-8"))
+    # Rendering restores the Claude Code invocation and paths.
+    tapeout = (target_repo / ".claude" / "commands" / "kct" / "tapeout.md").read_text()
+    assert "/kct:manufacturing-readiness" in tapeout
+    assert ".claude/commands/kct/manufacturing-readiness.md" in tapeout
+
+    # Exactly one guarded CLAUDE.md block, slimmed to a pointer (the
+    # load-bearing conventions now live in .kct/CONVENTIONS.md, not inlined).
+    claude = (target_repo / "CLAUDE.md").read_text()
+    assert claude.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert claude.count("<!-- END KICAD-TOOLS -->") == 1
+    assert ".kct/CONVENTIONS.md" in claude  # slim pointer references the vendored file
+    assert ".claude/commands/kct/README.md" in claude  # pointer references the skills README
+    # The numbered convention list must NOT be inlined into CLAUDE.md anymore.
+    assert "### Conventions (load-bearing" not in claude
+    assert "refill-zones" not in claude
+    assert "Existing content stays." in claude  # pre-existing content preserved
+
+    # The four conventions live verbatim in the vendored .kct/CONVENTIONS.md.
+    conventions = (target_repo / ".kct" / "CONVENTIONS.md").read_text()
+    assert "build-native" in conventions
+    assert "refill-zones" in conventions
+    assert "Artifact-first" in conventions
+    assert "per rule" in conventions
+
+    # Metadata is valid JSON with the schema fields.
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["kct_version"]
+    assert meta["source_mode"] == "path"
+    assert meta["source_ref"] == str(REPO_ROOT)
+    assert "ee-review" in meta["skills_selected"]
+    assert ".claude/commands/kct/ee-review.md" in meta["installed_files"]
+    assert ".claude/commands/kct/README.md" in meta["installed_files"]
+    assert ".claude/commands/kct/help.md" in meta["installed_files"]
+    assert ".kct/CONVENTIONS.md" in meta["installed_files"]
+    # help.md is a meta-skill, not a per-board skill: it is always vendored, so
+    # it must NOT appear in skills_selected (like README.md, it is not selectable).
+    assert "help" not in meta["skills_selected"]
+
+
+# --- idempotent re-run -------------------------------------------------------
+
+
+def test_rerun_is_idempotent(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    first = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert first.returncode == 0, first.stderr
+    second = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert second.returncode == 0, second.stderr
+
+    pyproject = (target_repo / "pyproject.toml").read_text()
+    assert pyproject.count('"kicad-tools"') == 1, "dependency must not duplicate"
+
+    claude = (target_repo / "CLAUDE.md").read_text()
+    assert claude.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert claude.count("<!-- END KICAD-TOOLS -->") == 1
+
+    # The second run must recognize the up-to-date dependency and no-op it.
+    assert "already present and up to date" in second.stdout
+
+
+# --- loom coexistence --------------------------------------------------------
+
+
+def test_loom_dir_untouched(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    loom_file = target_repo / ".claude" / "commands" / "loom" / "seed.md"
+    before = loom_file.read_bytes()
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert loom_file.read_bytes() == before, "installer must never touch loom skills"
+
+
+# --- malformed CLAUDE.md markers: error, never silent data loss --------------
+
+
+def test_unterminated_begin_marker_errors_without_data_loss(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """A BEGIN with no matching END must abort and leave the file byte-unchanged.
+
+    Regression for the PR #4062 judge finding: the in-place line rebuild dropped
+    every line after a stale BEGIN (in_block never cleared), then clobbered the
+    original — silent data loss on exit 0.
+    """
+    claude = target_repo / "CLAUDE.md"
+    claude.write_text(
+        "# My Repo\n"
+        "IMPORTANT USER CONTENT\n"
+        "<!-- BEGIN KICAD-TOOLS -->\n"
+        "stale half block\n"
+        "MORE IMPORTANT CONTENT AFTER STALE BEGIN\n"
+    )
+    before = claude.read_bytes()
+
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+
+    assert result.returncode != 0, "unterminated BEGIN must fail, not exit 0"
+    assert "unterminated" in result.stderr.lower()
+    assert claude.read_bytes() == before, "malformed target must be byte-unchanged"
+
+
+def test_unterminated_begin_marker_dry_run_errors(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """--dry-run must surface the malformed-marker error, not report an in-place replace."""
+    claude = target_repo / "CLAUDE.md"
+    claude.write_text("# My Repo\n<!-- BEGIN KICAD-TOOLS -->\nstale half block\nUSER CONTENT\n")
+    before = claude.read_bytes()
+
+    result = run_installer(target_repo, "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env)
+
+    assert result.returncode != 0
+    assert "unterminated" in result.stderr.lower()
+    assert "replace existing kicad-tools block" not in result.stdout
+    assert claude.read_bytes() == before
+
+
+def test_end_before_begin_marker_errors_without_data_loss(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """Inverse malformation (END before BEGIN): also errors out, file unchanged.
+
+    Documented behavior: an END that precedes its BEGIN is treated as malformed
+    and aborts (the grep gate still fires because a BEGIN exists later). Either
+    an error or a safe no-op is acceptable per the issue; we choose to error so
+    the operator fixes the markers. Never silent corruption.
+    """
+    claude = target_repo / "CLAUDE.md"
+    claude.write_text(
+        "# My Repo\n"
+        "USER CONTENT ABOVE\n"
+        "<!-- END KICAD-TOOLS -->\n"
+        "USER CONTENT BETWEEN\n"
+        "<!-- BEGIN KICAD-TOOLS -->\n"
+        "block body\n"
+        "<!-- END KICAD-TOOLS -->\n"
+    )
+    before = claude.read_bytes()
+
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+
+    assert result.returncode != 0
+    err = result.stderr.lower()
+    assert "before any" in err or "unterminated" in err
+    assert claude.read_bytes() == before
+
+
+# --- skill selection ---------------------------------------------------------
+
+
+def test_skills_filter_selects_named_skill(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    result = run_installer(
+        target_repo, "--skills=ee-review", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+    kct_dir = target_repo / ".claude" / "commands" / "kct"
+    assert (kct_dir / "ee-review.md").exists()
+    # README and help are always vendored regardless of --skills= filtering:
+    # README documents the namespace; help.md is the introspective /kct:help
+    # meta-skill that must exist even when only one per-board skill was selected.
+    assert (kct_dir / "README.md").exists()
+    assert (kct_dir / "help.md").exists()
+    # A per-board skill NOT named in --skills= must be absent — proves help.md's
+    # presence is unconditional, not just a side effect of vendoring everything.
+    assert not (kct_dir / "tapeout.md").exists()
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["skills_selected"] == ["ee-review"]
+    assert "help" not in meta["skills_selected"]
+    # help.md is still recorded in installed_files (always-vendored, like README).
+    assert ".claude/commands/kct/help.md" in meta["installed_files"]
+
+
+def test_unknown_skill_errors(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    result = run_installer(
+        target_repo, "--skills=does-not-exist", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode != 0
+    assert "unknown skill" in result.stderr
+
+
+def test_help_is_not_a_selectable_skill(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """--skills=help must be rejected, exactly like --skills=README today.
+
+    help.md is always vendored (a meta-skill), never opt-in via --skills=. It is
+    excluded from ALL_SKILLS the same way README.md is, so requesting it by name
+    is an unknown-skill error, not a way to select it.
+    """
+    result = run_installer(target_repo, "--skills=help", "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode != 0
+    assert "unknown skill" in result.stderr
+
+
+# --- prerequisite failure ----------------------------------------------------
+
+
+def test_missing_pyproject_fails_clearly(tmp_path: Path, fake_uv_env: dict[str, str]) -> None:
+    target = tmp_path / "no-pyproject"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    result = run_installer(target, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode != 0
+    assert "no pyproject.toml" in result.stderr
+
+
+# --- git mode (asserted on pyproject content, no network) --------------------
+
+
+def test_git_mode_writes_git_source(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    result = run_installer(target_repo, "--tag", "v0.14.0", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    pyproject = (target_repo / "pyproject.toml").read_text()
+    assert '"kicad-tools"' in pyproject
+    src = pyproject.split("[tool.uv.sources]", 1)[1]
+    assert "git" in src
+    assert "rjwalters/kicad-tools" in src
+    assert "v0.14.0" in src
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["source_mode"] == "git"
+
+
+# --- portable CI gates vendored into .kct/ci/ (#4056) ------------------------
+
+
+def test_ci_gates_vendored_byte_identical_and_executable(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """The 3 portable gates land in .kct/ci/, byte-identical + executable."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+
+    ci_dir = target_repo / ".kct" / "ci"
+    for name in VENDORED_CI_GATES:
+        dst = ci_dir / name
+        assert dst.exists(), f"{name} not vendored into .kct/ci/"
+        assert dst.read_bytes() == (CI_GATES_SRC / name).read_bytes(), (
+            f"{name} must be a verbatim copy of scripts/ci/{name}"
+        )
+        # Executable so a consumer can invoke the gate directly.
+        assert dst.stat().st_mode & 0o111, f"{name} must be executable"
+
+    # A README documenting consumer-side invocation ships alongside the gates.
+    readme = ci_dir / "README.md"
+    assert readme.exists()
+    readme_text = readme.read_text()
+    assert "--allow" in readme_text, "README must document the --allow N pattern"
+    assert "check_copper_lvs.py" in readme_text
+    assert "check_routed_drc.py" in readme_text
+
+
+def test_ci_gates_not_over_vendored(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """Repo-internal / board-specific gates must NOT be vendored."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    ci_dir = target_repo / ".kct" / "ci"
+    for excluded in (
+        "check_board_00_e2e.py",
+        "check_board_05_blocking.py",
+        "check_diffpair_coverage.py",
+        "check_matchgroup_coverage.py",
+    ):
+        assert not (ci_dir / excluded).exists(), f"{excluded} must not be vendored"
+
+
+def test_ci_gates_recorded_in_metadata(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """install-metadata.json installed_files lists every vendored gate + README."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    for name in VENDORED_CI_GATES:
+        assert f".kct/ci/{name}" in meta["installed_files"]
+    assert ".kct/ci/README.md" in meta["installed_files"]
+
+
+def test_ci_gates_dry_run_writes_nothing(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """--dry-run must not create .kct/ci/ or any gate file."""
+    result = run_installer(target_repo, "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert not (target_repo / ".kct" / "ci").exists()
+    assert "vendor .kct/ci/check_copper_lvs.py" in result.stdout
+
+
+def test_ci_gates_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """A second install re-copies the gates without duplication or drift."""
+    first = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert first.returncode == 0, first.stderr
+    second = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert second.returncode == 0, second.stderr
+
+    ci_dir = target_repo / ".kct" / "ci"
+    # Still exactly the expected set (3 gates + README), all byte-identical.
+    vendored = sorted(p.name for p in ci_dir.iterdir())
+    assert vendored == sorted([*VENDORED_CI_GATES, "README.md"])
+    for name in VENDORED_CI_GATES:
+        assert (ci_dir / name).read_bytes() == (CI_GATES_SRC / name).read_bytes()
+
+    # Metadata still lists each gate exactly once.
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    for name in VENDORED_CI_GATES:
+        assert meta["installed_files"].count(f".kct/ci/{name}") == 1
+
+
+def test_vendored_gates_run_standalone_from_consumer(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """Functional smoke: the vendored gates operate standalone from .kct/ci/.
+
+    Proves (a) check_routed_drc.py's sibling `from net_class_map_resolver
+    import ...` still resolves after relocation (its --help importing the
+    module is the tell), (b) the zero-files no-op exits 0, and (c) copper-LVS
+    gates a JSON verdict with no repo-relative path leakage.
+    """
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    ci_dir = target_repo / ".kct" / "ci"
+
+    # (a) check_routed_drc.py --help succeeds ONLY if the sibling import of
+    # net_class_map_resolver resolves at module load (it is a top-level import).
+    drc_help = subprocess.run(
+        ["python3", str(ci_dir / "check_routed_drc.py"), "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert drc_help.returncode == 0, drc_help.stderr
+    assert "usage: check_routed_drc" in drc_help.stdout
+
+    # (b) zero files passed is a documented no-op that exits 0.
+    drc_noop = subprocess.run(
+        ["python3", str(ci_dir / "check_routed_drc.py"), "--allow", "0"],
+        capture_output=True,
+        text=True,
+    )
+    assert drc_noop.returncode == 0, drc_noop.stderr
+
+    # (c) copper-LVS gate: clean verdict -> 0, dirty verdict -> 2, from a path
+    # outside this repo (the tmp target), proving no boards/-relative assumption.
+    clean = target_repo / "clean.json"
+    clean.write_text('{"clean": true, "mismatches": []}')
+    clean_run = subprocess.run(
+        ["python3", str(ci_dir / "check_copper_lvs.py"), str(clean)],
+        capture_output=True,
+        text=True,
+    )
+    assert clean_run.returncode == 0, clean_run.stderr
+
+    dirty = target_repo / "dirty.json"
+    dirty.write_text('{"clean": false, "mismatches": [{"net": "N", "kind": "short"}]}')
+    dirty_run = subprocess.run(
+        ["python3", str(ci_dir / "check_copper_lvs.py"), str(dirty)],
+        capture_output=True,
+        text=True,
+    )
+    assert dirty_run.returncode == 2, dirty_run.stdout
+
+
+# --- .kct/CONVENTIONS.md vendoring (#4190) -----------------------------------
+
+
+def test_conventions_vendored_with_verbatim_conventions(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """The four load-bearing conventions are vendored verbatim.
+
+    (1)-(3) are the Epic #4054 conventions; (4) is the per-rule warning-baseline
+    convention from #4614.
+    """
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+
+    conventions = target_repo / ".kct" / "CONVENTIONS.md"
+    assert conventions.exists()
+    text = conventions.read_text()
+    # (1) native backend build, (2) cross-gate DRC, (3) artifact-first,
+    # (4) per-rule warning baselines.
+    assert "build-native" in text
+    assert "refill-zones" in text
+    assert "Artifact-first" in text
+    assert "warning baselines are recorded per rule" in text
+    # The anti-pattern is named explicitly: an aggregate total is not a baseline.
+    assert "aggregate" in text
+
+    # Recorded in the metadata manifest alongside the other vendored artifacts.
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["installed_files"].count(".kct/CONVENTIONS.md") == 1
+
+
+def test_conventions_dry_run_writes_nothing(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """--dry-run reports the planned .kct/CONVENTIONS.md write without creating it."""
+    result = run_installer(target_repo, "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert not (target_repo / ".kct" / "CONVENTIONS.md").exists()
+    assert "write .kct/CONVENTIONS.md" in result.stdout
+
+
+def test_conventions_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """A second install refreshes .kct/CONVENTIONS.md in place, no duplication."""
+    first = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert first.returncode == 0, first.stderr
+    conventions = target_repo / ".kct" / "CONVENTIONS.md"
+    first_text = conventions.read_text()
+
+    second = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert second.returncode == 0, second.stderr
+    assert conventions.read_text() == first_text  # refreshed in place, identical
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["installed_files"].count(".kct/CONVENTIONS.md") == 1
+
+
+# --- --client selection (issue #4905) ----------------------------------------
+
+
+def test_default_client_is_claude_parity(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """Omitting --client must produce byte-identical output to --client claude.
+
+    Backward compatibility is the explicit acceptance criterion: existing
+    callers of install-kct.sh (no --client flag) must see no behavior change.
+    """
+    default_target = target_repo
+    explicit_target = target_repo.parent / "explicit-claude-repo"
+    explicit_target.mkdir()
+    for name in ("pyproject.toml", "CLAUDE.md"):
+        (explicit_target / name).write_text((default_target / name).read_text())
+    (explicit_target / ".claude" / "commands" / "loom").mkdir(parents=True)
+    (explicit_target / ".claude" / "commands" / "loom" / "seed.md").write_text(
+        (default_target / ".claude" / "commands" / "loom" / "seed.md").read_text()
+    )
+    subprocess.run(["git", "init", "-q"], cwd=explicit_target, check=True)
+
+    default_result = run_installer(default_target, "--path", str(REPO_ROOT), env=fake_uv_env)
+    explicit_result = run_installer(
+        explicit_target, "--client", "claude", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert default_result.returncode == 0, default_result.stderr
+    assert explicit_result.returncode == 0, explicit_result.stderr
+
+    assert not (default_target / ".agents").exists()
+    assert not (explicit_target / ".agents").exists()
+    assert _snapshot(default_target) == _snapshot(explicit_target)
+
+
+def test_client_unknown_value_rejected_before_any_write(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(
+        target_repo, "--client", "bogus", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode != 0
+    assert "unknown --client" in result.stderr
+    assert _snapshot(target_repo) == before, "a rejected --client value must write nothing"
+
+
+def test_client_codex_installs_agents_skills_and_agents_md(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    result = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+
+    # No Claude-side artifacts written for a codex-only install.
+    assert not (target_repo / ".claude" / "commands" / "kct").exists()
+    claude_md = (target_repo / "CLAUDE.md").read_text()
+    assert "BEGIN KICAD-TOOLS" not in claude_md
+    assert "Existing content stays." in claude_md  # untouched
+
+    # SKILL.md landed for every selected skill plus the always-vendored help.
+    skills_dir = target_repo / ".agents" / "skills"
+    for name in sorted(path.stem for path in SKILLS_SRC.glob("*.md") if path.name != "README.md"):
+        skill_md = skills_dir / f"kct-{name}" / "SKILL.md"
+        assert skill_md.exists(), f"{skill_md} missing"
+        text = skill_md.read_text()
+        assert text.startswith("---\n")
+        # Only the FRONTMATTER (between the two leading '---' fences) is
+        # checked for Claude-specific dispatch metadata -- the body (shared
+        # workflow content) is allowed to discuss `suggestedModel`/model
+        # resolution in prose, as help.md's own body legitimately does.
+        frontmatter = text.split("---", 2)[1]
+        assert f"name: kct-{name}" in frontmatter
+        assert "description:" in frontmatter
+        assert "invocation:" not in frontmatter
+        assert "suggestedModel:" not in frontmatter
+        metadata = yaml.safe_load(frontmatter)
+        assert metadata["name"] == f"kct-{name}"
+        source_description = next(
+            line.removeprefix("description:").strip()
+            for line in (SKILLS_SRC / f"{name}.md").read_text().splitlines()
+            if line.startswith("description:")
+        )
+        assert metadata["description"] == source_description
+
+    # The body is derived from the shared source, not hand-duplicated: a
+    # distinctive sentence from ee-review.md's body must survive verbatim.
+    ee_review_body = (skills_dir / "kct-ee-review" / "SKILL.md").read_text()
+    source_body = (SKILLS_SRC / "ee-review.md").read_text().split("---", 2)[2]
+    for line in source_body.splitlines():
+        if not any(
+            token in line for token in ("{{", "/kct:", ".claude/commands/kct/", "CLAUDE.md")
+        ):
+            assert line in ee_review_body
+
+    # Operational references resolve inside a Codex-only installation.
+    help_text = (skills_dir / "kct-help" / "SKILL.md").read_text()
+    assert "ls .agents/skills/kct-*/SKILL.md" in help_text
+    assert ".agents/skills/kct-<command>/SKILL.md" in help_text
+    assert (skills_dir / "kct-help" / "README.md").exists()
+    assert "optional metadata" in help_text
+    assert "`$kct-<name>`" in help_text
+    tapeout_text = (skills_dir / "kct-tapeout" / "SKILL.md").read_text()
+    assert ".agents/skills/kct-manufacturing-readiness/SKILL.md" in tapeout_text
+    assert "$kct-manufacturing-readiness" in tapeout_text
+    for skill_md in skills_dir.glob("kct-*/SKILL.md"):
+        body = skill_md.read_text().split("---", 2)[2].split("-->\n", 1)[1]
+        assert ".claude/commands/kct/" not in body
+        assert "/kct:" not in body
+        assert not PLACEHOLDER_RE.search(body)
+        # The installer's sed rules agree with the Python renderer (issue #5954).
+        name = skill_md.parent.name.removeprefix("kct-")
+        source_body = (SKILLS_SRC / f"{name}.md").read_text(encoding="utf-8").split("---", 2)[2]
+        assert body.strip("\n") == render(source_body, "codex").strip("\n")
+    readme = (skills_dir / "kct-help" / "README.md").read_text(encoding="utf-8")
+    assert readme == render((SKILLS_SRC / "README.md").read_text(encoding="utf-8"), "codex")
+
+    # A guarded AGENTS.md block was created, pointing at the SKILL.md layout.
+    agents_md = (target_repo / "AGENTS.md").read_text()
+    assert agents_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert agents_md.count("<!-- END KICAD-TOOLS -->") == 1
+    assert ".agents/skills/kct-<name>/SKILL.md" in agents_md
+    assert ".kct/CONVENTIONS.md" in agents_md
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["clients_installed"] == ["codex"]
+    assert ".agents/skills/kct-help/SKILL.md" in meta["installed_files"]
+    assert ".agents/skills/kct-ee-review/SKILL.md" in meta["installed_files"]
+    assert ".claude/commands/kct/README.md" not in meta["installed_files"]
+
+
+def test_client_codex_dry_run_writes_nothing(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(
+        target_repo, "--client", "codex", "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+    assert _snapshot(target_repo) == before
+    assert not (target_repo / ".agents").exists()
+    assert "vendor .agents/skills/kct-help/SKILL.md" in result.stdout
+    assert "create AGENTS.md with kicad-tools marker block" in result.stdout
+
+
+def test_client_both_installs_both_client_trees(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    result = run_installer(
+        target_repo, "--client", "both", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert (target_repo / ".claude" / "commands" / "kct" / "ee-review.md").exists()
+    assert (target_repo / ".agents" / "skills" / "kct-ee-review" / "SKILL.md").exists()
+
+    claude_md = (target_repo / "CLAUDE.md").read_text()
+    assert claude_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    agents_md = (target_repo / "AGENTS.md").read_text()
+    assert agents_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert set(meta["clients_installed"]) == {"claude", "codex"}
+
+
+def test_client_codex_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    first = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert first.returncode == 0, first.stderr
+    second = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert second.returncode == 0, second.stderr
+    assert "already present and up to date" in second.stdout
+
+    agents_md = (target_repo / "AGENTS.md").read_text()
+    assert agents_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert agents_md.count("<!-- END KICAD-TOOLS -->") == 1
+
+    skills_dir = target_repo / ".agents" / "skills"
+    vendored = sorted(p.name for p in skills_dir.iterdir())
+    assert len(vendored) == len(set(vendored)), "no duplicate skill directories"
+
+
+def test_switching_client_preserves_prior_install(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """Installing claude then codex (or vice versa) is additive, never a wipe.
+
+    Neither run may remove, overwrite, or duplicate the other client's files,
+    and install-metadata.json must accumulate (union) clients/skills/files
+    across the two runs rather than reflecting only the most recent one.
+    """
+    claude_result = run_installer(
+        target_repo, "--client", "claude", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert claude_result.returncode == 0, claude_result.stderr
+    claude_md_after_first = (target_repo / "CLAUDE.md").read_text()
+
+    codex_result = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert codex_result.returncode == 0, codex_result.stderr
+
+    # Claude's artifacts are untouched by the codex run.
+    assert (target_repo / ".claude" / "commands" / "kct" / "ee-review.md").exists()
+    assert (target_repo / "CLAUDE.md").read_text() == claude_md_after_first
+
+    # Codex's artifacts now exist too.
+    assert (target_repo / ".agents" / "skills" / "kct-ee-review" / "SKILL.md").exists()
+    assert (target_repo / "AGENTS.md").exists()
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert set(meta["clients_installed"]) == {"claude", "codex"}
+    assert ".claude/commands/kct/ee-review.md" in meta["installed_files"]
+    assert ".agents/skills/kct-ee-review/SKILL.md" in meta["installed_files"]
+    # No duplicate entries from the union merge.
+    assert len(meta["installed_files"]) == len(set(meta["installed_files"]))
+
+    # Switching back to claude does not disturb the codex artifacts either.
+    back_result = run_installer(
+        target_repo, "--client", "claude", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert back_result.returncode == 0, back_result.stderr
+    assert (target_repo / ".agents" / "skills" / "kct-ee-review" / "SKILL.md").exists()
+    meta_after = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert set(meta_after["clients_installed"]) == {"claude", "codex"}
+
+
+def test_client_codex_preserves_existing_loom_agents_md_block(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """A pre-existing Loom AGENTS.md block (different markers) is untouched.
+
+    Loom's own guarded block uses `<!-- BEGIN LOOM ORCHESTRATION (AGENTS) -->`
+    -- distinct marker text from this installer's `<!-- BEGIN KICAD-TOOLS -->`
+    -- so the two coexist additively in the same file, exactly like the
+    already-tested `.claude/commands/loom/` coexistence for the claude client.
+    """
+    agents_md = target_repo / "AGENTS.md"
+    loom_block = (
+        "<!-- BEGIN LOOM ORCHESTRATION (AGENTS) -->\n"
+        "This repository uses Loom for AI-powered development orchestration.\n"
+        "<!-- END LOOM ORCHESTRATION (AGENTS) -->\n"
+    )
+    agents_md.write_text(loom_block)
+
+    result = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+
+    text = agents_md.read_text()
+    assert "BEGIN LOOM ORCHESTRATION (AGENTS)" in text
+    assert "This repository uses Loom for AI-powered development orchestration." in text
+    assert text.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert text.count("<!-- END KICAD-TOOLS -->") == 1
+
+    # Re-running is still idempotent with both blocks present.
+    second = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert second.returncode == 0, second.stderr
+    text_second = agents_md.read_text()
+    assert text_second.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert "BEGIN LOOM ORCHESTRATION (AGENTS)" in text_second
+
+
+# --- PyPI source mode: the default (#8077) -----------------------------------
+
+UPGRADE_WORKFLOW_SRC = REPO_ROOT / "scripts" / "templates" / "kct-upgrade.yml"
+UPGRADE_WORKFLOW_REL = Path(".github") / "workflows" / "kct-upgrade.yml"
+
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
+
+def _source_version() -> str:
+    return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
+
+
+def _load_toml(path: Path) -> dict:
+    return tomllib.loads(path.read_text())
+
+
+def _write_pyproject(target: Path, body: str) -> None:
+    (target / "pyproject.toml").write_text(
+        '[project]\nname = "board-repo"\nversion = "0.1.0"\nrequires-python = ">=3.10"\n' + body
+    )
+
+
+GIT_PINNED_BODY = (
+    "dependencies = [\n"
+    '    "pyyaml>=6",\n'
+    '    "kicad-tools[placement,parts,geometry,drc,report]",\n'
+    "]\n"
+    "\n"
+    "[tool.uv.sources]\n"
+    'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", rev = "v0.24.0" }\n'
+)
+
+
+def test_bare_install_defaults_to_pypi_and_removes_git_source(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    version = _source_version()
+    assert data["project"]["dependencies"] == [
+        "pyyaml>=6",
+        f"kicad-tools[placement,parts,geometry,drc,report]>={version}",
+    ]
+    # The sources entry is gone, and so is the table it emptied.
+    assert "kicad-tools" not in data.get("tool", {}).get("uv", {}).get("sources", {})
+    assert "[tool.uv.sources]" not in (target_repo / "pyproject.toml").read_text()
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["source_mode"] == "pypi"
+    assert meta["source_ref"] == f"kicad-tools>={version}"
+    assert "uv lock" in result.stdout
+
+
+def test_pypi_mode_explicit_flag_matches_default(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    result = run_installer(target_repo, "--pypi", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    deps = _load_toml(target_repo / "pyproject.toml")["project"]["dependencies"]
+    assert deps[1].endswith(f">={_source_version()}")
+
+
+def test_pypi_mode_rerun_is_noop(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    first = run_installer(target_repo, env=fake_uv_env)
+    assert first.returncode == 0, first.stderr
+    pyproject_after_first = (target_repo / "pyproject.toml").read_text()
+    second = run_installer(target_repo, env=fake_uv_env)
+    assert second.returncode == 0, second.stderr
+    assert "already present and up to date (no-op)" in second.stdout
+    assert (target_repo / "pyproject.toml").read_text() == pyproject_after_first
+
+
+def test_pypi_mode_keeps_other_sources_entries(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(
+        target_repo,
+        'dependencies = ["kicad-tools", "other-lib"]\n'
+        "\n"
+        "[tool.uv.sources]\n"
+        'kicad-tools = { path = "../kicad-tools", editable = true }\n'
+        'other-lib = { git = "https://example.invalid/other-lib", tag = "v1" }\n'
+        "\n"
+        "[tool.ruff]\n"
+        "line-length = 100\n",
+    )
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    assert data["tool"]["uv"]["sources"] == {
+        "other-lib": {"git": "https://example.invalid/other-lib", "tag": "v1"}
+    }
+    assert data["tool"]["ruff"] == {"line-length": 100}
+    assert data["project"]["dependencies"] == [
+        f"kicad-tools>={_source_version()}",
+        "other-lib",
+    ]
+
+
+def test_pypi_mode_adds_absent_dependency(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    # target_repo's fixture pyproject has `dependencies = []`.
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    deps = _load_toml(target_repo / "pyproject.toml")["project"]["dependencies"]
+    assert deps == [f"kicad-tools>={_source_version()}"]
+
+
+def test_pypi_mode_keeps_a_higher_floor_and_marker(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(
+        target_repo, "dependencies = [\"kicad-tools[drc]>=99.0; python_version >= '3.10'\"]\n"
+    )
+    before = (target_repo / "pyproject.toml").read_text()
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert "no-op" in result.stdout
+    assert (target_repo / "pyproject.toml").read_text() == before
+
+
+def test_pypi_mode_raises_a_lower_floor_and_drops_exact_pin(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, 'dependencies = ["kicad-tools[drc]==0.1.0"]\n')
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    deps = _load_toml(target_repo / "pyproject.toml")["project"]["dependencies"]
+    assert deps == [f"kicad-tools[drc]>={_source_version()}"]
+
+
+def test_pypi_mode_dry_run_writes_nothing(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--dry-run", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert f"[dry-run] pin kicad-tools>={_source_version()} from PyPI" in result.stdout
+    assert _snapshot(target_repo) == before
+
+
+@pytest.mark.parametrize("other", [["--tag", "v0.14.0"], ["--rev", "abc1234"], ["--path", "."]])
+def test_pypi_flag_conflicts_with_other_sources(
+    target_repo: Path, fake_uv_env: dict[str, str], other: list[str]
+) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--pypi", *other, env=fake_uv_env)
+    assert result.returncode != 0
+    assert "--pypi" in result.stderr
+    assert _snapshot(target_repo) == before
+
+
+def test_pypi_install_reports_no_doctor_drift(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    from kicad_tools.doctor import INSTALL_METADATA, RecordStatus, check_version_drift
+
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    version = _source_version()
+    report = check_version_drift(target_repo, version)
+    assert not report.has_drift, [(r.name, r.status, r.detail) for r in report.records]
+    assert report.pypi_mode
+
+    # A newer installed package than the vendored skills/gates is drift.
+    newer = check_version_drift(target_repo, "999.0.0")
+    stale = {r.name for r in newer.stale_records}
+    assert INSTALL_METADATA in stale
+    dep = next(r for r in newer.records if r.name == "pyproject-dependency")
+    assert dep.status is not RecordStatus.DRIFT
+
+
+def test_help_documents_pypi_default(tmp_path: Path) -> None:
+    result = subprocess.run([str(INSTALLER), "--help"], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "--pypi" in result.stdout
+    assert "DEFAULT" in result.stdout
+    assert "--upgrade-workflow" in result.stdout
+    assert "Escape hatch" in result.stdout
+
+
+# --- opt-in upgrade workflow (#8077) -----------------------------------------
+
+
+def test_upgrade_workflow_is_opt_in(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert not (target_repo / UPGRADE_WORKFLOW_REL).exists()
+
+
+def test_upgrade_workflow_vendored_and_recorded(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    result = run_installer(target_repo, "--upgrade-workflow", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    dst = target_repo / UPGRADE_WORKFLOW_REL
+    assert dst.read_bytes() == UPGRADE_WORKFLOW_SRC.read_bytes()
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert str(UPGRADE_WORKFLOW_REL) in meta["installed_files"]
+
+    wf = yaml.safe_load(dst.read_text())
+    triggers = wf[True] if True in wf else wf["on"]  # PyYAML reads `on:` as True
+    assert "workflow_dispatch" in triggers
+    assert triggers["schedule"]
+    run_text = dst.read_text()
+    assert 'install-kct.sh" --pypi -y' in run_text
+    assert "uv lock --upgrade-package kicad-tools" in run_text
+    assert "pypi.org/pypi/kicad-tools/json" in run_text
+    assert "Upgrade notes" in run_text
+
+
+def test_upgrade_workflow_dry_run_lists_it(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--upgrade-workflow", "--dry-run", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert f"[dry-run] vendor {UPGRADE_WORKFLOW_REL}" in result.stdout
+    assert _snapshot(target_repo) == before
+
+
+def test_upgrade_workflow_passes_actionlint(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    import shutil
+
+    actionlint = shutil.which("actionlint")
+    if actionlint is None:
+        # Issue #8098: CI installs a pinned actionlint and sets
+        # KCT_REQUIRE_ACTIONLINT=1, so a missing binary there is a failure,
+        # never a skip that reads as a pass.
+        if os.environ.get("KCT_REQUIRE_ACTIONLINT") == "1":
+            pytest.fail("KCT_REQUIRE_ACTIONLINT=1 but actionlint is not on PATH")
+        pytest.skip("actionlint not installed")
+    result = run_installer(target_repo, "--upgrade-workflow", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    lint = subprocess.run(
+        [actionlint, str(UPGRADE_WORKFLOW_REL)],
+        cwd=target_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert lint.returncode == 0, lint.stdout + lint.stderr
+
+
+def test_pypi_mode_removes_table_form_sources_entry(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(
+        target_repo,
+        'dependencies = ["kicad-tools[report] @ git+https://github.com/rjwalters/kicad-tools@45744d0a"]\n'
+        "\n"
+        "[tool.uv.sources.kicad-tools]\n"
+        'git = "https://github.com/rjwalters/kicad-tools"\n'
+        'rev = "45744d0a"\n'
+        "\n"
+        "[tool.ruff]\n"
+        "line-length = 100\n",
+    )
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    assert data["project"]["dependencies"] == [f"kicad-tools[report]>={_source_version()}"]
+    assert "sources" not in data.get("tool", {}).get("uv", {})
+    assert data["tool"]["ruff"] == {"line-length": 100}
+
+
+# --- the pin helper only edits dependency arrays (#8081 review) --------------
+
+PIN_HELPER = REPO_ROOT / "scripts" / "lib" / "install_kct_pypi_pin.py"
+
+
+def _pin(path: Path, cmd: str, version: str = "0.25.0") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(PIN_HELPER), cmd, str(path), version],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _pin_apply(tmp_path: Path, text: str) -> tuple[subprocess.CompletedProcess[str], dict]:
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    result = _pin(path, "apply")
+    return result, tomllib.loads(path.read_text())
+
+
+def test_pin_helper_ignores_keywords_and_adds_the_dependency(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\n'
+        'keywords = ["kicad-tools", "pcb"]\ndependencies = ["numpy"]\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(text)
+    assert _pin(tmp_path / "pyproject.toml", "state").stdout.strip() == "absent"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["keywords"] == ["kicad-tools", "pcb"]
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+    assert _pin(tmp_path / "pyproject.toml", "state").stdout.strip() == "match"
+
+
+@pytest.mark.parametrize(
+    ("deps", "expected"),
+    [
+        ('["numpy"]', ["kicad-tools>=0.25.0", "numpy"]),
+        ('["numpy", "kicad-tools[drc]"]', ["numpy", "kicad-tools[drc]>=0.25.0"]),
+    ],
+    ids=["dependency-absent", "dependency-present"],
+)
+def test_pin_helper_leaves_a_kicad_tools_description_alone(
+    tmp_path: Path, deps: str, expected: list[str]
+) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\n'
+        'description = "kicad-tools based motor driver board"\n'
+        f"dependencies = {deps}\n"
+    )
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["description"] == "kicad-tools based motor driver board"
+    assert data["project"]["dependencies"] == expected
+
+
+def test_pin_helper_ignores_comments_and_still_adds_the_dependency(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\n'
+        'dependencies = [\n  "numpy",\n  # "kicad-tools>=0.1",\n]\n'
+        '# Note: add "kicad-tools" later\n'
+        "\n"
+        "[tool.uv.sources]\n"
+        "kicad-tools = [\n"
+        '  { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" },\n'
+        "]\n"
+    )
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+    assert "sources" not in data.get("tool", {}).get("uv", {})
+    new = (tmp_path / "pyproject.toml").read_text()
+    assert '# Note: add "kicad-tools" later' in new
+    assert '# "kicad-tools>=0.1",' in new
+
+
+def test_pin_helper_adds_main_dependency_when_only_in_a_group(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
+        '\n[dependency-groups]\ndev = ["kicad-tools>=0.20"]\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(text)
+    assert _pin(tmp_path / "pyproject.toml", "state").stdout.strip() == "mismatch"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+    assert data["dependency-groups"]["dev"] == ["kicad-tools>=0.25.0"]
+
+
+def test_pin_helper_refuses_a_sources_entry_it_cannot_remove(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
+        '\n[tool.uv]\nsources.kicad-tools = { git = "https://github.com/rjwalters/kicad-tools" }\n'
+    )
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    result = _pin(path, "apply")
+    assert result.returncode == 1
+    assert "[tool.uv.sources]" in result.stderr
+    assert path.read_text() == text
+
+
+def test_installer_keeps_keywords_and_adds_the_dependency(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, 'keywords = ["kicad-tools", "pcb"]\ndependencies = ["numpy"]\n')
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    assert data["project"]["keywords"] == ["kicad-tools", "pcb"]
+    assert data["project"]["dependencies"] == [f"kicad-tools>={_source_version()}", "numpy"]
+
+
+# --- pin helper / workflow hardening (#8097) ---------------------------------
+
+
+def test_pin_helper_keeps_crlf_line_endings(tmp_path: Path) -> None:
+    lines = [
+        "[project]",
+        'name = "board"',
+        'version = "0.1.0"',
+        "dependencies = [",
+        '    "numpy",',
+        '    "kicad-tools[drc]",',
+        "]",
+        "",
+        "[tool.uv.sources]",
+        'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" }',
+        "",
+        "[tool.ruff]",
+        "line-length = 100",
+    ]
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode())
+    result = _pin(path, "apply")
+    assert result.returncode == 0, result.stderr
+    raw = path.read_bytes().decode()
+    # Every line still ends CRLF -- no whole-file LF conversion.
+    assert raw.count("\n") == raw.count("\r\n") > 0
+    expected = lines[:5] + [
+        '    "kicad-tools[drc]>=0.25.0",',
+        "]",
+        "",
+        "[tool.ruff]",
+        "line-length = 100",
+    ]
+    assert raw == "\r\n".join(expected) + "\r\n"
+
+
+@pytest.mark.parametrize(
+    "deps",
+    ['dependencies = ["numpy"]', 'dependencies = [\r\n    "numpy",\r\n]'],
+    ids=["inline", "multi-line"],
+)
+def test_pin_helper_added_line_matches_crlf(tmp_path: Path, deps: str) -> None:
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(f'[project]\r\nname = "board"\r\n{deps}\r\n'.encode())
+    result = _pin(path, "apply")
+    assert result.returncode == 0, result.stderr
+    raw = path.read_bytes().decode()
+    assert raw.count("\n") == raw.count("\r\n")
+    assert tomllib.loads(raw)["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+
+
+def test_pin_helper_keeps_mixed_line_endings_per_line(tmp_path: Path) -> None:
+    path = tmp_path / "pyproject.toml"
+    text = (
+        '[project]\r\nname = "board"\nversion = "0.1.0"\r\n'
+        'dependencies = ["kicad-tools"]\n\n[tool.uv.sources]\r\n'
+        'kicad-tools = { path = "../kct" }\r\n\r\n[tool.ruff]\nline-length = 100\r\n'
+    )
+    path.write_bytes(text.encode())
+    result = _pin(path, "apply")
+    assert result.returncode == 0, result.stderr
+    assert path.read_bytes().decode() == (
+        '[project]\r\nname = "board"\nversion = "0.1.0"\r\n'
+        'dependencies = ["kicad-tools>=0.25.0"]\n\n[tool.ruff]\nline-length = 100\r\n'
+    )
+
+
+_BS = chr(92)  # a backslash, spelled so no tool decodes the escapes below
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [
+        (f'"kicad{_BS}u002Dtools>=0.20"', "kicad-tools>=0.25.0"),
+        (f'"kicad{_BS}u005Ftools[drc]>=0.20"', "kicad-tools[drc]>=0.25.0"),
+        (f'"kicad{_BS}u002etools{_BS}u003E=99.0"', "kicad-tools>=99.0"),
+    ],
+    ids=["escaped-dash", "escaped-underscore-extras", "escaped-dot-higher-floor"],
+)
+def test_pin_helper_decodes_toml_escapes_and_never_duplicates(
+    tmp_path: Path, literal: str, expected: str
+) -> None:
+    text = f'[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy", {literal}]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    # The escaped string is a kicad-tools requirement, not "absent".
+    assert _pin(path, "state").stdout.strip() != "absent"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["numpy", expected]
+    assert _pin(path, "state").stdout.strip() == "match"
+
+
+def _python_without_toml(tmp_path: Path, env: dict[str, str]) -> dict[str, str]:
+    """``env`` whose only usable Python cannot import tomllib or tomli (a 3.9 stand-in)."""
+    block = tmp_path / "no-toml"
+    block.mkdir()
+    for mod in ("tomllib", "tomli"):
+        (block / f"{mod}.py").write_text(f"raise ImportError('no {mod} (test stand-in)')\n")
+    bindir = Path(env["PATH"].split(os.pathsep)[0])  # fake_uv_env's fakebin
+    (bindir / "python3").write_text(
+        f'#!/usr/bin/env bash\nPYTHONPATH="{block}" exec "{sys.executable}" "$@"\n'
+    )
+    (bindir / "python3").chmod(0o755)
+    for minor in range(9, 16):  # shadow any real python3.X on PATH
+        shim = bindir / f"python3.{minor}"
+        shim.write_text("#!/usr/bin/env bash\nexit 1\n")
+        shim.chmod(0o755)
+    return env
+
+
+def test_pypi_dry_run_needs_no_tomllib(
+    tmp_path: Path, target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    env = _python_without_toml(tmp_path, fake_uv_env)
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--dry-run", env=env)
+    assert result.returncode == 0, result.stderr
+    assert f"[dry-run] pin kicad-tools>={_source_version()} from PyPI" in result.stdout
+    assert _snapshot(target_repo) == before
+
+
+def test_pypi_apply_without_tomllib_refuses_clearly(
+    tmp_path: Path, target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    env = _python_without_toml(tmp_path, fake_uv_env)
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    before = (target_repo / "pyproject.toml").read_text()
+    result = run_installer(target_repo, env=env)
+    assert result.returncode != 0
+    assert "Python >= 3.11" in result.stderr
+    assert (target_repo / "pyproject.toml").read_text() == before
+
+
+def test_upgrade_workflow_scopes_the_token_to_the_publish_job() -> None:
+    workflow = yaml.safe_load(UPGRADE_WORKFLOW_SRC.read_text())
+    jobs = workflow["jobs"]
+    prepare, publish = jobs["prepare"], jobs["publish"]
+    assert publish["needs"] == "prepare"
+    # No step that executes installer or `uv lock` output shares a job with the token.
+    assert "secrets." not in yaml.safe_dump(prepare)
+    assert "GH_TOKEN" not in yaml.safe_dump(prepare)
+    assert prepare["permissions"] == {"contents": "read"}
+    assert any("install-kct.sh" in s.get("run", "") for s in prepare["steps"])
+    assert not any(
+        "install-kct.sh" in s.get("run", "") or "uv lock" in s.get("run", "")
+        for s in publish["steps"]
+    )
+    for job in (prepare, publish):
+        checkout = next(
+            s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout")
+        )
+        assert checkout["with"]["persist-credentials"] is False
+        assert "token" not in checkout["with"]
+    pr_step = next(s for s in publish["steps"] if s.get("name") == "Open the upgrade PR")
+    assert "GH_TOKEN" in pr_step["env"]
+    assert "GH_TOKEN" not in publish.get("env", {})
+    assert "push origin" in pr_step["run"]
+    assert "credential.helper=!gh auth git-credential" in pr_step["run"]
+    assert any("git apply" in s.get("run", "") for s in publish["steps"])
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ['"""kicad-tools>=0.20"""', "'''kicad-tools>=0.20'''", '"""\nkicad-tools>=0.20"""'],
+    ids=["basic", "literal", "leading-newline"],
+)
+def test_pin_helper_rewrites_multiline_strings_in_place(tmp_path: Path, literal: str) -> None:
+    text = f'[project]\nname = "board"\nversion = "0.1.0"\ndependencies = [\n    "numpy",\n    {literal},\n]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    assert _pin(path, "state").stdout.strip() == "mismatch"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["numpy", "kicad-tools>=0.25.0"]
+
+
+def test_pin_helper_multiline_in_dependency_group(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "b"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
+        "[dependency-groups]\ndev = [\n    '''kicad-tools>=0.20''',\n]\n"
+    )
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["dependency-groups"]["dev"] == ["kicad-tools>=0.25.0"]
+    assert data["project"]["dependencies"].count("kicad-tools>=0.25.0") == 1
+
+
+def test_pin_helper_multiline_crlf(tmp_path: Path) -> None:
+    text = '[project]\r\nname = "b"\r\nversion = "0.1.0"\r\ndependencies = [\r\n    """kicad-tools>=0.20""",\r\n]\r\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(text.encode())
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0"]
+
+
+def test_pin_helper_leaves_requirement_spanning_lines_unmatched(tmp_path: Path) -> None:
+    text = '[project]\nname = "b"\nversion = "0.1.0"\ndependencies = [\n    """kicad-tools\n>=0.20""",\n]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    assert _pin(path, "state").stdout.strip() == "absent"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr  # valid TOML either way
+
+
+@pytest.mark.parametrize("escape", ["\\x2D", "\\e"], ids=["hex-x", "escape-e"])
+def test_pin_helper_rejects_toml_1_1_escapes(tmp_path: Path, escape: str) -> None:
+    text = (
+        f'[project]\nname = "b"\nversion = "0.1.0"\ndependencies = ["kicad{escape}tools>=0.20"]\n'
+    )
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    assert _pin(path, "state").returncode != 0
+
+
+def test_submit_jlcpcb_skill_is_vendored(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """Regression (#8537): the submit-jlcpcb skill reaches consumer repos."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert (target_repo / ".claude" / "commands" / "kct" / "submit-jlcpcb.md").is_file()

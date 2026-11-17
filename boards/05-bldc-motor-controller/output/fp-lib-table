@@ -1,0 +1,1 @@
+(fp_lib_table (version 7) (lib (name "board05_revB") (type "KiCad") (uri "${KIPRJMOD}/board05_revB.pretty") (options "") (descr "TI DRV8313 land pattern")))

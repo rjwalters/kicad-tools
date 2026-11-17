@@ -1,0 +1,29 @@
+{
+  "nextAgentNumber": 3,
+  "autonomous": {
+    "workFinder": {
+      "enabled": true,
+      "intervalSecs": 30,
+      "maxConcurrent": 5
+    },
+    "exampleTierProbe": 4,
+    "mainHealthGate": {
+      "enabled": true
+    }
+  },
+  "guards": {
+    "sqlDdl": null,
+    "cloudCli": false
+  },
+  "legacyOnly": "legacy-value",
+  "buildGate": {
+    "enabled": true,
+    "command": "make test"
+  },
+  "projectOnly": "project-value",
+  "overriddenByLocal": "local-value",
+  "worktree": {
+    "root": "/mnt/scratch"
+  },
+  "overriddenByFleetRepo": "fleet-repo-value"
+}

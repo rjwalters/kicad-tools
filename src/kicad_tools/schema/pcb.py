@@ -1,0 +1,9510 @@
+"""KiCad PCB data models.
+
+Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import re
+import tempfile
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, cast
+
+logger = logging.getLogger(__name__)
+
+from kicad_tools.sexp import SExp
+
+from ..core.board_outline import board_outline_bounds, legacy_arc_points
+from ..core.schematic_uuids import UuidMinter
+from ..core.sexp_file import load_footprint, load_pcb, save_pcb
+from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
+from ..footprints.fp_lib_table import find_project_fp_lib_table, parse_fp_lib_table
+from ..footprints.library_path import (
+    detect_kicad_library_path,
+    guess_standard_library,
+    parse_library_id,
+)
+
+if TYPE_CHECKING:
+    from ..manufacturers import DesignRules
+    from ..query.footprints import FootprintList
+
+# S-expression tags that introduce a component (footprint) block.
+#
+# KiCad 6 renamed ``(module ...)`` to ``(footprint ...)``; boards written by
+# pre-KiCad-6 tools -- still a large share of the public corpus -- use the
+# legacy spelling.  Every sub-form we read inside the block (``pad``, ``at``,
+# ``layer``, ``fp_text reference`` / ``fp_text value``, ``attr``) is spelled
+# identically on both sides of the rename, so accepting ``module`` as an alias
+# recovers the whole component graph without any per-sub-form translation
+# (issue #4873).  ``core.sexp_file.load_footprint`` already accepts the same
+# alias for standalone ``.kicad_mod`` library files.
+FOOTPRINT_TAGS: tuple[str, ...] = ("footprint", "module")
+
+
+def _is_footprint_tag(tag: str | None) -> bool:
+    """Return True if *tag* names a footprint block (modern or legacy).
+
+    Use this instead of a bare ``tag == "footprint"`` comparison anywhere the
+    board S-expression tree is walked, so legacy ``(module ...)`` boards stay
+    editable (position sync, rename, remove, translate) and not just readable.
+    """
+    return tag in FOOTPRINT_TAGS
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
+
+
+# Default regex for detecting power/ground net names.
+# Matches names like GND, +3V3, +5V, VCC, VDD, VBUS, or names starting with '+'.
+_DEFAULT_POWER_NET_PATTERN = re.compile(
+    r"^(\+|GND|GNDA|GNDPWR|VCC|VDD|VBUS|VSS|V[0-9])",
+    re.IGNORECASE,
+)
+
+
+def _is_power_net(name: str, pattern: re.Pattern[str] | None = None) -> bool:
+    """Return True if *name* looks like a power or ground net.
+
+    Uses *pattern* if provided, otherwise falls back to the built-in
+    heuristic ``_DEFAULT_POWER_NET_PATTERN``.
+    """
+    if not name:
+        return False
+    pat = pattern if pattern is not None else _DEFAULT_POWER_NET_PATTERN
+    return pat.search(name) is not None
+
+
+# Copper-deduplication support (issue #4175).
+#
+# ``route-auto`` (and any completion-loop caller) re-solves the same corridor
+# on every external retry and appends a geometrically-identical, uuid-distinct
+# copy of the same copper.  ``add_trace``/``add_via`` deduplicate against an
+# incrementally-maintained key set so the same net-geometry is never appended
+# twice; ``dedupe_copper`` cleans up boards that were already bloated.
+#
+# ``_DEDUP_QUANT`` = 3 decimal places rounds coordinates/widths to ~1 micron at
+# mm scale, matching the ``EPS = 1e-3`` mm coincidence tolerance established by
+# ``router/connectivity.py`` (#4165) rather than inventing a second epsilon.
+_DEDUP_QUANT = 3
+
+# ``remove_segments``/``remove_vias``' coordinate-fallback matching (for
+# elements with no UUID) round-trips a coordinate through board-relative
+# space and back (subtract ``board_origin`` at parse time in
+# ``_detect_board_origin``, re-add it when building the lookup key) -- a
+# float operation that is not always bit-exact.  ``_DEDUP_QUANT``'s 1-micron
+# precision is occasionally too coarse to disambiguate that round-trip noise
+# from a genuine tie at the rounding boundary (observed: a real board with a
+# non-zero ``board_origin`` -- BeagleConnect Freedom, issue #4933 -- left a
+# small residual of un-removed copper at 1-micron rounding). 0.1-micron
+# precision matches this file format's actual on-disk decimal precision
+# closely enough to absorb the round-trip noise without it, and empirically
+# resolved 100% of that board's segments/vias (verified against all three
+# of #4933's fetched benchmark boards). This is intentionally a separate,
+# tighter constant from ``_DEDUP_QUANT`` -- that one governs a different,
+# deliberately coarser "is this a near-duplicate copper pour" comparison.
+_COORD_MATCH_QUANT = 4
+
+# Type aliases for the dedup keys.
+_SegmentKey = tuple[int, str, tuple[tuple[float, float], tuple[float, float]], float]
+_ViaKey = tuple[int, float, float, tuple[str, ...]]
+
+
+def _segment_dedup_key(
+    net_number: int,
+    layer: str,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    width: float,
+) -> _SegmentKey:
+    """Order-insensitive dedup key for a trace segment.
+
+    Two segments are duplicates only when they share net, layer, width, and the
+    same *unordered* pair of endpoints (a re-solved corridor may walk the same
+    two points in either direction).  Segments that merely share one endpoint,
+    or that differ in layer/width/net, are NOT duplicates.
+    """
+    p1 = (round(start[0], _DEDUP_QUANT), round(start[1], _DEDUP_QUANT))
+    p2 = (round(end[0], _DEDUP_QUANT), round(end[1], _DEDUP_QUANT))
+    endpoints = (p1, p2) if p1 <= p2 else (p2, p1)
+    return (net_number, layer, endpoints, round(width, _DEDUP_QUANT))
+
+
+def _via_dedup_key(
+    net_number: int,
+    x: float,
+    y: float,
+    layers: tuple[str, ...] | list[str],
+) -> _ViaKey:
+    """Dedup key for a via: net + rounded position + order-insensitive layers."""
+    return (
+        net_number,
+        round(x, _DEDUP_QUANT),
+        round(y, _DEDUP_QUANT),
+        tuple(sorted(layers)),
+    )
+
+
+def _segment_span_intersects_region(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    region: tuple[float, float, float, float],
+) -> bool:
+    """Return True if the segment ``start``->``end`` crosses the axis-aligned box.
+
+    All coordinates are board-relative.  ``region`` is a normalized
+    ``(x1, y1, x2, y2)`` box with ``x1 <= x2`` and ``y1 <= y2``.  Uses the
+    Liang-Barsky parametric clip test.  This is only used to decide whether a
+    both-endpoints-outside segment should be *reported* as boundary-skipped
+    (it is never itself modified), so a conservative True on tangency is fine.
+    """
+    x1, y1, x2, y2 = region
+    sx, sy = start
+    ex, ey = end
+    dx = ex - sx
+    dy = ey - sy
+    # Degenerate (zero-length) segment: treat as a point-in-box test.
+    if dx == 0.0 and dy == 0.0:
+        return x1 <= sx <= x2 and y1 <= sy <= y2
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, sx - x1), (dx, x2 - sx), (-dy, sy - y1), (dy, y2 - sy)):
+        if p == 0.0:
+            if q < 0.0:
+                return False  # Parallel to this edge and outside the slab.
+            continue
+        r = q / p
+        if p < 0.0:
+            if r > t1:
+                return False
+            if r > t0:
+                t0 = r
+        else:
+            if r < t0:
+                return False
+            if r < t1:
+                t1 = r
+    return t0 <= t1
+
+
+# ---------------------------------------------------------------------------
+# Power-rail name canonicalisation (issue #3302)
+# ---------------------------------------------------------------------------
+#
+# KiCad's stock ``power:`` library uses ``V`` as a decimal separator for
+# sub-volt fractional rails (``+3V3``, ``+1V8``, ``+2V5``) while the
+# kicad-tools netlist-sync convention emits the same rails with a decimal
+# point (``+3.3V``, ``+1.8V``, ``+2.5V``). The two forms refer to the
+# same electrical net but the strings differ, so a naive set-difference
+# between schematic-label names and PCB-net names sees a spurious add
+# and a spurious remove for every fractional rail.
+#
+# ``_POWER_RAIL_ALIAS_RE`` recognises the canonical-form pair and
+# ``canonicalize_power_net`` rewrites both forms to a single canonical
+# string (``+N.MV``, no decimal-point removal) so the two sides of a
+# drift comparison agree without affecting non-power names. Whole-volt
+# rails (``+5V`` / ``+5.0V``) are also normalised; this keeps the table
+# closed and avoids drift surprises on boards that emit ``+5.0V``.
+#
+# The table is deliberately limited to the ``+N`` and ``+N.M`` rails
+# called out in the schema convention documentation
+# (``src/kicad_tools/schematic/models/elements_mixin.py:394-397``). It
+# is *not* a general fuzzy net matcher; non-matching names are returned
+# unchanged.
+
+# ``+3V3`` / ``+3.3V`` / ``+3.0V`` (whole volt with explicit fraction)
+_POWER_RAIL_V_DECIMAL_RE = re.compile(r"^([+\-])(\d+)V(\d+)$")
+_POWER_RAIL_DOT_DECIMAL_RE = re.compile(r"^([+\-])(\d+)\.(\d+)V$")
+_POWER_RAIL_WHOLE_RE = re.compile(r"^([+\-])(\d+)V$")
+
+
+def iter_copper_pads(pcb: PCB) -> Iterator[tuple[Footprint, Pad]]:
+    """Yield ``(footprint, pad)`` for every pad that can carry a net.
+
+    Non-plated holes (``np_thru_hole``) have no copper and never sit on a
+    net, so they are skipped.  Shared by ``kct validate --sync`` and
+    ``kct fleet status`` so both read pad nets through the schema parser,
+    which understands the numbered ``(net N "name")`` and the KiCad 10
+    name-only ``(net "name")`` dialects alike (issue #6815).
+    """
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.type == "np_thru_hole":
+                continue
+            yield fp, pad
+
+
+def pad_net_names(pcb: PCB) -> set[str]:
+    """Return the set of non-empty net names attached to copper pads."""
+    return {pad.net_name for _fp, pad in iter_copper_pads(pcb) if pad.net_name}
+
+
+def canonicalize_power_net(name: str) -> str:
+    """Return the canonical form of a power-rail net name.
+
+    The canonical form is ``+N.MV`` for fractional rails (``+3V3`` ->
+    ``+3.3V``) and ``+NV`` for whole-volt rails (``+5.0V`` -> ``+5V``).
+    Names that don't match the power-rail-alias grammar are returned
+    unchanged, so the function is a pure no-op for signal names like
+    ``BOOT0``, ``LED_K`` or ``USB_CC1``.
+
+    Examples:
+        ``+3V3``    -> ``+3.3V``
+        ``+3.3V``   -> ``+3.3V``
+        ``+1V8``    -> ``+1.8V``
+        ``+5V``     -> ``+5V``
+        ``+5.0V``   -> ``+5V``
+        ``-3V3``    -> ``-3.3V``
+        ``VBUS``    -> ``VBUS`` (no change)
+        ``BOOT0``   -> ``BOOT0`` (no change)
+    """
+    if not name:
+        return name
+    m = _POWER_RAIL_V_DECIMAL_RE.match(name)
+    if m:
+        sign, whole, frac = m.group(1), m.group(2), m.group(3)
+        # Strip a trailing zero fraction (``+3V0`` -> ``+3V`` canonical).
+        if frac == "0":
+            return f"{sign}{whole}V"
+        return f"{sign}{whole}.{frac}V"
+    m = _POWER_RAIL_DOT_DECIMAL_RE.match(name)
+    if m:
+        sign, whole, frac = m.group(1), m.group(2), m.group(3)
+        # Whole-volt rail expressed with explicit ``.0`` fraction.
+        if frac == "0":
+            return f"{sign}{whole}V"
+        return f"{sign}{whole}.{frac}V"
+    m = _POWER_RAIL_WHOLE_RE.match(name)
+    if m:
+        sign, whole = m.group(1), m.group(2)
+        return f"{sign}{whole}V"
+    return name
+
+
+def canonicalize_power_nets(names: set[str]) -> set[str]:
+    """Apply :func:`canonicalize_power_net` to every name in a set.
+
+    Returns a new set; the input is not mutated. Non-power-rail names
+    pass through unchanged so the caller can treat the result as a
+    drop-in replacement for the original set.
+    """
+    return {canonicalize_power_net(n) for n in names}
+
+
+@dataclass
+class Layer:
+    """PCB layer definition."""
+
+    number: int
+    name: str
+    type: str  # signal, power, user
+
+
+@dataclass
+class Net:
+    """PCB net definition."""
+
+    number: int
+    name: str
+
+
+def _sync_at_angle(owner: object, at_node: SExp, angle: float) -> None:
+    """Write *angle* into an ``(at x y [angle])`` node, residue-free.
+
+    KiCad omits the angle token entirely when the rotation is zero, so a
+    node that arrived as a 2-token ``(at x y)`` must go back to 2 tokens
+    when its angle returns to zero.  Otherwise a mirror/un-mirror (or
+    rotate-and-back) round trip leaves a cosmetic ``(at x y 0)`` behind in
+    the saved file -- harmless to KiCad, but diff noise (issue #4752).
+
+    Only the token *this* write-through appended is ever removed, tracked
+    per-owner via ``_at_angle_synthetic``: a node the file supplied as an
+    explicit 3-token ``(at x y 0)`` keeps its zero, so byte-fidelity for
+    boards written that way is unchanged.  Nodes carrying extra trailing
+    tokens (4+ children) are never trimmed either.
+
+    Args:
+        owner: The ``Pad``/``Footprint`` owning *at_node* (holds the
+            synthetic-token flag in its ``__dict__``).
+        at_node: The ``(at ...)`` S-expression node to update.
+        angle: The new rotation in degrees.
+    """
+    if len(at_node.children) >= 3:
+        synthetic = owner.__dict__.get("_at_angle_synthetic", False)
+        if angle == 0.0 and synthetic and len(at_node.children) == 3:
+            del at_node.children[2]
+            owner.__dict__["_at_angle_synthetic"] = False
+        else:
+            at_node.set_value(2, angle)
+    elif angle != 0.0:
+        at_node.add(angle)
+        owner.__dict__["_at_angle_synthetic"] = True
+
+
+# A footprint's placement as the frame transform KiCad applies to its children:
+# ``(anchor_x, anchor_y, rotation_deg, is_back)``.
+_FootprintFrame = tuple[float, float, float, bool]
+
+# Children of a ``(zone ...)`` that hold a ``(pts ...)`` list in sheet
+# coordinates.  ``fill_segments`` is the pre-KiCad-6 hatch-fill spelling.
+_ZONE_PTS_PARENTS = frozenset({"polygon", "filled_polygon", "fill_segments"})
+
+
+def _flip_side_layer(name: str) -> str:
+    """Swap a KiCad layer name to the other board side (``F.* <-> B.*``).
+
+    Side-neutral names (``*.Cu``, ``F&B.Cu``, ``In1.Cu``, ``Edge.Cuts``) are
+    returned unchanged -- what KiCad's footprint flip does to them as well.
+    """
+    if name.startswith("F."):
+        return "B." + name[2:]
+    if name.startswith("B."):
+        return "F." + name[2:]
+    return name
+
+
+def _is_back_layer(layer: object) -> bool:
+    return isinstance(layer, str) and layer.startswith("B.")
+
+
+def _footprint_frame_mapper(old: _FootprintFrame, new: _FootprintFrame):
+    """Return ``f(x, y) -> (x', y')`` re-placing a point from *old* to *new*.
+
+    KiCad stores footprint-embedded zones in board coordinates with the
+    footprint's placement already applied::
+
+        board = anchor + R(rotation) . M(is_back) . local
+
+    where ``R(a)`` is KiCad's ``RotatePoint`` (Y-down, so ``x' = x cos a +
+    y sin a``, ``y' = -x sin a + y cos a``) and ``M`` mirrors ``y`` for a
+    back-side footprint.  Pulling a point back through *old* and pushing it
+    through *new* reproduces every ``FOOTPRINT`` operation exactly:
+    ``SetPosition`` (translate), ``SetOrientation`` (rotate about the anchor),
+    ``Flip(TOP_BOTTOM)`` (side swap, ``a -> -a``) and ``Flip(LEFT_RIGHT)``
+    (side swap, ``a -> 180 - a``).  Pinned against pcbnew 10.0.1 by
+    ``tests/fixtures/fp_zone_transform/`` (Issue #6119).
+
+    The map depends only on the two end states, so a sequence of single-field
+    updates (``position``, then ``rotation``, then ``layer``) composes to the
+    same result as one combined update, in any order.
+    """
+    ox, oy, orot, oback = old
+    nx, ny, nrot, nback = new
+    oa = math.radians(orot)
+    na = math.radians(nrot)
+    oc, os_ = math.cos(oa), math.sin(oa)
+    nc, ns = math.cos(na), math.sin(na)
+    mirror = oback != nback
+
+    def mapper(x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - ox, y - oy
+        # Inverse rotation R(-old) brings the point into the oriented local frame.
+        lx = dx * oc - dy * os_
+        ly = dx * os_ + dy * oc
+        if mirror:
+            ly = -ly
+        return (lx * nc + ly * ns + nx, -lx * ns + ly * nc + ny)
+
+    return mapper
+
+
+def _mm_atom(value: float) -> SExp:
+    """A numeric atom formatted like KiCad's own writer (up to 6 decimals).
+
+    The generic float serializer uses 6 *significant* digits, which would
+    round a transformed ``124.598076`` to ``124.598``.  The in-memory value
+    keeps full precision, so a move-and-restore (``check_placement_collision``,
+    placement-feedback rollback) puts the original text back exactly.
+    """
+    text = f"{round(value, 6):.6f}".rstrip("0").rstrip(".")
+    if text in ("-0", ""):
+        text = "0"
+    return SExp(value=value, _original_str=text)
+
+
+def _transform_zone_sexp(
+    zone_node: SExp,
+    mapper,
+    flip_layers: bool,
+) -> None:
+    """Re-place one footprint ``(zone ...)`` node in the S-expression tree."""
+    for child in zone_node.iter_children():
+        if child.tag in _ZONE_PTS_PARENTS:
+            pts = child.find_child("pts")
+            if pts is not None:
+                for point in pts.iter_children():
+                    # Zone outlines may carry ``(arc (start) (mid) (end))``
+                    # entries; a rigid motion maps them point-wise too.
+                    targets = (
+                        [point]
+                        if point.tag == "xy"
+                        else [n for n in point.iter_children() if n.tag in ("start", "mid", "end")]
+                        if point.tag == "arc"
+                        else []
+                    )
+                    for node in targets:
+                        x, y = node.get_float(0), node.get_float(1)
+                        if x is None or y is None:
+                            continue
+                        nx, ny = mapper(x, y)
+                        node.children[0] = _mm_atom(nx)
+                        node.children[1] = _mm_atom(ny)
+            if flip_layers and child.tag == "filled_polygon":
+                _flip_layer_node(child.find_child("layer"))
+        elif flip_layers and child.tag == "layer":
+            _flip_layer_node(child)
+        elif flip_layers and child.tag == "layers":
+            child.children = [
+                SExp.quoted_atom(_flip_side_layer(atom.value))
+                if atom.is_atom and isinstance(atom.value, str)
+                else atom
+                for atom in child.children
+            ]
+
+
+def _flip_layer_node(node: SExp | None) -> None:
+    if node is None:
+        return
+    name = node.get_string(0)
+    if name:
+        node.children[0] = SExp.quoted_atom(_flip_side_layer(name))
+
+
+# Nodes holding a footprint-local ``y`` that a back-side placement mirrors.
+_BACK_MIRROR_XY_TAGS = frozenset({"start", "end", "mid", "center", "xy", "offset"})
+# ``(chamfer ...)`` corners swap top <-> bottom when the y axis is mirrored.
+_CHAMFER_CORNER_SWAP = {
+    "top_left": "bottom_left",
+    "bottom_left": "top_left",
+    "top_right": "bottom_right",
+    "bottom_right": "top_right",
+}
+_FP_GRAPHIC_TAG_PREFIXES = ("fp_", "gr_")
+
+
+def _negate_node_y(node: SExp) -> None:
+    """Negate the ``y`` of an ``(at x y ...)``/``(xy x y)`` style node."""
+    y = node.get_float(1)
+    if y is not None:
+        node.children[1] = _mm_atom(-y)
+
+
+def _mirror_local_y(node: SExp) -> None:
+    """Mirror every footprint-local point under *node* across the x axis."""
+    for child in node.iter_children():
+        if child.tag in _BACK_MIRROR_XY_TAGS:
+            _negate_node_y(child)
+        else:
+            _mirror_local_y(child)
+
+
+def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0) -> None:
+    """Re-express a front-authored raw ``(footprint ...)`` for a back placement.
+
+    A library footprint is authored for the front.  KiCad stores a footprint
+    on ``B.Cu`` with every side-specific layer swapped (``F.* <-> B.*``), its
+    local geometry mirrored across the x axis, pad angles negated (the
+    footprint's own *rotation* is added on top by the caller), and texts
+    mirrored (``(justify mirror)``) with angle ``180 + rotation - local``.
+    Verified black-box against ``pcbnew`` 10.0.6 ``Flip`` output (Issue #8581).
+    Side-neutral layers (``*.Cu``, ``In1.Cu``, ``Edge.Cuts``) are unchanged.
+    """
+    for child in footprint_node.iter_children():
+        tag = child.tag
+        if tag == "pad":
+            _flip_layer_children(child)
+            at_node = child.find_child("at")
+            if at_node is not None:
+                _negate_node_y(at_node)
+                angle = at_node.get_float(2)
+                if angle:
+                    at_node.children[2] = _mm_atom(-angle)
+            drill = child.find_child("drill")
+            if drill is not None:
+                _mirror_local_y(drill)
+            chamfer = child.find_child("chamfer")
+            if chamfer is not None:
+                chamfer.children = [
+                    SExp.atom(_CHAMFER_CORNER_SWAP[c.value])
+                    if c.is_atom and c.value in _CHAMFER_CORNER_SWAP
+                    else c
+                    for c in chamfer.children
+                ]
+            primitives = child.find_child("primitives")
+            if primitives is not None:
+                _mirror_local_y(primitives)
+        elif tag in _FP_TEXT_TAGS:
+            _flip_layer_children(child)
+            at_node = child.find_child("at")
+            if at_node is not None:
+                _negate_node_y(at_node)
+                local = at_node.get_float(2) or 0.0
+                _set_text_at_angle(at_node, _normalize_text_angle(180.0 + rotation - local), None)
+            _mirror_text_effects(child)
+        elif tag is not None and tag.startswith(_FP_GRAPHIC_TAG_PREFIXES):
+            _flip_layer_children(child)
+            if tag == "fp_text_box":
+                _mirror_text_effects(child)
+            _mirror_local_y(child)
+        elif tag == "zone":
+            _flip_layer_children(child)
+            _mirror_local_y(child)
+            for poly in child.iter_children():
+                if poly.tag == "filled_polygon":
+                    _flip_layer_node(poly.find_child("layer"))
+
+
+def _flip_layer_children(node: SExp) -> None:
+    """Swap the sides of a node's direct ``(layer ...)``/``(layers ...)`` children."""
+    for child in node.iter_children():
+        if child.tag == "layer":
+            _flip_layer_node(child)
+        elif child.tag == "layers":
+            child.children = [
+                SExp.quoted_atom(_flip_side_layer(atom.value))
+                if atom.is_atom and isinstance(atom.value, str)
+                else atom
+                for atom in child.children
+            ]
+
+
+def _mirror_text_effects(text_node: SExp) -> None:
+    """Add ``mirror`` to a text's ``(effects (justify ...))`` (creating it)."""
+    effects = text_node.find_child("effects")
+    if effects is None:
+        effects = SExp.list("effects")
+        text_node.append(effects)
+    justify = effects.find_child("justify")
+    if justify is None:
+        effects.append(SExp.list("justify", "mirror"))
+    elif not any(c.is_atom and c.value == "mirror" for c in justify.children):
+        justify.append(SExp.atom("mirror"))
+
+
+def transform_footprint_zone_nodes(
+    footprint_node: SExp,
+    old_frame: _FootprintFrame,
+    new_frame: _FootprintFrame,
+) -> int:
+    """Re-place the ``(zone ...)`` children of a raw ``(footprint ...)`` node.
+
+    For code that edits a footprint's ``(at ...)`` directly in the
+    S-expression tree instead of going through :class:`Footprint` (whose
+    ``position``/``rotation``/``layer`` setters already do this).  Both
+    frames are **sheet-absolute** ``(x, y, rotation_deg, is_back)`` -- the
+    values in the footprint's ``(at ...)``/``(layer ...)`` before and after
+    the edit.  Returns the number of zones rewritten (Issue #6119).
+    """
+    if new_frame == old_frame:
+        return 0
+    zone_nodes = [child for child in footprint_node.iter_children() if child.tag == "zone"]
+    if not zone_nodes:
+        return 0
+    mapper = _footprint_frame_mapper(old_frame, new_frame)
+    flip_layers = old_frame[3] != new_frame[3]
+    for zone_node in zone_nodes:
+        _transform_zone_sexp(zone_node, mapper, flip_layers)
+    return len(zone_nodes)
+
+
+def footprint_node_frame(footprint_node: SExp) -> _FootprintFrame:
+    """Sheet-absolute ``(x, y, rotation, is_back)`` of a raw footprint node."""
+    at_node = footprint_node.find_child("at")
+    x = y = rot = 0.0
+    if at_node is not None:
+        x = at_node.get_float(0) or 0.0
+        y = at_node.get_float(1) or 0.0
+        rot = at_node.get_float(2) or 0.0
+    layer_node = footprint_node.find_child("layer")
+    layer = layer_node.get_string(0) if layer_node is not None else None
+    return (x, y, rot, _is_back_layer(layer))
+
+
+# ---------------------------------------------------------------------------
+# Footprint text angles (Issue #6126)
+# ---------------------------------------------------------------------------
+
+# Footprint children whose ``(at x y ANGLE)`` angle KiCad stores
+# **board-absolute** -- like a pad angle, it already includes the footprint's
+# rotation and side -- while ``x y`` stay footprint-local.
+_FP_TEXT_TAGS = frozenset({"property", "fp_text"})
+
+# What KiCad's ``PCB_TEXT::KeepUpright`` does to the justification when it
+# turns a text by 180 degrees (``center`` maps to itself).
+_JUSTIFY_SWAP = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
+
+
+def _normalize_text_angle(angle: float) -> float:
+    """Fold a text angle into ``[0, 360)`` like ``EDA_ANGLE::Normalize``.
+
+    Rounded to 6 decimals (what KiCad writes) so a rotate-and-restore round
+    trip lands back on the exact original value instead of ``44.99999999``.
+    """
+    value = round(float(angle) % 360.0, 6)
+    if value >= 360.0 or value == 0.0:
+        return 0.0
+    return value
+
+
+def footprint_text_angle(
+    old_frame: _FootprintFrame, new_frame: _FootprintFrame, angle: float
+) -> float:
+    """A footprint text's board-absolute angle after re-placing the footprint.
+
+    KiCad stores a ``property`` / ``fp_text`` angle board-absolute.  With ``l``
+    the text's angle inside the footprint definition and ``(theta, is_back)``
+    the footprint's placement, the stored angle is::
+
+        front:  a = theta + l
+        back:   a = 180 + theta - l
+
+    (``FOOTPRINT::Flip`` maps a text angle ``a -> 180 - a`` while the
+    footprint orientation goes ``theta -> -theta``).  Pulling *angle* back
+    through *old_frame* and pushing it through *new_frame* reproduces
+    ``SetOrientation`` (``a + delta``) and the side swap of
+    ``Flip(LEFT_RIGHT)`` (``a -> -a``), pinned against pcbnew 10.0.1 by
+    ``tests/fixtures/fp_zone_transform/``.  Like the zone mapper, it depends
+    only on the two end states, so single-field updates compose in any order.
+
+    This is the ``SetOrientation`` result: KiCad's interactive rotate and
+    left/right flip additionally re-upright "keep upright" texts -- see
+    :func:`keep_footprint_texts_upright`.
+    """
+    _ox, _oy, old_rot, old_back = old_frame
+    _nx, _ny, new_rot, new_back = new_frame
+    if old_back == new_back:
+        turned = angle + (new_rot - old_rot)
+    else:
+        turned = 180.0 + old_rot + new_rot - angle
+    return _normalize_text_angle(turned)
+
+
+def _text_is_keep_upright(text_node: SExp) -> bool:
+    """Whether a footprint text has KiCad's "keep upright" flag set.
+
+    KiCad 8+ writes ``(unlocked yes)`` for a text that is *not* kept upright;
+    KiCad 6/7 wrote an ``unlocked`` token inside ``(at x y [angle] unlocked)``.
+    Absent both, the text is kept upright (KiCad's default for fields).
+    """
+    unlocked = text_node.find_child("unlocked")
+    if unlocked is not None:
+        return unlocked.get_string(0) == "no"
+    at_node = text_node.find_child("at")
+    if at_node is not None and any(
+        child.is_atom and child.value == "unlocked" for child in at_node.children[2:]
+    ):
+        return False
+    return True
+
+
+def _set_text_at_angle(at_node: SExp, angle: float, synthetic: set[int] | None) -> None:
+    """Write a text's ``(at x y ANGLE)`` angle, keeping any ``unlocked`` token.
+
+    KiCad 10 always writes the angle; older files omit a zero one.  An angle
+    token this function had to add is tracked in *synthetic* (by node id) so
+    that returning to zero removes it again and a rotate-and-restore round
+    trip leaves the file byte-identical (the #4752 rule ``_sync_at_angle``
+    applies to footprints and pads).
+    """
+    if at_node.get_float(2) is not None:
+        if angle == 0.0 and synthetic is not None and id(at_node) in synthetic:
+            del at_node.children[2]
+            synthetic.discard(id(at_node))
+        else:
+            at_node.children[2] = _mm_atom(angle)
+    elif angle != 0.0:
+        # Before a legacy trailing ``unlocked`` token, if any.
+        at_node.children.insert(2, _mm_atom(angle))
+        if synthetic is not None:
+            synthetic.add(id(at_node))
+
+
+def _footprint_text_at_nodes(footprint_node: SExp) -> Iterator[tuple[SExp, SExp]]:
+    """``(text_node, at_node)`` for each direct ``property``/``fp_text`` child."""
+    for child in footprint_node.iter_children():
+        if child.tag in _FP_TEXT_TAGS:
+            at_node = child.find_child("at")
+            if at_node is not None and at_node.get_float(1) is not None:
+                yield child, at_node
+
+
+def transform_footprint_text_nodes(
+    footprint_node: SExp,
+    old_frame: _FootprintFrame,
+    new_frame: _FootprintFrame,
+    *,
+    synthetic: set[int] | None = None,
+) -> int:
+    """Turn the ``property``/``fp_text`` angles of a raw footprint node.
+
+    The text counterpart of :func:`transform_footprint_zone_nodes`, for code
+    that edits a footprint's ``(at ...)``/``(layer ...)`` directly in the
+    S-expression tree (``Footprint``'s setters already do this).  Each text
+    angle is re-placed with :func:`footprint_text_angle`; text positions are
+    footprint-local and stay put.  Returns the number of texts rewritten
+    (Issue #6126).
+    """
+    if (old_frame[2], old_frame[3]) == (new_frame[2], new_frame[3]):
+        return 0
+    count = 0
+    for _text, at_node in _footprint_text_at_nodes(footprint_node):
+        angle = at_node.get_float(2) or 0.0
+        _set_text_at_angle(at_node, footprint_text_angle(old_frame, new_frame, angle), synthetic)
+        count += 1
+    return count
+
+
+def _keep_text_node_upright(text_node: SExp, at_node: SExp) -> bool:
+    if not _text_is_keep_upright(text_node):
+        return False
+    angle = _normalize_text_angle(at_node.get_float(2) or 0.0)
+    if angle < 180.0:
+        return False
+    _set_text_at_angle(at_node, _normalize_text_angle(angle - 180.0), None)
+    effects = text_node.find_child("effects")
+    justify = effects.find_child("justify") if effects is not None else None
+    if justify is not None:
+        justify.children = [
+            SExp.atom(_JUSTIFY_SWAP[child.value])
+            if child.is_atom and child.value in _JUSTIFY_SWAP
+            else child
+            for child in justify.children
+        ]
+    return True
+
+
+def keep_footprint_texts_upright(footprint_node: SExp) -> int:
+    """Apply KiCad's ``PCB_TEXT::KeepUpright`` to a raw footprint's texts.
+
+    ``FOOTPRINT::Rotate`` -- the interactive rotate, and the 180-degree turn
+    inside ``Flip(LEFT_RIGHT)`` -- ends by re-uprighting every "keep upright"
+    text: one whose normalized angle is 180 or more turns by -180 and swaps
+    its justification (left/right, top/bottom), so it reads the same way up
+    from the same spot.  ``SetOrientation`` does not.  Texts with
+    ``(unlocked yes)`` are left alone.  Returns the number of texts turned
+    (Issue #6126).
+    """
+    return sum(
+        _keep_text_node_upright(text, at_node)
+        for text, at_node in _footprint_text_at_nodes(footprint_node)
+    )
+
+
+def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
+    """Re-place one parsed footprint :class:`Zone` (board-relative coords)."""
+    zone.polygon = [mapper(x, y) for x, y in zone.polygon]
+    zone.filled_polygons = [[mapper(x, y) for x, y in poly] for poly in zone.filled_polygons]
+    if flip_layers:
+        zone.layer = _flip_side_layer(zone.layer)
+        zone.layers = [_flip_side_layer(name) for name in zone.layers]
+        zone.filled_polygon_layers = [_flip_side_layer(name) for name in zone.filled_polygon_layers]
+
+
+# Pad fields whose assignment is mirrored into the backing ``(pad ...)`` node
+# (issue #4518/#4560 for the first three, issue #7479 for the rest).  Every
+# other public ``Pad`` field is dataclass-only; :meth:`PCB.save` refuses to
+# write a board where such a field no longer matches its node.
+_PAD_WRITE_THROUGH_FIELDS = frozenset(
+    {
+        "rotation",
+        "position",
+        "layers",
+        "size",
+        "drill",
+        "drill_size",
+        "drill_offset",
+        "shape",
+        "roundrect_rratio",
+        "solder_mask_margin",
+        "zone_connect",
+    }
+)
+
+# Where a freshly created pad child goes: after the first of these that exists.
+_PAD_CHILD_AFTER: dict[str, tuple[str, ...]] = {
+    "size": ("at",),
+    "drill": ("size", "at"),
+    "roundrect_rratio": ("layers", "drill", "size", "at"),
+    "solder_mask_margin": ("pinfunction", "pintype", "net", "roundrect_rratio", "layers"),
+    "zone_connect": (
+        "solder_mask_margin",
+        "pinfunction",
+        "pintype",
+        "net",
+        "roundrect_rratio",
+        "layers",
+    ),
+}
+
+
+def _insert_pad_child(pad_node: SExp, new: SExp) -> None:
+    """Insert ``new`` into a ``(pad ...)`` node in KiCad's usual token order."""
+    for tag in _PAD_CHILD_AFTER.get(new.name or "", ()):
+        anchor = pad_node.find_child(tag)
+        if anchor is None:
+            continue
+        for idx, child in enumerate(pad_node.children):
+            if child is anchor:
+                pad_node.children.insert(idx + 1, new)
+                return
+    pad_node.children.append(new)
+
+
+def _set_float_at(node: SExp, index: int, value: float) -> None:
+    """``set_value`` that leaves an already-equal token (and its formatting) alone."""
+    current = node.get_float(index)
+    if current is not None and (current == value or (current != current and value != value)):
+        return
+    node.set_value(index, float(value))
+
+
+def _write_pad_drill_through(pad: Pad, sexp_node: SExp, name: str, value: object) -> None:
+    """Mirror ``drill`` / ``drill_size`` / ``drill_offset`` into ``(drill ...)``."""
+    drill_node = sexp_node.find_child("drill")
+    is_oval = drill_node is not None and drill_node.get_string(0) == "oval"
+
+    if name == "drill":
+        if drill_node is None:
+            if float(value) != 0.0:  # type: ignore[arg-type]
+                _insert_pad_child(sexp_node, SExp.list("drill", float(value)))  # type: ignore[arg-type]
+        else:
+            _set_float_at(drill_node, 0, float(value))  # type: ignore[arg-type]
+
+    elif name == "drill_size":
+        if value is None:
+            return
+        w, h = cast("tuple[float, float]", value)
+        if drill_node is None:
+            _insert_pad_child(sexp_node, SExp.list("drill", SExp.atom("oval"), w, h))
+        elif is_oval:
+            _set_float_at(drill_node, 1, float(w))
+            _set_float_at(drill_node, 2, float(h))
+        else:
+            # Round hole -> slot: ``(drill D)`` becomes ``(drill oval W H)``;
+            # a nested ``(offset ...)`` stays where it was.
+            drill_node.children[0:1] = [SExp.atom("oval"), SExp.atom(float(w)), SExp.atom(float(h))]
+            object.__setattr__(pad, "drill", 0.0)
+
+    elif name == "drill_offset":
+        dx, dy = cast("tuple[float, float]", value)
+        offset_node = drill_node.find_child("offset") if drill_node is not None else None
+        if offset_node is None and (dx, dy) == (0.0, 0.0):
+            return
+        if drill_node is None:
+            if pad.drill_size is not None:
+                drill_node = SExp.list("drill", SExp.atom("oval"), *pad.drill_size)
+            else:
+                drill_node = SExp.list("drill", float(pad.drill))
+            _insert_pad_child(sexp_node, drill_node)
+        if offset_node is None:
+            drill_node.append(SExp.list("offset", float(dx), float(dy)))
+        else:
+            _set_float_at(offset_node, 0, float(dx))
+            _set_float_at(offset_node, 1, float(dy))
+
+
+def _write_pad_optional_through(sexp_node: SExp, tag: str, value: object) -> None:
+    """Mirror a single-value optional pad token, creating or removing the node."""
+    node = sexp_node.find_child(tag)
+    if value is None:
+        if node is not None:
+            sexp_node.remove_child(tag)
+        return
+    if node is None:
+        new_value = int(value) if tag == "zone_connect" else float(value)  # type: ignore[call-overload,arg-type]
+        _insert_pad_child(sexp_node, SExp.list(tag, new_value))
+    elif tag == "zone_connect":
+        if node.get_int(0) != int(value):  # type: ignore[call-overload]
+            node.set_value(0, int(value))  # type: ignore[call-overload]
+    else:
+        _set_float_at(node, 0, float(value))  # type: ignore[arg-type]
+
+
+@dataclass
+class Pad:
+    """Component pad."""
+
+    number: str
+    type: str  # smd, thru_hole
+    shape: str  # roundrect, rect, circle, oval
+    position: tuple[float, float]
+    size: tuple[float, float]
+    layers: list[str]
+    net_number: int = 0
+    net_name: str = ""
+    drill: float = 0.0
+    solder_mask_margin: float | None = None
+    # Per-pad zone connection override from ``(zone_connect N)``: 0 = none,
+    # 1 = thermal reliefs, 2 = solid, 3 = thermal reliefs for THT only.
+    # ``None`` when absent (the pad inherits its zone's ``connect_pads``).
+    # Read-only; ``thermal_asymmetry`` resolves the effective mode (#7220).
+    zone_connect: int | None = None
+    uuid: str = ""
+    # Per-pad rotation in degrees (the optional third token of ``(at x y angle)``).
+    # KiCad stores this angle in the ABSOLUTE board frame -- it already includes
+    # the parent footprint's rotation, so ``pad.rotation`` IS the pad's absolute
+    # orientation (do NOT add ``footprint.rotation`` on top of it). Note the
+    # asymmetry with ``position``, which is stored footprint-local and must be
+    # rotated by ``footprint.rotation`` to reach board coordinates. Defaults to 0.
+    rotation: float = 0.0
+    # Corner-radius ratio for ``roundrect`` pads: radius = rratio * min(w, h).
+    # KiCad's default is 0.25 when ``(roundrect_rratio ...)`` is absent.
+    roundrect_rratio: float = 0.25
+    # Back-reference to the ``(pad ...)`` S-expression node, linked by
+    # :meth:`PCB._link_footprint_sexp_nodes` after parsing so that assigning
+    # ``pad.rotation`` keeps the ``(at x y ANGLE)`` third token in sync with the
+    # Python value (issue #4518).  Without this a mutation like
+    # ``StrategyApplicator._apply_rotate_component`` bumping ``pad.rotation``
+    # would update the dataclass field but never reach ``PCB.save`` (which
+    # serialises the raw S-expression tree), leaving stale absolute pad angles
+    # -- the #3902 defect class.  ``compare=False`` keeps dataclass equality
+    # value-based (as the existing pad round-trip tests expect).
+    _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
+    drill_size: tuple[float, float] | None = None
+    drill_offset: tuple[float, float] = (0.0, 0.0)
+    # Schematic pin electrical type copied onto the pad by KiCad's
+    # "Update PCB from Schematic" (``(pintype "power_in")``).  Empty when the
+    # board predates KiCad 6 or was generated without schematic pin data.
+    # Read-only: used as evidence for power-net classification (issue #5939).
+    pintype: str = ""
+    # Schematic pin *name* written alongside ``pintype`` (``(pinfunction
+    # "SW")``).  Read-only; lets the rail-evidence check tell a buck's
+    # ``power_out`` switch-node pin from a regulator output (issue #5998).
+    pinfunction: str = ""
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # An oval hole has no single diameter: refuse *before* storing so the
+        # Python value and the tree cannot diverge (issue #7479).
+        if name == "drill":
+            node: SExp | None = self.__dict__.get("_sexp_node")
+            drill_child = node.find_child("drill") if node is not None else None
+            if (
+                drill_child is not None
+                and drill_child.get_string(0) == "oval"
+                and float(value) != self.__dict__.get("drill", 0.0)  # type: ignore[arg-type]
+            ):
+                raise ValueError(
+                    "Pad.drill cannot be set on an oval-drill pad; "
+                    "assign Pad.drill_size = (width, height) instead"
+                )
+
+        # Store the Python value first via the default mechanism.
+        super().__setattr__(name, value)
+
+        # ``rotation``, ``position`` and ``layers`` mirror into the
+        # S-expression tree (issue #4518 for rotation; #4560 extends the
+        # write-through to the fields a mirror/layer-flip mutates -- before
+        # that, assigning ``pad.position`` or ``pad.layers`` updated the
+        # dataclass but silently never reached ``PCB.save``, so a flipped
+        # board would have saved half-flipped with no error signal).  Issue
+        # #7479 adds the geometry/fab fields (``size``, ``drill*``, ``shape``,
+        # ``roundrect_rratio``, ``solder_mask_margin``, ``zone_connect``).
+        # During ``__init__`` (and for pads never linked to a node, e.g.
+        # freshly instantiated library pads or test doubles) ``_sexp_node`` is
+        # None and this is a no-op -- matching ``Footprint.__setattr__``'s
+        # guard.
+        if name not in _PAD_WRITE_THROUGH_FIELDS:
+            return
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return
+
+        if name == "rotation":
+            at_node = sexp_node.find_child("at")
+            if at_node is not None:
+                # ``rotation`` is always numeric; narrow to ``float`` so the
+                # SExp mutators receive their declared ``float`` type rather
+                # than the ``object`` of ``__setattr__``'s signature (keeps
+                # mypy at baseline, matching ``Footprint.__setattr__``'s
+                # already-baselined pattern).
+                _sync_at_angle(self, at_node, float(value))  # type: ignore[arg-type]
+
+        elif name == "position":
+            # Pad ``(at x y ...)`` stores FOOTPRINT-LOCAL coordinates (no
+            # board-origin conversion, unlike ``Footprint.position``).
+            at_node = sexp_node.find_child("at")
+            if at_node is not None:
+                pos = cast("tuple[float, float]", value)
+                at_node.set_value(0, float(pos[0]))
+                at_node.set_value(1, float(pos[1]))
+
+        elif name == "layers":
+            layers_node = sexp_node.find_child("layers")
+            if layers_node is not None:
+                # Rebuild in place; quoted atoms because layer names ("F.Cu",
+                # "*.Mask") are strict-typed strings in the KiCad grammar.
+                layers_node.children = [
+                    SExp.quoted_atom(str(layer_name))
+                    for layer_name in value  # type: ignore[attr-defined]
+                ]
+
+        elif name == "size":
+            w, h = cast("tuple[float, float]", value)
+            size_node = sexp_node.find_child("size")
+            if size_node is None:
+                _insert_pad_child(sexp_node, SExp.list("size", float(w), float(h)))
+            else:
+                _set_float_at(size_node, 0, float(w))
+                _set_float_at(size_node, 1, float(h))
+
+        elif name in ("drill", "drill_size", "drill_offset"):
+            _write_pad_drill_through(self, sexp_node, name, value)
+
+        elif name == "shape":
+            if sexp_node.get_string(2) != value:
+                sexp_node.set_value(2, str(value))
+
+        elif name in ("roundrect_rratio", "solder_mask_margin", "zone_connect"):
+            _write_pad_optional_through(sexp_node, name, value)
+
+    @property
+    def net(self) -> int:
+        """Net ID (alias for net_number for API consistency)."""
+        return self.net_number
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Pad | None:
+        """Parse pad from S-expression."""
+        pad = cls(
+            number=sexp.get_string(0) or "",
+            type=sexp.get_string(1) or "",
+            shape=sexp.get_string(2) or "",
+            position=(0.0, 0.0),
+            size=(0.0, 0.0),
+            layers=[],
+        )
+
+        # Position (and optional per-pad rotation as the third token)
+        if at := sexp.find("at"):
+            x = at.get_float(0) or 0.0
+            y = at.get_float(1) or 0.0
+            pad.position = (x, y)
+            pad.rotation = at.get_float(2) or 0.0
+
+        # Size
+        if size := sexp.find("size"):
+            w = size.get_float(0) or 0.0
+            h = size.get_float(1) or w
+            pad.size = (w, h)
+
+        # Corner radius ratio for roundrect pads (default 0.25 when absent)
+        if rratio := sexp.find("roundrect_rratio"):
+            value = rratio.get_float(0)
+            if value is not None:
+                pad.roundrect_rratio = value
+
+        # Layers
+        if layers := sexp.find("layers"):
+            pad.layers = [
+                layers.get_string(i) or ""
+                for i in range(len(layers.values))
+                if isinstance(layers.values[i], str)
+            ]
+
+        # Net — handles both (net N "name") and (net "name") formats.
+        # KiCad 10 may emit (net "name") without a numeric net number.
+        if net := sexp.find("net"):
+            # Only a bare integer atom is a net number; quoted "12" is a name (#8550).
+            first_val = net.get_value(0)
+            first_int = first_val if isinstance(first_val, int) else None
+            if first_int is not None:
+                # Traditional format: (net N "name")
+                pad.net_number = first_int
+                pad.net_name = net.get_string(1) or ""
+            else:
+                # KiCad 10 name-only format: (net "name")
+                pad.net_number = 0
+                pad.net_name = net.get_string(0) or ""
+
+        # Drill
+        if drill := sexp.find("drill"):
+            pad.drill = drill.get_float(0) or 0.0
+            if drill.get_string(0) == "oval":
+                # Retain both dimensions; the legacy scalar stays unknown.
+                pad.drill_size = (drill.get_float(1) or 0.0, drill.get_float(2) or 0.0)
+            if offset := drill.find("offset"):
+                offset_x, offset_y = offset.get_float(0), offset.get_float(1)
+                pad.drill_offset = (
+                    offset_x if offset_x is not None else float("nan"),
+                    offset_y if offset_y is not None else float("nan"),
+                )
+
+        # Solder mask margin (per-pad override)
+        if mask_margin := sexp.find("solder_mask_margin"):
+            pad.solder_mask_margin = mask_margin.get_float(0)
+
+        # Per-pad zone connection override (issue #7220)
+        if zone_connect := sexp.find_child("zone_connect"):
+            pad.zone_connect = zone_connect.get_int(0)
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            pad.uuid = uuid.get_string(0) or ""
+
+        # Schematic pin electrical type (KiCad 6+), e.g. "power_in"
+        if pintype := sexp.find_child("pintype"):
+            pad.pintype = pintype.get_string(0) or ""
+        if pinfunction := sexp.find_child("pinfunction"):
+            pad.pinfunction = pinfunction.get_string(0) or ""
+
+        return pad
+
+
+@dataclass
+class FootprintText:
+    """Text element within a footprint (fp_text).
+
+    Used for reference designators, values, and user text on footprints.
+    Contains font information for silkscreen validation.
+    """
+
+    text_type: str  # reference, value, user
+    text: str
+    position: tuple[float, float]
+    layer: str
+    font_size: tuple[float, float]  # (width, height) in mm
+    font_thickness: float  # stroke thickness in mm
+    uuid: str = ""
+    hidden: bool = False
+    # Serialized board-frame angle; position remains footprint-local for fp_text.
+    rotation: float = 0.0
+    # KiCad's "keep upright" flag (absent ``(unlocked yes)``): an interactive
+    # rotate or a left/right flip turns such a text back upright (Issue #6126).
+    keep_upright: bool = field(default=True, compare=False)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> FootprintText:
+        """Parse footprint text from S-expression."""
+        text_type = sexp.get_string(0) or ""
+        text = sexp.get_string(1) or ""
+
+        fp_text = cls(
+            text_type=text_type,
+            text=text,
+            position=(0.0, 0.0),
+            layer="",
+            font_size=(1.0, 1.0),
+            font_thickness=0.15,
+        )
+
+        # Position
+        if at := sexp.find("at"):
+            x = at.get_float(0) or 0.0
+            y = at.get_float(1) or 0.0
+            fp_text.position = (x, y)
+            fp_text.rotation = at.get_float(2) or 0.0
+        fp_text.keep_upright = _text_is_keep_upright(sexp)
+
+        # Layer
+        if layer := sexp.find("layer"):
+            fp_text.layer = layer.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            fp_text.uuid = uuid.get_string(0) or ""
+
+        # Effects (font size and thickness)
+        if effects := sexp.find("effects"):
+            if effects.find("hide"):
+                fp_text.hidden = True
+            if font := effects.find("font"):
+                if size := font.find("size"):
+                    w = size.get_float(0) or 1.0
+                    h = size.get_float(1) or w
+                    fp_text.font_size = (w, h)
+                if thickness := font.find("thickness"):
+                    fp_text.font_thickness = thickness.get_float(0) or 0.15
+
+        return fp_text
+
+    @classmethod
+    def _from_property_sexp(cls, sexp: SExp, text_type: str) -> FootprintText:
+        """Parse footprint text from property S-expression (KiCad 8+ format).
+
+        Property nodes have a different structure than fp_text nodes:
+        (property "Reference" "U1" (at 0 -4) (layer "F.SilkS") (effects ...))
+        """
+        text = sexp.get_string(1) or ""
+
+        fp_text = cls(
+            text_type=text_type,
+            text=text,
+            position=(0.0, 0.0),
+            layer="",
+            font_size=(1.0, 1.0),
+            font_thickness=0.15,
+        )
+
+        # Position
+        if at := sexp.find("at"):
+            x = at.get_float(0) or 0.0
+            y = at.get_float(1) or 0.0
+            fp_text.position = (x, y)
+            fp_text.rotation = at.get_float(2) or 0.0
+        fp_text.keep_upright = _text_is_keep_upright(sexp)
+
+        # Layer
+        if layer := sexp.find("layer"):
+            fp_text.layer = layer.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            fp_text.uuid = uuid.get_string(0) or ""
+
+        # Hidden check - property format uses (hide yes) directly on the property
+        if hide := sexp.find("hide"):
+            hide_val = hide.get_string(0)
+            fp_text.hidden = hide_val == "yes"
+
+        # Effects (font size and thickness)
+        if effects := sexp.find("effects"):
+            if effects.find("hide"):
+                fp_text.hidden = True
+            if font := effects.find("font"):
+                if size := font.find("size"):
+                    w = size.get_float(0) or 1.0
+                    h = size.get_float(1) or w
+                    fp_text.font_size = (w, h)
+                if thickness := font.find("thickness"):
+                    fp_text.font_thickness = thickness.get_float(0) or 0.15
+
+        return fp_text
+
+    @property
+    def font_height(self) -> float:
+        """Font height in mm (used for minimum text height checks)."""
+        return self.font_size[1]
+
+
+#: ``(fill ...)`` tokens that mean "the interior is printed".  KiCad 7+
+#: writes ``yes``/``no``; files written by older versions (and some
+#: third-party exporters) use ``solid``/``none``.  Both spellings appear in
+#: this repository's committed boards, so both are recognised (Issue #5811).
+_FILLED_FILL_TOKENS = frozenset({"yes", "solid", "true"})
+
+
+def _fill_token_is_filled(token: str) -> bool:
+    """Resolve a raw ``(fill ...)`` token to a filled/not-filled boolean."""
+    return token.strip().lower() in _FILLED_FILL_TOKENS
+
+
+@dataclass
+class FootprintGraphic:
+    """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc, fp_poly).
+
+    Used for silkscreen outlines, courtyard outlines, and markings on
+    footprints.  ``fp_poly`` graphics store their vertices in ``points``;
+    all other types leave ``points`` empty.
+
+    ``fill`` carries the raw ``(fill ...)`` token verbatim (``"yes"`` /
+    ``"no"`` on KiCad 7+, ``"solid"`` / ``"none"`` on older files, ``""``
+    when the node is absent).  Consumers should read :pyattr:`is_filled`
+    rather than comparing the token themselves -- a filled shape renders
+    its whole interior, which is what silk clearance geometry must model
+    (Issue #5811).
+    """
+
+    graphic_type: str  # line, rect, circle, arc, poly
+    layer: str
+    stroke_width: float  # in mm
+    start: tuple[float, float] = (0.0, 0.0)
+    end: tuple[float, float] = (0.0, 0.0)
+    center: tuple[float, float] | None = None
+    radius: float | None = None
+    points: list[tuple[float, float]] = field(default_factory=list)
+    uuid: str = ""
+    mid: tuple[float, float] | None = None  # Appended for positional compatibility
+    fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+
+    @property
+    def is_filled(self) -> bool:
+        """True when the shape's interior is printed, not just its outline."""
+        return _fill_token_is_filled(self.fill)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp, graphic_type: str) -> FootprintGraphic:
+        """Parse footprint graphic from S-expression."""
+        graphic = cls(
+            graphic_type=graphic_type,
+            layer="",
+            stroke_width=0.0,
+        )
+
+        # Layer
+        if layer := sexp.find("layer"):
+            graphic.layer = layer.get_string(0) or ""
+
+        # Stroke width
+        if stroke := sexp.find("stroke"):
+            if width := stroke.find("width"):
+                graphic.stroke_width = width.get_float(0) or 0.0
+
+        # Start/end points (for line, rect)
+        if start := sexp.find("start"):
+            graphic.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            graphic.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+
+        if graphic_type == "arc":
+            graphic.start, graphic.mid, graphic.end = _arc_points_from_sexp(sexp)
+
+        # Center/radius (for circle)
+        if center := sexp.find("center"):
+            graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
+        if graphic_type == "circle" and graphic.center is not None:
+            # For circles, end is a point on the circumference, so the radius
+            # is its distance from the centre (#8540).
+            if sexp.find("end") is not None:
+                graphic.radius = math.hypot(
+                    graphic.end[0] - graphic.center[0],
+                    graphic.end[1] - graphic.center[1],
+                )
+
+        # Polygon vertices (for fp_poly): (pts (xy X Y) ...).
+        if graphic_type == "poly":
+            if pts := sexp.find("pts"):
+                for xy in pts.find_all("xy"):
+                    graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
+
+        # Fill state: (fill yes|no) on KiCad 7+, (fill solid|none) on older
+        # files.  A filled shape prints its whole interior, so silk clearance
+        # geometry must not reduce it to a stroked outline (Issue #5811).
+        if fill := sexp.find("fill"):
+            graphic.fill = fill.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            graphic.uuid = uuid.get_string(0) or ""
+
+        return graphic
+
+
+@dataclass
+class GraphicText:
+    """Board-level text element (gr_text).
+
+    Used for board markings, labels, and silkscreen text not tied to footprints.
+    """
+
+    text: str
+    position: tuple[float, float]
+    layer: str
+    font_size: tuple[float, float]  # (width, height) in mm
+    font_thickness: float  # stroke thickness in mm
+    uuid: str = ""
+    hidden: bool = False
+    # Board text position and serialized angle are both board-frame.
+    rotation: float = 0.0
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> GraphicText:
+        """Parse graphic text from S-expression."""
+        text = sexp.get_string(0) or ""
+
+        gr_text = cls(
+            text=text,
+            position=(0.0, 0.0),
+            layer="",
+            font_size=(1.0, 1.0),
+            font_thickness=0.15,
+        )
+
+        # Position
+        if at := sexp.find("at"):
+            gr_text.position = (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
+            gr_text.rotation = at.get_float(2) or 0.0
+
+        # Layer
+        if layer := sexp.find("layer"):
+            gr_text.layer = layer.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            gr_text.uuid = uuid.get_string(0) or ""
+
+        # Effects (font size and thickness)
+        if effects := sexp.find("effects"):
+            if effects.find("hide"):
+                gr_text.hidden = True
+            if font := effects.find("font"):
+                if size := font.find("size"):
+                    w = size.get_float(0) or 1.0
+                    h = size.get_float(1) or w
+                    gr_text.font_size = (w, h)
+                if thickness := font.find("thickness"):
+                    gr_text.font_thickness = thickness.get_float(0) or 0.15
+
+        return gr_text
+
+    @property
+    def font_height(self) -> float:
+        """Font height in mm (used for minimum text height checks)."""
+        return self.font_size[1]
+
+
+@dataclass
+class BoardGraphic:
+    """Board-level graphic element (gr_line, gr_rect, gr_circle, gr_arc, gr_poly).
+
+    Used for board outlines, silkscreen graphics, and other board-level drawings.
+
+    Mirrors :class:`FootprintGraphic`: ``gr_poly`` vertices land in
+    ``points`` and the ``(fill ...)`` token in ``fill`` (read it through
+    :pyattr:`is_filled`).  Before Issue #5811 ``gr_poly`` was not parsed at
+    all, so a board-level polygon silk marker was invisible to every
+    consumer of :pyattr:`PCB.graphics` -- including the silkscreen
+    clearance geometry.
+    """
+
+    graphic_type: str  # line, rect, circle, arc, poly
+    layer: str
+    stroke_width: float  # in mm
+    start: tuple[float, float] = (0.0, 0.0)
+    end: tuple[float, float] = (0.0, 0.0)
+    center: tuple[float, float] | None = None
+    uuid: str = ""
+    mid: tuple[float, float] | None = None  # Appended for positional compatibility
+    points: list[tuple[float, float]] = field(default_factory=list)
+    fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+
+    @property
+    def is_filled(self) -> bool:
+        """True when the shape's interior is printed, not just its outline."""
+        return _fill_token_is_filled(self.fill)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
+        """Parse board graphic from S-expression."""
+        graphic = cls(
+            graphic_type=graphic_type,
+            layer="",
+            stroke_width=0.0,
+        )
+
+        # Layer
+        if layer := sexp.find("layer"):
+            graphic.layer = layer.get_string(0) or ""
+
+        # Stroke width
+        if stroke := sexp.find("stroke"):
+            if width := stroke.find("width"):
+                graphic.stroke_width = width.get_float(0) or 0.0
+
+        # Start/end points
+        if start := sexp.find("start"):
+            graphic.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            graphic.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+
+        if graphic_type == "arc":
+            graphic.start, graphic.mid, graphic.end = _arc_points_from_sexp(sexp)
+
+        # Center (for circle/arc)
+        if center := sexp.find("center"):
+            graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
+
+        # Polygon vertices (for gr_poly): (pts (xy X Y) ...).
+        if graphic_type == "poly":
+            if pts := sexp.find("pts"):
+                for xy in pts.find_all("xy"):
+                    graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
+            # A ``gr_poly`` has no ``(start ...)`` node, and several consumers
+            # report ``graphic.start`` as the element's location (e.g.
+            # ``check_silkscreen_line_width``, ``_iter_silk_geometries``).
+            # Seed it from the first vertex so a board-level polygon does not
+            # report itself at the origin.  This is new behaviour only in the
+            # sense that ``gr_poly`` was not parsed at all before #5811.
+            if graphic.points:
+                graphic.start = graphic.points[0]
+
+        # Fill state -- see FootprintGraphic.from_sexp (Issue #5811).
+        if fill := sexp.find("fill"):
+            graphic.fill = fill.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            graphic.uuid = uuid.get_string(0) or ""
+
+        return graphic
+
+
+@dataclass
+class Footprint:
+    """PCB component footprint.
+
+    The ``position``, ``rotation``, and ``layer`` attributes are backed by
+    a ``__setattr__`` override that keeps the underlying S-expression node
+    in sync.  After a :class:`PCB` is fully constructed (parsing and
+    board-origin detection complete), the PCB links each ``Footprint`` to
+    its S-expression node via :pyattr:`_sexp_node` and stores the board
+    origin offset in :pyattr:`_board_origin`.  From that point on, any
+    assignment to ``position``, ``rotation``, or ``layer`` is
+    automatically reflected in the S-expression tree that
+    :meth:`PCB.save` serialises.
+    """
+
+    name: str
+    layer: str
+    position: tuple[float, float]
+    rotation: float
+    reference: str
+    value: str
+    pads: list[Pad] = field(default_factory=list)
+    texts: list[FootprintText] = field(default_factory=list)
+    graphics: list[FootprintGraphic] = field(default_factory=list)
+    uuid: str = ""
+    description: str = ""
+    tags: str = ""
+    attr: str = ""  # smd, through_hole
+    exclude_from_pos_files: bool = False
+    exclude_from_bom: bool = False
+    locked: bool = False
+    dnp: bool = False
+    properties: dict[str, str] = field(default_factory=dict)
+    _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
+    _board_origin: tuple[float, float] = field(
+        default=(0.0, 0.0),
+        repr=False,
+        compare=False,
+    )
+    # Parsed zones embedded in this footprint (an RF module's antenna keepout,
+    # a footprint copper pour), the same objects ``PCB.footprint_rule_areas``
+    # returns.  KiCad stores them in board coordinates with the footprint's
+    # placement already applied, so ``__setattr__`` re-places them -- and
+    # their ``(zone ...)`` nodes -- whenever position/rotation/side change
+    # (Issue #6119).
+    _zones: list[Zone] = field(default_factory=list, repr=False, compare=False)
+    # Tokens inside ``(attr ...)`` that the parser does not yet model
+    # (e.g. ``board_only``, ``allow_missing_courtyard``,
+    # ``allow_soldermask_bridges``). Preserved verbatim so that the
+    # ``__setattr__`` rebuild of the ``(attr ...)`` block does not
+    # silently drop them on round-trip.
+    _attr_unknown_tokens: list[str] = field(
+        default_factory=list,
+        repr=False,
+        compare=False,
+    )
+
+    # Set of attr-block tokens the parser models explicitly. Anything
+    # else that appears as an atom child of ``(attr ...)`` is captured
+    # in ``_attr_unknown_tokens`` and re-emitted verbatim.
+    _ATTR_KNOWN_TOKENS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "smd",
+            "through_hole",
+            "exclude_from_pos_files",
+            "exclude_from_bom",
+            "locked",
+            "dnp",
+        }
+    )
+
+    _ATTR_SYNCED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "attr",
+            "exclude_from_pos_files",
+            "exclude_from_bom",
+            "locked",
+            "dnp",
+            "_attr_unknown_tokens",
+        }
+    )
+
+    # ------------------------------------------------------------------
+    # __setattr__ override -- syncs position/rotation/layer to _sexp_node
+    # ------------------------------------------------------------------
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Capture the pre-change placement so embedded zones can be moved
+        # from the old frame to the new one (Issue #6119).
+        old_frame = self._placement_frame() if name in ("position", "rotation", "layer") else None
+
+        # Always store the Python value first via the default mechanism.
+        super().__setattr__(name, value)
+
+        # Bail out during __init__ (before _sexp_node exists) or when
+        # there is no backing S-expression node.
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return
+
+        if old_frame is not None:
+            self._replace_embedded_zones(sexp_node, old_frame)
+            self._turn_texts(sexp_node, old_frame)
+
+        # Direct children only for the (at)/(layer) lookups below:
+        # properties, fp_texts and pads carry their own (at)/(layer)
+        # nodes, and a recursive find() would mutate a descendant's
+        # node if the footprint-level one were absent (issue #3602).
+        if name == "position":
+            at_node = sexp_node.find_child("at")
+            if at_node is not None:
+                x, y = value  # type: ignore[unpacking-non-sequence]
+                # ``fp.position`` stores board-relative coordinates but the
+                # S-expression ``(at ...)`` node uses sheet-absolute values.
+                # Add the board origin offset to convert.
+                origin = self.__dict__.get("_board_origin", (0.0, 0.0))
+                at_node.set_value(0, x + origin[0])
+                at_node.set_value(1, y + origin[1])
+
+        elif name == "rotation":
+            at_node = sexp_node.find_child("at")
+            if at_node is not None:
+                _sync_at_angle(self, at_node, float(value))  # type: ignore[arg-type]
+
+        elif name == "layer":
+            layer_node = sexp_node.find_child("layer")
+            if layer_node is not None:
+                layer_node.set_value(0, value)
+
+        elif name in self._ATTR_SYNCED_FIELDS:
+            # Any change to a field that maps into the (attr ...) block
+            # rebuilds that block from the current Python state. Unknown
+            # tokens captured at parse time (board_only,
+            # allow_missing_courtyard, allow_soldermask_bridges, ...)
+            # are preserved verbatim via ``_attr_unknown_tokens`` so we
+            # don't drop tokens the parser doesn't yet model.
+            self._sync_attr_node()
+
+    @property
+    def sheet_position(self) -> tuple[float, float]:
+        """Footprint origin in sheet-absolute coordinates (Y down), as stored
+        in the ``(at ...)`` node -- ``position`` plus the board origin."""
+        ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
+        x, y = self.position
+        return (x + ox, y + oy)
+
+    def _placement_frame(self) -> _FootprintFrame | None:
+        """Board-relative ``(x, y, rotation, is_back)``; None before init."""
+        state = self.__dict__
+        if "position" not in state or "rotation" not in state or "layer" not in state:
+            return None
+        x, y = cast("tuple[float, float]", state["position"])
+        return (float(x), float(y), float(state["rotation"]), _is_back_layer(state["layer"]))
+
+    def _replace_embedded_zones(self, sexp_node: SExp, old_frame: _FootprintFrame) -> None:
+        """Move this footprint's ``(zone ...)`` children with the footprint.
+
+        KiCad stores footprint zones in board coordinates with the
+        footprint's placement already applied (unlike pads, texts and
+        graphics, which are footprint-local), so a position/rotation/side
+        change must rewrite their polygons -- outline and fill -- or an RF
+        module's antenna keepout stays behind at the old location
+        (Issue #6119).  Both the ``(zone ...)`` nodes ``PCB.save`` writes and
+        the parsed :class:`Zone` objects (``PCB.footprint_rule_areas``) are
+        updated.
+        """
+        new_frame = self._placement_frame()
+        if new_frame is None or new_frame == old_frame:
+            return
+        # The parsed zones are board-relative, like ``position``.
+        zones: list[Zone] = self.__dict__.get("_zones") or []
+        if zones:
+            board_map = _footprint_frame_mapper(old_frame, new_frame)
+            flip_layers = old_frame[3] != new_frame[3]
+            for zone in zones:
+                _transform_zone_object(zone, board_map, flip_layers)
+
+        # The tree is sheet-absolute: shift both frames by the board origin.
+        ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
+        transform_footprint_zone_nodes(
+            sexp_node,
+            (old_frame[0] + ox, old_frame[1] + oy, old_frame[2], old_frame[3]),
+            (new_frame[0] + ox, new_frame[1] + oy, new_frame[2], new_frame[3]),
+        )
+
+    def _turn_texts(self, sexp_node: SExp, old_frame: _FootprintFrame) -> None:
+        """Turn this footprint's text angles with a rotation/side change.
+
+        KiCad stores ``property``/``fp_text`` angles board-absolute, like pad
+        angles, so a rotation or side change must rewrite them or the
+        silkscreen/fab text is drawn at the old orientation (Issue #6126).
+        This is ``FOOTPRINT::SetOrientation``'s result; the interactive
+        rotate's extra "keep upright" step is :meth:`keep_texts_upright`.
+        Both the ``(at ...)`` nodes ``PCB.save`` writes and the parsed
+        :attr:`texts` are updated.
+        """
+        new_frame = self._placement_frame()
+        if new_frame is None or (new_frame[2], new_frame[3]) == (old_frame[2], old_frame[3]):
+            return
+        for text in self.__dict__.get("texts") or []:
+            text.rotation = footprint_text_angle(old_frame, new_frame, text.rotation)
+        synthetic: set[int] = self.__dict__.setdefault("_text_angle_synthetic", set())
+        transform_footprint_text_nodes(sexp_node, old_frame, new_frame, synthetic=synthetic)
+
+    def keep_texts_upright(self) -> int:
+        """Re-upright "keep upright" texts, as KiCad's ``FOOTPRINT::Rotate`` does.
+
+        Call after a *relative* rotation or a left/right flip -- the
+        operations KiCad performs through ``FOOTPRINT::Rotate`` -- to match
+        what pcbnew writes: each keep-upright text whose angle is 180 or more
+        turns by -180 and swaps its justification.  Absolute placement
+        writes (``rotation = ...``, ``PCB.update_footprint_position``) follow
+        ``SetOrientation`` and skip this.  Returns the number of texts turned
+        in the S-expression tree (Issue #6126).
+        """
+        for text in self.texts:
+            angle = _normalize_text_angle(text.rotation)
+            if text.keep_upright and angle >= 180.0:
+                text.rotation = _normalize_text_angle(angle - 180.0)
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return 0
+        return keep_footprint_texts_upright(sexp_node)
+
+    @property
+    def attr_flags(self) -> frozenset[str]:
+        """Every flag token in the footprint's ``(attr ...)`` block (Issue #7204).
+
+        Covers the modeled flags (``exclude_from_pos_files``,
+        ``exclude_from_bom``, ``dnp``) and the ones kept verbatim but not
+        modeled (``board_only``, ``allow_missing_courtyard``,
+        ``allow_soldermask_bridges``, ...).  The footprint type (``smd`` /
+        ``through_hole``) is :attr:`attr`, not a flag.
+        """
+        flags = set(self.__dict__.get("_attr_unknown_tokens", []) or [])
+        if self.exclude_from_pos_files:
+            flags.add("exclude_from_pos_files")
+        if self.exclude_from_bom:
+            flags.add("exclude_from_bom")
+        if self.dnp:
+            flags.add("dnp")
+        flags.discard("locked")
+        return frozenset(flags)
+
+    def _sync_attr_node(self) -> None:
+        """Rebuild the ``(attr ...)`` child of ``_sexp_node`` from Python state.
+
+        Mirrors the position/rotation/layer sync pattern in
+        :meth:`__setattr__`. Removes the existing ``(attr ...)`` node
+        (if any), then re-emits it from the current values of
+        ``attr``, ``exclude_from_pos_files``, ``exclude_from_bom``,
+        ``dnp``, and any ``_attr_unknown_tokens`` captured during
+        parse. If no flags are set and no unknown tokens are present,
+        no ``(attr ...)`` node is emitted (matches KiCad's canonical
+        "no flags" form).
+
+        ``locked`` is emitted as a top-level ``(locked yes)`` child of
+        the footprint, NEVER as an in-attr ``locked`` token: KiCad 10's
+        kicad-cli rejects the legacy KiCad-6 ``(attr smd locked)`` form
+        with "Failed to load board", which silently breaks zone fill,
+        DRC and gerber export for any board re-saved through the schema
+        layer (issue #3457). Parsing still accepts both forms (see
+        :meth:`from_sexp`), so loading a legacy file and saving it
+        migrates the lock to the modern form.
+        """
+        sexp_node: SExp | None = self.__dict__.get("_sexp_node")
+        if sexp_node is None:
+            return
+
+        # Remove any existing (attr ...) so we can rebuild it cleanly.
+        # find_children() searches direct children only -- we want to
+        # avoid stripping nested (attr ...) inside fp_text/property,
+        # which don't currently exist but could appear in future
+        # KiCad versions.
+        for existing in list(sexp_node.find_children("attr")):
+            sexp_node.remove(existing)
+
+        # Remove any existing top-level (locked ...) so we can re-emit
+        # it from Python state below. Direct children only -- pads can
+        # legitimately carry their own (locked yes), which must not be
+        # stripped here.
+        for existing in list(sexp_node.find_children("locked")):
+            sexp_node.remove(existing)
+
+        # Defensive: 'locked' is a modeled token (parsed into
+        # ``fp.locked``), but if it ever leaks into the unknown-token
+        # list it must not be echoed back into (attr ...) -- KiCad 10
+        # rejects that form.
+        unknown = [
+            token
+            for token in (self.__dict__.get("_attr_unknown_tokens", []) or [])
+            if token != "locked"
+        ]
+
+        # Only emit (attr ...) if there is something to say.
+        if self.attr or self.dnp or self.exclude_from_pos_files or self.exclude_from_bom or unknown:
+            attr_node = SExp.list("attr")
+            # Canonical KiCad order: <type> [board_only]
+            # [exclude_from_pos_files] [exclude_from_bom]
+            # [allow_missing_courtyard] [dnp]. We emit modeled tokens in
+            # a stable order and append unknown tokens at the end --
+            # KiCad accepts any ordering of these atoms, so this is a
+            # safe simplification.
+            if self.attr:
+                attr_node.add(self.attr)  # 'smd' or 'through_hole'
+            if self.exclude_from_pos_files:
+                attr_node.add("exclude_from_pos_files")
+            if self.exclude_from_bom:
+                attr_node.add("exclude_from_bom")
+            if self.dnp:
+                attr_node.add("dnp")
+            for token in unknown:
+                attr_node.add(token)
+
+            sexp_node.append(attr_node)
+
+        # Modern lock form: top-level (locked yes), the only form
+        # KiCad 10's kicad-cli accepts (issue #3410 / #3457).
+        if self.locked:
+            sexp_node.append(SExp.list("locked", "yes"))
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Footprint:
+        """Parse footprint from S-expression.
+
+        Note: ``_sexp_node`` is intentionally **not** set here.  It is
+        linked later by :meth:`PCB._link_footprint_sexp_nodes` after the
+        board origin has been detected and footprint positions have been
+        converted to board-relative coordinates.  This prevents the
+        ``__setattr__`` sync from writing stale values during parsing.
+        """
+        name = sexp.get_string(0) or ""
+
+        fp = cls(
+            name=name,
+            layer="F.Cu",
+            position=(0.0, 0.0),
+            rotation=0.0,
+            reference="",
+            value="",
+            pads=[],
+            texts=[],
+            graphics=[],
+        )
+
+        # NOTE: all footprint-level scalar tokens below use
+        # find_child() (direct children only), NOT the recursive
+        # find(). Descendants legitimately carry same-named tokens --
+        # pads have (at)/(uuid)/(locked), properties and fp_texts have
+        # (at)/(layer)/(uuid) -- and a recursive lookup would misread
+        # a descendant's token as the footprint's own whenever the
+        # footprint-level token is absent (issue #3602).
+
+        # Layer
+        if layer := sexp.find_child("layer"):
+            fp.layer = layer.get_string(0) or "F.Cu"
+
+        # Position
+        if at := sexp.find_child("at"):
+            x = at.get_float(0) or 0.0
+            y = at.get_float(1) or 0.0
+            rot = at.get_float(2) or 0.0
+            fp.position = (x, y)
+            fp.rotation = rot
+
+        # UUID
+        if uuid := sexp.find_child("uuid"):
+            fp.uuid = uuid.get_string(0) or ""
+
+        # Description and tags
+        if descr := sexp.find_child("descr"):
+            fp.description = descr.get_string(0) or ""
+        if tags := sexp.find_child("tags"):
+            fp.tags = tags.get_string(0) or ""
+
+        # Modern lock form: a top-level ``(locked yes)`` child (KiCad 9/10).
+        # KiCad 10's kicad-cli REJECTS the legacy ``locked`` token inside
+        # ``(attr ...)`` ("Failed to load board"), so generators that need
+        # kicad-cli interop (zone fill, DRC, gerber export) emit the
+        # top-level form instead -- without this branch the router's
+        # anchor logic (``getattr(fp, "locked", False)``, issue #2845)
+        # would silently stop seeing those footprints as locked
+        # (issue #3410).
+        #
+        # Direct children only: PADS can carry their own ``(locked
+        # yes)``, and the recursive find() previously misread a
+        # pad-level lock as the footprint's, so unlocking a footprint
+        # with locked pads didn't persist across save/reload
+        # (issue #3602).
+        if locked_node := sexp.find_child("locked"):
+            if (locked_node.get_string(0) or "yes") in ("yes", "true"):
+                fp.locked = True
+
+        if attr := sexp.find_child("attr"):
+            # The footprint *type* token (``smd`` / ``through_hole``)
+            # is optional in KiCad's emitted form. When KiCad omits the
+            # type, the first atom is a flag (e.g. ``(attr
+            # exclude_from_pos_files exclude_from_bom)``). Detect this
+            # by only accepting known type tokens at index 0.
+            first_token = attr.get_string(0) or ""
+            if first_token in ("smd", "through_hole"):
+                fp.attr = first_token
+                token_start_idx = 1
+            else:
+                fp.attr = ""
+                token_start_idx = 0
+            # Parse additional attribute flags (e.g., exclude_from_pos_files, dnp).
+            # Tokens we don't model (board_only, allow_missing_courtyard,
+            # allow_soldermask_bridges, ...) are captured verbatim into
+            # _attr_unknown_tokens so the (attr ...) rebuild in
+            # _sync_attr_node() can re-emit them on save without
+            # silent data loss.
+            unknown_tokens: list[str] = []
+            for i in range(token_start_idx, len(attr.children)):
+                token = attr.get_string(i)
+                if token is None:
+                    continue
+                if token == "exclude_from_pos_files":
+                    fp.exclude_from_pos_files = True
+                elif token == "exclude_from_bom":
+                    fp.exclude_from_bom = True
+                elif token == "locked":
+                    fp.locked = True
+                elif token == "dnp":
+                    fp.dnp = True
+                else:
+                    unknown_tokens.append(token)
+            if unknown_tokens:
+                fp._attr_unknown_tokens = unknown_tokens
+
+        # Reference and value from fp_text (KiCad 7 format)
+        for fp_text_sexp in sexp.find_all("fp_text"):
+            fp_text = FootprintText.from_sexp(fp_text_sexp)
+            fp.texts.append(fp_text)
+            # Also set reference/value for convenience
+            if fp_text.text_type == "reference":
+                fp.reference = fp_text.text
+            elif fp_text.text_type == "value":
+                fp.value = fp_text.text
+
+        # Reference and value from property (KiCad 8+ format)
+        for prop in sexp.find_all("property"):
+            prop_name = prop.get_string(0)
+            prop_value = prop.get_string(1) or ""
+            if prop_name == "Reference":
+                fp.reference = prop_value
+                # Also create FootprintText for validation
+                fp_text = FootprintText._from_property_sexp(prop, "reference")
+                fp.texts.append(fp_text)
+            elif prop_name == "Value":
+                fp.value = prop_value
+                # Also create FootprintText for validation
+                fp_text = FootprintText._from_property_sexp(prop, "value")
+                fp.texts.append(fp_text)
+            elif prop_name not in ("Reference", "Value", "Footprint"):
+                # Store additional properties (LCSC, MPN, Manufacturer, etc.)
+                fp.properties[prop_name] = prop_value
+
+        # Pads
+        for pad_sexp in sexp.find_all("pad"):
+            pad = Pad.from_sexp(pad_sexp)
+            if pad:
+                fp.pads.append(pad)
+
+        # Graphics (fp_line, fp_rect, fp_circle, fp_arc, fp_poly)
+        for graphic_type in ("line", "rect", "circle", "arc", "poly"):
+            for graphic_sexp in sexp.find_all(f"fp_{graphic_type}"):
+                graphic = FootprintGraphic.from_sexp(graphic_sexp, graphic_type)
+                fp.graphics.append(graphic)
+
+        return fp
+
+
+@dataclass
+class Segment:
+    """PCB trace segment."""
+
+    start: tuple[float, float]
+    end: tuple[float, float]
+    width: float
+    layer: str
+    net_number: int
+    net_name: str = ""
+    uuid: str = ""
+    # Issue #4416: parsed-dialect memory.  ``True`` when this segment's net
+    # reference was read in KiCad-10 name-only form ``(net "SDA")`` (no
+    # numeric id).  Serialization re-emits the same dialect so a name-based
+    # board stays name-based on save instead of flipping to ``(net 12)`` and
+    # ping-ponging with kicad-cli's ``--save-board`` name-only rewrite.
+    # Mirrors the parser's ``_originally_bare`` round-trip flag at the element
+    # level.  ``compare=False`` keeps dataclass equality identity-stable.
+    net_name_only: bool = field(default=False, compare=False)
+    # Issue #8278: a user-locked track -- KiCad 7+ ``(locked yes)`` child or
+    # KiCad 6 bare ``(segment locked ...)`` token.  Read-only here: saving goes
+    # through the parsed tree, which keeps the original token.  ``kct pcb
+    # prune`` never removes, snaps or merges a locked track.
+    locked: bool = field(default=False, compare=False)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Segment:
+        """Parse segment from S-expression."""
+        seg = cls(
+            start=(0.0, 0.0),
+            end=(0.0, 0.0),
+            width=0.0,
+            layer="",
+            net_number=0,
+        )
+
+        if start := sexp.find("start"):
+            seg.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            seg.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+        if width := sexp.find("width"):
+            seg.width = width.get_float(0) or 0.0
+        if layer := sexp.find("layer"):
+            seg.layer = layer.get_string(0) or ""
+        # Net — handles both (net N "name") and (net "name") formats.
+        # KiCad 10 may emit (net "name") without a numeric net number.
+        if net := sexp.find("net"):
+            first_int = net.get_int(0)
+            if first_int is not None:
+                # Traditional format: (net N "name") or (net N)
+                seg.net_number = first_int
+                seg.net_name = net.get_string(1) or ""
+            else:
+                # KiCad 10 name-only format: (net "name")
+                seg.net_number = 0
+                seg.net_name = net.get_string(0) or ""
+                seg.net_name_only = True
+        if uuid := sexp.find("uuid"):
+            seg.uuid = uuid.get_string(0) or ""
+        if (locked := sexp.find("locked")) is not None:
+            seg.locked = (locked.get_string(0) or "yes") != "no"
+        elif any(c.is_atom and c.value == "locked" for c in sexp.children):
+            seg.locked = True
+
+        return seg
+
+    def _net_sexp(self) -> SExp:
+        """Build the ``(net ...)`` child in the segment's parsed dialect.
+
+        Issue #4416: emit ``(net "name")`` when the segment was read (or
+        constructed) in KiCad-10 name-only dialect and a net name is known;
+        otherwise fall back to the numeric ``(net N)`` form.  The empty-name
+        fallback keeps numeric boards and programmatic construction unchanged
+        and avoids emitting an invalid ``(net "")``.
+        """
+        if self.net_name_only and self.net_name:
+            return SExp.list("net", SExp.quoted_atom(self.net_name))
+        return SExp.list("net", self.net_number)
+
+    def to_sexp(self, offset: tuple[float, float] = (0.0, 0.0)) -> SExp:
+        """Convert segment to S-expression for serialization.
+
+        Issue #3925/#3907 parity: field order matches KiCad's canonical
+        writer (``uuid`` BEFORE ``net``), aligning the schema emitter with
+        ``router/primitives.py`` so a node flowing through either path does
+        not churn field order on the first KiCad open/save round-trip.
+
+        Issue #4416: ``offset`` adds a board-origin shift to the stored
+        coordinates (board-relative -> sheet-absolute) without mutating the
+        Python object, so ``add_trace`` can serialize through this single
+        dialect-aware path instead of hand-rolling a numeric ``(net ...)``.
+        """
+        ox, oy = offset
+        seg_sexp = SExp.list("segment")
+        seg_sexp.append(SExp.list("start", self.start[0] + ox, self.start[1] + oy))
+        seg_sexp.append(SExp.list("end", self.end[0] + ox, self.end[1] + oy))
+        seg_sexp.append(SExp.list("width", self.width))
+        seg_sexp.append(SExp.list("layer", self.layer))
+        if not self.uuid:
+            self.uuid = str(uuid.uuid4())
+        seg_sexp.append(SExp.list("uuid", self.uuid))
+        seg_sexp.append(self._net_sexp())
+        return seg_sexp
+
+
+@dataclass
+class Arc(Segment):
+    """Imported circular copper track, distinct from straight segments/graphics.
+
+    Coordinates use the same board-relative frame as ``Segment``. Length is
+    analytic; connectivity alone tessellates with a maximum 0.00001 mm sagitta.
+    Invalid circular geometry raises instead of silently becoming a chord.
+    """
+
+    mid: tuple[float, float] = (0.0, 0.0)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Arc:
+        arc = cast(Arc, super().from_sexp(sexp))
+        for tag in ("start", "mid", "end"):
+            node = sexp.find(tag)
+            if node is None or any(node.get_float(i) is None for i in (0, 1)):
+                raise ValueError(f"Copper arc is missing {tag} coordinates")
+            setattr(arc, tag, (node.get_float(0), node.get_float(1)))
+        arc.circular_geometry()  # Validate before exposing copper to consumers.
+        if not math.isfinite(arc.width) or arc.width <= 0:
+            raise ValueError("Copper arc width must be finite and positive")
+        if not arc.layer.endswith(".Cu"):
+            raise ValueError("Copper arc must be on a copper layer")
+        return arc
+
+    def circular_geometry(self) -> tuple[tuple[float, float], float, float, float]:
+        """Return center, radius, start angle and signed sweep through mid."""
+        if not all(math.isfinite(v) for p in (self.start, self.mid, self.end) for v in p):
+            raise ValueError("Copper arc coordinates must be finite")
+        # Translate first to avoid cancellation for boards far from the origin.
+        ax, ay = self.start
+        bx, by = self.mid[0] - ax, self.mid[1] - ay
+        cx, cy = self.end[0] - ax, self.end[1] - ay
+        determinant = 2 * (bx * cy - by * cx)
+        scale = max(bx * bx + by * by, cx * cx + cy * cy)
+        if scale == 0 or abs(determinant) <= 1e-14 * scale:
+            raise ValueError("Copper arc points must define a nondegenerate circle")
+        ux = ((bx * bx + by * by) * cy - (cx * cx + cy * cy) * by) / determinant
+        uy = (bx * (cx * cx + cy * cy) - cx * (bx * bx + by * by)) / determinant
+        radius = math.hypot(ux, uy)
+        start = math.atan2(-uy, -ux)
+        mid = (math.atan2(by - uy, bx - ux) - start) % math.tau
+        end = (math.atan2(cy - uy, cx - ux) - start) % math.tau
+        sweep = end if mid <= end else end - math.tau
+        if not all(math.isfinite(v) for v in (ux, uy, radius, sweep)) or radius <= 0:
+            raise ValueError("Copper arc geometry is not finite")
+        if not all(math.isfinite(v) for v in (ax + ux, ay + uy, radius * sweep)):
+            raise ValueError("Copper arc geometry is not finite")
+        return (ax + ux, ay + uy), radius, start, sweep
+
+    @property
+    def length(self) -> float:
+        """True swept centerline length in millimeters (never the chord)."""
+        _, radius, _, sweep = self.circular_geometry()
+        return radius * abs(sweep)
+
+    def centerline_points(self, max_error_mm: float = 0.00001) -> list[tuple[float, float]]:
+        """Polyline with sagitta <= max_error_mm; endpoints remain exact.
+
+        This is an analysis approximation, never routing output. The bound is
+        on centerline distance; buffered copper inherits that absolute bound.
+        Excessive geometry is rejected rather than silently relaxing the bound.
+        """
+        if not math.isfinite(max_error_mm) or max_error_mm <= 0:
+            raise ValueError("Arc approximation error must be finite and positive")
+        (cx, cy), radius, start, sweep = self.circular_geometry()
+        step = 4 * math.asin(math.sqrt(min(max_error_mm / (2 * radius), 0.5)))
+        if step == 0:
+            raise ValueError("Copper arc approximation exceeds floating-point resolution")
+        count = max(2, math.ceil(abs(sweep) / step))
+        if count > 100000:
+            raise ValueError("Copper arc requires more than 100000 approximation edges")
+        return (
+            [self.start]
+            + [
+                (
+                    cx + radius * math.cos(start + sweep * i / count),
+                    cy + radius * math.sin(start + sweep * i / count),
+                )
+                for i in range(1, count)
+            ]
+            + [self.end]
+        )
+
+    def to_sexp(self, offset: tuple[float, float] = (0.0, 0.0)) -> SExp:
+        node = super().to_sexp(offset)
+        node.name = "arc"
+        node.children.insert(1, SExp.list("mid", self.mid[0] + offset[0], self.mid[1] + offset[1]))
+        return node
+
+
+@dataclass
+class Via:
+    """PCB via."""
+
+    position: tuple[float, float]
+    size: float
+    drill: float
+    layers: list[str]
+    net_number: int
+    net_name: str = ""
+    uuid: str = ""
+    # Issue #3124 (folds in #3118 prerequisite): preserve the optional
+    # leading via-type token ``(via micro ...)`` / ``(via blind ...)`` /
+    # ``(via buried ...)`` through parse + emit so micro vias added by
+    # the router (or read from an upstream PCB) survive serialization.
+    # ``None`` => standard through-hole via.  The serializer mirrors
+    # :func:`kicad_tools.sexp.builders.via_node` exactly.
+    via_type: str | None = None
+    # Issue #4416: parsed-dialect memory (see :class:`Segment.net_name_only`).
+    # ``True`` when the via's net reference was read in name-only
+    # ``(net "SDA")`` form so serialization re-emits the same dialect.
+    net_name_only: bool = field(default=False, compare=False)
+    # Issue #4624: per-via tenting override.  KiCad 10 writes
+    # ``(tenting (front yes|no|none) (back yes|no|none))`` after the
+    # ``layers`` node when either side is overridden in the via
+    # properties dialog; the node is absent entirely when both sides
+    # follow the board default.  Raw tokens are preserved verbatim
+    # (``"yes"`` = tented, ``"no"`` = not tented, ``"none"`` = inherit
+    # the board default) so a load -> save round-trip re-emits the
+    # override byte-for-byte -- same round-trip discipline as
+    # :attr:`via_type` (#3124).  ``None`` = side not present in the node.
+    tenting_front: str | None = None
+    tenting_back: str | None = None
+    # Issue #6493: ``True`` when :meth:`from_sexp` widened a keyword-less
+    # partial ``(layers ...)`` pair to ``F.Cu``/``B.Cu``, the span KiCad
+    # actually reads.  Only the PCB loader consumes it (one warning per
+    # board); the source S-expression is not rewritten.
+    layers_read_as_through: bool = field(default=False, compare=False, repr=False)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Via:
+        """Parse via from S-expression."""
+        via = cls(
+            position=(0.0, 0.0),
+            size=0.0,
+            drill=0.0,
+            layers=[],
+            net_number=0,
+        )
+
+        # Issue #3124: detect the optional leading via-type token.  KiCad
+        # emits ``(via micro ...)`` / ``(via blind ...)`` / ``(via buried
+        # ...)`` with the type as a bare atom immediately after ``via``.
+        # We only preserve the token (no semantic handling for blind/
+        # buried -- that's out of scope for this issue and #3118).
+        # ``sexp.values[0]`` is a string atom for these forms; for a
+        # standard through-hole via the first child is the ``(at ...)``
+        # list, which appears as an SExp in ``values``.
+        if sexp.values and isinstance(sexp.values[0], str):
+            token = sexp.values[0]
+            if token in ("micro", "blind", "buried"):
+                via.via_type = token
+
+        if at := sexp.find("at"):
+            via.position = (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
+        if size := sexp.find("size"):
+            via.size = size.get_float(0) or 0.0
+        if drill := sexp.find("drill"):
+            via.drill = drill.get_float(0) or 0.0
+        if layers := sexp.find("layers"):
+            via.layers = [
+                layers.get_string(i) or ""
+                for i in range(len(layers.values))
+                if isinstance(layers.values[i], str)
+            ]
+            # Issue #6493: KiCad reads a via with no blind/buried/micro
+            # keyword as a through via, whatever its layer pair says.
+            from ..core.layers import kicad_read_via_layers
+
+            read_layers, normalised = kicad_read_via_layers(via.layers, via.via_type)
+            if normalised:
+                via.layers = list(read_layers)
+                via.layers_read_as_through = True
+        # Issue #4624: per-via tenting override
+        # ``(tenting (front yes|no|none) (back yes|no|none))``.
+        if tenting := sexp.find("tenting"):
+            if front := tenting.find("front"):
+                via.tenting_front = front.get_string(0)
+            if back := tenting.find("back"):
+                via.tenting_back = back.get_string(0)
+        # Net — handles both (net N "name") and (net "name") formats.
+        # KiCad 10 may emit (net "name") without a numeric net number.
+        if net := sexp.find("net"):
+            first_int = net.get_int(0)
+            if first_int is not None:
+                # Traditional format: (net N "name") or (net N)
+                via.net_number = first_int
+                via.net_name = net.get_string(1) or ""
+            else:
+                # KiCad 10 name-only format: (net "name")
+                via.net_number = 0
+                via.net_name = net.get_string(0) or ""
+                via.net_name_only = True
+        if uuid := sexp.find("uuid"):
+            via.uuid = uuid.get_string(0) or ""
+
+        return via
+
+    def _net_sexp(self) -> SExp:
+        """Build the ``(net ...)`` child in the via's parsed dialect (#4416).
+
+        See :meth:`Segment._net_sexp` -- emit ``(net "name")`` for name-only
+        boards with a known name, numeric ``(net N)`` otherwise.
+        """
+        if self.net_name_only and self.net_name:
+            return SExp.list("net", SExp.quoted_atom(self.net_name))
+        return SExp.list("net", self.net_number)
+
+    def to_sexp(self, offset: tuple[float, float] = (0.0, 0.0)) -> SExp:
+        """Convert via to S-expression for serialization.
+
+        When :attr:`via_type` is set (``"micro"`` / ``"blind"`` /
+        ``"buried"``) the token is emitted immediately after ``via`` to
+        match KiCad's format and survive a load + save round-trip
+        (issue #3124).
+
+        Issue #3925/#3907 parity: ``uuid`` is emitted BEFORE ``net`` to
+        match KiCad's canonical writer and ``router/primitives.py``.
+
+        Issue #4416: ``offset`` adds a board-origin shift (board-relative ->
+        sheet-absolute) without mutating the Python object, and the net
+        reference is emitted in the via's parsed dialect.
+        """
+        ox, oy = offset
+        via_sexp = SExp.list("via")
+        if self.via_type:
+            via_sexp.append(SExp.atom(self.via_type))
+        via_sexp.append(SExp.list("at", self.position[0] + ox, self.position[1] + oy))
+        via_sexp.append(SExp.list("size", self.size))
+        via_sexp.append(SExp.list("drill", self.drill))
+        # Build layers list
+        layers_sexp = SExp.list("layers", *self.layers)
+        via_sexp.append(layers_sexp)
+        # Issue #4624: re-emit a parsed per-via tenting override after
+        # ``layers``, matching KiCad 10's writer position, so the
+        # override survives a load + save round-trip.  Only sides that
+        # were present in the parsed node are emitted.
+        if self.tenting_front is not None or self.tenting_back is not None:
+            tenting_sexp = SExp.list("tenting")
+            if self.tenting_front is not None:
+                tenting_sexp.append(SExp.list("front", self.tenting_front))
+            if self.tenting_back is not None:
+                tenting_sexp.append(SExp.list("back", self.tenting_back))
+            via_sexp.append(tenting_sexp)
+        if not self.uuid:
+            self.uuid = str(uuid.uuid4())
+        via_sexp.append(SExp.list("uuid", self.uuid))
+        via_sexp.append(self._net_sexp())
+        return via_sexp
+
+
+@dataclass
+class ZoneKeepout:
+    """Keepout settings of a KiCad rule area (``(zone ... (keepout ...))``).
+
+    Issue #4605: rule areas were previously dropped on parse (the ``keepout``
+    child was silently ignored), so no engine could honor a
+    ``(tracks not_allowed)`` area declared in the board.  Each flag mirrors
+    one ``(<object> allowed|not_allowed)`` child; a missing child defaults to
+    ``allowed`` (KiCad's own default for an unspecified object type).
+    """
+
+    tracks_allowed: bool = True
+    vias_allowed: bool = True
+    pads_allowed: bool = True
+    copperpour_allowed: bool = True
+    footprints_allowed: bool = True
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> ZoneKeepout:
+        """Parse a ``(keepout ...)`` node's per-object-type flags."""
+        keepout = cls()
+        for tag, attr in (
+            ("tracks", "tracks_allowed"),
+            ("vias", "vias_allowed"),
+            ("pads", "pads_allowed"),
+            ("copperpour", "copperpour_allowed"),
+            ("footprints", "footprints_allowed"),
+        ):
+            if child := sexp.find(tag):
+                setattr(keepout, attr, child.get_string(0) != "not_allowed")
+        return keepout
+
+
+# Last ``(version N)`` whose zones default to *stroked* fills when
+# ``filled_areas_thickness`` is absent.  KiCad's parser initialises
+# ``isStrokedFill = m_requiredVersion < 20250210``, so 20250209 is the last
+# legacy version and 20250210 is the first modern (solid-fill) one.  Verified
+# with native kicad-cli 10.0.5 on a version-only differential: the identical
+# two-fragment board with the token absent reports 0 unconnected items at
+# 20240108 / 20250209 and 1 at 20250210 / 20260101 / 20260206 (Issue #5362).
+STROKED_FILL_LAST_VERSION = 20250209
+
+
+@dataclass
+class Zone:
+    """PCB copper pour zone.
+
+    Represents a copper fill zone with boundary polygon and thermal relief settings.
+    Zones are used for ground planes, power planes, and copper pours.
+
+    A zone carrying a ``(keepout ...)`` child is a KiCad **rule area** rather
+    than a pour: :attr:`keepout` holds its per-object-type flags (issue
+    #4605) and is non-None. Rule areas are commonly
+    multi-layer (``(layers "F.Cu" "B.Cu")``), captured in :attr:`layers`.
+    """
+
+    net_number: int
+    net_name: str
+    layer: str
+    uuid: str = ""
+    name: str = ""
+    # Multi-layer spec from a ``(layers ...)`` node (rule areas; may contain
+    # wildcards such as ``*.Cu`` / ``F&B.Cu``).  Empty for single-layer zones.
+    layers: list[str] = field(default_factory=list)
+    # Keepout flags when this zone is a rule area; None for pour zones.
+    keepout: ZoneKeepout | None = None
+    # Boundary polygon points (x, y) in mm
+    polygon: list[tuple[float, float]] = field(default_factory=list)
+    # Filled polygon regions after DRC (may differ from boundary due to clearances)
+    filled_polygons: list[list[tuple[float, float]]] = field(default_factory=list)
+    # Layer of each filled polygon, parallel to ``filled_polygons``.
+    # KiCad writes ``(filled_polygon (layer "F.Cu") (pts ...))`` per fill;
+    # multi-layer zones emit one filled_polygon per layer, so the zone-level
+    # ``layer`` field alone cannot locate fill copper.  Entries may be
+    # missing/empty for programmatically constructed zones -- use
+    # :meth:`filled_polygon_layer`, which falls back to the zone-level
+    # ``layer``.  See Issue #3527.
+    filled_polygon_layers: list[str] = field(default_factory=list)
+    # Zone fill priority (higher priority fills later, on top of lower priority)
+    priority: int = 0
+    # Minimum copper thickness in mm
+    min_thickness: float = 0.2
+    # Clearance to pads/traces of other nets in mm
+    clearance: float = 0.2
+    # Thermal relief gap (antipad) in mm
+    thermal_gap: float = 0.3
+    # Thermal relief spoke (bridge) width in mm
+    thermal_bridge_width: float = 0.3
+    # Pad connection type: "thermal_reliefs", "solid", "none"
+    connect_pads: str = "thermal_reliefs"
+    # Fill type: "solid" or "hatch"
+    fill_type: str = "solid"
+    # Whether zone is filled (has copper)
+    is_filled: bool = False
+    # KiCad's ``(filled_areas_thickness yes|no)``.  ``None`` means the token
+    # was absent, whose meaning is **file-version dependent** -- see
+    # :meth:`fill_inflation` and :data:`STROKED_FILL_LAST_VERSION`.
+    filled_areas_thickness: bool | None = None
+    # ``(version N)`` of the board file this zone came from, needed to resolve
+    # an absent ``filled_areas_thickness``.  ``0`` when unknown, which is
+    # treated as the modern (solid-fill) default (Issue #5362).
+    file_version: int = 0
+    # Owning footprint of a zone embedded in a ``(footprint ...)`` block
+    # (e.g. an RF module's antenna keepout) -- its reference designator and
+    # UUID.  Both empty for board-level zones.  Footprint zones are exposed
+    # through :attr:`PCB.footprint_rule_areas`, never :attr:`PCB.zones`
+    # (Issue #6087).
+    parent_reference: str = ""
+    parent_uuid: str = ""
+
+    def is_stroked_fill(self) -> bool:
+        """Whether ``filled_polygons`` are centre-lines rather than final copper.
+
+        Mirrors KiCad's own parser (``pcb_io_kicad_sexpr_parser.cpp``,
+        verified against the KiCad 10.0 source): it initialises
+        ``isStrokedFill = m_requiredVersion < 20250210`` and then, for the
+        token handler, does exactly::
+
+            case T_filled_areas_thickness:
+                if( !parseBool() )
+                    isStrokedFill = false;
+
+        ``parseBool()`` is ``true`` for an explicit ``yes`` and ``false`` for
+        an explicit ``no``.  So the token can only ever **clear** the flag
+        (an explicit ``no`` forces solid) -- there is no branch that *sets*
+        it, so an explicit ``yes`` is a no-op that leaves the version-derived
+        default untouched.  Confirmed against native ``kicad-cli`` 10.0.6: an
+        explicit ``(filled_areas_thickness yes)`` two-fragment zone at
+        ``(version 20250210)`` still reports ``unconnected`` even at a
+        zero-gap shared edge, identically to the token being absent --
+        treating an explicit ``yes`` as force-stroked (as an earlier revision
+        of this method did) would have kept such a board false-clean on a
+        combination #5362's own matrix never exercised (Issue #5382).
+        """
+        if self.filled_areas_thickness is False:
+            return False
+        return 0 < self.file_version <= STROKED_FILL_LAST_VERSION
+
+    def fill_inflation(self) -> float:
+        """Half-width the stored fill outlines must grow by to be real copper.
+
+        When the fill is stroked (:meth:`is_stroked_fill`) the manufactured
+        copper is the stored polygon inflated by ``min_thickness / 2``, which
+        is what makes two adjacent fill fragments of one zone electrically
+        continuous.  When it is solid the stored outline already *is* the
+        copper and no inflation applies, so two fill outlines of one zone are
+        never bonded to each other by adjacency alone.
+
+        Measured against native ``kicad-cli pcb drc`` (KiCad 10.0.5, no
+        ``--refill-zones``, board hash unchanged), two same-zone fragments
+        carrying one pad each, ``min_thickness 0.25``:
+
+        =========================  ===============  ==================
+        ``filled_areas_thickness``  ``(version N)``  connected up to
+        =========================  ===============  ==================
+        absent                      <= 20250209      gap <= min_thickness
+        absent                      >= 20250210      never
+        ``yes``                     <= 20250209      gap <= min_thickness
+        ``yes``                     >= 20250210      never
+        ``no``                      any               never
+        =========================  ===============  ==================
+
+        An explicit ``yes`` measures identically to the token being absent at
+        every version (see :meth:`is_stroked_fill`) -- confirmed against
+        native ``kicad-cli`` 10.0.6 on the ``>= 20250210`` rows, which an
+        earlier revision of this method got backwards (Issue #5382).
+
+        A conductor (pad / via / track) reaching into both fragments bonds
+        them in every row; that path is handled by the callers, not here.
+        """
+        if not self.is_stroked_fill():
+            return 0.0
+        return max(self.min_thickness, 0.0) / 2.0
+
+    @staticmethod
+    def _first_descendant_index(sexp: SExp) -> dict[str, SExp]:
+        """Return a ``name -> first-matching-descendant`` map, one walk only.
+
+        Issue #5240 (CI runtime): ``Zone.from_sexp`` previously issued ~13
+        independent ``sexp.find(name)`` calls against the same zone node.
+        Each ``find()`` call re-walks ``sexp.children`` from scratch --
+        and, for every non-matching sibling along the way, that sibling's
+        *entire* subtree via ``iter_all()`` -- looking for its own single
+        target name.  A zone's ``polygon``/``filled_polygon`` children can
+        carry many thousands of ``(xy ...)`` points, so this is genuinely
+        expensive: profiling ``PCB.load()`` on
+        ``boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb``
+        (85 zones) showed ``Zone.from_sexp`` consuming 3.76s of a 6.3s
+        ``PCB.__init__`` (cProfile, Python 3.12), almost entirely inside
+        these repeated ``find()`` calls and their ``iter_all()`` descent.
+
+        This helper performs the equivalent traversal exactly once and
+        caches the first occurrence of every descendant name in the same
+        order ``SExp.find()`` itself searches (``self.children``, and for
+        each child its full ``iter_all()``) -- so a dict lookup by name
+        returns the identical node ``find(name)`` would have, without
+        re-scanning already-visited siblings for every subsequent field.
+        Only the *direct* zone-level ``find()`` calls below are switched
+        to this index; nested lookups on already-small subtrees
+        (``connect_pads``, ``fill``, ``ZoneKeepout``) and the
+        necessarily-exhaustive ``find_all("filled_polygon")`` are
+        unchanged, since neither is called repeatedly against the same
+        large node.
+        """
+        index: dict[str, SExp] = {}
+        for child in sexp.children:
+            for node in child.iter_all():
+                if node.name is not None and node.name not in index:
+                    index[node.name] = node
+        return index
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Zone:
+        """Parse zone from S-expression.
+
+        Parses KiCad zone definitions including:
+        - Net assignment (net, net_name)
+        - Layer and name
+        - Boundary polygon points
+        - Filled polygon regions (actual copper after DRC)
+        - Thermal relief parameters (gap, bridge width)
+        - Connection type (thermal, solid, none)
+        - Priority and minimum thickness
+        """
+        zone = cls(
+            net_number=0,
+            net_name="",
+            layer="",
+        )
+
+        index = cls._first_descendant_index(sexp)
+
+        # Basic properties — handles both (net N "name") and (net "name") formats.
+        # KiCad 9 may emit (net "name") without a numeric net number.
+        if net := index.get("net"):
+            first_int = net.get_int(0)
+            if first_int is not None:
+                zone.net_number = first_int
+            else:
+                zone.net_number = 0
+                # Name-only format: (net "GND") — store name from net node
+                zone.net_name = net.get_string(0) or ""
+        if net_name := index.get("net_name"):
+            zone.net_name = net_name.get_string(0) or ""
+        if layer := index.get("layer"):
+            zone.layer = layer.get_string(0) or ""
+        # Multi-layer form (rule areas): (layers "F.Cu" "B.Cu") / (layers "*.Cu")
+        if layers := index.get("layers"):
+            zone.layers = [
+                layer_name
+                for i in range(len(layers.values))
+                if (layer_name := layers.get_string(i))
+            ]
+            if not zone.layer and zone.layers:
+                zone.layer = zone.layers[0]
+        # Pre-KiCad-7 boards spell the zone's KIID ``(tstamp ...)``; KiCad
+        # loads it into the same UUID slot (Issue #6087).
+        if uuid := index.get("uuid") or index.get("tstamp"):
+            zone.uuid = uuid.get_string(0) or ""
+        if name := index.get("name"):
+            zone.name = name.get_string(0) or ""
+
+        # Rule-area keepout flags (issue #4605): (keepout (tracks not_allowed) ...)
+        if keepout := index.get("keepout"):
+            zone.keepout = ZoneKeepout.from_sexp(keepout)
+
+        # Priority
+        if priority := index.get("priority"):
+            zone.priority = priority.get_int(0) or 0
+
+        # Minimum thickness
+        if min_thickness := index.get("min_thickness"):
+            zone.min_thickness = min_thickness.get_float(0) or 0.2
+
+        # ``(filled_areas_thickness yes|no)``.  Left as ``None`` when absent:
+        # the meaning depends on the file version, which the zone alone does
+        # not know -- ``PCB._parse`` supplies it (Issue #5362).
+        if fat := index.get("filled_areas_thickness"):
+            zone.filled_areas_thickness = fat.get_string(0) != "no"
+
+        # Connect pads - can be (connect_pads yes) or (connect_pads (clearance X))
+        # or (connect_pads thru_hole_only (clearance X)) etc.
+        if connect_pads := index.get("connect_pads"):
+            # Check for connection type keyword
+            first_val = connect_pads.get_string(0)
+            if first_val == "no":
+                zone.connect_pads = "none"
+            elif first_val == "yes":
+                zone.connect_pads = "solid"
+            elif first_val == "thru_hole_only":
+                zone.connect_pads = "thermal_reliefs"
+            else:
+                # Default thermal reliefs if just clearance specified
+                zone.connect_pads = "thermal_reliefs"
+
+            # Extract clearance if present
+            if clearance := connect_pads.find("clearance"):
+                zone.clearance = clearance.get_float(0) or 0.2
+
+        # Fill settings - (fill yes/no (thermal_gap X) (thermal_bridge_width X))
+        if fill := index.get("fill"):
+            first_val = fill.get_string(0)
+            zone.is_filled = first_val == "yes"
+
+            if thermal_gap := fill.find("thermal_gap"):
+                zone.thermal_gap = thermal_gap.get_float(0) or 0.3
+            if thermal_bridge := fill.find("thermal_bridge_width"):
+                zone.thermal_bridge_width = thermal_bridge.get_float(0) or 0.3
+            if mode := fill.find("mode"):
+                fill_mode = mode.get_string(0)
+                if fill_mode == "hatch":
+                    zone.fill_type = "hatch"
+
+        # Parse boundary polygon - (polygon (pts (xy X Y) ...))
+        if polygon := index.get("polygon"):
+            zone.polygon = cls._parse_polygon_pts(polygon)
+
+        # Parse filled polygons - (filled_polygon (layer X) (pts (xy X Y) ...))
+        for filled_poly in sexp.find_all("filled_polygon"):
+            points = cls._parse_polygon_pts(filled_poly)
+            if points:
+                zone.filled_polygons.append(points)
+                fp_layer = ""
+                if fp_layer_node := filled_poly.find("layer"):
+                    fp_layer = fp_layer_node.get_string(0) or ""
+                zone.filled_polygon_layers.append(fp_layer or zone.layer)
+
+        return zone
+
+    def filled_polygon_layer(self, index: int) -> str:
+        """Return the copper layer of ``filled_polygons[index]``.
+
+        Uses the per-fill ``(layer ...)`` value when it was parsed from the
+        S-expression and falls back to the zone-level ``layer`` for zones
+        constructed programmatically (whose ``filled_polygon_layers`` list
+        may be shorter than ``filled_polygons`` or contain empty strings).
+        """
+        if index < len(self.filled_polygon_layers) and self.filled_polygon_layers[index]:
+            return self.filled_polygon_layers[index]
+        return self.layer
+
+    @staticmethod
+    def _parse_polygon_pts(polygon_sexp: SExp) -> list[tuple[float, float]]:
+        """Parse polygon points from (pts (xy X Y) ...) structure."""
+        points: list[tuple[float, float]] = []
+
+        if pts := polygon_sexp.find("pts"):
+            for xy in pts.find_all("xy"):
+                x = xy.get_float(0) or 0.0
+                y = xy.get_float(1) or 0.0
+                points.append((x, y))
+
+        return points
+
+
+@dataclass
+class GraphicLine:
+    """PCB graphic line element (gr_line).
+
+    Used for board outlines on Edge.Cuts layer and other graphic elements.
+    """
+
+    start: tuple[float, float]
+    end: tuple[float, float]
+    layer: str
+    width: float = 0.1
+    uuid: str = ""
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> GraphicLine:
+        """Parse graphic line from S-expression."""
+        line = cls(
+            start=(0.0, 0.0),
+            end=(0.0, 0.0),
+            layer="",
+        )
+
+        if start := sexp.find("start"):
+            line.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            line.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+        if layer := sexp.find("layer"):
+            line.layer = layer.get_string(0) or ""
+        if width := sexp.find("width"):
+            line.width = width.get_float(0) or 0.1
+        if stroke := sexp.find("stroke"):
+            # KiCad 8+ uses stroke instead of width
+            if stroke_width := stroke.find("width"):
+                line.width = stroke_width.get_float(0) or 0.1
+        if uuid := sexp.find("uuid"):
+            line.uuid = uuid.get_string(0) or ""
+
+        return line
+
+
+def _arc_points_from_sexp(
+    sexp: SExp,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Normalize modern three-point and legacy center/signed-angle arcs.
+
+    Preserve GraphicArc's tolerant defaults and explicit-mid precedence. Points
+    stay in the input coordinate frame (footprint graphics use local space).
+    Legacy normalization is delegated to ``legacy_arc_points`` so schema
+    parsing and routing share the exact same arc math.
+    """
+    start = mid = end = (0.0, 0.0)
+    if node := sexp.find("start"):
+        start = (node.get_float(0) or 0.0, node.get_float(1) or 0.0)
+    mid_node = sexp.find("mid")
+    if mid_node is not None:
+        mid = (mid_node.get_float(0) or 0.0, mid_node.get_float(1) or 0.0)
+    if node := sexp.find("end"):
+        end = (node.get_float(0) or 0.0, node.get_float(1) or 0.0)
+    if mid_node is None and (angle := sexp.find("angle")) is not None:
+        angle_deg = angle.get_float(0) or 0.0
+        center, on_arc_point = start, end
+        start, mid, end = legacy_arc_points(on_arc_point, center, angle_deg)
+    return start, mid, end
+
+
+@dataclass
+class GraphicArc:
+    """PCB graphic arc element (gr_arc).
+
+    Used for curved board outlines on Edge.Cuts layer.
+    """
+
+    start: tuple[float, float]
+    mid: tuple[float, float]
+    end: tuple[float, float]
+    layer: str
+    width: float = 0.1
+    uuid: str = ""
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> GraphicArc:
+        """Parse graphic arc from S-expression."""
+        arc = cls(
+            start=(0.0, 0.0),
+            mid=(0.0, 0.0),
+            end=(0.0, 0.0),
+            layer="",
+        )
+
+        arc.start, arc.mid, arc.end = _arc_points_from_sexp(sexp)
+        if layer := sexp.find("layer"):
+            arc.layer = layer.get_string(0) or ""
+        if width := sexp.find("width"):
+            arc.width = width.get_float(0) or 0.1
+        if stroke := sexp.find("stroke"):
+            # KiCad 8+ uses stroke instead of width
+            if stroke_width := stroke.find("width"):
+                arc.width = stroke_width.get_float(0) or 0.1
+        if uuid := sexp.find("uuid"):
+            arc.uuid = uuid.get_string(0) or ""
+
+        return arc
+
+
+@dataclass
+class EdgeContour:
+    """A group of connected Edge.Cuts graphic elements forming a contour.
+
+    Each contour is either a closed polygon (board outline) or a small
+    shape such as a mounting hole.  The ``sexp_nodes`` list stores the
+    raw S-expression nodes so the contour can be removed from the PCB.
+    """
+
+    index: int
+    element_count: int
+    bbox: tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
+    is_mounting_hole: bool = False
+    sexp_nodes: list = field(default_factory=list)  # list[SExp]
+
+    @property
+    def bbox_area(self) -> float:
+        """Bounding box area in mm^2."""
+        return (self.bbox[2] - self.bbox[0]) * (self.bbox[3] - self.bbox[1])
+
+    @property
+    def bbox_width(self) -> float:
+        return self.bbox[2] - self.bbox[0]
+
+    @property
+    def bbox_height(self) -> float:
+        return self.bbox[3] - self.bbox[1]
+
+
+@dataclass
+class StackupLayer:
+    """Stackup layer definition."""
+
+    name: str
+    type: str  # copper, prepreg, core, solder mask, silk screen
+    thickness: float = 0.0
+    material: str = ""
+    epsilon_r: float = 0.0
+    loss_tangent: float = 0.0
+
+
+@dataclass
+class Setup:
+    """PCB setup/design rules."""
+
+    stackup: list[StackupLayer] = field(default_factory=list)
+    pad_to_mask_clearance: float = 0.0
+    copper_finish: str = ""
+    aux_axis_origin: tuple[float, float] = (0.0, 0.0)
+    # Issue #4624: board-default via tenting from the setup-level
+    # ``(tenting (front yes|no) (back yes|no))`` node.  ``True`` = tented
+    # (mask covers vias on that side), ``False`` = not tented (vias have
+    # mask openings).  ``None`` = the token is absent from the file, which
+    # lets consumers distinguish "explicitly untented" from "unspecified"
+    # (KiCad's absent-token default is tented -- measured against
+    # kicad-cli 10.0.5, see ``validate/rules/silkscreen.py``).
+    tenting_front: bool | None = None
+    tenting_back: bool | None = None
+
+
+@dataclass
+class BoardNetClass:
+    """A board-declared legacy top-level ``(net_class …)`` design-rule block.
+
+    Issue #4875.  Pre-KiCad-6 ``.kicad_pcb`` files (and the transitional
+    files written around the format change) carry their trace-clearance /
+    track-width / via-size design rules **in the board file itself**, as
+    top-level ``(net_class …)`` nodes that are siblings of ``(setup …)``::
+
+        (net_class Default "This is the default net class."
+          (clearance 0.2)
+          (trace_width 0.25)
+          (via_dia 0.8)
+          (via_drill 0.4)
+          (uvia_dia 0.3)
+          (uvia_drill 0.1)
+          (add_net GND)
+        )
+
+    KiCad 6+ moved net classes into the companion ``.kicad_pro`` project
+    file, so a modern board carries none of these -- which is exactly why
+    :attr:`PCB.net_classes` is empty for every board this repo's own writer
+    produces (it never emits ``net_class`` nodes).  Consumers therefore use
+    a non-empty :attr:`PCB.net_classes` as the positive signal "this is an
+    imported board that declares its own rules".
+
+    Every dimension is ``None`` when the corresponding token is absent, so
+    callers can distinguish "declared as 0" from "not declared".
+
+    Attributes:
+        name: Class name (``Default`` for the board-wide class).
+        description: Free-text description, ``""`` when absent.
+        clearance: Trace-to-trace clearance in mm.
+        trace_width: Default track width in mm.
+        via_dia: Through-via pad diameter in mm.
+        via_drill: Through-via drill diameter in mm.
+        uvia_dia: Micro-via pad diameter in mm.
+        uvia_drill: Micro-via drill diameter in mm.
+        diff_pair_width: Differential-pair track width in mm.
+        diff_pair_gap: Differential-pair gap in mm.
+        nets: Net names assigned to this class (``add_net`` entries).
+    """
+
+    name: str = ""
+    description: str = ""
+    clearance: float | None = None
+    trace_width: float | None = None
+    via_dia: float | None = None
+    via_drill: float | None = None
+    uvia_dia: float | None = None
+    uvia_drill: float | None = None
+    diff_pair_width: float | None = None
+    diff_pair_gap: float | None = None
+    nets: list[str] = field(default_factory=list)
+
+
+# Paper sizes in mm (width, height) - KiCad uses landscape orientation
+PAPER_SIZES: dict[str, tuple[float, float]] = {
+    "A4": (297.0, 210.0),
+    "A3": (420.0, 297.0),
+    "A2": (594.0, 420.0),
+    "A1": (841.0, 594.0),
+    "A0": (1189.0, 841.0),
+    "A": (279.4, 215.9),  # US Letter
+    "B": (431.8, 279.4),  # US Tabloid
+    "C": (558.8, 431.8),
+    "D": (863.6, 558.8),
+    "E": (1117.6, 863.6),
+}
+
+
+class PCB:
+    """KiCad PCB document.
+
+    Parses .kicad_pcb files and provides access to:
+    - Board outline and dimensions
+    - Layers and stackup
+    - Nets
+    - Footprints (components)
+    - Traces (segments)
+    - Vias
+    - Zones (copper pours)
+    """
+
+    def __init__(self, sexp: SExp, path: str | Path | None = None):
+        """Initialize from parsed S-expression data.
+
+        Args:
+            sexp: Parsed S-expression data
+            path: Optional path to the PCB file (used for export operations)
+
+        Raises:
+            TypeError: If sexp is a string or Path instead of a parsed SExp
+        """
+        if isinstance(sexp, (str, Path)):
+            raise TypeError(
+                f"PCB() expects a parsed SExp, not a file path. "
+                f"Use PCB.load({str(sexp)!r}) instead."
+            )
+        self._sexp = sexp
+        self._path: Path | None = Path(path) if path else None
+        self._layers: dict[int, Layer] = {}
+        self._nets: dict[int, Net] = {}
+        self._footprints: list[Footprint] = []
+        self._segments: list[Segment] = []
+        self._arcs: list[Arc] = []
+        self._vias: list[Via] = []
+        # Incrementally-maintained dedup key sets (issue #4175).  Built lazily
+        # from _segments/_vias on first add_trace/add_via, then updated on each
+        # append.  Reset to None whenever the underlying lists are bulk-mutated
+        # (strip_traces, dedupe_copper, segments/vias reload) so they rebuild.
+        self._segment_keys: set[_SegmentKey] | None = None
+        self._via_keys: set[_ViaKey] | None = None
+        # Deterministic UUIDs for items this API adds (Issue #6076); built
+        # lazily so it reserves every UUID the board holds at first use.
+        self._uuid_minter: UuidMinter | None = None
+        self._zones: list[Zone] = []
+        # Issue #6087: zones embedded in footprints (antenna keepouts and
+        # the like).  Kept apart from ``_zones`` so pour/zone-count/save
+        # consumers keep seeing board-level zones only.
+        self._footprint_zones: list[Zone] = []
+        self._graphic_lines: list[GraphicLine] = []
+        self._graphic_arcs: list[GraphicArc] = []
+        self._texts: list[GraphicText] = []
+        self._graphics: list[BoardGraphic] = []
+        self._setup: Setup | None = None
+        # Issue #4875: board-declared legacy top-level ``(net_class …)``
+        # design rules, keyed by class name.  A dict (not a list) so a
+        # re-``_parse()`` -- which appends rather than replaces -- overwrites
+        # instead of duplicating.  Empty for every KiCad 6+ board and for
+        # every board this repo's writer produces.
+        self._net_classes: dict[str, BoardNetClass] = {}
+        self._title_block: dict[str, str] = {}
+        self._board_origin: tuple[float, float] = (0.0, 0.0)
+        # Issue #4416: board-level net-reference dialect signal.  Set by
+        # _fixup_net_numbers() when the loaded board uses KiCad-10 name-only
+        # ``(net "SDA")`` inline references (or had its header net table
+        # stripped by kicad-cli --save-board).  Newly added copper
+        # (add_trace/add_via) emits name-based refs when this is True so a
+        # name-based board stays name-based on save.
+        self._net_name_only_dialect: bool = False
+        #: Non-empty when this board's ``Edge.Cuts`` geometry could not be read
+        #: well enough to prove a board origin (issue #5274).  ``PCB.load()``
+        #: deliberately tolerates such a board -- see
+        #: :meth:`_detect_board_origin` -- so consumers that *require* a proven
+        #: outline can fail closed on their own terms instead of every load
+        #: raising.  Empty on a board whose outline bounds were resolved (or
+        #: that has no outline geometry at all).
+        self.outline_error: str = ""
+        #: Loud, human-readable signals raised while parsing this board -- used
+        #: today for the "file has a component graph we could not read" guard
+        #: (issue #4873).  Empty on a board the parser fully understands.
+        self.parse_warnings: list[str] = []
+        self._parse()
+        self._detect_board_origin()
+        self._link_footprint_sexp_nodes()
+
+    @classmethod
+    def load(cls, path: str | Path) -> PCB:
+        """Load PCB from file.
+
+        Args:
+            path: Path to .kicad_pcb file
+
+        Returns:
+            PCB instance with path stored for export operations
+        """
+        path = Path(path)
+        sexp = load_pcb(str(path))
+        return cls(sexp, path)
+
+    @classmethod
+    def create(
+        cls,
+        width: float = 100.0,
+        height: float = 100.0,
+        layers: int = 2,
+        title: str = "",
+        revision: str = "1.0",
+        company: str = "",
+        board_date: str | None = None,
+        paper: str = "A4",
+        center: bool = True,
+    ) -> PCB:
+        """Create a new blank PCB from scratch.
+
+        This creates a minimal but valid KiCad PCB file with:
+        - Board outline on Edge.Cuts layer (centered on drawing sheet by default)
+        - Layer definitions (2 or 4 copper layers)
+        - Basic design rules
+        - Title block information
+
+        Args:
+            width: Board width in mm (default 100.0)
+            height: Board height in mm (default 100.0)
+            layers: Number of copper layers (2 or 4, default 2)
+            title: Board title for title block
+            revision: Board revision (default "1.0")
+            company: Company name for title block
+            board_date: Date string (default: today's date in YYYY-MM-DD format)
+            paper: Paper size for drawing sheet (default "A4"). Supported sizes:
+                   A4, A3, A2, A1, A0, A (US Letter), B, C, D, E
+            center: If True, center the board on the drawing sheet (default True).
+                    If False, place the board at origin (0, 0).
+
+        .. note::
+            When ``center=True`` the outline is *plain-centered* on the paper —
+            ``origin = ((paper_w - width) / 2, (paper_h - height) / 2)`` — and
+            does **not** account for the title-block band at the bottom of the
+            sheet. This differs from
+            :func:`kicad_tools.pcb.center_sheet.centered_origin`, which insets
+            for the title block first and therefore returns a different
+            (higher) origin for the same board. A placement script that anchors
+            positions to ``centered_origin()`` but applies them to a
+            ``create-pcb`` board lands everything shifted by the title-block
+            inset (issue #4156). These two conventions are intentionally left
+            un-reconciled here; anchor to the board's actual Edge.Cuts outline
+            (e.g. ``PCB.get_board_outline()``) if you need convention-agnostic
+            positions.
+
+        Returns:
+            A new PCB instance ready for adding footprints and traces.
+
+        Raises:
+            ValueError: If layers is not 2 or 4
+            ValueError: If paper size is not recognized
+
+        Example:
+            >>> pcb = PCB.create(width=160, height=100, layers=4, title="My Board")
+            >>> pcb.save("my_board.kicad_pcb")
+        """
+        if layers not in (2, 4):
+            raise ValueError(f"Layers must be 2 or 4, got {layers}")
+
+        if paper not in PAPER_SIZES:
+            raise ValueError(
+                f"Unknown paper size '{paper}'. "
+                f"Supported sizes: {', '.join(sorted(PAPER_SIZES.keys()))}"
+            )
+
+        if board_date is None:
+            board_date = date.today().isoformat()
+
+        # Calculate board origin based on centering preference
+        if center:
+            paper_width, paper_height = PAPER_SIZES[paper]
+            origin_x = (paper_width - width) / 2
+            origin_y = (paper_height - height) / 2
+        else:
+            origin_x, origin_y = 0.0, 0.0
+
+        sexp = cls._build_blank_pcb_sexp(
+            width=width,
+            height=height,
+            layers=layers,
+            title=title,
+            revision=revision,
+            company=company,
+            board_date=board_date,
+            paper=paper,
+            origin_x=origin_x,
+            origin_y=origin_y,
+        )
+        return cls(sexp)
+
+    @staticmethod
+    def _build_blank_pcb_sexp(
+        width: float,
+        height: float,
+        layers: int,
+        title: str,
+        revision: str,
+        company: str,
+        board_date: str,
+        paper: str,
+        origin_x: float,
+        origin_y: float,
+    ) -> SExp:
+        """Build the S-expression for a blank PCB."""
+        pcb = SExp.list("kicad_pcb")
+
+        # Version and generator info
+        pcb.append(SExp.list("version", KICAD_BOARD_FORMAT_VERSION))
+        pcb.append(SExp.list("generator", "kicad_tools"))
+        # generator_version is a strict-typed string field in KiCad; emit the
+        # value as a quoted atom so kicad-cli accepts the file even though the
+        # version string textually parses as a number.
+        pcb.append(SExp.list("generator_version", SExp.quoted_atom(KICAD_GENERATOR_VERSION)))
+
+        # General settings
+        pcb.append(
+            SExp.list(
+                "general",
+                SExp.list("thickness", 1.6),
+                SExp.list("legacy_teardrops", "no"),
+            )
+        )
+
+        # Paper size
+        pcb.append(SExp.list("paper", paper))
+
+        # Title block
+        pcb.append(
+            SExp.list(
+                "title_block",
+                SExp.list("title", title),
+                SExp.list("date", board_date),
+                SExp.list("rev", revision),
+                SExp.list("company", company),
+            )
+        )
+
+        # Layers
+        pcb.append(PCB._build_layers_sexp(layers))
+
+        # Setup with design rules
+        pcb.append(PCB._build_setup_sexp(layers))
+
+        # Empty net (required)
+        pcb.append(SExp.list("net", 0, ""))
+
+        # Board outline on Edge.Cuts (four gr_line segments)
+        for line in PCB._build_board_outline_sexp(width, height, origin_x, origin_y):
+            pcb.append(line)
+
+        return pcb
+
+    @staticmethod
+    def _build_layers_sexp(num_layers: int) -> SExp:
+        """Build the layers definition S-expression."""
+        layers_node = SExp.list("layers")
+
+        # Copper layers
+        layers_node.append(SExp.list("0", "F.Cu", "signal"))
+        if num_layers == 4:
+            layers_node.append(SExp.list("1", "In1.Cu", "signal"))
+            layers_node.append(SExp.list("2", "In2.Cu", "signal"))
+        layers_node.append(SExp.list("31", "B.Cu", "signal"))
+
+        # Technical layers (always present)
+        layers_node.append(SExp.list("32", "B.Adhes", "user", "B.Adhesive"))
+        layers_node.append(SExp.list("33", "F.Adhes", "user", "F.Adhesive"))
+        layers_node.append(SExp.list("34", "B.Paste", "user"))
+        layers_node.append(SExp.list("35", "F.Paste", "user"))
+        layers_node.append(SExp.list("36", "B.SilkS", "user", "B.Silkscreen"))
+        layers_node.append(SExp.list("37", "F.SilkS", "user", "F.Silkscreen"))
+        layers_node.append(SExp.list("38", "B.Mask", "user"))
+        layers_node.append(SExp.list("39", "F.Mask", "user"))
+        layers_node.append(SExp.list("40", "Dwgs.User", "user", "User.Drawings"))
+        layers_node.append(SExp.list("44", "Edge.Cuts", "user"))
+        layers_node.append(SExp.list("46", "B.CrtYd", "user", "B.Courtyard"))
+        layers_node.append(SExp.list("47", "F.CrtYd", "user", "F.Courtyard"))
+        layers_node.append(SExp.list("48", "B.Fab", "user"))
+        layers_node.append(SExp.list("49", "F.Fab", "user"))
+
+        return layers_node
+
+    @staticmethod
+    def _build_setup_sexp(num_layers: int) -> SExp:
+        """Build the setup/design rules S-expression."""
+        setup = SExp.list("setup")
+
+        # Stackup for multi-layer boards
+        if num_layers == 4:
+            stackup = SExp.list("stackup")
+            stackup.append(SExp.list("layer", "F.SilkS", SExp.list("type", "Top Silk Screen")))
+            stackup.append(SExp.list("layer", "F.Paste", SExp.list("type", "Top Solder Paste")))
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "F.Mask",
+                    SExp.list("type", "Top Solder Mask"),
+                    SExp.list("thickness", 0.01),
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer", "F.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "dielectric 1",
+                    SExp.list("type", "prepreg"),
+                    SExp.list("thickness", 0.2),
+                    SExp.list("material", "FR4"),
+                    SExp.list("epsilon_r", 4.5),
+                    SExp.list("loss_tangent", 0.02),
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer", "In1.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "dielectric 2",
+                    SExp.list("type", "core"),
+                    SExp.list("thickness", 1.0),
+                    SExp.list("material", "FR4"),
+                    SExp.list("epsilon_r", 4.5),
+                    SExp.list("loss_tangent", 0.02),
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer", "In2.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "dielectric 3",
+                    SExp.list("type", "prepreg"),
+                    SExp.list("thickness", 0.2),
+                    SExp.list("material", "FR4"),
+                    SExp.list("epsilon_r", 4.5),
+                    SExp.list("loss_tangent", 0.02),
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer", "B.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "B.Mask",
+                    SExp.list("type", "Bottom Solder Mask"),
+                    SExp.list("thickness", 0.01),
+                )
+            )
+            stackup.append(SExp.list("layer", "B.Paste", SExp.list("type", "Bottom Solder Paste")))
+            stackup.append(SExp.list("layer", "B.SilkS", SExp.list("type", "Bottom Silk Screen")))
+            stackup.append(SExp.list("copper_finish", "ENIG"))
+            stackup.append(SExp.list("dielectric_constraints", "no"))
+            setup.append(stackup)
+
+        # Basic design rules
+        setup.append(SExp.list("pad_to_mask_clearance", 0))
+
+        return setup
+
+    @staticmethod
+    def _build_board_outline_sexp(
+        width: float,
+        height: float,
+        origin_x: float,
+        origin_y: float,
+        minter: UuidMinter | None = None,
+    ) -> list[SExp]:
+        """Build a rectangular board outline on Edge.Cuts layer.
+
+        Emits four ``gr_line`` segments forming a closed rectangle rather than
+        a single ``gr_rect``.  Downstream placement/route tooling (and some of
+        this package's own DSN/routing paths) expect ``gr_line`` boundary
+        segments, and the PCB parser already ingests ``gr_line`` into
+        ``_graphic_lines`` (used by both ``board_size`` and board-origin
+        detection via their gr_line fallbacks).
+
+        Corners are walked clockwise:
+        ``(ox,oy) -> (ox+w,oy) -> (ox+w,oy+h) -> (ox,oy+h) -> (ox,oy)``.
+
+        ``minter`` (default: a fresh one) supplies the ``gr_line`` UUIDs; pass
+        one seeded with the board's existing UUIDs when adding the outline to
+        an existing board so no UUID is reused.
+
+        Returns:
+            A list of four ``gr_line`` S-expressions.
+        """
+        if minter is None:
+            minter = UuidMinter()
+        ox, oy = origin_x, origin_y
+        corners = [
+            (ox, oy),
+            (ox + width, oy),
+            (ox + width, oy + height),
+            (ox, oy + height),
+        ]
+
+        lines: list[SExp] = []
+        for i in range(4):
+            start = corners[i]
+            end = corners[(i + 1) % 4]
+            lines.append(
+                SExp.list(
+                    "gr_line",
+                    SExp.list("start", start[0], start[1]),
+                    SExp.list("end", end[0], end[1]),
+                    SExp.list("stroke", SExp.list("width", 0.1), SExp.list("type", "default")),
+                    SExp.list("layer", "Edge.Cuts"),
+                    # Content-keyed (Issue #6076); the minter separates
+                    # degenerate (zero-size) sides that share a key.
+                    SExp.list("uuid", minter.claim("edge", *start, *end)),
+                )
+            )
+        return lines
+
+    def _parse(self):
+        """Parse the PCB data structure."""
+        # Issue #6493: keyword-less partial-span vias read as through.
+        vias_read_as_through = 0
+        for child in self._sexp.iter_children():
+            tag = child.tag
+            if tag is None:
+                continue  # Skip unnamed list nodes
+
+            if tag == "layers":
+                self._parse_layers(child)
+            elif tag == "net":
+                self._parse_net(child)
+            elif tag in FOOTPRINT_TAGS:
+                # ``module`` is the pre-KiCad-6 spelling of ``footprint``;
+                # the block's contents are unchanged by the rename, so the
+                # same parser handles both (issue #4873).
+                fp = Footprint.from_sexp(child)
+                self._footprints.append(fp)
+                for fp_child in child.iter_children():
+                    if fp_child.tag != "zone":
+                        continue
+                    # Footprint zones are stored sheet-absolute in a board
+                    # file, exactly like top-level zones (Issue #6087).
+                    fp_zone = Zone.from_sexp(fp_child)
+                    fp_zone.file_version = self._file_version()
+                    fp_zone.parent_reference = fp.reference
+                    fp_zone.parent_uuid = fp.uuid
+                    self._footprint_zones.append(fp_zone)
+                    # Back-reference so moving the footprint moves the zone
+                    # with it (Issue #6119).
+                    fp._zones.append(fp_zone)
+            elif tag == "segment":
+                seg = Segment.from_sexp(child)
+                self._segments.append(seg)
+            elif tag == "arc":
+                self._arcs.append(Arc.from_sexp(child))
+            elif tag == "via":
+                via = Via.from_sexp(child)
+                if via.layers_read_as_through:
+                    vias_read_as_through += 1
+                self._vias.append(via)
+            elif tag == "zone":
+                zone = Zone.from_sexp(child)
+                # An absent ``filled_areas_thickness`` means "stroked" only
+                # below KiCad's 20250210 boundary, so every zone needs the
+                # file version to resolve it (Issue #5362).
+                zone.file_version = self._file_version()
+                self._zones.append(zone)
+            elif tag == "gr_line":
+                line = GraphicLine.from_sexp(child)
+                self._graphic_lines.append(line)
+                # Also surface as a BoardGraphic so the public read path
+                # (``graphics`` / ``graphics_on_layer``) sees gr_line outlines
+                # (e.g. the four-segment Edge.Cuts boundary emitted by
+                # ``PCB.create``).  Without this, gr_line boards would be
+                # invisible to ``graphics_on_layer``.
+                self._graphics.append(BoardGraphic.from_sexp(child, "line"))
+            elif tag == "gr_arc":
+                arc = GraphicArc.from_sexp(child)
+                self._graphic_arcs.append(arc)
+                self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
+            elif tag == "setup":
+                self._parse_setup(child)
+            elif tag == "title_block":
+                self._parse_title_block(child)
+            elif tag == "gr_text":
+                text = GraphicText.from_sexp(child)
+                self._texts.append(text)
+            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+                # ``gr_poly`` joined this dispatch in Issue #5811: a
+                # board-level polygon silk marker was previously parsed
+                # nowhere, so the silkscreen clearance geometry could not
+                # see it at all.
+                #
+                # Edge.Cuts ``gr_poly`` outlines are unaffected, on two
+                # independent counts: ``_edge_cuts_poly_chains_sexp`` walks
+                # ``self._sexp`` directly and never consults ``_graphics``,
+                # and ``BoardOutline``'s ``_graphics`` loop
+                # (``pcb/board_geometry.py``) dispatches only on ``rect`` /
+                # ``circle`` / ``bezier``, so a new ``poly`` entry there
+                # contributes no outline segments.  Nothing is
+                # double-counted.
+                graphic_type = tag[3:]  # Remove "gr_" prefix
+                graphic = BoardGraphic.from_sexp(child, graphic_type)
+                self._graphics.append(graphic)
+            elif tag == "net_class":
+                # Issue #4875: legacy (pre-KiCad-6) board-declared design
+                # rules.  These are top-level siblings of ``(setup …)``, NOT
+                # nested inside it, so ``_parse_setup`` never sees them.
+                self._parse_net_class(child)
+
+        if vias_read_as_through:
+            from ..core.layers import warn_normalised_vias
+
+            board_path = getattr(self, "_path", None)
+            warn_normalised_vias(
+                logger, str(board_path) if board_path else "PCB", vias_read_as_through
+            )
+
+        # Post-parse fixup: recover net_number from name for KiCad 10 name-only
+        # format.  KiCad 10 may emit inline (net "name") without a numeric ID,
+        # but the header declarations (net N "name") are always present, so we
+        # can rebuild the number from the name.
+        self._fixup_net_numbers()
+
+        self._warn_on_unparsed_component_graph()
+
+    def _warn_on_unparsed_component_graph(self) -> None:
+        """Refuse to return an empty component graph *silently*.
+
+        The ``(module ...)`` defect (issue #4873) was invisible precisely
+        because ``_parse()``'s dispatch chain has no fallback: a component
+        block spelled with an unrecognised tag simply fell through the loop
+        and the board reported zero footprints and zero pads with no error,
+        no warning, and no version signal.
+
+        This guard makes that class of failure loud rather than data-shaped:
+        if the file plainly carries a component graph (it has ``(pad ...)``
+        nodes somewhere in the tree) but no footprint was parsed, log a
+        warning naming the declared board version and the container tags we
+        could not read, and record it in :attr:`parse_warnings` so callers
+        can surface it too.  Genuinely component-free boards (panel frames,
+        outline-only fixtures) have no pads and stay quiet.
+        """
+        if self._footprints:
+            return
+
+        pad_nodes = self._sexp.find_all("pad")
+        if not pad_nodes:
+            return  # No component graph in the file at all -- nothing lost.
+
+        unreadable_tags = sorted(
+            {
+                child.tag
+                for child in self._sexp.iter_children()
+                if child.tag is not None and not _is_footprint_tag(child.tag) and child.find("pad")
+            }
+        )
+        version_node = self._sexp.find_child("version")
+        declared_version = (version_node.get_string(0) if version_node else None) or "unknown"
+        message = (
+            f"Board declares version {declared_version} and contains "
+            f"{len(pad_nodes)} pad node(s), but no footprint could be parsed: "
+            f"the component graph is unreadable. Unrecognised container tag(s): "
+            f"{', '.join(unreadable_tags) if unreadable_tags else 'none at top level'}. "
+            "Pad-level results (routing, DRC, LVS, BOM) from this board would be "
+            "wrong, not merely incomplete."
+        )
+        logger.warning("%s", message)
+        self.parse_warnings.append(message)
+
+    def _file_version(self) -> int:
+        """The board's ``(version N)`` as an int, or ``0`` when unreadable.
+
+        Used to resolve an absent ``filled_areas_thickness`` on each zone
+        (:meth:`Zone.is_stroked_fill`, Issue #5362).  ``0`` is deliberately
+        *not* treated as legacy: an unknown version falls through to the
+        modern solid-fill reading, the conservative choice, since assuming a
+        stroke inflation that isn't there would fuse genuinely open copper.
+        """
+        version_node = self._sexp.find_child("version")
+        if version_node is None:
+            return 0
+        raw = version_node.get_string(0)
+        if raw is None:
+            return 0
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+
+    def _parse_layers(self, sexp: SExp):
+        """Parse layer definitions."""
+        for child in sexp.iter_children():
+            # Layers are stored as (N "name" type)
+            if len(child.values) >= 1:
+                # The tag is the layer number as string. ``child.tag`` is
+                # ``None`` for an untagged/malformed nested list (e.g. a
+                # stray extra "(" produces a bare list child) -- ``int(None)``
+                # raises ``TypeError``, not ``ValueError``, so both must be
+                # caught here or a malformed ``(layers ...)`` block crashes
+                # the parser instead of skipping the unreadable entry
+                # (found by the never-panic fuzz property, issue #4880).
+                try:
+                    number = int(child.tag)
+                except (ValueError, TypeError):
+                    continue
+                name = child.get_string(0) or ""
+                layer_type = child.get_string(1) or "user"
+                self._layers[number] = Layer(number, name, layer_type)
+
+    def _parse_net(self, sexp: SExp):
+        """Parse net definition."""
+        net_num = sexp.get_int(0) or 0
+        net_name = sexp.get_string(1) or ""
+        self._nets[net_num] = Net(net_num, net_name)
+
+    def _fixup_net_numbers(self) -> None:
+        """Reconcile net_number and net_name using PCB header declarations.
+
+        Handles three cases:
+
+        1. **KiCad 10 name-only format** -- inline references are
+           ``(net "name")`` without a numeric ID.  We resolve ``net_number``
+           from ``net_name`` using the header's ``(net N "name")`` map.
+
+        2. **Traditional number-only format** -- inline references are
+           ``(net N)`` without an inline name string.  We resolve
+           ``net_name`` from ``net_number`` using the same header map.
+
+        3. **KiCad 10 ``--save-board`` format (no header table)** -- KiCad
+           10.0.4's ``kicad-cli pcb drc --refill-zones --save-board`` deletes
+           the entire top-level ``(net N "name")`` table *and* rewrites every
+           inline ref to name-only ``(net "name")`` form.  With no header to
+           recover numbers from, we synthesize the table from the inline
+           names (see :meth:`_synthesize_net_table`) before running the
+           recovery loop, otherwise ``self._nets`` stays empty and every
+           element silently collapses to ``net_number=0``.
+        """
+        # Issue #4416: detect the board-level net-reference dialect BEFORE the
+        # recovery loop rewrites name-only elements' net_number.  The board is
+        # treated as name-only when any parsed segment/via was read in
+        # ``(net "name")`` form, or when any pad carries a name but no number
+        # (the pad-level name-only signal).  The kicad-cli --save-board case
+        # (stripped header table) is covered by these same element-level flags
+        # -- its inline copper/pad refs are all name-only.  We deliberately do
+        # NOT treat an empty ``self._nets`` alone as name-only, so a freshly
+        # constructed board with no header table keeps numeric emission.
+        self._net_name_only_dialect = (
+            any(seg.net_name_only for seg in [*self._segments, *self._arcs])
+            or any(via.net_name_only for via in self._vias)
+            or any(
+                pad.net_number == 0 and bool(pad.net_name)
+                for fp in self._footprints
+                for pad in fp.pads
+            )
+        )
+
+        # KiCad 10 --save-board: no header table survived. Synthesize one from
+        # the inline name-only references so the recovery loop below has a map.
+        if not self._nets:
+            self._synthesize_net_table()
+
+        # Build bidirectional lookups from the header declarations
+        name_to_number: dict[str, int] = {}
+        for net in self._nets.values():
+            if net.name and net.number != 0:
+                name_to_number[net.name] = net.number
+
+        if not name_to_number and not self._nets:
+            return
+
+        # Fix pads
+        for fp in self._footprints:
+            for pad in fp.pads:
+                if pad.net_number == 0 and pad.net_name:
+                    pad.net_number = name_to_number.get(pad.net_name, 0)
+                elif pad.net_number != 0 and not pad.net_name:
+                    net = self._nets.get(pad.net_number)
+                    if net:
+                        pad.net_name = net.name
+
+        # Fix straight and curved tracks
+        for seg in [*self._segments, *self._arcs]:
+            if seg.net_number == 0 and seg.net_name:
+                seg.net_number = name_to_number.get(seg.net_name, 0)
+            elif seg.net_number != 0 and not seg.net_name:
+                net = self._nets.get(seg.net_number)
+                if net:
+                    seg.net_name = net.name
+
+        # Fix vias
+        for via in self._vias:
+            if via.net_number == 0 and via.net_name:
+                via.net_number = name_to_number.get(via.net_name, 0)
+            elif via.net_number != 0 and not via.net_name:
+                net = self._nets.get(via.net_number)
+                if net:
+                    via.net_name = net.name
+
+        # Fix zones
+        for zone in self._zones:
+            if zone.net_number == 0 and zone.net_name:
+                zone.net_number = name_to_number.get(zone.net_name, 0)
+            elif zone.net_number != 0 and not zone.net_name:
+                net = self._nets.get(zone.net_number)
+                if net:
+                    zone.net_name = net.name
+
+    def _synthesize_net_table(self) -> None:
+        """Rebuild ``self._nets`` from inline name-only references.
+
+        KiCad 10.0.4's ``kicad-cli pcb drc --refill-zones --save-board``
+        deletes the top-level ``(net N "name")`` header table entirely and
+        rewrites every inline reference to name-only ``(net "name")`` form.
+        Without the header, :meth:`_parse_net` never populates
+        ``self._nets``, so the fixup loop in :meth:`_fixup_net_numbers` has
+        no map and every element silently keeps ``net_number=0`` while its
+        name is (correctly) preserved -- a false-clean connectivity model.
+
+        This method reconstructs the table from the inline names:
+
+        * Net 0 is reserved for the "no net" sentinel (empty name), matching
+          KiCad's own convention.
+        * Any *surviving* numeric reference (e.g. an inline ``(net 3 "GND")``
+          that escaped the name-only rewrite) is honored, so its name keeps
+          its original number.
+        * Remaining named nets are assigned numbers deterministically, in
+          first-seen order across pads -> segments -> vias -> zones, filling
+          the lowest unused positive integers.  This is stable across loads
+          of the same file.
+
+        The synthesized table is in-memory only: it is deliberately NOT written
+        back into ``self._sexp``, so ``PCB.save()`` preserves the file's
+        name-only dialect (KiCad 10 loads header-less boards natively; Issue #8239).
+
+        No-op if a header table already exists or if there are no named
+        inline references to recover from.
+        """
+        if self._nets:
+            return
+
+        # Iterate elements in a stable order and collect (name, surviving_num).
+        name_to_number: dict[str, int] = {"": 0}
+        reserved: set[int] = {0}
+        ordered_names: list[str] = []
+
+        def observe(name: str, number: int) -> None:
+            if not name:
+                return
+            if name not in name_to_number:
+                ordered_names.append(name)
+                name_to_number[name] = 0  # placeholder, resolved below
+            # Honor a surviving numeric ref (nonzero) if we have not already
+            # locked a nonzero number for this name.
+            if number and name_to_number[name] == 0:
+                name_to_number[name] = number
+                reserved.add(number)
+
+        for fp in self._footprints:
+            for pad in fp.pads:
+                observe(pad.net_name, pad.net_number)
+        for seg in [*self._segments, *self._arcs]:
+            observe(seg.net_name, seg.net_number)
+        for via in self._vias:
+            observe(via.net_name, via.net_number)
+        for zone in self._zones:
+            observe(zone.net_name, zone.net_number)
+
+        if not ordered_names:
+            return  # nothing to synthesize (empty board / no named nets)
+
+        # Assign the lowest unused positive integers to names that had no
+        # surviving numeric ref, in first-seen order.
+        next_number = 1
+        for name in ordered_names:
+            if name_to_number[name] != 0:
+                continue  # already fixed by a surviving numeric ref
+            while next_number in reserved:
+                next_number += 1
+            name_to_number[name] = next_number
+            reserved.add(next_number)
+
+        # Populate self._nets (including the net 0 "" sentinel) ...
+        self._nets[0] = Net(0, "")
+        for name in ordered_names:
+            number = name_to_number[name]
+            self._nets[number] = Net(number, name)
+
+    def _parse_setup(self, sexp: SExp):
+        """Parse setup/design rules."""
+        setup = Setup()
+
+        if stackup := sexp.find("stackup"):
+            setup.stackup = self._parse_stackup(stackup)
+
+        if clearance := sexp.find("pad_to_mask_clearance"):
+            setup.pad_to_mask_clearance = clearance.get_float(0) or 0.0
+
+        if aux_origin := sexp.find("aux_axis_origin"):
+            x = aux_origin.get_float(0) or 0.0
+            y = aux_origin.get_float(1) or 0.0
+            setup.aux_axis_origin = (x, y)
+
+        # Issue #4624: board-default via tenting.  KiCad 10 writes
+        # ``(tenting (front yes|no) (back yes|no))`` directly under setup;
+        # tokens other than yes/no are left as None (unspecified).
+        if tenting := sexp.find("tenting"):
+            if front := tenting.find("front"):
+                value = front.get_string(0)
+                if value in ("yes", "no"):
+                    setup.tenting_front = value == "yes"
+            if back := tenting.find("back"):
+                value = back.get_string(0)
+                if value in ("yes", "no"):
+                    setup.tenting_back = value == "yes"
+
+        self._setup = setup
+
+    def _parse_net_class(self, sexp: SExp) -> None:
+        """Parse one legacy top-level ``(net_class …)`` block (issue #4875).
+
+        The legacy grammar is ``(net_class <name> <description> (clearance
+        …) (trace_width …) …)`` -- name and description are positional
+        strings, every rule is a child node.  Unknown child tokens are
+        ignored; absent tokens leave their field ``None`` so a caller can
+        tell "not declared" from "declared as 0".
+        """
+        name = sexp.get_string(0) or ""
+        net_class = BoardNetClass(
+            name=name,
+            description=sexp.get_string(1) or "",
+        )
+
+        for token in (
+            "clearance",
+            "trace_width",
+            "via_dia",
+            "via_drill",
+            "uvia_dia",
+            "uvia_drill",
+            "diff_pair_width",
+            "diff_pair_gap",
+        ):
+            node = sexp.find(token)
+            if node is None:
+                continue
+            value = node.get_float(0)
+            if value is not None:
+                setattr(net_class, token, float(value))
+
+        for add_net in sexp.find_all("add_net"):
+            net_name = add_net.get_string(0)
+            if net_name is not None:
+                net_class.nets.append(net_name)
+
+        self._net_classes[net_class.name] = net_class
+
+    def _parse_stackup(self, sexp: SExp) -> list[StackupLayer]:
+        """Parse physical stackup strata, expanding native ``addsublayer`` entries.
+
+        KiCad represents a composite dielectric with repeated material fields
+        separated by bare addsublayer tokens. Keep each stratum's properties
+        rather than dropping all but the first or averaging unlike materials.
+        """
+        layers = []
+
+        for child in sexp.iter_children():
+            if child.tag == "layer":
+                layer = StackupLayer(
+                    name=child.get_string(0) or "",
+                    type="",
+                )
+
+                if type_node := child.find("type"):
+                    layer.type = type_node.get_string(0) or ""
+                name, layer_type = layer.name, layer.type
+                sublayer = 1
+                for item in child.children:
+                    if item.is_atom and item.value == "addsublayer":
+                        layers.append(layer)
+                        sublayer += 1
+                        layer = StackupLayer(name=f"{name} (sublayer {sublayer})", type=layer_type)
+                    elif item.tag == "thickness":
+                        layer.thickness = item.get_float(0) or 0.0
+                    elif item.tag == "material":
+                        layer.material = item.get_string(0) or ""
+                    elif item.tag == "epsilon_r":
+                        layer.epsilon_r = item.get_float(0) or 0.0
+                    elif item.tag == "loss_tangent":
+                        layer.loss_tangent = item.get_float(0) or 0.0
+                layers.append(layer)
+            elif child.tag == "copper_finish":
+                pass  # Store globally if needed
+
+        return layers
+
+    def _parse_title_block(self, sexp: SExp):
+        """Parse title block."""
+        for child in sexp.iter_children():
+            value = child.get_string(0) or ""
+            self._title_block[child.tag] = value
+
+    def _detect_board_origin(self) -> None:
+        """Detect board origin from Edge.Cuts graphics.
+
+        For PCBs created with PCB.create(center=True), the board outline
+        (gr_rect on Edge.Cuts) starts at an offset from (0, 0). This method
+        detects that offset so footprint positions can be specified relative
+        to the board corner.
+
+        Uses the minimum corner of shared Edge.Cuts bounds, or (0, 0)
+        if no outline geometry is present.
+
+        Coordinate-space invariant
+        --------------------------
+        After ``_detect_board_origin()`` runs:
+
+        * ``Footprint.position`` (and pad-derived coordinates such as those
+          returned by :meth:`get_pad_position`) are in **board-relative**
+          coordinates -- i.e. relative to ``self._board_origin``.
+        * ``Segment.start`` / ``Segment.end``, ``Via.position``, and the
+          ``Zone.polygon`` / ``Zone.filled_polygons`` vertex lists are also
+          in **board-relative** coordinates after this method runs.
+
+        Storing every consumer-visible coordinate in the same (board-relative)
+        space means analyzers such as :class:`NetStatusAnalyzer` and
+        :mod:`kicad_tools.validate.connectivity` can compare pad positions
+        directly against segment endpoints and zone polygons without
+        coordinate-space conversion -- fixing the off-by-``board_origin``
+        bug that previously caused every signal net on a centered board to
+        be reported as ``incomplete``.
+
+        The underlying S-expression tree (``self._sexp``) is left in
+        sheet-absolute coordinates as required by the KiCad file format.
+        :meth:`add_trace`, :meth:`add_via`, and :meth:`save` are responsible
+        for adding ``self._board_origin`` back when writing new copper
+        primitives to the tree.
+
+        Malformed outlines are tolerated here (issue #5274)
+        ---------------------------------------------------
+        :func:`~kicad_tools.core.board_outline.board_outline_bounds` keeps its
+        fail-loud contract: malformed or unsupported ``Edge.Cuts`` geometry
+        raises ``ValueError`` for every caller that asks for bounds directly
+        (routing's outline reader, :pyattr:`board_size`,
+        :meth:`_edge_cuts_bbox_sexp`).  ``PCB.load()`` must *not* inherit that
+        contract.  Loading is the entry point for tools whose whole job is to
+        inspect or repair a board that a human already knows is imperfect --
+        ``fix-vias --relocate-in-pad --search-alternatives`` proves containment
+        itself and refuses atomically when it cannot
+        (``_alternative_board_region`` fails closed to an empty region), and
+        silkscreen placement reports the outline problem per-reference.  If the
+        load itself raised, those consumers would never get to make their own
+        proof-based decision and a repair tool would abort instead of reporting.
+
+        So an unreadable outline degrades to "no proven origin": the origin
+        stays ``(0.0, 0.0)``, no coordinates are rewritten, and the reason is
+        recorded on :pyattr:`outline_error` for consumers that want to fail
+        closed on it.  That matches the tolerant behaviour every ``PCB.load()``
+        had before the shared outline reader was introduced.
+        """
+        try:
+            bounds = board_outline_bounds(self._sexp)
+        except ValueError as exc:
+            # No proven origin: leave every coordinate in sheet-absolute space
+            # (identical to the no-outline case) and record why.
+            self.outline_error = str(exc)
+            self._board_origin = (0.0, 0.0)
+            return
+
+        self.outline_error = ""
+        origin = bounds[:2] if bounds is not None else (0.0, 0.0)
+
+        self._board_origin = origin
+
+        # Convert all copper primitives from sheet-absolute to board-relative
+        # coordinates so consumers (analyzers, validators, optimizers) see a
+        # consistent coordinate space.  The S-expression tree retains the
+        # original sheet-absolute values; new primitives appended through
+        # add_trace()/add_via() add the origin back when writing to the tree.
+        if origin != (0.0, 0.0):
+            ox, oy = origin
+            # Footprints: existing behavior (preserved for backward compat).
+            for fp in self._footprints:
+                abs_x, abs_y = fp.position
+                fp.position = (abs_x - ox, abs_y - oy)
+
+            # Segments: convert both endpoints.
+            for seg in self._segments:
+                sx, sy = seg.start
+                ex, ey = seg.end
+                seg.start = (sx - ox, sy - oy)
+                seg.end = (ex - ox, ey - oy)
+
+            for arc in self._arcs:
+                arc.start = (arc.start[0] - ox, arc.start[1] - oy)
+                arc.mid = (arc.mid[0] - ox, arc.mid[1] - oy)
+                arc.end = (arc.end[0] - ox, arc.end[1] - oy)
+
+            # Vias: convert position.
+            for via in self._vias:
+                vx, vy = via.position
+                via.position = (vx - ox, vy - oy)
+
+            # Zones: convert boundary polygon AND every filled polygon.
+            for zone in (*self._zones, *self._footprint_zones):
+                if zone.polygon:
+                    zone.polygon = [(x - ox, y - oy) for x, y in zone.polygon]
+                if zone.filled_polygons:
+                    zone.filled_polygons = [
+                        [(x - ox, y - oy) for x, y in poly] for poly in zone.filled_polygons
+                    ]
+
+    def _link_footprint_sexp_nodes(self) -> None:
+        """Attach S-expression back-references to parsed Footprint objects.
+
+        Called after ``_detect_board_origin()`` so that the ``__setattr__``
+        sync is only active once positions have been converted to
+        board-relative coordinates and the board origin is known.
+
+        Each ``Footprint`` receives:
+        * ``_sexp_node`` -- the S-expression ``(footprint ...)`` node from
+          the tree that :meth:`save` serialises.
+        * ``_board_origin`` -- the board origin offset so that the setter
+          can convert board-relative positions back to sheet-absolute
+          when writing to the S-expression.
+        """
+        # Build a UUID -> index lookup for fast matching.
+        fp_by_uuid: dict[str, int] = {}
+        for idx, fp in enumerate(self._footprints):
+            if fp.uuid:
+                fp_by_uuid[fp.uuid] = idx
+
+        # Walk the top-level S-expression children and match footprint
+        # nodes to parsed Footprint objects by UUID (preferred) or by
+        # iteration order (fallback for legacy files without UUIDs).
+        order_idx = 0
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            # Direct child only: pads/properties carry their own (uuid)
+            # nodes, and a recursive find() would match a descendant's
+            # uuid when the footprint-level one is absent (issue #3602).
+            uuid_node = child.find_child("uuid")
+            child_uuid = uuid_node.get_string(0) if uuid_node else None
+
+            fp_idx: int | None = None
+            if child_uuid and child_uuid in fp_by_uuid:
+                fp_idx = fp_by_uuid[child_uuid]
+            elif order_idx < len(self._footprints):
+                fp_idx = order_idx
+
+            if fp_idx is not None:
+                fp = self._footprints[fp_idx]
+                # Use object.__setattr__ to avoid triggering sync before
+                # both _sexp_node and _board_origin are in place.
+                object.__setattr__(fp, "_board_origin", self._board_origin)
+                object.__setattr__(fp, "_sexp_node", child)
+
+                # Issue #4518: link each Pad to its own ``(pad ...)`` node so
+                # that assigning ``pad.rotation`` syncs the absolute ``(at x y
+                # ANGLE)`` third token into the S-expression tree ``save()``
+                # serialises.  ``Footprint.from_sexp`` appends pads in
+                # ``find_all("pad")`` order, so matching that same traversal
+                # here keeps the Python list and the node list index-aligned.
+                pad_nodes = child.find_all("pad")
+                # strict=False: ``fp.pads`` and the ``(pad ...)`` node list are
+                # both built from the same ``find_all("pad")`` traversal, so
+                # they align; tolerate a rare mismatch rather than raising.
+                for pad_obj, pad_node in zip(fp.pads, pad_nodes, strict=False):
+                    object.__setattr__(pad_obj, "_sexp_node", pad_node)
+
+                # Migrate the legacy KiCad-6 in-attr 'locked' token to
+                # the modern top-level ``(locked yes)`` form. KiCad 10's
+                # kicad-cli rejects the legacy form ("Failed to load
+                # board"), so a load->save round-trip must not echo the
+                # original token back via raw-sexp passthrough (issue
+                # #3457). ``fp.locked`` was already set by from_sexp;
+                # rebuilding the attr block from Python state drops the
+                # in-attr token and emits the top-level node.
+                attr_nodes = child.find_children("attr")
+                if attr_nodes and any(
+                    atom.value == "locked" for atom in attr_nodes[0].children if atom.is_atom
+                ):
+                    fp._sync_attr_node()
+
+            order_idx += 1
+
+    # Public accessors
+
+    @property
+    def title(self) -> str:
+        """Board title."""
+        return self._title_block.get("title", "")
+
+    @property
+    def revision(self) -> str:
+        """Board revision."""
+        return self._title_block.get("rev", "")
+
+    @property
+    def date(self) -> str:
+        """Board date."""
+        return self._title_block.get("date", "")
+
+    @property
+    def board_origin(self) -> tuple[float, float]:
+        """Board origin offset from drawing sheet origin.
+
+        When a PCB is created with center=True (the default), the board outline
+        is placed at an offset from (0, 0) to center it on the drawing sheet.
+        This property returns that offset.
+
+        Footprint positions specified via update_footprint_position() and
+        add_footprint() are relative to this board origin, so users can specify
+        positions relative to the board corner rather than the sheet origin.
+
+        Returns:
+            Tuple (x, y) of the board origin in mm.
+            For a centered board, this is typically ((paper_width - board_width) / 2,
+            (paper_height - board_height) / 2).
+            For a non-centered board or loaded PCB without detectable origin, (0, 0).
+        """
+        return self._board_origin
+
+    @property
+    def board_size(self) -> tuple[float, float]:
+        """Board dimensions (width, height) in mm.
+
+        Uses the same layer-aware outline bounds as routing and planning,
+        including extrema of arcs, circles and cubic curves.
+
+        Returns:
+            Tuple (width, height) in mm.  Returns (0.0, 0.0) if no
+            Edge.Cuts geometry is found.
+
+        Raises:
+            ValueError: If the Edge.Cuts geometry present is malformed or
+                unsupported -- this asks for bounds directly, so it keeps
+                the shared reader's fail-loud contract (issue #5274) rather
+                than :meth:`_detect_board_origin`'s load-time tolerance.
+        """
+        bounds = board_outline_bounds(self._sexp)
+        if bounds is None:
+            return (0.0, 0.0)
+        return bounds[2] - bounds[0], bounds[3] - bounds[1]
+
+    def _edge_cuts_bbox_sexp(self) -> tuple[float, float, float, float] | None:
+        """Return shared outline bounds in sheet-absolute coordinates."""
+        return board_outline_bounds(self._sexp)
+
+    def _edge_cuts_poly_chains_sexp(self) -> list[list[tuple[float, float]]]:
+        """Collect ``gr_poly``/``gr_curve`` Edge.Cuts vertex chains.
+
+        ``gr_curve`` is not parsed into the in-memory
+        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections at all,
+        and while ``gr_poly`` now lands in ``_graphics`` (Issue #5811, so that
+        board-level polygon *silk* is visible to the clearance checks) its
+        ``BoardGraphic`` carries no outline-chain accessor.  So this still
+        walks ``self._sexp`` directly (like :meth:`_edge_cuts_bbox_sexp`) and
+        returns each polygon/curve's ordered ``(pts (xy ...))`` vertex list in
+        **sheet-absolute** coordinates.  It is the sole Edge.Cuts reader for
+        these two tags: ``BoardOutline``'s ``_graphics`` loop dispatches only
+        on ``rect``/``circle``/``bezier``, so the added ``poly`` entries
+        cannot double-count an outline.
+
+        Returns:
+            A list of vertex chains; each chain is an ordered list of
+            ``(x, y)`` tuples.  Empty if no ``gr_poly``/``gr_curve`` Edge.Cuts
+            geometry is present.
+        """
+
+        def _on_edge_cuts(node: SExp) -> bool:
+            layer_node = node.find_child("layer")
+            return bool(layer_node and layer_node.get_string(0) == "Edge.Cuts")
+
+        chains: list[list[tuple[float, float]]] = []
+        for child in self._sexp.iter_children():
+            if child.tag not in ("gr_poly", "gr_curve"):
+                continue
+            if not _on_edge_cuts(child):
+                continue
+            chain: list[tuple[float, float]] = []
+            for pts in child.find_all("pts"):
+                for xy in pts.find_children("xy"):
+                    x, y = xy.get_float(0), xy.get_float(1)
+                    if x is not None and y is not None:
+                        chain.append((x, y))
+            if child.tag == "gr_curve":
+                from kicad_tools.core.board_outline import is_degenerate_closed_curve
+
+                if is_degenerate_closed_curve(chain):
+                    continue
+            if chain:
+                chains.append(chain)
+        return chains
+
+    @staticmethod
+    def _translate_coord_node(node: SExp, dx_nm: int, dy_nm: int) -> None:
+        """Translate the first two atoms (X, Y) of a coordinate node in place.
+
+        Used for ``(at X Y ...)``, ``(start X Y)``, ``(end X Y)``,
+        ``(mid X Y)``, ``(center X Y)`` and ``(xy X Y)`` nodes.  Any trailing
+        atoms (e.g. a rotation angle on ``(at X Y ANGLE)``) are left
+        untouched.
+
+        The translation delta is supplied in **integer nanometres** (KiCad's
+        native storage grid: mm to 6 decimals = 1 nm).  The delta is added to
+        each base coordinate as an exact-on-grid mm offset (``delta_nm / 1e6``)
+        **without re-snapping the base coordinate first**, so every point in
+        the board is shifted by the *identical* delta.  This makes the
+        transform a true rigid translation: it is both distance- AND
+        angle-preserving (a 45-degree segment stays exactly 45 degrees).
+
+        Re-snapping each base coordinate independently (``round(x * 1e6)``)
+        would shift the two endpoints of a segment by slightly different
+        amounts when they carry differing sub-nanometre fractions, tilting
+        otherwise-exact 45-degree copper off-angle.  Off-45 copper is
+        non-manufacturable, so we must NOT do that here.
+
+        The shifted value is written as a 6-decimal **string** (trailing
+        zeros stripped) rather than a Python ``float``: the SExp serializer
+        formats bare floats with ``%.6g`` (6 *significant* digits), which
+        silently truncates a coordinate like ``147.9252`` to ``147.925`` --
+        moving one endpoint of a 45-degree segment and tilting it off-angle.
+        Emitting the full 6-decimal text preserves the nm grid exactly, so
+        both endpoints shift by the identical delta and the angle is kept.
+        """
+        x, y = node.get_float(0), node.get_float(1)
+        if x is None or y is None:
+            return
+        node.set_value(0, PCB._format_coord_mm(x + dx_nm / 1_000_000))
+        node.set_value(1, PCB._format_coord_mm(y + dy_nm / 1_000_000))
+
+    @staticmethod
+    def _format_coord_mm(value: float) -> str:
+        """Format an mm coordinate on the KiCad nm grid (6 decimals).
+
+        Rounds to 6 decimal places (1 nm) and strips trailing zeros so the
+        text matches KiCad's own output (e.g. ``148`` not ``148.000000`` and
+        ``147.9252`` not ``147.925200``).  Returned as a string to bypass the
+        SExp serializer's lossy ``%.6g`` float formatting.
+        """
+        text = f"{round(value, 6):.6f}".rstrip("0").rstrip(".")
+        return text if text not in ("", "-0") else "0"
+
+    def _translate_item_sexp(self, node: SExp, dx_nm: int, dy_nm: int) -> None:
+        """Recursively translate all coordinate nodes within an item.
+
+        Applies to every ``at`` / ``start`` / ``end`` / ``mid`` / ``center`` /
+        ``xy`` descendant of ``node``.  This is correct for board-level items
+        (``segment``, ``via``, ``zone`` incl. ``filled_polygon`` vertices,
+        ``gr_*`` graphics, ``gr_text`` / ``text`` / ``dimension``) whose
+        coordinates are all sheet-absolute.
+
+        NOTE: this MUST NOT be called on a ``footprint`` node, whose internal
+        pad/text ``at`` nodes are footprint-relative.  Use
+        :meth:`_translate_footprint_sexp` for footprints.
+        """
+        coord_tags = {"at", "start", "end", "mid", "center", "xy"}
+        if node.tag in coord_tags:
+            self._translate_coord_node(node, dx_nm, dy_nm)
+        for child in node.iter_children():
+            self._translate_item_sexp(child, dx_nm, dy_nm)
+
+    def _translate_footprint_sexp(self, node: SExp, dx_nm: int, dy_nm: int) -> None:
+        """Translate a footprint by shifting only its top-level ``(at ...)``.
+
+        A footprint's position is its direct-child ``(at X Y [ANGLE])`` node;
+        all pad and graphic ``at`` nodes nested inside are relative to that
+        anchor and must be left untouched.
+        """
+        at_node = node.find_child("at")
+        if at_node is not None:
+            self._translate_coord_node(at_node, dx_nm, dy_nm)
+
+    def page_fit(self, margin: float = 5.0) -> tuple[float, float]:
+        """Resize the drawing sheet to fit the board with a uniform margin.
+
+        Computes the Edge.Cuts bounding box, sets ``(paper "User" W H)`` where
+        ``W = bbox_width + 2*margin`` and ``H = bbox_height + 2*margin``, then
+        translates ALL board items so the board sits at ``(margin, margin)`` in
+        the new sheet space -- i.e. centered with a uniform margin all around.
+
+        The board's interactive viewer (KiCanvas) fits its camera to the whole
+        drawing sheet, so a tight ``User`` page makes the board fill and center
+        the frame instead of appearing tiny in an A4 page.
+
+        This is a pure geometric transform: every item shifts together, so
+        relative spacing -- and therefore routing and DRC validity -- is
+        preserved.  No re-routing is required.
+
+        The transform operates directly on ``self._sexp`` (the authoritative
+        tree that :meth:`save` serialises), then re-runs
+        :meth:`_detect_board_origin` so the in-memory board-relative view stays
+        consistent.
+
+        Args:
+            margin: Margin around the board in mm (default 5.0).
+
+        Returns:
+            ``(new_width, new_height)`` of the paper in mm.
+
+        Raises:
+            ValueError: If no Edge.Cuts geometry is found to fit the page to.
+        """
+        bbox = self._edge_cuts_bbox_sexp()
+        if bbox is None:
+            raise ValueError("page_fit() requires an Edge.Cuts board outline; none found.")
+        min_x, min_y, max_x, max_y = bbox
+        bbox_w = max_x - min_x
+        bbox_h = max_y - min_y
+
+        # Snap the translation delta to the KiCad nm grid (mm to 6 decimals)
+        # ONCE here, then add this single on-grid delta to every coordinate
+        # (see _translate_coord_node).  Every point shifts by the identical
+        # delta, so the transform is a true rigid translation -- both
+        # distance- AND angle-preserving (45-degree copper stays 45 degrees).
+        dx_nm = round((margin - min_x) * 1_000_000)
+        dy_nm = round((margin - min_y) * 1_000_000)
+
+        # Translate every positioned top-level item in the tree.
+        for child in self._sexp.iter_children():
+            tag = child.tag
+            if _is_footprint_tag(tag):
+                self._translate_footprint_sexp(child, dx_nm, dy_nm)
+            elif tag in (
+                "segment",
+                "via",
+                "arc",
+                "zone",
+                "gr_line",
+                "gr_arc",
+                "gr_rect",
+                "gr_circle",
+                "gr_poly",
+                "gr_curve",
+                "gr_text",
+                "text",
+                "dimension",
+                "target",
+            ):
+                self._translate_item_sexp(child, dx_nm, dy_nm)
+
+        # Rewrite the (paper ...) node to a tight User page.
+        new_w = round(bbox_w + 2 * margin, 6)
+        new_h = round(bbox_h + 2 * margin, 6)
+        paper_node = self._sexp.find_child("paper")
+        if paper_node is not None:
+            self._sexp.remove(paper_node)
+        new_paper = SExp.list("paper", SExp.quoted_atom("User"), new_w, new_h)
+        # Keep paper near the front of the document, where KiCad writes it.
+        version_node = self._sexp.find_child("version")
+        if version_node is not None:
+            self._sexp.insert_after("version", new_paper)
+        else:
+            self._sexp.insert(0, new_paper)
+
+        # Re-derive the in-memory board-relative coordinate view from the
+        # mutated tree so analyzers/optimizers stay consistent.  Reset the
+        # collections first since _parse() appends rather than replaces.
+        self._layers = {}
+        self._nets = {}
+        self._footprints = []
+        self._segments = []
+        self._arcs = []
+        self._vias = []
+        self._invalidate_dedup_keys()
+        self._zones = []
+        self._footprint_zones = []
+        self._graphic_lines = []
+        self._graphic_arcs = []
+        self._texts = []
+        self._graphics = []
+        self._setup = None
+        self._net_classes = {}
+        self._title_block = {}
+        self._parse()
+        self._board_origin = (0.0, 0.0)
+        self._detect_board_origin()
+        self._link_footprint_sexp_nodes()
+
+        return (new_w, new_h)
+
+    @property
+    def layers(self) -> dict[int, Layer]:
+        """Layer definitions."""
+        return self._layers
+
+    @property
+    def copper_layers(self) -> list[Layer]:
+        """Copper layers only."""
+        return [layer for layer in self._layers.values() if layer.type in ("signal", "power")]
+
+    @property
+    def nets(self) -> dict[int, Net]:
+        """Net definitions."""
+        return self._nets
+
+    def get_net(self, number: int) -> Net | None:
+        """Get net by number."""
+        return self._nets.get(number)
+
+    def get_net_by_name(self, name: str) -> Net | None:
+        """Get net by name."""
+        for net in self._nets.values():
+            if net.name == name:
+                return net
+        return None
+
+    def _resolve_copper_net_ref(self, net: str | int, api: str) -> tuple[int, str]:
+        """Resolve the ``net`` argument of a copper-adding API (issue #9078).
+
+        A string is a net NAME (created via :meth:`add_net` when new); an
+        int is a net NUMBER, resolved through the board's net table.  Before
+        this split, an int reached ``add_net`` verbatim and minted a phantom
+        net NAMED after the number -- board-04's staircase-collapse copper
+        landed on ``(net 13 5)`` and shorted against the real net 5
+        ("OSC_OUT") copper the pads and vias still carried -- so an unknown
+        number now fails loudly instead of creating a net.
+
+        Returns ``(net_number, net_name)``.
+        """
+        if isinstance(net, int):
+            resolved = self.get_net(net)
+            if resolved is None:
+                raise ValueError(f"{api}: no net number {net} on this board")
+            return resolved.number, resolved.name
+        resolved = self.add_net(net)
+        return resolved.number, net
+
+    @property
+    def footprints(self) -> FootprintList:
+        """All footprints.
+
+        Returns a FootprintList which extends list with query methods:
+            pcb.footprints.by_reference("U1")
+            pcb.footprints.filter(layer="F.Cu")
+            pcb.footprints.query().smd().on_top().all()
+
+        Backward compatible - all list operations still work.
+        """
+        # Import here to avoid circular import
+        from ..query.footprints import FootprintList
+
+        return FootprintList(self._footprints)
+
+    def get_footprint(self, reference: str) -> Footprint | None:
+        """Get footprint by reference designator."""
+        for fp in self._footprints:
+            if fp.reference == reference:
+                return fp
+        return None
+
+    def _iter_footprint_sexps(self) -> Iterator[SExp]:
+        """Yield every footprint node in the tree, in document order.
+
+        Matches both the modern ``(footprint ...)`` spelling and the legacy
+        pre-KiCad-6 ``(module ...)`` spelling (issue #4873).  Search semantics
+        match :meth:`SExp.find_all` -- descendants of the root, not the root
+        itself -- so this is a drop-in replacement for the
+        ``self._sexp.find_all("footprint")`` calls it supersedes.
+        """
+        for child in self._sexp.children:
+            for node in child.iter_all():
+                if _is_footprint_tag(node.tag):
+                    yield node
+
+    def _find_footprint_sexp(self, reference: str) -> SExp | None:
+        """Find a footprint S-expression node by reference designator.
+
+        Searches both KiCad 7 (fp_text) and KiCad 8+ (property) formats.
+
+        Args:
+            reference: Footprint reference designator (e.g., "R1", "U1")
+
+        Returns:
+            The footprint SExp node if found, None otherwise.
+        """
+        for fp_sexp in self._iter_footprint_sexps():
+            ref_value = None
+
+            # KiCad 7 format: fp_text with type "reference"
+            for fp_text in fp_sexp.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref_value = fp_text.get_string(1)
+                    break
+
+            # KiCad 8+ format: property with name "Reference"
+            if not ref_value:
+                for prop in fp_sexp.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref_value = prop.get_string(1)
+                        break
+
+            if ref_value == reference:
+                return fp_sexp
+
+        return None
+
+    def remove_footprint(self, reference: str) -> bool:
+        """Remove a footprint from the PCB by reference designator.
+
+        Removes the footprint from both the S-expression tree (for
+        persistence via save()) and the in-memory ``_footprints`` list.
+
+        Args:
+            reference: Footprint reference designator (e.g., "R1", "U1")
+
+        Returns:
+            True if the footprint was found and removed, False otherwise.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.remove_footprint("C1")
+            True
+            >>> pcb.get_footprint("C1") is None
+            True
+        """
+        # Remove from the S-expression tree
+        fp_sexp = self._find_footprint_sexp(reference)
+        if fp_sexp is None:
+            return False
+
+        self._sexp.remove(fp_sexp)
+
+        # Remove from the in-memory list
+        self._footprints = [fp for fp in self._footprints if fp.reference != reference]
+        self._footprint_zones = [
+            zone for zone in self._footprint_zones if zone.parent_reference != reference
+        ]
+
+        return True
+
+    def footprint_has_traces(self, reference: str) -> bool:
+        """Check whether a footprint has any routed traces connected to its pads.
+
+        Examines each pad of the footprint and checks if any trace segment
+        in the same net touches the pad position (within 0.01mm tolerance).
+
+        Args:
+            reference: Footprint reference designator (e.g., "R1", "C1")
+
+        Returns:
+            True if at least one pad has a connected trace segment, False
+            if the footprint has no traces or does not exist.
+        """
+        import math
+
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        for pad in fp.pads:
+            if pad.net_number == 0:
+                continue
+            pos = self.get_pad_position(reference, pad.number)
+            if not pos:
+                continue
+            for seg in self.segments_in_net(pad.net_number):
+                tolerance = 0.01  # mm
+                start_dist = math.sqrt((seg.start[0] - pos[0]) ** 2 + (seg.start[1] - pos[1]) ** 2)
+                end_dist = math.sqrt((seg.end[0] - pos[0]) ** 2 + (seg.end[1] - pos[1]) ** 2)
+                if start_dist < tolerance or end_dist < tolerance:
+                    return True
+
+        return False
+
+    def remove_segments(self, segments: list[Segment]) -> int:
+        """Remove specific trace segments from the PCB.
+
+        Removes matching segments from both the S-expression tree (for
+        persistence via save()) and the in-memory ``_segments`` list.
+        Segments are matched by UUID when available, falling back to
+        matching by start/end coordinates and layer.
+
+        Args:
+            segments: List of Segment objects to remove.
+
+        Returns:
+            The number of segments actually removed.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> segs = list(pcb.segments_in_net(5))
+            >>> removed = pcb.remove_segments(segs)
+            >>> print(f"Removed {removed} segments")
+        """
+        if not segments:
+            return 0
+
+        # Build lookup sets for fast matching
+        uuids_to_remove: set[str] = set()
+        # Fallback: match by (start, end, layer) for segments without UUIDs.
+        # Segment coordinates are board-relative, but the S-expression tree
+        # stores them in sheet-absolute form, so offset by board_origin when
+        # building the lookup key. Coordinates are rounded to
+        # _COORD_MATCH_QUANT rather than compared for exact float equality:
+        # board_origin subtraction at parse time (_detect_board_origin) and
+        # re-addition here is a float round-trip that is not always
+        # bit-exact, so an un-rounded key silently failed to match some
+        # no-UUID segments on boards with a non-zero board_origin (issue
+        # #4933, discovered via a real-world fetched board -- BeagleConnect
+        # Freedom -- during normalize.py's end-to-end rip-up smoke test).
+        coords_to_remove: set[tuple[float, float, float, float, str]] = set()
+        ox, oy = self._board_origin
+
+        for seg in segments:
+            if seg.uuid:
+                uuids_to_remove.add(seg.uuid)
+            else:
+                coords_to_remove.add(
+                    (
+                        round(seg.start[0] + ox, _COORD_MATCH_QUANT),
+                        round(seg.start[1] + oy, _COORD_MATCH_QUANT),
+                        round(seg.end[0] + ox, _COORD_MATCH_QUANT),
+                        round(seg.end[1] + oy, _COORD_MATCH_QUANT),
+                        seg.layer,
+                    )
+                )
+
+        # Remove from S-expression tree
+        removed_count = 0
+        sexp_to_remove = []
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "segment":
+                continue
+
+            # Check UUID match
+            uuid_node = child.find("uuid")
+            if uuid_node:
+                seg_uuid = uuid_node.get_string(0) or ""
+                if seg_uuid in uuids_to_remove:
+                    sexp_to_remove.append(child)
+                    continue
+
+            # Fallback: coordinate match
+            start_node = child.find("start")
+            end_node = child.find("end")
+            layer_node = child.find("layer")
+            if start_node and end_node and layer_node:
+                key = (
+                    round(start_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
+                    round(start_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
+                    round(end_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
+                    round(end_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
+                    layer_node.get_string(0) or "",
+                )
+                if key in coords_to_remove:
+                    sexp_to_remove.append(child)
+
+        for node in sexp_to_remove:
+            self._sexp.remove(node)
+            removed_count += 1
+
+        # Remove from in-memory list. Must use the SAME (offset + rounded)
+        # key space as coords_to_remove above -- a bare board-relative key
+        # here (no +ox/+oy) never matches on a board with a non-zero
+        # board_origin, silently leaving ripped-up-from-the-tree segments
+        # behind in self._segments (issue #4933).
+        remaining = []
+        for seg in self._segments:
+            should_remove = False
+            if seg.uuid and seg.uuid in uuids_to_remove:
+                should_remove = True
+            elif not seg.uuid:
+                key = (
+                    round(seg.start[0] + ox, _COORD_MATCH_QUANT),
+                    round(seg.start[1] + oy, _COORD_MATCH_QUANT),
+                    round(seg.end[0] + ox, _COORD_MATCH_QUANT),
+                    round(seg.end[1] + oy, _COORD_MATCH_QUANT),
+                    seg.layer,
+                )
+                if key in coords_to_remove:
+                    should_remove = True
+            if not should_remove:
+                remaining.append(seg)
+        self._segments = remaining
+        self._invalidate_dedup_keys()
+
+        return removed_count
+
+    def remove_vias(self, vias: list[Via]) -> int:
+        """Remove specific vias from the PCB (issue #4933's rip-up helper).
+
+        Removes matching vias from both the S-expression tree (for
+        persistence via save()) and the in-memory ``_vias`` list. Vias are
+        matched by UUID when available, falling back to matching by
+        position and layer stack -- mirrors :meth:`remove_segments`'s
+        lookup discipline (there was previously no public via-removal
+        method; :meth:`dedupe_copper` shows the closest existing pattern).
+
+        Args:
+            vias: List of Via objects to remove.
+
+        Returns:
+            The number of vias actually removed.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> removed = pcb.remove_vias(list(pcb.vias))
+            >>> print(f"Removed {removed} vias")
+        """
+        if not vias:
+            return 0
+
+        # Build lookup sets for fast matching
+        uuids_to_remove: set[str] = set()
+        # Fallback: match by (x, y, layers) for vias without UUIDs. Via
+        # positions are board-relative, but the S-expression tree stores
+        # them in sheet-absolute form, so offset by board_origin when
+        # building the lookup key -- same convention as remove_segments().
+        # Coordinates are rounded to _COORD_MATCH_QUANT rather than compared
+        # for exact float equality: the board_origin subtract-then-add
+        # round trip is not always bit-exact, so an un-rounded key can
+        # silently fail to match (see remove_segments() for the full
+        # explanation and the real-world board that surfaced this, issue
+        # #4933).
+        coords_to_remove: set[tuple[float, float, tuple[str, ...]]] = set()
+        ox, oy = self._board_origin
+
+        for via in vias:
+            if via.uuid:
+                uuids_to_remove.add(via.uuid)
+            else:
+                coords_to_remove.add(
+                    (
+                        round(via.position[0] + ox, _COORD_MATCH_QUANT),
+                        round(via.position[1] + oy, _COORD_MATCH_QUANT),
+                        tuple(via.layers),
+                    )
+                )
+
+        from ..core.layers import kicad_read_via_layers, via_node_type
+
+        # Remove from S-expression tree
+        removed_count = 0
+        sexp_to_remove = []
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "via":
+                continue
+
+            # Check UUID match
+            uuid_node = child.find("uuid")
+            if uuid_node:
+                via_uuid = uuid_node.get_string(0) or ""
+                if via_uuid in uuids_to_remove:
+                    sexp_to_remove.append(child)
+                    continue
+
+            # Fallback: position + layers match
+            at_node = child.find("at")
+            layers_node = child.find("layers")
+            if at_node and layers_node:
+                raw_layers = tuple(
+                    layers_node.get_string(i) or ""
+                    for i in range(len(layers_node.values))
+                    if isinstance(layers_node.values[i], str)
+                )
+                # Issue #6493: Via.layers holds the span KiCad *reads*
+                # (keyword-less partial pairs widen to F.Cu/B.Cu), so key
+                # the raw node on the same normalised span or a uuid-less
+                # keyword-less partial via would never match here.
+                layers, _ = kicad_read_via_layers(raw_layers, via_node_type(child))
+                layers = tuple(layers)
+                key = (
+                    round(at_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
+                    round(at_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
+                    layers,
+                )
+                if key in coords_to_remove:
+                    sexp_to_remove.append(child)
+
+        for node in sexp_to_remove:
+            self._sexp.remove(node)
+            removed_count += 1
+
+        # Remove from in-memory list. Must use the SAME (offset + rounded)
+        # key space as coords_to_remove above -- see remove_segments()'s
+        # equivalent step for why (issue #4933).
+        remaining_vias = []
+        for via in self._vias:
+            should_remove = False
+            if via.uuid and via.uuid in uuids_to_remove:
+                should_remove = True
+            elif not via.uuid:
+                key = (
+                    round(via.position[0] + ox, _COORD_MATCH_QUANT),
+                    round(via.position[1] + oy, _COORD_MATCH_QUANT),
+                    tuple(via.layers),
+                )
+                if key in coords_to_remove:
+                    should_remove = True
+            if not should_remove:
+                remaining_vias.append(via)
+        self._vias = remaining_vias
+        self._invalidate_dedup_keys()
+
+        return removed_count
+
+    def drag_trace_endpoints(
+        self,
+        point: tuple[float, float],
+        delta: tuple[float, float],
+        tolerance: float = 0.05,
+        net_number: int | None = None,
+    ) -> int:
+        """Translate trace-segment endpoints coincident with ``point`` by ``delta``.
+
+        Moves every segment endpoint (``start`` or ``end``) whose board-relative
+        position lies within ``tolerance`` mm of ``point`` by
+        ``delta = (dx, dy)``, updating BOTH the in-memory :class:`Segment`
+        dataclasses and the backing S-expression tree in place so the change
+        survives :meth:`save`.  Segment UUIDs are preserved (unlike a
+        remove + :meth:`add_trace`, which would mint fresh UUIDs).
+
+        This is the primitive behind ``move-footprint --drag-endpoints``: when a
+        footprint is nudged, the caller records each pad's OLD board-relative
+        position, moves the footprint, then calls this method once per pad with
+        that pad's translation so the copper that terminated on the pad follows
+        it and stays electrically attached.
+
+        Coordinate spaces: ``point``, ``delta`` and the stored
+        :attr:`Segment.start`/:attr:`Segment.end` values are all board-relative
+        (see :meth:`_detect_board_origin`).  The S-expression tree stores
+        sheet-absolute coordinates, so the board-origin offset is re-added when
+        the ``(start ...)``/``(end ...)`` atoms are rewritten -- this is what
+        makes the move persist correctly on a non-zero-origin board.
+
+        Args:
+            point: Board-relative (x, y) to match endpoints against.
+            delta: Board-relative (dx, dy) translation applied to each match.
+            tolerance: Match radius in mm (default 0.05).
+            net_number: When a positive net id is given, only segments in that
+                net are considered (fast path).  When ``None`` or ``0`` (e.g.
+                KiCad-10 name-only boards whose segments carry
+                ``net_number == 0``; see issue #4416), all segments are
+                considered and matching is purely geometric.
+
+        Returns:
+            The number of endpoints translated.
+        """
+        ox, oy = self._board_origin
+        px, py = point
+        dx, dy = delta
+        tol_sq = tolerance * tolerance
+
+        # Index the backing tree nodes so the matched atoms can be rewritten
+        # in place.  Segments loaded from disk carry UUIDs; fall back to a
+        # sheet-absolute coordinate key for any UUID-less node (mirrors the
+        # matching in remove_segments()).
+        node_by_uuid: dict[str, SExp] = {}
+        node_by_coord: dict[tuple[float, float, float, float, str], SExp] = {}
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "segment":
+                continue
+            uuid_node = child.find("uuid")
+            uval = uuid_node.get_string(0) if uuid_node else None
+            if uval:
+                node_by_uuid[uval] = child
+                continue
+            start_node = child.find("start")
+            end_node = child.find("end")
+            layer_node = child.find("layer")
+            if start_node and end_node and layer_node:
+                key = (
+                    start_node.get_float(0) or 0.0,
+                    start_node.get_float(1) or 0.0,
+                    end_node.get_float(0) or 0.0,
+                    end_node.get_float(1) or 0.0,
+                    layer_node.get_string(0) or "",
+                )
+                node_by_coord[key] = child
+
+        def _matches(coord: tuple[float, float]) -> bool:
+            return (coord[0] - px) ** 2 + (coord[1] - py) ** 2 <= tol_sq
+
+        def _tree_node(seg: Segment) -> SExp | None:
+            if seg.uuid:
+                return node_by_uuid.get(seg.uuid)
+            key = (
+                seg.start[0] + ox,
+                seg.start[1] + oy,
+                seg.end[0] + ox,
+                seg.end[1] + oy,
+                seg.layer,
+            )
+            return node_by_coord.get(key)
+
+        moved = 0
+        for seg in self._segments:
+            if net_number is not None and net_number > 0 and seg.net_number != net_number:
+                continue
+            hit_start = _matches(seg.start)
+            hit_end = _matches(seg.end)
+            if not hit_start and not hit_end:
+                continue
+
+            # Resolve the tree node BEFORE mutating the coordinates so the
+            # coordinate-fallback key still reflects the on-disk position.
+            node = _tree_node(seg)
+
+            if hit_start:
+                new_start = (seg.start[0] + dx, seg.start[1] + dy)
+                seg.start = new_start
+                if node is not None:
+                    start_node = node.find("start")
+                    if start_node is not None:
+                        start_node.set_atom(0, new_start[0] + ox)
+                        start_node.set_atom(1, new_start[1] + oy)
+                moved += 1
+            if hit_end:
+                new_end = (seg.end[0] + dx, seg.end[1] + dy)
+                seg.end = new_end
+                if node is not None:
+                    end_node = node.find("end")
+                    if end_node is not None:
+                        end_node.set_atom(0, new_end[0] + ox)
+                        end_node.set_atom(1, new_end[1] + oy)
+                moved += 1
+
+        if moved:
+            self._invalidate_dedup_keys()
+
+        return moved
+
+    def footprints_on_layer(self, layer: str) -> Iterator[Footprint]:
+        """Get footprints on a specific layer."""
+        for fp in self._footprints:
+            if fp.layer == layer:
+                yield fp
+
+    @property
+    def segments(self) -> list[Segment]:
+        """All trace segments."""
+        return self._segments
+
+    @segments.setter
+    def segments(self, value: list[Segment]) -> None:
+        """Prevent direct assignment to segments.
+
+        Raises:
+            AttributeError: Always raised to prevent silent data loss.
+                Modifying segments directly does not update the S-expression
+                tree used by save(), causing changes to be silently discarded.
+        """
+        raise AttributeError(
+            "Cannot modify segments directly. Changes would not persist to save(). "
+            "Use add_trace() to add segments, or reload the PCB after modifying "
+            "the file with merge_routes_into_pcb()."
+        )
+
+    @property
+    def arcs(self) -> list[Arc]:
+        """Imported copper arcs; excluded from straight-segment angle statistics."""
+        return self._arcs
+
+    def arcs_on_layer(self, layer: str) -> Iterator[Arc]:
+        return (arc for arc in self._arcs if arc.layer == layer)
+
+    def arcs_in_net(self, net_number: int) -> Iterator[Arc]:
+        return (arc for arc in self._arcs if arc.net_number == net_number)
+
+    def segments_on_layer(self, layer: str) -> Iterator[Segment]:
+        """Get segments on a specific layer."""
+        for seg in self._segments:
+            if seg.layer == layer:
+                yield seg
+
+    def segments_in_net(self, net_number: int) -> Iterator[Segment]:
+        """Get segments in a specific net."""
+        for seg in self._segments:
+            if seg.net_number == net_number:
+                yield seg
+
+    @property
+    def vias(self) -> list[Via]:
+        """All vias."""
+        return self._vias
+
+    @vias.setter
+    def vias(self, value: list[Via]) -> None:
+        """Prevent direct assignment to vias.
+
+        Raises:
+            AttributeError: Always raised to prevent silent data loss.
+                Modifying vias directly does not update the S-expression
+                tree used by save(), causing changes to be silently discarded.
+        """
+        raise AttributeError(
+            "Cannot modify vias directly. Changes would not persist to save(). "
+            "Use add_via() to add vias, or reload the PCB after modifying "
+            "the file with merge_routes_into_pcb()."
+        )
+
+    def vias_in_net(self, net_number: int) -> Iterator[Via]:
+        """Get vias in a specific net."""
+        for via in self._vias:
+            if via.net_number == net_number:
+                yield via
+
+    @property
+    def zones(self) -> list[Zone]:
+        """All zones (copper pours)."""
+        return self._zones
+
+    @property
+    def rule_areas(self) -> list[Zone]:
+        """All keepout rule areas (zones carrying a ``(keepout ...)`` child).
+
+        Issue #4605: the first-class read path for KiCad rule areas.  Each
+        entry's :attr:`Zone.keepout` holds the per-object-type flags and
+        :attr:`Zone.layers` the (possibly multi-layer / wildcard) layer spec.
+        Polygon vertices are board-relative, like every other zone polygon.
+        """
+        return [zone for zone in self._zones if zone.keepout is not None]
+
+    @property
+    def footprint_rule_areas(self) -> list[Zone]:
+        """Keepout rule areas embedded inside footprints (Issue #6087).
+
+        The usual case is an RF module's antenna keepout.  Same shape as
+        :attr:`rule_areas` (board-relative polygons, ``keepout`` flags,
+        multi-layer ``layers``), plus :attr:`Zone.parent_reference` /
+        :attr:`Zone.parent_uuid` naming the owning footprint -- KiCad exempts
+        that footprint's own items from its keepout.  Deliberately *not*
+        part of :attr:`rule_areas`/:attr:`zones`.
+        """
+        return [zone for zone in self._footprint_zones if zone.keepout is not None]
+
+    @property
+    def graphic_lines(self) -> list[GraphicLine]:
+        """All graphic lines."""
+        return self._graphic_lines
+
+    @property
+    def graphic_arcs(self) -> list[GraphicArc]:
+        """All graphic arcs."""
+        return self._graphic_arcs
+
+    @property
+    def texts(self) -> list[GraphicText]:
+        """All board-level text elements (gr_text)."""
+        return self._texts
+
+    def texts_on_layer(self, layer: str) -> Iterator[GraphicText]:
+        """Get text elements on a specific layer."""
+        for text in self._texts:
+            if text.layer == layer:
+                yield text
+
+    @property
+    def graphics(self) -> list[BoardGraphic]:
+        """All board-level graphic elements (gr_line, gr_rect, etc.)."""
+        return self._graphics
+
+    @property
+    def graphic_items(self) -> Iterator[GraphicLine | GraphicArc | BoardGraphic]:
+        """All board-level graphic items (lines, arcs, rects, circles).
+
+        Yields all graphic elements from Edge.Cuts and other layers.
+        Used for board outline calculations and layer analysis.
+
+        ``gr_line`` and ``gr_arc`` elements are emitted once, as their richer
+        typed forms (:class:`GraphicLine` / :class:`GraphicArc`).  They are
+        also mirrored into ``_graphics`` as :class:`BoardGraphic` for the
+        ``graphics`` / ``graphics_on_layer`` read path, so those line/arc
+        mirrors are skipped here to avoid double-counting.
+        """
+        yield from self._graphic_lines
+        yield from self._graphic_arcs
+        for graphic in self._graphics:
+            if graphic.graphic_type not in ("line", "arc"):
+                yield graphic
+
+    def graphics_on_layer(self, layer: str) -> Iterator[BoardGraphic]:
+        """Get graphic elements on a specific layer."""
+        for graphic in self._graphics:
+            if graphic.layer == layer:
+                yield graphic
+
+    @staticmethod
+    def _rect_to_segments(
+        start: tuple[float, float], end: tuple[float, float]
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Decompose a rectangle (start, end corners) into 4 line segments."""
+        x1, y1 = start
+        x2, y2 = end
+        return [
+            ((x1, y1), (x2, y1)),  # top
+            ((x2, y1), (x2, y2)),  # right
+            ((x2, y2), (x1, y2)),  # bottom
+            ((x1, y2), (x1, y1)),  # left
+        ]
+
+    def get_board_outline(self) -> list[tuple[float, float]]:
+        """Extract board outline polygon from Edge.Cuts layer.
+
+        Returns an ordered list of (x, y) points forming the board outline.
+        Handles ``gr_line``, ``gr_arc``, ``gr_rect``, ``gr_poly``, and
+        ``gr_curve`` elements on the Edge.Cuts layer.  Arc segments are
+        approximated by their start and end points; polygon/curve outlines
+        contribute their vertex chain (``(pts (xy ...))``).
+
+        ``gr_poly``/``gr_curve`` Edge.Cuts geometry is common for rounded
+        corners, chamfers, and any outline drawn with KiCad's polygon tool.
+        Those elements are not surfaced through the in-memory
+        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections, so they
+        are recovered by walking ``self._sexp`` directly (mirroring
+        :meth:`_edge_cuts_bbox_sexp`).  Without this, a board whose outline is
+        a single ``gr_poly`` would silently return ``[]``.
+
+        Segments do not need to be stored in end-to-end path order, and the
+        Edge.Cuts layer may contain more than one closed contour (mounting
+        holes, fiducial marks, stray shapes) alongside the real board edge.
+        Segments are first grouped into connected components by endpoint
+        proximity (order-independent), each component is chained into a
+        complete nondegenerate closed polygon, and the valid component with
+        the largest bounding-box area is
+        returned as the board outline -- the real edge is essentially always
+        the largest closed shape on the layer. Endpoint matching uses a
+        0.01mm tolerance to absorb the small sub-DRC gaps real-world exports
+        commonly leave between segments that are otherwise continuous.
+
+        Returns:
+            List of (x, y) coordinate tuples in mm. Empty list if no outline found.
+        """
+        # Collect all Edge.Cuts segments
+        edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
+        edge_arcs = [arc for arc in self._graphic_arcs if arc.layer == "Edge.Cuts"]
+        edge_rects = [
+            g for g in self._graphics if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
+        ]
+        # gr_poly / gr_curve are not parsed into the in-memory collections, so
+        # recover their vertex chains straight off the S-expression tree.
+        poly_chains = self._edge_cuts_poly_chains_sexp()
+
+        if not edge_lines and not edge_arcs and not edge_rects and not poly_chains:
+            return []
+
+        # Build a list of all line segments (including arc endpoints)
+        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+
+        for line in edge_lines:
+            segments.append((line.start, line.end))
+
+        for arc in edge_arcs:
+            # For arcs, include start->mid and mid->end as approximation
+            segments.append((arc.start, arc.mid))
+            segments.append((arc.mid, arc.end))
+
+        for rect in edge_rects:
+            segments.extend(self._rect_to_segments(rect.start, rect.end))
+
+        # Each gr_poly / gr_curve contributes edges between consecutive
+        # vertices (and a closing edge back to the first vertex) so the shared
+        # segment-stitching logic below can walk them like any other outline.
+        for chain in poly_chains:
+            for i in range(len(chain) - 1):
+                segments.append((chain[i], chain[i + 1]))
+            if len(chain) >= 3:
+                segments.append((chain[-1], chain[0]))
+
+        if not segments:
+            return []
+
+        # Real-world Edge.Cuts exports frequently have sub-micron-to-several-
+        # micron gaps between the endpoints of segments that are visually and
+        # functionally continuous (e.g. a rounded-corner outline where a
+        # gr_line's end and the next gr_arc's start were independently
+        # rounded during export/normalization). A too-tight tolerance here
+        # makes the very first segment look "isolated" -- nothing else
+        # connects to it within tolerance -- so the loop below terminates
+        # after a single segment and returns a degenerate 2-point sliver
+        # instead of the closed board outline (#4948). 0.01mm mirrors the
+        # gap tolerance KiCad itself uses when stitching Edge.Cuts graphics
+        # into board polygons.
+        tolerance = 0.01
+
+        # Segments on Edge.Cuts may include more than one closed contour --
+        # the board edge itself, but also mounting holes, stray fiducial
+        # marks, or other small shapes drawn on the same layer. Chaining
+        # blindly from segments[0] can walk one of those unrelated shapes
+        # (or an unclosed fragment) instead of the actual board outline.
+        # Group segments into connected components first (by endpoint
+        # proximity, independent of file order), chain each component into
+        # its own polygon, and keep the one with the largest bounding-box
+        # area -- the real board edge is essentially always the largest
+        # closed shape on Edge.Cuts.
+        components = self._group_segments_by_connectivity(segments, tolerance)
+
+        polygon: list[tuple[float, float]] = []
+        best_area = -1.0
+        for indices in components:
+            candidate = self._chain_segment_indices(segments, indices, tolerance)
+            if not candidate:
+                continue
+            xs = [p[0] for p in candidate]
+            ys = [p[1] for p in candidate]
+            area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+            if area > best_area:
+                best_area = area
+                polygon = candidate
+
+        # Transform from sheet-absolute to board-relative coordinates
+        # so that outline coordinates match footprint positions (which are
+        # converted to board-relative in _detect_board_origin).
+        ox, oy = self._board_origin
+        if ox != 0.0 or oy != 0.0:
+            polygon = [(x - ox, y - oy) for x, y in polygon]
+
+        return polygon
+
+    @staticmethod
+    def _group_segments_by_connectivity(
+        segments: list[tuple[tuple[float, float], tuple[float, float]]],
+        tolerance: float,
+    ) -> list[list[int]]:
+        """Partition segment indices into connected components by endpoint proximity.
+
+        Two segments are in the same component if any of their endpoints are
+        within ``tolerance`` of each other, regardless of the order the
+        segments appear in ``segments``. Used to separate the board's actual
+        Edge.Cuts outline from unrelated closed shapes (mounting holes, stray
+        marks) that may also live on the Edge.Cuts layer.
+        """
+        n = len(segments)
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for i in range(n):
+            si, ei = segments[i]
+            for j in range(i + 1, n):
+                sj, ej = segments[j]
+                if (
+                    PCB._points_close(si, sj, tolerance)
+                    or PCB._points_close(si, ej, tolerance)
+                    or PCB._points_close(ei, sj, tolerance)
+                    or PCB._points_close(ei, ej, tolerance)
+                ):
+                    union(i, j)
+
+        groups: dict[int, list[int]] = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(i)
+        return list(groups.values())
+
+    @staticmethod
+    def _chain_segment_indices(
+        segments: list[tuple[tuple[float, float], tuple[float, float]]],
+        indices: list[int],
+        tolerance: float,
+    ) -> list[tuple[float, float]]:
+        """Chain a subset of segments (by index) into an ordered point list.
+
+        Greedily walks from the first segment, repeatedly appending whichever
+        remaining segment (in any order) connects to the current chain's
+        endpoint within ``tolerance``. Segments do not need to be pre-sorted
+        into path order -- this handles ``gr_line``/``gr_arc`` mixes stored
+        in arbitrary order in the source file.
+        """
+        if len(indices) < 3:
+            return []
+
+        # Every endpoint must have exactly one mate in another segment.
+        # Use the same 0.01mm tolerance as grouping and walking: incomplete
+        # or branched components must not become partial outline candidates.
+        for i in indices:
+            start, end = segments[i]
+            if PCB._points_close(start, end, tolerance):
+                return []
+            for point in (start, end):
+                mates = sum(
+                    PCB._points_close(point, endpoint, tolerance)
+                    for j in indices
+                    if j != i
+                    for endpoint in segments[j]
+                )
+                if mates != 1:
+                    return []
+
+        start_idx = indices[0]
+        polygon: list[tuple[float, float]] = [
+            segments[start_idx][0],
+            segments[start_idx][1],
+        ]
+        remaining = set(indices) - {start_idx}
+
+        while remaining:
+            current_end = polygon[-1]
+            found = False
+
+            for i in remaining:
+                start, end = segments[i]
+                if PCB._points_close(current_end, start, tolerance):
+                    polygon.append(end)
+                    remaining.discard(i)
+                    found = True
+                    break
+                elif PCB._points_close(current_end, end, tolerance):
+                    polygon.append(start)
+                    remaining.discard(i)
+                    found = True
+                    break
+
+            if not found:
+                # No more connected segments found within this component.
+                break
+
+        if remaining or not PCB._points_close(polygon[-1], polygon[0], tolerance):
+            return []
+        # Snap only the closing gap; keep all other source vertices intact.
+        polygon[-1] = polygon[0]
+        ox, oy = polygon[0]
+        twice_area = sum(
+            (a[0] - ox) * (b[1] - oy) - (b[0] - ox) * (a[1] - oy)
+            for a, b in zip(polygon, polygon[1:], strict=False)
+        )
+        if abs(twice_area) <= tolerance * tolerance:
+            return []
+        return polygon
+
+    @staticmethod
+    def _points_close(
+        p1: tuple[float, float], p2: tuple[float, float], tolerance: float = 0.001
+    ) -> bool:
+        """Check if two points are within tolerance distance."""
+        dx = p1[0] - p2[0]
+        dy = p1[1] - p2[1]
+        return (dx * dx + dy * dy) < (tolerance * tolerance)
+
+    def get_board_outline_segments(
+        self,
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Get board outline as a list of line segments.
+
+        Returns all Edge.Cuts graphic elements as line segments.
+        Handles gr_line, gr_arc, and gr_rect elements.
+        More useful for distance calculations than the polygon.
+
+        Returns:
+            List of ((x1, y1), (x2, y2)) tuples representing line segments.
+        """
+        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+
+        for line in self._graphic_lines:
+            if line.layer == "Edge.Cuts":
+                segments.append((line.start, line.end))
+
+        for arc in self._graphic_arcs:
+            if arc.layer == "Edge.Cuts":
+                # Approximate arc with two segments through midpoint
+                segments.append((arc.start, arc.mid))
+                segments.append((arc.mid, arc.end))
+
+        for graphic in self._graphics:
+            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
+                segments.extend(self._rect_to_segments(graphic.start, graphic.end))
+
+        # Transform from sheet-absolute to board-relative coordinates
+        # so that outline segments match footprint positions (which are
+        # converted to board-relative in _detect_board_origin).
+        ox, oy = self._board_origin
+        if ox != 0.0 or oy != 0.0:
+            segments = [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments]
+
+        return segments
+
+    # ------------------------------------------------------------------
+    # Edge.Cuts contour analysis and manipulation
+    # ------------------------------------------------------------------
+
+    _MOUNTING_HOLE_AREA_THRESHOLD = 25.0  # mm^2
+
+    def list_edge_contours(self) -> list[EdgeContour]:
+        """Group Edge.Cuts graphic elements into connected contours.
+
+        Each contour is a set of connected graphic elements (gr_line,
+        gr_arc, gr_rect, gr_circle) on the Edge.Cuts layer.  A gr_rect
+        or gr_circle is always its own contour; gr_line/gr_arc elements
+        are chained by endpoint proximity.
+
+        Small contours (bounding-box area < 25 mm^2) are flagged as
+        mounting holes.
+
+        Returns:
+            Ordered list of ``EdgeContour`` objects with index, bounding
+            box, element count, and sexp node references.
+        """
+        # Collect Edge.Cuts sexp nodes, keyed by identity, with endpoints
+        # Each entry: (sexp_node, endpoints_list)
+        # endpoints_list items are (x, y) tuples at segment ends
+        edge_elements: list[tuple[SExp, list[tuple[float, float]]]] = []
+
+        for child in self._sexp.children:
+            if child.is_atom:
+                continue
+            tag = child.tag
+            if tag not in ("gr_line", "gr_arc", "gr_rect", "gr_circle"):
+                continue
+            layer_node = child.find("layer")
+            if not layer_node:
+                continue
+            layer_name = layer_node.get_string(0) or ""
+            if layer_name != "Edge.Cuts":
+                continue
+
+            endpoints: list[tuple[float, float]] = []
+            if tag == "gr_arc":
+                start, _, end = _arc_points_from_sexp(child)
+                endpoints = [start, end]
+            elif tag == "gr_line":
+                s = child.find("start")
+                e = child.find("end")
+                if s and e:
+                    endpoints = [
+                        (s.get_float(0) or 0.0, s.get_float(1) or 0.0),
+                        (e.get_float(0) or 0.0, e.get_float(1) or 0.0),
+                    ]
+            elif tag in ("gr_rect", "gr_circle"):
+                # Self-contained shape -- not chainable with lines/arcs
+                endpoints = []  # sentinel: standalone contour
+
+            edge_elements.append((child, endpoints))
+
+        if not edge_elements:
+            return []
+
+        # Partition into groups.
+        # Standalone shapes (gr_rect, gr_circle) are each their own group.
+        # Line/arc elements are chained by endpoint proximity.
+        standalone: list[list[int]] = []
+        chainable_indices: list[int] = []
+        for idx, (node, eps) in enumerate(edge_elements):
+            tag = node.tag
+            if tag in ("gr_rect", "gr_circle"):
+                standalone.append([idx])
+            else:
+                chainable_indices.append(idx)
+
+        # Union-Find for chainable elements
+        parent = {i: i for i in chainable_indices}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        tolerance = 0.001
+        for i_pos, i in enumerate(chainable_indices):
+            eps_i = edge_elements[i][1]
+            for j in chainable_indices[i_pos + 1 :]:
+                eps_j = edge_elements[j][1]
+                for pi in eps_i:
+                    for pj in eps_j:
+                        dx = pi[0] - pj[0]
+                        dy = pi[1] - pj[1]
+                        if (dx * dx + dy * dy) < (tolerance * tolerance):
+                            union(i, j)
+
+        # Group chainable elements by root
+        from collections import defaultdict
+
+        chain_groups: dict[int, list[int]] = defaultdict(list)
+        for i in chainable_indices:
+            chain_groups[find(i)].append(i)
+
+        all_groups = standalone + list(chain_groups.values())
+
+        # Build EdgeContour objects
+        contours: list[EdgeContour] = []
+        for group_idx, group in enumerate(all_groups):
+            nodes = [edge_elements[i][0] for i in group]
+            all_points = self._collect_edge_points(nodes)
+            if not all_points:
+                continue
+            xs = [p[0] for p in all_points]
+            ys = [p[1] for p in all_points]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
+            area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            contour = EdgeContour(
+                index=group_idx,
+                element_count=len(nodes),
+                bbox=bbox,
+                is_mounting_hole=area < self._MOUNTING_HOLE_AREA_THRESHOLD,
+                sexp_nodes=nodes,
+            )
+            contours.append(contour)
+
+        # Re-index
+        for idx, c in enumerate(contours):
+            c.index = idx
+        return contours
+
+    @staticmethod
+    def _collect_edge_points(nodes: list[SExp]) -> list[tuple[float, float]]:
+        """Collect all coordinate points from a list of sexp graphic nodes."""
+        points: list[tuple[float, float]] = []
+        for node in nodes:
+            if node.tag == "gr_arc":
+                points.extend(_arc_points_from_sexp(node))
+                continue
+            for attr in ("start", "end", "mid", "center"):
+                n = node.find(attr)
+                if n:
+                    points.append((n.get_float(0) or 0.0, n.get_float(1) or 0.0))
+        return points
+
+    def remove_edge_contour(self, index: int) -> bool:
+        """Remove an Edge.Cuts contour by index.
+
+        Removes the graphic sexp nodes belonging to the contour from the
+        S-expression tree and from the in-memory ``_graphic_lines``,
+        ``_graphic_arcs``, and ``_graphics`` lists.
+
+        Args:
+            index: Contour index as returned by ``list_edge_contours()``.
+
+        Returns:
+            True if the contour was found and removed, False otherwise.
+        """
+        contours = self.list_edge_contours()
+        target = None
+        for c in contours:
+            if c.index == index:
+                target = c
+                break
+        if target is None:
+            return False
+
+        # Remove from sexp tree
+        for node in target.sexp_nodes:
+            self._sexp.remove(node)
+
+        # Clean in-memory lists by matching UUID
+        target_uuids: set[str] = set()
+        for node in target.sexp_nodes:
+            uuid_n = node.find("uuid")
+            if uuid_n:
+                u = uuid_n.get_string(0) or ""
+                if u:
+                    target_uuids.add(u)
+
+        if target_uuids:
+            self._graphic_lines = [gl for gl in self._graphic_lines if gl.uuid not in target_uuids]
+            self._graphic_arcs = [ga for ga in self._graphic_arcs if ga.uuid not in target_uuids]
+            self._graphics = [g for g in self._graphics if g.uuid not in target_uuids]
+        else:
+            # Fallback: re-parse the in-memory lists from sexp
+            self._graphic_lines = []
+            self._graphic_arcs = []
+            self._graphics = []
+            for child in self._sexp.children:
+                if child.is_atom:
+                    continue
+                tag = child.tag
+                if tag == "gr_line":
+                    self._graphic_lines.append(GraphicLine.from_sexp(child))
+                    self._graphics.append(BoardGraphic.from_sexp(child, "line"))
+                elif tag == "gr_arc":
+                    self._graphic_arcs.append(GraphicArc.from_sexp(child))
+                    self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
+                elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+                    graphic_type = tag[3:]
+                    self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
+
+        return True
+
+    def replace_outline(
+        self,
+        origin_x: float,
+        origin_y: float,
+        width: float,
+        height: float,
+    ) -> int:
+        """Replace all outline contours with a rectangle.
+
+        Removes every Edge.Cuts contour whose bounding-box area is above
+        the mounting-hole threshold, then inserts a new rectangular outline
+        (four ``gr_line`` Edge.Cuts segments) at the given origin and size.
+        Mounting-hole contours are preserved.
+
+        Args:
+            origin_x: X coordinate of top-left corner (mm).
+            origin_y: Y coordinate of top-left corner (mm).
+            width: Board width (mm).
+            height: Board height (mm).
+
+        Returns:
+            Number of outline contours removed.
+        """
+        contours = self.list_edge_contours()
+        removed = 0
+        # Remove outlines (non-mounting-hole contours)
+        # Process in reverse index order so earlier indices stay valid
+        for c in sorted(contours, key=lambda c: c.index, reverse=True):
+            if not c.is_mounting_hole:
+                for node in c.sexp_nodes:
+                    self._sexp.remove(node)
+                removed += 1
+
+        # Insert new outline (four gr_line Edge.Cuts segments) whose UUIDs
+        # avoid every UUID still on the board (Issue #6076).
+        outline_minter = UuidMinter(self._board_uuids())
+        for line in PCB._build_board_outline_sexp(
+            width, height, origin_x, origin_y, minter=outline_minter
+        ):
+            self._sexp.append(line)
+            if self._uuid_minter is not None:
+                self._uuid_minter.reserve(
+                    str(n.get_first_atom()) for n in line.iter_all() if n.name == "uuid"
+                )
+
+        # Rebuild in-memory lists
+        self._graphic_lines = []
+        self._graphic_arcs = []
+        self._graphics = []
+        for child in self._sexp.children:
+            if child.is_atom:
+                continue
+            tag = child.tag
+            if tag == "gr_line":
+                self._graphic_lines.append(GraphicLine.from_sexp(child))
+                self._graphics.append(BoardGraphic.from_sexp(child, "line"))
+            elif tag == "gr_arc":
+                self._graphic_arcs.append(GraphicArc.from_sexp(child))
+                self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
+            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+                graphic_type = tag[3:]
+                self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
+
+        return removed
+
+    @property
+    def setup(self) -> Setup | None:
+        """Board setup/design rules."""
+        return self._setup
+
+    @property
+    def net_classes(self) -> dict[str, BoardNetClass]:
+        """Board-declared legacy top-level ``(net_class …)`` blocks by name.
+
+        Issue #4875.  Empty (``{}``) for every KiCad 6+ board -- modern
+        files keep net classes in the companion ``.kicad_pro`` -- and for
+        every board this repo writes, so a non-empty mapping is the
+        positive "imported board with its own declared design rules"
+        signal that :mod:`kicad_tools.cli.route_cmd` gates rule derivation
+        on.
+        """
+        return self._net_classes
+
+    # Statistics
+
+    @property
+    def footprint_count(self) -> int:
+        """Number of footprints."""
+        return len(self._footprints)
+
+    @property
+    def segment_count(self) -> int:
+        """Number of trace segments.
+
+        Counts top-level ``(segment ...)`` nodes in the S-expression tree
+        so the result always reflects the actual file content, even if the
+        in-memory ``_segments`` list has drifted.
+        """
+        return sum(
+            1 for child in self._sexp.children if not child.is_atom and child.name == "segment"
+        )
+
+    @property
+    def arc_count(self) -> int:
+        """Number of top-level copper arc nodes in the authoritative tree."""
+        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "arc")
+
+    @property
+    def via_count(self) -> int:
+        """Number of vias.
+
+        Counts top-level ``(via ...)`` nodes in the S-expression tree
+        so the result always reflects the actual file content, even if the
+        in-memory ``_vias`` list has drifted.
+        """
+        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "via")
+
+    @property
+    def zone_count(self) -> int:
+        """Number of zones (copper pours).
+
+        Counts top-level ``(zone ...)`` nodes in the S-expression tree
+        so the result always reflects the actual file content, even if the
+        in-memory ``_zones`` list has drifted.
+
+        Cross-validates against the in-memory ``_zones`` list and logs a
+        warning if the two disagree, which aids diagnosis of counting
+        discrepancies.
+        """
+        sexp_count = sum(
+            1 for child in self._sexp.children if not child.is_atom and child.name == "zone"
+        )
+        mem_count = len(self._zones)
+        if sexp_count != mem_count:
+            logger.warning(
+                "Zone count mismatch: S-expression tree has %d zone nodes "
+                "but in-memory list has %d entries",
+                sexp_count,
+                mem_count,
+            )
+        return sexp_count
+
+    @property
+    def net_count(self) -> int:
+        """Number of nets."""
+        return len(self._nets)
+
+    def total_trace_length(self, layer: str | None = None) -> float:
+        """Calculate total trace length in mm."""
+        import math
+
+        total = 0.0
+        for seg in self._segments:
+            if layer is None or seg.layer == layer:
+                dx = seg.end[0] - seg.start[0]
+                dy = seg.end[1] - seg.start[1]
+                total += math.sqrt(dx * dx + dy * dy)
+        total += sum(arc.length for arc in self._arcs if layer is None or arc.layer == layer)
+        return total
+
+    def summary(self) -> dict:
+        """Get board summary statistics.
+
+        Via and zone counts are derived from the S-expression tree (the
+        authoritative on-disk representation) rather than the in-memory
+        cache lists, ensuring accuracy even after in-place modifications
+        by other tools.
+        """
+        w, h = self.board_size
+        return {
+            "title": self.title,
+            "revision": self.revision,
+            "width_mm": round(w, 2),
+            "height_mm": round(h, 2),
+            "area_mm2": round(w * h, 2),
+            "copper_layers": len(self.copper_layers),
+            "footprints": self.footprint_count,
+            "nets": self.net_count,
+            "segments": self.segment_count,
+            "arcs": self.arc_count,
+            "vias": self.via_count,
+            "zones": self.zone_count,
+            "trace_length_mm": round(self.total_trace_length(), 2),
+        }
+
+    # Modification methods
+
+    def update_footprint_position(
+        self,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float | None = None,
+    ) -> bool:
+        """
+        Update a footprint's position in the underlying S-expression.
+
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
+        Args:
+            reference: Reference designator (e.g., "U1")
+            x: New X position in mm, relative to board origin
+            y: New Y position in mm, relative to board origin
+            rotation: New rotation in degrees (optional)
+
+        Returns:
+            True if footprint was found and updated
+        """
+        # Find the footprint in the parsed data
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        # The Footprint.__setattr__ override automatically syncs the
+        # board-relative position to the S-expression ``(at ...)`` node,
+        # adding the board origin offset, and re-places the footprint's
+        # embedded zones (keepouts), which KiCad stores in board coordinates
+        # (Issue #6119).
+        fp.position = (x, y)
+        if rotation is not None:
+            rotation_delta = float(rotation) - float(fp.rotation)
+            if rotation_delta != 0.0:
+                # A pad's ``(at x y ANGLE)`` angle is board-absolute -- it
+                # already includes the footprint rotation (#3902) -- so it
+                # turns with the footprint.  Pad *positions* are
+                # footprint-local and need no change (Issue #6119).
+                for pad in fp.pads:
+                    pad.rotation = (float(pad.rotation) + rotation_delta) % 360.0
+            fp.rotation = rotation
+
+        if fp._sexp_node is not None:
+            return True
+
+        # Fallback: walk the top-level S-expression tree when there is no
+        # back-reference (should not happen for footprints parsed via
+        # from_sexp, but kept for safety).
+        abs_x = x + self._board_origin[0]
+        abs_y = y + self._board_origin[1]
+
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            # Check if this is the right footprint by looking at reference
+            ref_value = None
+
+            # KiCad 7 format: fp_text with type "reference"
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref_value = fp_text.get_string(1)
+                    break
+
+            # KiCad 8+ format: property with name "Reference"
+            if not ref_value:
+                for prop in child.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref_value = prop.get_string(1)
+                        break
+
+            if ref_value != reference:
+                continue
+
+            # Found the footprint, update its 'at' node with sheet-absolute coords
+            at_node = child.find("at")
+            if at_node:
+                at_node.set_value(0, abs_x)
+                at_node.set_value(1, abs_y)
+                if rotation is not None:
+                    # Handle cases where rotation may or may not exist
+                    if len(at_node.children) >= 3:
+                        at_node.set_value(2, rotation)
+                    elif rotation != 0.0:
+                        # Use add() instead of values.append() since values
+                        # is a read-only property that returns a new list
+                        at_node.add(rotation)
+            return True
+
+        return False
+
+    def update_footprint_reference(
+        self,
+        old_reference: str,
+        new_reference: str,
+    ) -> bool:
+        """
+        Update a footprint's reference designator.
+
+        Renames the reference designator in both the parsed footprint object
+        and the underlying S-expression tree. Handles both KiCad 7 (fp_text)
+        and KiCad 8+ (property) formats.
+
+        Args:
+            old_reference: Current reference designator (e.g., "R1")
+            new_reference: New reference designator (e.g., "R100")
+
+        Returns:
+            True if footprint was found and updated, False if the old
+            reference was not found or the new reference already exists.
+        """
+        # Check that the old reference exists
+        fp = self.get_footprint(old_reference)
+        if not fp:
+            return False
+
+        # Check for collision with existing reference
+        if old_reference != new_reference and self.get_footprint(new_reference):
+            return False
+
+        # Update the S-expression tree
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref != old_reference:
+                continue
+
+            # Update KiCad 7 format: fp_text with type "reference"
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    fp_text.set_value(1, new_reference)
+
+            # Update KiCad 8+ format: property with name "Reference"
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    prop.set_value(1, new_reference)
+
+            # Update parsed footprint object
+            fp.reference = new_reference
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    text.text = new_reference
+
+            return True
+
+        return False
+
+    def update_footprint_value(
+        self,
+        reference: str,
+        new_value: str,
+    ) -> bool:
+        """
+        Update a footprint's value field.
+
+        Updates the value in both the parsed footprint object and the
+        underlying S-expression tree. Handles both KiCad 7 (fp_text)
+        and KiCad 8+ (property) formats.
+
+        Args:
+            reference: Reference designator of the footprint (e.g., "R1")
+            new_value: New value string (e.g., "4.7k")
+
+        Returns:
+            True if footprint was found and updated, False if the
+            reference was not found.
+        """
+        # Check that the reference exists
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        # Update the S-expression tree
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref != reference:
+                continue
+
+            # Update KiCad 7 format: fp_text with type "value"
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "value":
+                    fp_text.set_value(1, new_value)
+
+            # Update KiCad 8+ format: property with name "Value"
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Value":
+                    prop.set_value(1, new_value)
+
+            # Update parsed footprint object
+            fp.value = new_value
+            for text in fp.texts:
+                if text.text_type == "value":
+                    text.text = new_value
+
+            return True
+
+        return False
+
+    # Silkscreen management methods
+
+    def set_reference_visibility(
+        self,
+        reference: str | None = None,
+        *,
+        visible: bool = True,
+        pattern: str | None = None,
+    ) -> int:
+        """
+        Set visibility of reference designators on silkscreen.
+
+        Can target a specific reference, all references, or references matching
+        a glob pattern.
+
+        Args:
+            reference: Specific reference designator (e.g., "U1"). If None,
+                      applies to all footprints (or those matching pattern).
+            visible: True to show, False to hide the reference designator.
+            pattern: Glob pattern to match references (e.g., "C*" for all
+                    capacitors, "U?" for single-digit ICs). Ignored if
+                    reference is specified.
+
+        Returns:
+            Number of references updated.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Hide all reference designators
+            >>> pcb.set_reference_visibility(visible=False)
+            >>> # Hide just capacitors
+            >>> pcb.set_reference_visibility(pattern="C*", visible=False)
+            >>> # Show specific reference
+            >>> pcb.set_reference_visibility("U1", visible=True)
+        """
+        import fnmatch
+
+        count = 0
+
+        # Determine which references to update
+        refs_to_update: set[str] = set()
+        if reference is not None:
+            refs_to_update.add(reference)
+        elif pattern is not None:
+            for fp in self._footprints:
+                if fnmatch.fnmatch(fp.reference, pattern):
+                    refs_to_update.add(fp.reference)
+        else:
+            # All footprints
+            refs_to_update = {fp.reference for fp in self._footprints}
+
+        # Update S-expression tree
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            # Get reference from this footprint
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref not in refs_to_update:
+                continue
+
+            # Update visibility in fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    self._set_text_visibility(fp_text, visible)
+                    count += 1
+
+            # Update visibility in property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    self._set_text_visibility(prop, visible)
+                    count += 1
+
+        # Update parsed footprint objects
+        for fp in self._footprints:
+            if fp.reference in refs_to_update:
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        text.hidden = not visible
+
+        return count
+
+    def _get_footprint_reference(self, fp_sexp: SExp) -> str:
+        """Extract reference designator from footprint S-expression."""
+        # Try KiCad 7 format first (fp_text)
+        for fp_text in fp_sexp.find_all("fp_text"):
+            if fp_text.get_string(0) == "reference":
+                return fp_text.get_string(1) or ""
+
+        # Try KiCad 8+ format (property)
+        for prop in fp_sexp.find_all("property"):
+            if prop.get_string(0) == "Reference":
+                return prop.get_string(1) or ""
+
+        return ""
+
+    def _set_text_visibility(self, text_sexp: SExp, visible: bool) -> None:
+        """Set visibility on a text S-expression node."""
+        effects = text_sexp.find("effects")
+        if effects is None:
+            # Create effects node if needed
+            effects = SExp.list("effects")
+            font = SExp.list("font")
+            font.append(SExp.list("size", 1.0, 1.0))
+            font.append(SExp.list("thickness", 0.15))
+            effects.append(font)
+            text_sexp.append(effects)
+
+        # Find existing hide node
+        hide_node = effects.find("hide")
+
+        if visible:
+            # Remove hide node if present
+            if hide_node is not None:
+                effects.remove(hide_node)
+        else:
+            # Add hide node if not present
+            if hide_node is None:
+                effects.append(SExp.list("hide", "yes"))
+
+    def move_reference(
+        self,
+        reference: str,
+        offset: tuple[float, float] = (0.0, 0.0),
+        *,
+        absolute: tuple[float, float] | None = None,
+        layer: str | None = None,
+    ) -> bool:
+        """
+        Move a reference designator's silkscreen text.
+
+        Args:
+            reference: Reference designator to move (e.g., "U1").
+            offset: (dx, dy) offset from current position in mm.
+                   Ignored if absolute is specified.
+            absolute: Absolute (x, y) position in mm, relative to the
+                     footprint origin. If specified, offset is ignored.
+            layer: Optional new layer (e.g., "F.SilkS", "F.Fab").
+                  If None, layer is unchanged.
+
+        Returns:
+            True if reference was found and updated.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Move U1 reference up by 5mm
+            >>> pcb.move_reference("U1", offset=(0, -5))
+            >>> # Move to absolute position
+            >>> pcb.move_reference("U1", absolute=(2.0, -3.0))
+            >>> # Move to fab layer (hidden from manufacturing)
+            >>> pcb.move_reference("U1", layer="F.Fab")
+        """
+        # Find footprint in S-expression tree
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref != reference:
+                continue
+
+            # Found the footprint - update reference text
+            updated = False
+
+            # Update fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    self._move_text_element(fp_text, offset, absolute, layer)
+                    updated = True
+
+            # Update property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    self._move_text_element(prop, offset, absolute, layer)
+                    updated = True
+
+            # Update parsed footprint object
+            if updated:
+                for fp in self._footprints:
+                    if fp.reference == reference:
+                        for text in fp.texts:
+                            if text.text_type == "reference":
+                                if absolute is not None:
+                                    text.position = absolute
+                                else:
+                                    text.position = (
+                                        text.position[0] + offset[0],
+                                        text.position[1] + offset[1],
+                                    )
+                                if layer is not None:
+                                    text.layer = layer
+                        break
+
+            return updated
+
+        return False
+
+    def _move_text_element(
+        self,
+        text_sexp: SExp,
+        offset: tuple[float, float],
+        absolute: tuple[float, float] | None,
+        layer: str | None,
+    ) -> None:
+        """Move a text element's position and optionally change its layer."""
+        # Update position
+        at_node = text_sexp.find("at")
+        if at_node is None:
+            # Create at node with default position
+            at_node = SExp.list("at", 0.0, 0.0)
+            text_sexp.append(at_node)
+
+        if absolute is not None:
+            at_node.set_value(0, absolute[0])
+            at_node.set_value(1, absolute[1])
+        else:
+            current_x = at_node.get_float(0) or 0.0
+            current_y = at_node.get_float(1) or 0.0
+            at_node.set_value(0, current_x + offset[0])
+            at_node.set_value(1, current_y + offset[1])
+
+        # Update layer if specified
+        if layer is not None:
+            layer_node = text_sexp.find("layer")
+            if layer_node is not None:
+                layer_node.set_value(0, layer)
+            else:
+                text_sexp.append(SExp.list("layer", layer))
+
+    def set_silkscreen_font(
+        self,
+        size: float | tuple[float, float] = 1.0,
+        thickness: float = 0.15,
+        *,
+        pattern: str | None = None,
+        text_types: tuple[str, ...] = ("reference",),
+    ) -> int:
+        """
+        Set font size for silkscreen text on all footprints.
+
+        Args:
+            size: Font size in mm. Can be a single value (used for both
+                 width and height) or a (width, height) tuple.
+            thickness: Stroke thickness in mm.
+            pattern: Glob pattern to match references (e.g., "C*" for all
+                    capacitors). If None, applies to all footprints.
+            text_types: Which text types to update. Default is ("reference",).
+                       Can include "reference", "value", "user".
+
+        Returns:
+            Number of text elements updated.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Set smaller font for all references
+            >>> pcb.set_silkscreen_font(size=0.8, thickness=0.15)
+            >>> # Set font for just capacitor values
+            >>> pcb.set_silkscreen_font(
+            ...     size=0.6, pattern="C*", text_types=("value",)
+            ... )
+        """
+        import fnmatch
+
+        if isinstance(size, (int, float)):
+            font_size = (float(size), float(size))
+        else:
+            font_size = size
+
+        count = 0
+
+        # Determine which references to update
+        refs_to_update: set[str] = set()
+        if pattern is not None:
+            for fp in self._footprints:
+                if fnmatch.fnmatch(fp.reference, pattern):
+                    refs_to_update.add(fp.reference)
+        else:
+            refs_to_update = {fp.reference for fp in self._footprints}
+
+        # Update S-expression tree
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref not in refs_to_update:
+                continue
+
+            # Update fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                text_type = fp_text.get_string(0)
+                if text_type in text_types:
+                    self._set_text_font(fp_text, font_size, thickness)
+                    count += 1
+
+            # Update property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                prop_name = prop.get_string(0)
+                if (prop_name == "Reference" and "reference" in text_types) or (
+                    prop_name == "Value" and "value" in text_types
+                ):
+                    self._set_text_font(prop, font_size, thickness)
+                    count += 1
+
+        # Update parsed footprint objects
+        for fp in self._footprints:
+            if fp.reference in refs_to_update:
+                for text in fp.texts:
+                    if text.text_type in text_types:
+                        text.font_size = font_size
+                        text.font_thickness = thickness
+
+        return count
+
+    def _set_text_font(
+        self,
+        text_sexp: SExp,
+        size: tuple[float, float],
+        thickness: float,
+    ) -> None:
+        """Set font properties on a text S-expression node."""
+        effects = text_sexp.find("effects")
+        if effects is None:
+            effects = SExp.list("effects")
+            text_sexp.append(effects)
+
+        font = effects.find("font")
+        if font is None:
+            font = SExp.list("font")
+            effects.append(font)
+
+        # Update or create size node
+        size_node = font.find("size")
+        if size_node is not None:
+            size_node.set_value(0, size[0])
+            size_node.set_value(1, size[1])
+        else:
+            font.append(SExp.list("size", size[0], size[1]))
+
+        # Update or create thickness node
+        thickness_node = font.find("thickness")
+        if thickness_node is not None:
+            thickness_node.set_value(0, thickness)
+        else:
+            font.append(SExp.list("thickness", thickness))
+
+    def move_references_to_layer(
+        self,
+        layer: str,
+        *,
+        pattern: str | None = None,
+    ) -> int:
+        """
+        Move all reference designators to a different layer.
+
+        Useful for moving references to the fabrication layer (F.Fab)
+        so they don't appear on manufactured silkscreen.
+
+        Args:
+            layer: Target layer (e.g., "F.Fab", "F.SilkS").
+            pattern: Glob pattern to match references (e.g., "C*" for all
+                    capacitors). If None, applies to all footprints.
+
+        Returns:
+            Number of references moved.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Move all references to fab layer
+            >>> pcb.move_references_to_layer("F.Fab")
+            >>> # Move just capacitor references to fab
+            >>> pcb.move_references_to_layer("F.Fab", pattern="C*")
+        """
+        import fnmatch
+
+        count = 0
+
+        # Determine which references to update
+        refs_to_update: set[str] = set()
+        if pattern is not None:
+            for fp in self._footprints:
+                if fnmatch.fnmatch(fp.reference, pattern):
+                    refs_to_update.add(fp.reference)
+        else:
+            refs_to_update = {fp.reference for fp in self._footprints}
+
+        # Update S-expression tree
+        for child in self._sexp.iter_children():
+            if not _is_footprint_tag(child.tag):
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref not in refs_to_update:
+                continue
+
+            # Update fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    layer_node = fp_text.find("layer")
+                    if layer_node is not None:
+                        layer_node.set_value(0, layer)
+                    else:
+                        fp_text.append(SExp.list("layer", layer))
+                    count += 1
+
+            # Update property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    layer_node = prop.find("layer")
+                    if layer_node is not None:
+                        layer_node.set_value(0, layer)
+                    else:
+                        prop.append(SExp.list("layer", layer))
+                    count += 1
+
+        # Update parsed footprint objects
+        for fp in self._footprints:
+            if fp.reference in refs_to_update:
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        text.layer = layer
+
+        return count
+
+    def validate_silkscreen(
+        self,
+        design_rules: DesignRules | None = None,
+    ) -> list[dict]:
+        """
+        Validate silkscreen elements and return issues.
+
+        Checks for common silkscreen problems including:
+        - Text height too small for manufacturing
+        - Line width too thin
+        - Silkscreen overlapping exposed pads
+
+        Args:
+            design_rules: Manufacturing design rules. If None, uses
+                         default JLCPCB-compatible rules.
+
+        Returns:
+            List of issue dictionaries with keys:
+            - type: Issue type (e.g., "text_height", "over_pad")
+            - reference: Reference designator or element identifier
+            - description: Human-readable description
+            - location: (x, y) position in mm
+            - layer: Layer name
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> issues = pcb.validate_silkscreen()
+            >>> for issue in issues:
+            ...     print(f"{issue['type']}: {issue['reference']} - {issue['description']}")
+        """
+        from ..manufacturers import DesignRules as DR
+        from ..validate.rules.silkscreen import check_all_silkscreen
+
+        if design_rules is None:
+            # Use default JLCPCB-compatible rules
+            design_rules = DR(
+                min_trace_width_mm=0.127,
+                min_clearance_mm=0.127,
+                min_via_drill_mm=0.3,
+                min_via_diameter_mm=0.5,
+                min_annular_ring_mm=0.127,
+                min_silkscreen_width_mm=0.15,
+                min_silkscreen_height_mm=0.8,
+            )
+
+        results = check_all_silkscreen(self, design_rules)
+
+        issues = []
+        for violation in results.violations:
+            issues.append(
+                {
+                    "type": violation.rule_id.replace("silkscreen_", ""),
+                    "reference": violation.items[0] if violation.items else "",
+                    "description": violation.message,
+                    "location": violation.location,
+                    "layer": violation.layer,
+                }
+            )
+
+        return issues
+
+    def mint_uuid(self, *key: object) -> str:
+        """Deterministic, collision-free UUID for an item this API adds (Issue #6076).
+
+        ``uuid5`` of ``key`` (plus an ordinal for repeats) under
+        :data:`~kicad_tools.core.schematic_uuids.SCHEMATIC_UUID_NAMESPACE`,
+        never equal to a UUID already on the board, so building the same board
+        twice writes the same UUIDs.  Existing UUIDs are never changed.
+        """
+        if self._uuid_minter is None:
+            self._uuid_minter = UuidMinter(self._board_uuids())
+        return self._uuid_minter.mint("pcb", *key)
+
+    def _board_uuids(self) -> set[str]:
+        """Every ``(uuid ...)`` / ``(tstamp ...)`` value on the board (lower-cased)."""
+        return {
+            str(node.get_first_atom()).lower()
+            for node in self._sexp.iter_all()
+            if node.name in ("uuid", "tstamp") and node.get_first_atom() is not None
+        }
+
+    def add_footprint_from_file(
+        self,
+        kicad_mod_path: str | Path,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float = 0.0,
+        layer: str = "F.Cu",
+        value: str = "",
+        library_id: str | None = None,
+    ) -> Footprint:
+        """
+        Add a footprint from a .kicad_mod file to the PCB.
+
+        Loads a footprint from a KiCad footprint file and adds it to the PCB
+        at the specified position with the given reference designator.
+
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
+        Args:
+            kicad_mod_path: Path to the .kicad_mod footprint file
+            reference: Reference designator for the component (e.g., "U1", "C1")
+            x: X position in mm, relative to board origin
+            y: Y position in mm, relative to board origin
+            rotation: Rotation angle in degrees (default: 0)
+            layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
+            value: Component value (e.g., "100nF", "10k")
+            library_id: Optional ``Library:Footprint`` lib ID to write as the
+                placed footprint's name. Defaults to the file's own name,
+                which is bare (no library nickname) for ``.kicad_mod`` files.
+
+        Returns:
+            The Footprint object that was added to the PCB
+
+        Raises:
+            FileNotFoundError: If the footprint file doesn't exist
+            FileFormatError: If the file is not a valid footprint
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> fp = pcb.add_footprint_from_file(
+            ...     "MyFootprints.pretty/SOT-23.kicad_mod",
+            ...     reference="U1",
+            ...     x=50.0,
+            ...     y=30.0,
+            ...     rotation=90,
+            ...     value="LM317"
+            ... )
+        """
+        # Load the footprint from file
+        fp_sexp = load_footprint(kicad_mod_path)
+
+        # Keep the Library:Footprint lib ID so kicad-cli's schematic-parity
+        # check can match it against the symbol's Footprint field (#7213).
+        if library_id:
+            fp_sexp.set_value(0, library_id)
+
+        # Deterministic UUID for this footprint instance (Issue #6076)
+        new_uuid = self.mint_uuid("footprint", reference)
+
+        # Update the UUID in the footprint
+        uuid_node = fp_sexp.find_child("uuid")
+        if uuid_node:
+            uuid_node.set_value(0, new_uuid)
+        else:
+            # Add UUID if not present
+            fp_sexp.append(SExp.list("uuid", new_uuid))
+
+        # Library pad identities are not placed-instance identities. Persist
+        # fresh IDs even when the library omits them, so native DRC findings
+        # can be correlated with the saved board instead of transient IDs.
+        for pad_index, pad_node in enumerate(fp_sexp.find_all("pad")):
+            pad_id = self.mint_uuid("pad", new_uuid, pad_index)
+            pad_uuid = pad_node.find_child("uuid")
+            if pad_uuid is not None:
+                pad_uuid.set_value(0, pad_id)
+            else:
+                pad_node.append(SExp.list("uuid", pad_id))
+            legacy_stamp = pad_node.find_child("tstamp")
+            if legacy_stamp is not None:
+                pad_node.remove(legacy_stamp)
+
+        # Update layer first (at node must come after layer)
+        layer_node = fp_sexp.find("layer")
+        if layer_node:
+            layer_node.set_value(0, layer)
+        else:
+            # Create layer node - library footprints always have this, but be safe
+            layer_node = SExp.list("layer", layer)
+            fp_sexp.append(layer_node)
+
+        # Update position (at x y rotation)
+        # Library footprints (.kicad_mod) don't have a top-level (at) node -
+        # that's only present in placed footprints within a PCB file.
+        # We must create the (at) node and insert it immediately after (layer)
+        # for KiCad to recognize it properly.
+        at_node = fp_sexp.find("at")
+        if at_node:
+            # Remove existing at node - we'll insert a fresh one in the correct position
+            fp_sexp.remove(at_node)
+
+        # Apply board origin offset to convert board-relative to sheet-absolute
+        abs_x = x + self._board_origin[0]
+        abs_y = y + self._board_origin[1]
+
+        # Create new at node with position (sheet-absolute coordinates)
+        at_sexp = SExp.list("at", abs_x, abs_y)
+        if rotation != 0.0:
+            at_sexp.add(rotation)
+
+        # Find layer node's index and insert at node immediately after it
+        layer_index = None
+        for i, child in enumerate(fp_sexp.children):
+            if not child.is_atom and child.name == "layer":
+                layer_index = i
+                break
+
+        if layer_index is not None:
+            fp_sexp.children.insert(layer_index + 1, at_sexp)
+        else:
+            # Fallback: append to end (shouldn't happen for valid footprints)
+            fp_sexp.append(at_sexp)
+
+        # A back-side placement needs the whole footprint re-expressed for the
+        # back (layers, mirrored local geometry/text), not just its (layer)
+        # node (Issue #8581). Front placements are untouched.
+        is_back = _is_back_layer(layer)
+        if is_back:
+            flip_footprint_children_to_back(fp_sexp, rotation)
+
+        # Rewrite each pad's angle to ABSOLUTE (board-frame) rotation.
+        #
+        # KiCad stores a pad's ``(at x y ANGLE)`` with the angle expressed in
+        # the ABSOLUTE board frame -- it already includes the parent
+        # footprint's rotation. A library (.kicad_mod) footprint is authored at
+        # rotation 0, so its pad angles are footprint-local. When we place that
+        # footprint at a non-zero ``rotation`` we must fold that rotation into
+        # every pad angle so the emitted board matches KiCad's convention.
+        #
+        # Without this, KiCad (and kicad-cli DRC) renders elongated pads
+        # (e.g. TSSOP 1.475mm pads) unrotated relative to their pin row,
+        # producing phantom shorting / solder-mask-bridge violations and
+        # geometrically wrong gerber apertures for every rotated footprint
+        # (issue #3902).
+        if rotation != 0.0:
+            for pad in fp_sexp.find_all("pad"):
+                pad_at = pad.find("at")
+                if pad_at is None:
+                    continue
+                local_angle = pad_at.get_float(2) or 0.0
+                abs_angle = (local_angle + rotation) % 360
+                pad_at.set_value(2, abs_angle)
+
+        # Update reference and value - try KiCad 8+ property format first
+        ref_updated = False
+        val_updated = False
+
+        for prop in fp_sexp.find_all("property"):
+            prop_name = prop.get_string(0)
+            if prop_name == "Reference":
+                # Use quoted_atom so values that look numeric (e.g. a
+                # reference "1") still serialize quoted. A bare numeric
+                # property value makes the board unloadable in kicad-cli.
+                prop.children[1] = SExp.quoted_atom(reference)
+                ref_updated = True
+            elif prop_name == "Value":
+                # Use quoted_atom so unit-less numeric values (e.g. "470",
+                # "0", "100") serialize as (property "Value" "470") rather
+                # than the bare token (property "Value" 470), which
+                # kicad-cli rejects with "Failed to load board".
+                prop.children[1] = SExp.quoted_atom(value)
+                val_updated = True
+
+        # Fall back to KiCad 7 fp_text format
+        for fp_text in fp_sexp.find_all("fp_text"):
+            text_type = fp_text.get_string(0)
+            if text_type == "reference" and not ref_updated:
+                fp_text.children[1] = SExp.quoted_atom(reference)
+                ref_updated = True
+            elif text_type == "value" and not val_updated:
+                fp_text.children[1] = SExp.quoted_atom(value)
+                val_updated = True
+
+        # If reference/value weren't found, add them as KiCad 8+ properties
+        if not ref_updated:
+            # Quote the value so a numeric reference doesn't serialize bare.
+            ref_prop = SExp.list("property", "Reference", SExp.quoted_atom(reference))
+            ref_prop.append(SExp.list("at", 0.0, -1.5))
+            ref_prop.append(SExp.list("layer", layer.replace(".Cu", ".SilkS")))
+            ref_prop.append(SExp.list("uuid", self.mint_uuid("property", new_uuid, "Reference")))
+            effects = SExp.list("effects")
+            font = SExp.list("font")
+            font.append(SExp.list("size", 1.0, 1.0))
+            font.append(SExp.list("thickness", 0.15))
+            effects.append(font)
+            ref_prop.append(effects)
+            if is_back:
+                _mirror_text_effects(ref_prop)
+            fp_sexp.append(ref_prop)
+
+        if not val_updated:
+            # Quote the value so a unit-less numeric value doesn't serialize bare.
+            val_prop = SExp.list("property", "Value", SExp.quoted_atom(value))
+            val_prop.append(SExp.list("at", 0.0, 1.5))
+            val_prop.append(SExp.list("layer", layer.replace(".Cu", ".Fab")))
+            val_prop.append(SExp.list("uuid", self.mint_uuid("property", new_uuid, "Value")))
+            effects = SExp.list("effects")
+            font = SExp.list("font")
+            font.append(SExp.list("size", 1.0, 1.0))
+            font.append(SExp.list("thickness", 0.15))
+            effects.append(font)
+            val_prop.append(effects)
+            if is_back:
+                _mirror_text_effects(val_prop)
+            fp_sexp.append(val_prop)
+
+        # Append footprint to PCB S-expression tree
+        self._sexp.append(fp_sexp)
+
+        # Parse and add to internal footprints list
+        footprint = Footprint.from_sexp(fp_sexp)
+        # Store board-relative position in the footprint object for API consistency.
+        # _sexp_node is not yet set, so this won't sync to the S-expression
+        # (the S-expression already has the correct sheet-absolute coordinates).
+        footprint.position = (x, y)
+
+        # Link the S-expression node so that future mutations to position,
+        # rotation, or layer are automatically persisted.
+        object.__setattr__(footprint, "_board_origin", self._board_origin)
+        object.__setattr__(footprint, "_sexp_node", fp_sexp)
+        # New footprints need the same pad write-through links as loaded
+        # footprints (#5049). Use parser order, not pad numbers: shield and
+        # NPTH pads may share a number or have no number at all.
+        for pad_obj, pad_node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
+            object.__setattr__(pad_obj, "_sexp_node", pad_node)
+
+        self._footprints.append(footprint)
+
+        return footprint
+
+    def add_footprint(
+        self,
+        library_id: str,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float = 0.0,
+        layer: str = "F.Cu",
+        value: str = "",
+        schematic_path: str | Path | None = None,
+    ) -> Footprint:
+        """
+        Add a footprint from KiCad standard libraries to the PCB.
+
+        Loads a footprint from KiCad's standard library installation and adds
+        it to the PCB at the specified position.
+
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
+        Args:
+            library_id: Footprint identifier in "Library:Footprint" format
+                       (e.g., "Capacitor_SMD:C_0805_2012Metric")
+                       If library is omitted, it will be guessed from the footprint name.
+            reference: Reference designator for the component (e.g., "U1", "C1")
+            x: X position in mm, relative to board origin
+            y: Y position in mm, relative to board origin
+            rotation: Rotation angle in degrees (default: 0)
+            layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
+            value: Component value (e.g., "100nF", "10k")
+            schematic_path: Optional path to the ``.kicad_sch``/``.kicad_pro``
+                that ``library_id`` was sourced from. When given, the
+                project's ``fp-lib-table`` (found by walking upward from
+                this path, so ``${KIPRJMOD}`` always resolves against the
+                *input* schematic's project root even if the PCB is saved
+                elsewhere) is consulted **before** the standard KiCad
+                library search, so project-local library nicknames resolve
+                the same way they do for ``kct suggest-footprint`` /
+                ``assign-footprints``. A missing, malformed, or
+                non-matching project table silently falls back to the
+                standard library search below -- this parameter only ever
+                adds a resolution path, never removes one.
+
+        Returns:
+            The Footprint object that was added to the PCB
+
+        Raises:
+            FileNotFoundError: If the footprint cannot be found in the library
+            ValueError: If the library path cannot be detected
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> fp = pcb.add_footprint(
+            ...     library_id="Capacitor_SMD:C_0805_2012Metric",
+            ...     reference="C1",
+            ...     x=50.0,
+            ...     y=30.0,
+            ...     value="100nF"
+            ... )
+
+            # With automatic library guessing
+            >>> fp = pcb.add_footprint(
+            ...     library_id="C_0402_1005Metric",  # Will guess Capacitor_SMD
+            ...     reference="C2",
+            ...     x=60.0,
+            ...     y=30.0,
+            ...     value="10nF"
+            ... )
+        """
+        # Parse library_id to extract library name and footprint name
+        library_name, footprint_name = parse_library_id(library_id)
+
+        # If no library specified, try to guess it
+        if library_name is None:
+            library_name = guess_standard_library(footprint_name)
+            if library_name is None:
+                raise ValueError(
+                    f"Cannot determine library for footprint '{footprint_name}'. "
+                    "Please specify the library explicitly using 'Library:Footprint' format."
+                )
+
+        fp_filename = footprint_name
+        if not fp_filename.endswith(".kicad_mod"):
+            fp_filename = f"{fp_filename}.kicad_mod"
+
+        # Project fp-lib-table resolution first -- matches KiCad's own
+        # project-then-global nickname resolution order and the pattern
+        # already used by sch_suggest_footprint.py / sch_assign_footprints.py.
+        if schematic_path is not None:
+            table_path = find_project_fp_lib_table(Path(schematic_path))
+            if table_path is not None:
+                for entry in parse_fp_lib_table(table_path):
+                    if entry.name != library_name:
+                        continue
+                    if entry.type != "KiCad" or entry.resolved_path is None:
+                        continue
+                    candidate = entry.resolved_path / fp_filename
+                    if candidate.is_file():
+                        return self.add_footprint_from_file(
+                            kicad_mod_path=candidate,
+                            reference=reference,
+                            x=x,
+                            y=y,
+                            rotation=rotation,
+                            layer=layer,
+                            value=value,
+                            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
+                        )
+                    break
+
+        # Detect KiCad library path
+        lib_paths = detect_kicad_library_path()
+        if not lib_paths.found:
+            raise ValueError(
+                "KiCad footprint library path not found. "
+                "Set KICAD_FOOTPRINT_DIR environment variable or install KiCad."
+            )
+
+        # Get the footprint file path (with fallback search across all libraries)
+        fp_path = lib_paths.get_footprint_file(library_name, footprint_name)
+        if fp_path is None:
+            raise FileNotFoundError(
+                f"Footprint '{footprint_name}' not found in library '{library_name}'. "
+                f"Searched in: {lib_paths.footprints_path} "
+                f"(also searched all available libraries as fallback)"
+            )
+
+        # Delegate to add_footprint_from_file
+        return self.add_footprint_from_file(
+            kicad_mod_path=fp_path,
+            reference=reference,
+            x=x,
+            y=y,
+            rotation=rotation,
+            layer=layer,
+            value=value,
+            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
+        )
+
+    def add_net(self, net_name: str) -> Net:
+        """
+        Add a new net to the PCB.
+
+        If a net with the same name already exists, returns the existing net.
+
+        Args:
+            net_name: Name of the net (e.g., "GND", "+3V3", "Net-U1-Pad1")
+
+        Returns:
+            The Net object that was added or already existed
+
+        Example:
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> gnd = pcb.add_net("GND")
+            >>> print(gnd.number, gnd.name)
+            1 GND
+        """
+        # Check if net already exists
+        existing = self.get_net_by_name(net_name)
+        if existing:
+            return existing
+
+        # Find the next available net number
+        next_num = max(self._nets.keys(), default=0) + 1
+
+        # Create the net object
+        net = Net(number=next_num, name=net_name)
+        self._nets[next_num] = net
+
+        # Issue #8550: KiCad 10 name-only boards have no top-level net table;
+        # pads reference nets by name. Keep the net in memory only.
+        if self._net_name_only_dialect:
+            return net
+
+        # Add to the S-expression tree - insert after the last net, not at the end
+        # KiCad requires nets to be declared before footprints
+        net_sexp = SExp.list("net", next_num, net_name)
+
+        # Find the position of the last net in the S-expression
+        last_net_index = -1
+        for i, child in enumerate(self._sexp.children):
+            if child.name == "net":
+                last_net_index = i
+
+        if last_net_index >= 0:
+            # Insert after the last net
+            self._sexp.children.insert(last_net_index + 1, net_sexp)
+        else:
+            # No nets found (shouldn't happen since net 0 is always present)
+            # Find the first footprint and insert before it
+            first_footprint_index = -1
+            for i, child in enumerate(self._sexp.children):
+                if _is_footprint_tag(child.name):
+                    first_footprint_index = i
+                    break
+
+            if first_footprint_index >= 0:
+                self._sexp.children.insert(first_footprint_index, net_sexp)
+            else:
+                # No footprints either, just append
+                self._sexp.append(net_sexp)
+
+        return net
+
+    def get_pad_position(self, reference: str, pad_number: str) -> tuple[float, float] | None:
+        """
+        Get the absolute board position of a pad on a footprint.
+
+        Calculates the absolute position by combining the footprint position
+        with the pad's local offset, accounting for footprint rotation.
+
+        Args:
+            reference: Footprint reference designator (e.g., "U1", "C1")
+            pad_number: Pad number/name (e.g., "1", "2", "A1")
+
+        Returns:
+            Tuple of (x, y) in mm if found, None if footprint or pad not found
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pos = pcb.get_pad_position("U1", "1")
+            >>> print(f"Pad at ({pos[0]:.2f}, {pos[1]:.2f})")
+        """
+
+        fp = self.get_footprint(reference)
+        if not fp:
+            return None
+
+        from kicad_tools.core.geometry import rotate_pad_offset
+
+        for pad in fp.pads:
+            if pad.number == pad_number:
+                # Rotate pad offset around footprint origin using KiCad's
+                # negated-angle convention (see core.geometry.rotate_pad_offset).
+                pad_x, pad_y = pad.position
+                rotated_x, rotated_y = rotate_pad_offset(pad_x, pad_y, fp.rotation)
+
+                # Add footprint position
+                abs_x = fp.position[0] + rotated_x
+                abs_y = fp.position[1] + rotated_y
+                return (abs_x, abs_y)
+
+        return None
+
+    def _invalidate_dedup_keys(self) -> None:
+        """Drop the cached copper dedup key sets (issue #4175).
+
+        Call after any bulk mutation of ``_segments``/``_vias`` (strip,
+        dedupe, reload) so the next ``add_trace``/``add_via`` rebuilds them.
+        """
+        self._segment_keys = None
+        self._via_keys = None
+
+    def _ensure_segment_keys(self) -> set[_SegmentKey]:
+        """Return the segment dedup key set, building it lazily if needed."""
+        if self._segment_keys is None:
+            self._segment_keys = {
+                _segment_dedup_key(seg.net_number, seg.layer, seg.start, seg.end, seg.width)
+                for seg in self._segments
+            }
+        return self._segment_keys
+
+    def _ensure_via_keys(self) -> set[_ViaKey]:
+        """Return the via dedup key set, building it lazily if needed."""
+        if self._via_keys is None:
+            self._via_keys = {
+                _via_dedup_key(via.net_number, via.position[0], via.position[1], via.layers)
+                for via in self._vias
+            }
+        return self._via_keys
+
+    def add_trace(
+        self,
+        start: tuple[float, float] | tuple[str, str],
+        end: tuple[float, float] | tuple[str, str],
+        width: float = 0.25,
+        layer: str = "F.Cu",
+        net: str | int | None = None,
+        waypoints: list[tuple[float, float]] | None = None,
+        dedupe: bool = True,
+    ) -> list[Segment]:
+        """
+        Add a trace (one or more segments) between two points or pads.
+
+        Routes a trace from start to end, optionally through waypoints.
+        When pad references are used, the net is automatically determined.
+
+        Args:
+            start: Start position as (x, y) tuple or pad reference as (reference, pad_number)
+            end: End position as (x, y) tuple or pad reference as (reference, pad_number)
+            width: Trace width in mm (default 0.25)
+            layer: Copper layer name (default "F.Cu")
+            net: Net name for the trace, or a net NUMBER (int, issue #9078)
+                resolved through the board's net table.  Auto-detected from
+                pads if not specified.
+            waypoints: Optional list of (x, y) intermediate points
+            dedupe: When True (default, issue #4175), skip appending any
+                segment whose (net, layer, unordered endpoints, width) key
+                already exists on the board.  Prevents route-auto retries from
+                accumulating exact-duplicate copper.  Set False only if you
+                deliberately need identical-geometry duplicates.
+
+        Returns:
+            List of Segment objects that were created (skipped duplicates are
+            excluded, so this may be shorter than the number of point-pairs).
+
+        Raises:
+            ValueError: If pad references are invalid or positions cannot be determined
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Route between two pads
+            >>> pcb.add_trace(("U1", "1"), ("C1", "1"), width=0.25, layer="F.Cu")
+            >>> # Route between coordinates with waypoints
+            >>> pcb.add_trace((50, 30), (60, 30), waypoints=[(55, 35)])
+            >>> pcb.save("board.kicad_pcb")
+        """
+        # Resolve start position
+        if isinstance(start[0], str):
+            ref, pad = start[0], start[1]
+            start_pos = self.get_pad_position(ref, pad)
+            if start_pos is None:
+                raise ValueError(f"Cannot find pad {pad} on footprint {ref}")
+            # Auto-detect net from pad if not specified
+            if net is None:
+                fp = self.get_footprint(ref)
+                if fp:
+                    for p in fp.pads:
+                        if p.number == pad and p.net_name:
+                            net = p.net_name
+                            break
+        else:
+            start_pos = (float(start[0]), float(start[1]))
+
+        # Resolve end position
+        if isinstance(end[0], str):
+            ref, pad = end[0], end[1]
+            end_pos = self.get_pad_position(ref, pad)
+            if end_pos is None:
+                raise ValueError(f"Cannot find pad {pad} on footprint {ref}")
+            # Auto-detect net from pad if not specified
+            if net is None:
+                fp = self.get_footprint(ref)
+                if fp:
+                    for p in fp.pads:
+                        if p.number == pad and p.net_name:
+                            net = p.net_name
+                            break
+        else:
+            end_pos = (float(end[0]), float(end[1]))
+
+        # Get net number.  A str is a net name; an int is a net NUMBER
+        # resolved through the net table (issue #9078) -- an int must never
+        # reach ``add_net``, which would mint a phantom net named after the
+        # number and land the new copper on a different net than its pads.
+        # Falsy refs (``None``, ``""``, ``0``) keep the historical no-net
+        # meaning.
+        if not net:
+            net_number, net_name = 0, ""
+        else:
+            net_number, net_name = self._resolve_copper_net_ref(net, "add_trace")
+
+        # Build list of points: start -> waypoints -> end
+        points = [start_pos]
+        if waypoints:
+            points.extend(waypoints)
+        points.append(end_pos)
+
+        # Create segments between consecutive points.  Inputs are in
+        # board-relative coordinates (see _detect_board_origin docstring);
+        # the underlying S-expression must store sheet-absolute coords, so
+        # we add the board origin offset when constructing the sexp node.
+        ox, oy = self._board_origin
+        segments = []
+        seg_keys = self._ensure_segment_keys() if dedupe else None
+        for i in range(len(points) - 1):
+            if seg_keys is not None:
+                key = _segment_dedup_key(net_number, layer, points[i], points[i + 1], width)
+                if key in seg_keys:
+                    # Exact-duplicate copper already on the board (issue #4175):
+                    # skip appending rather than accumulating a uuid-distinct
+                    # copy.  Connectivity is unaffected (identical geometry).
+                    continue
+                seg_keys.add(key)
+            seg = Segment(
+                start=points[i],
+                end=points[i + 1],
+                width=width,
+                layer=layer,
+                net_number=net_number,
+                net_name=net_name,
+                # Issue #4416: match the board's net-reference dialect so
+                # copper added to a name-based board stays name-based on save.
+                net_name_only=self._net_name_only_dialect and bool(net_name),
+                uuid=self.mint_uuid(
+                    "segment", net_number, layer, *points[i], *points[i + 1], width
+                ),
+            )
+            segments.append(seg)
+            self._segments.append(seg)
+            # Serialize through the dialect-aware emitter; the board-origin
+            # offset converts board-relative coords to sheet-absolute without
+            # mutating the Python object (issue #4416 folds the former hand-
+            # rolled numeric branch into Segment.to_sexp).
+            self._sexp.append(seg.to_sexp(offset=(ox, oy)))
+
+        return segments
+
+    def add_via(
+        self,
+        x: float,
+        y: float,
+        size: float = 0.6,
+        drill: float = 0.3,
+        layers: tuple[str, str] = ("F.Cu", "B.Cu"),
+        net: str | int | None = None,
+        dedupe: bool = True,
+        via_type: str | None = None,
+        tenting: tuple[str, str] | None = None,
+    ) -> Via | None:
+        """
+        Add a via at the specified position.
+
+        Vias connect traces between copper layers. Default parameters create
+        a standard through-hole via suitable for most designs.
+
+        Issue #6485: KiCad reads a via with no type keyword as a THROUGH via
+        whatever its ``layers`` pair says, so a partial span is never written
+        keyword-less.  With ``via_type=None`` the type follows ``layers``: the
+        outer ``F.Cu``/``B.Cu`` pair is a through via, any other copper pair
+        becomes ``blind`` (one outer end) or ``buried`` (two inner ends) --
+        both need a fab process that offers them.  Pass ``via_type="through"``
+        to drill the full stack regardless of the pair given.
+
+        Args:
+            x: X position in mm
+            y: Y position in mm
+            size: Via pad size in mm (default 0.6)
+            drill: Via drill diameter in mm (default 0.3)
+            layers: Tuple of layer names to connect (default ("F.Cu", "B.Cu"))
+            net: Net name for the via, or a net NUMBER (int, issue #9078)
+                resolved through the board's net table (optional)
+            dedupe: When True (default, issue #4175), skip appending a via
+                whose (net, rounded position, unordered layers) key already
+                exists on the board.
+            via_type: ``"micro"``, ``"blind"``, ``"buried"``, ``"through"``,
+                or ``None`` (default) to derive it from ``layers`` as above.
+            tenting: Optional per-via ``(front, back)`` tenting override, each
+                ``"yes"``, ``"no"`` or ``"none"`` (Issue #8743).  ``("no", "no")``
+                leaves the via's rings solder-mask open whatever the board-level
+                tenting is.  ``None`` (default) writes no override.
+
+        Raises:
+            ValueError: If ``via_type`` is not a via type KiCad knows.
+
+        Returns:
+            The Via object that was created, or None if an identical via was
+            already present and was skipped as a duplicate.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.add_via(50, 30, net="GND")
+            >>> pcb.save("board.kicad_pcb")
+        """
+        # Issue #6485: resolve the type before anything is recorded, so the
+        # dedup key, the stored ``Via`` and the written node all describe the
+        # barrel KiCad will actually build.
+        from ..core.layers import resolve_via_type, warn_derived_via_type
+
+        resolved_type, resolved_layers = resolve_via_type(layers, via_type)
+        if via_type is None:
+            warn_derived_via_type(logger, "add_via", layers, x, y, resolved_type)
+        layers = cast("tuple[str, str]", resolved_layers)
+
+        # Net reference: str name or int NUMBER through the net table
+        # (issue #9078 -- mirrors ``add_trace``; an int must never mint a
+        # phantom net named after the number).  Falsy refs keep the
+        # historical no-net meaning.
+        if not net:
+            net_number, net_name = 0, ""
+        else:
+            net_number, net_name = self._resolve_copper_net_ref(net, "add_via")
+
+        if dedupe:
+            via_keys = self._ensure_via_keys()
+            key = _via_dedup_key(net_number, x, y, layers)
+            if key in via_keys:
+                # Exact-duplicate via already on the board (issue #4175): skip.
+                return None
+            via_keys.add(key)
+
+        via = Via(
+            position=(x, y),
+            size=size,
+            drill=drill,
+            layers=list(layers),
+            net_number=net_number,
+            net_name=net_name,
+            via_type=resolved_type,
+            # Issue #4416: match the board's net-reference dialect (see add_trace).
+            net_name_only=self._net_name_only_dialect and bool(net_name),
+            uuid=self.mint_uuid("via", net_number, x, y, size, drill, *layers),
+        )
+        if tenting is not None:
+            via.tenting_front, via.tenting_back = tenting
+        self._vias.append(via)
+
+        # Input position is board-relative (matches Footprint.position and
+        # add_trace inputs); the S-expression form requires sheet-absolute.
+        # Serialize through the dialect-aware emitter with the board-origin
+        # offset (issue #4416 folds the former hand-rolled numeric branch in).
+        ox, oy = self._board_origin
+        self._sexp.append(via.to_sexp(offset=(ox, oy)))
+
+        return via
+
+    def has_graphic_line(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        layer: str,
+        *,
+        absolute: bool = False,
+    ) -> bool:
+        """Whether a ``gr_line`` with these endpoints (either order) is on ``layer``.
+
+        Endpoints match within 11 um: gr_line nodes are written at 2 decimals, so a line read
+        back from disk differs from the in-memory value by rounding. Inputs are
+        board-relative unless ``absolute`` (sheet coordinates).
+        """
+        ox, oy = (0.0, 0.0) if absolute else self._board_origin
+        a = (start[0] + ox, start[1] + oy)
+        b = (end[0] + ox, end[1] + oy)
+        tol = 1.1e-2
+
+        def near(p: tuple[float, float], q: tuple[float, float]) -> bool:
+            return abs(p[0] - q[0]) <= tol and abs(p[1] - q[1]) <= tol
+
+        return any(
+            g.layer == layer
+            and ((near(g.start, a) and near(g.end, b)) or (near(g.start, b) and near(g.end, a)))
+            for g in self._graphic_lines
+        )
+
+    def graphic_lines_on(self, layer: str) -> list[GraphicLine]:
+        """The board-level ``gr_line`` graphics on ``layer`` (sheet-absolute coordinates)."""
+        return [g for g in self._graphic_lines if g.layer == layer]
+
+    def remove_graphic_lines(self, lines: list[GraphicLine]) -> int:
+        """Remove specific ``gr_line`` graphics (Issue #8747); returns how many went.
+
+        Matched by identity in the in-memory list, then dropped from the
+        S-expression tree by UUID (or, for a UUID-less node, by layer and endpoints).
+        """
+        if not lines:
+            return 0
+        ids = {id(g) for g in lines}
+        victims = [g for g in self._graphic_lines if id(g) in ids]
+        uuids = {g.uuid for g in victims if g.uuid}
+        removed = 0
+        for node in list(self._sexp.children):
+            if node.is_atom or node.tag != "gr_line":
+                continue
+            u = node.find("uuid")
+            uuid = (u.get_string(0) or "") if u else ""
+            if uuid:
+                hit = uuid in uuids
+            else:
+                parsed = GraphicLine.from_sexp(node)
+                hit = any(
+                    not g.uuid
+                    and g.layer == parsed.layer
+                    and g.start == parsed.start
+                    and g.end == parsed.end
+                    for g in victims
+                )
+            if hit:
+                self._sexp.remove(node)
+                removed += 1
+        self._graphic_lines = [g for g in self._graphic_lines if id(g) not in ids]
+        self._graphics = [g for g in self._graphics if not (g.uuid and g.uuid in uuids)]
+        return len(victims)
+
+    def add_graphic_line(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        layer: str,
+        width: float = 0.1,
+        dedupe: bool = True,
+    ) -> GraphicLine | None:
+        """Add a board-level ``gr_line`` (Issue #8743, e.g. a solder-mask opening).
+
+        ``start``/``end`` are board-relative (like :meth:`add_via`); the written
+        node is sheet-absolute.  With ``dedupe`` (default) a line already on the
+        same ``layer`` with the same endpoints (either direction, to 1 nm) is
+        not added again and ``None`` is returned.
+        """
+        from ..sexp.builders import gr_line_node
+
+        ox, oy = self._board_origin
+        a = (start[0] + ox, start[1] + oy)
+        b = (end[0] + ox, end[1] + oy)
+        if dedupe and self.has_graphic_line(a, b, layer, absolute=True):
+            return None
+        line = GraphicLine(
+            start=a,
+            end=b,
+            layer=layer,
+            width=width,
+            uuid=self.mint_uuid("gr_line", layer, a[0], a[1], b[0], b[1], width),
+        )
+        node = gr_line_node(a[0], a[1], b[0], b[1], layer, width, line.uuid)
+        self._sexp.append(node)
+        self._graphic_lines.append(line)
+        self._graphics.append(BoardGraphic.from_sexp(node, "line"))
+        return line
+
+    def relocate_via(self, via: Via, new_position: tuple[float, float]) -> bool:
+        """Move an existing via to a new board-relative position.
+
+        Updates BOTH the in-memory :class:`Via` object and the backing
+        ``(via ...)`` S-expression node's ``(at ...)`` child, so the move
+        persists through :meth:`save`.  This is the mutating counterpart the
+        ``vias`` property setter deliberately forbids (direct assignment to
+        ``pcb.vias`` raises, because it would not touch the S-expression tree).
+
+        The via is matched to its S-expression node by UUID when available,
+        falling back to the via's current (pre-move) position.  Inputs are in
+        board-relative coordinates (matching :attr:`Via.position` and
+        :meth:`add_via`); the S-expression form stores sheet-absolute
+        coordinates, so :attr:`_board_origin` is added when writing the node.
+
+        Args:
+            via: The Via object to move (its :attr:`position` is updated in place).
+            new_position: Target ``(x, y)`` in board-relative mm.
+
+        Returns:
+            ``True`` when a backing S-expression node was found and updated;
+            ``False`` when no matching ``(via ...)`` node could be located
+            (in which case the in-memory object is still updated, but the move
+            will not persist -- callers should treat ``False`` as a failure).
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> v = next(pcb.vias_in_net(5))
+            >>> pcb.relocate_via(v, (v.position[0] + 0.5, v.position[1]))
+            >>> pcb.save()
+        """
+        ox, oy = self._board_origin
+        old_x, old_y = via.position
+        target_uuid = via.uuid
+
+        updated = False
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "via":
+                continue
+
+            at_node = child.find("at")
+            if at_node is None:
+                continue
+
+            if target_uuid:
+                uuid_node = child.find("uuid")
+                if not uuid_node or (uuid_node.get_string(0) or "") != target_uuid:
+                    continue
+            else:
+                # Fallback: match by current (sheet-absolute) position.
+                ax = at_node.get_float(0) or 0.0
+                ay = at_node.get_float(1) or 0.0
+                if abs(ax - (old_x + ox)) > 1e-6 or abs(ay - (old_y + oy)) > 1e-6:
+                    continue
+
+            at_node.set_value(0, new_position[0] + ox)
+            at_node.set_value(1, new_position[1] + oy)
+            updated = True
+            break
+
+        # Update the in-memory object regardless so reads reflect the move.
+        via.position = (new_position[0], new_position[1])
+        # Position changed -> the cached via dedup key set is stale.
+        self._invalidate_dedup_keys()
+        return updated
+
+    def reinforce_net(
+        self,
+        net_name: str,
+        *,
+        wire_gauge_awg: int = 16,
+        spacing_mm: float = 15.0,
+        design_rules: object | None = None,
+        layer: str | None = None,
+        dry_run: bool = False,
+        anchor_mode: str = "ends",
+        end_offset_mm: float = 1.0,
+        max_end_shift_mm: float | None = None,
+    ) -> object:
+        """Emit same-net PTH buttress-wire anchors along a routed net.
+
+        Thin wrapper around
+        :func:`kicad_tools.pcb.reinforce.reinforce_net` (Unit A of the
+        #4218 buttress-wire reinforcement design). Chains the target net's
+        routed segments into ordered polylines and places gauge-sized
+        plated-PTH anchor vias: by default (``anchor_mode="ends"``, #8742)
+        exactly two per single-layer wire leg, one near each end;
+        ``anchor_mode="spaced"`` keeps the historical row at both endpoints
+        and every ``spacing_mm`` along the longest run. Anchors are same-net
+        (no shorts); a candidate that would collide with a different net is
+        refused and reported rather than placed.
+
+        Args:
+            net_name: Target net name (must have routed copper).
+            wire_gauge_awg: Buttress-wire gauge in AWG (default 16).
+            spacing_mm: ``spaced`` mode: arc-length spacing between mid-run
+                anchors (mm).
+            design_rules: Manufacturer ``DesignRules`` supplying the
+                annular-ring / clearance / hole-to-hole floors. ``None``
+                uses JLCPCB-tier-typical fallback values.
+            layer: Restrict to a copper layer; ``None`` picks the layer with
+                the most cumulative routed length for the net.
+            dry_run: Compute the placement plan without adding vias.
+            anchor_mode: ``"ends"`` (default) or ``"spaced"``.
+            end_offset_mm: ``ends`` mode clearance (mm) from each end
+                anchor's pad edge to the same-net pad/via/trunk copper.
+            max_end_shift_mm: ``ends`` mode: how far (mm) a refused end
+                position is searched inward along the leg; ``None`` = a
+                quarter of the leg (at least 2 mm).
+
+        Returns:
+            A ``kicad_tools.pcb.reinforce.ReinforceResult``.
+        """
+        from kicad_tools.manufacturers.base import DesignRules
+        from kicad_tools.pcb.reinforce import reinforce_net as _reinforce_net
+
+        rules = design_rules if isinstance(design_rules, DesignRules) else None
+        return _reinforce_net(
+            self,
+            net_name,
+            wire_gauge_awg=wire_gauge_awg,
+            spacing_mm=spacing_mm,
+            design_rules=rules,
+            layer=layer,
+            dry_run=dry_run,
+            anchor_mode=anchor_mode,
+            end_offset_mm=end_offset_mm,
+            max_end_shift_mm=max_end_shift_mm,
+        )
+
+    def dedupe_copper(self) -> dict[str, int]:
+        """Remove pre-existing exact-duplicate copper (issue #4175).
+
+        Scans existing segments and vias, groups them by the same dedup keys
+        used by ``add_trace``/``add_via`` (net + geometry + layer/width, with
+        order-insensitive endpoints and ~1 micron rounding), keeps the first
+        element of each group, and drops the rest from both the in-memory
+        lists and the S-expression tree (so ``save()`` persists the cleanup).
+
+        Because every removed element is geometrically and electrically
+        identical to a copy that remains, net connectivity is unchanged.
+        Zero-length segments (start == end after rounding) are also dropped
+        (Issue #8397).
+
+        Returns:
+            ``{"segments": n_seg_removed, "vias": n_via_removed}``.
+        """
+        # Determine which segment/via uuids to drop (keep first per key).
+        seg_uuids_to_remove: set[str] = set()
+        seen_seg_keys: set[_SegmentKey] = set()
+        kept_segments: list[Segment] = []
+        for seg in self._segments:
+            skey = _segment_dedup_key(seg.net_number, seg.layer, seg.start, seg.end, seg.width)
+            if skey[2][0] == skey[2][1]:
+                # Issue #8397: zero-length (start == end after ~1 um rounding)
+                # copper is a point already covered by the adjoining segment,
+                # pad or via endpoint -- drop it.
+                if seg.uuid:
+                    seg_uuids_to_remove.add(seg.uuid)
+                continue
+            if skey in seen_seg_keys:
+                if seg.uuid:
+                    seg_uuids_to_remove.add(seg.uuid)
+            else:
+                seen_seg_keys.add(skey)
+                kept_segments.append(seg)
+
+        via_uuids_to_remove: set[str] = set()
+        seen_via_keys: set[_ViaKey] = set()
+        kept_vias: list[Via] = []
+        for via in self._vias:
+            vkey = _via_dedup_key(via.net_number, via.position[0], via.position[1], via.layers)
+            if vkey in seen_via_keys:
+                if via.uuid:
+                    via_uuids_to_remove.add(via.uuid)
+            else:
+                seen_via_keys.add(vkey)
+                kept_vias.append(via)
+
+        n_seg_removed = len(self._segments) - len(kept_segments)
+        n_via_removed = len(self._vias) - len(kept_vias)
+
+        # Remove duplicate S-expression nodes by uuid.
+        if seg_uuids_to_remove or via_uuids_to_remove:
+            sexp_to_remove = []
+            for child in self._sexp.children:
+                if child.is_atom:
+                    continue
+                if child.name == "segment":
+                    uuid_node = child.find("uuid")
+                    if uuid_node and (uuid_node.get_string(0) or "") in seg_uuids_to_remove:
+                        sexp_to_remove.append(child)
+                elif child.name == "via":
+                    uuid_node = child.find("uuid")
+                    if uuid_node and (uuid_node.get_string(0) or "") in via_uuids_to_remove:
+                        sexp_to_remove.append(child)
+            for node in sexp_to_remove:
+                self._sexp.remove(node)
+
+        self._segments = kept_segments
+        self._vias = kept_vias
+        self._invalidate_dedup_keys()
+
+        return {"segments": n_seg_removed, "vias": n_via_removed}
+
+    def routing_status(self) -> dict:
+        """
+        Get routing statistics for the PCB.
+
+        Returns information about traces, vias, and unrouted connections
+        (ratsnest) that can be used to assess routing completion.
+
+        Returns:
+            Dictionary with routing statistics:
+            - segments: Number of straight trace segments
+            - arcs: Number of curved copper tracks
+            - vias: Number of vias
+            - trace_length_mm: Total trace length in mm
+            - nets_with_traces: Set of net numbers that have traces
+            - unrouted_pads: List of (reference, pad, net) for pads without traces
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> status = pcb.routing_status()
+            >>> print(f"Segments: {status['segments']}, Vias: {status['vias']}")
+            >>> print(f"Total trace length: {status['trace_length_mm']:.1f} mm")
+        """
+        import math
+
+        # Count segments and calculate total length
+        total_length = 0.0
+        nets_with_traces: set[int] = set()
+
+        for seg in self._segments:
+            dx = seg.end[0] - seg.start[0]
+            dy = seg.end[1] - seg.start[1]
+            total_length += math.sqrt(dx * dx + dy * dy)
+            if seg.net_number > 0:
+                nets_with_traces.add(seg.net_number)
+
+        for arc in self._arcs:
+            total_length += arc.length
+            if arc.net_number > 0:
+                nets_with_traces.add(arc.net_number)
+
+        # Add vias to nets with traces
+        for via in self._vias:
+            if via.net_number > 0:
+                nets_with_traces.add(via.net_number)
+
+        # Find unrouted pads (pads with nets that have no traces)
+        unrouted_pads = []
+        for fp in self._footprints:
+            for pad in fp.pads:
+                if pad.net_number > 0 and pad.net_number not in nets_with_traces:
+                    unrouted_pads.append((fp.reference, pad.number, pad.net_name))
+
+        return {
+            "segments": self.segment_count,
+            "arcs": self.arc_count,
+            "vias": self.via_count,
+            "trace_length_mm": total_length,
+            "nets_with_traces": nets_with_traces,
+            "unrouted_pads": unrouted_pads,
+        }
+
+    def get_ratsnest(self) -> list[dict]:
+        """
+        Get the ratsnest (unrouted connections) for the PCB.
+
+        Returns a list of connections that need to be routed, showing which
+        pads need to be connected together on each net.
+
+        Returns:
+            List of dictionaries, each containing:
+            - net: Net name
+            - net_number: Net number
+            - pads: List of (reference, pad_number, x, y) tuples for pads in the net
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> for connection in pcb.get_ratsnest():
+            ...     print(f"{connection['net']}: {len(connection['pads'])} pads")
+        """
+        # Group pads by net
+        nets_pads: dict[int, list[tuple[str, str, float, float]]] = {}
+
+        for fp in self._footprints:
+            for pad in fp.pads:
+                if pad.net_number > 0:
+                    pos = self.get_pad_position(fp.reference, pad.number)
+                    if pos:
+                        if pad.net_number not in nets_pads:
+                            nets_pads[pad.net_number] = []
+                        nets_pads[pad.net_number].append((fp.reference, pad.number, pos[0], pos[1]))
+
+        # Build result with net names
+        result = []
+        for net_num, pads in nets_pads.items():
+            if len(pads) >= 2:  # Only include nets with multiple pads
+                net = self.get_net(net_num)
+                net_name = net.name if net else ""
+                result.append(
+                    {
+                        "net": net_name,
+                        "net_number": net_num,
+                        "pads": pads,
+                    }
+                )
+
+        return result
+
+    def assign_net_to_footprint_pad(
+        self,
+        reference: str,
+        pad_number: str,
+        net_name: str,
+    ) -> bool:
+        """
+        Assign a net to a specific pad on a footprint.
+
+        This updates both the in-memory footprint data and the underlying
+        S-expression tree for persistence.
+
+        Args:
+            reference: Footprint reference designator (e.g., "U1", "C1")
+            pad_number: Pad number/name (e.g., "1", "2", "A1")
+            net_name: Name of the net to assign (will be created if doesn't exist)
+
+        Returns:
+            True if the pad was found and updated, False otherwise
+
+        Example:
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> pcb.add_footprint("Capacitor_SMD:C_0805_2012Metric", "C1", 50, 50)
+            >>> pcb.assign_net_to_footprint_pad("C1", "1", "GND")
+            True
+        """
+        # Find the footprint in parsed data
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        # Ensure net exists and get its number
+        net = self.add_net(net_name)
+
+        # Update every in-memory pad sharing this number.
+        #
+        # KiCad models EP/thermal groups (QFN exposed pads, RF-module
+        # heatsink grids, DPAK tabs) as many pads that share a single pad
+        # number. All pads with the same number are one logical pin and must
+        # carry the same net, so we assign to every match rather than stopping
+        # at the first (see issue #4186). Empty/blank pad numbers are never
+        # passed here for a real schematic pin, and grouping only ever keys on
+        # a specific non-empty number, so unrelated unnumbered mechanical pads
+        # are never netted together.
+        pad_found = False
+        for pad in fp.pads:
+            if pad.number == pad_number:
+                pad.net_number = net.number
+                pad.net_name = net.name
+                pad_found = True
+
+        if not pad_found:
+            return False
+
+        # Update the S-expression tree
+        for fp_sexp in self._iter_footprint_sexps():
+            # Find the matching footprint by reference
+            ref_value = None
+
+            # KiCad 7 format: fp_text with type "reference"
+            for fp_text in fp_sexp.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref_value = fp_text.get_string(1)
+                    break
+
+            # KiCad 8+ format: property with name "Reference"
+            if not ref_value:
+                for prop in fp_sexp.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref_value = prop.get_string(1)
+                        break
+
+            if ref_value != reference:
+                continue
+
+            # Found the footprint, now update every pad sharing this number.
+            # Same rationale as the in-memory loop above (issue #4186): all
+            # pads with a given number are one logical pin and must all carry
+            # the net, so we visit every match instead of returning on the
+            # first one.
+            sexp_pad_found = False
+            for pad_sexp in fp_sexp.find_all("pad"):
+                if pad_sexp.get_string(0) == pad_number:
+                    # Remove existing net node if present
+                    net_node = pad_sexp.find("net")
+                    if net_node:
+                        pad_sexp.remove(net_node)
+
+                    # Add new net node
+                    # Issue #8550: name-only boards use (net "name") on pads.
+                    if self._net_name_only_dialect:
+                        new_net_node = SExp.list("net", SExp.quoted_atom(net.name))
+                    else:
+                        new_net_node = SExp.list("net", net.number, net.name)
+                    pad_sexp.append(new_net_node)
+                    sexp_pad_found = True
+
+            return sexp_pad_found
+
+        return False
+
+    def assign_nets_from_netlist(
+        self,
+        netlist,
+        pin_to_pad_map: dict[tuple[str, str], str] | None = None,
+    ) -> dict[str, list[str]]:
+        """
+        Assign nets to all footprint pads based on netlist connectivity.
+
+        Iterates through all nets in the netlist and assigns them to the
+        corresponding pads on footprints in the PCB.
+
+        When the netlist is produced by the pure-Python fallback path
+        (``build_netlist_from_schematic``), the ``node.pin`` values are
+        schematic symbol pin numbers.  These may differ from the footprint
+        pad numbers when alternate pin-to-pad mappings are in effect.
+        Callers can supply *pin_to_pad_map* to translate schematic pin
+        numbers to footprint pad numbers before assignment.
+
+        Args:
+            netlist: A Netlist object containing connectivity information
+            pin_to_pad_map: Optional mapping from ``(reference, pin_number)``
+                to ``pad_number``.  When provided, each ``node.pin`` is
+                looked up in the map before being used as a pad number.
+                If a key is not found in the map, ``node.pin`` is used
+                as-is (identity fallback).
+
+        Returns:
+            Dictionary with statistics:
+            - "assigned": List of successfully assigned pads (format: "REF.PIN")
+            - "missing_footprints": List of references not found in PCB
+            - "missing_pads": List of pads not found (format: "REF.PIN")
+
+        Example:
+            >>> from kicad_tools.operations.netlist import Netlist
+            >>> netlist = Netlist.load("project.kicad_net")
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> # ... add footprints ...
+            >>> result = pcb.assign_nets_from_netlist(netlist)
+            >>> print(f"Assigned {len(result['assigned'])} pads")
+        """
+        stats: dict[str, list[str]] = {
+            "assigned": [],
+            "missing_footprints": [],
+            "missing_pads": [],
+        }
+
+        # Track which footprints we've warned about
+        warned_refs: set[str] = set()
+
+        for net in netlist.nets:
+            # Skip the empty net (net 0)
+            if not net.name:
+                continue
+
+            for node in net.nodes:
+                ref = node.reference
+                pin = node.pin
+
+                # Resolve schematic pin number to footprint pad number
+                if pin_to_pad_map is not None:
+                    pad_number = pin_to_pad_map.get((ref, pin), pin)
+                else:
+                    pad_number = pin
+
+                # Check if footprint exists
+                fp = self.get_footprint(ref)
+                if not fp:
+                    if ref not in warned_refs:
+                        stats["missing_footprints"].append(ref)
+                        warned_refs.add(ref)
+                    continue
+
+                # Assign net to pad using the resolved pad number
+                if self.assign_net_to_footprint_pad(ref, pad_number, net.name):
+                    stats["assigned"].append(f"{ref}.{pad_number}")
+                else:
+                    stats["missing_pads"].append(f"{ref}.{pin}")
+
+        return stats
+
+    @property
+    def path(self) -> Path | None:
+        """Path to the PCB file (if loaded from file or saved).
+
+        This is used by export methods to locate the PCB file for kicad-cli.
+        Returns None if the PCB was created in memory and never saved.
+        """
+        return self._path
+
+    def strip_traces(
+        self,
+        *,
+        nets: list[str] | None = None,
+        layers: list[str] | None = None,
+        keep_zones: bool = True,
+        exclude_power: bool = False,
+        power_pattern: re.Pattern[str] | None = None,
+        remove_orphan_vias: bool = False,
+        region: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, int]:
+        """Remove trace segments and vias from the PCB.
+
+        This method strips routing from the PCB while preserving component
+        placement, zones (optionally), and other board elements. Useful for
+        re-routing a board from scratch with different routing strategies
+        or design rules.
+
+        Args:
+            nets: Optional list of net names to strip. If None, strips all nets.
+                  When specified, only segments/vias belonging to these nets
+                  are removed.
+            layers: Optional list of layer names to strip (e.g. ``["In1.Cu"]``).
+                    When provided, only segments on the listed layers are
+                    candidates for removal.  Vias are removed only when ALL of
+                    their layers are in the strip set.  When both *nets* and
+                    *layers* are given they are ANDed together.
+            keep_zones: If True (default), preserve copper pour zones.
+                        If False, remove zones as well.
+            exclude_power: If True, power/ground nets are never stripped
+                           even when they match other filters.  Defaults to
+                           ``False`` for backward compatibility; the CLI
+                           defaults to excluding power nets.
+            power_pattern: Optional compiled regex overriding the built-in
+                           power-net heuristic used when *exclude_power* is
+                           ``True``.
+            remove_orphan_vias: If True, remove vias that no longer connect
+                                to any remaining segment on either of their
+                                layers after layer-filtered stripping.
+                                Only meaningful when *layers* is specified.
+            region: Optional ``(x1, y1, x2, y2)`` bounding box (board-relative
+                    mm coordinates) that spatially bounds the strip.  When
+                    given, only geometry *inside* the box is removed and the
+                    filter is ANDed with *nets* / *layers* / *exclude_power*:
+
+                    * A **via** is stripped only when its ``(at x y)`` point is
+                      inside the box.
+                    * A **segment** fully inside the box is removed; a segment
+                      fully outside is kept unchanged.  A segment with exactly
+                      one endpoint inside is *clipped* at the box boundary --
+                      the inside portion is removed and the outside portion is
+                      kept as a shortened segment (see ``segments_clipped`` in
+                      the returned stats).  A segment with both endpoints
+                      outside is kept unchanged even if its span happens to
+                      cross the box (a "skip-and-report" fallback -- these are
+                      counted in ``segments_boundary_skipped``), because
+                      splitting a segment into two outside pieces would leave a
+                      dangling gap with no via/pad termination inside the box.
+                    * **Zones** are polygons; region-based zone removal only
+                      triggers (with ``keep_zones=False``) when the zone's
+                      entire polygon is contained in the box (conservative --
+                      no polygon clipping is performed).
+
+                    The box is normalized internally, so inverted/degenerate
+                    coordinates are tolerated by this method; the CLI validates
+                    and rejects ``x1 >= x2`` / ``y1 >= y2`` before calling.
+
+        Returns:
+            Dictionary with counts of removed elements:
+            - "segments": Number of trace segments removed (includes the
+              inside portion of clipped segments)
+            - "vias": Number of vias removed
+            - "zones": Number of zones removed (0 if keep_zones=True)
+            - "segments_clipped": Number of boundary-crossing segments that
+              were clipped to their outside portion (0 when *region* is None)
+            - "segments_boundary_skipped": Number of segments spanning the box
+              with both endpoints outside that were left untouched (0 when
+              *region* is None)
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> stats = pcb.strip_traces()
+            >>> print(f"Removed {stats['segments']} segments and {stats['vias']} vias")
+            >>> pcb.save("board-stripped.kicad_pcb")
+
+            # Strip only specific nets
+            >>> stats = pcb.strip_traces(nets=["GND", "VCC"])
+
+            # Strip everything including zones
+            >>> stats = pcb.strip_traces(keep_zones=False)
+
+            # Strip only inner-layer signal traces (power excluded by default)
+            >>> stats = pcb.strip_traces(layers=["In1.Cu", "In2.Cu"])
+        """
+        from ..core.layers import kicad_read_via_layers, via_node_type, via_spans_layer
+
+        # Build set of net numbers to strip (if filtering by net name)
+        net_numbers_to_strip: set[int] | None = None
+        if nets is not None:
+            net_numbers_to_strip = set()
+            for net_name in nets:
+                for net_num, net in self._nets.items():
+                    if net.name == net_name:
+                        net_numbers_to_strip.add(net_num)
+                        break
+
+        # Reverse map (net name -> number) so we can resolve name-based inline
+        # net references — ``(net "GND")``, the dialect KiCad 10 writes — back to
+        # the numeric id carried in the header net table.  Mirrors the map built
+        # by ``_fixup_net_numbers`` (see the ``name_to_number`` construction
+        # above).  Without this, ``get_int(0)`` returns None for a name token and
+        # every copper item resolves to net 0, so the net filter matches nothing.
+        name_to_number: dict[str, int] = {
+            net.name: net_num for net_num, net in self._nets.items() if net.name and net_num != 0
+        }
+
+        # Build layer set for fast membership tests
+        layer_set: set[str] | None = None
+        if layers is not None:
+            layer_set = set(layers)
+
+        # Normalize the region bbox (board-relative coords) so x1<x2, y1<y2.
+        # SExp start/end/at nodes store sheet-absolute coords (board-relative +
+        # board_origin), so we convert them to board-relative before comparing.
+        region_box: tuple[float, float, float, float] | None = None
+        if region is not None:
+            rx1, ry1, rx2, ry2 = region
+            region_box = (min(rx1, rx2), min(ry1, ry2), max(rx1, rx2), max(ry1, ry2))
+        ox_region, oy_region = self._board_origin
+
+        def _point_in_region(abs_x: float, abs_y: float) -> bool:
+            """True if a sheet-absolute point falls inside the region box."""
+            if region_box is None:
+                return True
+            rel_x = abs_x - ox_region
+            rel_y = abs_y - oy_region
+            x1, y1, x2, y2 = region_box
+            return x1 <= rel_x <= x2 and y1 <= rel_y <= y2
+
+        def _clip_point_to_region(
+            inside: tuple[float, float], outside: tuple[float, float]
+        ) -> tuple[float, float]:
+            """Intersect the inside->outside segment with the region boundary.
+
+            Both points are sheet-absolute.  Returns the sheet-absolute point
+            on the box boundary (the closest crossing to *inside*).  The
+            returned point becomes the new terminal of the kept outside piece.
+            """
+            assert region_box is not None
+            x1, y1, x2, y2 = region_box
+            ix, iy = inside[0] - ox_region, inside[1] - oy_region
+            oxp, oyp = outside[0] - ox_region, outside[1] - oy_region
+            dx = oxp - ix
+            dy = oyp - iy
+            # Find the smallest t in (0, 1] where the segment exits the box.
+            t_best = 1.0
+            if dx > 0:
+                t_best = min(t_best, (x2 - ix) / dx)
+            elif dx < 0:
+                t_best = min(t_best, (x1 - ix) / dx)
+            if dy > 0:
+                t_best = min(t_best, (y2 - iy) / dy)
+            elif dy < 0:
+                t_best = min(t_best, (y1 - iy) / dy)
+            t_best = max(0.0, min(1.0, t_best))
+            cx = ix + dx * t_best
+            cy = iy + dy * t_best
+            # Convert back to sheet-absolute coordinates.
+            return (cx + ox_region, cy + oy_region)
+
+        # Build set of power-net numbers for exclusion
+        power_net_numbers: set[int] = set()
+        if exclude_power:
+            for net_num, net in self._nets.items():
+                if _is_power_net(net.name, power_pattern):
+                    power_net_numbers.add(net_num)
+
+        def _net_num_from_child(child: SExp) -> int:
+            net_node = child.find("net")
+            if not net_node:
+                return 0
+            # Numeric dialect: ``(net 5)`` — read the id directly.
+            num = net_node.get_int(0)
+            if num is not None:
+                return num
+            # Name-based dialect: ``(net "GND")`` — resolve via the header table.
+            # Read-only resolution for the filter decision; the on-disk token is
+            # left untouched, so kept items retain their original name form.
+            name = net_node.get_string(0)
+            if name is not None:
+                return name_to_number.get(name, 0)
+            return 0
+
+        def _should_strip_net(net_num: int) -> bool:
+            """Return True if *net_num* passes the net filter."""
+            if net_numbers_to_strip is not None and net_num not in net_numbers_to_strip:
+                return False
+            if exclude_power and net_num in power_net_numbers:
+                return False
+            return True
+
+        removed_segments = 0
+        removed_vias = 0
+        removed_zones = 0
+        clipped_segments = 0
+        boundary_skipped_segments = 0
+
+        # Track clipped-segment geometry so the parsed self._segments view can
+        # be updated in lock-step with the S-expression tree below.  Maps the
+        # segment's uuid -> new board-relative (start, end) endpoints.
+        clipped_geometry: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
+
+        # Filter S-expression children to remove segments, vias, and optionally zones
+        new_children = []
+        for child in self._sexp.children:
+            should_remove = False
+
+            if child.name == "segment":
+                net_num = _net_num_from_child(child)
+                passes_net = _should_strip_net(net_num)
+                passes_layer = True
+                if passes_net and layer_set is not None:
+                    layer_node = child.find("layer")
+                    seg_layer = (layer_node.get_string(0) or "") if layer_node else ""
+                    passes_layer = seg_layer in layer_set
+
+                if passes_net and passes_layer:
+                    if region_box is None:
+                        # No spatial bound: existing whole-segment behavior.
+                        should_remove = True
+                    else:
+                        # Spatially bounded: classify by endpoint membership.
+                        start_node = child.find("start")
+                        end_node = child.find("end")
+                        if start_node and end_node:
+                            sx = start_node.get_float(0) or 0.0
+                            sy = start_node.get_float(1) or 0.0
+                            ex = end_node.get_float(0) or 0.0
+                            ey = end_node.get_float(1) or 0.0
+                            start_in = _point_in_region(sx, sy)
+                            end_in = _point_in_region(ex, ey)
+                            if start_in and end_in:
+                                # Fully inside the box — remove entirely.
+                                should_remove = True
+                            elif start_in != end_in:
+                                # Boundary-crossing — clip to the outside piece.
+                                inside_pt = (sx, sy) if start_in else (ex, ey)
+                                outside_pt = (ex, ey) if start_in else (sx, sy)
+                                clip_pt = _clip_point_to_region(inside_pt, outside_pt)
+                                # Rewrite the surviving segment: the outside
+                                # endpoint stays, the inside endpoint moves to
+                                # the region boundary.
+                                if start_in:
+                                    start_node.set_value(0, clip_pt[0])
+                                    start_node.set_value(1, clip_pt[1])
+                                    abs_start = clip_pt
+                                    abs_end = (ex, ey)
+                                else:
+                                    end_node.set_value(0, clip_pt[0])
+                                    end_node.set_value(1, clip_pt[1])
+                                    abs_start = (sx, sy)
+                                    abs_end = clip_pt
+                                clipped_segments += 1
+                                uuid_node = child.find("uuid")
+                                seg_uuid = uuid_node.get_string(0) if uuid_node else None
+                                if seg_uuid:
+                                    # Record board-relative endpoints (subtract
+                                    # board origin) for the parsed-view sync.
+                                    clipped_geometry[seg_uuid] = (
+                                        (abs_start[0] - ox_region, abs_start[1] - oy_region),
+                                        (abs_end[0] - ox_region, abs_end[1] - oy_region),
+                                    )
+                            else:
+                                # Both endpoints outside the box.  The span may
+                                # still cross the box, but splitting it would
+                                # leave a dangling gap with no termination
+                                # inside; per the documented policy we skip and
+                                # report it instead of silently mangling copper.
+                                if _segment_span_intersects_region(
+                                    (sx - ox_region, sy - oy_region),
+                                    (ex - ox_region, ey - oy_region),
+                                    region_box,
+                                ):
+                                    boundary_skipped_segments += 1
+
+                if should_remove:
+                    removed_segments += 1
+
+            elif child.name == "via":
+                net_num = _net_num_from_child(child)
+                if _should_strip_net(net_num):
+                    if layer_set is not None:
+                        # Remove via only if ALL its layers are in the strip set
+                        layers_node = child.find("layers")
+                        if layers_node:
+                            # Issue #6614: judge the span KiCad reads -- a
+                            # keyword-less partial pair is a through via, so
+                            # it also reaches F.Cu/B.Cu.
+                            via_layers = list(
+                                kicad_read_via_layers(
+                                    [
+                                        layers_node.get_string(i) or ""
+                                        for i in range(len(layers_node.values))
+                                        if isinstance(layers_node.values[i], str)
+                                    ],
+                                    via_node_type(child),
+                                )[0]
+                            )
+                            if via_layers and all(vl in layer_set for vl in via_layers):
+                                should_remove = True
+                    elif net_numbers_to_strip is not None:
+                        should_remove = True
+                    else:
+                        should_remove = True
+
+                # A via is a point: it is only stripped when its (at x y)
+                # position falls inside the region box (ANDed with the above).
+                if should_remove and region_box is not None:
+                    at_node = child.find("at")
+                    if at_node is None:
+                        should_remove = False
+                    else:
+                        vx = at_node.get_float(0) or 0.0
+                        vy = at_node.get_float(1) or 0.0
+                        should_remove = _point_in_region(vx, vy)
+
+                if should_remove:
+                    removed_vias += 1
+
+            elif child.name == "zone" and not keep_zones:
+                net_num = _net_num_from_child(child)
+                if _should_strip_net(net_num):
+                    if layer_set is not None:
+                        # Only remove zones on specified layers
+                        layer_node = child.find("layer")
+                        if layer_node:
+                            zone_layer = layer_node.get_string(0) or ""
+                            if zone_layer in layer_set:
+                                should_remove = True
+                    elif net_numbers_to_strip is not None:
+                        should_remove = True
+                    else:
+                        should_remove = True
+
+                # Region: zones are polygons, not lines.  Phase 1 does NOT clip
+                # zone polygons; a zone is only removed when its entire boundary
+                # polygon is contained in the region box (conservative).
+                if should_remove and region_box is not None:
+                    poly_node = child.find("polygon")
+                    pts_node = poly_node.find("pts") if poly_node else None
+                    if pts_node is None:
+                        should_remove = False
+                    else:
+                        xy_nodes = pts_node.find_all("xy")
+                        if not xy_nodes:
+                            should_remove = False
+                        else:
+                            should_remove = all(
+                                _point_in_region(xy.get_float(0) or 0.0, xy.get_float(1) or 0.0)
+                                for xy in xy_nodes
+                            )
+
+                if should_remove:
+                    removed_zones += 1
+
+            if not should_remove:
+                new_children.append(child)
+
+        # Update the S-expression tree
+        self._sexp.children = new_children
+
+        # --- Orphan via removal ------------------------------------------------
+        # After stripping layer-filtered segments, detect vias that no longer
+        # connect to any remaining segment on either of their layers.
+        removed_orphan_vias = 0
+        if remove_orphan_vias and layer_set is not None:
+            # Build a map position -> layers of remaining segment endpoints
+            remaining_endpoints: dict[tuple[float, float], set[str]] = {}
+            for child in self._sexp.children:
+                if child.name == "segment":
+                    layer_node = child.find("layer")
+                    seg_layer = (layer_node.get_string(0) or "") if layer_node else ""
+                    start_node = child.find("start")
+                    end_node = child.find("end")
+                    if start_node:
+                        sx = start_node.get_float(0) or 0.0
+                        sy = start_node.get_float(1) or 0.0
+                        remaining_endpoints.setdefault((round(sx, 4), round(sy, 4)), set()).add(
+                            seg_layer
+                        )
+                    if end_node:
+                        ex = end_node.get_float(0) or 0.0
+                        ey = end_node.get_float(1) or 0.0
+                        remaining_endpoints.setdefault((round(ex, 4), round(ey, 4)), set()).add(
+                            seg_layer
+                        )
+
+            new_children2 = []
+            for child in self._sexp.children:
+                if child.name == "via":
+                    at_node = child.find("at")
+                    layers_node = child.find("layers")
+                    if at_node and layers_node:
+                        vx = round(at_node.get_float(0) or 0.0, 4)
+                        vy = round(at_node.get_float(1) or 0.0, 4)
+                        # Issue #6614: read the span KiCad reads (a
+                        # keyword-less partial pair is a through via) and
+                        # count an endpoint on ANY layer the barrel passes
+                        # through, not just the two named in the pair.
+                        read_span, _ = kicad_read_via_layers(
+                            [
+                                layers_node.get_string(i) or ""
+                                for i in range(len(layers_node.values))
+                                if isinstance(layers_node.values[i], str)
+                            ],
+                            via_node_type(child),
+                        )
+                        # Via is orphan if NO layer it spans has a segment
+                        # endpoint at its position.
+                        connected = any(
+                            via_spans_layer(read_span, seg_layer)
+                            for seg_layer in remaining_endpoints.get((vx, vy), ())
+                        )
+                        if not connected:
+                            removed_orphan_vias += 1
+                            removed_vias += 1
+                            continue
+                new_children2.append(child)
+            self._sexp.children = new_children2
+
+        # Update internal state to reflect the changes
+        def _seg_matches(seg: Segment) -> bool:
+            """Return True if segment should be KEPT."""
+            if exclude_power and seg.net_number in power_net_numbers:
+                return True
+            if net_numbers_to_strip is not None and seg.net_number not in net_numbers_to_strip:
+                return True
+            if layer_set is not None and seg.layer not in layer_set:
+                return True
+            return False
+
+        def _via_matches(via: Via) -> bool:
+            """Return True if via should be KEPT."""
+            if exclude_power and via.net_number in power_net_numbers:
+                return True
+            if net_numbers_to_strip is not None and via.net_number not in net_numbers_to_strip:
+                return True
+            if layer_set is not None and not all(vl in layer_set for vl in via.layers):
+                return True
+            # Region: keep the via if its point is outside the box.
+            if region_box is not None:
+                x1, y1, x2, y2 = region_box
+                vx, vy = via.position
+                if not (x1 <= vx <= x2 and y1 <= vy <= y2):
+                    return True
+            return False
+
+        def _zone_matches(zone: Zone) -> bool:
+            """Return True if zone should be KEPT."""
+            if exclude_power and zone.net_number in power_net_numbers:
+                return True
+            if net_numbers_to_strip is not None and zone.net_number not in net_numbers_to_strip:
+                return True
+            if layer_set is not None and zone.layer not in layer_set:
+                return True
+            # Region: keep the zone unless its whole polygon is inside the box.
+            if region_box is not None:
+                x1, y1, x2, y2 = region_box
+                poly = zone.polygon or []
+                if not poly or not all(x1 <= px <= x2 and y1 <= py <= y2 for px, py in poly):
+                    return True
+            return False
+
+        def _region_keeps_segment(seg: Segment) -> bool:
+            """Return True if *region* alone would preserve (not fully strip) seg.
+
+            A segment is fully removed only when both endpoints are inside the
+            box.  Crossing segments are clipped (their endpoints are rewritten
+            below), so they are "kept" here in the sense of surviving the list.
+            """
+            if region_box is None:
+                return False
+            x1, y1, x2, y2 = region_box
+            start_in = x1 <= seg.start[0] <= x2 and y1 <= seg.start[1] <= y2
+            end_in = x1 <= seg.end[0] <= x2 and y1 <= seg.end[1] <= y2
+            return not (start_in and end_in)
+
+        def _seg_matches_with_region(seg: Segment) -> bool:
+            """Return True if the segment should be KEPT (region-aware)."""
+            if _seg_matches(seg):
+                return True
+            # Passed the net/layer/power filters — apply the spatial bound.
+            if region_box is not None and _region_keeps_segment(seg):
+                return True
+            return False
+
+        # Rewrite clipped segments' parsed endpoints (board-relative) so the
+        # parsed view matches the S-expression tree.
+        if clipped_geometry:
+            for seg in self._segments:
+                new_geom = clipped_geometry.get(seg.uuid)
+                if new_geom is not None:
+                    seg.start, seg.end = new_geom
+
+        # Apply filtering helpers
+        has_any_filter = (
+            net_numbers_to_strip is not None
+            or layer_set is not None
+            or exclude_power
+            or region_box is not None
+        )
+        if has_any_filter:
+            self._segments = [seg for seg in self._segments if _seg_matches_with_region(seg)]
+            self._vias = [via for via in self._vias if _via_matches(via)]
+            if not keep_zones:
+                self._zones = [zone for zone in self._zones if _zone_matches(zone)]
+        else:
+            self._segments = []
+            self._vias = []
+            if not keep_zones:
+                self._zones = []
+
+        # Handle orphan via removal in internal state
+        if remove_orphan_vias and layer_set is not None and removed_orphan_vias > 0:
+            remaining_ep_set: set[tuple[float, float, str]] = set()
+            for seg in self._segments:
+                remaining_ep_set.add((round(seg.start[0], 4), round(seg.start[1], 4), seg.layer))
+                remaining_ep_set.add((round(seg.end[0], 4), round(seg.end[1], 4), seg.layer))
+            self._vias = [
+                v
+                for v in self._vias
+                if any(
+                    (round(v.position[0], 4), round(v.position[1], 4), vl) in remaining_ep_set
+                    for vl in v.layers
+                )
+            ]
+
+        # Copper lists were bulk-mutated: drop cached dedup keys (issue #4175)
+        # so a later add_trace/add_via rebuilds them from the surviving copper.
+        self._invalidate_dedup_keys()
+
+        return {
+            "segments": removed_segments,
+            "vias": removed_vias,
+            "zones": removed_zones,
+            "segments_clipped": clipped_segments,
+            "segments_boundary_skipped": boundary_skipped_segments,
+        }
+
+    def _unpersisted_edits(self) -> list[str]:
+        """List ``ref/pad.field`` edits that ``save()`` would silently drop.
+
+        ``save()`` serialises the S-expression tree, so a ``Pad``/``Footprint``
+        field with no write-through only changes the Python object.  Re-parse
+        each linked node and report the identity/net fields that no longer
+        match it (issue #7479).  The supported mutators
+        (``update_footprint_reference`` and friends) edit the node as well, so
+        they never show up here; in-memory-only edits stay legal until saved.
+        """
+        problems: list[str] = []
+        for fp in self._footprints:
+            fp_node = fp.__dict__.get("_sexp_node")
+            if fp_node is None:
+                continue
+            ref = fp.reference or fp.name or "?"
+            node_fp = Footprint.from_sexp(fp_node)
+            for fname in ("name", "reference", "value", "description", "tags", "uuid"):
+                if getattr(fp, fname) != getattr(node_fp, fname):
+                    problems.append(f"{ref}.{fname}")
+            if fp.properties != node_fp.properties:
+                changed = sorted(
+                    k
+                    for k in fp.properties.keys() | node_fp.properties.keys()
+                    if fp.properties.get(k) != node_fp.properties.get(k)
+                )
+                problems.extend(f"{ref}.properties[{k!r}]" for k in changed)
+            pad_nodes = fp_node.find_all("pad")
+            if len(fp.pads) != len(pad_nodes):
+                problems.append(f"{ref}.pads ({len(fp.pads)} in memory, {len(pad_nodes)} in file)")
+                continue
+            for pad in fp.pads:
+                pad_node = pad.__dict__.get("_sexp_node")
+                if pad_node is None:
+                    problems.append(f"{ref}/pad {pad.number}: not linked to the board")
+                    continue
+                node_pad = Pad.from_sexp(pad_node)
+                if node_pad is None:
+                    continue
+                fields = ["number", "type", "uuid", "pintype", "pinfunction"]
+                net_node = pad_node.find_child("net")
+                # Number-only ``(net N)`` pads get ``net_name`` filled in memory
+                # by ``_fixup_net_numbers``; only a node with a name atom can
+                # disagree (issue #7519).
+                # A quoted numeric-looking name is a name, not a number (#8550).
+                numbered = net_node is not None and isinstance(net_node.get_value(0), int)
+                name_idx = 1 if numbered else 0
+                if net_node is None or net_node.get_string(name_idx) is not None:
+                    fields.append("net_name")
+                # Name-only ``(net "X")`` pads get ``net_number`` filled in memory
+                # by ``_fixup_net_numbers``; only a numbered node can disagree.
+                if numbered:
+                    fields.append("net_number")
+                for fname in fields:
+                    if getattr(pad, fname) != getattr(node_pad, fname):
+                        problems.append(f"{ref}/pad {node_pad.number}.{fname}")
+        return problems
+
+    def _check_no_unpersisted_edits(self) -> None:
+        problems = self._unpersisted_edits()
+        if problems:
+            raise ValueError(
+                "PCB.save() would silently drop edits that are not mirrored into the "
+                "S-expression tree (nothing was written): "
+                + ", ".join(problems)
+                + ". Use the supported API instead: update_footprint_reference(), "
+                "update_footprint_value() or assign_net_to_footprint_pad(); "
+                "Pad.size/drill/drill_size/drill_offset/shape/roundrect_rratio/"
+                "solder_mask_margin/zone_connect and Footprint.position/rotation/layer "
+                "write through."
+            )
+
+    def save(self, path: str | Path | None = None) -> None:
+        """
+        Save the PCB to a file.
+
+        Args:
+            path: Path to save to (.kicad_pcb). If None, uses the original
+                  path from load() or the last save location.
+
+        Raises:
+            ValueError: If no path provided and PCB has no stored path, or if
+                a ``Pad``/``Footprint`` field that is not mirrored into the
+                S-expression tree was edited directly (issue #7479); nothing
+                is written in that case.
+        """
+        self._check_no_unpersisted_edits()
+        if path is None:
+            if self._path is None:
+                raise ValueError(
+                    "No path specified and PCB has no stored path. "
+                    "Provide a path or use PCB.load() to load from a file."
+                )
+            path = self._path
+        else:
+            path = Path(path)
+            self._path = path
+
+        save_pcb(self._sexp, path)
+
+    # =========================================================================
+    # Manufacturing Export Methods
+    # =========================================================================
+
+    def export_gerbers(
+        self,
+        output_dir: str | Path,
+        *,
+        manufacturer: str = "jlcpcb",
+        layers: list[str] | None = None,
+        include_drill: bool | None = None,
+        create_zip: bool | None = None,
+    ) -> Path:
+        """
+        Export Gerber files for PCB fabrication.
+
+        Uses kicad-cli to generate Gerber files with manufacturer-specific settings.
+
+        Every argument is honoured for every manufacturer (Issue #7023). For the
+        presets (``"jlcpcb"``, ``"pcbway"``, ``"oshpark"``) the preset supplies the
+        defaults and an explicitly passed argument overrides it.
+
+        Args:
+            output_dir: Directory for output files
+            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark") or
+                any other name for a generic export
+            layers: Specific layers to export, passed verbatim to kicad-cli
+                (default: all copper + required layers). A list without
+                ``Edge.Cuts`` logs a warning.
+            include_drill: Include drill files (default when omitted: True)
+            create_zip: Create a zip archive of all files. When omitted, presets
+                return a ready-to-upload zip (loose files removed) and the
+                generic path returns the directory. ``False`` always returns
+                the directory with loose files; ``True`` always returns a zip.
+
+        Returns:
+            Path to the zip file when zipping, otherwise the output directory
+
+        Raises:
+            ValueError: If PCB has no stored path (save first)
+            ExportError: If kicad-cli fails
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_gerbers("./output", manufacturer="jlcpcb")  # -> zip
+            >>> # Loose files instead of a zip
+            >>> pcb.export_gerbers("./gerbers", manufacturer="jlcpcb", create_zip=False)
+        """
+        from ..export import GerberConfig, GerberExporter
+
+        pcb_path = self._require_path("export_gerbers")
+
+        exporter = GerberExporter(pcb_path)
+
+        if manufacturer.lower() in ("jlcpcb", "pcbway", "oshpark"):
+            result = exporter.export_for_manufacturer(
+                manufacturer.lower(),
+                output_dir,
+                layers=layers,
+                generate_drill=include_drill,
+                create_zip=create_zip,
+            )
+        else:
+            config = GerberConfig(
+                output_dir=Path(output_dir),
+                layers=layers or [],
+                generate_drill=True if include_drill is None else include_drill,
+                create_zip=False if create_zip is None else create_zip,
+            )
+            result = exporter.export(config, output_dir)
+
+        return result
+
+    def export_drill(
+        self,
+        output_dir: str | Path,
+        *,
+        format: str = "excellon",
+        units: str = "mm",
+        merge_pth_npth: bool = False,
+    ) -> Path:
+        """
+        Export drill files (Excellon format).
+
+        Args:
+            output_dir: Directory for output files
+            format: Drill format ("excellon" or "gerber"; "gerber_x2" is an alias)
+            units: Units ("mm" or "in"; "inch" is an alias)
+            merge_pth_npth: One merged ``<board>.drl`` instead of separate
+                ``<board>-PTH.drl`` / ``<board>-NPTH.drl`` (default: False)
+
+        Returns:
+            Path to output directory containing only the drill files
+            (no Gerbers, no zip)
+
+        Raises:
+            ValueError: If PCB has no stored path
+            ExportError: If kicad-cli fails
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_drill("./gerbers", merge_pth_npth=False)
+        """
+        from ..export import GerberConfig, GerberExporter
+
+        pcb_path = self._require_path("export_drill")
+
+        config = GerberConfig(
+            output_dir=Path(output_dir),
+            generate_drill=True,
+            drill_format=format,
+            drill_units=units,
+            merge_pth_npth=merge_pth_npth,
+            # Drill only: no Gerber plot and no zip (Issue #6180)
+            generate_gerbers=False,
+            create_zip=False,
+            clean_after_zip=False,
+        )
+
+        exporter = GerberExporter(pcb_path)
+        return exporter.export(config, output_dir)
+
+    def export_bom(
+        self,
+        output: str | Path,
+        *,
+        schematic_path: str | Path | None = None,
+        format: str = "csv",
+        manufacturer: str = "generic",
+    ) -> Path:
+        """
+        Export Bill of Materials (BOM).
+
+        Generates a BOM from the associated schematic file.
+
+        Args:
+            output: Output file path
+            schematic_path: Path to schematic file. If not provided, looks for
+                           a .kicad_sch file with the same name as the PCB.
+            format: Output format ("csv", "jlcpcb", "pcbway", "seeed")
+            manufacturer: Manufacturer format preset
+
+        Returns:
+            Path to generated BOM file
+
+        Raises:
+            ValueError: If schematic not found
+            ExportError: If BOM generation fails
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_bom("bom.csv")
+            >>> # JLCPCB format
+            >>> pcb.export_bom("bom_jlcpcb.csv", format="jlcpcb")
+        """
+        from ..export import BOMExportConfig
+        from ..export import export_bom as _export_bom
+        from ..schema.bom import extract_bom
+
+        # Find schematic
+        if schematic_path is None:
+            pcb_path = self._require_path("export_bom")
+            schematic_path = pcb_path.with_suffix(".kicad_sch")
+            if not schematic_path.exists():
+                raise ValueError(
+                    f"Schematic not found at {schematic_path}. Provide schematic_path explicitly."
+                )
+        else:
+            schematic_path = Path(schematic_path)
+            if not schematic_path.exists():
+                raise ValueError(f"Schematic not found: {schematic_path}")
+
+        # Extract BOM from schematic
+        bom = extract_bom(schematic_path)
+        items = bom.items
+
+        # Determine manufacturer format
+        mfr = manufacturer.lower()
+        if format.lower() in ("jlcpcb", "pcbway", "seeed"):
+            mfr = format.lower()
+
+        config = BOMExportConfig()
+        bom_csv = _export_bom(items, mfr, config)
+
+        # Write to file
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(bom_csv)
+
+        return output_path
+
+    def export_placement(
+        self,
+        output: str | Path,
+        *,
+        format: str = "csv",
+        manufacturer: str = "generic",
+        side: str | None = None,
+    ) -> Path:
+        """
+        Export pick-and-place (CPL) file for SMT assembly.
+
+        Args:
+            output: Output file path
+            format: Output format ("csv", "jlcpcb", "pcbway")
+            manufacturer: Manufacturer format preset
+            side: Export only "top" or "bottom" side (default: both)
+
+        Returns:
+            Path to generated placement file
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_placement("placement.csv")
+            >>> # JLCPCB format
+            >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
+        """
+        from ..export import export_pnp as _export_pnp
+        from ..export.pnp import _aux_origin_of
+
+        footprints = list(self.footprints)
+
+        # Filter by side if specified
+        if side:
+            layer = "F.Cu" if side.lower() == "top" else "B.Cu"
+            footprints = [fp for fp in footprints if fp.layer == layer]
+
+        # Determine manufacturer format
+        mfr = manufacturer.lower()
+        if format.lower() in ("jlcpcb", "pcbway"):
+            mfr = format.lower()
+
+        # Pass config=None so the formatter resolves the effective config —
+        # the single source of truth (issues #3616/#3618).  Synthesizing a
+        # bare PnPExportConfig() here would defeat manufacturer defaults such
+        # as a fab-specific exclude_tht default.
+        pnp_csv = _export_pnp(footprints, mfr, config=None, aux_origin=_aux_origin_of(self.setup))
+
+        # Write to file
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(pnp_csv)
+
+        return output_path
+
+    def export_manufacturing(
+        self,
+        output_dir: str | Path,
+        *,
+        manufacturer: str = "jlcpcb",
+        schematic_path: str | Path | None = None,
+        include_assembly: bool = True,
+        create_zip: bool = True,
+    ) -> dict[str, str | None]:
+        """
+        Export complete manufacturing package.
+
+        Generates all files needed for PCB fabrication and assembly:
+        - Gerber files (copper, silkscreen, solder mask, outline)
+        - Drill files (PTH and NPTH)
+        - BOM (if include_assembly=True)
+        - Pick-and-place/CPL (if include_assembly=True)
+
+        Args:
+            output_dir: Directory for output files
+            manufacturer: Target manufacturer ("jlcpcb", "pcbway", "oshpark", "seeed")
+            schematic_path: Path to schematic (required for BOM/assembly)
+            include_assembly: Include BOM and placement files (default: True)
+            create_zip: Create zip archive ready for upload (default: True)
+
+        Returns:
+            Dictionary with paths to generated files:
+            {
+                "gerbers": "./output/gerbers.zip",
+                "drill": "./output/gerbers.zip",  # Included in gerbers
+                "bom": "./output/bom.csv",
+                "placement": "./output/cpl.csv",
+                "zip": "./output/manufacturing.zip"
+            }
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> result = pcb.export_manufacturing("./manufacturing", manufacturer="jlcpcb")
+            >>> print(f"Upload {result['zip']} to JLCPCB")
+        """
+        from ..export import AssemblyConfig, AssemblyPackage
+
+        pcb_path = self._require_path("export_manufacturing")
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Find schematic if needed
+        if include_assembly:
+            if schematic_path is None:
+                schematic_path = pcb_path.with_suffix(".kicad_sch")
+            else:
+                schematic_path = Path(schematic_path)
+
+            if not schematic_path.exists():
+                include_assembly = False
+
+        # Configure and export
+        config = AssemblyConfig(
+            output_dir=output_path,
+            include_bom=include_assembly,
+            include_pnp=include_assembly,
+            include_gerbers=True,
+        )
+
+        pkg = AssemblyPackage(
+            pcb_path=pcb_path,
+            schematic_path=schematic_path if include_assembly else None,
+            manufacturer=manufacturer,
+            config=config,
+        )
+        pkg_result = pkg.export(output_path)
+
+        # Build result dictionary
+        result: dict[str, str | None] = {
+            "gerbers": str(pkg_result.gerber_path) if pkg_result.gerber_path else None,
+            "drill": str(pkg_result.gerber_path) if pkg_result.gerber_path else None,
+            "bom": str(pkg_result.bom_path) if pkg_result.bom_path else None,
+            "placement": str(pkg_result.pnp_path) if pkg_result.pnp_path else None,
+        }
+
+        # Create combined zip if requested
+        if create_zip:
+            import zipfile
+
+            zip_path = output_path / f"{manufacturer}_manufacturing.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in output_path.iterdir():
+                    if file_path.is_file() and file_path != zip_path:
+                        zf.write(file_path, file_path.name)
+                # Include gerber subdirectory if exists
+                gerber_dir = output_path / "gerbers"
+                if gerber_dir.is_dir():
+                    for file_path in gerber_dir.iterdir():
+                        if file_path.is_file():
+                            zf.write(file_path, f"gerbers/{file_path.name}")
+
+            result["zip"] = str(zip_path)
+        else:
+            result["zip"] = None
+
+        return result
+
+    def export_gerbers_zip(
+        self,
+        output: str | Path,
+        *,
+        manufacturer: str = "jlcpcb",
+        include_drill: bool = True,
+    ) -> Path:
+        """
+        Export Gerbers and drill files as a single zip archive.
+
+        Convenience method for quick export of fabrication files ready
+        for upload to PCB manufacturers. The archive holds the Gerber and
+        drill files directly at its root (no nested ``gerbers.zip``).
+
+        Args:
+            output: Output zip file path
+            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark")
+            include_drill: Include drill files in zip (default: True)
+
+        Returns:
+            Path to generated zip file
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_gerbers_zip("gerbers.zip", manufacturer="jlcpcb")
+        """
+        import tempfile
+
+        from ..export import GerberExporter
+
+        pcb_path = self._require_path("export_gerbers_zip")
+        output_path = Path(output)
+
+        # Export to temp directory, then zip
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            exporter = GerberExporter(pcb_path)
+            # Loose files only: the preset would otherwise zip and clean the
+            # temp dir, nesting its gerbers.zip inside ours (Issue #7023).
+            exporter.export_for_manufacturer(
+                manufacturer.lower(),
+                temp_path,
+                generate_drill=include_drill,
+                create_zip=False,
+            )
+
+            # Create zip
+            import zipfile
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in temp_path.iterdir():
+                    if file_path.is_file():
+                        zf.write(file_path, file_path.name)
+
+        return output_path
+
+    def _require_path(self, method_name: str) -> Path:
+        """Ensure PCB has a stored path for export operations."""
+        if self._path is None:
+            raise ValueError(
+                f"{method_name}() requires a PCB file path. "
+                "Either load the PCB with PCB.load() or save it first with pcb.save()."
+            )
+        return self._path
+
+    def import_from_netlist(
+        self,
+        netlist,
+        placement_start: tuple[float, float] = (10.0, 10.0),
+        placement_spacing: float = 15.0,
+        columns: int = 10,
+    ) -> dict[str, list[str]]:
+        """
+        Import footprints and assign nets from a netlist.
+
+        Adds all footprints referenced in the netlist to the PCB and
+        assigns net connections to their pads. Footprints are placed
+        in a grid pattern starting from the placement_start position.
+
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
+        Args:
+            netlist: A Netlist object containing components and connectivity
+            placement_start: Starting (x, y) position for footprint placement,
+                            relative to board origin
+            placement_spacing: Spacing between footprints in mm
+            columns: Number of footprints per row in the grid
+
+        Returns:
+            Dictionary with statistics:
+            - "footprints_added": List of references successfully added
+            - "footprints_skipped": List of references skipped (no footprint spec)
+            - "footprints_failed": List of references that failed to add
+            - "nets_assigned": Number of pad-net assignments made
+            - "nets_failed": List of failed pad-net assignments (format: "REF.PIN")
+
+        Example:
+            >>> from kicad_tools.operations.netlist import Netlist
+            >>> netlist = Netlist.load("project.kicad_net")
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> result = pcb.import_from_netlist(netlist)
+            >>> print(f"Added {len(result['footprints_added'])} footprints")
+        """
+        stats: dict[str, list[str]] = {
+            "footprints_added": [],
+            "footprints_skipped": [],
+            "footprints_failed": [],
+            "nets_assigned": [],
+            "nets_failed": [],
+        }
+
+        # Track grid position for footprint placement
+        x, y = placement_start
+        col = 0
+
+        # Add footprints from netlist components
+        for comp in netlist.components:
+            ref = comp.reference
+            value = comp.value
+            footprint_id = comp.footprint
+
+            # Skip components without footprint specification
+            if not footprint_id:
+                stats["footprints_skipped"].append(ref)
+                continue
+
+            # Skip if footprint already exists
+            if self.get_footprint(ref):
+                stats["footprints_skipped"].append(ref)
+                continue
+
+            try:
+                self.add_footprint(
+                    library_id=footprint_id,
+                    reference=ref,
+                    x=x,
+                    y=y,
+                    rotation=0.0,
+                    layer="F.Cu",
+                    value=value,
+                )
+                stats["footprints_added"].append(ref)
+
+                # Advance to next grid position
+                col += 1
+                if col >= columns:
+                    col = 0
+                    x = placement_start[0]
+                    y += placement_spacing
+                else:
+                    x += placement_spacing
+
+            except (FileNotFoundError, ValueError) as e:
+                # Footprint not found in library or invalid
+                stats["footprints_failed"].append(f"{ref}: {e}")
+
+        # Assign nets to pads
+        net_result = self.assign_nets_from_netlist(netlist)
+        stats["nets_assigned"] = net_result["assigned"]
+        stats["nets_failed"] = net_result["missing_pads"]
+
+        return stats
+
+    def import_from_schematic(
+        self,
+        schematic_path: str | Path,
+        placement_start: tuple[float, float] = (10.0, 10.0),
+        placement_spacing: float = 15.0,
+        columns: int = 10,
+    ) -> dict[str, list[str]]:
+        """
+        Import footprints and assign nets from a schematic file.
+
+        Exports a netlist from the schematic using kicad-cli, then imports
+        all footprints and assigns net connections. This is the programmatic
+        equivalent of KiCad's "Update PCB from Schematic" (F8) operation.
+
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
+        Args:
+            schematic_path: Path to the .kicad_sch schematic file
+            placement_start: Starting (x, y) position for footprint placement,
+                            relative to board origin
+            placement_spacing: Spacing between footprints in mm
+            columns: Number of footprints per row in the grid
+
+        Returns:
+            Dictionary with statistics (same as import_from_netlist)
+
+        Raises:
+            FileNotFoundError: If schematic file or kicad-cli not found
+            RuntimeError: If netlist export fails
+
+        Example:
+            >>> pcb = PCB.create(width=160, height=100)
+            >>> result = pcb.import_from_schematic("project.kicad_sch")
+            >>> print(f"Added {len(result['footprints_added'])} footprints")
+            >>> pcb.save("project.kicad_pcb")
+        """
+        from ..operations.netlist import export_netlist
+
+        # Export netlist from schematic, routing the kicad-cli byproduct
+        # into a temp directory.
+        #
+        # ``export_netlist`` defaults ``output_path`` to
+        # ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it,
+        # so a bare call would drop an unrequested netlist file beside the
+        # user's schematic on every import (#4750, #4763).  ``export_netlist``
+        # returns a fully parsed ``Netlist``; nothing below re-reads the
+        # file, so the temp directory can be torn down immediately.
+        sch = Path(schematic_path)
+        with tempfile.TemporaryDirectory(prefix="kct-import-netlist-") as tmpdir:
+            netlist = export_netlist(
+                schematic_path,
+                output_path=Path(tmpdir) / f"{sch.stem}-netlist.kicad_net",
+            )
+
+        # Import using the netlist
+        return self.import_from_netlist(
+            netlist,
+            placement_start=placement_start,
+            placement_spacing=placement_spacing,
+            columns=columns,
+        )
+
+    @classmethod
+    def from_schematic(
+        cls,
+        schematic_path: str | Path,
+        width: float = 100.0,
+        height: float = 100.0,
+        layers: int = 2,
+        placement_start: tuple[float, float] = (10.0, 10.0),
+        placement_spacing: float = 15.0,
+        columns: int = 10,
+    ) -> tuple[PCB, dict[str, list[str]]]:
+        """
+        Create a new PCB from a schematic file.
+
+        Creates a blank PCB with the specified dimensions, then imports
+        all footprints and net assignments from the schematic.
+
+        Coordinates are relative to the board origin. For centered boards
+        (the default), the board origin is offset from the drawing sheet origin.
+        This method automatically applies that offset so users can specify
+        positions relative to the board corner (0, 0 = top-left of board outline).
+
+        Args:
+            schematic_path: Path to the .kicad_sch schematic file
+            width: Board width in mm
+            height: Board height in mm
+            layers: Number of copper layers (2 or 4)
+            placement_start: Starting (x, y) position for footprint placement,
+                            relative to board origin
+            placement_spacing: Spacing between footprints in mm
+            columns: Number of footprints per row in the grid
+
+        Returns:
+            Tuple of (PCB instance, import statistics dict)
+
+        Raises:
+            FileNotFoundError: If schematic file or kicad-cli not found
+            RuntimeError: If netlist export fails
+            ValueError: If layers is not 2 or 4
+
+        Example:
+            >>> pcb, stats = PCB.from_schematic(
+            ...     "project.kicad_sch",
+            ...     width=160,
+            ...     height=100,
+            ...     layers=4
+            ... )
+            >>> print(f"Created PCB with {len(stats['footprints_added'])} components")
+            >>> pcb.save("project.kicad_pcb")
+        """
+        # Create blank PCB
+        pcb = cls.create(width=width, height=height, layers=layers)
+
+        # Import from schematic
+        stats = pcb.import_from_schematic(
+            schematic_path,
+            placement_start=placement_start,
+            placement_spacing=placement_spacing,
+            columns=columns,
+        )
+
+        return pcb, stats
+
+    # =========================================================================
+    # Collision Detection and DRC Methods
+    # =========================================================================
+
+    def check_placement_collision(
+        self,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float | None = None,
+        *,
+        clearance: float = 0.2,
+        courtyard_margin: float = 0.25,
+    ):
+        """
+        Check if placing a component at the given position would cause a collision.
+
+        This temporarily updates the component's position in memory, checks for
+        conflicts, then restores the original position.
+
+        Args:
+            reference: Reference designator of the component to check (e.g., "U1")
+            x: Proposed X position in mm
+            y: Proposed Y position in mm
+            rotation: Proposed rotation in degrees (optional, uses current if None)
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_margin: Courtyard margin in mm (default: 0.25)
+
+        Returns:
+            CollisionResult with collision details if any, or no_collision if safe
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> result = pcb.check_placement_collision("U1", x=50, y=50)
+            >>> if result.has_collision:
+            ...     print(f"Would collide with: {result.other_ref}")
+            ...     print(f"Clearance needed: {result.required_clearance}mm")
+            ...     print(f"Actual clearance: {result.actual_clearance}mm")
+        """
+        from ..placement import CollisionResult, DesignRules, PlacementAnalyzer
+
+        # Find the footprint
+        fp = self.get_footprint(reference)
+        if not fp:
+            return CollisionResult(
+                has_collision=False,
+                message=f"Component {reference} not found",
+            )
+
+        # Save original position
+        orig_x, orig_y = fp.position
+        orig_rot = fp.rotation
+
+        # Temporarily update position (in memory only)
+        fp.position = (x, y)
+        if rotation is not None:
+            fp.rotation = rotation
+
+        try:
+            # Create analyzer and check conflicts
+            analyzer = PlacementAnalyzer()
+            rules = DesignRules(
+                min_pad_clearance=clearance,
+                courtyard_margin=courtyard_margin,
+            )
+
+            # Load this PCB's components
+            analyzer._load_pcb_from_instance(self, courtyard_margin)
+
+            # Check all pairs involving this component
+            components = analyzer.get_components()
+            target_comp = next((c for c in components if c.reference == reference), None)
+
+            if not target_comp:
+                return CollisionResult.no_collision()
+
+            for other_comp in components:
+                if other_comp.reference == reference:
+                    continue
+
+                # Check for conflicts between target and other
+                conflicts = analyzer._check_pair((target_comp, other_comp), rules)
+
+                if conflicts:
+                    # Return the first conflict found
+                    return CollisionResult.from_conflict(conflicts[0])
+
+            return CollisionResult.no_collision()
+
+        finally:
+            # Restore original position
+            fp.position = (orig_x, orig_y)
+            fp.rotation = orig_rot
+
+    def validate_placements(
+        self,
+        placements: dict[str, tuple[float, float, float]],
+        *,
+        clearance: float = 0.2,
+        courtyard_margin: float = 0.25,
+    ):
+        """
+        Validate a batch of proposed placements before committing.
+
+        Checks all proposed placements for conflicts with each other and
+        with existing components.
+
+        Args:
+            placements: Dictionary mapping reference to (x, y, rotation) tuples
+                e.g., {"U1": (50, 50, 0), "C1": (52, 50, 90), ...}
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_margin: Courtyard margin in mm (default: 0.25)
+
+        Returns:
+            PlacementValidationResult with all detected issues
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> placements = {"U1": (50, 50, 0), "C1": (52, 50, 0)}
+            >>> result = pcb.validate_placements(placements)
+            >>> for issue in result.collisions:
+            ...     print(f"{issue.ref1} <-> {issue.ref2}: {issue.violation_type}")
+        """
+        from ..placement import (
+            DesignRules,
+            PlacementAnalyzer,
+            PlacementCollision,
+            PlacementValidationResult,
+        )
+
+        # Save original positions
+        original_positions: dict[str, tuple[float, float, float]] = {}
+        for ref in placements:
+            fp = self.get_footprint(ref)
+            if fp:
+                original_positions[ref] = (fp.position[0], fp.position[1], fp.rotation)
+
+        # Apply proposed positions temporarily
+        for ref, (x, y, rot) in placements.items():
+            fp = self.get_footprint(ref)
+            if fp:
+                fp.position = (x, y)
+                fp.rotation = rot
+
+        try:
+            # Run conflict analysis
+            analyzer = PlacementAnalyzer()
+            rules = DesignRules(
+                min_pad_clearance=clearance,
+                courtyard_margin=courtyard_margin,
+            )
+
+            analyzer._load_pcb_from_instance(self, courtyard_margin)
+            conflicts = analyzer._find_conflicts_internal(rules)
+
+            # Build result
+            collisions = [PlacementCollision.from_conflict(c) for c in conflicts]
+
+            return PlacementValidationResult(
+                is_valid=len(collisions) == 0,
+                total_placements=len(placements),
+                collision_count=len(collisions),
+                collisions=collisions,
+            )
+
+        finally:
+            # Restore original positions
+            for ref, (x, y, rot) in original_positions.items():
+                fp = self.get_footprint(ref)
+                if fp:
+                    fp.position = (x, y)
+                    fp.rotation = rot
+
+    def run_drc(
+        self,
+        *,
+        clearance: float = 0.2,
+        courtyard_margin: float = 0.25,
+        edge_clearance: float = 0.3,
+        hole_to_hole: float = 0.5,
+    ):
+        """
+        Run design rule check on the current PCB state.
+
+        Checks for placement conflicts including:
+        - Pad clearance violations
+        - Courtyard overlaps
+        - Edge clearance violations
+        - Hole-to-hole violations
+
+        Args:
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_margin: Courtyard margin in mm (default: 0.25)
+            edge_clearance: Minimum edge clearance in mm (default: 0.3)
+            hole_to_hole: Minimum hole-to-hole distance in mm (default: 0.5)
+
+        Returns:
+            DRCResult with all violations and summary counts
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> result = pcb.run_drc()
+            >>> print(f"Clearance violations: {result.clearance_count}")
+            >>> print(f"Courtyard overlaps: {result.courtyard_count}")
+            >>> for violation in result.violations:
+            ...     print(f"{violation.type}: {violation.description}")
+        """
+        from ..placement import (
+            ConflictType,
+            DesignRules,
+            DRCResult,
+            DRCViolation,
+            PlacementAnalyzer,
+        )
+
+        analyzer = PlacementAnalyzer()
+        rules = DesignRules(
+            min_pad_clearance=clearance,
+            courtyard_margin=courtyard_margin,
+            min_edge_clearance=edge_clearance,
+            min_hole_to_hole=hole_to_hole,
+        )
+
+        analyzer._load_pcb_from_instance(self, courtyard_margin)
+        conflicts = analyzer._find_conflicts_internal(rules)
+
+        # Convert to DRC violations and count by type
+        violations = []
+        clearance_count = 0
+        courtyard_count = 0
+        edge_count = 0
+        hole_count = 0
+
+        for conflict in conflicts:
+            violations.append(DRCViolation.from_conflict(conflict))
+
+            if conflict.type == ConflictType.PAD_CLEARANCE:
+                clearance_count += 1
+            elif conflict.type == ConflictType.COURTYARD_OVERLAP:
+                courtyard_count += 1
+            elif conflict.type == ConflictType.EDGE_CLEARANCE:
+                edge_count += 1
+            elif conflict.type == ConflictType.HOLE_TO_HOLE:
+                hole_count += 1
+
+        return DRCResult(
+            passed=len(violations) == 0,
+            violation_count=len(violations),
+            clearance_count=clearance_count,
+            courtyard_count=courtyard_count,
+            edge_clearance_count=edge_count,
+            hole_to_hole_count=hole_count,
+            violations=violations,
+        )
+
+    def set_design_rules(
+        self,
+        clearance: float = 0.2,
+        courtyard_clearance: float = 0.25,
+        silkscreen_clearance: float = 0.15,
+        edge_clearance: float = 0.3,
+        hole_to_hole: float = 0.5,
+    ):
+        """
+        Set design rules for collision detection and DRC.
+
+        These rules are stored on the PCB instance and used as defaults
+        for collision checking and DRC operations.
+
+        Args:
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_clearance: Courtyard margin in mm (default: 0.25)
+            silkscreen_clearance: Silkscreen clearance in mm (default: 0.15)
+            edge_clearance: Minimum edge clearance in mm (default: 0.3)
+            hole_to_hole: Minimum hole-to-hole distance in mm (default: 0.5)
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.set_design_rules(
+            ...     clearance=0.2,
+            ...     courtyard_clearance=0.25,
+            ...     silkscreen_clearance=0.15
+            ... )
+            >>> # Now collision checks use these rules by default
+            >>> result = pcb.run_drc()
+        """
+        from ..placement import DesignRules
+
+        self._design_rules = DesignRules(
+            min_pad_clearance=clearance,
+            courtyard_margin=courtyard_clearance,
+            min_edge_clearance=edge_clearance,
+            min_hole_to_hole=hole_to_hole,
+        )
+
+    def place_footprint_safe(
+        self,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float | None = None,
+        *,
+        min_clearance: float = 0.2,
+        auto_adjust: bool = True,
+        max_adjustment: float = 5.0,
+    ) -> tuple[bool, tuple[float, float] | None, str]:
+        """
+        Place a footprint with automatic collision avoidance.
+
+        Attempts to place the footprint at the given position. If a collision
+        would occur and auto_adjust is True, tries to find a nearby position
+        that avoids the collision.
+
+        Args:
+            reference: Reference designator of the component (e.g., "U1")
+            x: Desired X position in mm
+            y: Desired Y position in mm
+            rotation: Rotation in degrees (optional)
+            min_clearance: Minimum clearance to maintain in mm (default: 0.2)
+            auto_adjust: If True, automatically adjust position to avoid collision
+            max_adjustment: Maximum distance to adjust position in mm (default: 5.0)
+
+        Returns:
+            Tuple of:
+            - success: True if placement succeeded (with or without adjustment)
+            - final_position: (x, y) of final position, or None if failed
+            - message: Description of what happened
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> success, pos, msg = pcb.place_footprint_safe(
+            ...     "C1", x=50, y=50, min_clearance=0.2
+            ... )
+            >>> if success:
+            ...     print(f"Placed at {pos}")
+            >>> else:
+            ...     print(f"Failed: {msg}")
+        """
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False, None, f"Component {reference} not found"
+
+        # Check if proposed position is clear
+        result = self.check_placement_collision(reference, x, y, rotation, clearance=min_clearance)
+
+        if not result.has_collision:
+            # Position is clear, apply it
+            self.update_footprint_position(reference, x, y, rotation)
+            return True, (x, y), "Placed at requested position"
+
+        if not auto_adjust:
+            return (
+                False,
+                None,
+                f"Collision with {result.other_ref}: {result.message}",
+            )
+
+        # Try to find a clear position nearby
+        import math
+
+        # Try positions in expanding circles
+        for radius in [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]:
+            if radius > max_adjustment:
+                break
+
+            for angle in range(0, 360, 45):
+                rad = math.radians(angle)
+                test_x = x + radius * math.cos(rad)
+                test_y = y + radius * math.sin(rad)
+
+                test_result = self.check_placement_collision(
+                    reference, test_x, test_y, rotation, clearance=min_clearance
+                )
+
+                if not test_result.has_collision:
+                    self.update_footprint_position(reference, test_x, test_y, rotation)
+                    return (
+                        True,
+                        (test_x, test_y),
+                        f"Adjusted by {radius:.1f}mm to avoid collision with {result.other_ref}",
+                    )
+
+        return (
+            False,
+            None,
+            f"Could not find clear position within {max_adjustment}mm",
+        )

@@ -1,0 +1,750 @@
+"""Extended tests for export modules (gerber, assembly, pnp, bom)."""
+
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from kicad_tools.exceptions import ConfigurationError
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.export.gerber import (
+    JLCPCB_PRESET,
+    MANUFACTURER_PRESETS,
+    OSHPARK_PRESET,
+    PCBWAY_PRESET,
+    GerberConfig,
+    GerberExporter,
+    find_kicad_cli,
+    get_drill_origin_value,
+    get_kicad_cli_version,
+)
+
+
+class TestGerberConfig:
+    """Tests for GerberConfig dataclass."""
+
+    def test_default_values(self):
+        config = GerberConfig()
+        assert config.output_dir is None
+        assert config.create_zip is True
+        assert config.zip_name == "gerbers.zip"
+        assert config.layers == []
+        assert config.include_edge_cuts is True
+        assert config.include_silkscreen is True
+        assert config.include_soldermask is True
+        assert config.include_solderpaste is False
+        assert config.use_protel_extensions is True
+        assert config.use_aux_origin is True
+        assert config.generate_drill is True
+        assert config.drill_format == "excellon"
+
+    def test_custom_values(self):
+        config = GerberConfig(
+            create_zip=False,
+            include_solderpaste=True,
+            merge_pth_npth=True,
+        )
+        assert config.create_zip is False
+        assert config.include_solderpaste is True
+        assert config.merge_pth_npth is True
+
+
+class TestManufacturerPreset:
+    """Tests for ManufacturerPreset dataclass."""
+
+    def test_jlcpcb_preset(self):
+        preset = JLCPCB_PRESET
+        assert preset.name == "JLCPCB"
+        assert preset.config.use_protel_extensions is True
+        assert preset.config.include_solderpaste is True
+
+    def test_pcbway_preset(self):
+        preset = PCBWAY_PRESET
+        assert preset.name == "PCBWay"
+        assert preset.config.include_solderpaste is True
+
+    def test_oshpark_preset(self):
+        preset = OSHPARK_PRESET
+        assert preset.name == "OSH Park"
+        assert preset.config.merge_pth_npth is True
+        assert preset.config.use_aux_origin is False
+
+    def test_manufacturer_presets_dict(self):
+        assert "jlcpcb" in MANUFACTURER_PRESETS
+        assert "pcbway" in MANUFACTURER_PRESETS
+        assert "oshpark" in MANUFACTURER_PRESETS
+        assert "seeed" in MANUFACTURER_PRESETS
+
+
+class TestFindKicadCli:
+    """Tests for find_kicad_cli function."""
+
+    def test_find_in_path(self):
+        with (
+            patch("shutil.which") as mock_which,
+            patch("kicad_tools.cli.runner._probe_kicad_cli", return_value=True),
+        ):
+            mock_which.return_value = "/usr/bin/kicad-cli"
+            result = find_kicad_cli()
+            assert result == Path("/usr/bin/kicad-cli")
+
+    def test_not_found_anywhere(self):
+        with patch("shutil.which", return_value=None):
+            with patch.object(Path, "exists", return_value=False):
+                result = find_kicad_cli()
+                assert result is None
+
+
+class TestGerberExporter:
+    """Tests for GerberExporter class."""
+
+    @pytest.fixture
+    def mock_pcb_path(self, tmp_path):
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        return pcb_path
+
+    def test_init(self, mock_pcb_path):
+        with patch(
+            "kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            exporter = GerberExporter(mock_pcb_path)
+            assert exporter.pcb_path == mock_pcb_path
+
+    def test_init_string_path(self, mock_pcb_path):
+        with patch(
+            "kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
+            exporter = GerberExporter(str(mock_pcb_path))
+            assert exporter.pcb_path == mock_pcb_path
+
+    def test_preset_lookup(self, mock_pcb_path):
+        # Test preset lookup via MANUFACTURER_PRESETS
+        assert "jlcpcb" in MANUFACTURER_PRESETS
+        preset = MANUFACTURER_PRESETS["jlcpcb"]
+        assert preset == JLCPCB_PRESET
+
+    def test_preset_not_found(self, mock_pcb_path):
+        # Verify unknown manufacturers are not in presets
+        assert "unknown_manufacturer" not in MANUFACTURER_PRESETS
+
+    def test_init_file_not_found(self, tmp_path):
+        """Test that FileNotFoundError is raised for missing PCB."""
+        nonexistent = tmp_path / "nonexistent.kicad_pcb"
+        with pytest.raises(KiCadFileNotFoundError):
+            GerberExporter(nonexistent)
+
+    def test_export_for_manufacturer_unknown(self, mock_pcb_path):
+        """Test that unknown manufacturer raises ConfigurationError."""
+        with patch.object(GerberExporter, "__init__", lambda self, path: None):
+            exporter = GerberExporter.__new__(GerberExporter)
+            exporter.pcb_path = mock_pcb_path
+            exporter.kicad_cli = Path("/usr/bin/kicad-cli")
+
+            with pytest.raises(ConfigurationError, match="Unknown manufacturer"):
+                exporter.export_for_manufacturer("unknown_fab_house")
+
+
+class TestGerberConfigDefaults:
+    """Additional tests for GerberConfig default layer computation."""
+
+    def test_config_all_options_disabled(self):
+        """Test config with all optional layers disabled."""
+        config = GerberConfig(
+            include_edge_cuts=False,
+            include_silkscreen=False,
+            include_soldermask=False,
+            include_solderpaste=False,
+        )
+        assert config.include_edge_cuts is False
+        assert config.include_silkscreen is False
+        assert config.include_soldermask is False
+        assert config.include_solderpaste is False
+
+    def test_config_drill_options(self):
+        """Test drill-specific options."""
+        config = GerberConfig(
+            generate_drill=True,
+            drill_format="gerber_x2",
+            merge_pth_npth=True,
+            minimal_header=True,
+        )
+        assert config.drill_format == "gerber_x2"
+        assert config.merge_pth_npth is True
+        assert config.minimal_header is True
+
+    def test_config_format_options(self):
+        """Test format options."""
+        config = GerberConfig(
+            subtract_soldermask=True,
+            disable_aperture_macros=True,
+        )
+        assert config.subtract_soldermask is True
+        assert config.disable_aperture_macros is True
+
+
+class TestManufacturerPresetDetails:
+    """More detailed tests for manufacturer presets."""
+
+    def test_presets_carry_no_file_rename_map(self):
+        """Presets ship kicad-cli's own file names (Issue #6163).
+
+        The former ``layer_rename`` maps were never applied; they were
+        removed so a preset cannot imply a naming it does not produce.
+        """
+        for preset in (JLCPCB_PRESET, PCBWAY_PRESET, OSHPARK_PRESET):
+            assert not hasattr(preset, "layer_rename")
+
+
+class TestGerberExporterMethods:
+    """Tests for GerberExporter internal methods."""
+
+    @pytest.fixture
+    def mock_exporter(self, tmp_path):
+        """Create a mock exporter."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        with patch.object(GerberExporter, "__init__", lambda self, path: None):
+            exporter = GerberExporter.__new__(GerberExporter)
+            exporter.pcb_path = pcb_path
+            exporter.kicad_cli = Path("/usr/bin/kicad-cli")
+            return exporter
+
+    def test_get_default_layers_full(self, mock_exporter):
+        """Test default layers with all options enabled."""
+        config = GerberConfig(
+            include_silkscreen=True,
+            include_soldermask=True,
+            include_solderpaste=True,
+            include_edge_cuts=True,
+        )
+        layers = mock_exporter._get_default_layers(config)
+
+        assert "F.Cu" in layers
+        assert "B.Cu" in layers
+        assert "F.SilkS" in layers
+        assert "B.SilkS" in layers
+        assert "F.Mask" in layers
+        assert "B.Mask" in layers
+        assert "F.Paste" in layers
+        assert "B.Paste" in layers
+        assert "Edge.Cuts" in layers
+
+    def test_get_default_layers_minimal(self, mock_exporter):
+        """Test default layers with options disabled."""
+        config = GerberConfig(
+            include_silkscreen=False,
+            include_soldermask=False,
+            include_solderpaste=False,
+            include_edge_cuts=False,
+        )
+        layers = mock_exporter._get_default_layers(config)
+
+        assert "F.Cu" in layers
+        assert "B.Cu" in layers
+        assert "F.SilkS" not in layers
+        assert "F.Mask" not in layers
+        assert "Edge.Cuts" not in layers
+
+    def test_create_zip(self, mock_exporter, tmp_path):
+        """Test zip file creation."""
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+
+        # Create some test files
+        (source_dir / "test1.gbr").write_text("gerber1")
+        (source_dir / "test2.gbr").write_text("gerber2")
+
+        zip_path = source_dir / "output.zip"
+        mock_exporter._create_zip(source_dir, zip_path)
+
+        assert zip_path.exists()
+
+        # Verify contents
+        import zipfile
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            assert "test1.gbr" in names
+            assert "test2.gbr" in names
+
+    def test_create_zip_overwrites_existing(self, mock_exporter, tmp_path):
+        """Test that existing zip is overwritten."""
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        (source_dir / "test.gbr").write_text("gerber")
+
+        zip_path = source_dir / "output.zip"
+        zip_path.write_text("old content")
+
+        mock_exporter._create_zip(source_dir, zip_path)
+
+        # Should be a valid zip now
+        import zipfile
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            assert "test.gbr" in zf.namelist()
+
+
+@pytest.fixture(autouse=True)
+def _clear_kicad_cli_version_cache():
+    from kicad_tools.export.gerber import clear_kicad_cli_version_cache
+
+    clear_kicad_cli_version_cache()
+    yield
+    clear_kicad_cli_version_cache()
+
+
+class TestGetKicadCliVersion:
+    """Tests for get_kicad_cli_version function."""
+
+    def test_memoised_per_path(self):
+        """Second call for the same path must not spawn a subprocess (#5910)."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result) as run:
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            assert run.call_count == 1
+            assert get_kicad_cli_version(Path("/b/kicad-cli")) == "10.0.1"
+            assert run.call_count == 2
+
+    def test_failures_not_cached(self):
+        bad = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
+        good = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", side_effect=[bad, good]) as run:
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) is None
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            assert run.call_count == 2
+
+    def test_reuses_discovery_probe_version(self):
+        from kicad_tools.cli import runner
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.cli.runner.subprocess.run", return_value=mock_result):
+            assert runner._probe_kicad_cli(Path("/a/kicad-cli")) is True
+        with patch("kicad_tools.export.gerber.subprocess.run") as run:
+            assert get_kicad_cli_version(Path("/a/kicad-cli")) == "10.0.1"
+            run.assert_not_called()
+
+    def test_returns_version_string(self):
+        """Should return stripped stdout on success."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) == "10.0.1"
+
+    def test_returns_none_on_nonzero_exit(self):
+        """Should return None when kicad-cli exits non-zero."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) is None
+
+    def test_returns_none_on_exception(self):
+        """Should return None when subprocess.run raises."""
+        with patch(
+            "kicad_tools.export.gerber.subprocess.run",
+            side_effect=FileNotFoundError("not found"),
+        ):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) is None
+
+    def test_kicad_9_version(self):
+        """Should return KiCad 9 version string correctly."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="9.0.2\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) == "9.0.2"
+
+
+class TestGetDrillOriginValue:
+    """Tests for get_drill_origin_value function."""
+
+    def test_kicad_10_returns_plot(self):
+        """KiCad 10+ should use 'plot' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_kicad_11_returns_plot(self):
+        """Future KiCad 11 should also use 'plot'."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="11.0.0\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_kicad_9_returns_aux(self):
+        """KiCad 9 should use 'aux' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="9.0.2\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "aux"
+
+    def test_kicad_8_returns_aux(self):
+        """KiCad 8 should use 'aux' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="8.0.6\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "aux"
+
+    def test_kicad_7_returns_aux(self):
+        """KiCad 7 should use 'aux' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="7.0.11\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "aux"
+
+    def test_version_detection_failure_defaults_to_plot(self):
+        """When version detection fails, default to 'plot' (modern)."""
+        with patch(
+            "kicad_tools.export.gerber.subprocess.run",
+            side_effect=FileNotFoundError("not found"),
+        ):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_unparseable_version_defaults_to_plot(self):
+        """Garbage version string should default to 'plot'."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="unknown\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_empty_version_defaults_to_plot(self):
+        """Empty version string should default to 'plot'."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+
+class TestDrillExportCommand:
+    """Tests verifying _drill_command builds the correct command."""
+
+    @pytest.fixture
+    def mock_exporter(self, tmp_path):
+        """Create a mock exporter."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        with patch.object(GerberExporter, "__init__", lambda self, path: None):
+            exporter = GerberExporter.__new__(GerberExporter)
+            exporter.pcb_path = pcb_path
+            exporter.kicad_cli = Path("/usr/bin/kicad-cli")
+            return exporter
+
+    def test_drill_command_uses_plot_for_kicad_10(self, mock_exporter, tmp_path):
+        """Drill export with use_aux_origin=True should pass '--drill-origin plot' for KiCad 10."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        config = GerberConfig(use_aux_origin=True)
+
+        version_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+
+        with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
+            # The only subprocess call is the version check
+            mock_run.side_effect = [version_result]
+            cmd = mock_exporter._drill_command(config, output_dir)
+
+        origin_idx = cmd.index("--drill-origin")
+        assert cmd[origin_idx + 1] == "plot"
+
+    def test_drill_command_uses_aux_for_kicad_9(self, mock_exporter, tmp_path):
+        """Drill export with use_aux_origin=True should pass '--drill-origin aux' for KiCad 9."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        config = GerberConfig(use_aux_origin=True)
+
+        version_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="9.0.2\n")
+
+        with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
+            mock_run.side_effect = [version_result]
+            cmd = mock_exporter._drill_command(config, output_dir)
+
+        origin_idx = cmd.index("--drill-origin")
+        assert cmd[origin_idx + 1] == "aux"
+
+    def test_drill_command_omits_origin_when_disabled(self, mock_exporter, tmp_path):
+        """Drill export with use_aux_origin=False should not include --drill-origin."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        config = GerberConfig(use_aux_origin=False)
+
+        with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
+            cmd = mock_exporter._drill_command(config, output_dir)
+
+        # No version check is needed, and the command has no --drill-origin
+        mock_run.assert_not_called()
+        assert "--drill-origin" not in cmd
+
+
+# Import assembly module
+from kicad_tools.export.assembly import (
+    AssemblyConfig,
+    AssemblyPackage,
+    AssemblyPackageResult,
+)
+
+
+class TestAssemblyConfig:
+    """Tests for AssemblyConfig dataclass."""
+
+    def test_default_values(self):
+        config = AssemblyConfig()
+        assert config.output_dir == Path("assembly")
+        assert config.include_bom is True
+        assert config.include_pnp is True
+        assert config.include_gerbers is True
+        assert config.exclude_references == []
+
+    def test_custom_values(self):
+        config = AssemblyConfig(
+            output_dir=Path("/custom/output"),
+            include_gerbers=False,
+            exclude_references=["R1", "R2"],
+        )
+        assert config.output_dir == Path("/custom/output")
+        assert config.include_gerbers is False
+        assert config.exclude_references == ["R1", "R2"]
+
+
+class TestAssemblyPackageResult:
+    """Tests for AssemblyPackageResult dataclass."""
+
+    def test_success_no_errors(self):
+        result = AssemblyPackageResult(output_dir=Path("/output"))
+        assert result.success is True
+
+    def test_failure_with_errors(self):
+        result = AssemblyPackageResult(
+            output_dir=Path("/output"),
+            errors=["Error 1", "Error 2"],
+        )
+        assert result.success is False
+
+    def test_str_representation(self):
+        result = AssemblyPackageResult(
+            output_dir=Path("/output"),
+            bom_path=Path("/output/bom.csv"),
+            pnp_path=Path("/output/cpl.csv"),
+        )
+        s = str(result)
+        assert "Assembly Package" in s
+        assert "BOM" in s
+        assert "CPL" in s
+
+    def test_str_with_errors(self):
+        result = AssemblyPackageResult(
+            output_dir=Path("/output"),
+            errors=["Something went wrong"],
+        )
+        s = str(result)
+        assert "Errors" in s
+        assert "Something went wrong" in s
+
+
+class TestAssemblyPackage:
+    """Tests for AssemblyPackage class."""
+
+    @pytest.fixture
+    def mock_pcb_path(self, tmp_path):
+        pcb_path = tmp_path / "test.kicad_pcb"
+        # Minimal valid PCB content
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (paper "A4")
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+        )
+        """
+        pcb_path.write_text(pcb_content)
+        return pcb_path
+
+    def test_init(self, mock_pcb_path):
+        # A sibling .kicad_sch is required for the default schematic-sourced
+        # BOM path -- AssemblyPackage fails fast otherwise (see issue #2741).
+        sch_path = mock_pcb_path.with_suffix(".kicad_sch")
+        sch_path.write_text("(kicad_sch)")
+        pkg = AssemblyPackage(mock_pcb_path)
+        assert pkg.pcb_path == mock_pcb_path
+
+
+# Import PnP module
+from kicad_tools.export.pnp import (
+    GenericPnPFormatter,
+    JLCPCBPnPFormatter,
+    PlacementData,
+    PnPExportConfig,
+)
+
+
+class TestPlacementData:
+    """Tests for PlacementData dataclass."""
+
+    def test_creation(self):
+        data = PlacementData(
+            reference="R1",
+            value="10k",
+            footprint="0402_1005Metric",
+            x=100.0,
+            y=50.0,
+            rotation=90.0,
+            layer="F.Cu",
+        )
+        assert data.reference == "R1"
+        assert data.value == "10k"
+        assert data.x == 100.0
+        assert data.y == 50.0
+        assert data.rotation == 90.0
+        assert data.layer == "F.Cu"
+
+
+class TestPnPExportConfig:
+    """Tests for PnPExportConfig dataclass."""
+
+    def test_default_values(self):
+        config = PnPExportConfig()
+        assert config.x_offset == 0.0
+        assert config.y_offset == 0.0
+        assert config.mirror_x is False
+        assert config.mirror_y is False
+        assert config.use_aux_origin is True
+        assert config.include_dnp is False
+        assert config.rotation_offset == 0.0
+
+    def test_custom_values(self):
+        config = PnPExportConfig(
+            x_offset=10.0,
+            mirror_x=True,
+            rotation_offset=90.0,
+        )
+        assert config.x_offset == 10.0
+        assert config.mirror_x is True
+        assert config.rotation_offset == 90.0
+
+
+class TestPnPFormatter:
+    """Tests for PnPFormatter and subclasses."""
+
+    @pytest.fixture
+    def sample_placements(self):
+        return [
+            PlacementData("R1", "10k", "R_0402", 100.0, 50.0, 0.0, "F.Cu"),
+            PlacementData("R2", "4.7k", "R_0402", 110.0, 50.0, 90.0, "F.Cu"),
+            PlacementData("C1", "100nF", "C_0402", 100.0, 60.0, 0.0, "B.Cu"),
+        ]
+
+    def test_jlcpcb_formatter_headers(self):
+        formatter = JLCPCBPnPFormatter()
+        headers = formatter.get_headers()
+        assert "Designator" in headers
+        assert "Package" in headers  # JLCPCB uses "Package" not "Footprint"
+
+    def test_jlcpcb_formatter_format(self, sample_placements):
+        formatter = JLCPCBPnPFormatter()
+        result = formatter.format(sample_placements)
+        assert "R1" in result
+        assert "R2" in result
+        assert "10k" in result
+
+    def test_generic_formatter_headers(self):
+        formatter = GenericPnPFormatter()
+        headers = formatter.get_headers()
+        assert len(headers) > 0
+
+    def test_apply_transforms_offset(self, sample_placements):
+        config = PnPExportConfig(x_offset=10.0, y_offset=5.0)
+        formatter = JLCPCBPnPFormatter(config)
+
+        transformed = formatter.apply_transforms(sample_placements[0])
+        assert transformed.x == 110.0
+        assert transformed.y == 55.0
+
+    def test_apply_transforms_mirror(self, sample_placements):
+        config = PnPExportConfig(mirror_x=True, mirror_y=True)
+        formatter = JLCPCBPnPFormatter(config)
+
+        transformed = formatter.apply_transforms(sample_placements[0])
+        assert transformed.x == -100.0
+        assert transformed.y == -50.0
+
+    def test_apply_transforms_rotation(self, sample_placements):
+        config = PnPExportConfig(rotation_offset=90.0)
+        formatter = JLCPCBPnPFormatter(config)
+
+        transformed = formatter.apply_transforms(sample_placements[0])
+        assert transformed.rotation == 90.0  # 0 + 90
+
+    def test_filter_top_only(self, sample_placements):
+        config = PnPExportConfig(top_only=True)
+        formatter = JLCPCBPnPFormatter(config)
+
+        filtered = formatter.filter_placements(sample_placements)
+        assert len(filtered) == 2  # Only F.Cu parts
+
+    def test_filter_bottom_only(self, sample_placements):
+        config = PnPExportConfig(bottom_only=True)
+        formatter = JLCPCBPnPFormatter(config)
+
+        filtered = formatter.filter_placements(sample_placements)
+        assert len(filtered) == 1  # Only B.Cu parts
+        assert filtered[0].reference == "C1"
+
+
+# Import BOM formats
+from kicad_tools.export.bom_formats import (
+    BOMExportConfig,
+    GenericBOMFormatter,
+    JLCPCBBOMFormatter,
+)
+
+
+class TestBOMExportConfig:
+    """Tests for BOMExportConfig dataclass."""
+
+    def test_default_values(self):
+        config = BOMExportConfig()
+        assert config.group_by_value is True
+        assert config.include_dnp is False
+
+    def test_custom_values(self):
+        config = BOMExportConfig(
+            group_by_value=False,
+            include_dnp=True,
+        )
+        assert config.group_by_value is False
+        assert config.include_dnp is True
+
+
+class TestBOMFormatter:
+    """Tests for BOMFormatter classes."""
+
+    def test_jlcpcb_formatter_headers(self):
+        formatter = JLCPCBBOMFormatter()
+        headers = formatter.get_headers()
+        assert "Comment" in headers
+        assert "Designator" in headers
+        assert "Footprint" in headers
+
+    def test_generic_formatter_headers(self):
+        formatter = GenericBOMFormatter()
+        headers = formatter.get_headers()
+        assert len(headers) > 0
+
+
+# Additional export helper tests
+class TestExportModuleImports:
+    """Tests for module-level exports."""
+
+    def test_export_init_imports(self):
+        from kicad_tools.export import create_assembly_package
+
+        assert create_assembly_package is not None
+
+    def test_gerber_exporter_available(self):
+        from kicad_tools.export.gerber import GerberExporter
+
+        assert GerberExporter is not None
+
+    def test_pnp_exports_available(self):
+        from kicad_tools.export.pnp import PlacementData, PnPExportConfig
+
+        assert PlacementData is not None
+        assert PnPExportConfig is not None

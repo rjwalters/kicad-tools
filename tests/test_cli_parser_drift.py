@@ -1,0 +1,1150 @@
+"""Argparse-drift regression test (Issues #2817, #2819, #4633, #7017).
+
+This module guards three-hop parser pairs -- an outer ``parser.py``
+subparser, a forwarding shim that rebuilds an argv from its ``Namespace``,
+and the real inner parser -- against flags declared on one side only:
+
+* ``check`` -- ``parser.py :: _add_check_parser`` ->
+  ``commands/validation.py :: run_check_command`` -> ``check_cmd.main``
+  (added by #4633; see the ``check``-pair section below).
+* ``readiness`` (#5816), further down.
+
+``route`` used to be guarded here too.  Five drift bugs shipped through
+its pair (#2620, #2622/#2793, #2812/#2817, #2819 -- ``--max-search-iterations``
+parsed cleanly and was then silently dropped by the shim).  Issue #7017
+removed the pair instead: ``kct route`` now hands its argv straight to
+``route_cmd.main``, so ``route_cmd._route_parser`` is its only parser and
+that drift cannot happen.  The ``route`` tests left below only pin flags
+whose loss shipped as a bug, and the env-stamp behaviour behind one of them.
+
+The ``check`` pair went unguarded until #4633, and had accumulated
+**three** live instances of the bug class in the meantime -- all three
+declared on ``check_cmd.py`` only and rejected by the real ``kct check``
+with ``error: unrecognized arguments``:
+
+* ``--refill-zones`` (#4113, ``d42248ee``) -- entirely unreachable
+  through the ``kct`` entry point despite being advertised in
+  ``CHANGELOG.md`` and ``docs/reference/cli.md``.
+* ``--courtyard-waivers`` (#4137/#4150, ``07fd58f1``) and ``--waivers``
+  (#4417/#4445, ``59e36c47``) -- degraded partially rather than loudly,
+  because both sidecars are auto-discovered next to the board, so only
+  the explicit-path override was unreachable.
+
+#4633 added all three to the outer parser and the shim, so both
+``check`` allowlists below start out empty.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+
+def _flags_from_parser(parser: argparse.ArgumentParser) -> set[str]:
+    """Return the set of ``--long-form`` option strings declared on ``parser``.
+
+    Short flags (``-o``, ``-q``, ``-v``) are intentionally excluded
+    because the drift bug class only manifests for long flags -- short
+    flags are typically aliases and live alongside their long form.
+    """
+    flags: set[str] = set()
+    for action in parser._actions:
+        for option_string in action.option_strings:
+            if option_string.startswith("--"):
+                flags.add(option_string)
+    return flags
+
+
+def _kct_route_parser_flags() -> set[str]:
+    """Long flags ``kct route`` accepts: those of ``route_cmd._route_parser``."""
+    from kicad_tools.cli.route_cmd import _route_parser
+
+    return _flags_from_parser(_route_parser())
+
+
+def test_checkpoint_interval_is_on_the_route_parser():
+    """Direct regression test for #2812 / #2817 (``unrecognized arguments``)."""
+    assert "--checkpoint-interval" in _kct_route_parser_flags()
+
+
+def test_max_search_iterations_is_on_the_route_parser():
+    """Direct regression test for #2819 (the flag was silently dropped)."""
+    from tests.route_cli import kct_route
+
+    assert "--max-search-iterations" in _kct_route_parser_flags()
+    _, args = kct_route(["board.kicad_pcb", "--max-search-iterations", "50000"])
+    assert args.max_search_iterations == 50000
+
+
+def test_strict_in_pad_clearance_is_on_the_route_parser_and_stamps_env(tmp_path):
+    """Direct regression test for #3033 / #3062.
+
+    ``--strict-in-pad-clearance`` is a ``kct route`` flag.  When set,
+    ``route_cmd.main`` stamps the
+    ``KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1`` env var so the
+    lazily-constructed ``EscapeRouter`` reads the opt-in without each
+    intermediate call site needing an explicit pass-through.
+
+    This test pins two invariants so the flag never drifts again:
+
+    1. The flag appears on the ``kct route`` parser (``route_cmd._route_parser``).
+    2. Running ``route_cmd.main`` with the flag stamps the env var to
+       ``"1"`` and the absence of the flag leaves the env var unset.
+    """
+    assert "--strict-in-pad-clearance" in _kct_route_parser_flags(), (
+        "--strict-in-pad-clearance is missing from the route parser "
+        "(this would regress #3033/#3062)"
+    )
+
+    # Verify the inner parser stamps the env var when the flag is set.
+    # We intercept just before any routing work happens by mocking out
+    # the heavyweight downstream functions; the parse-args + env-stamp
+    # block runs first so we can observe it.
+    #
+    # Issue #4559: ``main()`` now restores ``os.environ`` when it exits
+    # (any path, including this SystemExit interception), so the stamp
+    # must be observed MID-RUN -- inside the interception -- rather than
+    # after ``main()`` returns.  The mid-run view is the one that matters
+    # for #3033/#3062 anyway: it is what the lazily-constructed
+    # EscapeRouter sees.  The post-return view is now pinned to "no leak".
+    import os
+    from unittest.mock import patch
+
+    # route_cmd.main validates the PCB path exists before it reaches
+    # _set_wall_clock_deadline, so give it a real (minimal) file
+    # (stale-test fix, issue #3436 burn-down).
+    dummy_pcb = tmp_path / "dummy.kicad_pcb"
+    dummy_pcb.write_text("(kicad_pcb)")
+
+    observed: dict[str, str | None] = {}
+
+    def _capture_and_exit(*args, **kwargs):
+        observed["mid_run"] = os.environ.get("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE")
+        raise SystemExit(0)
+
+    # Stage 1: flag set -> env var is "1" during the run.
+    saved = os.environ.pop("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", None)
+    try:
+        # We invoke the inner parser via the shim's sub_argv construction
+        # rather than executing the full routing pipeline.  Mock the
+        # inner main's exit point so we don't actually route.
+        from kicad_tools.cli import route_cmd
+
+        # Patch the function that runs after env-stamping but well
+        # before any real work.  ``_set_wall_clock_deadline`` is the
+        # very next line after the env-stamp block.
+        with patch.object(
+            route_cmd,
+            "_set_wall_clock_deadline",
+            side_effect=_capture_and_exit,
+        ):
+            with pytest.raises(SystemExit):
+                route_cmd.main([str(dummy_pcb), "--strict-in-pad-clearance"])
+        assert observed["mid_run"] == "1", (
+            "Inner route_cmd.main must stamp "
+            "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1 (visible mid-run to the "
+            "lazily-constructed EscapeRouter) when --strict-in-pad-clearance "
+            f"is passed; got {observed['mid_run']!r}"
+        )
+        assert "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE" not in os.environ, (
+            "route_cmd.main must restore os.environ on exit (issue #4559); "
+            "the strict-in-pad stamp leaked out of main()"
+        )
+
+        # Stage 2: flag absent -> env var stays unset during the run too.
+        observed.clear()
+        with patch.object(
+            route_cmd,
+            "_set_wall_clock_deadline",
+            side_effect=_capture_and_exit,
+        ):
+            with pytest.raises(SystemExit):
+                route_cmd.main([str(dummy_pcb)])
+        assert observed["mid_run"] is None, (
+            "Inner route_cmd.main must NOT stamp the env var when the "
+            "flag is absent; legacy bit-for-bit behaviour requires the "
+            "env var be unset in this code path"
+        )
+        assert "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE" not in os.environ
+    finally:
+        # Restore env to original state.
+        if saved is None:
+            os.environ.pop("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", None)
+        else:
+            os.environ["KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE"] = saved
+
+
+# ---------------------------------------------------------------------------
+# Manufacturer-flag consistency across DRC-family subcommands (#3159)
+# ---------------------------------------------------------------------------
+#
+# ``--mfr`` selects the manufacturer profile that supplies clearance /
+# design-rule targets.  Every subcommand that derives rules from a
+# manufacturer profile must accept it so users do not have to learn a
+# different (or missing) flag per subcommand.
+#
+# ``fix-drc`` was the drift case (#3159): it silently pinned its
+# internally-generated DRC report to ``jlcpcb`` because it had no
+# ``--mfr`` flag at all, while ``check`` / ``audit`` / ``route`` / ``drc`` /
+# ``repair-clearance`` all declare it.
+#
+# NOTE: the *spelling* and ``choices`` source are intentionally not
+# unified here -- ``check``/``audit`` use ``get_manufacturer_ids()`` while
+# ``route``/``drc``/``fix-drc`` use ``get_all_manufacturer_names()``.  This
+# test only pins that ``--mfr`` is *present* on each; unifying the
+# parent-parser is deferred to a separate issue.
+MFR_SUBCOMMANDS = ("check", "audit", "route", "drc", "fix-drc", "repair-clearance")
+
+
+def _outer_subparser_flags(name: str) -> set[str]:
+    """Return the ``--long-form`` flags declared on the named outer subparser.
+
+    Passthrough stubs (``route``, issue #7017) resolve to their real parser.
+    """
+    from kicad_tools.cli.parser import create_parser, resolve_passthrough
+
+    main_parser = resolve_passthrough(create_parser())
+    for action in main_parser._actions:
+        choices = getattr(action, "choices", None)
+        if choices and name in choices:
+            return _flags_from_parser(choices[name])
+    raise AssertionError(f"could not find {name!r} subparser on outer parser")
+
+
+@pytest.mark.parametrize("subcommand", MFR_SUBCOMMANDS)
+def test_mfr_flag_is_consistent_across_subcommands(subcommand):
+    """Every manufacturer-relevant subcommand must accept ``--mfr``.
+
+    Catches future drift of the kind that left ``fix-drc`` without the
+    flag (#3159).
+    """
+    flags = _outer_subparser_flags(subcommand)
+    assert "--mfr" in flags, (
+        f"kct {subcommand} is missing --mfr; manufacturer-relevant "
+        f"subcommands must accept --mfr consistently (regresses #3159)."
+    )
+
+
+def test_fix_drc_mfr_on_inner_and_outer_parser():
+    """Direct regression test for #3159.
+
+    ``fix-drc`` had no ``--mfr`` flag on either parser, so
+    ``kct fix-drc --mfr jlcpcb-tier1 board.kicad_pcb`` failed with
+    ``error: unrecognized arguments``.  Pin both parsers so the flag
+    never goes missing again.
+    """
+    outer = _outer_subparser_flags("fix-drc")
+    assert "--mfr" in outer, (
+        "--mfr is missing from the outer parser.py fix-drc subparser (this would regress #3159)"
+    )
+
+    # Inner parser: the flag must parse without an "unrecognized
+    # arguments" error.  We parse a minimal argv and assert the value
+    # lands on the namespace.
+    from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
+
+    captured: dict[str, object] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        ns = real_parse_args(self, *args, **kwargs)
+        if getattr(self, "prog", "") == "kicad-tools fix-drc":
+            captured["ns"] = ns
+            raise SystemExit(0)
+        return ns
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            fix_drc_main(["board.kicad_pcb", "--mfr", "jlcpcb"])
+
+    assert "ns" in captured, "failed to capture inner fix-drc namespace"
+    assert getattr(captured["ns"], "mfr", None) == "jlcpcb", (
+        "inner fix-drc parser must accept --mfr and store it on the namespace (regresses #3159)"
+    )
+
+
+def test_fix_drc_threads_manufacturer_into_drc_checker():
+    """``--mfr`` and ``--layers`` must flow into the self-generated DRC report.
+
+    In the no-``--drc-report`` path, ``fix-drc`` builds its own report via
+    ``_run_python_drc``.  Before #3159 the manufacturer was never passed, so
+    clearance targets were silently pinned to jlcpcb.  Since #6431 the report
+    comes from ``kct check``'s own rule set
+    (:func:`kicad_tools.cli.check_cmd.build_check_rule_set`), so assert the
+    selected profile and layer count reach it, with the board itself as the
+    project path.
+    """
+    from unittest.mock import MagicMock
+
+    from kicad_tools.cli import fix_drc_cmd
+
+    fake_results = MagicMock()
+    fake_results.violations = []
+
+    with (
+        patch("kicad_tools.cli.check_cmd.build_check_rule_set", return_value=MagicMock()) as mk,
+        patch("kicad_tools.cli.check_cmd.run_check_rule_set", return_value=fake_results),
+        patch("kicad_tools.schema.pcb.PCB.load", return_value=MagicMock()),
+        patch("kicad_tools.drc.compat.drc_results_to_report", return_value=MagicMock()),
+    ):
+        fix_drc_cmd._run_python_drc(Path("board.kicad_pcb"), manufacturer="oshpark", layers=4)
+
+    assert mk.call_count == 1, "_run_python_drc should build exactly one rule set"
+    args, kwargs = mk.call_args
+    assert kwargs.get("manufacturer") == "oshpark", (
+        "_run_python_drc must thread --mfr into the rule set (regresses #3159)"
+    )
+    assert kwargs.get("layers") == 4, "_run_python_drc must thread --layers into the rule set"
+    assert args[0] == Path("board.kicad_pcb")
+
+
+# ---------------------------------------------------------------------------
+# ``check`` parser pair (#4633)
+# ---------------------------------------------------------------------------
+#
+# ``kct check`` has the three-hop forwarding shape ``route`` had before #7017:
+#
+#     parser.py :: _add_check_parser
+#         -> commands/validation.py :: run_check_command
+#             -> check_cmd.py :: main
+#
+# and went unguarded until #4633, by which point three flags had drifted
+# (``--refill-zones``, ``--courtyard-waivers``, ``--waivers`` -- see the
+# module docstring).  The allowlists below are DELIBERATELY EMPTY.
+
+# Flags that legitimately exist ONLY on the inner ``check_cmd.py`` parser.
+#
+# Empty by construction: as of #4633 every inner ``check`` flag is also
+# declared on the outer ``kct check`` subparser and forwarded by the shim.
+# A future entry belongs here only if the flag is genuinely internal-only
+# (a debug/profiling/experimental toggle that must NOT be advertised on the
+# ``kct`` surface), and must carry a one-line justification.  A user-facing,
+# documented flag is a DRIFT BUG: add it to _add_check_parser and
+# run_check_command instead of allowlisting it.
+INNER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
+
+# Flags that legitimately exist ONLY on the outer ``kct check`` subparser.
+#
+# Empty by construction.  A future entry belongs here only if the shim
+# consumes the flag entirely
+# before building ``sub_argv`` (so it is never forwarded and the inner
+# parser has no equivalent), and must carry a one-line justification.
+# Otherwise an outer-only flag parses cleanly and is then silently dropped
+# -- the #2819 failure mode, applied to ``check``.
+OUTER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
+
+
+def _inner_check_parser(prog: str = "kct check") -> argparse.ArgumentParser:
+    """Capture the inner ``check_cmd.main`` parser without parsing argv.
+
+    ``prog`` is parameterised ONLY so the vacuity control below can prove
+    that a wrong prog string fails loudly rather than silently capturing
+    nothing.  Production callers must use the default.
+
+    .. warning::
+
+       The inner check parser's ``prog`` is ``"kct check"``, NOT
+       ``"kicad-tools check"`` (``check_cmd.py`` ``main()``), whereas the
+       *route* parser uses ``"kicad-tools route"``.  Copying a route
+       parser-capture helper and its prog filter here captures nothing.  The hard ``assert`` below is what turns that mistake into
+       a loud failure instead of a permanently-green, vacuous test.
+    """
+    from kicad_tools.cli.check_cmd import main as check_main
+
+    captured: dict[str, argparse.ArgumentParser] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        if getattr(self, "prog", "") == prog:
+            captured["parser"] = self
+            raise SystemExit(0)
+        return real_parse_args(self, *args, **kwargs)
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            check_main([])
+
+    assert "parser" in captured, (
+        f"failed to capture inner check parser with prog={prog!r} -- "
+        "check_cmd.main's prog string has changed; update "
+        "_inner_check_parser_flags rather than letting this test go vacuous"
+    )
+    return captured["parser"]
+
+
+def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
+    """Return the ``--long-form`` flags of the inner ``check_cmd`` parser."""
+    return _flags_from_parser(_inner_check_parser(prog))
+
+
+def test_check_inner_only_flags_are_in_allowlist():
+    """Every flag on the inner check parser must be on the outer one.
+
+    Guards the direction that actually shipped three times (#4113,
+    #4137, #4417): a flag declared on ``check_cmd.py`` only, so
+    ``kct check --flag`` dies with ``error: unrecognized arguments``.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    unexpected_inner_only = (inner - outer) - INNER_ONLY_CHECK_ALLOWLIST
+
+    if unexpected_inner_only:
+        flag_list = "\n  ".join(sorted(unexpected_inner_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the inner 'check_cmd.py' parser but rejected by the outer "
+            "'kct check' parser:\n  "
+            f"{flag_list}\n\n"
+            "Fix by adding each flag to BOTH:\n"
+            "  1. src/kicad_tools/cli/parser.py :: _add_check_parser\n"
+            "  2. src/kicad_tools/cli/commands/validation.py :: "
+            "run_check_command (forward to sub_argv)\n\n"
+            "Model after the --refill-zones / --waivers blocks added by "
+            "#4633.  If the flag is genuinely internal-only "
+            "(debug/profiling), add it to INNER_ONLY_CHECK_ALLOWLIST in "
+            "tests/test_cli_parser_drift.py with justification."
+        )
+
+
+def test_check_outer_only_flags_are_in_allowlist():
+    """Every flag on the outer check parser must be on the inner one.
+
+    Guards the #2819 direction applied to ``check``: a flag the outer
+    parser accepts but the shim never forwards, so the user-supplied
+    value is silently discarded.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    unexpected_outer_only = (outer - inner) - OUTER_ONLY_CHECK_ALLOWLIST
+
+    if unexpected_outer_only:
+        flag_list = "\n  ".join(sorted(unexpected_outer_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the outer 'kct check' parser but rejected by the inner "
+            "'check_cmd.py' parser:\n  "
+            f"{flag_list}\n\n"
+            "These flags will be silently dropped by the forwarding shim, "
+            "so any user-supplied value is ignored.  Fix by:\n"
+            "  1. src/kicad_tools/cli/check_cmd.py :: main "
+            "(add matching add_argument)\n"
+            "  2. src/kicad_tools/cli/commands/validation.py :: "
+            "run_check_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely consumed by the shim and "
+            "intentionally never forwarded, add it to "
+            "OUTER_ONLY_CHECK_ALLOWLIST with justification."
+        )
+
+
+def test_check_allowlist_entries_are_actually_inner_only():
+    """Sanity: ``INNER_ONLY_CHECK_ALLOWLIST`` must not go stale.
+
+    Mirrors ``test_allowlist_entries_are_actually_inner_only`` for the
+    check pair, so an allowlisted flag that later gains an outer
+    declaration stops masking future drift for that flag.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    stale: set[str] = set()
+    for flag in INNER_ONLY_CHECK_ALLOWLIST:
+        if flag not in inner:
+            stale.add(f"{flag} (not on inner parser at all)")
+        elif flag in outer:
+            stale.add(f"{flag} (now on outer parser -- remove from allowlist)")
+
+    if stale:
+        entries = "\n  ".join(sorted(stale))
+        pytest.fail(
+            "Stale entries in INNER_ONLY_CHECK_ALLOWLIST:\n  "
+            f"{entries}\n\n"
+            "Remove these entries from tests/test_cli_parser_drift.py."
+        )
+
+
+def test_check_allowlist_entries_are_actually_outer_only():
+    """Sanity: ``OUTER_ONLY_CHECK_ALLOWLIST`` must not go stale."""
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    stale: set[str] = set()
+    for flag in OUTER_ONLY_CHECK_ALLOWLIST:
+        if flag not in outer:
+            stale.add(f"{flag} (not on outer parser at all)")
+        elif flag in inner:
+            stale.add(f"{flag} (now on inner parser -- remove from allowlist)")
+
+    if stale:
+        entries = "\n  ".join(sorted(stale))
+        pytest.fail(
+            "Stale entries in OUTER_ONLY_CHECK_ALLOWLIST:\n  "
+            f"{entries}\n\n"
+            "Remove these entries from tests/test_cli_parser_drift.py."
+        )
+
+
+def test_inner_check_parser_capture_is_not_vacuous():
+    """Negative control for the ``prog``-string trap (#4633).
+
+    The inner check parser uses ``prog="kct check"`` while the outer
+    subparser inherits ``"kicad-tools check"``.  A filter on the wrong
+    prog would capture nothing; depending on how the helper is written
+    that either fails loudly or degrades into comparing a set against
+    itself (a permanently-green test).  This pins the loud behaviour:
+
+    1. the default capture returns a non-empty flag set, and
+    2. a wrong prog string raises ``AssertionError``, it does not
+       silently return an empty set.
+    """
+    inner = _inner_check_parser_flags()
+    assert inner, "inner check parser capture returned an empty flag set"
+    # A few flags that have been on the inner parser since long before
+    # #4633 -- if these vanish, the capture is looking at the wrong parser.
+    assert {"--errors-only", "--strict", "--layers"} <= inner, (
+        f"inner check capture looks wrong; got {sorted(inner)}"
+    )
+
+    with pytest.raises(AssertionError, match="failed to capture inner check parser"):
+        _inner_check_parser_flags(prog="kicad-tools check")
+
+
+def test_no_net_class_map_is_on_both_check_parsers():
+    """Direct regression pin for #4601 / PR #4629.
+
+    ``--no-net-class-map`` is the flag whose Judge review surfaced the
+    missing ``check`` guard (#4633).  It is correct on both parsers
+    today; pin it so it cannot drift.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    assert "--no-net-class-map" in inner, (
+        "--no-net-class-map is missing from the inner check_cmd.py parser "
+        "(this would regress #4601)"
+    )
+    assert "--no-net-class-map" in outer, (
+        "--no-net-class-map is missing from the outer parser.py check "
+        "subparser (this would regress #4601)"
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--strict-connectivity", "--legacy-connectivity"],
+)
+def test_connectivity_mode_flags_are_on_both_check_parsers(flag):
+    """#4673 flag-inversion pin: the connectivity-mode flags live on BOTH parsers.
+
+    ``--legacy-connectivity`` is the behavior-changing opt-out of the new
+    strict (real-geometry) connectivity default; ``--strict-connectivity``
+    is kept as a compatibility no-op restating the default.  Both must be
+    accepted by the outer ``kct check`` parser (the user-facing surface)
+    and the inner ``check_cmd.py`` parser.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    assert flag in inner, f"{flag} is missing from the inner check_cmd.py parser"
+    assert flag in outer, (
+        f"{flag} is missing from the outer parser.py check subparser "
+        "(`kct check` would reject it with 'unrecognized arguments')"
+    )
+
+
+def test_check_shim_forwards_legacy_connectivity():
+    """The outer shim must forward ``--legacy-connectivity`` to the inner main.
+
+    Declaring the flag on the outer parser alone would parse it and then
+    discard it (#2819 failure mode) -- the user would silently get the
+    strict default instead of the requested legacy model.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", "--legacy-connectivity"])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        assert run_check_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert "--legacy-connectivity" in sub_argv, (
+        f"run_check_command dropped --legacy-connectivity; got {sub_argv}"
+    )
+
+    # Absent flag must not be forwarded (default strict behavior preserved).
+    args = create_parser().parse_args(["check", "board.kicad_pcb"])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        run_check_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    assert "--legacy-connectivity" not in sub_argv, (
+        "--legacy-connectivity forwarded even though it was not supplied"
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--refill-zones", "--courtyard-waivers", "--waivers"],
+)
+def test_drifted_check_flags_are_on_both_parsers(flag):
+    """Direct regression pins for the three drift instances fixed by #4633.
+
+    Each was declared on ``check_cmd.py`` only and rejected by the real
+    ``kct check`` CLI:  ``--refill-zones`` (#4113) was entirely
+    unreachable; ``--courtyard-waivers`` (#4137) and ``--waivers``
+    (#4417) lost only their explicit-path override because both sidecars
+    are auto-discovered next to the board.
+    """
+    inner = _inner_check_parser_flags()
+    outer = _outer_subparser_flags("check")
+
+    assert flag in inner, f"{flag} is missing from the inner check_cmd.py parser"
+    assert flag in outer, (
+        f"{flag} is missing from the outer parser.py check subparser "
+        "(this would regress #4633 -- `kct check` would reject it with "
+        "'unrecognized arguments')"
+    )
+
+
+def test_check_shim_forwards_drifted_flags_to_inner_main():
+    """The shim must actually forward the #4633 flags, not just parse them.
+
+    Declaring the flags on the outer parser alone would fix the
+    ``unrecognized arguments`` error while still discarding the value --
+    the #2819 failure mode.  This drives the real
+    ``create_parser() -> run_check_command`` path and asserts the flags
+    and their values land in the argv handed to ``check_cmd.main``.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(
+        [
+            "check",
+            "board.kicad_pcb",
+            "--refill-zones",
+            "--courtyard-waivers",
+            "/tmp/cw.json",
+            "--waivers",
+            "/tmp/w.json",
+        ]
+    )
+
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        assert run_check_command(args) == 0
+
+    assert inner_main.call_count == 1
+    sub_argv = inner_main.call_args[0][0]
+
+    assert "--refill-zones" in sub_argv, f"run_check_command dropped --refill-zones; got {sub_argv}"
+    for opt, value in (
+        ("--courtyard-waivers", "/tmp/cw.json"),
+        ("--waivers", "/tmp/w.json"),
+    ):
+        assert opt in sub_argv, f"run_check_command dropped {opt}; got {sub_argv}"
+        assert sub_argv[sub_argv.index(opt) + 1] == value, (
+            f"run_check_command forwarded {opt} without its value; got {sub_argv}"
+        )
+
+
+def test_check_shim_omits_drifted_flags_when_unset():
+    """Absent flags must not be forwarded (default behaviour preserved).
+
+    Note the value-bearing flags use a truthiness guard, matching the
+    existing ``--net-class-map`` block: an empty-string path is treated
+    as "not supplied" rather than forwarded as ``--waivers ''``.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb"])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        run_check_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    for opt in ("--refill-zones", "--courtyard-waivers", "--waivers"):
+        assert opt not in sub_argv, f"{opt} forwarded even though it was not supplied"
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", "--waivers", ""])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        run_check_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    assert "--waivers" not in sub_argv, (
+        "an empty --waivers path should be treated as absent (matching the "
+        f"--net-class-map truthiness guard); got {sub_argv}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ``check`` type/default parity (#5810)
+# ---------------------------------------------------------------------------
+#
+# The containment tests above only prove a flag is *present* on both
+# parsers.  #5810 was the next rung of the same bug class: ``--copper`` was
+# on both, but the outer parser declared ``type=float, default=1.0`` while
+# the inner one takes a raw string (``default=None``).  ``kct check --copper
+# outer=2,inner=0.5`` therefore died in argparse with ``invalid float
+# value`` before the shim ever ran, and the shim's ``!= 1.0`` guard silently
+# dropped an explicit ``--copper 1``.  The tests below compare the argparse
+# ``type`` and ``default`` of every flag declared on BOTH check parsers.
+
+
+def _actions_by_long_flag(parser: argparse.ArgumentParser) -> dict[str, argparse.Action]:
+    """Map each ``--long-form`` option string on ``parser`` to its action."""
+    return {
+        option_string: action
+        for action in parser._actions
+        for option_string in action.option_strings
+        if option_string.startswith("--")
+    }
+
+
+def _outer_subparser(name: str) -> argparse.ArgumentParser:
+    """Return the named outer ``kct`` subparser object."""
+    from kicad_tools.cli.parser import create_parser
+
+    main_parser = create_parser()
+    for action in main_parser._actions:
+        choices = getattr(action, "choices", None)
+        if choices and name in choices:
+            return choices[name]
+    raise AssertionError(f"could not find {name!r} subparser on outer parser")
+
+
+# Pre-existing, understood ``type=`` drift between the outer ``kct check``
+# subparser and the inner ``check_cmd.py`` parser.  Each entry must say why
+# the mismatch is harmless.  A new entry is almost always a bug: share the
+# argument definition instead (see ``add_check_copper_argument``).
+CHECK_TYPE_DRIFT_ALLOWLIST: dict[str, str] = {
+    # Outer keeps the raw string; the shim forwards ``str(value)`` and the
+    # inner parser converts it to ``Path``.  Same accepted inputs.
+    "--mask-copper-config": "outer str, inner Path; shim forwards str()",
+}
+
+# Pre-existing, understood ``default=`` drift.  Same rules as above.
+CHECK_DEFAULT_DRIFT_ALLOWLIST: dict[str, str] = {
+    # Outer default 2 vs inner None (auto-detect from the board).  The shim
+    # forwards only ``!= 2``, so an omitted flag still auto-detects -- but an
+    # EXPLICIT ``--layers 2`` is dropped too.  Same shape as the #5810
+    # ``--copper 1`` bug; left for a follow-up to keep #5810 scoped.
+    "--layers": "outer 2 vs inner None; shim forwards only != 2",
+    # Outer None sentinel; the shim forwards only when set so the inner
+    # parser's 15.0mm default stays the single source of truth (#4595).
+    "--sch-field-threshold": "outer None sentinel, inner 15.0; forwarded only when set",
+}
+
+
+def _check_type_default_drift() -> tuple[dict[str, str], dict[str, str]]:
+    """Return ``({flag: detail}, {flag: detail})`` for type / default drift."""
+    inner = _actions_by_long_flag(_inner_check_parser())
+    outer = _actions_by_long_flag(_outer_subparser("check"))
+    type_drift: dict[str, str] = {}
+    default_drift: dict[str, str] = {}
+    for flag in sorted(set(inner) & set(outer)):
+        i, o = inner[flag], outer[flag]
+        if i.type != o.type:
+            type_drift[flag] = f"inner type={i.type!r}, outer type={o.type!r}"
+        if i.default != o.default:
+            default_drift[flag] = f"inner default={i.default!r}, outer default={o.default!r}"
+    return type_drift, default_drift
+
+
+def test_check_shared_flags_agree_on_type_and_default():
+    """Every flag on both check parsers must share ``type`` and ``default``.
+
+    Generalises the #5810 ``--copper`` pin: a flag whose outer ``type=``
+    is narrower than the inner one rejects inputs the implementation
+    accepts; a flag whose outer ``default=`` differs changes behaviour when
+    the flag is omitted (or, via a ``!= default`` shim guard, silently drops
+    an explicit value equal to the outer default).
+    """
+    type_drift, default_drift = _check_type_default_drift()
+    unexpected = [
+        f"{flag}: {detail}"
+        for flag, detail in type_drift.items()
+        if flag not in CHECK_TYPE_DRIFT_ALLOWLIST
+    ] + [
+        f"{flag}: {detail}"
+        for flag, detail in default_drift.items()
+        if flag not in CHECK_DEFAULT_DRIFT_ALLOWLIST
+    ]
+    if unexpected:
+        pytest.fail(
+            "Argparse type/default drift between 'kct check' (parser.py) and "
+            "check_cmd.py:\n  "
+            + "\n  ".join(unexpected)
+            + "\n\nShare one add_argument definition between both parsers "
+            "(see copper_weight.add_check_copper_argument, #5810), or, if the "
+            "mismatch is provably harmless, allowlist it with justification in "
+            "CHECK_TYPE_DRIFT_ALLOWLIST / CHECK_DEFAULT_DRIFT_ALLOWLIST."
+        )
+
+
+def test_check_type_default_drift_allowlists_are_not_stale():
+    """An allowlisted flag that no longer drifts must be removed."""
+    type_drift, default_drift = _check_type_default_drift()
+    stale = [f"type: {f}" for f in CHECK_TYPE_DRIFT_ALLOWLIST if f not in type_drift] + [
+        f"default: {f}" for f in CHECK_DEFAULT_DRIFT_ALLOWLIST if f not in default_drift
+    ]
+    assert not stale, f"stale type/default drift allowlist entries: {stale}"
+
+
+def test_copper_type_and_default_match_on_both_check_parsers():
+    """Direct regression pin for #5810: raw-string ``--copper``, ``None`` default."""
+    inner = _actions_by_long_flag(_inner_check_parser())["--copper"]
+    outer = _actions_by_long_flag(_outer_subparser("check"))["--copper"]
+    for side, action in (("inner", inner), ("outer", outer)):
+        assert action.type is None, f"{side} --copper must stay a raw string, got {action.type!r}"
+        assert action.default is None, (
+            f"{side} --copper default must be None (defer to board stackup / "
+            f"profile), got {action.default!r}"
+        )
+        assert "-c" in action.option_strings, f"{side} --copper lost its -c alias"
+
+
+@pytest.mark.parametrize(
+    ("cli", "forwarded"),
+    [
+        (["--copper", "outer=2,inner=0.5"], "outer=2,inner=0.5"),
+        (["-c", "outer=2"], "outer=2"),
+        (["--copper", "2"], "2"),
+        (["--copper", "1"], "1"),
+        (["--copper", "1.0"], "1.0"),
+        ([], None),
+    ],
+    ids=["keyed", "keyed-short", "scalar", "explicit-1", "explicit-1.0", "omitted"],
+)
+def test_check_shim_forwards_copper_verbatim(cli, forwarded):
+    """The shim forwards ``--copper`` verbatim, and only when supplied (#5810).
+
+    An omitted flag must not be forwarded (so ``check_cmd`` resolves the
+    board stackup / profile default); a supplied value -- including ``1``,
+    which the old ``!= 1.0`` guard dropped -- is forwarded unmangled.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", *cli])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        assert run_check_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    if forwarded is None:
+        assert "--copper" not in sub_argv, f"omitted --copper was forwarded: {sub_argv}"
+    else:
+        assert sub_argv[sub_argv.index("--copper") + 1] == forwarded, sub_argv
+
+
+# ---------------------------------------------------------------------------
+# ``readiness`` pair (#5816)
+#
+# ``kct readiness`` has the same three-hop forwarding shape as ``check``:
+#
+#     parser.py :: _add_readiness_parser
+#         -> commands/readiness.py :: run_readiness_command
+#             -> readiness_cmd.py :: main / add_readiness_arguments
+#
+# #5816: the outer ``_add_readiness_parser`` maintained its own separate,
+# stale argument list instead of calling the shared
+# ``add_readiness_arguments``, and never declared the standalone runner's
+# mutually-exclusive ``--verify``/``--generate`` operation flags at all.
+# ``kct readiness board --generate`` failed argument parsing outright, and a
+# bare ``kct readiness board`` silently verified instead of erroring on a
+# missing package.  Both allowlists below are DELIBERATELY EMPTY -- a
+# user-facing readiness flag belongs on both parsers.
+
+INNER_ONLY_READINESS_ALLOWLIST: frozenset[str] = frozenset(set())
+OUTER_ONLY_READINESS_ALLOWLIST: frozenset[str] = frozenset(set())
+
+
+def _inner_readiness_parser_flags(prog: str = "kct readiness") -> set[str]:
+    """Capture the inner ``readiness_cmd.main`` parser without parsing argv.
+
+    Mirrors ``_inner_check_parser_flags``: ``prog`` is parameterised ONLY so
+    the vacuity control below can prove a wrong prog string fails loudly.
+    """
+    from kicad_tools.cli.readiness_cmd import main as readiness_main
+
+    captured: dict[str, argparse.ArgumentParser] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        if getattr(self, "prog", "") == prog:
+            captured["parser"] = self
+            raise SystemExit(0)
+        return real_parse_args(self, *args, **kwargs)
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            readiness_main([])
+
+    assert "parser" in captured, (
+        f"failed to capture inner readiness parser with prog={prog!r} -- "
+        "readiness_cmd.main's prog string has changed; update "
+        "_inner_readiness_parser_flags rather than letting this test go vacuous"
+    )
+    return _flags_from_parser(captured["parser"])
+
+
+def test_readiness_inner_only_flags_are_in_allowlist():
+    """Every flag on the inner readiness parser must be on the outer one.
+
+    Guards the direction that shipped in #5816: a flag declared on
+    ``readiness_cmd.py`` only, so ``kct readiness --flag`` dies with
+    ``error: unrecognized arguments``.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    unexpected_inner_only = (inner - outer) - INNER_ONLY_READINESS_ALLOWLIST
+
+    if unexpected_inner_only:
+        flag_list = "\n  ".join(sorted(unexpected_inner_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the inner 'readiness_cmd.py' parser but rejected by the outer "
+            "'kct readiness' parser:\n  "
+            f"{flag_list}\n\n"
+            "Fix by adding each flag to BOTH:\n"
+            "  1. src/kicad_tools/cli/parser.py :: _add_readiness_parser\n"
+            "  2. src/kicad_tools/cli/commands/readiness.py :: "
+            "run_readiness_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely internal-only, add it to "
+            "INNER_ONLY_READINESS_ALLOWLIST in tests/test_cli_parser_drift.py "
+            "with justification."
+        )
+
+
+def test_readiness_outer_only_flags_are_in_allowlist():
+    """Every flag on the outer readiness parser must be on the inner one.
+
+    Guards the #2819 direction applied to ``readiness``: a flag the outer
+    parser accepts but the shim never forwards, so the user-supplied value
+    is silently discarded.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    unexpected_outer_only = (outer - inner) - OUTER_ONLY_READINESS_ALLOWLIST
+
+    if unexpected_outer_only:
+        flag_list = "\n  ".join(sorted(unexpected_outer_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the outer 'kct readiness' parser but rejected by the inner "
+            "'readiness_cmd.py' parser:\n  "
+            f"{flag_list}\n\n"
+            "These flags will be silently dropped by the forwarding shim, "
+            "so any user-supplied value is ignored.  Fix by:\n"
+            "  1. src/kicad_tools/cli/readiness_cmd.py :: "
+            "add_readiness_arguments (add matching add_argument)\n"
+            "  2. src/kicad_tools/cli/commands/readiness.py :: "
+            "run_readiness_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely consumed by the shim and intentionally "
+            "never forwarded, add it to OUTER_ONLY_READINESS_ALLOWLIST with "
+            "justification."
+        )
+
+
+def test_inner_readiness_parser_capture_is_not_vacuous():
+    """Negative control for the ``prog``-string trap, mirroring the check pair."""
+    inner = _inner_readiness_parser_flags()
+    assert inner, "inner readiness parser capture returned an empty flag set"
+    assert {"--verify", "--generate", "--mfr"} <= inner, (
+        f"inner readiness capture looks wrong; got {sorted(inner)}"
+    )
+
+    with pytest.raises(AssertionError, match="failed to capture inner readiness parser"):
+        _inner_readiness_parser_flags(prog="kicad-tools readiness")
+
+
+@pytest.mark.parametrize("flag", ["--verify", "--generate"])
+def test_readiness_operation_flags_are_on_both_parsers(flag):
+    """Direct regression pin for #5816.
+
+    ``--generate``/``--verify`` were declared on the standalone
+    ``readiness_cmd.py`` parser only; ``kct readiness board --generate``
+    failed with ``error: unrecognized arguments``.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    assert flag in inner, f"{flag} is missing from the inner readiness_cmd.py parser"
+    assert flag in outer, (
+        f"{flag} is missing from the outer parser.py readiness subparser "
+        "(this would regress #5816 -- `kct readiness` would reject it with "
+        "'unrecognized arguments')"
+    )
+
+
+def test_readiness_generate_and_verify_are_mutually_exclusive_on_outer_parser():
+    """``kct readiness board --generate --verify`` must be rejected.
+
+    Matches the standalone parser's mutually-exclusive group (#5816).
+    """
+    from kicad_tools.cli.parser import create_parser
+
+    with pytest.raises(SystemExit):
+        create_parser().parse_args(["readiness", "board", "--generate", "--verify"])
+
+
+def test_readiness_shim_forwards_generate_and_defaults_to_verify():
+    """The shim must forward ``--generate`` and omit it (and ``--verify``)
+
+    when unset, preserving verification as the safe default (#5816
+    acceptance criteria).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--generate"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert "--generate" in sub_argv, f"run_readiness_command dropped --generate; got {sub_argv}"
+    assert "--verify" not in sub_argv, (
+        f"--generate and --verify should not both be forwarded; got {sub_argv}"
+    )
+
+    # No operation flag supplied: default must still be verify, and neither
+    # flag should be forwarded (matching readiness_cmd.py's own default).
+    args = create_parser().parse_args(["readiness", "board"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    assert "--generate" not in sub_argv, (
+        f"--generate forwarded even though it was not supplied; got {sub_argv}"
+    )
+    assert "--verify" not in sub_argv, (
+        f"an explicit --verify should not be required to preserve the safe default; got {sub_argv}"
+    )
+
+
+def test_readiness_skip_cleanup_reaches_inner_parser_through_kct_readiness():
+    """``kct readiness --skip-cleanup`` must parse on the outer parser and be
+
+    forwarded to the inner runner (#8218: the skip needs an explicit flag).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli.readiness_cmd import build_parser as standalone_build_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--generate", "--skip-cleanup"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert "--skip-cleanup" in sub_argv, f"shim dropped --skip-cleanup; got {sub_argv}"
+    assert standalone_build_parser().parse_args(sub_argv).skip_cleanup is True
+
+    # Not supplied: must not be forwarded (cleanup runs by default).
+    args = create_parser().parse_args(["readiness", "board", "--generate"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    assert "--skip-cleanup" not in inner_main.call_args[0][0]
+
+
+def test_readiness_explicit_verify_dispatches_like_standalone_default():
+    """``kct readiness board --verify`` must dispatch identically to the
+
+    standalone runner's own default (#5816 acceptance criteria: unified and
+    standalone CLI dispatch the operation flags identically).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli.readiness_cmd import build_parser as standalone_build_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--verify"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    sub_argv = inner_main.call_args[0][0]
+
+    # Whatever the shim forwards (or omits) must parse through the real
+    # standalone parser to the same resolved operation as the standalone
+    # runner's own no-flag default.
+    unified_operation_args = standalone_build_parser().parse_args(sub_argv)
+    default_operation_args = standalone_build_parser().parse_args(["board"])
+    assert bool(unified_operation_args.generate) == bool(default_operation_args.generate), (
+        "kct readiness --verify must resolve to the same operation as the "
+        f"standalone runner's bare default; got sub_argv={sub_argv}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# erc pair (Issue #7161):
+#   parser.py :: _add_erc_parser ("erc parse") -> cli/__init__.py shim ->
+#   erc_cmd.build_parser / erc_cmd.main
+#
+# ``kct erc x.kicad_sch --strict`` used to fail with "unrecognized
+# arguments" although erc_cmd documented and implemented it.
+# ---------------------------------------------------------------------------
+
+
+def _outer_erc_parse_parser() -> argparse.ArgumentParser:
+    erc = _outer_subparser("erc")
+    for action in erc._actions:
+        choices = getattr(action, "choices", None)
+        if choices and "parse" in choices:
+            return choices["parse"]
+    raise AssertionError("could not find 'erc parse' on the outer parser")
+
+
+def test_erc_parse_mirrors_every_erc_cmd_flag():
+    from kicad_tools.cli.erc_cmd import build_parser
+
+    inner = _flags_from_parser(build_parser()) - {"--help"}
+    outer = _flags_from_parser(_outer_erc_parse_parser()) - {"--help"}
+    assert "--strict" in inner, "erc_cmd parser capture is vacuous"
+    assert inner == outer, (
+        f"kct erc drift -- inner only: {sorted(inner - outer)}, outer only: {sorted(outer - inner)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("cli", "forwarded"),
+    [
+        (["--strict"], ["--strict"]),
+        (["--by-sheet"], ["--by-sheet"]),
+        (["-v"], ["--verbose"]),
+        (["--keep-report"], ["--keep-report"]),
+        (["--filter-config", "f.toml"], ["--filter-config", "f.toml"]),
+        (["-o", "r.json"], ["--output", "r.json"]),
+        (["-t", "pin"], ["--type", "pin"]),
+    ],
+)
+def test_erc_shim_forwards_flags_to_erc_cmd(cli, forwarded):
+    from kicad_tools.cli import main as kct_main
+    from kicad_tools.cli.erc_cmd import build_parser
+
+    with patch("kicad_tools.cli.erc_cmd.main", return_value=0) as inner_main:
+        assert kct_main(["erc", "board.kicad_sch", *cli]) == 0
+    sub_argv = inner_main.call_args[0][0]
+
+    assert sub_argv[0] == "board.kicad_sch"
+    assert sub_argv[1:] == forwarded
+    # ...and the forwarded argv parses on the real parser.
+    build_parser().parse_args(sub_argv)
+
+
+def test_erc_list_types_needs_no_input():
+    from kicad_tools.cli import main as kct_main
+
+    with patch("kicad_tools.cli.erc_cmd.main", return_value=0) as inner_main:
+        assert kct_main(["erc", "--list-types"]) == 0
+    assert inner_main.call_args[0][0] == ["--list-types"]
+
+
+def test_readiness_shim_forwards_baseline():
+    """``kct readiness --baseline X`` must reach the inner parser (#8664)."""
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--verify", "--baseline", "prev"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert sub_argv[sub_argv.index("--baseline") + 1] == "prev", sub_argv
+
+    args = create_parser().parse_args(["readiness", "board"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    assert "--baseline" not in inner_main.call_args[0][0]

@@ -1,0 +1,1192 @@
+"""
+Command-line interface tools for kicad-tools.
+
+Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct` command:
+
+    kicad-tools symbols <schematic>    - List and query symbols
+    kicad-tools nets <schematic>       - Trace and analyze nets
+    kicad-tools erc <report>           - Parse ERC report
+    kicad-tools drc <report>           - Parse DRC report
+    kicad-tools bom <schematic>        - Generate bill of materials
+    kicad-tools check <pcb>            - Pure Python DRC (no kicad-cli)
+    kicad-tools validate --sync        - Check schematic-to-PCB netlist sync
+    kicad-tools sch <command> <file>   - Schematic analysis tools
+    kicad-tools pcb <command> <file>   - PCB query tools
+    kicad-tools lib <command> <file>   - Symbol library tools
+    kicad-tools footprint <command>    - Footprint generation tools
+    kicad-tools mfr <command>          - Manufacturer tools
+    kicad-tools parts <command>        - LCSC parts lookup and search
+    kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
+    kicad-tools route <pcb>            - Autoroute a PCB
+    kicad-tools route-auto <pcb>       - Orchestrator-based smart routing for a net
+    kicad-tools route-link <pcb>       - Route individual links between chosen endpoints
+    kicad-tools zones <command>        - Add and fill copper pour zones
+    kicad-tools stitch <pcb>           - Auto-add stitching vias for plane connections
+    kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
+    kicad-tools placement <command>    - Detect and fix placement conflicts
+    kicad-tools optimize-traces <pcb>  - Optimize PCB traces
+    kicad-tools validate-footprints    - Validate footprint pad spacing
+    kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
+    kicad-tools analyze <command>      - PCB analysis tools (congestion, etc.)
+    kicad-tools suggest <command>      - Part suggestions (alternatives, etc.)
+    kicad-tools config                 - View/manage configuration
+    kicad-tools interactive            - Launch interactive REPL mode
+    kicad-tools net-status <pcb>       - Report net connectivity status
+    kicad-tools pipeline <pcb>          - End-to-end repair pipeline for existing PCBs
+    kicad-tools create-pcb <schematic>  - Create PCB from schematic
+    kicad-tools readiness <board>      - Manufacturing-readiness sign-off + readiness.json
+    kicad-tools submit-jlcpcb <bundle> - Prepare JLCPCB PCBA submission (orders only via opt-in attended --checkout)
+    kicad-tools tapeout-sign-off <bundle> - Record human sign-off in a tapeout manifest
+    kicad-tools init <project>         - Initialize project with manufacturer rules
+    kicad-tools run <script>           - Run Python script with kicad-tools interpreter
+    kicad-tools bench external         - Zero-touch DeepPCB-comparable board benchmarks
+
+See `kicad-tools --help` for complete documentation.
+"""
+
+import sys
+
+from kicad_tools.config import Config
+from kicad_tools.exceptions import KiCadToolsError
+from kicad_tools.units import get_unit_formatter, set_current_formatter
+
+from .parser import PASSTHROUGH_SUBCOMMANDS, create_parser, passthrough_main
+from .utils import format_error, print_error
+
+__all__ = [
+    "main",
+    "normalize_argv",
+    "split_passthrough_argv",
+    "symbols_main",
+    "nets_main",
+    "erc_main",
+    "drc_main",
+    "drc_summary_main",
+    "bom_main",
+    "net_status_main",
+    "format_error",
+    "print_error",
+]
+
+
+def normalize_argv(argv: list[str]) -> list[str]:
+    """Return a copy of *argv* with the CLI's backwards-compatible shorthands expanded.
+
+    :func:`main` runs this before :func:`create_parser` parses the arguments, so
+    anything that checks a ``kct`` command line against the parser (such as the
+    agent-guide test, issue #5966) must run it too.
+    """
+    argv = list(argv)  # Make a copy to avoid mutating the original
+    # Handle erc backwards compatibility: kct erc <file> -> kct erc parse <file>
+    # Insert "parse" subcommand if the first arg after "erc" isn't a known subcommand
+    i = _command_index(argv)
+    if (
+        i + 1 < len(argv)
+        and argv[i] == "erc"
+        and argv[i + 1] not in ("parse", "explain", "-h", "--help")
+    ):
+        argv.insert(i + 1, "parse")
+    return argv
+
+
+# Top-level options (``create_parser``) that may precede a subcommand.  Used
+# only to find where a passthrough subcommand starts; the prefix itself is
+# still parsed (and validated) by the real top-level parser.
+_GLOBAL_FLAGS = ("--verbose", "--quiet")
+_GLOBAL_VALUE_FLAGS = ("--units",)
+
+
+def _global_flag_arity(token: str) -> int | None:
+    """Tokens a leading global option consumes, or ``None`` if *token* is not one."""
+    if token.startswith("-") and not token.startswith("--"):
+        # Short options: only ``-q`` exists, possibly repeated (``-qq``).
+        return 1 if len(token) > 1 and set(token[1:]) == {"q"} else None
+    name, eq, _ = token.partition("=")
+    if len(name) < 3:
+        return None
+    # argparse accepts unique prefixes (``--verb``); mirror that, counting
+    # ``--version``/``--help`` so an ambiguous prefix is left to argparse.
+    matches = [
+        f
+        for f in (*_GLOBAL_FLAGS, *_GLOBAL_VALUE_FLAGS, "--version", "--help")
+        if f.startswith(name)
+    ]
+    if len(matches) != 1 or matches[0] in ("--version", "--help"):
+        return None
+    if matches[0] in _GLOBAL_VALUE_FLAGS:
+        return 1 if eq else 2
+    return None if eq else 1
+
+
+def _command_index(argv: list[str]) -> int:
+    """Index of the first token after any leading global options."""
+    i = 0
+    while i < len(argv):
+        arity = _global_flag_arity(argv[i])
+        if arity is None:
+            break
+        i += arity
+    return i
+
+
+def split_passthrough_argv(argv: list[str]) -> tuple[list[str], str, list[str]] | None:
+    """Split ``kct`` argv aimed at a passthrough subcommand (issue #7017).
+
+    Returns ``(global_prefix, subcommand, sub_argv)`` when *argv* is leading
+    global options followed by a :data:`~.parser.PASSTHROUGH_SUBCOMMANDS`
+    name (``route``), else ``None``.  ``sub_argv`` is everything after the
+    subcommand, untouched, so the owning parser sees exactly what was typed.
+    A ``nargs=REMAINDER`` subparser cannot do this: it lets the top-level
+    parser steal leading ``--flag value`` pairs and ``--help``.
+    """
+    i = _command_index(argv)
+    if i < len(argv) and argv[i] in PASSTHROUGH_SUBCOMMANDS:
+        return argv[:i], argv[i], argv[i + 1 :]
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kicad-tools CLI."""
+    # Windows consoles/pipes default to cp1252, which cannot encode characters
+    # such as the "Δ" in help text; degrade instead of crashing (Issue #6894).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+    parser = create_parser()
+
+    # Handle footprint generate specially - it has its own subcommand parser
+    if argv is None:
+        argv = sys.argv[1:]
+    # Leading global options are skipped so ``kct -q footprint generate`` works.
+    i = _command_index(argv)
+    if argv[i : i + 2] == ["footprint", "generate"]:
+        from .footprint_generate import main as generate_main
+
+        parser.parse_args(argv[:i])  # validate/apply the global prefix
+        return generate_main(argv[i + 2 :]) or 0
+
+    # Passthrough subcommands (``kct route``) own their whole argv: parse only
+    # the leading global options here and hand the rest over verbatim.
+    passthrough = split_passthrough_argv(argv)
+    if passthrough is not None:
+        prefix, command, sub_argv = passthrough
+        args = parser.parse_args(prefix)
+        if args.global_quiet and not ({"-q", "--quiet"} & set(sub_argv)):
+            sub_argv = [*sub_argv, "--quiet"]
+    else:
+        args = parser.parse_args(normalize_argv(argv))
+        command = args.command
+
+    if not command:
+        parser.print_help()
+        return 0
+
+    # Get global verbose flag (use getattr for backwards compatibility)
+    verbose = getattr(args, "global_verbose", False)
+
+    # Initialize unit formatter with CLI > env > config precedence
+    cli_units = getattr(args, "global_units", None)
+    config = Config.load()
+    formatter = get_unit_formatter(cli_units=cli_units, config=config)
+    set_current_formatter(formatter)
+
+    try:
+        if passthrough is not None:
+            return passthrough_main(command)(sub_argv)
+        return _dispatch_command(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted", file=sys.stderr)
+        return 130
+    except KiCadToolsError as e:
+        print_error(e, verbose)
+        return 1
+    except Exception as e:
+        print_error(e, verbose)
+        return 1
+
+
+def _dispatch_command(args) -> int:
+    """Dispatch to the appropriate command handler."""
+    if args.command == "symbols":
+        from .symbols import main as symbols_cmd
+
+        # Convert args back to argv for the subcommand
+        sub_argv = [args.schematic]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.pattern:
+            sub_argv.extend(["--filter", args.pattern])
+        if args.lib_id:
+            sub_argv.extend(["--lib", args.lib_id])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return symbols_cmd(sub_argv)
+
+    elif args.command == "nets":
+        from .nets import main as nets_cmd
+
+        sub_argv = [args.schematic]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.net:
+            sub_argv.extend(["--net", args.net])
+        if args.stats:
+            sub_argv.append("--stats")
+        return nets_cmd(sub_argv)
+
+    elif args.command == "netlist":
+        from .netlist_cmd import main as netlist_cmd
+
+        if not args.netlist_command:
+            # No subcommand, show help
+            return netlist_cmd(["--help"])
+
+        sub_argv = [args.netlist_command]
+
+        if args.netlist_command == "compare":
+            sub_argv.extend([args.netlist_old, args.netlist_new])
+        elif args.netlist_command == "export":
+            sub_argv.append(args.netlist_schematic)
+            if hasattr(args, "netlist_output") and args.netlist_output:
+                sub_argv.extend(["-o", args.netlist_output])
+        else:
+            sub_argv.append(args.netlist_schematic)
+
+        if hasattr(args, "netlist_format") and args.netlist_format:
+            sub_argv.extend(["--format", args.netlist_format])
+        if hasattr(args, "netlist_sort") and args.netlist_sort != "connections":
+            sub_argv.extend(["--sort", args.netlist_sort])
+        if hasattr(args, "netlist_net") and args.netlist_net:
+            sub_argv.extend(["--net", args.netlist_net])
+
+        return netlist_cmd(sub_argv)
+
+    elif args.command == "erc":
+        # Check for subcommand
+        erc_command = getattr(args, "erc_command", None)
+
+        if erc_command == "explain":
+            from .erc_explain_cmd import main as erc_explain_cmd
+
+            sub_argv = [args.explain_input]
+            if hasattr(args, "explain_format") and args.explain_format != "text":
+                sub_argv.extend(["--format", args.explain_format])
+            if hasattr(args, "explain_errors_only") and args.explain_errors_only:
+                sub_argv.append("--errors-only")
+            if hasattr(args, "explain_filter_type") and args.explain_filter_type:
+                sub_argv.extend(["--type", args.explain_filter_type])
+            if hasattr(args, "explain_keep_report") and args.explain_keep_report:
+                sub_argv.append("--keep-report")
+            return erc_explain_cmd(sub_argv)
+
+        elif erc_command == "parse":
+            # Parse subcommand (default behavior)
+            from .erc_cmd import main as erc_cmd
+
+            sub_argv = [args.report] if args.report else []
+            if args.format != "table":
+                sub_argv.extend(["--format", args.format])
+            if args.errors_only:
+                sub_argv.append("--errors-only")
+            if args.erc_strict:
+                sub_argv.append("--strict")
+            if args.filter_type:
+                sub_argv.extend(["--type", args.filter_type])
+            if args.sheet:
+                sub_argv.extend(["--sheet", args.sheet])
+            if args.erc_by_sheet:
+                sub_argv.append("--by-sheet")
+            if args.erc_verbose:
+                sub_argv.append("--verbose")
+            if args.erc_filter_config:
+                sub_argv.extend(["--filter-config", args.erc_filter_config])
+            if args.erc_keep_report:
+                sub_argv.append("--keep-report")
+            if args.erc_output:
+                sub_argv.extend(["--output", args.erc_output])
+            if args.erc_list_types:
+                sub_argv.append("--list-types")
+            return erc_cmd(sub_argv)
+
+        else:
+            # No subcommand provided, show help
+            from .parser import create_parser
+
+            parser = create_parser()
+            parser.parse_args(["erc", "--help"])
+            return 0
+
+    elif args.command == "drc":
+        from .drc_cmd import main as drc_cmd
+
+        sub_argv = [args.report]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.errors_only:
+            sub_argv.append("--errors-only")
+        if args.filter_type:
+            sub_argv.extend(["--type", args.filter_type])
+        if args.net:
+            sub_argv.extend(["--net", args.net])
+        if args.mfr:
+            sub_argv.extend(["--mfr", args.mfr])
+        if args.layers != 2:
+            sub_argv.extend(["--layers", str(args.layers)])
+        # Issue #6898: forward the run-DRC options the standalone kicad-drc has.
+        if args.strict:
+            sub_argv.append("--strict")
+        # Issue #7077: opt out of the NOT RUN parity -> exit 2 gate.
+        if getattr(args, "allow_incomplete", False):
+            sub_argv.append("--allow-incomplete")
+        # Issue #7096: opt out of failing on unconnected items.
+        if getattr(args, "ignore_unconnected", False):
+            sub_argv.append("--ignore-unconnected")
+        # Issue #7147: explicit parity schematic.
+        if getattr(args, "schematic", None):
+            sub_argv.extend(["--schematic", str(args.schematic)])
+        if args.category:
+            sub_argv.extend(["--category", args.category])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if args.suggest:
+            sub_argv.append("--suggest")
+        if args.filter_config:
+            sub_argv.extend(["--filter-config", str(args.filter_config)])
+        if args.keep_report:
+            sub_argv.append("--keep-report")
+        if args.output:
+            sub_argv.extend(["--output", str(args.output)])
+        # Issue #4691: forward --waivers to the inner parser (a flag added only
+        # to the outer parser never reaches drc_cmd -- the #3159 drift trap).
+        if getattr(args, "waivers", None):
+            sub_argv.extend(["--waivers", args.waivers])
+        return drc_cmd(sub_argv)
+
+    elif args.command == "bom":
+        from .bom_cmd import main as bom_cmd
+
+        sub_argv = [args.schematic]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.group:
+            sub_argv.append("--group")
+        for pattern in args.exclude:
+            sub_argv.extend(["--exclude", pattern])
+        if args.include_dnp:
+            sub_argv.append("--include-dnp")
+        if args.sort != "reference":
+            sub_argv.extend(["--sort", args.sort])
+        # Issue #8907 / #8893: forward the stock/validation flags to the inner
+        # parser (a flag added only to the outer parser never reaches bom_cmd).
+        if args.check_availability:
+            sub_argv.append("--check-availability")
+        if args.check_distributor_stock:
+            sub_argv.append("--check-distributor-stock")
+        if args.no_cache:
+            sub_argv.append("--no-cache")
+        if args.validate:
+            sub_argv.append("--validate")
+        if args.quantity != 1:
+            sub_argv.extend(["--quantity", str(args.quantity)])
+        return bom_cmd(sub_argv)
+
+    elif args.command == "check":
+        from .commands.validation import run_check_command
+
+        return run_check_command(args)
+
+    elif args.command == "creepage":
+        from .commands.creepage import run_creepage_command
+
+        return run_creepage_command(args)
+
+    elif args.command == "creepage-export-rules":
+        from .commands.creepage_export_rules import run_creepage_export_rules_command
+
+        return run_creepage_export_rules_command(args)
+
+    elif args.command == "sch":
+        from .commands.schematic import run_sch_command
+
+        return run_sch_command(args)
+
+    elif args.command == "pcb":
+        from .commands.pcb import run_pcb_command
+
+        return run_pcb_command(args)
+
+    elif args.command == "lib":
+        from .commands.library import run_lib_command
+
+        return run_lib_command(args)
+
+    elif args.command == "footprint":
+        from .commands.footprint import run_footprint_command
+
+        return run_footprint_command(args)
+
+    elif args.command == "mfr":
+        from .commands.manufacturer import run_mfr_command
+
+        return run_mfr_command(args)
+
+    elif args.command == "parts":
+        from .commands.parts import run_parts_command
+
+        return run_parts_command(args)
+
+    elif args.command == "datasheet":
+        from .commands.datasheet import run_datasheet_command
+
+        return run_datasheet_command(args)
+
+    elif args.command == "decisions":
+        from .commands.decisions import run_decisions_command
+
+        return run_decisions_command(args)
+
+    elif args.command == "zones":
+        from .commands.routing import run_zones_command
+
+        return run_zones_command(args)
+
+    elif args.command == "stitch":
+        return _run_stitch_command(args)
+
+    elif args.command == "route-auto":
+        from .commands.routing import run_route_auto_command
+
+        return run_route_auto_command(args)
+
+    elif args.command == "route-link":
+        from .route_link_cmd import run_route_link_command
+
+        return run_route_link_command(args)
+
+    elif args.command == "retune-lengths":
+        from .commands.routing import run_retune_lengths_command
+
+        return run_retune_lengths_command(args)
+
+    elif args.command == "reason":
+        from .commands.reasoning import run_reason_command
+
+        return run_reason_command(args)
+
+    elif args.command == "placement":
+        from .commands.placement import run_placement_command
+
+        return run_placement_command(args)
+
+    elif args.command == "optimize-placement":
+        from .commands.optimize_placement import run_optimize_placement_command
+
+        return run_optimize_placement_command(args)
+
+    elif args.command == "optimize-traces":
+        from .commands.routing import run_optimize_command
+
+        return run_optimize_command(args)
+
+    elif args.command == "validate-footprints":
+        from .commands.validation import run_validate_footprints_command
+
+        return run_validate_footprints_command(args)
+
+    elif args.command == "fix-footprints":
+        from .commands.validation import run_fix_footprints_command
+
+        return run_fix_footprints_command(args)
+
+    elif args.command == "fix-vias":
+        from .commands.validation import run_fix_vias_command
+
+        return run_fix_vias_command(args)
+
+    elif args.command == "fix-silkscreen":
+        from .commands.validation import run_fix_silkscreen_command
+
+        return run_fix_silkscreen_command(args)
+
+    elif args.command == "place-silk-refs":
+        from .commands.validation import run_place_silk_refs_command
+
+        return run_place_silk_refs_command(args)
+
+    elif args.command == "repair-clearance":
+        from .commands.validation import run_repair_clearance_command
+
+        return run_repair_clearance_command(args)
+
+    elif args.command == "repair-creepage":
+        from .repair_creepage_cmd import run_repair_creepage_command
+
+        return run_repair_creepage_command(args)
+
+    elif args.command == "fix-drc":
+        from .commands.validation import run_fix_drc_command
+
+        return run_fix_drc_command(args)
+
+    elif args.command == "fix-erc":
+        from .commands.validation import run_fix_erc_command
+
+        return run_fix_erc_command(args)
+
+    elif args.command == "config":
+        from .commands.config import run_config_command
+
+        return run_config_command(args)
+
+    elif args.command == "interactive":
+        from .commands.config import run_interactive_command
+
+        return run_interactive_command(args)
+
+    elif args.command == "validate":
+        from .commands.validation import run_validate_command
+
+        return run_validate_command(args)
+
+    elif args.command == "analyze":
+        from .commands.analyze import run_analyze_command
+
+        return run_analyze_command(args)
+
+    elif args.command == "constraints":
+        from .commands.validation import run_constraints_command
+
+        return run_constraints_command(args)
+
+    elif args.command == "estimate":
+        from .commands.estimate import run_estimate_command
+
+        return run_estimate_command(args)
+
+    elif args.command == "audit":
+        from .commands.validation import run_audit_command
+
+        return run_audit_command(args)
+
+    elif args.command == "suggest":
+        from .commands.suggest import run_suggest_command
+
+        return run_suggest_command(args)
+
+    elif args.command == "sync":
+        from .commands.sync import run_sync_command
+
+        return run_sync_command(args)
+
+    elif args.command == "fleet":
+        from .commands.fleet import run_fleet_command
+
+        return run_fleet_command(args)
+
+    elif args.command == "models":
+        from .commands.models import run_models_command
+
+        return run_models_command(args)
+
+    elif args.command == "ecosystem":
+        from .commands.ecosystem import run_ecosystem_command
+
+        return run_ecosystem_command(args)
+
+    elif args.command == "skills":
+        from .commands.skills import run_skills_command
+
+        return run_skills_command(args)
+
+    elif args.command == "agent-guide":
+        from .commands.agent_guide import run_agent_guide_command
+
+        return run_agent_guide_command(args)
+
+    elif args.command == "render":
+        return _run_render_command(args)
+    elif args.command == "export-formats":
+        from .export_formats_cmd import run as run_export_formats
+
+        return run_export_formats(args)
+
+    elif args.command == "board-metrics":
+        from .commands.board_metrics import run_board_metrics_command
+
+        return run_board_metrics_command(args)
+
+    elif args.command == "submit-jlcpcb":
+        from .submit_jlcpcb_cmd import run as submit_jlcpcb_run
+
+        return submit_jlcpcb_run(args)
+
+    elif args.command == "tapeout-sign-off":
+        from .tapeout_signoff_cmd import run as tapeout_signoff_run
+
+        return tapeout_signoff_run(args)
+
+    elif args.command == "readiness":
+        from .commands.readiness import run_readiness_command
+
+        return run_readiness_command(args)
+
+    elif args.command == "net-status":
+        from .net_status_cmd import main as net_status_cmd
+
+        sub_argv = [args.pcb]
+        if hasattr(args, "net_status_format") and args.net_status_format != "text":
+            sub_argv.extend(["--format", args.net_status_format])
+        if hasattr(args, "net_status_incomplete") and args.net_status_incomplete:
+            sub_argv.append("--incomplete")
+        if hasattr(args, "net_status_net") and args.net_status_net:
+            sub_argv.extend(["--net", args.net_status_net])
+        if hasattr(args, "net_status_by_class") and args.net_status_by_class:
+            sub_argv.append("--by-class")
+        if hasattr(args, "net_status_verbose") and args.net_status_verbose:
+            sub_argv.append("--verbose")
+        if hasattr(args, "net_status_why") and args.net_status_why:
+            sub_argv.append("--why")
+        if getattr(args, "net_status_crossings", False):
+            sub_argv.append("--crossings")
+        if getattr(args, "net_status_signal_layers", None):
+            sub_argv.extend(["--signal-layers", str(args.net_status_signal_layers)])
+        if hasattr(args, "net_status_strict") and args.net_status_strict:
+            sub_argv.append("--strict")
+        if hasattr(args, "net_status_legacy_proximity") and args.net_status_legacy_proximity:
+            sub_argv.append("--legacy-proximity")
+        return net_status_cmd(sub_argv)
+
+    elif args.command == "clean":
+        from .commands.project import run_clean_command
+
+        return run_clean_command(args)
+
+    elif args.command == "impedance":
+        from .commands.impedance import run_impedance_command
+
+        return run_impedance_command(args)
+
+    elif args.command == "mcp":
+        from .commands.mcp import run_mcp_command
+
+        return run_mcp_command(args)
+
+    elif args.command == "ipc":
+        from .commands.ipc import run_ipc_command
+
+        return run_ipc_command(args)
+
+    elif args.command == "init":
+        from .commands.project import run_init_command
+
+        return run_init_command(args)
+
+    elif args.command == "panel":
+        from .commands.panel import run_panel_command
+
+        return run_panel_command(args)
+
+    elif args.command == "pipeline":
+        from .commands.pipeline import run_pipeline_command
+
+        return run_pipeline_command(args)
+
+    elif args.command == "create-pcb":
+        from .commands.create_pcb import run_create_pcb_command
+
+        return run_create_pcb_command(args)
+
+    elif args.command == "build":
+        from .commands.build import run_build_command
+
+        return run_build_command(args)
+
+    elif args.command == "build-native":
+        from .commands.native import run_build_native_command
+
+        return run_build_native_command(args)
+
+    elif args.command == "doctor":
+        from .commands.doctor import run_doctor_command
+
+        return run_doctor_command(args)
+
+    elif args.command == "spec":
+        from .commands.spec import run_spec_command
+
+        return run_spec_command(args)
+
+    elif args.command == "benchmark":
+        from .commands.benchmark import run_benchmark_command
+
+        return run_benchmark_command(args)
+
+    elif args.command == "bench":
+        from .commands.bench import run_bench_command
+
+        return run_bench_command(args)
+
+    elif args.command == "run":
+        from .commands.run import run_run_command
+
+        return run_run_command(args)
+
+    elif args.command == "explain":
+        return _run_explain_command(args)
+
+    elif args.command == "detect-mistakes":
+        return _run_detect_mistakes_command(args)
+
+    elif args.command == "calibrate":
+        return _run_calibrate_command(args)
+
+    elif args.command == "screenshot":
+        return _run_screenshot_command(args)
+
+    elif args.command == "board-view":
+        from .commands.board_view import run_board_view_command
+
+        return run_board_view_command(args)
+
+    elif args.command == "report":
+        return _run_report_command(args)
+
+    elif args.command == "export":
+        return _run_export_command(args)
+
+    elif args.command == "optim":
+        return _run_optim_command(args)
+
+    return 0
+
+
+def _run_optim_command(args) -> int:
+    """Dispatch the ``optim`` subcommand tree (issue #3186)."""
+    sub = getattr(args, "optim_command", None)
+    if sub == "fom-debug":
+        from .optim_fom_cmd import run_optim_fom_debug
+
+        return run_optim_fom_debug(
+            pcb_path=args.pcb,
+            weights_path=getattr(args, "weights", None),
+            output_format=getattr(args, "output_format", "text"),
+            verbose=getattr(args, "verbose", False),
+        )
+    print("error: no optim subcommand specified (try: kct optim fom-debug --help)")
+    return 2
+
+
+def _run_stitch_command(args) -> int:
+    """Run the stitch command."""
+    from .stitch_cmd import main as stitch_cmd
+
+    sub_argv = [args.pcb]
+
+    if hasattr(args, "stitch_nets") and args.stitch_nets:
+        for net in args.stitch_nets:
+            sub_argv.extend(["--net", net])
+    if hasattr(args, "stitch_via_size") and args.stitch_via_size != 0.45:
+        sub_argv.extend(["--via-size", str(args.stitch_via_size)])
+    if hasattr(args, "stitch_drill") and args.stitch_drill != 0.2:
+        sub_argv.extend(["--drill", str(args.stitch_drill)])
+    if hasattr(args, "stitch_clearance") and args.stitch_clearance != 0.2:
+        sub_argv.extend(["--clearance", str(args.stitch_clearance)])
+    if hasattr(args, "stitch_offset") and args.stitch_offset != 0.5:
+        sub_argv.extend(["--offset", str(args.stitch_offset)])
+    if hasattr(args, "stitch_target_layer") and args.stitch_target_layer:
+        sub_argv.extend(["--target-layer", args.stitch_target_layer])
+    if hasattr(args, "stitch_trace_width") and args.stitch_trace_width != 0.2:
+        sub_argv.extend(["--trace-width", str(args.stitch_trace_width)])
+    if hasattr(args, "stitch_escape_distance") and args.stitch_escape_distance != 3.0:
+        sub_argv.extend(["--escape-distance", str(args.stitch_escape_distance)])
+    if hasattr(args, "stitch_blanket") and args.stitch_blanket:
+        sub_argv.append("--blanket")
+    if hasattr(args, "stitch_micro_via") and args.stitch_micro_via:
+        sub_argv.append("--micro-via")
+    if hasattr(args, "stitch_micro_via_size") and args.stitch_micro_via_size != 0.3:
+        sub_argv.extend(["--micro-via-size", str(args.stitch_micro_via_size)])
+    if hasattr(args, "stitch_micro_via_drill") and args.stitch_micro_via_drill != 0.15:
+        sub_argv.extend(["--micro-via-drill", str(args.stitch_micro_via_drill)])
+    if hasattr(args, "stitch_avoid_pad_overlap") and args.stitch_avoid_pad_overlap:
+        sub_argv.append("--avoid-pad-overlap")
+    if hasattr(args, "stitch_spacing") and args.stitch_spacing != 3.0:
+        sub_argv.extend(["--spacing", str(args.stitch_spacing)])
+    if hasattr(args, "stitch_thermal") and args.stitch_thermal:
+        sub_argv.append("--thermal")
+    if hasattr(args, "stitch_vias_per_pad") and args.stitch_vias_per_pad != 4:
+        sub_argv.extend(["--vias-per-pad", str(args.stitch_vias_per_pad)])
+    if hasattr(args, "stitch_thermal_radius") and args.stitch_thermal_radius != 2.5:
+        sub_argv.extend(["--thermal-radius", str(args.stitch_thermal_radius)])
+    if hasattr(args, "stitch_thermal_min_pad_size") and args.stitch_thermal_min_pad_size != 2.0:
+        sub_argv.extend(["--thermal-min-pad-size", str(args.stitch_thermal_min_pad_size)])
+    if (
+        hasattr(args, "stitch_thermal_component_prefixes")
+        and args.stitch_thermal_component_prefixes
+    ):
+        for prefix in args.stitch_thermal_component_prefixes:
+            sub_argv.extend(["--thermal-component-prefix", prefix])
+    if hasattr(args, "stitch_dry_run") and args.stitch_dry_run:
+        sub_argv.append("--dry-run")
+    if hasattr(args, "stitch_output") and args.stitch_output:
+        sub_argv.extend(["-o", args.stitch_output])
+    if getattr(args, "stitch_complete", False):
+        sub_argv.append("--complete")
+    if getattr(args, "stitch_evidence_dir", None):
+        sub_argv.extend(["--evidence-dir", str(args.stitch_evidence_dir)])
+    if getattr(args, "stitch_kicad_cli", None):
+        sub_argv.extend(["--kicad-cli", str(args.stitch_kicad_cli)])
+    if getattr(args, "stitch_drc_strict", False):
+        sub_argv.append("--drc-strict")
+    if hasattr(args, "stitch_drc") and args.stitch_drc:
+        sub_argv.append("--drc")
+    if getattr(args, "stitch_project", None):
+        sub_argv.extend(["--project", str(args.stitch_project)])
+    if getattr(args, "stitch_allow_default_rules", False):
+        sub_argv.append("--allow-default-rules")
+    if hasattr(args, "stitch_mfr") and args.stitch_mfr is not None:
+        sub_argv.extend(["--mfr", str(args.stitch_mfr)])
+    if hasattr(args, "stitch_copper") and args.stitch_copper != 1.0:
+        sub_argv.extend(["--copper", str(args.stitch_copper)])
+    # Machine output (#4674): forward the canonical flag only when it asks for
+    # JSON, so a default invocation still builds a byte-identical inner argv.
+    if getattr(args, "format", "text") == "json":
+        sub_argv.extend(["--format", "json"])
+
+    return stitch_cmd(sub_argv)
+
+
+def _run_explain_command(args) -> int:
+    """Run the explain command."""
+    from .explain_cmd import main as explain_cmd
+
+    sub_argv = []
+
+    # Add rule if provided
+    if hasattr(args, "explain_rule") and args.explain_rule:
+        sub_argv.append(args.explain_rule)
+
+    # Handle flags
+    if hasattr(args, "explain_list") and args.explain_list:
+        sub_argv.append("--list")
+    if hasattr(args, "explain_search") and args.explain_search:
+        sub_argv.extend(["--search", args.explain_search])
+    if hasattr(args, "explain_value") and args.explain_value is not None:
+        sub_argv.extend(["--value", str(args.explain_value)])
+    if hasattr(args, "explain_required") and args.explain_required is not None:
+        sub_argv.extend(["--required", str(args.explain_required)])
+    if hasattr(args, "explain_unit") and args.explain_unit != "mm":
+        sub_argv.extend(["--unit", args.explain_unit])
+    if hasattr(args, "explain_net1") and args.explain_net1:
+        sub_argv.extend(["--net1", args.explain_net1])
+    if hasattr(args, "explain_net2") and args.explain_net2:
+        sub_argv.extend(["--net2", args.explain_net2])
+    if hasattr(args, "explain_drc_report") and args.explain_drc_report:
+        sub_argv.extend(["--drc-report", args.explain_drc_report])
+    if hasattr(args, "explain_format") and args.explain_format != "text":
+        sub_argv.extend(["--format", args.explain_format])
+    if hasattr(args, "explain_net") and args.explain_net:
+        sub_argv.extend(["--net", args.explain_net])
+    if hasattr(args, "explain_interface") and args.explain_interface:
+        sub_argv.extend(["--interface", args.explain_interface])
+
+    return explain_cmd(sub_argv)
+
+
+def _run_detect_mistakes_command(args) -> int:
+    """Run the detect-mistakes command."""
+    from .mistakes_cmd import main as mistakes_cmd
+
+    sub_argv = []
+
+    # Add PCB file if provided
+    if hasattr(args, "mistakes_pcb") and args.mistakes_pcb:
+        sub_argv.append(args.mistakes_pcb)
+
+    # Handle flags
+    if hasattr(args, "mistakes_list_categories") and args.mistakes_list_categories:
+        sub_argv.append("--list-categories")
+    if hasattr(args, "mistakes_category") and args.mistakes_category:
+        sub_argv.extend(["--category", args.mistakes_category])
+    if hasattr(args, "mistakes_severity") and args.mistakes_severity:
+        sub_argv.extend(["--severity", args.mistakes_severity])
+    if hasattr(args, "mistakes_format") and args.mistakes_format != "table":
+        sub_argv.extend(["--format", args.mistakes_format])
+    if hasattr(args, "mistakes_strict") and args.mistakes_strict:
+        sub_argv.append("--strict")
+    if hasattr(args, "mistakes_verbose") and args.mistakes_verbose:
+        sub_argv.append("--verbose")
+    # Issue #6006: evidence-bound waivers.
+    for key in getattr(args, "mistakes_waive", None) or []:
+        sub_argv.extend(["--waive", key])
+    for flag, attr in (
+        ("--waive-reason", "mistakes_waive_reason"),
+        ("--waive-reviewer", "mistakes_waive_reviewer"),
+        ("--waive-issue", "mistakes_waive_issue"),
+        ("--waivers", "mistakes_waivers"),
+    ):
+        value = getattr(args, attr, None)
+        if value:
+            sub_argv.extend([flag, value])
+
+    return mistakes_cmd(sub_argv)
+
+
+def _run_calibrate_command(args) -> int:
+    """Run the calibrate command."""
+    from .calibrate_cmd import main as calibrate_cmd
+
+    sub_argv = []
+
+    # Handle flags
+    if hasattr(args, "calibrate_show") and args.calibrate_show:
+        sub_argv.append("--show")
+    if hasattr(args, "calibrate_show_gpu") and args.calibrate_show_gpu:
+        sub_argv.append("--show-gpu")
+    if hasattr(args, "calibrate_gpu") and args.calibrate_gpu:
+        sub_argv.append("--gpu")
+    if hasattr(args, "calibrate_all") and args.calibrate_all:
+        sub_argv.append("--all")
+    if hasattr(args, "calibrate_benchmark") and args.calibrate_benchmark:
+        sub_argv.append("--benchmark")
+    if hasattr(args, "calibrate_quick") and args.calibrate_quick:
+        sub_argv.append("--quick")
+    if hasattr(args, "calibrate_output") and args.calibrate_output:
+        sub_argv.extend(["-o", args.calibrate_output])
+    if hasattr(args, "calibrate_format") and args.calibrate_format != "text":
+        sub_argv.extend(["--format", args.calibrate_format])
+    if hasattr(args, "calibrate_json") and args.calibrate_json:
+        sub_argv.append("--json")
+    if hasattr(args, "calibrate_verbose") and args.calibrate_verbose:
+        sub_argv.append("--verbose")
+
+    return calibrate_cmd(sub_argv)
+
+
+def symbols_main() -> int:
+    """Standalone entry point for kicad-symbols command."""
+    from .symbols import main
+
+    return main()
+
+
+def nets_main() -> int:
+    """Standalone entry point for kicad-nets command."""
+    from .nets import main
+
+    return main()
+
+
+def erc_main() -> int:
+    """Standalone entry point for kicad-erc command."""
+    from .erc_cmd import main
+
+    return main()
+
+
+def erc_explain_main() -> int:
+    """Standalone entry point for kicad-erc-explain command."""
+    from .erc_explain_cmd import main
+
+    return main()
+
+
+def drc_main() -> int:
+    """Standalone entry point for kicad-drc command."""
+    from .drc_cmd import main
+
+    return main()
+
+
+def bom_main() -> int:
+    """Standalone entry point for kicad-bom command."""
+    from .bom_cmd import main
+
+    return main()
+
+
+def drc_summary_main() -> int:
+    """Standalone entry point for kicad-drc-summary command."""
+    from .drc_summary import main
+
+    return main()
+
+
+def net_status_main() -> int:
+    """Standalone entry point for kicad-net-status command."""
+    from .net_status_cmd import main
+
+    return main()
+
+
+def _run_screenshot_command(args) -> int:
+    """Run the screenshot command."""
+    from .screenshot_cmd import main as screenshot_cmd
+
+    sub_argv = [args.screenshot_input]
+
+    if hasattr(args, "screenshot_output") and args.screenshot_output:
+        sub_argv.extend(["-o", args.screenshot_output])
+    if hasattr(args, "screenshot_layers") and args.screenshot_layers:
+        sub_argv.extend(["--layers", args.screenshot_layers])
+    if hasattr(args, "screenshot_max_size") and args.screenshot_max_size != 1568:
+        sub_argv.extend(["--max-size", str(args.screenshot_max_size)])
+    if hasattr(args, "screenshot_bw") and args.screenshot_bw:
+        sub_argv.append("--bw")
+    if hasattr(args, "screenshot_theme") and args.screenshot_theme:
+        sub_argv.extend(["--theme", args.screenshot_theme])
+    if getattr(args, "screenshot_baseline_save", None):
+        sub_argv.extend(["--baseline-save", args.screenshot_baseline_save])
+    if getattr(args, "screenshot_baseline_compare", None):
+        sub_argv.extend(["--baseline-compare", args.screenshot_baseline_compare])
+    # Machine output (#4674): forward the canonical flag to the inner parser.
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
+
+    return screenshot_cmd(sub_argv)
+
+
+def _run_report_command(args) -> int:
+    """Run the report command."""
+    from .report_cmd import main as report_cmd
+
+    sub_argv: list[str] = []
+
+    report_command = getattr(args, "report_command", None)
+    if not report_command:
+        return report_cmd(["--help"])
+
+    sub_argv.append(report_command)
+
+    if report_command == "generate":
+        sub_argv.append(args.report_input)
+        if hasattr(args, "report_mfr") and args.report_mfr:
+            sub_argv.extend(["--mfr", args.report_mfr])
+        if hasattr(args, "report_output") and args.report_output:
+            sub_argv.extend(["-o", args.report_output])
+        if hasattr(args, "report_data_dir") and args.report_data_dir:
+            sub_argv.extend(["--data-dir", args.report_data_dir])
+        if hasattr(args, "report_template") and args.report_template:
+            sub_argv.extend(["--template", args.report_template])
+        if hasattr(args, "report_sch") and args.report_sch:
+            sub_argv.extend(["--sch", args.report_sch])
+        if getattr(args, "report_no_figures", False):
+            sub_argv.append("--no-figures")
+        if hasattr(args, "report_quantity") and args.report_quantity is not None:
+            sub_argv.extend(["--quantity", str(args.report_quantity)])
+        if getattr(args, "report_skip_erc", False):
+            sub_argv.append("--skip-erc")
+        if getattr(args, "report_skip_collect", False):
+            sub_argv.append("--skip-collect")
+        # Machine output (#4674): forward the canonical flag to the inner parser.
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
+
+    return report_cmd(sub_argv)
+
+
+def _run_render_command(args) -> int:
+    """Run the render command (Epic #3674, Phase 1)."""
+    import argparse as _argparse
+
+    from .render_cmd import run_render
+
+    render_args = _argparse.Namespace(
+        path=args.render_path,
+        no_3d=getattr(args, "render_no_3d", False),
+        models=getattr(args, "render_models", None),
+        allow_incomplete_models=getattr(args, "render_allow_incomplete_models", False),
+        format=getattr(args, "render_format", "text"),
+        output=getattr(args, "render_output", None),
+    )
+    return run_render(render_args)
+
+
+def _run_export_command(args) -> int:
+    """Run the export command."""
+    from .export_cmd import main as export_cmd
+
+    sub_argv = [args.export_pcb]
+
+    # Issue #6881: --stackup-id was defined by export_cmd but never forwarded.
+    if getattr(args, "export_stackup_id", None):
+        sub_argv.extend(["--stackup-id", args.export_stackup_id])
+
+    # Issue #6169: an unflagged --mfr defaults from project.kct target_fab
+    # (looked up next to the board, or in the project directory when given).
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    sub_argv.extend(
+        ["--mfr", resolve_cli_manufacturer(getattr(args, "export_mfr", None), args.export_pcb)]
+    )
+    if hasattr(args, "export_output") and args.export_output:
+        sub_argv.extend(["-o", args.export_output])
+    if hasattr(args, "export_sch") and args.export_sch:
+        sub_argv.extend(["--sch", args.export_sch])
+    if getattr(args, "export_dry_run", False):
+        sub_argv.append("--dry-run")
+    if getattr(args, "export_no_report", False):
+        sub_argv.append("--no-report")
+    if getattr(args, "export_no_gerbers", False):
+        sub_argv.append("--no-gerbers")
+    if getattr(args, "export_no_bom", False):
+        sub_argv.append("--no-bom")
+    if getattr(args, "export_no_cpl", False):
+        sub_argv.append("--no-cpl")
+    if getattr(args, "export_no_project_zip", False):
+        sub_argv.append("--no-project-zip")
+    if getattr(args, "export_no_ampacity_rules", False):
+        sub_argv.append("--no-ampacity-rules")
+    if getattr(args, "export_no_auto_lcsc", False):
+        sub_argv.append("--no-auto-lcsc")
+    if getattr(args, "export_no_spec", False):
+        sub_argv.append("--no-spec")
+    if getattr(args, "export_spec", None):
+        sub_argv.extend(["--spec", args.export_spec])
+    if getattr(args, "export_no_merge_lcsc", False):
+        sub_argv.append("--no-merge-lcsc")
+    if getattr(args, "export_merge_lcsc_from", None):
+        sub_argv.extend(["--merge-lcsc-from", args.export_merge_lcsc_from])
+    if getattr(args, "export_skip_preflight", False):
+        sub_argv.append("--skip-preflight")
+    if getattr(args, "export_skip_drc_floor", False):
+        sub_argv.append("--skip-drc-floor")
+    if getattr(args, "export_strict_preflight", False):
+        sub_argv.append("--strict-preflight")
+    export_assembly_tier = getattr(args, "export_assembly_tier", "auto")
+    if export_assembly_tier and export_assembly_tier != "auto":
+        sub_argv.extend(["--assembly-tier", export_assembly_tier])
+    export_boards = getattr(args, "export_boards", 5)
+    if export_boards is not None and export_boards != 5:
+        sub_argv.extend(["--boards", str(export_boards)])
+    if getattr(args, "export_allow_unbuildable_bom", False):
+        sub_argv.append("--allow-unbuildable-bom")
+    if getattr(args, "export_skip_drc", False):
+        sub_argv.append("--skip-drc")
+    if getattr(args, "export_skip_erc", False):
+        sub_argv.append("--skip-erc")
+    if hasattr(args, "export_drc_report") and args.export_drc_report:
+        sub_argv.extend(["--drc-report", args.export_drc_report])
+    if hasattr(args, "export_erc_report") and args.export_erc_report:
+        sub_argv.extend(["--erc-report", args.export_erc_report])
+    if getattr(args, "export_keep_versions", False):
+        sub_argv.append("--keep-versions")
+    if getattr(args, "export_keep_build_artifacts", False):
+        sub_argv.append("--keep-build-artifacts")
+    if getattr(args, "export_keep_gerber_files", False):
+        sub_argv.append("--keep-gerber-files")
+    bom_source = getattr(args, "export_bom_source", "schematic")
+    if bom_source and bom_source != "schematic":
+        sub_argv.extend(["--bom-source", bom_source])
+    for layer in getattr(args, "export_vscore_layer", None) or []:
+        sub_argv.extend(["--vscore-layer", layer])
+    if getattr(args, "export_include_tht", False):
+        sub_argv.append("--include-tht")
+    if hasattr(args, "export_format") and args.export_format != "text":
+        sub_argv.extend(["--format", args.export_format])
+
+    return export_cmd(sub_argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

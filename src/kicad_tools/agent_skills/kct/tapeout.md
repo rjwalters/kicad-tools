@@ -1,0 +1,296 @@
+---
+name: tapeout
+invocation: /kct:tapeout
+suggestedModel: sonnet
+description: Produce a complete, fab-ready export bundle for a routed board — or refuse loudly. Superset of the manufacturing-readiness skill: runs the three sign-off pre-gates, then adds a BOM part-number-resolution gate, a per-rule warning-review gate (assembly-affecting warnings block unless explicitly acknowledged), schematic + assembly-view PDFs, a human-readable README, and a manifest that checksums the entire final bundle. "tapeout returned 0" means "upload this directory as-is."
+---
+
+# Tapeout
+
+Produce a **complete, orderable manufacturing package** for a routed `.kicad_pcb`, or **refuse and exit non-zero**. This skill is the **deliverable-completeness** counterpart to sign-off: `{{skill:manufacturing-readiness}}` proves *the copper is manufacturable*; `tapeout` proves *the package you are about to upload is complete and orderable*.
+
+The contract is exactly: **`tapeout` returning 0 (with a manifest written) means "upload this output directory to the fab as-is."** Anything less writes **no manifest** and exits non-zero, naming the gate that failed.
+
+> **The `kct` namespace.** This skill lives in `{{skills-dir}}` — the kicad-tools-native, harness-agnostic agent-tool namespace, invoked as `{{skill:tapeout}}`. It runs from inside a **consumer repo** that depends on kicad-tools as a `uv` dependency (`kct ...` is on `PATH` via the venv; `kicad-cli` comes from the KiCad install and is resolved as described below). It does **not** assume the current directory is the kicad-tools repo, and it hardcodes no board path, no fab-tier list, and no CI-workflow context.
+
+## Prerequisite
+
+The native router/DRC backend must be built in the active checkout before this skill is meaningful (Epic #4054 convention #1). Run once per checkout / worktree:
+
+```bash
+uv run kct build-native --check   # expect: "C++ backend: available"
+# if "not installed":
+uv run kct build-native
+```
+
+`uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
+
+If the local KiCad is not the pinned release, `kct readiness` refuses before any gate; run it with `KCT_KICAD_DOCKER=1` to use the pinned image.
+
+`kicad-cli` is required by both the mandatory DRC cross-gate (Gate 2, delegated) and the drawing-export gates (Gates 5–6), and `jq` by the pre-gates and Gate 4b. The venv does not provide `kicad-cli`, and a stock macOS install is not on `PATH`, so resolve it the way `kct` does — with the `find_kicad_cli()` one-liner from `{{skill:manufacturing-readiness}}` Gate 2 (it checks `PATH`, then the macOS app bundle, Homebrew and the Linux and Windows default install paths; `kct doctor` prints the path it found). Only an empty result means it is missing; then `tapeout` **refuses** (see Refusal conditions) — there is no partial-package fallback.
+
+## Model selection
+
+`suggestedModel: sonnet`. Like `{{skill:manufacturing-readiness}}`, this is deterministic checklist execution — run gates in order, read exit codes and reports, and refuse on any failure or unresolved BOM line. It does not require frontier judgment.
+
+One open question worth flagging rather than silently resolving: the **BOM-resolution gate** (Gate 4) can involve a judgment call when the part matcher returns an *ambiguous* candidate (multiple plausible LCSC parts) rather than a clean hit or a clean miss. This skill treats ambiguity conservatively — an ambiguous line is an **unresolved** line (human selection required), never an auto-accepted guess — so `sonnet` remains appropriate. If a future consumer needs the skill to *adjudicate* ambiguous matches, that is a reason to revisit the model, and it should be raised as a follow-up rather than papered over here.
+
+Model resolves through the harness's normal precedence chain (explicit dispatch param → harness role config → this doc's frontmatter `suggestedModel` → session default).
+
+## Arguments
+
+**Arguments**: `$ARGUMENTS`
+
+`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--assembly | --pcb-only] [--output <dir>] [--ack-warnings <rule,...>] [--skip-cleanup] [--skip-fiducials] [--skip-board-info]`.
+
+| Token | Meaning |
+|-------|---------|
+| `<board-path>` | **Required.** Path to the routed `*.kicad_pcb` to tape out (or a board directory containing one). Everything the skill operates on is derived from this token — never from a hardcoded board directory. The user supplies it. |
+| `--mfr <tier>` | The fabrication tier to check and export against. **Optional**; if omitted, discover it (see "Resolving the fab tier" below) rather than assuming a default. |
+| `--assembly` | Produce a **full assembly package**: gerbers + drill **and** BOM + CPL with part-number resolution. In this mode the BOM gate (Gate 4) is a **hard gate** — any unresolved BOM line fails the tapeout. |
+| `--pcb-only` | Produce a **bare-board package**: gerbers + drill only. **Skips BOM and CPL entirely** (Gate 4 and the CPL half of Gate 3 are not run). Use when you are ordering the PCB alone and sourcing/assembling parts yourself. |
+| `--output <dir>` | Where the bundle is written. Optional; defaults to `<pcb-dir>/manufacturing/` (the `kct export` default). |
+| `--skip-cleanup` | **Optional.** Skip Gate 0 (copper cleanup). The skip is **recorded**: Gate 7 writes `copper_cleanup: skipped` to `README.txt` and Gate 8 to the manifest. Without this flag Gate 0 always runs. |
+| `--skip-fiducials` / `--skip-board-info` | **Optional.** Skip Gate 0b (adding global fiducials / the board-ID silkscreen text). Each skip is **recorded**: Gate 7 writes `fiducials: skipped (--skip-fiducials)` / `board_info: skipped (--skip-board-info)` to `README.txt` and Gate 8 to the manifest. Without them Gate 0b always runs. |
+| `--ack-warnings <rule,...>` | **Optional.** Explicitly acknowledge nonzero **assembly-affecting** warning counts for the named rules (comma-separated `rule_id`s, e.g. `--ack-warnings silk_over_copper,silk_edge_clearance`). Each acknowledged rule becomes a per-rule accepted-risk line in `README.txt` (Gate 7). Without an acknowledgement covering **every** assembly-affecting rule that has a nonzero warning count, Gate 4b **refuses** the tapeout. This is a *skill* argument (an acknowledgement ritual), not a `kct check` CLI flag. |
+
+**`--assembly` and `--pcb-only` are mutually exclusive.** If both are passed, refuse. **If neither is passed, default to `--assembly`** — the safe default is the *complete* package; a caller who wants the reduced bare-board package must ask for it explicitly.
+
+## Resolving the fab tier (never hardcode a tier list)
+
+Do **not** embed a fixed list of tier names in your reasoning — the set of tiers lives in `kicad_tools.manufacturers` and grows without any edit to this skill. Resolve `<tier>` in this order:
+
+1. If the user passed `--mfr <tier>`, use it.
+2. Otherwise read the tier from the **board's own recipe / manifest** — a `generate_design.py`, `README.md`, or existing `manufacturing/manifest.json` next to the board usually names its target fab. Use that.
+3. Otherwise ask the user which tier to target.
+
+Then **validate** the resolved tier against `kct`'s own registry rather than a memorized list:
+
+```bash
+# The authoritative choices — sourced from kicad_tools.manufacturers.get_manufacturer_ids():
+kct check --help      # see the --mfr {choices} set
+kct export --help     # same registry, plus the "generic" export-only pseudo-tier
+# or, programmatically:
+uv run python -c "from kicad_tools.manufacturers import get_manufacturer_ids; print(get_manufacturer_ids())"
+```
+
+If the resolved tier is not in that set, stop and ask — do not silently fall back to a default, because the fab tier is load-bearing (in-pad-via rescue rules, min trace/space floors, whether LCSC part-number resolution even applies, etc. differ by tier).
+
+## The tapeout ritual (run in order; refuse on the first hard failure)
+
+### Gate 0 — copper cleanup (always runs unless `--skip-cleanup`)
+
+Before Gate 1, run, in order and in place: `kct pcb dedupe <pcb>` (#8218), `kct pcb prune <pcb>` (DRC-verified; #8216 landed), then `kct optimize-traces <pcb> --drc-aware --mfr <tier>` (add `--voltage-map <file>` when the board has one). Layers and copper weight come from the board stackup / `.kicad_pro` `meta.copper_oz` unless `--layers` / `--copper` are passed (#8633). It must precede Gate 1 so the `--refill-zones` cross-gate (Gate 2) judges the **cleaned** board, and nothing is hashed or exported from the uncleaned one. `--drc-aware` is **not self-verifying** (#8632 is open): Gate 2's refill DRC (unconnected items) and the `kct creepage` census are what catch a regression, so keep this ordering. Record each step's counts for Gate 7/8 (`0` is valid; README.txt and the manifest `copper_cleanup.steps`). `kct readiness --generate` performs the same three steps (`--skip-cleanup` skips all three and is recorded).
+
+**Trace-quality gate (part of Gate 4b):** after cleanup, any nonzero `redundant_copper_*` or `via_dangling` count in Gate 1's per-rule table **refuses** tapeout unless each rule is acknowledged with a reason (`kct readiness --ack-trace-quality RULE=REASON`, repeatable). The acknowledgement and reason are listed in README.txt and recorded in the manifest. These rules stay advisory for the generic strict gate (`NON_GATING_RULE_PREFIXES` is unchanged).
+
+
+### Gate 0b — fiducials and board ID (always runs unless skipped)
+
+After Gate 0 and before Gate 1, run `kct pcb add-fiducials <pcb> --sides populated` and `kct pcb add-board-info <pcb> --auto` (issue #8532) so the checks judge the finished board. Both are idempotent. `kct check` reports what remains missing as `fiducials_missing` (fewer than 3 global fiducials on a populated side) and `board_id_missing` (no silkscreen text naming the revision); both are **assembly-affecting** warnings, so Gate 4b refuses `--assembly` unless they are zero or acknowledged via `--ack-warnings`. `kct readiness --generate` performs the same step (`--skip-fiducials` / `--skip-board-info` to opt out); `--verify` never regenerates or mutates the board.
+
+### Pre-gates (Gates 1–3): delegate to `{{skill:manufacturing-readiness}}`, do not re-describe
+
+`tapeout` is a **superset** of `{{skill:manufacturing-readiness}}` — it does **not** re-invent the sign-off gates. Before generating any package, run the `# sign-off gate 1`, `# sign-off gate 2` and `# sign-off gate 3` command blocks in **`{{skill-file:manufacturing-readiness}}`** exactly as written, in order, at the resolved tier and with `<dir>` set to this tapeout's output directory. Each block's exit code is its verdict; a non-zero block is a refusal. Do not restate, paraphrase, reorder or relax those blocks here — the sibling skill is the single source of truth for the commands and the pass rules:
+
+1. **Gate 1** — `kct check --output <dir>/check-report.json`, judged by that skill's `jq` rule over the JSON report, not by `kct check`'s exit code (which is 2 on a good board before export). The report stays in the bundle: Gate 4b derives its per-rule warning table from it, and Gate 8 checksums it. Do **not** run a separate `kct check` just for the warning table — reuse this gate's report.
+2. **Gate 2** — the mandatory independent cross-gate `kicad-cli pcb drc --refill-zones --severity-error --exit-code-violations --format json`, writing `<pcb-dir>/drc_report.json`. It passes only with **0 error-severity violations and 0 unconnected items**. **Not optional and not skippable**: it is a second, independent DRC engine that catches stale-zone-fill shorts `kct check` misses. A kicad-cli that cannot be found is a **hard blocker**, not a pass.
+3. **Gate 3** — `kct export --drc-report <pcb-dir>/drc_report.json` after deleting the old manifest, producing gerbers, drill, and (in `--assembly` mode) BOM + CPL, plus a first-pass `manifest.json`.
+
+Equivalently, run `{{skill:manufacturing-readiness}} <board-path> --mfr <tier> --output <dir>` and **confirm it signs off**. If sign-off fails, `tapeout` **refuses** — do not proceed to package generation on a board that is not manufacturing-ready.
+
+> Sequencing note: because `kct export` runs `kct check`'s rule set, and Gate 2 forces a zone refill, running the pre-gates *in this order* also side-steps two staleness traps a hand-assembled checklist hit — rules present in the board but not the paired `.kicad_pro` (#4097), and check-vs-fill staleness (#4096). Do not reorder.
+
+### Gate 4 — BOM part-number resolution (hard gate in `--assembly`; **skipped** in `--pcb-only`)
+
+**In `--pcb-only` mode, skip this gate entirely** (no BOM, no CPL — see Arguments). The rest of this section applies only to `--assembly` mode.
+
+`kct export` enriches the BOM with fab-orderable part numbers (LCSC for JLC-style tiers) via `--auto-lcsc` (the default; disabled by `--no-auto-lcsc`). See `src/kicad_tools/cli/export_cmd.py` and `src/kicad_tools/export/bom_enrich.py` for the current behavior. **LCSC merge source (#8260):** the export also merges LCSC numbers from an existing `<output-dir>/bom_<mfr>.csv` (disabled by `--no-merge-lcsc`). A **new** bundle directory has nothing to merge, so it yields a worse BOM than the previous verified bundle. Run Gate 3 with `--merge-lcsc-from <previous-bundle>/bom_<mfr>.csv` (or seed the new directory with that file); the export summary's `LCSC merge source:` line names the source used, or says "no existing BOM to merge". The tapeout BOM gate wraps that enrichment with a **completeness contract** `kct export`'s exit code does not currently give you.
+
+Every BOM line must fall into exactly one bucket:
+
+- **Resolved** — carries a verified, fab-orderable part number for the resolved tier (e.g. a populated LCSC column for a JLC tier).
+- **Unresolved (human selection required)** — the matcher genuinely found **no candidate** for this component. This is a legitimate outcome for a non-standard part; it belongs in an explicit **"unresolved — human selection required"** report line, not a silent blank.
+
+The gate then:
+
+1. **Opens the exported BOM and inspects the actual part-number column.** Do **not** trust `kct export`'s exit code as proof the BOM is populated.
+2. **Fails hard** if the resolution machinery is broken rather than merely finding no match — the canonical case is the missing `[parts]` extra, where `--auto-lcsc` **soft-fails to an empty part-number column while `kct export` still exits 0** (this is the defect tracked in **#4104**). An **entirely empty** part-number column (0 resolved lines) when resolution was expected is treated as **matcher-broken**, not "every part is exotic" — that is a **hard failure of this gate**, not an unresolved-lines report.
+3. **Fails** `--assembly` tapeout if **any** line is unresolved. A complete assembly package has zero human-selection-required lines by definition; surface the unresolved report and refuse.
+
+4. **Reads the recorded `bom_lcsc_values` result** from the Gate 3 `manifest.json` (`jq '.preflight[] | select(.name=="bom_lcsc_values")'`, the same lookup `kct readiness` uses), because "LCSC column populated" does not mean "right part" (issue #8113: an NXP BGA-196 MCU sat on a 2-pad diode footprint and counted as resolved). `kct export` downgrades that check's FAIL to a warning, so this step is where it blocks. In `--assembly` mode:
+   - `FAIL` → **refuse**, naming the mismatched lines from `details`.
+   - Entry missing, or a status other than `OK`/`WARN` → **refuse** (the check did not run; unknown is not pass, #5946).
+   - `WARN` with lines the check could not look up (`unverified`, "not in parts cache or offline catalog") → count those lines as **unresolved** and **refuse**; tell the human to run `kct parts lookup <LCSC>` (which fills the cache) and re-run.
+   - **Declared exemptions (issue #8261):** a ref the project `.kct` declares in `bom_entries` with `exempt: consigned | hand_solder | dnp_by_intent` plus a mandatory `exempt_reason` (and no `lcsc`) is not counted as unverified; the check reports it in an `exempt (declared): <ref> [<category>: <reason>]` segment of `details` and returns `OK` if nothing else is unverifiable. Only declared refs are accepted this way — an undeclared `unverified` line still refuses. Never accept an unverifiable line on judgement; if it is deliberately not an LCSC part, have the human declare it in the spec. Each exemption (ref, category, reason) is listed in the README and recorded in the manifest (Gates 7/8).
+   - `WARN` (or any status) whose `details` contain `exempt ref carries a verifiable LCSC part` → **refuse**, quoting that segment. The spec declares the ref non-LCSC but the BOM row carries a real LCSC part, so the order would either place a part the owner meant to supply, or the exemption is stale; the human must reconcile the spec (drop the exemption, or drop the LCSC number from the row) and re-run. The check still judges such a ref normally — a wrong part is still a `FAIL` — so the conflict segment can appear alongside `FAIL` or `unverified` lines; refuse on whichever applies.
+
+The distinction is load-bearing: **matcher-broken → refuse the whole tapeout** (the package is not trustworthy); **no-match on specific parts → unresolved report → refuse `--assembly`** (the human must pick parts before this can ship as an assembly order). Never let a silently-empty part-number column pass as "resolved."
+
+### Gate 4b — warning review (per-rule table + assembly-affecting acknowledgement)
+
+**"0 errors" and "fit to fabricate" are not the same claim.** `kct check`'s exit code is driven by errors — warnings never fail Gate 1 — but some warning classes are genuine **assembly risks** (silkscreen printed over an exposed pad can interfere with solder wetting), and they must not ride through a gate whose stated meaning is "upload this directory as-is." This gate forces the warning population to be *looked at*, per rule, before the bundle is declared upload-ready. It runs in both `--assembly` and `--pcb-only` modes.
+
+1. **Derive a per-rule warning table** from Gate 1's machine-readable report (`<dir>/check-report.json` — see the pre-gates note; do not re-run `kct check`). Group the JSON `violations[]` by `rule_id`, warnings only:
+
+   ```bash
+   jq '[.violations[] | select(.severity=="warning")]
+       | group_by(.rule_id)
+       | map({rule: .[0].rule_id, count: length})' <dir>/check-report.json
+   ```
+
+   **Print this table in the tapeout report.** Reporting an aggregate warning total alone ("N warnings") is **non-compliant** — an aggregate can satisfy a "matches baseline / non-regressive" check indefinitely while concealing an entire defect class. The per-rule table is the artifact that prevents that.
+
+   **Baseline step (Issue #8664).** A per-rule table for *this* revision cannot show a rule growing 14 → 40 between revisions. When a previous revision exists (an earlier `.kicad_pcb`, board directory or bundle), pass it: `kct readiness --baseline <previous>` diffs the Gate 1 report against the baseline's with the same finding-key comparison as `kct check --diff OLD NEW`, prints the warnings **introduced** per rule (old → new count), and lists them in `README.txt`. Introduced findings in an assembly-affecting rule make this gate **fail** unless that rule is in `--ack-warnings`; introduced findings in other rules are listed but do not block. An unreadable baseline fails the gate rather than being skipped. Without `--baseline`, readiness prints a notice if a previous board or bundle sits beside the output directory — pass `--baseline` rather than ignoring it.
+
+2. **Check the assembly-affecting rule set.** At minimum, the following rules are **assembly-affecting** (treat this set as a floor, not a ceiling — extend it when a new rule clearly affects assembly or is a manufacturer-profile floor):
+
+   - `silk_over_copper` — silk over an exposed pad interferes with solder wetting
+   - `silkscreen_line_width` — the compared floor comes from the manufacturer profile, so every warning is a hard fab-constraint violation, not a preference
+   - `silk_edge_clearance`
+   - `silk_overlap`
+   - `silk_ref_obscured` — mirrors `ASSEMBLY_AFFECTING_RULES` (`kct readiness` refuses it without an ack)
+   - `thermal_asymmetry` — a 2-pad passive with one solid and one relieved terminal (tombstoning) or a PTH pin solid on 2+ layers (barrel fill) is an assembly defect; `kct zones relieve` is the fixer (Issue #8659)
+
+3. **Require explicit acknowledgement of any nonzero count in that set.** A nonzero assembly-affecting warning count is acceptable **only** when explicitly acknowledged: the caller passed `--ack-warnings` naming that exact rule, or a human-authored accepted-risk decision exists and you record it as one accepted-risk line **per rule** in `README.txt` (Gate 7). Silence is not acknowledgement, and a passing Gate 1 exit code is not acknowledgement. **Unacknowledged assembly-affecting warnings ⇒ TAPEOUT REFUSED** — never exit 0, never write the final manifest. Warnings outside the assembly-affecting set appear in the table but do not require acknowledgement.
+
+**Gate condition:** the per-rule warning table was derived from Gate 1's JSON report and printed in the tapeout report, **and** every assembly-affecting rule with a nonzero warning count carries an explicit acknowledgement (or all assembly-affecting counts are zero).
+
+### Gate 5 — schematic PDF (full hierarchy)
+
+`kct export` does **not** produce human-reviewable drawings; generate them with `kicad-cli` into the same output directory:
+
+```bash
+KICAD_CLI=$(uv run python -c "from kicad_tools.cli.runner import find_kicad_cli; print(find_kicad_cli() or '')")
+test -n "$KICAD_CLI" || { echo "kicad-cli not found (run: kct doctor)"; exit 3; }
+"$KICAD_CLI" sch export pdf <board-or-project>.kicad_sch --output <dir>/<board>-schematic.pdf
+```
+
+Each tool call is a fresh shell, so the `KICAD_CLI` resolution line must be inside every block that uses it.
+
+Export the **full hierarchy** (all sheets), not just the root sheet. **Gate condition:** the PDF exists, is non-empty, and its mtime is newer than the schematic source. No schematic PDF ⇒ no tapeout.
+
+### Gate 6 — assembly-view PDFs (front and back)
+
+Produce two board drawings a human (and the assembler) can read, with explicit, named layer sets:
+
+```bash
+KICAD_CLI=$(uv run python -c "from kicad_tools.cli.runner import find_kicad_cli; print(find_kicad_cli() or '')")
+test -n "$KICAD_CLI" || { echo "kicad-cli not found (run: kct doctor)"; exit 3; }
+
+# Front assembly view: front copper + front silkscreen + board outline
+"$KICAD_CLI" pcb export pdf <board.kicad_pcb> \
+  --layers F.Cu,F.SilkS,Edge.Cuts \
+  --output <dir>/<board>-assembly-front.pdf
+
+# Back assembly view: back copper + back silkscreen + board outline
+"$KICAD_CLI" pcb export pdf <board.kicad_pcb> \
+  --layers B.Cu,B.SilkS,Edge.Cuts \
+  --output <dir>/<board>-assembly-back.pdf
+```
+
+**Gate condition:** both PDFs exist and are non-empty. Optionally also generate `kct render` 2D/3D preview images and drop them in the output dir — nice-to-have, not a gate.
+
+### Gate 7 — README.txt (human-facing bundle index)
+
+Write `<dir>/README.txt` enumerating **every** deliverable in the bundle so a human opening the zip knows what they have. It must include:
+
+- The exact **board file** taped out and the **resolved fab tier**.
+- The mode (`--assembly` or `--pcb-only`) and what that implies (BOM/CPL present or intentionally absent).
+- A list of every file in the output directory with a one-line description (gerbers/drill archive, BOM, CPL, schematic PDF, assembly-view PDFs, renders, manifest).
+- **Declared BOM exemptions** (Gate 4, issue #8261) — one line per `exempt (declared)` ref from the `bom_lcsc_values` details: ref, category, reason. If none, say "no declared BOM exemptions."
+- **Hand-solder / THT items** (carried from the CPL's THT-exclusion note) — parts the assembler will *not* place and someone must hand-solder.
+- The **per-rule warning table** from Gate 4b (rule → warning count; not an aggregate total), and **one acknowledgement line per assembly-affecting rule with a nonzero count** — naming the rule, the count, and why the risk is accepted (from `--ack-warnings` or the recorded accepted-risk decision). If every assembly-affecting count is zero, state that explicitly.
+- A **Copper cleanup** line from Gate 0: segments/vias removed, or `copper_cleanup: skipped` when `--skip-cleanup` was passed.
+- An **Assembly prep** line per step from Gate 0b: `applied`, or `fiducials: skipped (--skip-fiducials)` / `board_info: skipped (--skip-board-info)` when opted out.
+- Any **accepted-risk notes** carried forward from sign-off docs (e.g. a documented DRC waiver). Waived findings in Gate 1's report (`"status": "waived"`) are listed one per line with their `key`, `waiver_reason` and reviewer from the board's `<board>.kct-waivers.json`. If none, say "no accepted-risk waivers."
+
+**Gate condition:** `README.txt` exists, names the board file, the tier, and the mode, **and** contains the per-rule warning table plus one acknowledgement line per assembly-affecting rule with a nonzero count (or the explicit statement that all assembly-affecting counts are zero).
+
+### Gate 8 — full-bundle manifest (checksums the entire output dir)
+
+The `manifest.json` `kct export` wrote in Gate 3 only covers **what `kct export` itself produced** — it does **not** include the PDFs, renders, or README added by Gates 5–7. Regenerate/extend the manifest so it checksums **every file present in the output directory at completion**:
+
+- Enumerate **all** files in `<dir>` (recursively), and record a checksum (e.g. SHA-256) for each.
+- Record the **exact board file** name and the **resolved tier**.
+- Record the mode (`--assembly` / `--pcb-only`).
+- Record the **declared BOM exemptions** from Gate 4 (a list of `{ref, category, reason}`; empty list if none).
+- Record the **per-rule warning counts** from Gate 4b (a `rule_id` → warning-count map, plus the list of acknowledged assembly-affecting rules), so a later re-verification can diff the warning population **per rule** rather than against an aggregate total. An aggregate-only warning number in the manifest is non-compliant for the same reason it is in Gate 4b.
+
+**Exact schema `kct submit-jlcpcb` consumes** (the same module, `export/submission_workflow.py`, reads and writes it):
+
+```json
+{"files": {"<bundle-relative path>": {"sha256": "<hex>", "size": <bytes>}},
+ "tapeout": {"board_sha256": "<sha256 of the board .kicad_pcb>",
+             "readiness_sha256": "<sha256 of the passing readiness.json receipt>",
+             "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>", "gerber_sha256": "<sha256>"},
+             "fab_review_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>", "gerber_sha256": "<sha256>"}}}
+```
+
+Per-file records use the keys `sha256` and `size` (not `bytes`). The `tapeout` block is **not** written by `kct export` or by this skill: it is a human act. After the gates pass, the human (or the agent on their explicit instruction, with their name) records it:
+
+```bash
+kct tapeout-sign-off <dir> --board <board.kicad_pcb> --readiness <readiness.json> --reviewer "<name>"
+```
+
+It verifies the manifest's file set equals `<dir>` and every `sha256`/`size`, and **refuses (exit 2, manifest untouched)** unless the `kct readiness` receipt is `ready` with every check passed (`kct_check`, `native_drc`, `artifacts`, `bom` present), hashes `--board` in its `inputs`, and covers every bundle file; only then does it write `tapeout`, including the receipt's sha256. Never invent a reviewer. After any change to the bundle or board, re-run the gates (or `kct readiness --verify`) to get a fresh receipt, and only then re-sign.
+
+**Two sign-offs, each attesting something different (issue #8818).** The command above (`--stage release`, the default) says *the gates pass; these bytes may be sent to the fab for preview*. It is enough to upload and preview, never to save a cart. After uploading, look at the fab's gerber viewer / DFM rendering of those bytes, then record that review: `kct tapeout-sign-off <dir> --board <board.kicad_pcb> --stage fab-review --reviewer "<name>"` (no `--readiness` needed). Only that second attestation lets `submit-jlcpcb --website` save the cart. Both bind the gerber zip sha256; changing the board or gerbers invalidates both, and re-running the release sign-off drops an earlier fab-review one.
+
+**Gate condition:** a `manifest.json` exists, is newer than every other file it lists, its file set equals the actual contents of `<dir>` (nothing in the directory is unchecksummed, nothing checksummed is missing), and it records the per-rule warning counts. A stale or partial manifest is a **failure** — it breaks the "upload as-is" contract.
+
+### Readiness compatibility (`kct readiness --verify` accepts this bundle)
+
+`kct readiness --verify` re-checks a tapeout bundle's `artifacts` and `bom` gates. Keep this layout so both sign-off routes agree (issue #8571):
+
+- `manufacturing.zip` sits **beside** the bundle directory (`<pcb-dir>/manufacturing.zip` next to `<pcb-dir>/manufacturing/`), with members either flat or `manufacturing/`-prefixed, byte-identical to the bundle files. Tapeout does not write it, so zip the bundle files yourself (byte-identical) or pass `--no-archive` to skip the outer-archive comparison (the receipt then says the comparison was skipped). `kct readiness <board> --generate` only regenerates bundles that `kct readiness` itself produced; it refuses a tapeout bundle. Without the archive, `artifacts` fails with `bundle has no manufacturing.zip next to ...`.
+- `manifest.json` keeps `files{name: {sha256, size}}` for every file, and a **top-level** `preflight[]` (do not nest it) carrying the `bom_lcsc_values` entry that Gate 4 reads and the `bom` gate re-reads.
+- `README.txt` and `gerbers/gerbers.zip` (with Gerber and drill members) are present.
+
+## Tapeout verdict
+
+Emit a **complete, orderable package** (manifest written, exit 0) **only if all applicable gates hold**:
+
+1. Pre-gates 1–3 (`{{skill:manufacturing-readiness}}`) sign off at the resolved tier (Gate 1 run with `--output <dir>/check-report.json`).
+2. Gate 4 BOM resolution: in `--assembly`, **zero** unresolved lines **and** resolution machinery intact (part-number column actually populated, not silently empty). Skipped in `--pcb-only`.
+3. Gate 4b warning review: the **per-rule** warning table derived from Gate 1's JSON report and printed (an aggregate total alone does not satisfy this), **and** every assembly-affecting rule with a nonzero warning count explicitly acknowledged — or all assembly-affecting counts are zero. **"0 errors + an aggregate warning total" is never sufficient for this verdict.**
+4. Gate 5 schematic PDF present and fresh.
+5. Gate 6 both assembly-view PDFs present and non-empty.
+6. Gate 7 `README.txt` present, naming board + tier + mode, and carrying the per-rule warning table + per-rule acknowledgement lines (or the all-zero statement).
+7. Gate 8 full-bundle `manifest.json` covers **every** file in the output dir, records the per-rule warning counts, and is the newest artifact.
+
+If any applicable gate fails or could not run, **do not write the final manifest**. Report **TAPEOUT REFUSED**, name the failing gate, and quote the specific violation(s). Never emit a manifest — and never imply "upload as-is" — on a partial run.
+
+## Refusal conditions (exit non-zero, no final manifest written)
+
+Refuse the tapeout, loudly, when any of these hold:
+
+- **Any pre-gate fails** — any of the `# sign-off gate 1-3` blocks in `{{skill-file:manufacturing-readiness}}` exits non-zero: Gate 1's rule is false, the `kicad-cli pcb drc` cross-gate reports any error-severity violation or unconnected item (or did not run), or `kct export --drc-report` did not produce its first-pass bundle.
+- **Gate 1's rule is false on a `meta_checks` sub-check** — any `meta_checks` sub-check other than Manifest is `NOT RUN` (e.g. ERC/LVS with no schematic found), `meta_checks.lvs` is vacuous, or `--allow-incomplete` / `--drc-only` was used. `summary.passed` can be `true` in exactly these cases, so it is not the signal; apply the manufacturing-readiness Gate 1 rule rather than restating it.
+- **A blocking check's coverage is `unknown`** — "unknown is not pass" (issue #5946). Gate 1's report carries a `coverage` map (one entry per check: `checked`, `skipped:<reason>` or `unknown:<reason>`, plus `blocking`), and `summary.coverage_blocking_unknown` lists every blocking check that could not evaluate the board (e.g. `segment_zone` with `zone_fills_absent`, `diffpair_length_skew` with `needs_input:net_class_map`, `courtyard_overlap` with `no_courtyard_geometry (N of M footprints)`). Zero findings from such a check is not a pass: refuse, quote the names and reasons, and say which input to supply (refill zones, pass the net-class map, fix the `.kicad_pro`, give each footprint named by a `courtyard_missing` warning an `F.CrtYd` outline or, for a part with no body, set `(attr ... allow_missing_courtyard)`). `kct readiness` enforces the same rule in its `kct_check` gate.
+- **A stale evidence-bound waiver** — `summary.stale_waivers` is nonzero, or any finding carries `"waiver_status": "stale"`. The geometry or nets under a reviewed waiver changed, so the finding is active again; it must be re-reviewed (and re-waived with `kct check --waive <key> --waive-reason ... --waive-reviewer ...` only if still intentional), never carried forward as accepted risk.
+- **Unacknowledged assembly-affecting warnings (Gate 4b)** — any rule in the assembly-affecting set (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`, `silk_overlap`, `silk_ref_obscured`, `thermal_asymmetry`, `courtyard_missing`, at minimum) has a nonzero warning count with no matching `--ack-warnings` entry or per-rule accepted-risk line. Quote the per-rule warning table in the refusal. "0 errors" is not "fit to fabricate" — these two claims must never be conflated by this skill.
+- **`--assembly` with unresolved BOM lines** — one or more components have no fab-orderable part number (human selection required). Surface the unresolved report; do not ship an incomplete assembly order.
+- **LCSC part/package check failed or unverified (Gate 4, `--assembly`)** — the manifest's `bom_lcsc_values` preflight entry is `FAIL`, is missing, or is `WARN` with `unverified` lines not covered by a declared spec exemption, or reports an `exempt ref carries a verifiable LCSC part` conflict (issues #8113, #8261). Quote the offending `details` lines.
+
+- **BOM-resolution machinery unavailable** — the requested capability could not run: the `[parts]` extra is missing (so `--auto-lcsc` soft-fails to an empty column — **#4104**), or there is no network for part matching. This is a **refusal**, not a silently-empty BOM that exits 0.
+- **Requested capability unavailable** generally — e.g. `kicad-cli` cannot be found by the `find_kicad_cli()` resolution (drawings and the cross-gate cannot run), `jq` is missing, or the resolved tier is not in `get_manufacturer_ids()`.
+- **Board has no paired project rules** — the board file has no accompanying `.kicad_pro` (or the rules live only in the board / `.kicad_prl` and not the project file, echoing #4097). Without paired project rules the sign-off tier is not trustworthy; refuse.
+- **`--assembly` and `--pcb-only` both passed** — mutually exclusive; refuse rather than guessing.
+
+## What this skill does NOT do
+
+- **It does not itself implement a CLI subcommand.** This is a **skill** — an agent orchestrating existing `kct check` / `kicad-cli pcb drc` / `kct export` / `kicad-cli sch|pcb export pdf` invocations, exactly as `{{skill:manufacturing-readiness}}` orchestrates its gates without a dedicated binary. **A scriptable equivalent now exists** (issue #4977): `kct readiness <board> [--generate|--verify] [--assembly|--pcb-only] [--mfr <tier>] [--ack-warnings <rules>]` runs these same gates non-interactively and additionally writes the hash-bound `output/readiness.json` evidence documented in `docs/board-json-schema.md`. `--verify` is the default (checks an existing package without writing shipped files); pass `--generate` explicitly to (re)produce the package — it refuses to replace one a manufacturing recipe already finalized (issue #5816). Prefer `kct readiness` for CI and batch sign-off; use this skill when you need an agent in the loop for the judgment calls (ambiguous BOM candidates, accepted-risk decisions) that the command deliberately refuses to make for you.
+- **It does not fix the `--auto-lcsc` soft-fail defect (#4104).** It *surfaces* that defect as a refusal condition — the BOM gate independently verifies the part-number column is populated rather than trusting `kct export`'s exit code — but it does not change `kct export`'s behavior. When #4104 is fixed upstream, the BOM gate's independent check becomes belt-and-suspenders; until then it is the only thing standing between you and an empty BOM that "succeeded."
+- **It does not route copper, place parts, or edit the `.kicad_pcb` / schematic.** If the board is not manufacturing-ready, tapeout refuses; making it ready is `{{skill:manufacturing-readiness}}`'s upstream concern and the router's job.
+- **It does not enumerate fab tiers.** The tier set is owned by `kicad_tools.manufacturers.get_manufacturer_ids()`.
+- **It does not depend on any CI workflow or GitHub Actions context.** It runs identically as an interactive agent invocation inside any consumer repo's working tree, needing only `kct` (on `PATH` via the venv), a KiCad install for `kicad-cli`, and `jq`.
+
+## References
+
+- **`{{skill:manufacturing-readiness}}`** (`{{skill-file:manufacturing-readiness}}`) — the sign-off ritual `tapeout` delegates its three pre-gates to. `tapeout` is a strict superset: sign-off + BOM-resolution gate + drawings + README + full-bundle manifest.
+- **#4104** — `kct export --auto-lcsc` soft-fails to an empty LCSC column when the `[parts]` extra is missing (export still exits 0). This is the known BOM-resolution gap the Gate 4 contract must **not** silently swallow: verify the part-number column independently; do not trust the exit code.
+- **#4614** — a board returned a clean tapeout while carrying dozens of `silk_over_copper` warnings (silkscreen printed across exposed pads); the fab order was aborted at the vendor site. Every finding was warning-severity, so the error-driven gates never looked at them. Gate 4b (the per-rule warning table + assembly-affecting acknowledgement) exists because of that incident.
+- `kct check --help` / `kct export --help` — authoritative `--mfr` tier choices (sourced from `kicad_tools.manufacturers.get_manufacturer_ids()`).
+- `src/kicad_tools/cli/export_cmd.py`, `src/kicad_tools/export/bom_enrich.py` — the `--auto-lcsc` / `--no-auto-lcsc` enrichment behavior Gate 4 wraps.
+- `{{skill:ee-review}}` — sibling `kct` skill for analog/placement-blocked boards (advisory decisions, not copper).

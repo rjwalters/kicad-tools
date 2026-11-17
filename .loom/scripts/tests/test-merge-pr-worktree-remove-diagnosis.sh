@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# test-merge-pr-worktree-remove-diagnosis.sh - Regression test for #6372.
+#
+# merge-pr.sh's post-merge worktree cleanup (`_remove_loom_worktree`) used to
+# handle a failed `git worktree remove --force` with nothing but a bare
+# `warning "Could not remove worktree at $worktree_path"` — the actual git
+# error was discarded (`2>/dev/null`), there was no remediation command, and
+# no attempt was made to recover from a stale worktree registration before
+# giving up. This reads as a "Done" success (the merge itself did succeed;
+# only cleanup failed) with an unexplained warning tacked on, which is exactly
+# the "exit code disagrees with the message" complaint #6372 reported.
+#
+# A sibling code path in the SAME function (the partial-increment /
+# issue-state-lookup case) already sets the bar: it names the case and the
+# remedy explicitly. This test locks in that #6372 brings worktree-removal
+# failure up to the same standard:
+#   1. The first removal attempt's actual git error is captured and surfaced
+#      (no more silent 2>/dev/null discard).
+#   2. On failure, `git worktree prune` is tried once and the removal is
+#      retried — a stale worktree registration (administrative metadata out
+#      of sync with the actual directory, the #6372 reporter's own working
+#      hypothesis, confirmed by their manual `git worktree prune` recovery)
+#      can make the first attempt fail even though nothing is genuinely
+#      holding the worktree open.
+#   3. If the retry also fails, the warning states the failure is best-effort
+#      (the merge already succeeded and is unaffected), includes the actual
+#      git error, and names the remediation commands — never a bare
+#      "could not remove" with no explanation.
+#   4. Exit status matches the "best-effort" decision: `_remove_loom_worktree`
+#      never calls error()/exit 1 on a removal failure, so the containing
+#      merge-pr.sh run still reports success for the merge itself.
+#
+# Test strategy (mirrors test-merge-pr-dirty-worktree-guard.sh /
+# test-merge-pr-primary-worktree-guard.sh):
+#   1. Static grep assertions that the live source retains the prune-and-retry
+#      logic, the captured error, and the remediation message.
+#   2. Behavioral tests running the ACTUAL function body extracted from
+#      merge-pr.sh (no drift) against REAL git repos, with `git` itself
+#      swapped out via PATH for a thin wrapper that deterministically forces
+#      `git worktree remove --force` to fail on its first call — a corrupt
+#      worktree registration is otherwise awkward to reproduce portably, and
+#      this lets the test assert on the retry behavior precisely rather than
+#      relying on incidental host git behavior:
+#      (a) first attempt fails, `git worktree prune` is invoked, second
+#          attempt succeeds -> "removed after pruning" success message, the
+#          worktree is actually gone.
+#      (b) both attempts fail -> best-effort warning naming the real git
+#          error and the remediation commands, rc 0, worktree still present.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
+
+# #8191: _maybe_delete_local_branch (called directly and via
+# _remove_loom_worktree) now delegates to `loom-daemon merge-pr delete-branch`.
+# Pin the binary built from this tree so a stale installed daemon cannot answer
+# instead — it would warn-and-keep every branch and fail these cases for the
+# wrong reason.
+#
+# #8191 slice: the porcelain lookups this suite extracts (_primary_worktree_path
+# / _worktree_branch_for) now delegate to `loom-daemon merge-pr worktree-*`, so
+# the LEAF verbs are checked too — a binary with only the `merge-pr` group
+# predates this slice and would make every lookup fail, which the #3710 guard
+# turns into "refuse to clean up anything at all": a whole-suite failure that
+# reads as broken logic rather than as one stale binary.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
+    "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
+    "merge-pr worktree-find-by-branch" "merge-pr worktree-teardown"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+YELLOW='\033[1;33m'
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why it could not
+# survive, and what proves the property now. Counted as run so the totals stay
+# honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
+
+[[ -f "$MERGE_PR" ]] || { echo "ERROR: $MERGE_PR not found" >&2; exit 1; }
+
+# --- Test 1: source retains the #6372 diagnosis + prune-and-retry logic ---
+echo "Test 1: merge-pr.sh source retains the #6372 worktree-removal diagnosis"
+
+assert_grep '#6372' "$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr/worktree_teardown.rs" \
+    "the teardown (now Rust, #8191) documents the #6372 fix"
+retired "the grep for the first removal attempt's captured stderr (worktree remove \"\$worktree_path\" --force 2>&1)" \
+    "git's real error is captured, not discarded via 2>/dev/null" \
+    "the remove/prune/retry ladder left merge-pr.sh in the #8191 worktree-teardown slice; it is Rust in loom-daemon/src/merge_pr/worktree_teardown.rs, so no grep of this file can pass" \
+    "Test 3 below (the simulated git error text must reach the operator, behavioural, unchanged), plus loom-daemon/tests/merge_pr_worktree_teardown_differential.rs, which compares the port against a FROZEN copy of the retired ladder over stderr-only, stdout/stderr-interleaved, multi-line and empty git output"
+retired "the grep for the prune-before-giving-up call (git -C \"\$REPO_ROOT\" worktree prune)" \
+    "a failed first removal is followed by exactly one git worktree prune and one retry" \
+    "same slice: the prune call is made by loom-daemon merge-pr worktree-teardown, not by this file" \
+    "Tests 2 and 3 below (the wrapper's prune marker must be written, behavioural, unchanged), plus the differential's git call log (remove/prune/remove, and remove/prune with no retry when prune fails) and a_failed_first_try_prunes_once_then_retries_once / a_failed_prune_skips_the_retry_and_keeps_the_first_error in src/merge_pr/worktree_teardown/tests.rs"
+assert_grep 'worktree_teardown::teardown' "$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr/post_merge_cleanup.rs" \
+    "the orchestrator performs the removal through worktree_teardown::teardown (#8191 orchestrator slice 1: in-process, no verb round trip)"
+# The terminal failure report is rendered by the teardown (Rust) and pinned
+# behaviourally by Test 3; these two greps pin where its wording lives now.
+assert_grep 'Could not remove worktree at .*\(best-effort cleanup' "$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr/worktree_teardown.rs" \
+    "the terminal failure message states the best-effort decision"
+assert_grep 'Remediation: git worktree prune' "$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr/worktree_teardown.rs" \
+    "the terminal failure message names the remediation command"
+retired "the grep for the distinct prune-then-retry success text" \
+    "a successful prune-then-retry is reported distinctly from a first-try success" \
+    "same slice: the success text is rendered by loom-daemon merge-pr worktree-teardown and replayed through success(), so it no longer appears in this file" \
+    "Test 2 below (asserts 'removed (after pruning a stale worktree registration)' in the output and Test 4 asserts its absence on a first-try success, both behavioural, unchanged), plus success_texts_distinguish_a_pruned_retry in src/merge_pr/worktree_teardown/tests.rs and the differential"
+
+# shellcheck source=lib/post-merge-cleanup-harness.sh
+source "$SCRIPT_DIR/lib/post-merge-cleanup-harness.sh"
+pmc_load "$MERGE_PR"
+
+# --- Build a real git repo with a secondary Loom-managed worktree ---
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loom-merge-remove-diag.XXXXXX")"
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
+cleanup() { rm -rf "$TMP_ROOT" 2>/dev/null || true; }
+trap cleanup EXIT
+
+PRIMARY="$TMP_ROOT/repo"
+mkdir -p "$PRIMARY"
+git -C "$PRIMARY" init -q
+git -C "$PRIMARY" config user.email "test@example.com"
+git -C "$PRIMARY" config user.name "Test"
+echo "hello" > "$PRIMARY/README.md"
+git -C "$PRIMARY" add -A
+git -C "$PRIMARY" commit -q -m "initial"
+git -C "$PRIMARY" branch -M main
+
+# shellcheck disable=SC2034
+REPO_ROOT="$PRIMARY"
+
+make_worktree() { # <name> -> echoes the worktree path
+    local name="$1"
+    local wt="$PRIMARY/.loom/worktrees/issue-$name"
+    mkdir -p "$PRIMARY/.loom/worktrees"
+    git -C "$PRIMARY" worktree add -q -b "feature/issue-$name" "$wt" >/dev/null 2>&1
+    touch "$wt/.loom-managed"
+    echo "$wt"
+}
+
+# Locate real git once, before any PATH manipulation, so the fake wrapper can
+# always delegate to it by absolute path (never itself, no recursion risk).
+REAL_GIT="$(command -v git)"
+
+# make_fake_git <bin-dir> <fail-count> <marker-file> <error-text>
+#
+# Writes a `git` wrapper into <bin-dir> that intercepts ONLY
+# `worktree remove ... --force` calls: the first <fail-count> such calls print
+# <error-text> to stderr and exit 128 (git's typical fatal-error status);
+# every call after that delegates to the real `git worktree remove` so the
+# worktree is genuinely removed. A `worktree prune` call is logged to
+# <marker-file> (so the test can assert it was actually invoked) and then
+# delegated to real git. Every other invocation passes straight through.
+make_fake_git() {
+    local bin_dir="$1" fail_count="$2" marker_file="$3" error_text="$4"
+    mkdir -p "$bin_dir"
+    local counter_file="$bin_dir/.remove-attempts"
+    echo 0 > "$counter_file"
+    cat > "$bin_dir/git" <<WRAPPER
+#!/usr/bin/env bash
+if [[ "\$*" == *"worktree remove"* && "\$*" == *"--force"* ]]; then
+    n=\$(cat "$counter_file")
+    n=\$((n + 1))
+    echo "\$n" > "$counter_file"
+    if [[ "\$n" -le $fail_count ]]; then
+        echo "$error_text" >&2
+        exit 128
+    fi
+    exec "$REAL_GIT" "\$@"
+fi
+if [[ "\$*" == *"worktree prune"* ]]; then
+    echo "pruned" >> "$marker_file"
+    exec "$REAL_GIT" "\$@"
+fi
+exec "$REAL_GIT" "\$@"
+WRAPPER
+    chmod +x "$bin_dir/git"
+}
+
+# --- Test 2 (a): first attempt fails, prune fixes it, retry succeeds ---
+echo ""
+echo "Test 2: a first-attempt removal failure recovers via prune-and-retry"
+
+WT_A="$(make_worktree 637201)"
+FAKE_BIN_A="$TMP_ROOT/fake-bin-a"
+MARKER_A="$TMP_ROOT/prune-marker-a"
+make_fake_git "$FAKE_BIN_A" 1 "$MARKER_A" "fatal: simulated stale worktree registration"
+
+set +e
+out_a="$(PATH="$FAKE_BIN_A:$PATH" pmc_run_issue "${WT_A##*issue-}" 2>&1)"
+rc_a=$?
+set -e
+
+if [[ $rc_a -eq 0 ]] \
+   && [[ -f "$MARKER_A" ]] \
+   && [[ "$out_a" == *"removed (after pruning a stale worktree registration)"* ]] \
+   && [[ "$out_a" != *"Could not remove worktree"* ]] \
+   && [[ ! -d "$WT_A" ]]; then
+    pass "(a) prune-and-retry recovers a stale-registration failure and removes the worktree"
+else
+    fail "(a) expected prune-then-succeed; rc=$rc_a, pruned=$([[ -f "$MARKER_A" ]] && echo yes || echo no), dir=$([[ -d "$WT_A" ]] && echo yes || echo no), out: $out_a"
+fi
+
+# --- Test 3 (b): both attempts fail -> best-effort diagnosis + remediation ---
+echo ""
+echo "Test 3: a removal failure that survives prune gets a diagnosed, best-effort warning"
+
+WT_B="$(make_worktree 637202)"
+FAKE_BIN_B="$TMP_ROOT/fake-bin-b"
+MARKER_B="$TMP_ROOT/prune-marker-b"
+make_fake_git "$FAKE_BIN_B" 99 "$MARKER_B" "fatal: simulated persistent removal failure"
+
+set +e
+out_b="$(PATH="$FAKE_BIN_B:$PATH" pmc_run_issue "${WT_B##*issue-}" 2>&1)"
+rc_b=$?
+set -e
+
+if [[ $rc_b -eq 0 ]] \
+   && [[ -f "$MARKER_B" ]] \
+   && [[ "$out_b" == *"Could not remove worktree at $WT_B (best-effort cleanup"* ]] \
+   && [[ "$out_b" == *"simulated persistent removal failure"* ]] \
+   && [[ "$out_b" == *"Remediation: git worktree prune"* ]] \
+   && [[ -d "$WT_B" ]]; then
+    pass "(b) a removal failure that survives prune reports a best-effort diagnosis with the real git error and a remediation command; rc stays 0"
+else
+    fail "(b) expected diagnosed best-effort warning; rc=$rc_b, pruned=$([[ -f "$MARKER_B" ]] && echo yes || echo no), dir=$([[ -d "$WT_B" ]] && echo yes || echo no), out: $out_b"
+fi
+
+# --- Test 4: control — a clean worktree with a healthy git still removes on
+#     the first attempt (no regression to the common case) ---
+echo ""
+echo "Test 4: control — a healthy removal (no wrapper) still succeeds on the first try"
+
+WT_C="$(make_worktree 637203)"
+
+set +e
+out_c="$(pmc_run_issue "${WT_C##*issue-}" 2>&1)"
+rc_c=$?
+set -e
+
+if [[ $rc_c -eq 0 ]] \
+   && [[ "$out_c" == *"Removing worktree"* ]] \
+   && [[ "$out_c" == *"Worktree removed"* ]] \
+   && [[ "$out_c" != *"after pruning"* ]] \
+   && [[ "$out_c" != *"Could not remove"* ]] \
+   && [[ ! -d "$WT_C" ]]; then
+    pass "(c) the common healthy-removal case is unaffected by the #6372 change"
+else
+    fail "(c) expected a plain first-try success; rc=$rc_c, dir=$([[ -d "$WT_C" ]] && echo yes || echo no), out: $out_c"
+fi
+
+# --- Summary ---
+echo ""
+echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"
+[[ $TESTS_FAILED -eq 0 ]] || exit 1

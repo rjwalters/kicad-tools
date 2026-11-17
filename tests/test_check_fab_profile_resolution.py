@@ -1,0 +1,565 @@
+"""Tests for ``kct check`` fab-profile resolution + tier advisory (issue #3920).
+
+A routed ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct check``
+used to hard-default to the base ``jlcpcb`` tier and report a false ``FAILED``
+on boards that route legal, tier-gated geometry (e.g. via-in-pad, legal at
+``jlcpcb-tier1``).  These tests cover the two complementary layers that close
+the gap:
+
+* **Layer 1 (primary):** ``kct route`` writes a ``fab_profile.json`` sidecar;
+  ``kct check`` auto-discovers it and resolves the effective ``--mfr`` with a
+  documented precedence chain (explicit > sidecar > ``project.kct target_fab``
+  > ``jlcpcb`` default).
+
+* **Layer 2 (belt-and-suspenders):** for a standalone routed board with NO
+  sidecar and NO ``project.kct``, a non-blocking stderr advisory names a
+  permitting tier when via-in-pad findings appear at a base tier -- WITHOUT
+  changing the verdict / exit code.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.check_cmd import (
+    _discover_fab_profile_sidecar,
+    _maybe_emit_via_in_pad_tier_advisory,
+    _profile_supports_via_in_pad,
+    _resolve_effective_check_mfr,
+    main,
+)
+from kicad_tools.cli.route_cmd import _write_fab_profile_sidecar
+from kicad_tools.sync.discover import resolve_target_fab_for_pcb
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+# A synthetic routed board with a single via dead-centre inside an SMD pad on
+# the same net -- the canonical via-in-pad geometry.  Illegal at ``jlcpcb``
+# (via_in_pad_supported=False).
+#
+# Issue #5009 (layer count now matters): ``via_in_pad_supported`` alone no
+# longer suppresses the finding -- the profile's layer/copper configuration
+# must ALSO declare a real, orderable ``via_in_pad_process_id``.  For
+# ``jlcpcb-tier1`` that is the 4+ layer POFV process, so the "tier1 makes the
+# check pass" acceptance criteria of issue #3920 are exercised on the FOUR-
+# layer variant below.  The two-layer variant is deliberately retained (it is
+# what every base-tier ``jlcpcb`` assertion in this file uses, where
+# ``via_in_pad_supported=False`` decides the verdict before layer count is
+# ever consulted) and additionally pins the new #5009 fail-closed behavior in
+# ``test_two_layer_tier1_fails_closed_without_declared_process``.
+_LAYERS_2L = """  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )"""
+
+_LAYERS_4L = """  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )"""
+
+# Via drill 0.3mm / size 0.6mm -> 0.15mm annular ring: comfortably inside
+# JLCPCB's POFV envelope (0.2-0.5mm drill, >= 0.10mm ring), so the four-layer
+# board is genuinely process-eligible rather than merely "not checked".
+_VIA_IN_PAD_PCB_TEMPLATE = """(kicad_pcb (version 20240108) (generator "test_fixture")
+  (general (thickness 1.6))
+  (paper "A4")
+{layers}
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "DATA")
+  (footprint "Package:TEST" (layer "F.Cu")
+    (at 100 100)
+    (property "Reference" "U1" (at 0 -2 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-000000000001"))
+    (property "Value" "TEST" (at 0 2 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000002"))
+    (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "DATA") (uuid "00000000-0000-0000-0000-000000000003"))
+  )
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "00000000-0000-0000-0000-000000000004"))
+)
+"""
+
+_VIA_IN_PAD_PCB = _VIA_IN_PAD_PCB_TEMPLATE.format(layers=_LAYERS_2L)
+_VIA_IN_PAD_PCB_4L = _VIA_IN_PAD_PCB_TEMPLATE.format(layers=_LAYERS_4L)
+
+
+def _write_pcb(directory: Path, *, layers: int = 2) -> Path:
+    """Write the via-in-pad fixture board.
+
+    Args:
+        directory: Destination directory.
+        layers: Copper-layer count -- ``2`` (default, the historical
+            fixture) or ``4``.  Issue #5009: only the four-layer variant
+            is eligible for ``jlcpcb-tier1``'s POFV via-in-pad process.
+    """
+    pcb = directory / "routed.kicad_pcb"
+    pcb.write_text(_VIA_IN_PAD_PCB_4L if layers == 4 else _VIA_IN_PAD_PCB)
+    return pcb
+
+
+def _write_sidecar(directory: Path, mfr: str) -> Path:
+    sidecar = directory / "fab_profile.json"
+    sidecar.write_text(json.dumps({"mfr": mfr, "source": "kct route --manufacturer"}))
+    return sidecar
+
+
+def _write_project_kct(directory: Path, target_fab: str) -> Path:
+    kct = directory / "project.kct"
+    kct.write_text(
+        'kct_version: "1.0"\n'
+        "project:\n"
+        "  name: T\n"
+        "requirements:\n"
+        "  manufacturing:\n"
+        f"    target_fab: {target_fab}\n"
+    )
+    return kct
+
+
+class _FakeViolation:
+    """Minimal stand-in with the single attribute the advisory reads."""
+
+    def __init__(self, rule_id: str) -> None:
+        self.rule_id = rule_id
+
+
+# ---------------------------------------------------------------------------
+# Sidecar discovery
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverFabProfileSidecar:
+    def test_finds_sidecar_next_to_pcb(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        sidecar = _write_sidecar(tmp_path, "jlcpcb-tier1")
+        assert _discover_fab_profile_sidecar(pcb) == sidecar
+
+    def test_finds_sidecar_in_output_subdir(self, tmp_path: Path) -> None:
+        board = tmp_path / "board"
+        output = board / "output"
+        output.mkdir(parents=True)
+        pcb = _write_pcb(board)
+        sidecar = _write_sidecar(output, "jlcpcb-tier1")
+        assert _discover_fab_profile_sidecar(pcb) == sidecar
+
+    def test_finds_sidecar_as_sibling_in_output(self, tmp_path: Path) -> None:
+        output = tmp_path / "output"
+        output.mkdir()
+        pcb = _write_pcb(output)
+        # <pcb_dir>/fab_profile.json wins first, so remove that layout and use
+        # the <pcb_dir>/../output/fab_profile.json candidate explicitly.
+        sidecar = output / "fab_profile.json"
+        sidecar.write_text(json.dumps({"mfr": "jlcpcb-tier1", "source": "x"}))
+        assert _discover_fab_profile_sidecar(pcb) == sidecar
+
+    def test_returns_none_when_absent(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        assert _discover_fab_profile_sidecar(pcb) is None
+
+
+# ---------------------------------------------------------------------------
+# project.kct target_fab discovery
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTargetFabForPcb:
+    def test_reads_target_fab_next_to_pcb(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_project_kct(tmp_path, "jlcpcb-tier1")
+        assert resolve_target_fab_for_pcb(pcb) == "jlcpcb-tier1"
+
+    def test_reads_target_fab_one_dir_up(self, tmp_path: Path) -> None:
+        board = tmp_path / "board"
+        output = board / "output"
+        output.mkdir(parents=True)
+        pcb = _write_pcb(output)
+        _write_project_kct(output, "jlcpcb-tier1")
+        # project.kct is a sibling of the PCB here; also verify the parent
+        # lookup by moving it up one level.
+        (output / "project.kct").unlink()
+        _write_project_kct(board, "jlcpcb-tier1")
+        assert resolve_target_fab_for_pcb(pcb) == "jlcpcb-tier1"
+
+    def test_returns_none_without_project_kct(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        assert resolve_target_fab_for_pcb(pcb) is None
+
+
+# ---------------------------------------------------------------------------
+# Precedence chain (the core deliverable)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveEffectiveCheckMfr:
+    def test_explicit_flag_wins_over_everything(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        _write_project_kct(tmp_path, "jlcpcb-tier1")
+        mfr, messages, source = _resolve_effective_check_mfr("jlcpcb", pcb)
+        assert mfr == "jlcpcb"
+        # An explicit flag short-circuits before any discovery message.
+        assert messages == []
+        assert source == "cli"
+
+    def test_sidecar_wins_over_project_kct_and_default(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        _write_project_kct(tmp_path, "jlcpcb")  # lower-precedence, different value
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb-tier1"
+        assert any("auto-loaded fab profile: jlcpcb-tier1" in m for m in messages)
+        assert any("fab_profile.json" in m or "from" in m for m in messages)
+        assert source == "sidecar"
+
+    def test_project_kct_wins_over_default(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_project_kct(tmp_path, "jlcpcb-tier1")
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb-tier1"
+        assert any("project.kct target_fab" in m for m in messages)
+        assert source == "project_kct"
+
+    def test_falls_back_to_default(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb"
+        assert messages == []
+        assert source == "default"
+
+    def test_full_precedence_ladder(self, tmp_path: Path) -> None:
+        """explicit > sidecar > project.kct > default, asserted stepwise."""
+        pcb = _write_pcb(tmp_path)
+
+        # 4. default only
+        resolved = _resolve_effective_check_mfr(None, pcb)
+        assert resolved.mfr == "jlcpcb"
+        assert resolved.source == "default"
+
+        # 3. project.kct beats default
+        _write_project_kct(tmp_path, "jlcpcb-tier1")
+        resolved = _resolve_effective_check_mfr(None, pcb)
+        assert resolved.mfr == "jlcpcb-tier1"
+        assert resolved.source == "project_kct"
+
+        # 2. sidecar beats project.kct
+        _write_sidecar(tmp_path, "pcbway")
+        resolved = _resolve_effective_check_mfr(None, pcb)
+        assert resolved.mfr == "pcbway"
+        assert resolved.source == "sidecar"
+
+        # 1. explicit beats sidecar
+        resolved = _resolve_effective_check_mfr("jlcpcb", pcb)
+        assert resolved.mfr == "jlcpcb"
+        assert resolved.source == "cli"
+
+
+# ---------------------------------------------------------------------------
+# Graceful degradation of malformed / unknown sidecars
+# ---------------------------------------------------------------------------
+
+
+class TestSidecarGracefulDegradation:
+    def test_malformed_json_warns_and_falls_back(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        (tmp_path / "fab_profile.json").write_text("{not valid json")
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb"
+        assert any("malformed fab-profile sidecar" in m for m in messages)
+        assert source == "default"
+
+    def test_malformed_sidecar_falls_back_to_project_kct(self, tmp_path: Path) -> None:
+        """A malformed sidecar degrades to the NEXT precedence tier, not the
+        historical default, when a valid ``project.kct`` is also present."""
+        pcb = _write_pcb(tmp_path)
+        (tmp_path / "fab_profile.json").write_text("{not valid json")
+        _write_project_kct(tmp_path, "jlcpcb-tier1")
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb-tier1"
+        assert any("malformed fab-profile sidecar" in m for m in messages)
+        assert source == "project_kct"
+
+    def test_unknown_profile_id_warns_and_falls_back(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "definitely-not-a-real-fab")
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb"
+        assert any("unknown profile" in m for m in messages)
+        assert source == "default"
+
+    def test_missing_mfr_field_warns_and_falls_back(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        (tmp_path / "fab_profile.json").write_text(json.dumps({"source": "x"}))
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb"
+        assert any("no 'mfr' field" in m for m in messages)
+        assert source == "default"
+
+    def test_unknown_target_fab_in_project_kct_warns_and_falls_back(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_project_kct(tmp_path, "not-a-real-fab")
+        mfr, messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb"
+        assert any("unknown profile" in m for m in messages)
+        assert source == "default"
+
+
+# ---------------------------------------------------------------------------
+# Route-side sidecar write + round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestFabProfileSidecarRoundTrip:
+    def test_route_writes_sidecar_check_reads_it(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_fab_profile_sidecar(pcb, "jlcpcb-tier1", quiet=True)
+
+        sidecar = tmp_path / "routed.fab_profile.json"
+        assert sidecar.is_file()
+        assert not (tmp_path / "fab_profile.json").exists()
+        payload = json.loads(sidecar.read_text())
+        assert payload["mfr"] == "jlcpcb-tier1"
+        assert payload["source"] == "kct route --manufacturer"
+
+        mfr, _messages, source = _resolve_effective_check_mfr(None, pcb)
+        assert mfr == "jlcpcb-tier1"
+        assert source == "sidecar"
+
+    def test_empty_manufacturer_writes_nothing(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_fab_profile_sidecar(pcb, "", quiet=True)
+        assert not (tmp_path / "routed.fab_profile.json").exists()
+
+    def test_two_boards_in_one_directory_do_not_cross_pick_up(self, tmp_path: Path) -> None:
+        """Issue #8156: stem-keyed sidecars never leak between sibling boards."""
+        a = _write_pcb(tmp_path)
+        b = tmp_path / "other.kicad_pcb"
+        b.write_text(a.read_text())
+        _write_fab_profile_sidecar(a, "jlcpcb-tier1", quiet=True)
+        assert _resolve_effective_check_mfr(None, a)[0] == "jlcpcb-tier1"
+        assert _resolve_effective_check_mfr(None, b)[2] != "sidecar"
+
+    def test_stem_keyed_wins_over_legacy_bare(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb")
+        (tmp_path / "routed.fab_profile.json").write_text(json.dumps({"mfr": "jlcpcb-tier1"}))
+        assert _resolve_effective_check_mfr(None, pcb)[0] == "jlcpcb-tier1"
+
+    def test_legacy_bare_sidecar_still_found(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        mfr, _m, source = _resolve_effective_check_mfr(None, pcb)
+        assert (mfr, source) == ("jlcpcb-tier1", "sidecar")
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 advisory
+# ---------------------------------------------------------------------------
+
+
+class TestViaInPadTierAdvisory:
+    def test_advisory_fires_at_base_tier_with_findings(self, capsys) -> None:
+        _maybe_emit_via_in_pad_tier_advisory("jlcpcb", [_FakeViolation("via_in_pad")])
+        err = capsys.readouterr().err
+        assert "via_in_pad finding(s) at profile 'jlcpcb'" in err
+        assert "jlcpcb-tier1" in err
+        assert "--mfr" in err
+
+    def test_default_source_still_says_defaulting(self, capsys) -> None:
+        """#4701: with no source (or an explicit ``source="default"``) the
+        original 'Defaulting to the base tier.' wording is preserved."""
+        _maybe_emit_via_in_pad_tier_advisory(
+            "jlcpcb", [_FakeViolation("via_in_pad")], source="default"
+        )
+        err = capsys.readouterr().err
+        assert "Defaulting to the base tier." in err
+
+    def test_project_kct_source_names_itself_not_defaulting(self, capsys) -> None:
+        """#4701: a declared (project.kct) tier must NOT say 'Defaulting'."""
+        _maybe_emit_via_in_pad_tier_advisory(
+            "jlcpcb", [_FakeViolation("via_in_pad")], source="project_kct"
+        )
+        err = capsys.readouterr().err
+        assert "Defaulting to the base tier" not in err
+        assert "project.kct target_fab" in err
+        assert "'jlcpcb'" in err
+
+    def test_sidecar_source_names_itself_not_defaulting(self, capsys) -> None:
+        """#4701: a declared (fab_profile.json sidecar) tier must NOT say
+        'Defaulting'."""
+        _maybe_emit_via_in_pad_tier_advisory(
+            "jlcpcb", [_FakeViolation("via_in_pad")], source="sidecar"
+        )
+        err = capsys.readouterr().err
+        assert "Defaulting to the base tier" not in err
+        assert "fab_profile.json sidecar" in err
+        assert "'jlcpcb'" in err
+
+    def test_cli_source_names_itself_not_defaulting(self, capsys) -> None:
+        """#4701: an explicit --mfr tier must NOT say 'Defaulting' either --
+        the CLI flag was not a fallback."""
+        _maybe_emit_via_in_pad_tier_advisory("jlcpcb", [_FakeViolation("via_in_pad")], source="cli")
+        err = capsys.readouterr().err
+        assert "Defaulting to the base tier" not in err
+        assert "passed explicitly via --mfr" in err
+        assert "'jlcpcb'" in err
+
+    def test_no_advisory_when_active_profile_permits(self, capsys) -> None:
+        _maybe_emit_via_in_pad_tier_advisory("jlcpcb-tier1", [_FakeViolation("via_in_pad")])
+        assert capsys.readouterr().err == ""
+
+    def test_no_advisory_without_via_in_pad_findings(self, capsys) -> None:
+        _maybe_emit_via_in_pad_tier_advisory("jlcpcb", [_FakeViolation("clearance")])
+        assert capsys.readouterr().err == ""
+
+    def test_no_advisory_for_unknown_profile(self, capsys) -> None:
+        _maybe_emit_via_in_pad_tier_advisory("not-a-real-fab", [_FakeViolation("via_in_pad")])
+        assert capsys.readouterr().err == ""
+
+    def test_profile_support_helper(self) -> None:
+        assert _profile_supports_via_in_pad("jlcpcb") is False
+        assert _profile_supports_via_in_pad("jlcpcb-tier1") is True
+        assert _profile_supports_via_in_pad("nope") is False
+
+
+# ---------------------------------------------------------------------------
+# End-to-end CLI behaviour (the acceptance criteria)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCliEndToEnd:
+    def test_bare_check_fails_at_base_tier_and_prints_advisory(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Bare check on a via-in-pad board: FAILED + Layer-2 advisory."""
+        pcb = _write_pcb(tmp_path)
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "via_in_pad finding(s) at profile 'jlcpcb'" in err
+        assert "jlcpcb-tier1" in err
+
+    def test_sidecar_makes_bare_check_pass(self, tmp_path: Path, capsys) -> None:
+        """AC: with the sidecar present, bare check reports 0 blocking via_in_pad.
+
+        Issue #5009: the board is the FOUR-layer variant of the fixture,
+        because ``jlcpcb-tier1`` only declares a real via-in-pad process
+        (POFV) on its 4+ layer configurations.  The #3920 acceptance
+        criterion under test here is the profile *resolution* chain
+        (sidecar -> effective ``--mfr``); a two-layer board at the same
+        tier now correctly fails closed, which
+        ``test_two_layer_tier1_fails_closed_without_declared_process``
+        pins separately.
+        """
+        pcb = _write_pcb(tmp_path, layers=4)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "auto-loaded fab profile: jlcpcb-tier1" in err
+        # No advisory when the resolved tier already permits via-in-pad.
+        assert "via_in_pad finding(s)" not in err
+        # #5009: nor the process-eligibility advisory -- a real process is
+        # declared for this layer configuration and the geometry meets it.
+        assert "via_in_pad_process_missing" not in err
+        assert "via_in_pad_process_ineligible" not in err
+
+    def test_project_kct_makes_bare_check_pass(self, tmp_path: Path, capsys) -> None:
+        """Same AC as above, resolved via ``project.kct`` instead of the sidecar."""
+        pcb = _write_pcb(tmp_path, layers=4)
+        _write_project_kct(tmp_path, "jlcpcb-tier1")
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "project.kct target_fab" in err
+
+    def test_two_layer_tier1_fails_closed_without_declared_process(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """#5009: tier1 + 2 layers = capability flag but NO orderable process.
+
+        ``jlcpcb-tier1``'s 2-layer configurations set
+        ``via_in_pad_supported: true`` (Capability Plus is orderable on
+        2-layer boards) but carry no ``via_in_pad_process_id`` -- JLCPCB's
+        via-in-pad-specific POFV process publishes a 4-layer minimum.  The
+        bare capability flag must therefore NOT suppress the finding: this
+        is the intentional behavior change this fixture pair documents, and
+        the reason ``test_sidecar_makes_bare_check_pass`` above moved to the
+        four-layer variant.
+        """
+        pcb = _write_pcb(tmp_path, layers=2)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "auto-loaded fab profile: jlcpcb-tier1" in err
+        # The tier-gate advisory must NOT fire (the tier DOES claim
+        # support); the process advisory is the one that applies.
+        assert "via_in_pad finding(s) at profile" not in err
+        assert "via_in_pad_process_missing finding(s)" in err
+
+    def test_project_kct_declared_base_tier_advisory_is_not_defaulted(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """#4701 regression: a board declaring ``target_fab: jlcpcb`` via
+        ``project.kct`` still fails via-in-pad findings at that tier, but the
+        advisory must name the declared source instead of claiming the tier
+        was defaulted -- the exact scenario from the issue reproduction."""
+        pcb = _write_pcb(tmp_path)
+        _write_project_kct(tmp_path, "jlcpcb")
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "auto-loaded fab profile: jlcpcb (from project.kct target_fab)" in err
+        assert "via_in_pad finding(s) at profile 'jlcpcb'" in err
+        assert "Defaulting to the base tier" not in err
+        assert "Board declares 'jlcpcb' (project.kct target_fab)." in err
+
+    def test_sidecar_declared_base_tier_advisory_is_not_defaulted(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """#4701: same as above but the tier is declared via the
+        fab_profile.json sidecar rather than project.kct."""
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb")
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "Defaulting to the base tier" not in err
+        assert "Board declares 'jlcpcb' (fab_profile.json sidecar)." in err
+
+    def test_explicit_base_tier_overrides_sidecar(self, tmp_path: Path, capsys) -> None:
+        """AC: explicit --mfr jlcpcb still surfaces the via_in_pad findings."""
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad", "--mfr", "jlcpcb"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        # Explicit flag wins: no sidecar auto-load line.
+        assert "auto-loaded fab profile" not in err
+        # #4701: an explicit --mfr must not be reported as a fallback default.
+        assert "Defaulting to the base tier" not in err
+        assert "passed explicitly via --mfr" in err
+
+    def test_advisory_is_verdict_invariant(self, tmp_path: Path, capsys) -> None:
+        """The Layer-2 advisory must NOT change the exit code.
+
+        Compare the bare-check exit code (advisory fires) against an explicit
+        ``--mfr jlcpcb`` run at the SAME base tier (advisory also fires): both
+        must be exit 2, proving the hint is purely informational.
+        """
+        pcb = _write_pcb(tmp_path)
+        rc_bare = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        capsys.readouterr()
+        rc_explicit = main([str(pcb), "--drc-only", "--only", "via_in_pad", "--mfr", "jlcpcb"])
+        assert rc_bare == rc_explicit == 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(pytest.main([__file__, "-v"]))

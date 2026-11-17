@@ -1,0 +1,948 @@
+"""Tests for the Issue #3439 corridor-bounded coupled diff-pair search.
+
+Background: ``CoupledPathfinder.route_coupled`` is a pure-Python A* over
+the joint ``(P-pos, N-pos)`` product state space.  On board 07's
+4-layer 110x95 mm grid every declared pair blew its 60 s per-pair
+budget at ~14k iterations (pure-Python speed), so coupled routing was
+structurally intractable and the recipe had to disable
+``--differential-pairs`` entirely.
+
+Issue #3439 adds a corridor-bounded search mode:
+
+1. ``build_corridor_mask`` dilates a single-ended guide route (found by
+   the C++-accelerated per-net pathfinder) into a layer-agnostic
+   spatial corridor.
+2. ``CoupledPathfinder.route_coupled`` accepts a ``corridor`` kwarg and
+   prunes any neighbor state whose P or N head leaves the corridor
+   (endpoint cells exempt).
+3. ``DiffPairRouter.route_differential_pair_coupled`` routes the P side
+   single-ended (WITHOUT committing it), builds the corridor, attempts
+   the coupled search inside it with half the per-pair budget, and
+   falls back to the legacy unconstrained search when the corridor
+   attempt fails.
+
+The corridor reduces the joint search space from the full grid product
+to a near-1D tube, which the pure-Python search completes in seconds.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import random
+
+import pytest
+
+from kicad_tools.router.core import Autorouter
+from kicad_tools.router.diffpair import DifferentialPairConfig
+from kicad_tools.router.diffpair_routing import (
+    CoupledPathfinder,
+    DiffPairRouter,
+    build_corridor_mask,
+)
+from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
+from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+# Issue #6448: the deprecated grid coupled pre-pass is exercised on purpose here.
+pytestmark = pytest.mark.filterwarnings("ignore:route_diffpair_prepass.*:DeprecationWarning")
+
+# ---------------------------------------------------------------------------
+# build_corridor_mask
+# ---------------------------------------------------------------------------
+
+
+def _make_grid(width: float = 12.7, height: float = 12.7) -> RoutingGrid:
+    rules = DesignRules()
+    return RoutingGrid(width=width, height=height, rules=rules)
+
+
+def _straight_guide_route(grid: RoutingGrid) -> Route:
+    """A single horizontal segment from (2, 5) to (10, 5) mm."""
+    route = Route(net=1, net_name="GUIDE")
+    route.segments.append(
+        Segment(
+            x1=2.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="GUIDE",
+        )
+    )
+    return route
+
+
+def test_corridor_mask_covers_guide_path():
+    """Every rasterized guide cell is inside the corridor."""
+    grid = _make_grid()
+    route = _straight_guide_route(grid)
+    corridor = build_corridor_mask(grid, route, radius_cells=2)
+
+    gx1, gy1 = grid.world_to_grid(2.0, 5.0)
+    gx2, gy2 = grid.world_to_grid(10.0, 5.0)
+    for x in range(gx1, gx2 + 1):
+        assert (x, gy1) in corridor, f"guide cell ({x},{gy1}) missing from corridor"
+
+
+def test_corridor_mask_dilates_by_radius():
+    """Cells within ``radius_cells`` (Chebyshev) of the guide are
+    included; cells beyond it are excluded."""
+    grid = _make_grid()
+    route = _straight_guide_route(grid)
+    radius = 3
+    corridor = build_corridor_mask(grid, route, radius_cells=radius)
+
+    gx, gy = grid.world_to_grid(6.0, 5.0)  # mid-path cell
+    assert (gx, gy + radius) in corridor
+    assert (gx, gy - radius) in corridor
+    assert (gx, gy + radius + 1) not in corridor
+    assert (gx, gy - radius - 1) not in corridor
+
+
+def test_corridor_mask_clamps_to_grid_bounds():
+    """Dilation near the board edge never produces out-of-bounds cells."""
+    grid = _make_grid()
+    route = Route(net=1, net_name="EDGE")
+    route.segments.append(
+        Segment(
+            x1=0.1,
+            y1=0.1,
+            x2=1.0,
+            y2=0.1,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="EDGE",
+        )
+    )
+    corridor = build_corridor_mask(grid, route, radius_cells=5)
+    for x, y in corridor:
+        assert 0 <= x < grid.cols
+        assert 0 <= y < grid.rows
+
+
+def test_corridor_mask_includes_extra_cells():
+    """``extra_cells`` (pad endpoints) are dilated into the mask too."""
+    grid = _make_grid()
+    route = _straight_guide_route(grid)
+    far_cell = grid.world_to_grid(11.5, 11.5)
+    corridor = build_corridor_mask(grid, route, radius_cells=1, extra_cells=(far_cell,))
+    assert far_cell in corridor
+
+
+def _reference_corridor_mask(
+    grid: RoutingGrid,
+    guide_route: Route,
+    radius_cells: int,
+    extra_cells: tuple[tuple[int, int], ...] = (),
+) -> frozenset[tuple[int, int]]:
+    """Oracle: the pre-Issue-#5240 nested-Python-loop dilation.
+
+    Reproduces the original ``build_corridor_mask`` bit-for-bit (same
+    per-step interpolation, same unbounded square/Chebyshev dilation with
+    independent per-axis bounds checks) so the NumPy-vectorized
+    implementation can be checked against it directly, instead of only
+    against hand-picked single-cell assertions.
+    """
+    base_cells: set[tuple[int, int]] = set(extra_cells)
+
+    for seg in guide_route.segments:
+        gx1, gy1 = grid.world_to_grid(seg.x1, seg.y1)
+        gx2, gy2 = grid.world_to_grid(seg.x2, seg.y2)
+        steps = max(abs(gx2 - gx1), abs(gy2 - gy1))
+        if steps == 0:
+            base_cells.add((gx1, gy1))
+            continue
+        for i in range(steps + 1):
+            t = i / steps
+            base_cells.add(
+                (
+                    int(round(gx1 + (gx2 - gx1) * t)),
+                    int(round(gy1 + (gy2 - gy1) * t)),
+                )
+            )
+
+    for via in guide_route.vias:
+        base_cells.add(grid.world_to_grid(via.x, via.y))
+
+    radius = max(0, int(radius_cells))
+    corridor: set[tuple[int, int]] = set()
+    cols, rows = grid.cols, grid.rows
+    for cx, cy in base_cells:
+        for dx in range(-radius, radius + 1):
+            x = cx + dx
+            if x < 0 or x >= cols:
+                continue
+            for dy in range(-radius, radius + 1):
+                y = cy + dy
+                if 0 <= y < rows:
+                    corridor.add((x, y))
+
+    return frozenset(corridor)
+
+
+def test_corridor_mask_matches_reference_on_multi_segment_route():
+    """Issue #5240: the NumPy-vectorized dilation must reproduce the
+    original nested-loop algorithm bit-for-bit on a non-trivial guide
+    route (multiple angled segments + a via + several radii)."""
+    grid = _make_grid(width=25.0, height=20.0)
+    route = Route(net=1, net_name="MULTI")
+    route.segments.append(
+        Segment(
+            x1=1.0, y1=1.0, x2=9.3, y2=4.7, width=0.2, layer=Layer.F_CU, net=1, net_name="MULTI"
+        )
+    )
+    route.segments.append(
+        Segment(
+            x1=9.3, y1=4.7, x2=9.3, y2=15.2, width=0.2, layer=Layer.F_CU, net=1, net_name="MULTI"
+        )
+    )
+    route.segments.append(
+        Segment(
+            x1=9.3, y1=15.2, x2=18.6, y2=18.0, width=0.2, layer=Layer.F_CU, net=1, net_name="MULTI"
+        )
+    )
+    route.vias.append(
+        Via(
+            x=9.3,
+            y=15.2,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="MULTI",
+        )
+    )
+    extra = (grid.world_to_grid(0.5, 0.5), grid.world_to_grid(19.5, 19.5))
+
+    for radius in (0, 1, 4, 9, 17):
+        expected = _reference_corridor_mask(grid, route, radius, extra_cells=extra)
+        actual = build_corridor_mask(grid, route, radius, extra_cells=extra)
+        assert actual == expected, f"radius={radius} mismatch vs reference"
+
+
+def test_corridor_mask_matches_reference_near_board_edges():
+    """Edge/corner guide routes exercise the per-axis bounds clamping the
+    reference implementation relies on."""
+    grid = _make_grid(width=10.0, height=8.0)
+    route = Route(net=1, net_name="CORNER")
+    route.segments.append(
+        Segment(
+            x1=0.05, y1=0.05, x2=0.4, y2=7.9, width=0.2, layer=Layer.F_CU, net=1, net_name="CORNER"
+        )
+    )
+    route.segments.append(
+        Segment(
+            x1=9.95, y1=7.9, x2=9.95, y2=0.05, width=0.2, layer=Layer.F_CU, net=1, net_name="CORNER"
+        )
+    )
+
+    for radius in (0, 2, 6, 12):
+        expected = _reference_corridor_mask(grid, route, radius)
+        actual = build_corridor_mask(grid, route, radius)
+        assert actual == expected, f"radius={radius} mismatch vs reference near edges"
+
+
+def test_corridor_mask_matches_reference_with_out_of_range_extra_cells():
+    """Base cells outside the grid contribute nothing, exactly as before.
+
+    ``build_corridor_mask`` sizes a dense array to the base cells'
+    bounding box, so an unclamped ``extra_cells`` entry must be dropped
+    rather than inflating that box.  Dropping it is not a behaviour
+    change: the reference implementation's per-axis bounds checks
+    already discarded every cell such a base cell dilates to.
+    """
+    grid = _make_grid(width=10.0, height=8.0)
+    route = _straight_guide_route(grid)
+    far = (grid.cols + 10_000, grid.rows + 10_000)
+    negative = (-10_000, -10_000)
+
+    for radius in (0, 3, 7):
+        expected = _reference_corridor_mask(grid, route, radius, extra_cells=(far, negative))
+        actual = build_corridor_mask(grid, route, radius, extra_cells=(far, negative))
+        assert actual == expected, f"radius={radius} mismatch with out-of-range extra cells"
+
+    # Only out-of-range cells and no guide geometry -> empty corridor.
+    empty_route = Route(net=1, net_name="NONE")
+    assert build_corridor_mask(grid, empty_route, 4, extra_cells=(far, negative)) == frozenset()
+    assert (
+        _reference_corridor_mask(grid, empty_route, 4, extra_cells=(far, negative)) == frozenset()
+    )
+
+
+def test_corridor_mask_matches_reference_on_randomized_routes():
+    """Fuzz the vectorized dilation against the nested-loop oracle.
+
+    Seeded so the case set is fixed run-to-run; covers axis-aligned,
+    diagonal and shallow-slope segments (the three interpolation
+    regimes), several radii, vias, and pad-derived extra cells.
+    """
+    rng = random.Random(5240)
+    grid = _make_grid(width=20.0, height=16.0)
+
+    for case in range(40):
+        route = Route(net=1, net_name=f"FUZZ{case}")
+        for _ in range(rng.randint(1, 4)):
+            route.segments.append(
+                Segment(
+                    x1=rng.uniform(0.2, 19.8),
+                    y1=rng.uniform(0.2, 15.8),
+                    x2=rng.uniform(0.2, 19.8),
+                    y2=rng.uniform(0.2, 15.8),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name=f"FUZZ{case}",
+                )
+            )
+        if rng.random() < 0.5:
+            route.vias.append(
+                Via(
+                    x=rng.uniform(0.2, 19.8),
+                    y=rng.uniform(0.2, 15.8),
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=1,
+                    net_name=f"FUZZ{case}",
+                )
+            )
+        extra = tuple(
+            grid.world_to_grid(rng.uniform(0.0, 20.0), rng.uniform(0.0, 16.0))
+            for _ in range(rng.randint(0, 3))
+        )
+        radius = rng.choice((0, 1, 2, 5, 11))
+
+        expected = _reference_corridor_mask(grid, route, radius, extra_cells=extra)
+        actual = build_corridor_mask(grid, route, radius, extra_cells=extra)
+        assert actual == expected, f"case {case} (radius={radius}) mismatch vs reference"
+
+
+def test_corridor_mask_matches_reference_empty_route():
+    """No segments/vias, only ``extra_cells`` -- the early-return path."""
+    grid = _make_grid()
+    route = Route(net=1, net_name="EMPTY")
+    extra = (grid.world_to_grid(3.0, 3.0),)
+    assert build_corridor_mask(grid, route, radius_cells=5, extra_cells=extra) == (
+        _reference_corridor_mask(grid, route, radius_cells=5, extra_cells=extra)
+    )
+    assert build_corridor_mask(grid, route, radius_cells=0) == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# CoupledPathfinder.route_coupled corridor kwarg
+# ---------------------------------------------------------------------------
+
+
+def _make_simple_pair_pads() -> tuple[Pad, Pad, Pad, Pad]:
+    """Two-pad fixture the coupled pathfinder routes in well under 1 s."""
+    p_start = Pad(x=2.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+", layer=Layer.F_CU)
+    p_end = Pad(x=10.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+", layer=Layer.F_CU)
+    n_start = Pad(x=2.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-", layer=Layer.F_CU)
+    n_end = Pad(x=10.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-", layer=Layer.F_CU)
+    return p_start, p_end, n_start, n_end
+
+
+def test_route_coupled_signature_accepts_corridor():
+    """The kwarg must be on the method with a None default (legacy)."""
+    import inspect
+
+    sig = inspect.signature(CoupledPathfinder.route_coupled)
+    assert "corridor" in sig.parameters
+    assert sig.parameters["corridor"].default is None
+
+
+def test_route_coupled_succeeds_inside_corridor():
+    """A corridor dilated around the P-side path admits the pair."""
+    rules = DesignRules()
+    grid = _make_grid()
+    pf = CoupledPathfinder(grid=grid, rules=rules, target_spacing_cells=2, min_spacing_cells=2)
+    p_start, p_end, n_start, n_end = _make_simple_pair_pads()
+
+    corridor = build_corridor_mask(
+        grid,
+        _straight_guide_route(grid),
+        radius_cells=8,
+        extra_cells=(
+            grid.world_to_grid(p_start.x, p_start.y),
+            grid.world_to_grid(p_end.x, p_end.y),
+            grid.world_to_grid(n_start.x, n_start.y),
+            grid.world_to_grid(n_end.x, n_end.y),
+        ),
+    )
+    result = pf.route_coupled(p_start, p_end, n_start, n_end, corridor=corridor)
+    assert result is not None, "corridor-bounded search must route the simple pair"
+
+
+def test_route_coupled_corridor_prunes_outside_states():
+    """A corridor that covers only the start cells (no path to the
+    goal) must make the search fail fast instead of exploring the open
+    grid."""
+    rules = DesignRules()
+    grid = _make_grid()
+    pf = CoupledPathfinder(grid=grid, rules=rules, target_spacing_cells=2, min_spacing_cells=2)
+    p_start, p_end, n_start, n_end = _make_simple_pair_pads()
+
+    # Corridor = just the start pad neighborhoods.  Goal cells are
+    # exempt from the check but unreachable because every intermediate
+    # cell is pruned.
+    start_only: set[tuple[int, int]] = set()
+    for pad in (p_start, n_start):
+        cx, cy = grid.world_to_grid(pad.x, pad.y)
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                start_only.add((cx + dx, cy + dy))
+
+    # Issue #3508: the fail-fast assertion is iteration-based, not
+    # wall-clock.  Mid-route asymmetric moves enlarge the joint state
+    # space inside the corridor (positions x direction tags), so FULL
+    # frontier exhaustion under coverage instrumentation can exceed a
+    # small wall-clock bound while still being a tiny fraction of an
+    # open-grid search.  Production callers always pass an iteration
+    # budget; mirror that here and assert the search failed by corridor
+    # pruning (frontier exhausted) rather than by burning the budget.
+    budget = 200_000
+    result = pf.route_coupled(
+        p_start,
+        p_end,
+        n_start,
+        n_end,
+        corridor=frozenset(start_only),
+        max_iterations_budget=budget,
+    )
+
+    assert result is None, "search must fail when the corridor has no path to the goal"
+    assert pf.last_iterations < budget, (
+        "pruned search must exhaust the corridor-bounded frontier instead of "
+        f"burning the full budget; used {pf.last_iterations} iterations"
+    )
+
+
+def test_route_coupled_corridor_none_preserves_legacy_behaviour():
+    """``corridor=None`` (default) matches the unconstrained search."""
+    rules = DesignRules()
+    pf = CoupledPathfinder(
+        grid=_make_grid(), rules=rules, target_spacing_cells=2, min_spacing_cells=2
+    )
+    p_start, p_end, n_start, n_end = _make_simple_pair_pads()
+
+    result_default = pf.route_coupled(p_start, p_end, n_start, n_end)
+    assert result_default is not None
+
+
+# ---------------------------------------------------------------------------
+# DiffPairRouter integration: corridor-guided attempt
+# ---------------------------------------------------------------------------
+
+
+def _opt_in_diffpair_class_map(net_names: list[str]) -> dict[str, NetClassRouting]:
+    nc = NetClassRouting(name="HighSpeedOptIn", coupled_routing=True)
+    return dict.fromkeys(net_names, nc)
+
+
+def _two_pad_diffpair_router(diffpair_spacing: float = 0.8) -> Autorouter:
+    """30x10mm board with one straight two-pad diff pair (see
+    ``test_diffpair_routing_integration.py`` for the geometry rationale)."""
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=rules,
+        net_class_map=_opt_in_diffpair_class_map(["USB_D+", "USB_D-"]),
+    )
+    p_y = 5.0 - diffpair_spacing / 2
+    n_y = 5.0 + diffpair_spacing / 2
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 5.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
+        ],
+    )
+    router.add_component(
+        "J1",
+        [
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
+        ],
+    )
+    return router
+
+
+def test_coupled_routing_uses_corridor_phase(caplog, monkeypatch):
+    """On a clean fixture the corridor attempt should succeed (the
+    structured timing log reports ``phase=corridor``) and the pair
+    should be fully routed.
+
+    Issue #3508: the geometric shadow constructor now runs FIRST and
+    satisfies this clean fixture, so the corridor mechanism is
+    exercised here by disabling the shadow (it has its own coverage in
+    ``tests/test_diffpair_shadow.py``).
+    """
+    router = _two_pad_diffpair_router()
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+
+    with caplog.at_level(logging.INFO, logger="kicad_tools.router.diffpair_routing"):
+        routes, warnings, routed_net_ids = router.route_diffpair_prepass(config)
+
+    assert 1 in routed_net_ids and 2 in routed_net_ids, (
+        f"Expected both diff-pair nets to route; got {routed_net_ids}"
+    )
+    timing_records = [r for r in caplog.records if "diffpair coupled timing" in r.getMessage()]
+    assert timing_records, "per-pair timing log must be emitted (issue #3439)"
+    assert any("phase=corridor" in r.getMessage() for r in timing_records), (
+        "corridor-guided attempt should succeed on a clean straight pair; "
+        f"got: {[r.getMessage() for r in timing_records]}"
+    )
+
+
+def test_guide_route_is_not_committed_to_route_list():
+    """The single-ended guide route must never leak into
+    ``autorouter.routes`` -- only the coupled P/N routes are committed."""
+    router = _two_pad_diffpair_router()
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+
+    routes, _warnings, routed_net_ids = router.route_diffpair_prepass(config)
+    assert routed_net_ids == {1, 2}
+
+    # Exactly the committed coupled routes appear on the autorouter;
+    # an uncommitted guide route would add a third entry for net 1.
+    net1_routes = [r for r in router.routes if r.net == 1]
+    net2_routes = [r for r in router.routes if r.net == 2]
+    assert len(net1_routes) == 1
+    assert len(net2_routes) == 1
+
+
+# ---------------------------------------------------------------------------
+# PR #3473 (review of #3439): shared per-pair budgets across the two
+# coupled attempts + bounded guide-route probe
+# ---------------------------------------------------------------------------
+
+
+def test_iteration_budget_is_split_between_corridor_and_fallback(monkeypatch):
+    """A failing pair must NOT receive the full iteration budget twice.
+
+    PR #3473 review (board 06 forensics): the corridor attempt was
+    passed the un-halved ``per_pair_max_iterations``, so every failing
+    pair burned 4000 corridor + 4000 open iterations, doubling the
+    diff-pair phase and tipping the CI job over its 15-minute ceiling.
+    The corridor attempt gets at most half; the open fallback gets the
+    remainder of the SHARED budget.
+    """
+    # Issue #3508: bypass the shadow constructor so the corridor/
+    # fallback budget split is what this test exercises.
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    monkeypatch.setattr(DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None)
+    router = _two_pad_diffpair_router()
+    # Issue #5895: the pose-centerline rescue (on by default) would couple
+    # this open-field pair after the joint-state attempts; this test is about
+    # the budget split between those attempts.
+    router._diffpair.enable_pose_centerline = False
+    pairs = router._diffpair.detect_differential_pairs()
+    assert len(pairs) == 1
+
+    budgets_seen: list[int | None] = []
+
+    def fake_route_coupled(
+        self,
+        p_start,
+        p_end,
+        n_start,
+        n_end,
+        timeout_seconds=None,
+        max_iterations_budget=None,
+        corridor=None,
+    ):
+        budgets_seen.append(max_iterations_budget)
+        self.last_timeout_exceeded = False
+        # Simulate exhausting exactly the budget this attempt received.
+        self.last_iterations = max_iterations_budget or 0
+        return None
+
+    monkeypatch.setattr(CoupledPathfinder, "route_coupled", fake_route_coupled)
+
+    routes, warning = router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+        per_pair_max_iterations=4000,
+    )
+
+    assert routes == [] and warning is None
+    assert len(budgets_seen) == 2, f"expected corridor attempt + open fallback, got {budgets_seen}"
+    corridor_budget, fallback_budget = budgets_seen
+    assert corridor_budget == 2000, (
+        f"corridor attempt must get half the iteration budget, got {corridor_budget}"
+    )
+    assert fallback_budget == 2000, (
+        "open fallback must get only the remainder of the shared budget "
+        f"(4000 - 2000), got {fallback_budget}"
+    )
+
+
+def test_fallback_gets_full_remainder_when_corridor_exits_early(monkeypatch):
+    """If the corridor attempt fails after only a few iterations, the
+    open fallback inherits nearly the whole shared budget (mirrors the
+    wall-clock remaining-budget arithmetic)."""
+    # Issue #3508: bypass the shadow constructor so the corridor/
+    # fallback budget split is what this test exercises.
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    monkeypatch.setattr(DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None)
+    router = _two_pad_diffpair_router()
+    pairs = router._diffpair.detect_differential_pairs()
+
+    budgets_seen: list[int | None] = []
+
+    def fake_route_coupled(
+        self,
+        p_start,
+        p_end,
+        n_start,
+        n_end,
+        timeout_seconds=None,
+        max_iterations_budget=None,
+        corridor=None,
+    ):
+        budgets_seen.append(max_iterations_budget)
+        self.last_timeout_exceeded = False
+        self.last_iterations = 100  # cheap corridor failure
+        return None
+
+    monkeypatch.setattr(CoupledPathfinder, "route_coupled", fake_route_coupled)
+
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+        per_pair_max_iterations=4000,
+    )
+
+    assert budgets_seen[0] == 2000
+    assert budgets_seen[1] == 3900, (
+        "fallback budget must be the shared budget minus iterations the "
+        f"corridor attempt actually used, got {budgets_seen[1]}"
+    )
+
+
+def test_guide_route_probe_receives_deadline(monkeypatch):
+    """The single-ended probe must be bounded by a per-net deadline.
+
+    PR #3473 review: the probe was called with no ``per_net_timeout``;
+    on hard P sides (C++ fails -> unbounded Python fallback) it ate
+    nearly the whole per-pair budget before either coupled attempt ran,
+    leaving the open fallback only the 1.0s floor.
+    """
+    router = _two_pad_diffpair_router()
+    pairs = router._diffpair.detect_differential_pairs()
+
+    probe_timeouts: list[float | None] = []
+
+    # Issue #6908: the test asserts only on the deadlines handed to the
+    # probe, so stub the real routing (probe, coupled attempts, shadow and
+    # rescue) to return immediately. Left real, the call took ~77s with the
+    # C++ backend and tripped the 60s pytest-timeout on CI.
+    def spying_route(start, end, *args, per_net_timeout=None, **kwargs):
+        probe_timeouts.append(per_net_timeout)
+        return None
+
+    def fake_route_coupled(self, *args, **kwargs):
+        self.last_timeout_exceeded = False
+        self.last_iterations = 0
+        return None
+
+    monkeypatch.setattr(router.router, "route", spying_route)
+    monkeypatch.setattr(CoupledPathfinder, "route_coupled", fake_route_coupled)
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    monkeypatch.setattr(DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None)
+
+    routes, _warning = router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+    )
+
+    assert probe_timeouts, "guide-route probe was never invoked"
+    # Issue #3508 (decomposition): with the shadow constructor OFF
+    # (default), the probe keeps the legacy #3473 eighth-of-budget
+    # bound -- the expensive 45s probe floor exists to feed the shadow
+    # guide and would otherwise burn most of a 2-core CI runner's
+    # re-route wall-clock before a deterministic budget-exit defer.
+    assert probe_timeouts[0] == 60.0 * 0.125, (
+        "with shadow construction off the probe must get the legacy "
+        f"eighth-of-budget deadline, got {probe_timeouts[0]}"
+    )
+
+    # With the shadow constructor ON, the budget is floored at 45s and
+    # clamped to half the per-pair budget -- the eighth-of-budget bound
+    # starved board 06's USB3 probes (30-37s single-ended guide routes)
+    # at the 60s per-pair budget.
+    probe_timeouts.clear()
+    router._diffpair.enable_shadow_construction = True
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+    )
+    assert probe_timeouts, "guide-route probe was never invoked (shadow on)"
+    assert probe_timeouts[0] == min(max(60.0 * 0.125, 45.0), 60.0 * 0.5), (
+        "with shadow construction on the probe must get the "
+        f"floored-and-clamped budget, got {probe_timeouts[0]}"
+    )
+
+
+def test_failed_probe_clears_avoidance_costs():
+    """A probe that raises must still clear persistent avoidance costs.
+
+    PR #3473 review (non-blocking note): the C++ validation-failure
+    path mutates grid avoidance costs via ``_boost_avoidance_at``;
+    the normal cleanup lives in ``Autorouter._route_net``, which the
+    probe bypasses.
+    """
+    router = _two_pad_diffpair_router()
+
+    class _StubRouter:
+        def __init__(self):
+            self.cleared = 0
+
+        def route(self, start, end, per_net_timeout=None):
+            raise RuntimeError("probe failure")
+
+        def clear_avoidance_costs(self):
+            self.cleared += 1
+
+    stub = _StubRouter()
+    router.router = stub
+
+    pads = [p for p in router.pads.values() if p.net == 1]
+    start, end = pads[0], pads[1]
+
+    result = router._diffpair._single_ended_guide_route(start, end)
+    assert result is None
+    assert stub.cleared == 1, "clear_avoidance_costs must run even when the probe raises"
+
+
+# ---------------------------------------------------------------------------
+# Issue #4052: impedance-coupling gap must not become the within-pair floor
+# ---------------------------------------------------------------------------
+
+
+def _impedance_class_map(net_names: list[str], intra_gap: float) -> dict[str, NetClassRouting]:
+    """A coupled-routing net class whose ``intra_pair_clearance`` has been
+    OVERWRITTEN with a stackup-impedance edge-to-edge coupling gap.
+
+    This mirrors what ``diffpair_impedance.resolve_impedance_driven_sizing``
+    does when a class carries ``target_diff_impedance``: it replaces
+    ``intra_pair_clearance`` with the physics gap needed to hit the target
+    impedance on the board's stackup (board 07: 8.425 mm for loosely-coupled
+    100 ohm on a thick 4-layer stack).  The resulting ``NetClassRouting``
+    that reaches ``route_differential_pair_coupled`` therefore reports a
+    within-pair clearance FAR wider than any geometric spacing floor.
+    """
+    nc = NetClassRouting(
+        name="ImpedanceCoupled",
+        coupled_routing=True,
+        intra_pair_clearance=intra_gap,
+        target_diff_impedance=100.0,
+    )
+    return dict.fromkeys(net_names, nc)
+
+
+def test_impedance_gap_does_not_inflate_coupled_spacing_floor(monkeypatch):
+    """Issue #4052: the impedance-coupling gap must be clamped OUT of the
+    coupled search's ``min_spacing_cells`` floor.
+
+    Regression: board 07 declares ``target_diff_impedance=100`` on its
+    diff pairs, so the impedance resolver overwrites
+    ``intra_pair_clearance`` with an 8.425 mm coupling gap.  Before the
+    fix, ``route_differential_pair_coupled`` fed
+    ``ceil((trace_width + 8.425 mm) / resolution)`` -- ~86 cells -- as the
+    within-pair floor.  The joint-state search then rejected EVERY move
+    off the ~1 mm pad pitch as a spacing-floor violation and died at the
+    start state after 4 iterations (measured: ``sym_floor`` /
+    ``asym_floor_p`` / ``asym_floor_n`` rejections only, ``best_progress``
+    never improving).  The impedance gap is a stackup quantity, not a
+    within-pair spacing floor; the floor must clamp to the geometric
+    ``trace_width + trace_clearance``.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=rules,
+        net_class_map=_impedance_class_map(["USB_D+", "USB_D-"], intra_gap=8.425),
+    )
+    # Same two-pad straight geometry as ``_two_pad_diffpair_router``.
+    p_y, n_y = 5.0 - 0.4, 5.0 + 0.4
+    for ref, x in (("U1", 5.0), ("J1", 25.0)):
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": p_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": x,
+                    "y": n_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+            ],
+        )
+
+    # Capture the floor passed into every CoupledPathfinder construction.
+    seen_floors: list[int] = []
+    orig_init = CoupledPathfinder.__init__
+
+    def spying_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        seen_floors.append(self.min_spacing_cells)
+
+    monkeypatch.setattr(CoupledPathfinder, "__init__", spying_init)
+
+    pairs = router._diffpair.detect_differential_pairs()
+    assert len(pairs) == 1
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=5.0,
+    )
+
+    assert seen_floors, "route_differential_pair_coupled never built a CoupledPathfinder"
+
+    # The impedance-driven floor would be ceil((0.2 + 8.425) / 0.1) = 87
+    # cells.  The clamped floor is ceil((0.2 + 0.15) / 0.1) = 4 cells --
+    # the geometric trace_width + trace_clearance.
+    impedance_floor = math.ceil((0.2 + 8.425) / 0.1)
+    geometric_floor = math.ceil((0.2 + 0.15) / 0.1)
+    for floor in seen_floors:
+        assert floor < impedance_floor, (
+            f"coupled spacing floor {floor} still reflects the 8.425 mm "
+            f"impedance gap ({impedance_floor} cells); it must clamp to the "
+            f"geometric trace_width+trace_clearance floor ({geometric_floor})"
+        )
+        assert floor <= geometric_floor, (
+            f"coupled spacing floor {floor} exceeds the geometric "
+            f"trace_width+trace_clearance floor ({geometric_floor} cells)"
+        )
+
+
+def test_declared_wide_intra_clearance_survives_clamp(monkeypatch):
+    """Issue #4052 clamp must NOT touch a legitimately-declared wide
+    within-pair clearance (the #3012 case).
+
+    The clamp is gated on ``target_diff_impedance`` -- the signal that
+    ``intra_pair_clearance`` was overwritten by the impedance resolver.
+    A pair that DECLARES a wider ``intra_pair_clearance`` without a target
+    impedance (board 07's original 0.1 mm within-pair clearance was the
+    motivating #3012 case) must keep its declared floor so the post-route
+    partner-edge clearance still holds; clamping it down to
+    ``trace_clearance`` would reintroduce the #3012
+    ``diffpair_clearance_intra`` violations.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    # Declared intra clearance 0.5 mm (> trace_clearance 0.15 mm), no impedance.
+    nc = NetClassRouting(name="WideDeclared", coupled_routing=True, intra_pair_clearance=0.5)
+    router = Autorouter(
+        width=30.0,
+        height=10.0,
+        rules=rules,
+        net_class_map=dict.fromkeys(["USB_D+", "USB_D-"], nc),
+    )
+    p_y, n_y = 5.0 - 0.4, 5.0 + 0.4
+    for ref, x in (("U1", 5.0), ("J1", 25.0)):
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": p_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": x,
+                    "y": n_y,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+            ],
+        )
+
+    seen_floors: list[int] = []
+    orig_init = CoupledPathfinder.__init__
+
+    def spying_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        seen_floors.append(self.min_spacing_cells)
+
+    monkeypatch.setattr(CoupledPathfinder, "__init__", spying_init)
+
+    pairs = router._diffpair.detect_differential_pairs()
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=5.0,
+    )
+
+    assert seen_floors, "route_differential_pair_coupled never built a CoupledPathfinder"
+    # Declared floor: ceil((0.2 + 0.5) / 0.1) = 7 cells.  A wrongful clamp
+    # to trace_clearance would give ceil((0.2 + 0.15) / 0.1) = 4.
+    declared_floor = math.ceil((0.2 + 0.5) / 0.1)
+    for floor in seen_floors:
+        assert floor >= declared_floor, (
+            f"declared within-pair floor was clamped from {declared_floor} to "
+            f"{floor} cells; the #4052 clamp must only fire when "
+            f"target_diff_impedance is set"
+        )

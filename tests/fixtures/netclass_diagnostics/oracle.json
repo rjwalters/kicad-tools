@@ -1,0 +1,3141 @@
+{
+  "kicad_version": "10.0.5",
+  "source_tag": "10.0.5",
+  "cases": [
+    {
+      "pattern": "",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "\n",
+      "matches": true
+    },
+    {
+      "pattern": "",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB\n",
+      "matches": true
+    },
+    {
+      "pattern": "USB",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB",
+      "matches": true
+    },
+    {
+      "pattern": "USB",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB_\u00e9",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB_\ud83d\ude00",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB_\n",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB\n",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB_D",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB__",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB_",
+      "matches": true
+    },
+    {
+      "pattern": "USB_*",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB_*",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB_\n",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB\n",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB_",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "US",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "USBB",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB1",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB*",
+      "matches": true
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB?",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB\nX",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB_\u00e9",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB_\ud83d\ude00",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB_\n",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB\n",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB_D",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB__",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB_",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "US",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USBB",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB1",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB.1",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB*",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB\\x",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "USB[0-9]",
+      "matches": true
+    },
+    {
+      "pattern": "USB*",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB*",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "*",
+      "net": "\u00e9",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "\ud83d\ude00",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "\n\n",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB\nX",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "Net-(U1-Pad1)",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "/sheet/USB",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB_\u00e9",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB_\ud83d\ude00",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB_\n",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB\n",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "\n",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "*",
+      "net": "USB",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB_D",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB__",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB_",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "usb_D",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "XUSB",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "US",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USBB",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB1",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB.1",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB*",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB\\x",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "USB[0-9]",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "A-B",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "A B",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "ab",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "aaab",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "a",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "b",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "XYZ",
+      "matches": true
+    },
+    {
+      "pattern": "*",
+      "net": "/USB/",
+      "matches": true
+    },
+    {
+      "pattern": "?",
+      "net": "\u00e9",
+      "matches": true
+    },
+    {
+      "pattern": "?",
+      "net": "\ud83d\ude00",
+      "matches": true
+    },
+    {
+      "pattern": "?",
+      "net": "\n\n",
+      "matches": true
+    },
+    {
+      "pattern": "?",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "\n",
+      "matches": true
+    },
+    {
+      "pattern": "?",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "a",
+      "matches": true
+    },
+    {
+      "pattern": "?",
+      "net": "b",
+      "matches": true
+    },
+    {
+      "pattern": "?",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "?",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB\nX",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "/sheet/USB",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB_\u00e9",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB_\ud83d\ude00",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB_\n",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB\n",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB_D",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB__",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB_",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "XUSB",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USBB",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB1",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB.1",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB*",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB\\x",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "USB[0-9]",
+      "matches": true
+    },
+    {
+      "pattern": "*USB*",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "*USB*",
+      "net": "/USB/",
+      "matches": true
+    },
+    {
+      "pattern": "a*b?",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "\n",
+      "matches": true
+    },
+    {
+      "pattern": "a*b?",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "ab",
+      "matches": true
+    },
+    {
+      "pattern": "a*b?",
+      "net": "aaab",
+      "matches": true
+    },
+    {
+      "pattern": "a*b?",
+      "net": "a",
+      "matches": true
+    },
+    {
+      "pattern": "a*b?",
+      "net": "b",
+      "matches": true
+    },
+    {
+      "pattern": "a*b?",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "a*b?",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB_D",
+      "matches": true
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB_D",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "usb_D",
+      "matches": true
+    },
+    {
+      "pattern": "usb_*",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "usb_*",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "A-B",
+      "matches": true
+    },
+    {
+      "pattern": "A-B",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "A-B",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "A B",
+      "matches": true
+    },
+    {
+      "pattern": "A B",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "A B",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB.1",
+      "matches": true
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB.1",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB*",
+      "matches": true
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB\\x",
+      "matches": true
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB\\*",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB1",
+      "matches": true
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "USB[0-9]",
+      "matches": true
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "USB[0-9]",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB\n",
+      "matches": true
+    },
+    {
+      "pattern": "^USB$",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB",
+      "matches": true
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "^USB$",
+      "net": "/USB/",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "ab",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "aaab",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "a",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "/USB/",
+      "net": "/USB/",
+      "matches": true
+    },
+    {
+      "pattern": "a**",
+      "net": "\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "\n\n",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB\nX",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "Net-(U1-Pad1)",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "/sheet/USB",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB_\u00e9",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB_\ud83d\ude00",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB_\n",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB\n",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "\n",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB_D",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB__",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB_",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "usb_D",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "XUSB",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "US",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USBB",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB1",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB.1",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB*",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB\\x",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "USB[0-9]",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "A-B",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "A B",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "ab",
+      "matches": true
+    },
+    {
+      "pattern": "a**",
+      "net": "aaab",
+      "matches": true
+    },
+    {
+      "pattern": "a**",
+      "net": "a",
+      "matches": true
+    },
+    {
+      "pattern": "a**",
+      "net": "b",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "XYZ",
+      "matches": false
+    },
+    {
+      "pattern": "a**",
+      "net": "/USB/",
+      "matches": false
+    }
+  ]
+}

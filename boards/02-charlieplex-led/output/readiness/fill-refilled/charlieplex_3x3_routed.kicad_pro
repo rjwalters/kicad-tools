@@ -1,0 +1,192 @@
+{
+  "meta": {
+    "filename": "charlieplex_3x3_routed.kicad_pro",
+    "version": 1,
+    "manufacturer": "jlcpcb",
+    "layers": 2,
+    "copper_oz": 1.0,
+    "kct_router_netclasses": {
+      "classes": [
+        "Audio",
+        "Clock",
+        "Debug",
+        "Digital",
+        "Power"
+      ],
+      "assignments": [
+        "GND",
+        "ISP_SCK",
+        "LINE_A",
+        "LINE_B",
+        "LINE_C",
+        "LINE_D",
+        "NODE_A",
+        "NODE_B",
+        "NODE_C",
+        "NODE_D",
+        "RESET",
+        "VCC"
+      ]
+    },
+    "kct_sidecar_sha256": "9a8338f22716f9888a0f9d9d5987aac6d0aa4789bd345016b5e61b81af67c0cc"
+  },
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_clearance": 0.127,
+        "min_track_width": 0.127,
+        "min_via_diameter": 0.6,
+        "min_microvia_diameter": 0.2,
+        "min_via_annular_width": 0.05,
+        "min_through_hole_diameter": 0.3,
+        "min_via_hole": 0.3,
+        "min_microvia_drill": 0.1,
+        "min_hole_to_hole": 0.5,
+        "min_copper_edge_clearance": 0.3,
+        "min_silk_clearance": 0.05,
+        "min_text_thickness": 0.15,
+        "min_text_height": 1.0
+      },
+      "rule_severities": {
+        "lib_footprint_mismatch": "ignore",
+        "isolated_copper": "warning"
+      },
+      "defaults": {
+        "track_min_width": 0.127,
+        "clearance_min": 0.127,
+        "via_min_diameter": 0.6,
+        "via_min_drill": 0.3
+      }
+    }
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.127,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Default",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Audio",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Clock",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Debug",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Digital",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.127,
+        "line_style": 0,
+        "microvia_diameter": 0.2,
+        "microvia_drill": 0.1,
+        "name": "Power",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.127,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      }
+    ],
+    "meta": {
+      "version": 3
+    },
+    "netclass_assignments": {
+      "GND": "Power",
+      "ISP_SCK": "Clock",
+      "LINE_A": "Audio",
+      "LINE_B": "Audio",
+      "LINE_C": "Audio",
+      "LINE_D": "Audio",
+      "NODE_A": "Digital",
+      "NODE_B": "Digital",
+      "NODE_C": "Digital",
+      "NODE_D": "Digital",
+      "RESET": "Debug",
+      "VCC": "Power"
+    }
+  },
+  "schematic": {
+    "meta": {
+      "version": 1
+    }
+  },
+  "sheets": [],
+  "text_variables": {}
+}

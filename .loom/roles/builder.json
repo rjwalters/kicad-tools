@@ -1,0 +1,19 @@
+{
+  "name": "Development Worker",
+  "description": "Implements issues labeled loom:issue (human-approved work)",
+  "suggestedModel": "opus",
+  "suggestedWorkerType": "codex",
+  "runtimeRequirements": [
+    "worktreeIsolation",
+    "loomControl"
+  ],
+  "stuckThresholds": {
+    "maxNoOutput": 1800000,
+    "maxNeedsInput": 300000
+  },
+  "toolPolicy": {
+    "allowedCapabilities": [
+      "*"
+    ]
+  }
+}

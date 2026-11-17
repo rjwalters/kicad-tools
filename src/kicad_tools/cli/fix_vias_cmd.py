@@ -1,0 +1,1054 @@
+#!/usr/bin/env python3
+"""
+Fix vias to meet manufacturer specifications.
+
+Usage:
+    kicad-tools fix-vias board.kicad_pcb [options]
+
+Examples:
+    # Resize vias to meet JLCPCB minimums (default)
+    kicad-tools fix-vias board.kicad_pcb --mfr jlcpcb
+
+    # Specify sizes directly
+    kicad-tools fix-vias board.kicad_pcb --drill 0.3 --diameter 0.6
+
+    # Preview changes without applying
+    kicad-tools fix-vias board.kicad_pcb --mfr jlcpcb --dry-run
+
+    # Output to a different file
+    kicad-tools fix-vias board.kicad_pcb --mfr jlcpcb -o fixed_board.kicad_pcb
+"""
+
+import argparse
+import json
+import math
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from kicad_tools.core.sexp_file import save_pcb
+from kicad_tools.manufacturers import get_all_manufacturer_names
+from kicad_tools.manufacturers.base import load_design_rules_from_yaml
+from kicad_tools.schema.pcb import _is_footprint_tag
+from kicad_tools.sexp.parser import SExp, parse_file
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4892). Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
+
+
+@dataclass
+class ViaFix:
+    """Record of a via that was fixed."""
+
+    x: float
+    y: float
+    net: int
+    old_drill: float
+    new_drill: float
+    old_diameter: float
+    new_diameter: float
+    uuid: str
+
+
+@dataclass
+class SameLayerViaFix:
+    """Record of a same-layer via that was repaired."""
+
+    x: float
+    y: float
+    net: int
+    old_start_layer: str
+    old_end_layer: str
+    new_start_layer: str
+    new_end_layer: str
+    uuid: str
+
+
+@dataclass
+class SameLayerViaWarning:
+    """Warning for a same-layer via that could not be auto-repaired (blind/buried)."""
+
+    x: float
+    y: float
+    net: int
+    start_layer: str
+    end_layer: str
+    via_type: str
+    uuid: str
+
+
+@dataclass
+class ViaClearanceWarning:
+    """Warning for a via that may cause clearance issues after resize."""
+
+    x: float
+    y: float
+    new_diameter: float
+    nearby_item: str
+    clearance_mm: float
+
+
+@dataclass
+class ViaSkip:
+    """Record of a via that was skipped because resizing would violate clearance."""
+
+    x: float
+    y: float
+    net: int
+    current_drill: float
+    current_diameter: float
+    would_be_diameter: float
+    reason: str
+    uuid: str
+
+
+def get_design_rules(
+    mfr: str | None, layers: int, copper: float, drill: float | None, diameter: float | None
+) -> tuple[float, float, float, float]:
+    """Get the target drill and diameter from manufacturer or explicit values.
+
+    Returns:
+        Tuple of (min_drill_mm, min_diameter_mm, min_annular_ring_mm, min_clearance_mm).
+        min_annular_ring_mm is 0.0 when explicit values are used (no
+        manufacturer annular ring cross-check needed).
+        min_clearance_mm is 0.2 as a default when no manufacturer is specified.
+    """
+    if drill is not None and diameter is not None:
+        return drill, diameter, 0.0, 0.2
+
+    if mfr:
+        try:
+            rules_dict = load_design_rules_from_yaml(mfr)
+            # Build key like "2layer_1oz"
+            key = f"{layers}layer_{int(copper)}oz"
+            if key in rules_dict:
+                rules = rules_dict[key]
+            else:
+                # Try without copper weight
+                key = f"{layers}layer_1oz"
+                if key in rules_dict:
+                    rules = rules_dict[key]
+                else:
+                    # Fall back to first available
+                    rules = list(rules_dict.values())[0]
+
+            target_drill = drill if drill is not None else rules.min_via_drill_mm
+            min_annular_ring = rules.min_annular_ring_mm
+            mfr_min_diameter = rules.min_via_diameter_mm
+            annular_ring_min_diameter = target_drill + 2 * min_annular_ring
+            effective_min_diameter = max(mfr_min_diameter, annular_ring_min_diameter)
+            target_diameter = diameter if diameter is not None else effective_min_diameter
+            min_clearance = rules.min_clearance_mm
+            return target_drill, target_diameter, min_annular_ring, min_clearance
+        except FileNotFoundError:
+            print(f"Warning: No configuration found for manufacturer '{mfr}'", file=sys.stderr)
+
+    # Default values if nothing specified
+    return drill or 0.3, diameter or 0.6, 0.0, 0.2
+
+
+def get_mfr_design_rules(mfr: str, layers: int, copper: float):
+    """Load the full :class:`DesignRules` object for a manufacturer/stackup.
+
+    Unlike :func:`get_design_rules` (which returns only the scalar via
+    drill/diameter/clearance tuple used by the resize path), the relocation
+    path needs the whole rules object -- specifically ``min_clearance_mm``,
+    ``min_hole_to_hole_mm``, and the ``via_in_pad_supported`` capability flag.
+
+    Resolves through the manufacturer *profile* registry (not the raw YAML
+    loader) so capability-tier aliases such as ``jlcpcb-tier1`` /
+    ``jlcpcb_capabilityplus`` resolve correctly and carry the right
+    ``via_in_pad_supported`` flag.
+
+    Returns:
+        The matching ``DesignRules`` for the stackup, or ``None`` when the
+        manufacturer is unknown.
+    """
+    from kicad_tools.manufacturers import get_profile
+
+    try:
+        profile = get_profile(mfr)
+    except ValueError:
+        return None
+    return profile.get_design_rules(layers=layers, copper_oz=copper)
+
+
+def _closest_point_on_segment(
+    x1: float, y1: float, x2: float, y2: float, px: float, py: float
+) -> tuple[float, float, float]:
+    """Find the closest point on a line segment to a given point.
+
+    Args:
+        x1, y1: Segment start point.
+        x2, y2: Segment end point.
+        px, py: Query point.
+
+    Returns:
+        (closest_x, closest_y, distance) tuple.
+    """
+    dx = x2 - x1
+    dy = y2 - y1
+    seg_len_sq = dx * dx + dy * dy
+
+    if seg_len_sq < 1e-10:
+        # Segment is essentially a point
+        dist = math.sqrt((x1 - px) ** 2 + (y1 - py) ** 2)
+        return (x1, y1, dist)
+
+    # Project point onto line, clamped to segment
+    t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+
+    cx = x1 + t * dx
+    cy = y1 + t * dy
+    dist = math.sqrt((cx - px) ** 2 + (cy - py) ** 2)
+
+    return (cx, cy, dist)
+
+
+def find_all_vias(
+    doc: SExp,
+) -> list[tuple[SExp, float, float, float, float, int, str, str, str, str]]:
+    """Find all vias in the PCB document.
+
+    Returns:
+        List of (node, x, y, drill, diameter, net, uuid, start_layer, end_layer, via_type) tuples.
+        ``start_layer`` and ``end_layer`` are the layer names from the ``(layers ...)``
+        child node.  ``via_type`` is the value of the ``(type ...)`` child node
+        (e.g. ``"blind"``, ``"micro"``), or ``""`` for standard through-hole vias.
+    """
+    vias = []
+
+    for via_node in doc.find_all("via"):
+        at_node = via_node.find("at")
+        if not at_node:
+            continue
+
+        at_atoms = at_node.get_atoms()
+        x = float(at_atoms[0]) if at_atoms else 0
+        y = float(at_atoms[1]) if len(at_atoms) > 1 else 0
+
+        size_node = via_node.find("size")
+        drill_node = via_node.find("drill")
+        net_node = via_node.find("net")
+        uuid_node = via_node.find("uuid")
+        layers_node = via_node.find("layers")
+        type_node = via_node.find("type")
+
+        diameter = float(size_node.get_first_atom()) if size_node else 0
+        drill = float(drill_node.get_first_atom()) if drill_node else 0
+        net_val = net_node.get_first_atom() if net_node else ""
+        try:
+            net = int(net_val)
+        except (ValueError, TypeError):
+            net = 0  # KiCad 9 name-only format or empty string
+        uuid = uuid_node.get_first_atom() if uuid_node else ""
+
+        # Extract layer names
+        if layers_node:
+            layer_atoms = layers_node.get_atoms()
+            start_layer = str(layer_atoms[0]) if layer_atoms else ""
+            end_layer = str(layer_atoms[1]) if len(layer_atoms) > 1 else ""
+        else:
+            start_layer = ""
+            end_layer = ""
+
+        # Extract via type (empty string for standard through-hole)
+        via_type = str(type_node.get_first_atom()) if type_node else ""
+
+        vias.append((via_node, x, y, drill, diameter, net, uuid, start_layer, end_layer, via_type))
+
+    return vias
+
+
+def find_nearby_items(
+    doc: SExp, x: float, y: float, radius: float
+) -> list[tuple[str, float, float, float]]:
+    """Find PCB items near a point.
+
+    Returns:
+        List of (item_type, ix, iy, item_width) for items within radius.
+        ``item_width`` is the physical width/size of the item (e.g. trace
+        width, via diameter, or pad size) so that callers can account for it
+        when computing edge-to-edge clearance.
+    """
+    items: list[tuple[str, float, float, float]] = []
+
+    # Check pads (in footprints)
+    for fp_node in _find_all_footprints(doc):
+        for pad_node in fp_node.find_all("pad"):
+            at_node = pad_node.find("at")
+            if at_node:
+                at_atoms = at_node.get_atoms()
+                px = float(at_atoms[0]) if at_atoms else 0
+                py = float(at_atoms[1]) if len(at_atoms) > 1 else 0
+                dist = ((px - x) ** 2 + (py - y) ** 2) ** 0.5
+                if dist < radius:
+                    # Use pad size if available (take the smaller dimension
+                    # as a conservative approximation for round pads)
+                    size_node = pad_node.find("size")
+                    if size_node:
+                        size_atoms = size_node.get_atoms()
+                        pad_w = float(size_atoms[0]) if size_atoms else 0
+                        pad_h = float(size_atoms[1]) if len(size_atoms) > 1 else pad_w
+                        pad_size = min(pad_w, pad_h)
+                    else:
+                        pad_size = 0.0
+                    items.append(("pad", px, py, pad_size))
+
+    # Check other vias
+    for via_node in doc.find_all("via"):
+        at_node = via_node.find("at")
+        if at_node:
+            at_atoms = at_node.get_atoms()
+            vx = float(at_atoms[0]) if at_atoms else 0
+            vy = float(at_atoms[1]) if len(at_atoms) > 1 else 0
+            # Skip if same position (it's the via we're checking)
+            if abs(vx - x) < 0.001 and abs(vy - y) < 0.001:
+                continue
+            dist = ((vx - x) ** 2 + (vy - y) ** 2) ** 0.5
+            if dist < radius:
+                size_node = via_node.find("size")
+                via_diameter = float(size_node.get_first_atom()) if size_node else 0.0
+                items.append(("via", vx, vy, via_diameter))
+
+    # Check track segments using closest-point-on-segment geometry
+    for seg_node in doc.find_all("segment"):
+        start_node = seg_node.find("start")
+        end_node = seg_node.find("end")
+        if start_node and end_node:
+            start_atoms = start_node.get_atoms()
+            end_atoms = end_node.get_atoms()
+            sx = float(start_atoms[0]) if start_atoms else 0
+            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
+            ex = float(end_atoms[0]) if end_atoms else 0
+            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
+
+            # Skip if endpoint is at the via position (it's connected)
+            if abs(sx - x) < 0.001 and abs(sy - y) < 0.001:
+                continue
+            if abs(ex - x) < 0.001 and abs(ey - y) < 0.001:
+                continue
+
+            # Use closest point on segment instead of midpoint
+            cx, cy, dist = _closest_point_on_segment(sx, sy, ex, ey, x, y)
+            if dist < radius:
+                width_node = seg_node.find("width")
+                trace_width = float(width_node.get_first_atom()) if width_node else 0.0
+                items.append(("track", cx, cy, trace_width))
+
+    return items
+
+
+def get_board_outer_layers(doc: SExp) -> tuple[str, str]:
+    """Determine the outermost copper layers from the PCB document.
+
+    Reads the top-level ``(layers ...)`` section and returns the first and
+    last copper (signal/power) layer names.  Falls back to ``("F.Cu", "B.Cu")``
+    if detection fails.
+    """
+    layers_section = doc.find("layers")
+    if not layers_section:
+        return ("F.Cu", "B.Cu")
+
+    copper_layers: list[str] = []
+    for child in layers_section.children:
+        if not child.children:
+            continue
+        atoms = child.get_atoms()
+        # Each layer entry looks like: (0 "F.Cu" signal)
+        if len(atoms) >= 2:
+            layer_type = str(atoms[-1]) if len(atoms) >= 3 else ""
+            if layer_type in ("signal", "power"):
+                copper_layers.append(str(atoms[0]))
+
+    if len(copper_layers) >= 2:
+        return (copper_layers[0], copper_layers[-1])
+
+    return ("F.Cu", "B.Cu")
+
+
+def fix_same_layer_vias(
+    doc: SExp,
+    dry_run: bool = False,
+) -> tuple[list[SameLayerViaFix], list[SameLayerViaWarning]]:
+    """Detect and repair vias where start_layer == end_layer.
+
+    Through-hole vias (no ``(type ...)`` child, or ``type "through"``) are
+    auto-repaired by setting their layers to the board's outermost copper
+    layers.  Blind and micro vias produce a warning without auto-repair
+    because the correct target layer depends on the stackup.
+
+    Returns:
+        Tuple of (fixes, warnings).
+    """
+    fixes: list[SameLayerViaFix] = []
+    warnings: list[SameLayerViaWarning] = []
+
+    outer_start, outer_end = get_board_outer_layers(doc)
+    vias = find_all_vias(doc)
+
+    for via_node, x, y, _drill, _diameter, net, uuid, start_layer, end_layer, via_type in vias:
+        if not start_layer or not end_layer:
+            # Missing layers node -- skip gracefully
+            continue
+
+        if start_layer != end_layer:
+            continue
+
+        # Same-layer via detected
+        is_through = via_type in ("", "through")
+
+        if is_through:
+            fixes.append(
+                SameLayerViaFix(
+                    x=x,
+                    y=y,
+                    net=net,
+                    old_start_layer=start_layer,
+                    old_end_layer=end_layer,
+                    new_start_layer=outer_start,
+                    new_end_layer=outer_end,
+                    uuid=uuid,
+                )
+            )
+
+            if not dry_run:
+                layers_node = via_node.find("layers")
+                if layers_node:
+                    layers_node.set_value(0, outer_start)
+                    layers_node.set_value(1, outer_end)
+        else:
+            warnings.append(
+                SameLayerViaWarning(
+                    x=x,
+                    y=y,
+                    net=net,
+                    start_layer=start_layer,
+                    end_layer=end_layer,
+                    via_type=via_type,
+                    uuid=uuid,
+                )
+            )
+
+    return fixes, warnings
+
+
+def fix_vias(
+    doc: SExp,
+    target_drill: float,
+    target_diameter: float,
+    min_clearance: float = 0.2,
+    dry_run: bool = False,
+    min_annular_ring: float = 0.0,
+    skip_on_clearance: bool = False,
+) -> tuple[list[ViaFix], list[ViaClearanceWarning], list[ViaSkip]]:
+    """Fix undersized vias in the PCB.
+
+    Args:
+        doc: Parsed PCB document
+        target_drill: Minimum drill size in mm
+        target_diameter: Minimum via diameter in mm
+        min_clearance: Minimum clearance for warnings in mm
+        dry_run: If True, don't modify the document
+        min_annular_ring: Minimum annular ring width in mm.
+            When set, each via's diameter is also checked against
+            its own drill size to ensure the annular ring is met:
+            required_diameter = drill + 2 * min_annular_ring.
+        skip_on_clearance: If True, skip resizing vias that would
+            cause clearance violations after enlargement.  The skipped
+            vias are returned in the third element of the tuple.
+
+    Returns:
+        Tuple of (fixes, warnings, skips).  ``skips`` is empty when
+        *skip_on_clearance* is False.
+    """
+    fixes = []
+    warnings = []
+    skips: list[ViaSkip] = []
+
+    vias = find_all_vias(doc)
+
+    for via_node, x, y, current_drill, current_diameter, net, uuid, _sl, _el, _vt in vias:
+        need_drill_fix = current_drill < target_drill
+        need_diameter_fix = current_diameter < target_diameter
+
+        # Check annular ring for the via's actual drill size
+        new_drill = max(current_drill, target_drill)
+        if min_annular_ring > 0:
+            annular_ring_diameter = new_drill + 2 * min_annular_ring
+            need_diameter_fix = need_diameter_fix or current_diameter < annular_ring_diameter
+        else:
+            annular_ring_diameter = 0.0
+
+        if not need_drill_fix and not need_diameter_fix:
+            continue
+
+        new_diameter = max(current_diameter, target_diameter, annular_ring_diameter)
+
+        # Check for potential clearance issues
+        size_increase = new_diameter - current_diameter
+        via_warnings: list[ViaClearanceWarning] = []
+        if size_increase > 0:
+            check_radius = new_diameter / 2 + min_clearance * 2
+            nearby = find_nearby_items(doc, x, y, check_radius)
+            for item_type, ix, iy, item_width in nearby:
+                dist = ((ix - x) ** 2 + (iy - y) ** 2) ** 0.5
+                # Edge-to-edge clearance: subtract both the via radius and
+                # half the width/size of the nearby item
+                clearance = dist - new_diameter / 2 - item_width / 2
+                if clearance < min_clearance:
+                    via_warnings.append(
+                        ViaClearanceWarning(
+                            x=x,
+                            y=y,
+                            new_diameter=new_diameter,
+                            nearby_item=f"{item_type} at ({ix:.2f}, {iy:.2f})",
+                            clearance_mm=clearance,
+                        )
+                    )
+
+        # When skip_on_clearance is enabled, do not resize vias that would
+        # cause clearance violations -- keep the original size instead.
+        if skip_on_clearance and via_warnings:
+            reasons = [f"{w.clearance_mm:.3f}mm to {w.nearby_item}" for w in via_warnings]
+            skips.append(
+                ViaSkip(
+                    x=x,
+                    y=y,
+                    net=net,
+                    current_drill=current_drill,
+                    current_diameter=current_diameter,
+                    would_be_diameter=new_diameter,
+                    reason="; ".join(reasons),
+                    uuid=uuid,
+                )
+            )
+            continue
+
+        warnings.extend(via_warnings)
+
+        # Record the fix
+        fixes.append(
+            ViaFix(
+                x=x,
+                y=y,
+                net=net,
+                old_drill=current_drill,
+                new_drill=new_drill,
+                old_diameter=current_diameter,
+                new_diameter=new_diameter,
+                uuid=uuid,
+            )
+        )
+
+        # Apply the fix if not dry run
+        if not dry_run:
+            drill_node = via_node.find("drill")
+            size_node = via_node.find("size")
+
+            if drill_node and need_drill_fix:
+                drill_node.set_value(0, new_drill)
+
+            if size_node and need_diameter_fix:
+                size_node.set_value(0, new_diameter)
+
+    return fixes, warnings, skips
+
+
+def print_fix_results(
+    fixes: list[ViaFix],
+    warnings: list[ViaClearanceWarning],
+    output_format: str = "text",
+    dry_run: bool = False,
+    target_drill: float = 0,
+    target_diameter: float = 0,
+    mfr: str | None = None,
+    skips: list[ViaSkip] | None = None,
+    same_layer_fixes: list[SameLayerViaFix] | None = None,
+    same_layer_warnings: list[SameLayerViaWarning] | None = None,
+) -> None:
+    """Print the results of via fixes.
+
+    Args:
+        fixes: List of via size fixes
+        warnings: List of clearance warnings
+        output_format: Output format ("text", "json", "summary")
+        dry_run: Whether this was a dry run
+        target_drill: Target drill size used
+        target_diameter: Target diameter used
+        mfr: Manufacturer name (for display)
+        skips: List of vias skipped due to clearance violations
+        same_layer_fixes: List of same-layer vias that were repaired
+        same_layer_warnings: List of same-layer vias that could not be auto-repaired
+    """
+    skips = skips or []
+    same_layer_fixes = same_layer_fixes or []
+    same_layer_warnings = same_layer_warnings or []
+
+    if output_format == "json":
+        data = {
+            "target_drill_mm": target_drill,
+            "target_diameter_mm": target_diameter,
+            "manufacturer": mfr,
+            "dry_run": dry_run,
+            "fixes": [
+                {
+                    "x": f.x,
+                    "y": f.y,
+                    "net": f.net,
+                    "old_drill_mm": f.old_drill,
+                    "new_drill_mm": f.new_drill,
+                    "old_diameter_mm": f.old_diameter,
+                    "new_diameter_mm": f.new_diameter,
+                    "uuid": f.uuid,
+                }
+                for f in fixes
+            ],
+            "warnings": [
+                {
+                    "x": w.x,
+                    "y": w.y,
+                    "new_diameter_mm": w.new_diameter,
+                    "nearby_item": w.nearby_item,
+                    "clearance_mm": w.clearance_mm,
+                }
+                for w in warnings
+            ],
+            "skipped": [
+                {
+                    "x": s.x,
+                    "y": s.y,
+                    "net": s.net,
+                    "current_drill_mm": s.current_drill,
+                    "current_diameter_mm": s.current_diameter,
+                    "would_be_diameter_mm": s.would_be_diameter,
+                    "reason": s.reason,
+                    "uuid": s.uuid,
+                }
+                for s in skips
+            ],
+            "same_layer_fixes": [
+                {
+                    "x": f.x,
+                    "y": f.y,
+                    "net": f.net,
+                    "old_start_layer": f.old_start_layer,
+                    "old_end_layer": f.old_end_layer,
+                    "new_start_layer": f.new_start_layer,
+                    "new_end_layer": f.new_end_layer,
+                    "uuid": f.uuid,
+                }
+                for f in same_layer_fixes
+            ],
+            "same_layer_warnings": [
+                {
+                    "x": w.x,
+                    "y": w.y,
+                    "net": w.net,
+                    "start_layer": w.start_layer,
+                    "end_layer": w.end_layer,
+                    "via_type": w.via_type,
+                    "uuid": w.uuid,
+                }
+                for w in same_layer_warnings
+            ],
+        }
+        print(json.dumps(data, indent=2))
+        return
+
+    if output_format == "summary":
+        action = "Would resize" if dry_run else "Resized"
+        source = f" to {mfr.upper()} minimums" if mfr else ""
+        print(f"{action} vias{source} (drill: {target_drill}mm, diameter: {target_diameter}mm):")
+        print(f"  {len(fixes)} vias {'would be ' if dry_run else ''}updated")
+        if skips:
+            print(f"  {len(skips)} vias skipped (clearance violation)")
+        if warnings:
+            print(f"  {len(warnings)} potential clearance violations")
+        if same_layer_fixes:
+            sl_action = "Would repair" if dry_run else "Repaired"
+            print(f"  {sl_action} {len(same_layer_fixes)} same-layer via(s)")
+        if same_layer_warnings:
+            print(
+                f"  {len(same_layer_warnings)} same-layer via(s) need manual repair (blind/micro)"
+            )
+        return
+
+    # Text output -- same-layer section
+    if same_layer_fixes:
+        sl_action = "Would repair" if dry_run else "Repaired"
+        print(f"\n{sl_action} {len(same_layer_fixes)} same-layer via(s):")
+        for f in same_layer_fixes[:5]:
+            print(
+                f"  Via at ({f.x:.2f}, {f.y:.2f}): "
+                f"layers {f.old_start_layer}/{f.old_end_layer} "
+                f"-> {f.new_start_layer}/{f.new_end_layer}"
+            )
+        if len(same_layer_fixes) > 5:
+            print(f"  ... and {len(same_layer_fixes) - 5} more")
+
+    if same_layer_warnings:
+        print(
+            f"\nWarning: {len(same_layer_warnings)} same-layer via(s) need manual repair "
+            f"(blind/micro type, cannot auto-determine target layer):"
+        )
+        for w in same_layer_warnings[:5]:
+            print(
+                f"  Via at ({w.x:.2f}, {w.y:.2f}): "
+                f"type={w.via_type}, layers={w.start_layer}/{w.end_layer}"
+            )
+        if len(same_layer_warnings) > 5:
+            print(f"  ... and {len(same_layer_warnings) - 5} more")
+
+    # Size fix section
+    if not fixes and not skips:
+        if not same_layer_fixes and not same_layer_warnings:
+            print("No vias needed resizing.")
+        return
+
+    action = "Would resize" if dry_run else "Resizing"
+    source = f" to {mfr.upper()} minimums" if mfr else ""
+    print(f"{action} vias{source} (drill: {target_drill}mm, diameter: {target_diameter}mm):")
+
+    # Group by layer for display
+    print(f"  Updated {len(fixes)} via(s)")
+
+    # Show some examples
+    if len(fixes) <= 5:
+        for f in fixes:
+            print(
+                f"    Via at ({f.x:.2f}, {f.y:.2f}): "
+                f"drill {f.old_drill:.3f}->{f.new_drill:.3f}mm, "
+                f"diameter {f.old_diameter:.3f}->{f.new_diameter:.3f}mm"
+            )
+    else:
+        for f in fixes[:3]:
+            print(
+                f"    Via at ({f.x:.2f}, {f.y:.2f}): "
+                f"drill {f.old_drill:.3f}->{f.new_drill:.3f}mm, "
+                f"diameter {f.old_diameter:.3f}->{f.new_diameter:.3f}mm"
+            )
+        print(f"    ... and {len(fixes) - 3} more")
+
+    if skips:
+        print(f"\n  Skipped {len(skips)} via(s) (would violate clearance):")
+        for s in skips[:5]:
+            print(
+                f"    Via at ({s.x:.2f}, {s.y:.2f}): "
+                f"kept at {s.current_diameter:.3f}mm "
+                f"(enlarging to {s.would_be_diameter:.3f}mm would violate clearance: {s.reason})"
+            )
+        if len(skips) > 5:
+            print(f"    ... and {len(skips) - 5} more")
+
+    if warnings:
+        print(f"\nWarning: {len(warnings)} via(s) may cause DRC violations after resize:")
+        for w in warnings[:5]:
+            print(
+                f"  - Via at ({w.x:.2f}, {w.y:.2f}) - {w.clearance_mm:.2f}mm clearance to {w.nearby_item}"
+            )
+        if len(warnings) > 5:
+            print(f"  ... and {len(warnings) - 5} more")
+
+
+def _run_relocate_in_pad(
+    args, pcb_path: Path, resolved_layers: int, *, pad_edge: bool = False
+) -> int:
+    """Run the --relocate-in-pad pass on the PCB schema and save if changed.
+
+    ``pad_edge=True`` runs the ``--relocate-pad-edge`` pass instead (Issue
+    #7296): the same load / report / save / exit-code contract.
+
+    Returns a process exit code: 0 on success (incl. clean no-op), 1 on
+    load/save error, 2 when some vias could not be relocated (skipped or
+    unresolvable) so the pipeline surfaces the partial result.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    from .relocate_in_pad_vias import (
+        print_relocation_results,
+        relocate_in_pad_vias,
+        relocate_pad_edge_vias,
+    )
+
+    rules = get_mfr_design_rules(args.mfr, resolved_layers, args.copper)
+    if rules is None:
+        print(
+            f"Error: No design rules found for manufacturer '{args.mfr}'",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error parsing PCB file: {e}", file=sys.stderr)
+        return 1
+
+    nets = set(args.nets) if getattr(args, "nets", None) else None
+
+    # Resolve the source project's hole floor before a renamed output is saved.
+    try:
+        if pad_edge:
+            result = relocate_pad_edge_vias(pcb, rules, nets=nets)
+        else:
+            result = relocate_in_pad_vias(
+                pcb,
+                rules,
+                nets=nets,
+                dry_run=args.dry_run,
+                search_alternatives=getattr(args, "search_alternatives", False),
+            )
+    except (ValueError, OSError) as exc:
+        print(f"Error resolving relocation constraints: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.quiet:
+        print_relocation_results(
+            result,
+            output_format=args.format,
+            dry_run=args.dry_run,
+            mfr=args.mfr,
+        )
+
+    # Persist only when vias actually moved and this is not a dry run.
+    if result.changed and not args.dry_run:
+        output_path = Path(args.output) if args.output else pcb_path
+        try:
+            pcb.save(output_path)
+            if not args.quiet and args.format == "text":
+                print(f"\nSaved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB file: {e}", file=sys.stderr)
+            return 1
+
+    # Exit code 2 signals "completed with unhandled vias" (skipped/unresolvable)
+    # so a pipeline treats it as completed-with-warnings, mirroring the resize
+    # path's warning convention.  A clean run (all handled or nothing to do)
+    # returns 0.
+    if result.skipped or result.unresolvable:
+        return 2
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for fix-vias command."""
+    parser = argparse.ArgumentParser(
+        description="Fix vias to meet manufacturer specifications",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # Resize vias to meet JLCPCB minimums
+    kct fix-vias board.kicad_pcb --mfr jlcpcb
+
+    # Specify sizes directly
+    kct fix-vias board.kicad_pcb --drill 0.3 --diameter 0.6
+
+    # Preview changes without applying
+    kct fix-vias board.kicad_pcb --mfr jlcpcb --dry-run
+        """,
+    )
+    parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        default="jlcpcb",
+        help="Manufacturer to use for design rules (default: jlcpcb)",
+    )
+    parser.add_argument(
+        "--layers",
+        type=int,
+        default=None,
+        help="Number of PCB layers (auto-detected from board if not specified)",
+    )
+    parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Outer copper weight in oz (default: 1.0)",
+    )
+    parser.add_argument(
+        "--drill",
+        type=float,
+        help="Target drill diameter in mm (overrides manufacturer rules)",
+    )
+    parser.add_argument(
+        "--diameter",
+        type=float,
+        help="Target via diameter in mm (overrides manufacturer rules)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+    )
+    parser.add_argument(
+        "--skip-if-clearance-violation",
+        action="store_true",
+        help=(
+            "Skip resizing vias that would cause clearance violations. "
+            "Keeps the original via size when enlargement would violate "
+            "minimum clearance to nearby tracks, pads, or other vias."
+        ),
+    )
+    parser.add_argument(
+        "--relocate-in-pad",
+        action="store_true",
+        help=(
+            "Relocate via-in-pad vias off-pad (connectivity-preserving) so the "
+            "board can move to a manufacturer profile that disallows via-in-pad "
+            "(e.g. standard jlcpcb). Slides each in-pad signal via just outside "
+            "the pad along its connected escape track and adds short stub "
+            "segments to preserve the net. Vias that cannot be safely relocated "
+            "are reported (skipped/unresolvable), never left silently in-pad. "
+            "This is a distinct pass from via resizing."
+        ),
+    )
+    parser.add_argument(
+        "--relocate-pad-edge",
+        action="store_true",
+        help=(
+            "Slide vias out of the mask-dam zone beside an SMD pad (the geometry "
+            "`kct check` reports as via_at_pad_edge) along their escape track, "
+            "keeping connectivity with stubs. Vias with no legal spot are "
+            "reported unresolvable and left in place (Issue #7296)."
+        ),
+    )
+    parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, try up to 24 safe cardinal/45-degree alternatives when the preferred escape is blocked (default: disabled).",
+    )
+    parser.add_argument(
+        "--net",
+        action="append",
+        dest="nets",
+        metavar="NET",
+        help=(
+            "Restrict --relocate-in-pad / --relocate-pad-edge to the given net name (repeatable). Default: all nets."
+        ),
+    )
+
+    args = parser.parse_args(argv)
+
+    # Validate input file
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix.lower() != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Auto-detect layer count from PCB if not explicitly provided
+    if args.layers is not None:
+        resolved_layers = args.layers
+    else:
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(pcb_path)
+            detected = len(pcb.copper_layers)
+            resolved_layers = detected if detected > 0 else 2
+        except Exception:
+            resolved_layers = 2
+
+    # Relocation is a distinct pass from via resizing: when --relocate-in-pad
+    # is requested we run only the connectivity-preserving off-pad slide and
+    # return, leaving the resize path untouched (issue #4359).
+    if getattr(args, "relocate_in_pad", False):
+        return _run_relocate_in_pad(args, pcb_path, resolved_layers)
+    if getattr(args, "relocate_pad_edge", False):
+        return _run_relocate_in_pad(args, pcb_path, resolved_layers, pad_edge=True)
+
+    # Get target dimensions
+    target_drill, target_diameter, min_annular_ring, min_clearance = get_design_rules(
+        args.mfr, resolved_layers, args.copper, args.drill, args.diameter
+    )
+
+    # Parse PCB
+    try:
+        doc = parse_file(pcb_path)
+    except Exception as e:
+        print(f"Error parsing PCB file: {e}", file=sys.stderr)
+        return 1
+
+    # Fix same-layer vias first (layer correction before size fixes)
+    same_layer_fixes, same_layer_warnings = fix_same_layer_vias(doc, dry_run=args.dry_run)
+
+    # Fix undersized vias
+    fixes, warnings, skips = fix_vias(
+        doc,
+        target_drill,
+        target_diameter,
+        min_clearance=min_clearance,
+        dry_run=args.dry_run,
+        min_annular_ring=min_annular_ring,
+        skip_on_clearance=args.skip_if_clearance_violation,
+    )
+
+    # Print results
+    if not args.quiet:
+        print_fix_results(
+            fixes,
+            warnings,
+            output_format=args.format,
+            dry_run=args.dry_run,
+            target_drill=target_drill,
+            target_diameter=target_diameter,
+            mfr=args.mfr,
+            skips=skips,
+            same_layer_fixes=same_layer_fixes,
+            same_layer_warnings=same_layer_warnings,
+        )
+
+    # Save if not dry run and there were any fixes (size or same-layer)
+    has_fixes = bool(fixes) or bool(same_layer_fixes)
+    if has_fixes and not args.dry_run:
+        output_path = Path(args.output) if args.output else pcb_path
+        try:
+            save_pcb(doc, output_path)
+            if not args.quiet and args.format == "text":
+                print(f"\nSaved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB file: {e}", file=sys.stderr)
+            return 1
+
+    # Return exit code 2 for success-with-warnings (pipeline treats this as
+    # "completed with warnings" and continues).  Exit code 1 is reserved for
+    # actual errors (file not found, parse failure, save failure).
+    has_warnings = bool(warnings) or bool(same_layer_warnings)
+    return 2 if has_warnings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

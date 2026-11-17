@@ -1,0 +1,3 @@
+[mcp_servers.kct]
+command = "/opt/kct/bin/kct"
+args = ["mcp", "serve"]

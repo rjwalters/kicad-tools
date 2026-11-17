@@ -1,0 +1,46 @@
+import json,hashlib,collections
+from pathlib import Path
+from shapely.geometry import Point
+from shapely.ops import nearest_points,unary_union
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.geometry.copper import segment_copper_polygon
+from kicad_tools.validate.rules.clearance import _pad_polygon
+from kicad_tools.validate.connectivity import ConnectivityValidator
+from kicad_tools.core.layers import via_spans_layer
+from kicad_tools.router.pairwise_clearance import build_attach_zones
+from kicad_tools.creepage.engine import _net_union_on_layer
+root=Path('/private/tmp/4507-current-main-20260916');path=root/'stage3/step3.kicad_pcb';rawhash=hashlib.sha256(path.read_bytes()).hexdigest();pcb=PCB.load(str(path));zones=build_attach_zones(pcb.footprints);origin=pcb.board_origin
+census=json.loads(Path('/private/tmp/4507-current-main-20260916/audit-stage3-creepage.json').read_text());fails=[p for p in census['pairs'] if not p.get('pass',True) and not p.get('waived')];numbers={n.name:n.number for n in pcb.nets.values()};geom={};rows=[]
+for layer in {p['layer'] for p in fails}:
+ items=collections.defaultdict(list)
+ def add(net,g,kind,identity):
+  if g is not None and not g.is_empty:items[net].append((g,{'kind':kind,'identity':identity}))
+ for i,s in enumerate(pcb.segments_on_layer(layer)):add(s.net_number,segment_copper_polygon(s.start,s.end,s.width),'segment',{'index_on_layer':i,'start':s.start,'end':s.end,'width':s.width})
+ for f in pcb.footprints:
+  for p in f.pads:
+   if layer in p.layers or '*.Cu' in p.layers:add(p.net_number,_pad_polygon(p,f),'pad',{'reference':f.reference,'number':p.number})
+ for i,v in enumerate(pcb.vias):
+  if via_spans_layer(v.layers,layer):add(v.net_number,Point(v.position).buffer(v.size/2),'via',{'index':i,'position':v.position,'size':v.size})
+ for i,z in enumerate(pcb.zones):
+  n=z.net_number or numbers.get(z.net_name,0)
+  for j,pts in enumerate(z.filled_polygons):
+   if n and z.filled_polygon_layer(j)==layer:add(n,ConnectivityValidator._fill_solid_region(pts),'zone_fill',{'zone_index':i,'polygon_index':j})
+ original=_net_union_on_layer(pcb,layer)
+ for net,parts in items.items():assert unary_union([g for g,_ in parts]).equals(original[net]),(layer,net)
+ geom[layer]=items
+for f in fails:
+ a,b=numbers[f['net_a']],numbers[f['net_b']];items=geom[f['layer']];best=1e9;ties=[]
+ for ga,ma in items[a]:
+  for gb,mb in items[b]:
+   d=ga.distance(gb)
+   if d>best+1e-7:continue
+   if d<best-1e-7:best=d;ties=[]
+   pa,pb=nearest_points(ga,gb);mid=((pa.x+pb.x)/2,(pa.y+pb.y)/2)
+   zi=[i for i,z in enumerate(zones) if z.exempts(*mid,f['net_a'],f['net_b'],f['layer'])]
+   ties.append({'a':ma,'b':mb,'distance':d,'nearest_relative':[[pa.x,pa.y],[pb.x,pb.y]],'midpoint_absolute':[mid[0]+origin[0],mid[1]+origin[1]],'exempting_zone_indices':zi})
+ assert abs(best-f['clearance_mm'])<0.000051,(f['net_a'],f['net_b'],best,f['clearance_mm'])
+ dv=f['provenance']['voltage']['delta_v_v'];rows.append({'net_a':f['net_a'],'net_b':f['net_b'],'layer':f['layer'],'delta_v':dv,'below_threshold':dv<30,'required_creepage_mm':f['required_creepage_mm'],'census_clearance_mm':f['clearance_mm'],'exact_clearance_mm':best,'all_closest_ties_attach_exempt':all(t['exempting_zone_indices'] for t in ties),'closest_ties':ties})
+assert rawhash==hashlib.sha256(path.read_bytes()).hexdigest()
+result={'board_sha256':rawhash,'board_origin':origin,'primitive_unions_equal_census_geometry':True,'attach_zones':[{'index':i,'bbox_relative':[z.min_x,z.min_y,z.max_x,z.max_y],'nets':sorted(z.net_names),'net_layers':[[n,sorted(ls)] for n,ls in sorted(z.net_layers)],'footprint_references':[f.reference for f in pcb.footprints if z in build_attach_zones([f])]} for i,z in enumerate(zones)],'rows':rows,'scope':'Closest primitive-pair attribution; uses the same immutable-source geometry functions and attach-zone contract as existing tools, not independent standards certification'}
+Path('/private/tmp/4507-current-main-20260916/census-attribution.json').write_text(json.dumps(result,indent=2)+'\n')
+for r in rows:print(r['net_a'],r['net_b'],'below',r['below_threshold'],'exempt',r['all_closest_ties_attach_exempt'],'ties',len(r['closest_ties']),[(t['a']['kind'],t['b']['kind']) for t in r['closest_ties']])

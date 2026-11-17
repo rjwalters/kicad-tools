@@ -1,0 +1,17 @@
+(kicad_pcb
+	(version 20231120)
+	(generator "kicadtools_test")
+	(general
+		(thickness 1.6)
+	)
+	(paper "A4")
+	(layers
+		(0 "F.Cu" signal)
+		(31 "B.Cu" signal)
+	)
+	(footprint "my_project_lib:UsedFootprint"
+		(layer "F.Cu")
+		(uuid "fp-u1-uuid")
+		(at 100 50)
+	)
+)

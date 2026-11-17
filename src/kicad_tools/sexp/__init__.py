@@ -1,0 +1,70 @@
+"""
+S-expression parser for KiCad files.
+
+This is the canonical S-expression implementation for kicad_tools.
+It provides feature-rich S-expression parsing with:
+- Round-trip editing with format preservation
+- Deep S-expression manipulation (find_all, get_atoms, etc.)
+- Document-level operations
+- Full backward compatibility with the legacy core/sexp.py API
+
+Usage:
+    from kicad_tools.sexp import SExp, parse_file, parse_string
+
+    # Parse from file (preferred for file paths)
+    doc = parse_file("project.kicad_sch")
+
+    # Parse from string
+    doc = parse_string('(kicad_sch (version 20231120))')
+
+    # Access elements using either new or legacy API
+    doc.name  # or doc.tag for backward compat
+    doc.children  # or doc.values for backward compat
+"""
+
+from .parser import (
+    Document,
+    ParseError,
+    Parser,
+    SExp,
+    SExpParser,
+    SExpSerializer,
+    escape_string,
+    normalize_chamfer,
+    parse_file,
+    parse_sexp,
+    parse_string,
+    quote_string,
+    read_text_exact,
+    serialize_sexp,
+    source_span,
+    write_text_exact,
+)
+from .scan import find_unquoted, has_unquoted, iter_unquoted
+
+__all__ = [
+    # Parser classes and functions
+    "SExp",
+    "Parser",
+    "ParseError",
+    "Document",
+    "parse_file",
+    "parse_string",
+    "source_span",
+    # KiCad string quoting and newline-exact file IO (issue #7648)
+    "escape_string",
+    "quote_string",
+    "read_text_exact",
+    "write_text_exact",
+    # Token search that skips quoted strings (issue #6873)
+    "find_unquoted",
+    "has_unquoted",
+    "iter_unquoted",
+    # Pad chamfer writer-safety normalizer (issue #4393)
+    "normalize_chamfer",
+    # Backward compatibility with core/sexp.py
+    "parse_sexp",
+    "serialize_sexp",
+    "SExpParser",
+    "SExpSerializer",
+]

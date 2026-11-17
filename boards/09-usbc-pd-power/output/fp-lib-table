@@ -1,0 +1,1 @@
+(fp_lib_table (lib (name "board09") (type "KiCad") (uri "${KIPRJMOD}/board09.pretty") (options "") (descr "Bourns land pattern")))

@@ -1,0 +1,243 @@
+{
+  "acknowledged_trace_quality": {},
+  "acknowledged_warning_rules": [],
+  "board": {
+    "name": "simple_led_routed",
+    "pcb_file": "simple_led_routed.kicad_pcb"
+  },
+  "copper_cleanup": {
+    "copper_cleanup": "applied",
+    "removed": {
+      "segments": 0,
+      "vias": 0
+    },
+    "steps": {
+      "dedupe": {
+        "segments": 0,
+        "status": "applied",
+        "vias": 0
+      },
+      "optimize_traces": {
+        "copper_oz": 1.0,
+        "corners_after": 1,
+        "corners_before": 1,
+        "layers": 2,
+        "segments_after": 2,
+        "segments_before": 2,
+        "status": "applied"
+      },
+      "prune": {
+        "ends_snapped": 0,
+        "segments_removed": 0,
+        "status": "applied"
+      }
+    }
+  },
+  "files": {
+    "README.txt": {
+      "sha256": "fcb6ea2396233d2e8e76968bfd44a84d5d22d379519c7dd3d85b0fc12f796c96",
+      "size": 1645
+    },
+    "assembly-back.pdf": {
+      "sha256": "0f5a0b63d868177224cacdb0406691659b053c00d1142e143eed624c8fdee275",
+      "size": 7497
+    },
+    "assembly-front.pdf": {
+      "sha256": "26f1d4c098e3cb9f0d4a3cc03d924f95ff127b17ac0975cd28f78a5379c30793",
+      "size": 17336
+    },
+    "bom_jlcpcb.csv": {
+      "sha256": "bff6f5bac21cb349473f4bd2c2a55f1245bfe32e5a3a804ce99a46b8d502801c",
+      "size": 194
+    },
+    "check-report.json": {
+      "sha256": "4dcd8e7a18668deea493b5fe9209ad3106d00636f2e7ba057ead2aff1b811451",
+      "size": 10589
+    },
+    "cpl_jlcpcb.csv": {
+      "sha256": "aae5fc27c33e43d1e058dab990fddd66a2092c4c9ada334c6f839e16a56cf811",
+      "size": 270
+    },
+    "gerbers/gerbers.zip": {
+      "sha256": "936f99646dc5db85b8e1b7444085361f84c065d56866e5065f3092ed8976da13",
+      "size": 14674
+    },
+    "images/assembly.png": {
+      "sha256": "474add67ae86688fb9bc83ae198e6cfee13c940b0618522cf77c768a55c5d023",
+      "size": 176276
+    },
+    "images/layer_B_Cu.png": {
+      "sha256": "020d8d05263f15aa381c09fd9646ea3a767e13b87a7fe9225157800dff7ca655",
+      "size": 72269
+    },
+    "images/layer_F_Cu.png": {
+      "sha256": "5196c938250d0b7a66120fa9f8622d1f82acdf71b557ba72c019172dcc56957e",
+      "size": 108431
+    },
+    "images/pcb_back.png": {
+      "sha256": "ba073176765de3d510c915ffcbb5e186f3426785d946aeaa000ff49eb9c0bfbf",
+      "size": 74178
+    },
+    "images/pcb_copper.png": {
+      "sha256": "79582d20380fce3a1718612f73308afb69f4f24dfd63aa2ef738940b54b259c1",
+      "size": 81962
+    },
+    "images/pcb_front.png": {
+      "sha256": "e5bbf97cab69cb59912a2b50f2217d8d0647c334630f20e9c4cba66cd1b7c036",
+      "size": 222832
+    },
+    "images/schematic_simple_led.png": {
+      "sha256": "c90b07e37b51eb037d80cf8bcac2ab4392d8eca7868d0f6409ff154e62b7727a",
+      "size": 117853
+    },
+    "kicad_project.zip": {
+      "sha256": "2f59cde18a28e85b152a15014d8760d1bc9e8df3e2fcbeecb3710a446a17fe11",
+      "size": 14740
+    },
+    "native-drc.json": {
+      "sha256": "f3111b8826083d73b4cfa92f6a5efca061fa86805dda967579d77edc8ed616f5",
+      "size": 252
+    },
+    "procurement-review.md": {
+      "sha256": "9031a5c3b93e948252943a0d3211e727c20aa2eff9d32fc3632386a931af9d80",
+      "size": 12096
+    },
+    "report.md": {
+      "sha256": "a83c4c9496824e29040b66cc4ec9a06ef6b6febfdb211e1446e586b4f3c6df54",
+      "size": 2528
+    },
+    "report.pdf": {
+      "sha256": "0add9192bc84628ae0a986eb5845e51448cd810ce363ca71e01cbbe76cd242dd",
+      "size": 925043
+    },
+    "schematic.pdf": {
+      "sha256": "ea8146fc1bab8e69e05b39d19906048faf81a4bc03ed29d62a318798fe41174d",
+      "size": 47252
+    }
+  },
+  "generated_at": "2026-11-11T19:00:00+00:00",
+  "kicad_tools_version": "0.29.0",
+  "manufacturer": "jlcpcb",
+  "mode": "assembly",
+  "ordered_copper": {
+    "layers": 2,
+    "ordered_inner_oz": 0.0,
+    "ordered_outer_oz": 1.0,
+    "profile_options": [
+      [
+        1.0,
+        0.0
+      ],
+      [
+        2.0,
+        0.0
+      ]
+    ],
+    "source": "https://jlcpcb.com/help/article/jlcpcb-copper-weight",
+    "source_verified": "2026-10-18",
+    "stackup_inner_oz": null,
+    "stackup_outer_oz": null,
+    "status": "undeclared"
+  },
+  "preflight": [
+    {
+      "details": "Footprints: 6",
+      "message": "PCB file parsed successfully",
+      "name": "pcb_file",
+      "status": "OK"
+    },
+    {
+      "message": "Schematic auto-detected: simple_led.kicad_sch",
+      "name": "schematic_file",
+      "status": "OK"
+    },
+    {
+      "message": "All schematic symbols have a footprint assigned",
+      "name": "schematic_footprints",
+      "status": "OK"
+    },
+    {
+      "message": "Board outline is closed (5 points)",
+      "name": "board_outline",
+      "status": "OK"
+    },
+    {
+      "message": "All 6 footprints have library footprint names",
+      "name": "footprints",
+      "status": "OK"
+    },
+    {
+      "message": "Board dimensions within limits (25.00 x 20.00 mm)",
+      "name": "board_dimensions",
+      "status": "OK"
+    },
+    {
+      "message": "Drill holes present (0 vias, 4 TH pads)",
+      "name": "drill_holes",
+      "status": "OK"
+    },
+    {
+      "message": "No usable stackup copper to reconcile; profile default copper applies",
+      "name": "stackup_copper",
+      "status": "OK"
+    },
+    {
+      "details": "THT references: D1, J1",
+      "message": "2 through-hole component(s) included in CPL",
+      "name": "tht_in_cpl",
+      "status": "OK"
+    },
+    {
+      "message": "No bottom-side components in CPL (single-sided assembly)",
+      "name": "bottom_side_in_cpl",
+      "status": "OK"
+    },
+    {
+      "details": "1 package/pitch requirement(s) checked",
+      "message": "All placed packages fit JLCPCB Economic PCBA (min package 0402, IC pitch 0.4 mm, BGA pitch 0.5 mm)",
+      "name": "assembly_package_limits",
+      "status": "OK"
+    },
+    {
+      "details": "3 active item(s) will receive LCSC from spec overlay",
+      "message": "All 3 BOM items have required fields",
+      "name": "bom_fields",
+      "status": "OK"
+    },
+    {
+      "message": "3 of 3 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches",
+      "name": "bom_lcsc_values",
+      "status": "OK"
+    },
+    {
+      "message": "3 LCSC part(s) have recorded stock for 5 board(s)",
+      "name": "bom_lcsc_stock",
+      "status": "OK"
+    },
+    {
+      "message": "BOM and PCB references match (3 components)",
+      "name": "bom_pcb_match",
+      "status": "OK"
+    },
+    {
+      "message": "BOM and CPL references match (3 components)",
+      "name": "bom_cpl_match",
+      "status": "OK"
+    },
+    {
+      "details": "Use --drc-report to specify a report file, or --skip-drc to skip",
+      "message": "No DRC report found; run kicad-cli or kct check first",
+      "name": "drc",
+      "status": "WARN"
+    },
+    {
+      "details": "Use --erc-report to specify a report file, or --skip-erc to skip",
+      "message": "No ERC report found; run kicad-cli first",
+      "name": "erc",
+      "status": "WARN"
+    }
+  ],
+  "producer": "kct readiness",
+  "version": "1.0",
+  "warning_counts_by_rule": {}
+}

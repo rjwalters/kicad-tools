@@ -1,0 +1,149 @@
+# PCBWay Design Rules Configuration
+# Source: https://www.pcbway.com/capabilities.html
+# Last verified: 2026-05-10
+#
+# V-score copper clearance (Issue #6177): min_copper_to_vscore_mm = 0.4 from
+# https://www.pcbway.com/pcb_prototype/PCB_Panel_Creation.html: "the minimum
+# spacing between copper pattern (trace/pad/copper ground) and V-cut line is
+# 0.4mm"; restated by
+# https://www.pcbway.com/helpcenter/panel_issues/V_cut_standard_Limited_to_Quick_turn_PCB.html
+# (verified 2026-10-07).
+#
+# All measurements in millimeters unless otherwise noted.
+#
+# Via-type capabilities (Issue #6640, verified 2026-10-14):
+# ``blind_buried_vias_supported`` is ``true`` on the 4- and 6-layer configs
+# only.  ``micro_vias_supported`` stays ``false`` everywhere: the micro-via
+# claim is sourced (below) but ``validate/rules/dimensions.py`` skips every
+# dimension check for micro vias (#3118), so turning the flag on would let
+# out-of-window or non-adjacent-layer microvias pass.  Enabling it is blocked
+# on encoding the 4-8 mil laser-drill window, PCBWay's "dielectric thickness
+# cannot exceed 0.15mm" limit and the single-dielectric (adjacent-layer) span
+# (follow-up to #6640).
+#   - https://www.pcbway.com/hdi-pcb.html: "PCBWay manufactures and assembles
+#     HDI PCBs designed with blind, buried, and micro-via technologies";
+#     capability table "Via Types: Blind via, buried via, through-hole via",
+#     "HDI builds 1+N+1, 2+N+2, ... , 6+N+6", "Min. laser drilling Standard
+#     4 mil", "Max. laser drilling 8 mil".
+#   - https://www.pcbway.com/capabilities.html, "Advanced PCB" table, row 2
+#     "Blind and Buried Vias": "HDI(1+1+....+N+......+1+1)" is listed as
+#     "Normal process"; row 1 lists "3L<=Layers<=16L" as normal process.
+# The smallest HDI build (1+N+1) needs at least four copper layers, so the
+# 2-layer configs keep the fail-closed ``false`` default.  HDI is quoted as
+# an "Advanced PCB" option (capabilities.html), not part of the standard
+# build.
+#
+# Scope of the check: ``kct check`` verifies that the fab offers the via type
+# and applies the drill/diameter/annular-ring floors to blind and buried vias.
+# It does NOT verify that the span set is laminable (overlapping or staggered
+# spans, mechanical blind vias such as F.Cu to In2.Cu on 6 layers, buried
+# spans with no matching core); PCBWay reviews the stackup at quote time.
+#
+# PCBWay offers via-in-pad (epoxy-filled, plated-over) as a standard
+# option, so ``via_in_pad_supported: true`` on every stackup block.
+# Mirrors the router's MFR_PCBWAY.via_in_pad_supported in
+# router/mfr_limits.py (drift-prevention test in
+# tests/test_manufacturer_registry_sync.py enforces parity).
+#
+# Issue #5009: unlike JLCPCB Capability Plus (whose via-in-pad-specific
+# POFV process requires 4+ layers), PCBWay publishes via-in-pad as
+# available at every layer count, so ``via_in_pad_process_id`` is
+# attached to every config here (see
+# kicad_tools.manufacturers.fabrication_process.PCBWAY_VIA_IN_PAD).
+
+design_rules:
+  2layer_1oz:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.2
+    min_via_diameter_mm: 0.4
+    min_annular_ring_mm: 0.15      # 6 mil (per PCBWay specs)
+    min_hole_diameter_mm: 0.2
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
+    min_hole_to_edge_mm: 0.4
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1    # 4 mil (per PCBWay specs)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+
+  2layer_2oz:
+    min_trace_width_mm: 0.2         # 8 mil for 2oz
+    min_clearance_mm: 0.2           # 8 mil
+    min_via_drill_mm: 0.2
+    min_via_diameter_mm: 0.4
+    min_annular_ring_mm: 0.15      # 6 mil (per PCBWay specs)
+    min_hole_diameter_mm: 0.2
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
+    min_hole_to_edge_mm: 0.4
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1    # 4 mil (per PCBWay specs)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 0.0
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+
+  4layer_1oz:
+    min_trace_width_mm: 0.1016      # 4 mil
+    min_clearance_mm: 0.1016        # 4 mil
+    min_via_drill_mm: 0.2
+    min_via_diameter_mm: 0.4
+    min_annular_ring_mm: 0.15      # 6 mil (per PCBWay specs)
+    min_hole_diameter_mm: 0.2
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
+    min_hole_to_edge_mm: 0.4
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1    # 4 mil (per PCBWay specs)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+    blind_buried_vias_supported: true  # #6640: PCBWay hdi-pcb.html "Via Types: Blind via, buried via", verified 2026-10-14
+    # micro_vias_supported stays false (default): sourced but not yet encodable, see header (#6640)
+
+  6layer_1oz:
+    min_trace_width_mm: 0.0889      # 3.5 mil
+    min_clearance_mm: 0.0889        # 3.5 mil
+    min_via_drill_mm: 0.15
+    min_via_diameter_mm: 0.35
+    min_annular_ring_mm: 0.15      # 6 mil (per PCBWay specs)
+    min_hole_diameter_mm: 0.15
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.25
+    min_copper_to_vscore_mm: 0.4  # PCBWay PCB_Panel_Creation, verified 2026-10-07
+    min_hole_to_edge_mm: 0.4
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1    # 4 mil (per PCBWay specs)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
+    via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
+    blind_buried_vias_supported: true  # #6640: PCBWay hdi-pcb.html "Via Types: Blind via, buried via", verified 2026-10-14
+    # micro_vias_supported stays false (default): sourced but not yet encodable, see header (#6640)

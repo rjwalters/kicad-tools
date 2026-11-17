@@ -1,0 +1,1907 @@
+{
+  "schema_version": 1,
+  "board": "07",
+  "runs": {
+    "run1": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/07-run1",
+      "present": true,
+      "times": [
+        "START 2026-09-21T07:57:40Z",
+        "END 2026-09-21T08:38:08Z RC=1"
+      ],
+      "harness_captures": [],
+      "routed_artifacts": [
+        "matchgroup_test_routed_timeout_unverified_u4m68ps_.kicad_pcb"
+      ],
+      "net_status_why": {
+        "source": "captured:board07-run1-timeout.json",
+        "payload": {
+          "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/07-run1/matchgroup_test_routed_timeout_unverified_u4m68ps_.kicad_pcb",
+          "connectivity_model": "strict",
+          "summary": {
+            "stuck_nets": 34,
+            "counts": {
+              "escape_blocked": 0,
+              "congestion_saturated": 0,
+              "placement_bound": 5,
+              "budget_starved": 26,
+              "pour_discontinuous": 3
+            }
+          },
+          "nets": [
+            {
+              "net_name": "A0",
+              "net_number": 27,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.1"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 2,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "A1",
+              "net_number": 28,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.2"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (5 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 5,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 3,
+              "foreign_congestion": 2,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "A2",
+              "net_number": 29,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.3"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 4,
+              "foreign_congestion": 0,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "A3",
+              "net_number": 30,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.4"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 4,
+              "foreign_congestion": 0,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "A4",
+              "net_number": 31,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.5"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 4,
+              "foreign_congestion": 0,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "A5",
+              "net_number": 32,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.6"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 4,
+              "foreign_congestion": 0,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "A6",
+              "net_number": 33,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.7"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 3,
+              "foreign_congestion": 1,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "A7",
+              "net_number": 34,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U5.8"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 2,
+              "match_group": "ADDR_BUS",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DM0",
+              "net_number": 12,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.5"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 4,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ0",
+              "net_number": 4,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.1"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 2,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ1",
+              "net_number": 5,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.2"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (5 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 5,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 3,
+              "foreign_congestion": 2,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ2",
+              "net_number": 6,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.3"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 3,
+              "foreign_congestion": 1,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ3",
+              "net_number": 7,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.4"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 2,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ4",
+              "net_number": 8,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.8"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 2,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ5",
+              "net_number": 9,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.9"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 3,
+              "foreign_congestion": 1,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ6",
+              "net_number": 10,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.10"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 3,
+              "foreign_congestion": 1,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQ7",
+              "net_number": 11,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.11"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (5 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 5,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 3,
+              "match_group": "DDR_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQS_N",
+              "net_number": 14,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.7"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 4,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "DQS_P",
+              "net_number": 13,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U2.6"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 4,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "MIPI_CLK_N",
+              "net_number": 16,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U3.2"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (3 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 3,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 3,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "MIPI_CLK_P",
+              "net_number": 15,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U3.1"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (3 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 3,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 3,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "MIPI_DAT0_N",
+              "net_number": 18,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U3.4"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 4,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "MIPI_DAT0_P",
+              "net_number": 17,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U3.3"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (4 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 4,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 4,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "MIPI_DAT1_N",
+              "net_number": 20,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U3.6"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (3 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 3,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 3,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "MIPI_DAT1_P",
+              "net_number": 19,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U3.5"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (3 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 3,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 3,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "TMDS_D0_N",
+              "net_number": 22,
+              "classification": "placement_bound",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U4.B2"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); moderate local congestion (2 same-group + 6 foreign obstructions) -- ripping cannot help, a part must move",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 8,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 6,
+              "match_group": "HDMI_TMDS_DATA",
+              "topology": "foreign_cluster",
+              "recommendation": [
+                {
+                  "action": "move_part",
+                  "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "widen_channel",
+                  "rationale": "open the routing corridor around the pad",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "accept_plateau",
+                  "rationale": "if no placement lever helps, this is a plateau",
+                  "confidence": "medium"
+                }
+              ]
+            },
+            {
+              "net_name": "TMDS_D0_P",
+              "net_number": 21,
+              "classification": "budget_starved",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U4.B1"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (5 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 5,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 1,
+              "foreign_congestion": 4,
+              "match_group": "HDMI_TMDS_DATA",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "TMDS_D1_N",
+              "net_number": 24,
+              "classification": "placement_bound",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U4.B4"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); moderate local congestion (2 same-group + 6 foreign obstructions) -- ripping cannot help, a part must move",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 8,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 6,
+              "match_group": "HDMI_TMDS_DATA",
+              "topology": "foreign_cluster",
+              "recommendation": [
+                {
+                  "action": "move_part",
+                  "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "widen_channel",
+                  "rationale": "open the routing corridor around the pad",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "accept_plateau",
+                  "rationale": "if no placement lever helps, this is a plateau",
+                  "confidence": "medium"
+                }
+              ]
+            },
+            {
+              "net_name": "TMDS_D1_P",
+              "net_number": 23,
+              "classification": "placement_bound",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U4.B3"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); moderate local congestion (2 same-group + 6 foreign obstructions) -- ripping cannot help, a part must move",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 8,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 6,
+              "match_group": "HDMI_TMDS_DATA",
+              "topology": "foreign_cluster",
+              "recommendation": [
+                {
+                  "action": "move_part",
+                  "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "widen_channel",
+                  "rationale": "open the routing corridor around the pad",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "accept_plateau",
+                  "rationale": "if no placement lever helps, this is a plateau",
+                  "confidence": "medium"
+                }
+              ]
+            },
+            {
+              "net_name": "TMDS_D2_N",
+              "net_number": 26,
+              "classification": "placement_bound",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U4.B6"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); moderate local congestion (1 same-group + 7 foreign obstructions) -- ripping cannot help, a part must move",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 8,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 1,
+              "foreign_congestion": 7,
+              "match_group": "HDMI_TMDS_DATA",
+              "topology": "foreign_cluster",
+              "recommendation": [
+                {
+                  "action": "move_part",
+                  "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "widen_channel",
+                  "rationale": "open the routing corridor around the pad",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "accept_plateau",
+                  "rationale": "if no placement lever helps, this is a plateau",
+                  "confidence": "medium"
+                }
+              ]
+            },
+            {
+              "net_name": "TMDS_D2_P",
+              "net_number": 25,
+              "classification": "placement_bound",
+              "failure_cause": "routing_order",
+              "unconnected_pads": [
+                "U4.B5"
+              ],
+              "blocking_nets": [],
+              "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); moderate local congestion (2 same-group + 6 foreign obstructions) -- ripping cannot help, a part must move",
+              "escape_lane_deg": 360.0,
+              "local_congestion": 8,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 2,
+              "foreign_congestion": 6,
+              "match_group": "HDMI_TMDS_DATA",
+              "topology": "foreign_cluster",
+              "recommendation": [
+                {
+                  "action": "move_part",
+                  "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "widen_channel",
+                  "rationale": "open the routing corridor around the pad",
+                  "confidence": "medium"
+                },
+                {
+                  "action": "accept_plateau",
+                  "rationale": "if no placement lever helps, this is a plateau",
+                  "confidence": "medium"
+                }
+              ]
+            },
+            {
+              "net_name": "+1V2",
+              "net_number": 1,
+              "classification": "pour_discontinuous",
+              "failure_cause": "blocked_path",
+              "unconnected_pads": [
+                "U1.36",
+                "U2.12",
+                "U2.24",
+                "U3.18",
+                "U4.C2",
+                "U4.E6",
+                "U5.24"
+              ],
+              "blocking_nets": [],
+              "evidence": "pour-carried net: 7 pad(s) stranded from main connected island (layers: In2.Cu)",
+              "escape_lane_deg": 0.0,
+              "local_congestion": 0,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 0,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "+1V8",
+              "net_number": 2,
+              "classification": "pour_discontinuous",
+              "failure_cause": "blocked_path",
+              "unconnected_pads": [
+                "U2.36",
+                "U3.12",
+                "U4.C3",
+                "U4.C4",
+                "U4.C5",
+                "U4.C6",
+                "U4.D2",
+                "U4.D3",
+                "U4.D4",
+                "U4.D5",
+                "U4.D6",
+                "U4.E2",
+                "U4.E3",
+                "U4.E4",
+                "U4.E5",
+                "U5.12",
+                "U5.36"
+              ],
+              "blocking_nets": [],
+              "evidence": "pour-carried net: 17 pad(s) stranded from main connected island (layers: F.Cu)",
+              "escape_lane_deg": 0.0,
+              "local_congestion": 0,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 0,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            },
+            {
+              "net_name": "GND",
+              "net_number": 3,
+              "classification": "pour_discontinuous",
+              "failure_cause": "blocked_path",
+              "unconnected_pads": [
+                "J1.M1",
+                "J1.M2",
+                "J2.3",
+                "J2.6",
+                "J2.S1",
+                "J2.S2",
+                "J3.1",
+                "U1.10",
+                "U1.11",
+                "U1.13",
+                "U1.14",
+                "U1.15",
+                "U1.16",
+                "U1.17",
+                "U1.18",
+                "U1.19",
+                "U1.20",
+                "U1.21",
+                "U1.22",
+                "U1.23",
+                "U1.24",
+                "U1.3",
+                "U1.37",
+                "U1.38",
+                "U1.39",
+                "U1.4",
+                "U1.40",
+                "U1.41",
+                "U1.42",
+                "U1.43",
+                "U1.44",
+                "U1.45",
+                "U1.46",
+                "U1.47",
+                "U1.48",
+                "U1.5",
+                "U1.6",
+                "U1.7",
+                "U1.8",
+                "U1.9",
+                "U2.13",
+                "U2.14",
+                "U2.15",
+                "U2.16",
+                "U2.17",
+                "U2.18",
+                "U2.19",
+                "U2.20",
+                "U2.21",
+                "U2.22",
+                "U2.23",
+                "U2.25",
+                "U2.26",
+                "U2.27",
+                "U2.28",
+                "U2.29",
+                "U2.30",
+                "U2.31",
+                "U2.32",
+                "U2.33",
+                "U2.34",
+                "U2.35",
+                "U2.37",
+                "U2.38",
+                "U2.39",
+                "U2.40",
+                "U2.41",
+                "U2.42",
+                "U2.43",
+                "U2.44",
+                "U2.45",
+                "U2.46",
+                "U2.47",
+                "U2.48",
+                "U3.10",
+                "U3.11",
+                "U3.13",
+                "U3.14",
+                "U3.15",
+                "U3.16",
+                "U3.17",
+                "U3.19",
+                "U3.20",
+                "U3.21",
+                "U3.22",
+                "U3.23",
+                "U3.24",
+                "U3.7",
+                "U3.8",
+                "U3.9",
+                "U4.A1",
+                "U4.A2",
+                "U4.A3",
+                "U4.A4",
+                "U4.A5",
+                "U4.A6",
+                "U4.A7",
+                "U4.B7",
+                "U4.C1",
+                "U4.C7",
+                "U4.D1",
+                "U4.D7",
+                "U4.E1",
+                "U4.E7",
+                "U4.F1",
+                "U4.F2",
+                "U4.F3",
+                "U4.F4",
+                "U4.F5",
+                "U4.F6",
+                "U4.F7",
+                "U4.G1",
+                "U4.G2",
+                "U4.G3",
+                "U4.G4",
+                "U4.G5",
+                "U4.G6",
+                "U4.G7",
+                "U5.10",
+                "U5.11",
+                "U5.13",
+                "U5.14",
+                "U5.15",
+                "U5.16",
+                "U5.17",
+                "U5.18",
+                "U5.19",
+                "U5.20",
+                "U5.21",
+                "U5.22",
+                "U5.23",
+                "U5.25",
+                "U5.26",
+                "U5.27",
+                "U5.28",
+                "U5.29",
+                "U5.30",
+                "U5.31",
+                "U5.32",
+                "U5.33",
+                "U5.34",
+                "U5.35",
+                "U5.37",
+                "U5.38",
+                "U5.39",
+                "U5.40",
+                "U5.41",
+                "U5.42",
+                "U5.43",
+                "U5.44",
+                "U5.45",
+                "U5.46",
+                "U5.47",
+                "U5.48",
+                "U5.9"
+              ],
+              "blocking_nets": [],
+              "evidence": "pour-carried net: 155 pad(s) stranded from main connected island (layers: In1.Cu)",
+              "escape_lane_deg": 0.0,
+              "local_congestion": 0,
+              "nearest_blocker_mm": null,
+              "same_group_congestion": 0,
+              "foreign_congestion": 0,
+              "match_group": "",
+              "topology": "",
+              "recommendation": []
+            }
+          ]
+        }
+      },
+      "kct_route_sidecars": [],
+      "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
+    },
+    "run2": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/07-run2",
+      "present": true,
+      "times": [
+        "START 2026-09-21T08:39:04Z harness=on targets=U4.C2,U1.28,U2.4",
+        "END 2026-09-21T09:19:39Z RC=1"
+      ],
+      "harness_captures": [
+        {
+          "file": "witness-board07-run2.negotiated-return.01.json",
+          "marker": "negotiated-return",
+          "captured_at": "2026-09-21T08:54:06Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 23,
+            "commits": 23,
+            "rips": 0,
+            "truncated": false,
+            "summary_line": "Commit journal: 23 record(s) -- 23 commit(s), 0 rip(s), across 3 stage(s)"
+          },
+          "targeted_witness": {
+            "U4.C2": {
+              "ref": "U4",
+              "pin": "C2",
+              "net": 0,
+              "net_name": "+1V2",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            },
+            "U1.28": {
+              "ref": "U1",
+              "pin": "28",
+              "net": 7,
+              "net_name": "DQ3",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            },
+            "U2.4": {
+              "ref": "U2",
+              "pin": "4",
+              "net": 7,
+              "net_name": "DQ3",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.127,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [
+            "15",
+            "17",
+            "22",
+            "23",
+            "24",
+            "25",
+            "26",
+            "33"
+          ],
+          "error": null,
+          "default_witness": {
+            "record_count": 23,
+            "evaluations": 46,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "J1",
+                "pin": "1",
+                "net": 15,
+                "net_name": "MIPI_CLK_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J1",
+                "pin": "3",
+                "net": 17,
+                "net_name": "MIPI_DAT0_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "2",
+                "net": 22,
+                "net_name": "TMDS_D0_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "4",
+                "net": 23,
+                "net_name": "TMDS_D1_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "5",
+                "net": 24,
+                "net_name": "TMDS_D1_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "7",
+                "net": 25,
+                "net_name": "TMDS_D2_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "8",
+                "net": 26,
+                "net_name": "TMDS_D2_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "8",
+                "net": 33,
+                "net_name": "A6",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "1",
+                "net": 15,
+                "net_name": "MIPI_CLK_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "3",
+                "net": 17,
+                "net_name": "MIPI_DAT0_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B2",
+                "net": 22,
+                "net_name": "TMDS_D0_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B3",
+                "net": 23,
+                "net_name": "TMDS_D1_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B4",
+                "net": 24,
+                "net_name": "TMDS_D1_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B5",
+                "net": 25,
+                "net_name": "TMDS_D2_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B6",
+                "net": 26,
+                "net_name": "TMDS_D2_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "7",
+                "net": 33,
+                "net_name": "A6",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          }
+        },
+        {
+          "file": "witness-board07-run2.negotiated-return.02.json",
+          "marker": "negotiated-return",
+          "captured_at": "2026-09-21T09:13:19Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 107,
+            "commits": 84,
+            "rips": 23,
+            "truncated": false,
+            "summary_line": "Commit journal: 107 record(s) -- 84 commit(s), 23 rip(s), across 5 stage(s)"
+          },
+          "targeted_witness": {
+            "U4.C2": {
+              "ref": "U4",
+              "pin": "C2",
+              "net": 0,
+              "net_name": "+1V2",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            },
+            "U1.28": {
+              "ref": "U1",
+              "pin": "28",
+              "net": 7,
+              "net_name": "DQ3",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            },
+            "U2.4": {
+              "ref": "U2",
+              "pin": "4",
+              "net": 7,
+              "net_name": "DQ3",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.127,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [
+            "22",
+            "23",
+            "24",
+            "25",
+            "26",
+            "27",
+            "28",
+            "29",
+            "30",
+            "31",
+            "32",
+            "33",
+            "34"
+          ],
+          "error": null,
+          "default_witness": {
+            "record_count": 107,
+            "evaluations": 166,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "J2",
+                "pin": "2",
+                "net": 22,
+                "net_name": "TMDS_D0_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "4",
+                "net": 23,
+                "net_name": "TMDS_D1_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "5",
+                "net": 24,
+                "net_name": "TMDS_D1_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "7",
+                "net": 25,
+                "net_name": "TMDS_D2_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J2",
+                "pin": "8",
+                "net": 26,
+                "net_name": "TMDS_D2_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "2",
+                "net": 27,
+                "net_name": "A0",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "3",
+                "net": 28,
+                "net_name": "A1",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "4",
+                "net": 29,
+                "net_name": "A2",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "5",
+                "net": 30,
+                "net_name": "A3",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "6",
+                "net": 31,
+                "net_name": "A4",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "7",
+                "net": 32,
+                "net_name": "A5",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "8",
+                "net": 33,
+                "net_name": "A6",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J3",
+                "pin": "9",
+                "net": 34,
+                "net_name": "A7",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B2",
+                "net": 22,
+                "net_name": "TMDS_D0_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B3",
+                "net": 23,
+                "net_name": "TMDS_D1_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B4",
+                "net": 24,
+                "net_name": "TMDS_D1_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B5",
+                "net": 25,
+                "net_name": "TMDS_D2_P",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U4",
+                "pin": "B6",
+                "net": 26,
+                "net_name": "TMDS_D2_N",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "1",
+                "net": 27,
+                "net_name": "A0",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 46,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "2",
+                "net": 28,
+                "net_name": "A1",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 46,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "3",
+                "net": 29,
+                "net_name": "A2",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 47,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "4",
+                "net": 30,
+                "net_name": "A3",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 48,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "5",
+                "net": 31,
+                "net_name": "A4",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 49,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "6",
+                "net": 32,
+                "net_name": "A5",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 50,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "7",
+                "net": 33,
+                "net_name": "A6",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 51,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U5",
+                "pin": "8",
+                "net": 34,
+                "net_name": "A7",
+                "access_at_escape_end": "empty",
+                "final_access": "empty",
+                "first_closed_at": {
+                  "pass": "routing",
+                  "iteration": 0
+                },
+                "first_closed_index": 52,
+                "first_closed_kind": "commit",
+                "closing_nets": [
+                  "net0"
+                ],
+                "closing_refs": [
+                  "<board-edge>"
+                ],
+                "closing_copper_class": [
+                  "board_edge"
+                ],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          }
+        }
+      ],
+      "routed_artifacts": [
+        "matchgroup_test_routed_partial.kicad_pcb",
+        "matchgroup_test_routed_timeout_unverified_muqjoj9p.kicad_pcb"
+      ],
+      "net_status_why": {
+        "skipped": "no captured net-status pass for matchgroup_test_routed_timeout_unverified_muqjoj9p.kicad_pcb"
+      },
+      "kct_route_sidecars": [],
+      "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
+    }
+  }
+}

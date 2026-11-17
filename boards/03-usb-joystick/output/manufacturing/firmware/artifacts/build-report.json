@@ -1,0 +1,21 @@
+{
+  "mcu": "ATmega32U4-AU",
+  "clock_hz": 8000000,
+  "fuses": {
+    "low": "0xFF",
+    "high": "0xD9",
+    "extended": "0xCA"
+  },
+  "usb_vid": "0x16C0",
+  "usb_pid": "0x27DC",
+  "test_identity": false,
+  "manufacturing_identity_review": "shared joystick identity with domain-prefixed serial",
+  "flash_image_bytes": 7284,
+  "device_descriptor_hex": "1201000200000040c016dc27000101020301",
+  "usb_suspend_resume_clock_patch": "applied (see patches/apply_usbcore_patch.py)",
+  "sha256": {
+    "firmware.hex": "ac7e071658cc4721a0aeb1023098d423e8f40e48025fe898e1a80f60bc55f21e",
+    "firmware.elf": "7a536ba67de87b34a4217310de38104db830fc873e29b7643e28c305ab99f011",
+    "firmware.bin": "6b815d0720f7a15b32c2c1fecf66e3b3c6cf4f72904ace56dea400124734bfd4"
+  }
+}

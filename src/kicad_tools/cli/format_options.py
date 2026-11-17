@@ -1,0 +1,157 @@
+"""Helpers for the canonical machine-output idiom (``--format json``).
+
+``kct`` standardizes machine-readable output on a single spelling::
+
+    kct <command> --format json
+
+A handful of older commands grew a boolean ``--json`` flag instead.  Those
+spellings are kept working forever as **legacy aliases** -- they are never
+removed or repurposed -- but new machine-output surfaces must use
+``--format`` with a ``json`` choice.  See ``docs/reference/machine-output.md``
+for the full design note, the audited inventory, and the exemption list.
+
+This module is the shared machinery for commands that carry both spellings:
+
+* :func:`add_format_flag` / :func:`add_legacy_json_flag` -- declare the pair
+  of arguments with consistent help text.
+* :func:`normalize_format_alias` -- reconcile the two spellings after
+  ``parse_args`` so downstream code can keep checking a single attribute.
+* :func:`wants_json` -- one-shot predicate for code that prefers not to
+  mutate the namespace.
+* :func:`stdout_to_stderr_when` -- protect the single-document contract from
+  third-party / progress chatter printed on stdout by code the command does
+  not own.
+
+Precedence rule: either spelling requesting JSON wins.  The two flags cannot
+conflict, because ``--json`` only ever means ``--format json``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+import sys
+from collections.abc import Iterator
+from typing import Any
+
+FORMAT_TEXT = "text"
+FORMAT_JSON = "json"
+
+
+def add_format_flag(
+    parser: argparse.ArgumentParser,
+    *,
+    choices: tuple[str, ...] = (FORMAT_TEXT, FORMAT_JSON),
+    default: str = FORMAT_TEXT,
+    dest: str = "format",
+    help_text: str | None = None,
+) -> argparse.Action:
+    """Add the canonical ``--format`` choice flag to *parser*."""
+    if help_text is None:
+        # argparse removes suppressed defaults before interpolating help.
+        help_text = "Output format"
+        if default != argparse.SUPPRESS:
+            help_text += " (default: %(default)s)"
+    return parser.add_argument(
+        "--format",
+        choices=list(choices),
+        default=default,
+        dest=dest,
+        help=help_text,
+    )
+
+
+def add_legacy_json_flag(
+    parser: argparse.ArgumentParser,
+    *,
+    dest: str = "json",
+    help_text: str = "Output as JSON (same as --format json)",
+) -> argparse.Action:
+    """Add the legacy ``--json`` boolean alias to *parser*.
+
+    Only for commands that already shipped ``--json``; new commands should
+    add :func:`add_format_flag` alone.
+    """
+    return parser.add_argument(
+        "--json",
+        action="store_true",
+        dest=dest,
+        help=help_text,
+    )
+
+
+def wants_json(
+    args: argparse.Namespace,
+    *,
+    format_attr: str = "format",
+    json_attr: str = "json",
+) -> bool:
+    """Return ``True`` when JSON output was requested via either spelling."""
+    if getattr(args, json_attr, False):
+        return True
+    return getattr(args, format_attr, None) == FORMAT_JSON
+
+
+def emit_json(payload: Any) -> None:
+    """Print *payload* as the single JSON document on stdout.
+
+    The machine-output contract (docs/reference/machine-output.md) is one
+    deterministic JSON document per invocation: keys are sorted, and any
+    non-serializable value (e.g. ``Path``) falls back to ``str``.  Human
+    chatter must go to stderr or be suppressed when JSON mode is active.
+    """
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+@contextlib.contextmanager
+def stdout_to_stderr_when(active: bool) -> Iterator[None]:
+    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
+
+    Many commands call into code they do not own -- third-party libraries,
+    subprocess drivers, the negotiated router, report collectors -- that
+    writes progress chatter or install banners on **stdout**.  Under
+    ``--format json`` that chatter would corrupt the single-document
+    contract, so wrap those regions in this context manager: the output is
+    captured and replayed on stderr, so the diagnostics survive and the JSON
+    stream stays parseable.
+
+    When *active* is false this is a no-op, so a command can wrap the region
+    unconditionally and pass its own ``as_json`` predicate.
+
+    Introduced per-module in batch 5 of the #4674 machine-output sweep
+    (``report_cmd``), copied into ``reason_cmd`` and ``commands/routing`` in
+    batch 6, and promoted here in batch 7 (``build`` / ``pipeline`` /
+    ``stitch``) rather than making a fourth copy.
+    """
+    if not active:
+        yield
+        return
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            yield
+    finally:
+        if buffer.getvalue():
+            print(buffer.getvalue(), end="", file=sys.stderr)
+
+
+def normalize_format_alias(
+    args: argparse.Namespace,
+    *,
+    format_attr: str = "format",
+    json_attr: str = "json",
+) -> argparse.Namespace:
+    """Reconcile the legacy ``--json`` boolean with the canonical ``--format``.
+
+    After this call the two attributes agree: if either spelling requested
+    JSON, ``args.<json_attr>`` is ``True`` and ``args.<format_attr>`` is
+    ``"json"``.  Downstream code may keep checking whichever attribute it
+    historically used.  Returns *args* for convenience.
+    """
+    if getattr(args, format_attr, None) == FORMAT_JSON:
+        setattr(args, json_attr, True)
+    elif getattr(args, json_attr, False):
+        setattr(args, format_attr, FORMAT_JSON)
+    return args

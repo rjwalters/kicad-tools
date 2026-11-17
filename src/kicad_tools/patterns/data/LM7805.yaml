@@ -1,0 +1,29 @@
+# Component requirements for LM7805
+# Linear 5V regulator (not LDO - has higher dropout)
+
+type: LinearRegulator
+manufacturer: Various
+description: 5V 1A Linear Voltage Regulator
+
+input_cap:
+  min_uf: 0.33
+  max_esr_mohm: 1000
+
+output_cap:
+  min_uf: 0.1
+  max_esr_mohm: 1000
+
+dropout_voltage: 2.0
+max_output_current_ma: 1000
+input_voltage_min: 7.5
+input_voltage_max: 35.0
+output_voltage: 5.0
+
+thermal_pad:
+  required: false
+  max_junction_temp_c: 150
+
+notes:
+  - Classic linear regulator, high dropout voltage
+  - Requires heatsink for high current applications
+  - Use ceramic or electrolytic capacitors

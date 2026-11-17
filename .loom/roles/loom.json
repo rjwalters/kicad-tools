@@ -1,0 +1,11 @@
+{
+  "name": "Loom Daemon",
+  "description": "Tier 2 daemon-mode operator surface: observes the running Rust loom-daemon via MCP tools and dispatches sweeps for multi-account autonomous batches",
+  "suggestedModel": "sonnet",
+  "suggestedWorkerType": "claude",
+  "toolPolicy": {
+    "allowedCapabilities": [
+      "*"
+    ]
+  }
+}

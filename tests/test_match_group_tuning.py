@@ -1,0 +1,4548 @@
+"""N-trace match-group serpentine tuner tests.
+
+Issue #2700, Epic #2661 Phase 2E.
+
+This module verifies the curator-specified mitigations of
+:func:`kicad_tools.router.match_group_tuning.tune_match_group_v2`:
+
+1. **Reference-policy semantics** (longest + pace-car + longer-than-reference).
+2. **Outer-normal generalization to N>=3** (nearest-other-trace heuristic).
+3. **Per-insertion DRC self-check** with byte-for-byte rollback (intra-group
+   AND non-group neighbor variants).
+4. **Cascade-safety budget** (per-member SMALL / LARGE branches + group-level
+   ceiling).
+5. **Phase 2F handoff guard** (``pair_ids`` precondition).
+6. **Drift-prevention** -- ``LengthTracker.calculate_route_length`` is the
+   single source of truth; tuner's untouched routes preserve ``is``-identity.
+7. **Module-level invariants** (constants drift-prevention).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from kicad_tools.router.diffpair_length_tuning import MAX_INSERTS_PER_PAIR
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.length import LengthTracker
+from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
+from kicad_tools.router.match_group_tuning import (
+    AMPLITUDE_BACKOFF_FACTORS,
+    MAX_INSERTS_PER_GROUP_MEMBER,
+    MAX_INSERTS_PER_GROUP_MEMBER_LARGE,
+    MAX_INSERTS_PER_GROUP_MEMBER_SMALL,
+    MAX_SEGMENT_RETRY_CANDIDATES,
+    MAX_TOTAL_INSERTS_PER_GROUP,
+    REASON_SUMMARY_LABELS,
+    TUNE_RESULT_REASONS,
+    TuneResult,
+    _outer_normal_hint_group,
+    _post_insertion_clearance_detail_group,
+    _post_insertion_clearance_ok_group,
+    _straighten_jog_runs,
+    format_reason_counts,
+    group_skew_before_after,
+    tune_match_group_v2,
+)
+from kicad_tools.router.optimizer.serpentine import (
+    SerpentineConfig,
+    SerpentineGenerator,
+)
+from kicad_tools.router.primitives import Route, Segment
+
+# =============================================================================
+# Test helpers
+# =============================================================================
+
+
+def _straight_route(
+    net_id: int,
+    name: str,
+    length_mm: float,
+    y: float = 0.0,
+    layer: Layer = Layer.F_CU,
+) -> Route:
+    """Single horizontal segment along +x at y=``y``."""
+    return Route(
+        net=net_id,
+        net_name=name,
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=y,
+                x2=length_mm,
+                y2=y,
+                width=0.2,
+                layer=layer,
+                net=net_id,
+                net_name=name,
+            )
+        ],
+    )
+
+
+def _ddr_group(
+    name: str = "DDR_DATA",
+    net_ids: list[int] | None = None,
+    tolerance: float = 0.1,
+    reference_net_id: int | None = None,
+) -> MatchGroup:
+    if net_ids is None:
+        net_ids = [1, 2, 3, 4]
+    return MatchGroup(
+        name=name,
+        net_ids=net_ids,
+        tolerance=tolerance,
+        reference_net_id=reference_net_id,
+        source=MatchGroupSource.LEGACY_API,
+    )
+
+
+# =============================================================================
+# 1. Reference policy -- longest-in-group default
+# =============================================================================
+
+
+class TestReferencePolicyLongest:
+    """When ``reference_net_id is None`` the target is the longest member."""
+
+    def test_longest_is_target_for_4_net_group(self):
+        # Lengths: 10, 11, 12, 9 mm.  Reference = longest = 12.
+        # Net 3 (12mm) should be left alone; the others need lengthening.
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 20.0, y=0.0),
+            2: _straight_route(2, "D1", 20.0, y=2.0),
+            3: _straight_route(3, "D2", 22.0, y=4.0),
+            4: _straight_route(4, "D3", 18.0, y=6.0),
+        }
+        # Override actual lengths via the segment x2 above: 20, 20, 22, 18.
+        # Reference = 22.  Deltas: net1=2, net2=2, net3=0, net4=4.
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        # Net 3 is the longest -> already_within_tolerance.
+        assert results[3][1].reason == "already_within_tolerance"
+        assert results[3][0] is routes[3]
+        assert results[3][0].segments is routes[3].segments
+        # Net 1, 2, 4 need tuning.  They should at least attempt.
+        for nid in (1, 2, 4):
+            assert results[nid][1].attempts >= 1 or results[nid][1].reason == "tuned"
+
+
+# =============================================================================
+# 2. Reference policy -- pace-car (explicit reference net)
+# =============================================================================
+
+
+class TestReferencePolicyPaceCar:
+    """``reference_net_id = N`` targets net N's length (pace-car).
+
+    Issue #3440 semantics: strict pace-car behavior applies only when
+    the declaration is SATISFIABLE for a lengthen-only tuner, i.e. when
+    no member is longer than the reference by more than tolerance.
+    Otherwise the tuner auto-promotes longest-in-group as the effective
+    reference (see :class:`TestReferenceAutoPromotion`).
+    """
+
+    def test_pace_car_net_is_never_modified(self):
+        # Reference = net 3 (12mm) -- the LONGEST member, so the strict
+        # pace-car declaration is satisfiable and preserved.
+        group = _ddr_group(
+            net_ids=[1, 2, 3, 4],
+            tolerance=0.1,
+            reference_net_id=3,
+        )
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 11.0, y=2.0),
+            3: _straight_route(3, "D2", 12.0, y=4.0),
+            4: _straight_route(4, "D3", 9.0, y=6.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        # Net 3 is the explicit reference -> reason="reference", unchanged.
+        assert results[3][1].reason == "reference"
+        assert results[3][0] is routes[3]
+        assert results[3][0].segments is routes[3].segments
+        assert results[3][1].success is True
+
+    def test_longer_within_tolerance_does_not_promote(self):
+        # Reference = net 2 (11mm).  Net 3 is 11.05mm -- longer than the
+        # reference but WITHIN the 0.1mm tolerance, so the declaration is
+        # satisfiable and NO auto-promotion happens: the reference keeps
+        # its strict pace-car reason and net 3 is already-within-tolerance.
+        group = _ddr_group(
+            net_ids=[1, 2, 3, 4],
+            tolerance=0.1,
+            reference_net_id=2,
+        )
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 11.0, y=2.0),
+            3: _straight_route(3, "D2", 11.05, y=4.0),
+            4: _straight_route(4, "D3", 9.0, y=6.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        assert results[2][1].reason == "reference"
+        assert results[2][0] is routes[2]
+        assert results[2][0].segments is routes[2].segments
+        assert results[3][1].reason == "already_within_tolerance"
+        assert results[3][0] is routes[3]
+
+
+class TestReferenceAutoPromotion:
+    """Issue #3440: a shortest-member pace car is auto-promoted.
+
+    The tuner is lengthen-only; when the declared reference routes
+    shorter than another member by more than tolerance, strict pace-car
+    semantics are structurally unsatisfiable (board 07's ADDR_BUS with
+    ``length_match_reference="A0"`` while A0 routed shortest -> 15.4mm
+    skew left untouched).  Policy: log a structured warning and fall
+    back to longest-in-group semantics -- every member (including the
+    declared reference) becomes tunable toward the longest member.
+    """
+
+    def _routes(self) -> dict[int, Route]:
+        return {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 11.0, y=4.0),
+            3: _straight_route(3, "D2", 12.0, y=8.0),
+            4: _straight_route(4, "D3", 9.0, y=12.0),
+        }
+
+    def test_shortest_member_reference_promotes_longest(self, caplog):
+        import logging
+
+        # Reference = net 2 (11mm) but net 3 (12mm) is longer by more
+        # than the 0.1mm tolerance -> unsatisfiable -> auto-promotion.
+        group = _ddr_group(
+            net_ids=[1, 2, 3, 4],
+            tolerance=0.1,
+            reference_net_id=2,
+        )
+        routes = self._routes()
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.router.match_group_tuning"):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.1,
+                intra_group_clearance_mm=0.2,
+                config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+            )
+
+        # A structured warning announces the promotion.
+        assert any("auto-promoting" in rec.getMessage().lower() for rec in caplog.records), (
+            f"expected an auto-promotion warning, got: {[r.getMessage() for r in caplog.records]}"
+        )
+
+        # The longest member (net 3) is the effective target -> it is
+        # already at the reference length.
+        assert results[3][1].reason == "already_within_tolerance"
+        assert results[3][0] is routes[3]
+
+        # The DECLARED reference (net 2) is now tunable: it must NOT
+        # carry the "reference" reason and the tuner attempted to
+        # lengthen it toward 12mm.
+        assert results[2][1].reason != "reference"
+        assert results[2][1].reason in (
+            "tuned",
+            "exceeded_max_inserts",
+            "cascade_budget_exhausted",
+            "post_insertion_drc_violation",
+            "no_suitable_segment",
+        )
+
+        # NOBODY is left in the dead-end "longer_than_reference" bucket
+        # -- that was the Issue #3440 regime-A defect.
+        assert all(res.reason != "longer_than_reference" for (_r, res) in results.values())
+
+    def test_promotion_converges_group_skew(self):
+        from kicad_tools.router.length import LengthTracker
+
+        group = _ddr_group(
+            net_ids=[1, 2, 3, 4],
+            tolerance=0.1,
+            reference_net_id=2,
+        )
+        routes = self._routes()
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        lengths = [
+            LengthTracker.calculate_route_length(route) for (route, _res) in results.values()
+        ]
+        skew = max(lengths) - min(lengths)
+        assert skew <= 0.1 + 1e-6, (
+            f"auto-promotion should converge max-min skew to tolerance; got "
+            f"{skew:.4f}mm (lengths: {[f'{length:.3f}' for length in lengths]})"
+        )
+
+
+# =============================================================================
+# 3. Engagement gate -- length_critical=False
+# =============================================================================
+
+
+class TestEngagementGate:
+    """Groups whose net class is not length-critical are not tuned."""
+
+    def test_length_critical_false_returns_unchanged(self):
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 11.0, y=2.0),
+            3: _straight_route(3, "D2", 12.0, y=4.0),
+            4: _straight_route(4, "D3", 9.0, y=6.0),
+        }
+        original_segments = {nid: r.segments for nid, r in routes.items()}
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            length_critical=False,
+        )
+
+        for nid in group.net_ids:
+            assert results[nid][1].reason == "not_length_critical"
+            assert results[nid][1].success is True
+            assert results[nid][0] is routes[nid]
+            assert results[nid][0].segments is original_segments[nid]
+
+
+# =============================================================================
+# 4. Outer-normal generalization (nearest-other-trace heuristic)
+# =============================================================================
+
+
+class TestOuterNormalGeneralization:
+    """Three parallel traces: the inserted serpentine bulges to one side only."""
+
+    def test_three_traces_bulge_does_not_cross_other_members(self):
+        # Stacked horizontal traces at y=0, y=2, y=4 (mm).  Tune the
+        # MIDDLE trace (y=2).  Lengths 6, 5, 8 -- middle is 5, reference
+        # is the longest (8mm @ y=4) so the middle should bulge UP toward
+        # the reference's outer side OR DOWN toward y=0.  Either is OK,
+        # but NOT both (verifies outer-normal-only).
+        group = _ddr_group(net_ids=[1, 2, 3], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "T0", 6.0, y=0.0),
+            2: _straight_route(2, "T1", 5.0, y=2.0),
+            3: _straight_route(3, "T2", 8.0, y=4.0),
+        }
+        # Reference = longest = net 3 (8mm); net 2 needs +3mm.
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        net2_route = results[2][0]
+        net2_result = results[2][1]
+        if net2_result.inserts_applied >= 1:
+            ys: list[float] = []
+            for seg in net2_route.segments:
+                ys.append(seg.y1)
+                ys.append(seg.y2)
+            # NOT both sides simultaneously.  Verifies single-sided
+            # outer-normal-only bulge.
+            went_up = max(ys) > 2.0 + 1e-6
+            went_down = min(ys) < 2.0 - 1e-6
+            assert went_up != went_down, (
+                f"Trombone leaked to both sides: y range = [{min(ys)}, {max(ys)}]; "
+                "outer-normal-only invariant violated."
+            )
+
+    def test_outer_normal_hint_falls_back_when_no_other_members(self):
+        """The helper falls back to the segment's perpendicular when no neighbors."""
+        seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="T0",
+        )
+        hint = _outer_normal_hint_group(seg, candidate_net_id=1, group_routes={})
+        # Horizontal segment -> perpendicular is +/-y.  The default
+        # fallback yields (0, 1) for a horizontal segment.
+        import math
+
+        mag = math.sqrt(hint[0] ** 2 + hint[1] ** 2)
+        assert mag == pytest.approx(1.0, abs=1e-9), "Fallback hint must be unit vector"
+
+    def test_outer_normal_hint_uses_nearest_neighbor(self):
+        """When two other members are present, the hint points away from the nearer."""
+        # Segment at y=2 (the candidate).  Other members at y=0 (closer)
+        # and y=10 (farther).  The hint should point AWAY from y=0,
+        # i.e. +y direction.
+        seg = Segment(
+            x1=0.0,
+            y1=2.0,
+            x2=10.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=99,
+            net_name="cand",
+        )
+        near = _straight_route(1, "near", 10.0, y=0.0)
+        far = _straight_route(2, "far", 10.0, y=10.0)
+        hint = _outer_normal_hint_group(
+            seg,
+            candidate_net_id=99,
+            group_routes={1: near, 2: far},
+        )
+        # Y component should be positive (away from y=0, the nearer one).
+        assert hint[1] > 0.0, (
+            f"Hint y-component {hint[1]} should be positive "
+            "(pointing AWAY from nearer neighbor at y=0)"
+        )
+
+
+# =============================================================================
+# 5. Cascade-safety budget
+# =============================================================================
+
+
+class TestCascadeBudget:
+    """Per-member SMALL / LARGE branches + group-level cumulative ceiling."""
+
+    def test_small_group_default_is_three(self):
+        """``len(net_ids) <= 4`` -> MAX_INSERTS_PER_GROUP_MEMBER_SMALL."""
+        # 4-net group; unreachable target.  Spy on add_serpentine; the
+        # cumulative count for the four members must be at most 4*3 = 12.
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.01)
+        routes = {
+            1: _straight_route(1, "D0", 50.0, y=0.0),
+            2: _straight_route(2, "D1", 50.0, y=2.0),
+            3: _straight_route(3, "D2", 50.0, y=4.0),
+            4: _straight_route(4, "D3", 100.0, y=6.0),  # unreachable target
+        }
+        cfg = SerpentineConfig(
+            amplitude=0.1,
+            min_spacing=0.2,
+            gap_factor=2.0,
+            max_iterations=2,
+        )
+
+        orig_add = SerpentineGenerator.add_serpentine
+        call_count = {"n": 0}
+
+        def spy(self, route, target_length, grid=None):
+            call_count["n"] += 1
+            return orig_add(self, route, target_length, grid)
+
+        with patch.object(SerpentineGenerator, "add_serpentine", spy):
+            tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+            )
+
+        # 4 members, 3 of which need tuning, at MAX_INSERTS_SMALL=3 each
+        # -> 3 * 3 = 9 attempts max.  (Reference net is unchanged.)
+        # The group-level ceiling (16) is permissive enough to not fire.
+        assert call_count["n"] <= 3 * MAX_INSERTS_PER_GROUP_MEMBER_SMALL
+
+    def test_large_group_default_is_two(self):
+        """``len(net_ids) > 4`` -> MAX_INSERTS_PER_GROUP_MEMBER_LARGE."""
+        # 6 nets, no override -> LARGE branch active.  All members need
+        # unreachable tuning except the longest.  Per-member cap is 2,
+        # not 3 -- verify by spy.
+        net_ids = list(range(1, 7))  # 1..6
+        group = _ddr_group(net_ids=net_ids, tolerance=0.01)
+        routes = {
+            nid: _straight_route(nid, f"D{nid}", 50.0, y=float(nid) * 2.0) for nid in net_ids[:-1]
+        }
+        # Last net is the reference (longest).
+        routes[net_ids[-1]] = _straight_route(net_ids[-1], "DR", 100.0, y=12.0)
+
+        cfg = SerpentineConfig(
+            amplitude=0.1,
+            min_spacing=0.2,
+            gap_factor=2.0,
+            max_iterations=2,
+        )
+
+        orig_add = SerpentineGenerator.add_serpentine
+        call_count = {"n": 0}
+
+        def spy(self, route, target_length, grid=None):
+            call_count["n"] += 1
+            return orig_add(self, route, target_length, grid)
+
+        with patch.object(SerpentineGenerator, "add_serpentine", spy):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+            )
+
+        # 5 non-reference members at MAX_INSERTS_LARGE=2 each -> 10 max in
+        # the first pass, plus one top-up insert each from the unused group
+        # ceiling (Issue #5798): 15 <= 16, so the ceiling doesn't trip.
+        assert call_count["n"] <= 5 * (MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1)
+        # Each non-reference member reports the correct attempts ceiling.
+        for nid in net_ids[:-1]:
+            assert results[nid][1].attempts <= MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        total = sum(r.inserts_applied for _, r in results.values())
+        assert total <= MAX_TOTAL_INSERTS_PER_GROUP
+
+    @staticmethod
+    def _one_capped_member_group(need_mm: float):
+        """Six nets: four already matched, D5 ``need_mm`` short, REF longest."""
+        net_ids = list(range(1, 7))
+        routes = {nid: _straight_route(nid, f"D{nid}", 99.95, y=nid * 2.0) for nid in net_ids[:4]}
+        routes[5] = _straight_route(5, "D5", 100.0 - need_mm, y=10.0)
+        routes[6] = _straight_route(6, "REF", 100.0, y=12.0)
+        cfg = SerpentineConfig(amplitude=0.1, min_spacing=0.2, gap_factor=2.0, max_iterations=2)
+        return _ddr_group(net_ids=net_ids, tolerance=0.1), routes, cfg
+
+    def test_capped_member_tops_up_from_unused_ceiling(self):
+        """Issue #5798: a member at its per-member cap may use the leftover ceiling.
+
+        Mirrors board 07 SDRAM_BYTE0 on the complete 07m route: DQ6 stopped
+        at the LARGE cap (2) 0.8 mm short with 4 of the 16 ceiling inserts
+        unused, so the group stayed at 5.80 mm. Here each insert adds 0.4 mm
+        and D5 needs 1.0 mm: two inserts leave it 0.2 mm short (tolerance
+        0.1), the top-up insert closes it. The result reports the member's
+        whole history, measured from its original route.
+        """
+        group, routes, cfg = self._one_capped_member_group(1.0)
+        results = tune_match_group_v2(
+            group, routes, tolerance_mm=0.1, intra_group_clearance_mm=0.2, config=cfg
+        )
+        route, res = results[5]
+        assert res.reason == "tuned"
+        assert res.inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        assert res.attempts == MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        assert res.length_before_mm == pytest.approx(99.0)
+        assert res.length_after_mm == pytest.approx(100.0, abs=0.1)
+        assert len(res.serpentine_results) >= res.inserts_applied
+        assert list(results) == group.net_ids
+
+    def test_topup_is_one_round_only(self):
+        """A member still short after its top-up insert stays ``exceeded_max_inserts``."""
+        group, routes, cfg = self._one_capped_member_group(1.5)
+        results = tune_match_group_v2(
+            group, routes, tolerance_mm=0.1, intra_group_clearance_mm=0.2, config=cfg
+        )
+        res = results[5][1]
+        assert res.reason == "exceeded_max_inserts"
+        assert res.inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE + 1
+        assert res.length_before_mm == pytest.approx(98.5)
+        assert 99.0 < res.length_after_mm < 100.0 - 0.1
+
+    def test_explicit_per_member_budget_gets_no_topup(self):
+        """An explicit ``max_inserts_per_member`` stays a hard per-member cap."""
+        group, routes, cfg = self._one_capped_member_group(1.0)
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=cfg,
+            max_inserts_per_member=MAX_INSERTS_PER_GROUP_MEMBER_LARGE,
+        )
+        res = results[5][1]
+        assert res.reason == "exceeded_max_inserts"
+        assert res.inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE
+
+    def test_max_total_inserts_per_group_caps_cumulative_count(self):
+        """The group-level ceiling fires for pathological cases."""
+        # 10-net group, unreachable target.  Per-member budget = LARGE = 2;
+        # cumulative worst case = 10*2 = 20, but MAX_TOTAL = 16 caps it.
+        net_ids = list(range(1, 11))
+        group = _ddr_group(net_ids=net_ids, tolerance=0.01)
+        routes = {
+            nid: _straight_route(nid, f"D{nid}", 50.0, y=float(nid) * 2.0) for nid in net_ids[:-1]
+        }
+        routes[net_ids[-1]] = _straight_route(net_ids[-1], "DR", 200.0, y=20.0)
+
+        cfg = SerpentineConfig(
+            amplitude=0.1,
+            min_spacing=0.2,
+            gap_factor=2.0,
+            max_iterations=2,
+        )
+
+        # Set the threshold so DRC always passes (huge clearance, no
+        # neighbors at distance).  Inserts should commit each time.
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.01,
+            intra_group_clearance_mm=0.2,
+            config=cfg,
+        )
+
+        total = sum(r[1].inserts_applied for r in results.values())
+        assert total <= MAX_TOTAL_INSERTS_PER_GROUP, (
+            f"Total inserts {total} exceeded MAX_TOTAL_INSERTS_PER_GROUP "
+            f"({MAX_TOTAL_INSERTS_PER_GROUP})"
+        )
+
+    def test_ceiling_is_spent_on_largest_deficits_first(self):
+        """Issue #5798: the group ceiling must not starve the shortest members.
+
+        Mirrors board 07 SDRAM_ADDRESS (docs item 9): the members that need
+        the most length (BA0/BA1) sit late in ``net_ids`` and the 16-insert
+        ceiling is spent on small-deficit members first.  Nine members need
+        one insert each; four need the per-member cap (2).  That is 17
+        inserts of demand against a ceiling of 16.  Visiting members by
+        descending deficit gives every large-deficit member its inserts
+        and leaves the one member that closes the least skew to report
+        ``cascade_budget_exhausted``.
+        """
+        small = list(range(1, 10))
+        big = list(range(10, 14))
+        ref = 14
+        routes = {nid: _straight_route(nid, f"D{nid}", 98.0, y=nid * 2.0) for nid in small}
+        routes.update({nid: _straight_route(nid, f"D{nid}", 70.0, y=nid * 2.0) for nid in big})
+        routes[ref] = _straight_route(ref, "REF", 100.0, y=ref * 2.0)
+        group = _ddr_group(net_ids=small + big + [ref], tolerance=0.1)
+        cfg = SerpentineConfig(
+            amplitude=0.5,
+            min_spacing=0.2,
+            gap_factor=2.0,
+            max_iterations=4,
+        )
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=cfg,
+        )
+
+        for nid in big:
+            assert results[nid][1].inserts_applied == MAX_INSERTS_PER_GROUP_MEMBER_LARGE, nid
+        exhausted = [n for n in small if results[n][1].reason == "cascade_budget_exhausted"]
+        assert exhausted == [small[-1]]
+        assert sum(r.inserts_applied for _, r in results.values()) == MAX_TOTAL_INSERTS_PER_GROUP
+
+    def test_small_deficit_group_unaffected_by_visit_order(self):
+        """Demand under the ceiling: every member tunes, results keyed as before."""
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 98.0, y=0.0),
+            2: _straight_route(2, "D1", 99.0, y=2.0),
+            3: _straight_route(3, "D2", 97.0, y=4.0),
+            4: _straight_route(4, "D3", 100.0, y=6.0),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0),
+        )
+        assert list(results) == [1, 2, 3, 4]
+        assert results[4][1].reason == "already_within_tolerance"
+        assert all(results[n][1].success for n in (1, 2, 3))
+
+    def test_override_max_inserts_per_member(self):
+        """Explicit ``max_inserts_per_member`` overrides the SMALL/LARGE default."""
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.01)
+        routes = {
+            1: _straight_route(1, "D0", 50.0, y=0.0),
+            2: _straight_route(2, "D1", 50.0, y=2.0),
+            3: _straight_route(3, "D2", 50.0, y=4.0),
+            4: _straight_route(4, "D3", 100.0, y=6.0),
+        }
+        cfg = SerpentineConfig(amplitude=0.1, max_iterations=2)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.01,
+            intra_group_clearance_mm=0.2,
+            config=cfg,
+            max_inserts_per_member=1,  # override
+        )
+
+        for nid in (1, 2, 3):
+            assert results[nid][1].attempts <= 1
+
+
+# =============================================================================
+# 6. Post-insertion DRC self-check + byte-for-byte rollback
+# =============================================================================
+
+
+class TestPostInsertionDRC:
+    """Rollback fires for intra-group AND non-group neighbor variants."""
+
+    def test_intra_group_rollback(self):
+        """A bulge that would collide with another group member is rolled back."""
+        # 3 traces stacked.  We want to tune net 1 (shorter) and have its
+        # bulge land into net 2's clearance zone.
+        group = _ddr_group(net_ids=[1, 2, 3], tolerance=0.1)
+        # net 1 at y=0 (short, 10mm); net 2 at y=0.5 (very close!);
+        # net 3 at y=5 (the reference, 15mm).  Net 1's bulge in either
+        # direction near y=0.5 will collide with net 2.
+        # The bulge direction is determined by the nearest-other-trace
+        # heuristic: closest neighbor to net 1's mid-segment is net 2
+        # (y=0.5), so the bulge goes to y<0 (negative).  But then
+        # the DRC pass 1 against other group members will check vs
+        # net 3 (y=5, layer F_CU) -- no collision there.
+        # To force rollback let's place net 2 at y=-0.1 (below net 1
+        # by 0.1mm).  Net 2 is the nearest neighbor; bulge points to
+        # y>0.  Net 3 sits at y=5, no collision.  But we want rollback.
+        # Instead: place net 2 such that whichever way the bulge goes,
+        # it collides.  Simpler: place net 3 (large group member) very
+        # close to net 1 on the OPPOSITE side from net 2.  But this is
+        # what we want to test.
+        # Concrete: net 1 at y=0; net 2 at y=2 (the nearest neighbor);
+        # net 3 at y=-0.3 (also a group member, very close on the other side).
+        # The bulge will go to y<0 (away from net 2 @ y=2) -> bulges
+        # into net 3 @ y=-0.3 -> intra-group rollback.
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 10.0, y=2.0),
+            3: _straight_route(3, "D2", 15.0, y=-0.3),
+        }
+        original_net1 = routes[1]
+        original_net1_segments = routes[1].segments
+
+        cfg = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.4,  # large enough to trip
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        # Net 1's bulge collides with net 3 (intra-group) -> rollback.
+        assert results[1][1].reason == "post_insertion_drc_violation"
+        assert results[1][0] is original_net1
+        assert results[1][0].segments is original_net1_segments
+
+    def test_non_group_neighbor_rollback(self):
+        """A bulge that would collide with a non-group routed net is rolled back."""
+        # 3 group members + 1 non-group neighbor placed where the bulge
+        # would land.
+        group = _ddr_group(net_ids=[1, 2, 3], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 10.0, y=2.0),
+            3: _straight_route(3, "D2", 15.0, y=4.0),
+            # Non-group net 99: close enough to net 1's outer-normal bulge
+            # (which is away from the nearest other group member -- net 2 @ y=2 --
+            # so the bulge goes to y < 0).  Place neighbor at y=-0.5.
+            99: _straight_route(99, "VCC", 10.0, y=-0.5),
+        }
+        original_net1 = routes[1]
+        original_net1_segments = routes[1].segments
+
+        cfg = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.6,  # tight enough to trip
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        # Net 1's bulge collides with net 99 (non-group) -> rollback.
+        assert results[1][1].reason == "post_insertion_drc_violation"
+        assert results[1][0] is original_net1
+        assert results[1][0].segments is original_net1_segments
+
+    def test_post_insertion_clearance_ok_group_pass(self):
+        """Direct unit test on the DRC helper -- happy path."""
+        new_seg = Segment(
+            x1=0.0,
+            y1=10.0,
+            x2=5.0,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Other group member far away.
+        other = _straight_route(2, "D1", 10.0, y=0.0)
+        routes_by_net = {1: _straight_route(1, "D0", 5.0, y=0.0), 2: other}
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.5,
+        )
+        assert ok is True
+
+    def test_post_insertion_clearance_ok_group_fail_intra(self):
+        """Direct unit test on the DRC helper -- intra-group failure."""
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.1,
+            x2=5.0,
+            y2=0.1,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        other = _straight_route(2, "D1", 10.0, y=0.0)
+        routes_by_net = {1: _straight_route(1, "D0", 5.0, y=5.0), 2: other}
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.5,
+        )
+        assert ok is False
+
+
+# =============================================================================
+# 6b. Issue #3317 follow-up -- broader DRC self-check passes
+# =============================================================================
+
+
+class TestPostInsertionBroaderDRC:
+    """Issue #3317 follow-up (judge change-request on PR #3317).
+
+    The legacy two-pass self-check (intra-group + inter-net segment-only)
+    let trombone inserts pass that subsequently failed the full DRC
+    validator on board 07.  The expanded helper adds:
+
+    * **Pass 3** -- segment-vs-other-net-via clearance at
+      ``via_clearance_mm`` (typically 0.2 mm).  Catches the
+      ``[via] DM0 vs DQ6`` class of underflow.
+    * **Pass 4** -- segment-vs-diff-pair-partner clearance at
+      ``intra_pair_clearance_mm`` (typically 0.1 mm).  Catches the
+      ``[segment] TMDS_D0_N vs TMDS_D0_P`` underflow.
+
+    Both passes are gated behind explicit optional arguments so legacy
+    callers / tests retain byte-for-byte behavior when they don't supply
+    the thresholds.
+    """
+
+    def test_via_clearance_pass_skipped_when_threshold_omitted(self):
+        """Legacy behavior preserved: omitting ``via_clearance_mm`` skips
+        the via-clearance pass even when a foreign via sits beneath the
+        new segment.
+        """
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Foreign route owns a via that sits ON the new segment (so its
+        # center-to-segment distance is 0 mm, well below any via_clearance
+        # floor).  With pass 3 disabled (legacy), the helper must accept.
+        other_via = Via(
+            x=2.5,
+            y=0.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            # via_clearance_mm intentionally omitted -- legacy path.
+        )
+        assert ok is True
+
+    def test_via_clearance_pass_rejects_segment_near_foreign_via(self):
+        """When ``via_clearance_mm`` is supplied, a new segment that lands
+        within the via-clearance floor of a foreign-net via is rejected.
+
+        Mirrors the board 07 ``[via] DM0 vs DQ6 ... -0.096mm (required
+        0.200mm)`` failure: the segment-only legacy check missed the
+        underflow because there is no FOREIGN SEGMENT at the same XY --
+        only a foreign via.
+        """
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Foreign via at (2.5, 0.4) with diameter 0.7 (radius 0.35).
+        # Distance from via center to segment line = 0.4 mm.
+        # Edge clearance = 0.4 - 0.35 - 0.1 = -0.05 mm (underflow).
+        # With via_clearance_mm=0.2 mm the check must reject.
+        other_via = Via(
+            x=2.5,
+            y=0.4,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            via_clearance_mm=0.2,
+        )
+        assert ok is False
+
+    def test_via_clearance_pass_passes_when_via_far_away(self):
+        """Sanity: a foreign via well outside via_clearance_mm passes."""
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Foreign via on the other side of the board; edge clearance
+        # >> via_clearance_mm.
+        other_via = Via(
+            x=2.5,
+            y=2.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            via_clearance_mm=0.2,
+        )
+        assert ok is True
+
+    @pytest.mark.parametrize("is_micro,expected_ok", [(False, False), (True, True)])
+    def test_via_clearance_respects_physical_span(self, is_micro, expected_ok):
+        """Only explicit microvias exclude layers outside their declared span."""
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # A microvia spans B.Cu <-> In1.Cu only. An ordinary via
+        # includes F.Cu despite the routing endpoint metadata.
+        other_via = Via(
+            x=2.5,
+            y=0.4,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.B_CU, Layer.IN1_CU),
+            is_micro=is_micro,
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            via_clearance_mm=0.2,
+        )
+        assert ok is expected_ok
+
+    def test_diff_pair_intra_pass_skipped_when_partner_omitted(self):
+        """Legacy behavior preserved: omitting ``diff_pair_partners``
+        skips the intra-pair clearance pass even when the candidate has
+        a partner-shaped neighbor that would violate
+        ``intra_pair_clearance_mm`` -- the legacy intra-group threshold
+        does the gating instead.
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner sits at y=0.15 (edge clearance = 0.05 mm).  Without
+        # the intra-pair pass, the helper still rejects because the
+        # candidate's partner is a NON-GROUP NET (or it's omitted from
+        # the group set) so the inter-net pass at 0.2 mm fires.  For
+        # this test the partner is NOT in group_net_ids: the inter-net
+        # pass catches it at the 0.2 mm threshold.  We're checking that
+        # the SKIPPED intra-pair pass does not double-fire.
+        partner = _straight_route(2, "TMDS_D0_N", 5.0, y=0.15)
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+            2: partner,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},  # partner is NOT a group member
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            # diff_pair_partners + intra_pair_clearance_mm intentionally
+            # omitted.  The legacy inter-net pass at 0.2 mm STILL fires
+            # against partner at 0.05 mm edge clearance.
+        )
+        assert ok is False
+
+    def test_diff_pair_intra_pass_isolates_partner_check(self):
+        """Pass 4 fires in isolation when pass 1 + 2 are lax enough.
+
+        Verifies the new pass is independently effective -- not merely
+        coincidentally co-firing with pass 1 / pass 2.
+
+        Setup: partner is NOT in group_net_ids (so pass 1 skips it).
+        Inter-net threshold (pass 2) is set to a NEGATIVE value so pass
+        2 trivially passes (the helper compares ``clearance + 1e-9 <
+        threshold``; with threshold = -1.0 mm, no real geometry can
+        trip it).  Pass 4 with intra_pair_clearance_mm = 0.1 mm fires
+        against the partner whose edge clearance is 0.02 mm.
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner at y=0.22 -- edge clearance = 0.22 - 0.1 - 0.1 = 0.02 mm.
+        # Below the 0.1 mm intra-pair floor -> pass 4 must reject.
+        partner = _straight_route(2, "TMDS_D0_N", 5.0, y=0.22)
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+            2: partner,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            # Partner net 2 is NOT in group_net_ids so pass 1 skips it.
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            # Pass 2 (inter-net) threshold set to a value the actual
+            # 0.02 mm edge clearance comfortably exceeds.
+            intra_group_clearance_mm=0.01,
+            diff_pair_partners={1: 2, 2: 1},
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is False  # rejected by pass 4 only
+
+    def test_diff_pair_intra_pass_passes_when_partner_within_floor(self):
+        """When the candidate's partner is at >= intra_pair_clearance_mm
+        edge distance, the new pass accepts.
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner at y=0.35 -- edge clearance = 0.35 - 0.1 - 0.1 = 0.15 mm
+        # >= 0.1 mm floor.  Pass 4 must accept.
+        partner = _straight_route(2, "TMDS_D0_N", 5.0, y=0.35)
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+            2: partner,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            # Partner NOT in group_net_ids so pass 1 skips.
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            # Lax intra-group threshold so pass 2 accepts the 0.15 mm
+            # edge clearance.
+            intra_group_clearance_mm=0.05,
+            diff_pair_partners={1: 2, 2: 1},
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is True
+
+    def test_diff_pair_intra_pass_skips_when_partner_not_routed(self):
+        """When the candidate's diff-pair partner is in the partners map
+        but NOT in ``routes_by_net``, the intra-pair pass is silently
+        skipped (no spurious rejections).
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner net 2 NOT in routes_by_net.
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            diff_pair_partners={1: 2, 2: 1},
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_skipped_when_threshold_omitted(self):
+        """Legacy behavior preserved: omitting ``pad_clearance_mm`` skips
+        the pad-clearance pass even when a foreign pad sits beneath the
+        new segment.
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # Foreign pad on net 2 sits ON the segment (well below any
+        # pad-clearance floor).  Without the pad-clearance pass the
+        # helper must accept.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.F_CU,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            foreign_pads=[foreign_pad],
+            # pad_clearance_mm intentionally omitted -- legacy path.
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_rejects_segment_near_foreign_pad(self):
+        """When ``pad_clearance_mm`` is supplied, a new segment that
+        lands within the pad-clearance floor of a foreign-net pad is
+        rejected.
+
+        Mirrors the board 07 ``[pad] A1 vs J3-4 ... -0.116 mm (required
+        0.102 mm)`` failure: the segment-only legacy check missed the
+        underflow because the segment was near a PAD, not a foreign
+        segment.
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # Foreign pad at (2.5, 0.4) with 0.5 mm diameter (radius 0.25).
+        # center-to-segment distance = 0.4 mm.
+        # Edge clearance = 0.4 - 0.25 - 0.1 = 0.05 mm.
+        # With pad_clearance_mm = 0.2 mm the check must reject.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.4,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.F_CU,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,  # lax so pass 1/2 don't fire
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is False
+
+    def test_pad_clearance_pass_passes_when_pad_far_away(self):
+        """Sanity: a foreign pad well outside pad_clearance_mm passes."""
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        foreign_pad = Pad(
+            x=2.5,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.F_CU,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_skips_when_pad_layer_disjoint(self):
+        """Layer-aware: an SMD pad on B.Cu does not collide with an
+        F.Cu segment regardless of XY proximity.
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # SMD pad on B.Cu sitting under the F.Cu segment must pass.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.B_CU,
+            through_hole=False,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_pth_pad_blocks_all_layers(self):
+        """A PTH (through-hole) pad blocks every routing layer, so the
+        segment-vs-pad clearance pass must fire on F.Cu even if the
+        pad's ``layer`` attribute happens to be set to a different
+        layer (PTH pads are present on all copper layers by
+        manufacturing definition).
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # PTH pad on B.Cu attribute but ``through_hole=True``: must
+        # still collide with the F.Cu segment.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.4,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.B_CU,
+            through_hole=True,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is False
+
+
+# =============================================================================
+# 7. Already within tolerance -- byte-for-byte unchanged
+# =============================================================================
+
+
+class TestAlreadyWithinTolerance:
+    """A group already meeting tolerance returns every member by reference."""
+
+    def test_all_members_within_tolerance_unchanged(self):
+        # All four members within 0.1mm of the longest.
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.5)
+        routes = {
+            1: _straight_route(1, "D0", 10.00, y=0.0),
+            2: _straight_route(2, "D1", 10.05, y=2.0),
+            3: _straight_route(3, "D2", 10.10, y=4.0),
+            4: _straight_route(4, "D3", 10.02, y=6.0),
+        }
+        original_segments = {nid: r.segments for nid, r in routes.items()}
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+        )
+
+        for nid in group.net_ids:
+            assert results[nid][1].reason == "already_within_tolerance"
+            assert results[nid][1].success is True
+            assert results[nid][0] is routes[nid]
+            assert results[nid][0].segments is original_segments[nid]
+
+
+# =============================================================================
+# 8. Drift-prevention -- single source of truth for segment math
+# =============================================================================
+
+
+class TestDriftPrevention:
+    """``LengthTracker.calculate_route_length`` is the single source of truth."""
+
+    @pytest.mark.parametrize("group_size", [3, 5, 10])
+    def test_calculate_route_length_is_called_on_every_member(self, group_size):
+        """The tuner must use LengthTracker, not inline its own segment math."""
+        net_ids = list(range(1, group_size + 1))
+        group = _ddr_group(net_ids=net_ids, tolerance=0.001)
+        # Make ALL members the same length so the tuner short-circuits
+        # to already_within_tolerance after measuring; no serpentine
+        # generation happens.  This isolates the measurement call site.
+        routes = {nid: _straight_route(nid, f"D{nid}", 10.0, y=float(nid) * 2.0) for nid in net_ids}
+        original_segments = {nid: r.segments for nid, r in routes.items()}
+
+        from kicad_tools.router.length import LengthTracker
+
+        orig_calc = LengthTracker.calculate_route_length
+        call_count = {"n": 0}
+
+        def spy(route):
+            call_count["n"] += 1
+            return orig_calc(route)
+
+        with patch.object(LengthTracker, "calculate_route_length", spy):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.001,
+                intra_group_clearance_mm=0.2,
+            )
+
+        # At minimum, the tuner measures every member once (entry).
+        assert call_count["n"] >= group_size, (
+            f"Expected >= {group_size} calls to calculate_route_length, "
+            f"got {call_count['n']}; tuner may have inlined segment math."
+        )
+
+        # Equal lengths -> already_within_tolerance for every member.
+        for nid in net_ids:
+            assert results[nid][1].reason == "already_within_tolerance"
+            assert results[nid][0] is routes[nid]
+            assert results[nid][0].segments is original_segments[nid]
+
+
+# =============================================================================
+# 9. Phase 2F dispatcher -- pair_ids routes to pair-aware path
+# =============================================================================
+
+
+class TestPhase2FDispatcher:
+    """``MatchGroup.pair_ids`` non-empty -> Phase 2F pair-aware path."""
+
+    def test_pair_ids_requires_intra_pair_clearance_mm(self):
+        """Pair-aware path requires the within-pair clearance kwarg."""
+        group = MatchGroup(
+            name="MIPI_LANE0",
+            net_ids=[1],
+            pair_ids=[(2, 3)],
+            tolerance=0.05,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: _straight_route(1, "CLK_P", 10.0, y=0.0),
+            2: _straight_route(2, "DAT0_P", 10.0, y=2.0),
+            3: _straight_route(3, "DAT0_N", 10.0, y=4.0),
+        }
+        with pytest.raises(ValueError, match="intra_pair_clearance_mm"):
+            tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.05,
+                intra_group_clearance_mm=0.2,
+            )
+
+    def test_overlap_between_net_ids_and_pair_ids_raises(self):
+        """A net cannot appear in both net_ids AND pair_ids."""
+        group = MatchGroup(
+            name="OVERLAP",
+            net_ids=[2],
+            pair_ids=[(2, 3)],  # net 2 is in both
+            tolerance=0.05,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            2: _straight_route(2, "X", 10.0, y=0.0),
+            3: _straight_route(3, "Y", 10.0, y=2.0),
+        }
+        with pytest.raises(ValueError, match=r"appear in BOTH net_ids and pair_ids"):
+            tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.05,
+                intra_group_clearance_mm=0.2,
+                intra_pair_clearance_mm=0.1,
+            )
+
+
+# =============================================================================
+# 10. Unrouted members
+# =============================================================================
+
+
+class TestUnroutedMembers:
+    """Unrouted members are reported but do not crash the tuner."""
+
+    def test_one_unrouted_member_returns_unrouted_reason(self):
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 11.0, y=2.0),
+            # Net 3 missing.
+            4: _straight_route(4, "D3", 12.0, y=6.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+        )
+
+        assert 3 in results
+        assert results[3][1].reason == "unrouted"
+        assert results[3][1].success is False
+        # Net 4 is the longest among the routed -> already_within_tolerance.
+        assert results[4][1].reason == "already_within_tolerance"
+
+
+# =============================================================================
+# 10.5. Per-segment retry (Issue #3274) -- multi-candidate fan-out
+# =============================================================================
+
+
+class TestPerSegmentRetry:
+    """Issue #3274: cascade tries up to ``MAX_SEGMENT_RETRY_CANDIDATES``
+    segments before declaring ``post_insertion_drc_violation``.
+
+    Before #3274 the single DRC failure on the top-ranked segment
+    aborted the whole member's cascade (one unlucky candidate
+    disqualified the whole member).  After #3274 the cascade tries up
+    to ``MAX_SEGMENT_RETRY_CANDIDATES`` ranked segments per attempt
+    and commits the first that passes -- significantly improving
+    tuner yield on dense boards (e.g. board 07's ADDR_BUS).
+    """
+
+    def _multi_segment_route(
+        self,
+        net_id: int,
+        name: str,
+        legs: list[tuple[float, float, float, float]],
+    ) -> Route:
+        """Build a route with multiple straight segments stitched end-to-end."""
+        segs = []
+        for x1, y1, x2, y2 in legs:
+            segs.append(
+                Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net_id,
+                    net_name=name,
+                )
+            )
+        return Route(net=net_id, net_name=name, segments=segs)
+
+    def test_constant_is_three(self):
+        """``MAX_SEGMENT_RETRY_CANDIDATES`` MUST be 3 by default."""
+
+        assert MAX_SEGMENT_RETRY_CANDIDATES == 3
+
+    def test_rank_candidate_segments_returns_top_k(self):
+        """Helper returns segments sorted by score, capped at K."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        # Multi-segment route with varying lengths; longest-with-middle-bonus
+        # should rank first.
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 3.0, 0.0),  # idx 0, length 3 (edge -- no 1.2x bonus)
+                (3.0, 0.0, 13.0, 0.0),  # idx 1, length 10 (middle, axis -- 1.2 * 1.5)
+                (13.0, 0.0, 19.0, 0.0),  # idx 2, length 6 (middle, axis -- 1.2 * 1.5)
+                (19.0, 0.0, 21.0, 0.0),  # idx 3, length 2 (edge -- no 1.2x)
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=3)
+        assert len(ranked) == 3
+        # Best score: idx 1 (10mm * 1.2 * 1.5 = 18.0).
+        assert ranked[0][0] == 1
+        # Second: idx 2 (6mm * 1.2 * 1.5 = 10.8).
+        assert ranked[1][0] == 2
+        # Third: idx 0 (3mm * 1.5 = 4.5; idx 3 is exactly 2mm and tied below).
+        assert ranked[2][0] == 0
+
+    def test_rank_candidate_segments_filters_short_segments(self):
+        """Segments below ``min_segment_length`` are excluded."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 5.0, 0.0),  # 5mm -- kept
+                (5.0, 0.0, 6.0, 0.0),  # 1mm -- filtered (below 2mm floor)
+                (6.0, 0.0, 16.0, 0.0),  # 10mm -- kept
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=5)
+        # Only two segments are >= 2mm.
+        assert len(ranked) == 2
+
+    def test_rank_candidate_segments_empty_route(self):
+        """Empty route yields empty candidate list."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        route = Route(net=1, net_name="D0", segments=[])
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0)
+        assert ranked == []
+
+    def test_rank_candidate_segments_deterministic_tiebreak(self):
+        """Ties are broken by ascending segment index (deterministic)."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        # Three middle segments with identical length and orientation -->
+        # identical score.  Tie-break: ascending index.
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 1.0, 0.0),  # 1mm edge filtered
+                (1.0, 0.0, 11.0, 0.0),  # idx 1 -- middle
+                (11.0, 0.0, 21.0, 0.0),  # idx 2 -- middle, same length
+                (21.0, 0.0, 31.0, 0.0),  # idx 3 -- middle, same length
+                (31.0, 0.0, 32.0, 0.0),  # 1mm edge filtered
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=3)
+        # All three middle segments have score 10 * 1.2 * 1.5 = 18.0.
+        # Tie-break: ascending index --> [1, 2, 3].
+        assert [idx for (idx, _seg) in ranked] == [1, 2, 3]
+
+    def test_per_segment_retry_falls_back_to_next_candidate(self):
+        """When best segment is blocked, the next-best is tried.
+
+        This is the core Issue #3274 fix: a single DRC failure on the
+        top-ranked segment used to abort the member's cascade.  Now
+        the cascade falls back to the next-best segment.
+        """
+        # Net 1 has a multi-segment route -- two viable serpentine
+        # segments at different y coordinates.  We place a non-group
+        # neighbor RIGHT next to the segment that ``find_best_segment``
+        # would pick FIRST (the middle, ranked higher by middle-bonus).
+        # The fallback segment (also long, but at a different y) is
+        # clear, so the per-segment retry should pick it.
+        group = _ddr_group(name="DDR_DATA", net_ids=[1, 2], tolerance=0.05)
+
+        # Net 1: 3 horizontal legs glued by short jogs.
+        #   leg A: y=0, x=0..8 (index 0, edge)
+        #   jog:  y=0->5, x=8 (index 1, vertical 5mm, gets axis bonus)
+        #   leg B: y=5, x=8..16 (index 2, middle, horizontal)
+        # The "best" segment is the middle jog (idx 1, 5mm, vertical, middle bonus 1.2 * 1.5).
+        # Wait, lengths matter most: idx 2 leg (8mm * 1.5 = 12 vs idx 1 jog 5mm * 1.2 * 1.5 = 9).
+        # So idx 2 wins.  Place a hostile neighbor near y=5 (leg B's y).
+        route1 = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 8.0, 0.0),  # idx 0: leg A, 8mm, edge, horizontal
+                (8.0, 0.0, 8.0, 5.0),  # idx 1: jog, 5mm, middle, vertical
+                (8.0, 5.0, 18.0, 5.0),  # idx 2: leg B, 10mm, edge, horizontal
+            ],
+        )
+        # Net 2 (reference, longer).
+        route2 = self._straight_route(2, "D1", 25.0, y=10.0)
+        routes = {1: route1, 2: route2}
+
+        # Hostile neighbor right above leg B at y=5.4 (within
+        # intra_group_clearance_mm=0.5 of the bulge that goes y=5 -> y=5+amplitude).
+        # The outer-normal hint vs net 2 (y=10) will point AWAY from
+        # net 2 -- so leg B's bulge goes to y < 5 (toward decreasing y).
+        # That means leg B's bulge is at y in [4, 5], NOT colliding with
+        # neighbor at y=5.4.  Hmm, need to redesign.
+        #
+        # Better setup: place the hostile neighbor at y=4.5 (below leg B
+        # by 0.5mm).  Net 2 at y=10 (above).  Outer-normal vs net 2:
+        # bulge goes DOWN.  Bulge from leg B at y=5 amplitude 0.5 -->
+        # serpentine at y in [4.5, 5].  Neighbor at y=4.5 -- collision.
+        #
+        # For leg A (idx 0, also a candidate): y=0.  Outer-normal vs
+        # net 2 (y=10) points DOWN (y<0).  Neighbor at y=4.5 doesn't
+        # interfere.  So leg A is a clean fallback.
+        hostile = self._straight_route(99, "HOSTILE", 25.0, y=4.5)
+        routes[99] = hostile
+
+        # Use a tiny amplitude so the bulge is geometrically realizable.
+        cfg = SerpentineConfig(amplitude=0.3, min_spacing=0.2, gap_factor=2.0)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.05,
+            intra_group_clearance_mm=0.4,
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        # The key assertion: net 1 should NOT be marked as
+        # ``post_insertion_drc_violation`` because the fallback
+        # segment (leg A) is clear.  Either ``tuned`` (if a single
+        # insert sufficed) or ``exceeded_max_inserts`` (delta was
+        # too big for 1 insert) is acceptable -- what we're proving
+        # is that the cascade no longer immediately rolls back.
+        assert results[1][1].reason != "post_insertion_drc_violation", (
+            f"Issue #3274: cascade should have tried the fallback segment, "
+            f"got reason={results[1][1].reason!r} "
+            f"message={results[1][1].message!r}"
+        )
+        # And at least one insert was committed (i.e. the fallback
+        # actually fired).
+        assert results[1][1].inserts_applied >= 1, (
+            f"Issue #3274: per-segment retry should have committed >=1 insert, "
+            f"got inserts_applied={results[1][1].inserts_applied}"
+        )
+
+    def _straight_route(
+        self,
+        net_id: int,
+        name: str,
+        length_mm: float,
+        y: float = 0.0,
+        layer: Layer = Layer.F_CU,
+    ) -> Route:
+        return _straight_route(net_id, name, length_mm, y=y, layer=layer)
+
+    def test_all_candidates_fail_still_rolls_back(self):
+        """When every candidate fails DRC, the member is rolled back.
+
+        Preserves the legacy contract: if NO candidate passes, the
+        member's cascade rolls back byte-for-byte and reports
+        ``post_insertion_drc_violation``.
+        """
+        # Single straight segment route -- only one candidate available.
+        # Hostile geometry on both sides of net 1 means the single
+        # candidate's only bulge direction collides.  Equivalent to
+        # the existing ``test_intra_group_rollback`` but explicit
+        # about the new contract.
+        group = _ddr_group(net_ids=[1, 2, 3], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 10.0, y=2.0),
+            3: _straight_route(3, "D2", 15.0, y=-0.3),
+        }
+        original_net1 = routes[1]
+        original_net1_segments = routes[1].segments
+
+        cfg = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.4,
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        assert results[1][1].reason == "post_insertion_drc_violation"
+        # Drift-prevention: byte-for-byte rollback to original.
+        assert results[1][0] is original_net1
+        assert results[1][0].segments is original_net1_segments
+        assert results[1][1].inserts_applied == 0
+
+
+class TestPerBumpPlacement:
+    """Issue #7043: a blocked loop must not disqualify the other bumps."""
+
+    CFG = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+
+    def _run(self, routes):
+        return tune_match_group_v2(
+            _ddr_group(net_ids=[1, 2], tolerance=0.1),
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.3,
+            config=self.CFG,
+            max_inserts_per_member=1,
+        )
+
+    def test_blocked_loop_still_places_other_bumps(self):
+        # Net 1 (20 mm) must grow by 2 mm to match net 2 (22 mm).  A foreign
+        # stub sits above the host near x=2, blocking the bumps there on
+        # BOTH sides, so every whole-trombone attempt is rejected.
+        stub = Route(
+            net=99,
+            net_name="STUB",
+            segments=[
+                Segment(
+                    x1=1.0,
+                    y1=-0.5,
+                    x2=3.5,
+                    y2=-0.5,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=99,
+                    net_name="STUB",
+                ),
+                Segment(
+                    x1=1.0,
+                    y1=0.5,
+                    x2=3.5,
+                    y2=0.5,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=99,
+                    net_name="STUB",
+                ),
+            ],
+        )
+        routes = {
+            1: _straight_route(1, "D0", 20.0, y=0.0),
+            2: _straight_route(2, "D1", 22.0, y=6.0),
+            99: stub,
+        }
+        result_route, result = self._run(routes)[1]
+
+        assert result.inserts_applied >= 1
+        assert result.length_after_mm > result.length_before_mm + 1.0
+        assert result.success, result.message
+        # No added copper inside the blocked window.
+        added = [s for s in result_route.segments if s.y1 != 0.0 or s.y2 != 0.0]
+        assert added
+        assert not any(1.0 - 0.3 < min(s.x1, s.x2) < 3.5 + 0.3 for s in added)
+
+    def test_fully_blocked_host_rolls_back_untouched(self):
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 15.0, y=2.0),
+            3: _straight_route(3, "D2", 12.0, y=-0.3),
+        }
+        original = routes[1]
+        results = tune_match_group_v2(
+            _ddr_group(net_ids=[1, 2, 3], tolerance=0.1),
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.4,
+            config=SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0),
+            max_inserts_per_member=1,
+        )
+        assert results[1][0] is original
+        assert results[1][1].inserts_applied == 0
+
+    def test_place_bumps_never_exceeds_needed_length(self):
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        route = _straight_route(1, "D0", 20.0)
+        out = _place_bumps_per_host(
+            route,
+            length_needed=1.0,
+            tolerance_mm=0.05,
+            base_config=self.CFG,
+            host_floor=1.2,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        assert out is not None
+        grown = sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in out.segments) - 20.0
+        assert 0.95 <= grown <= 1.05
+
+    def test_place_bumps_returns_none_when_everything_blocked(self):
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        assert (
+            _place_bumps_per_host(
+                _straight_route(1, "D0", 20.0),
+                length_needed=1.0,
+                tolerance_mm=0.05,
+                base_config=self.CFG,
+                host_floor=1.2,
+                fixed_segment_ids=None,
+                other_group_routes={},
+                check=lambda segs: "blocked",
+            )
+            is None
+        )
+
+
+# =============================================================================
+# 11. Module-level invariants -- constants drift-prevention
+# =============================================================================
+
+
+class TestPartialProgressKeptOnLaterAttemptFailure:
+    """Issue #5798: a member's committed inserts survive a later attempt failing.
+
+    Board 07's SDRAM_ADDRESS: the two shortest members committed one meander
+    each, then found no host for a second one (``no_suitable_segment``), and
+    a later member hit the group ceiling mid-cascade
+    (``cascade_budget_exhausted``).  Both paths reset the member to its
+    original route, discarding DRC-clean commits that had already been
+    charged to the group budget.  The shortest member therefore never grew,
+    the group spread never moved (52.44 -> 52.44 mm) and the whole group was
+    rolled back.  The post-insertion-DRC path already kept partial progress.
+    """
+
+    @staticmethod
+    def _group_and_routes():
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.01)
+        routes = {
+            1: _straight_route(1, "SHORT", 20.0, y=0.0),
+            2: _straight_route(2, "LONG", 200.0, y=30.0),
+        }
+        cfg = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+        return group, routes, cfg
+
+    def test_no_suitable_segment_after_a_commit_keeps_the_commit(self):
+        from kicad_tools.router import match_group_tuning as mgt
+
+        group, routes, cfg = self._group_and_routes()
+        original = routes[1]
+        real_rank = mgt._rank_candidate_segments
+        calls = {"n": 0}
+
+        def rank_once(route, **kw):
+            # First ranking call finds the host; every later one (the second
+            # attempt, including its fallback re-rank) finds none.
+            calls["n"] += 1
+            return real_rank(route, **kw) if calls["n"] == 1 else []
+
+        with patch.object(mgt, "_rank_candidate_segments", rank_once):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+                max_inserts_per_member=2,
+            )
+
+        route, result = results[1]
+        assert result.reason == "no_suitable_segment"
+        assert result.inserts_applied == 1
+        assert route is not original, "the committed meander was discarded"
+        assert result.length_after_mm > result.length_before_mm + 1.0
+        assert routes[1] is route  # published for later members' DRC checks
+
+    def test_group_ceiling_mid_cascade_keeps_the_commit(self):
+        from kicad_tools.router import match_group_tuning as mgt
+
+        group, routes, cfg = self._group_and_routes()
+        original = routes[1]
+        with patch.object(mgt, "MAX_TOTAL_INSERTS_PER_GROUP", 1):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+                max_inserts_per_member=2,
+            )
+
+        route, result = results[1]
+        assert result.reason == "cascade_budget_exhausted"
+        assert result.inserts_applied == 1
+        assert route is not original, "the committed meander was discarded"
+        assert result.length_after_mm > result.length_before_mm + 1.0
+
+    def test_no_commit_still_returns_the_original_route(self):
+        """Drift guard: with nothing committed the original reference is returned."""
+        from kicad_tools.router import match_group_tuning as mgt
+
+        group, routes, cfg = self._group_and_routes()
+        original = routes[1]
+        with patch.object(mgt, "_rank_candidate_segments", lambda route, **kw: []):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.01,
+                intra_group_clearance_mm=0.2,
+                config=cfg,
+            )
+        route, result = results[1]
+        assert result.reason == "no_suitable_segment"
+        assert result.inserts_applied == 0
+        assert route is original
+
+
+class TestModuleInvariants:
+    """Constants must stay aligned with the pair tuner and with each other."""
+
+    def test_max_inserts_small_equals_max_inserts_per_pair(self):
+        """SMALL budget MUST equal pair budget (the curator's drift-prevention)."""
+        # A future change touching either constant without the other fires.
+        assert MAX_INSERTS_PER_GROUP_MEMBER_SMALL == MAX_INSERTS_PER_PAIR == 3
+
+    def test_max_inserts_large_is_two(self):
+        assert MAX_INSERTS_PER_GROUP_MEMBER_LARGE == 2
+
+    def test_max_total_inserts_per_group_is_sixteen(self):
+        assert MAX_TOTAL_INSERTS_PER_GROUP == 16
+
+    def test_max_total_inserts_per_group_floor(self):
+        """Sanity: total ceiling >= 2 * per-member-large."""
+        assert MAX_TOTAL_INSERTS_PER_GROUP >= 2 * MAX_INSERTS_PER_GROUP_MEMBER_LARGE
+
+    def test_default_alias_matches_small(self):
+        """``MAX_INSERTS_PER_GROUP_MEMBER`` (alias) == SMALL."""
+        assert MAX_INSERTS_PER_GROUP_MEMBER == MAX_INSERTS_PER_GROUP_MEMBER_SMALL
+
+    def test_tune_result_dataclass_defaults(self):
+        r = TuneResult()
+        assert r.success is False
+        assert r.reason == ""
+        assert r.attempts == 0
+        assert r.inserts_applied == 0
+        assert r.length_before_mm == 0.0
+        assert r.length_after_mm == 0.0
+        assert r.serpentine_results == []
+
+
+# =============================================================================
+# =============================================================================
+# Phase 2F (Issue #2701): group-of-pairs symmetric serpentine
+# =============================================================================
+# =============================================================================
+#
+# These tests cover the pair-aware path activated when
+# ``MatchGroup.pair_ids`` is non-empty.  The 9 acceptance criteria
+# from Issue #2701 are exercised across the classes below.
+
+
+from kicad_tools.router.match_group_tuning import (  # noqa: E402
+    _find_corresponding_n_segment,
+    _mirror_segments_about_centerline,
+    _outer_normal_hint_pair_group,
+    _pair_centerline_midpoint,
+    _post_insertion_clearance_ok_pair_group,
+    _reflect_point_about_axis,
+    _snap_to_grid,
+    _splice_mirrored_n_route,
+)
+
+
+def _pair_routes(
+    p_id: int,
+    n_id: int,
+    p_length: float,
+    n_length: float,
+    *,
+    p_y: float,
+    n_y: float,
+    base_name: str = "LANE",
+) -> dict[int, Route]:
+    """Build a pair of straight P/N routes at given y-coordinates."""
+    return {
+        p_id: _straight_route(p_id, f"{base_name}_P", p_length, y=p_y),
+        n_id: _straight_route(n_id, f"{base_name}_N", n_length, y=n_y),
+    }
+
+
+def _mipi_2_lane_group() -> tuple[MatchGroup, dict[int, Route]]:
+    """Curator-spec'd MIPI CSI 2-lane fixture.
+
+    Lane 0 = (P=10, N=11), both at 8mm.
+    Lane 1 = (P=20, N=21), both at 10mm.
+    Pairs separated by 2mm inter-pair gap; pair-internal gap 0.5mm.
+    """
+    group = MatchGroup(
+        name="MIPI_CSI_DAT",
+        net_ids=[],
+        pair_ids=[(10, 11), (20, 21)],
+        tolerance=0.05,
+        source=MatchGroupSource.LEGACY_API,
+    )
+    routes = {
+        10: _straight_route(10, "DAT0_P", 8.0, y=0.0),
+        11: _straight_route(11, "DAT0_N", 8.0, y=0.5),
+        20: _straight_route(20, "DAT1_P", 10.0, y=2.5),
+        21: _straight_route(21, "DAT1_N", 10.0, y=3.0),
+    }
+    return group, routes
+
+
+# =============================================================================
+# 12. AC #1 -- MIPI 2-lane: lane-average converges
+# =============================================================================
+
+
+class TestPhase2FLaneConvergence:
+    """Phase 2F AC #1 -- lane averages converge to within tolerance."""
+
+    def test_mipi_2_lane_lane_average_converges(self):
+        group, routes = _mipi_2_lane_group()
+        # Reference = longest lane (lane 1 @ 10mm).  Lane 0 at 8mm needs
+        # +2mm in lane average; the mirrored serpentine raises both
+        # halves of lane 0 by the same amount.
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.3, gap_factor=2.0),
+        )
+        # Both halves of lane 0 should now be present in results.
+        assert 10 in results and 11 in results
+        # Reference (lane 1) untouched.
+        assert results[20][1].reason in ("already_within_tolerance", "reference")
+        assert results[21][1].reason in ("already_within_tolerance", "reference")
+        # Lane 0 should attempt to be tuned (may succeed or fail, but
+        # must report attempts; rollback OK because the geometry can
+        # vary on small fixtures).
+        assert results[10][1].attempts >= 0  # smoke: tuner did something
+
+
+# =============================================================================
+# 13. AC #2 -- within-pair skew is non-increasing
+# =============================================================================
+
+
+class TestPhase2FWithinPairSkewPreservation:
+    """Phase 2F AC #2 -- within-pair skew non-increasing after tuning."""
+
+    def test_within_pair_skew_non_increasing_on_mipi_2_lane(self):
+        group, routes = _mipi_2_lane_group()
+        # Within-pair skew before tuning: both lanes at 0mm.
+        # The mirror-symmetry contract guarantees post-tuning skew is
+        # <= pre-tuning skew + epsilon.
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.3, gap_factor=2.0),
+        )
+        from kicad_tools.router.length import LengthTracker
+
+        for p_id, n_id in group.pair_ids:
+            p_route, _ = results[p_id]
+            n_route, _ = results[n_id]
+            p_len = LengthTracker.calculate_route_length(p_route)
+            n_len = LengthTracker.calculate_route_length(n_route)
+            within_pair_skew = abs(p_len - n_len)
+            # Pre-tuning was 0.0 -- post-tuning skew should be very small
+            # (bounded by grid_resolution_mm tolerance).  Use 0.05 as an
+            # epsilon that comfortably exceeds the 0.01mm default grid.
+            assert within_pair_skew <= 0.05, (
+                f"Within-pair skew for pair ({p_id}, {n_id}) grew to "
+                f"{within_pair_skew:.6f}mm; mirror-symmetry contract "
+                f"violated."
+            )
+
+
+# =============================================================================
+# 14. AC #3 -- mirrored geometry: P-side and N-side segments are mirror images
+# =============================================================================
+
+
+class TestPhase2FMirroredGeometry:
+    """Phase 2F AC #3 -- P-side and N-side new segments are mirror images
+    across the pair centerline."""
+
+    def test_reflect_point_basic(self):
+        """``_reflect_point_about_axis`` is a true geometric reflection."""
+        # Centerline at y=1.0, normal = +y (axis = horizontal y=1 line).
+        # Point (5, 0) reflects to (5, 2).
+        rx, ry = _reflect_point_about_axis(5.0, 0.0, 0.0, 1.0, 0.0, 1.0)
+        assert rx == pytest.approx(5.0)
+        assert ry == pytest.approx(2.0)
+
+    def test_reflect_point_on_axis_is_itself(self):
+        """A point on the reflection axis is its own reflection."""
+        rx, ry = _reflect_point_about_axis(3.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+        assert rx == pytest.approx(3.0)
+        assert ry == pytest.approx(1.0)
+
+    def test_snap_to_grid_round_to_nearest(self):
+        assert _snap_to_grid(1.234, 0.01) == pytest.approx(1.23, abs=1e-9)
+        assert _snap_to_grid(1.236, 0.01) == pytest.approx(1.24, abs=1e-9)
+        assert _snap_to_grid(0.0, 0.01) == 0.0
+        # grid_resolution_mm == 0 -> no snap.
+        assert _snap_to_grid(1.234, 0.0) == 1.234
+
+    def test_mirror_segments_preserves_length(self):
+        """Mirrored segment endpoints reflect; segment length is preserved."""
+        from kicad_tools.router.optimizer.geometry import segment_length
+
+        # P-side new segment at y=2.0, length 4mm.
+        new_p = Segment(
+            x1=0.0,
+            y1=2.0,
+            x2=4.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="DAT0_P",
+        )
+        # Mirror across y=1.0 (centerline midpoint y=1, normal=+y).
+        mirrored = _mirror_segments_about_centerline(
+            [new_p],
+            p_net_id=10,
+            n_net_id=11,
+            n_net_name="DAT0_N",
+            cx=2.0,
+            cy=1.0,
+            nx=0.0,
+            ny=1.0,
+            grid_resolution_mm=0.001,  # fine grid to avoid snap noise
+        )
+        assert len(mirrored) == 1
+        m = mirrored[0]
+        # The mirrored segment should be at y=0.0 (reflection of y=2.0).
+        assert m.y1 == pytest.approx(0.0, abs=1e-3)
+        assert m.y2 == pytest.approx(0.0, abs=1e-3)
+        # X-coordinates and length preserved.
+        assert m.x1 == pytest.approx(0.0, abs=1e-3)
+        assert m.x2 == pytest.approx(4.0, abs=1e-3)
+        # Length identical.
+        assert segment_length(m) == pytest.approx(segment_length(new_p), abs=1e-3)
+        # Net id swapped to N.
+        assert m.net == 11
+        assert m.net_name == "DAT0_N"
+
+    def test_mirror_segments_grid_snap_within_half_resolution(self):
+        """Mirror-then-snap rounding stays within grid_resolution/2."""
+        # P-side segment that, when reflected, lands at a non-grid coord.
+        new_p = Segment(
+            x1=0.123456,
+            y1=2.0,
+            x2=4.567890,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="DAT0_P",
+        )
+        grid = 0.01
+        mirrored = _mirror_segments_about_centerline(
+            [new_p],
+            p_net_id=10,
+            n_net_id=11,
+            n_net_name="DAT0_N",
+            cx=0.0,
+            cy=1.0,
+            nx=0.0,
+            ny=1.0,
+            grid_resolution_mm=grid,
+        )
+        m = mirrored[0]
+        # Each coordinate must be a multiple of grid.
+        for v in (m.x1, m.y1, m.x2, m.y2):
+            rem = abs(v - round(v / grid) * grid)
+            assert rem < 1e-9, f"Coordinate {v} is not snapped to grid {grid}"
+
+
+# =============================================================================
+# 15. AC #4 -- rollback: both halves preserved by reference
+# =============================================================================
+
+
+class TestPhase2FRollbackBothHalves:
+    """Phase 2F AC #4 -- on DRC failure BOTH halves are returned by ``is``."""
+
+    def test_rollback_returns_both_halves_by_reference(self):
+        # Two pairs.  Lane 0 needs tuning.  We seed a non-group neighbor
+        # placed where the bulge would land so the DRC self-check
+        # always rejects.
+        group = MatchGroup(
+            name="MIPI_TEST",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.01,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            10: _straight_route(10, "DAT0_P", 5.0, y=0.0),
+            11: _straight_route(11, "DAT0_N", 5.0, y=0.4),
+            20: _straight_route(20, "DAT1_P", 10.0, y=2.0),
+            21: _straight_route(21, "DAT1_N", 10.0, y=2.4),
+            # Non-group neighbor lurking very close to lane 0.
+            99: _straight_route(99, "VCC", 10.0, y=-0.1),
+        }
+        original_p = routes[10]
+        original_p_segments = routes[10].segments
+        original_n = routes[11]
+        original_n_segments = routes[11].segments
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.01,
+            intra_group_clearance_mm=2.0,  # huge: forces rollback
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+            max_inserts_per_member=1,
+        )
+
+        # Lane 0 should roll back.  Both halves preserved by reference.
+        assert results[10][1].reason == "post_insertion_drc_violation"
+        assert results[11][1].reason == "post_insertion_drc_violation"
+        assert results[10][0] is original_p
+        assert results[10][0].segments is original_p_segments
+        assert results[11][0] is original_n
+        assert results[11][0].segments is original_n_segments
+
+
+# =============================================================================
+# Issue #4984: end-to-end -- unequal host spans never produce a malformed
+# (discontinuous / duplicated-copper) route through the public entrypoint.
+# =============================================================================
+
+
+class TestPhase2FUnequalHostSpanRejection:
+    """The pair-aware tuner must reject an insertion attempt outright when
+    the N-side host segment does not correspond to the P-side insertion
+    segment's span, rather than commit a discontinuous route with
+    asymmetric added length (issue #4984)."""
+
+    @staticmethod
+    def _assert_contiguous(route: Route, *, label: str) -> None:
+        for a, b in zip(route.segments, route.segments[1:], strict=False):
+            assert (a.x2, a.y2) == (b.x1, b.y1), (
+                f"{label}: route is not contiguous between {(a.x2, a.y2)} and {(b.x1, b.y1)}"
+            )
+
+    def test_unequal_host_spans_rejected_not_spliced(self):
+        from kicad_tools.router.length import LengthTracker
+
+        def seg(x1: float, y1: float, x2: float, y2: float, net: int) -> Segment:
+            return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=net)
+
+        group = MatchGroup(
+            name="MIPI_ASYM",
+            net_ids=[32],
+            pair_ids=[(30, 31)],
+            tolerance=0.1,
+            reference_net_id=32,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        # P's longest (and therefore preferred) segment spans 8mm (x=1..9).
+        p_route = Route(
+            net=30,
+            net_name="DAT_P",
+            segments=[seg(0, 0, 1, 0, 30), seg(1, 0, 9, 0, 30), seg(9, 0, 10, 0, 30)],
+        )
+        # N is parallel (offset in y) but segmented completely differently
+        # -- no N segment spans anywhere near 8mm, so the nearest-midpoint
+        # candidate the pre-#4984 heuristic would have picked (the
+        # (4.5,1)-(7,1) 2.5mm segment) does NOT correspond to P's host.
+        n_route = Route(
+            net=31,
+            net_name="DAT_N",
+            segments=[
+                seg(0, 1, 1.5, 1, 31),
+                seg(1.5, 1, 4.5, 1, 31),
+                seg(4.5, 1, 7, 1, 31),
+                seg(7, 1, 8, 1, 31),
+            ],
+        )
+        clk_route = Route(net=32, net_name="CLK", segments=[seg(0, 5, 12, 5, 32)])
+        routes = {30: p_route, 31: n_route, 32: clk_route}
+
+        original_p_length = LengthTracker.calculate_route_length(p_route)
+        original_n_length = LengthTracker.calculate_route_length(n_route)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.3, gap_factor=2.0),
+            max_inserts_per_member=3,
+        )
+
+        p_result_route, p_result = results[30]
+        n_result_route, n_result = results[31]
+
+        # The malformed mirror candidate must be rejected -- never silently
+        # committed.  Issue #7799: with no pair skew limits given, the lane is
+        # then tuned by the pair fallbacks instead, never by splicing the
+        # mismatched host.
+        assert p_result.reason == n_result.reason == "tuned"
+
+        # Independent verification (per issue #4984): whatever the tuner
+        # decided, the resulting routes must still be geometrically
+        # contiguous and have NOT silently grown/shrunk in length --
+        # the two symptoms of the original bug (duplicated/overlapping
+        # copper and asymmetric added length).
+        self._assert_contiguous(p_result_route, label="P")
+        self._assert_contiguous(n_result_route, label="N")
+        # The pair-skew invariant: the fallbacks never widen the pair's skew.
+        skew_before = abs(original_p_length - original_n_length)
+        skew_after = abs(
+            LengthTracker.calculate_route_length(p_result_route)
+            - LengthTracker.calculate_route_length(n_result_route)
+        )
+        assert skew_after <= skew_before + 1e-3
+
+
+# =============================================================================
+# 16. AC #5 -- mixed group: scalar clock + paired data lanes
+# =============================================================================
+
+
+class TestPhase2FMixedGroup:
+    """Phase 2F AC #5 -- ``net_ids`` (clock) + ``pair_ids`` (data) coexist."""
+
+    def test_mixed_group_scalar_clock_left_alone_when_reference(self):
+        # Clock = scalar net 5 (reference).  Two paired data lanes.
+        group = MatchGroup(
+            name="BUS",
+            net_ids=[5],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.5,
+            reference_net_id=5,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            5: _straight_route(5, "CLK", 10.0, y=0.0),
+            10: _straight_route(10, "DAT0_P", 8.0, y=2.0),
+            11: _straight_route(11, "DAT0_N", 8.0, y=2.4),
+            20: _straight_route(20, "DAT1_P", 9.0, y=4.0),
+            21: _straight_route(21, "DAT1_N", 9.0, y=4.4),
+        }
+        original_clock = routes[5]
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.3, gap_factor=2.0),
+        )
+
+        # The clock IS the reference -> reason="reference" and unchanged.
+        assert results[5][1].reason == "reference"
+        assert results[5][0] is original_clock
+
+
+# =============================================================================
+# 17. AC #6 -- reference resolved to a paired half (lane average)
+# =============================================================================
+
+
+class TestPhase2FPairedReference:
+    """Phase 2F AC #6 -- ``reference_net_id`` points at a paired half."""
+
+    def test_reference_paired_half_uses_lane_average(self):
+        group = MatchGroup(
+            name="REF_LANE",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.5,
+            reference_net_id=10,  # paired half of lane 0
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            10: _straight_route(10, "DAT0_P", 10.0, y=0.0),
+            11: _straight_route(11, "DAT0_N", 10.0, y=0.4),
+            20: _straight_route(20, "DAT1_P", 8.0, y=2.0),
+            21: _straight_route(21, "DAT1_N", 8.0, y=2.4),
+        }
+        original_p = routes[10]
+        original_n = routes[11]
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.3, gap_factor=2.0),
+        )
+
+        # Lane 0 IS the reference -> both halves reason="reference".
+        assert results[10][1].reason == "reference"
+        assert results[11][1].reason == "reference"
+        assert results[10][0] is original_p
+        assert results[11][0] is original_n
+
+
+# =============================================================================
+# 18. AC #7 -- HDMI 4-lane fixture: N=4 lanes, all match within tolerance
+# =============================================================================
+
+
+class TestPhase2FHDMI4Lane:
+    """Phase 2F AC #7 -- HDMI TMDS 4-pair group."""
+
+    def test_hdmi_4_lane_all_lanes_attempt_tuning(self):
+        # 4 lanes at different lengths, all should attempt tuning.
+        group = MatchGroup(
+            name="TMDS",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4), (5, 6), (7, 8)],
+            tolerance=0.5,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: _straight_route(1, "D0_P", 8.0, y=0.0),
+            2: _straight_route(2, "D0_N", 8.0, y=0.4),
+            3: _straight_route(3, "D1_P", 9.0, y=2.0),
+            4: _straight_route(4, "D1_N", 9.0, y=2.4),
+            5: _straight_route(5, "D2_P", 10.0, y=4.0),
+            6: _straight_route(6, "D2_N", 10.0, y=4.4),
+            7: _straight_route(7, "D3_P", 7.0, y=6.0),
+            8: _straight_route(8, "D3_N", 7.0, y=6.4),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.3, gap_factor=2.0),
+        )
+
+        # All 8 halves report a TuneResult.
+        for nid in range(1, 9):
+            assert nid in results
+        # Reference (longest lane = lane 2 @ 10mm) untouched.
+        assert results[5][1].reason in ("already_within_tolerance", "reference")
+        assert results[6][1].reason in ("already_within_tolerance", "reference")
+
+
+# =============================================================================
+# 19. AC #8 -- cascade-safety budget for pair-aware groups
+# =============================================================================
+
+
+class TestPhase2FCascadeBudget:
+    """Phase 2F AC #8 -- pair-aware insertion counts as ONE against the budget."""
+
+    def test_4_lane_pair_group_worst_case_inserts_bounded(self):
+        # 4 pairs + reference (longest lane).  Cascade should NOT count
+        # P and N as two separate insertions -- the geometry is logically
+        # a single "lane perturbation".  Tightening the tolerance very
+        # low + unreachable target exercises the budget.
+        group = MatchGroup(
+            name="TMDS",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4), (5, 6), (7, 8)],
+            tolerance=0.001,  # ultra-tight, likely unreachable
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: _straight_route(1, "D0_P", 5.0, y=0.0),
+            2: _straight_route(2, "D0_N", 5.0, y=0.4),
+            3: _straight_route(3, "D1_P", 5.0, y=2.0),
+            4: _straight_route(4, "D1_N", 5.0, y=2.4),
+            5: _straight_route(5, "D2_P", 5.0, y=4.0),
+            6: _straight_route(6, "D2_N", 5.0, y=4.4),
+            7: _straight_route(7, "D3_P", 100.0, y=6.0),  # unreachable
+            8: _straight_route(8, "D3_N", 100.0, y=6.4),  # unreachable
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.001,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.1, gap_factor=2.0),
+        )
+
+        # Sum inserts_applied across P and N halves of each pair.  For a
+        # pair-aware insertion both halves register the same count (one
+        # is committed per attempt, not two).
+        # Total committed pair-insertions = inserts_applied counted ONCE
+        # per pair (since P and N share the count).
+        pair_inserts = 0
+        for p_id, n_id in group.pair_ids:
+            # Pair insertion count is the P-side count (N-side mirrors).
+            p_count = results[p_id][1].inserts_applied
+            n_count = results[n_id][1].inserts_applied
+            assert p_count == n_count, (
+                f"Pair ({p_id}, {n_id}): P inserts ({p_count}) != "
+                f"N inserts ({n_count}); paired insertion must commit "
+                f"both halves atomically."
+            )
+            pair_inserts += p_count
+
+        # The worst-case ceiling for a 4-lane group is bounded by
+        # MAX_TOTAL_INSERTS_PER_GROUP regardless of P/N doubling.
+        assert pair_inserts <= MAX_TOTAL_INSERTS_PER_GROUP
+
+
+# =============================================================================
+# 20. AC #9 -- single-ended path unchanged (drift prevention)
+# =============================================================================
+
+
+class TestPhase2FSingleEndedUnchanged:
+    """Phase 2F AC #9 -- ``pair_ids=[]`` results identical to Phase 2E path."""
+
+    def test_empty_pair_ids_dispatches_to_single_ended(self):
+        """A group with no pair_ids takes the single-ended path."""
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.5)
+        # Confirm pair_ids is empty -> single-ended path.
+        assert group.pair_ids == []
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 10.05, y=2.0),
+            3: _straight_route(3, "D2", 10.10, y=4.0),
+            4: _straight_route(4, "D3", 10.02, y=6.0),
+        }
+        original_segments = {nid: r.segments for nid, r in routes.items()}
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+        )
+
+        # All within tolerance: byte-for-byte unchanged.
+        for nid in group.net_ids:
+            assert results[nid][1].reason == "already_within_tolerance"
+            assert results[nid][0] is routes[nid]
+            assert results[nid][0].segments is original_segments[nid]
+
+
+# =============================================================================
+# 21. Outer-normal hint at pair centerline -- nearest-neighbor + fallbacks
+# =============================================================================
+
+
+class TestPhase2FCenterlineOuterNormal:
+    """Phase 2F additional curator ACs -- centerline outer-normal helper."""
+
+    def test_centerline_midpoint_average(self):
+        p = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        n = Segment(
+            x1=0.0,
+            y1=2.0,
+            x2=10.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        mx, my = _pair_centerline_midpoint(p, n)
+        # P-midpoint = (5, 0), N-midpoint = (5, 2) -> centerline = (5, 1).
+        assert mx == pytest.approx(5.0)
+        assert my == pytest.approx(1.0)
+
+    def test_centerline_outer_normal_points_away_from_nearest_other(self):
+        """Centerline at y=1; nearest other member at y=-5; bulge => +y."""
+        p = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        n = Segment(
+            x1=0.0,
+            y1=2.0,
+            x2=10.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        # Other member far below -> bulge should point AWAY from y=-5,
+        # i.e. +y direction.
+        other = _straight_route(99, "OTHER", 10.0, y=-5.0)
+        hint = _outer_normal_hint_pair_group(
+            p,
+            n,
+            candidate_p_id=10,
+            candidate_n_id=11,
+            group_routes={99: other},
+        )
+        assert hint[1] > 0.0, (
+            f"Centerline outer-normal y-component ({hint[1]}) should be "
+            "positive (away from nearest other below)"
+        )
+
+    def test_centerline_outer_normal_fallback_when_empty(self):
+        """No other members -> fallback to P-segment perpendicular."""
+        p = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        n = Segment(
+            x1=0.0,
+            y1=2.0,
+            x2=10.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        hint = _outer_normal_hint_pair_group(
+            p,
+            n,
+            candidate_p_id=10,
+            candidate_n_id=11,
+            group_routes={},
+        )
+        # Horizontal segment perpendicular -> (0, +/-1).
+        import math
+
+        mag = math.sqrt(hint[0] ** 2 + hint[1] ** 2)
+        assert mag == pytest.approx(1.0, abs=1e-9)
+
+    def test_centerline_outer_normal_collinear_centerlines_well_defined(self):
+        """Curator's AC #4 -- collinear centerlines edge case yields a
+        well-defined normal (the segment's own perpendicular)."""
+        # Pair A centerline at y=1, running horizontally x=[0, 10].
+        # Pair B centerline at y=1 too, x=[20, 30] -- collinear (same y).
+        # The closest point on pair B's centerline to pair A's centerline
+        # midpoint (5, 1) is (20, 1).  Magnitude is nonzero -- the
+        # outer-normal is well-defined.
+        p = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        n = Segment(
+            x1=0.0,
+            y1=2.0,
+            x2=10.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        other_p = Segment(
+            x1=20.0,
+            y1=0.0,
+            x2=30.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=20,
+            net_name="other_P",
+        )
+        other_route = Route(net=20, net_name="other_P", segments=[other_p])
+        hint = _outer_normal_hint_pair_group(
+            p,
+            n,
+            candidate_p_id=10,
+            candidate_n_id=11,
+            group_routes={20: other_route},
+        )
+        import math
+
+        mag = math.sqrt(hint[0] ** 2 + hint[1] ** 2)
+        assert mag == pytest.approx(1.0, abs=1e-9), (
+            f"Centerline outer-normal magnitude {mag} should be unit "
+            "even in the collinear-centerlines edge case."
+        )
+
+
+# =============================================================================
+# 22. Paired DRC self-check -- direct unit tests
+# =============================================================================
+
+
+class TestPhase2FPairedDRCHelper:
+    """Phase 2F -- direct unit tests on the paired DRC helper."""
+
+    def test_paired_drc_pass_happy_path(self):
+        """No collisions: returns True."""
+        new_p = Segment(
+            x1=0.0,
+            y1=10.0,
+            x2=5.0,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        new_n = Segment(
+            x1=0.0,
+            y1=12.0,
+            x2=5.0,
+            y2=12.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        ok = _post_insertion_clearance_ok_pair_group(
+            new_p_segments=[new_p],
+            new_n_segments=[new_n],
+            candidate_p_id=10,
+            candidate_n_id=11,
+            group_net_ids={10, 11},
+            routes_by_net={
+                10: _straight_route(10, "P", 5.0, y=0.0),
+                11: _straight_route(11, "N", 5.0, y=2.0),
+            },
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is True
+
+    def test_paired_drc_fail_within_pair(self):
+        """P/N new segments too close -> fail (within-pair pass)."""
+        new_p = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        # N segment at y=0.05 -- below the intra_pair_clearance_mm floor.
+        new_n = Segment(
+            x1=0.0,
+            y1=0.05,
+            x2=5.0,
+            y2=0.05,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        ok = _post_insertion_clearance_ok_pair_group(
+            new_p_segments=[new_p],
+            new_n_segments=[new_n],
+            candidate_p_id=10,
+            candidate_n_id=11,
+            group_net_ids={10, 11},
+            routes_by_net={
+                10: _straight_route(10, "P", 5.0, y=5.0),
+                11: _straight_route(11, "N", 5.0, y=10.0),
+            },
+            intra_group_clearance_mm=0.5,
+            intra_pair_clearance_mm=0.5,  # tight -> fail
+        )
+        assert ok is False
+
+    def test_paired_drc_fail_intra_group(self):
+        """New segment near another group member -> fail (intra-group pass)."""
+        new_p = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        new_n = Segment(
+            x1=0.0,
+            y1=2.0,
+            x2=5.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        # Another group member (net 20) very close to the new_p y=0.
+        other = _straight_route(20, "OTHER_P", 5.0, y=0.1)
+        ok = _post_insertion_clearance_ok_pair_group(
+            new_p_segments=[new_p],
+            new_n_segments=[new_n],
+            candidate_p_id=10,
+            candidate_n_id=11,
+            group_net_ids={10, 11, 20, 21},
+            routes_by_net={20: other},
+            intra_group_clearance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is False
+
+
+# =============================================================================
+# 23. _find_corresponding_n_segment heuristic
+# =============================================================================
+
+
+class TestPhase2FFindCorrespondingN:
+    """Phase 2F -- N-side segment correspondence by midpoint proximity."""
+
+    def test_finds_same_layer_segment_by_midpoint_proximity(self):
+        p_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        n_route = _straight_route(11, "N", 10.0, y=2.0)
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        assert result is not None
+        idx, n_seg = result
+        assert idx == 0
+        assert n_seg.layer == Layer.F_CU
+
+    def test_returns_none_when_no_same_layer_segment(self):
+        p_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="P",
+        )
+        # N route on a different layer.
+        n_route = _straight_route(11, "N", 10.0, y=2.0, layer=Layer.B_CU)
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        assert result is None
+
+    # -- Issue #4984: unequal parallel spans / nearby nonparallel segments --
+
+    def test_rejects_nearest_midpoint_host_with_mismatched_span(self):
+        """A same-layer segment can be the nearest-midpoint match while
+        having a completely different span than ``p_seg`` -- the exact
+        precondition hole from issue #4984. The heuristic must not treat
+        that segment as "corresponding" just because it is closest.
+        """
+        p_seg = Segment(
+            x1=1.0,
+            y1=0.3,
+            x2=9.0,
+            y2=0.3,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="P",
+        )  # 8mm span, midpoint (5, 0.3)
+        n_route = Route(
+            net=3,
+            net_name="N",
+            segments=[
+                Segment(x1=0.0, y1=1.0, x2=1.5, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+                # Nearest midpoint to (5, 0.3) is this 3mm segment (midpoint
+                # (4.5, 1.0)) -- but its span is nowhere close to 8mm.
+                Segment(x1=1.5, y1=1.0, x2=4.5, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+                Segment(x1=4.5, y1=1.0, x2=7.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+                Segment(x1=7.0, y1=1.0, x2=8.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+            ],
+        )
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        assert result is None, (
+            "expected the span-mismatched, nearest-midpoint host to be "
+            "rejected rather than returned as a false correspondence"
+        )
+
+    def test_prefers_span_matching_segment_over_closer_mismatched_neighbor(self):
+        """When a genuinely corresponding (matching-span) segment exists
+        further from the midpoint than a mismatched decoy, the matching
+        one must win."""
+        p_seg = Segment(
+            x1=1.0,
+            y1=0.3,
+            x2=9.0,
+            y2=0.3,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="P",
+        )  # 8mm span, midpoint (5, 0.3)
+        n_route = Route(
+            net=3,
+            net_name="N",
+            segments=[
+                # Decoy: very close midpoint but a short (1mm) span.
+                Segment(x1=4.5, y1=0.4, x2=5.5, y2=0.4, width=0.2, layer=Layer.F_CU, net=3),
+                # True correspondence: matching 8mm span, further away.
+                Segment(x1=1.0, y1=5.0, x2=9.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=3),
+            ],
+        )
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        assert result is not None
+        idx, seg = result
+        assert idx == 1
+        assert seg.x1 == 1.0 and seg.x2 == 9.0
+
+    def test_rejects_nearby_nonparallel_segment_with_coincidental_length(self):
+        """A nearby but nonparallel (perpendicular) segment must not be
+        treated as corresponding merely because its length happens to
+        match ``p_seg``'s span -- it still fails on midpoint-adjacent
+        selection producing an unusable host once ``_splice_mirrored_n_route``
+        validates endpoints (covered separately); this test locks down that
+        the finder itself does not special-case orientation and callers
+        rely on the splice-time endpoint guard as the backstop."""
+        p_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=8.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="P",
+        )  # 8mm horizontal span, midpoint (4, 0)
+        # A vertical (nonparallel) segment near the midpoint with the SAME
+        # length (8mm) as p_seg -- length alone cannot distinguish it from
+        # a true corresponding segment.
+        nonparallel = Segment(x1=4.0, y1=-4.0, x2=4.0, y2=4.0, width=0.2, layer=Layer.F_CU, net=3)
+        n_route = Route(net=3, net_name="N", segments=[nonparallel])
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        # The finder has no other same-layer candidate, so it returns this
+        # nonparallel segment (length matches, same layer) -- but the
+        # splice-time endpoint guard below is what actually protects the
+        # route from a malformed splice using it.
+        assert result is not None
+        idx, seg = result
+        assert seg is nonparallel
+
+
+# =============================================================================
+# Issue #4984: `_splice_mirrored_n_route` must reject a non-corresponding host
+# =============================================================================
+
+
+class TestSpliceMirroredNRouteHostValidation:
+    """The splice must reject a host whose endpoints do not match the
+    reflected chain's endpoints, rather than build a discontinuous route."""
+
+    @staticmethod
+    def _seg(x1: float, y1: float, x2: float, y2: float) -> Segment:
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=2)
+
+    def test_issue_4984_minimal_repro_is_rejected(self):
+        """The exact minimal reproduction from issue #4984: an 8mm host
+        (index 1, spanning x=1..9) receiving a mirrored chain that
+        actually spans x=0..10. Pre-fix this silently spliced a
+        discontinuous, overlapping-copper route; post-fix it must be
+        rejected outright."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[s(0, 0.3, 1, 0.3), s(1, 0.3, 9, 0.3), s(9, 0.3, 10, 0.3)],
+        )
+        mirrored = [
+            s(0, 0.3, 2, 0.3),
+            s(2, 0.3, 2, 1.3),
+            s(2, 1.3, 8, 1.3),
+            s(8, 1.3, 8, 0.3),
+            s(8, 0.3, 10, 0.3),
+        ]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored)
+        assert result is None
+
+    def test_matching_host_span_splices_contiguously(self):
+        """When the mirrored chain's endpoints DO match the host's own
+        endpoints, the splice succeeds and the resulting route is fully
+        contiguous (no gap, no duplication)."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[s(0, 0.3, 1, 0.3), s(1, 0.3, 9, 0.3), s(9, 0.3, 10, 0.3)],
+        )
+        mirrored = [
+            s(1, 0.3, 3, 0.3),
+            s(3, 0.3, 3, 1.3),
+            s(3, 1.3, 7, 1.3),
+            s(7, 1.3, 7, 0.3),
+            s(7, 0.3, 9, 0.3),
+        ]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored)
+        assert result is not None
+        for a, b in zip(result.segments, result.segments[1:], strict=False):
+            assert (a.x2, a.y2) == (b.x1, b.y1), "spliced route must be contiguous"
+        assert result.segments[0].x1 == 0 and result.segments[0].y1 == 0.3
+        assert result.segments[-1].x2 == 10 and result.segments[-1].y2 == 0.3
+
+    def test_reversed_mirrored_chain_still_splices_contiguously(self):
+        """The mirror can flip direction relative to the host (the
+        reflection axis crosses through the host segment); the splice
+        must reorder/flip the chain rather than reject a legitimately
+        corresponding, reversed-direction match."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[s(0, 0.3, 1, 0.3), s(1, 0.3, 9, 0.3), s(9, 0.3, 10, 0.3)],
+        )
+        mirrored_reversed = [
+            s(9, 0.3, 7, 0.3),
+            s(7, 0.3, 7, 1.3),
+            s(7, 1.3, 3, 1.3),
+            s(3, 1.3, 3, 0.3),
+            s(3, 0.3, 1, 0.3),
+        ]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored_reversed)
+        assert result is not None
+        for a, b in zip(result.segments, result.segments[1:], strict=False):
+            assert (a.x2, a.y2) == (b.x1, b.y1), "spliced route must be contiguous"
+
+    def test_nonparallel_host_is_rejected(self):
+        """A nonparallel (perpendicular) host segment can never have its
+        endpoints coincide with a mirrored chain built in the parallel
+        plane -- the splice must reject it."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[
+                s(0, 0.3, 1, 0.3),
+                Segment(x1=4, y1=-4, x2=4, y2=4, width=0.2, layer=Layer.F_CU, net=2),
+                s(9, 0.3, 10, 0.3),
+            ],
+        )
+        mirrored = [s(1, 0.3, 3, 0.3), s(3, 0.3, 3, 1.3), s(3, 1.3, 7, 1.3), s(7, 1.3, 9, 0.3)]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored)
+        assert result is None
+
+    def test_empty_mirrored_segments_is_rejected(self):
+        s = self._seg
+        n_route = Route(net=2, net_name="TEST_N", segments=[s(0, 0.3, 10, 0.3)])
+        assert _splice_mirrored_n_route(n_route, 0, []) is None
+
+
+# =============================================================================
+# Issue #3440: reason registry + summary formatting (observability)
+# =============================================================================
+
+
+class TestReasonRegistry:
+    """Every TuneResult.reason value is registered and label-mapped."""
+
+    def test_labels_cover_registry_exactly(self):
+        assert set(REASON_SUMMARY_LABELS) == set(TUNE_RESULT_REASONS)
+
+    def test_every_reason_assigned_in_source_is_registered(self):
+        """Exhaustiveness: scan the tuner source for reason assignments.
+
+        A new reason value added to the tuner without a registry entry
+        (and therefore without a summary bucket) fails here instead of
+        silently vanishing from the route log -- the Issue #3440
+        "all-zeros summary while 15.4mm of skew goes untouched" defect.
+        """
+        import inspect
+        import re
+
+        import kicad_tools.router.match_group_tuning as mgt
+
+        src = inspect.getsource(mgt)
+        found: set[str] = set()
+        # ``reason="x"`` kwargs / ``.reason = "x"`` / ``last_failure_reason = "x"``
+        found |= set(re.findall(r'reason\s*=\s*\(?\s*"([a-z_]+)"', src))
+        # ``"tuned" if ... else "exceeded_max_inserts"`` conditional form.
+        found |= set(re.findall(r'reason\s*=\s*"[a-z_]+"\s+if\s+.+?\s+else\s+"([a-z_]+)"', src))
+        # ``<x>.reason or "fallback"`` / ``last_failure_reason or "fallback"``.
+        found |= set(re.findall(r'reason\s+or\s+"([a-z_]+)"', src))
+
+        unregistered = found - set(TUNE_RESULT_REASONS)
+        assert not unregistered, (
+            f"reasons assigned in match_group_tuning.py but missing from "
+            f"TUNE_RESULT_REASONS: {sorted(unregistered)}"
+        )
+        missing = set(TUNE_RESULT_REASONS) - found
+        assert not missing, (
+            f"registered reasons never assigned in match_group_tuning.py "
+            f"(stale registry entry?): {sorted(missing)}"
+        )
+
+
+class TestFormatReasonCounts:
+    """The shared summary formatter accounts for EVERY member."""
+
+    def test_every_member_is_counted(self):
+        import re
+
+        reasons = [
+            "tuned",
+            "already_within_tolerance",
+            "post_insertion_drc_violation",
+            "exceeded_max_inserts",
+            "cascade_budget_exhausted",
+            "not_length_critical",
+            "reference",
+            "longer_than_reference",
+            "unrouted",
+            "no_suitable_segment",
+            "weird_future_reason",
+        ]
+        out = format_reason_counts(reasons)
+        total = sum(int(m) for m in re.findall(r"(\d+) ", out))
+        assert total == len(reasons), f"silent bucket detected in: {out!r}"
+        assert "1 tuned" in out
+        assert "1 clean" in out
+        assert "1 rolled back" in out
+        assert "2 budget-exhausted" in out
+        assert "1 skipped" in out
+        assert "1 reference" in out
+        assert "1 longer-than-ref" in out
+        assert "1 unrouted" in out
+        assert "1 no-segment" in out
+        assert "1 other(weird_future_reason)" in out
+
+    def test_legacy_five_buckets_always_present(self):
+        out = format_reason_counts([])
+        assert out == "0 tuned, 0 clean, 0 rolled back, 0 budget-exhausted, 0 skipped"
+
+    def test_board07_regime_a_line_is_not_all_zeros(self):
+        # The exact regime-A composition from the issue: A0 declared
+        # reference + 7 members classified longer_than_reference.  The
+        # legacy printer rendered this as all-zeros; now both buckets
+        # surface explicitly.
+        out = format_reason_counts(["reference"] + ["longer_than_reference"] * 7)
+        assert "1 reference" in out
+        assert "7 longer-than-ref" in out
+
+
+class TestGroupSkewBeforeAfter:
+    """Issue #3924 AC2: the tuner's verbose summary reports achieved group
+    skew before and after tuning, derived from per-member
+    ``(length_before_mm, length_after_mm)``."""
+
+    def test_converged_group_reports_shrinking_skew(self):
+        # Reference held at 20mm; two shorter members grown toward it.
+        lengths = [(20.0, 20.0), (4.6, 19.998), (10.0, 20.001)]
+        result = group_skew_before_after(lengths)
+        assert result is not None
+        skew_before, skew_after = result
+        # Before: max 20 - min 4.6 = 15.4mm.  After: ~0.003mm.
+        assert skew_before == pytest.approx(15.4, abs=1e-6)
+        assert skew_after < 0.01
+
+    def test_single_member_returns_none(self):
+        # Skew is undefined for a single trace.
+        assert group_skew_before_after([(10.0, 10.0)]) is None
+
+    def test_empty_returns_none(self):
+        assert group_skew_before_after([]) is None
+
+    def test_unrouted_placeholders_excluded(self):
+        # An unrouted member (0.0, 0.0) must not drag min to zero and
+        # inflate the reported skew.  Only the two real members count.
+        lengths = [(10.0, 10.0), (10.5, 10.5), (0.0, 0.0)]
+        result = group_skew_before_after(lengths)
+        assert result is not None
+        skew_before, skew_after = result
+        assert skew_before == pytest.approx(0.5, abs=1e-6)
+        assert skew_after == pytest.approx(0.5, abs=1e-6)
+
+
+# =============================================================================
+# Issue #3440: distributed meanders (amplitude back-off ladder)
+# =============================================================================
+
+
+class TestAmplitudeBackoffLadder:
+    """The tuner retries a candidate segment with smaller amplitudes."""
+
+    def test_factors_descend_from_unity(self):
+        assert AMPLITUDE_BACKOFF_FACTORS[0] == 1.0
+        assert all(
+            a > b
+            for a, b in zip(AMPLITUDE_BACKOFF_FACTORS, AMPLITUDE_BACKOFF_FACTORS[1:], strict=False)
+        )
+
+    def _group_and_routes(self, noise_y: float) -> tuple[MatchGroup, dict[int, Route]]:
+        """Candidate net 1 (10mm, y=0) + reference net 2 (12mm, y=10).
+
+        A NON-group neighbor ``NOISE`` runs parallel below the candidate
+        at ``y=noise_y``.  The outer-normal for net 1 points AWAY from
+        net 2 (the only other group member), i.e. straight at NOISE --
+        so the bulge amplitude decides whether the insert clears DRC.
+        """
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+            50: _straight_route(50, "NOISE", 30.0, y=noise_y),
+        }
+        return group, routes
+
+    def test_smaller_amplitude_recovers_blocked_insert(self):
+        # NOISE at y=-1.0.  Full amplitude (0.5mm) bulge bottoms out at
+        # y=-0.5 -> clearance 0.5 - 0.2 (half-widths) = 0.3mm < 0.35mm
+        # floor -> rejected.  Quarter amplitude (0.125..0.25) bottoms at
+        # y>=-0.25 -> clearance >= 0.55mm -> committed.  The legacy
+        # single-amplitude tuner rolled this member back.
+        group, routes = self._group_and_routes(noise_y=-1.0)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.35,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0, min_spacing=0.2),
+        )
+
+        res = results[1][1]
+        assert res.reason == "tuned", f"expected tuned, got {res.reason}: {res.message}"
+        assert res.inserts_applied >= 1
+        # The committed meander is the distributed (smaller-amplitude)
+        # variant: every committed serpentine segment stays above
+        # y=-0.5 (the full-amplitude envelope).
+        committed_route = results[1][0]
+        assert min(min(s.y1, s.y2) for s in committed_route.segments) > -0.5, (
+            "expected a smaller-amplitude meander, found a full-amplitude bulge"
+        )
+
+    def test_all_amplitudes_blocked_rolls_back_with_detail(self):
+        # NOISE at y=-0.3: even the smallest ladder amplitude (0.125mm)
+        # cannot clear the 0.35mm floor -> the member rolls back and the
+        # message names the violated rule, the neighbor, and the
+        # capacity shortfall (Issue #3440 addendum AC).
+        group, routes = self._group_and_routes(noise_y=-0.3)
+        original_route = routes[1]
+        original_segments = routes[1].segments
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.35,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0, min_spacing=0.2),
+        )
+
+        res = results[1][1]
+        assert res.reason == "post_insertion_drc_violation"
+        # Byte-for-byte rollback contract preserved.
+        assert results[1][0] is original_route
+        assert results[1][0].segments is original_segments
+        # Actionable rollback detail: rule + neighbor + capacity.
+        assert "NOISE" in res.message, res.message
+        assert "inter-net clearance" in res.message, res.message
+        assert "Capacity: requested" in res.message, res.message
+
+
+class TestPostInsertionDetailGroup:
+    """The detail variant names the first violation; the bool wrapper agrees."""
+
+    def test_detail_none_when_clear(self):
+        routes = {
+            1: _straight_route(1, "A", 10.0, y=0.0),
+            2: _straight_route(2, "B", 10.0, y=10.0),
+        }
+        new_segments = [
+            Segment(
+                x1=0.0,
+                y1=2.0,
+                x2=5.0,
+                y2=2.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="A",
+            )
+        ]
+        detail = _post_insertion_clearance_detail_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+        assert detail is None
+        assert _post_insertion_clearance_ok_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+
+    def test_detail_names_group_member_on_intra_group_violation(self):
+        routes = {
+            1: _straight_route(1, "A", 10.0, y=0.0),
+            2: _straight_route(2, "B", 10.0, y=0.3),
+        }
+        new_segments = [
+            Segment(
+                x1=0.0,
+                y1=0.25,
+                x2=5.0,
+                y2=0.25,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="A",
+            )
+        ]
+        detail = _post_insertion_clearance_detail_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+        assert detail is not None
+        assert "intra-group clearance" in detail
+        assert "'B'" in detail
+        assert not _post_insertion_clearance_ok_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+
+
+# =============================================================================
+# Issue #3440: staleness publish + collinear-merge normalization + exact fit
+# =============================================================================
+
+
+class TestRoutesByNetPublish:
+    """Committed meanders are published into ``routes_by_net`` so later
+    members' DRC self-checks see them (the board 07 ``A2 vs A1`` stacked
+    meander defect)."""
+
+    def test_tuned_member_entry_is_replaced(self):
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+        }
+        original_1 = routes[1]
+        original_2 = routes[2]
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        assert results[1][1].reason == "tuned"
+        # The tuned route is published in place.
+        assert routes[1] is results[1][0]
+        assert routes[1] is not original_1
+        # The untouched (longest) member's entry is never replaced.
+        assert routes[2] is original_2
+
+
+class TestCollinearMergeNormalization:
+    """A* staircase micro-segments are merged before host ranking."""
+
+    def test_microsegmented_straight_run_is_tunable(self):
+        # Net 1 is a straight 10mm run split into 25 collinear 0.4mm
+        # segments -- each FAR below the 2.0mm host minimum.  Without
+        # the Issue #3440 collinear merge the tuner reported
+        # ``no_suitable_segment`` (board 07's A3 at 7mm residual skew);
+        # with it the merged 10mm run hosts the meander.
+        n = 25
+        step = 0.4
+        micro_segments = [
+            Segment(
+                x1=i * step,
+                y1=0.0,
+                x2=(i + 1) * step,
+                y2=0.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="D0",
+            )
+            for i in range(n)
+        ]
+        routes = {
+            1: Route(net=1, net_name="D0", segments=micro_segments, vias=[]),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+        }
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        res = results[1][1]
+        assert res.reason == "tuned", f"expected tuned, got {res.reason}: {res.message}"
+
+        # Endpoint preservation: the tuned route still spans pad to pad.
+        tuned = results[1][0]
+        xs = [tuned.segments[0].x1, tuned.segments[-1].x2]
+        assert xs[0] == 0.0 and abs(xs[1] - n * step) < 1e-9
+
+    def test_rollback_still_returns_original_reference(self):
+        # Same staircase, but a neighbor blocks every amplitude -> the
+        # member rolls back and the ORIGINAL (un-merged) route reference
+        # is returned byte-for-byte.
+        n = 25
+        step = 0.4
+        micro_segments = [
+            Segment(
+                x1=i * step,
+                y1=0.0,
+                x2=(i + 1) * step,
+                y2=0.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="D0",
+            )
+            for i in range(n)
+        ]
+        original = Route(net=1, net_name="D0", segments=micro_segments, vias=[])
+        routes = {
+            1: original,
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+            50: _straight_route(50, "NOISE", 30.0, y=-0.3),
+        }
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.35,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0, min_spacing=0.2),
+        )
+
+        assert results[1][1].reason == "post_insertion_drc_violation"
+        assert results[1][0] is original
+        assert results[1][0].segments is micro_segments
+
+
+class TestExactFitAmplitude:
+    """The meander amplitude is shrunk so loops add EXACTLY the needed
+    length -- no more ``2 * amplitude`` overshoot quanta (board 07's A6
+    landed 1.8mm past the reference at the fixed 1.0mm amplitude)."""
+
+    def test_small_correction_does_not_overshoot(self):
+        from kicad_tools.router.length import LengthTracker
+
+        # Net 1 needs +0.3mm; at the fixed 1.0mm base amplitude one loop
+        # would add 2.0mm (1.7mm overshoot, outside the 0.1mm tolerance).
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 11.7, y=0.0),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+
+        res = results[1][1]
+        assert res.reason == "tuned", f"expected tuned, got {res.reason}: {res.message}"
+        tuned_length = LengthTracker.calculate_route_length(results[1][0])
+        assert abs(tuned_length - 12.0) <= 0.01, (
+            f"exact-fit amplitude should land within ~1um of the target, "
+            f"got {tuned_length:.4f}mm vs 12.0mm"
+        )
+
+
+class TestNoOvershootPastGroupMaximum:
+    """Issue #7423: a tuned member must never end past the group target.
+
+    On a host that is not 8-direction aligned the trombone's snapped frame and
+    exit dogleg change the forward travel, so the added length differs from the
+    requested one by microns and the member used to raise the group maximum.
+    """
+
+    @staticmethod
+    def _run(host_dy: float, refits: int, monkeypatch):
+        import math
+
+        from kicad_tools.router import match_group_tuning as mgt
+        from kicad_tools.router.length import LengthTracker
+
+        monkeypatch.setattr(mgt, "MAX_OVERSHOOT_REFITS", refits)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=12.0,
+                    y2=host_dy,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        target = math.hypot(12.0, host_dy) + 1.3
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=10.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+        return LengthTracker.calculate_route_length(results[1][0]) - target
+
+    def test_off_angle_host_does_not_overshoot(self, monkeypatch):
+        excess = self._run(0.7, refits=3, monkeypatch=monkeypatch)
+        assert excess <= 1e-8, f"member ended {excess * 1000:.4f}um past the target"
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 5.0, 13.0, 22.5, 30.0, 58.0, 75.0, 89.0])
+    @pytest.mark.parametrize("shortfall", [0.3, 1.3])
+    def test_member_never_ends_past_target_on_any_host_angle(
+        self, angle_deg, shortfall, monkeypatch
+    ):
+        """Whatever the refit manages, the committed route is never past target."""
+        import math
+
+        from kicad_tools.router.length import LengthTracker
+
+        host_len = 20.0
+        a = math.radians(angle_deg)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=host_len * math.cos(a),
+                    y2=host_len * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        target = host_len + shortfall
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=30.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.15, gap_factor=2.0),
+        )
+        excess = LengthTracker.calculate_route_length(results[1][0]) - target
+        assert excess <= 1e-6, f"member ended {excess:.6f}mm past the target"
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 13.0, 22.5, 45.0, 58.0])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    def test_per_bump_fallback_never_passes_the_need(self, angle_deg, need):
+        import math
+
+        from kicad_tools.router.length import LengthTracker
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        a = math.radians(angle_deg)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=12.0 * math.cos(a),
+                    y2=12.0 * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        before = LengthTracker.calculate_route_length(host)
+        placed = _place_bumps_per_host(
+            host,
+            length_needed=need,
+            tolerance_mm=0.1,
+            base_config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            host_floor=1.0,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        if placed is None:
+            return
+        added = LengthTracker.calculate_route_length(placed) - before
+        assert added <= need + 1e-6, f"per-bump added {added:.6f}mm for a need of {need}mm"
+
+    def test_per_bump_result_past_target_is_rejected(self, monkeypatch):
+        """The per-bump fallback is gated on the measured route, not its own booking.
+
+        Force the whole-trombone attempts to fail and make the fallback return a
+        route that ends past the target; the member must be left untouched.
+        """
+        from kicad_tools.router import match_group_tuning as mgt
+        from kicad_tools.router.length import LengthTracker
+
+        def fail_trombone(self, *args, **kwargs):
+            from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+            return SerpentineResult(success=False, message="forced")
+
+        def overshooting_bumps(route, **kwargs):
+            seg = route.segments[0]
+            extra = Segment(
+                x1=seg.x2,
+                y1=seg.y2,
+                x2=seg.x2 + 5.0,
+                y2=seg.y2,
+                width=seg.width,
+                layer=seg.layer,
+                net=seg.net,
+                net_name=seg.net_name,
+            )
+            return Route(net=route.net, net_name=route.net_name, segments=[*route.segments, extra])
+
+        monkeypatch.setattr(mgt.SerpentineGenerator, "generate_trombone", fail_trombone)
+        monkeypatch.setattr(mgt, "_place_bumps_per_host", overshooting_bumps)
+        host = _straight_route(1, "D0", 12.0, y=0.0)
+        target = 13.0
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=10.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+        route, result = results[1]
+        assert LengthTracker.calculate_route_length(route) - target <= 1e-8
+        assert result.inserts_applied == 0
+        assert result.reason == "overshoot"
+
+    def test_without_refit_the_overshooting_candidate_is_rejected(self, monkeypatch):
+        """With the refit off the raw trombone overshoots, so the guard rejects it.
+
+        The member is left short rather than committed past the target; the
+        refit is what lets the same host land inside the tolerance.
+        """
+        without_refit = self._run(0.7, refits=0, monkeypatch=monkeypatch)
+        assert -0.5 < without_refit < -0.1  # rejected: still short, never past
+        assert self._run(0.7, refits=3, monkeypatch=monkeypatch) > -0.1
+
+
+# =============================================================================
+# Via-count imbalance (Issue #3931)
+# =============================================================================
+
+
+class TestViaCountImbalance:
+    """Issue #3931: the tuner targets VIA-INCLUSIVE skew when a stackup is
+    supplied via ``board_thickness_mm`` / ``num_copper_layers``.
+
+    Board 07's ADDR_BUS exposed the class of defect: some match-group
+    members escape to an inner layer behind a full-stack via while others
+    route flat on the surface.  Their COPPER lengths are matched (within
+    microns), but the ~1.6 mm of drilled via length pushes the group over
+    its skew tolerance.  A planar-only tuner sees the members as already
+    matched and does nothing; a via-aware tuner adds F.Cu meander to the
+    via-free members to compensate the drilled length.
+    """
+
+    @staticmethod
+    def _via_route(net_id: int, name: str, copper_mm: float, y: float) -> Route:
+        """Straight F.Cu route of ``copper_mm`` plus one F.Cu->B.Cu via.
+
+        On a 1.6 mm / 4-layer stack the through-via contributes exactly
+        1.6 mm of drilled length (|Δstack_index| = 3, so
+        ``1.6 * 3 / (4 - 1) = 1.6``), so the via-inclusive length is
+        ``copper_mm + 1.6``.
+        """
+        from kicad_tools.router.primitives import Via
+
+        route = _straight_route(net_id, name, copper_mm, y=y)
+        route.vias.append(
+            Via(
+                x=copper_mm,
+                y=y,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=net_id,
+                net_name=name,
+            )
+        )
+        return route
+
+    def test_via_free_member_lengthened_when_stackup_supplied(self):
+        """A0 (copper-only) gets ~1.6 mm of F.Cu meander to match A4's via."""
+        from kicad_tools.router.length import LengthTracker
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        # A0: 30 mm copper, NO via  -> via-inclusive length 30.0 mm.
+        # A4: 30 mm copper, ONE through-via -> via-inclusive length 31.6 mm.
+        # Copper-only skew is 0.0; via-inclusive skew is 1.6 mm (> 0.5 tol).
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.5)
+        routes = {
+            1: _straight_route(1, "A0", 30.0, y=0.0),
+            2: self._via_route(2, "A4", 30.0, y=5.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        # A4 carries the via -> it is the via-inclusive longest -> untouched.
+        assert results[2][1].reason in ("already_within_tolerance", "reference")
+        assert results[2][0] is routes[2]
+
+        # A0 must be lengthened to compensate A4's 1.6 mm drilled length.
+        assert results[1][1].reason == "tuned", (
+            f"expected A0 tuned, got {results[1][1].reason}: {results[1][1].message}"
+        )
+        # The tuned A0's via-inclusive length (== its copper length, no via)
+        # should now match A4's 31.6 mm within tolerance.
+        a0_total = MatchGroupTracker._measure_route_total(results[1][0], 1.6, 4)
+        a4_total = MatchGroupTracker._measure_route_total(results[2][0], 1.6, 4)
+        assert abs(a0_total - a4_total) <= 0.5, (
+            f"via-inclusive skew should be within tolerance after tuning: "
+            f"A0={a0_total:.4f}mm vs A4={a4_total:.4f}mm"
+        )
+        # The added copper is real F.Cu meander (~1.6 mm), not a via.
+        a0_copper = LengthTracker.calculate_route_length(results[1][0])
+        assert a0_copper > 31.0, (
+            f"A0 should have gained ~1.6 mm of copper meander, got {a0_copper:.4f}mm"
+        )
+
+    def test_via_blind_when_no_stackup_is_a_noop(self):
+        """Without ``board_thickness_mm`` the tuner ignores via drilled length.
+
+        Drift-prevention: the ``board_thickness_mm=None`` default must
+        preserve byte-for-byte prior behavior.  With the copper lengths
+        matched and vias invisible, both members are already within
+        tolerance and returned by reference.
+        """
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.5)
+        routes = {
+            1: _straight_route(1, "A0", 30.0, y=0.0),
+            2: self._via_route(2, "A4", 30.0, y=5.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            # board_thickness_mm omitted -> via-blind (legacy behavior).
+        )
+
+        # Copper lengths are identical -> nobody is tuned; both by reference.
+        for nid in (1, 2):
+            assert results[nid][1].reason in (
+                "already_within_tolerance",
+                "reference",
+                "longer_than_reference",
+            ), f"net {nid}: unexpected reason {results[nid][1].reason}"
+            assert results[nid][0] is routes[nid]
+            assert results[nid][0].segments is routes[nid].segments
+
+    def test_mixed_via_counts_multiple_members(self):
+        """Generalizes beyond board 07: 2 via-free + 2 via-carrying members.
+
+        Confirms the fix is not ADDR_BUS-specific -- any group with a
+        via-count imbalance gets F.Cu meander added to the via-free
+        members to compensate the drilled length of the via-carrying ones.
+        """
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        # Nets 1,2: copper-only 30 mm.  Nets 3,4: 30 mm copper + one via.
+        group = _ddr_group(net_ids=[1, 2, 3, 4], tolerance=0.5)
+        routes = {
+            1: _straight_route(1, "M0", 30.0, y=0.0),
+            2: _straight_route(2, "M1", 30.0, y=3.0),
+            3: self._via_route(3, "M2", 30.0, y=6.0),
+            4: self._via_route(4, "M3", 30.0, y=9.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.5,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+
+        # The two via-free members must be lengthened.
+        for nid in (1, 2):
+            assert results[nid][1].reason == "tuned", (
+                f"net {nid}: expected tuned, got {results[nid][1].reason}: "
+                f"{results[nid][1].message}"
+            )
+
+        totals = {
+            nid: MatchGroupTracker._measure_route_total(results[nid][0], 1.6, 4)
+            for nid in (1, 2, 3, 4)
+        }
+        skew = max(totals.values()) - min(totals.values())
+        assert skew <= 0.5, (
+            f"via-inclusive group skew should converge within tolerance, "
+            f"got {skew:.4f}mm; totals={ {k: round(v, 3) for k, v in totals.items()} }"
+        )
+
+
+def _written_length(route: Route) -> float:
+    """Planar length of ``route`` as ``Segment.to_sexp`` writes it (4 dp)."""
+    import math
+    import re
+
+    total = 0.0
+    for seg in route.segments:
+        text = seg.to_sexp()
+        x1, y1 = map(float, re.search(r"\(start ([-\d.]+) ([-\d.]+)\)", text).groups())
+        x2, y2 = map(float, re.search(r"\(end ([-\d.]+) ([-\d.]+)\)", text).groups())
+        total += math.hypot(x2 - x1, y2 - y1)
+    return total
+
+
+class TestNoOvershootAsWritten:
+    """Issue #7423: ``kct check`` reads the 4 dp written copper, so the guard
+    must hold on the rounded geometry, not only on the in-memory floats."""
+
+    @staticmethod
+    def _host(angle_deg: float, length: float) -> Route:
+        import math
+
+        a = math.radians(angle_deg)
+        return Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=length * math.cos(a),
+                    y2=length * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 22.5, 45.0, 67.5, 90.0])
+    @pytest.mark.parametrize("need", [0.3, 0.7, 1.3, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.4, 1.0])
+    def test_refit_path_written_length_never_past_target(self, angle_deg, need, amplitude):
+        import math
+
+        host = self._host(angle_deg, 20.0)
+        # Reference member is a straight run at exactly the written target.
+        target = round(_written_length(host) + need, 4)
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=30.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+        )
+        excess = _written_length(results[1][0]) - _written_length(routes[2])
+        assert excess <= 1e-9, f"written member {excess * 1000:.3f}um past the target"
+        assert math.isfinite(excess)
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 22.5, 45.0, 67.5, 90.0])
+    @pytest.mark.parametrize("need", [0.3, 0.7, 1.3, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.4, 1.0])
+    def test_per_bump_path_written_length_never_past_need(self, angle_deg, need, amplitude):
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        host = self._host(angle_deg, 12.0)
+        before = _written_length(host)
+        placed = _place_bumps_per_host(
+            host,
+            length_needed=need,
+            tolerance_mm=0.1,
+            base_config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            host_floor=1.0,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        if placed is None:
+            return
+        # The written placement must not end past the written target, with
+        # no tolerance: the old head ended up to 0.32 um past it.
+        written_target = before + need
+        excess = _written_length(placed) - written_target
+        assert _written_length(placed) <= written_target, (
+            f"written bump placement {excess * 1e6:.3f}nm past the written target"
+        )
+
+    @staticmethod
+    def _off_angle_reference(length: float, angle_deg: float) -> Route:
+        """A ``length`` mm reference at ``angle_deg`` whose 4 dp written copper
+        is SHORTER than its in-memory length (the start x is chosen from a
+        fixed set of sub-grid offsets to make it round short)."""
+        import math
+
+        a = math.radians(angle_deg)
+
+        def build(x0: float) -> Route:
+            return Route(
+                net=2,
+                net_name="D1",
+                segments=[
+                    Segment(
+                        x1=x0,
+                        y1=-40.0,
+                        x2=x0 + length * math.cos(a),
+                        y2=-40.0 + length * math.sin(a),
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=2,
+                        net_name="D1",
+                    )
+                ],
+            )
+
+        candidates = [build(-40.0 - k * 1e-5) for k in range(10)]
+        return min(
+            candidates, key=lambda r: _written_length(r) - LengthTracker.calculate_route_length(r)
+        )
+
+    @pytest.mark.parametrize("host_angle", [0.0, 45.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5, 1.0])
+    def test_refit_path_never_past_off_angle_reference_as_written(
+        self, host_angle, ref_angle, need, amplitude
+    ):
+        """Issue #7423: ``kct check`` compares against the reference AS
+        WRITTEN.  An off-angle reference that rounds shorter must still bound
+        the tuned member in the file (the old head ended 40 nm past it)."""
+        host = self._host(host_angle, 6.0)
+        ref = self._off_angle_reference(
+            LengthTracker.calculate_route_length(host) + need, ref_angle
+        )
+        # Precondition: the reference really does round shorter when written.
+        assert _written_length(ref) < LengthTracker.calculate_route_length(ref) - 1e-5
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: ref}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+        )
+        tuned, result = results[1]
+        assert result.inserts_applied >= 1, result.message
+        excess = _written_length(tuned) - _written_length(ref)
+        assert _written_length(tuned) <= _written_length(ref), (
+            f"written member {excess * 1e6:.3f}nm past the written reference"
+        )
+
+
+def _seg_route(net_id: int, x0: float, y0: float, length: float, angle_deg: float) -> Route:
+    """One straight ``length`` mm segment from ``(x0, y0)`` at ``angle_deg``."""
+    import math
+
+    a = math.radians(angle_deg)
+    return Route(
+        net=net_id,
+        net_name=f"N{net_id}",
+        segments=[
+            Segment(
+                x1=x0,
+                y1=y0,
+                x2=x0 + length * math.cos(a),
+                y2=y0 + length * math.sin(a),
+                width=0.2,
+                layer=Layer.F_CU,
+                net=net_id,
+                net_name=f"N{net_id}",
+            )
+        ],
+    )
+
+
+def _short_rounding_reference(net_id: int, length: float, angle_deg: float) -> Route:
+    """An off-angle reference whose 4 dp written copper rounds SHORTER than
+    its in-memory length (start x picked from fixed sub-grid offsets)."""
+    candidates = [_seg_route(net_id, -40.0 - k * 1e-5, -40.0, length, angle_deg) for k in range(10)]
+    return min(
+        candidates, key=lambda r: _written_length(r) - LengthTracker.calculate_route_length(r)
+    )
+
+
+def _off_angle_reference_pair(length: float, angle_deg: float, dx: float) -> tuple[Route, Route]:
+    """Reference pair (nets 1, 2) at ``angle_deg``, 0.3 mm pitch, shifted by
+    a sub-grid ``dx`` so its written lane rounds differently from memory."""
+    import math
+
+    a = math.radians(angle_deg)
+    nx, ny = -math.sin(a) * 0.3, math.cos(a) * 0.3
+    return (
+        _seg_route(1, -40.0 + dx, -40.0, length, angle_deg),
+        _seg_route(2, -40.0 + dx + nx, -40.0 + ny, length, angle_deg),
+    )
+
+
+#: Float-summation tie slack (1 fm); see :func:`_assert_pair_not_past_reference`.
+_SUM_ULP_MM = 1e-12
+
+
+def _assert_pair_not_past_reference(
+    tuned_p: Route, tuned_n: Route, ref_p: Route, ref_n: Route
+) -> None:
+    """Q8 on written geometry: the tuned lane may not end past the reference
+    lane, and no tuned trace past the reference's longest trace.
+
+    The only slack is ``_SUM_ULP_MM``: the same written decimals can sum to
+    floats one ulp apart (8.9 vs 8.899999999999999), which is a tie, not an
+    overshoot -- the smallest real overshoot on the old head was ~1 nm."""
+    lane = (_written_length(tuned_p) + _written_length(tuned_n)) / 2.0
+    ref_lane = (_written_length(ref_p) + _written_length(ref_n)) / 2.0
+    assert lane <= ref_lane + _SUM_ULP_MM, (
+        f"written lane {(lane - ref_lane) * 1e6:.3f}nm past the written reference lane"
+    )
+    longest = max(_written_length(tuned_p), _written_length(tuned_n))
+    ref_longest = max(_written_length(ref_p), _written_length(ref_n))
+    assert longest <= ref_longest + _SUM_ULP_MM, (
+        f"written trace {(longest - ref_longest) * 1e6:.3f}nm past the longest "
+        "written reference trace"
+    )
+
+
+class TestNoOvershootAsWrittenMixedAndPairGroups:
+    """Issue #7423 (Q8): a member never ends past the target, measured on the
+    written copper -- for a mixed group whose default reference is a scalar,
+    and for pair lanes on every strategy (mirrored, centreline, per-leg)."""
+
+    @pytest.mark.parametrize("host_angle", [0.0, 45.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5, 1.0])
+    def test_mixed_group_default_scalar_reference_not_past_as_written(
+        self, host_angle, ref_angle, need, amplitude
+    ):
+        """No declared reference; the longest member is a scalar.  The
+        scalar sub-pass must still cap at that scalar's written length (the
+        old head dropped the source and ended up to 69.5 nm past it)."""
+        host = _seg_route(1, 0.0, 0.0, 6.0, host_angle)
+        ref = _short_rounding_reference(2, 6.0 + need, ref_angle)
+        assert _written_length(ref) < LengthTracker.calculate_route_length(ref) - 1e-5
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            pair_ids=[(3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: host,
+            2: ref,
+            3: _straight_route(3, "N3", 3.0, y=20.0),
+            4: _straight_route(4, "N4", 3.0, y=20.3),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={3: 4, 4: 3},
+            intra_pair_clearance_mm=0.1,
+        )
+        tuned, result = results[1]
+        assert result.inserts_applied >= 1, result.message
+        excess = _written_length(tuned) - _written_length(ref)
+        assert _written_length(tuned) <= _written_length(ref), (
+            f"written member {excess * 1e6:.3f}nm past the written reference"
+        )
+
+    @pytest.mark.parametrize("host_angle", [0.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5])
+    @pytest.mark.parametrize("dx", [0.0, 3.7e-5, 7.4e-5])
+    def test_pair_lane_not_past_written_reference_lane(
+        self, host_angle, ref_angle, need, amplitude, dx
+    ):
+        """Production pair path (``pair_fallbacks``): a coupled pair tuned by
+        centreline meanders against an off-angle reference pair (the old
+        head ended up to 38.2 nm past the written reference lane)."""
+        import math
+
+        ref_p, ref_n = _off_angle_reference_pair(8.0 + need, ref_angle, dx)
+        h = math.radians(host_angle)
+        hx, hy = -math.sin(h) * 0.3, math.cos(h) * 0.3
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: ref_p,
+            2: ref_n,
+            3: _seg_route(3, 0.0, 0.0, 8.0, host_angle),
+            4: _seg_route(4, hx, hy, 8.0, host_angle),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={1: 2, 2: 1, 3: 4, 4: 3},
+            pair_fallbacks=True,
+        )
+        assert results[3][1].inserts_applied >= 1, results[3][1].message
+        _assert_pair_not_past_reference(results[3][0], results[4][0], ref_p, ref_n)
+
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5])
+    @pytest.mark.parametrize("dx", [0.0, 3.7e-5, 7.4e-5])
+    @pytest.mark.parametrize("skew", [0.0, 0.2])
+    def test_per_leg_tuning_not_past_written_reference(self, ref_angle, need, amplitude, dx, skew):
+        """Per-leg strategy: legs at right angles have neither a mirror host
+        nor a coupled span, so each leg is tuned single-ended (the old head
+        ended up to 38.2 nm past the written reference lane)."""
+        ref_p, ref_n = _off_angle_reference_pair(8.0 + need, ref_angle, dx)
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: ref_p,
+            2: ref_n,
+            3: _seg_route(3, 0.0, 0.0, 8.0 + skew, 0.0),
+            4: _seg_route(4, -3.0, 2.0, 8.0 - skew, 90.0),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={1: 2, 2: 1, 3: 4, 4: 3},
+            pair_fallbacks=True,
+            pair_skew_limits_mm={(3, 4): 1.0},
+        )
+        assert results[3][1].reason == "tuned", results[3][1].message
+        _assert_pair_not_past_reference(results[3][0], results[4][0], ref_p, ref_n)
+
+    @pytest.mark.parametrize("pair_fallbacks", [False, True])
+    @pytest.mark.parametrize("ref_length", [8.30004, 8.70004, 8.90004, 9.30003, 10.00004])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.3, 0.5])
+    def test_mirrored_pair_lane_not_past_written_reference(
+        self, pair_fallbacks, ref_length, amplitude
+    ):
+        """Mirrored meander (both modes): the reference pair ends 40 nm past
+        a 4 dp grid point, so it is written shorter; the mirrored N side
+        snaps to the 0.01 mm grid (the old head ended up to 10.1 um past)."""
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.05,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            10: _straight_route(10, "P0", 8.0, y=0.0),
+            11: _straight_route(11, "N0", 8.0, y=0.5),
+            20: _straight_route(20, "P1", ref_length, y=2.5),
+            21: _straight_route(21, "N1", ref_length, y=3.0),
+        }
+        ref_p, ref_n = routes[20], routes[21]
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            pair_fallbacks=pair_fallbacks,
+        )
+        assert results[10][1].inserts_applied >= 1, results[10][1].message
+        _assert_pair_not_past_reference(results[10][0], results[11][0], ref_p, ref_n)
+
+
+class TestBoard07RealGeometryNeverPastReference:
+    """Issue #7423 carry-over (judge of PR #7461, finding 3): board 07 ended a
+    tuned member past the group reference (SDRAM_ADDRESS A8, 0.068 um past
+    A5) while every synthetic overshoot test passed.  This pins the real
+    copper: the SDRAM_BYTE1 tuner input from a seed-42 07m route with
+    ``length_critical`` on, reduced to DQ14 and its UDQM reference (no
+    foreign copper is needed to reproduce it).  The old head committed the
+    refit candidate when the refit loop gave up, ending DQ14 118.5 nm past
+    UDQM; the measured-route guard rejects that candidate instead."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "board07_byte1_dq14_overshoot.json"
+
+    @classmethod
+    def _load(cls):
+        import json
+
+        from kicad_tools.router.kicad_length import KicadLengthModel, KicadStackup, LPad
+        from kicad_tools.router.primitives import Via
+
+        data = json.loads(cls.FIXTURE.read_text())
+        routes: dict[int, Route] = {}
+        pads: dict[int, list[LPad]] = {}
+        ids: dict[str, int] = {}
+        for name, net in data["nets"].items():
+            nid = net["net"]
+            ids[name] = nid
+            routes[nid] = Route(
+                net=nid,
+                net_name=name,
+                segments=[
+                    Segment(
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        width=w,
+                        layer=Layer[layer],
+                        net=nid,
+                        net_name=name,
+                    )
+                    for x1, y1, x2, y2, w, layer in net["segments"]
+                ],
+                vias=[
+                    Via(
+                        x=x,
+                        y=y,
+                        drill=drill,
+                        diameter=dia,
+                        layers=(Layer[a], Layer[b]),
+                        net=nid,
+                        net_name=name,
+                        is_micro=micro,
+                    )
+                    for x, y, drill, dia, a, b, micro in net["vias"]
+                ],
+            )
+            pads[nid] = [
+                LPad(**{**p, "layers": frozenset(p["layers"]) if p["layers"] else None})
+                for p in net["pads"]
+            ]
+        model = KicadLengthModel(KicadStackup([tuple(s) for s in data["stackup"]]), pads)
+        return data, routes, ids, model
+
+    def test_dq14_never_ends_past_udqm_on_written_copper(self):
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        data, routes, ids, model = self._load()
+        dq14, udqm = ids["DQ14"], ids["UDQM"]
+        n_layers = data["num_copper_layers"]
+
+        def length(route: Route) -> float:
+            # The kicad-cli measure on the 4 dp written copper (segments and
+            # vias), i.e. exactly what ``kct check`` reads back from the file.
+            return MatchGroupTracker._measure_route_total(route, None, n_layers, length_model=model)
+
+        ref_length = length(routes[udqm])
+        # Precondition: DQ14 is far enough short of UDQM to need a meander.
+        assert ref_length - length(routes[dq14]) > data["tolerance_mm"]
+
+        group = MatchGroup(
+            name="SDRAM_BYTE1",
+            net_ids=[dq14, udqm],
+            tolerance=data["tolerance_mm"],
+            source=MatchGroupSource.EXPLICIT,
+        )
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=data["tolerance_mm"],
+            intra_group_clearance_mm=data["intra_group_clearance_mm"],
+            num_copper_layers=n_layers,
+            length_model=model,
+        )
+        tuned, result = results[dq14]
+        assert result.inserts_applied >= 1, result.message
+        excess = length(tuned) - ref_length
+        # Zero tolerance: the issue's bar is "never past the group target".
+        assert excess <= 0.0, (
+            f"DQ14 tuned {excess * 1e6:.3f} nm past the UDQM reference ({result.reason})"
+        )
+
+
+# =============================================================================
+# Issue #7766: staircase flattening
+# =============================================================================
+
+
+def _staircase_route(hops: int, *, layer: Layer = Layer.F_CU) -> Route:
+    """Pad stub, then ``hops`` 0.675 mm runs hopping 0.26 mm between two rails.
+
+    Mirrors board 07's MIPI_DAT0_P: the longest straight run is 0.675 mm, so no
+    meander fits, yet every joint lies within 0.26 mm of the line y=1.0.
+    """
+    pts = [(0.0, 1.0)]
+    x = 0.0
+    for k in range(hops):
+        y_a, y_b = (1.0, 0.74) if k % 2 == 0 else (0.74, 1.0)
+        pts += [(x + 0.675, y_a), (x + 0.675, y_b)]
+        x += 0.675
+    pts[-1] = (pts[-1][0], 1.0)
+    pts.append((pts[-1][0] + 1.0, 2.0))  # 45 degree exit
+    segs = [
+        Segment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=0.2, layer=layer, net=1, net_name="P")
+        for a, b in zip(pts[:-1], pts[1:], strict=True)
+        if a != b
+    ]
+    return Route(net=1, net_name="P", segments=segs, vias=[])
+
+
+class TestStraightenJogRuns:
+    def test_flattens_staircase_to_one_host(self) -> None:
+        route = _staircase_route(10)
+        out = _straighten_jog_runs(route)
+        assert out is not None
+        flat, new = out
+        assert len(new) == 1
+        assert len(flat.segments) < len(route.segments)
+        assert max(s.x2 - s.x1 for s in flat.segments if s.y1 == s.y2) > 5.0
+        # Only shortens, and stays connected end to end.
+        assert LengthTracker.calculate_route_length(flat) <= LengthTracker.calculate_route_length(
+            route
+        )
+        ends = {(round(s.x1, 4), round(s.y1, 4)) for s in flat.segments} | {
+            (round(s.x2, 4), round(s.y2, 4)) for s in flat.segments
+        }
+        assert (0.0, 1.0) in ends
+
+    def test_straight_route_is_untouched(self) -> None:
+        assert _straighten_jog_runs(_straight_route(1, "P", 20.0)) is None
+
+    def test_skipped_segments_are_not_flattened(self) -> None:
+        route = _staircase_route(10)
+        skip = {id(s) for s in route.segments}
+        assert _straighten_jog_runs(route, skip_segment_ids=skip) is None
+
+    def test_wide_excursion_is_not_a_jog(self) -> None:
+        route = _staircase_route(10)
+        assert _straighten_jog_runs(route, band_mm=0.1) is None

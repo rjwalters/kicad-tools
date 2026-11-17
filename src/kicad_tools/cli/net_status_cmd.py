@@ -1,0 +1,839 @@
+"""Net connectivity status CLI command.
+
+Report net connectivity status showing which nets are complete, incomplete,
+or unrouted, with details on what's missing.
+
+Usage:
+    kicad-net-status board.kicad_pcb
+    kicad-net-status board.kicad_pcb --incomplete
+    kicad-net-status board.kicad_pcb --net GND
+    kicad-net-status board.kicad_pcb --by-class
+    kicad-net-status board.kicad_pcb --format json
+    kicad-net-status board.kicad_pcb --strict
+    kicad-net-status board.kicad_pcb --legacy-proximity
+
+Connectivity model:
+    By default (since issue #4557), connectivity is decided by real geometric
+    copper contact (shapely polygon intersection), matching the semantics of
+    ``kicad-cli pcb drc`` (issue #4176). ``--strict`` selects the same model
+    explicitly (kept as a no-op for script compatibility).
+    Pass ``--legacy-proximity`` to opt into the legacy 0.01mm
+    endpoint-proximity tolerance: a segment endpoint is unioned with a pad /
+    via / other segment whenever their reference points land within 0.01mm,
+    without testing whether the real copper (segment width, pad shape)
+    actually touches. That model diverges from KiCad in both directions -- it
+    can report proximity-unioned copper "complete" that KiCad reports open
+    (issue #4176), and it reports false opens when a trace endpoint lands
+    inside pad copper but away from the pad center (issue #4557).
+
+Exit Codes:
+    0 - No incomplete nets
+    1 - Error loading file or other error
+    2 - Incomplete nets found
+
+    The exit code for the normal status path is board-wide even under
+    ``--net`` (exit 2 when ANY net on the board is incomplete, regardless of
+    the selected net's status) -- kept unchanged for script compatibility
+    (issue #4682). The ``--why`` path scopes its exit code to the selected
+    net when ``--net`` is given.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from kicad_tools.analysis.net_status import NetStatus, NetStatusAnalyzer, NetStatusResult
+from kicad_tools.cli.check_cmd import portable_report_path
+from kicad_tools.findings import findings_payload, from_net_status
+
+if TYPE_CHECKING:
+    from kicad_tools.router.stuck_classifier import StuckNetDiagnosis
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kicad-net-status command."""
+    parser = argparse.ArgumentParser(
+        prog="kicad-net-status",
+        description="Report net connectivity status for a PCB",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    parser.add_argument(
+        "--incomplete",
+        action="store_true",
+        help="Show only incomplete nets",
+    )
+    parser.add_argument(
+        "--net",
+        help=(
+            "Show status for a specific net by name. Scopes the text "
+            "summary/banner (and --why diagnoses) to the selected net. "
+            "Note: the exit code stays BOARD-WIDE for the normal status "
+            "path -- exit 2 when any net on the board is incomplete, even "
+            "if the selected net is complete (issue #4682)."
+        ),
+    )
+    parser.add_argument(
+        "--by-class",
+        action="store_true",
+        dest="by_class",
+        help="Group output by net class",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show all pads with coordinates",
+    )
+    model_group = parser.add_mutually_exclusive_group()
+    model_group.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Decide connectivity by REAL geometric copper contact (shapely "
+            "polygon intersection), matching KiCad's connectivity semantics "
+            "(issue #4176). This has been the DEFAULT since issue #4557; the "
+            "flag is kept as an explicit no-op for script compatibility."
+        ),
+    )
+    model_group.add_argument(
+        "--legacy-proximity",
+        action="store_true",
+        dest="legacy_proximity",
+        help=(
+            "Opt into the legacy 0.01mm endpoint-proximity connectivity "
+            "model: a segment endpoint is unioned with a pad/via/segment "
+            "whenever their reference points land within 0.01mm, even if the "
+            "actual copper (segment width, pad shape) does not touch. "
+            "Faster (~1.5-2x) but diverges from KiCad in both directions "
+            "(issues #4176, #4557). Mutually exclusive with --strict."
+        ),
+    )
+    parser.add_argument(
+        "--allow-stranded-pour-pads",
+        action="store_true",
+        dest="allow_stranded_pour_pads",
+        help=(
+            "Treat nets that are incomplete ONLY as pour/plane residuals as "
+            "advisory for the exit code (Issue #5785). By default a pad "
+            "stranded on a pour is a completion failure (exit 2), matching "
+            "kicad-cli and `kct route`. Also KCT_ALLOW_STRANDED_POUR_PADS=1."
+        ),
+    )
+    parser.add_argument(
+        "--why",
+        action="store_true",
+        help=(
+            "Classify each incomplete signal net by WHY it is stuck "
+            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / BUDGET_STARVED / "
+            "PLACEMENT_BOUND) with supporting evidence. Read-only diagnostic "
+            "(issue #3863)."
+        ),
+    )
+    parser.add_argument(
+        "--crossings",
+        action="store_true",
+        help=(
+            "Pre-route bundle crossing report (issue #6339): per part-pair "
+            "bundle, pin orders, inversions per entry side, forced crossings "
+            "and over-sized conflict sets; plus hub pin columns whose exit "
+            "directions interleave. Read-only; honours --format json and --net."
+        ),
+    )
+    parser.add_argument(
+        "--signal-layers",
+        type=int,
+        default=None,
+        dest="signal_layers",
+        help=(
+            "Signal-layer count for the --crossings over-size verdict "
+            "(default: copper layers of type signal)."
+        ),
+    )
+
+    args = parser.parse_args(argv)
+
+    # Validate PCB path
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: PCB not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if args.crossings:
+        return output_crossings(pcb_path, args.format, args.signal_layers, args.net)
+
+    # Connectivity model selection (issue #4557): strict (real copper
+    # geometry) is the default; --strict is an explicit no-op kept for script
+    # compatibility; --legacy-proximity opts back into the endpoint-proximity
+    # model. The two flags are mutually exclusive (argparse-enforced).
+    strict = not args.legacy_proximity
+
+    # Run analysis
+    try:
+        analyzer = NetStatusAnalyzer(pcb_path, strict=strict)
+        result = analyzer.analyze()
+    except Exception as e:
+        print(f"Error during analysis: {e}", file=sys.stderr)
+        return 1
+
+    # --net: validate the selected net exists before dispatching to either
+    # output path. This must run ahead of the --why branch -- previously
+    # --why short-circuited first and silently ignored --net entirely
+    # (issue #4682).
+    net_status: NetStatus | None = None
+    if args.net:
+        net_status = result.get_net(args.net)
+        if not net_status:
+            print(f"Error: Net '{args.net}' not found", file=sys.stderr)
+            print("\nAvailable nets:", file=sys.stderr)
+            for net in sorted(result.nets, key=lambda n: n.net_name)[:20]:
+                print(f"  {net.net_name}", file=sys.stderr)
+            if len(result.nets) > 20:
+                print(f"  ... and {len(result.nets) - 20} more", file=sys.stderr)
+            return 1
+
+    # --why: stuck-net classifier (issue #3863). Read-only diagnostic that
+    # labels each incomplete signal net by WHY it is stuck. Handled before the
+    # normal filter/output path because it has its own output shape. Respects
+    # the strict/legacy selection (issue #4557) and the --net filter
+    # (issue #4682).
+    if args.why:
+        return output_why(pcb_path, args.format, strict=strict, net=args.net)
+
+    # Filter results if needed
+    if net_status is not None:
+        # Create a result with just this net (--net validated above)
+        filtered = NetStatusResult(nets=[net_status], total_nets=1)
+    elif args.incomplete:
+        # Issue #6491: a complete net with stranded copper still fails the
+        # exit code, so --incomplete keeps it in view.
+        filtered = NetStatusResult(
+            nets=result.incomplete
+            + result.unrouted
+            + [n for n in result.stranded if n.status == "complete"],
+            total_nets=result.total_nets,
+        )
+    else:
+        filtered = result
+
+    # Output
+    if args.format == "json":
+        output_json(
+            filtered,
+            pcb_path,
+            args.by_class,
+            strict=strict,
+            origin=analyzer.pcb.board_origin,
+        )
+    else:
+        # For --incomplete the summary header must describe the unfiltered
+        # board so its counts stay internally consistent (Complete +
+        # Incomplete + Unrouted == total). The filtered set only drives the
+        # net *list* below the header. For --net the summary is instead
+        # scoped to the selection (issue #4682) so the banner and summary
+        # cannot contradict each other; ``net_filter`` selects that path.
+        output_text(
+            filtered,
+            pcb_path,
+            args.verbose,
+            args.by_class,
+            args.incomplete,
+            summary_result=result,
+            strict=strict,
+            net_filter=args.net,
+        )
+
+    # Exit code. Deliberately BOARD-WIDE even under --net (issue #4682 kept
+    # this unchanged to avoid breaking script consumers; documented in the
+    # --net help text).
+    return exit_code_for(result, getattr(args, "allow_stranded_pour_pads", False))
+
+
+def output_crossings(
+    pcb_path: Path, fmt: str, signal_layers: int | None = None, net: str | None = None
+) -> int:
+    """``--crossings``: pre-route bundle crossing report (issue #6339)."""
+    from kicad_tools.router.bundle_crossings import compute_bundle_crossings, format_report_text
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        report = compute_bundle_crossings(PCB.load(str(pcb_path)), signal_layers)
+    except Exception as e:
+        print(f"Error during crossing analysis: {e}", file=sys.stderr)
+        return 1
+    if net:
+        report = report.filtered(net)
+    if fmt == "json":
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_report_text(report))
+    return 0
+
+
+def exit_code_for(result: NetStatusResult, allow_stranded_pour_pads: bool = False) -> int:
+    """Board-wide exit code (Issue #5785: one verdict with kicad-cli/`kct route`).
+
+    A pad stranded on a pour fails (2), exactly as kicad-cli reports it as an
+    unconnected item, unless the user explicitly opts in to treating
+    pour-only residuals as advisory.
+
+    Stranded copper -- a track or via reaching no pad -- also fails (2),
+    even on a net whose pads are all joined (``status == "complete"``):
+    kicad-cli reports each fragment as an unconnected item (Issue #6491).
+    ``--allow-stranded-pour-pads`` does not relax this; that flag is about
+    pads on a pour, not orphan copper.
+    """
+    from kicad_tools.router.completion_verdict import allow_stranded_pour_pads as _allowed
+
+    incomplete = (
+        result.blocking_incomplete_count
+        if _allowed(allow_stranded_pour_pads)
+        else result.incomplete_count
+    )
+    if incomplete > 0 or result.unrouted_count > 0 or result.stranded_count > 0:
+        return 2
+    return 0
+
+
+def _model_label(strict: bool) -> str:
+    """Human-readable name of the connectivity model in use (issue #4557)."""
+    if strict:
+        return "strict (real copper geometry, matches kicad-cli)"
+    return "legacy endpoint-proximity (0.01mm tolerance)"
+
+
+def output_text(
+    result: NetStatusResult,
+    pcb_path: Path,
+    verbose: bool = False,
+    by_class: bool = False,
+    incomplete_only: bool = False,
+    summary_result: NetStatusResult | None = None,
+    strict: bool = True,
+    net_filter: str | None = None,
+) -> None:
+    """Output results as formatted text.
+
+    Args:
+        result: The (possibly filtered) result used to render the net list.
+        summary_result: The unfiltered result used for the Summary header. When
+            ``--incomplete`` filters complete nets out of ``result``, the header
+            must still describe the full board so its counts stay consistent
+            (Complete + Incomplete + Unrouted == total). Defaults to ``result``.
+        strict: Which connectivity model produced ``result`` (drives the
+            model line in the header, issue #4557).
+        net_filter: Name of the net selected with ``--net``, if any. When set,
+            the Summary block and the connectivity banner are BOTH scoped to
+            the selection (with the board-wide total named for context) so no
+            rendered line contradicts another (issue #4682). Note the exit
+            code computed by ``main()`` stays board-wide regardless.
+    """
+    summary = summary_result if summary_result is not None else result
+    print(f"Net Status: {pcb_path.name}")
+    print("=" * 60)
+    print(f"Connectivity model: {_model_label(strict)}")
+    print()
+    if net_filter is not None:
+        # --net: scope the counts to the selection (issue #4682). Before
+        # this, a board-wide "Incomplete: 1" rendered directly above an
+        # "All nets are fully connected!" banner derived from the filtered
+        # set -- a direct contradiction.
+        print(f"Summary: 1 net selected (of {summary.total_nets} on board)")
+        counted = result
+    else:
+        print(f"Summary: {summary.total_nets} nets total")
+        counted = summary
+    print(f"  Complete:   {counted.complete_count} (all pads connected)")
+    print(f"  Incomplete: {counted.incomplete_count} (partially connected)")
+    print(f"  Unrouted:   {counted.unrouted_count} (no pads connected)")
+    if counted.stranded_count:
+        print(f"  Stranded:   {counted.stranded_count} (track/via reaching no pad)")
+    print()
+
+    if by_class:
+        _output_by_class(result, verbose)
+    else:
+        _output_flat(result, verbose, incomplete_only, net_filter=net_filter)
+
+
+def _output_flat(
+    result: NetStatusResult,
+    verbose: bool,
+    incomplete_only: bool,
+    net_filter: str | None = None,
+) -> None:
+    """Output nets in flat list format.
+
+    ``net_filter`` names the ``--net`` selection when set; the fully-connected
+    banner is then worded for that scope instead of claiming board-wide
+    completeness (issue #4682).
+    """
+    # Show incomplete nets with details
+    if result.incomplete or result.unrouted:
+        print("Incomplete Nets:")
+        print("=" * 60)
+
+        for net in result.incomplete + result.unrouted:
+            _print_net_status(net, verbose)
+
+    elif not incomplete_only and not result.stranded:
+        if net_filter is not None:
+            print(f"Selected net '{net_filter}' is fully connected.")
+        else:
+            print("All nets are fully connected!")
+
+    # Issue #6491: copper reaching no pad fails the exit code even when every
+    # pad is joined, so name it -- an "all connected" banner over exit 2
+    # would leave the user nothing to fix.
+    stranded_complete = [n for n in result.stranded if n.status == "complete"]
+    if stranded_complete:
+        print()
+        print("Stranded Copper (pads all connected, track/via reaching no pad):")
+        print("=" * 60)
+        for net in stranded_complete:
+            print(f"  [~] {net.net_name} ({net.padless_components} stranded fragment(s))")
+            print(f"    -> Fix: {net.suggested_fix}")
+
+    # Show complete nets if not filtering
+    if not incomplete_only and result.complete:
+        print()
+        print("Complete Nets:")
+        print("-" * 60)
+        for net in result.complete[:20]:
+            print(f"  {net.net_name} ({net.total_pads} pads)")
+        if len(result.complete) > 20:
+            print(f"  ... and {len(result.complete) - 20} more")
+
+
+def _output_by_class(result: NetStatusResult, verbose: bool) -> None:
+    """Output nets grouped by net class."""
+    by_class = result.by_net_class()
+
+    for class_name, nets in sorted(by_class.items()):
+        incomplete = [n for n in nets if n.status != "complete"]
+        complete = [n for n in nets if n.status == "complete"]
+
+        print(f"\nNet Class: {class_name}")
+        print("-" * 60)
+        print(f"  Complete: {len(complete)}, Incomplete: {len(incomplete)}")
+
+        if incomplete:
+            print()
+            for net in incomplete:
+                _print_net_status(net, verbose, indent="  ")
+
+
+def _print_net_status(net: NetStatus, verbose: bool, indent: str = "") -> None:
+    """Print status for a single net."""
+    # Status indicator
+    if net.status == "complete":
+        status_char = "+"
+    elif net.status == "incomplete":
+        status_char = "!"
+    else:  # unrouted
+        status_char = "X"
+
+    # Net type indicator
+    type_info = ""
+    if net.is_plane_net:
+        layers = (
+            net.plane_layers if net.plane_layers else ([net.plane_layer] if net.plane_layer else [])
+        )
+        layers_str = ", ".join(layers) if layers else "unknown"
+        type_info = f" -- Plane net on {layers_str}"
+
+    print()
+    print(
+        f"{indent}[{status_char}] {net.net_name} ({net.unconnected_count} pads unconnected){type_info}"
+    )
+
+    # Show unconnected pads
+    pads_to_show = net.unconnected_pads[:5] if not verbose else net.unconnected_pads
+    for pad in pads_to_show:
+        fix_hint = "needs via to plane" if net.is_plane_net else "needs routing"
+        print(
+            f"{indent}  {pad.full_name:<8} @ ({pad.position[0]:.2f}, {pad.position[1]:.2f}) -- {fix_hint}"
+        )
+
+    if not verbose and len(net.unconnected_pads) > 5:
+        print(f"{indent}  ... ({len(net.unconnected_pads) - 5} more)")
+
+    # Suggested fix
+    print(f"{indent}  -> Fix: {net.suggested_fix}")
+
+
+def output_json(
+    result: NetStatusResult,
+    pcb_path: Path,
+    by_class: bool = False,
+    strict: bool = True,
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> None:
+    """Output results as JSON.
+
+    ``origin`` is ``PCB.board_origin``; it moves the board-relative pad
+    positions back into the KiCad file frame for ``findings`` (Issue #8015).
+    """
+    data: dict[str, Any] = {
+        "pcb": portable_report_path(pcb_path),
+        "connectivity_model": "strict" if strict else "legacy_proximity",
+        "summary": {
+            "total_nets": result.total_nets,
+            "complete": result.complete_count,
+            "incomplete": result.incomplete_count,
+            "unrouted": result.unrouted_count,
+            "stranded": result.stranded_count,
+            "total_unconnected_pads": result.total_unconnected_pads,
+        },
+        **findings_payload(f for n in result.nets for f in from_net_status(n, origin)),
+    }
+
+    if by_class:
+        data["by_class"] = {
+            class_name: [n.to_dict() for n in nets]
+            for class_name, nets in result.by_net_class().items()
+        }
+    else:
+        data["nets"] = [n.to_dict() for n in result.nets]
+
+    print(json.dumps(data, indent=2))
+
+
+_ACTION_LABELS = {
+    "de_reverse_bundle": "de-reverse the bundle",
+    "reorder_pins": "re-order pins",
+    "widen_channel": "widen the channel",
+    "move_part": "move a part",
+    "accept_plateau": "accept plateau",
+}
+
+
+def _print_recommendation(diag: StuckNetDiagnosis) -> None:
+    """Render the additive ranked fix ladder for one stuck net (issue #4261).
+
+    Only called when ``diag`` has a non-empty ``recommendation``.
+    """
+    confidence = diag.recommendation[0].confidence.value.upper()
+    if diag.topology == "self_crossing_bundle":
+        group = diag.match_group or "bundle"
+        headline = f"self-crossing {group} bundle"
+    elif diag.topology == "co_oriented_bundle":
+        # Issue #4286: same-group congestion with a MEASURED co-oriented pin
+        # order -- the bundle is planar, so de-reversal is never suggested.
+        group = diag.match_group or "bundle"
+        headline = f"co-oriented {group} bundle (saturated corridor)"
+    else:
+        headline = "foreign-cluster congestion"
+    print(f"  recommendation:   [{confidence}] {headline}")
+    for i, ranked in enumerate(diag.recommendation, start=1):
+        label = _ACTION_LABELS.get(ranked.action.value, ranked.action.value)
+        preferred = "  [preferred]" if i == 1 else ""
+        print(f"                    {i}. {label} ({ranked.rationale}){preferred}")
+
+
+def _discover_net_class_map(pcb_path: Path) -> dict[str, Any] | None:
+    """Auto-discover + load a ``net_class_map.json`` sidecar for *pcb_path*.
+
+    Issue #5522: scoped to *pcb_path*'s own directory only (a single-element
+    directory list to :func:`~kicad_tools.sidecars.
+    first_existing_net_class_map_sidecar`), matching the other
+    single-directory sidecar consumers (the CI merge gates, the export
+    report) rather than ``kct check``'s wider three-directory probe --
+    widening the scope is explicitly out of AC4 for that shared module.
+    Returns ``None`` (never raises) when no sidecar exists, or when one
+    exists but fails to parse -- a malformed sidecar must not break
+    ``--why`` output that worked before #5522.
+    """
+    from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.sidecars import first_existing_net_class_map_sidecar
+
+    sidecar_path = first_existing_net_class_map_sidecar([pcb_path.parent], pcb_path.stem)
+    if sidecar_path is None:
+        return None
+    try:
+        return net_class_map_from_path(sidecar_path, pcb_path=pcb_path)
+    except Exception:
+        return None
+
+
+def _discover_routing_plan(pcb_path: Path) -> tuple[Any, Path] | None:
+    """Auto-discover + load the ``<stem>.routing_plan.json`` sidecar (#5521).
+
+    ``kct route`` writes the report-only routing plan beside the **routed**
+    PCB under a stem-keyed name (``_write_routing_plan_sidecar``, #5519), so
+    the lookup is the exact inverse of the write: same directory, same stem.
+
+    Returns ``(plan, path)``, or ``None`` when there is nothing trustworthy
+    to read.  Three distinct "nothing" cases, deliberately different:
+
+    - **No sidecar** -- silent.  ``--why`` output is byte-identical to
+      pre-#5521 (this is what the golden test pins); printing "no plan
+      found" would itself be the behaviour change.
+    - **Unreadable / malformed sidecar** -- silent.  A broken diagnostic
+      must not break a diagnostic that worked before it existed.
+    - **Stale sidecar** (``source.pcb`` names a different board, or the
+      sidecar predates the PCB) -- one stderr line, then ignored.  Guessing
+      from a stale plan is worse than not guessing: the same attitude the
+      census gate takes to a stale cross-check.
+    """
+    from kicad_tools.router.routing_plan import RoutingPlan
+
+    sidecar = pcb_path.with_name(pcb_path.stem + ".routing_plan.json")
+    if not sidecar.is_file():
+        return None
+    try:
+        plan = RoutingPlan.from_dict(json.loads(sidecar.read_text()))
+    except Exception:
+        return None
+
+    recorded = plan.source.get("pcb")
+    if recorded and Path(str(recorded)).name != pcb_path.name:
+        print(
+            f"Warning: ignoring {sidecar.name} -- it was built for "
+            f"{Path(str(recorded)).name}, not {pcb_path.name}",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        if sidecar.stat().st_mtime < pcb_path.stat().st_mtime:
+            print(
+                f"Warning: ignoring {sidecar.name} -- it is older than "
+                f"{pcb_path.name} (re-run `kct route` to refresh it)",
+                file=sys.stderr,
+            )
+            return None
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return plan, sidecar
+
+
+def _print_routing_plan_block(plan: Any, crossings: dict[str, list], net_name: str) -> None:
+    """Print the ``routing plan:`` block for one diagnosis (#5521).
+
+    Prints nothing when the net crosses no overflowed edge (or no sidecar
+    was loaded), which is what keeps the no-sidecar output byte-identical.
+
+    Ordered **before** ``recommendation:`` on purpose: the classifier's
+    ``PLACEMENT_BOUND`` verdict is inferred from finished copper, while the
+    plan is a pre-route capacity measurement.  When both are present the
+    measurement is the stronger witness and should be read first -- but it
+    does not *reclassify* anything, so the ``[PLACEMENT_BOUND]`` header and
+    the counts above are untouched.
+    """
+    edges = crossings.get(net_name) or []
+    if not edges:
+        return
+    edge = edges[0]
+    print(f"  routing plan:     {plan.format_edge_headline(edge)}")
+    if len(edges) > 1:
+        print(f"                    (+{len(edges) - 1} more overflowed edge(s) on this net)")
+    for line in plan.relief_lines(edge):
+        print(f"                    relief: {line}")
+
+
+def _print_access_witness(diag: Any) -> None:
+    """Render the replay-derived access witness for one diagnosis (#5517).
+
+    Prints nothing when no ``<stem>.access_witness.json`` sidecar was found,
+    which keeps ``--why`` text output byte-identical to pre-#5517 for a bare
+    ``.kicad_pcb``.
+
+    The block answers the question ``blocking nets`` only guesses at: that
+    line is a line-of-sight scan over the *finished* board, while these fields
+    are replayed from the order copper actually landed in, so they name the
+    commit -- pass, iteration and net -- that took the pad's last way out.
+    """
+    witness = getattr(diag, "access_witness", None)
+    if not witness:
+        return
+    print("  access witness:")
+    for pad in witness:
+        print(f"    {pad.label}:")
+        print(f"      access at escape end: {pad.access_at_escape_end}")
+        print(f"      access now:           {pad.final_access}")
+        if pad.first_closed_at is None:
+            # The DQ3 / #5509 category: nothing the router committed took this
+            # pad's access away, so no commit can be named as the cause.
+            print("      first closed at:      never (no commit emptied the access set)")
+            continue
+        pass_name, iteration = pad.first_closed_at
+        print(
+            f"      first closed at:      {pass_name}[{iteration}] "
+            f"(journal record #{pad.first_closed_index}, {pad.first_closed_kind})"
+        )
+        print(f"      closing nets:         {', '.join(pad.closing_nets) or '(unattributed)'}")
+        if pad.closing_refs:
+            print(f"      closing copper:       {', '.join(pad.closing_refs)}")
+        if pad.closing_copper_class:
+            print(f"      closing copper class: {', '.join(pad.closing_copper_class)}")
+        if pad.reopened:
+            print("      note:                 a later rip-up reopened this pad")
+    if witness.clearance:
+        values = ", ".join(f"{name}={mm}mm" for name, mm in witness.clearance)
+        print(f"    resolver clearances:  {values}")
+    if witness.truncated:
+        print("    note: witness truncated (journal or replay budget exhausted)")
+
+
+def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = None) -> int:
+    """Classify incomplete signal nets by why they are stuck and print them.
+
+    ``strict`` selects the connectivity model the classifier's internal
+    ``NetStatusAnalyzer`` runs use (issue #4557) -- before this parameter,
+    ``--strict --why`` silently ignored ``--strict``.
+
+    ``net`` scopes the output to a single net (the ``--net`` selection,
+    issue #4682): classification still runs whole-board (acceptable cost for
+    a read-only diagnostic), then the diagnoses are post-filtered to the
+    selected net. The caller (``main()``) has already validated that the net
+    exists on the board. Before this parameter, ``--net X --why`` silently
+    printed every stuck net EXCEPT the one asked about.
+
+    Returns 2 if any (selected) stuck nets were found (matching the rest of
+    net-status' exit-code convention), 0 if there are none -- so under
+    ``--net`` the exit code reflects the selected net only.
+
+    Issue #5522 (Phase 1 of Epic #5511): auto-discovers a committed
+    ``net_class_map.json`` / ``<stem>.net_class_map.json`` sidecar next to
+    *pcb_path* (single-directory scope, matching the other single-directory
+    sidecar consumers per ``sidecars.py``'s AC4 note) and forwards it to the
+    classifier so a declared ``swap_group`` can surface a ``swap_proposal``
+    on a verified-reversed bundle.  No new CLI flag -- an absent sidecar
+    resolves to ``None``, which keeps this output byte-identical to
+    pre-#5522 behavior.
+
+    Issue #5517 (Epic #5508, Phase 1b): the classifier likewise auto-discovers
+    a ``<stem>.access_witness.json`` sidecar next to *pcb_path* -- the ordered
+    commit journal replayed into a per-pad verdict by ``kct route``.  When one
+    is present, each diagnosis carries the terminals of its own net and both
+    output formats render the block: which pass and iteration emptied the pad's
+    access set, and whose copper did it.  Also no new CLI flag, and also
+    byte-identical output when the sidecar is absent.
+
+    Issue #5521 (Epic #5510, Phase 1c): the same auto-discovery for the
+    ``<stem>.routing_plan.json`` sidecar ``kct route`` writes.  When one is
+    present and a stuck net crosses an overflowed corridor in it, both
+    formats name that corridor and its measured relief *ahead of* the
+    classifier's ``PLACEMENT_BOUND`` guess -- a pre-route capacity
+    measurement rather than an inference from finished copper.  Again no new
+    flag, and again byte-identical output without a sidecar: the
+    ``overflow_edge`` / ``routing_plan`` JSON keys are injected here, never
+    added to ``StuckNetDiagnosis.to_dict`` (which other consumers share).
+    """
+    from kicad_tools.router.stuck_classifier import StuckClassifierResult, classify_stuck_nets
+
+    net_class_map = _discover_net_class_map(pcb_path)
+    result = classify_stuck_nets(pcb_path, strict=strict, net_class_map=net_class_map)
+
+    # Issue #5521: the routing-plan sidecar, if one is beside the board.
+    discovered = _discover_routing_plan(pcb_path)
+    plan = discovered[0] if discovered is not None else None
+    crossings: dict[str, list] = plan.crossings_by_net_name() if plan is not None else {}
+
+    # --net filter (issue #4682): restrict diagnoses (and every derived
+    # count) to the selected net.
+    if net is not None:
+        result = StuckClassifierResult(diagnoses=[d for d in result.diagnoses if d.net_name == net])
+
+    if fmt == "json":
+        data = {
+            "pcb": portable_report_path(pcb_path),
+            "connectivity_model": "strict" if strict else "legacy_proximity",
+            **result.to_dict(),
+        }
+        if net is not None:
+            data["net_filter"] = net
+        if plan is not None and discovered is not None:
+            # Issue #5521: additive ONLY when a sidecar was actually loaded.
+            # A ``"overflow_edge": null`` on every diagnosis would change the
+            # byte output of every board that has no plan -- exactly what the
+            # golden test forbids.
+            data["routing_plan"] = {
+                "path": str(discovered[1]),
+                "schema_version": plan.schema_version,
+                "total_overflow": (
+                    plan.overflow_report.total_overflow if plan.overflow_report else 0
+                ),
+                "overflowed_edges": (
+                    plan.overflow_report.overflowed_edges if plan.overflow_report else 0
+                ),
+                "feasible": (plan.overflow_report.feasible if plan.overflow_report else True),
+            }
+            for diag, payload in zip(result.diagnoses, data["nets"], strict=False):
+                edges = crossings.get(diag.net_name) or []
+                if edges:
+                    payload["overflow_edge"] = edges[0].to_dict()
+        print(json.dumps(data, indent=2))
+        return 2 if result.diagnoses else 0
+
+    print(f"Stuck-net classification: {pcb_path.name}")
+    print("=" * 70)
+    print(f"Connectivity model: {_model_label(strict)}")
+    if net is not None:
+        print(f"Selected net: {net}")
+    print()
+    counts = result.counts
+    print(f"Stuck signal nets: {len(result.diagnoses)}")
+    print(f"  ESCAPE_BLOCKED:       {counts['escape_blocked']}")
+    print(f"  CONGESTION_SATURATED: {counts['congestion_saturated']}")
+    print(f"  BUDGET_STARVED:       {counts['budget_starved']}")
+    print(f"  PLACEMENT_BOUND:      {counts['placement_bound']}")
+    print(f"  POUR_DISCONTINUOUS:   {counts['pour_discontinuous']}")
+    print()
+
+    if not result.diagnoses:
+        if net is not None:
+            print(f"Net '{net}' is not stuck (complete, or only advisory plane/pour residuals).")
+        else:
+            print("No stuck signal nets -- board is fully routed (or only advisory")
+            print("plane/pour residuals remain).")
+        return 0
+
+    # Group for readability, escape-blocked first (most upstream).
+    order = {
+        "escape_blocked": 0,
+        "congestion_saturated": 1,
+        "budget_starved": 2,
+        "placement_bound": 3,
+        "pour_discontinuous": 4,
+    }
+    for diag in sorted(result.diagnoses, key=lambda d: order[d.classification_value]):
+        pads = ", ".join(diag.unconnected_pads) or "(none)"
+        print(f"[{diag.classification.value.upper()}] {diag.net_name}")
+        print(f"  unconnected pads: {pads}")
+        if diag.blocking_nets:
+            # Defect 2 (#4261): flag which blockers are the net's OWN match-group
+            # siblings rather than foreign copper.
+            note = ""
+            if diag.same_group_blockers and diag.match_group:
+                note = (
+                    f"        (same match-group {diag.match_group}: "
+                    f"{', '.join(diag.same_group_blockers)})"
+                )
+            print(f"  blocking nets:    {', '.join(diag.blocking_nets)}{note}")
+        print(f"  evidence:         {diag.evidence}")
+        # Issue #5521: the measured plan witness goes BEFORE the inferred
+        # recommendation (see _print_routing_plan_block).
+        if plan is not None:
+            _print_routing_plan_block(plan, crossings, diag.net_name)
+        if diag.recommendation:
+            _print_recommendation(diag)
+        _print_access_witness(diag)
+        print()
+
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

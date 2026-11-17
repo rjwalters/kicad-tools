@@ -1,0 +1,46 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "nested-uuid-0001")
+	(paper "A4")
+	(title_block
+		(title "Nested Sub Sheet - Level 3")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:C"
+			(symbol "C_0_1"
+				(polyline (pts (xy -2.032 -0.762) (xy 2.032 -0.762)) (stroke (width 0.508)) (fill (type none)))
+				(polyline (pts (xy -2.032 0.762) (xy 2.032 0.762)) (stroke (width 0.508)) (fill (type none)))
+			)
+			(symbol "C_1_1"
+				(pin passive line (at 0 3.81 270) (length 2.794) (name "~") (number "1"))
+				(pin passive line (at 0 -3.81 90) (length 2.794) (name "~") (number "2"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 80 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "nested-c2-uuid")
+		(property "Reference" "C2"
+			(at 82 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10uF"
+			(at 82 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 80 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "nested-c2-pin1"))
+		(pin "2" (uuid "nested-c2-pin2"))
+	)
+)

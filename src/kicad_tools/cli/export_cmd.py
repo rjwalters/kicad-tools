@@ -1,0 +1,617 @@
+"""
+Manufacturing export command for kicad-tools CLI.
+
+Usage:
+    kct export board.kicad_pcb --mfr jlcpcb -o manufacturing/
+    kct export board.kicad_pcb --mfr jlcpcb --dry-run
+    kct export board.kicad_pcb --mfr jlcpcb --no-report
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from kicad_tools.manufacturers import get_all_manufacturer_names
+
+if TYPE_CHECKING:
+    from kicad_tools.export.manufacturing import ManufacturingConfig
+
+# Single source for ``--stackup-id`` (Issue #6881): both this standalone parser
+# and the unified ``kct export`` subparser in ``cli/parser.py`` read these, so
+# the two can no longer drift. Each ID must be accepted by
+# ``Stackup.jlcpcb_named`` (asserted in tests/test_export_cmd.py); kept as
+# literals here because importing ``kicad_tools.physics`` would pull the whole
+# physics package into CLI start-up.
+STACKUP_ID_CHOICES: tuple[str, ...] = ("JLC04161H-3313", "JLC04161H-7628")
+STACKUP_ID_HELP = (
+    "Verify this factory construction against actual PCB layers and bundle ordering metadata"
+)
+
+
+def _boards_arg(value: str) -> int:
+    """argparse type for ``--boards``: an integer >= 1 (Issue #8121)."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError("--boards must be >= 1")
+    return n
+
+
+def _find_pcb_for_export(directory: Path) -> Path | None:
+    """Find a .kicad_pcb file in the given directory for export.
+
+    Searches recursively and prefers routed files (*_routed.kicad_pcb)
+    since those are the manufacturing-ready artifacts. Falls back to the
+    primary (non-backup) PCB file if no routed version exists.
+
+    Args:
+        directory: Directory to search
+
+    Returns:
+        Path to PCB file if found, None otherwise
+    """
+    pcb_files = list(directory.glob("**/*.kicad_pcb"))
+    # Filter out backup files
+    pcb_files = [f for f in pcb_files if not f.name.endswith("-bak.kicad_pcb")]
+
+    if not pcb_files:
+        return None
+
+    # Prefer routed files (manufacturing-ready)
+    routed = [f for f in pcb_files if f.name.endswith("_routed.kicad_pcb")]
+    if routed:
+        return routed[0]
+
+    # Fall back to non-routed PCB files
+    return pcb_files[0]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the standalone ``kct export`` argument parser.
+
+    The unified ``kct`` parser (``cli/parser.py::_add_export_parser``) mirrors
+    every option defined here; tests/test_export_cmd.py enforces that parity
+    (Issue #6881).
+    """
+    parser = argparse.ArgumentParser(
+        prog="kct export",
+        description="Generate a complete manufacturing package.",
+    )
+    parser.add_argument(
+        "pcb",
+        help="Path to .kicad_pcb file or directory containing one",
+    )
+    parser.add_argument(
+        "--stackup-id",
+        choices=list(STACKUP_ID_CHOICES),
+        help=STACKUP_ID_HELP,
+    )
+    parser.add_argument(
+        "--mfr",
+        "-m",
+        default="jlcpcb",
+        choices=[*get_all_manufacturer_names(), "generic"],
+        help="Target manufacturer (default: jlcpcb)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output directory (default: <pcb-dir>/manufacturing/)",
+    )
+    parser.add_argument(
+        "--sch",
+        default=None,
+        help="Path to .kicad_sch file (auto-detected by default)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be generated without writing files",
+    )
+    parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Skip report generation",
+    )
+    parser.add_argument(
+        "--no-gerbers",
+        action="store_true",
+        help="Skip Gerber export",
+    )
+    parser.add_argument(
+        "--no-bom",
+        action="store_true",
+        help="Skip BOM generation",
+    )
+    parser.add_argument(
+        "--no-cpl",
+        action="store_true",
+        help="Skip CPL/pick-and-place generation",
+    )
+    parser.add_argument(
+        "--no-project-zip",
+        action="store_true",
+        help="Skip KiCad project ZIP creation",
+    )
+    parser.add_argument(
+        "--no-ampacity-rules",
+        action="store_true",
+        help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
+    )
+    parser.add_argument(
+        "--keep-versions",
+        action="store_true",
+        help="Preserve versioned vN/ report directories (default: flat report/ directory)",
+    )
+    parser.add_argument(
+        "--keep-build-artifacts",
+        action="store_true",
+        help="Preserve intermediate report files (markdown, figures, data) in .build/ directory",
+    )
+    parser.add_argument(
+        "--keep-gerber-files",
+        action="store_true",
+        help="Keep individual gerber/drill files alongside the zip archive",
+    )
+    parser.add_argument(
+        "--auto-lcsc",
+        action="store_true",
+        default=True,
+        help="Auto-match LCSC part numbers for JLCPCB BOMs (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-auto-lcsc",
+        action="store_true",
+        help="Disable LCSC auto-matching",
+    )
+    parser.add_argument(
+        "--no-spec",
+        action="store_true",
+        help="Disable BOM enrichment from .kct project spec",
+    )
+    parser.add_argument(
+        "--spec",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Use this .kct project spec for BOM enrichment instead of walking up "
+            "from the PCB directory (needed when exporting outside the project tree). "
+            "--no-spec takes precedence; a missing PATH is still an error"
+        ),
+    )
+    parser.add_argument(
+        "--no-merge-lcsc",
+        action="store_true",
+        help=(
+            "Disable merging LCSC part numbers from an existing BOM CSV. By default the "
+            "merge reads <output-dir>/bom_<mfr>.csv, so a new output directory has "
+            "nothing to merge (see --merge-lcsc-from)"
+        ),
+    )
+    parser.add_argument(
+        "--merge-lcsc-from",
+        metavar="BOM_CSV",
+        default=None,
+        help=(
+            "Merge LCSC part numbers from this BOM CSV (e.g. the previous revision's "
+            "verified bom_jlcpcb.csv) instead of <output-dir>/bom_<mfr>.csv. "
+            "A missing file is an error; --no-merge-lcsc takes precedence"
+        ),
+    )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help=(
+            "Skip BOM/ERC/LCSC/cosmetic pre-flight validation checks. Does NOT "
+            "suppress the hard connectivity safety floor (net shorts / "
+            "connectivity errors in a pre-existing DRC report still block "
+            "export). Use --skip-drc-floor to override that too."
+        ),
+    )
+    parser.add_argument(
+        "--skip-drc-floor",
+        action="store_true",
+        help=(
+            "Disable the connectivity safety floor that blocks export on net "
+            "shorts or unconnected items found in a pre-existing DRC report. "
+            "Only for known-safe "
+            "workarounds -- shipping a shorted board is never safe."
+        ),
+    )
+    parser.add_argument(
+        "--strict-preflight",
+        action="store_true",
+        help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
+    )
+    parser.add_argument(
+        "--assembly-tier",
+        default="auto",
+        choices=["auto", "economic", "standard"],
+        help=(
+            "PCBA service tier preflight judges package/pitch limits against "
+            "(Issue #7204): 'auto' (default) reports the cheapest tier the board "
+            "fits; 'economic'/'standard' select a JLCPCB tier. Ignored by fabs "
+            "with a single assembly service"
+        ),
+    )
+    parser.add_argument(
+        "--boards",
+        type=_boards_arg,
+        default=5,
+        metavar="N",
+        help=(
+            "Boards in the assembly order (>= 1, default 5 = JLCPCB minimum); "
+            "the bom_lcsc_stock preflight check needs placements-per-board x N "
+            "of each LCSC part in stock (Issue #8121)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-unbuildable-bom",
+        action="store_true",
+        help=(
+            "Allow export to proceed when the BOM contains refs with no PCB "
+            "footprint (default: block, since the package would be unbuildable). "
+            "Use only for partial/debug exports."
+        ),
+    )
+    parser.add_argument(
+        "--skip-drc",
+        action="store_true",
+        help="Skip DRC check in pre-flight validation",
+    )
+    parser.add_argument(
+        "--skip-erc",
+        action="store_true",
+        help="Skip ERC check in pre-flight validation",
+    )
+    parser.add_argument(
+        "--drc-report",
+        default=None,
+        help="Path to pre-existing DRC report file",
+    )
+    parser.add_argument(
+        "--erc-report",
+        default=None,
+        help="Path to pre-existing ERC report file",
+    )
+    parser.add_argument(
+        "--bom-source",
+        default="schematic",
+        choices=["schematic", "pcb", "auto"],
+        help=(
+            "Source for BOM data: 'schematic' (default) extracts from .kicad_sch; "
+            "'pcb' extracts from PCB footprints (no schematic needed); "
+            "'auto' uses schematic but falls back to PCB on reference mismatch"
+        ),
+    )
+    parser.add_argument(
+        "--vscore-layer",
+        action="append",
+        default=None,
+        metavar="LAYER",
+        help=(
+            "Plot this user layer as a V-score layer (repeatable; Issue #6193). "
+            "For panels whose partial or jump scores the outline geometry "
+            "cannot prove; detected score layers are still added"
+        ),
+    )
+    parser.add_argument(
+        "--include-tht",
+        action="store_true",
+        help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
+    )
+    parser.add_argument(
+        "--format",
+        dest="output_format",
+        default="text",
+        choices=["text", "json"],
+        help="Output format (default: text)",
+    )
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point for the kct export command."""
+    args = build_parser().parse_args(argv)
+    return run_export(args)
+
+
+def build_manufacturing_config(
+    *,
+    output_dir: Path,
+    stackup_id: str | None = None,
+    include_bom: bool = True,
+    include_pnp: bool = True,
+    include_gerbers: bool = True,
+    include_report: bool = True,
+    include_project_zip: bool = True,
+    emit_ampacity_rules: bool = True,
+    auto_lcsc: bool = True,
+    no_spec: bool = False,
+    spec_path: Path | None = None,
+    merge_lcsc: bool = True,
+    merge_lcsc_from: Path | None = None,
+    bom_source: str = "schematic",
+    skip_preflight: bool = False,
+    skip_drc: bool = False,
+    skip_erc: bool = False,
+    skip_drc_floor: bool = False,
+    drc_report_path: str | None = None,
+    erc_report_path: str | None = None,
+    assembly_tier: str = "auto",
+    boards: int = 5,
+    strict_preflight: bool = False,
+    allow_unbuildable_bom: bool = False,
+    include_tht: bool = False,
+    keep_gerber_files: bool = False,
+    vscore_layers: list[str] | None = None,
+    keep_versions: bool = False,
+    keep_build_artifacts: bool = False,
+) -> ManufacturingConfig:
+    """Build the ``PreflightConfig`` + ``ManufacturingConfig`` ``kct export`` uses.
+
+    Shared by :func:`run_export` and the MCP ``export_assembly`` tool (Issue
+    #7260) so both run the same preflight, strict-mode, unbuildable-BOM and
+    DRC-safety-floor gates.  Every default matches the ``kct export`` flag
+    default.
+    """
+    from kicad_tools.export.manufacturing import ManufacturingConfig
+    from kicad_tools.export.preflight import PreflightConfig
+
+    preflight_cfg = PreflightConfig(
+        skip_all=skip_preflight,
+        skip_drc=skip_drc,
+        skip_erc=skip_erc,
+        skip_drc_floor=skip_drc_floor,
+        drc_report_path=drc_report_path,
+        erc_report_path=erc_report_path,
+        assembly_tier=assembly_tier or "auto",
+        order_boards=boards,
+    )
+
+    # Build PnP configuration when --include-tht is specified
+    pnp_config = None
+    if include_tht:
+        from kicad_tools.export.pnp import PnPExportConfig
+
+        pnp_config = PnPExportConfig(exclude_tht=False)
+
+    # Build Gerber configuration when --keep-gerber-files is specified
+    gerber_config = None
+    vscore = list(vscore_layers or [])
+    if keep_gerber_files or vscore:
+        from kicad_tools.export.gerber import GerberConfig
+
+        gerber_config = GerberConfig(
+            clean_after_zip=not keep_gerber_files,
+            vscore_layers=vscore,
+        )
+
+    return ManufacturingConfig(
+        stackup_id=stackup_id,
+        output_dir=output_dir,
+        include_bom=include_bom,
+        include_pnp=include_pnp,
+        include_gerbers=include_gerbers,
+        include_report=include_report,
+        include_project_zip=include_project_zip,
+        emit_ampacity_rules=emit_ampacity_rules,
+        auto_lcsc=auto_lcsc,
+        no_spec=no_spec,
+        spec_path=spec_path,
+        merge_lcsc=merge_lcsc,
+        merge_lcsc_from=merge_lcsc_from,
+        bom_source=bom_source,
+        preflight=preflight_cfg,
+        strict_preflight=strict_preflight,
+        block_on_unbuildable_bom=not allow_unbuildable_bom,
+        pnp_config=pnp_config,
+        gerber_config=gerber_config,
+        latest_report_only=not keep_versions,
+        keep_build_artifacts=keep_build_artifacts,
+    )
+
+
+def run_export(args: argparse.Namespace) -> int:
+    """Execute the export command with parsed arguments."""
+    import json
+
+    from kicad_tools.export.manufacturing import ManufacturingPackage
+
+    input_path = Path(args.pcb).resolve()
+
+    if not input_path.exists():
+        print(f"Error: Path not found: {input_path}", file=sys.stderr)
+        return 1
+
+    if input_path.is_dir():
+        # Auto-discover PCB file in directory (consistent with kct build/check)
+        pcb_path = _find_pcb_for_export(input_path)
+        if pcb_path is None:
+            print(
+                f"Error: No .kicad_pcb file found in directory: {input_path}",
+                file=sys.stderr,
+            )
+            print(
+                "Hint: Specify a .kicad_pcb file directly, or ensure the directory contains one.",
+                file=sys.stderr,
+            )
+            return 1
+    elif input_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {input_path.name}", file=sys.stderr)
+        print("Hint: Provide a .kicad_pcb file or a directory containing one.", file=sys.stderr)
+        return 1
+    else:
+        pcb_path = input_path
+
+    spec_arg = getattr(args, "spec", None)
+    spec_path = Path(spec_arg) if spec_arg else None
+    if spec_path is not None and not spec_path.is_file():
+        print(f"Error: Spec file not found: {spec_path}", file=sys.stderr)
+        return 1
+
+    merge_from_arg = getattr(args, "merge_lcsc_from", None)
+    merge_lcsc_from = Path(merge_from_arg) if merge_from_arg else None
+    if (
+        merge_lcsc_from is not None
+        and not getattr(args, "no_merge_lcsc", False)
+        and not merge_lcsc_from.is_file()
+    ):
+        print(f"Error: --merge-lcsc-from file not found: {merge_lcsc_from}", file=sys.stderr)
+        return 1
+
+    # Determine output directory
+    output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
+
+    config = build_manufacturing_config(
+        output_dir=output_dir,
+        stackup_id=getattr(args, "stackup_id", None),
+        include_bom=not args.no_bom,
+        include_pnp=not args.no_cpl,
+        include_gerbers=not args.no_gerbers,
+        include_report=not args.no_report,
+        include_project_zip=not args.no_project_zip,
+        emit_ampacity_rules=not getattr(args, "no_ampacity_rules", False),
+        auto_lcsc=args.auto_lcsc and not args.no_auto_lcsc,
+        no_spec=getattr(args, "no_spec", False),
+        spec_path=spec_path,
+        merge_lcsc=not getattr(args, "no_merge_lcsc", False),
+        merge_lcsc_from=merge_lcsc_from,
+        bom_source=getattr(args, "bom_source", "schematic"),
+        skip_preflight=getattr(args, "skip_preflight", False),
+        skip_drc=getattr(args, "skip_drc", False),
+        skip_erc=getattr(args, "skip_erc", False),
+        skip_drc_floor=getattr(args, "skip_drc_floor", False),
+        drc_report_path=getattr(args, "drc_report", None),
+        erc_report_path=getattr(args, "erc_report", None),
+        assembly_tier=getattr(args, "assembly_tier", "auto") or "auto",
+        boards=getattr(args, "boards", 5),
+        strict_preflight=getattr(args, "strict_preflight", False),
+        allow_unbuildable_bom=getattr(args, "allow_unbuildable_bom", False),
+        include_tht=getattr(args, "include_tht", False),
+        keep_gerber_files=getattr(args, "keep_gerber_files", False),
+        vscore_layers=list(getattr(args, "vscore_layer", None) or []),
+        keep_versions=getattr(args, "keep_versions", False),
+        keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
+    )
+
+    pkg = ManufacturingPackage(
+        pcb_path=pcb_path,
+        schematic_path=args.sch,
+        manufacturer=args.mfr,
+        config=config,
+    )
+
+    output_format = getattr(args, "output_format", "text")
+
+    # Dry run
+    if args.dry_run:
+        result = pkg.export(output_dir, dry_run=True)
+        if output_format == "json":
+            print(json.dumps({"dry_run": True, "files": [f.name for f in result.all_files]}))
+        else:
+            print("Dry run -- the following files would be generated:")
+            print(f"  Output directory: {result.output_dir}")
+            for f in result.all_files:
+                print(f"  - {f.name}")
+        return 0
+
+    # Normal run with progress output
+    quiet = getattr(args, "global_quiet", False)
+
+    if not quiet and output_format == "text":
+        print(f"Generating manufacturing package for {args.mfr}...")
+        print(f"  PCB: {pcb_path}")
+        print(f"  Output: {output_dir}")
+        print()
+
+    result = pkg.export(output_dir)
+
+    # Display preflight results
+    if result.preflight_results and output_format == "text" and not quiet:
+        print("Pre-flight checks:")
+        for pr in result.preflight_results:
+            status_tag = f"[{pr.status}]"
+            print(f"  {status_tag:6s} {pr.name}: {pr.message}")
+            if pr.details and pr.status != "OK":
+                print(f"         {pr.details}")
+        print()
+
+    # Display preflight warnings (non-blocking failures) in text mode
+    if result.warnings and output_format == "text" and not quiet:
+        print(f"Preflight warnings ({len(result.warnings)}):")
+        for warn in result.warnings:
+            print(f"  - {warn}")
+        print()
+
+    # JSON output mode
+    if output_format == "json":
+        json_result: dict = {
+            "success": result.success,
+            "output_dir": str(result.output_dir),
+            "files": [str(f) for f in result.all_files],
+            "errors": result.errors,
+        }
+        if result.warnings:
+            json_result["warnings"] = result.warnings
+        if result.preflight_results:
+            json_result["preflight"] = [pr.to_dict() for pr in result.preflight_results]
+        print(json.dumps(json_result, indent=2))
+        return 0 if result.success else 1
+
+    if not quiet:
+        if result.assembly_result:
+            if result.assembly_result.bom_path:
+                print(f"  [ok] BOM: {result.assembly_result.bom_path.name}")
+            if result.assembly_result.pnp_path:
+                print(f"  [ok] CPL: {result.assembly_result.pnp_path.name}")
+            if result.assembly_result.gerber_path:
+                gerber_rel = result.bundle_relpath(result.assembly_result.gerber_path)
+                print(f"  [ok] Gerbers: {gerber_rel}")
+            # Report spec overlay results
+            if result.assembly_result.spec_overlay:
+                overlay = result.assembly_result.spec_overlay
+                print()
+                for line in overlay.summary_lines():
+                    print(f"  {line}")
+            if result.assembly_result.lcsc_merge_source:
+                print(f"  {result.assembly_result.lcsc_merge_source}")
+            for conflict in result.assembly_result.lcsc_merge_conflicts:
+                print(f"  [warn] LCSC merge source disagrees with assigned LCSC: {conflict}")
+            for skipped in result.assembly_result.lcsc_merge_exempt_skipped:
+                print(f"  LCSC merge skipped spec-exempt part: {skipped}")
+            # Report LCSC enrichment results
+            if result.assembly_result.lcsc_enrichment:
+                enrichment = result.assembly_result.lcsc_enrichment
+                print()
+                for line in enrichment.summary_lines():
+                    print(f"  {line}")
+        if result.report_path:
+            print(f"  [ok] Report: {result.report_path.name}")
+        if result.project_zip_path:
+            print(f"  [ok] Project ZIP: {result.project_zip_path.name}")
+        if result.manifest_path:
+            print(f"  [ok] Manifest: {result.manifest_path.name}")
+
+    if result.errors:
+        print(f"\n{len(result.errors)} error(s) during export:", file=sys.stderr)
+        for err in result.errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        n_files = len(result.all_files)
+        print(f"\nDone -- {n_files} file(s) written to {output_dir}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

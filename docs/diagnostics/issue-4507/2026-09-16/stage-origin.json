@@ -1,0 +1,1155 @@
+{
+  "board_hashes": {
+    "input": "bad824faa370307225ec4f45256de8e649afe60ee43b55483e3631555ea190d4",
+    "stage1": "8c3dfe8507d8ca3e4f1b8f1b92098bfad9040047ce9deba49504804e18a7481f",
+    "stage2": "0541f21cf6f079a7d52daa0583c831a16563366a7693624cae477f74bcf25c39",
+    "stage3": "98a73b55d89b3109178671d613f39aa4747631b366b9d16c134cec606c0f8c36"
+  },
+  "source_tree": {
+    "path": "/var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T/4507-creepage-source-s_tpzv4d",
+    "commit": "2fb4ebdc8ed9ef0d9f4890c71b5cb38b110ecc02"
+  },
+  "method": "Exact emitted conductor geometry, net name, width, layer, via diameter/drill; coordinates rounded to 1e-6mm. Tracks are undirected. Unmatched geometry does not rule out split/coalesced ancestor copper.",
+  "matrix_note": "Diagnostic uses original voltage map and default30V threshold with0.15mm scalar floor; not evidence of actual active per-net routing rules or attachment exemptions.",
+  "originals_unchanged": true,
+  "rows": [
+    {
+      "net_a": "/AC_LINE",
+      "net_b": "/V_AC_SENSE_MID",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.4937,
+      "required_creepage_mm": 1.3,
+      "margin_mm": -0.8063,
+      "relationship": "board",
+      "exact_gap_mm": 0.4937000000000041,
+      "object_a": {
+        "kind": "track",
+        "index": 225,
+        "start": [
+          84.88749999999999,
+          8.200000000000003
+        ],
+        "end": [
+          84.90629999999999,
+          8.181199999999997
+        ],
+        "width": 2.0
+      },
+      "object_b": {
+        "kind": "pad",
+        "ref": "R1",
+        "pin": "2",
+        "occurrence": 1
+      },
+      "nearest_points": [
+        [
+          85.90629999999999,
+          8.181199999999809
+        ],
+        [
+          86.39999999999999,
+          8.181199999999809
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "a",
+          "object": {
+            "kind": "track",
+            "index": 225,
+            "start": [
+              84.88749999999999,
+              8.200000000000003
+            ],
+            "end": [
+              84.90629999999999,
+              8.181199999999997
+            ],
+            "width": 2.0
+          },
+          "identity": [
+            "/AC_LINE",
+            "F.Cu",
+            [
+              [
+                84.8875,
+                8.2
+              ],
+              [
+                84.9063,
+                8.1812
+              ]
+            ],
+            2.0
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 75.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.3
+    },
+    {
+      "net_a": "/AC_LINE",
+      "net_b": "/ZC_LINE_MID",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.4536,
+      "required_creepage_mm": 1.1,
+      "margin_mm": -0.6464,
+      "relationship": "board",
+      "exact_gap_mm": 0.45356997831950413,
+      "object_a": {
+        "kind": "track",
+        "index": 226,
+        "start": [
+          62.21879999999999,
+          8.181199999999997
+        ],
+        "end": [
+          62.90629999999999,
+          8.181199999999997
+        ],
+        "width": 2.0
+      },
+      "object_b": {
+        "kind": "track",
+        "index": 1900,
+        "start": [
+          64.80000000000001,
+          8.0
+        ],
+        "end": [
+          64.4,
+          7.600000000000001
+        ],
+        "width": 0.3
+      },
+      "nearest_points": [
+        [
+          63.83436194889139,
+          7.810205638353927
+        ],
+        [
+          64.26141807012331,
+          7.657402514854766
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "a",
+          "object": {
+            "kind": "track",
+            "index": 226,
+            "start": [
+              62.21879999999999,
+              8.181199999999997
+            ],
+            "end": [
+              62.90629999999999,
+              8.181199999999997
+            ],
+            "width": 2.0
+          },
+          "identity": [
+            "/AC_LINE",
+            "F.Cu",
+            [
+              [
+                62.2188,
+                8.1812
+              ],
+              [
+                62.9063,
+                8.1812
+              ]
+            ],
+            2.0
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        },
+        {
+          "side": "b",
+          "object": {
+            "kind": "track",
+            "index": 1900,
+            "start": [
+              64.80000000000001,
+              8.0
+            ],
+            "end": [
+              64.4,
+              7.600000000000001
+            ],
+            "width": 0.3
+          },
+          "identity": [
+            "/ZC_LINE_MID",
+            "F.Cu",
+            [
+              [
+                64.4,
+                7.6
+              ],
+              [
+                64.8,
+                8.0
+              ]
+            ],
+            0.3
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 35.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.1
+    },
+    {
+      "net_a": "/AC_NEUTRAL",
+      "net_b": "/FUSED_LINE",
+      "kind": "conductor",
+      "layer": "B.Cu",
+      "creepage_mm": 0.6,
+      "required_creepage_mm": 1.6,
+      "margin_mm": -1.0,
+      "relationship": "board",
+      "exact_gap_mm": 0.6000000000000032,
+      "object_a": {
+        "kind": "pad",
+        "ref": "J2",
+        "pin": "2",
+        "occurrence": 1
+      },
+      "object_b": {
+        "kind": "track",
+        "index": 101,
+        "start": [
+          4.799999999999997,
+          46.400000000000006
+        ],
+        "end": [
+          4.799999999999997,
+          54.400000000000006
+        ],
+        "width": 2.6
+      },
+      "nearest_points": [
+        [
+          6.7,
+          50.92
+        ],
+        [
+          6.099999999999997,
+          50.92
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "b",
+          "object": {
+            "kind": "track",
+            "index": 101,
+            "start": [
+              4.799999999999997,
+              46.400000000000006
+            ],
+            "end": [
+              4.799999999999997,
+              54.400000000000006
+            ],
+            "width": 2.6
+          },
+          "identity": [
+            "/FUSED_LINE",
+            "B.Cu",
+            [
+              [
+                4.8,
+                46.4
+              ],
+              [
+                4.8,
+                54.4
+              ]
+            ],
+            2.6
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 150.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.6
+    },
+    {
+      "net_a": "/AC_NEUTRAL",
+      "net_b": "/ZC_NEUT_MID",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.5687,
+      "required_creepage_mm": 1.1,
+      "margin_mm": -0.5313,
+      "relationship": "board",
+      "exact_gap_mm": 0.5686999999999927,
+      "object_a": {
+        "kind": "track",
+        "index": 270,
+        "start": [
+          61.19999999999999,
+          14.0
+        ],
+        "end": [
+          62.8313,
+          14.0
+        ],
+        "width": 2.0
+      },
+      "object_b": {
+        "kind": "pad",
+        "ref": "R4",
+        "pin": "2",
+        "occurrence": 1
+      },
+      "nearest_points": [
+        [
+          63.8313,
+          14.0
+        ],
+        [
+          64.39999999999999,
+          14.0
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "a",
+          "object": {
+            "kind": "track",
+            "index": 270,
+            "start": [
+              61.19999999999999,
+              14.0
+            ],
+            "end": [
+              62.8313,
+              14.0
+            ],
+            "width": 2.0
+          },
+          "identity": [
+            "/AC_NEUTRAL",
+            "F.Cu",
+            [
+              [
+                61.2,
+                14.0
+              ],
+              [
+                62.8313,
+                14.0
+              ]
+            ],
+            2.0
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.9478698573467327
+          }
+        }
+      ],
+      "voltage_delta": 40.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.1
+    },
+    {
+      "net_a": "/GATE_BUS_NEG",
+      "net_b": "/SCAP_NEG",
+      "kind": "conductor",
+      "layer": "In1.Cu",
+      "creepage_mm": 0.5,
+      "required_creepage_mm": 1.25,
+      "margin_mm": -0.75,
+      "relationship": "board",
+      "exact_gap_mm": 0.5,
+      "object_a": {
+        "kind": "pad",
+        "ref": "Q2A",
+        "pin": "1",
+        "occurrence": 0
+      },
+      "object_b": {
+        "kind": "track",
+        "index": 341,
+        "start": [
+          109.6,
+          89.6
+        ],
+        "end": [
+          100.80000000000001,
+          89.6
+        ],
+        "width": 0.2
+      },
+      "nearest_points": [
+        [
+          108.9525,
+          89.0
+        ],
+        [
+          108.9525,
+          89.5
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "b",
+          "object": {
+            "kind": "track",
+            "index": 341,
+            "start": [
+              109.6,
+              89.6
+            ],
+            "end": [
+              100.80000000000001,
+              89.6
+            ],
+            "width": 0.2
+          },
+          "identity": [
+            "/SCAP_NEG",
+            "In1.Cu",
+            [
+              [
+                100.8,
+                89.6
+              ],
+              [
+                109.6,
+                89.6
+              ]
+            ],
+            0.2
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 60.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.25
+    },
+    {
+      "net_a": "/PRE_D_NEG",
+      "net_b": "/PRECHARGE_NEG",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.4,
+      "required_creepage_mm": 0.48,
+      "margin_mm": -0.08,
+      "relationship": "board",
+      "exact_gap_mm": 0.40000000000000574,
+      "object_a": {
+        "kind": "pad",
+        "ref": "Q6",
+        "pin": "3",
+        "occurrence": 2
+      },
+      "object_b": {
+        "kind": "track",
+        "index": 1081,
+        "start": [
+          131.2,
+          65.2
+        ],
+        "end": [
+          135.6,
+          65.2
+        ],
+        "width": 0.2
+      },
+      "nearest_points": [
+        [
+          133.525,
+          65.7
+        ],
+        [
+          133.525,
+          65.3
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "b",
+          "object": {
+            "kind": "track",
+            "index": 1081,
+            "start": [
+              131.2,
+              65.2
+            ],
+            "end": [
+              135.6,
+              65.2
+            ],
+            "width": 0.2
+          },
+          "identity": [
+            "/PRECHARGE_NEG",
+            "F.Cu",
+            [
+              [
+                131.2,
+                65.2
+              ],
+              [
+                135.6,
+                65.2
+              ]
+            ],
+            0.2
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 18.3,
+      "matrix_pair_present": false,
+      "matrix_required_mm_at_default_threshold": 0.15
+    },
+    {
+      "net_a": "/RTN_COM_NEG",
+      "net_b": "/GATE_RTN_NEG",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.45,
+      "required_creepage_mm": 0.53,
+      "margin_mm": -0.08,
+      "relationship": "board",
+      "exact_gap_mm": 0.44999999999998863,
+      "object_a": {
+        "kind": "via",
+        "index": 130,
+        "position": [
+          132.0,
+          80.0
+        ],
+        "size": 0.6
+      },
+      "object_b": {
+        "kind": "pad",
+        "ref": "D_TVS4",
+        "pin": "1",
+        "occurrence": 0
+      },
+      "nearest_points": [
+        [
+          132.3,
+          80.0
+        ],
+        [
+          132.75,
+          80.0
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "a",
+          "object": {
+            "kind": "via",
+            "index": 130,
+            "position": [
+              132.0,
+              80.0
+            ],
+            "size": 0.6
+          },
+          "identity": [
+            "/RTN_COM_NEG",
+            [
+              132.0,
+              80.0
+            ],
+            0.6,
+            0.3,
+            [
+              "F.Cu",
+              "B.Cu"
+            ]
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2"
+        }
+      ],
+      "voltage_delta": 27.0,
+      "matrix_pair_present": false,
+      "matrix_required_mm_at_default_threshold": 0.15
+    },
+    {
+      "net_a": "/SCAP_NEG",
+      "net_b": "/SRC_NEG",
+      "kind": "conductor",
+      "layer": "In2.Cu",
+      "creepage_mm": 0.5,
+      "required_creepage_mm": 1.25,
+      "margin_mm": -0.75,
+      "relationship": "board",
+      "exact_gap_mm": 0.5,
+      "object_a": {
+        "kind": "track",
+        "index": 318,
+        "start": [
+          111.6,
+          89.6
+        ],
+        "end": [
+          115.19999999999999,
+          89.6
+        ],
+        "width": 0.2
+      },
+      "object_b": {
+        "kind": "pad",
+        "ref": "Q2A",
+        "pin": "3",
+        "occurrence": 2
+      },
+      "nearest_points": [
+        [
+          113.08,
+          89.5
+        ],
+        [
+          113.08,
+          89.0
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "a",
+          "object": {
+            "kind": "track",
+            "index": 318,
+            "start": [
+              111.6,
+              89.6
+            ],
+            "end": [
+              115.19999999999999,
+              89.6
+            ],
+            "width": 0.2
+          },
+          "identity": [
+            "/SCAP_NEG",
+            "In2.Cu",
+            [
+              [
+                111.6,
+                89.6
+              ],
+              [
+                115.2,
+                89.6
+              ]
+            ],
+            0.2
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 60.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.25
+    },
+    {
+      "net_a": "/SCAP_NEG_RTN",
+      "net_b": "/GATE_RTN_NEG",
+      "kind": "conductor",
+      "layer": "In1.Cu",
+      "creepage_mm": 0.3,
+      "required_creepage_mm": 0.53,
+      "margin_mm": -0.23,
+      "relationship": "board",
+      "exact_gap_mm": 0.29999999999999716,
+      "object_a": {
+        "kind": "pad",
+        "ref": "R21",
+        "pin": "1",
+        "occurrence": 0
+      },
+      "object_b": {
+        "kind": "track",
+        "index": 196,
+        "start": [
+          109.6,
+          75.6
+        ],
+        "end": [
+          106.4,
+          75.6
+        ],
+        "width": 0.2
+      },
+      "nearest_points": [
+        [
+          108.0,
+          75.2
+        ],
+        [
+          108.0,
+          75.5
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "b",
+          "object": {
+            "kind": "track",
+            "index": 196,
+            "start": [
+              109.6,
+              75.6
+            ],
+            "end": [
+              106.4,
+              75.6
+            ],
+            "width": 0.2
+          },
+          "identity": [
+            "/GATE_RTN_NEG",
+            "In1.Cu",
+            [
+              [
+                106.4,
+                75.6
+              ],
+              [
+                109.6,
+                75.6
+              ]
+            ],
+            0.2
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 27.0,
+      "matrix_pair_present": false,
+      "matrix_required_mm_at_default_threshold": 0.15
+    },
+    {
+      "net_a": "/SCAP_POS",
+      "net_b": "/SCAP_POS_RTN",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.6,
+      "required_creepage_mm": 1.3,
+      "margin_mm": -0.7,
+      "relationship": "board",
+      "exact_gap_mm": 0.6000000000000085,
+      "object_a": {
+        "kind": "track",
+        "index": 1248,
+        "start": [
+          59.599999999999994,
+          66.0
+        ],
+        "end": [
+          57.2,
+          66.0
+        ],
+        "width": 0.2
+      },
+      "object_b": {
+        "kind": "pad",
+        "ref": "J3",
+        "pin": "2",
+        "occurrence": 1
+      },
+      "nearest_points": [
+        [
+          59.08,
+          66.1
+        ],
+        [
+          59.08,
+          66.7
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "a",
+          "object": {
+            "kind": "track",
+            "index": 1248,
+            "start": [
+              59.599999999999994,
+              66.0
+            ],
+            "end": [
+              57.2,
+              66.0
+            ],
+            "width": 0.2
+          },
+          "identity": [
+            "/SCAP_POS",
+            "F.Cu",
+            [
+              [
+                57.2,
+                66.0
+              ],
+              [
+                59.6,
+                66.0
+              ]
+            ],
+            0.2
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 75.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.3
+    },
+    {
+      "net_a": "/SCAP_POS_RTN",
+      "net_b": "/OC_TRIP_N",
+      "kind": "conductor",
+      "layer": "In2.Cu",
+      "creepage_mm": 0.3925,
+      "required_creepage_mm": 0.42,
+      "margin_mm": -0.0275,
+      "relationship": "board",
+      "exact_gap_mm": 0.3924999999999983,
+      "object_a": {
+        "kind": "pad",
+        "ref": "J3",
+        "pin": "2",
+        "occurrence": 1
+      },
+      "object_b": {
+        "kind": "track",
+        "index": 265,
+        "start": [
+          57.2,
+          69.6
+        ],
+        "end": [
+          57.2,
+          66.4
+        ],
+        "width": 0.375
+      },
+      "nearest_points": [
+        [
+          57.78,
+          68.0
+        ],
+        [
+          57.3875,
+          68.0
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "b",
+          "object": {
+            "kind": "track",
+            "index": 265,
+            "start": [
+              57.2,
+              69.6
+            ],
+            "end": [
+              57.2,
+              66.4
+            ],
+            "width": 0.375
+          },
+          "identity": [
+            "/OC_TRIP_N",
+            "In2.Cu",
+            [
+              [
+                57.2,
+                66.4
+              ],
+              [
+                57.2,
+                69.6
+              ]
+            ],
+            0.375
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 11.7,
+      "matrix_pair_present": false,
+      "matrix_required_mm_at_default_threshold": 0.15
+    },
+    {
+      "net_a": "/V_AC_SENSE_MID",
+      "net_b": "/V_AC_SENSE_RAW",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.707,
+      "required_creepage_mm": 1.3,
+      "margin_mm": -0.593,
+      "relationship": "board",
+      "exact_gap_mm": 0.7070291600090471,
+      "object_a": {
+        "kind": "track",
+        "index": 1879,
+        "start": [
+          85.6,
+          4.799999999999997
+        ],
+        "end": [
+          85.19999999999999,
+          4.399999999999999
+        ],
+        "width": 0.3
+      },
+      "object_b": {
+        "kind": "pad",
+        "ref": "R75",
+        "pin": "2",
+        "occurrence": 1
+      },
+      "nearest_points": [
+        [
+          85.74354105035982,
+          4.756457298411827
+        ],
+        [
+          86.4107648966901,
+          4.522571488685511
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "a",
+          "object": {
+            "kind": "track",
+            "index": 1879,
+            "start": [
+              85.6,
+              4.799999999999997
+            ],
+            "end": [
+              85.19999999999999,
+              4.399999999999999
+            ],
+            "width": 0.3
+          },
+          "identity": [
+            "/V_AC_SENSE_MID",
+            "F.Cu",
+            [
+              [
+                85.2,
+                4.4
+              ],
+              [
+                85.6,
+                4.8
+              ]
+            ],
+            0.3
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 73.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.3
+    },
+    {
+      "net_a": "/ZC_LINE_LIM",
+      "net_b": "/ZC_LINE_MID",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "creepage_mm": 0.707,
+      "required_creepage_mm": 1.1,
+      "margin_mm": -0.393,
+      "relationship": "board",
+      "exact_gap_mm": 0.7070291600090471,
+      "object_a": {
+        "kind": "pad",
+        "ref": "R76",
+        "pin": "2",
+        "occurrence": 1
+      },
+      "object_b": {
+        "kind": "track",
+        "index": 1902,
+        "start": [
+          63.599999999999994,
+          4.799999999999997
+        ],
+        "end": [
+          63.19999999999999,
+          4.399999999999999
+        ],
+        "width": 0.3
+      },
+      "nearest_points": [
+        [
+          64.4107648966901,
+          4.522571488685511
+        ],
+        [
+          63.74354105035982,
+          4.756457298411827
+        ]
+      ],
+      "copper_origin": [
+        {
+          "side": "b",
+          "object": {
+            "kind": "track",
+            "index": 1902,
+            "start": [
+              63.599999999999994,
+              4.799999999999997
+            ],
+            "end": [
+              63.19999999999999,
+              4.399999999999999
+            ],
+            "width": 0.3
+          },
+          "identity": [
+            "/ZC_LINE_MID",
+            "F.Cu",
+            [
+              [
+                63.2,
+                4.4
+              ],
+              [
+                63.6,
+                4.8
+              ]
+            ],
+            0.3
+          ],
+          "present_in": [
+            "stage2",
+            "stage3"
+          ],
+          "first_exact_geometry_stage": "stage2",
+          "prior_same_net_track_copper_overlap_fraction": {
+            "input": 0.0,
+            "stage1": 0.0
+          }
+        }
+      ],
+      "voltage_delta": 40.0,
+      "matrix_pair_present": true,
+      "matrix_required_mm_at_default_threshold": 1.1
+    }
+  ]
+}

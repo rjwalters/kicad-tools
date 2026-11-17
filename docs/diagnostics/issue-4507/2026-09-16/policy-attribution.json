@@ -1,0 +1,224 @@
+{
+  "board_sha256": "98a73b55d89b3109178671d613f39aa4747631b366b9d16c134cec606c0f8c36",
+  "vmap_sha256": "3b2452a5169be3b09416259b8c9de7b6b8ae1af7f11f525530c00a2e3fe85d55",
+  "source": "2fb4ebdc8ed9ef0d9f4890c71b5cb38b110ecc02",
+  "rows": [
+    {
+      "net_a": "/AC_LINE",
+      "net_b": "/V_AC_SENSE_MID",
+      "layer": "F.Cu",
+      "gap": 0.4937000000000041,
+      "census_required": 1.3,
+      "router_required": 1.3,
+      "positive_delta_required": 1.3,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "R1"
+      ],
+      "midpoint": [
+        86.15314999999998,
+        8.181199999999809
+      ]
+    },
+    {
+      "net_a": "/AC_LINE",
+      "net_b": "/ZC_LINE_MID",
+      "layer": "F.Cu",
+      "gap": 0.45356997831950413,
+      "census_required": 1.1,
+      "router_required": 1.1,
+      "positive_delta_required": 1.1,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "R3"
+      ],
+      "midpoint": [
+        64.04789000950736,
+        7.733804076604347
+      ]
+    },
+    {
+      "net_a": "/AC_NEUTRAL",
+      "net_b": "/FUSED_LINE",
+      "layer": "B.Cu",
+      "gap": 0.6000000000000032,
+      "census_required": 1.6,
+      "router_required": 1.6,
+      "positive_delta_required": 1.6,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "J2"
+      ],
+      "midpoint": [
+        6.399999999999999,
+        50.92
+      ]
+    },
+    {
+      "net_a": "/AC_NEUTRAL",
+      "net_b": "/ZC_NEUT_MID",
+      "layer": "F.Cu",
+      "gap": 0.5686999999999927,
+      "census_required": 1.1,
+      "router_required": 1.1,
+      "positive_delta_required": 1.1,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "R4"
+      ],
+      "midpoint": [
+        64.11564999999999,
+        14.0
+      ]
+    },
+    {
+      "net_a": "/GATE_BUS_NEG",
+      "net_b": "/SCAP_NEG",
+      "layer": "In1.Cu",
+      "gap": 0.5,
+      "census_required": 1.25,
+      "router_required": 1.25,
+      "positive_delta_required": 1.25,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "Q2A"
+      ],
+      "midpoint": [
+        108.9525,
+        89.25
+      ]
+    },
+    {
+      "net_a": "/PRE_D_NEG",
+      "net_b": "/PRECHARGE_NEG",
+      "layer": "F.Cu",
+      "gap": 0.40000000000000574,
+      "census_required": 0.48,
+      "router_required": 0.15,
+      "positive_delta_required": 0.48,
+      "matrix_includes_pair": false,
+      "attach_zone_refs": [
+        "Q6"
+      ],
+      "midpoint": [
+        133.525,
+        65.5
+      ]
+    },
+    {
+      "net_a": "/RTN_COM_NEG",
+      "net_b": "/GATE_RTN_NEG",
+      "layer": "F.Cu",
+      "gap": 0.44999999999998863,
+      "census_required": 0.53,
+      "router_required": 0.15,
+      "positive_delta_required": 0.53,
+      "matrix_includes_pair": false,
+      "attach_zone_refs": [
+        "D_TVS4"
+      ],
+      "midpoint": [
+        132.525,
+        80.0
+      ]
+    },
+    {
+      "net_a": "/SCAP_NEG",
+      "net_b": "/SRC_NEG",
+      "layer": "In2.Cu",
+      "gap": 0.5,
+      "census_required": 1.25,
+      "router_required": 1.25,
+      "positive_delta_required": 1.25,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "Q2A"
+      ],
+      "midpoint": [
+        113.08,
+        89.25
+      ]
+    },
+    {
+      "net_a": "/SCAP_NEG_RTN",
+      "net_b": "/GATE_RTN_NEG",
+      "layer": "In1.Cu",
+      "gap": 0.29999999999999716,
+      "census_required": 0.53,
+      "router_required": 0.15,
+      "positive_delta_required": 0.53,
+      "matrix_includes_pair": false,
+      "attach_zone_refs": [],
+      "midpoint": [
+        108.0,
+        75.35
+      ]
+    },
+    {
+      "net_a": "/SCAP_POS",
+      "net_b": "/SCAP_POS_RTN",
+      "layer": "F.Cu",
+      "gap": 0.6000000000000085,
+      "census_required": 1.3,
+      "router_required": 1.3,
+      "positive_delta_required": 1.3,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "J3"
+      ],
+      "midpoint": [
+        59.08,
+        66.4
+      ]
+    },
+    {
+      "net_a": "/SCAP_POS_RTN",
+      "net_b": "/OC_TRIP_N",
+      "layer": "In2.Cu",
+      "gap": 0.3924999999999983,
+      "census_required": 0.42,
+      "router_required": 0.15,
+      "positive_delta_required": 0.42,
+      "matrix_includes_pair": false,
+      "attach_zone_refs": [],
+      "midpoint": [
+        57.58375,
+        68.0
+      ]
+    },
+    {
+      "net_a": "/V_AC_SENSE_MID",
+      "net_b": "/V_AC_SENSE_RAW",
+      "layer": "F.Cu",
+      "gap": 0.7070291600090471,
+      "census_required": 1.3,
+      "router_required": 1.3,
+      "positive_delta_required": 1.3,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "R75"
+      ],
+      "midpoint": [
+        86.07715297352496,
+        4.639514393548669
+      ]
+    },
+    {
+      "net_a": "/ZC_LINE_LIM",
+      "net_b": "/ZC_LINE_MID",
+      "layer": "F.Cu",
+      "gap": 0.7070291600090471,
+      "census_required": 1.1,
+      "router_required": 1.1,
+      "positive_delta_required": 1.1,
+      "matrix_includes_pair": true,
+      "attach_zone_refs": [
+        "R76"
+      ],
+      "midpoint": [
+        64.07715297352496,
+        4.639514393548669
+      ]
+    }
+  ]
+}

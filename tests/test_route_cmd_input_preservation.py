@@ -1,0 +1,473 @@
+"""Tests that ``kct route INPUT -o OUTPUT`` does not modify INPUT (issue #2548).
+
+Auto-pour writes zone definitions in-place to its target PCB.  Before
+this fix, ``kct route`` passed the user's INPUT path to auto-pour, which
+silently mutated the input file -- producing a confusing two-file diff
+for what users naturally read as a single read-INPUT/write-OUTPUT
+operation.
+
+The fix stages a copy at OUTPUT first (when INPUT != OUTPUT) and runs
+auto-pour against the copy, leaving INPUT byte-identical.  When INPUT
+== OUTPUT (the ``kct build`` pipeline case), the copy is a no-op and
+in-place behavior is preserved.
+
+This module covers:
+
+1. The ``_stage_input_for_auto_pour`` helper directly (path semantics).
+2. A behavioral test that exercises the auto-pour code path through
+   the helper plus ``auto_pour_if_missing`` and confirms the user's
+   INPUT file is unchanged across the full operation.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Minimal PCB fixture (mirrors the fixture in tests/test_auto_pour.py so
+# this test stays self-contained even if that one is refactored).
+# ---------------------------------------------------------------------------
+
+_PCB_HEADER = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+"""
+
+_PCB_FOOTER = """\
+  (gr_line (start 0 0) (end 50 0) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 50 0) (end 50 50) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 50 50) (end 0 50) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 0 50) (end 0 0) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+)
+"""
+
+
+def _make_pcb_with_pour_candidates() -> str:
+    """Build a PCB that has *both* power and signal nets (auto-pour eligible).
+
+    The board-level guard in ``auto_pour_if_missing`` skips boards where
+    *every* net is power/ground; including SDA/SCL ensures pours actually
+    get created so the test exercises the in-place write that motivated
+    issue #2548.
+    """
+    parts = [_PCB_HEADER]
+    parts.append('  (net 0 "")\n')
+    parts.append('  (net 1 "GND")\n')
+    parts.append('  (net 2 "VCC")\n')
+    parts.append('  (net 3 "SDA")\n')
+    parts.append('  (net 4 "SCL")\n')
+    parts.append('  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 10 10)\n')
+    for idx, (nid, name) in enumerate([(1, "GND"), (2, "VCC"), (3, "SDA"), (4, "SCL")]):
+        x_off = idx * 2.0
+        parts.append(
+            f'    (pad "{idx + 1}" smd roundrect (at {x_off} 0) '
+            f'(size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") '
+            f'(roundrect_rratio 0.25) (net {nid} "{name}"))\n'
+        )
+    parts.append("  )\n")
+    parts.append(_PCB_FOOTER)
+    return "".join(parts)
+
+
+def _sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file's bytes."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Helper-level tests
+# ---------------------------------------------------------------------------
+
+
+class TestStageInputForAutoPour:
+    """Direct tests of the ``_stage_input_for_auto_pour`` helper."""
+
+    def test_input_equals_output_returns_input_unchanged(self, tmp_path: Path):
+        """Pipeline case (``kct build``): no copy when input == output."""
+        from kicad_tools.cli.route_cmd import _stage_input_for_auto_pour
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(_make_pcb_with_pour_candidates())
+        original_hash = _sha256(pcb)
+
+        # Same path passed for both arguments -- pipeline mode.
+        returned = _stage_input_for_auto_pour(pcb, pcb)
+
+        assert returned == pcb
+        # No copy was made; the file is byte-identical.
+        assert _sha256(pcb) == original_hash
+
+    def test_input_equals_output_via_distinct_path_objects(self, tmp_path: Path):
+        """Same file referenced through two Path objects still hits the no-op branch."""
+        from kicad_tools.cli.route_cmd import _stage_input_for_auto_pour
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(_make_pcb_with_pour_candidates())
+
+        # Build a second Path object that resolves to the same file.
+        same_file_via_other_object = Path(str(pcb))
+        returned = _stage_input_for_auto_pour(pcb, same_file_via_other_object)
+
+        assert returned == pcb
+
+    def test_distinct_paths_copies_input_to_output(self, tmp_path: Path):
+        """``kct route IN -o OUT`` case: input is copied to output."""
+        from kicad_tools.cli.route_cmd import _stage_input_for_auto_pour
+
+        input_pcb = tmp_path / "input.kicad_pcb"
+        output_pcb = tmp_path / "output.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+        input_hash = _sha256(input_pcb)
+        assert not output_pcb.exists()
+
+        returned = _stage_input_for_auto_pour(input_pcb, output_pcb)
+
+        # Helper rebinds the working path to OUTPUT.
+        assert returned == output_pcb
+        # Output was created and contains identical bytes to input.
+        assert output_pcb.exists()
+        assert _sha256(output_pcb) == input_hash
+        # Input is byte-identical (not even mtime-touched in the
+        # absence of a write -- shutil.copy2 only writes to dst).
+        assert _sha256(input_pcb) == input_hash
+
+
+def _make_pcb_with_copper(n_segments: int, n_vias: int) -> str:
+    """Pour-candidate PCB carrying ``n_segments`` segments and ``n_vias`` vias."""
+    body = _make_pcb_with_pour_candidates()
+    copper = []
+    for i in range(n_segments):
+        copper.append(f'  (segment (start {i} 5) (end {i} 6) (width 0.2) (layer "F.Cu") (net 3))\n')
+    for i in range(n_vias):
+        copper.append(
+            f'  (via (at {i} 20) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+        )
+    # Insert before the Edge.Cuts outline (top level, inside kicad_pcb).
+    return body.replace(_PCB_FOOTER, "".join(copper) + _PCB_FOOTER)
+
+
+class TestStageInputCopperBaseline:
+    """Issue #6531: the #6351 copper baseline is recorded on in-place runs too."""
+
+    def test_in_place_run_replaces_stale_baseline(self, tmp_path: Path, monkeypatch):
+        """``A -> O`` then ``O -> O`` in one process: baseline is O's own counts."""
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "_INPUT_COPPER_BASELINE", {})
+        a = tmp_path / "a.kicad_pcb"
+        o = tmp_path / "o.kicad_pcb"
+        a.write_text(_make_pcb_with_copper(n_segments=7, n_vias=3))
+
+        route_cmd._stage_input_for_auto_pour(a, o)
+        key = route_cmd._baseline_key(o)
+        assert route_cmd._INPUT_COPPER_BASELINE[key] == (7, 3)
+
+        # O now holds a different board (e.g. the routed result of run 1).
+        o.write_text(_make_pcb_with_copper(n_segments=2, n_vias=1))
+        returned = route_cmd._stage_input_for_auto_pour(o, Path(str(o)))
+
+        assert returned == o
+        assert route_cmd._INPUT_COPPER_BASELINE[key] == (2, 1)
+
+    def test_in_place_unreadable_input_leaves_no_entry(self, tmp_path: Path, monkeypatch):
+        """In-place staging of an undecodable file drops any stale entry."""
+        from kicad_tools.cli import route_cmd
+
+        o = tmp_path / "o.kicad_pcb"
+        o.write_bytes(b"(kicad_pcb \xff\xfe\xfd)")
+        key = route_cmd._baseline_key(o)
+        monkeypatch.setattr(route_cmd, "_INPUT_COPPER_BASELINE", {key: (99, 99)})
+
+        returned = route_cmd._stage_input_for_auto_pour(o, o)
+
+        assert returned == o
+        assert key not in route_cmd._INPUT_COPPER_BASELINE
+
+
+# ---------------------------------------------------------------------------
+# Behavioral test: auto-pour does not mutate INPUT when staged via helper
+# ---------------------------------------------------------------------------
+
+
+class TestAutoPourDoesNotModifyInput:
+    """Composes the helper with auto_pour_if_missing to verify input-preservation."""
+
+    def test_input_preserved_when_output_differs(self, tmp_path: Path):
+        """``kct route IN -o OUT`` (IN != OUT) leaves IN byte-identical even though
+        auto-pour writes zones."""
+        from kicad_tools.cli.route_cmd import _stage_input_for_auto_pour
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        input_pcb = tmp_path / "input.kicad_pcb"
+        output_pcb = tmp_path / "output.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+        input_hash_before = _sha256(input_pcb)
+
+        # Mirror the call-site pattern: stage, then auto-pour on the staged path.
+        working_path = _stage_input_for_auto_pour(input_pcb, output_pcb)
+        count, names = auto_pour_if_missing(working_path, quiet=True)
+
+        # Auto-pour did create zones (the test would be trivially passing otherwise).
+        assert count >= 1, "Expected auto-pour to create at least one zone for GND/VCC"
+        assert set(names).issubset({"GND", "VCC"})
+
+        # OUTPUT now contains the auto-poured zones.
+        assert "(zone" in output_pcb.read_text()
+
+        # CRITICAL: INPUT is byte-identical -- no zones leaked into the user's input.
+        input_hash_after = _sha256(input_pcb)
+        assert input_hash_after == input_hash_before, (
+            "INPUT.kicad_pcb was modified despite -o pointing at a different file"
+        )
+        assert "(zone" not in input_pcb.read_text()
+
+    def test_input_mutated_when_input_equals_output(self, tmp_path: Path):
+        """Pipeline case (``kct build``): input == output, in-place auto-pour
+        is the desired behavior; zones must end up in the file."""
+        from kicad_tools.cli.route_cmd import _stage_input_for_auto_pour
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(_make_pcb_with_pour_candidates())
+        hash_before = _sha256(pcb)
+
+        # Same path for input and output -- pipeline mode.
+        working_path = _stage_input_for_auto_pour(pcb, pcb)
+        count, _names = auto_pour_if_missing(working_path, quiet=True)
+
+        assert working_path == pcb
+        assert count >= 1
+        # The file *should* have changed (zones were added).
+        assert _sha256(pcb) != hash_before
+        assert "(zone" in pcb.read_text()
+
+    def test_command_level_idempotency_across_fresh_outputs(self, tmp_path: Path):
+        """Running the staged auto-pour twice on the same fresh INPUT (each time
+        to a fresh OUTPUT) leaves INPUT unchanged and produces structurally
+        equivalent OUTPUTs.
+
+        Locks in command-level idempotency, which was broken before #2548:
+        run 1 mutated INPUT so run 2 saw a different starting state.
+
+        Note: zone UUIDs are random (zones/generator.py uses uuid4), so the
+        outputs are not byte-identical -- we compare the *set of zoned net
+        names*, which is the user-visible idempotency property."""
+        import re
+
+        from kicad_tools.cli.route_cmd import _stage_input_for_auto_pour
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        input_pcb = tmp_path / "input.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+        input_hash_before = _sha256(input_pcb)
+
+        def _zoned_nets(text: str) -> set[str]:
+            """Return the set of net names that have at least one zone."""
+            nets: set[str] = set()
+            for m in re.finditer(r'\(zone\s+.*?\(net_name\s+"([^"]+)"\)', text, re.DOTALL):
+                nets.add(m.group(1))
+            for m in re.finditer(r'\(zone\s[^)]*\(net\s+"([^"]+)"\)', text):
+                nets.add(m.group(1))
+            return nets
+
+        # Run 1: auto-pour into a fresh output path.
+        out1 = tmp_path / "out1.kicad_pcb"
+        working1 = _stage_input_for_auto_pour(input_pcb, out1)
+        count1, names1 = auto_pour_if_missing(working1, quiet=True)
+
+        # INPUT must still be unchanged.
+        assert _sha256(input_pcb) == input_hash_before
+
+        # Run 2: same INPUT, different fresh output path.
+        out2 = tmp_path / "out2.kicad_pcb"
+        working2 = _stage_input_for_auto_pour(input_pcb, out2)
+        count2, names2 = auto_pour_if_missing(working2, quiet=True)
+
+        # INPUT *still* unchanged -- two independent runs against a
+        # pristine input.
+        assert _sha256(input_pcb) == input_hash_before
+
+        # Both runs must report the same set of pour-net names.
+        assert count1 == count2
+        assert set(names1) == set(names2)
+
+        # Both outputs must zone the same set of nets.
+        assert _zoned_nets(out1.read_text()) == _zoned_nets(out2.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Banner accuracy: the startup banner's ``Input:`` line must show the
+# user-supplied path, not the staged output copy (issue #4689).
+#
+# ``_stage_input_for_auto_pour`` rebinds ``pcb_path`` to ``output_path``
+# (see the helper tests above); the four functions that print the startup
+# banner AFTER staging used to report that rebound value on ``Input:``,
+# so the banner claimed the OUTPUT file was the input. Each site now
+# captures ``display_input_path`` before the rebind and prints that on
+# ``Input:`` instead.
+#
+# These run real routes (the zero-net fixture routes near-instantly) into
+# ``tmp_path``.  They used to pass ``--dry-run`` as a cheap stand-in, which
+# only worked because ``--dry-run`` still staged the input at ``--output`` and
+# (on the escalation flows) routed for real.  Issue #6563 made ``--dry-run``
+# print the plan and exit before any staging, so it no longer reaches the
+# banners under test.
+# ---------------------------------------------------------------------------
+
+
+class TestRouteStartupBannerInputLine:
+    """CLI-level (capsys) checks that ``Input:`` names the user's argument."""
+
+    def test_single_attempt_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """Plain ``kct route IN -o OUT --no-auto-layers`` (the reporter's repro
+        path: single-attempt ``_main_impl``, banner at route_cmd.py:~12768)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--no-auto-layers"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_layer_escalation_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """``--auto-layers`` (the default) drives ``route_with_layer_escalation``
+        (banner at route_cmd.py:~5094)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(input_pcb), "-o", str(output_pcb)])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_rule_relaxation_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """``--adaptive-rules --no-auto-layers`` drives
+        ``route_with_rule_relaxation`` (banner at route_cmd.py:~6151)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main(
+            [
+                str(input_pcb),
+                "-o",
+                str(output_pcb),
+                "--no-auto-layers",
+                "--adaptive-rules",
+            ]
+        )
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_combined_escalation_banner_shows_user_input(self, tmp_path: Path, capsys):
+        """``--adaptive-rules`` with default ``--auto-layers`` drives
+        ``route_with_combined_escalation`` (banner at route_cmd.py:~8299)."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        input_pcb = tmp_path / "board.kicad_pcb"
+        output_pcb = tmp_path / "step1.kicad_pcb"
+        input_pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(input_pcb), "-o", str(output_pcb), "--adaptive-rules"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(input_pcb) in input_line
+        assert str(output_pcb) not in input_line
+        assert str(output_pcb) in output_line
+
+    def test_banner_input_equals_output_unchanged(self, tmp_path: Path, capsys):
+        """Pipeline case (``kct build``): input == output, so both banner
+        lines legitimately show the same path -- the fix must not disturb
+        this pre-existing, accidentally-correct case."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(_make_pcb_with_pour_candidates())
+
+        rc = route_main([str(pcb), "-o", str(pcb), "--no-auto-layers"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        input_line = next(line for line in out.splitlines() if line.startswith("Input:"))
+        output_line = next(line for line in out.splitlines() if line.startswith("Output:"))
+
+        assert str(pcb) in input_line
+        assert str(pcb) in output_line
+
+    def test_two_step_composition_banners_identify_the_right_file(self, tmp_path: Path, capsys):
+        """Two-step composition sanity check from the issue body: step 2's
+        banner must read ``Input: step1`` / ``Output: step2`` -- the two
+        lines differ and correctly identify which file was consumed."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        board = tmp_path / "board.kicad_pcb"
+        step1 = tmp_path / "step1.kicad_pcb"
+        step2 = tmp_path / "step2.kicad_pcb"
+        board.write_text(_make_pcb_with_pour_candidates())
+
+        # Step 1: board -> step1.
+        rc1 = route_main([str(board), "-o", str(step1), "--no-auto-layers"])
+        assert rc1 == 0
+        out1 = capsys.readouterr().out
+        input_line1 = next(line for line in out1.splitlines() if line.startswith("Input:"))
+        output_line1 = next(line for line in out1.splitlines() if line.startswith("Output:"))
+        assert str(board) in input_line1
+        assert str(step1) in output_line1
+
+        # Step 1 must have produced step1.kicad_pcb for step 2 to consume.
+        assert step1.exists()
+
+        # Step 2: step1 -> step2.
+        rc2 = route_main([str(step1), "-o", str(step2), "--no-auto-layers"])
+        assert rc2 == 0
+        out2 = capsys.readouterr().out
+        input_line2 = next(line for line in out2.splitlines() if line.startswith("Input:"))
+        output_line2 = next(line for line in out2.splitlines() if line.startswith("Output:"))
+
+        # The reported bug: step 2's banner used to show step2 (the OUTPUT)
+        # on the Input line. It must now show step1 (the actual input).
+        assert str(step1) in input_line2
+        assert str(step2) not in input_line2
+        assert str(step2) in output_line2

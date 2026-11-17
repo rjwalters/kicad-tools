@@ -1,0 +1,3153 @@
+/*
+ * Router C++ Core - A* Pathfinder Implementation
+ * Part of kicad-tools router performance optimization (Phase 4)
+ */
+
+#include "pathfinder.hpp"
+#include <queue>
+#include <unordered_set>
+#include <cmath>
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
+namespace router {
+
+// Issue #3135: env-gated A* neighbor-expansion trace.  Set
+// ``KICAD_ROUTER_TRACE_ASTAR=1`` to log every neighbor accept/reject from the
+// resumable and one-shot A* loops.  The check is performed once per process
+// startup (``getenv`` is fairly cheap but not free); the cached result is
+// branch-predictable and the log path is then a single comparison when the
+// flag is unset.  Use this when investigating under-clearance bugs to verify
+// which gate (out-of-bounds / diagonal-corner / blocked-foreign /
+// trace-clearance) is letting (or not letting) a neighbor through.
+static bool astar_trace_enabled() {
+    static const bool enabled = []() {
+        const char* v = std::getenv("KICAD_ROUTER_TRACE_ASTAR");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return enabled;
+}
+
+Pathfinder::Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_routing)
+    : grid_(grid), rules_(rules), diagonal_routing_(diagonal_routing) {
+
+    // Pre-compute neighbor offsets for 2D moves
+    neighbors_2d_ = {
+        {1, 0, 0, 1.0f},   // Right
+        {-1, 0, 0, 1.0f},  // Left
+        {0, 1, 0, 1.0f},   // Down
+        {0, -1, 0, 1.0f},  // Up
+    };
+
+    if (diagonal_routing) {
+        // Add 45-degree diagonal moves (cost = sqrt(2) ~= 1.414)
+        neighbors_2d_.push_back({1, 1, 0, 1.414f});   // Down-Right
+        neighbors_2d_.push_back({-1, 1, 0, 1.414f});  // Down-Left
+        neighbors_2d_.push_back({1, -1, 0, 1.414f});  // Up-Right
+        neighbors_2d_.push_back({-1, -1, 0, 1.414f}); // Up-Left
+    }
+
+    // Pre-compute trace clearance radius in grid cells
+    // This is the total radius from trace centerline that must be clear:
+    // - trace_width/2: half-width of the trace copper
+    // - trace_clearance: required clearance from trace edge to obstacles
+    // This enforces clearance as a hard constraint during routing.
+    // Issue #553: Previously only checked trace_width/2, causing DRC violations
+    // when traces were placed too close to obstacles.
+    // Issue #6994: guarded rounding shared with Python (search_radius_cells).
+    trace_half_width_cells_ = search_radius_cells(
+        rules.trace_width / 2, rules.trace_clearance, grid.resolution());
+
+    // Pre-compute via blocking radius in grid cells
+    via_half_cells_ = search_radius_cells(
+        rules.via_diameter / 2, rules.via_clearance, grid.resolution());
+
+    // Issue #3229: Pre-compute the circular (Euclidean) kernel offsets at
+    // ``trace_half_width_cells_``.  The legacy implementation scanned a
+    // ``[-r, r]`` Chebyshev square, but the manufacturer's DRC rule is
+    // Euclidean (perpendicular distance from trace edge to obstacle).  At
+    // the diagonals the two metrics disagreed by up to ``r * (1 - 1/sqrt(2))``
+    // cells, which on board 05 (``r = 2`` at ``res = 0.127mm``) produced
+    // 8 sub-127um ``clearance_pad_segment`` violations with shortfalls of
+    // 17-98um -- the exact diagonal-corner Chebyshev/Euclidean gap.
+    //
+    // The disc kernel iterates only cells with ``dx*dx + dy*dy <= r*r``,
+    // matching the DRC metric exactly.  Cell counts:
+    //   r=1:  5 cells (vs 9 square)
+    //   r=2: 13 cells (vs 25 square)
+    //   r=3: 29 cells (vs 49 square)
+    //   r=4: 49 cells (vs 81 square)
+    // Net result is fewer cells scanned per neighbour expansion than the
+    // square kernel -- so the disc switch is a small *speedup* at the
+    // ``is_trace_blocked`` hot path, not a slowdown.
+    {
+        const int r = trace_half_width_cells_;
+        const int r_sq = r * r;
+        circular_kernel_offsets_.clear();
+        // Reserve roughly pi*r^2 cells to avoid reallocations.
+        circular_kernel_offsets_.reserve(
+            static_cast<size_t>(3.15f * r_sq + 1));
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx * dx + dy * dy <= r_sq) {
+                    circular_kernel_offsets_.emplace_back(
+                        static_cast<int8_t>(dx), static_cast<int8_t>(dy));
+                }
+            }
+        }
+    }
+
+    // Issue #3234: Pre-compute the circular (Euclidean) kernel offsets at
+    // ``via_half_cells_``.  Sibling to ``circular_kernel_offsets_`` --
+    // ``is_via_blocked_diag`` had the same Chebyshev/Euclidean mismatch as
+    // the trace kernel that PR #3232 closed.  Cells in the diagonal corners
+    // of the legacy ``[-r, r]`` square have Euclidean distance ``r * sqrt(2)``,
+    // so the square kernel admitted candidate via centers whose true
+    // Euclidean clearance fell up to ``r * (1 - 1/sqrt(2)) ~= 0.293 * r``
+    // cells short of the rule.  This matches the trace-side mechanism and
+    // contributes to ``clearance_segment_via`` / ``clearance_pad_via``
+    // violations on dense layouts.
+    {
+        const int r = via_half_cells_;
+        const int r_sq = r * r;
+        via_kernel_offsets_.clear();
+        via_kernel_offsets_.reserve(
+            static_cast<size_t>(3.15f * r_sq + 1));
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx * dx + dy * dy <= r_sq) {
+                    via_kernel_offsets_.emplace_back(
+                        static_cast<int8_t>(dx), static_cast<int8_t>(dy));
+                }
+            }
+        }
+    }
+
+    // Default: all layers are routable
+    for (int i = 0; i < grid.layers(); ++i) {
+        routable_layers_.push_back(i);
+    }
+}
+
+void Pathfinder::set_routable_layers(const std::vector<int>& layers) {
+    routable_layers_ = layers;
+}
+
+// Issue #3309: Size the flat A* arrays for the current grid and bump
+// the generation counter so every prior cell's stamp is invalidated
+// in O(1).  Called at the top of every fresh search (one-shot route()
+// and resumable route_resumable()) before any g_score / closed-set
+// access.
+//
+// The arrays are sized to ``cols * rows * layers`` floats / uint32s.
+// For a chorus-grade 1.5K x 1.5K x 4L grid that's 9M floats + 9M
+// uint32s = 72MB total -- well within typical worker memory and a
+// one-time allocation per Pathfinder lifetime.  Subsequent searches
+// reuse the same memory; only the generation counter advances.
+//
+// Wraparound: ``search_current_gen_`` is a uint32_t.  If we reach
+// ``UINT32_MAX`` searches on the same Pathfinder instance (~4B), we
+// must zero the stamp arrays before reusing the counter so a stale
+// cell does not falsely match the new generation 0.  On a router that
+// runs maybe 100 searches per board, this branch is effectively
+// dead code -- but defending against it makes the invariant explicit.
+void Pathfinder::ensure_search_arrays_sized() {
+    const int cols = grid_.cols();
+    const int rows = grid_.rows();
+    const int layers = grid_.layers();
+    const size_t total = static_cast<size_t>(cols) *
+                         static_cast<size_t>(rows) *
+                         static_cast<size_t>(layers);
+
+    if (cols != search_flat_cols_ ||
+        rows != search_flat_rows_ ||
+        layers != search_flat_layers_) {
+        // Grid resized (or first use).  Reallocate and reset stamps.
+        search_g_scores_flat_.assign(total, 0.0f);
+        search_g_score_gen_.assign(total, 0);
+        search_closed_gen_.assign(total, 0);
+        search_flat_cols_ = cols;
+        search_flat_rows_ = rows;
+        search_flat_layers_ = layers;
+        search_current_gen_ = 0;
+    }
+
+    // Advance the generation counter.  On wraparound, clear the stamps
+    // to avoid a stale-cell false positive on generation 0.
+    if (search_current_gen_ == std::numeric_limits<uint32_t>::max()) {
+        std::fill(search_g_score_gen_.begin(),
+                  search_g_score_gen_.end(), 0u);
+        std::fill(search_closed_gen_.begin(),
+                  search_closed_gen_.end(), 0u);
+        search_current_gen_ = 0;
+    }
+    ++search_current_gen_;
+}
+
+// Issue #5617: see ``via_verdict_`` in pathfinder.hpp.  Same generation-
+// stamp scheme as ``ensure_search_arrays_sized()``: O(1) invalidation per
+// epoch, full reset only on a grid resize or a uint32 wraparound.
+void Pathfinder::begin_via_verdict_epoch() {
+    const int cols = grid_.cols();
+    const int rows = grid_.rows();
+    if (cols != via_verdict_cols_ || rows != via_verdict_rows_) {
+        const size_t total = static_cast<size_t>(cols) * static_cast<size_t>(rows);
+        via_verdict_gen_.assign(total, 0u);
+        via_verdict_.assign(total, ViaVerdict{});
+        via_verdict_cols_ = cols;
+        via_verdict_rows_ = rows;
+        via_verdict_epoch_ = 0;
+    }
+    if (via_verdict_epoch_ == std::numeric_limits<uint32_t>::max()) {
+        std::fill(via_verdict_gen_.begin(), via_verdict_gen_.end(), 0u);
+        via_verdict_epoch_ = 0;
+    }
+    ++via_verdict_epoch_;
+}
+
+bool Pathfinder::search_via_blocked_cached(int x, int y, int& out_blocking_net,
+                                           float& out_world_x, float& out_world_y) {
+    if (grid_.pairwise_active()) {
+        return is_via_blocked_diag(x, y, search_net_, search_negotiated_mode_,
+                                   search_via_radius_cells_,
+                                   out_blocking_net, out_world_x, out_world_y);
+    }
+    const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(via_verdict_cols_) +
+                       static_cast<size_t>(x);
+    ViaVerdict& v = via_verdict_[idx];
+    if (via_verdict_gen_[idx] != via_verdict_epoch_) {
+        const bool result = is_via_blocked_diag(
+            x, y, search_net_, search_negotiated_mode_, search_via_radius_cells_,
+            v.blocking_net, v.world_x, v.world_y);
+        v.blocked = result ? 1 : 0;
+        via_verdict_gen_[idx] = via_verdict_epoch_;
+    }
+    out_blocking_net = v.blocking_net;
+    out_world_x = v.world_x;
+    out_world_y = v.world_y;
+    return v.blocked != 0;
+}
+
+bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                                       int x2, int y2, int net, int partner) const {
+    if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
+    if (partner >= 0 && partner != physical_partner_net_) return false;
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = search_trace_half_width_mm_ > 0 ? 2 * search_trace_half_width_mm_ : rules_.trace_width;
+    segment.layer = layer; segment.net = net;
+    const float clearance = search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance;
+    return grid_.route_trace_geometry_clear(segment, clearance,
+                                            physical_partner_net_, physical_partner_clearance_,
+                                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance);
+}
+
+// Issue #6315: exact clearance of the swept step (x1,y1)->(x2,y2) of ``net``
+// against every pad of another net on ``layer`` (plus the authored per-net
+// minima of #6243).  Width and clearance are the routing net's own (set per
+// search by the Python backend), the same values the disc radius came from.
+bool Pathfinder::pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net) const {
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    const float half = search_trace_half_width_mm_ > 0 ? search_trace_half_width_mm_
+                                                       : rules_.trace_width / 2.0f;
+    // The pair rule is max(own class, pad's class); a pad's class is not
+    // known here and defaults to the board clearance, so never go below it
+    // (a net class tighter than the board default stays on the disc path).
+    const float clearance = std::max({search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_
+                                                                       : rules_.trace_clearance,
+                                      rules_.trace_clearance, search_pad_clearance_floor_});
+    // Drilled holes carry their own hole-to-copper and (NPTH slot) board-edge
+    // clearances, which the copper-only pad test does not model -- and an NPTH
+    // hole can be registered only as a no-copper pad plus a census hole.  Never
+    // resolve a step that comes anywhere near one; the disc keeps deciding.
+    constexpr float PAD_EXACT_HOLE_GUARD_MM = 0.75f;
+    const float half_len = 0.5f * std::hypot(bx - ax, by - ay);
+    if (!grid_.component_holes_clear(0.5f * (ax + bx), 0.5f * (ay + by),
+                                     2.0f * (half + half_len),
+                                     clearance + PAD_EXACT_HOLE_GUARD_MM)) return false;
+    if (!grid_.pad_geometry_clear(ax, ay, bx, by, layer, net, half, clearance)) return false;
+    if (!grid_.authored_segment_clear(ax, ay, bx, by, 2.0 * half, layer, net)) return false;
+    // Routed copper whose clearance halo overlaps a pad's halo does not
+    // repaint the pad's cells (``mark_segment`` keeps a blocked cell's net),
+    // so the same step must also clear every stored foreign segment / via.
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = 2.0f * half;
+    segment.layer = layer; segment.net = net;
+    return grid_.route_trace_geometry_clear(segment, clearance,
+                                            physical_partner_net_, physical_partner_clearance_,
+                                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_
+                                                                            : rules_.via_clearance);
+}
+
+// Issue #6315: a cell the exact pad test may resolve -- blocked only by pad
+// copper/clearance (``pad_cell``), not in use by a routed net, not reserved,
+// not a zone, and with no routed-copper halo of unknown geometry over it.
+bool Pathfinder::pad_cell_resolvable(const GridCell& cell, int cx, int cy, int layer) const {
+    if (!cell.pad_cell || cell.usage_count != 0 || cell.reserved_count > 0 || cell.is_zone)
+        return false;
+    return grid_.route_coverage_at(cx, cy, layer) >= 0;
+}
+
+bool Pathfinder::pad_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                                int x2, int y2, int net) const {
+    if (!grid_.is_valid(cx, cy, layer)) return false;
+    const auto& cell = grid_.at(cx, cy, layer);
+    if (!cell.blocked || cell.net == net || !pad_cell_resolvable(cell, cx, cy, layer))
+        return false;
+    return pad_step_clear(x1, y1, x2, y2, layer, net);
+}
+
+// Issue #6375: a cell of the routing net's own STATIC geometry -- its pads'
+// copper and clearance halos (``pad_cell``), plus own-net static cells whose
+// pad provenance was voided (a drilled pad, a pad sharing a keepout; board
+// 03's USB_D- at J1 is one).  Routed copper (``usage_count``) is never static,
+// so the gate below stays local to pad surroundings.
+bool Pathfinder::own_pad_cell(int x, int y, int layer, int net) const {
+    if (!grid_.is_valid(x, y, layer)) return false;
+    const auto& cell = grid_.at(x, y, layer);
+    return cell.blocked && cell.net == net && (cell.pad_cell || cell.static_blocked);
+}
+
+// Issue #6375: the post-route validator's segment-vs-pad verdict on the swept
+// step (x1,y1)->(x2,y2), via the very function ``validate_route`` calls.
+Segment Pathfinder::own_pad_step_segment(int x1, int y1, int x2, int y2, int layer, int net,
+                                         float emit_trace_width) const {
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = search_gate_trace_width_ > 0.0f ? search_gate_trace_width_
+                  : (emit_trace_width > 0.0f ? emit_trace_width : rules_.trace_width);
+    segment.layer = layer; segment.net = net;
+    return segment;
+}
+
+bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
+                                    float emit_trace_width) const {
+    return grid_.segment_pads_clear(own_pad_step_segment(x1, y1, x2, y2, layer, net,
+                                                         emit_trace_width),
+                                    net, search_gate_exclude_refs_,
+                                    search_gate_clamp_refs_);
+}
+
+// Issue #7887: the own-pad step gate measures the validator's verdict, which
+// widens a foreign-domain pad's requirement to the pairwise (HV) floor
+// (``Grid3D::segment_pad_clear``).  On a TO-220-style HV pad ringed by LV pads
+// that gate -- not the annulus scan of ``cross_domain_trace_blocked`` -- is
+// what refuses every escape, so the drained search reported a bare NO_PATH.
+// Attribute the refusal only when the pairwise floor decided it.
+void Pathfinder::note_own_pad_pairwise_block(int x1, int y1, int x2, int y2, int layer,
+                                             int net, float emit_trace_width) const {
+    if (!grid_.pairwise_active()) return;
+    const int blocker = grid_.segment_pads_pairwise_blocker(
+        own_pad_step_segment(x1, y1, x2, y2, layer, net, emit_trace_width),
+        net, search_gate_exclude_refs_, search_gate_clamp_refs_);
+    if (blocker == 0) return;
+    const auto [wx, wy] = grid_.grid_to_world(x2, y2);
+    note_pairwise_block(blocker, wx, wy);
+}
+
+bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
+    const auto [wx, wy] = grid_.grid_to_world(x, y);
+    Via via;
+    via.x = wx; via.y = wy; via.net = net;
+    via.drill = search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill;
+    via.diameter = search_via_half_diam_mm_ > 0 ? 2 * search_via_half_diam_mm_ : rules_.via_diameter;
+    via.layer_from = 0; via.layer_to = grid_.layers() - 1;
+    const float clearance = search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance;
+    // Issue #6272: via-vs-stored-trace takes the trace/via floor.
+    const float trace_clearance = search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance;
+    return grid_.route_via_geometry_clear(via, clearance, rules_.min_hole_to_hole, rules_.min_drill_clearance,
+                                          trace_clearance);
+}
+
+bool Pathfinder::own_path_vias_clear(const std::vector<AStarNode>& closed, int via_anc,
+                                     int x, int y) const {
+    // Issue #6464: KiCad's ``hole_to_hole`` rule does not exempt two vias of
+    // the same net (see #5673), nor two vias of the same ROUTE.  The stored-
+    // via check in ``Grid3D::route_via_geometry_clear`` only sees committed
+    // copper, so a route could drop a second via 0.461 mm drill-to-drill from
+    // its own first one (board 05, EN_A).  The floor is the same one the
+    // stored-via branch applies: ``max(min_drill_clearance, min_hole_to_hole)``.
+    if (via_anc < 0) return true;
+    const float drill = search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill;
+    const float floor_mm = std::max(rules_.min_drill_clearance, rules_.min_hole_to_hole);
+    const auto [wx, wy] = grid_.grid_to_world(x, y);
+    const int n = static_cast<int>(closed.size());
+    int idx = via_anc;
+    while (idx >= 0 && idx < n) {
+        const AStarNode& node = closed[idx];
+        // A via stack at the same cell (F -> In1 -> B) is one drill.
+        if (node.x != x || node.y != y) {
+            const auto [vx, vy] = grid_.grid_to_world(node.x, node.y);
+            const float gap = std::hypot(wx - vx, wy - vy) - drill;
+            if (gap < floor_mm - 1e-4f) return false;  // grid.cpp CLEARANCE_EPSILON_MM
+        }
+        const int parent = node.parent_idx;
+        if (parent < 0 || parent >= n) break;
+        idx = closed[parent].via_anc;
+    }
+    return true;
+}
+
+bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
+                                  bool allow_sharing, int radius_override,
+                                  int partner_net, int partner_radius, int from_x, int from_y) const {
+    int radius = (radius_override > 0) ? radius_override : trace_half_width_cells_;
+    // Every covered cell in this neighborhood asks about the same swept
+    // candidate. Compute its indexed physical clearance at most once.
+    int physical_clear = -1;
+    auto halo_clear = [&](int cx, int cy) {
+        if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
+        if (physical_clear < 0)
+            physical_clear = trace_halo_cell_clear(cx, cy, layer,
+                from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y,
+                x, y, net, partner_net) ? 1 : 0;
+        return physical_clear != 0;
+    };
+    // Issue #6315: a cell blocked only by pad copper/clearance is resolved
+    // with the exact swept-edge vs pad test (computed at most once per
+    // call) instead of being treated as copper.
+    int pad_exact = -1;
+    auto pad_clear = [&](const GridCell& c, int cx, int cy) {
+        if (!pad_cell_resolvable(c, cx, cy, layer)) return false;
+        if (pad_exact < 0)
+            pad_exact = pad_step_clear(from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y,
+                                       x, y, layer, net) ? 1 : 0;
+        return pad_exact != 0;
+    };
+
+    // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
+    // (partner_net >= 0 && partner_radius > 0 && partner_radius < radius),
+    // partner-owned blocked cells in the slack ring (Euclidean distance
+    // > partner_radius) are treated as passable.  All other cells use the
+    // wider radius as before.
+    bool partner_active =
+        (partner_net >= 0) && (partner_radius > 0) && (partner_radius < radius);
+    const int partner_radius_sq = partner_radius * partner_radius;
+
+    // Issue #3229: Switch the trace-clearance kernel from Chebyshev (square)
+    // to Euclidean (circular disc).  The DRC measures Euclidean clearance
+    // and the legacy square kernel passed candidates at the diagonal corners
+    // whose true Euclidean clearance fell as short as
+    // ``radius * (1 - 1/sqrt(2)) ~= 0.293 * radius`` cells.  The disc
+    // kernel iterates only cells with ``dx*dx + dy*dy <= r*r``, matching
+    // the DRC metric exactly.
+    //
+    // Fast path: when ``radius_override`` is zero, use the cached
+    // ``circular_kernel_offsets_`` populated in the constructor.  When the
+    // caller supplies a per-net override (smaller-width nets only -- the
+    // override is only set when it differs from the default), iterate the
+    // square as a fallback and apply the Euclidean filter inline; that
+    // branch is rare and not perf-critical.
+    const bool use_cached = (radius_override <= 0);
+    const int radius_sq = radius * radius;
+
+    // Issue #4079: lateral-trace corridor keep-out.  A cell reserved for a
+    // net set that EXCLUDES ``net`` blocks this trace placement -- EVEN if
+    // the cell is not otherwise ``blocked`` -- so a foreign net's A* cannot
+    // route through another net's reserved continuation corridor (the via-
+    // only keep-out in ``mark_via`` was insufficient; without this the A*
+    // could pick an illegal lateral path and only be caught after the fact).
+    // Mirrors the Python ``_is_trace_blocked`` reservation consult.  Fast-
+    // pathed behind ``has_reservations()`` so unreserved boards are
+    // byte-identical.  The keep-out is a HARD gate even in negotiated /
+    // relief mode (``allow_sharing``), matching ``mark_via``'s unconditional
+    // skip -- a reserved corridor is not soft-negotiable.
+    const bool check_reservations = grid_.has_reservations();
+
+    if (use_cached) {
+        for (const auto& [dx_off, dy_off] : circular_kernel_offsets_) {
+            const int dx = static_cast<int>(dx_off);
+            const int dy = static_cast<int>(dy_off);
+            const int cx = x + dx;
+            const int cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) {
+                return true;  // Out of bounds
+            }
+
+            // Issue #4079: hard keep-out for foreign-reserved cells.
+            if (check_reservations &&
+                grid_.is_reserved_excluding(cx, cy, layer, net)) {
+                return true;
+            }
+
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (!cell.blocked) {
+                continue;
+            }
+            if (cell.net != net && halo_clear(cx, cy)) {
+                continue;
+            }
+            if (cell.net != net && pad_clear(cell, cx, cy)) {
+                continue;
+            }
+
+            // Issue #2559: relax partner cells outside the tighter
+            // intra-pair radius (Euclidean -- matches the kernel shape
+            // used by Python compute_expanded_blocked() post-#3229).
+            // A tighter intra-pair rule applies to routed partner copper, not
+            // authored pads or static obstacles. Those cannot negotiate away
+            // their pad clearance, and final validation retains that floor.
+            if (partner_active && cell.net == partner_net &&
+                !cell.static_blocked && !cell.pad_blocked && !cell.is_obstacle) {
+                const int dist_sq = dx * dx + dy * dy;
+                if (dist_sq > partner_radius_sq) {
+                    continue;
+                }
+            }
+
+            if (allow_sharing) {
+                if (cell.is_obstacle && cell.net != net) {
+                    return true;
+                }
+                // Issue #3545: statically blocked foreign cells (pad
+                // clearance halos, keepouts) are non-negotiable
+                // regardless of usage_count -- a pad cannot "negotiate
+                // away", so sharing a halo cell only produces
+                // unresolvable overflow.  Relief probes keep their
+                // #3438 soft-crossing semantics for foreign-net cells.
+                if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                    return true;
+                }
+                if (cell.net == 0 && cell.usage_count == 0) {
+                    return true;
+                }
+                if (cell.net != net && cell.usage_count == 0 &&
+                    !relief_mode_) {
+                    // Issue #3438: in relief-probe mode this foreign
+                    // usage-0 cell is passable at a finite penalty
+                    // (see relief_conflict_cost) instead of hard.
+                    return true;
+                }
+            } else {
+                // Issue #3456: same-net cells are passable in standard
+                // mode regardless of the obstacle flag -- parity with
+                // the Python ``_is_trace_blocked`` standard branch
+                // (Issue #864: ``blocked & (net != net)``).  Pre-fix,
+                // ``cell.is_obstacle`` here rejected every trace
+                // centerline within trace-half-width of the net's OWN
+                // pad copper, sealing dense connector pad pockets
+                // (board 03's J1 USB-C at 0.05mm grid: standard-mode
+                // open set exhausted in ~800 iterations on the J1->U1
+                // USB edges) and silently handing those nets to the
+                // 10-100x-slower Python fallback.  This predicate --
+                // not ``is_diagonal_blocked`` -- was the operative
+                // board-03 seal; post-fix the board routes with zero
+                // fallbacks.
+                if (cell.net != net) {
+                    return true;
+                }
+            }
+        }
+        // Issue #4511: the scalar disc is clear -- consult the cross-domain
+        // (HV-isolation) annulus.  No-op unless the grid has an active
+        // pairwise matrix that widens beyond ``radius``.
+        // Issue #6008: net-filtered keepout rule areas live outside the planes.
+        if (grid_.has_rule_area_keepouts() &&
+            grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
+        return cross_domain_trace_blocked(x, y, layer, net, radius);
+    }
+
+    // Slow path: per-net radius override.  Iterate the square and filter
+    // to the Euclidean disc inline.
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const int dist_sq = dx * dx + dy * dy;
+            if (dist_sq > radius_sq) {
+                continue;  // Outside the disc.
+            }
+            const int cx = x + dx, cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) {
+                return true;  // Out of bounds
+            }
+
+            // Issue #4079: hard keep-out for foreign-reserved cells (see
+            // the fast-path branch above for the full rationale).
+            if (check_reservations &&
+                grid_.is_reserved_excluding(cx, cy, layer, net)) {
+                return true;
+            }
+
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (!cell.blocked) {
+                continue;
+            }
+            if (cell.net != net && halo_clear(cx, cy)) {
+                continue;
+            }
+            if (cell.net != net && pad_clear(cell, cx, cy)) {
+                continue;
+            }
+
+            // A tighter intra-pair rule applies to routed partner copper, not
+            // authored pads or static obstacles. Those cannot negotiate away
+            // their pad clearance, and final validation retains that floor.
+            if (partner_active && cell.net == partner_net &&
+                !cell.static_blocked && !cell.pad_blocked && !cell.is_obstacle) {
+                if (dist_sq > partner_radius_sq) {
+                    continue;
+                }
+            }
+
+            if (allow_sharing) {
+                if (cell.is_obstacle && cell.net != net) {
+                    return true;
+                }
+                // Issue #3545: statically blocked foreign cells (pad
+                // clearance halos, keepouts) are non-negotiable
+                // regardless of usage_count -- a pad cannot "negotiate
+                // away", so sharing a halo cell only produces
+                // unresolvable overflow.  Relief probes keep their
+                // #3438 soft-crossing semantics for foreign-net cells.
+                if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                    return true;
+                }
+                if (cell.net == 0 && cell.usage_count == 0) {
+                    return true;
+                }
+                if (cell.net != net && cell.usage_count == 0 &&
+                    !relief_mode_) {
+                    // Issue #3438: in relief-probe mode this foreign
+                    // usage-0 cell is passable at a finite penalty
+                    // (see relief_conflict_cost) instead of hard.
+                    return true;
+                }
+            } else {
+                // Issue #3456: same-net cells passable in standard mode
+                // (Python #864 parity -- see fast path above).
+                if (cell.net != net) {
+                    return true;
+                }
+            }
+        }
+    }
+    // Issue #4511: cross-domain (HV-isolation) annulus check -- see the fast
+    // path above.  No-op unless a widening pairwise matrix is installed.
+    // Issue #6008: net-filtered keepout rule areas live outside the planes.
+    if (grid_.has_rule_area_keepouts() &&
+        grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
+    return cross_domain_trace_blocked(x, y, layer, net, radius);
+}
+
+// Issue #3226: Pad-exit relaxation safety check.  See header for the full
+// rationale.  Equivalent to ``is_trace_blocked`` restricted to FOREIGN-net
+// pad-metal cells (``cell.pad_blocked == true && cell.net != net``).
+// Pure halo cells, copper-pour cells, and routed-trace cells are skipped so
+// the relaxation still admits the legitimate pad-exit step into a foreign
+// pad's clearance band -- only steps that put the trace centerline within
+// ``radius`` of foreign pad copper are rejected.
+//
+// Issue #3229: Kernel is the Euclidean disc (``dx*dx + dy*dy <= r*r``)
+// rather than the legacy Chebyshev square.  The DRC measures Euclidean
+// clearance, and the Chebyshev kernel passed candidates at the diagonal
+// corners whose Euclidean clearance fell short.  The hot path uses the
+// pre-computed ``circular_kernel_offsets_`` when the caller's ``radius``
+// matches the cached ``trace_half_width_cells_`` (the typical case --
+// callers in the A* loop pass either the default or the same per-net
+// override they passed to ``is_trace_blocked``).
+bool Pathfinder::strict_step_in_scope(int nx, int ny) const {
+    if (!search_strict_pad_kernel_) return false;
+    if (search_strict_center_x_ < 0 || search_strict_center_y_ < 0 ||
+        search_strict_radius_ < 0) {
+        return true;  // Global scope (diagnostics / unit tests only).
+    }
+    // Issue #5599: Euclidean disc around the repeated violation site --
+    // the locality bound that keeps the strict pad check from closing
+    // relaxation-dependent corridors elsewhere on dense pad arrays.
+    const int dx = nx - search_strict_center_x_;
+    const int dy = ny - search_strict_center_y_;
+    return dx * dx + dy * dy <= search_strict_radius_ * search_strict_radius_;
+}
+
+bool Pathfinder::strict_edge_pad_clear(int cx, int cy, int nx, int ny, int layer,
+                                        int net, float emit_trace_width) const {
+    const auto [ax, ay] = grid_.grid_to_world(cx, cy);
+    const auto [bx, by] = grid_.grid_to_world(nx, ny);
+    const float width = emit_trace_width > 0.0f ? emit_trace_width
+                                                : rules_.trace_width;
+    return grid_.edge_foreign_pad_clear(ax, ay, bx, by, layer, net,
+                                        width / 2.0f,
+                                        rules_.trace_clearance);
+}
+
+bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
+                                                    int net, int radius) const {
+    if (radius <= 0) {
+        return false;
+    }
+
+    if (radius == trace_half_width_cells_) {
+        // Fast path: cached offset list.
+        for (const auto& [dx_off, dy_off] : circular_kernel_offsets_) {
+            const int cx = x + static_cast<int>(dx_off);
+            const int cy = y + static_cast<int>(dy_off);
+            if (!grid_.is_valid(cx, cy, layer)) {
+                continue;
+            }
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (cell.pad_blocked && cell.net != net) {
+                return true;
+            }
+        }
+        // Issue #4511: also refuse the pad-exit relaxation when cross-domain
+        // (HV) copper sits in the widened annulus beyond ``radius`` -- so a
+        // relaxed exit step cannot hug foreign HV metal below the pairwise
+        // requirement.  No-op unless a widening pairwise matrix is installed.
+        // Issue #6008: net-filtered keepout rule areas live outside the planes.
+        if (grid_.has_rule_area_keepouts() &&
+            grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
+        return cross_domain_trace_blocked(x, y, layer, net, radius);
+    }
+
+    // Slow path: caller-supplied radius differs from the cached default;
+    // iterate the square and filter to the Euclidean disc inline.  This
+    // branch is not perf-critical (per-net overrides are uncommon at
+    // hot-path call sites).
+    const int radius_sq = radius * radius;
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            if (dx * dx + dy * dy > radius_sq) {
+                continue;
+            }
+            int cx = x + dx;
+            int cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) {
+                continue;
+            }
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (cell.pad_blocked && cell.net != net) {
+                return true;
+            }
+        }
+    }
+    // Issue #4511: cross-domain annulus tail (see the fast path above).
+    // Issue #6008: net-filtered keepout rule areas live outside the planes.
+    if (grid_.has_rule_area_keepouts() &&
+        grid_.rule_area_trace_blocked(x, y, layer, net, radius)) return true;
+    return cross_domain_trace_blocked(x, y, layer, net, radius);
+}
+
+bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
+                                     int net, bool allow_sharing) const {
+    // Only check for diagonal moves
+    if (dx == 0 || dy == 0) return false;
+
+    // Check the two adjacent orthogonal cells (prevent corner cutting)
+    std::vector<std::pair<int, int>> adjacent = {
+        {x, y + dy},  // Vertical neighbor
+        {x + dx, y},  // Horizontal neighbor
+    };
+
+    for (const auto& [cx, cy] : adjacent) {
+        if (!grid_.is_valid(cx, cy, layer)) {
+            return true;  // Out of bounds
+        }
+
+        const auto& cell = grid_.at(cx, cy, layer);
+        if (cell.blocked) {
+            if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, x, y, x + dx, y + dy, net))
+                continue;
+            // Issue #6315: pad-derived corner cell, exact geometry clear.
+            if (cell.net != net && pad_cell_clear(cx, cy, layer, x, y, x + dx, y + dy, net))
+                continue;
+            if (allow_sharing) {
+                // Negotiated mode: own-net obstacle cells remain
+                // passable (Issue #2989 sibling fix; see
+                // ``is_trace_blocked`` for the diff-pair rationale).
+                if (cell.is_obstacle && cell.net != net) {
+                    return true;
+                }
+                // Issue #3545: statically blocked foreign cells (pad
+                // clearance halos, keepouts) are non-negotiable
+                // regardless of usage_count -- a pad cannot "negotiate
+                // away", so sharing a halo cell only produces
+                // unresolvable overflow.  Relief probes keep their
+                // #3438 soft-crossing semantics for foreign-net cells.
+                if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                    return true;
+                }
+                if (cell.net == 0 && cell.usage_count == 0) {
+                    return true;
+                }
+                if (cell.net != net && cell.usage_count == 0 &&
+                    !relief_mode_) {
+                    // Issue #3438: in relief-probe mode this foreign
+                    // usage-0 cell is passable at a finite penalty
+                    // (see relief_conflict_cost) instead of hard.
+                    return true;
+                }
+            } else {
+                // Issue #3456: same-net cells are passable regardless of
+                // the obstacle flag -- parity with the Python
+                // ``_is_diagonal_corner_blocked`` standard-mode branch
+                // (Issue #864 semantics) and the sibling sharing-mode fix
+                // from Issue #2989 above.  Pre-fix, ``cell.is_obstacle``
+                // here rejected diagonal moves adjacent to the net's OWN
+                // pad copper.  (The operative board-03 seal was the
+                // matching divergence in ``is_trace_blocked`` -- see the
+                // comment there -- but this predicate shares the exact
+                // same Issue #864 parity contract.)
+                if (cell.net != net) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Issue #3438: per-step relief penalty.  Returns the configured penalty
+// when (x, y, layer) holds a foreign-net usage-0 non-obstacle blocked
+// cell AND relief mode is on; 0.0f otherwise.  The penalty makes the
+// relief probe a MIN-CONFLICT search: the A* prefers paths that cross as
+// few sealed foreign cells as possible, so the owner nets extracted from
+// the probe path form a small, targeted rip-up set.
+float Pathfinder::relief_conflict_cost(int x, int y, int layer, int net) const {
+    if (!relief_mode_) {
+        return 0.0f;
+    }
+    if (!grid_.is_valid(x, y, layer)) {
+        return 0.0f;
+    }
+    const auto& cell = grid_.at(x, y, layer);
+    if (cell.blocked && !cell.is_obstacle && cell.net != 0 &&
+        cell.net != net && cell.usage_count == 0) {
+        return relief_conflict_penalty_;
+    }
+    return 0.0f;
+}
+
+// Issue #4511 / Epic #4431 Phase 2b: search-time pairwise (HV-isolation)
+// avoidance helpers.  See the header for the full contract.  Every one of
+// these short-circuits on ``grid_.pairwise_active()`` so the no-voltage-map
+// hot path pays a single boolean test -- the same fast-path gate #4071 used
+// for reservations.
+int Pathfinder::pairwise_wide_radius_cells(float half_mm) const {
+    const float cmax = grid_.max_pairwise_clearance();
+    if (cmax <= 0.0f) return 0;
+    return search_radius_cells(half_mm, cmax, grid_.resolution());
+}
+
+bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
+                                            int scalar_radius) const {
+    if (!grid_.pairwise_active()) return false;
+
+    // The scalar kernel already covered every cell within ``scalar_radius``.
+    // Cross-domain widening only needs the ANNULUS out to the widest pair.
+    const float res = grid_.resolution();
+    const float half_mm = (search_trace_half_width_mm_ > 0.0f)
+                              ? search_trace_half_width_mm_
+                              : rules_.trace_width / 2.0f;
+    const int wide_radius = pairwise_wide_radius_cells(half_mm);
+    if (wide_radius <= scalar_radius) return false;  // matrix never widens here
+
+    const int scalar_sq = scalar_radius * scalar_radius;
+    const int wide_sq = wide_radius * wide_radius;
+    const auto cw = grid_.grid_to_world(x, y);
+
+    for (int dy = -wide_radius; dy <= wide_radius; ++dy) {
+        for (int dx = -wide_radius; dx <= wide_radius; ++dx) {
+            const int dist_sq = dx * dx + dy * dy;
+            // Annulus only: the inner disc is the scalar kernel's job.
+            if (dist_sq <= scalar_sq || dist_sq > wide_sq) continue;
+            const int cx = x + dx, cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) continue;  // OOB is scalar's job
+            const auto& cell = grid_.at(cx, cy, layer);
+            // Only foreign real-net copper can trip a cross-domain rule; net 0
+            // (pour / unconnected convention) never carries a domain.
+            if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+            const float required = grid_.pairwise_required_clearance(net, cell.net);
+            if (required <= 0.0f) continue;  // same domain / no widening
+            // Widened radius for THIS specific pair (<= wide_radius).  A cell
+            // inside the annulus but outside this pair's requirement is fine.
+            const int pair_r = search_radius_cells(half_mm, required, res);
+            if (dist_sq > pair_r * pair_r) continue;
+            // Attach-zone exemption (#4506) at the approximate gap midpoint:
+            // a rated domain-bridging footprint may neck the pair down to the
+            // scalar floor inside its pad field -- but the scalar floor was
+            // already enforced by the caller's inner scan, so waiving the
+            // widening here is safe (mirrors ``validate_route``'s ``widen``).
+            // Issue #4507: scoped to THIS layer, so the search no longer
+            // accepts copper the layer-scoped Python check would reject.
+            const auto fw = grid_.grid_to_world(cx, cy);
+            const float mx = (cw.first + fw.first) * 0.5f;
+            const float my = (cw.second + fw.second) * 0.5f;
+            if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+            // Issue #4507: name the blocker so a drained search can report
+            // FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH.  Diagnostic
+            // only -- the verdict below is unchanged.
+            note_pairwise_block(cell.net, cw.first, cw.second);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
+    if (!grid_.pairwise_active()) return false;
+
+    const float res = grid_.resolution();
+    const float half_mm = (search_via_half_diam_mm_ > 0.0f)
+                              ? search_via_half_diam_mm_
+                              : rules_.via_diameter / 2.0f;
+    const int wide_radius = pairwise_wide_radius_cells(half_mm);
+    const int scalar_radius = via_half_cells_;
+    if (wide_radius <= scalar_radius) return false;
+
+    const int scalar_sq = scalar_radius * scalar_radius;
+    const int wide_sq = wide_radius * wide_radius;
+    const auto cw = grid_.grid_to_world(x, y);
+
+    for (int layer = 0; layer < grid_.layers(); ++layer) {
+        for (int dy = -wide_radius; dy <= wide_radius; ++dy) {
+            for (int dx = -wide_radius; dx <= wide_radius; ++dx) {
+                const int dist_sq = dx * dx + dy * dy;
+                if (dist_sq <= scalar_sq || dist_sq > wide_sq) continue;
+                const int cx = x + dx, cy = y + dy;
+                if (!grid_.is_valid(cx, cy, layer)) continue;
+                const auto& cell = grid_.at(cx, cy, layer);
+                if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+                const float required =
+                    grid_.pairwise_required_clearance(net, cell.net);
+                if (required <= 0.0f) continue;
+                const int pair_r = search_radius_cells(half_mm, required, res);
+                if (dist_sq > pair_r * pair_r) continue;
+                const auto fw = grid_.grid_to_world(cx, cy);
+                const float mx = (cw.first + fw.first) * 0.5f;
+                const float my = (cw.second + fw.second) * 0.5f;
+                // Issue #4507: the candidate via's barrel meets this copper ON
+                // ``layer``, so the waiver is scoped to it (a via passing a
+                // rated SMD part's pad field on an inner layer is not exempt).
+                if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+                // Issue #4507: record the blocker (diagnostic only).
+                note_pairwise_block(cell.net, cw.first, cw.second);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+const std::vector<Pathfinder::PairwiseBandOffset>&
+Pathfinder::pairwise_band_offsets(int hard_radius, int band) const {
+    if (pairwise_band_hard_r_ == hard_radius && pairwise_band_band_ == band) {
+        return pairwise_band_offsets_;
+    }
+
+    const int halo_radius = hard_radius + band;
+    const int hard_sq = hard_radius * hard_radius;
+    const int halo_sq = halo_radius * halo_radius;
+
+    pairwise_band_offsets_.clear();
+    // Annulus area is ~pi * (halo^2 - hard^2); reserve the bounding-square
+    // upper bound's fraction so the build never reallocates in a loop.
+    pairwise_band_offsets_.reserve(
+        static_cast<size_t>(3.2f * static_cast<float>(halo_sq - hard_sq)) + 8);
+
+    for (int dy = -halo_radius; dy <= halo_radius; ++dy) {
+        for (int dx = -halo_radius; dx <= halo_radius; ++dx) {
+            const int dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= hard_sq || dist_sq > halo_sq) continue;  // band only
+            // Linear decay: strongest just outside the hard radius, zero at the
+            // band edge.  Scaled by the caller to ``cost_straight`` so a cell
+            // hugging the hard limit costs ~1 extra step of detour -- enough to
+            // steer, not enough to distort the optimum route away from a clean
+            // lane.
+            const float d = std::sqrt(static_cast<float>(dist_sq));
+            float frac = (static_cast<float>(halo_radius) - d) /
+                         static_cast<float>(band);
+            if (frac < 0.0f) frac = 0.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            pairwise_band_offsets_.push_back(
+                PairwiseBandOffset{static_cast<int16_t>(dx),
+                                   static_cast<int16_t>(dy), frac});
+        }
+    }
+
+    // Ring order: nearest cell first.  ``frac`` is a strictly decreasing
+    // function of distance, so sorting by DESCENDING ``frac`` is exactly
+    // sorting by ascending distance -- and it keeps the comparison on the
+    // value the kernel returns, so ties (equal distance) are indistinguishable
+    // by construction and the scan is deterministic regardless of which one it
+    // stops on.  ``stable_sort`` keeps the build reproducible across
+    // toolchains.
+    std::stable_sort(pairwise_band_offsets_.begin(),
+                     pairwise_band_offsets_.end(),
+                     [](const PairwiseBandOffset& a,
+                        const PairwiseBandOffset& b) {
+                         return a.frac > b.frac;
+                     });
+
+    pairwise_band_hard_r_ = hard_radius;
+    pairwise_band_band_ = band;
+    return pairwise_band_offsets_;
+}
+
+float Pathfinder::pairwise_avoidance_cost(int x, int y, int layer,
+                                          int net) const {
+    if (!grid_.pairwise_active()) return 0.0f;
+
+    const float res = grid_.resolution();
+    const float half_mm = (search_trace_half_width_mm_ > 0.0f)
+                              ? search_trace_half_width_mm_
+                              : rules_.trace_width / 2.0f;
+    const int hard_radius = pairwise_wide_radius_cells(half_mm);
+    if (hard_radius <= 0) return 0.0f;
+
+    // Soft gradient band: a margin proportional to the widening, so the search
+    // is nudged to keep ~half the pairwise clearance of slack beyond the hard
+    // limit.  Bounded and thin -- the extra cells scanned are HV-board only.
+    const int band = std::max(
+        1, static_cast<int>(std::ceil(grid_.max_pairwise_clearance() * 0.5f / res)));
+
+    // Issue #4848: NEAREST-in-band pricing.  The offsets are pre-sorted from
+    // the hard radius outward, so the first qualifying cell is the closest
+    // cross-domain copper and the scan can return immediately -- the early
+    // exit the pre-#4848 row-major ``break`` bought, but now with the
+    // semantics the gradient was always documented to have ("strongest just
+    // outside the hard radius").  One cross-domain neighbour still sets the
+    // whole price: a candidate flanked by a long HV run is not over-penalised.
+    for (const auto& off : pairwise_band_offsets(hard_radius, band)) {
+        const int cx = x + off.dx, cy = y + off.dy;
+        if (!grid_.is_valid(cx, cy, layer)) continue;
+        const auto& cell = grid_.at(cx, cy, layer);
+        if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+        if (grid_.pairwise_required_clearance(net, cell.net) <= 0.0f) continue;
+        return rules_.cost_straight * off.frac;
+    }
+    return 0.0f;
+}
+
+bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
+                                int radius_override) const {
+    int dummy_net = 0;
+    float dummy_x = 0.0f, dummy_y = 0.0f;
+    return is_via_blocked_diag(x, y, net, allow_sharing, radius_override,
+                               dummy_net, dummy_x, dummy_y);
+}
+
+bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
+                                     int radius_override,
+                                     int& out_blocking_net,
+                                     float& out_world_x,
+                                     float& out_world_y) const {
+    out_blocking_net = 0;
+    out_world_x = 0.0f;
+    out_world_y = 0.0f;
+
+    const auto [hole_x, hole_y] = grid_.grid_to_world(x, y);
+    if (!grid_.component_holes_clear(hole_x, hole_y,
+                                    search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill,
+                                    rules_.min_hole_to_hole)) return true;
+    // Issue #6243: authored per-net minimum for the barrel, before any
+    // sharing / raster relief.
+    if (grid_.authored_active() &&
+        !grid_.authored_via_clear(hole_x, hole_y,
+                                  search_via_half_diam_mm_ > 0 ? 2.0 * search_via_half_diam_mm_
+                                                               : rules_.via_diameter,
+                                  net)) return true;
+
+    const bool geometry_complete = grid_.route_geometry_complete();
+    int physical_clear = -1;
+    auto geometry_clear = [&]() {
+        if (physical_clear < 0) physical_clear = via_route_geometry_clear(x, y, net) ? 1 : 0;
+        return physical_clear != 0;
+    };
+    if (geometry_complete && !geometry_clear()) return true;
+
+    if (grid_.has_fixed_fills()) {
+        auto [wx, wy] = grid_.grid_to_world(x, y);
+        const double half = search_via_half_diam_mm_ > 0
+            ? search_via_half_diam_mm_ : rules_.via_diameter / 2.0;
+        const double reach = half + (search_fill_via_clearance_ >= 0
+            ? search_fill_via_clearance_ : rules_.via_clearance);
+        for (int layer = 0; layer < grid_.layers(); ++layer)
+            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach)) return true;
+    }
+
+    // Issue #7296: mask-dam zone beside an SMD pad (drill clears the copper
+    // but leaves < min_via_pad_edge_gap to it).  Outside the allow_smd_vias
+    // gate: via-in-pad being allowed does not waive the dam.  Same arithmetic
+    // as Python ``Router._pad_edge_clear``.
+    if (rules_.min_via_pad_edge_gap > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const float radius = rules_.via_drill / 2.0f;
+        const float floor_mm = rules_.min_via_pad_edge_gap;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+            float local_x = wx - pad.x, local_y = wy - pad.y;
+            if (pad.rotation != 0.0f) {
+                const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+                const float c = std::cos(angle), s = std::sin(angle);
+                const float rotated_x = c * local_x - s * local_y;
+                local_y = s * local_x + c * local_y;
+                local_x = rotated_x;
+            }
+            const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+            const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist >= radius && dist < radius + floor_mm) return true;
+        }
+    }
+
+    // Issue #8994: same-net pad slit band -- the fab-view ``physical_copper_gap``
+    // population #8957 graded and #8974 drained on the Python producers.  The
+    // annulus (NOT the drill: that is the #7296 block above) must either union
+    // with its own SMD pad or clear the stackup-resolved detection edge;
+    // the open band in between is a slit the checker rejects, so the seat is
+    // refused.  Own net only (a foreign pad here is min_via_pad_edge_gap's /
+    // clearance's job), SMD only (``layer_idx < 0`` is a through-hole annulus,
+    // excluded exactly as the Python predicate's SMD bboxes exclude it), and
+    // OFF when the caller resolved no stackup edge -- never a literal
+    // (#8974 AC-3).  Same arithmetic as Python
+    // ``via_clearance.same_net_pad_gap_acceptable`` (types.hpp's
+    // ``same_net_pad_gap_in_band`` holds the single shared copy).
+    if (rules_.same_net_pad_gap_band_edge_mm > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const double half = search_via_half_diam_mm_ > 0
+            ? search_via_half_diam_mm_ : rules_.via_diameter / 2.0;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.net != net || pad.layer_idx < 0) continue;
+            if (same_net_pad_gap_in_band(static_cast<double>(wx),
+                                         static_cast<double>(wy), half, pad,
+                                         rules_.same_net_pad_gap_band_edge_mm))
+                return true;
+        }
+    }
+
+    if (!rules_.allow_smd_vias) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const float drill_radius = rules_.via_drill / 2.0f;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+            float local_x = wx - pad.x, local_y = wy - pad.y;
+            if (pad.rotation != 0.0f) {
+                // Invert KiCad's clockwise residual rotation, as in grid.cpp.
+                const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+                const float c = std::cos(angle), s = std::sin(angle);
+                const float rotated_x = c * local_x - s * local_y;
+                local_y = s * local_x + c * local_y;
+                local_x = rotated_x;
+            }
+            const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+            const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+            if (dx * dx + dy * dy < drill_radius * drill_radius) {
+                // Issue #6315: a via inside the routing net's OWN pad is a
+                // disallowed via-in-pad, not a via-via block -- leave the
+                // blocker unset so the search does not count it towards
+                // FAILURE_VIA_VIA_BLOCKED and report "blocked by stored-via
+                // geometry (blocking net <own net>)".
+                if (pad.net != net) {
+                    out_blocking_net = pad.net;
+                    out_world_x = pad.x;
+                    out_world_y = pad.y;
+                }
+                return true;
+            }
+        }
+    }
+
+    int radius = (radius_override > 0) ? radius_override : via_half_cells_;
+
+    // Issue #3234: Switch the via-clearance kernel from Chebyshev (square)
+    // to Euclidean (circular disc).  Sibling to PR #3232 (Issue #3229)
+    // which closed the same gap on the trace side.  The DRC measures
+    // Euclidean clearance; the legacy square kernel passed candidates at
+    // the diagonal corners whose true Euclidean clearance fell as short
+    // as ``radius * (1 - 1/sqrt(2)) ~= 0.293 * radius`` cells.
+    //
+    // Fast path: when ``radius_override`` is zero, use the cached
+    // ``via_kernel_offsets_`` populated in the constructor.  Slow path
+    // (per-net via radius override): iterate the bounding square and
+    // apply an inline Euclidean filter -- no temporary vector allocation
+    // (mirrors PR #3232's canonical approach for ``is_trace_blocked``).
+    const bool use_cached = (radius_override <= 0);
+    const int radius_sq = radius * radius;
+
+    if (use_cached) {
+        for (int layer = 0; layer < grid_.layers(); ++layer) {
+            for (const auto& [dx_off, dy_off] : via_kernel_offsets_) {
+                const int cx = x + static_cast<int>(dx_off);
+                const int cy = y + static_cast<int>(dy_off);
+                if (!grid_.is_valid(cx, cy, layer)) {
+                    // Grid-cell rejection: no specific blocking net.
+                    return true;
+                }
+
+                const auto& cell = grid_.at(cx, cy, layer);
+                if (!cell.blocked) {
+                    continue;
+                }
+                if (grid_.route_cell_has_geometry(cx, cy, layer)) {
+                    if (!geometry_clear()) return true;
+                    if (cell.net != net) continue;
+                }
+
+                if (allow_sharing) {
+                    // Negotiated mode: mirror Python
+                    // pathfinder.py::_is_via_blocked SoA branch.
+                    // Issue #2989: own-net ``is_obstacle`` cells must
+                    // remain passable so the routing net's own via can
+                    // land inside its destination pad's footprint.
+                    if (cell.is_obstacle && cell.net != net) {
+                        return true;  // Foreign-net obstacle blocks
+                    }
+                    // Issue #3545: statically blocked foreign cells (pad
+                    // clearance halos, keepouts) are non-negotiable
+                    // regardless of usage_count -- a pad cannot "negotiate
+                    // away", so sharing a halo cell only produces
+                    // unresolvable overflow.  Relief probes keep their
+                    // #3438 soft-crossing semantics for foreign-net cells.
+                    if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                        return true;
+                    }
+                    if (cell.net == 0 && cell.usage_count == 0) {
+                        return true;
+                    }
+                    if (cell.net != net && cell.usage_count == 0 &&
+                        !relief_mode_) {
+                        // Issue #3438: relief-probe mode (see above).
+                        return true;
+                    }
+                    // Allow with cost for routed cells / own-net obstacle.
+                } else {
+                    // Issue #3622: same-net cells are passable in standard
+                    // mode regardless of the obstacle flag -- parity with the
+                    // Python ``_is_via_blocked`` standard branch (Issue #864:
+                    // "same-net passable, different nets block"; it does NOT
+                    // consult ``is_obstacle``) and with the sibling
+                    // ``is_trace_blocked`` / ``is_diagonal_blocked`` standard
+                    // predicates aligned in #3456.  Pre-fix, ``cell.is_obstacle``
+                    // here rejected a via candidate whose disc touched the
+                    // routing net's OWN ``is_obstacle`` pad copper, so a board
+                    // that routes a via through its own destination pad in the
+                    // Python fallback would FAIL in C++ and silently fall back
+                    // (the exact #3456-class silent-fallback seed).
+                    if (cell.net != net) {
+                        return true;
+                    }
+                }
+            }
+        }
+    } else {
+        // Slow path: per-net radius override.  Iterate the square and
+        // filter to the Euclidean disc inline.
+        for (int layer = 0; layer < grid_.layers(); ++layer) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int dist_sq = dx * dx + dy * dy;
+                    if (dist_sq > radius_sq) {
+                        continue;  // Outside the disc.
+                    }
+                    const int cx = x + dx, cy = y + dy;
+                    if (!grid_.is_valid(cx, cy, layer)) {
+                        return true;
+                    }
+
+                    const auto& cell = grid_.at(cx, cy, layer);
+                    if (!cell.blocked) {
+                        continue;
+                    }
+                    if (grid_.route_cell_has_geometry(cx, cy, layer)) {
+                        if (!geometry_clear()) return true;
+                        if (cell.net != net) continue;
+                    }
+
+                    if (allow_sharing) {
+                        if (cell.is_obstacle && cell.net != net) {
+                            return true;
+                        }
+                        // Issue #3545: statically blocked foreign cells (pad
+                        // clearance halos, keepouts) are non-negotiable
+                        // regardless of usage_count -- a pad cannot "negotiate
+                        // away", so sharing a halo cell only produces
+                        // unresolvable overflow.  Relief probes keep their
+                        // #3438 soft-crossing semantics for foreign-net cells.
+                        if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                            return true;
+                        }
+                        if (cell.net == 0 && cell.usage_count == 0) {
+                            return true;
+                        }
+                        if (cell.net != net && cell.usage_count == 0 &&
+                            !relief_mode_) {
+                            // Issue #3438: relief-probe mode (see above).
+                            return true;
+                        }
+                    } else {
+                        // Issue #3622: same-net cells passable in standard
+                        // mode (Python #864 parity -- see the cached fast-path
+                        // branch above for the full rationale).
+                        if (cell.net != net) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Issue #2466: Geometric via-vs-via clearance against ``stored_vias_``.
+    // Issue #2476: When this branch causes a rejection, record the offending
+    // stored-via net so the negotiated strategy can target the rip-up at the
+    // specific net whose via is blocking us, rather than blanket retry.
+    auto candidate_world = grid_.grid_to_world(x, y);
+    float candidate_x = candidate_world.first;
+    float candidate_y = candidate_world.second;
+    float candidate_radius = rules_.via_diameter / 2.0f;
+    float clearance_required = rules_.via_clearance;
+
+    for (const auto& sv : grid_.stored_vias()) {
+        if (sv.net == net) continue;  // same-net spacing handled elsewhere
+        float dxw = candidate_x - sv.x;
+        float dyw = candidate_y - sv.y;
+        float distance = std::sqrt(dxw * dxw + dyw * dyw);
+        float clearance = distance - candidate_radius - sv.diameter / 2.0f;
+        // Issue #4511: widen the required via-vs-via clearance for a
+        // cross-domain (HV) pair, mirroring ``validate_route``'s via-via
+        // widening (grid.cpp) -- attach-zone exemption at the gap midpoint
+        // waives only the widening, never the scalar ``via_clearance``.
+        float required = clearance_required;
+        if (grid_.pairwise_active()) {
+            const float pair_req =
+                grid_.pairwise_required_clearance(net, sv.net);
+            if (pair_req > required) {
+                const float mx = (candidate_x + sv.x) * 0.5f;
+                const float my = (candidate_y + sv.y) * 0.5f;
+                // Issue #4507: two barrels share no single layer, so this
+                // consult stays layer-agnostic (the defaulted ``layer = -1``),
+                // matching ``validate_route``'s via-via branch exactly.
+                if (!grid_.attach_zone_exempts(mx, my, net, sv.net)) {
+                    required = pair_req;
+                }
+            }
+        }
+        if (clearance < required) {
+            out_blocking_net = sv.net;
+            out_world_x = candidate_x;
+            out_world_y = candidate_y;
+            return true;
+        }
+    }
+
+    // Partial raster coverage cannot waive clearance to known copper. Keep
+    // this after via-via diagnostics so their blocker metadata is preserved.
+    if (!geometry_clear()) return true;
+
+    // Issue #4511: the scalar via disc + via-vs-via geometry are clear --
+    // consult the cross-domain (HV-isolation) annulus against foreign copper
+    // cells the scalar disc could not reach.  No-op unless a widening pairwise
+    // matrix is installed.
+    // Issue #6008: via-blocking keepout rule areas (layer-agnostic).
+    if (grid_.has_rule_area_keepouts() &&
+        grid_.rule_area_via_blocked(x, y, net, radius)) return true;
+    return cross_domain_via_blocked(x, y, net);
+}
+
+float Pathfinder::heuristic(int x, int y, int layer,
+                            int goal_x, int goal_y, int goal_layer) const {
+    float dx = static_cast<float>(std::abs(x - goal_x));
+    float dy = static_cast<float>(std::abs(y - goal_y));
+
+    // Octile distance for diagonal routing
+    float h;
+    if (diagonal_routing_) {
+        h = std::max(dx, dy) + (1.414f - 1.0f) * std::min(dx, dy);
+    } else {
+        h = dx + dy;  // Manhattan distance
+    }
+
+    // Add layer change cost estimate
+    if (layer != goal_layer) {
+        h += rules_.cost_via;
+    }
+
+    return h * rules_.cost_straight;
+}
+
+float Pathfinder::get_congestion_cost(int x, int y, int layer) const {
+    float congestion = grid_.get_congestion(x, y, layer);
+    if (congestion > rules_.congestion_threshold) {
+        float excess = congestion - rules_.congestion_threshold;
+        return rules_.cost_congestion * (1.0f + excess * 2.0f);
+    }
+    return 0.0f;
+}
+
+float Pathfinder::get_pad_channel_cost(int x, int y, int layer) const {
+    // Issue #3143: hot-path per-cell lookup against the pre-built
+    // ``search_pad_budget_cost_lookup_`` populated once at the top of
+    // ``route_resumable()``.  Empty map (the default when no per-pad
+    // budget is configured) short-circuits to 0.0 with a single
+    // ``empty()`` test, so the cost contribution is zero-overhead for
+    // calls that don't use the new feature.
+    if (search_pad_budget_cost_lookup_.empty()) {
+        return 0.0f;
+    }
+    auto it = search_pad_budget_cost_lookup_.find(std::make_tuple(x, y, layer));
+    if (it == search_pad_budget_cost_lookup_.end()) {
+        return 0.0f;
+    }
+    return it->second;
+}
+
+bool Pathfinder::is_pad_via_fenced(int x, int y) const {
+    // Issue #6761: hard via fence (``PadChannelBudget.layer ==
+    // PAD_VIA_FENCE_LAYER``).  Same empty() fast path as the cost lookup.
+    if (search_pad_budget_cost_lookup_.empty()) {
+        return false;
+    }
+    return search_pad_budget_cost_lookup_.count(
+               std::make_tuple(x, y, PAD_VIA_FENCE_LAYER)) > 0;
+}
+
+// Issue #3143: Helper that materialises a per-cell pad-channel cost lookup
+// from the list of ``PadChannelBudget`` rectangles supplied by the caller.
+// Each cell inside a budget's bbox (intersected with the routing-grid
+// extent) is assigned the budget's ``overflow_penalty``; overlapping
+// budgets sum their penalties (so a cell inside two contested channels
+// pays for both).  Layer-specific budgets (``layer >= 0``) only register
+// cells on the matching layer; layer-agnostic budgets (``layer == -1``)
+// register cells on every routable layer the grid carries.
+//
+// Called once per route_resumable() entry; the resulting map is held
+// across resume() calls so the soft-budget cost shaping stays consistent
+// during a single net's (initial + N resume) sequence.
+static void build_pad_channel_cost_lookup(
+    const std::vector<PadChannelBudget>& budgets,
+    const Grid3D& grid,
+    std::unordered_map<std::tuple<int, int, int>, float, GridPosHash>& out
+) {
+    out.clear();
+    if (budgets.empty()) {
+        return;
+    }
+    const int cols = grid.cols();
+    const int rows = grid.rows();
+    const int layers = grid.layers();
+    for (const auto& b : budgets) {
+        // Inert budget: capacity == 0 OR overflow_penalty == 0.0 means
+        // the caller is intentionally passing a zero-cost budget (often
+        // a transient signal that the channel is not currently contested
+        // for this net).  Skip the cell registration entirely to keep
+        // the lookup table small.
+        if (b.overflow_penalty == 0.0f) {
+            continue;
+        }
+        int gx1 = std::max(0, b.gx1);
+        int gy1 = std::max(0, b.gy1);
+        int gx2 = std::min(cols - 1, b.gx2);
+        int gy2 = std::min(rows - 1, b.gy2);
+        if (gx1 > gx2 || gy1 > gy2) {
+            continue;
+        }
+        // Build a per-layer list once and then iterate.
+        std::vector<int> target_layers;
+        if (b.layer == -1) {
+            target_layers.reserve(layers);
+            for (int l = 0; l < layers; ++l) target_layers.push_back(l);
+        } else if (b.layer == PAD_VIA_FENCE_LAYER) {
+            // Issue #6761: a via fence.  Registered under the pseudo-layer
+            // key so it never prices a trace step; consulted only by the
+            // via-expansion branches through ``is_pad_via_fenced``.
+            target_layers.push_back(PAD_VIA_FENCE_LAYER);
+        } else if (b.layer >= 0 && b.layer < layers) {
+            target_layers.push_back(b.layer);
+        } else {
+            continue;  // Out-of-range layer index -- ignore the budget.
+        }
+        for (int gx = gx1; gx <= gx2; ++gx) {
+            for (int gy = gy1; gy <= gy2; ++gy) {
+                for (int l : target_layers) {
+                    auto key = std::make_tuple(gx, gy, l);
+                    // Sum penalties for overlapping budgets.
+                    out[key] += b.overflow_penalty;
+                }
+            }
+        }
+    }
+}
+
+// Helper: Initialize pad bounds from arguments, applying default single-cell
+// fallback when no explicit bounds are provided (Issue #2427).
+// Issue #8155: squared grid distance from (x, y) to the nearer of the two
+// route endpoints, used to prefer the locally relevant via-blocker.
+static long long endpoint_dist2(int x, int y, int sx, int sy, int ex, int ey) {
+    const long long dsx = x - sx, dsy = y - sy, dex = x - ex, dey = y - ey;
+    return std::min(dsx * dsx + dsy * dsy, dex * dex + dey * dey);
+}
+
+static void init_pad_bounds(
+    PadBounds& sp, PadBounds& ep,
+    int start_gx, int start_gy, int end_gx, int end_gy,
+    const PadBounds& start_pad_bounds, const PadBounds& end_pad_bounds
+) {
+    sp = start_pad_bounds;
+    ep = end_pad_bounds;
+    bool has_start_bounds = (sp.metal_gx1 != sp.metal_gx2 || sp.metal_gy1 != sp.metal_gy2
+                             || (sp.metal_gx1 == start_gx && sp.metal_gy1 == start_gy));
+    bool has_end_bounds = (ep.metal_gx1 != ep.metal_gx2 || ep.metal_gy1 != ep.metal_gy2
+                           || (ep.metal_gx1 == end_gx && ep.metal_gy1 == end_gy));
+    if (!has_start_bounds && sp.metal_gx1 == 0 && sp.metal_gy1 == 0
+        && sp.metal_gx2 == 0 && sp.metal_gy2 == 0) {
+        sp.metal_gx1 = sp.metal_gx2 = start_gx;
+        sp.metal_gy1 = sp.metal_gy2 = start_gy;
+        sp.approach_gx1 = start_gx - 2;
+        sp.approach_gy1 = start_gy - 2;
+        sp.approach_gx2 = start_gx + 2;
+        sp.approach_gy2 = start_gy + 2;
+    }
+    if (!has_end_bounds && ep.metal_gx1 == 0 && ep.metal_gy1 == 0
+        && ep.metal_gx2 == 0 && ep.metal_gy2 == 0) {
+        ep.metal_gx1 = ep.metal_gx2 = end_gx;
+        ep.metal_gy1 = ep.metal_gy2 = end_gy;
+        ep.approach_gx1 = end_gx - 2;
+        ep.approach_gy1 = end_gy - 2;
+        ep.approach_gx2 = end_gx + 2;
+        ep.approach_gy2 = end_gy + 2;
+    }
+}
+
+// Issue #6368: pad centreline landing cost.  Mirror of
+// ``kicad_tools.router.pad_landing.landing_cost`` -- keep the two in step.
+//
+// Seeding every cell of the start pad's metal box and accepting any cell of
+// the end pad's box make every row of the box an equally legal landing, but
+// not an equally priced one: the off-grid tail ``reconstruct_path`` draws
+// between the pad centre and the first/last grid cell is free, so an
+// off-centre row gets its row change as a free dogleg inside the pad while a
+// centred landing pays two turns to change rows outside it.  This charges
+// that skipped jog -- two turns plus one straight step per cell of offset --
+// when a step that leaves the start pad (or reaches the end pad) has a cell
+// more than one grid cell off the pad centreline.  "Leaves"/"reaches" is
+// either of:
+//   * crossing the pad's copper tip line (the long-axis end of its copper)
+//     inside the pad's lane -- this also catches a diagonal that jogs across
+//     the tip and a run that slips out of the box sideways at the tip column;
+//   * crossing the metal box boundary while moving along the long axis --
+//     this catches a diagonal that crosses the centreline inside the pad.
+// A pure side step out of the box is not charged.  Soft cost only: no seed
+// or goal stops being legal.
+static constexpr float kLandingDeadbandCells = 1.0f + 1e-3f;
+
+static float landing_cost(const PadBounds& pb, int ax, int ay, int bx, int by,
+                          bool outward, const DesignRules& rules) {
+    int a_along, b_along;
+    float a_off, b_off;
+    if (pb.long_axis == 0) {
+        a_along = ax; b_along = bx;
+        a_off = std::fabs(static_cast<float>(ay) - pb.centre_gy);
+        b_off = std::fabs(static_cast<float>(by) - pb.centre_gy);
+    } else if (pb.long_axis == 1) {
+        a_along = ay; b_along = by;
+        a_off = std::fabs(static_cast<float>(ax) - pb.centre_gx);
+        b_off = std::fabs(static_cast<float>(bx) - pb.centre_gx);
+    } else {
+        return 0.0f;
+    }
+    const float off = std::max(a_off, b_off);
+    if (off <= kLandingDeadbandCells) return 0.0f;
+    const bool a_tip = (a_along >= pb.tip_lo && a_along <= pb.tip_hi);
+    const bool b_tip = (b_along >= pb.tip_lo && b_along <= pb.tip_hi);
+    bool crosses = (outward ? (a_tip && !b_tip) : (!a_tip && b_tip)) &&
+                   std::min(a_off, b_off) <= pb.lane_half_cells + kLandingDeadbandCells;
+    if (!crosses && a_along != b_along) {
+        const bool a_box = (ax >= pb.metal_gx1 && ax <= pb.metal_gx2 &&
+                            ay >= pb.metal_gy1 && ay <= pb.metal_gy2);
+        const bool b_box = (bx >= pb.metal_gx1 && bx <= pb.metal_gx2 &&
+                            by >= pb.metal_gy1 && by <= pb.metal_gy2);
+        crosses = outward ? (a_box && !b_box) : (!a_box && b_box);
+    }
+    if (!crosses) return 0.0f;
+    return 2.0f * rules.cost_turn + rules.cost_straight * off;
+}
+
+RouteResult Pathfinder::route(
+    float start_x, float start_y, int start_layer,
+    float end_x, float end_y, int end_layer,
+    int net,
+    const std::vector<int>& start_layers,
+    const std::vector<int>& end_layers,
+    bool negotiated_mode,
+    float present_cost_factor,
+    float weight,
+    int trace_radius_cells,
+    int via_radius_cells,
+    const PadBounds& start_pad_bounds,
+    const PadBounds& end_pad_bounds,
+    int partner_net,
+    int intra_pair_radius_cells,
+    double per_net_timeout_seconds,
+    int max_search_iterations,
+    float emit_trace_width,
+    float emit_via_diameter,
+    float emit_via_drill,
+    const std::vector<PadChannelBudget>& pad_channel_budgets
+) {
+    begin_route_geometry_context(partner_net);
+    search_emit_via_drill_ = emit_via_drill;
+    // Non-resumable route: use local A* state.
+    // This preserves backward compatibility for callers that don't need retry.
+    //
+    // Issue #2610: silence -Wunused-parameter for the partner_net/intra_pair
+    // and timeout arguments when the inline loop path is not yet wired to
+    // honor them past this entry point.  The one-shot route() is mostly
+    // exercised by unit tests today; production traffic goes through
+    // route_resumable() which has the full implementation.  We still accept
+    // the parameters so callers see a consistent ABI.
+    (void)partner_net;
+    (void)intra_pair_radius_cells;
+
+    RouteResult result;
+    result.net = net;
+    result.success = false;
+
+    // Issue #2610: Establish a per-net wall-clock deadline up front so the
+    // inline A* loop can check it every N iterations without recomputing
+    // the absolute deadline each tick.  ``has_deadline == false`` skips
+    // all timeout checks (zero overhead vs. the pre-#2610 hot loop).
+    bool has_deadline = (per_net_timeout_seconds > 0.0);
+    std::chrono::steady_clock::time_point deadline{};
+    if (has_deadline) {
+        deadline = std::chrono::steady_clock::now()
+            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(per_net_timeout_seconds));
+    }
+    bool timed_out = false;
+    constexpr int kTimeoutCheckInterval = 1024;
+
+    auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
+    auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
+
+    std::vector<int> valid_start_layers = start_layers.empty()
+        ? std::vector<int>{start_layer} : start_layers;
+    std::vector<int> valid_end_layers = end_layers.empty()
+        ? std::vector<int>{end_layer} : end_layers;
+
+    PadBounds sp, ep;
+    init_pad_bounds(sp, ep, start_gx, start_gy, end_gx, end_gy,
+                    start_pad_bounds, end_pad_bounds);
+
+    // Local A* data structures (not stored as members)
+    PQ open_set;
+    std::unordered_set<std::tuple<int, int, int>, GridPosHash> closed_set;
+    std::unordered_map<std::tuple<int, int, int>, float, GridPosHash> g_scores;
+    std::vector<AStarNode> closed_list;
+
+    // Issue #3144: monotonic insertion counter for deterministic
+    // tie-breaking when f_score is equal between heap entries.  See
+    // ``AStarNode::seq`` for the full rationale.
+    uint64_t seq_counter = 0;
+
+    // Seed start nodes
+    for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
+        for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
+            if (!grid_.is_valid(sgx, sgy, 0)) continue;
+            for (int sl : valid_start_layers) {
+                const auto& seed_cell = grid_.at(sgx, sgy, sl);
+                if (seed_cell.blocked && seed_cell.is_obstacle &&
+                    seed_cell.pad_blocked && seed_cell.net != net) continue;
+                float h = heuristic(sgx, sgy, sl, end_gx, end_gy, valid_end_layers[0]);
+                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0,
+                                     seq_counter++};
+                auto key = std::make_tuple(sgx, sgy, sl);
+                auto it = g_scores.find(key);
+                if (it == g_scores.end() || 0.0f < it->second) {
+                    g_scores[key] = 0.0f;
+                    open_set.push(start_node);
+                }
+            }
+        }
+    }
+
+    // Issue #2610: ``max_search_iterations`` overrides the historical
+    // ``cols * rows * 4`` ceiling so callers (CLI ``--max-search-iterations``,
+    // ``cpp_backend.py``) can trade memory for completeness on dense boards.
+    // The default (<= 0) preserves pre-#2610 behavior.
+    int max_iterations = (max_search_iterations > 0)
+        ? max_search_iterations
+        : grid_.cols() * grid_.rows() * 4;
+    last_iterations_ = 0;
+    last_nodes_explored_ = 0;
+
+    // Issue #2476: Track via-vs-via blocked rejections so the negotiated
+    // strategy can target rip-up at the specific net whose stored via is
+    // blocking us, rather than blanket retry.  We record the most-recently
+    // observed offending stored via along with the world-coord of the
+    // candidate slot that was rejected.  When the search ends with
+    // success=false, these are written into ``result``'s diagnostic fields.
+    int via_block_count = 0;
+    // Issue #8155: keep the blocker nearest the start/goal pad, not whichever
+    // via candidate happened to be expanded last (A* floods the board first).
+    int last_blocking_net = 0;
+    float last_block_world_x = 0.0f;
+    float last_block_world_y = 0.0f;
+    long long best_block_d2 = std::numeric_limits<long long>::max();
+
+    // Issue #4507: same idea for cross-domain (HV) refusals, which until now
+    // were the one rejection path that produced no diagnostic at all.  The
+    // counters live on the pathfinder (the recording kernels are ``const``
+    // and are reached from four different blocking call sites), so reset them
+    // here for a fresh one-shot search.
+    clear_pairwise_block_diagnostics();
+
+    // Issue #3143: Populate the per-cell pad-channel cost lookup so the
+    // one-shot route() path honours the budget identically to
+    // route_resumable().  Empty budget list (default) leaves the map
+    // empty; the per-cell helper short-circuits at the empty() check.
+    build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
+                                  search_pad_budget_cost_lookup_);
+
+    // Inline A* loop (uses local variables, no rejected goals check)
+    while (!open_set.empty() && last_iterations_ < max_iterations) {
+        last_iterations_++;
+
+        // Issue #2610: Per-net wall-clock deadline check.  Sampled every
+        // ``kTimeoutCheckInterval`` iterations to amortize the syscall to
+        // ``steady_clock::now()`` -- mirrors the Python pathfinder's
+        // approach at line 1791.  When the deadline fires we set
+        // ``timed_out`` so the epilogue reports FAILURE_TIMEOUT rather
+        // than FAILURE_NO_PATH / FAILURE_ITERATION_LIMIT.
+        if (has_deadline && (last_iterations_ % kTimeoutCheckInterval == 0)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                timed_out = true;
+                break;
+            }
+        }
+
+        AStarNode current = open_set.top();
+        open_set.pop();
+
+        auto current_key = std::make_tuple(current.x, current.y, current.layer);
+        if (closed_set.count(current_key)) {
+            continue;
+        }
+        closed_set.insert(current_key);
+
+        int current_idx = static_cast<int>(closed_list.size());
+        // Issue #6464: nearest via on this node's path (self if it is one).
+        current.via_anc = current.via_from_parent ? current_idx
+            : (current.parent_idx >= 0 ? closed_list[current.parent_idx].via_anc : -1);
+        closed_list.push_back(current);
+        last_nodes_explored_++;
+
+        // Goal check
+        bool in_end_metal = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2
+        );
+        if (in_end_metal) {
+            bool layer_ok = std::find(valid_end_layers.begin(), valid_end_layers.end(),
+                                      current.layer) != valid_end_layers.end();
+            if (layer_ok) {
+                // Issue #3130: forward per-net emit widths so the
+                // reconstructed Segment/Via carry per-net values instead
+                // of the global ``rules_`` defaults.
+                result = reconstruct_path(closed_list, current_idx,
+                                          start_x, start_y, end_x, end_y, net,
+                                          emit_trace_width, emit_via_diameter,
+                                          emit_via_drill);
+                result.success = true;
+                // Issue #5599: report the accepted goal node (grid coords).
+                result.goal_gx = current.x;
+                result.goal_gy = current.y;
+                result.goal_layer = current.layer;
+                return result;
+            }
+        }
+
+        // Pad exit relaxation
+        bool is_exiting_start_pad = (
+            current.x >= sp.metal_gx1 && current.x <= sp.metal_gx2 &&
+            current.y >= sp.metal_gy1 && current.y <= sp.metal_gy2 &&
+            std::find(valid_start_layers.begin(), valid_start_layers.end(),
+                      current.layer) != valid_start_layers.end()
+        );
+        bool is_exiting_end_pad = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2 &&
+            std::find(valid_end_layers.begin(), valid_end_layers.end(),
+                      current.layer) != valid_end_layers.end()
+        );
+
+        // Explore 2D neighbors
+        for (const auto& [dx, dy, dlayer, cost_mult] : neighbors_2d_) {
+            int nx = current.x + dx;
+            int ny = current.y + dy;
+            int nlayer = current.layer;
+
+            // Stored via metal cannot be ripped up as a soft trace crossing.
+            // Check the swept edge before pad/approach occupancy waivers.
+            {
+                const auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                const auto [bx, by] = grid_.grid_to_world(nx, ny);
+                Segment edge;
+                edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
+                edge.width = emit_trace_width > 0 ? emit_trace_width : rules_.trace_width;
+                edge.layer = nlayer; edge.net = net;
+                // Issue #6272: the trace/via floor, not the bare trace floor,
+                // so search and commit agree in either insertion order.
+                if (!grid_.trace_stored_vias_clear(edge,
+                        trace_via_clearance(
+                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
+                        physical_partner_net_, physical_partner_clearance_)) continue;
+                // Issue #6243: authored per-net minimum on the swept step,
+                // before any pad-exit / sharing / partner relief below.
+                if (grid_.authored_active() &&
+                    !grid_.authored_segment_clear(ax, ay, bx, by, edge.width, nlayer, edge.net)) continue;
+            }
+
+            if (grid_.has_fixed_fills()) {
+                auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                auto [bx, by] = grid_.grid_to_world(nx, ny);
+                const double half = search_trace_half_width_mm_ > 0
+                    ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
+                const double reach = half + (search_fill_trace_clearance_ >= 0
+                    ? search_fill_trace_clearance_ : rules_.trace_clearance);
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+            }
+
+            if (!grid_.is_valid(nx, ny, nlayer)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT reason=oob\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+
+            if (dx != 0 && dy != 0) {
+                if (is_diagonal_blocked(current.x, current.y, dx, dy, nlayer, net,
+                                        negotiated_mode)) {
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                            "reason=diagonal_corner_blocked\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer);
+                    }
+                    continue;
+                }
+            }
+
+            const auto& cell = grid_.at(nx, ny, nlayer);
+
+            bool layer_in_start = std::find(valid_start_layers.begin(),
+                valid_start_layers.end(), nlayer) != valid_start_layers.end();
+            bool layer_in_end = std::find(valid_end_layers.begin(),
+                valid_end_layers.end(), nlayer) != valid_end_layers.end();
+
+            bool is_in_start_metal = (
+                nx >= sp.metal_gx1 && nx <= sp.metal_gx2 &&
+                ny >= sp.metal_gy1 && ny <= sp.metal_gy2 && layer_in_start
+            );
+            bool is_in_end_metal = (
+                nx >= ep.metal_gx1 && nx <= ep.metal_gx2 &&
+                ny >= ep.metal_gy1 && ny <= ep.metal_gy2 && layer_in_end
+            );
+
+            bool is_start_adjacent = (
+                nx >= sp.approach_gx1 && nx <= sp.approach_gx2 &&
+                ny >= sp.approach_gy1 && ny <= sp.approach_gy2 && layer_in_start
+            );
+            bool is_end_adjacent = (
+                nx >= ep.approach_gx1 && nx <= ep.approach_gx2 &&
+                ny >= ep.approach_gy1 && ny <= ep.approach_gy2 && layer_in_end
+            );
+
+            if (cell.blocked) {
+                if (is_in_start_metal || is_in_end_metal) {
+                    // Allow entry into own pad's metal area
+                } else if (cell.net == net) {
+                    // Issue #6315: a shared pad halo belongs to neither net
+                    // alone -- its recorded owner must clear it too.
+                    if (cell.shared_pad_halo &&
+                        is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                         trace_radius_cells, partner_net,
+                                         intra_pair_radius_cells, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=shared_pad_halo_blocked\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
+                        }
+                        continue;
+                    }
+                    // Same-net blocked cell - allow -- UNLESS the exact swept
+                    // edge fails the validator's segment-vs-pad clearance
+                    // (Issue #5599; see the twin comment in the resumable
+                    // loop).  Evidence-gated on search_strict_pad_kernel_.
+                    if (strict_step_in_scope(nx, ny) &&
+                        !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                               nlayer, net, emit_trace_width)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=same_net_corridor_foreign_pad_too_close\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
+                        }
+                        continue;
+                    }
+                } else if (cell.net == 0) {
+                    if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                         trace_radius_cells,
+                                         partner_net, intra_pair_radius_cells, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=trace_blocked(no_net_blocked_cell)\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
+                        }
+                        continue;
+                    }
+                } else if (pad_cell_clear(nx, ny, nlayer, current.x, current.y, nx, ny, net) &&
+                           !is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                             trace_radius_cells, partner_net,
+                                             intra_pair_radius_cells, current.x, current.y)) {
+                    // Issue #6315: a foreign pad's clearance cell whose exact
+                    // swept-edge geometry is legal.
+                } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
+                                                   nx, ny, net, partner_net) &&
+                           !is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                             trace_radius_cells, partner_net, intra_pair_radius_cells, current.x, current.y)) {
+                    // Registered dynamic halo; exact swept copper is clear.
+                } else if (relief_mode_ && !cell.is_obstacle &&
+                           !cell.pad_blocked) {
+                    // Issue #3438: relief probe may step ON foreign
+                    // non-obstacle non-pad cells (escape stubs, route
+                    // halos) -- the per-step relief penalty in the cost
+                    // function keeps the probe min-conflict.  Foreign
+                    // obstacles and pad metal stay hard.
+                } else {
+                    bool is_clearance_only = !cell.pad_blocked;
+                    bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
+                    if (is_clearance_only && is_pad_exit) {
+                        // Clearance zone cell while exiting pad - allow,
+                        // but only when the trace centerline placement
+                        // here does NOT bring its radius envelope within
+                        // touching distance of any FOREIGN pad metal.
+                        // Issue #3226: without this guard, dense pin
+                        // packages (LQFP-32 0.8mm pitch on board 05's
+                        // STM32G431 / DRV8301 row) admit a pad-exit step
+                        // into the *inner* part of an adjacent foreign
+                        // pad's halo, leaving the trace edge inside the
+                        // foreign pad's required-clearance band and
+                        // producing ``clearance_pad_segment`` DRC errors
+                        // (8 sub-127um positive + 1 -0.265mm severe at
+                        // U10-17 / PWM_AH).
+                        if (is_foreign_pad_metal_within_radius(
+                                nx, ny, nlayer, net, trace_radius_cells)) {
+                            if (astar_trace_enabled()) {
+                                std::fprintf(stderr,
+                                    "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                    "REJECT reason=pad_exit_clearance_too_tight "
+                                    "radius=%d\n",
+                                    current.x, current.y, current.layer,
+                                    nx, ny, nlayer, trace_radius_cells);
+                            }
+                            continue;
+                        }
+                    } else {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=foreign_net_blocked cell.net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                cell.net);
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                bool is_pad_exit_or_approach = (
+                    is_start_adjacent || is_end_adjacent ||
+                    is_exiting_start_pad || is_exiting_end_pad
+                );
+                if (!is_pad_exit_or_approach) {
+                    if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                         trace_radius_cells,
+                                         partner_net, intra_pair_radius_cells, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=trace_clearance_envelope_overlap "
+                                "radius=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                trace_radius_cells);
+                        }
+                        continue;
+                    }
+                } else if (
+                    strict_step_in_scope(nx, ny) &&
+                    !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                           nlayer, net, emit_trace_width)) {
+                    // Issue #5599: the pad-exit/approach-zone relaxation
+                    // skips the swept-envelope check, but a step whose exact
+                    // swept edge fails the validator's own segment-vs-pad
+                    // clearance produces a committed segment the post-route
+                    // validator will ALWAYS reject (pad metal is not
+                    // rippable) -- exactly the board 04 BOOT0/USER_LED
+                    // under-tip diagonal class that exhausted the resume
+                    // budget and fell back to the Python A*.  Evidence-gated
+                    // on search_strict_pad_kernel_ (see the setter's
+                    // comment): off for fresh searches, armed by the Python
+                    // resume loop after a repeated violation.
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                            "REJECT reason=approach_zone_foreign_pad_too_close\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer);
+                    }
+                    continue;
+                }
+            }
+
+            // Issue #6375: own-pad step gate (see ``set_search_own_pad_gate``).
+            // A planar step touching the routing net's own pad copper/halo
+            // outside the seed/goal metal boxes must pass the validator's own
+            // segment-vs-pad verdict -- the ``cell.net == net`` branch above
+            // admits such cells unchecked, and a net-0 neighbour never marks
+            // the halo shared.
+            if (nlayer == current.layer && !is_in_start_metal && !is_in_end_metal &&
+                (own_pad_cell(nx, ny, nlayer, net) ||
+                 own_pad_cell(current.x, current.y, nlayer, net)) &&
+                !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, net,
+                                    emit_trace_width)) {
+                note_own_pad_pairwise_block(current.x, current.y, nx, ny, nlayer, net,
+                                            emit_trace_width);  // Issue #7887
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                        "REJECT reason=own_pad_step_foreign_pad_too_close\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+
+            if (astar_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
+                    "cell.blocked=%d cell.net=%d\n",
+                    current.x, current.y, current.layer, nx, ny, nlayer,
+                    cell.blocked ? 1 : 0, cell.net);
+            }
+
+            auto neighbor_key = std::make_tuple(nx, ny, nlayer);
+            if (closed_set.count(neighbor_key)) continue;
+
+            float turn_cost = 0.0f;
+            if (current.dx != 0 || current.dy != 0) {
+                if (current.dx != dx || current.dy != dy) {
+                    turn_cost = rules_.cost_turn;
+                }
+            }
+
+            float congestion_cost = get_congestion_cost(nx, ny, nlayer);
+            float negotiated_cost = 0.0f;
+            if (negotiated_mode) {
+                // Issue #2963: pass routing net so own-net obstacle
+                // cells (destination pad metal post-PR #2928) stay
+                // reachable with finite cost.
+                negotiated_cost = grid_.get_negotiated_cost(
+                    nx, ny, nlayer, present_cost_factor, net);
+                // Issue #3438: relief-probe penalty for foreign usage-0
+                // non-obstacle cells (passable only in relief mode).
+                negotiated_cost += relief_conflict_cost(nx, ny, nlayer, net);
+            }
+
+            float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
+
+            // Issue #3143: per-pad channel budget cost.  Returns 0.0 when
+            // the budget list is empty (the default) or when the candidate
+            // cell does not sit inside a configured budget bbox.  When
+            // active, the per-cell penalty accumulates into the A* g_score
+            // so the search prefers less-contested escape paths.
+            float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
+
+            // Issue #4071: diff-pair / match-group corridor attractor.
+            // Subtract a bonus when this cell is reserved for our net so
+            // the search preferentially uses the reserved channel (mirrors
+            // ``pathfinder.py:2985`` / ``get_corridor_attractor_bonus``).
+            // Clamped below at 0 so g_scores stay non-negative.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                nx, ny, nlayer, net, rules_.cost_corridor_attractor);
+
+            // Issue #4511 Scope 2: soft cross-domain (HV) avoidance gradient
+            // (mirrors the resumable loop).  Zero unless a widening pairwise
+            // matrix is installed.
+            float pairwise_cost = pairwise_avoidance_cost(nx, ny, nlayer, net);
+
+            float positive_step_cost =
+                cost_mult * rules_.cost_straight +
+                turn_cost + congestion_cost + negotiated_cost +
+                avoidance + pad_channel_cost + pairwise_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            // Issue #6368: centreline landing cost on a step leaving the start
+            // pad or reaching the end pad (after the attractor clamp, so a
+            // reservation cannot cancel it).
+            float landing = 0.0f;
+            if (layer_in_end) {
+                landing += landing_cost(ep, current.x, current.y, nx, ny, false, rules_);
+            }
+            if (layer_in_start) {
+                landing += landing_cost(sp, current.x, current.y, nx, ny, true, rules_);
+            }
+            float new_g = current.g_score + positive_step_cost + landing;
+
+            auto it = g_scores.find(neighbor_key);
+            if (it == g_scores.end() || new_g < it->second) {
+                g_scores[neighbor_key] = new_g;
+                float h = heuristic(nx, ny, nlayer, end_gx, end_gy, valid_end_layers[0]);
+                float f = new_g + weight * h;
+
+                AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
+                                   seq_counter++};
+                open_set.push(neighbor);
+            }
+        }
+
+        // Try layer change (via)
+        int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
+        ViaBlockMemo via_memo;    // Issue #5617: once per node, not per layer
+        for (int new_layer : routable_layers_) {
+            if (new_layer == current.layer) continue;
+
+            // Issue #2476: Use diagnostic-aware variant so we can record the
+            // offending stored-via net when the geometric via-vs-via clearance
+            // rule is what caused the rejection.
+            int blocking_net = 0;
+            float block_wx = 0.0f, block_wy = 0.0f;
+            if (via_memo.blocked(*this, current.x, current.y, net, negotiated_mode,
+                                 via_radius_cells,
+                                 blocking_net, block_wx, block_wy)) {
+                if (blocking_net != 0) {
+                    ++via_block_count;
+                    const long long d2 = endpoint_dist2(current.x, current.y,
+                                                        start_gx, start_gy,
+                                                        end_gx, end_gy);
+                    if (d2 < best_block_d2) {
+                        best_block_d2 = d2;
+                        last_blocking_net = blocking_net;
+                        last_block_world_x = block_wx;
+                        last_block_world_y = block_wy;
+                    }
+                }
+                continue;
+            }
+            // Issue #6464: hole-to-hole against this path's own earlier vias.
+            if (own_vias_clear < 0)
+                own_vias_clear = own_path_vias_clear(closed_list, current.via_anc,
+                                                     current.x, current.y) ? 1 : 0;
+            if (!own_vias_clear) continue;
+
+            auto neighbor_key = std::make_tuple(current.x, current.y, new_layer);
+            if (closed_set.count(neighbor_key)) continue;
+
+            float congestion_cost = get_congestion_cost(current.x, current.y, new_layer);
+            float negotiated_cost = 0.0f;
+            if (negotiated_mode) {
+                // Issue #2963: pass routing net so own-net obstacle
+                // cells stay reachable with finite cost (via-drop into
+                // destination pad).
+                negotiated_cost = grid_.get_negotiated_cost(
+                    current.x, current.y, new_layer, present_cost_factor, net);
+                // Issue #3438: relief-probe penalty (via expansion).
+                negotiated_cost +=
+                    relief_conflict_cost(current.x, current.y, new_layer, net);
+            }
+
+            float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
+
+            // Issue #3143: per-pad channel budget cost (via expansion).
+            // Charged on the destination layer of the via so the search
+            // also redirects layer-change attempts that land in a
+            // contested channel.
+            float pad_channel_cost =
+                get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
+
+            // Issue #4071: corridor attractor on the via-drop destination
+            // cell -- the reservation is what makes the router prefer to
+            // actually via-hop INTO the reserved channel (mirrors the
+            // Python attractor's applicability to via drops as well as
+            // trace steps).  Clamped at 0 below.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                current.x, current.y, new_layer, net,
+                rules_.cost_corridor_attractor);
+
+            float positive_step_cost = rules_.cost_via + congestion_cost +
+                                       negotiated_cost + avoidance + pad_channel_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            float new_g = current.g_score + positive_step_cost;
+
+            auto it = g_scores.find(neighbor_key);
+            if (it == g_scores.end() || new_g < it->second) {
+                g_scores[neighbor_key] = new_g;
+                float h = heuristic(current.x, current.y, new_layer,
+                                    end_gx, end_gy, valid_end_layers[0]);
+                float f = new_g + weight * h;
+
+                AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
+                                   current_idx, true, current.dx, current.dy,
+                                   seq_counter++};
+                open_set.push(neighbor);
+            }
+        }
+    }
+
+    // Search ended without reaching the goal.  Populate structured failure
+    // diagnostics (Issues #2476 / #2610) so the negotiated strategy can
+    // dispatch targeted retry/rip-up and so the router log can distinguish
+    // wall-clock TIMEOUT from ITERATION_LIMIT (memory backstop hit) from
+    // genuine NO_PATH (open set drained).
+    if (timed_out) {
+        result.failure_reason = FAILURE_TIMEOUT;
+    } else if (last_iterations_ >= max_iterations) {
+        result.failure_reason = FAILURE_ITERATION_LIMIT;
+    } else {
+        result.failure_reason = FAILURE_NO_PATH;
+    }
+    if (via_block_count > 0 && last_blocking_net != 0) {
+        // Preserve budget exhaustion so callers do not retry an exhausted
+        // search in Python. Retain the blocker as additional diagnostics.
+        if (result.failure_reason == FAILURE_NO_PATH) {
+            result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        }
+        result.blocking_via_net = last_blocking_net;
+        result.failure_x = last_block_world_x;
+        result.failure_y = last_block_world_y;
+    } else if (result.failure_reason == FAILURE_NO_PATH &&
+               pairwise_block_count_ > 0 && last_pairwise_block_net_ != 0) {
+        // Issue #4507: no stored-via blocker, but the open set drained while
+        // cross-domain (HV) widening refused expansions -- name that net so
+        // the negotiated strategy rips IT up instead of blanket-retrying.
+        // Deliberately narrower than the VIA_VIA branch above: only a genuine
+        // drain qualifies, never TIMEOUT / ITERATION_LIMIT (budget artifacts,
+        // per Issue #2610's distinction).
+        set_pairwise_failure(result);
+    }
+    return result;
+}
+
+RouteResult Pathfinder::route_resumable(
+    float start_x, float start_y, int start_layer,
+    float end_x, float end_y, int end_layer,
+    int net,
+    const std::vector<int>& start_layers,
+    const std::vector<int>& end_layers,
+    bool negotiated_mode,
+    float present_cost_factor,
+    float weight,
+    int trace_radius_cells,
+    int via_radius_cells,
+    const PadBounds& start_pad_bounds,
+    const PadBounds& end_pad_bounds,
+    int partner_net,
+    int intra_pair_radius_cells,
+    double per_net_timeout_seconds,
+    int max_search_iterations,
+    float emit_trace_width,
+    float emit_via_diameter,
+    float emit_via_drill,
+    const std::vector<PadChannelBudget>& pad_channel_budgets
+) {
+    begin_route_geometry_context(partner_net);
+    // Clear any previous search state
+    clear_search_state();
+
+    // Store parameters for resume()
+    search_start_x_ = start_x;
+    search_start_y_ = start_y;
+    search_end_x_ = end_x;
+    search_end_y_ = end_y;
+    search_net_ = net;
+    search_negotiated_mode_ = negotiated_mode;
+    search_present_cost_factor_ = present_cost_factor;
+    search_weight_ = weight;
+    search_trace_radius_cells_ = trace_radius_cells;
+    search_via_radius_cells_ = via_radius_cells;
+
+    // Issue #2559 / Epic #2556 Phase 1C: cache diff-pair partner state so
+    // resume() and run_astar_loop() can apply the partner-aware radius
+    // branch on every neighbor expansion.
+    search_partner_net_ = partner_net;
+    search_intra_pair_radius_cells_ = intra_pair_radius_cells;
+
+    // Issue #3130: cache per-net emit widths/diameters so
+    // ``reconstruct_path()`` (called from ``run_astar_loop()``) writes
+    // per-net values into the returned Segment/Via objects instead of
+    // the global ``rules_`` defaults.  Cached across resume() so an
+    // (initial + resume*) sequence for a single net stays consistent.
+    search_emit_trace_width_ = emit_trace_width;
+    search_emit_via_diameter_ = emit_via_diameter;
+    search_emit_via_drill_ = emit_via_drill;
+
+    auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
+    auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
+    search_start_gx_ = start_gx;
+    search_start_gy_ = start_gy;
+    search_end_gx_ = end_gx;
+    search_end_gy_ = end_gy;
+
+    search_valid_start_layers_ = start_layers.empty()
+        ? std::vector<int>{start_layer} : start_layers;
+    search_valid_end_layers_ = end_layers.empty()
+        ? std::vector<int>{end_layer} : end_layers;
+
+    init_pad_bounds(search_start_pad_bounds_, search_end_pad_bounds_,
+                    start_gx, start_gy, end_gx, end_gy,
+                    start_pad_bounds, end_pad_bounds);
+
+    // Issue #3144: reset the monotonic insertion counter at the start of
+    // every fresh resumable search.  ``resume()`` does NOT reset it; the
+    // counter must continue monotonically across (initial search + N
+    // resume attempts) so newly-pushed nodes never collide with older
+    // sequence numbers already sitting in ``search_open_set_``.
+    search_seq_counter_ = 0;
+
+    // Issue #3309: Size the flat g_score / closed-set arrays for the
+    // current grid and bump the generation counter so all prior cell
+    // stamps are invalidated in O(1).  Must run before any
+    // ``set_g_score`` / ``is_closed`` access during seeding below.
+    ensure_search_arrays_sized();
+
+    // Seed start nodes into member open set
+    const auto& sp = search_start_pad_bounds_;
+    for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
+        for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
+            if (!grid_.is_valid(sgx, sgy, 0)) continue;
+            for (int sl : search_valid_start_layers_) {
+                if (!grid_.is_valid(sgx, sgy, sl)) continue;
+                const auto& seed_cell = grid_.at(sgx, sgy, sl);
+                if (seed_cell.blocked && seed_cell.is_obstacle &&
+                    seed_cell.pad_blocked && seed_cell.net != net) continue;
+                float h = heuristic(sgx, sgy, sl, end_gx, end_gy,
+                                    search_valid_end_layers_[0]);
+                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0,
+                                     search_seq_counter_++};
+                // Issue #3309: flat-array g_score seed.  Skip if a
+                // shorter (or equal) path to this cell has already been
+                // seeded in this generation -- preserves the pre-#3309
+                // observational semantics where the hashmap branch fell
+                // through when ``g_scores[key] <= 0.0f``.
+                const size_t idx = flat_index(sgx, sgy, sl);
+                if (g_score_at(idx) > 0.0f) {
+                    set_g_score(idx, 0.0f);
+                    search_open_set_.push(start_node);
+                }
+            }
+        }
+    }
+
+    // Issue #2610: ``max_search_iterations`` overrides the historical
+    // ``cols * rows * 4`` ceiling.  Default (<= 0) preserves pre-#2610 behavior.
+    search_max_iterations_ = (max_search_iterations > 0)
+        ? max_search_iterations
+        : grid_.cols() * grid_.rows() * 4;
+    last_iterations_ = 0;
+    last_nodes_explored_ = 0;
+    search_state_active_ = true;
+
+    // Issue #2476: Reset via-vs-via failure trackers at the start of a
+    // fresh resumable search.  resume() must NOT reset these -- a candidate
+    // observed during the original route_resumable() may still be the
+    // best diagnostic when resume() fails.
+    search_via_block_count_ = 0;
+    search_last_blocking_net_ = 0;
+    search_last_block_world_x_ = 0.0f;
+    search_last_block_world_y_ = 0.0f;
+    search_best_block_d2_ = std::numeric_limits<long long>::max();
+
+    // Issue #4507: cross-domain (HV) refusal diagnostics follow the SAME
+    // reset discipline -- cleared for a fresh resumable search, deliberately
+    // preserved across resume() so a blocker observed by the initial search
+    // still names the culprit when a later resume drains the open set.
+    clear_pairwise_block_diagnostics();
+
+    // Issue #3143: Build the per-cell pad-channel cost lookup ONCE per
+    // resumable search.  Held across resume() calls so the soft-budget
+    // cost shaping is consistent during the (initial + N resume) sequence
+    // for this net.  Empty budget list (default) leaves the map empty;
+    // ``get_pad_channel_cost`` short-circuits via an ``empty()`` check
+    // and returns 0.0 on every cell -- preserving pre-#3143 behaviour
+    // identically.
+    build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
+                                  search_pad_budget_cost_lookup_);
+
+    // Issue #2610: Compute the per-net wall-clock deadline ONCE here and
+    // share it with subsequent resume() calls.  This way a single per-net
+    // budget covers the (initial search + up to N resume attempts), which
+    // matches how cpp_backend.py orchestrates retries on validation
+    // failure.  Without this, each resume() would get a fresh budget and
+    // a pathological net could blow well past --per-net-timeout.
+    search_has_deadline_ = (per_net_timeout_seconds > 0.0);
+    if (search_has_deadline_) {
+        search_deadline_ = std::chrono::steady_clock::now()
+            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(per_net_timeout_seconds));
+    }
+    search_timed_out_ = false;
+
+    return run_astar_loop();
+}
+
+RouteResult Pathfinder::resume(int reject_x, int reject_y, int reject_layer) {
+    RouteResult result;
+    result.net = search_net_;
+    result.success = false;
+
+    if (!search_state_active_) {
+        return result;  // No active search to resume
+    }
+
+    // Add rejected goal to skip set; it stays in closed_set (already expanded)
+    rejected_goals_.insert(std::make_tuple(reject_x, reject_y, reject_layer));
+
+    return run_astar_loop();
+}
+
+RouteResult Pathfinder::run_astar_loop() {
+    RouteResult result;
+    result.net = search_net_;
+    result.success = false;
+
+    const auto& sp = search_start_pad_bounds_;
+    const auto& ep = search_end_pad_bounds_;
+
+    constexpr int kTimeoutCheckInterval = 1024;
+
+    // Issue #5617: via-drop verdicts are valid for this call only.
+    begin_via_verdict_epoch();
+
+    while (!search_open_set_.empty() && last_iterations_ < search_max_iterations_) {
+        last_iterations_++;
+
+        // Issue #2610: Per-net wall-clock deadline check.  Sampled every
+        // ``kTimeoutCheckInterval`` iterations to amortize the syscall to
+        // ``steady_clock::now()`` -- mirrors pathfinder.py:1791.  The deadline
+        // was computed once in route_resumable() and is shared with resume()
+        // so a single per-net budget covers all attempts.
+        if (search_has_deadline_ &&
+            (last_iterations_ % kTimeoutCheckInterval == 0)) {
+            if (std::chrono::steady_clock::now() >= search_deadline_) {
+                search_timed_out_ = true;
+                break;
+            }
+        }
+
+        AStarNode current = search_open_set_.top();
+        search_open_set_.pop();
+
+        // Issue #3309: flat-array closed-set check.  The pre-#3309 path
+        // built a tuple, hashed it, walked an unordered_set bucket --
+        // 4 ops + 1 allocation per pop.  The flat-array path is a
+        // single integer compare against the generation stamp.
+        auto current_key = std::make_tuple(current.x, current.y, current.layer);
+        const size_t cur_idx = flat_index(current.x, current.y, current.layer);
+        if (is_closed(cur_idx)) {
+            continue;
+        }
+        mark_closed(cur_idx);
+
+        int current_idx = static_cast<int>(search_closed_list_.size());
+        // Issue #6464: nearest via on this node's path (self if it is one).
+        current.via_anc = current.via_from_parent ? current_idx
+            : (current.parent_idx >= 0 ? search_closed_list_[current.parent_idx].via_anc : -1);
+        search_closed_list_.push_back(current);
+        last_nodes_explored_++;
+
+        // Goal check (with rejected goals skip)
+        bool in_end_metal = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2
+        );
+        if (in_end_metal) {
+            bool layer_ok = std::find(search_valid_end_layers_.begin(),
+                                      search_valid_end_layers_.end(),
+                                      current.layer) != search_valid_end_layers_.end();
+            if (layer_ok) {
+                // Issue #2447: Skip rejected goals (mirrors Python pathfinder's
+                // continue at line 1553 when _reconstruct_route fails).
+                // rejected_goals_ stays a small set (one entry per resume()
+                // call) -- not worth flattening; hashmap is fine here.
+                if (!rejected_goals_.count(current_key)) {
+                    // Issue #3130: forward cached per-net emit widths so
+                    // the reconstructed Segment/Via carry per-net values
+                    // for the (initial + resume*) sequence.
+                    result = reconstruct_path(search_closed_list_, current_idx,
+                                              search_start_x_, search_start_y_,
+                                              search_end_x_, search_end_y_,
+                                              search_net_,
+                                              search_emit_trace_width_,
+                                              search_emit_via_diameter_,
+                                              search_emit_via_drill_);
+                    result.success = true;
+                    // Issue #5599: report the goal node actually accepted so
+                    // the Python resume loop rejects THIS cell (not the pad
+                    // center the reconstruction's final segment always ends
+                    // at).
+                    result.goal_gx = current.x;
+                    result.goal_gy = current.y;
+                    result.goal_layer = current.layer;
+                    return result;
+                }
+                // Goal rejected, continue searching from open set
+            }
+        }
+
+        // Pad exit relaxation
+        bool is_exiting_start_pad = (
+            current.x >= sp.metal_gx1 && current.x <= sp.metal_gx2 &&
+            current.y >= sp.metal_gy1 && current.y <= sp.metal_gy2 &&
+            std::find(search_valid_start_layers_.begin(),
+                      search_valid_start_layers_.end(),
+                      current.layer) != search_valid_start_layers_.end()
+        );
+        bool is_exiting_end_pad = (
+            current.x >= ep.metal_gx1 && current.x <= ep.metal_gx2 &&
+            current.y >= ep.metal_gy1 && current.y <= ep.metal_gy2 &&
+            std::find(search_valid_end_layers_.begin(),
+                      search_valid_end_layers_.end(),
+                      current.layer) != search_valid_end_layers_.end()
+        );
+
+        // Explore 2D neighbors
+        for (const auto& [dx, dy, dlayer, cost_mult] : neighbors_2d_) {
+            int nx = current.x + dx;
+            int ny = current.y + dy;
+            int nlayer = current.layer;
+
+            // Stored via metal cannot be ripped up as a soft trace crossing.
+            // Check the swept edge before pad/approach occupancy waivers.
+            {
+                const auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                const auto [bx, by] = grid_.grid_to_world(nx, ny);
+                Segment edge;
+                edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
+                edge.width = search_emit_trace_width_ > 0 ? search_emit_trace_width_ : rules_.trace_width;
+                edge.layer = nlayer; edge.net = search_net_;
+                // Issue #6272: the trace/via floor, not the bare trace floor,
+                // so search and commit agree in either insertion order.
+                if (!grid_.trace_stored_vias_clear(edge,
+                        trace_via_clearance(
+                            search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
+                        physical_partner_net_, physical_partner_clearance_)) continue;
+                // Issue #6243: authored per-net minimum on the swept step,
+                // before any pad-exit / sharing / partner relief below.
+                if (grid_.authored_active() &&
+                    !grid_.authored_segment_clear(ax, ay, bx, by, edge.width, nlayer, edge.net)) continue;
+            }
+
+            if (grid_.has_fixed_fills()) {
+                auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                auto [bx, by] = grid_.grid_to_world(nx, ny);
+                const double half = search_trace_half_width_mm_ > 0
+                    ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
+                const double reach = half + (search_fill_trace_clearance_ >= 0
+                    ? search_fill_trace_clearance_ : rules_.trace_clearance);
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+            }
+
+            if (!grid_.is_valid(nx, ny, nlayer)) {
+                // Issue #3135: trace out-of-bounds rejections so future
+                // under-clearance investigations can confirm the gate fired.
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT reason=oob\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+
+            if (dx != 0 && dy != 0) {
+                if (is_diagonal_blocked(current.x, current.y, dx, dy, nlayer,
+                                        search_net_, search_negotiated_mode_)) {
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                            "reason=diagonal_corner_blocked\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer);
+                    }
+                    continue;
+                }
+            }
+
+            const auto& cell = grid_.at(nx, ny, nlayer);
+
+            bool layer_in_start = std::find(search_valid_start_layers_.begin(),
+                search_valid_start_layers_.end(), nlayer) != search_valid_start_layers_.end();
+            bool layer_in_end = std::find(search_valid_end_layers_.begin(),
+                search_valid_end_layers_.end(), nlayer) != search_valid_end_layers_.end();
+
+            bool is_in_start_metal = (
+                nx >= sp.metal_gx1 && nx <= sp.metal_gx2 &&
+                ny >= sp.metal_gy1 && ny <= sp.metal_gy2 && layer_in_start
+            );
+            bool is_in_end_metal = (
+                nx >= ep.metal_gx1 && nx <= ep.metal_gx2 &&
+                ny >= ep.metal_gy1 && ny <= ep.metal_gy2 && layer_in_end
+            );
+
+            bool is_start_adjacent = (
+                nx >= sp.approach_gx1 && nx <= sp.approach_gx2 &&
+                ny >= sp.approach_gy1 && ny <= sp.approach_gy2 && layer_in_start
+            );
+            bool is_end_adjacent = (
+                nx >= ep.approach_gx1 && nx <= ep.approach_gx2 &&
+                ny >= ep.approach_gy1 && ny <= ep.approach_gy2 && layer_in_end
+            );
+
+            if (cell.blocked) {
+                if (is_in_start_metal || is_in_end_metal) {
+                    // Allow entry into own pad's metal area
+                } else if (cell.net == search_net_) {
+                    // Issue #6315: a shared pad halo belongs to neither net
+                    // alone -- its recorded owner must clear it too.
+                    if (cell.shared_pad_halo &&
+                        is_trace_blocked(nx, ny, nlayer, search_net_,
+                                         search_negotiated_mode_,
+                                         search_trace_radius_cells_,
+                                         search_partner_net_,
+                                         search_intra_pair_radius_cells_, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=shared_pad_halo_blocked net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_net_);
+                        }
+                        continue;
+                    }
+                    // Same-net blocked cell - allow -- UNLESS the exact
+                    // swept edge fails the validator's own segment-vs-pad
+                    // clearance (Issue #5599).  A same-net corridor built
+                    // from this net's own escape stub / prior copper can hug
+                    // a neighbor pad closer than the post-route validator
+                    // permits (the stub was laid with the relaxed fine-pitch
+                    // escape clearance; the validator enforces the full
+                    // clearance).  Every candidate reusing that corridor is
+                    // rejected after the search, exhausting the resume
+                    // budget -- board 04's BOOT0 under-tip diagonal class.
+                    // EVIDENCE-GATED (search_strict_pad_kernel_): the exact
+                    // geometry is conservative against the rasterized grid
+                    // (cell-center kernels can slip a diagonal corner-cut
+                    // past an off-grid pad), so it stays off for fresh
+                    // searches and is armed by the Python resume loop only
+                    // once a clearance violation has actually repeated.
+                    if (strict_step_in_scope(nx, ny) &&
+                        !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                               nlayer, search_net_,
+                                               search_emit_trace_width_)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=same_net_corridor_foreign_pad_too_close "
+                                "net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_net_);
+                        }
+                        continue;
+                    }
+                } else if (cell.net == 0) {
+                    if (is_trace_blocked(nx, ny, nlayer, search_net_,
+                                         search_negotiated_mode_,
+                                         search_trace_radius_cells_,
+                                         search_partner_net_,
+                                         search_intra_pair_radius_cells_, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=trace_blocked(no_net_blocked_cell) "
+                                "cell.net=0 cell.is_obstacle=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                cell.is_obstacle ? 1 : 0);
+                        }
+                        continue;
+                    }
+                } else if (pad_cell_clear(nx, ny, nlayer, current.x, current.y, nx, ny,
+                                          search_net_) &&
+                           !is_trace_blocked(nx, ny, nlayer, search_net_, search_negotiated_mode_,
+                                             search_trace_radius_cells_, search_partner_net_,
+                                             search_intra_pair_radius_cells_, current.x, current.y)) {
+                    // Issue #6315: exact pad geometry, as in the one-shot loop.
+                } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
+                                                   nx, ny, search_net_, search_partner_net_) &&
+                           !is_trace_blocked(nx, ny, nlayer, search_net_, search_negotiated_mode_,
+                                             search_trace_radius_cells_, search_partner_net_,
+                                             search_intra_pair_radius_cells_, current.x, current.y)) {
+                    // Same refinement in resumable search.
+                } else if (relief_mode_ && !cell.is_obstacle &&
+                           !cell.pad_blocked) {
+                    // Issue #3438: relief probe may step ON foreign
+                    // non-obstacle non-pad cells (escape stubs, route
+                    // halos) -- the per-step relief penalty in the cost
+                    // function keeps the probe min-conflict.  Foreign
+                    // obstacles and pad metal stay hard.
+                } else {
+                    bool is_clearance_only = !cell.pad_blocked;
+                    bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
+                    if (is_clearance_only && is_pad_exit) {
+                        // Clearance zone cell while exiting pad - allow,
+                        // but only when the trace centerline placement
+                        // here does NOT bring its radius envelope within
+                        // touching distance of any FOREIGN pad metal.
+                        // Issue #3226: see comment in the one-shot path
+                        // above for the dense-pin-package failure mode.
+                        if (is_foreign_pad_metal_within_radius(
+                                nx, ny, nlayer, search_net_,
+                                search_trace_radius_cells_)) {
+                            if (astar_trace_enabled()) {
+                                std::fprintf(stderr,
+                                    "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                    "reason=pad_exit_clearance_too_tight "
+                                    "radius=%d net=%d\n",
+                                    current.x, current.y, current.layer,
+                                    nx, ny, nlayer,
+                                    search_trace_radius_cells_, search_net_);
+                            }
+                            continue;
+                        }
+                    } else {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=foreign_net_blocked cell.net=%d "
+                                "cell.is_obstacle=%d pad_blocked=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                cell.net, cell.is_obstacle ? 1 : 0,
+                                cell.pad_blocked ? 1 : 0);
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                bool is_pad_exit_or_approach = (
+                    is_start_adjacent || is_end_adjacent ||
+                    is_exiting_start_pad || is_exiting_end_pad
+                );
+                if (!is_pad_exit_or_approach) {
+                    if (is_trace_blocked(nx, ny, nlayer, search_net_,
+                                         search_negotiated_mode_,
+                                         search_trace_radius_cells_,
+                                         search_partner_net_,
+                                         search_intra_pair_radius_cells_, current.x, current.y)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=trace_clearance_envelope_overlap "
+                                "radius=%d net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_trace_radius_cells_, search_net_);
+                        }
+                        continue;
+                    }
+                } else if (
+                    strict_step_in_scope(nx, ny) &&
+                    !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                           nlayer, search_net_,
+                                           search_emit_trace_width_)) {
+                    // Issue #5599: see the twin comment in the one-shot loop
+                    // -- the approach-zone relaxation must still respect the
+                    // exact foreign-pad clearance the post-route validator
+                    // enforces (the validator's own segment-vs-pad geometry,
+                    // via Grid3D::edge_foreign_pad_clear).  Evidence-gated on
+                    // search_strict_pad_kernel_.
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                            "reason=approach_zone_foreign_pad_too_close "
+                            "net=%d\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer,
+                            search_net_);
+                    }
+                    continue;
+                }
+            }
+
+            // Issue #6375: own-pad step gate, as in the one-shot loop.
+            if (nlayer == current.layer && !is_in_start_metal && !is_in_end_metal &&
+                (own_pad_cell(nx, ny, nlayer, search_net_) ||
+                 own_pad_cell(current.x, current.y, nlayer, search_net_)) &&
+                !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, search_net_,
+                                    search_emit_trace_width_)) {
+                note_own_pad_pairwise_block(current.x, current.y, nx, ny, nlayer,
+                                            search_net_, search_emit_trace_width_);  // #7887
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                        "reason=own_pad_step_foreign_pad_too_close net=%d\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer,
+                        search_net_);
+                }
+                continue;
+            }
+
+            if (astar_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
+                    "cell.blocked=%d cell.net=%d cell.is_obstacle=%d\n",
+                    current.x, current.y, current.layer, nx, ny, nlayer,
+                    cell.blocked ? 1 : 0, cell.net, cell.is_obstacle ? 1 : 0);
+            }
+
+            // Issue #3309: flat-array closed-set check on neighbour expansion.
+            const size_t nbr_idx = flat_index(nx, ny, nlayer);
+            if (is_closed(nbr_idx)) continue;
+
+            float turn_cost = 0.0f;
+            if (current.dx != 0 || current.dy != 0) {
+                if (current.dx != dx || current.dy != dy) {
+                    turn_cost = rules_.cost_turn;
+                }
+            }
+
+            float congestion_cost = get_congestion_cost(nx, ny, nlayer);
+            float negotiated_cost = 0.0f;
+            if (search_negotiated_mode_) {
+                // Issue #2963: pass routing net so own-net obstacle
+                // cells (destination pad metal) stay reachable.
+                negotiated_cost = grid_.get_negotiated_cost(
+                    nx, ny, nlayer, search_present_cost_factor_, search_net_);
+                // Issue #3438: relief-probe penalty for foreign usage-0
+                // non-obstacle cells (passable only in relief mode).
+                negotiated_cost +=
+                    relief_conflict_cost(nx, ny, nlayer, search_net_);
+            }
+
+            float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
+
+            // Issue #3143: per-pad channel budget cost.  Mirrors the
+            // one-shot ``route()`` cost contribution above; consults the
+            // lookup populated at ``route_resumable()`` entry.  Empty
+            // budget => returns 0.0 (zero overhead).
+            float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
+
+            // Issue #4071: corridor attractor (resumable / negotiated path).
+            // Mirrors the one-shot ``route()`` contribution above using the
+            // search-local ``search_net_``.  Clamped at 0 below.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                nx, ny, nlayer, search_net_, rules_.cost_corridor_attractor);
+
+            // Issue #4511 Scope 2: soft cross-domain (HV) avoidance gradient.
+            // Zero unless a widening pairwise matrix is installed AND foreign
+            // HV copper sits in the thin band just beyond the hard-block
+            // radius -- steers A* to keep isolation margin before the hard
+            // block bites, so an HV board converges instead of thrashing.
+            float pairwise_cost =
+                pairwise_avoidance_cost(nx, ny, nlayer, search_net_);
+
+            float positive_step_cost =
+                cost_mult * rules_.cost_straight +
+                turn_cost + congestion_cost + negotiated_cost +
+                avoidance + pad_channel_cost + pairwise_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            // Issue #6368: centreline landing cost (see the one-shot loop).
+            float landing = 0.0f;
+            if (layer_in_end) {
+                landing += landing_cost(ep, current.x, current.y, nx, ny, false, rules_);
+            }
+            if (layer_in_start) {
+                landing += landing_cost(sp, current.x, current.y, nx, ny, true, rules_);
+            }
+            float new_g = current.g_score + positive_step_cost + landing;
+
+            // Issue #3309: flat-array g_score relax.  ``g_score_at`` returns
+            // +infinity if the cell has not been touched in this generation,
+            // so the ``new_g < ...`` compare matches the pre-#3309 semantics
+            // of the ``find() == end()`` branch.
+            if (new_g < g_score_at(nbr_idx)) {
+                set_g_score(nbr_idx, new_g);
+                float h = heuristic(nx, ny, nlayer, search_end_gx_, search_end_gy_,
+                                    search_valid_end_layers_[0]);
+                float f = new_g + search_weight_ * h;
+
+                AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
+                                   search_seq_counter_++};
+                search_open_set_.push(neighbor);
+            }
+        }
+
+        // Try layer change (via)
+        int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
+        for (int new_layer : routable_layers_) {
+            if (new_layer == current.layer) continue;
+
+            // Issue #2476: Diagnostic-aware via blocking check so we can
+            // record which stored-via net rejected our candidate slot.
+            // Issue #5617: one verdict per (x, y) per loop call, replayed
+            // for every other target layer and every other layer's node.
+            int blocking_net = 0;
+            float block_wx = 0.0f, block_wy = 0.0f;
+            if (search_via_blocked_cached(current.x, current.y,
+                                          blocking_net, block_wx, block_wy)) {
+                if (blocking_net != 0) {
+                    ++search_via_block_count_;
+                    // Issue #8155: nearest-to-endpoint blocker, as in route().
+                    const long long d2 = endpoint_dist2(current.x, current.y,
+                                                        search_start_gx_, search_start_gy_,
+                                                        search_end_gx_, search_end_gy_);
+                    if (d2 < search_best_block_d2_) {
+                        search_best_block_d2_ = d2;
+                        search_last_blocking_net_ = blocking_net;
+                        search_last_block_world_x_ = block_wx;
+                        search_last_block_world_y_ = block_wy;
+                    }
+                }
+                continue;
+            }
+            // Issue #6464: hole-to-hole against this path's own earlier vias.
+            if (own_vias_clear < 0)
+                own_vias_clear = own_path_vias_clear(search_closed_list_, current.via_anc,
+                                                     current.x, current.y) ? 1 : 0;
+            if (!own_vias_clear) continue;
+
+            // Issue #3309: flat-array closed-set check on via expansion.
+            const size_t via_idx = flat_index(current.x, current.y, new_layer);
+            if (is_closed(via_idx)) continue;
+
+            float congestion_cost = get_congestion_cost(current.x, current.y, new_layer);
+            float negotiated_cost = 0.0f;
+            if (search_negotiated_mode_) {
+                // Issue #2963: pass routing net (search_net_) so own-net
+                // obstacle cells stay reachable for via drop into the
+                // destination pad metal.
+                negotiated_cost = grid_.get_negotiated_cost(
+                    current.x, current.y, new_layer, search_present_cost_factor_,
+                    search_net_);
+                // Issue #3438: relief-probe penalty (via expansion).
+                negotiated_cost += relief_conflict_cost(
+                    current.x, current.y, new_layer, search_net_);
+            }
+
+            float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
+
+            // Issue #3143: per-pad channel budget cost on via expansion.
+            // Charged on the destination layer of the via -- mirrors the
+            // one-shot route() via path.
+            float pad_channel_cost =
+                get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
+
+            // Issue #4071: corridor attractor on the via-drop destination
+            // (resumable / negotiated path), mirroring the one-shot via
+            // branch.  Clamped at 0 below.
+            float attractor_bonus = grid_.corridor_attractor_bonus(
+                current.x, current.y, new_layer, search_net_,
+                rules_.cost_corridor_attractor);
+
+            float positive_step_cost = rules_.cost_via + congestion_cost +
+                                       negotiated_cost + avoidance + pad_channel_cost;
+            if (attractor_bonus > 0.0f) {
+                positive_step_cost =
+                    std::max(0.0f, positive_step_cost - attractor_bonus);
+            }
+            float new_g = current.g_score + positive_step_cost;
+
+            // Issue #3309: flat-array g_score relax for via expansion.
+            if (new_g < g_score_at(via_idx)) {
+                set_g_score(via_idx, new_g);
+                float h = heuristic(current.x, current.y, new_layer,
+                                    search_end_gx_, search_end_gy_,
+                                    search_valid_end_layers_[0]);
+                float f = new_g + search_weight_ * h;
+
+                AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
+                                   current_idx, true, current.dx, current.dy,
+                                   search_seq_counter_++};
+                search_open_set_.push(neighbor);
+            }
+        }
+    }
+
+    // Open set exhausted, iteration limit hit, or wall-clock deadline fired.
+    // Surface structured failure diagnostics (Issues #2476 / #2610) so the
+    // negotiated strategy can dispatch targeted retries and the router log
+    // can distinguish TIMEOUT (wall-clock) from ITERATION_LIMIT (memory
+    // backstop) from NO_PATH (open set drained).
+    search_state_active_ = false;
+    if (search_timed_out_) {
+        result.failure_reason = FAILURE_TIMEOUT;
+    } else if (last_iterations_ >= search_max_iterations_) {
+        result.failure_reason = FAILURE_ITERATION_LIMIT;
+    } else {
+        result.failure_reason = FAILURE_NO_PATH;
+    }
+    if (search_via_block_count_ > 0 && search_last_blocking_net_ != 0) {
+        // Preserve budget exhaustion so callers do not retry an exhausted
+        // search in Python. Retain the blocker as additional diagnostics.
+        if (result.failure_reason == FAILURE_NO_PATH) {
+            result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        }
+        result.blocking_via_net = search_last_blocking_net_;
+        result.failure_x = search_last_block_world_x_;
+        result.failure_y = search_last_block_world_y_;
+    } else if (result.failure_reason == FAILURE_NO_PATH &&
+               pairwise_block_count_ > 0 && last_pairwise_block_net_ != 0) {
+        // Issue #4507: cross-domain (HV) blocker on a genuine drain -- see the
+        // twin branch in route() for the precedence rationale.
+        set_pairwise_failure(result);
+    }
+    return result;
+}
+
+void Pathfinder::clear_search_state() {
+    // Clear all A* member state to release memory
+    search_open_set_ = PQ();  // Release both the frontier and its sparse index.
+    // Issue #3309: The flat g_score / closed-gen arrays are reused across
+    // searches; reset by bumping ``search_current_gen_`` in
+    // ``ensure_search_arrays_sized()`` on the next call.  We do NOT
+    // ``assign(0)`` here because that would defeat the O(1) reset
+    // optimization that was the whole point of the flat-array switch.
+    // The vectors themselves stay sized so the next search reuses memory.
+    search_closed_list_.clear();
+    rejected_goals_.clear();
+    search_state_active_ = false;
+    // Issue #2476: Reset failure trackers as well so a stale blocker from
+    // the previous net does not leak into the next route().
+    search_via_block_count_ = 0;
+    search_last_blocking_net_ = 0;
+    search_last_block_world_x_ = 0.0f;
+    search_last_block_world_y_ = 0.0f;
+    search_best_block_d2_ = std::numeric_limits<long long>::max();
+    // Issue #4507: ditto for the cross-domain (HV) blocker diagnostics.
+    clear_pairwise_block_diagnostics();
+    // Issue #2559 / Phase 1C: reset partner-net state so a stale partner
+    // from a previous net does not leak into the next route().
+    search_partner_net_ = -1;
+    search_intra_pair_radius_cells_ = 0;
+    // Issue #2610: reset deadline state so a stale per-net deadline from
+    // the previous net does not leak into the next route().
+    search_has_deadline_ = false;
+    search_timed_out_ = false;
+    // Issue #3130: reset per-net emit widths so a stale value from the
+    // previous net does not leak into the next route().
+    search_emit_trace_width_ = 0.0f;
+    search_emit_via_diameter_ = 0.0f;
+    search_emit_via_drill_ = 0.0f;
+    // Issue #3143: drop the per-cell pad-channel cost lookup so a stale
+    // budget from the previous net does not leak into the next route().
+    search_pad_budget_cost_lookup_.clear();
+}
+
+RouteResult Pathfinder::reconstruct_path(
+    const std::vector<AStarNode>& closed_list,
+    int end_idx,
+    float start_x, float start_y,
+    float end_x, float end_y,
+    int net,
+    float emit_trace_width,
+    float emit_via_diameter,
+    float emit_via_drill
+) {
+    RouteResult result;
+    result.net = net;
+    result.success = true;
+
+    // Issue #3130: Resolve per-net emit values up front.  A caller-supplied
+    // value > 0 wins; otherwise fall back to the global ``rules_`` defaults
+    // so existing callers (and the pre-#3130 ABI) see identical behavior.
+    const float seg_width = (emit_trace_width > 0.0f)
+        ? emit_trace_width : rules_.trace_width;
+    const float via_diameter = (emit_via_diameter > 0.0f)
+        ? emit_via_diameter : rules_.via_diameter;
+    const float via_drill = (emit_via_drill > 0.0f)
+        ? emit_via_drill : rules_.via_drill;
+
+    // Build path from end to start
+    std::vector<std::tuple<float, float, int, bool>> path;
+    int idx = end_idx;
+    while (idx >= 0 && idx < static_cast<int>(closed_list.size())) {
+        const auto& node = closed_list[idx];
+        auto [wx, wy] = grid_.grid_to_world(node.x, node.y);
+        path.emplace_back(wx, wy, node.layer, node.via_from_parent);
+        idx = node.parent_idx;
+    }
+    std::reverse(path.begin(), path.end());
+
+    if (path.size() < 2) {
+        return result;
+    }
+
+    // Convert path to segments and vias
+    float current_x = start_x;
+    float current_y = start_y;
+    int current_layer = std::get<2>(path[0]);
+
+    for (size_t i = 0; i < path.size(); ++i) {
+        auto [wx, wy, layer, is_via] = path[i];
+
+        if (is_via) {
+            // Add via
+            Via via;
+            via.x = current_x;
+            via.y = current_y;
+            via.drill = via_drill;
+            via.diameter = via_diameter;
+            via.layer_from = current_layer;
+            via.layer_to = layer;
+            via.net = net;
+            result.vias.push_back(via);
+            current_layer = layer;
+        } else {
+            // Add segment if position changed
+            if (std::abs(wx - current_x) > 0.01f || std::abs(wy - current_y) > 0.01f) {
+                Segment seg;
+                seg.x1 = current_x;
+                seg.y1 = current_y;
+                seg.x2 = wx;
+                seg.y2 = wy;
+                seg.width = seg_width;
+                seg.layer = layer;
+                seg.net = net;
+                result.segments.push_back(seg);
+                current_x = wx;
+                current_y = wy;
+                current_layer = layer;
+            }
+        }
+    }
+
+    // Final segment to end
+    if (std::abs(end_x - current_x) > 0.01f || std::abs(end_y - current_y) > 0.01f) {
+        Segment seg;
+        seg.x1 = current_x;
+        seg.y1 = current_y;
+        seg.x2 = end_x;
+        seg.y2 = end_y;
+        seg.width = seg_width;
+        seg.layer = current_layer;
+        seg.net = net;
+        result.segments.push_back(seg);
+    }
+
+    return result;
+}
+
+}  // namespace router

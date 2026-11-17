@@ -1,0 +1,11 @@
+{
+  "layers": 2,
+  "via_type": "through",
+  "minimum_via_drill_mm": 0.15,
+  "minimum_via_diameter_mm": 0.3,
+  "minimum_via_annular_ring_mm": 0.075,
+  "via_covering": "Tented",
+  "paid_factory_option": "0.15 mm minimum via hole size",
+  "via_in_pad": false,
+  "source": "https://jlcpcb.com/capabilities/pcb-capabilities/"
+}

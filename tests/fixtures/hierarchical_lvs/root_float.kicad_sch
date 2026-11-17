@@ -1,0 +1,28 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "hlvs-root-float-uuid")
+	(paper "A4")
+	(title_block
+		(title "Hierarchical LVS Root - floating pin case")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+	)
+	(sheet
+		(at 50 30) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "hlvs-sheet-float-uuid")
+		(property "Sheetname" "SubFloat"
+			(at 50 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "sub_float.kicad_sch"
+			(at 50 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+	)
+)

@@ -1,0 +1,421 @@
+"""Tests that the router and DRC manufacturer registries stay in sync.
+
+The router (``kicad_tools.router.mfr_limits``) and the DRC manufacturer
+profile registry (``kicad_tools.manufacturers``) each maintain their own
+list of supported manufacturer names and aliases.  Historically these
+could (and did) drift apart - see issue #2622, where ``jlcpcb-tier1``
+was accepted by the router but rejected by DRC with
+``Unknown manufacturer: 'jlcpcb-tier1'``.
+
+This module enforces the invariant that **every canonical manufacturer
+name and every alias known to the router resolves to a valid DRC
+profile**.  If you add a manufacturer or alias to one registry you must
+add it to the other, or this test will fail.
+
+The DRC registry is allowed to contain additional names that the router
+does not know about (e.g. ``flashpcb`` which is not currently a router
+target), so the relationship is a subset, not equality.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+
+import pytest
+
+from kicad_tools.manufacturers import (
+    _ALIASES as DRC_ALIASES,
+)
+from kicad_tools.manufacturers import (
+    _PROFILES as DRC_PROFILES,
+)
+from kicad_tools.manufacturers import (
+    get_all_manufacturer_names,
+    get_profile,
+)
+from kicad_tools.router.mfr_limits import (
+    _MFR_ALIASES,
+    MFR_LIMITS,
+)
+
+
+class TestRouterDRCRegistrySync:
+    """Drift-prevention invariants between router and DRC registries."""
+
+    def test_router_canonical_names_resolve_in_drc(self):
+        """Every canonical MFR_LIMITS key resolves to a DRC profile."""
+        router_names = set(MFR_LIMITS.keys())
+        drc_known = set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys())
+
+        missing = router_names - drc_known
+        assert not missing, (
+            f"Router knows manufacturer names that DRC does not: {sorted(missing)}. "
+            f"Add them to kicad_tools.manufacturers._PROFILES or _ALIASES."
+        )
+
+    def test_router_aliases_resolve_in_drc(self):
+        """Every router alias resolves to a DRC profile or alias."""
+        router_aliases = set(_MFR_ALIASES.keys())
+        drc_known = set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys())
+
+        missing = router_aliases - drc_known
+        assert not missing, (
+            f"Router aliases are not recognised by DRC: {sorted(missing)}. "
+            f"Add them to kicad_tools.manufacturers._ALIASES (mirroring the router)."
+        )
+
+    def test_all_router_names_construct_drc_profile(self):
+        """get_profile() never raises for any router-known name or alias."""
+        all_router_names = set(MFR_LIMITS.keys()) | set(_MFR_ALIASES.keys())
+
+        for name in sorted(all_router_names):
+            # Should not raise ValueError("Unknown manufacturer: ...")
+            profile = get_profile(name)
+            assert profile is not None, f"get_profile({name!r}) returned None"
+
+    def test_jlcpcb_tier1_canonical_and_aliases(self):
+        """All four router aliases for jlcpcb-tier1 resolve to the tier1 profile."""
+        canonical = get_profile("jlcpcb-tier1")
+        assert canonical.id == "jlcpcb-tier1"
+
+        for alias in [
+            "jlcpcb_tier1",
+            "jlcpcb-capabilityplus",
+            "jlcpcb_capabilityplus",
+            "jlcpcb-capability-plus",
+        ]:
+            profile = get_profile(alias)
+            assert profile is canonical, (
+                f"Alias {alias!r} resolved to {profile.id!r}, expected 'jlcpcb-tier1'"
+            )
+
+    def test_jlcpcb_tier1_router_alias_table_matches_drc(self):
+        """The router and DRC alias targets for jlcpcb-tier1 are identical.
+
+        This guards against silent drift where one registry remaps an
+        alias to a different canonical name than the other.
+        """
+        jlcpcb_tier1_router_aliases = {
+            alias for alias, target in _MFR_ALIASES.items() if target == "jlcpcb-tier1"
+        }
+        jlcpcb_tier1_drc_aliases = {
+            alias for alias, target in DRC_ALIASES.items() if target == "jlcpcb-tier1"
+        }
+
+        assert jlcpcb_tier1_router_aliases == jlcpcb_tier1_drc_aliases, (
+            f"Router and DRC alias tables for jlcpcb-tier1 disagree.\n"
+            f"  Router: {sorted(jlcpcb_tier1_router_aliases)}\n"
+            f"  DRC:    {sorted(jlcpcb_tier1_drc_aliases)}"
+        )
+
+    def test_via_in_pad_supported_parity(self):
+        """``via_in_pad_supported`` parity between router and DRC (issue #2635).
+
+        For every manufacturer name known to BOTH the router's
+        ``MFR_LIMITS`` table and the DRC profile registry, the
+        ``via_in_pad_supported`` flag must agree across all stackup
+        layer counts (2L, 4L, 6L).  If a future contributor flips this
+        flag on one side but not the other, the router would refuse to
+        place in-pad vias while DRC would silently accept them (or vice
+        versa) -- this test catches that drift.
+
+        Layer counts that the DRC profile doesn't model fall back to
+        the closest available stackup (see ``ManufacturerProfile.get_design_rules``).
+        We still assert parity per-layer to surface stackup-level
+        regressions where the capability flag is missing on a specific
+        block.
+        """
+        # Iterate the intersection: only names that exist in both
+        # registries.  Aliases on one side that resolve to a canonical
+        # name on the other are already covered by the resolver tests
+        # above; here we focus on the capability-flag value itself.
+        shared_names = set(MFR_LIMITS.keys()) & (set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys()))
+        assert shared_names, "No shared manufacturer names between router and DRC"
+
+        mismatches: list[str] = []
+        for name in sorted(shared_names):
+            router_flag = MFR_LIMITS[name].via_in_pad_supported
+            drc_profile = get_profile(name)
+            for layers in (2, 4, 6):
+                drc_rules = drc_profile.get_design_rules(layers=layers, copper_oz=1.0)
+                drc_flag = drc_rules.via_in_pad_supported
+                if router_flag != drc_flag:
+                    mismatches.append(f"{name} ({layers}L): router={router_flag}, DRC={drc_flag}")
+
+        assert not mismatches, (
+            "Router and DRC disagree on via_in_pad_supported for some "
+            "manufacturer/layer combinations. Update the corresponding "
+            "YAML stackup block (manufacturers/data/<mfr>.yaml) or the "
+            "router's MfrLimits entry to restore parity:\n  " + "\n  ".join(mismatches)
+        )
+
+
+class TestJLCPCBTier1DRCProfile:
+    """Regression tests for the jlcpcb-tier1 DRC profile (issue #2622)."""
+
+    def test_drc_checker_accepts_jlcpcb_tier1(self):
+        """DRCChecker constructs without raising for manufacturer='jlcpcb-tier1'."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb = PCB.create(width=50.0, height=50.0, layers=2)
+        # Should not raise ValueError: Unknown manufacturer ...
+        checker = DRCChecker(pcb, manufacturer="jlcpcb-tier1", layers=4)
+        assert checker.design_rules is not None
+        assert checker.manufacturer == "jlcpcb-tier1"
+
+    def test_drc_checker_accepts_all_jlcpcb_tier1_aliases(self):
+        """Every router alias for jlcpcb-tier1 also works in DRCChecker."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb = PCB.create(width=50.0, height=50.0, layers=2)
+        for alias in [
+            "jlcpcb-tier1",
+            "jlcpcb_tier1",
+            "jlcpcb-capabilityplus",
+            "jlcpcb_capabilityplus",
+            "jlcpcb-capability-plus",
+        ]:
+            checker = DRCChecker(pcb, manufacturer=alias, layers=4)
+            assert checker.design_rules is not None, (
+                f"DRCChecker(manufacturer={alias!r}) produced no design_rules"
+            )
+
+    def test_tier1_rules_at_least_as_strict_as_base_jlcpcb(self):
+        """tier1 rules must never be looser than the base jlcpcb profile.
+
+        DRC must surface at least as many violations on jlcpcb-tier1 as on
+        plain jlcpcb so users opting into the tier1 profile do not get a
+        silent regression.
+        """
+        base = get_profile("jlcpcb")
+        tier1 = get_profile("jlcpcb-tier1")
+
+        for layers in (2, 4, 6):
+            base_rules = base.get_design_rules(layers=layers, copper_oz=1.0)
+            tier1_rules = tier1.get_design_rules(layers=layers, copper_oz=1.0)
+
+            # Fields where larger = looser (tier1 must be <=)
+            for field in (
+                "min_trace_width_mm",
+                "min_clearance_mm",
+                "min_via_drill_mm",
+                "min_via_diameter_mm",
+                "min_annular_ring_mm",
+                "min_hole_diameter_mm",
+                "min_copper_to_edge_mm",
+                "min_hole_to_edge_mm",
+                "min_silkscreen_width_mm",
+                "min_silkscreen_height_mm",
+                "min_solder_mask_dam_mm",
+                "min_solder_mask_clearance_mm",
+                "min_pad_size_mm",
+            ):
+                base_val = getattr(base_rules, field)
+                tier1_val = getattr(tier1_rules, field)
+                assert tier1_val <= base_val, (
+                    f"{layers}-layer {field}: tier1={tier1_val} looser than "
+                    f"base jlcpcb={base_val} (would be a DRC regression)"
+                )
+
+    def test_run_post_route_drc_no_unknown_manufacturer_message(self, tmp_path):
+        """Running the post-route DRC step does not emit the regression message.
+
+        Issue #2622: when the router calls ``run_post_route_drc`` with
+        ``manufacturer='jlcpcb-tier1'``, stdout must NOT contain the
+        ``Unknown manufacturer`` warning that was the original user-visible
+        symptom of the broken DRC registry.
+        """
+        from kicad_tools.cli.route_cmd import run_post_route_drc
+        from kicad_tools.schema.pcb import PCB
+
+        # Create a minimal but valid PCB on disk so run_post_route_drc can
+        # PCB.load() it.  Any small board is sufficient - DRC only runs
+        # manufacturer-rule checks against whatever is present.
+        pcb = PCB.create(width=50.0, height=50.0, layers=2)
+        test_pcb = tmp_path / "tier1_regression.kicad_pcb"
+        pcb.save(str(test_pcb))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_post_route_drc(
+                output_path=test_pcb,
+                manufacturer="jlcpcb-tier1",
+                layers=4,
+                quiet=False,
+            )
+
+        output = buf.getvalue()
+        assert "Unknown manufacturer" not in output, (
+            f"Regression of issue #2622: 'Unknown manufacturer' surfaced "
+            f"in stdout for jlcpcb-tier1:\n{output}"
+        )
+        # And the positive assertion: the DRC validation block ran.
+        assert "DRC Validation" in output, (
+            f"Expected DRC validation header in output, got:\n{output}"
+        )
+
+    def test_tier1_profile_has_via_in_pad_capability_documented(self):
+        """The tier1 profile exists specifically for via-in-pad support.
+
+        Until DesignRules grows a via_in_pad_supported field (follow-up
+        scoped out of #2622), we at minimum require that the profile's
+        name documents the Capability Plus tier so users can identify it.
+        """
+        profile = get_profile("jlcpcb-tier1")
+        assert "Capability" in profile.name or "Plus" in profile.name, (
+            f"jlcpcb-tier1 profile name should reference Capability Plus, got {profile.name!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLI <-> registry parity (issue #2793)
+# ---------------------------------------------------------------------------
+#
+# Each entry below is one ``--mfr`` site in the top-level argparse tree:
+#
+# - ``argv``: the argv prefix needed to reach that subcommand's parser
+#   (positional args use dummy paths; argparse only needs the right shape).
+# - ``mfr_attr``: the attribute name on the parsed Namespace that carries
+#   the manufacturer value (most are ``mfr``; some have unique dest names
+#   to avoid collisions in the shared top-level Namespace).
+#
+# When adding a new ``--mfr`` site to the top-level parser, append it here
+# so the parametrised parity tests cover it.  See ``parser.py`` and the
+# Curator analysis in issue #2793 for the full inventory.
+CLI_MFR_SITES: list[tuple[str, list[str], str]] = [
+    ("drc", ["drc", "dummy.rpt"], "mfr"),
+    ("check", ["check", "dummy.kicad_pcb"], "mfr"),
+    ("fix-vias", ["fix-vias", "dummy.kicad_pcb"], "mfr"),
+    ("fix-silkscreen", ["fix-silkscreen", "dummy.kicad_pcb"], "mfr"),
+    ("place-silk-refs", ["place-silk-refs", "dummy.kicad_pcb"], "mfr"),
+    ("repair-clearance", ["repair-clearance", "dummy.kicad_pcb"], "mfr"),
+    ("estimate cost", ["estimate", "cost", "dummy.kicad_pcb"], "mfr"),
+    ("audit", ["audit", "dummy.kicad_pro"], "audit_mfr"),
+    ("pipeline", ["pipeline", "dummy.kicad_pcb"], "pipeline_mfr"),
+    ("build", ["build", "dummy.kicad_pcb"], "build_mfr"),
+    ("export", ["export", "dummy.kicad_pcb"], "export_mfr"),
+]
+
+
+class TestCLIRegistryParity:
+    """CLI argparse <-> manufacturer registry parity (issue #2793).
+
+    Every ``--mfr`` argparse site in the top-level kicad-tools parser must
+    accept every name and alias the manufacturer registry resolves.  This
+    is the drift-prevention test that would have caught the #2793 bug
+    (e.g. ``kct check --mfr jlcpcb-tier1`` rejected at argparse time even
+    though ``get_profile('jlcpcb-tier1')`` works).
+    """
+
+    @pytest.mark.parametrize(
+        "label, argv_prefix, mfr_attr",
+        CLI_MFR_SITES,
+        ids=[label for label, _, _ in CLI_MFR_SITES],
+    )
+    @pytest.mark.parametrize(
+        "name",
+        sorted(set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys())),
+    )
+    def test_every_cli_site_accepts_every_registered_name(self, label, argv_prefix, mfr_attr, name):
+        """Every registered manufacturer name parses on every CLI ``--mfr`` site."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        argv = [*argv_prefix, "--mfr", name]
+        try:
+            ns = parser.parse_args(argv)
+        except SystemExit as exc:  # argparse calls sys.exit(2) on choice mismatch
+            pytest.fail(
+                f"CLI site {label!r} rejected registered manufacturer "
+                f"name {name!r} (argv={argv!r}, SystemExit({exc.code})). "
+                f"This is the #2793 / #2622 class of bug: top-level argparse "
+                f"choices= list drifted from the registry."
+            )
+
+        actual = getattr(ns, mfr_attr, None)
+        assert actual == name, (
+            f"CLI site {label!r} parsed --mfr {name!r} but Namespace.{mfr_attr} "
+            f"was {actual!r}.  Either the dest changed or argparse swallowed the value."
+        )
+
+    @pytest.mark.parametrize(
+        "label, argv_prefix, mfr_attr",
+        CLI_MFR_SITES,
+        ids=[label for label, _, _ in CLI_MFR_SITES],
+    )
+    def test_every_cli_site_rejects_bogus_manufacturer(self, label, argv_prefix, mfr_attr):
+        """An unknown manufacturer name still raises SystemExit on every site."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        argv = [*argv_prefix, "--mfr", "completely-bogus-mfr-name-xyz"]
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(argv)
+        # argparse uses exit code 2 for argument errors.
+        assert excinfo.value.code == 2, (
+            f"CLI site {label!r} did not raise SystemExit(2) for a bogus "
+            f"--mfr value (got code={excinfo.value.code!r})."
+        )
+
+    def test_export_still_accepts_generic(self):
+        """The ``export`` subcommand keeps its ``generic`` sentinel alongside registry names."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        ns = parser.parse_args(["export", "dummy.kicad_pcb", "--mfr", "generic"])
+        assert ns.export_mfr == "generic", (
+            "kct export --mfr generic must still parse: 'generic' is a "
+            "non-registry sentinel for vendor-agnostic gerber export."
+        )
+
+    def test_get_all_manufacturer_names_covers_profiles_and_aliases(self):
+        """``get_all_manufacturer_names()`` returns canonicals UNION aliases."""
+        names = set(get_all_manufacturer_names())
+        expected = set(DRC_PROFILES.keys()) | set(DRC_ALIASES.keys())
+        assert names == expected, (
+            f"get_all_manufacturer_names() drifted from "
+            f"_PROFILES | _ALIASES.\n  missing:  {sorted(expected - names)}\n"
+            f"  extra:    {sorted(names - expected)}"
+        )
+
+    def test_flashpcb_is_selectable_from_cli(self):
+        """``flashpcb`` is callable from every CLI site that has a ``--mfr`` flag.
+
+        Curator note from issue #2793: ``flashpcb`` was silently inaccessible
+        from the CLI before this fix despite being a fully registered profile.
+        """
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        for label, argv_prefix, mfr_attr in CLI_MFR_SITES:
+            ns = parser.parse_args([*argv_prefix, "--mfr", "flashpcb"])
+            assert getattr(ns, mfr_attr) == "flashpcb", (
+                f"CLI site {label!r} did not surface --mfr flashpcb on Namespace.{mfr_attr}"
+            )
+
+    def test_tier1_aliases_parse_on_every_cli_site(self):
+        """All four jlcpcb-tier1 aliases parse on every CLI ``--mfr`` site.
+
+        This is the direct regression test for the user-visible #2793 symptom:
+        ``kct check board.kicad_pcb --mfr jlcpcb-tier1`` was rejected before
+        this fix.
+        """
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        tier1_names = [
+            "jlcpcb-tier1",
+            "jlcpcb_tier1",
+            "jlcpcb-capabilityplus",
+            "jlcpcb_capabilityplus",
+            "jlcpcb-capability-plus",
+        ]
+        for label, argv_prefix, mfr_attr in CLI_MFR_SITES:
+            for name in tier1_names:
+                ns = parser.parse_args([*argv_prefix, "--mfr", name])
+                assert getattr(ns, mfr_attr) == name, (
+                    f"CLI site {label!r} did not surface --mfr {name!r} on Namespace.{mfr_attr}"
+                )

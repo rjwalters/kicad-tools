@@ -1,0 +1,43 @@
+{
+    "source": "test-non-blocking.kicad_sch",
+    "kicad_version": "8.0.0",
+    "coordinate_units": "mm",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "00000000-0000-0000-0000-000000000000",
+            "violations": [
+                {
+                    "type": "lib_symbol_mismatch",
+                    "severity": "error",
+                    "description": "Symbol 'R_0402' in library has been modified",
+                    "pos": {"x": 100.0, "y": 50.0},
+                    "items": [
+                        {"description": "Symbol R1 (R_0402)"}
+                    ],
+                    "excluded": false
+                },
+                {
+                    "type": "footprint_link_issues",
+                    "severity": "error",
+                    "description": "Footprint not found in library",
+                    "pos": {"x": 120.0, "y": 60.0},
+                    "items": [
+                        {"description": "Symbol U1 footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"}
+                    ],
+                    "excluded": false
+                },
+                {
+                    "type": "single_global_label",
+                    "severity": "warning",
+                    "description": "Only one global label for net 'RESET'",
+                    "pos": {"x": 140.0, "y": 70.0},
+                    "items": [
+                        {"description": "Global label 'RESET'"}
+                    ],
+                    "excluded": false
+                }
+            ]
+        }
+    ]
+}

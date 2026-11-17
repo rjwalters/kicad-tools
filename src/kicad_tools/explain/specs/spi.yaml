@@ -1,0 +1,83 @@
+# SPI Interface Specifications
+# Reference: Motorola SPI specification (de facto standard)
+
+interface: SPI
+spec_document: "Motorola SPI Protocol Specification"
+spec_url: ""
+
+constraints:
+  clock_frequency:
+    section: "Timing Specifications"
+    value: "Device dependent, typically 1-50MHz"
+    severity: info
+    explanation: |
+      SPI clock speed is limited by the slowest device on the bus and
+      trace characteristics. Higher speeds require careful attention to
+      signal integrity, impedance matching, and layout.
+    fix_templates:
+      - "Check all device datasheets for maximum SPI clock speed"
+      - "For speeds >10MHz, consider controlled impedance routing"
+      - "Add series termination resistors for very high speeds"
+
+  trace_length_matching:
+    section: "Layout Guidelines"
+    value: 25mm
+    severity: warning
+    explanation: |
+      SPI signals (MOSI, MISO, SCLK) should be length-matched to minimize
+      skew, especially at high frequencies. Excessive skew can cause
+      setup/hold time violations.
+    fix_templates:
+      - "Match MOSI, MISO, and SCLK trace lengths to within 5mm"
+      - "Keep total trace length under 150mm for reliable operation"
+      - "For high-speed SPI (>25MHz), use tighter matching"
+
+  chip_select_routing:
+    section: "Electrical Characteristics"
+    severity: warning
+    explanation: |
+      Each SPI device requires a dedicated chip select (CS) line.
+      CS should be kept short and have minimal crosstalk with clock
+      to prevent glitches that could corrupt transactions.
+    fix_templates:
+      - "Route CS lines away from SCLK to minimize crosstalk"
+      - "Add a pull-up resistor on CS to ensure devices are deselected at startup"
+      - "Keep CS traces short to minimize delay"
+
+  termination:
+    section: "Signal Integrity"
+    value: "Series resistors 22-33Ω"
+    severity: warning
+    explanation: |
+      For high-speed SPI (>10MHz) or long traces, series termination
+      resistors help reduce reflections and improve signal quality.
+      Place resistors near the source (driver) end of each signal.
+    fix_templates:
+      - "Add {value} series resistors on MOSI and SCLK near the master"
+      - "Add {value} series resistor on MISO near the slave"
+      - "Resistor value should match (Z0 - Rdriver) for best results"
+
+  ground_return:
+    section: "Layout Guidelines"
+    severity: error
+    explanation: |
+      SPI signals require a solid ground return path. High-frequency
+      switching creates ground currents that need low-impedance paths.
+      Split grounds or long return paths cause EMI and signal integrity issues.
+    fix_templates:
+      - "Ensure continuous ground plane under all SPI traces"
+      - "Place ground vias near any layer transitions"
+      - "Connect device grounds with short, wide traces"
+
+  crosstalk:
+    section: "Signal Integrity"
+    value: 3W
+    severity: warning
+    explanation: |
+      SPI signals should maintain adequate spacing to prevent crosstalk.
+      The 3W rule (spacing = 3x trace width) provides good isolation.
+      Critical for high-speed operation and mixed-signal designs.
+    fix_templates:
+      - "Space SPI traces at least 3x trace width apart"
+      - "Separate MISO from SCLK and MOSI to reduce crosstalk"
+      - "Use ground traces between sensitive signals if space is limited"

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://kicad-tools.org/schemas/benchmark-external/v1.json",
+  "schema_version": 1,
+  "generated_at": "2026-08-25T04:10:36.208374+00:00",
+  "board_id": "pocketbeagle",
+  "board_commit": "d793a63f48dd3041e333362d5ec870377d255f89",
+  "board_source": "https://github.com/beagleboard/pocketbeagle",
+  "board_file": "pocketbeagle.kicad_pcb",
+  "protocol": "zero-touch",
+  "tool_commit": "636fd368",
+  "completion": {
+    "connections_routed": 94,
+    "connections_total": 296,
+    "completion_pct": 31.76,
+    "nets_total": 187,
+    "nets_complete": 57,
+    "nets_incomplete": 130,
+    "nets_unrouted": 0,
+    "nets_blocking_incomplete": 121
+  },
+  "copper": {
+    "via_count": 0,
+    "wirelength_mm": 0,
+    "segment_count": 0,
+    "arc_count": 0,
+    "wirelength_by_layer_mm": {}
+  },
+  "timing": {
+    "wall_clock_s": 2.821,
+    "valid": true,
+    "refusal_reason": null
+  },
+  "backend": {
+    "backend": "cpp",
+    "available": true,
+    "version": "1.0.0",
+    "build_version": 21,
+    "unavailable_reason": null
+  },
+  "kct_check": {
+    "ran": true,
+    "passed": false,
+    "error_count": 394,
+    "warning_count": 801,
+    "errors_by_rule": {
+      "connectivity": 121,
+      "edge_clearance_pad": 1,
+      "edge_clearance_zone": 218,
+      "single_pad_net": 54
+    },
+    "note": null
+  },
+  "kicad_cli_drc": {
+    "ran": true,
+    "violation_count": 0,
+    "by_type": {},
+    "note": null
+  },
+  "diff_pairs": null,
+  "notes": [
+    "seed=42",
+    "router exit code: 1",
+    "human baseline (pre-rip-up): 1297 segments, 171 vias, 2561.0mm, 78 unrouted pads",
+    "router produced no output file -- reporting the unrouted, ripped-up board (0% complete) rather than a stale artifact",
+    "DeepPCB published reference: {'airwires': 290}"
+  ]
+}

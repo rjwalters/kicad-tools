@@ -1,0 +1,8 @@
+{
+  "LED_ANODE": {
+    "name": "Power",
+    "priority": 1,
+    "trace_width": 0.25,
+    "target_ampacity": 0.01
+  }
+}

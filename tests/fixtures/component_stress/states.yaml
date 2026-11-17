@@ -1,0 +1,67 @@
+# Reviewed operating-state manifest (test fixture for issue #5039).
+#
+# Every state entry is a CORRELATED snapshot: all node potentials below belong
+# to the same instant, which is what makes a terminal-to-terminal differential
+# (VDS = V(D) - V(S)) meaningful. The analyzer never combines one net's extreme
+# with another net's unrelated extreme, and never infers a state on its own.
+version: 1
+
+states:
+  startup:
+    description: "Bank empty, both bus drives off, mains not yet applied."
+    source: "softstart architecture rev-B section 3"
+    assumptions: "steady state; contactor open"
+    nets:
+      BANK_POS: 0
+      SRC_POS: 0
+      GATE_A: 0
+
+  precharge:
+    description: "Bank charged through the precharge path, bus switches off."
+    source: "softstart architecture rev-B section 3"
+    nets:
+      BANK_POS: 75
+      SRC_POS: 0
+      GATE_A: -0.2
+
+  mains_positive:
+    description: "Positive mains half-cycle at nominal 120 Vrms line peak."
+    source: "softstart architecture rev-B section 4"
+    assumptions: "120 Vrms nominal -> 169.7 V peak; high-line margin not included"
+    nets:
+      BANK_POS: 90
+      SRC_POS: 169.3
+      GATE_A: 169.1
+
+  mains_negative:
+    description: "Negative mains half-cycle: the worst-case bus-switch stress."
+    source: "softstart architecture rev-B section 4; EE_REVIEW_BUS_MOSFETS.md"
+    assumptions: "120 Vrms nominal -> -169.3 V peak at SRC_POS with the bank at +90 V"
+    nets:
+      BANK_POS: 90
+      SRC_POS: -169.3
+      GATE_A: -169.5
+
+  support:
+    description: "Bus switches enhanced, bank supporting the line."
+    source: "softstart architecture rev-B section 4"
+    nets:
+      BANK_POS: 90
+      SRC_POS: 80
+      GATE_A: 92
+
+  trip:
+    description: "Overcurrent trip: drives commanded off, line disconnected."
+    source: "softstart architecture rev-B section 5"
+    nets:
+      BANK_POS: 90
+      SRC_POS: 0
+      GATE_A: 0
+
+  loss_of_drive:
+    description: "Gate-drive supply lost; gates pulled to their own source."
+    source: "softstart architecture rev-B section 5"
+    nets:
+      BANK_POS: 90
+      SRC_POS: 0
+      GATE_A: 0

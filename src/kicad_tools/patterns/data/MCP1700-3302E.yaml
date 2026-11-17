@@ -1,0 +1,30 @@
+# Component requirements for MCP1700-3302E
+# 3.3V 250mA Low Dropout Regulator
+
+type: LDO
+manufacturer: Microchip
+description: 3.3V 250mA Low Quiescent Current LDO
+
+input_cap:
+  min_uf: 1.0
+  max_esr_mohm: null  # Works with ceramic caps
+
+output_cap:
+  min_uf: 1.0
+  max_esr_mohm: null  # Works with ceramic caps
+
+dropout_voltage: 0.178  # At 250mA
+max_output_current_ma: 250
+input_voltage_min: 2.3
+input_voltage_max: 6.0
+output_voltage: 3.3
+
+thermal_pad:
+  required: false
+  max_junction_temp_c: 150
+
+notes:
+  - Ultra-low quiescent current (1.6uA typical)
+  - Excellent for battery-powered applications
+  - Stable with low ESR ceramic capacitors
+  - Available in SOT-23 and TO-92 packages

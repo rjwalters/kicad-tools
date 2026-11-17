@@ -1,0 +1,1586 @@
+"""Tests for ``kct bench external`` (Epic #4932 Phase 2, issue #4941).
+
+Exercises the fetch -> normalize -> route -> measure pipeline WITHOUT live
+network access or a real (slow) router pass:
+
+* Fetch is either bypassed via ``--skip-fetch`` (a pre-populated cache dir)
+  or stubbed with an in-memory tarball ``opener`` -- mirroring
+  ``tests/test_benchmark_external.py``'s pattern -- so no live HTTP request
+  is ever made.
+* The router itself is replaced with an injectable stub: both
+  ``_run_one_board`` and (via ``monkeypatch`` on
+  ``kicad_tools.cli.route_cmd.main_with_result``) the full CLI path never invoke the
+  real negotiated router, which would take minutes on anything but a
+  trivial fixture.
+
+Per the issue's note on sandboxes without live network access, no test
+here depends on ``benchmarks/external/boards.toml``'s real pinned boards
+or on actually reaching GitHub/GitLab.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import shutil
+import tarfile
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from kicad_tools.benchmark.external import BackendInfo
+from kicad_tools.cli.commands import bench as bench_cmd
+from kicad_tools.cli.parser import create_parser
+from kicad_tools.schema.pcb import PCB
+
+# ---------------------------------------------------------------------------
+# Fixture boards
+# ---------------------------------------------------------------------------
+
+# One net (SIG1) across 3 pads on 2 footprints -- 2 required connections
+# (pads - 1). ONE pre-existing segment joins R1.2 <-> R2.1, leaving R1.1
+# stranded, so normalize.rip_up() has something real to strip and the
+# baseline sidecar captures a non-trivial "before" snapshot.
+SOURCE_FIXTURE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG1")
+
+  (gr_line (start 0 0) (end 20 0) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 20 0) (end 20 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 20 20) (end 0 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 0 20) (end 0 0) (layer "Edge.Cuts") (width 0.05))
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 5 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 15 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+  )
+
+  (segment (start 5.5 10) (end 14.5 10) (width 0.25) (layer "F.Cu") (net 1))
+)
+"""
+
+# What a successful zero-touch route of the RIPPED (normalized) board would
+# look like: both required connections satisfied (R1.1<->R1.2, R1.2<->R2.1),
+# 0 vias, 10mm of copper (1mm + 9mm).
+ROUTED_OUTPUT_FIXTURE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG1")
+
+  (gr_line (start 0 0) (end 20 0) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 20 0) (end 20 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 20 20) (end 0 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 0 20) (end 0 0) (layer "Edge.Cuts") (width 0.05))
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 5 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 15 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+  )
+
+  (segment (start 4.5 10) (end 5.5 10) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 5.5 10) (end 14.5 10) (width 0.25) (layer "F.Cu") (net 1))
+)
+"""
+
+
+def _make_stub_route(output_text: str | None = None, *, write_output: bool = True):
+    """Build a fake ``route_cmd.main``-shaped callable for injection.
+
+    Never invokes the real router -- writes ``output_text`` (or copies the
+    input unchanged when ``output_text`` is ``None``) to the ``-o`` path.
+    ``write_output=False`` simulates a fatal router failure that leaves no
+    output file at all (route_cmd.py's documented exit-code-1 behavior).
+    """
+
+    def _route(argv: list[str]) -> int:
+        input_path = Path(argv[0])
+        output_path = Path(argv[argv.index("-o") + 1])
+        if write_output:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_text is not None:
+                output_path.write_text(output_text, encoding="utf-8")
+            else:
+                shutil.copyfile(input_path, output_path)
+            return 0
+        return 1
+
+    return _route
+
+
+def _make_capturing_stub_route(output_text: str | None, captured_argv: list[list[str]]):
+    """Like ``_make_stub_route``, but records each invocation's argv.
+
+    Used to assert the tuned protocol actually appends ``--net-class-map``
+    / ``--differential-pairs`` to the router invocation (issue #4943)
+    without depending on the real router.
+    """
+
+    def _route(argv: list[str]) -> int:
+        captured_argv.append(list(argv))
+        input_path = Path(argv[0])
+        output_path = Path(argv[argv.index("-o") + 1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_text is not None:
+            output_path.write_text(output_text, encoding="utf-8")
+        else:
+            shutil.copyfile(input_path, output_path)
+        return 0
+
+    return _route
+
+
+def _cpp_backend() -> BackendInfo:
+    return BackendInfo(backend="cpp", available=True, version="1.0.0", build_version=21)
+
+
+def _python_backend() -> BackendInfo:
+    return BackendInfo(
+        backend="python",
+        available=False,
+        unavailable_reason="C++ router extension not built",
+    )
+
+
+def _spec(fetch_boards_mod: Any, **overrides: Any):
+    defaults = {
+        "slug": "fixture",
+        "name": "Fixture Board",
+        "repo_url": "https://example.invalid/fixture",
+        "vcs": "github",
+        "commit": "a" * 40,
+        "board_path": "fixture.kicad_pcb",
+        "license": "MIT",
+    }
+    defaults.update(overrides)
+    return fetch_boards_mod.BoardSpec(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Repo-root discovery / dynamic import of benchmarks/external/
+# ---------------------------------------------------------------------------
+
+
+class TestExternalModuleLoading:
+    def test_find_repo_root_locates_benchmarks_external(self):
+        root = bench_cmd._find_repo_root()
+        assert root is not None
+        assert (root / "benchmarks" / "external" / "fetch_boards.py").exists()
+
+    def test_load_external_modules_returns_expected_attrs(self):
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        assert hasattr(fetch_boards, "fetch_board")
+        assert hasattr(fetch_boards, "load_manifest")
+        assert hasattr(fetch_boards, "BoardSpec")
+        assert hasattr(normalize, "normalize_board")
+        assert hasattr(normalize, "NormalizeError")
+
+    def test_load_tuned_rules_returns_expected_attrs(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        assert hasattr(tuned_rules, "build_tuned_net_class_map")
+        assert hasattr(tuned_rules, "diff_pairs_for")
+        assert hasattr(tuned_rules, "TUNED_DIFF_PAIRS")
+
+
+# ---------------------------------------------------------------------------
+# tuned_rules.py -- the declared STRF netclass/diff-pair config (issue #4943)
+# ---------------------------------------------------------------------------
+
+
+class TestTunedRules:
+    """DeepPCB's STRF case-study values, reproduced from
+    https://deeppcb.ai/benchmark/mixed-signal-rf-board-routing/ (verified
+    2026-08-25): USB diff pairs at 0.20mm track / 0.15mm gap, SPI bus on
+    its own compact-via netclass. See ``benchmarks/external/tuned_rules.py``
+    for the full sourcing and schema-mapping notes.
+    """
+
+    def test_strf_usb_pairs_match_declared_geometry(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        ncm = tuned_rules.build_tuned_net_class_map("strf")
+        assert ncm is not None
+
+        for net_p, net_n in (("USB_D+", "USB_D-"), ("USB_CONN_D+", "USB_CONN_D-")):
+            for net, partner in ((net_p, net_n), (net_n, net_p)):
+                entry = ncm[net]
+                assert entry["trace_width"] == pytest.approx(0.20)
+                assert entry["intra_pair_clearance"] == pytest.approx(0.15)
+                assert entry["coupled_routing"] is True
+                assert entry["diffpair_partner"] == partner
+
+    def test_strf_spi_bus_gets_compact_via_netclass(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        ncm = tuned_rules.build_tuned_net_class_map("strf")
+        assert ncm is not None
+
+        for net in ("SPI3_SCK", "SPI3_MOSI", "SPI3_MISO", "SPI3_!CS"):
+            entry = ncm[net]
+            assert entry["via_size"] == pytest.approx(0.4)
+            assert entry["name"] == "SPI"
+
+    def test_strf_net_class_map_is_net_class_routing_loadable(self):
+        """Every entry round-trips through the real ``NetClassRouting.from_dict``
+        used by ``--net-class-map`` (issue #2996's canonical loader) -- not
+        just a dict with the right-looking keys.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+
+        tuned_rules = bench_cmd._load_tuned_rules()
+        ncm = tuned_rules.build_tuned_net_class_map("strf")
+        assert ncm is not None
+        for net, entry in ncm.items():
+            parsed = NetClassRouting.from_dict(entry)
+            assert parsed.name == entry["name"], net
+
+    def test_unsupported_board_returns_none(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        assert tuned_rules.build_tuned_net_class_map("pocketbeagle") is None
+        assert tuned_rules.build_tuned_net_class_map("beagleconnect_freedom") is None
+        assert tuned_rules.build_tuned_net_class_map("does-not-exist") is None
+
+    def test_diff_pairs_for_strf(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        pairs = tuned_rules.diff_pairs_for("strf")
+        assert pairs is not None
+        assert ("USB_D+", "USB_D-") in pairs
+        assert ("USB_CONN_D+", "USB_CONN_D-") in pairs
+
+    def test_diff_pairs_for_unsupported_board_returns_none(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        assert tuned_rules.diff_pairs_for("pocketbeagle") is None
+
+
+# ---------------------------------------------------------------------------
+# _run_one_board -- the per-board pipeline, in isolation
+# ---------------------------------------------------------------------------
+
+
+class TestRunOneBoard:
+    def test_full_pipeline_with_stub_router(self, tmp_path):
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        output_dir = tmp_path / "out"
+        spec = _spec(fetch_boards)
+
+        report = bench_cmd._run_one_board(
+            spec,
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            seed=7,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(ROUTED_OUTPUT_FIXTURE),
+        )
+
+        assert report.board_id == "fixture"
+        assert report.protocol == "zero-touch"
+        assert report.board_commit == "a" * 40
+        assert report.board_source == spec.repo_url
+        assert report.completion.connections_total == 2
+        assert report.completion.connections_routed == 2
+        assert report.completion.completion_pct == 100.0
+        assert report.copper.via_count == 0
+        assert report.copper.wirelength_mm == pytest.approx(10.0)
+        assert report.kicad_cli_drc.ran is False  # run_kicad_cli=False
+
+        # Timing recorded because the (stubbed) C++ backend was reported live.
+        assert report.timing.valid is True
+        assert report.timing.wall_clock_s is not None
+        assert report.timing.wall_clock_s >= 0.0
+
+        assert any(n == "seed=7" for n in report.notes)
+        assert any("human baseline" in n for n in report.notes)
+        assert any("router exit code: 0" in n for n in report.notes)
+
+        # Structured outcome (#5280): router ran, exited 0, and produced
+        # output that measures 100% complete.
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "completed"
+        assert report.route_outcome.artifact_source == "router_output"
+        assert report.route_outcome.exit_code == 0
+
+        # Baseline (pre-route) connectivity was measured on the ripped-up
+        # input, separate from the routed result.
+        assert report.pre_route_completion is not None
+        assert report.pre_route_completion.connections_routed == 0
+        assert report.newly_routed_connections == 2
+
+        # The normalized (ripped-up) board was written and stripped of copper.
+        normalized_path = output_dir / "normalized" / "fixture.kicad_pcb"
+        assert normalized_path.exists()
+        normalized_pcb = PCB.load(str(normalized_path))
+        assert len(normalized_pcb.segments) == 0
+        assert len(normalized_pcb.vias) == 0
+
+        # The routed output was written by the (stub) router, named by
+        # slug AND protocol so a tuned/zero-touch run sharing a slug never
+        # collides (#5280).
+        assert (output_dir / "routed" / "fixture.zero-touch.kicad_pcb").exists()
+
+        # The baseline sidecar captured the pre-rip-up human routing.
+        baseline_path = normalized_path.with_name("fixture.baseline.json")
+        assert baseline_path.exists()
+        baseline = json.loads(baseline_path.read_text())
+        assert baseline["segments"] == 1
+        assert baseline["vias"] == 0
+
+    def test_skip_fetch_missing_file_raises(self, tmp_path):
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        spec = _spec(fetch_boards)
+
+        with pytest.raises(bench_cmd.BenchExternalError, match="--skip-fetch"):
+            bench_cmd._run_one_board(
+                spec,
+                fetch_boards,
+                normalize,
+                cache_dir=tmp_path / "cache",
+                output_dir=tmp_path / "out",
+                seed=1,
+                manufacturer="jlcpcb",
+                layers=2,
+                skip_fetch=True,
+                run_kicad_cli=False,
+                kicad_cli_timeout=60,
+                backend=_cpp_backend(),
+                verbose=False,
+                route_fn=_make_stub_route(ROUTED_OUTPUT_FIXTURE),
+            )
+
+    def test_timing_refused_when_backend_unavailable(self, tmp_path):
+        """The stopwatch is never even started without the C++ backend.
+
+        This is the CLI-level enforcement of Epic #4932's stated risk:
+        gate BEFORE recording, not merely discard afterward.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+
+        report = bench_cmd._run_one_board(
+            spec := _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_python_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(ROUTED_OUTPUT_FIXTURE),
+        )
+        del spec
+
+        assert report.timing.valid is False
+        assert report.timing.wall_clock_s is None
+        assert report.timing.refusal_reason is not None
+        # Routing still happened (metrics reflect the stub's fully-routed
+        # output) -- only the timing number was refused, not the run itself.
+        assert report.completion.completion_pct == 100.0
+
+    def test_router_produces_no_output_falls_back_to_ripped_board(self, tmp_path):
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+
+        report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(write_output=False),
+        )
+
+        assert report.completion.completion_pct == 0.0
+        assert any("no output file" in n for n in report.notes)
+
+        # Structured outcome (#5280): a non-zero exit with no output file
+        # for this attempt is failed with unknown phase -- never success.
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "failed"
+        assert report.route_outcome.artifact_source == "fallback_input"
+        assert report.route_outcome.exit_code == 1
+        assert report.pre_route_completion is not None
+        assert report.pre_route_completion.connections_routed == 0
+        assert report.newly_routed_connections == 0
+        # A refused/unmeasured timing must never look like a completed-
+        # routing performance number.
+        assert report.timing.measured_phase == "failed"
+
+    def test_router_raises_marks_failed_outcome(self, tmp_path):
+        """A router exception (crash) is ``failed``, not silently dropped."""
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+
+        def _crashing_route(argv: list[str]) -> int:
+            raise RuntimeError("boom")
+
+        report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_crashing_route,
+        )
+
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "failed"
+        assert report.route_outcome.artifact_source == "fallback_input"
+        assert report.route_outcome.exit_code is None
+        assert "boom" in (report.route_outcome.reason or "")
+        assert report.timing.wall_clock_s is not None
+
+    def test_partial_output_from_nonzero_exit_is_not_mislabeled_success(self, tmp_path):
+        """A router that exits non-zero but DID write output for this
+        attempt is ``partial`` -- real progress, never silently
+        relabeled as a clean success.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+
+        def _partial_route(argv: list[str]) -> int:
+            output_path = Path(argv[argv.index("-o") + 1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(ROUTED_OUTPUT_FIXTURE, encoding="utf-8")
+            return 2
+
+        report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_partial_route,
+        )
+
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "partial"
+        assert report.route_outcome.artifact_source == "router_output"
+        assert report.route_outcome.exit_code == 2
+        # The fully-connected fixture output was actually measured (not
+        # discarded because of the non-zero exit).
+        assert report.completion.completion_pct == 100.0
+
+    def test_stale_prior_output_is_not_reused_by_a_failed_attempt(self, tmp_path):
+        """Reproduces the artifact-provenance failure from #5280's issue body:
+
+        pre-seed ``routed/<slug>.<protocol>.kicad_pcb`` with a prior run's
+        output, then run a NEW attempt whose (injected) router returns a
+        non-zero exit and writes nothing. The new attempt must report
+        ``failed`` / ``fallback_input`` -- never silently
+        pick up the stale file and look like a completed route.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        output_dir = tmp_path / "out"
+
+        stale_path = output_dir / "routed" / "fixture.zero-touch.kicad_pcb"
+        stale_path.parent.mkdir(parents=True)
+        stale_path.write_text(ROUTED_OUTPUT_FIXTURE, encoding="utf-8")
+
+        report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(write_output=False),
+        )
+
+        assert not stale_path.exists()  # cleared before this attempt's router ran
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "failed"
+        assert report.route_outcome.artifact_source == "fallback_input"
+        assert report.completion.completion_pct == 0.0
+        assert any("no output file" in n for n in report.notes)
+
+    def test_distinct_protocols_sharing_slug_do_not_collide(self, tmp_path):
+        """A tuned and a zero-touch run against the same board slug must
+        write/measure independent output files (#5280).
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        output_dir = tmp_path / "out"
+
+        zero_touch_report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(ROUTED_OUTPUT_FIXTURE),
+            protocol="zero-touch",
+        )
+        tuned_report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(write_output=False),
+            protocol="tuned",
+        )
+
+        assert zero_touch_report.route_outcome.outcome == "completed"  # type: ignore[union-attr]
+        assert tuned_report.route_outcome.outcome == "failed"  # type: ignore[union-attr]
+        assert (output_dir / "routed" / "fixture.zero-touch.kicad_pcb").exists()
+        assert not (output_dir / "routed" / "fixture.tuned.kicad_pcb").exists()
+
+    def test_fetch_via_stubbed_opener(self, tmp_path):
+        """``skip_fetch=False`` path with an in-memory tarball opener.
+
+        No live network call -- mirrors
+        ``tests/test_benchmark_external.py::TestFetchBoard``'s pattern.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        spec = _spec(
+            fetch_boards,
+            repo_url="https://github.com/example/fixture",
+            board_path="sub/fixture.kicad_pcb",
+        )
+        top_dir = f"fixture-{spec.commit}"
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            info = tarfile.TarInfo(name=f"{top_dir}/")
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+            content = SOURCE_FIXTURE.encode("utf-8")
+            info = tarfile.TarInfo(name=f"{top_dir}/{spec.board_path}")
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        tar_bytes = buf.getvalue()
+
+        class _FakeResponse:
+            def __init__(self, data: bytes) -> None:
+                self._data = data
+
+            def read(self) -> bytes:
+                return self._data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        opener = lambda url: _FakeResponse(tar_bytes)  # noqa: E731
+
+        report = bench_cmd._run_one_board(
+            spec,
+            fetch_boards,
+            normalize,
+            cache_dir=tmp_path / "cache",
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=False,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(ROUTED_OUTPUT_FIXTURE),
+            opener=opener,
+        )
+
+        assert report.board_id == "fixture"
+        assert (tmp_path / "cache" / "fixture" / "fixture.kicad_pcb").exists()
+
+    def test_tuned_protocol_appends_net_class_map_and_diffpair_flags(self, tmp_path):
+        """Issue #4943: a supplied ``net_class_map_path`` engages
+        ``--net-class-map`` + ``--differential-pairs`` on the router
+        invocation and tags the report ``protocol="tuned"``.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        spec = _spec(fetch_boards)
+
+        ncm_path = tmp_path / "tuned" / "fixture.net_class_map.json"
+        ncm_path.parent.mkdir(parents=True)
+        ncm_path.write_text("{}", encoding="utf-8")
+
+        captured: list[list[str]] = []
+        report = bench_cmd._run_one_board(
+            spec,
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured),
+            protocol="tuned",
+            net_class_map_path=ncm_path,
+            diff_pairs=[("SIG1", "SIG1")],
+        )
+
+        assert report.protocol == "tuned"
+        assert len(captured) == 1
+        assert "--net-class-map" in captured[0]
+        assert str(ncm_path) in captured[0]
+        assert "--differential-pairs" in captured[0]
+        assert any("tuned protocol: applied declared net-class-map" in n for n in report.notes)
+
+    def test_zero_touch_protocol_omits_net_class_map_flags(self, tmp_path):
+        """The default (no ``net_class_map_path``) path must NOT add the
+        tuned-only flags -- zero-touch stays rules-as-shipped.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        spec = _spec(fetch_boards)
+
+        captured: list[list[str]] = []
+        report = bench_cmd._run_one_board(
+            spec,
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured),
+        )
+
+        assert report.protocol == "zero-touch"
+        assert "--net-class-map" not in captured[0]
+        assert "--differential-pairs" not in captured[0]
+        assert not any("tuned protocol" in n for n in report.notes)
+
+
+# ---------------------------------------------------------------------------
+# Full CLI dispatch: run_bench_command
+# ---------------------------------------------------------------------------
+
+
+def _write_manifest(tmp_path: Path, cache_dir: Path) -> Path:
+    manifest_path = tmp_path / "boards.toml"
+    manifest_path.write_text(
+        f"""
+[fixture]
+name = "Fixture Board"
+repo_url = "https://example.invalid/fixture"
+vcs = "github"
+commit = "{"a" * 40}"
+board_path = "fixture.kicad_pcb"
+license = "MIT"
+""",
+        encoding="utf-8",
+    )
+    (cache_dir / "fixture").mkdir(parents=True)
+    (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+    return manifest_path
+
+
+class TestRunBenchExternalCli:
+    def test_end_to_end_via_cli(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+
+        cache_dir = tmp_path / "cache"
+        manifest_path = _write_manifest(tmp_path, cache_dir)
+        output_dir = tmp_path / "out"
+
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--board",
+                "fixture",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--skip-fetch",
+                "--skip-kicad-cli-drc",
+                "--seed",
+                "7",
+            ]
+        )
+        rc = bench_cmd.run_bench_command(args)
+        assert rc == 0
+
+        json_path = output_dir / "fixture.zero-touch.json"
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        assert payload["board_id"] == "fixture"
+        assert payload["board_commit"] == "a" * 40
+        assert payload["completion"]["completion_pct"] == 100.0
+        assert payload["kicad_cli_drc"]["ran"] is False
+
+        # Markdown report is named per protocol (issue #4943) so a later
+        # --tuned run never overwrites -- or gets conflated with -- this
+        # zero-touch report.
+        assert (output_dir / "report.zero-touch.md").exists()
+        assert not (output_dir / "report.md").exists()
+        markdown = (output_dir / "report.zero-touch.md").read_text()
+        assert "fixture" in markdown
+        assert "zero-touch" in markdown
+
+    def test_unknown_board_slug_errors(self, tmp_path, capsys):
+        cache_dir = tmp_path / "cache"
+        manifest_path = _write_manifest(tmp_path, cache_dir)
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--board",
+                "does-not-exist",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--skip-fetch",
+            ]
+        )
+        assert bench_cmd.run_bench_command(args) == 1
+        assert "unknown board slug" in capsys.readouterr().err
+
+    def test_skip_fetch_without_cached_file_produces_no_reports(self, tmp_path, capsys):
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        manifest_path = tmp_path / "boards.toml"
+        manifest_path.write_text(
+            f"""
+[fixture]
+name = "Fixture Board"
+repo_url = "https://example.invalid/fixture"
+vcs = "github"
+commit = "{"a" * 40}"
+board_path = "fixture.kicad_pcb"
+license = "MIT"
+""",
+            encoding="utf-8",
+        )
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--skip-fetch",
+            ]
+        )
+        assert bench_cmd.run_bench_command(args) == 1
+        assert "no benchmark reports were produced" in capsys.readouterr().err
+
+    def test_no_subcommand_prints_usage(self, capsys):
+        args = create_parser().parse_args(["bench"])
+        assert bench_cmd.run_bench_command(args) == 1
+        out = capsys.readouterr().out
+        assert "Usage: kct bench" in out
+        assert "external" in out
+
+    def test_json_format_emits_single_document(self, tmp_path, monkeypatch, capsys):
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+
+        cache_dir = tmp_path / "cache"
+        manifest_path = _write_manifest(tmp_path, cache_dir)
+        output_dir = tmp_path / "out"
+
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--board",
+                "fixture",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--skip-fetch",
+                "--skip-kicad-cli-drc",
+                "--format",
+                "json",
+            ]
+        )
+        rc = bench_cmd.run_bench_command(args)
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        payload = json.loads(out)  # single JSON document -- would raise otherwise
+        assert payload["success"] is True
+        assert len(payload["reports"]) == 1
+        assert payload["reports"][0]["board_id"] == "fixture"
+        assert payload["errors"] == {}
+
+    def test_default_boards_run_every_manifest_entry(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+
+        cache_dir = tmp_path / "cache"
+        manifest_path = tmp_path / "boards.toml"
+        manifest_path.write_text(
+            f"""
+[fixture_a]
+name = "Fixture A"
+repo_url = "https://example.invalid/a"
+vcs = "github"
+commit = "{"a" * 40}"
+board_path = "a.kicad_pcb"
+license = "MIT"
+
+[fixture_b]
+name = "Fixture B"
+repo_url = "https://example.invalid/b"
+vcs = "github"
+commit = "{"b" * 40}"
+board_path = "b.kicad_pcb"
+license = "MIT"
+""",
+            encoding="utf-8",
+        )
+        for slug, filename in (("fixture_a", "a.kicad_pcb"), ("fixture_b", "b.kicad_pcb")):
+            board_dir = cache_dir / slug
+            board_dir.mkdir(parents=True)
+            (board_dir / filename).write_text(SOURCE_FIXTURE, encoding="utf-8")
+
+        output_dir = tmp_path / "out"
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--skip-fetch",
+                "--skip-kicad-cli-drc",
+            ]
+        )
+        rc = bench_cmd.run_bench_command(args)
+        assert rc == 0
+        assert (output_dir / "fixture_a.zero-touch.json").exists()
+        assert (output_dir / "fixture_b.zero-touch.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# --tuned protocol, end-to-end (issue #4943)
+# ---------------------------------------------------------------------------
+
+
+class TestTunedProtocolCli:
+    def test_tuned_unsupported_board_records_per_board_error(self, tmp_path, monkeypatch, capsys):
+        """``--tuned`` against a board with no declared config (real
+        ``tuned_rules.py`` only covers STRF) must fail that board with a
+        clear message -- never silently fall back to zero-touch rules.
+        """
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+
+        cache_dir = tmp_path / "cache"
+        manifest_path = _write_manifest(tmp_path, cache_dir)
+        output_dir = tmp_path / "out"
+
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--board",
+                "fixture",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--skip-fetch",
+                "--skip-kicad-cli-drc",
+                "--tuned",
+            ]
+        )
+        rc = bench_cmd.run_bench_command(args)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "fixture" in err
+        assert "STRF only" in err
+
+        # No report was produced for the unsupported board.
+        assert not (output_dir / "fixture.tuned.json").exists()
+        assert not (output_dir / "report.tuned.md").exists()
+
+    def test_tuned_end_to_end_via_cli(self, tmp_path, monkeypatch):
+        """A board WITH a declared tuned config (monkeypatched here, since
+        production ``tuned_rules.py`` only defines STRF and this fixture
+        board isn't STRF) runs the full tuned pipeline: sidecar written,
+        ``--net-class-map``/``--differential-pairs`` passed to the router,
+        report tagged ``protocol="tuned"``, output files kept separate
+        from the zero-touch names.
+        """
+        from kicad_tools.cli import route_cmd
+
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            route_cmd,
+            "main_with_result",
+            _make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured),
+        )
+
+        tuned_rules = bench_cmd._load_tuned_rules()
+        fake_ncm = {"SIG1": {"name": "Tuned", "trace_width": 0.3}}
+        monkeypatch.setattr(
+            tuned_rules,
+            "build_tuned_net_class_map",
+            lambda slug: fake_ncm if slug == "fixture" else None,
+        )
+        monkeypatch.setattr(
+            tuned_rules,
+            "diff_pairs_for",
+            lambda slug: None,
+        )
+
+        cache_dir = tmp_path / "cache"
+        manifest_path = _write_manifest(tmp_path, cache_dir)
+        output_dir = tmp_path / "out"
+
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--board",
+                "fixture",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--skip-fetch",
+                "--skip-kicad-cli-drc",
+                "--seed",
+                "7",
+                "--tuned",
+            ]
+        )
+        rc = bench_cmd.run_bench_command(args)
+        assert rc == 0
+
+        # Sidecar written under output_dir/tuned/, matching the monkeypatched config.
+        ncm_path = output_dir / "tuned" / "fixture.net_class_map.json"
+        assert ncm_path.exists()
+        assert json.loads(ncm_path.read_text()) == fake_ncm
+
+        # Router was invoked with the tuned-protocol flags.
+        assert len(captured) == 1
+        assert "--net-class-map" in captured[0]
+        assert str(ncm_path) in captured[0]
+        assert "--differential-pairs" in captured[0]
+
+        # Report is tagged "tuned" and kept in tuned-named files, distinct
+        # from the zero-touch names.
+        json_path = output_dir / "fixture.tuned.json"
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        assert payload["protocol"] == "tuned"
+        assert not (output_dir / "fixture.zero-touch.json").exists()
+
+        assert (output_dir / "report.tuned.md").exists()
+        assert not (output_dir / "report.zero-touch.md").exists()
+        markdown = (output_dir / "report.tuned.md").read_text()
+        assert "tuned" in markdown
+
+    def test_tuned_flag_defaults_false(self):
+        """``--tuned`` is opt-in; the bare ``bench external`` subcommand
+        stays zero-touch (backward compatible with issue #4941's CLI).
+        """
+        args = create_parser().parse_args(["bench", "external"])
+        assert getattr(args, "tuned", False) is False
+
+
+@pytest.mark.parametrize(
+    "signal,write_output,expected",
+    [
+        ("refusal", False, "stopped_before_routing"),
+        ("search_failure", False, "failed"),
+        ("deadline", False, "timeout"),
+        ("deadline", True, "timeout"),
+        ("timeout_error", False, "timeout"),
+        ("timeout_error", True, "timeout"),
+        ("subprocess_timeout", False, "timeout"),
+        ("subprocess_timeout", True, "timeout"),
+    ],
+)
+def test_runner_preserves_phase_evidence_and_attempt_time(
+    tmp_path, monkeypatch, signal, write_output, expected
+):
+    import subprocess
+
+    from kicad_tools.cli.route_deadline import TIMEOUT_EXIT
+    from kicad_tools.router.crosstail_advisory import GATE_EXIT_CODE
+
+    fetch_boards, normalize = bench_cmd._load_external_modules()
+    cache_dir = tmp_path / "cache"
+    (cache_dir / "fixture").mkdir(parents=True)
+    (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE)
+    entered_search = []
+
+    def route(argv):
+        if signal == "refusal":
+            return GATE_EXIT_CODE
+        entered_search.append(True)
+        if write_output:
+            Path(argv[argv.index("-o") + 1]).write_text(ROUTED_OUTPUT_FIXTURE)
+        if signal == "timeout_error":
+            raise TimeoutError("routing budget exhausted")
+        if signal == "subprocess_timeout":
+            raise subprocess.TimeoutExpired("route", 2.5)
+        return TIMEOUT_EXIT if signal == "deadline" else 1
+
+    ticks = iter([10.0, 12.5])
+    # Later measurement/check calls use the real clock.
+    real_clock = bench_cmd.time.perf_counter
+    monkeypatch.setattr(bench_cmd.time, "perf_counter", lambda: next(ticks, real_clock()))
+    report = bench_cmd._run_one_board(
+        _spec(fetch_boards),
+        fetch_boards,
+        normalize,
+        cache_dir=cache_dir,
+        output_dir=tmp_path / "out",
+        seed=1,
+        manufacturer="jlcpcb",
+        layers=2,
+        skip_fetch=True,
+        run_kicad_cli=False,
+        kicad_cli_timeout=60,
+        backend=_cpp_backend(),
+        verbose=False,
+        route_fn=route,
+    )
+    assert bool(entered_search) == (signal != "refusal")
+    assert report.route_outcome.outcome == expected
+    assert report.route_outcome.artifact_source == (
+        "router_output" if write_output else "fallback_input"
+    )
+    assert report.timing.wall_clock_s == 2.5
+    assert report.timing.measured_phase == expected
+
+
+@pytest.mark.parametrize("write_output,exit_code", [(True, 2), (False, 2), (True, 0)])
+def test_attempt_local_placement_reporting(tmp_path, write_output, exit_code):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+    from kicad_tools.router.reporting import RouteAttemptResult
+
+    fetch, normalize = bench_cmd._load_external_modules()[:2]
+    spec = _spec(fetch)
+    cache = tmp_path / "cache"
+    source = cache / spec.slug / Path(spec.board_path).name
+    source.parent.mkdir(parents=True)
+    source.write_text(SOURCE_FIXTURE)
+    disposition = RoutingPlacementDisposition(
+        all_nets=frozenset({"SIG1"}),
+        invalid_references=frozenset({"R1"}),
+        direct_invalid_nets=frozenset({"SIG1"}),
+        requested_nets=frozenset({"SIG1"}),
+    )
+
+    def route(argv):
+        if write_output:
+            Path(argv[argv.index("-o") + 1]).write_text(ROUTED_OUTPUT_FIXTURE)
+        return RouteAttemptResult(exit_code, disposition)
+
+    kwargs = {
+        "cache_dir": cache,
+        "output_dir": tmp_path / "out",
+        "seed": 0,
+        "manufacturer": "jlcpcb",
+        "layers": 2,
+        "skip_fetch": True,
+        "run_kicad_cli": False,
+        "kicad_cli_timeout": 10,
+        "backend": _cpp_backend(),
+        "verbose": False,
+    }
+    report = bench_cmd._run_one_board(spec, fetch, normalize, route_fn=route, **kwargs)
+    encoded = report.to_dict()
+    assert encoded["placement_disposition"]["requested_blocked_nets"] == ["SIG1"]
+    assert encoded["placement_disposition"]["completed_nets"] == []
+    assert encoded["placement_disposition"]["invalid_references"] == ["R1"]
+    assert report.route_outcome.outcome == ("partial" if write_output else "failed")
+    assert report.completion.connections_routed == (2 if write_output else 0)
+    assert report.newly_routed_connections == (2 if write_output else 0)
+    assert report.copper.segment_count == (2 if write_output else 0)
+    # Same paths reused with a legacy integer callback: neither artifact nor
+    # metadata from the prior attempt may survive.
+    legacy = bench_cmd._run_one_board(
+        spec, fetch, normalize, route_fn=_make_stub_route(write_output=False), **kwargs
+    )
+    assert legacy.to_dict()["placement_disposition"] is None
+    assert legacy.completion.connections_routed == 0
+
+
+def test_unavailable_placement_preserves_permissive_success(tmp_path):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+    from kicad_tools.router.reporting import RouteAttemptResult
+
+    fetch, normalize = bench_cmd._load_external_modules()
+    cache = tmp_path / "cache"
+    (cache / "fixture").mkdir(parents=True)
+    (cache / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE)
+    disposition = RoutingPlacementDisposition(
+        requested_nets=frozenset({"SIG1"}),
+        check_available=False,
+    )
+
+    def route(argv):
+        Path(argv[argv.index("-o") + 1]).write_text(ROUTED_OUTPUT_FIXTURE)
+        return RouteAttemptResult(0, disposition)
+
+    report = bench_cmd._run_one_board(
+        _spec(fetch),
+        fetch,
+        normalize,
+        cache_dir=cache,
+        output_dir=tmp_path / "out",
+        seed=0,
+        manufacturer="jlcpcb",
+        layers=2,
+        skip_fetch=True,
+        run_kicad_cli=False,
+        kicad_cli_timeout=10,
+        backend=_cpp_backend(),
+        verbose=False,
+        route_fn=route,
+    )
+    assert report.route_outcome.outcome == "completed"
+    assert report.timing.measured_phase == "completed"
+    data = report.to_dict()["placement_disposition"]
+    assert data["status"] == "unavailable"
+    assert data["completed_nets"] == ["SIG1"]
+    assert data["clean_success"] is False  # Unknown assurance, not a new route failure.
+
+
+# ---------------------------------------------------------------------------
+# --suite pcbworld (issue #6331): PCBWorld, KiCad and the network are all mocked
+# ---------------------------------------------------------------------------
+
+
+class TestPCBWorldSuiteCli:
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        from tests.test_benchmark_pcbworld import _fake_cli
+
+        monkeypatch.setenv("PCBWORLD_PYTHON", "/opt/pcbworld/bin/python")
+        monkeypatch.setenv("KICAD_CLI", _fake_cli(tmp_path))
+        monkeypatch.setenv("PCBNEW_PYTHON", "/usr/bin/python3-kicad")
+
+    def _args(self, tmp_path, *extra):
+        return create_parser().parse_args(
+            [
+                "bench", "external", "--suite", "pcbworld", "--split", "d3a", "--limit", "2",
+                "--cache-dir", str(tmp_path / "cache"), "--output-dir", str(tmp_path / "out"),
+                "--skip-kicad-cli-drc", *extra,
+            ]
+        )  # fmt: skip
+
+    def _stub_guide_route(self, monkeypatch, captured):
+        from kicad_tools.cli import route_cmd
+
+        def route(argv):
+            captured.append(list(argv))
+            out = Path(argv[argv.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(Path(argv[0]).read_text(encoding="utf-8"), encoding="utf-8")
+            return 0
+
+        monkeypatch.setattr(route_cmd, "main_with_result", route)
+
+    def test_parser_flags_default_to_existing_behaviour(self):
+        args = create_parser().parse_args(["bench", "external"])
+        assert args.suite is None and args.split is None and args.limit is None
+
+    def test_end_to_end_keeps_pcbworld_cp_distinct_from_local_gates(
+        self, tmp_path, monkeypatch, env, capsys
+    ):
+        from tests.test_benchmark_pcbworld import NAMES, FakeOpener, make_runner
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        monkeypatch.setattr("kicad_tools.benchmark.external.probe_backend", lambda: _cpp_backend())
+        # normalize must never run on guide boards.
+        normalize_calls: list = []
+        _, normalize = bench_cmd._load_external_modules()
+        monkeypatch.setattr(normalize, "normalize_board", lambda *a, **k: normalize_calls.append(a))
+
+        def rows(boards):
+            return [
+                {"board_id": b.stem.rsplit("_kct_s", 1)[0], "rollout_idx": 0, "seed": 42,
+                 "eval_status": "ok", "eval_error": "", "clean_pass": "True",
+                 "routability": 1.0, "drv_errors_only_count": 0, "potential_gain": 1.5,
+                 "final_potential": 2.0}
+                for b in boards
+            ]  # fmt: skip
+
+        pcbworld = bench_cmd._load_pcbworld()
+        corpus = pcbworld.load_corpus()
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path),
+            runner=make_runner(eval_rows=rows),
+            opener=FakeOpener(corpus),
+        )
+        assert rc == 0
+        assert normalize_calls == []
+        assert len(captured) == 2  # --limit 2 -> two boards routed
+
+        out = tmp_path / "out"
+        slug = f"pcbworld_d3a_{NAMES[0]}"
+        payload = json.loads((out / f"{slug}.zero-touch.json").read_text())
+        assert payload["schema_version"] == 1
+        assert payload["board_id"] == f"pcbworld/d3a/{NAMES[0]}"
+        pw = payload["external_scores"]["pcbworld"]
+        assert pw["clean_pass"] is True and pw["potential_gain"] == 1.5
+        assert pw["kicad_version"] == "9.0.3"
+        assert pw["pcbworld_commit"] == corpus.pcbworld_commit
+        assert pw["pcbench_commit"] == corpus.pcbench_commit
+        # Local gates are reported separately, not folded into PCBWorld's verdict.
+        assert payload["kicad_cli_drc"]["ran"] is False
+        assert "kct_check" in payload
+        md = (out / "report.pcbworld.d3a.md").read_text()
+        assert "PCBWorld CP" in md and "kicad-cli DRC" in md
+
+    def test_missing_tool_env_fails_actionably(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("PCBWORLD_PYTHON", raising=False)
+        rc = bench_cmd.run_bench_command(self._args(tmp_path))
+        assert rc == 1
+        assert "PCBWORLD_PYTHON" in capsys.readouterr().err
+
+    def test_kicad_10_fails_instead_of_scoring(self, tmp_path, monkeypatch, env, capsys):
+        from tests.test_benchmark_pcbworld import make_runner
+
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path), runner=make_runner(kicad_version="10.0.1")
+        )
+        assert rc == 1
+        assert "requires KiCad 9" in capsys.readouterr().err
+
+    def test_unscorable_board_is_null_not_zero(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import FakeOpener, make_runner
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        pcbworld = bench_cmd._load_pcbworld()
+        # The scorer produces no per_rollout rows at all.
+        rc = bench_cmd._run_bench_pcbworld(
+            self._args(tmp_path, "--format", "json"),
+            runner=make_runner(eval_rows=lambda boards: []),
+            opener=FakeOpener(pcbworld.load_corpus()),
+        )
+        assert rc == 0
+        payload = json.loads(
+            (next((tmp_path / "out").glob("pcbworld_d3a_*.zero-touch.json"))).read_text()
+        )
+        pw = payload["external_scores"]["pcbworld"]
+        assert pw["available"] is False
+        assert pw["clean_pass"] is None and pw["routability"] is None
+        assert pw["unavailable_reason"]
+
+    def test_suite_rejects_board_and_tuned(self, tmp_path, env, capsys):
+        rc = bench_cmd.run_bench_command(self._args(tmp_path, "--tuned"))
+        assert rc == 1
+        assert "does not support" in capsys.readouterr().err
+
+    def test_default_suite_unchanged_by_suite_flag(self, tmp_path, capsys):
+        """`--suite deeppcb` is the existing path (unknown slug error proves it ran)."""
+        args = create_parser().parse_args(
+            ["bench", "external", "--suite", "deeppcb", "--board", "nope"]
+        )
+        assert bench_cmd.run_bench_command(args) == 1
+        assert "unknown board slug" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# --suite pcbworld D3 runs (issue #6332): rollouts, resume, bounded windows
+# ---------------------------------------------------------------------------
+
+
+class TestPCBWorldD3Run(TestPCBWorldSuiteCli):
+    """Inherits the env / stub fixtures; every external tool remains mocked."""
+
+    @staticmethod
+    def _rows(gain_by_seed=None, clean_seeds=(43,)):
+        def rows(boards):
+            out = []
+            for b in boards:
+                name, rest = b.stem.rsplit("_kct_s", 1)
+                seed = int(rest.split("_r", 1)[0])
+                out.append({
+                    "board_id": name, "rollout_idx": 0, "seed": seed, "eval_status": "ok",
+                    "eval_error": "", "clean_pass": str(seed in clean_seeds),
+                    "routability": 1.0, "drv_errors_only_count": 0 if seed in clean_seeds else 2,
+                    "potential_gain": (gain_by_seed or {}).get(seed, 0.0),
+                    "final_potential": 1.0,
+                })  # fmt: skip
+            return out
+
+        return rows
+
+    def _run(self, tmp_path, *extra, rows=None, runner=None):
+        from tests.test_benchmark_pcbworld import FakeOpener, make_runner
+
+        pcbworld = bench_cmd._load_pcbworld()
+        args = create_parser().parse_args(
+            ["bench", "external", "--suite", "pcbworld", "--split", "d3a", "--full-split",
+             "--cache-dir", str(tmp_path / "cache"), "--output-dir", str(tmp_path / "out"),
+             "--skip-kicad-cli-drc", *extra]
+        )  # fmt: skip
+        return bench_cmd._run_bench_pcbworld(
+            args,
+            runner=runner or make_runner(eval_rows=rows or self._rows()),
+            opener=FakeOpener(pcbworld.load_corpus()),
+        )
+
+    def _results(self, tmp_path):
+        return json.loads((tmp_path / "out" / "results.json").read_text())
+
+    def test_every_board_gets_every_rollout_and_at5_uses_max_gain(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import NAMES
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        monkeypatch.setattr("kicad_tools.benchmark.external.probe_backend", lambda: _cpp_backend())
+        # seed 43 (rollout 1) is the clean one but seed 44 has the larger gain.
+        rows = self._rows(gain_by_seed={43: 1.0, 44: 5.0}, clean_seeds=(43,))
+        rc = self._run(tmp_path, "--rollouts", "3", "--route-timeout", "60", rows=rows)
+        assert rc == 0
+        assert len(captured) == 3 * len(NAMES)
+        assert all(argv[argv.index("--timeout") + 1] == "60" for argv in captured)
+        assert sorted({argv[argv.index("--seed") + 1] for argv in captured}) == ["42", "43", "44"]
+        res = self._results(tmp_path)
+        assert res["board_ids"] == [f"pcbworld/d3a/{n}" for n in NAMES]
+        assert len(res["attempts"]) == 9 and res["run"]["seeds"] == [42, 43, 44]
+        rec = res["attempts"][0]
+        assert rec["identity"]["input_sha256"] and rec["identity"]["tool_commit"]
+        assert rec["identity"]["pcbworld_commit"] == res["provenance"]["pcbworld_commit"]
+        assert res["provenance"]["router_backend"] == "cpp"
+        assert "host_cpu_count" in res["provenance"]
+        assert rec["human_wirelength_mm"] == pytest.approx(10.0)  # routed guide = reference
+        from kicad_tools.benchmark.external import aggregate_d3
+
+        agg = aggregate_d3(res["attempts"], board_ids=res["board_ids"], rollouts=3)
+        assert agg["full"]["at1"]["pcbworld_clean_pass"]["passed"] == 0
+        assert agg["full"]["at5"]["pcbworld_clean_pass"]["passed"] == 0  # max gain = seed 44
+        md = (tmp_path / "out" / "report.d3.md").read_text()
+        assert "PCBWorld Clean Pass" in md and "Freerouting" in md and "TraceMaker" in md
+
+    def test_bounded_run_then_resume_reuses_only_current_attempts(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import NAMES
+
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        assert self._run(tmp_path, "--max-attempts", "2") == 0
+        assert len(captured) == 2
+        res = self._results(tmp_path)
+        assert len(res["attempts"]) == 2
+        md = (tmp_path / "out" / "report.d3.md").read_text()
+        assert "1 missing" in md and "Complete (every attempt has a known verdict): **no**" in md
+
+        captured.clear()
+        assert self._run(tmp_path, "--resume") == 0
+        assert len(captured) == len(NAMES) - 2  # only the not-yet-attempted board
+        assert len(self._results(tmp_path)["attempts"]) == len(NAMES)
+
+        # A changed tool commit makes every earlier record stale: all re-run.
+        captured.clear()
+        monkeypatch.setattr(
+            "kicad_tools.benchmark.external.metrics._tool_commit", lambda: "deadbeef"
+        )
+        assert self._run(tmp_path, "--resume") == 0
+        assert len(captured) == len(NAMES)
+        assert {r["identity"]["tool_commit"] for r in self._results(tmp_path)["attempts"]} == {
+            "deadbeef"
+        }
+
+    def test_fresh_run_without_resume_never_inherits_records(self, tmp_path, monkeypatch, env):
+        captured: list[list[str]] = []
+        self._stub_guide_route(monkeypatch, captured)
+        assert self._run(tmp_path) == 0
+        n = len(captured)
+        assert self._run(tmp_path) == 0
+        assert len(captured) == 2 * n
+
+    def test_prep_failure_is_a_record_not_a_dropped_board(self, tmp_path, monkeypatch, env):
+        from tests.test_benchmark_pcbworld import NAMES, make_runner
+
+        self._stub_guide_route(monkeypatch, [])
+        runner = make_runner(eval_rows=self._rows(), skip_guide_for=(NAMES[1][5:],))
+        rc = self._run(tmp_path, "--rollouts", "2", runner=runner)
+        assert rc == 1  # a prep failure is surfaced
+        res = self._results(tmp_path)
+        failed = [r for r in res["attempts"] if r["board_id"].endswith(NAMES[1])]
+        assert [r["status"] for r in failed] == ["prep_failed", "prep_failed"]
+        assert len(res["attempts"]) == 2 * len(NAMES)
+
+    def test_route_without_output_is_a_failure_row(self, tmp_path, monkeypatch, env):
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "main_with_result", lambda argv: 1)
+        assert self._run(tmp_path, "--limit", "1") == 0
+        rec = self._results(tmp_path)["attempts"][0]
+        assert rec["status"] == "route_no_output"
+        assert rec["failure_class"].startswith("route_no_output")
+
+    def test_deterministic_baseline_rejects_multiple_rollouts(self, tmp_path, env, capsys):
+        rc = self._run(tmp_path, "--deterministic-baseline", "--rollouts", "5")
+        assert rc == 1 and "deterministic" in capsys.readouterr().err
+
+    def test_render_d3_round_trips_byte_identically(self, tmp_path, monkeypatch, env):
+        self._stub_guide_route(monkeypatch, [])
+        assert self._run(tmp_path, "--rollouts", "2") == 0
+        report = tmp_path / "out" / "report.d3.md"
+        before = report.read_text()
+        report.unlink()
+        args = create_parser().parse_args(
+            ["bench", "external", "--render-d3", str(tmp_path / "out" / "results.json")]
+        )
+        assert bench_cmd.run_bench_command(args) == 0
+        assert report.read_text() == before
+
+
+def test_committed_d3_results_rerender_cleanly():
+    """Every committed PCBWorld results.json re-renders to its committed report."""
+    from kicad_tools.benchmark.external import render_d3_markdown
+
+    root = Path(__file__).resolve().parent.parent / "benchmarks" / "external" / "results"
+    found = sorted(root.glob("*/results.json"))
+    for path in found:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("schema") != "kct-pcbworld-d3-results/1":
+            continue
+        assert render_d3_markdown(data) == path.with_name("report.d3.md").read_text(
+            encoding="utf-8"
+        ), f"{path}: re-render differs -- run `kct bench external --render-d3 {path}`"

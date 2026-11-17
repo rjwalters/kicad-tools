@@ -1,0 +1,381 @@
+"""DRC violation models for pure Python validation.
+
+This module defines the data structures used to represent DRC violations
+and results from the pure Python DRC checker.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from .mask_copper import MaskCopperAssessment
+
+
+@dataclass(frozen=True)
+class DRCViolation:
+    """Represents a single DRC violation found by the checker.
+
+    This class is hashable (frozen) to support deduplication of violations.
+
+    Attributes:
+        rule_id: Unique identifier for the rule, e.g., "clearance_trace_trace"
+        severity: One of "error", "warning", or "info".  ``info`` is used
+            for advisory findings that are categorized by the rule as
+            non-actionable (e.g., a single-pad net that matches the
+            KiCad-emitted ``unconnected-(REF-PIN-PadN)`` convention for
+            explicit symbol no-connect pins).
+        message: Human-readable description of the violation
+        location: (x_mm, y_mm) tuple of the violation location, or None
+        layer: Layer name where violation occurs, e.g., "F.Cu"
+        actual_value: The measured value that violated the rule
+        required_value: The minimum/maximum value required by the rule
+        items: Tuple of item references involved, e.g., ("D1", "C5")
+        waived: When True, this finding was matched by a pair-level waiver
+            entry (e.g. ``.courtyard_waivers.json``).  Waived findings keep
+            their underlying ``severity`` (typically ``"error"``) but are
+            reported with a distinct ``WAIVED`` status, counted separately
+            in :attr:`DRCResults.waived_count`, and excluded from
+            ``error_count`` / ``warning_count`` / ``info_count`` so they
+            never fail the gate.  This is orthogonal to ``severity`` (Issue
+            #4137): the underlying defect classification is preserved for
+            audit, while the gate treats an intentional, documented
+            exception as non-blocking.
+        waiver_reason: Human-readable justification from the waiver entry
+            (present only when ``waived`` is True).
+        waiver_issue: Tracking reference from the waiver entry, e.g.
+            ``"chorus#13"`` (present only when ``waived`` is True).
+        evidence_hash: Hash of the finding's local evidence (geometry,
+            measured values, named footprints and net membership), attached
+            by :func:`kicad_tools.validate.evidence.annotate_evidence`
+            (Issue #5946).  ``None`` until annotated.
+        stale_waiver_hash: When an evidence-bound waiver names this finding's
+            :attr:`key` but its ``evidence_hash`` no longer matches, the
+            waiver is **stale**: the finding stays active (never suppressed)
+            and this field records the hash the waiver was reviewed against
+            (Issue #5946).
+        stale_waiver_reason: The stale waiver's ``reason`` (present only when
+            ``stale_waiver_hash`` is set).
+        fab_band: The fab band the finding was graded against, ``"trace"`` or
+            ``"pad"``, on a fab-band-graded ``physical_copper_gap`` finding
+            (Issue #8972).  ``None`` when the emitting site has no band
+            concept.  Labels the population only -- it never enters
+            :attr:`key`, so waiver identity is band-independent.
+        corner_class: The population of the ``sharp_trace_corner`` rule a
+            finding belongs to, ``"bend"`` (two segments meet at the vertex)
+            or ``"junction"`` (three or more do) (Issue #9037).  ``None``
+            when the emitting rule does not classify.  Labels the population
+            only -- it never enters :attr:`key`, so waiver identity is
+            class-independent.
+    """
+
+    rule_id: str
+    severity: str
+    message: str
+    location: tuple[float, float] | None = None
+    layer: str | None = None
+    actual_value: float | None = None
+    required_value: float | None = None
+    items: tuple[str, ...] = ()
+    nets: tuple[str, ...] = ()
+    # Issue #8938: True when every side of the finding sits on one net (a
+    # same-net slit).  The fab cannot see nets and fails the board on such a
+    # gap regardless, so the gap is still severity-graded -- this flag only
+    # labels the class, so a project can waive it deliberately through
+    # ``.kct_waivers.json`` instead of never seeing it.  ``None`` when the
+    # emitting rule does not classify (``physical_copper_gap`` always does).
+    same_net: bool | None = None
+    # Issue #8972: the fab band a ``physical_copper_gap`` finding was graded
+    # against -- ``"trace"`` or ``"pad"`` (the fab's ``trace_spacing`` /
+    # ``pad_spacing`` populations, issue #8938).  Like ``same_net`` this only
+    # labels the population so consumers (the fab-DFM parity attribution)
+    # can tell them apart without splitting the user-visible ``rule_id`` --
+    # ``DRCViolation.key`` embeds ``rule_id``, so an id split would break
+    # every existing ``.kct_waivers.json`` entry for this rule.  ``None``
+    # when the emitting site has no band concept (the legacy opt-in pass,
+    # the zone-fill ``info`` branch).
+    fab_band: str | None = None
+    # Issue #9037: which population of the ``sharp_trace_corner`` rule a
+    # finding belongs to -- ``"bend"`` (exactly two segments meet at the
+    # vertex, the subset JLCDFM was observed to flag) or ``"junction"``
+    # (three or more do, reported by operator ruling on PR #8848 but not
+    # observed fab behaviour).  Like ``fab_band`` this only labels the
+    # population so consumers can gate on the fab-equivalent subset without
+    # splitting the user-visible ``rule_id`` -- ``DRCViolation.key`` embeds
+    # ``rule_id``, so an id split would break every existing
+    # ``.kct_waivers.json`` entry for this rule.  ``None`` when the emitting
+    # rule does not classify.
+    corner_class: str | None = None
+    waived: bool = False
+    waiver_reason: str | None = None
+    waiver_issue: str | None = None
+    closest_locations: tuple[tuple[float, float], ...] = ()
+    evidence_hash: str | None = None
+    stale_waiver_hash: str | None = None
+    stale_waiver_reason: str | None = None
+    # Issue #8867: why an *unused* waiver advisory matched nothing, when the
+    # cause is a known key migration (e.g. ``path_ampacity_per_layer_key``).
+    unused_waiver_cause: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate severity value."""
+        if self.severity not in ("error", "warning", "info"):
+            raise ValueError(
+                f"severity must be 'error', 'warning', or 'info', got {self.severity!r}"
+            )
+
+    @property
+    def is_error(self) -> bool:
+        """Check if this is a blocking error (not waived, warning, or info)."""
+        return self.severity == "error" and not self.waived
+
+    @property
+    def is_warning(self) -> bool:
+        """Check if this is a warning (not an error, info, or waived)."""
+        return self.severity == "warning" and not self.waived
+
+    @property
+    def is_info(self) -> bool:
+        """Check if this is an informational finding (not error/warning/waived)."""
+        return self.severity == "info" and not self.waived
+
+    @property
+    def is_waived(self) -> bool:
+        """Check if this finding was matched by a waiver entry."""
+        return self.waived
+
+    @property
+    def key(self) -> str:
+        """Stable finding key: ``rule_id|items|nets|layer`` (Issue #5946).
+
+        Independent of location, measured values and message wording, so the
+        same finding keeps its key across board revisions.  See
+        :mod:`kicad_tools.validate.evidence`.
+        """
+        from .evidence import finding_key
+
+        return finding_key(self.rule_id, self.items, self.nets, self.layer)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization.
+
+        Includes a ``type`` field that mirrors ``rule_id`` so that
+        downstream consumers (e.g., ``drc.report._parse_kct_check_json``)
+        can resolve the violation to a ``ViolationType`` enum member via
+        ``ViolationType.from_string()``.
+        """
+        from kicad_tools.drc.violation import ViolationType
+
+        resolved_type = ViolationType.from_string(self.rule_id)
+        data: dict = {
+            "rule_id": self.rule_id,
+            "type": resolved_type.value,
+            "severity": self.severity,
+            "message": self.message,
+            "location": list(self.location) if self.location else None,
+            "layer": self.layer,
+            "actual_value": self.actual_value,
+            "required_value": self.required_value,
+            "items": list(self.items),
+            "nets": list(self.nets),
+            # Issue #8938: labels the same-net class without re-deriving it
+            # from ``nets`` (and stays None for rules that do not classify).
+            "same_net": self.same_net,
+            # Issue #8972: labels the fab band the finding was graded against
+            # (stays None for bandless emit sites); never part of ``key``.
+            "fab_band": self.fab_band,
+            # Issue #9037: labels the ``sharp_trace_corner`` population
+            # (``"bend"``/``"junction"``; stays None for rules that do not
+            # classify); never part of ``key`` -- this is the machine handle
+            # a consumer gates the fab-equivalent bend subset on.
+            "corner_class": self.corner_class,
+            # Status distinguishes a waived finding from an active one at a
+            # glance for JSON consumers.  Waived findings render as
+            # ``"waived"`` regardless of their underlying ``severity`` (Issue
+            # #4137).
+            "status": "waived" if self.waived else self.severity,
+            "waived": self.waived,
+            # Issue #5946: stable identity + local-evidence hash, the two
+            # handles an evidence-bound waiver and ``kct check --diff`` use.
+            "key": self.key,
+            "evidence_hash": self.evidence_hash,
+        }
+        if self.closest_locations:
+            data["closest_locations"] = [list(point) for point in self.closest_locations]
+        if self.waived:
+            data["waiver_reason"] = self.waiver_reason
+            data["waiver_issue"] = self.waiver_issue
+        if self.stale_waiver_hash is not None:
+            data["waiver_status"] = "stale"
+            data["stale_waiver_evidence_hash"] = self.stale_waiver_hash
+            data["stale_waiver_reason"] = self.stale_waiver_reason
+            # Issue #6011: tell an upgrade-induced stale (the waiver's hash
+            # was computed by an older evidence recipe) from a board edit.
+            from .evidence import is_outdated_evidence_hash
+
+            data["stale_waiver_cause"] = (
+                "outdated_evidence_version"
+                if is_outdated_evidence_hash(self.stale_waiver_hash)
+                else "evidence_changed"
+            )
+        elif self.unused_waiver_cause is not None:
+            data["stale_waiver_cause"] = self.unused_waiver_cause
+        return data
+
+
+@dataclass
+class DRCResults:
+    """Aggregates all DRC violations from a check run.
+
+    Provides convenient access to violation counts and filtering.
+
+    Attributes:
+        violations: List of all violations found
+        rules_checked: Number of rules that were checked (aggregate)
+        rules_checked_by_rule: Per-rule check counter mapping
+            ``rule_id -> count`` of times the rule actually ran (Issue
+            #2660 / Epic #2556 Phase 4N).  Rules that short-circuit
+            (e.g., a diff-pair rule on a board with no engaged pairs)
+            contribute ``0`` -- and the absence of an entry / a value of
+            ``0`` is the CI-side signal that the rule did NOT exercise
+            on the board.  Allows the ``diffpair-routing-regression``
+            CI gate to assert that the three diff-pair rules
+            (``diffpair_clearance_intra``, ``diffpair_length_skew``,
+            ``diffpair_routing_continuity``) actually ran against
+            board 06 on every PR, catching regressions in detection
+            logic (e.g., accidentally flipping ``coupled_routing`` back
+            to ``False``) that would otherwise silently report 0
+            errors.
+        suppressed_count: Number of violations suppressed by filters
+    """
+
+    violations: list[DRCViolation] = field(default_factory=list)
+    rules_checked: int = 0
+    rules_checked_by_rule: dict[str, int] = field(default_factory=dict)
+    suppressed_count: int = 0
+    mask_copper_assessments: list[MaskCopperAssessment] = field(default_factory=list)
+    # Issue #8131: whether the attach-zone exemption was applied by
+    # ``netclass_clearance_copper`` (``active`` / ``suppressed``); ``None`` when
+    # not applicable.  ``attach_zone_unexempted`` counts the findings the
+    # exemption would have waived.
+    attach_zone_exemption: str | None = None
+    attach_zone_exemption_reason: str | None = None
+    attach_zone_unexempted: int = 0
+
+    @property
+    def error_count(self) -> int:
+        """Count of violations with severity='error'."""
+        return sum(1 for v in self.violations if v.is_error)
+
+    @property
+    def warning_count(self) -> int:
+        """Count of violations with severity='warning'."""
+        return sum(1 for v in self.violations if v.is_warning)
+
+    @property
+    def info_count(self) -> int:
+        """Count of violations with severity='info'."""
+        return sum(1 for v in self.violations if v.is_info)
+
+    @property
+    def waived_count(self) -> int:
+        """Count of findings matched by a waiver entry (Issue #4137).
+
+        Waived findings are visible and counted here but excluded from
+        ``error_count`` / ``warning_count`` / ``info_count`` so they never
+        contribute to the gate verdict.
+        """
+        return sum(1 for v in self.violations if v.is_waived)
+
+    @property
+    def passed(self) -> bool:
+        """True if no errors (warnings and infos are allowed)."""
+        return self.error_count == 0 and all(a.passed for a in self.mask_copper_assessments)
+
+    @property
+    def errors(self) -> list[DRCViolation]:
+        """List of only error violations."""
+        return [v for v in self.violations if v.is_error]
+
+    @property
+    def warnings(self) -> list[DRCViolation]:
+        """List of only warning violations."""
+        return [v for v in self.violations if v.is_warning]
+
+    @property
+    def infos(self) -> list[DRCViolation]:
+        """List of only informational violations."""
+        return [v for v in self.violations if v.is_info]
+
+    @property
+    def waived(self) -> list[DRCViolation]:
+        """List of only waived findings (Issue #4137)."""
+        return [v for v in self.violations if v.is_waived]
+
+    def __iter__(self):
+        """Iterate over all violations."""
+        return iter(self.violations)
+
+    def __len__(self) -> int:
+        """Total number of violations."""
+        return len(self.violations)
+
+    def __bool__(self) -> bool:
+        """True if there are any violations."""
+        return len(self.violations) > 0
+
+    def add(self, violation: DRCViolation) -> None:
+        """Add a violation to the results."""
+        self.violations.append(violation)
+
+    def merge(self, other: DRCResults) -> None:
+        """Merge violations from another DRCResults into this one.
+
+        Sums ``rules_checked`` (aggregate counter) and per-rule entries
+        in ``rules_checked_by_rule`` so a downstream consumer can ask
+        "how many times did rule X run across all categories" after
+        ``DRCChecker.check_all()`` has called ``merge()`` on every
+        per-rule result.
+        """
+        self.violations.extend(other.violations)
+        self.mask_copper_assessments.extend(other.mask_copper_assessments)
+        self.rules_checked += other.rules_checked
+        for rule_id, count in other.rules_checked_by_rule.items():
+            self.rules_checked_by_rule[rule_id] = self.rules_checked_by_rule.get(rule_id, 0) + count
+        self.suppressed_count += other.suppressed_count
+        if other.attach_zone_exemption is not None:
+            self.attach_zone_exemption = other.attach_zone_exemption
+            self.attach_zone_exemption_reason = other.attach_zone_exemption_reason
+            self.attach_zone_unexempted += other.attach_zone_unexempted
+
+    def filter_by_rule(self, rule_id: str) -> list[DRCViolation]:
+        """Get violations for a specific rule."""
+        return [v for v in self.violations if v.rule_id == rule_id]
+
+    def filter_by_layer(self, layer: str) -> list[DRCViolation]:
+        """Get violations on a specific layer."""
+        return [v for v in self.violations if v.layer == layer]
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "passed": self.passed,
+            "error_count": self.error_count,
+            "warning_count": self.warning_count,
+            "info_count": self.info_count,
+            "waived_count": self.waived_count,
+            "mask_copper_assessments": [a.to_dict() for a in self.mask_copper_assessments],
+            "rules_checked": self.rules_checked,
+            "rules_checked_by_rule": dict(self.rules_checked_by_rule),
+            "violations": [v.to_dict() for v in self.violations],
+        }
+
+    def summary(self) -> str:
+        """Generate a human-readable summary."""
+        status = "PASSED" if self.passed else "FAILED"
+        info_part = f", {self.info_count} infos" if self.info_count else ""
+        waived_part = f", {self.waived_count} waived" if self.waived_count else ""
+        return (
+            f"DRC {status}: {self.error_count} errors, "
+            f"{self.warning_count} warnings{info_part}{waived_part} "
+            f"({self.rules_checked} rules checked)"
+        )

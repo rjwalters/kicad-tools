@@ -1,0 +1,728 @@
+#!/usr/bin/env bash
+# test-forge-helpers-rate-limit-fallback.sh - Unit tests for the GraphQL-
+# exhaustion REST fallback helpers in lib/forge-helpers.sh (#4856).
+#
+# `gh issue edit`, `gh issue comment`, `gh issue reopen`, and `gh pr comment`
+# are GraphQL-backed mutations. During a long sweep, GraphQL quota (5000/hr,
+# shared across every agent + tool) can exhaust while REST quota still has
+# headroom -- the same independent-quota fact the read-side fallback in
+# check-duplicate.sh and merge-pr.sh's #4447 auto-merge-enable fallback
+# already rely on. Before this fix, merge-pr.sh's best-effort mutating call
+# sites (partial-increment label reset, premature-auto-close reopen,
+# stacked-child deferral comment) simply swallowed a rate-limit rejection
+# with the same generic warning as any other failure, silently dropping the
+# label/comment update instead of retrying over REST.
+#
+# This file tests:
+#   1. is_rate_limit_error() fires on all five documented signatures and
+#      stays silent on unrelated failures (auth, network, 404).
+#   2. forge_gh_comment_rl_safe is daemon-only (#9865: success, failure with
+#      stderr passthrough, absent binary); forge_gh_reopen_issue_rl_safe /
+#      forge_gh_swap_label_rl_safe: succeed via the primary `gh` mutation
+#      when it works, fall back to the correct REST endpoint/method only on
+#      a rate-limit rejection, and propagate (not swallow) any OTHER
+#      failure without attempting a REST call.
+#   3. forge_gh_create_issue_rl_safe (#5047): same succeed/fallback/propagate
+#      shape as #2, PLUS an atomicity check -- the REST fallback's payload
+#      carries `labels` in the SAME POST as `title`/`body`, never a
+#      create-then-label two-step.
+#   4. merge-pr.sh source wiring: the four mutating call sites this issue
+#      is about actually route through the new wrappers.
+#   5. create-issue.sh (#5047/#5077): the CLI wrapper role prompts actually
+#      invoke -- flag parsing, --body-file, and both the primary and REST
+#      paths end to end. Regression guard: no role prompt under
+#      defaults/.claude/commands/loom/ contains a line-anchored bare
+#      `gh issue create`, all nine primary + five companion prompts named
+#      in #5077 reference create-issue.sh, no prompt teaches a
+#      create-issue.sh call immediately followed by a separate `gh issue
+#      edit --add-label` (create-then-label), and `loom-daemon forge issue
+#      create` documents that it has no REST fallback of its own.
+#
+# Usage:
+#   ./.loom/scripts/tests/test-forge-helpers-rate-limit-fallback.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
+
+# Colors
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+
+
+# shellcheck source=../lib/forge-helpers.sh
+source "$HELPERS_DIR/lib/forge-helpers.sh"
+
+# --- 1. is_rate_limit_error() signature table ---
+echo "Testing is_rate_limit_error() signature table..."
+
+positive_fixtures=(
+    "graphql_already_exceeded:GraphQL: API rate limit already exceeded for user ID 12345"
+    "rest_exceeded:HTTP 403: API rate limit exceeded for installation ID 1"
+    "secondary_rate_limit:You have exceeded a secondary rate limit. Please retry your request again later."
+    "abuse_detection:You have triggered an abuse detection mechanism and have been temporarily blocked."
+    "submitted_too_quickly:This endpoint has hit a secondary limit and was submitted too quickly"
+)
+
+for entry in "${positive_fixtures[@]}"; do
+    fixture_name="${entry%%:*}"
+    fixture_value="${entry#*:}"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if is_rate_limit_error "$fixture_value"; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: is_rate_limit_error fires on $fixture_name"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: is_rate_limit_error missed $fixture_name ('$fixture_value')"
+    fi
+done
+
+negative_fixtures=(
+    "auth_failure:gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable. HTTP 401 Bad credentials"
+    "not_found:HTTP 404: Not Found"
+    "network_error:dial tcp: lookup api.github.com: no such host"
+    "bad_label:HTTP 422: Validation Failed (label does not exist)"
+)
+
+for entry in "${negative_fixtures[@]}"; do
+    fixture_name="${entry%%:*}"
+    fixture_value="${entry#*:}"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if is_rate_limit_error "$fixture_value"; then
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: is_rate_limit_error fired on $fixture_name (false positive)"
+    else
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: is_rate_limit_error does NOT fire on $fixture_name"
+    fi
+done
+
+# Case-insensitivity, mirroring the Rust RATE_LIMIT_SIGNATURES / check-duplicate.sh original.
+TESTS_RUN=$((TESTS_RUN + 1))
+if is_rate_limit_error "GRAPHQL: API RATE LIMIT ALREADY EXCEEDED"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: is_rate_limit_error matches case-insensitively"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: is_rate_limit_error must match case-insensitively"
+fi
+
+# --- 2. REST-fallback wrapper functions, with a stubbed `gh` on PATH ---
+echo ""
+echo "Testing forge_gh_*_rl_safe REST-fallback wrappers..."
+
+STUB_DIR=$(mktemp -d)
+# #9548: every wrapper vets its repo through the write scope first. The suite
+# runs from a checkout registered as owner/repo (origin, .loom/, push reported
+# to the permission probe), so the real decision admits it.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
+write_scope_register "$STUB_DIR/checkout" owner/repo
+cd "$STUB_DIR/checkout"
+
+# #9774/#9865: forge_gh_comment_rl_safe posts only through the daemon
+# chokepoint. Pin the SELF daemon to a mock whose behavior is driven by
+# $DAEMON_MODE_FILE ("ok" posts, "fail" refuses with a stderr message).
+DAEMON_MODE_FILE="$STUB_DIR/daemon-mode.txt"
+DAEMON_ARGV_LOG="$STUB_DIR/daemon-argv.log"
+export DAEMON_MODE_FILE DAEMON_ARGV_LOG
+cat > "$STUB_DIR/loom-daemon" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DAEMON_ARGV_LOG"
+# A daemon predating `forge create-issue` (#12504): create-issue.sh must fall
+# back to the shell ladder these tests exercise.
+if [[ "${1:-} ${2:-}" == "forge create-issue" ]]; then
+  echo "error: unrecognized subcommand 'create-issue'" >&2
+  exit 2
+fi
+if [[ "$(cat "$DAEMON_MODE_FILE" 2>/dev/null || echo ok)" == "fail" ]]; then
+  echo "mock loom-daemon: forge refused the comment" >&2
+  exit 3
+fi
+exit 0
+MOCK
+chmod +x "$STUB_DIR/loom-daemon"
+export LOOM_DAEMON_SELF_BIN="$STUB_DIR/loom-daemon"
+ARGV_LOG="$STUB_DIR/argv.log"
+GH_MODE_FILE="$STUB_DIR/mode.txt"
+# Captures the JSON body a `gh api ... --input -` call reads from stdin, so
+# the #5047 tests can assert labels ride along in the SAME POST as the title
+# and body (atomic create+label, not create-then-label).
+API_STDIN_LOG="$STUB_DIR/api-stdin.json"
+# The stub script below runs as a separate process, so these must be
+# exported for it to see them (a plain `VAR=x cmd` prefix only exports for
+# the immediate command, not variables set earlier in this shell).
+export ARGV_LOG GH_MODE_FILE API_STDIN_LOG
+
+# A `gh` stub whose behavior is driven by $GH_MODE_FILE:
+#   "ok"          - the primary (non-`api`) mutation succeeds immediately.
+#   "ratelimited" - the primary mutation is rate-limited; `gh api ...` (the
+#                   REST fallback) succeeds.
+#   "other-error" - the primary mutation fails with an unrelated error; `gh
+#                   api ...` must NEVER be reached (recorded as a FAIL marker
+#                   in the argv log if it is).
+cat > "$STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+mode="$(cat "$GH_MODE_FILE" 2>/dev/null || echo ok)"
+printf '%s\n' "$*" >> "$ARGV_LOG"
+
+if [[ "$1" == "api" ]]; then
+  # Drain stdin only when the caller actually piped a body in (`--input -`),
+  # never unconditionally -- an unconditional `cat` would block on the
+  # inherited terminal for the label/comment fallbacks that use -f/-F.
+  if [[ "$*" == *"--input -"* ]]; then
+    cat > "$API_STDIN_LOG"
+  fi
+  # #9714 server-error modes: the duplicate probe (GET listing) and the POST.
+  case "$mode:$*" in
+    servererr-nomatch:"api --method POST"*) echo "https://github.test/o/r/issues/1234"; exit 0 ;;
+    servererr-nomatch:*) echo '[{"title":"A title","html_url":"https://github.test/o/r/pull/7","pull_request":{}},{"title":"Other","html_url":"https://github.test/o/r/issues/8"}]'; exit 0 ;;
+    servererr-match:"api repos/owner/repo/issues?"*) echo '[{"title":"A title","html_url":"https://github.test/o/r/issues/555"}]'; exit 0 ;;
+    servererr-probefail:"api repos/owner/repo/issues?"*) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;;
+    # A FULL page (== per_page=20) of newer, other-title issues: the original
+    # may sit on page two, so absence is unproven (#11145 review).
+    servererr-fullpage:"api --method POST"*) echo "https://github.test/o/r/issues/duplicate"; exit 0 ;;
+    servererr-fullpage:"api repos/owner/repo/issues?"*) jq -nc '[range(20) | {title: "Other \(.)", html_url: "https://github.test/o/r/issues/\(.)"}]'; exit 0 ;;
+  esac
+  if [[ "$mode" == "ratelimited" ]]; then
+    # POST .../issues --jq .html_url returns the new issue's URL (#5047).
+    [[ "$*" == *"--method POST"*/issues* ]] && echo "https://github.test/o/r/issues/1234"
+    exit 0
+  fi
+  # Reached only when it should not have been.
+  echo "UNEXPECTED_REST_CALL" >> "$ARGV_LOG"
+  exit 1
+fi
+
+case "$mode" in
+  ok)
+    # `gh issue create` prints the new issue's URL on stdout (#5047).
+    [[ "$1 $2" == "issue create" ]] && echo "https://github.test/o/r/issues/99"
+    exit 0
+    ;;
+  ratelimited)
+    echo "GraphQL: API rate limit already exceeded for user ID 1" >&2
+    exit 1
+    ;;
+  other-error)
+    echo "HTTP 404: Not Found" >&2
+    exit 1
+    ;;
+  servererr-*)
+    echo "GraphQL: Something went wrong while executing your query. Please include \`ABCD:1234\` when reporting this issue." >&2
+    exit 1
+    ;;
+  http422) echo "HTTP 422: Validation Failed" >&2; exit 1 ;;
+  emptyerr) exit 1 ;;
+  emptyok) exit 0 ;;
+  badjson) echo "unexpected end of JSON input" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$STUB_DIR/gh"
+
+_run_stubbed() {
+    local mode="$1"; shift
+    echo "$mode" > "$GH_MODE_FILE"
+    : > "$ARGV_LOG"
+    : > "$API_STDIN_LOG"
+    PATH="$STUB_DIR:$PATH" "$@"
+}
+
+# --- forge_gh_comment_rl_safe (#9865: daemon-only, no gh ladder) ---
+_run_daemon() {
+    echo "$1" > "$DAEMON_MODE_FILE"; shift
+    : > "$DAEMON_ARGV_LOG"; : > "$ARGV_LOG"
+    "$@"
+}
+
+rc=0
+_run_daemon ok forge_gh_comment_rl_safe "owner/repo" "42" "hello" >/dev/null 2>&1 || rc=$?
+assert_eq "0" "$rc" "forge_gh_comment_rl_safe: daemon success -> 0"
+assert_eq "forge comment 42 --repo owner/repo --body hello" "$(cat "$DAEMON_ARGV_LOG")" "forge_gh_comment_rl_safe: issue comment daemon argv"
+
+rc=0
+_run_daemon ok forge_gh_comment_rl_safe "owner/repo" "42" "hello" 1 >/dev/null 2>&1 || rc=$?
+assert_eq "forge comment 42 --repo owner/repo --body hello --pr" "$(cat "$DAEMON_ARGV_LOG")" "forge_gh_comment_rl_safe: PR comment passes --pr"
+
+rc=0
+err="$(_run_daemon fail forge_gh_comment_rl_safe "owner/repo" "42" "hello" 2>&1 >/dev/null)" || rc=$?
+assert_eq "1" "$rc" "forge_gh_comment_rl_safe: daemon failure -> 1"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$err" == *"forge refused the comment"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe passes the daemon's stderr through"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe swallowed the daemon's stderr ('$err')"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ ! -s "$ARGV_LOG" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe never falls back to gh on daemon failure"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe fell back to gh: $(cat "$ARGV_LOG")"
+fi
+
+# Daemon absent: LOOM_DAEMON_SELF_BIN empty makes the resolver run; point the
+# checkout at no binary by stubbing the resolver.
+rc=0
+err="$( ( loom_resolve_self_daemon_bin() { return 1; }
+          LOOM_DAEMON_SELF_BIN="" ; unset LOOM_DAEMON_SELF_BIN
+          forge_gh_comment_rl_safe "owner/repo" "42" "hello" ) 2>&1 >/dev/null)" || rc=$?
+assert_eq "1" "$rc" "forge_gh_comment_rl_safe: no daemon binary -> 1"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$err" == *"comment posting requires loom-daemon >= 0.19.598 (#9865)"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_comment_rl_safe no-binary failure names the minimum version"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_comment_rl_safe no-binary message wrong ('$err')"
+fi
+
+# --- forge_gh_reopen_issue_rl_safe ---
+rc=0
+_run_stubbed ratelimited forge_gh_reopen_issue_rl_safe "owner/repo" "99" >/dev/null 2>&1 || rc=$?
+assert_eq "0" "$rc" "forge_gh_reopen_issue_rl_safe: rate-limited primary call recovers via REST fallback"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q "^api repos/owner/repo/issues/99 -X PATCH -f state=open" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_reopen_issue_rl_safe REST fallback PATCHes state=open on the correct issue"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_reopen_issue_rl_safe REST fallback call wrong or missing"
+fi
+
+rc=0
+_run_stubbed other-error forge_gh_reopen_issue_rl_safe "owner/repo" "99" >/dev/null 2>&1 || rc=$?
+assert_eq "1" "$rc" "forge_gh_reopen_issue_rl_safe: non-rate-limit failure propagates"
+
+# --- forge_gh_swap_label_rl_safe ---
+rc=0
+_run_stubbed ratelimited forge_gh_swap_label_rl_safe "owner/repo" "7" "loom:building" "loom:issue" >/dev/null 2>&1 || rc=$?
+assert_eq "0" "$rc" "forge_gh_swap_label_rl_safe: rate-limited primary call recovers via REST fallback"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q "^api repos/owner/repo/issues/7/labels/loom%3Abuilding -X DELETE" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_swap_label_rl_safe REST fallback DELETEs the percent-encoded old label"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_swap_label_rl_safe REST DELETE call wrong or missing (':' must be %3A-encoded)"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q "^api repos/owner/repo/issues/7/labels -f labels\[\]=loom:issue" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_swap_label_rl_safe REST fallback POSTs the new label"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_swap_label_rl_safe REST POST call wrong or missing"
+fi
+
+rc=0
+_run_stubbed other-error forge_gh_swap_label_rl_safe "owner/repo" "7" "loom:building" "loom:issue" >/dev/null 2>&1 || rc=$?
+assert_eq "1" "$rc" "forge_gh_swap_label_rl_safe: non-rate-limit failure propagates"
+
+# --- forge_gh_create_issue_rl_safe (#5047) ---
+echo ""
+echo "Testing forge_gh_create_issue_rl_safe (#5047 issue-creation fallback)..."
+
+# Primary path: `gh issue create` succeeds -> URL on stdout, no REST call.
+out=$(_run_stubbed ok forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" 2>/dev/null)
+assert_eq "https://github.test/o/r/issues/99" "$out" \
+    "forge_gh_create_issue_rl_safe: primary path returns the created issue URL"
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! grep -q "^api " "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_create_issue_rl_safe (ok mode) never calls gh api"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe (ok mode) unexpectedly called gh api"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q -- "issue create --title A title --body A body --repo owner/repo --label loom:triage" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_create_issue_rl_safe primary path passes --label in the SAME create call"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe primary path must apply labels atomically via --label"
+fi
+
+# Exhausted-GraphQL path: falls back to ONE REST POST carrying labels inline.
+out=$(_run_stubbed ratelimited forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" "loom:important" 2>/dev/null)
+assert_eq "https://github.test/o/r/issues/1234" "$out" \
+    "forge_gh_create_issue_rl_safe: exhausted GraphQL recovers via REST and returns the URL"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q "^api --method POST repos/owner/repo/issues --input - --jq .html_url" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_create_issue_rl_safe REST fallback POSTs to repos/{nwo}/issues"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe REST fallback endpoint wrong or missing"
+fi
+
+# The atomicity guarantee: title + body + BOTH labels in one payload.
+assert_eq "A title" "$(jq -r '.title' "$API_STDIN_LOG")" \
+    "forge_gh_create_issue_rl_safe REST payload carries the title"
+assert_eq "A body" "$(jq -r '.body' "$API_STDIN_LOG")" \
+    "forge_gh_create_issue_rl_safe REST payload carries the body"
+assert_eq "loom:triage,loom:important" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
+    "forge_gh_create_issue_rl_safe REST payload applies ALL labels atomically with creation"
+
+# Exactly one REST call -- never create-then-label (that doubles the request
+# count under exactly the scarcity this fallback exists for, and can half-fail).
+rest_call_count="$(grep -c "^api " "$ARGV_LOG" || true)"
+assert_eq "1" "$rest_call_count" \
+    "forge_gh_create_issue_rl_safe REST fallback is a SINGLE call (no create-then-label)"
+
+# Empty NWO -> the repo `loom_write_repo` vetted, named explicitly (#9548).
+# The old `{owner}/{repo}` placeholder is exactly what #9548 removed from write
+# paths: gh expands it from an `upstream` remote in preference to `origin`.
+# (Production vetting resolves the target from git config and probes over REST,
+# so this path still makes no GraphQL call.)
+_run_stubbed ratelimited forge_gh_create_issue_rl_safe "" "T" "B" >/dev/null 2>&1
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qF "api --method POST repos/owner/repo/issues" "$ARGV_LOG" && ! grep -qF "{owner}" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_create_issue_rl_safe names the vetted repo (never {owner}/{repo}) when NWO is empty"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe must name the vetted repo, not {owner}/{repo}, when NWO is empty"
+fi
+assert_eq "[]" "$(jq -c '.labels' "$API_STDIN_LOG")" \
+    "forge_gh_create_issue_rl_safe REST payload uses an empty labels array when no labels are given"
+
+# A non-rate-limit failure must propagate untouched, with no REST retry.
+rc=0
+_run_stubbed other-error forge_gh_create_issue_rl_safe "owner/repo" "T" "B" >/dev/null 2>&1 || rc=$?
+assert_eq "1" "$rc" "forge_gh_create_issue_rl_safe: non-rate-limit failure propagates (not swallowed)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! grep -q "UNEXPECTED_REST_CALL" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_create_issue_rl_safe never retries over REST on a non-rate-limit failure"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe incorrectly retried over REST on a non-rate-limit failure"
+fi
+
+# --- #9714: server-error fallback, reconciled so it files exactly once ---
+echo ""
+echo "Testing forge_gh_create_issue_rl_safe server-error fallback (#9714)..."
+
+_post_count() { grep -c "^api --method POST" "$ARGV_LOG" || true; }
+
+# No matching issue in the listing (a same-title PR and an other-title issue
+# must NOT count) -> exactly one REST POST with title/body/labels.
+rc=0
+out=$(_run_stubbed servererr-nomatch forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" "loom:triage" 2>/dev/null) || rc=$?
+assert_eq "0:https://github.test/o/r/issues/1234" "$rc:$out" \
+    "server error + no match: files via REST and prints the URL"
+assert_eq "1" "$(_post_count)" "server error + no match: exactly ONE REST POST"
+assert_eq "A title|A body|loom:triage" "$(jq -r '[.title, .body, (.labels | join(","))] | join("|")' "$API_STDIN_LOG")" \
+    "server error + no match: the POST carries title, body and labels together"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qE "^api repos/owner/repo/issues\?state=all&sort=created&direction=desc&per_page=20&since=[0-9]{4}-[0-9]{2}-[0-9]{2}T" "$ARGV_LOG" \
+    && ! grep -q "search" "$ARGV_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: probe uses the non-search issue listing bounded by since=t0"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: probe must use repos/{nwo}/issues?...&since=<t0>, never search"
+fi
+
+# The GraphQL create actually committed -> adopt it, zero POSTs.
+rc=0
+out=$(_run_stubbed servererr-match forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>/dev/null) || rc=$?
+assert_eq "0:https://github.test/o/r/issues/555" "$rc:$out" \
+    "server error + matching issue: adopts the existing issue's URL"
+assert_eq "0" "$(_post_count)" "server error + matching issue: ZERO REST POSTs (no double-filing)"
+
+# The probe itself fails -> zero POSTs, return 1, "MAY exist".
+rc=0
+err=$(_run_stubbed servererr-probefail forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>&1 >/dev/null) || rc=$?
+assert_eq "1" "$rc" "server error + probe failure: returns 1"
+assert_eq "0" "$(_post_count)" "server error + probe failure: ZERO REST POSTs"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$err" == *"MAY exist"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: server error + probe failure: stderr says the issue MAY exist"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: server error + probe failure must say MAY exist (got: $err)"
+fi
+
+# Full first page, no exact-title match -> absence unproven: zero POSTs,
+# return 1, "MAY exist" (the original may be on page two).
+rc=0
+err=$(_run_stubbed servererr-fullpage forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>&1 >/dev/null) || rc=$?
+assert_eq "1" "$rc" "server error + full page, no match: returns 1"
+assert_eq "0" "$(_post_count)" "server error + full page, no match: ZERO REST POSTs (no double-filing)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$err" == *"MAY exist"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: server error + full page, no match: stderr says the issue MAY exist"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: server error + full page, no match must say MAY exist (got: $err)"
+fi
+
+# Exact-title comparison trims surrounding whitespace on both sides.
+rc=0
+out=$(_run_stubbed servererr-match forge_gh_create_issue_rl_safe "owner/repo" "  A title " "A body" 2>/dev/null) || rc=$?
+assert_eq "0:https://github.test/o/r/issues/555:0" "$rc:$out:$(_post_count)" \
+    "server error + whitespace-padded title: adopts the trimmed exact match, ZERO POSTs"
+
+# Unknown-outcome shapes keep #8289; HTTP 422 stays non-retryable. No REST at all.
+for m in emptyerr emptyok badjson http422; do
+    rc=0
+    err=$(_run_stubbed "$m" forge_gh_create_issue_rl_safe "owner/repo" "A title" "A body" 2>&1 >/dev/null) || rc=$?
+    assert_eq "1:0" "$rc:$(grep -c "^api " "$ARGV_LOG" || true)" "$m: returns 1 with ZERO REST calls"
+    if [[ "$m" == empty* ]]; then
+        TESTS_RUN=$((TESTS_RUN + 1))
+        if [[ "$err" == *"MAY exist"* ]]; then
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+            echo -e "  ${GREEN}PASS${NC}: $m: keeps the #8289 MAY-exist message"
+        else
+            TESTS_FAILED=$((TESTS_FAILED + 1))
+            echo -e "  ${RED}FAIL${NC}: $m: lost the #8289 MAY-exist message (got: $err)"
+        fi
+    fi
+done
+
+# --- create-issue.sh CLI wrapper (#5047), the surface role prompts invoke ---
+echo ""
+echo "Testing create-issue.sh CLI wrapper (#5047)..."
+
+CREATE_ISSUE_SH="$HELPERS_DIR/create-issue.sh"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -x "$CREATE_ISSUE_SH" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: create-issue.sh exists and is executable"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: create-issue.sh missing or not executable at $CREATE_ISSUE_SH"
+fi
+
+BODY_TMP="$STUB_DIR/body.md"
+cat > "$BODY_TMP" <<'BODY'
+## Problem
+
+A body read from a file.
+BODY
+
+out=$(_run_stubbed ratelimited env LOOM_FORGE_TYPE=github "$CREATE_ISSUE_SH" \
+    --title "From CLI" --body-file "$BODY_TMP" --label "loom:triage,loom:important" 2>/dev/null)
+assert_eq "https://github.test/o/r/issues/1234" "$out" \
+    "create-issue.sh: exhausted GraphQL still files the issue (REST) and prints the URL"
+assert_eq "loom:triage,loom:important" "$(jq -r '.labels | join(",")' "$API_STDIN_LOG")" \
+    "create-issue.sh: comma-separated --label splits like gh, applied atomically"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$(jq -r '.body' "$API_STDIN_LOG")" == *"A body read from a file."* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: create-issue.sh --body-file sends the file CONTENTS (not the path)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: create-issue.sh --body-file must send file contents, not the literal path"
+fi
+
+rc=0
+_run_stubbed ok env LOOM_FORGE_TYPE=github "$CREATE_ISSUE_SH" --body "no title" >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "create-issue.sh: missing --title exits 2"
+
+rc=0
+_run_stubbed ok env LOOM_FORGE_TYPE=github "$CREATE_ISSUE_SH" --title "T" --body "B" --nope >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "create-issue.sh: unknown argument exits 2"
+
+rc=0
+_run_stubbed ok env LOOM_FORGE_TYPE=github "$CREATE_ISSUE_SH" \
+    --title "T" --body "B" --body-file "$BODY_TMP" >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "create-issue.sh: --body and --body-file together exit 2"
+
+rc=0
+_run_stubbed other-error env LOOM_FORGE_TYPE=github "$CREATE_ISSUE_SH" \
+    --title "T" --body "B" >/dev/null 2>&1 || rc=$?
+assert_eq "1" "$rc" "create-issue.sh: a non-rate-limit gh failure exits 1"
+
+rm -rf "$STUB_DIR"
+
+# --- 3. merge-pr.sh source wiring: the four #4856 call sites use the wrappers ---
+echo ""
+echo "Testing merge-pr.sh source wiring (#4856)..."
+
+# #8191 slice 2: the reopen, the label swap and the partial-increment comments
+# are no longer call sites in merge-pr.sh. `merge-pr post-merge-bookkeeping`
+# (loom-daemon/src/merge_pr/post_merge_bookkeeping.rs) makes them, through a
+# child bash that sources THIS library, so they still reach the #4856 wrappers.
+# The three source greps cannot pass against merge-pr.sh any more; each is
+# retired under the three-part test (defaults/docs/verification-recipes.md §6).
+YELLOW='\033[0;33m'
+retired() { # <what> <property> <structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
+_moved="the call moved into the Rust orchestrator, which reaches the wrapper through a child bash; merge-pr.sh no longer contains the call text"
+retired "merge-pr.sh's premature-auto-close reopen uses forge_gh_reopen_issue_rl_safe" \
+    "the #4569 revert reopens through the rate-limit-safe wrapper, never a raw gh issue reopen" \
+    "$_moved" \
+    "post_merge_bookkeeping::tests::partial_reset_reverts_a_premature_close_before_swapping asserts the orchestrator calls forge_gh_reopen_issue_rl_safe, and test-merge-pr-partial-increment.sh drives the real wrapper against the stub gh"
+retired "merge-pr.sh's partial-increment label reset uses forge_gh_swap_label_rl_safe" \
+    "the loom:building -> loom:issue swap goes through the rate-limit-safe wrapper" \
+    "$_moved" \
+    "post_merge_bookkeeping::tests::partial_reset_swaps_and_comments asserts the exact wrapper call, and test-merge-pr-partial-increment.sh T1/T2 assert the recorded gh call"
+
+comment_call_count="$(grep -c 'forge_gh_comment_rl_safe "\$REPO_NWO"' "$MERGE_PR_SRC" || true)"
+# 2 sites: the PR-override comment and the --release-hold audit comment (#13517).
+assert_eq "2" "$comment_call_count" "merge-pr.sh's remaining comment call sites (PR override, --release-hold audit) go through forge_gh_comment_rl_safe"
+
+retired "merge-pr.sh's stacked-child deferred-reconciliation comment uses forge_gh_comment_rl_safe" \
+    "the stacked-child PR comment is posted through the #4856 rate-limit-safe wrapper, never a raw gh pr comment" \
+    "$_moved (_reconcile_one_stacked_child was ported to merge_pr/stacked_reconcile.rs, #8191)" \
+    "stacked_reconcile::tests assert the orchestrator's comment path, and the raw-gh-comment assertion below still pins that nothing posts around the wrapper"
+
+retired "both partial-increment comment kinds route through _mp_post_partial_comment" \
+    "the two partial-increment audit comments are posted through the one #4856 comment wrapper" \
+    "$_moved" \
+    "post_merge_bookkeeping::tests::partial_reset_reverts_a_premature_close_before_swapping asserts both bodies reach forge_gh_comment_rl_safe, and the raw-gh-comment assertion below still pins that nothing posts around the wrapper"
+
+# ...and nothing posts a comment by invoking gh directly. The two assertions
+# above pin the shape of the call sites that DO exist; this one pins that no
+# fourth, unwrapped one was added beside them -- which a count of 3 would
+# otherwise happily accept as "3 wrapped calls plus a raw one". The `gh issue
+# reopen` check further down is the same idea for its own call site, but it
+# names one exact retired line and so says nothing about `comment`.
+#
+# Comment lines are stripped first: merge-pr.sh's operator-advice strings name
+# these commands as prose ("may need manual 'gh issue edit'"), and those must
+# not read as call sites. `$GH` is covered as well as literal `gh`, since the
+# script resolves the binary through that variable.
+raw_comment_calls="$(grep -vE '^[[:space:]]*#' "$MERGE_PR_SRC" \
+  | grep -cE '(^|[^_[:alnum:]])(gh|\$GH|"\$GH") (issue|pr) comment' || true)"
+assert_eq "0" "$raw_comment_calls" "merge-pr.sh posts no comment via a raw gh invocation — every one goes through the #4856 wrapper"
+
+# The raw, un-wrapped mutating calls this issue is about must no longer
+# appear standalone (they are now routed through the wrapper functions
+# above). This deliberately does NOT check `gh issue edit --add-label
+# loom:reviewing`-style claim calls elsewhere in the file -- only the four
+# specific #4856 call sites.
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! grep -q 'gh issue reopen "\$issue_num" --repo "\$REPO_NWO" >/dev/null 2>&1' "$MERGE_PR_SRC"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: the old unwrapped 'gh issue reopen' call site is gone"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: the old unwrapped 'gh issue reopen' call site is still present"
+fi
+
+# --- 4. Role-prompt wiring (#5047): no prompt teaches a bare `gh issue create` ---
+#
+# This is the forcing function that keeps the fix from regressing back into
+# nine prompts. A role prompt is what an agent actually follows, so an
+# executable `gh issue create` line in one of them IS the bug, however well
+# documented the fallback is elsewhere. Prose mentions of `gh issue create`
+# (the #3707 serialization warnings, and the pointer blocks this issue added)
+# are fine and expected -- they never start a line, so anchoring on
+# line-start cleanly separates "instruction to run" from "discussion of".
+echo ""
+echo "Testing role-prompt wiring (#5047)..."
+
+# Two `..` reaches repo-root/.claude/commands/loom for an INSTALLED copy
+# (HELPERS_DIR is .loom/scripts there); one `..` reaches defaults/.claude/
+# commands/loom when running inside this source repo (HELPERS_DIR is
+# defaults/scripts) -- the two layouts differ in depth, so probe both rather
+# than hard-coding one (#447).
+if [[ -d "$HELPERS_DIR/../../.claude/commands/loom" ]]; then
+    PROMPT_DIR="$(cd "$HELPERS_DIR/../../.claude/commands/loom" && pwd)"
+else
+    PROMPT_DIR="$(cd "$HELPERS_DIR/../.claude/commands/loom" && pwd)"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+# Matches both a line-start invocation (`gh issue create ...`) and the
+# `VAR=$(gh issue create ...` assignment form (#5077's epic.md /
+# champion-pr-merge.md finding) -- both are executable, not prose. Prose
+# mentions (backtick-quoted, mid-sentence) never match either shape.
+bare_creates="$(grep -rlnE '^[[:space:]]*gh issue create|=\$\(gh issue create' "$PROMPT_DIR" || true)"
+if [[ -z "$bare_creates" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: no role prompt instructs a bare 'gh issue create'"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: these role prompts still instruct a bare 'gh issue create'"
+    echo "    (use ./.loom/scripts/create-issue.sh instead — see #5047):"
+    printf '    %s\n' $bare_creates
+fi
+
+# The nine prompts named in #5047, PLUS the five companion prompt/template
+# files #5077 found still teaching a bare `gh issue create` (architect-
+# patterns.md, architect-reference.md, champion-epic.md, champion-
+# reference.md, imagine.md), must each reach the helper -- either by
+# invoking it or by pointing at it.
+for prompt in architect.md auditor.md builder-complexity.md builder-pr.md \
+              curator.md doctor.md hermit.md hermit-patterns.md judge.md \
+              architect-patterns.md architect-reference.md champion-epic.md \
+              champion-reference.md imagine.md; do
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -q 'create-issue\.sh' "$PROMPT_DIR/$prompt"; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: $prompt routes issue filing through create-issue.sh"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: $prompt has no reference to create-issue.sh (#5047)"
+    fi
+done
+
+# create-then-label regression guard (#5077): a role prompt must never teach
+# applying a label via a follow-up `gh issue edit --add-label` on an issue
+# number/placeholder produced by the create call directly above it. This
+# doesn't try to parse "is this label call related to that create call" --
+# far simpler and just as effective: assert no `gh issue edit ... --add-label`
+# line ever appears within 2 lines of a `create-issue.sh` invocation, which is
+# exactly the shape a create-then-label two-step takes in these prompts.
+TESTS_RUN=$((TESTS_RUN + 1))
+create_then_label="$(grep -rn -A2 'create-issue\.sh' "$PROMPT_DIR" \
+    | grep -E '[-:]gh issue edit .*--add-label' || true)"
+if [[ -z "$create_then_label" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: no role prompt follows a create-issue.sh call with a separate --add-label edit"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: these lines teach create-then-label right after create-issue.sh (#5077):"
+    echo "$create_then_label"
+fi
+
+# `loom-daemon forge issue` must not silently look like an escape hatch: the
+# passthrough either gains the fallback or says out loud that it has none.
+# The `loom-daemon/` Rust crate is vendored only in the source repo
+# (rjwalters/loom itself) -- an installed consumer repo never has a
+# `loom-daemon/src/` directory at all, so its absence is a legitimate,
+# SKIPpable state, not a failure (#6736). Only fail when the directory *is*
+# present but forge_cmd.rs lacks the documentation string.
+LOOM_DAEMON_SRC_DIR="$(cd "$HELPERS_DIR/../../loom-daemon/src" 2>/dev/null && pwd || true)"
+if [[ -z "$LOOM_DAEMON_SRC_DIR" ]]; then
+    echo -e "  ${GREEN}SKIP${NC}: no vendored loom-daemon/src/ in this checkout (installed consumer repo, #6736)"
+else
+    TESTS_RUN=$((TESTS_RUN + 1))
+    FORGE_CMD_SRC="$LOOM_DAEMON_SRC_DIR/forge_cmd.rs"
+    if [[ -f "$FORGE_CMD_SRC" ]] && grep -q 'create-issue.sh' "$FORGE_CMD_SRC"; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: loom-daemon forge issue create documents its lack of a REST fallback"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: forge_cmd.rs must state that 'forge issue create' has no REST fallback (#5047)"
+    fi
+fi
+
+# --- Summary ---
+echo ""
+echo "────────────────────────────────"
+echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    exit 1
+fi
+exit 0

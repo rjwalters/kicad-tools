@@ -1,0 +1,720 @@
+#!/usr/bin/env bash
+# daemon-update-fixtures.sh — the fake-binary / fake-forge fixtures shared by
+# test-loom-daemon-update.sh and its resolve-json sibling (#7977).
+#
+# Source this file (do not exec). Extracted so the two suites build identical
+# fixtures from ONE definition: a fake `gh` that drifts from the real one in
+# only one of them is a test that proves nothing, and that is exactly the class
+# of bug #7977 hit (the stub emitted post-`--jq` scalars, indistinguishable
+# from real `gh` only because every caller passed `--jq`).
+#
+# Required globals, set by the sourcing suite BEFORE sourcing:
+#   LOOM_REPO_ROOT      repo root, for locating the real sources these fake
+#   CLI_DIR             defaults/scripts/cli, for START_SCRIPT-adjacent copies
+#   START_SCRIPT        the real loom-daemon-start.sh a fixture may copy
+#   NEW_FAKE_BIN_SRC    the fake-daemon source a fixture provisions from
+# `CARGO_TARGET_DIR` is read when set and is optional.
+#
+# WHICH BINARY IMPLEMENTS THE STUB (#8134, epic #7810 / #8087)
+#
+# Every fixture below copies the REAL loom-daemon-start.sh, which since #8087 is
+# a thin stub over `loom-daemon daemon-start`. The restart / --relaunch /
+# full-update flows exec it, so the suites only test what they think they do if
+# that stub execs the binary built from this working tree.
+#
+# `--self-only` is mandatory and is exactly the case that flag exists for: every
+# fixture pins $LOOM_DAEMON_BIN to a FAKE daemon binary, because that is the
+# daemon the update flow BUILDS, PROVISIONS and RESTARTS, and whose inherited
+# autonomy env the assertions read back. Exporting it as the implementation too
+# would make the stub exec the fake as itself and no start would ever happen.
+#
+# Pinned HERE rather than in each suite because all three consumers
+# (test-loom-daemon-update.sh, its -fetch and -resolve-json siblings) build
+# fixtures from this one definition, and a pin present in only some of them is
+# the drift this file was extracted to prevent. Guarded so re-sourcing is a
+# no-op. This is a HARNESS change, not an assertion change (#8011 /
+# verification-recipes.md §6): no expectation in any consumer suite moved.
+if [[ -z "${_LOOM_UPDATE_FIXTURES_DAEMON_BIN_PINNED:-}" ]]; then
+    # shellcheck source=require-daemon-bin.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/require-daemon-bin.sh"
+    loom_test_require_daemon_bin --self-only \
+        "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" daemon-start
+    _LOOM_UPDATE_FIXTURES_DAEMON_BIN_PINNED=1
+fi
+
+# ---------------------------------------------------------------------------
+# SCRATCH-ROOT CONTAINMENT (#8712)
+# ---------------------------------------------------------------------------
+#
+# THE INCIDENT. A fleet host's checkout was found with a 472-byte bash fake —
+# this file's own `fake loom-daemon: unsupported subcommand` stub — sitting at
+# `loom-daemon/target/release/loom-daemon`, the canonical build-output path.
+# `loom-daemon-update.sh --fetch` resolves the binary that IMPLEMENTS
+# `release-fetch` by preferring a repo-local build, got the fake, and every
+# `auto_update` fetch on that host failed for hours while the machine-level
+# install it was trying to update sat there working.
+#
+# HOW A FIXTURE CAN REACH A REAL PATH AT ALL. Every fixture below is handed an
+# explicit path under the suite's `mktemp -d`, so the direct writers are safe by
+# construction. The one that computes its destination at RUN time is the fake
+# `cargo` (`write_fake_cargo`): it writes `${CARGO_TARGET_DIR:-target}/release/
+# loom-daemon` relative to ITS OWN CWD, and that cwd is whatever
+# `loom-daemon-update.sh` resolved as `$REPO_ROOT/loom-daemon` — normally the
+# fixture, but the script has documented fallbacks (`$PWD` resolves no checkout
+# ⇒ the script's OWN checkout, #5140; `LOOM_MACHINE_CHECKOUT`, #4229) under
+# which that is a REAL checkout while a fake `cargo` is still first on `$PATH`.
+# That is the poisoning path, and it needs no test bug to fire — only a host
+# condition that makes a fixture's `$PWD` stop resolving as a checkout.
+#
+# THE GUARD. A suite declares its scratch root once (`loom_fixture_scratch_root
+# "$BASE_WORKDIR"`), which both records it here and EXPORTS it so the generated
+# fake `cargo` — a separate process, spawned later — enforces the same rule.
+# Any fixture write outside it aborts loudly instead of landing on a real path.
+# Containment, not cleanup: it holds on failure and on interruption alike,
+# because the write never happens rather than being undone afterwards.
+#
+# Declaring it is optional (unset ⇒ no containment, byte-identical behaviour)
+# so an unrelated suite can source this file without adopting the discipline.
+
+# #11044: loom-daemon-update.sh asks before it moves a fleet host off the fleet
+# floor, and refuses without a terminal. Whether this is a fleet host comes from
+# the HOST (its config, and ~/.loom/fleet-sync-status.json), so on a fleet
+# developer machine every non-interactive fixture run would be refused. These
+# suites are non-interactive Loom tooling, which is what this marker declares;
+# the check itself is covered by test-loom-daemon-update-floor-confirm.sh, which
+# clears it.
+export LOOM_DAEMON_UPDATE_INVOKER="${LOOM_DAEMON_UPDATE_INVOKER:-test-fixture}"
+
+# #13369: the updater's pre-sync `git fetch` is skipped when the checkout's
+# volume is below the disk-warn floor (#10995, default 20G). Those fixtures
+# fast-forward a local origin and expect the sync to land, so on a runner with
+# <20G free the sync silently did not happen: the source HEAD stayed behind
+# while the fake build stamped the origin's HEAD, tripping build verification
+# (floor-confirm 13 failures) and the "why not fast-forwarded" message (fetch).
+# The fixtures' origin is local and tiny; pin the floor to 0 (never skips) so
+# the result does not depend on how full the host's disk is.
+export LOOM_WORKTREE_REAPER_DISK_WARN_GB=0
+
+loom_fixture_scratch_root() {
+    LOOM_FIXTURE_SCRATCH_ROOT="$(cd "$1" 2>/dev/null && pwd -P)" || {
+        echo "loom_fixture_scratch_root: '$1' does not exist" >&2
+        return 1
+    }
+    export LOOM_FIXTURE_SCRATCH_ROOT
+    _loom_fixture_arm_build_output_sentinel
+}
+
+# ---------------------------------------------------------------------------
+# REAL-BUILD-OUTPUT SENTINEL (#8712)
+# ---------------------------------------------------------------------------
+#
+# The containment guard above is prevention; this is detection, for whatever it
+# does not cover. It watches exactly one path — the REAL checkout's
+# `loom-daemon/target/release/loom-daemon`, the canonical build output and the
+# first thing `loom_resolve_self_daemon_bin`'s tier 2 finds script-relative —
+# and reports it if the suite CREATED it.
+#
+# "Created", never merely "present": a developer's own `cargo build --release`
+# lives there legitimately, and a check that fired on it would be noise that
+# gets muted. Armed from the checkout this library itself lives in, which is by
+# construction the one a fixture can reach (it is the checkout whose scripts the
+# suite copies and runs), so a suite does not have to name it.
+_loom_fixture_arm_build_output_sentinel() {
+    local self_checkout
+    self_checkout="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." 2>/dev/null && pwd)" || return 0
+    _LOOM_FIXTURE_BUILD_OUTPUT="$self_checkout/loom-daemon/target/release/loom-daemon"
+    _LOOM_FIXTURE_BUILD_OUTPUT_EXISTED=false
+    [[ -e "$_LOOM_FIXTURE_BUILD_OUTPUT" ]] && _LOOM_FIXTURE_BUILD_OUTPUT_EXISTED=true
+    return 0
+}
+
+# loom_fixture_assert_build_output_untouched — 0 when the real build output was
+# not created by this run, 1 (with a diagnostic) when it was.
+#
+# On a violation the offending file is DELETED, but only after confirming it
+# starts with `#!` — i.e. that it is one of this harness's shell fakes and not a
+# real compiled binary. That asymmetry is the point: the damage this whole issue
+# is about is a host that cannot roll until somebody moves the file aside by
+# hand, so a failing test run must not walk away leaving one; but a real build
+# that merely happens to sit there is the developer's, and is never touched.
+loom_fixture_assert_build_output_untouched() {
+    [[ -n "${_LOOM_FIXTURE_BUILD_OUTPUT:-}" ]] || return 0
+    [[ "${_LOOM_FIXTURE_BUILD_OUTPUT_EXISTED:-true}" == "false" ]] || return 0
+    [[ -e "$_LOOM_FIXTURE_BUILD_OUTPUT" ]] || return 0
+    {
+        echo "  a fixture wrote into the REAL checkout's build output during this run (#8712):"
+        echo "    $_LOOM_FIXTURE_BUILD_OUTPUT"
+        if head -c 2 "$_LOOM_FIXTURE_BUILD_OUTPUT" 2>/dev/null | grep -q '#!'; then
+            rm -f -- "$_LOOM_FIXTURE_BUILD_OUTPUT"
+            echo "    (removed: it is a shell script, i.e. one of this harness's fakes)"
+        else
+            echo "    (left in place: not a shell script, so it may be a real build)"
+        fi
+    } >&2
+    return 1
+}
+
+# _loom_fixture_real_ancestor <path> — echo the physical (`pwd -P`, so macOS's
+# symlinked `$TMPDIR` resolves the same way the scratch root did) path of the
+# DEEPEST EXISTING ancestor directory of <path>.
+#
+# The deepest existing one, rather than the parent: the destination usually
+# does not exist yet, and neither does the `target/release/` it lives in, so
+# `cd "$(dirname …)"` alone cannot answer "where would this land". Walking up
+# to something real and resolving THAT is exact for the question actually being
+# asked — containment is inherited by every descendant.
+_loom_fixture_real_ancestor() {
+    local probe="$1"
+    case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac
+    while [[ -n "$probe" && "$probe" != "/" && ! -d "$probe" ]]; do
+        probe="$(dirname "$probe")"
+    done
+    (cd "$probe" 2>/dev/null && pwd -P) || printf '%s\n' "$probe"
+}
+
+# _loom_fixture_assert_scratch_path <path> <what> — abort unless <path> would
+# land under the declared scratch root.
+#
+# Exits rather than returning non-zero. A fixture that cannot write where it
+# was told has no correct fallback, and the whole point is that the write must
+# not reach a real build-output path by any route.
+_loom_fixture_assert_scratch_path() {
+    local path="$1" what="${2:-fixture file}" real
+    [[ -n "${LOOM_FIXTURE_SCRATCH_ROOT:-}" ]] || return 0
+    real="$(_loom_fixture_real_ancestor "$(dirname "$path")")"
+    case "$real/" in
+        "$LOOM_FIXTURE_SCRATCH_ROOT"/*) return 0 ;;
+    esac
+    {
+        echo "FIXTURE CONTAINMENT VIOLATION (#8712): refusing to write $what outside the suite scratch root."
+        echo "  requested:    $path"
+        echo "  resolved dir: $real"
+        echo "  scratch root: $LOOM_FIXTURE_SCRATCH_ROOT"
+        echo "A fake loom-daemon left at a real build-output path poisons"
+        echo "\`loom-daemon-update.sh --fetch\` on this host until it is removed by hand."
+    } >&2
+    exit 1
+}
+
+# sha256_of <path> — portable checksum in `.sha256`-file format
+# (`<hex>  <basename>`), matching the release workflow's own
+# `shasum -a 256`/`sha256sum` output.
+sha256_of() {
+    local path="$1" base
+    base="$(basename "$path")"
+    if command -v shasum >/dev/null 2>&1; then
+        (cd "$(dirname "$path")" && shasum -a 256 "$base")
+    else
+        (cd "$(dirname "$path")" && sha256sum "$base")
+    fi
+}
+
+# ---------- fixture builder ----------
+# Sets up a fresh throwaway repo root at $1 with a real git HEAD, a stub
+# loom-daemon crate, real start/stop scripts, a real copy of
+# provision-daemon.sh (so the #4016 signing step is exercised, not silently
+# skipped as "not found/sourceable"), and a minimal, machine-agnostic PATH
+# (excludes ~/.local/bin and similar, so a real loom-daemon possibly
+# installed on the dev machine can never leak into a test).
+new_fixture() {
+    local root="$1"
+    mkdir -p "$root/.loom/logs" "$root/.loom/scripts/cli" "$root/.loom/scripts/lib" "$root/loom-daemon" "$root/scripts/install"
+    cp "$CLI_DIR/loom-daemon-start.sh" "$root/.loom/scripts/cli/loom-daemon-start.sh"
+    cp "$CLI_DIR/loom-daemon-stop.sh" "$root/.loom/scripts/cli/loom-daemon-stop.sh"
+    chmod +x "$root/.loom/scripts/cli/"*.sh
+    # The fixture start/stop scripts source ../lib/launchd-domain.sh for the
+    # shared gui/<uid> ↦ user/<uid> resolver (#4130), so it must exist alongside
+    # them in the throwaway tree — else a launchd-mode restart path would find no
+    # resolve_launchd_domain. Mirrors the real defaults/scripts/lib layout.
+    cp "$CLI_DIR/../lib/launchd-domain.sh" "$root/.loom/scripts/lib/launchd-domain.sh"
+    # Same for lib/systemd-user.sh (#4268): the fixture start script's systemd
+    # --user path (invoked via perform_systemd_relaunch's call to $START_SCRIPT,
+    # #4260 sub-issue C) sources it relative to ITS OWN location, so it must exist
+    # alongside the fixture copy too, not just in the real repo tree.
+    cp "$CLI_DIR/../lib/systemd-user.sh" "$root/.loom/scripts/lib/systemd-user.sh"
+    # Same for lib/bounded-run.sh (#4799): the fixture start script's
+    # print_calibrate_hint() sources it relative to ITS OWN location to bound
+    # its `calibrate` command substitution, so it must exist alongside the
+    # fixture copy too.
+    cp "$CLI_DIR/../lib/bounded-run.sh" "$root/.loom/scripts/lib/bounded-run.sh"
+    # Same for lib/locate-daemon-bin.sh (#4875): the fixture start script
+    # sources it relative to ITS OWN location to resolve the daemon binary
+    # under a minimal PATH, so every fixture flow that execs the copied
+    # loom-daemon-start.sh (restart, --relaunch, the full update run) needs it
+    # in the throwaway tree. Without it those flows abort with
+    # "locate-daemon-bin.sh not found at <fixture>/.loom/scripts/lib" before
+    # reaching the behaviour under test.
+    cp "$CLI_DIR/../lib/locate-daemon-bin.sh" "$root/.loom/scripts/lib/locate-daemon-bin.sh"
+    # Same for lib/script-helper.sh (#8087): loom-daemon-start.sh is a thin stub
+    # over `loom-daemon daemon-start` and sources this helper relative to ITS
+    # OWN location to resolve + exec the implementing binary. Without it every
+    # fixture flow that execs the copied start script dies at
+    # "script-helper.sh: No such file or directory" before reaching the
+    # behaviour under test — the same failure shape locate-daemon-bin.sh above
+    # was added for.
+    cp "$CLI_DIR/../lib/script-helper.sh" "$root/.loom/scripts/lib/script-helper.sh"
+    cp "$LOOM_REPO_ROOT/scripts/install/provision-daemon.sh" "$root/scripts/install/provision-daemon.sh"
+    cat > "$root/loom-daemon/Cargo.toml" <<'EOF'
+[package]
+name = "loom-daemon"
+version = "0.0.0"
+EOF
+    ( cd "$root" && git init -q && git -c user.email=test@test -c user.name=test commit -q --allow-empty -m init )
+}
+
+# new_fixture_with_origin <root> <bare_dir> (#4330) — builds on new_fixture(),
+# adding a local BARE repo as `origin` so the ff-first sync path (which
+# resolves the default branch via refs/remotes/origin/HEAD, then fetches and
+# compares against origin/<branch>) has a real remote to talk to — entirely
+# offline (a plain filesystem path, no network). Forces the branch name to
+# `main` (deterministic regardless of the test host's init.defaultBranch) and
+# sets refs/remotes/origin/HEAD via `git remote set-head origin -a` so
+# loom_default_branch() resolves it the same way a real clone would.
+#
+# Shared with the fetch sibling (#8028): the local-checkout-divergence
+# scenario needs a real origin remote exactly like the parent suite's own
+# ff-sync tests do, and this repo's convention is one definition, not two
+# copies that can drift (see the module docs above).
+new_fixture_with_origin() {
+    local root="$1" bare="$2"
+    new_fixture "$root"
+    ( cd "$root" && git branch -q -M main )
+    git init -q --bare "$bare"
+    ( cd "$root" && git remote add origin "$bare" && git push -q origin HEAD:refs/heads/main )
+    git -C "$bare" symbolic-ref HEAD refs/heads/main
+    ( cd "$root" && git remote set-head origin -a >/dev/null 2>&1 )
+}
+
+# Writes a fake "release artifact" binary at $1 reporting version $2 / commit
+# $3 on --version, otherwise behaving like write_fake_daemon (rejects unknown
+# subcommands, loops forever on a normal run) — standing in for a downloaded
+# `loom-daemon-<target>` asset. A parameterized-version sibling of
+# write_fake_daemon (which hardcodes 0.15.0), needed so a fetched artifact can
+# report a version NEWER than the installed daemon's.
+write_fake_artifact_daemon() {
+    local path="$1" version="$2" commit="$3"
+    _loom_fixture_assert_scratch_path "$path" "a fake release-artifact loom-daemon"
+    cat > "$path" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+    echo "loom-daemon ${version} (commit ${commit}, built 2026-08-03T00:00:00Z)"
+    exit 0
+fi
+if [[ "\${1:-}" == "calibrate" ]]; then
+    exit 1
+fi
+if [[ "\${1:-}" == "telemetry-capabilities" ]]; then
+    # Answer the post-build OTLP probe (#10700) like a real daemon. Set
+    # FAKE_DAEMON_OTLP_PROBE_EXIT=1 to simulate a binary lacking the exporter.
+    if [[ "\${FAKE_DAEMON_OTLP_PROBE_EXIT:-0}" != "0" ]]; then
+        echo '{"otlp":false}'
+        exit "\${FAKE_DAEMON_OTLP_PROBE_EXIT}"
+    fi
+    echo '{"otlp":true}'
+    exit 0
+fi
+if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
+    echo "fake loom-daemon: unsupported subcommand: \$*" >&2
+    exit 1
+fi
+while true; do sleep 1; done
+EOF
+    chmod +x "$path"
+}
+
+# Writes a fake `cargo` that, on `cargo build --release [--message-format=...]`
+# (cwd = loom-daemon/), copies $NEW_FAKE_BIN_SRC into
+# ${CARGO_TARGET_DIR:-target}/release/loom-daemon instead of compiling --
+# honoring CARGO_TARGET_DIR (#6160) exactly like real cargo does, so tests can
+# redirect the build output the same way a redirected host does. Tests export
+# NEW_FAKE_BIN_SRC before invoking loom-daemon-update.sh. When a
+# --message-format=json* flag is present (the invocation loom-daemon-update.sh
+# actually uses since #6160), also emits the compiler-artifact/build-finished
+# JSON messages loom-daemon-update.sh parses to locate the built executable --
+# shaped like real `cargo build --message-format=json-render-diagnostics`
+# output (a null-executable library artifact first, matching the real
+# multi-target stream, then the bin target's own artifact with the real,
+# possibly-redirected, absolute executable path). Also answers `cargo metadata
+# --format-version 1 --no-deps` with a minimal object reporting the same
+# (redirect-aware) target_directory, for the fallback path's own test coverage.
+#
+# CONTAINMENT (#8712). This is the ONE fixture whose destination is computed at
+# run time, from the cwd `loom-daemon-update.sh` chose — so it is the one that
+# can land a fake binary on a REAL `loom-daemon/target/release/loom-daemon` when
+# the script's `$PWD` stops resolving to the fixture and one of its documented
+# checkout fallbacks (#5140 / #4229) picks a real checkout instead. It therefore
+# re-checks `$LOOM_FIXTURE_SCRATCH_ROOT` itself, in the child process, BEFORE
+# the `cp`: a suite that declared a scratch root gets a loud aborted build
+# instead of a poisoned host. Unset ⇒ unchanged behaviour.
+write_fake_cargo() {
+    local path="$1"
+    _loom_fixture_assert_scratch_path "$path" "a fake cargo"
+    cat > "$path" <<'EOF'
+#!/usr/bin/env bash
+# #8712: refuse to write build output outside the suite's scratch root.
+# Checked BEFORE the `mkdir -p`, so not even an empty `target/release/` is
+# created in a real checkout.
+assert_scratch() {
+    local probe="$1" real
+    [[ -n "${LOOM_FIXTURE_SCRATCH_ROOT:-}" ]] || return 0
+    case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac
+    while [[ -n "$probe" && "$probe" != "/" && ! -d "$probe" ]]; do
+        probe="$(dirname "$probe")"
+    done
+    real="$(cd "$probe" 2>/dev/null && pwd -P)" || real="$probe"
+    case "$real/" in
+        "$LOOM_FIXTURE_SCRATCH_ROOT"/*) return 0 ;;
+    esac
+    {
+        echo "[fake cargo] FIXTURE CONTAINMENT VIOLATION (#8712): refusing to write build output outside the suite scratch root."
+        echo "  cwd:          $PWD"
+        echo "  target dir:   $1 (resolved under $real)"
+        echo "  scratch root: $LOOM_FIXTURE_SCRATCH_ROOT"
+        echo "  A fake loom-daemon left at a real build-output path poisons"
+        echo "  \`loom-daemon-update.sh --fetch\` on this host until it is removed by hand."
+    } >&2
+    exit 1
+}
+if [[ "${1:-}" == "build" ]]; then
+    target_dir="${CARGO_TARGET_DIR:-target}"
+    assert_scratch "$target_dir"
+    mkdir -p "$target_dir/release"
+    cp "$NEW_FAKE_BIN_SRC" "$target_dir/release/loom-daemon"
+    chmod +x "$target_dir/release/loom-daemon"
+    abs_target_dir="$(cd "$target_dir" && pwd)"
+    for arg in "$@"; do
+        case "$arg" in
+            --message-format=json*)
+                printf '{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"loom_daemon"},"executable":null}\n'
+                printf '{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"loom-daemon"},"executable":"%s/release/loom-daemon"}\n' "$abs_target_dir"
+                printf '{"reason":"build-finished","success":true}\n'
+                break
+                ;;
+        esac
+    done
+    echo "[fake cargo] build ok" >&2
+    exit 0
+fi
+if [[ "${1:-}" == "metadata" ]]; then
+    target_dir="${CARGO_TARGET_DIR:-target}"
+    assert_scratch "$target_dir"
+    mkdir -p "$target_dir"
+    abs_target_dir="$(cd "$target_dir" && pwd)"
+    printf '{"target_directory":"%s"}\n' "$abs_target_dir"
+    exit 0
+fi
+echo "[fake cargo] unsupported subcommand: $*" >&2
+exit 1
+EOF
+    chmod +x "$path"
+}
+
+# Writes a fake `gh` at $1 for the artifact-fetch tests (Epic #4990 Phase 3,
+# #5020). Understands exactly the invocations loom-daemon-update.sh's
+# fetch_resolve_latest() / fetch_and_verify_artifact() make:
+#   gh release view --json tagName  -R <slug> --jq '.tagName'         -> $2
+#   gh release view --json assets   -R <slug> --jq '.assets[].name'   -> `ls $3`
+#   gh release download <tag> -R <slug> -p <name> [-p <name> ...] -D <dir> --clobber
+#       -> copies each matching file from $3 into <dir>; exits 1 if NONE of
+#          the -p patterns matched anything under $3 (mirrors real gh's
+#          "no assets match" failure for a required download).
+#
+# Optional $4 (#8197): extra asset names the release LISTS but cannot SERVE,
+# space-separated. They are appended to the `--json assets` listing only, so a
+# scenario can express a published-but-undownloadable `.sig` -- the case that
+# must refuse the artifact instead of degrading to checksum-only verification.
+# Omitted (the default) means the listing reports exactly what $3 can serve.
+write_fake_gh() {
+    local path="$1" tag="$2" assets_dir="$3" extra_listed="${4:-}"
+    cat > "$path" <<FAKEGH
+#!/usr/bin/env bash
+ASSETS_DIR="$assets_dir"
+TAG_VAL="$tag"
+EXTRA_LISTED="$extra_listed"
+FAKEGH
+    cat >> "$path" <<'FAKEGH'
+# Real `gh --json <fields>` emits an OBJECT, and `--jq` then filters it. This
+# stub used to skip to the post-`--jq` scalar, indistinguishable only because
+# every caller passed `--jq`. #7810 PR 5 has one that does not (the #7922
+# pattern: a bare scalar cannot distinguish "absent" from "empty"), so the stub
+# now does what gh does -- emit the object, filter only when asked.
+if [[ "${1:-}" == "release" && "${2:-}" == "view" ]]; then
+    shift 2
+    fields=""; jqx=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in --json) fields="$2"; shift 2 ;; --jq|-q) jqx="$2"; shift 2 ;; *) shift ;; esac
+    done
+    case "$fields" in
+        tagName) obj="$(jq -n --arg t "$TAG_VAL" '{tagName:$t}')" ;;
+        assets)  obj="$({ ls "$ASSETS_DIR" 2>/dev/null; printf '%s\n' $EXTRA_LISTED; } | jq -R -s -c 'split("\n")|map(select(length>0)|{name:.})|{assets:.}')" ;;
+        # --resolve-json (#7609) asks for the release's publish timestamp so
+        # the daemon can surface `artifact_available.published_at`.
+        publishedAt) obj="$(jq -n '{publishedAt:"2026-09-13T12:00:00Z"}')" ;;
+        *) exit 1 ;;
+    esac
+    [[ -n "$jqx" ]] && { printf '%s' "$obj" | jq -r "$jqx"; exit 0; }; printf '%s\n' "$obj"; exit 0
+fi
+if [[ "${1:-}" == "release" && "${2:-}" == "download" ]]; then
+    shift 2
+    shift # drop the <tag> positional arg
+    dest="."
+    patterns=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p) patterns+=("$2"); shift 2 ;;
+            -D) dest="$2"; shift 2 ;;
+            -R) shift 2 ;;
+            --clobber) shift ;;
+            *) shift ;;
+        esac
+    done
+    mkdir -p "$dest"
+    copied=0
+    for pat in "${patterns[@]}"; do
+        for f in "$ASSETS_DIR"/$pat; do
+            [[ -e "$f" ]] || continue
+            cp "$f" "$dest/"
+            copied=1
+        done
+    done
+    [[ "$copied" -eq 1 ]] && exit 0 || exit 1
+fi
+echo "fake gh: unsupported invocation: $*" >&2
+exit 1
+FAKEGH
+    chmod +x "$path"
+}
+
+# Writes a fake `gh` at $1 whose every `release view` fails — standing in for
+# the "GitHub API unreachable / rate-limited / unauthenticated" case that must
+# SOFTLY fall back to the local source build (AC4), never hard-fail.
+write_fake_gh_unreachable() {
+    local path="$1"
+    cat > "$path" <<'FAKEGH'
+#!/usr/bin/env bash
+echo "gh: failed to fetch release: dial tcp: lookup api.github.com: no such host" >&2
+exit 1
+FAKEGH
+    chmod +x "$path"
+}
+
+# ---------------------------------------------------------------------------
+# write_fake_daemon / write_fake_codesign* / write_fake_cosign* -- moved here
+# from test-loom-daemon-update.sh by #8028 (epic #7810 PR 6a) when the
+# artifact-fetch scenarios (tests A-V) split into the sibling suite
+# test-loom-daemon-update-fetch.sh: write_fake_daemon is used by BOTH suites
+# (every fetch scenario provisions an "installed" binary with it), and the
+# codesign/cosign fixtures are needed only by the fetch sibling but belong
+# beside the other fake-forge fixtures rather than duplicated into a suite of
+# their own.
+# ---------------------------------------------------------------------------
+
+# Writes a fake daemon binary at $1 that reports commit $2 on --version and,
+# on a normal run, appends its inherited LOOM_WORK_FINDER / LOOM_MAIN_HEALTH_GATE
+# to marker file $3 before looping forever (so it stays alive for kill -0).
+#
+# `calibrate` is handled explicitly (#4799) and exits immediately with no
+# output: this fixture has no real calibrate implementation, and every
+# successful loom-daemon-start.sh run (nohup/launchd/systemd, all three
+# reached by this suite's restart scenarios) calls `$DAEMON_BIN calibrate
+# --workspace ... --json` via print_calibrate_hint(). Before this fix, that
+# call fell through to the `while true` loop below and hung forever inside
+# print_calibrate_hint()'s blocking `$(...)` -- the exact hang
+# ci-excluded.txt documented. print_calibrate_hint() is bounded independently
+# now (lib/bounded-run.sh), but this fixture also short-circuits so the suite
+# stays fast rather than eating that timeout on every restart.
+#
+# GENERALIZED (#4799 CI hang): `calibrate` was only one instance of a whole
+# CLASS of wedge. ANY *subcommand* the lifecycle scripts dispatch that this
+# fixture does not recognize used to fall through to the `while true` daemon
+# body IN THE FOREGROUND and block its caller forever -- which is precisely how
+# the CI run hung: with a real `systemctl --user` reachable, the update script
+# resolved DAEMON_MANAGER=systemd and ran `"$PROVISION_TARGET" restart`, and
+# this fixture (no `restart` handler) looped instead of answering. So the
+# catch-all below exits non-zero for any unrecognized NON-FLAG first argument
+# (a real daemon rejects an unknown subcommand; it does not daemonize). A
+# leading `-`/`--` still falls through to the daemon body, because the
+# supervisors DO launch the daemon proper with flags.
+write_fake_daemon() {
+    local path="$1" commit="$2" marker="$3"
+    _loom_fixture_assert_scratch_path "$path" "a fake loom-daemon"
+    cat > "$path" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+    echo "loom-daemon 0.15.0 (commit ${commit}, built 2026-07-26T00:00:00Z)"
+    exit 0
+fi
+if [[ "\${1:-}" == "calibrate" ]]; then
+    exit 1
+fi
+if [[ "\${1:-}" == "telemetry-capabilities" ]]; then
+    # Answer the post-build OTLP probe (#10700) like a real daemon. Set
+    # FAKE_DAEMON_OTLP_PROBE_EXIT=1 to simulate a binary lacking the exporter.
+    if [[ "\${FAKE_DAEMON_OTLP_PROBE_EXIT:-0}" != "0" ]]; then
+        echo '{"otlp":false}'
+        exit "\${FAKE_DAEMON_OTLP_PROBE_EXIT}"
+    fi
+    echo '{"otlp":true}'
+    exit 0
+fi
+if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
+    echo "fake loom-daemon: unsupported subcommand: \$*" >&2
+    exit 1
+fi
+echo "FAKE_DAEMON WF=[\${LOOM_WORK_FINDER:-}] HG=[\${LOOM_MAIN_HEALTH_GATE:-}]" > "${marker}"
+while true; do sleep 1; done
+EOF
+    chmod +x "$path"
+}
+
+# Writes a fake `codesign` at $1 emulating one of three macOS states, so the
+# darwin signature branch of verify_artifact_signature() is testable on ANY
+# host (including a Linux CI runner, which has no codesign at all):
+#   unsigned    -- `-dv` reports "code object is not signed at all" (expected
+#                  for a release built with no Developer ID secrets: soft-skip)
+#   signed-ok   -- `-dv` reports an Authority, `--verify` succeeds
+#   signed-bad  -- `-dv` reports an Authority, `--verify` FAILS (tamper
+#                  evidence: must abort, NOT be confused with "unsigned")
+write_fake_codesign() {
+    local path="$1" mode="$2"
+    cat > "$path" <<FAKECS
+#!/usr/bin/env bash
+MODE="$mode"
+FAKECS
+    cat >> "$path" <<'FAKECS'
+target="${!#}"
+if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
+    if [[ "$MODE" == "unsigned" ]]; then
+        echo "$target: code object is not signed at all" >&2
+        exit 1
+    fi
+    {
+        echo "Executable=$target"
+        echo "Identifier=com.rjwalters.loom-daemon"
+        echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
+    } >&2
+    exit 0
+fi
+if [[ "${1:-}" == "--verify" ]]; then
+    [[ "$MODE" == "signed-ok" ]] && exit 0
+    echo "$target: invalid signature (code or signature have been modified)" >&2
+    exit 1
+fi
+exit 0
+FAKECS
+    chmod +x "$path"
+}
+
+# Writes a fake `codesign` at $1 that reports a Developer ID Authority for
+# every target EXCEPT the exact path $2 (the eventual provisioning
+# destination), which it reports as ad-hoc-signed (no `Authority=` line,
+# `--verify` still succeeds -- an ad-hoc signature IS a valid signature, just
+# not a certificate-anchored one). Simulates the #7932 regression class this
+# test (#8008) guards against: a verified download that demonstrably carried
+# a Developer ID signature, whose post-provision destination does not.
+write_fake_codesign_signature_downgrade() {
+    local path="$1" downgraded_target="$2"
+    cat > "$path" <<FAKECS
+#!/usr/bin/env bash
+DOWNGRADED_TARGET="$downgraded_target"
+FAKECS
+    cat >> "$path" <<'FAKECS'
+target="${!#}"
+if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
+    {
+        echo "Executable=$target"
+        echo "Identifier=com.rjwalters.loom-daemon"
+        if [[ "$target" == "$DOWNGRADED_TARGET" ]]; then
+            echo "Signature=adhoc"
+        else
+            echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
+        fi
+    } >&2
+    exit 0
+fi
+if [[ "${1:-}" == "--verify" ]]; then
+    exit 0
+fi
+exit 0
+FAKECS
+    chmod +x "$path"
+}
+
+# Writes a fake `codesign` at $1 that reports a Developer ID Authority for
+# every target EXCEPT the exact path $2 (the eventual provisioning
+# destination), on which `-dv`/`-dvvv` sleeps for $3 seconds before answering
+# -- long enough that a caller-side `timeout "$DEST_SIG_VERIFY_TIMEOUT"`
+# shorter than $3 kills it first. Exercises the #8770 bounded-invocation +
+# inconclusive-on-timeout fix in verify_destination_artifact(): the
+# post-provision check must NOT collapse "codesign never answered" into
+# "codesign answered and reported no Authority=" (the exit-5 DOWNGRADED path).
+write_fake_codesign_signature_hang() {
+    local path="$1" hang_target="$2" sleep_seconds="$3"
+    cat > "$path" <<FAKECS
+#!/usr/bin/env bash
+HANG_TARGET="$hang_target"
+SLEEP_SECONDS="$sleep_seconds"
+FAKECS
+    cat >> "$path" <<'FAKECS'
+target="${!#}"
+if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
+    if [[ "$target" == "$HANG_TARGET" ]]; then
+        sleep "$SLEEP_SECONDS"
+    fi
+    {
+        echo "Executable=$target"
+        echo "Identifier=com.rjwalters.loom-daemon"
+        echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
+    } >&2
+    exit 0
+fi
+if [[ "${1:-}" == "--verify" ]]; then
+    exit 0
+fi
+exit 0
+FAKECS
+    chmod +x "$path"
+}
+
+# Writes a fake `cosign` at $1 whose `verify-blob` exits $2 — the Linux
+# detached-signature branch of verify_artifact_signature().
+write_fake_cosign() {
+    local path="$1" rc="$2"
+    cat > "$path" <<FAKECOSIGN
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "verify-blob" ]]; then
+    if [[ "$rc" -eq 0 ]]; then
+        echo "Verified OK" >&2
+        exit 0
+    fi
+    echo "Error: failed to verify signature" >&2
+    exit 1
+fi
+exit 0
+FAKECOSIGN
+    chmod +x "$path"
+}
+
+# Writes a fake `cosign` at $1 whose `verify-blob` exits $2 AND appends its full
+# argv to the log file at $3 (#5054). Recording the argv is the point: the
+# keyless cases below assert not just "verification ran" but that it ran with
+# the DERIVED signer identity + OIDC issuer, which is the whole security
+# property — a fake cosign that always exits 0 would otherwise "pass" even if
+# the script silently verified against nothing.
+write_fake_cosign_recording() {
+    local path="$1" rc="$2" argslog="$3"
+    cat > "$path" <<FAKECOSIGN
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$argslog"
+if [[ "\${1:-}" == "verify-blob" ]]; then
+    if [[ "$rc" -eq 0 ]]; then
+        echo "Verified OK" >&2
+        exit 0
+    fi
+    echo "Error: failed to verify signature" >&2
+    exit 1
+fi
+exit 0
+FAKECOSIGN
+    chmod +x "$path"
+}

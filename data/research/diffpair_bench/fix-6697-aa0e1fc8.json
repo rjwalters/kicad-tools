@@ -1,0 +1,241 @@
+{
+  "label": "fix-6697",
+  "git_sha": "aa0e1fc8",
+  "timeout_s": 900.0,
+  "rows": [
+    {
+      "board": "03",
+      "engine": "lattice",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "aa0e1fc8",
+      "net_class_map_mode": "committed",
+      "input_sha256": "3691a5a5775ecde3c7ff28ce35dcaa005837ba16ed6a8ca508a16f1b3382702e",
+      "source": "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+      "stripped_items": 0,
+      "pair_nets": [
+        "USB_D+",
+        "USB_D-",
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "deterministic_rescue": false,
+      "cmd": "-m kicad_tools.cli route /tmp/r6697/pairs2/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /tmp/r6697/pairs2/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 900 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6697/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "exit_code": 3,
+      "wall_s": 656.1,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.05,
+      "cell_estimate": 5120529,
+      "router_nets": "24/25",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "routed": "/tmp/r6697/pairs2/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 26,
+      "nets_total": 27,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 114,
+      "connections_total": 115,
+      "via_count": 84,
+      "vias_per_connection": 0.737,
+      "wirelength_mm": 1123.9,
+      "kct_check_errors": 2,
+      "kct_check_errors_total": 2,
+      "kct_check_by_rule": {
+        "connectivity": 1,
+        "diffpair_uncoupled_length": 1
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/r6697/pairs2/03-lattice-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 1,
+      "kicad_drc_unconnected": 1,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {
+        "diff_pair_uncoupled_length_too_long": 1
+      },
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 1
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {
+        "VBUS": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "BTN1": 4,
+        "BTN2": 6,
+        "BTN3": 4,
+        "BTN4": 6,
+        "GND": 3,
+        "ISP_MISO": 2,
+        "ISP_MOSI": 2,
+        "ISP_SCK": 2,
+        "JOY_BTN": 6,
+        "JOY_X": 4,
+        "JOY_Y": 4,
+        "RESET": 12,
+        "USB_CC1": 1,
+        "USB_D+": 1,
+        "VBUS": 8,
+        "VCC": 19
+      },
+      "zone_nets": [
+        "GND",
+        "VCC"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "USB_D",
+          "nets": [
+            "USB_D+",
+            "USB_D-"
+          ],
+          "outcome": "partially-coupled:1/2",
+          "segment_outcomes": [
+            {
+              "segment": 0,
+              "span": "J1.B6->U2.3",
+              "outcome": "uncoupled-fallback:pair-no-path"
+            },
+            {
+              "segment": 1,
+              "span": "U2.4->R4.1",
+              "outcome": "coupled"
+            }
+          ],
+          "routed_mm": [
+            39.895,
+            39.741
+          ],
+          "skew_mm": 1.754,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 67.187,
+          "vias_p": 1,
+          "vias_n": 0,
+          "gap_min_mm": 0.15,
+          "gap_max_mm": 0.15,
+          "coupled_trunk_mm": 6.302,
+          "continuity_pct": 15.6,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 2.5,
+          "log_threshold": {
+            "continuity_pct": 70.0,
+            "skew_mm": 2.5
+          },
+          "protocol": "USB2_FS",
+          "skew_source": "protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": false,
+          "max_uncoupled_per_terminal_mm": 6.35,
+          "max_vias_per_net": 4,
+          "continuity_label": "info",
+          "unrouted": false,
+          "uncoupled_net_mm": [
+            31.675,
+            30.239
+          ],
+          "uncoupled_kicad_mm": 31.675,
+          "components": 3,
+          "max_uncoupled_total_mm": 19.05,
+          "uncoupled_limit_source": "6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+          "uncoupled_severity": "error",
+          "uncoupled_pass": false,
+          "vias_pass": true,
+          "vias_severity": "error",
+          "kct_verdict": {
+            "skew": "pass",
+            "uncoupled": "fail",
+            "vias": "pass"
+          },
+          "kicad_cli_verdict": {
+            "skew": "pass",
+            "uncoupled": "fail",
+            "vias": "pass",
+            "gap": "pass"
+          }
+        },
+        {
+          "pair": "USB_MCU_D",
+          "nets": [
+            "USB_MCU_D+",
+            "USB_MCU_D-"
+          ],
+          "outcome": "coupled",
+          "segment_outcomes": null,
+          "routed_mm": [
+            4.416,
+            4.57
+          ],
+          "skew_mm": 0.154,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 0.0,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.15,
+          "gap_max_mm": 0.1514,
+          "coupled_trunk_mm": 4.416,
+          "continuity_pct": 100.0,
+          "continuity_threshold_pct": 70.0,
+          "skew_tolerance_mm": 2.5,
+          "log_threshold": {
+            "continuity_pct": 70.0,
+            "skew_mm": 2.5
+          },
+          "protocol": "USB2_FS",
+          "skew_source": "protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": 6.35,
+          "max_vias_per_net": 4,
+          "continuity_label": "info",
+          "unrouted": false,
+          "uncoupled_net_mm": [
+            1.175,
+            1.329
+          ],
+          "uncoupled_kicad_mm": 1.329,
+          "components": 2,
+          "max_uncoupled_total_mm": 12.7,
+          "uncoupled_limit_source": "6.35 mm x 2 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+          "uncoupled_severity": "error",
+          "uncoupled_pass": true,
+          "vias_pass": true,
+          "vias_severity": "error",
+          "kct_verdict": {
+            "skew": "pass",
+            "uncoupled": "pass",
+            "vias": "pass"
+          },
+          "kicad_cli_verdict": {
+            "skew": "pass",
+            "uncoupled": "pass",
+            "vias": "pass",
+            "gap": "pass"
+          }
+        }
+      ],
+      "pair_digest": "c9c627a09a103080",
+      "nets_routed": "26/27",
+      "kct_errors_by_rule": {
+        "connectivity": 1,
+        "diffpair_uncoupled_length": 1
+      },
+      "kicad_cli_errors_by_type": {
+        "diff_pair_uncoupled_length_too_long": 1
+      },
+      "valid": true,
+      "invalid_reasons": []
+    }
+  ]
+}

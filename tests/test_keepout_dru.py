@@ -1,0 +1,798 @@
+"""Explicit ``.kicad_dru`` keepout rules per rule area (Issue #6039).
+
+``kicad-cli pcb drc`` 10.0.1 does not enforce keepout rule areas on its own,
+so kct emits one ``A.intersectsArea('<uuid>')`` disallow rule per area.  The
+pure-Python half pins rendering, flag mapping and managed-block merging; the
+KiCad-gated half proves the emitted sidecar actually makes native DRC fire.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.manufacturers import get_profile, write_drc_constraints
+from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+from kicad_tools.manufacturers.keepout_dru import (
+    DRU_KEEPOUT_BLOCK_BEGIN,
+    DRU_KEEPOUT_BLOCK_END,
+    KEEPOUT_NATIVE_MIN_KICAD_VERSION,
+    KeepoutDruRule,
+    apply_keepout_rules,
+    keepout_rules_for_board,
+    keepout_rules_from_zones,
+    merge_keepout_block,
+)
+from kicad_tools.schema.pcb import Zone, ZoneKeepout
+
+WALL_UUID = "cccccccc-0000-0000-0000-000000000001"
+SQUARE = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_kicad_cli(request, monkeypatch):
+    """Writer-integration tests must not depend on the host's KiCad release.
+
+    The block is only emitted below KiCad 10.0.6 (Issue #7198), so pin the
+    detected release to 10.0.1.  ``test_native_*`` tests drive the real
+    ``kicad-cli`` and keep the real version.
+    """
+    if request.node.name.startswith("test_native"):
+        return
+    from kicad_tools.manufacturers import project_generator
+
+    monkeypatch.setattr(project_generator, "_installed_kicad_cli_version", lambda: "10.0.1")
+
+
+def _installed_version() -> tuple[int, ...] | None:
+    from kicad_tools.manufacturers.dru_generator import parse_kicad_cli_version
+    from kicad_tools.manufacturers.project_generator import _installed_kicad_cli_version
+
+    _installed_kicad_cli_version.cache_clear()
+    return parse_kicad_cli_version(_installed_kicad_cli_version())
+
+
+@pytest.fixture
+def rule_dependent_engine():
+    """Skip unless kicad-cli needs kct's rule (older than the native gate)."""
+    version = _installed_version()
+    if version is not None and version >= KEEPOUT_NATIVE_MIN_KICAD_VERSION:
+        pytest.skip(f"kicad-cli {version} enforces keepouts natively; no kct rule emitted")
+
+
+def _zone(
+    *,
+    uuid: str = WALL_UUID,
+    name: str = "wall",
+    layers: list[str] | None = None,
+    **flags: bool,
+) -> Zone:
+    layers = ["F.Cu", "B.Cu"] if layers is None else layers
+    return Zone(
+        net_number=0,
+        net_name="",
+        layer=layers[0] if layers else "",
+        uuid=uuid,
+        name=name,
+        layers=list(layers),
+        keepout=ZoneKeepout(**flags),
+        polygon=list(SQUARE),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rule derivation
+# ---------------------------------------------------------------------------
+
+
+def test_flags_map_to_exact_disallow_kinds():
+    zones = [
+        _zone(tracks_allowed=False, vias_allowed=False),
+        _zone(uuid="u-pads", pads_allowed=False),
+        _zone(uuid="u-pour", copperpour_allowed=False),
+        _zone(uuid="u-fp", footprints_allowed=False),
+        _zone(
+            uuid="u-all",
+            tracks_allowed=False,
+            vias_allowed=False,
+            pads_allowed=False,
+            copperpour_allowed=False,
+            footprints_allowed=False,
+        ),
+    ]
+    assert [r.disallow for r in keepout_rules_from_zones(zones)] == [
+        ("track", "via"),
+        ("pad",),
+        ("zone",),
+        ("footprint",),
+        ("track", "via", "pad", "zone", "footprint"),
+    ]
+
+
+def test_area_forbidding_nothing_and_plain_pours_emit_no_rule():
+    permissive = _zone()  # every flag allowed
+    pour = Zone(net_number=1, net_name="GND", layer="B.Cu", uuid="p", polygon=list(SQUARE))
+    degenerate = _zone(tracks_allowed=False)
+    degenerate.polygon = SQUARE[:2]
+    assert keepout_rules_from_zones([permissive, pour, degenerate]) == []
+
+
+def test_rule_keys_on_uuid_and_falls_back_to_name():
+    named = _zone(tracks_allowed=False)
+    unnamed = _zone(uuid="dddd-1", name="", tracks_allowed=False)
+    no_uuid = _zone(uuid="", name="legacy", tracks_allowed=False)
+    neither = _zone(uuid="", name="", tracks_allowed=False)
+    rules = keepout_rules_from_zones([named, unnamed, no_uuid, neither])
+    assert [(r.reference, r.name) for r in rules] == [
+        (WALL_UUID, f"kct keepout wall [{WALL_UUID}]"),
+        ("dddd-1", "kct keepout dddd-1"),
+        ("legacy", "kct keepout legacy"),
+    ]
+
+
+def test_single_copper_layer_gets_layer_clause_multi_and_wildcards_do_not():
+    rules = keepout_rules_from_zones(
+        [
+            _zone(uuid="a", layers=["F.Cu"], tracks_allowed=False),
+            _zone(uuid="b", layers=["In2.Cu"], tracks_allowed=False),
+            _zone(uuid="c", layers=["F.Cu", "B.Cu"], tracks_allowed=False),
+            _zone(uuid="d", layers=["*.Cu"], tracks_allowed=False),
+            _zone(uuid="e", layers=["F&B.Cu"], tracks_allowed=False),
+        ]
+    )
+    assert [r.layer for r in rules] == ["F.Cu", "In2.Cu", None, None, None]
+    assert '(layer "F.Cu")' in rules[0].render()
+    assert "(layer" not in rules[2].render()
+
+
+def test_render_escapes_quotes_and_backslashes():
+    """Issue #6087: KiCad's expression lexer only decodes ``\'``.
+
+    So the expression layer escapes apostrophes and leaves backslashes alone;
+    only the s-expression layer doubles them.  (#6039 doubled them twice,
+    which made a backslash-named area unmatchable.)
+    """
+    rule = KeepoutDruRule(
+        name='kct keepout it\'s "q"', reference='it\'s "q"\\x', disallow=("track",)
+    )
+    assert rule.render() == (
+        '(rule "kct keepout it\'s \\"q\\""\n'
+        '  (condition "A.intersectsArea(\'it\\\\\'s \\"q\\"\\\\x\')")\n'
+        "  (constraint disallow track))"
+    )
+
+
+def test_expression_escape_trailing_backslash_becomes_wildcard():
+    from kicad_tools.manufacturers.keepout_dru import _escape_expr_string
+
+    assert _escape_expr_string("a\\b") == "a\\b"
+    assert _escape_expr_string("it's") == "it\\'s"
+    assert _escape_expr_string("a\\'b") == "a\\\\'b"
+    # A trailing backslash would escape the closing quote.
+    assert _escape_expr_string("foo\\") == "foo?"
+
+
+def test_footprint_rule_excludes_its_parent_footprint():
+    zone = _zone(uuid="fp-ko", name="antkeep", tracks_allowed=False, pads_allowed=False)
+    zone.parent_reference = "AE1"
+    [rule] = keepout_rules_from_zones([zone])
+    assert rule.parent_footprint == "AE1"
+    assert rule.name == "kct keepout antkeep [fp-ko] in AE1"
+    assert (
+        "(condition \"A.intersectsArea('fp-ko') && !A.memberOfFootprint('AE1')\")" in rule.render()
+    )
+
+
+def test_duplicate_reference_emits_only_the_first_rule(capsys):
+    """KiCad resolves a shared UUID to the first zone only (measured, #6087)."""
+    rules = keepout_rules_from_zones(
+        [_zone(uuid="same", tracks_allowed=False), _zone(uuid="same", vias_allowed=False)]
+    )
+    assert [r.disallow for r in rules] == [("track",)]
+    assert "shares its id" in capsys.readouterr().err
+
+
+def test_render_keeps_non_ascii_names_literal():
+    rule = keepout_rules_from_zones([_zone(uuid="", name="Zone µ", tracks_allowed=False)])[0]
+    assert "Zone µ" in rule.render()
+
+
+# ---------------------------------------------------------------------------
+# Managed-block merge
+# ---------------------------------------------------------------------------
+
+USER = '(version 1)\n\n(rule "mine"\n  (constraint clearance (min 0.3mm)))\n'
+
+
+def _rules(*uuids: str) -> list[KeepoutDruRule]:
+    return keepout_rules_from_zones([_zone(uuid=u, tracks_allowed=False) for u in uuids])
+
+
+def test_merge_is_idempotent_and_preserves_user_rules():
+    once = merge_keepout_block(USER, _rules("a"))
+    assert once is not None
+    assert once.startswith(USER.rstrip("\n"))
+    assert merge_keepout_block(once, _rules("a")) == once
+    assert once.count(DRU_KEEPOUT_BLOCK_BEGIN) == 1
+
+
+def test_merge_replaces_rather_than_duplicates_changed_rules():
+    first = merge_keepout_block(USER, _rules("a", "b"))
+    second = merge_keepout_block(first, _rules("c"))
+    assert second is not None
+    assert second.count(DRU_KEEPOUT_BLOCK_BEGIN) == 1
+    assert "'c'" in second and "'a'" not in second and "'b'" not in second
+    assert '(rule "mine"' in second
+
+
+def test_merge_without_rules_removes_stale_block_and_is_noop_otherwise():
+    assert merge_keepout_block(USER, []) == USER
+    assert merge_keepout_block(None, []) is None
+    with_block = merge_keepout_block(USER, _rules("a"))
+    assert merge_keepout_block(with_block, []) == USER
+
+
+def test_merge_into_empty_and_headerless_content():
+    fresh = merge_keepout_block(None, _rules("a"))
+    assert fresh is not None and fresh.startswith("(version 1)\n\n" + DRU_KEEPOUT_BLOCK_BEGIN)
+    assert fresh.rstrip().endswith(DRU_KEEPOUT_BLOCK_END)
+    headerless = merge_keepout_block('(rule "x" (constraint track_width (min 1mm)))\n', _rules("a"))
+    assert headerless is not None and headerless.startswith("(version 1)\n")
+
+
+# ---------------------------------------------------------------------------
+# Writer integration (no KiCad needed)
+# ---------------------------------------------------------------------------
+
+
+def _board(
+    path: Path,
+    *,
+    keepout: str | None = "(tracks not_allowed) (vias not_allowed)",
+    zone_layers: str = '"F.Cu" "B.Cu"',
+    track_layer: str = "F.Cu",
+    x0: float = 113.0,
+    x1: float = 117.0,
+    extra: str = "",
+) -> Path:
+    """The PR #6034 judge's crossing board: one /SIG track through a wall."""
+    zone = ""
+    if keepout is not None:
+        zone = f"""  (zone (net 0) (net_name "") (name "wall") (layers {zone_layers})
+    (uuid "{WALL_UUID}") (hatch edge 0.5)
+    (keepout {keepout})
+    (polygon (pts (xy {x0} 99.0) (xy {x1} 99.0) (xy {x1} 117.0) (xy {x0} 117.0))))
+"""
+    fps = "".join(
+        f"""  (footprint "R" (layer "F.Cu") (uuid "00000000-0000-0000-0000-00000000001{i}")
+    (at {x} 108.0)
+    (property "Reference" "R{i}" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "/SIG")))
+"""
+        for i, x in ((1, 104.0), (2, 126.0))
+    )
+    path.write_text(
+        f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user) (47 "F.CrtYd" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "/SIG")
+  (net 2 "GND")
+  (gr_rect (start 100.0 100.0) (end 130.0 116.0)
+    (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+{fps}{zone}  (segment (start 104 108) (end 126 108) (width 0.25) (layer "{track_layer}") (net 1)
+    (uuid "dddddddd-0000-0000-0000-000000000001"))
+{extra})
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _emit(path: Path) -> str:
+    rules = get_profile("jlcpcb").get_design_rules(layers=2, copper_oz=1)
+    write_drc_constraints(path, rules, manufacturer_id="jlcpcb", layers=2)
+    return path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+
+
+def test_write_drc_constraints_emits_block_and_is_idempotent(tmp_path):
+    board = _board(tmp_path / "cross.kicad_pcb")
+    first = _emit(board)
+    assert first.count(DRU_FLOORS_BLOCK_BEGIN) == 1
+    assert first.count(DRU_KEEPOUT_BLOCK_BEGIN) == 1
+    assert f"A.intersectsArea('{WALL_UUID}')" in first
+    assert "(constraint disallow track via))" in first
+    assert _emit(board) == first
+
+
+def test_write_drc_constraints_preserves_user_rules(tmp_path):
+    board = _board(tmp_path / "cross.kicad_pcb")
+    board.with_suffix(".kicad_dru").write_text(USER, encoding="utf-8")
+    first = _emit(board)
+    # Issue #8937: the floors block is inserted ABOVE the user's rules, so
+    # KiCad's last-match precedence keeps the user's clearance (0.3 mm here)
+    # governing instead of being overridden by the appended fab floor --
+    # preserving the rule means preserving its effect, not just its bytes.
+    # The block is anchored BELOW the leading ``(version ...)`` form (a
+    # file whose first element is not the version form does not load).
+    # (The keepout block may follow the user rules; it is scoped to its rule
+    # areas and carries no clearance constraint.)
+    assert first.startswith("(version 1)\n")
+    assert '(rule "mine"\n  (constraint clearance (min 0.3mm)))' in first
+    assert first.index("(version 1)") < first.index("# BEGIN kct fab floors")
+    assert first.index("# BEGIN kct fab floors") < first.index('(rule "mine"')
+    assert _emit(board) == first
+
+
+def test_keepout_free_board_gets_no_block(tmp_path):
+    board = _board(tmp_path / "clean.kicad_pcb", keepout=None)
+    assert keepout_rules_for_board(board) == []
+    assert DRU_KEEPOUT_BLOCK_BEGIN not in _emit(board)
+
+
+def test_removing_the_last_keepout_drops_the_block(tmp_path):
+    board = _board(tmp_path / "cross.kicad_pcb")
+    assert DRU_KEEPOUT_BLOCK_BEGIN in _emit(board)
+    _board(board, keepout=None)
+    assert DRU_KEEPOUT_BLOCK_BEGIN not in _emit(board)
+
+
+def test_renamed_destination_reads_keepouts_from_destination_board(tmp_path):
+    (tmp_path / "src").mkdir()
+    source = _board(tmp_path / "src" / "in.kicad_pcb", keepout=None)
+    dest = _board(tmp_path / "out.kicad_pcb")
+    rules = get_profile("jlcpcb").get_design_rules(layers=2, copper_oz=1)
+    write_drc_constraints(dest, rules, manufacturer_id="jlcpcb", layers=2, source_pcb_path=source)
+    assert f"A.intersectsArea('{WALL_UUID}')" in dest.with_suffix(".kicad_dru").read_text()
+
+
+# ---------------------------------------------------------------------------
+# KiCad-gated: the emitted sidecar makes native DRC fire
+# ---------------------------------------------------------------------------
+
+
+def _native_not_allowed(board: Path) -> list[dict]:
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("Native KiCad CLI is not installed")
+    report = board.with_suffix(".drc.json")
+    subprocess.run(
+        [
+            str(cli),
+            "pcb",
+            "drc",
+            "--severity-all",
+            "--format",
+            "json",
+            "-o",
+            str(report),
+            str(board),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    data = json.loads(report.read_text(encoding="utf-8"))
+    return [v for v in data["violations"] if v["type"] == "items_not_allowed"]
+
+
+def _kct_rule_hits(findings: list[dict]) -> list[dict]:
+    return [v for v in findings if "kct keepout" in v["description"]]
+
+
+def test_native_drc_flags_track_through_keepout_after_emit(tmp_path, rule_dependent_engine):
+    board = _board(tmp_path / "cross.kicad_pcb")
+    _emit(board)
+    hits = _kct_rule_hits(_native_not_allowed(board))
+    assert len(hits) >= 1
+    assert any("Track [/SIG] on F.Cu" in i["description"] for v in hits for i in v["items"])
+
+
+def test_native_drc_baseline_without_emitted_rule(tmp_path):
+    """Pins native keepout behaviour with NO emitted rule, per kicad-cli version.
+
+    * 10.0.1 (local gate install): the #6039 gap -- no rule, no finding.
+    * ``PINNED_KICAD_VERSION`` (10.0.6, CI): KiCad enforces the area itself,
+      reporting one ``items_not_allowed`` error on the crossing track.  The
+      kct rule is therefore not emitted there (Issue #7198; see
+      ``test_native_drc_reports_each_item_exactly_once`` for the emit gating).
+    """
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION
+    from kicad_tools.manufacturers.project_generator import _installed_kicad_cli_version
+
+    board = _board(tmp_path / "cross.kicad_pcb")
+    findings = _native_not_allowed(board)
+    _installed_kicad_cli_version.cache_clear()
+    version = _installed_kicad_cli_version() or ""
+    if version.startswith("10.0.1"):
+        assert findings == []
+    elif version.startswith(PINNED_KICAD_VERSION):
+        assert len(findings) == 1
+        assert any("Track [/SIG] on F.Cu" in i["description"] for i in findings[0]["items"])
+    else:
+        pytest.skip(
+            f"baseline only pinned on kicad-cli 10.0.1 / {PINNED_KICAD_VERSION} (have {version!r})"
+        )
+
+
+def test_native_drc_layer_scoped_area_ignores_other_layer(tmp_path, rule_dependent_engine):
+    board = _board(tmp_path / "fwall.kicad_pcb", zone_layers='"F.Cu"', track_layer="B.Cu")
+    dru = _emit(board)
+    assert '(layer "F.Cu")' in dru
+    assert _kct_rule_hits(_native_not_allowed(board)) == []
+
+
+def test_native_drc_clean_board_reports_nothing_new(tmp_path, rule_dependent_engine):
+    board = _board(tmp_path / "clean.kicad_pcb", x0=101.0, x1=103.0)
+    assert DRU_KEEPOUT_BLOCK_BEGIN in _emit(board)
+    assert _native_not_allowed(board) == []
+
+
+_CARVED_GND = """  (zone (net 2) (net_name "GND") (layer "B.Cu") (uuid "ffffffff-0000-0000-0000-000000000001")
+    (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2)
+    (filled_areas_thickness no) (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 101 101) (xy 129 101) (xy 129 115) (xy 101 115)))
+    (filled_polygon (layer "B.Cu") (pts {pts})){more})
+"""
+
+
+def test_native_drc_pour_only_area_is_quiet_on_carved_fill_and_fires_on_real_copper(
+    tmp_path, rule_dependent_engine
+):
+    """``disallow zone`` judges the saved fill, not the pour outline.
+
+    A pour outline overlapping a ``(copperpour not_allowed)`` area whose
+    saved fill was carved around it (KiCad's own fill result) is clean;
+    fill copper actually inside the area is a real violation.
+    """
+    pour_only = "(tracks allowed) (vias allowed) (pads allowed) (copperpour not_allowed)"
+    carved = _CARVED_GND.format(
+        pts="(xy 101 101) (xy 112.5 101) (xy 112.5 115) (xy 101 115)",
+        more='\n    (filled_polygon (layer "B.Cu") (pts (xy 117.5 101) (xy 129 101) (xy 129 115) (xy 117.5 115)))',
+    )
+    board = _board(
+        tmp_path / "carved.kicad_pcb",
+        keepout=pour_only,
+        zone_layers='"B.Cu"',
+        extra=carved,
+    )
+    assert "(constraint disallow zone))" in _emit(board)
+    assert _kct_rule_hits(_native_not_allowed(board)) == []
+
+    solid = _CARVED_GND.format(pts="(xy 101 101) (xy 129 101) (xy 129 115) (xy 101 115)", more="")
+    bad = _board(tmp_path / "solid.kicad_pcb", keepout=pour_only, zone_layers='"B.Cu"', extra=solid)
+    _emit(bad)
+    assert len(_kct_rule_hits(_native_not_allowed(bad))) == 1
+
+
+# ---------------------------------------------------------------------------
+# Footprint-embedded keepouts (Issue #6087)
+# ---------------------------------------------------------------------------
+
+ANT_ZONE_UUID = "eeeeeeee-0000-0000-0000-000000000001"
+_ALL_FORBIDDEN = (
+    "(tracks not_allowed) (vias not_allowed) (pads not_allowed) "
+    "(copperpour not_allowed) (footprints not_allowed)"
+)
+_CRTYD = (
+    "(fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05) (type default)) "
+    '(fill none) (layer "F.CrtYd"))'
+)
+
+
+def _fp_board(
+    path: Path,
+    *,
+    id_kw: str = "uuid",
+    version: str = "20240108",
+    zone_name: str = "antkeep",
+    zone_id: str | None = ANT_ZONE_UUID,
+    keepout: str = _ALL_FORBIDDEN,
+    intruder: bool = True,
+) -> Path:
+    """The PR #6080 judge's probe: AE1 owns an F.Cu+B.Cu keepout.
+
+    A B.Cu /SIG track (R1 -> R2) crosses the area, AE1's own pad sits inside
+    it, and (``intruder``) a third footprint R3 with a courtyard sits inside
+    too.  Zone names are written s-expression escaped.
+    """
+    esc = zone_name.replace("\\", "\\\\").replace('"', '\\"')
+    zid = f'({id_kw} "{zone_id}") ' if zone_id else ""
+
+    def fp(ref: str, x: float, y: float, fid: str, net: str, body: str = "") -> str:
+        return f"""  (footprint "X" (layer "F.Cu") ({id_kw} "00000000-0000-0000-0000-0000000000{fid}")
+    (at {x} {y})
+    (property "Reference" "{ref}" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "v" (at 0 1.5 0) (layer "F.Fab"))
+    {body}
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") {net})
+"""
+
+    ant_zone = f"""    (zone (net 0) (net_name "") (name "{esc}") (layers "F.Cu" "B.Cu") {zid}(hatch edge 0.5)
+      (keepout {keepout})
+      (polygon (pts (xy 113 101) (xy 117 101) (xy 117 115) (xy 113 115))))
+"""
+    parts = [
+        fp("R1", 104, 108, "11", '(net 1 "/SIG")'),
+        fp("R2", 126, 108, "12", '(net 1 "/SIG")'),
+        fp("AE1", 115, 104, "21", '(net 2 "/ANT")', _CRTYD) + ant_zone,
+    ]
+    if intruder:
+        parts.append(fp("R3", 115, 112, "13", '(net 0 "")', _CRTYD))
+    body = "".join(part + "  )\n" for part in parts)
+    path.write_text(
+        f"""(kicad_pcb
+  (version {version})
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (35 "F.Paste" user) (37 "F.SilkS" user)
+    (39 "F.Mask" user) (44 "Edge.Cuts" user) (47 "F.CrtYd" user) (49 "F.Fab" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "/SIG")
+  (net 2 "/ANT")
+  (gr_rect (start 100.0 100.0) (end 130.0 116.0)
+    (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+{body}  (segment (start 104 108) (end 126 108) (width 0.25) (layer "B.Cu") (net 1)
+    ({id_kw} "dddddddd-0000-0000-0000-000000000001"))
+)
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_footprint_keepout_is_parsed_apart_from_board_zones(tmp_path):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(_fp_board(tmp_path / "fp.kicad_pcb"))
+    assert pcb.rule_areas == [] and pcb.zones == []
+    [area] = pcb.footprint_rule_areas
+    assert (area.uuid, area.name, area.parent_reference) == (ANT_ZONE_UUID, "antkeep", "AE1")
+    assert area.parent_uuid == "00000000-0000-0000-0000-000000000021"
+    assert area.layers == ["F.Cu", "B.Cu"]
+    # Board-relative like every other zone: the outline starts at (100, 100).
+    assert min(x for x, _ in area.polygon) == pytest.approx(13.0)
+
+
+def test_footprint_keepout_rule_emitted_with_parent_exclusion(tmp_path):
+    dru = _emit(_fp_board(tmp_path / "fp.kicad_pcb"))
+    assert f"A.intersectsArea('{ANT_ZONE_UUID}') && !A.memberOfFootprint('AE1')" in dru
+    assert "(constraint disallow track via pad zone footprint))" in dru
+
+
+def test_legacy_tstamp_footprint_zone_keys_on_the_tstamp(tmp_path):
+    board = _fp_board(tmp_path / "old.kicad_pcb", id_kw="tstamp", version="20211014")
+    [rule] = keepout_rules_for_board(board)
+    assert rule.reference == ANT_ZONE_UUID
+    assert rule.parent_footprint == "AE1"
+
+
+def test_removing_a_footprint_drops_its_keepout(tmp_path):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(_fp_board(tmp_path / "fp.kicad_pcb"))
+    assert pcb.remove_footprint("AE1")
+    assert pcb.footprint_rule_areas == []
+
+
+def test_router_honours_footprint_keepouts(tmp_path):
+    """The grid/lattice keepout parse includes footprint-embedded areas."""
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.rules import DesignRules
+
+    router = Autorouter(width=40.0, height=30.0, rules=DesignRules())
+    router._pairwise_attach_zone_pcb_path = str(_fp_board(tmp_path / "fp.kicad_pcb"))
+    [area] = router._keepout_rule_area_polygons()
+    assert area.name == "antkeep"
+    assert area.blocks_tracks and area.blocks_vias
+    assert len(area.layers) == 2
+    # Sheet-absolute, exactly as written in the board file.
+    assert area.bbox == pytest.approx((113.0, 101.0, 117.0, 115.0))
+
+
+def _items(findings: list[dict]) -> list[str]:
+    return sorted(i["description"] for v in _kct_rule_hits(findings) for i in v["items"])
+
+
+def test_native_drc_flags_footprint_keepout_but_not_its_parent(tmp_path, rule_dependent_engine):
+    """AC: the judge's repro now fires; AE1's own pad/footprint stay clean."""
+    board = _fp_board(tmp_path / "fp.kicad_pcb")
+    assert _kct_rule_hits(_native_not_allowed(board)) == []  # the #6087 gap
+    _emit(board)
+    items = _items(_native_not_allowed(board))
+    assert any(i.startswith("Track [/SIG] on B.Cu") for i in items)
+    assert "Pad 1 [<no net>] of R3 on F.Cu" in items
+    assert "Footprint R3" in items
+    assert not any("AE1" in i for i in items), items
+
+
+def test_native_drc_footprint_keepout_clean_without_intruders(tmp_path, rule_dependent_engine):
+    board = _fp_board(
+        tmp_path / "clean.kicad_pcb",
+        intruder=False,
+        keepout="(tracks allowed) (vias not_allowed) (pads not_allowed) "
+        "(copperpour not_allowed) (footprints not_allowed)",
+    )
+    assert DRU_KEEPOUT_BLOCK_BEGIN in _emit(board)
+    assert _kct_rule_hits(_native_not_allowed(board)) == []
+
+
+def test_native_drc_legacy_tstamp_footprint_keepout(tmp_path, rule_dependent_engine):
+    board = _fp_board(tmp_path / "old.kicad_pcb", id_kw="tstamp", version="20211014")
+    _emit(board)
+    assert any(i.startswith("Track [/SIG] on B.Cu") for i in _items(_native_not_allowed(board)))
+
+
+@pytest.mark.parametrize(
+    "zone_name",
+    ["ant\\keep", "foo\\", "it's", "a\\'b", 'say "hi"'],
+    ids=["backslash", "trailing-backslash", "apostrophe", "backslash-apostrophe", "dquote"],
+)
+def test_native_drc_name_fallback_matches_awkward_names(tmp_path, zone_name, rule_dependent_engine):
+    """Issue #6087: a backslash in the referenced name must still match."""
+    board = _fp_board(tmp_path / "named.kicad_pcb", zone_name=zone_name, zone_id=None)
+    [rule] = keepout_rules_for_board(board)
+    assert rule.reference == zone_name
+    _emit(board)
+    assert any(i.startswith("Track [/SIG] on B.Cu") for i in _items(_native_not_allowed(board)))
+
+
+# ---------------------------------------------------------------------------
+# Version gate (Issue #7198)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("version", "emitted"),
+    [
+        ("10.0.1", True),
+        ("10.0.5", True),
+        ("9.0.9", True),
+        (None, True),
+        ("", True),
+        ("garbage", True),
+        ("10.0.6", False),
+        ("10.0.7", False),
+        ("10.0.6-1~ubuntu24.04.1 release build", False),
+        ("11.0.0", False),
+    ],
+)
+def test_apply_keepout_rules_gates_on_kicad_cli_version(tmp_path, version, emitted):
+    board = _board(tmp_path / "cross.kicad_pcb")
+    out = apply_keepout_rules("(version 1)\n", board, version)
+    assert (DRU_KEEPOUT_BLOCK_BEGIN in (out or "")) is emitted
+
+
+def test_apply_keepout_rules_removes_stale_block_on_native_release(tmp_path):
+    board = _board(tmp_path / "cross.kicad_pcb")
+    stale = apply_keepout_rules(USER, board, "10.0.1")
+    assert DRU_KEEPOUT_BLOCK_BEGIN in stale
+    assert apply_keepout_rules(stale, board, "10.0.6") == USER.rstrip("\n") + "\n"
+
+
+def test_apply_keepout_rules_stale_only_block_yields_empty_not_none(tmp_path):
+    """Callers use ``is not None``: ``""`` must win over the stale block."""
+    board = _board(tmp_path / "cross.kicad_pcb")
+    stale = apply_keepout_rules(None, board, "10.0.1")
+    assert DRU_KEEPOUT_BLOCK_BEGIN in stale
+    block_only = stale[stale.index(DRU_KEEPOUT_BLOCK_BEGIN) :]
+    assert apply_keepout_rules(block_only, board, "10.0.6") == ""
+
+
+def test_writer_drops_stale_block_on_native_release(tmp_path, monkeypatch):
+    from kicad_tools.manufacturers import project_generator
+
+    board = _board(tmp_path / "cross.kicad_pcb")
+    assert DRU_KEEPOUT_BLOCK_BEGIN in _emit(board)
+    monkeypatch.setattr(project_generator, "_installed_kicad_cli_version", lambda: "10.0.6")
+    after = _emit(board)
+    assert DRU_KEEPOUT_BLOCK_BEGIN not in after
+    assert "intersectsArea" not in after
+    assert DRU_FLOORS_BLOCK_BEGIN in after
+
+
+def test_writer_emits_block_when_version_unknown(tmp_path, monkeypatch):
+    from kicad_tools.manufacturers import project_generator
+
+    monkeypatch.setattr(project_generator, "_installed_kicad_cli_version", lambda: None)
+    assert DRU_KEEPOUT_BLOCK_BEGIN in _emit(_board(tmp_path / "cross.kicad_pcb"))
+
+
+# ---------------------------------------------------------------------------
+# KiCad-gated, version-agnostic: exactly one finding per offending item
+# ---------------------------------------------------------------------------
+
+_SOLID_GND_B = _CARVED_GND.format(
+    pts="(xy 101 101) (xy 129 101) (xy 129 115) (xy 101 115)", more=""
+)
+
+# The via/pad/footprint/zone intruders sit inside the wall (x 113..117).
+_VIA = '  (via (at 115 112) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "cccccccc-0000-0000-0000-000000000002"))\n'
+_PAD_FP = """  (footprint "P" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000031")
+    (at 115 112)
+    (property "Reference" "R9" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "v" (at 0 1.5 0) (layer "F.Fab"))
+    (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND")))
+"""
+
+_ONE_PER_ITEM = [
+    # id, keepout, extra, expected item-description prefixes (each exactly once)
+    (
+        "track",
+        "(tracks not_allowed) (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed)",
+        "",
+        ["Track [/SIG] on F.Cu"],
+    ),
+    (
+        "via",
+        "(tracks allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed)",
+        _VIA,
+        ["Via"],
+    ),
+    (
+        "pad",
+        "(tracks allowed) (vias allowed) (pads not_allowed) (copperpour allowed) (footprints allowed)",
+        _PAD_FP,
+        ["Pad 1"],
+    ),
+    (
+        "footprint",
+        "(tracks allowed) (vias allowed) (pads allowed) (copperpour allowed) (footprints not_allowed)",
+        _PAD_FP,
+        ["Footprint R9"],
+    ),
+    (
+        "zone",
+        "(tracks allowed) (vias allowed) (pads allowed) (copperpour not_allowed) (footprints allowed)",
+        _SOLID_GND_B,
+        ["Zone"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("keepout", "extra", "expected"),
+    [c[1:] for c in _ONE_PER_ITEM],
+    ids=[c[0] for c in _ONE_PER_ITEM],
+)
+def test_native_drc_reports_each_item_exactly_once(tmp_path, keepout, extra, expected):
+    """#7198: native + kct rule must never double-report an offending item."""
+    layers = '"B.Cu"' if "copperpour not_allowed" in keepout else '"F.Cu" "B.Cu"'
+    board = _board(tmp_path / "once.kicad_pcb", keepout=keepout, zone_layers=layers, extra=extra)
+    _emit(board)
+    findings = _native_not_allowed(board)
+    descriptions = [i["description"] for v in findings for i in v["items"]]
+    for prefix in expected:
+        assert sum(d.startswith(prefix) for d in descriptions) == 1, (prefix, descriptions)
+    assert len(findings) == len(expected), descriptions
+
+
+def test_native_drc_layer_scoped_area_reports_nothing_for_other_layer(tmp_path):
+    board = _board(tmp_path / "fwall.kicad_pcb", zone_layers='"F.Cu"', track_layer="B.Cu")
+    _emit(board)
+    assert _native_not_allowed(board) == []
+
+
+def test_native_drc_footprint_embedded_track_reported_once(tmp_path):
+    """The B.Cu track through AE1's keepout is one finding, whichever engine.
+
+    10.0.6 additionally flags AE1's own pad (KiCad behaviour, not ours), so
+    only the track and R3 are counted.
+    """
+    board = _fp_board(tmp_path / "fp.kicad_pcb")
+    _emit(board)
+    items = [i["description"] for v in _native_not_allowed(board) for i in v["items"]]
+    assert sum(d.startswith("Track [/SIG] on B.Cu") for d in items) == 1, items
+    assert sum(d == "Footprint R3" for d in items) == 1, items
+    assert sum(d.startswith("Pad 1 [<no net>] of R3") for d in items) == 1, items

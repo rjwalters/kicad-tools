@@ -1,0 +1,254 @@
+# Architect Reference Documentation
+
+This file contains detailed reference documentation for the Architect role, including label workflow details, exception handling, and edge cases.
+
+**Parent file**: `architect.md` contains core instructions and workflow.
+**Patterns file**: `architect-patterns.md` contains templates and examples.
+
+---
+
+## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
+
+If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
+comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
+posts the literal string `@path`, not the file's contents. **Full pitfall,
+incident citation, and fixes**:
+[`comment-body-literal-path.md`](comment-body-literal-path.md).
+
+## Label Workflow Details
+
+### Your Role: Proposal Generation Only
+
+**IMPORTANT: External Issues**
+- **You may review issues with the `external` label for inspiration**, but do NOT create proposals directly from them
+- External issues are submitted by non-collaborators and require maintainer approval before being worked on
+- Wait for maintainer to remove the `external` label before creating related proposals
+- Focus your scans on the codebase itself, not external suggestions
+
+### Your Work: Create Proposals
+
+- **You scan**: Codebase across all domains for improvement opportunities
+- **You create**: Issues with comprehensive proposals
+- **You label**: Add `loom:architect` (blue badge) immediately
+- **You wait**: Champion (or a human) will add `loom:issue` to approve (or close to reject)
+
+### What Happens Next (Not Your Job)
+
+- **Champion/human reviews**: Issues with `loom:architect` label
+- **Champion/human approves**: Adds `loom:issue` label (approved for work, ready for implementation)
+- **Champion/human rejects**: Closes issue with explanation
+- **Curator enhances**: Finds issues needing enhancement, adds details, marks `loom:curated`
+- **Worker implements**: Picks up `loom:issue` issues (approved work)
+
+### Key Commands
+
+```bash
+# Check if there are already open proposals (don't spam; loom:frozen counts)
+gh issue list --label="loom:architect" --state=open --limit 500
+
+# Create new proposal — blue-badge label applied atomically at creation (#5047)
+./.loom/scripts/create-issue.sh --title "..." --body "..." --label "loom:architect"
+```
+
+**Important**: Don't create too many proposals at once. If there are already 3+ open proposals, wait for the user to approve/reject some before creating more.
+
+---
+
+## Exception: Explicit User Instructions
+
+**User commands override the label-based state machine.**
+
+When the user explicitly instructs you to analyze a specific area or create a proposal:
+
+```bash
+# Examples of explicit user instructions
+"analyze the terminal state management architecture"
+"create a proposal for improving error handling"
+"review the daemon architecture for improvements"
+"analyze performance optimization opportunities"
+```
+
+### Behavior
+
+1. **Proceed immediately** - Focus on the specified area
+2. **Interpret as approval** - User instruction = implicit approval to analyze and create proposal
+3. **Document override** - Note in issue: "Created per user request to analyze [area]"
+4. **Follow normal completion** - Apply `loom:architect` label to proposal (this label is itself the proposal's state signal — there is no separate claim label)
+
+### Example
+
+```bash
+# User says: "analyze the terminal state management architecture"
+
+# Proceed immediately
+# Analyze the specified area
+# ... examine code, identify opportunities ...
+
+# Create proposal with clear context, applying its label ATOMICALLY at
+# creation (#5047) — a follow-up `gh issue edit --add-label` doubles the
+# request count and can half-fail, leaving an unlabelled issue behind.
+./.loom/scripts/create-issue.sh --title "Refactor terminal state management to use reducer pattern" \
+  --label "loom:architect" \
+  --body "$(cat <<'EOF'
+## Problem Statement
+Per user request to analyze terminal state management architecture...
+
+## Current State
+[Analysis of current implementation]
+
+## Recommended Solution
+[Detailed proposal]
+EOF
+)"
+
+./.loom/scripts/post-comment.sh <number> --body "Created per user request to analyze terminal state management"
+```
+
+### Why this matters
+
+- want proposals for specific areas now
+- Users may want to test architectural workflows
+- Users may have insights about areas needing attention
+- Flexibility is important for manual orchestration mode
+
+### When NOT to Override
+
+- When user says "find opportunities" or "scan codebase" -> Use autonomous workflow
+- When running autonomously -> Always use autonomous scanning workflow
+- When user doesn't specify a topic/area -> Use autonomous workflow
+
+---
+
+## Proposal Labeling Reference
+
+Apply `loom:architect` in the SAME `create-issue.sh` call that files the
+proposal (#5047) — never a follow-up `gh issue edit --add-label`, which
+doubles the request count and can half-fail into an unlabelled issue no queue
+query finds. Apply no tier or priority label: `tier:*` is retired, and Guide
+and Champion set priority (#11103).
+
+```bash
+./.loom/scripts/create-issue.sh --title "..." --body "..." \
+  --label "loom:architect"
+```
+
+---
+
+## Issue Creation Process (Detailed)
+
+**Full workflow with requirements gathering**:
+
+1. **Research thoroughly**: Read relevant code, understand current patterns
+2. **Identify the opportunity**: Recognize what needs improvement and why
+3. **Ask clarifying questions**: Engage user to gather constraints, priorities, context (see Requirements Gathering section)
+4. **Wait for responses**: Collect answers to understand the specific situation
+5. **Analyze options internally**: Evaluate approaches using gathered requirements
+6. **Select ONE recommendation**: Choose the approach that best fits their constraints
+7. **Document the problem**: Explain what needs improvement and why it matters
+8. **Present recommendation**: Single approach with justification based on their requirements
+9. **Document alternatives considered**: Briefly mention other options and why they were ruled out
+10. **Estimate impact**: Complexity, risks, dependencies
+11. **Assess priority**: If it looks critical, say so in the body (never apply a priority label)
+12. **Create the issue**: Use `./.loom/scripts/create-issue.sh` with focused recommendation
+13. **Add proposal label**: Pass `--label "loom:architect"` on that same creation call — never a follow-up `gh issue edit --add-label`
+
+**Key Difference from old workflow**: Steps 3-6 are about requirements gathering. You ask questions BEFORE creating issues, enabling you to recommend ONE approach instead of presenting multiple options without guidance.
+
+---
+
+## Autonomous Workflow (Detailed)
+
+When invoked with the `--autonomous` flag (Architect runs manually today — its automated cadence is tracked in #3381; there is no daemon-driven invocation):
+
+**Skip interactive requirements gathering**. Instead, use self-reflection to infer reasonable answers from the codebase itself.
+
+**IMPORTANT**: In autonomous mode, goal alignment is even more critical. Always check for project goals first and prioritize goal-advancing proposals.
+
+### Self-Reflection Process
+
+Before creating a proposal, analyze the codebase to answer your own questions:
+
+**For constraints**:
+- Check `.loom/` and `CLAUDE.md` for stated limits or preferences
+- Look at existing similar implementations for size/complexity norms
+- Review recent PRs for patterns in accepted scope
+
+**For priorities**:
+- What does CLAUDE.md emphasize? (simplicity, performance, etc.)
+- What style of solutions were recently merged?
+- What's the current development focus based on open issues?
+
+**For context**:
+- What patterns are already established in the codebase?
+- What frameworks/tools are in use?
+- What's the team's apparent expertise level?
+
+### Default Assumptions
+
+When no clear signal is available, use these defaults:
+- **Simplicity over complexity** - prefer straightforward solutions
+- **Incremental over rewrite** - prefer small, focused changes
+- **Consistency over novelty** - prefer existing patterns
+- **Reversibility over optimization** - prefer changes that can be undone
+
+### Autonomous Workflow Steps
+
+1. **Check project goals first**: Read README.md, docs/roadmap.md for current milestone and deliverables
+2. **Check backlog balance**: Run `check_backlog_balance` to see tier distribution
+3. Identify opportunity during codebase scan
+4. **Assess goal alignment**: Classify opportunity as Tier 1 (goal-advancing), Tier 2 (goal-supporting), or Tier 3 (general improvement)
+5. Self-reflect: Analyze codebase to infer constraints/priorities
+6. Apply default assumptions where signals are unclear
+7. **Prioritize goal-aligned proposals**: If multiple opportunities exist, prefer Tier 1 over Tier 2 over Tier 3
+8. Create proposal with ONE recommended approach
+9. **Include milestone context**: Document how proposal relates to current milestone
+10. Document all assumptions with sources
+11. Add `loom:architect` label (no priority label)
+12. Clear context (`/clear`)
+
+---
+
+## Proposal Limits
+
+To avoid overwhelming the backlog:
+
+- **Max open proposals**: 3+ open `loom:architect` proposals -> wait before creating more
+- **Proposals per iteration**: Create at most 1 proposal per autonomous iteration
+- **Spam prevention**: Check `gh issue list --label="loom:architect" --state=open` before creating
+
+---
+
+## Priority Assessment Details
+
+Architects never apply a priority label: Guide and Champion set
+`loom:important` / `loom:very-important` (#11103). If an issue looks critical (a
+user-facing bug NOW, a security hole, a hotfix, or it blocks all other work),
+say so in the body so they can weigh it.
+
+---
+
+## Common Patterns
+
+### Proposing a Refactor
+
+1. Identify the pain point (code duplication, tight coupling, etc.)
+2. Research current usage patterns
+3. Gather requirements or self-reflect on constraints
+4. Propose ONE solution with migration path
+5. Document risks and alternatives considered
+
+### Proposing a New Feature
+
+1. Identify the gap or opportunity
+2. Research existing patterns in codebase
+3. Gather requirements or self-reflect on priorities
+4. Propose ONE implementation approach
+5. Include acceptance criteria
+
+### Proposing Infrastructure Changes
+
+1. Identify the problem (slow CI, missing automation, etc.)
+2. Research current tooling and workflows
+3. Gather requirements or self-reflect on team needs
+4. Propose ONE solution with rollout plan
+5. Document impact on existing workflows

@@ -1,0 +1,840 @@
+"""
+Centralized KiCad DRC rules (.kicad_dru) file generator.
+
+Generates .kicad_dru file content from a DesignRules dataclass instance,
+producing rules with proper KiCad condition expressions to scope rules
+to the correct object types and avoid false positives.
+
+Usage:
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
+    profile = get_profile("jlcpcb")
+    rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+    content = generate_dru(rules, manufacturer_name="JLCPCB")
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Sequence
+
+from .base import DesignRules
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from kicad_tools.router.rules import NetClassRouting
+
+# ---------------------------------------------------------------------------
+# Managed fab-floors block (Issue #4600)
+# ---------------------------------------------------------------------------
+
+# Sentinel markers delimiting the kct-owned fab-floor rules inside a
+# ``.kicad_dru`` sidecar.  On re-emit only the text BETWEEN these markers is
+# replaced; everything else in the file -- hand-written custom rules, the
+# ``kct creepage export-rules`` managed block (which uses its own, distinct
+# markers; see ``kicad_tools.creepage.export_rules.DRU_BLOCK_BEGIN``) -- is
+# preserved verbatim, so the two managed blocks coexist in one file.
+DRU_FLOORS_BLOCK_BEGIN = "# BEGIN kct fab floors (Issue #4600) -- managed, do not edit"
+DRU_FLOORS_BLOCK_END = "# END kct fab floors"
+
+# KiCad ``.kicad_dru`` files start with a version header.
+DRU_VERSION_HEADER = "(version 1)"
+
+# ---------------------------------------------------------------------------
+# Native-engine capability floor for ``SMD Pad Clearance`` (Issue #5713)
+# ---------------------------------------------------------------------------
+
+#: Lowest ``kicad-cli`` version whose DRC engine actually *evaluates* the
+#: emitted ``SMD Pad Clearance`` rule.
+#:
+#: The rule's scope predicate is ``A.Reference != B.Reference``, which relies
+#: on a pad inheriting its parent footprint's reference designator.  KiCad
+#: 10.0.0 and 10.0.1 do not implement that inheritance: ``A.Reference``
+#: resolves to the empty string for a pad, both sides compare equal, and the
+#: whole condition is permanently false.  The rule is then silently inert --
+#: KiCad reports **no** ``drc_rule_error``, just a clean board, which is the
+#: dangerous shape this constant exists to make explicit.
+#:
+#: Measured, not inferred (Issue #5713): a two-footprint board with distinct
+#: references at a 0.12 mm sub-floor gap produced 0 ``SMD Pad Clearance``
+#: findings on ``kicad/kicad:10.0.0`` and ``:10.0.1`` and exactly 1 on
+#: ``:10.0.2``, ``:10.0.4``, ``:10.0.5`` and ``:10.0.6``.  Narrowing the
+#: condition one predicate at a time on the same board isolated
+#: ``A.Reference != B.Reference`` as the sole predicate that fails on 10.0.1
+#: (``A.Pad_Type == 'SMD'`` and ``A.Net != B.Net`` both behave there).
+#: There is no 10.0.3 release.
+#:
+#: Consumers must gate on *behaviour* where they can (run a positive control
+#: and see whether the rule fires) and fall back to this version floor only
+#: to name the reason -- a future KiCad could regress the property again at
+#: a version above the floor.  See
+#: ``tests/test_factory_object_clearance.py`` for both halves.
+SMD_PAD_CLEARANCE_MIN_KICAD_VERSION = (10, 0, 2)
+
+#: Human-readable rendering of :data:`SMD_PAD_CLEARANCE_MIN_KICAD_VERSION`
+#: (``"10.0.2"``) for warning text, so the floor is stated in exactly one place.
+SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR = ".".join(
+    str(part) for part in SMD_PAD_CLEARANCE_MIN_KICAD_VERSION
+)
+
+
+def parse_kicad_cli_version(raw: str | None) -> tuple[int, ...] | None:
+    """Parse ``kicad-cli version`` output into a comparable integer tuple.
+
+    ``kicad-cli version`` prints a bare ``10.0.6`` on some builds and a
+    decorated ``10.0.1-1~ubuntu24.04.1 release build`` on distro packages,
+    so only the leading dotted-numeric run is significant.
+
+    Args:
+        raw: Raw ``kicad-cli version`` stdout (or ``None``).
+
+    Returns:
+        A tuple such as ``(10, 0, 6)``, or ``None`` when ``raw`` is empty or
+        carries no leading numeric component.
+    """
+    tokens = (raw or "").split()
+    if not tokens:
+        return None
+    head = tokens[0].split("-")[0].split("~")[0]
+    parts: list[int] = []
+    for chunk in head.split("."):
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts) or None
+
+
+def smd_pad_clearance_inert_reason(raw_kicad_cli_version: str | None) -> str | None:
+    """Explain why the emitted ``SMD Pad Clearance`` rule cannot fire, if so.
+
+    The rule is *always* emitted when the profile declares a different-net SMD
+    pad floor, but it is silently inert below
+    :data:`SMD_PAD_CLEARANCE_MIN_KICAD_VERSION` -- see that constant for the
+    measured evidence.  This helper turns a resolved ``kicad-cli`` version into
+    the user-facing explanation, so the floor, the mechanism and the workaround
+    are worded in exactly one place (Issue #5724).
+
+    Args:
+        raw_kicad_cli_version: Raw ``kicad-cli version`` stdout, or ``None``
+            when ``kicad-cli`` could not be located or did not answer.
+
+    Returns:
+        A sentence describing the inertness, or ``None`` when the installed
+        engine is at/above the floor **or** could not be determined (an
+        unknown version is never reported as broken -- there is no local
+        baseline to compare against).
+    """
+    version = parse_kicad_cli_version(raw_kicad_cli_version)
+    if version is None or version >= SMD_PAD_CLEARANCE_MIN_KICAD_VERSION:
+        return None
+    installed = (raw_kicad_cli_version or "").strip() or "unknown"
+    return (
+        f"the emitted 'SMD Pad Clearance' rule is INERT on the installed "
+        f"kicad-cli {installed}: it requires KiCad >= "
+        f"{SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR}, where a pad first inherits its "
+        "parent footprint's Reference. Below that the rule's "
+        '"A.Reference != B.Reference" scope is permanently false, so '
+        "'kicad-cli pcb drc' reports a clean board without raising any rule "
+        "error. Upgrade KiCad to >= "
+        f"{SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR}, or rely on 'kct check' (whose "
+        "engine-independent clearance rule enforces the same floor), before "
+        "treating a native DRC pass as a different-net SMD pad clearance pass."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Legacy (pre-#4600) generated-sidecar detection (Issue #4667)
+# ---------------------------------------------------------------------------
+#
+# Before #4600 the ``.kicad_dru`` sidecar was clobber-written with raw
+# :func:`generate_dru` output -- no sentinel markers.  Those files are OUR
+# generated content, not user-authored, so on merge they must be REPLACED by
+# the managed block rather than appended to (appending duplicates every tier
+# floor and dirties committed board artifacts; see Issue #4667).
+#
+# Detection is deliberately strict: the file must start with a version
+# header, contain nothing but blank lines and rule s-expressions matching the
+# exact line grammar :func:`generate_dru` emits, and every rule name must be
+# one of the generated rule families (with an optional ``- <manufacturer>``
+# label suffix).  Any comment line, foreign rule name, or off-grammar line
+# (hand-edited values keep the generated grammar, so those still count as
+# legacy -- but structural edits do not) classifies the file as user-owned
+# and keeps the never-clobber append semantics from #4600.
+
+#: Rule-name families emitted by :func:`generate_dru`, sans label suffix.
+_LEGACY_RULE_NAME_RE = re.compile(
+    r"^(?:Trace Width|Clearance|Via Drill|Via Diameter|Annular Ring|PTH Annular Ring|"
+    r"Copper to Edge|Hole to Edge|Silkscreen Width|Silkscreen Height|"
+    r"SMD Pad Clearance|Solder Mask Clearance|Solder Mask Dam|"
+    r"Ampacity Min Width \(.+, (?:external|internal)\))"
+    r"(?: - .+)?$"
+)
+
+_LEGACY_VERSION_LINE_RE = re.compile(r"\(version \d+\)")
+_LEGACY_RULE_OPEN_RE = re.compile(r'\(rule "([^"]+)"')
+_LEGACY_CONDITION_LINE_RE = re.compile(r'  \(condition "[^"]*"\)')
+_LEGACY_CONSTRAINT_LINE_RE = re.compile(r"  \(constraint \w+ \(min [0-9.]+mm\)\)\)")
+
+
+def _is_legacy_generated_dru(existing: str) -> bool:
+    """True when ``existing`` is a pre-#4600 clobber-written generated sidecar.
+
+    Such files carry no sentinel markers but are recognizably raw
+    :func:`generate_dru` output: a leading ``(version N)`` header followed
+    exclusively by tier-floor rules using the generated line grammar and
+    rule names.  Genuinely user-authored content (custom rule names,
+    comments, creepage markers, multi-constraint rules, ...) never matches.
+    """
+    if not re.match(r"^\s*\(version\b", existing):
+        return False
+
+    saw_rule = False
+    for line in existing.splitlines():
+        if not line.strip():
+            continue
+        if _LEGACY_VERSION_LINE_RE.fullmatch(line):
+            continue
+        rule_open = _LEGACY_RULE_OPEN_RE.fullmatch(line)
+        if rule_open:
+            if not _LEGACY_RULE_NAME_RE.match(rule_open.group(1)):
+                return False
+            saw_rule = True
+            continue
+        if _LEGACY_CONDITION_LINE_RE.fullmatch(line):
+            continue
+        if _LEGACY_CONSTRAINT_LINE_RE.fullmatch(line):
+            continue
+        return False
+    return saw_rule
+
+
+class DRUUnloadableError(ValueError):
+    """Merged ``.kicad_dru`` content holds constructs KiCad silently drops (#8039)."""
+
+
+_DRU_REGEX_LITERAL_RE = re.compile(r"=~\s*/")
+
+
+def _has_unquoted_semicolon(line: str) -> bool:
+    in_string = False
+    for ch in line:
+        if ch == '"':
+            in_string = not in_string
+        elif ch == ";" and not in_string:
+            return True
+    return False
+
+
+def lint_dru_for_kicad_loadability(content: str) -> list[str]:
+    """Flag constructs that make KiCad 10.0.7 drop a whole ``.kicad_dru`` (#8039).
+
+    KiCad discards the entire file, with no message, when it meets a ``;``
+    comment or a ``=~ /regex/`` condition.  ``#`` comments are fine.  The list
+    is what was observed on 10.0.7; other triggers are not covered.
+
+    Returns one ``line N: ...`` description per offending line.
+    """
+    findings: list[str] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        if _has_unquoted_semicolon(line):
+            findings.append(f"line {lineno}: ';' comment")
+        if _DRU_REGEX_LITERAL_RE.search(line):
+            findings.append(f"line {lineno}: '=~ /regex/' condition")
+    return findings
+
+
+def _check_dru_loadable(merged: str, path: str | Path | None) -> str:
+    findings = lint_dru_for_kicad_loadability(merged)
+    if findings:
+        name = str(path) if path is not None else ".kicad_dru content"
+        raise DRUUnloadableError(
+            f"{name}: KiCad silently ignores the ENTIRE rules file (including kct's "
+            f"managed fab floors) when it contains a ';' comment or a "
+            f"'=~ /regex/' condition (observed on KiCad 10.0.7; other triggers are "
+            f"not detected). Use '#' comments and quoted-string conditions instead. "
+            f"Offending: " + "; ".join(findings) + " (Issue #8039)"
+        )
+    return merged
+
+
+def _strip_version_header(content: str) -> str:
+    """Drop a leading ``(version N)`` line so a merged file keeps exactly one."""
+    return re.sub(r"^\s*\(version[^)]*\)\s*\n?", "", content, count=1)
+
+
+def dru_clearance_rules(text: str | None) -> list[dict[str, Any]]:
+    """Parse a ``.kicad_dru`` file's ``clearance``-constraint rules, in order.
+
+    The record shape consumed by
+    :func:`kicad_tools.core.rule_loosening.rule_loosenings` (the ``dru_rules``
+    comparison shape, Issue #8937): one mapping per ``(rule ...)`` carrying a
+    ``(constraint clearance (min <N>mm))``, in file order -- KiCad gives the
+    last matching custom rule precedence, so order is semantics.  Each record
+    carries ``name``, ``condition`` (``None`` when the rule is unconditional),
+    ``layer`` (``None`` when unscoped) and ``clearance_mm``.
+
+    Rules with non-``mm`` minima or unparsable minima are skipped, as are
+    comments and every non-``clearance`` constraint: only ``clearance``-class
+    constraints can lower a copper clearance (the #8937 review's scope).  A
+    text that fails to parse yields ``[]`` -- the merge's own loadability
+    lint covers the *written* file, and this parser only feeds the loosening
+    comparison.
+    """
+    if not text or not text.strip():
+        return []
+    stripped = re.sub(r"(?m)^\s*#.*$", "", text)
+    try:
+        from kicad_tools.sexp import parse_string
+
+        doc = parse_string("(rules\n" + stripped + "\n)")
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for rule in doc.find_all("rule"):
+        name = rule.get_string(0)
+        if name is None:
+            continue
+        condition_node = rule.find("condition")
+        condition = condition_node.get_string(0) if condition_node is not None else None
+        layer_node = rule.find("layer")
+        layer = layer_node.get_string(0) if layer_node is not None else None
+        for constraint in rule.find_all("constraint"):
+            if constraint.get_string(0) != "clearance":
+                continue
+            minimum = constraint.find("min")
+            token = minimum.get_string(0) if minimum is not None else None
+            if token is None or not token.endswith("mm"):
+                continue
+            try:
+                value = float(token[:-2])
+            except ValueError:
+                continue
+            records.append(
+                {
+                    "name": name,
+                    "condition": condition,
+                    "layer": layer,
+                    "clearance_mm": value,
+                }
+            )
+    return records
+
+
+def _gate_dru_loosenings(
+    existing: str | None,
+    dru_content: str,
+    merged: str,
+    *,
+    authored: Mapping[str, Any] | None,
+    allow: Iterable[str],
+    path: str | Path | None,
+) -> None:
+    """Refuse a ``.kicad_dru`` rewrite that would lower a resolved clearance.
+
+    The #8937 gate behind :func:`kicad_tools.core.rule_loosening`'s ``dru``
+    shape: the freshly generated ``dru_content`` names the rules the writer
+    owns (they may move with the profile), everything else in ``existing``
+    is authored -- hand-written rules, the creepage block, the native
+    zone-clearance block -- and must survive the merge with its minimum
+    intact.  Independently of the pre-rewrite text, the merged file must
+    resolve every (track, track), (pad, zone) and (via, zone) pair at no
+    less than the design's own authored clearance (``authored``), which is
+    what the fab-floor-replaces-authored-clearance defect escaped.
+    """
+    from kicad_tools.core.rule_loosening import DRU_SHAPE_KEY, assert_no_loosenings
+
+    managed = {record["name"] for record in dru_clearance_rules(dru_content)}
+    # The rules of the fab-floors block being REPLACED are as much kct's own
+    # as the new content -- including a previous manufacturer's differently
+    # suffixed names (an explicit profile switch may legitimately move the
+    # floor; the authored-baseline check still bounds how far down it goes).
+    if existing:
+        match = re.search(
+            re.escape(DRU_FLOORS_BLOCK_BEGIN) + r"(.*?)" + re.escape(DRU_FLOORS_BLOCK_END),
+            existing,
+            re.DOTALL,
+        )
+        if match:
+            managed |= {record["name"] for record in dru_clearance_rules(match.group(1))}
+    before = {DRU_SHAPE_KEY: dru_clearance_rules(existing), "managed_names": managed}
+    after = {
+        DRU_SHAPE_KEY: dru_clearance_rules(merged),
+        "managed_names": managed,
+        "authored": authored or {},
+    }
+    writer = "merge_dru_floors"
+    if path is not None:
+        writer = f"merge_dru_floors({path})"
+    assert_no_loosenings(before, after, allow=allow, writer=writer)
+
+
+def merge_dru_floors(
+    existing: str | None,
+    dru_content: str,
+    path: str | Path | None = None,
+    *,
+    authored: Mapping[str, Any] | None = None,
+    allow: Iterable[str] = (),
+) -> str:
+    """Merge :func:`generate_dru` output into ``.kicad_dru`` content (#4600).
+
+    The tier-floor rules are wrapped in a sentinel-delimited managed block and
+    merged into ``existing`` with the same semantics as the creepage
+    exporter's ``merge_dru_block`` (Issue #4508) -- one merge dialect, two
+    distinct marker pairs:
+
+    * No existing content -> ``(version 1)`` + the managed block.
+    * Existing fab-floors block present -> replace only the text between the
+      sentinels.
+    * Existing content that is a **legacy pre-#4600 generated sidecar**
+      (no markers, but recognizably raw :func:`generate_dru` output; see
+      :func:`_is_legacy_generated_dru`) -> treat it as ours and REPLACE it
+      with the managed block.  Appending would duplicate every tier floor
+      on each re-emit and permanently dirty committed board artifacts
+      (Issue #4667).
+    * Other existing content without a fab-floors block (a fully user-owned
+      file, or one holding the creepage managed block) -> **append** the
+      block, preserving every existing byte, and prepend a version header
+      only if the file lacks one.  A pre-existing user file is therefore
+      never clobbered or deleted -- the previous blanket ``write_text``
+      silently destroyed HV creepage rules and hand-written custom rules.
+
+    The merged result contains exactly one leading ``(version 1)`` header
+    (the header inside ``dru_content`` is stripped before wrapping).
+
+    Idempotent: re-merging identical inputs yields byte-identical output.
+
+    Loosening gate (Issue #8937): before returning, the merged text is run
+    through :func:`kicad_tools.core.rule_loosening.assert_no_loosenings`
+    in its ``dru`` shape.  Rules named in ``dru_content`` are the writer's
+    own and may move with the profile; every other rule in ``existing``
+    must survive with its ``clearance`` minimum intact, and the merged file
+    must resolve every (track, track), (pad, zone) and (via, zone) pair at
+    no less than the clearance the design authorises (``authored``).
+    A violation raises :class:`RuleLooseningError` and nothing is written.
+
+    Args:
+        existing: Current ``.kicad_dru`` file content, or ``None`` when the
+            file does not exist yet.
+        dru_content: Fresh :func:`generate_dru` output (with its leading
+            version header) to install as the managed block.
+        path: Optional path of the ``.kicad_dru`` file the content came
+            from, used only to name the file in the one-line stderr warning
+            emitted when the legacy-replace branch fires (see below), and in
+            the loosening refusal message.  Has no effect on the merged
+            output.
+        authored: The design's own clearance floor sources, for the #8937
+            gate: ``{"netclasses": {name: mm}, "zones": [[layer, net, mm],
+            ...]}`` -- post-merge net classes and the board zones'
+            ``connect_pads`` clearances.  ``None`` skips the
+            resolved-below-authored check (the pre-rewrite comparison still
+            runs).
+        allow: :mod:`fnmatch` patterns over ``Loosening.path`` for
+            documented, permitted loosenings -- ``"*"`` under
+            ``KCT_PRESERVE_BOARD_RULES=0``, mirroring
+            :func:`~kicad_tools.manufacturers.project_generator.merge_policy_allowances`.
+
+    Returns:
+        The full merged ``.kicad_dru`` file content.
+
+    Warning behavior (#4676): when the legacy pre-#4600 branch is taken --
+    and only then -- a one-line notice is printed to stderr, because the
+    strict detector has a narrow documented false-positive window (a
+    hand-authored file matching exactly the generated grammar and rule
+    families is replaced).  The other branches stay silent so the warning
+    is a reliable signal that the legacy migration specifically occurred.
+    """
+    body = _strip_version_header(dru_content).strip("\n")
+    block = f"{DRU_FLOORS_BLOCK_BEGIN}\n{body}\n{DRU_FLOORS_BLOCK_END}"
+
+    if existing is None or not existing.strip():
+        merged = f"{DRU_VERSION_HEADER}\n\n{block}\n"
+        _gate_dru_loosenings(
+            existing, dru_content, merged, authored=authored, allow=allow, path=path
+        )
+        return merged
+
+    pattern = re.compile(
+        re.escape(DRU_FLOORS_BLOCK_BEGIN) + r".*?" + re.escape(DRU_FLOORS_BLOCK_END),
+        re.DOTALL,
+    )
+    if pattern.search(existing):
+        merged = pattern.sub(lambda _m: block, existing)
+        merged = merged if merged.endswith("\n") else merged + "\n"
+        _check_dru_loadable(merged, path)
+        _gate_dru_loosenings(
+            existing, dru_content, merged, authored=authored, allow=allow, path=path
+        )
+        return merged
+
+    if _is_legacy_generated_dru(existing):
+        # Pre-#4600 clobber-written sidecar: the whole file is our own
+        # generated output, so replace it with the marked block instead of
+        # appending a duplicate copy of every floor (#4667).  Warn so the
+        # rare hand-authored file caught by the detector's documented
+        # false-positive window is replaced loudly, not silently (#4676).
+        name = str(path) if path is not None else ".kicad_dru content"
+        print(
+            f"Warning: {name}: pre-#4600 generated sidecar detected -- "
+            f"replaced with the marked managed block (see Issue #4667). "
+            f"Hand-authored rules matching the generated grammar are treated "
+            f"as generated; restore from VCS if this file was yours.",
+            file=sys.stderr,
+        )
+        merged = f"{DRU_VERSION_HEADER}\n\n{block}\n"
+        # The pre-#4600 sidecar this branch just classified is kct's own
+        # generated output, not an authored "before" state: handing it to
+        # the gate as ``existing`` would re-classify its tier floors as
+        # authored rules and refuse the very replacement #4667 established
+        # (a profile switch legitimately moves the floor).  Only the
+        # ``authored`` baseline bounds how far down the replacement may go.
+        _gate_dru_loosenings(None, dru_content, merged, authored=authored, allow=allow, path=path)
+        return merged
+
+    # Insert; ensure a version header exists (mirrors ``merge_dru_block``'s
+    # append, with one deliberate difference: the block goes ABOVE the
+    # foreign content, not below it).  KiCad gives the last matching custom
+    # rule precedence, so appending kct's floors after a hand-written or
+    # native-zone clearance rule would let the floor *override* a designer
+    # minimum -- the exact #8937 defect class.  Above the foreign rules the
+    # floor still floors, and the designer's stricter rule still wins.
+    # "Above the foreign content" means above the foreign *rules*: a
+    # ``.kicad_dru`` whose first element is not the ``(version ...)`` form
+    # is not a valid design-rules file (``load_design_rules`` and KiCad
+    # both require the header first), so when a leading version form is
+    # present the block is anchored immediately after it.
+    version_form = re.search(r"^\s*\(version[^)]*\)[ \t]*\n?", existing, re.MULTILINE)
+    if version_form:
+        head = existing[: version_form.end()]
+        tail = existing[version_form.end() :].lstrip("\n")
+        merged = f"{head}\n{block}\n\n{tail}"
+    else:
+        prefix = existing if existing.endswith("\n") else existing + "\n"
+        merged = f"{DRU_VERSION_HEADER}\n\n{block}\n{prefix}"
+    merged = _check_dru_loadable(merged, path)
+    _gate_dru_loosenings(existing, dru_content, merged, authored=authored, allow=allow, path=path)
+    return merged
+
+
+def _dru_quote(value: str) -> str:
+    """Escape a net/class name for a single-quoted DRU condition literal."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def generate_dru(
+    rules: DesignRules,
+    manufacturer_name: str = "",
+    net_classes: Sequence[NetClassRouting] | None = None,
+    max_ampacity_width_mm: float | None = None,
+    route_edge_clearance_mm: float | None = None,
+) -> str:
+    """
+    Generate KiCad .kicad_dru file content from a DesignRules instance.
+
+    Produces rules with KiCad condition expressions where appropriate to
+    scope constraints to the correct object types (e.g., via drill vs pad
+    drill, silk-on-silk clearance).
+
+    Args:
+        rules: DesignRules instance containing manufacturer constraints.
+        manufacturer_name: Optional manufacturer name for rule labels.
+        net_classes: Optional sequence of net-class routing configs.  For
+            each class whose ``target_ampacity`` is set, two net-scoped
+            minimum-width rules (external + internal layers) are appended,
+            with the widths derived via IPC-2221 from ``rules.outer_copper_oz``
+            / ``rules.inner_copper_oz`` (see
+            :func:`kicad_tools.physics.ampacity.width_for_current`).  When
+            ``None`` (or when no class sets ``target_ampacity``), the output
+            is byte-for-byte identical to the board-wide rule set --
+            preserving the drift-prevention pass-through contract.
+
+    Returns:
+        String content of a valid .kicad_dru file.
+    """
+    label_suffix = f" - {manufacturer_name}" if manufacturer_name else ""
+    lines: list[str] = ["(version 1)"]
+
+    # --- Trace Width ---
+    lines.append(
+        f'(rule "Trace Width{label_suffix}"\n'
+        f"  (condition \"A.Type == 'track'\")\n"
+        f"  (constraint track_width (min {rules.min_trace_width_mm}mm)))"
+    )
+
+    # --- Clearance (general copper-to-copper) ---
+    inner_clearance = rules.min_inner_clearance_mm
+    if inner_clearance is not None and inner_clearance != rules.min_clearance_mm:
+        # Outer/inner floors differ with copper weight (Issue #8836).
+        lines.append(
+            f'(rule "Clearance (outer){label_suffix}"\n'
+            "  (layer outer)\n"
+            f"  (constraint clearance (min {rules.min_clearance_mm}mm)))"
+        )
+        lines.append(
+            f'(rule "Clearance (inner){label_suffix}"\n'
+            "  (layer inner)\n"
+            f"  (constraint clearance (min {inner_clearance}mm)))"
+        )
+    else:
+        lines.append(
+            f'(rule "Clearance{label_suffix}"\n'
+            f"  (constraint clearance (min {rules.min_clearance_mm}mm)))"
+        )
+
+    # These factory constraints have distinct applicability. Do not encode
+    # silk-to-pad as a silk-layer restriction: native cross-layer pairs need
+    # an explicit rule. No blanket same-net physical_clearance is emitted.
+    if rules.min_silk_to_pad_clearance_mm is not None:
+        # This rule is load-bearing, not belt-and-braces: the project key
+        # ``board.design_settings.rules.min_silk_clearance`` was MEASURED not
+        # to gate a sub-floor silk-to-pad gap at all (KiCad CLI 10.0.1: silent
+        # on a 0.085 mm gap even when raised to 2.0 mm, while the same project
+        # block demonstrably loaded).  Deleting this rule in the belief that
+        # the project setting covers it silently drops the factory floor --
+        # ``tests/test_effective_silk_clearance_5059.py`` measures both halves
+        # against real below-limit geometry so that cannot happen quietly.
+        #
+        # Severity is deliberately left to the project's DRC severity map
+        # (KiCad classifies ``silk_over_copper`` -- "Silkscreen clipped by
+        # solder mask" -- as a WARNING by default).  The factory floor is a
+        # legibility limit, not a fabrication stop: JLCPCB clips silkscreen
+        # that encroaches on a mask aperture rather than rejecting the
+        # panel, so nothing on the capabilities page supports promoting it
+        # to a blocking error.  Forcing ``(severity error)`` here overrode
+        # the board's own severity map and turned a cosmetic DFM advisory
+        # into "do not manufacture" on already-released designs.  The
+        # 0.15 mm floor itself is unchanged and still reported (visibly
+        # under ``kicad-cli pcb drc --severity-all`` and in ``kct check``).
+        lines.append(
+            f'(rule "Silk to Pad{label_suffix}"\n'
+            "  (condition \"A.Type == 'Pad' || B.Type == 'Pad'\")\n"
+            f"  (constraint silk_clearance (min {rules.min_silk_to_pad_clearance_mm}mm)))"
+        )
+    # The different-net SMD pad floor is emitted natively, scoped to pads of
+    # DIFFERENT footprints.  The scoping predicate the #5705 deferral thought
+    # impossible exists and is documented: KiCad's custom-rule Reference
+    # property states that footprint children (pads) carry their parent
+    # footprint's reference designator, so ``A.Reference != B.Reference`` is
+    # exactly "pads of two independently placed footprints" -- package-
+    # internal pairs compare equal and stay exempt, which keeps stock
+    # fine-pitch QFP/QFN packages (``Package_QFP:LQFP-48_7x7mm_P0.5mm`` has a
+    # 0.1414 mm diagonal gap between adjacent pad rows) out of the report.
+    # Measured against ``kicad-cli pcb drc`` 10.0.6 in
+    # ``tests/test_factory_object_clearance.py``
+    # (``test_native_smd_floor_is_scoped_to_different_footprints``); CI's
+    # ``kicad/kicad:10.0`` container exercises the same suite.
+    #
+    # Known boundary: the native scope is the reference STRING.  Pads under
+    # footprints with blank or duplicated references compare equal and are
+    # not discriminated -- the ``kct check`` floor (identity-scoped, see
+    # ``validate/rules/clearance.py``) remains authoritative for that shape
+    # (``test_native_smd_floor_omits_pairs_sharing_a_reference_designator``).
+    # No ``(severity error)`` override: a custom ``clearance`` constraint is
+    # error-class by default, matching the Python checker's severity.
+    #
+    # Second known boundary -- a MINIMUM KICAD VERSION, see
+    # ``SMD_PAD_CLEARANCE_MIN_KICAD_VERSION`` above: on KiCad 10.0.0/10.0.1
+    # the emitted rule is inert because pads do not yet inherit their parent
+    # footprint's ``Reference``.
+    if rules.min_smd_pad_clearance_mm is not None:
+        lines.append(
+            f'(rule "SMD Pad Clearance{label_suffix}"\n'
+            "  (condition \"A.Type == 'Pad' && B.Type == 'Pad'"
+            " && A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'"
+            ' && A.Net != B.Net && A.Reference != B.Reference")\n'
+            f"  (constraint clearance (min {rules.min_smd_pad_clearance_mm}mm)))"
+        )
+    if rules.min_pth_hole_to_track_mm is not None:
+        lines.append(
+            f'(rule "PTH Hole to Track{label_suffix}"\n'
+            "  (condition \"(A.Pad_Type == 'Through-hole' && B.Type == 'Track') || "
+            "(B.Pad_Type == 'Through-hole' && A.Type == 'Track')\")\n"
+            f"  (constraint hole_clearance (min {rules.min_pth_hole_to_track_mm}mm)))"
+        )
+    if rules.min_inner_pth_hole_to_copper_mm is not None:
+        minimum = max(rules.min_pth_hole_to_track_mm or 0, rules.min_inner_pth_hole_to_copper_mm)
+        lines.append(
+            f'(rule "Inner PTH Hole to Copper{label_suffix}"\n'
+            "  (layer inner)\n"
+            "  (condition \"A.Pad_Type == 'Through-hole' || B.Pad_Type == 'Through-hole'\")\n"
+            f"  (constraint hole_clearance (min {minimum}mm)))"
+        )
+
+    # --- Via Drill ---
+    # Issue #3118 / #3734: exempt micro vias from the standard through-via
+    # floors.  The router's ``--micro-via-in-pad-fallback`` (and ``kct stitch
+    # --micro-via``) emit ``(via micro ...)`` structures that are
+    # intentionally smaller than the manufacturer's standard via floor for
+    # fine-pitch escape (e.g. LQFP-48 0.5 mm pitch, where a 0.6 mm via cannot
+    # fit between adjacent pads).  jlcpcb-tier1's published Capability+ tier
+    # supports these micro vias natively, so the kct-check engine flatly
+    # exempts ``via_type == "micro"`` (see validate/rules/dimensions.py).
+    # Mirror that exemption here so ``kicad-cli pcb drc`` agrees -- otherwise
+    # the same micro via is exempt under one engine and a hard error under
+    # the other.  KiCad scopes via type via ``A.Via_Type``.
+    lines.append(
+        f'(rule "Via Drill{label_suffix}"\n'
+        f"  (condition \"A.Type == 'via' && A.Via_Type != 'Micro'\")\n"
+        f"  (constraint hole_size (min {rules.min_via_drill_mm}mm)))"
+    )
+
+    # --- Max Hole Size ---
+    # Issue #7132: enforce the manufacturer's maximum drill.  Unconditional so
+    # it covers vias, PTH pads and NPTH pads alike (the limit is global).
+    lines.append(
+        f'(rule "Max Hole Size{label_suffix}"\n'
+        f"  (constraint hole_size (max {rules.max_hole_diameter_mm}mm)))"
+    )
+
+    # --- Via Diameter ---
+    lines.append(
+        f'(rule "Via Diameter{label_suffix}"\n'
+        f"  (condition \"A.Type == 'via' && A.Via_Type != 'Micro'\")\n"
+        f"  (constraint via_diameter (min {rules.min_via_diameter_mm}mm)))"
+    )
+
+    # --- Annular Ring ---
+    lines.append(
+        f'(rule "Annular Ring{label_suffix}"\n'
+        f"  (condition \"A.Via_Type != 'Micro'\")\n"
+        f"  (constraint annular_width (min {rules.min_annular_ring_mm}mm)))"
+    )
+    if rules.min_pth_annular_ring_mm is not None:
+        lines.append(
+            f'(rule "PTH Annular Ring{label_suffix}"\n'
+            f"  (condition \"A.Type == 'pad'\")\n"
+            f"  (constraint annular_width (min {rules.min_pth_annular_ring_mm}mm)))"
+        )
+
+    # --- Copper to Edge ---
+    lines.append(
+        f'(rule "Copper to Edge{label_suffix}"\n'
+        f"  (constraint edge_clearance (min {rules.min_copper_to_edge_mm}mm)))"
+    )
+
+    # --- Route edge clearance (Issue #8674) ---
+    # The clearance the router kept tracks and vias from the board edge.  Scoped
+    # to tracks and vias: the board-wide rule above also covers pads and pours,
+    # so raising it would fail a board whose edge connector sits inside the
+    # route's value.  Emitted after the board-wide rule because KiCad lets the
+    # last matching rule win.  Never loosens the tier floor.
+    if (
+        route_edge_clearance_mm is not None
+        and route_edge_clearance_mm > rules.min_copper_to_edge_mm
+    ):
+        lines.append(
+            f'(rule "Route Edge Clearance{label_suffix}"\n'
+            f"  (condition \"A.Type == 'track' || A.Type == 'via'\")\n"
+            f"  (constraint edge_clearance (min {route_edge_clearance_mm:.4f}mm)))"
+        )
+
+    # --- Hole to Edge ---
+    lines.append(
+        f'(rule "Hole to Edge{label_suffix}"\n'
+        f"  (condition \"(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'\")\n"
+        f"  (constraint physical_hole_clearance (min {rules.min_hole_to_edge_mm}mm)))"
+    )
+
+    # --- Silkscreen Width ---
+    lines.append(
+        f'(rule "Silkscreen Width{label_suffix}"\n'
+        f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
+        f"  (constraint text_thickness (min {rules.min_silkscreen_width_mm}mm)))"
+    )
+
+    # --- Silkscreen Height ---
+    lines.append(
+        f'(rule "Silkscreen Height{label_suffix}"\n'
+        f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
+        f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
+    )
+
+    # KiCad does not support a solder_mask_margin custom constraint. Emitting
+    # it makes KiCad 10 silently discard all custom rules (#4999). The Python
+    # solder-mask checker continues to enforce explicit pad mask margins.
+
+    # A numeric solder-mask web floor also has no custom-rule equivalent.
+    # physical_hole_clearance measures holes to objects, not mask openings.
+
+    # --- Ampacity-derived net-scoped minimum trace widths (#4216) ---
+    #
+    # For each net class carrying a target current, emit two net-scoped
+    # min-width rules: one for external copper (F.Cu / B.Cu, k=0.048) and
+    # one for internal copper (all other copper layers, k=0.024).  The
+    # widths come from the IPC-2221 closed-form inversion using the board's
+    # copper weights (outer for external, inner for internal).
+    #
+    # KiCad's custom-rule condition grammar scopes to a net class via the
+    # ``A.NetClass`` token (KiCad 7/8/9 "Custom Design Rules" reference).
+    # These rules are appended only when at least one class sets
+    # ``target_ampacity``; otherwise the output is byte-for-byte identical to
+    # the board-wide rule set above (drift-prevention pass-through).
+    if net_classes:
+        from kicad_tools.physics.ampacity import width_for_current
+
+        for nc in net_classes:
+            if nc.target_ampacity is None:
+                continue
+
+            external_width_mm = width_for_current(
+                nc.target_ampacity,
+                copper_weight_oz=rules.outer_copper_oz,
+                layer="external",
+            )
+            # 2-layer profiles have no inner copper (inner_copper_oz == 0):
+            # there is no internal layer to constrain (#6171).
+            has_inner = rules.inner_copper_oz > 0
+            internal_width_mm = (
+                width_for_current(
+                    nc.target_ampacity,
+                    copper_weight_oz=rules.inner_copper_oz,
+                    layer="internal",
+                )
+                if has_inner
+                else 0.0
+            )
+
+            # #8612: a minimum wider than the board can never be met; skip it.
+            skip_external = (
+                max_ampacity_width_mm is not None and external_width_mm > max_ampacity_width_mm
+            )
+            skip_internal = (
+                max_ampacity_width_mm is not None and internal_width_mm > max_ampacity_width_mm
+            )
+
+            # Per-net targets are scoped to their nets (#8527); a class-wide
+            # target keeps the ``A.NetClass`` scope.
+            net_scope = tuple(getattr(nc, "net_scope", ()) or ())
+            if net_scope:
+                scope = " || ".join(f"A.NetName == '{_dru_quote(n)}'" for n in net_scope)
+                scope_cond = f"({scope})"
+                label = f"{nc.name} {nc.target_ampacity:g}A"
+            else:
+                scope_cond = f"A.NetClass == '{_dru_quote(nc.name)}'"
+                label = nc.name
+
+            # External copper: front and back layers.
+            if not skip_external:
+                lines.append(
+                    f'(rule "Ampacity Min Width ({label}, external){label_suffix}"\n'
+                    f"  (condition \"{scope_cond} && A.Type == 'track'"
+                    f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
+                    f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
+                )
+            if not has_inner or skip_internal:
+                continue
+            # Internal copper: any track that is not on an external layer.
+            lines.append(
+                f'(rule "Ampacity Min Width ({label}, internal){label_suffix}"\n'
+                f"  (condition \"{scope_cond} && A.Type == 'track'"
+                f" && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'\")\n"
+                f"  (constraint track_width (min {internal_width_mm:.4f}mm)))"
+            )
+
+    return "\n".join(lines) + "\n"

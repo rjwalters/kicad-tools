@@ -1,0 +1,20 @@
+from pathlib import Path
+exec(Path('/tmp/board07-sdram/planar-ports.py').read_text().split("for name in a.nets.split(','):")[0])
+import copy
+source=PCB.load('/tmp/board07-sdram/group-source/sdram_demo.kicad_pcb')
+def netname(board,node):
+ n=node.find('net');return board.nets[n.get_int(0)].name if n.get_int(0) is not None else n.get_string(0)
+for key in ['segment','via']:
+ for node in list(b._sexp.find_all(key)):
+  if netname(b,node)=='SDCLK':b._sexp.remove(node)
+ for node in source._sexp.find_all(key):
+  if netname(source,node)=='SDCLK':b._sexp.append(copy.deepcopy(node))
+b.save(a.out/'stripped.kicad_pcb');b=PCB.load(a.out/'stripped.kicad_pcb');endpoints=[tuple(v['port']) for v in ports if v['net']=='SDCLK'];obs=obstacles('SDCLK','B.Cu')
+for y in [62.5,63,63.5]:
+ waypoint=(65,y);paths=[findpath(endpoints[0],waypoint,obs)[0],findpath(waypoint,endpoints[1],obs)[0]]
+ if not all(paths):continue
+ points=paths[0]+paths[1][1:];length=sum(math.dist(u,v) for u,v in zip(points,points[1:]));print('CLOCK',y,'trunk',length,flush=True)
+ if 61.8<=length<=63.5:
+  for u,v in zip(points,points[1:]):
+   if math.dist(u,v)>1e-7:b.add_trace(u,v,width=.18,layer='B.Cu',net='SDCLK')
+  b.save(a.out/'physical.kicad_pcb');shutil.copy2(a.source.with_suffix('.kicad_pro'),a.out/'physical.kicad_pro');break

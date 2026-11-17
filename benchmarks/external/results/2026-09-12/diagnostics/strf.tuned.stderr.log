@@ -1,0 +1,562 @@
+C++ router backend: available (version 1.0.0) -- timing will be recorded.
+WARNING: net-class-map: 0/8 entries matched a board net after normalization.
+    'USB_D+' -> no similar board net found
+    'USB_D-' -> no similar board net found
+    'USB_CONN_D+' -> no similar board net found
+    'USB_CONN_D-' -> no similar board net found
+    'SPI3_SCK' -> no similar board net found
+    'SPI3_MOSI' -> no similar board net found
+    'SPI3_MISO' -> no similar board net found
+    'SPI3_!CS' -> no similar board net found
+/evidence/source/src/kicad_tools/router/diffpair_routing.py:12010: UserWarning: Router.route_all() called without per_net_timeout or timeout; dense boards can hang indefinitely in A* heap-key churn. Prefer Router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0) or pass suppress_no_timeout_warning=True to acknowledge bare semantics. See issue #2794.
+  return self.autorouter.route_all(net_order), []
+C1: 1/2 pads escaped (clearance violation: 1)
+C10: 0/2 pads escaped (clearance violation: 2)
+C11: 1/2 pads escaped (clearance violation: 1)
+C12: 0/2 pads escaped (clearance violation: 2)
+C15: 0/2 pads escaped (clearance violation: 2)
+C16: 0/2 pads escaped (clearance violation: 2)
+C2: 0/2 pads escaped (clearance violation: 2)
+C4: 1/2 pads escaped (clearance violation: 1)
+C7: 1/2 pads escaped (clearance violation: 1)
+C8: 0/2 pads escaped (clearance violation: 2)
+D1: 0/2 pads escaped (clearance violation: 2)
+D2: 0/2 pads escaped (clearance violation: 2)
+F1: 1/2 pads escaped (clearance violation: 1)
+FB1: 0/2 pads escaped (clearance violation: 2)
+J1: 7/11 pads escaped (clearance violation: 4)
+J3: 8/10 pads escaped (clearance violation: 2)
+L1: 1/2 pads escaped (clearance violation: 1)
+R1: 0/2 pads escaped (clearance violation: 2)
+R2: 0/2 pads escaped (clearance violation: 2)
+R3: 0/2 pads escaped (clearance violation: 2)
+R4: 0/2 pads escaped (clearance violation: 2)
+U1: 2/3 pads escaped (clearance violation: 1)
+U3: 13/34 pads escaped (clearance violation: 21)
+U4: 18/22 pads escaped (clearance violation: 4)
+Net Net-(C1-Pad1): C++ pathfinder gave up (no path (C++ A* open set exhausted)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+WARNING: layer stack '4-Layer SIG-GND-PWR-SIG' designates In1.Cu, In2.Cu as controlled-impedance reference plane(s), but PLANE metadata is NOT a hard routing constraint today -- LayerDefinition.is_routable treats every copper layer as signal-eligible, so the router may freely route signal onto those planes and break the continuous reference construction the design depends on. Pass --reserve-plane-layers to hard-restrict signal routing to the non-plane layers (F.Cu, B.Cu), or accept this warning if mixed-layer routing on the plane is intentional for this recipe.
+WARNING: net-class-map: 0/8 entries matched a board net after normalization.
+    'USB_D+' -> no similar board net found
+    'USB_D-' -> no similar board net found
+    'USB_CONN_D+' -> no similar board net found
+    'USB_CONN_D-' -> no similar board net found
+    'SPI3_SCK' -> no similar board net found
+    'SPI3_MOSI' -> no similar board net found
+    'SPI3_MISO' -> no similar board net found
+    'SPI3_!CS' -> no similar board net found
+/evidence/source/src/kicad_tools/router/diffpair_routing.py:12010: UserWarning: Router.route_all() called without per_net_timeout or timeout; dense boards can hang indefinitely in A* heap-key churn. Prefer Router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0) or pass suppress_no_timeout_warning=True to acknowledge bare semantics. See issue #2794.
+  return self.autorouter.route_all(net_order), []
+C1: 1/2 pads escaped (clearance violation: 1)
+C10: 0/2 pads escaped (clearance violation: 2)
+C11: 1/2 pads escaped (clearance violation: 1)
+C12: 0/2 pads escaped (clearance violation: 2)
+C15: 0/2 pads escaped (clearance violation: 2)
+C16: 0/2 pads escaped (clearance violation: 2)
+C2: 0/2 pads escaped (clearance violation: 2)
+C4: 1/2 pads escaped (clearance violation: 1)
+C7: 1/2 pads escaped (clearance violation: 1)
+C8: 0/2 pads escaped (clearance violation: 2)
+D1: 0/2 pads escaped (clearance violation: 2)
+D2: 0/2 pads escaped (clearance violation: 2)
+F1: 1/2 pads escaped (clearance violation: 1)
+FB1: 0/2 pads escaped (clearance violation: 2)
+J1: 7/11 pads escaped (clearance violation: 4)
+J3: 8/10 pads escaped (clearance violation: 2)
+L1: 1/2 pads escaped (clearance violation: 1)
+R1: 0/2 pads escaped (clearance violation: 2)
+R2: 0/2 pads escaped (clearance violation: 2)
+R3: 0/2 pads escaped (clearance violation: 2)
+R4: 0/2 pads escaped (clearance violation: 2)
+U1: 2/3 pads escaped (clearance violation: 1)
+U3: 13/34 pads escaped (clearance violation: 21)
+U4: 18/22 pads escaped (clearance violation: 4)
+Net Net-(C1-Pad1): C++ pathfinder gave up (iteration limit reached (memory backstop cap)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+WARNING: net-class-map: 0/8 entries matched a board net after normalization.
+    'USB_D+' -> no similar board net found
+    'USB_D-' -> no similar board net found
+    'USB_CONN_D+' -> no similar board net found
+    'USB_CONN_D-' -> no similar board net found
+    'SPI3_SCK' -> no similar board net found
+    'SPI3_MOSI' -> no similar board net found
+    'SPI3_MISO' -> no similar board net found
+    'SPI3_!CS' -> no similar board net found
+/evidence/source/src/kicad_tools/router/diffpair_routing.py:12010: UserWarning: Router.route_all() called without per_net_timeout or timeout; dense boards can hang indefinitely in A* heap-key churn. Prefer Router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0) or pass suppress_no_timeout_warning=True to acknowledge bare semantics. See issue #2794.
+  return self.autorouter.route_all(net_order), []
+C1: 1/2 pads escaped (clearance violation: 1)
+C10: 0/2 pads escaped (clearance violation: 2)
+C11: 1/2 pads escaped (clearance violation: 1)
+C12: 0/2 pads escaped (clearance violation: 2)
+C15: 0/2 pads escaped (clearance violation: 2)
+C16: 0/2 pads escaped (clearance violation: 2)
+C2: 0/2 pads escaped (clearance violation: 2)
+C4: 1/2 pads escaped (clearance violation: 1)
+C7: 1/2 pads escaped (clearance violation: 1)
+C8: 0/2 pads escaped (clearance violation: 2)
+D1: 0/2 pads escaped (clearance violation: 2)
+D2: 0/2 pads escaped (clearance violation: 2)
+F1: 1/2 pads escaped (clearance violation: 1)
+FB1: 0/2 pads escaped (clearance violation: 2)
+J1: 7/11 pads escaped (clearance violation: 4)
+J3: 8/10 pads escaped (clearance violation: 2)
+L1: 1/2 pads escaped (clearance violation: 1)
+R1: 0/2 pads escaped (clearance violation: 2)
+R2: 0/2 pads escaped (clearance violation: 2)
+R3: 0/2 pads escaped (clearance violation: 2)
+R4: 0/2 pads escaped (clearance violation: 2)
+U1: 2/3 pads escaped (clearance violation: 1)
+U3: 13/34 pads escaped (clearance violation: 21)
+U4: 18/22 pads escaped (clearance violation: 4)
+Net Net-(C1-Pad1): C++ pathfinder gave up (iteration limit reached (memory backstop cap)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+WARNING: layer stack '6-Layer SIG-GND-SIG-SIG-PWR-SIG' designates In1.Cu, In4.Cu as controlled-impedance reference plane(s), but PLANE metadata is NOT a hard routing constraint today -- LayerDefinition.is_routable treats every copper layer as signal-eligible, so the router may freely route signal onto those planes and break the continuous reference construction the design depends on. Pass --reserve-plane-layers to hard-restrict signal routing to the non-plane layers (F.Cu, In2.Cu, In3.Cu, B.Cu), or accept this warning if mixed-layer routing on the plane is intentional for this recipe.
+WARNING: net-class-map: 0/8 entries matched a board net after normalization.
+    'USB_D+' -> no similar board net found
+    'USB_D-' -> no similar board net found
+    'USB_CONN_D+' -> no similar board net found
+    'USB_CONN_D-' -> no similar board net found
+    'SPI3_SCK' -> no similar board net found
+    'SPI3_MOSI' -> no similar board net found
+    'SPI3_MISO' -> no similar board net found
+    'SPI3_!CS' -> no similar board net found
+/evidence/source/src/kicad_tools/router/diffpair_routing.py:12010: UserWarning: Router.route_all() called without per_net_timeout or timeout; dense boards can hang indefinitely in A* heap-key churn. Prefer Router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0) or pass suppress_no_timeout_warning=True to acknowledge bare semantics. See issue #2794.
+  return self.autorouter.route_all(net_order), []
+C1: 1/2 pads escaped (clearance violation: 1)
+C10: 0/2 pads escaped (clearance violation: 2)
+C11: 1/2 pads escaped (clearance violation: 1)
+C12: 0/2 pads escaped (clearance violation: 2)
+C15: 0/2 pads escaped (clearance violation: 2)
+C16: 0/2 pads escaped (clearance violation: 2)
+C2: 0/2 pads escaped (clearance violation: 2)
+C4: 1/2 pads escaped (clearance violation: 1)
+C7: 1/2 pads escaped (clearance violation: 1)
+C8: 0/2 pads escaped (clearance violation: 2)
+D1: 0/2 pads escaped (clearance violation: 2)
+D2: 0/2 pads escaped (clearance violation: 2)
+F1: 1/2 pads escaped (clearance violation: 1)
+FB1: 0/2 pads escaped (clearance violation: 2)
+J1: 7/11 pads escaped (clearance violation: 4)
+J3: 8/10 pads escaped (clearance violation: 2)
+L1: 1/2 pads escaped (clearance violation: 1)
+R1: 0/2 pads escaped (clearance violation: 2)
+R2: 0/2 pads escaped (clearance violation: 2)
+R3: 0/2 pads escaped (clearance violation: 2)
+R4: 0/2 pads escaped (clearance violation: 2)
+U1: 2/3 pads escaped (clearance violation: 1)
+U3: 13/34 pads escaped (clearance violation: 21)
+U4: 18/22 pads escaped (clearance violation: 4)
+Net Net-(C1-Pad1): C++ pathfinder gave up (iteration limit reached (memory backstop cap)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+/evidence/source/src/kicad_tools/router/primitives.py:332: OffAngleSegmentWarning: off-angle segment [net 8 on F.Cu]: (57.8000, 34.5000) -> (115.2000, 75.0000) is 9.7942 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+WARNING: rule 'diffpair_length_skew' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+WARNING: rule 'diffpair_routing_continuity' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+WARNING: rule 'match_group_length_skew' is INACTIVE without a net-class-map sidecar and will silently pass; supply a net-class-map sidecar to validate length-match skew.
+[seed] Seeded global random with --seed 42
+  Note: no current-paths sidecar found; declared branch current checks (path_ampacity) are INACTIVE. Pass --current-paths FILE to enable them, or --no-current-paths to silence this.
+Clearance: 0.127mm (rules: board net_class "Default")
+
+--- Auto-selecting grid resolution ---
+Multi-Resolution Grid Plan (adaptive)
+  Coarse grid: 0.050mm
+  Fine zones: 29
+    J1: 0.0250mm (6.7x10.6mm, ~113,632 cells)
+    R1: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0050,0.0000)
+    J2: 0.0250mm (4.2x9.7mm, ~65,403 cells)
+    J3: 0.0100mm (9.1x5.3mm, ~479,424 cells)
+    C1: 0.0250mm (4.0x5.6mm, ~35,903 cells) offset=(0.0100,0.0200)
+    C2: 0.0250mm (4.0x5.6mm, ~36,064 cells) offset=(0.0050,0.0150)
+    C3: 0.0100mm (5.0x4.0mm, ~199,297 cells)
+    C4: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0050,0.0050)
+    C5: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0050,0.0050)
+    C6: 0.0100mm (5.0x4.0mm, ~199,297 cells) offset=(0.0050,0.0000)
+    C7: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0000,0.0050)
+    C8: 0.0250mm (5.6x4.0mm, ~36,064 cells) offset=(0.0125,0.0000)
+    C10: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0050,0.0000)
+    C11: 0.0100mm (5.0x4.0mm, ~199,297 cells) offset=(0.0000,0.0050)
+    C12: 0.0100mm (5.0x4.0mm, ~199,297 cells) offset=(0.0000,0.0050)
+    C13: 0.0100mm (4.0x5.0mm, ~199,297 cells)
+    C14: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0050,0.0000)
+    D1: 0.0250mm (4.0x5.6mm, ~36,064 cells) offset=(0.0150,0.0050)
+    D2: 0.0250mm (4.0x5.6mm, ~36,064 cells) offset=(0.0150,0.0050)
+    L2: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0000,0.0050)
+    L3: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0000,0.0050)
+    R2: 0.0250mm (5.6x4.0mm, ~36,064 cells) offset=(0.0125,0.0000)
+    R3: 0.0250mm (5.6x4.0mm, ~36,064 cells) offset=(0.0150,0.0050)
+    R4: 0.0100mm (4.0x5.0mm, ~199,297 cells) offset=(0.0050,0.0050)
+    R5: 0.0100mm (5.0x4.0mm, ~199,297 cells) offset=(0.0000,0.0050)
+    U1: 0.0250mm (5.9x6.0mm, ~56,640 cells) offset=(0.0000,0.0150)
+    U3: 0.0125mm (8.9x8.9mm, ~505,521 cells) offset=(0.0025,0.0050)
+    U4: 0.0125mm (7.9x7.9mm, ~398,161 cells)
+    Y1: 0.0250mm (6.2x5.7mm, ~57,021 cells)
+  Total cell estimate: 5,152,324
+  Uniform fallback would be: 0.050mm
+
+Edge clearance: 0.3mm (from jlcpcb manufacturer limits)
+============================================================
+KiCad PCB Autorouter - Layer Escalation Mode
+============================================================
+Input:          /evidence/cases/strf.tuned/output/normalized/strf.kicad_pcb
+Output:         /evidence/cases/strf.tuned/output/routed/strf.tuned.kicad_pcb
+Strategy:       negotiated
+Max layers:     6
+Min completion: 95%
+
+============================================================
+Attempt 1: 2 layers (2-Layer)
+============================================================
+  Edge clearance: 0.3mm, 68 cells blocked
+  Net-class map: merged 0/8 sidecar entries
+  Fine-pitch escape regions detected: 5 (J1, J3, U2, U3, U4); escape clearance 0.140mm
+  WARNING: no manufacturer configured (rules.manufacturer unset); fine-pitch escape regions detected but escape clearance defaulted to rules.trace_clearance (no shrink). Set --manufacturer to enable the tier-aware escape clearance.
+  Board size: 65.0mm x 56.0mm
+  Nets to route: 11
+
+  WARNING: 17 single-pad signal net(s) detected (13 defect(s), 4 connector NC):
+    DEFECTS (likely missing footprint or schematic/PCB drift):
+      - Net-(U3-Pad10)
+      - Net-(U3-Pad11)
+      - Net-(U3-Pad12)
+      - Net-(U3-Pad13)
+      - Net-(U3-Pad14)
+      - Net-(U3-Pad15)
+      - Net-(U3-Pad18)
+      - Net-(U3-Pad19)
+      - Net-(U3-Pad2)
+      - Net-(U3-Pad20)
+      - Net-(U3-Pad3)
+      - Net-(U3-Pad6)
+      - Net-(U3-Pad7)
+    INFO -- connector-pin NCs (typically intentional GPIO no-connects):
+      - Net-(J1-Pad4)
+      - Net-(J3-Pad6)
+      - Net-(J3-Pad7)
+      - Net-(J3-Pad8)
+  Run 'kct check --only single_pad_net <pcb>' for details. Routing will proceed but these nets cannot be connected.
+
+  Routing (negotiated)...
+  Escape routing: auto-enabled (dense packages: ['J1', 'U3', 'U4'])
+
+=== Routing with Escape Pattern Generation + Differential Pairs ===
+
+=== Differential Pair Routing ===
+  No differential pairs detected
+  Sub-grid pre-pass: 88 escapes for 152 off-grid pads, 4 cells unblocked
+  Sub-grid pre-pass: 64 pads could not escape (components: C1, C10, C11, C12, C15, C16, C2, C4, C7, C8, D1, D2, F1, FB1, J1, J3, L1, R1, R2, R3, R4, U1, U3, U4)
+  Net 49: 1 routes, 0 segments, 0 vias
+  Net 5: 1 routes, 0 segments, 0 vias
+  Net 45: 1 routes, 0 segments, 0 vias
+  Net 9: 1 routes, 0 segments, 0 vias
+  Net 13: 1 routes, 0 segments, 0 vias
+  Net 12: 1 routes, 0 segments, 0 vias
+  Net 14: 1 routes, 0 segments, 0 vias
+  Net 44: 1 routes, 0 segments, 0 vias
+  Net 11: 1 routes, 0 segments, 0 vias
+  Net 8: 2 routes, 0 segments, 0 vias
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+
+=== Routing with Escape + Diff Pairs Complete ===
+  Total nets routed: 17
+  Total segments: 171
+  Total vias: 0
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+  Best result so far: 2L with 0/11 (0%)
+  Note: overflow=0 but best completion 0% < 50% floor — continuing escalation (issue #2673)
+
+  Routed: 0/11 nets (0%)
+  Status: INSUFFICIENT - escalating
+  Failure causes: {'blocked_path': 3}
+============================================================
+Attempt 2: 4 layers (4-Layer SIG-GND-PWR-SIG)
+============================================================
+  Edge clearance: 0.3mm, 136 cells blocked
+  Net-class map: merged 0/8 sidecar entries
+  Fine-pitch escape regions detected: 5 (J1, J3, U2, U3, U4); escape clearance 0.140mm
+  WARNING: no manufacturer configured (rules.manufacturer unset); fine-pitch escape regions detected but escape clearance defaulted to rules.trace_clearance (no shrink). Set --manufacturer to enable the tier-aware escape clearance.
+  Board size: 65.0mm x 56.0mm
+  Nets to route: 11
+
+  WARNING: 17 single-pad signal net(s) detected (13 defect(s), 4 connector NC):
+    DEFECTS (likely missing footprint or schematic/PCB drift):
+      - Net-(U3-Pad10)
+      - Net-(U3-Pad11)
+      - Net-(U3-Pad12)
+      - Net-(U3-Pad13)
+      - Net-(U3-Pad14)
+      - Net-(U3-Pad15)
+      - Net-(U3-Pad18)
+      - Net-(U3-Pad19)
+      - Net-(U3-Pad2)
+      - Net-(U3-Pad20)
+      - Net-(U3-Pad3)
+      - Net-(U3-Pad6)
+      - Net-(U3-Pad7)
+    INFO -- connector-pin NCs (typically intentional GPIO no-connects):
+      - Net-(J1-Pad4)
+      - Net-(J3-Pad6)
+      - Net-(J3-Pad7)
+      - Net-(J3-Pad8)
+  Run 'kct check --only single_pad_net <pcb>' for details. Routing will proceed but these nets cannot be connected.
+
+  Routing (negotiated)...
+  Escape routing: auto-enabled (dense packages: ['J1', 'U3', 'U4'])
+
+=== Routing with Escape Pattern Generation + Differential Pairs ===
+
+=== Differential Pair Routing ===
+  No differential pairs detected
+  Sub-grid pre-pass: 88 escapes for 152 off-grid pads, 8 cells unblocked
+  Sub-grid pre-pass: 64 pads could not escape (components: C1, C10, C11, C12, C15, C16, C2, C4, C7, C8, D1, D2, F1, FB1, J1, J3, L1, R1, R2, R3, R4, U1, U3, U4)
+  Net 49: 1 routes, 0 segments, 0 vias
+  Net 5: 1 routes, 0 segments, 0 vias
+  Net 45: 1 routes, 0 segments, 0 vias
+  Net 9: 1 routes, 0 segments, 0 vias
+  Net 13: 1 routes, 0 segments, 0 vias
+  Net 12: 1 routes, 0 segments, 0 vias
+  Net 14: 1 routes, 0 segments, 0 vias
+  Net 44: 1 routes, 0 segments, 0 vias
+  Net 11: 1 routes, 0 segments, 0 vias
+  Net 8: 2 routes, 0 segments, 0 vias
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+
+=== Routing with Escape + Diff Pairs Complete ===
+  Total nets routed: 17
+  Total segments: 171
+  Total vias: 0
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+  Note: overflow=0 but best completion 0% < 50% floor — continuing escalation (issue #2673)
+  Note: stagnation detected but best completion 0% < 50% floor — continuing escalation (issue #2673)
+
+  Routed: 0/11 nets (0%)
+  Status: INSUFFICIENT - escalating
+  Failure causes: {'blocked_path': 3}
+============================================================
+Attempt 3: 4 layers (4-Layer ALL-SIG)
+============================================================
+  Edge clearance: 0.3mm, 136 cells blocked
+  Net-class map: merged 0/8 sidecar entries
+  Fine-pitch escape regions detected: 5 (J1, J3, U2, U3, U4); escape clearance 0.140mm
+  WARNING: no manufacturer configured (rules.manufacturer unset); fine-pitch escape regions detected but escape clearance defaulted to rules.trace_clearance (no shrink). Set --manufacturer to enable the tier-aware escape clearance.
+  Board size: 65.0mm x 56.0mm
+  Nets to route: 11
+
+  WARNING: 17 single-pad signal net(s) detected (13 defect(s), 4 connector NC):
+    DEFECTS (likely missing footprint or schematic/PCB drift):
+      - Net-(U3-Pad10)
+      - Net-(U3-Pad11)
+      - Net-(U3-Pad12)
+      - Net-(U3-Pad13)
+      - Net-(U3-Pad14)
+      - Net-(U3-Pad15)
+      - Net-(U3-Pad18)
+      - Net-(U3-Pad19)
+      - Net-(U3-Pad2)
+      - Net-(U3-Pad20)
+      - Net-(U3-Pad3)
+      - Net-(U3-Pad6)
+      - Net-(U3-Pad7)
+    INFO -- connector-pin NCs (typically intentional GPIO no-connects):
+      - Net-(J1-Pad4)
+      - Net-(J3-Pad6)
+      - Net-(J3-Pad7)
+      - Net-(J3-Pad8)
+  Run 'kct check --only single_pad_net <pcb>' for details. Routing will proceed but these nets cannot be connected.
+
+  Routing (negotiated)...
+  Escape routing: auto-enabled (dense packages: ['J1', 'U3', 'U4'])
+
+=== Routing with Escape Pattern Generation + Differential Pairs ===
+
+=== Differential Pair Routing ===
+  No differential pairs detected
+  Sub-grid pre-pass: 88 escapes for 152 off-grid pads, 8 cells unblocked
+  Sub-grid pre-pass: 64 pads could not escape (components: C1, C10, C11, C12, C15, C16, C2, C4, C7, C8, D1, D2, F1, FB1, J1, J3, L1, R1, R2, R3, R4, U1, U3, U4)
+  Net 49: 1 routes, 0 segments, 0 vias
+  Net 5: 1 routes, 0 segments, 0 vias
+  Net 45: 1 routes, 0 segments, 0 vias
+  Net 9: 1 routes, 0 segments, 0 vias
+  Net 13: 1 routes, 0 segments, 0 vias
+  Net 12: 1 routes, 0 segments, 0 vias
+  Net 14: 1 routes, 0 segments, 0 vias
+  Net 44: 1 routes, 0 segments, 0 vias
+  Net 11: 1 routes, 0 segments, 0 vias
+  Net 8: 2 routes, 0 segments, 0 vias
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+
+=== Routing with Escape + Diff Pairs Complete ===
+  Total nets routed: 17
+  Total segments: 171
+  Total vias: 0
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+  Note: overflow=0 but best completion 0% < 50% floor — continuing escalation (issue #2673)
+  Note: stagnation detected but best completion 0% < 50% floor — continuing escalation (issue #2673)
+
+  Routed: 0/11 nets (0%)
+  Status: INSUFFICIENT - escalating
+  Failure causes: {'blocked_path': 3}
+============================================================
+Attempt 4: 6 layers (6-Layer SIG-GND-SIG-SIG-PWR-SIG)
+============================================================
+  Edge clearance: 0.3mm, 204 cells blocked
+  Net-class map: merged 0/8 sidecar entries
+  Fine-pitch escape regions detected: 5 (J1, J3, U2, U3, U4); escape clearance 0.140mm
+  WARNING: no manufacturer configured (rules.manufacturer unset); fine-pitch escape regions detected but escape clearance defaulted to rules.trace_clearance (no shrink). Set --manufacturer to enable the tier-aware escape clearance.
+  Board size: 65.0mm x 56.0mm
+  Nets to route: 11
+
+  WARNING: 17 single-pad signal net(s) detected (13 defect(s), 4 connector NC):
+    DEFECTS (likely missing footprint or schematic/PCB drift):
+      - Net-(U3-Pad10)
+      - Net-(U3-Pad11)
+      - Net-(U3-Pad12)
+      - Net-(U3-Pad13)
+      - Net-(U3-Pad14)
+      - Net-(U3-Pad15)
+      - Net-(U3-Pad18)
+      - Net-(U3-Pad19)
+      - Net-(U3-Pad2)
+      - Net-(U3-Pad20)
+      - Net-(U3-Pad3)
+      - Net-(U3-Pad6)
+      - Net-(U3-Pad7)
+    INFO -- connector-pin NCs (typically intentional GPIO no-connects):
+      - Net-(J1-Pad4)
+      - Net-(J3-Pad6)
+      - Net-(J3-Pad7)
+      - Net-(J3-Pad8)
+  Run 'kct check --only single_pad_net <pcb>' for details. Routing will proceed but these nets cannot be connected.
+
+  Routing (negotiated)...
+  Escape routing: auto-enabled (dense packages: ['J1', 'U3', 'U4'])
+
+=== Routing with Escape Pattern Generation + Differential Pairs ===
+
+=== Differential Pair Routing ===
+  No differential pairs detected
+  Sub-grid pre-pass: 88 escapes for 152 off-grid pads, 12 cells unblocked
+  Sub-grid pre-pass: 64 pads could not escape (components: C1, C10, C11, C12, C15, C16, C2, C4, C7, C8, D1, D2, F1, FB1, J1, J3, L1, R1, R2, R3, R4, U1, U3, U4)
+  Net 49: 1 routes, 0 segments, 0 vias
+  Net 5: 1 routes, 0 segments, 0 vias
+  Net 45: 1 routes, 0 segments, 0 vias
+  Net 9: 1 routes, 0 segments, 0 vias
+  Net 13: 1 routes, 0 segments, 0 vias
+  Net 12: 1 routes, 0 segments, 0 vias
+  Net 14: 1 routes, 0 segments, 0 vias
+  Net 44: 1 routes, 0 segments, 0 vias
+  Net 11: 1 routes, 0 segments, 0 vias
+  Net 8: 2 routes, 0 segments, 0 vias
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+
+=== Routing with Escape + Diff Pairs Complete ===
+  Total nets routed: 17
+  Total segments: 171
+  Total vias: 0
+Failed nets:
+  - Net 1 "Net-(C1-Pad1)": blocked_path (BLOCKED_BY_COMPONENT: Path blocked by component keepout)
+  Note: overflow=0 but best completion 0% < 50% floor — continuing escalation (issue #2673)
+  Note: stagnation detected but best completion 0% < 50% floor — continuing escalation (issue #2673)
+
+  Routed: 0/11 nets (0%)
+  Status: INSUFFICIENT - escalating
+  Failure causes: {'blocked_path': 3}
+
+============================================================
+LAYER ESCALATION SUMMARY
+============================================================
+Result: Best result on 2 layers (0% completion)
+Warning: Did not achieve 95% completion on any layer count (max: 6)
+
+--- Optimizing traces ---
+  DRC nudge: 0/1 violations resolved in 1 pass(es)
+  Skipped (edge_budget): 1
+  Remaining violations: 1
+
+--- Results ---
+  Routes created:  12
+  Segments:        1
+  Vias:            0
+  Total length:    70.25mm
+  Nets routed:     0/11
+  Partial routes:  10/11 -- have segments, not all pads connected
+  Unrouted:        1/11 -- no segments at all
+
+--- Saving routed PCB ---
+  Saved to: /evidence/cases/strf.tuned/output/routed/strf.tuned.kicad_pcb
+  Layer count: 2
+
+============================================================
+PARTIAL: Best result 0% on 2 layers
+
+============================================================
+Routing Incomplete (0% connected)
+  Nets routed: 0/11 (0%)
+  Partial routes: 10/11 (91%) -- have segments, not all pads connected
+  Unrouted: 1/11 (9%) -- no segments at all
+
+  Partially connected nets (10):
+    Net-(C12-Pad1): 1/2 pads connected
+    Net-(C15-Pad1): 1/3 pads connected
+    Net-(C15-Pad2): 1/2 pads connected
+    Net-(D1-Pad1): 1/2 pads connected
+    Net-(D1-Pad2): 1/2 pads connected
+    Net-(D2-Pad2): 1/2 pads connected
+    Net-(D2-Pad1): 1/2 pads connected
+    Net-(F1-Pad1): 1/2 pads connected
+    Net-(R1-Pad1): 1/2 pads connected
+    Net-(R4-Pad1): 1/2 pads connected
+============================================================
+
+Unrouted nets:
+  Net-(C1-Pad1): Path blocked by component or trace
+
+============================================================
+Failure Summary by Cause
+============================================================
+  BLOCKED_PATH: 1 net (100%)
+
+============================================================
+Routing Suggestions
+============================================================
+
+Based on failure analysis:
+
+1. COMPONENT BLOCKING (1 net affected)
+   Direct paths are blocked by component keepouts.
+   Try: Reposition components or use vias to route around
+
+
+Tip: 1/11 nets failed on 2 layers (9% failure rate).
+
+Tip: Try randomized net ordering for better results:
+  kct route /evidence/cases/strf.tuned/output/normalized/strf.kicad_pcb --strategy monte-carlo --mc-trials 20
+
+Tip: Export failed net names for manual routing in KiCad:
+  kct route /evidence/cases/strf.tuned/output/normalized/strf.kicad_pcb --export-failed-nets failed_nets.txt
+
+============================================================
+strf: 23.5% complete, 0 vias, 70.2mm -> /evidence/cases/strf.tuned/output/strf.tuned.json
+
+# External autorouter benchmark results (tuned)
+
+| Board | Protocol | Completion | Connections | Vias | Wirelength (mm) | Runtime | Backend | kct check | kicad-cli DRC | Diff pairs | Outcome | Artifact |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| strf | tuned | 23.5% | 23 of 98 | 0 | 70.25 | 1260.1 s (partial) | cpp | FAIL (95E / 8W) | 144 | 0/2 | partial | router output |
+
+**Notes**
+
+- `strf` (tuned): seed=42
+- `strf` (tuned): router exit code: 1
+- `strf` (tuned): human baseline (pre-rip-up): 346 segments, 70 vias, 287.8mm, 17 unrouted pads
+- `strf` (tuned): DeepPCB published reference: {'airwires': 98, 'completion_pct': 100, 'vias': 68, 'wall_clock_minutes_max': 3}
+- `strf` (tuned): tuned protocol: applied declared net-class-map (/evidence/cases/strf.tuned/output/tuned/strf.net_class_map.json) via --net-class-map --differential-pairs -- see benchmarks/external/tuned_rules.py for the source values and schema-mapping caveats
+
+**Reproduction**
+
+- `strf`: https://github.com/pms67/STRF-Kicad @ `0525ef655e460ff6d91d770582b47925e7852e7a` (kicad-tools `696315f`, protocol `tuned`)
+
+markdown report: /evidence/cases/strf.tuned/output/report.tuned.md

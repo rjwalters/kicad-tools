@@ -1,0 +1,538 @@
+"""Re-derive diff-pair engagement state from a routed PCB + net-class map.
+
+Issue #2652, Epic #2556 Phase 2.5b.
+
+The :class:`~kicad_tools.validate.rules.diffpair_routing_continuity.DiffPairRoutingContinuityRule`
+(Phase 2G / Issue #2640) consumes a caller-supplied ``engaged_pairs:
+set[tuple[int, int]]`` and per-pair ``threshold_map``.  The rule itself
+deliberately does NOT re-derive engagement state to avoid drift between
+the router's engagement decision (from #2638's
+:func:`should_engage_coupled`) and the validator's continuity check.
+
+This module provides the producer side -- a thin shim that:
+
+1. Detects differential pairs on a routed PCB using the same layered
+   detector the router uses (``diffpair_detection.detect_diff_pairs``).
+2. Re-runs :func:`should_engage_coupled` against each detected pair.
+3. Builds the ``threshold_map`` from each pair's net class
+   :meth:`NetClassRouting.effective_coupled_continuity_threshold`.
+
+Why re-derive instead of persist?
+
+The recommended approach per the curator review on #2652 is to recover
+the engagement state at validation time rather than persist it as PCB
+metadata.  :func:`should_engage_coupled` is a pure function of (pair,
+net_class_routing, net_to_class) and the net-class map is already
+available to the autorouter consumer, so re-running it on the routed
+PCB's detected pairs is idempotent.  PCB-metadata persistence is a
+separable change, deferred until a consumer needs more state than can
+be re-derived.
+
+Boundary discipline:
+
+This module is the ONLY place the ``validate/`` package depends on the
+``router/`` package's diff-pair primitives.  The rule itself remains
+router-independent.  Tests live in
+``tests/test_validate_diffpair_engagement.py`` and the drift-prevention
+test in ``tests/test_validate_diffpair_routing_continuity.py``
+(architect spec, AC #5).
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from kicad_tools.router.pair_protocols import (
+    SKEW_STRETCH_TARGET_MM,
+    PairProtocol,
+    Sourced,
+    protocol_defaults,
+    protocol_provenance,
+)
+
+if TYPE_CHECKING:
+    from kicad_tools.router.rules import NetClassRouting
+    from kicad_tools.schema.pcb import PCB
+
+
+logger = logging.getLogger(__name__)
+
+
+#: Provenance of a limit no class field and no protocol supplied.
+GENERIC_PROVENANCE = "default:generic"
+
+
+@dataclass(frozen=True)
+class PairThresholds:
+    """The thresholds ``kct check`` applies to one diff pair (Issue #6442).
+
+    ``continuity`` is a fraction (0.25 == 25 %); ``skew_mm`` is in mm.
+    ``source_net`` names the net whose class supplied them (``None`` when
+    neither net has a class and the module defaults apply).
+
+    Issue #6443 adds the protocol-aware limits.  Each is resolved as
+    ``class field > protocol default > generic default`` and
+    :attr:`provenance` records which of the three supplied it, per field::
+
+        {"skew_mm": "protocol:USB2_FS (Renesas, ... Table 2)"}   # table value
+        {"skew_mm": "class:USB3"}                                # explicit
+        {"skew_mm": "default:generic"}                           # 0.5 mm
+
+    :attr:`skew_severity` follows the source: a cited or explicit limit is an
+    ``error``; a limit that is an ``uncited`` table value is a ``warning``.
+    The generic 0.5 mm default stays an ``error``, as it was before #6443.
+    The uncoupled-length and via limits (piece (b)) resolve the same way and
+    carry their own severity: :attr:`uncoupled_severity` and
+    :attr:`vias_severity` are ``warning`` when the limit is an ``uncited``
+    table value, ``error`` otherwise.  :attr:`max_uncoupled_total_mm` is the
+    KiCad-equivalent limit (one net's uncoupled length, see
+    ``validate/rules/diffpair_uncoupled_length.py``); when the class sets none
+    it is derived per pair as ``max_uncoupled_per_terminal_mm`` x the number
+    of components on the net, by the rule that knows the board.
+
+    Issue #6615 adds the kct-only per-terminal check of
+    :attr:`max_uncoupled_per_terminal_mm` itself.  Its severity,
+    :attr:`uncoupled_per_terminal_severity`, follows the per-terminal limit's
+    own source (an explicit ``max_uncoupled_total_mm`` makes only the total an
+    ``error``).  :attr:`gather_ignore` is the class's
+    ``NetClassRouting.gather_ignore`` (``"courtyard"``, ``"none"`` or a radius
+    in mm).
+    """
+
+    continuity: float
+    skew_mm: float
+    source_net: str | None
+    protocol: str | None = None
+    skew_severity: str = "error"
+    skew_stretch_mm: float = SKEW_STRETCH_TARGET_MM
+    max_uncoupled_per_terminal_mm: float | None = None
+    max_uncoupled_total_mm: float | None = None
+    max_vias_per_net: int | None = None
+    uncoupled_severity: str = "error"
+    vias_severity: str = "error"
+    provenance: Mapping[str, str] = field(default_factory=dict)
+    uncoupled_per_terminal_severity: str = "error"
+    gather_ignore: str | float = "courtyard"
+
+    @property
+    def skew_source(self) -> str:
+        """Where the skew limit came from (see :attr:`provenance`)."""
+        return self.provenance.get("skew_mm", GENERIC_PROVENANCE)
+
+
+def _resolve_limit(
+    class_value: float | None,
+    table_value: Sourced | None,
+    class_name: str,
+    protocol: PairProtocol | None,
+) -> tuple[float | None, str | None, str]:
+    """One limit as ``(value, provenance, severity)``: class > protocol > none."""
+    if class_value is not None:
+        return class_value, f"class:{class_name}", "error"
+    if table_value is not None and protocol is not None:
+        severity = "error" if table_value.cited else "warning"
+        return table_value.value, protocol_provenance(protocol, table_value), severity
+    return None, None, "error"
+
+
+def resolve_pair_thresholds(
+    net_class_map: dict[str, NetClassRouting] | None,
+    p_name: str,
+    n_name: str,
+) -> PairThresholds:
+    """Resolve a pair's thresholds and their provenance -- the single source.
+
+    The positive net's class wins, then the negative net's, then the rule
+    defaults (one-sided-declaration policy, #2558/#2638).  Lookup is by
+    NET NAME only: a class-name key is shared by every net of the class
+    and, when the class has per-net variants (board 03's ``HighSpeed``),
+    would report an arbitrary one of them.
+
+    Within the chosen class each limit resolves as ``class field >
+    protocol default > generic default`` (Issue #6443); the protocol
+    defaults are :data:`kicad_tools.router.pair_protocols.PROTOCOL_DEFAULTS`.
+
+    Used by :func:`derive_engagement_state`, ``derive_skew_data`` and the
+    router's pair report, so the three can never print different numbers
+    for the same pair (Issue #6442).
+    """
+    from kicad_tools.validate.rules.diffpair_length_skew import DEFAULT_SKEW_TOLERANCE_MM
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DEFAULT_COUPLED_CONTINUITY_THRESHOLD,
+    )
+
+    ncm = net_class_map or {}
+    nc_p = ncm.get(p_name)
+    nc_n = ncm.get(n_name)
+    nc = nc_p if nc_p is not None else nc_n
+    source = p_name if nc_p is not None else (n_name if nc_n is not None else None)
+    continuity = DEFAULT_COUPLED_CONTINUITY_THRESHOLD
+    if nc is not None and hasattr(nc, "effective_coupled_continuity_threshold"):
+        continuity = nc.effective_coupled_continuity_threshold(
+            default=DEFAULT_COUPLED_CONTINUITY_THRESHOLD
+        )
+
+    protocol: PairProtocol | None = None
+    row = None
+    if nc is not None and hasattr(nc, "effective_pair_protocol"):
+        protocol = nc.effective_pair_protocol()
+        row = protocol_defaults(protocol)
+    class_name = str(getattr(nc, "name", "") or "")
+
+    def limit(field_name: str, table_field: str) -> tuple[float | None, str | None, str]:
+        return _resolve_limit(
+            getattr(nc, field_name, None) if nc is not None else None,
+            getattr(row, table_field) if row is not None else None,
+            class_name,
+            protocol,
+        )
+
+    provenance: dict[str, str] = {}
+    skew, skew_src, skew_severity = limit("skew_tolerance_mm", "max_skew_mm")
+    if skew is None:
+        skew, skew_src, skew_severity = DEFAULT_SKEW_TOLERANCE_MM, GENERIC_PROVENANCE, "error"
+    provenance["skew_mm"] = skew_src or GENERIC_PROVENANCE
+    per_terminal, src, unc_severity = limit(
+        "max_uncoupled_per_terminal_mm", "max_uncoupled_per_terminal_mm"
+    )
+    if src:
+        provenance["max_uncoupled_per_terminal_mm"] = src
+    per_terminal_severity = unc_severity
+    gather = getattr(nc, "gather_ignore", None) if nc is not None else None
+    vias, src, vias_severity = limit("max_vias_per_net", "max_vias_per_net")
+    if src:
+        provenance["max_vias_per_net"] = src
+    total = getattr(nc, "max_uncoupled_total_mm", None) if nc is not None else None
+    if total is not None:
+        provenance["max_uncoupled_total_mm"] = f"class:{class_name}"
+        unc_severity = "error"
+    return PairThresholds(
+        continuity=continuity,
+        skew_mm=float(skew),
+        source_net=source,
+        protocol=protocol.name if protocol is not None else None,
+        skew_severity=skew_severity,
+        max_uncoupled_per_terminal_mm=per_terminal,
+        max_uncoupled_total_mm=total,
+        max_vias_per_net=int(vias) if vias is not None else None,
+        uncoupled_severity=unc_severity,
+        vias_severity=vias_severity,
+        provenance=provenance,
+        uncoupled_per_terminal_severity=per_terminal_severity,
+        gather_ignore=gather if gather is not None else "courtyard",
+    )
+
+
+#: Provenance suffix of a class millimetre limit kept beside a derived budget.
+#: Issue #7894 removed these fields from the board generators; a class that
+#: still sets ``skew_tolerance_mm`` gets it as an explicit extra length cap.
+CLASS_CAP_NOTE = "explicit class cap beside the derived budget"
+
+
+@dataclass(frozen=True)
+class PairSkewLimits:
+    """Every skew limit ``kct check`` applies to one pair (Issue #7892).
+
+    ``budget`` is the derived time budget of
+    :func:`kicad_tools.physics.skew_budget.resolve_skew_budget` -- the one
+    source of skew budgets -- or ``None`` when the pair's protocol and rate
+    give nothing to derive from.  ``length_cap_mm`` is a length limit checked
+    as before: a class's own explicit ``skew_tolerance_mm`` beside a budget
+    (the board generators no longer set one, Issue #7894), or, for a pair
+    with no budget, the pre-#7892 limit (protocol table or generic 0.5 mm).
+    The generic 0.5 mm applies beside a budget only when the protocol is
+    completely unknown (#7894 ruling): a protocol declared or recognised
+    from a class or net name gets its derived budget alone.  ``delays`` are the board's per-layer delays at the class trace
+    width, ``None`` when the caller has no stackup.  ``legacy`` is the
+    pre-#7892 millimetre resolution (its source and severity feed
+    ``length_cap_mm``; since #7893 nothing tunes to its value directly).
+    """
+
+    budget: Any | None
+    length_cap_mm: float | None
+    length_severity: str
+    length_source: str
+    legacy: PairThresholds
+    delays: Any | None = None
+
+    @property
+    def budget_mm_equivalent(self) -> float | None:
+        """The budget at the slowest layer delay (mm), the conservative length form."""
+        if self.budget is None or self.delays is None:
+            return None
+        return float(self.delays.mm_equivalent(self.budget.budget_ps))
+
+    @property
+    def kicad_skew_mm(self) -> float:
+        """The millimetre ``skew`` rule the ``.kicad_dru`` carries.
+
+        kicad-cli 10.0.6 cannot enforce a time budget (Issue #7892 probe), so
+        it gets the tightest length form of every limit ``kct check`` applies:
+        the budget at the slowest layer and the length cap.  Issue #7893: the
+        router now tunes to these same limits
+        (:func:`kicad_tools.router.pair_skew_target.resolve_pair_skew_target`),
+        so the pre-#7892 table value it used to tune to is no longer a floor.
+        """
+        values: list[float] = []
+        if self.length_cap_mm is not None:
+            values.append(float(self.length_cap_mm))
+        eq = self.budget_mm_equivalent
+        if eq is not None:
+            values.append(eq)
+        if not values:  # a budget without delays: keep the length resolution
+            values.append(float(self.legacy.skew_mm))
+        return min(values)
+
+    @property
+    def kicad_skew_severity(self) -> str:
+        """``error`` when any of the limits behind :attr:`kicad_skew_mm` is one."""
+        severities: list[str] = []
+        if self.length_cap_mm is not None:
+            severities.append(self.length_severity)
+        if self.budget is not None and self.delays is not None:
+            severities.append(self.budget.severity)
+        if not severities:
+            severities.append(self.legacy.skew_severity)
+        return "error" if "error" in severities else "warning"
+
+
+def resolve_pair_skew_limits(
+    net_class_map: dict[str, NetClassRouting] | None,
+    p_name: str,
+    n_name: str,
+    stackup: Any | None = None,
+) -> PairSkewLimits:
+    """The skew limits ``kct check`` applies to a pair (Issue #7892).
+
+    The class is chosen as :func:`resolve_pair_thresholds` chooses it (the
+    positive net's, then the negative net's).  ``stackup`` (a
+    :class:`~kicad_tools.physics.stackup.Stackup`) supplies the per-layer
+    delays at the class trace width.
+    """
+    from kicad_tools.physics.skew_budget import layer_delays, resolve_skew_budget
+
+    ncm = net_class_map or {}
+    nc = ncm.get(p_name)
+    if nc is None:
+        nc = ncm.get(n_name)
+    legacy = resolve_pair_thresholds(net_class_map, p_name, n_name)
+    budget = resolve_skew_budget(nc, p_name, n_name)
+    delays = None
+    if stackup is not None:
+        width = getattr(nc, "trace_width", None) if nc is not None else None
+        delays = layer_delays(stackup, float(width) if width else 0.2)
+    if budget is None:
+        return PairSkewLimits(
+            budget=None,
+            length_cap_mm=float(legacy.skew_mm),
+            length_severity=legacy.skew_severity,
+            length_source=legacy.skew_source,
+            legacy=legacy,
+            delays=delays,
+        )
+    source = legacy.skew_source
+    if source.startswith("class:"):
+        # An explicit class millimetre limit is the user's own extra cap.
+        cap, cap_severity = float(legacy.skew_mm), "error"
+        source = f"{source} ({CLASS_CAP_NOTE})"
+    elif delays is None:
+        # No delays to measure time with: keep the length check.
+        cap, cap_severity = float(legacy.skew_mm), legacy.skew_severity
+    elif source.startswith("protocol:") or budget.protocol is not None:
+        # The derived budget supersedes the protocol table's millimetres, and
+        # the generic 0.5 mm for a protocol recognised from a class or net
+        # name (Issue #7894 ruling: the generic cap is for unknown protocols).
+        cap, cap_severity = None, "error"
+    else:
+        # The protocol is completely unknown (a budget derived from a declared
+        # rate alone): the generic default stays beside it.
+        cap, cap_severity = float(legacy.skew_mm), legacy.skew_severity
+    return PairSkewLimits(
+        budget=budget,
+        length_cap_mm=cap,
+        length_severity=cap_severity,
+        length_source=source if cap is not None else "",
+        legacy=legacy,
+        delays=delays,
+    )
+
+
+def pair_threshold_report(
+    net_names: dict[int, str] | None,
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> list[str]:
+    """Report lines naming the thresholds ``kct check`` will apply to each pair.
+
+    Printed by the router after its pair phase so the router log and a
+    later ``kct check`` quote the same continuity and skew thresholds for
+    every engaged pair (Issue #6442).  Engagement, detection and the
+    numbers all come from the validator's own code path
+    (:func:`resolve_pair_thresholds`), never a router-local copy.
+    """
+    if not net_names or not net_class_map:
+        return []
+    from kicad_tools.router.diffpair import should_engage_coupled
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    try:
+        detected = detect_diff_pairs(
+            net_names, net_class_routing=synth_routing, net_to_class=net_to_class
+        )
+    except Exception:  # reporting must never break routing
+        return []
+    lines: list[str] = []
+    for d in detected:
+        p_name = d.pair.positive.net_name
+        n_name = d.pair.negative.net_name
+        engaged, _ = should_engage_coupled(d.pair, synth_routing, net_to_class)
+        if not engaged:
+            continue
+        t = resolve_pair_thresholds(net_class_map, p_name, n_name)
+        line = (
+            f"    {p_name}/{n_name}: continuity threshold {t.continuity * 100:.1f}%, "
+            f"skew tolerance {t.skew_mm:.3f} mm [{t.skew_source}; {t.skew_severity}]"
+        )
+        # Issue #7892: ``kct check`` judges the pair in time; since #7893 the
+        # router tunes to that budget too (the tolerance above is the
+        # pre-#7892 length resolution, kept for its provenance).
+        budget = resolve_pair_skew_limits(net_class_map, p_name, n_name).budget
+        if budget is not None:
+            line += (
+                f"; kct check skew budget {budget.budget_ps:.2f} ps "
+                f"[{budget.provenance}; {budget.severity}]"
+            )
+        lines.append(line)
+    return sorted(lines)
+
+
+def derive_engagement_state(
+    pcb: PCB,
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> tuple[set[tuple[int, int]], dict[tuple[int, int], float]]:
+    """Re-derive ``(engaged_pairs, threshold_map)`` from a routed PCB.
+
+    Walks the PCB's net table, runs the layered differential-pair
+    detector, and re-runs :func:`should_engage_coupled` for each
+    detected pair.  Returns the inputs the
+    :class:`DiffPairRoutingContinuityRule` expects.
+
+    Args:
+        pcb: The routed PCB to inspect.  Only ``pcb.nets`` is consulted
+            (net id + net name).  Geometry is NOT used here -- the rule
+            walks the routed segments itself.
+        net_class_map: Map of ``{net_name: NetClassRouting}`` (the
+            autorouter convention used by
+            :attr:`~kicad_tools.router.core.AutoRouter.net_class_map`).
+            ``None`` or empty returns ``(set(), {})`` so the standalone
+            ``kct check`` path degrades gracefully to a no-op.
+
+    Returns:
+        ``(engaged_pairs, threshold_map)`` where
+
+        * ``engaged_pairs`` is the set of ``(min_net_id, max_net_id)``
+          tuples whose net class has ``coupled_routing == True`` AND
+          which passed the engagement-layer single-ended refusal check.
+        * ``threshold_map`` is the ``{(min, max): threshold}`` map of
+          per-pair coupled-fraction thresholds.  Each engaged pair's
+          threshold comes from
+          :meth:`NetClassRouting.effective_coupled_continuity_threshold`
+          on its net class (with the rule's module-level
+          :data:`DEFAULT_COUPLED_CONTINUITY_THRESHOLD` 0.7 fallback).
+
+    Notes:
+        Idempotence guarantee (architect AC #5): given the same net
+        classes (which are persisted in the PCB schema), this function
+        returns the same set as the producer-side
+        :meth:`DiffPairRouter._resolve_engagement` for the same pairs.
+        This is the drift-prevention property tested in
+        ``tests/test_validate_diffpair_routing_continuity.py``.
+    """
+    if not net_class_map:
+        return set(), {}
+
+    # Local imports keep the validate -> router boundary explicit: this
+    # is the ONE module in validate/ that depends on router/ diff-pair
+    # primitives.  See module docstring.
+    from kicad_tools.router.diffpair import should_engage_coupled
+    from kicad_tools.router.diffpair_detection import detect_diff_pairs
+
+    # Build the {net_id: net_name} map the detector expects.
+    net_names: dict[int, str] = {}
+    for net_id, net in pcb.nets.items():
+        net_name = getattr(net, "name", None)
+        if not net_name:
+            continue
+        net_names[net_id] = net_name
+
+    if not net_names:
+        return set(), {}
+
+    # Synthesise a {net_name: class_name} map so the layered detector
+    # can consult ``NetClassRouting.diffpair_partner`` explicit
+    # declarations.  Mirrors the autorouter convention -- see
+    # ``DiffPairRouter._resolve_detection_inputs`` (router-side).
+    from kicad_tools.router.diffpair_detection import build_synth_routing
+
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+
+    # KiCad-group templates declared in the PCB itself (parsed by the
+    # schema layer when the file was loaded).  Optional -- absent on
+    # most fixtures.  Mirrors router/orchestrator.py:207.
+    kicad_groups = getattr(pcb, "kicad_diff_pair_groups", None)
+
+    try:
+        detected = detect_diff_pairs(
+            net_names,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            kicad_groups=kicad_groups,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "[diffpair-engagement] detector raised %s; treating as no engaged pairs",
+            exc,
+        )
+        return set(), {}
+
+    engaged_pairs: set[tuple[int, int]] = set()
+    threshold_map: dict[tuple[int, int], float] = {}
+
+    for detected_pair in detected:
+        pair = detected_pair.pair
+        engaged, reason = should_engage_coupled(
+            pair,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+        )
+        if not engaged:
+            logger.debug(
+                "[diffpair-engagement] %s <-> %s NOT engaged (reason: %s)",
+                pair.positive.net_name,
+                pair.negative.net_name,
+                reason,
+            )
+            continue
+
+        a = pair.positive.net_id
+        b = pair.negative.net_id
+        key = (a, b) if a <= b else (b, a)
+        engaged_pairs.add(key)
+
+        # Per-pair threshold: shared resolver (Issue #6442) -- the same one
+        # the skew derivation and the router's pair report use.
+        threshold_map[key] = resolve_pair_thresholds(
+            net_class_map, pair.positive.net_name, pair.negative.net_name
+        ).continuity
+
+        logger.info(
+            "[diffpair-engagement] %s <-> %s engaged (threshold=%.2f)",
+            pair.positive.net_name,
+            pair.negative.net_name,
+            threshold_map[key],
+        )
+
+    return engaged_pairs, threshold_map

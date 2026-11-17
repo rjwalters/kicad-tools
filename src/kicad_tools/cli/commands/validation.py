@@ -1,0 +1,673 @@
+"""Validation command handlers (check, validate, validate-footprints, fix-footprints, constraints)."""
+
+__all__ = [
+    "run_check_command",
+    "run_validate_command",
+    "run_validate_connectivity_command",
+    "run_validate_consistency_command",
+    "run_validate_lvs_command",
+    "run_validate_placement_command",
+    "run_validate_footprints_command",
+    "run_fix_footprints_command",
+    "run_fix_vias_command",
+    "run_fix_silkscreen_command",
+    "run_place_silk_refs_command",
+    "run_repair_clearance_command",
+    "run_fix_drc_command",
+    "run_constraints_command",
+    "run_audit_command",
+]
+
+
+def _resolve_mfr(cli_mfr: str | None, path, *, consult_sidecar: bool = True) -> str:
+    """Resolve an unflagged ``--mfr`` from ``project.kct`` (Issue #6169).
+
+    Shared with ``kct check`` / ``kct route`` via
+    :func:`kicad_tools.manufacturers.resolve.resolve_cli_manufacturer`.
+    """
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    return resolve_cli_manufacturer(cli_mfr, path, consult_sidecar=consult_sidecar)
+
+
+def run_validate_footprints_command(args) -> int:
+    """Handle validate-footprints command."""
+    from ..footprint_cmd import main_validate
+
+    sub_argv = [args.pcb]
+    if args.min_pad_gap != 0.15:
+        sub_argv.extend(["--min-pad-gap", str(args.min_pad_gap)])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    if args.errors_only:
+        sub_argv.append("--errors-only")
+    # Standard comparison options
+    if getattr(args, "compare_standard", False):
+        sub_argv.append("--compare-standard")
+    if getattr(args, "tolerance", 0.05) != 0.05:
+        sub_argv.extend(["--tolerance", str(args.tolerance)])
+    if getattr(args, "kicad_library_path", None):
+        sub_argv.extend(["--kicad-library-path", args.kicad_library_path])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return main_validate(sub_argv)
+
+
+def run_fix_footprints_command(args) -> int:
+    """Handle fix-footprints command."""
+    from ..footprint_cmd import main_fix
+
+    sub_argv = [args.pcb]
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.min_pad_gap != 0.2:
+        sub_argv.extend(["--min-pad-gap", str(args.min_pad_gap)])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return main_fix(sub_argv)
+
+
+def run_fix_vias_command(args) -> int:
+    """Handle fix-vias command."""
+    from ..fix_vias_cmd import main as fix_vias_main
+
+    sub_argv = [args.pcb]
+    sub_argv.extend(["--mfr", _resolve_mfr(args.mfr, args.pcb)])
+    if args.layers is not None:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if args.copper != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if args.drill:
+        sub_argv.extend(["--drill", str(args.drill)])
+    if args.diameter:
+        sub_argv.extend(["--diameter", str(args.diameter)])
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    if getattr(args, "skip_if_clearance_violation", False):
+        sub_argv.append("--skip-if-clearance-violation")
+    if getattr(args, "relocate_in_pad", False):
+        sub_argv.append("--relocate-in-pad")
+    if getattr(args, "search_alternatives", False):
+        sub_argv.append("--search-alternatives")
+    for net in getattr(args, "nets", None) or []:
+        sub_argv.extend(["--net", net])
+    return fix_vias_main(sub_argv)
+
+
+def run_fix_silkscreen_command(args) -> int:
+    """Handle fix-silkscreen command."""
+    from ..fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    sub_argv = [args.pcb]
+    sub_argv.extend(["--mfr", _resolve_mfr(args.mfr, args.pcb)])
+    if args.layers != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if args.copper != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if getattr(args, "min_width", None):
+        sub_argv.extend(["--min-width", str(args.min_width)])
+    if getattr(args, "clip_to_pads", False):
+        sub_argv.append("--clip-to-pads")
+    if getattr(args, "clip_to_holes", False):
+        sub_argv.append("--clip-to-holes")
+    if getattr(args, "hole_clearance", None) is not None:
+        sub_argv.extend(["--hole-clearance", str(args.hole_clearance)])
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return fix_silkscreen_main(sub_argv)
+
+
+def run_place_silk_refs_command(args) -> int:
+    """Handle place-silk-refs command."""
+    from ..place_silk_refs_cmd import main as place_silk_refs_main
+
+    sub_argv = [args.pcb]
+    if getattr(args, "mfr", None):
+        sub_argv.extend(["--mfr", args.mfr])
+    if getattr(args, "layers", None) is not None:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if getattr(args, "copper", 1.0) != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if getattr(args, "clearance", None) is not None:
+        sub_argv.extend(["--clearance", str(args.clearance)])
+    if getattr(args, "edge_clearance", None) is not None:
+        sub_argv.extend(["--edge-clearance", str(args.edge_clearance)])
+    if getattr(args, "max_offset", None) is not None:
+        sub_argv.extend(["--max-offset", str(args.max_offset)])
+    if getattr(args, "step", None) is not None:
+        sub_argv.extend(["--step", str(args.step)])
+    if getattr(args, "allow_rotate", False):
+        sub_argv.append("--allow-rotate")
+    if getattr(args, "refs", None) is not None:
+        sub_argv.extend(["--refs", args.refs])
+    if getattr(args, "over_holes", False):
+        sub_argv.append("--over-holes")
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if getattr(args, "verify_drc", False):
+        sub_argv.append("--verify-drc")
+    if getattr(args, "render", None):
+        sub_argv.extend(["--render", args.render])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return place_silk_refs_main(sub_argv)
+
+
+def run_repair_clearance_command(args) -> int:
+    """Handle repair-clearance command."""
+    from ..repair_clearance_cmd import main as repair_clearance_main
+
+    sub_argv = [args.pcb]
+    if getattr(args, "drc_report", None):
+        sub_argv.extend(["--drc-report", args.drc_report])
+    if getattr(args, "mfr", None):
+        sub_argv.extend(["--mfr", args.mfr])
+    if args.max_displacement != 0.1:
+        sub_argv.extend(["--max-displacement", str(args.max_displacement)])
+    if args.margin != 0.01:
+        sub_argv.extend(["--margin", str(args.margin)])
+    if args.prefer != "move-trace":
+        sub_argv.extend(["--prefer", args.prefer])
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return repair_clearance_main(sub_argv)
+
+
+def run_fix_drc_command(args) -> int:
+    """Handle fix-drc command."""
+    from ..fix_drc_cmd import main as fix_drc_main
+
+    sub_argv = [args.pcb]
+    if getattr(args, "drc_report", None):
+        sub_argv.extend(["--drc-report", args.drc_report])
+    sub_argv.extend(["--mfr", _resolve_mfr(getattr(args, "mfr", None), args.pcb)])
+    if getattr(args, "layers", None) is not None:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if args.max_displacement != 0.5:
+        sub_argv.extend(["--max-displacement", str(args.max_displacement)])
+    if args.margin != 0.01:
+        sub_argv.extend(["--margin", str(args.margin)])
+    if getattr(args, "only", None):
+        sub_argv.extend(["--only", args.only])
+    if getattr(args, "output", None):
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if getattr(args, "max_passes", 1) != 1:
+        sub_argv.extend(["--max-passes", str(args.max_passes)])
+    # local_reroute defaults to True; forward both states
+    local_reroute = getattr(args, "local_reroute", True)
+    if local_reroute:
+        sub_argv.append("--local-reroute")
+    else:
+        sub_argv.append("--no-local-reroute")
+    if getattr(args, "no_connectivity_check", False):
+        sub_argv.append("--no-connectivity-check")
+    if getattr(args, "verify", False):
+        sub_argv.append("--verify")
+    if getattr(args, "transactional", False):
+        sub_argv.append("--transactional")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use command-level quiet or global quiet
+    if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return fix_drc_main(sub_argv)
+
+
+def run_fix_erc_command(args) -> int:
+    """Handle fix-erc command."""
+    from ..fix_erc_cmd import main as fix_erc_main
+
+    sub_argv = [args.schematic]
+    if getattr(args, "erc_report", None):
+        sub_argv.extend(["--erc-report", args.erc_report])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return fix_erc_main(sub_argv)
+
+
+def run_check_command(args) -> int:
+    """Handle check command (pure Python DRC)."""
+    from ..check_cmd import main as check_main
+
+    # Issue #5946: ``--diff OLD NEW`` replaces the positional board.
+    diff = getattr(args, "diff", None)
+    sub_argv = ["--diff", *diff] if diff else []
+    if args.pcb is not None:
+        sub_argv.append(args.pcb)
+    for key in getattr(args, "waive", None) or []:
+        sub_argv.extend(["--waive", key])
+    for flag, dest in (
+        ("--waive-reason", "waive_reason"),
+        ("--waive-reviewer", "waive_reviewer"),
+        ("--waive-issue", "waive_issue"),
+    ):
+        if getattr(args, dest, None) is not None:
+            sub_argv.extend([flag, getattr(args, dest)])
+    if getattr(args, "mask_copper_config", None) is not None:
+        sub_argv.extend(["--mask-copper-config", str(args.mask_copper_config)])
+    if getattr(args, "physical_copper_gap", None) is not None:
+        sub_argv.extend(["--physical-copper-gap", str(args.physical_copper_gap)])
+    # Issue #8940: forward an explicitly supplied recorded fab DFM result so
+    # the parity stanza/JSON print the kct-vs-fab comparison; dropping it
+    # here would silently fall back to the uncompared stanza (AC 5).
+    if getattr(args, "fab_dfm_result", None) is not None:
+        sub_argv.extend(["--fab-dfm-result", str(args.fab_dfm_result)])
+    if args.format != "table":
+        sub_argv.extend(["--format", args.format])
+    if args.errors_only:
+        sub_argv.append("--errors-only")
+    if args.strict:
+        sub_argv.append("--strict")
+    # Issue #7682: opt in to the host-dependent model_coverage category.
+    if getattr(args, "models_3d", False):
+        sub_argv.append("--3d-models")
+    # Issue #4176 / #4673: strict (real-geometry) connectivity is now the
+    # default; --strict-connectivity is a compatibility no-op but is still
+    # forwarded verbatim, and --legacy-connectivity is the opt-out that
+    # actually changes behavior (it wins if both are given).
+    if getattr(args, "strict_connectivity", False):
+        sub_argv.append("--strict-connectivity")
+    if getattr(args, "legacy_connectivity", False):
+        sub_argv.append("--legacy-connectivity")
+    # Issue #3920: forward an explicit --mfr regardless of value so that
+    # check_main can distinguish "no flag given" (None → auto-resolve from
+    # sidecar/project.kct) from an explicit choice that must always win. The
+    # subparser default is None, mirroring check_cmd.py's None sentinel.
+    if args.mfr is not None:
+        sub_argv.extend(["--mfr", args.mfr])
+    if args.layers != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    # Issue #5810: --copper is a raw string (scalar "2" or keyed
+    # "outer=2,inner=0.5") with a None default, forwarded verbatim whenever
+    # it was supplied -- including an explicit "1", which the old
+    # ``!= 1.0`` guard silently dropped (letting the board stackup override
+    # an explicit 1oz request).  Omitted stays omitted so check_cmd resolves
+    # the board stackup / profile default itself.
+    if args.copper is not None:
+        sub_argv.extend(["--copper", args.copper])
+    if args.only_checks:
+        sub_argv.extend(["--only", args.only_checks])
+    if args.skip_checks:
+        sub_argv.extend(["--skip", args.skip_checks])
+    # Issue #8016: forward the finding-scope flags.
+    for flag in ("bbox", "refs", "nets"):
+        if getattr(args, flag, None):
+            sub_argv.extend([f"--{flag}", getattr(args, flag)])
+    # Issue #4375: forward the DRC-constraint sidecar emission flags.
+    if getattr(args, "emit_dru", False):
+        sub_argv.append("--emit-dru")
+    if getattr(args, "emit_drc_constraints", False):
+        sub_argv.append("--emit-drc-constraints")
+    if args.verbose:
+        sub_argv.append("--verbose")
+    if getattr(args, "output", None):
+        sub_argv.extend(["--output", args.output])
+    if getattr(args, "suppress_library", False):
+        sub_argv.append("--suppress-library")
+    # Issue #3750: forward the legacy DRC-only opt-out flag.
+    if getattr(args, "drc_only", False):
+        sub_argv.append("--drc-only")
+    # Issue #3750: forward the --allow-incomplete opt-in.  By default the
+    # meta-check rollup exits non-zero when any sub-check is NOT RUN
+    # (e.g. no schematic next to the PCB); this flag preserves exit 0
+    # for boards that legitimately lack a sub-check input.
+    if getattr(args, "allow_incomplete", False):
+        sub_argv.append("--allow-incomplete")
+    # Issue #3154: forward the netlist-sync gate flags.
+    if getattr(args, "netlist_sync", False):
+        sub_argv.append("--netlist-sync")
+    if getattr(args, "schematic", None):
+        sub_argv.extend(["--schematic", args.schematic])
+    if getattr(args, "net_class_map", None):
+        sub_argv.extend(["--net-class-map", args.net_class_map])
+    # Issue #4601: forward the sidecar auto-discovery opt-out.
+    if getattr(args, "no_net_class_map", False):
+        sub_argv.append("--no-net-class-map")
+    # Issue #6044: forward the opt-in missing-routing-policy gate.
+    if getattr(args, "require_routing_policy", False):
+        sub_argv.append("--require-routing-policy")
+    # Issue #4980/#5124: forward the declared branch-specific current-path
+    # sidecar and its auto-discovery opt-out, mirroring --net-class-map /
+    # --no-net-class-map immediately above.
+    if getattr(args, "current_paths", None):
+        sub_argv.extend(["--current-paths", args.current_paths])
+    if getattr(args, "no_current_paths", False):
+        sub_argv.append("--no-current-paths")
+    # Issue #4633: forward the zone-refill opt-in (#4096/#4113) and the two
+    # waiver-sidecar path overrides (#4137 / #4417).  All three were declared
+    # on the inner check_cmd parser only, so `kct check --refill-zones` (and
+    # the explicit waiver paths) failed with "unrecognized arguments" until
+    # this shim + the outer subparser learned about them.  The parser-drift
+    # guard in tests/test_cli_parser_drift.py now pins all three.
+    if getattr(args, "refill_zones", False):
+        sub_argv.append("--refill-zones")
+    if getattr(args, "courtyard_waivers", None):
+        sub_argv.extend(["--courtyard-waivers", args.courtyard_waivers])
+    if getattr(args, "waivers", None):
+        sub_argv.extend(["--waivers", args.waivers])
+    # Issue #3061: forward pad_grid tolerance flags.
+    if getattr(args, "pad_grid_strict", False):
+        sub_argv.append("--pad-grid-strict")
+    if getattr(args, "pad_grid_tolerance", None) is not None:
+        sub_argv.extend(["--pad-grid-tolerance", str(args.pad_grid_tolerance)])
+    # Issue #4595: forward the sch_fields lint threshold.  The outer parser
+    # defaults it to None so the inner check_cmd parser's default (15.0mm)
+    # stays the single source of truth.
+    if getattr(args, "sch_field_threshold", None) is not None:
+        sub_argv.extend(["--sch-field-threshold", str(args.sch_field_threshold)])
+    # Issue #4651: forward the opt-in routing-quality threshold ceilings.
+    # Both default to None (advisory-only, no gating) so the inner parser's
+    # semantics stay the single source of truth.
+    if getattr(args, "max_fragment_fraction", None) is not None:
+        sub_argv.extend(["--max-fragment-fraction", str(args.max_fragment_fraction)])
+    if getattr(args, "max_staircase_fraction", None) is not None:
+        sub_argv.extend(["--max-staircase-fraction", str(args.max_staircase_fraction)])
+    if getattr(args, "max_off_axis_fraction", None) is not None:
+        sub_argv.extend(["--max-off-axis-fraction", str(args.max_off_axis_fraction)])
+    return check_main(sub_argv)
+
+
+def run_validate_command(args) -> int:
+    """Handle validate command."""
+    # Route to connectivity validation if --connectivity flag is set
+    if getattr(args, "connectivity", False):
+        return run_validate_connectivity_command(args)
+
+    # Route to consistency validation if --consistency flag is set
+    if getattr(args, "consistency", False):
+        return run_validate_consistency_command(args)
+
+    # Route to LVS validation if --lvs flag is set
+    if getattr(args, "lvs", False):
+        return run_validate_lvs_command(args)
+
+    # Route to placement validation if --placement flag is set
+    if getattr(args, "placement", False):
+        return run_validate_placement_command(args)
+
+    # Default to sync validation
+    if not args.sync:
+        print("Usage: kicad-tools validate --sync [options] <project>")
+        print("       kicad-tools validate --sync [options] <schematic> <pcb>")
+        print("       kicad-tools validate --connectivity [options] <pcb>")
+        print("       kicad-tools validate --consistency [options] <project>")
+        print("       kicad-tools validate --placement [options] <project>")
+        print("       kicad-tools validate --lvs [options] <project>")
+        print("\nOptions:")
+        print("  --sync           Check schematic-to-PCB netlist synchronization")
+        print("  --connectivity   Check net connectivity on PCB (detect unrouted nets)")
+        print(
+            "  --consistency    Check schematic-to-PCB consistency (components, nets, properties)"
+        )
+        print("  --placement      Check BOM components are placed on PCB")
+        print("  --lvs            Layout-vs-schematic check with hierarchical support")
+        return 1
+
+    from ..validate_sync_cmd import main as validate_sync_main
+
+    sub_argv = []
+
+    # Handle positional file arguments (validate_files is a list)
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
+    # Also pass explicit flags if provided
+    if getattr(args, "validate_schematic", None):
+        sub_argv.extend(["--schematic", args.validate_schematic])
+    if getattr(args, "validate_pcb", None):
+        sub_argv.extend(["--pcb", args.validate_pcb])
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+    return validate_sync_main(sub_argv)
+
+
+def run_validate_connectivity_command(args) -> int:
+    """Handle validate --connectivity command."""
+    from ..validate_connectivity_cmd import main as validate_connectivity_main
+
+    sub_argv = []
+
+    # Get PCB path from validate_files or --pcb flag
+    validate_files = getattr(args, "validate_files", []) or []
+    pcb_path = getattr(args, "validate_pcb", None)
+
+    # Try to find PCB from positional files
+    if not pcb_path:
+        for f in validate_files:
+            if f.lower().endswith(".kicad_pcb"):
+                pcb_path = f
+                break
+            elif f.lower().endswith(".kicad_pro"):
+                # Resolve .kicad_pro to .kicad_pcb by stem matching so the
+                # S-expression parser receives a PCB file, not JSON.
+                from pathlib import Path
+
+                pro_path = Path(f)
+                resolved = pro_path.with_suffix(".kicad_pcb")
+                if not resolved.exists():
+                    print(f"Error: PCB file not found: {resolved}")
+                    return 1
+                pcb_path = str(resolved)
+                break
+
+    if not pcb_path:
+        print("Error: PCB file required. Use --pcb or provide a .kicad_pcb file.")
+        return 1
+
+    sub_argv.append(pcb_path)
+
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+
+    return validate_connectivity_main(sub_argv)
+
+
+def run_validate_consistency_command(args) -> int:
+    """Handle validate --consistency command."""
+    from ..validate_consistency_cmd import main as validate_consistency_main
+
+    sub_argv = []
+
+    # Handle positional file arguments
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
+    if getattr(args, "validate_schematic", None):
+        sub_argv.extend(["--schematic", args.validate_schematic])
+    if getattr(args, "validate_pcb", None):
+        sub_argv.extend(["--pcb", args.validate_pcb])
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+
+    return validate_consistency_main(sub_argv)
+
+
+def run_validate_lvs_command(args) -> int:
+    """Handle validate --lvs command."""
+    from ..validate_lvs_cmd import main as validate_lvs_main
+
+    sub_argv = []
+
+    # Handle positional file arguments
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
+    if getattr(args, "validate_schematic", None):
+        sub_argv.extend(["--schematic", args.validate_schematic])
+    if getattr(args, "validate_pcb", None):
+        sub_argv.extend(["--pcb", args.validate_pcb])
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+    min_conf = getattr(args, "validate_min_confidence", 0.0)
+    if min_conf > 0.0:
+        sub_argv.extend(["--min-confidence", str(min_conf)])
+
+    return validate_lvs_main(sub_argv)
+
+
+def run_validate_placement_command(args) -> int:
+    """Handle validate --placement command."""
+    from ..validate_placement_cmd import main as validate_placement_main
+
+    sub_argv = []
+
+    # Handle positional file arguments
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
+    if getattr(args, "validate_schematic", None):
+        sub_argv.extend(["--schematic", args.validate_schematic])
+    if getattr(args, "validate_pcb", None):
+        sub_argv.extend(["--pcb", args.validate_pcb])
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+
+    return validate_placement_main(sub_argv)
+
+
+def run_constraints_command(args) -> int:
+    """Handle constraints command with its subcommands."""
+    if not getattr(args, "constraints_command", None):
+        print("Usage: kicad-tools constraints <command> [options]")
+        print("\nCommands:")
+        print("  check    Detect conflicts between constraints")
+        print("\nUse 'kicad-tools constraints <command> --help' for more info.")
+        return 1
+
+    if args.constraints_command == "check":
+        from ..constraints_cmd import main as constraints_main
+
+        sub_argv = [args.pcb]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.keepout:
+            sub_argv.extend(["--keepout", args.keepout])
+        if getattr(args, "constraints_file", None):
+            sub_argv.extend(["--constraints", args.constraints_file])
+        if getattr(args, "auto_keepout", False):
+            sub_argv.append("--auto-keepout")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return constraints_main(sub_argv)
+
+    return 0
+
+
+def run_audit_command(args) -> int:
+    """Handle audit command for manufacturing readiness."""
+    from ..audit_cmd import main as audit_main
+
+    sub_argv = [args.audit_project]
+
+    if getattr(args, "audit_format", "table") != "table":
+        sub_argv.extend(["--format", args.audit_format])
+    sub_argv.extend(["--mfr", _resolve_mfr(getattr(args, "audit_mfr", None), args.audit_project)])
+    if getattr(args, "audit_layers", None):
+        sub_argv.extend(["--layers", str(args.audit_layers)])
+    if getattr(args, "audit_copper", 1.0) != 1.0:
+        sub_argv.extend(["--copper", str(args.audit_copper)])
+    if getattr(args, "audit_quantity", 5) != 5:
+        sub_argv.extend(["--quantity", str(args.audit_quantity)])
+    if getattr(args, "audit_skip_erc", False):
+        sub_argv.append("--skip-erc")
+    if getattr(args, "audit_pcb", None):
+        sub_argv.extend(["--pcb", args.audit_pcb])
+    if getattr(args, "audit_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "audit_verbose", False):
+        sub_argv.append("--verbose")
+    if getattr(args, "audit_net_class_map", None):
+        sub_argv.extend(["--net-class-map", args.audit_net_class_map])
+    # HV / isolation flags (issue #5979): forward only what was given, so
+    # audit_cmd's own defaults stay the single source of truth.
+    if getattr(args, "audit_hv_net_class", "HV") != "HV":
+        sub_argv.extend(["--hv-net-class", args.audit_hv_net_class])
+    if getattr(args, "audit_hv_min", None) is not None:
+        sub_argv.extend(["--hv-min", str(args.audit_hv_min)])
+    if getattr(args, "audit_hv_standard", None):
+        sub_argv.extend(["--hv-standard", args.audit_hv_standard])
+    if getattr(args, "audit_hv_working_voltage", None) is not None:
+        sub_argv.extend(["--hv-working-voltage", str(args.audit_hv_working_voltage)])
+    if getattr(args, "audit_hv_pollution_degree", None) is not None:
+        sub_argv.extend(["--hv-pollution-degree", str(args.audit_hv_pollution_degree)])
+    if getattr(args, "audit_hv_material_group", "IIIa") != "IIIa":
+        sub_argv.extend(["--hv-material-group", args.audit_hv_material_group])
+    if getattr(args, "audit_hv_overvoltage_category", "II") != "II":
+        sub_argv.extend(["--hv-overvoltage-category", args.audit_hv_overvoltage_category])
+    if getattr(args, "audit_hv_insulation", "basic") != "basic":
+        sub_argv.extend(["--hv-insulation", args.audit_hv_insulation])
+
+    return audit_main(sub_argv)

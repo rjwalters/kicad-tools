@@ -1,0 +1,1515 @@
+"""Tests for kicad_tools.optim.place_route module."""
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from kicad_tools.optim import OptimizationResult, PlaceRouteOptimizer
+from kicad_tools.validate.violations import DRCViolation
+
+# =============================================================================
+# Test PCB fixtures
+# =============================================================================
+
+# Simple 2-component PCB for testing
+SIMPLE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (gr_line (start 90 90) (end 110 90) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 110 90) (end 110 110) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 110 110) (end 90 110) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 90 110) (end 90 90) (layer "Edge.Cuts") (width 0.1))
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 95 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 105 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "GND"))
+  )
+)
+"""
+
+
+# =============================================================================
+# OptimizationResult tests
+# =============================================================================
+
+
+class TestOptimizationResult:
+    """Tests for OptimizationResult dataclass."""
+
+    def test_default_construction(self):
+        """Test OptimizationResult with default values."""
+        result = OptimizationResult(success=True)
+
+        assert result.success is True
+        assert result.pcb_path is None
+        assert result.routes is None
+        assert result.placement_conflicts is None
+        assert result.drc_results is None
+        assert result.iterations == 0
+        assert result.message == ""
+
+    def test_full_construction(self):
+        """Test OptimizationResult with all fields."""
+        mock_routes = [MagicMock()]
+        mock_conflicts = [MagicMock()]
+        mock_drc = MagicMock()
+
+        result = OptimizationResult(
+            success=False,
+            pcb_path=Path("/test/board.kicad_pcb"),
+            routes=mock_routes,
+            placement_conflicts=mock_conflicts,
+            drc_results=mock_drc,
+            iterations=5,
+            message="Test message",
+        )
+
+        assert result.success is False
+        assert result.pcb_path == Path("/test/board.kicad_pcb")
+        assert result.routes == mock_routes
+        assert result.placement_conflicts == mock_conflicts
+        assert result.drc_results == mock_drc
+        assert result.iterations == 5
+        assert result.message == "Test message"
+
+    def test_has_placement_conflicts_true(self):
+        """Test has_placement_conflicts when conflicts exist."""
+        result = OptimizationResult(
+            success=False,
+            placement_conflicts=[MagicMock()],
+        )
+        assert result.has_placement_conflicts is True
+
+    def test_has_placement_conflicts_false(self):
+        """Test has_placement_conflicts when no conflicts."""
+        result = OptimizationResult(success=True, placement_conflicts=None)
+        assert result.has_placement_conflicts is False
+
+        result2 = OptimizationResult(success=True, placement_conflicts=[])
+        assert result2.has_placement_conflicts is False
+
+    def test_has_drc_violations_true(self):
+        """Test has_drc_violations when violations exist."""
+        mock_drc = MagicMock()
+        mock_drc.passed = False
+
+        result = OptimizationResult(success=False, drc_results=mock_drc)
+        assert result.has_drc_violations is True
+
+    def test_has_drc_violations_false(self):
+        """Test has_drc_violations when DRC passed."""
+        mock_drc = MagicMock()
+        mock_drc.passed = True
+
+        result = OptimizationResult(success=True, drc_results=mock_drc)
+        assert result.has_drc_violations is False
+
+    def test_has_drc_violations_no_results(self):
+        """Test has_drc_violations when no DRC was run."""
+        result = OptimizationResult(success=True, drc_results=None)
+        assert result.has_drc_violations is False
+
+    def test_routing_complete_true(self):
+        """Test routing_complete when routes exist."""
+        result = OptimizationResult(success=True, routes=[MagicMock()])
+        assert result.routing_complete is True
+
+    def test_routing_complete_false(self):
+        """Test routing_complete when no routes."""
+        result = OptimizationResult(success=False, routes=None)
+        assert result.routing_complete is False
+
+        result2 = OptimizationResult(success=False, routes=[])
+        assert result2.routing_complete is False
+
+    def test_str_success(self):
+        """Test string representation for success."""
+        result = OptimizationResult(
+            success=True,
+            routes=[MagicMock(), MagicMock()],
+            iterations=3,
+            message="Done",
+        )
+        s = str(result)
+        assert "SUCCESS" in s
+        assert "iterations=3" in s
+        assert "routes=2" in s
+
+    def test_str_failed(self):
+        """Test string representation for failure."""
+        result = OptimizationResult(
+            success=False,
+            iterations=10,
+            message="Max iterations exceeded",
+        )
+        s = str(result)
+        assert "FAILED" in s
+        assert "iterations=10" in s
+
+
+# =============================================================================
+# PlaceRouteOptimizer tests
+# =============================================================================
+
+
+class TestPlaceRouteOptimizer:
+    """Tests for PlaceRouteOptimizer class."""
+
+    @pytest.fixture
+    def mock_analyzer(self):
+        """Create a mock PlacementAnalyzer."""
+        analyzer = MagicMock()
+        analyzer.find_conflicts.return_value = []
+        analyzer.get_components.return_value = []
+        analyzer.get_board_edge.return_value = None
+        return analyzer
+
+    @pytest.fixture
+    def mock_fixer(self):
+        """Create a mock PlacementFixer."""
+        fixer = MagicMock()
+        fixer.suggest_fixes.return_value = []
+        fixer.apply_fixes.return_value = MagicMock(fixes_applied=0)
+        return fixer
+
+    @pytest.fixture
+    def mock_router(self):
+        """Create a mock Autorouter."""
+        router = MagicMock()
+        router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        router.pads = {}
+        router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+        return router
+
+    @pytest.fixture
+    def mock_drc_results(self):
+        """Create mock DRC results."""
+        results = MagicMock()
+        results.passed = True
+        results.errors = []
+        results.warnings = []
+        return results
+
+    def test_init(self, mock_analyzer, mock_fixer, mock_router, tmp_path):
+        """Test PlaceRouteOptimizer initialization."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: mock_router,
+            verbose=False,
+        )
+
+        assert optimizer.pcb_path == pcb_path
+        assert optimizer.analyzer == mock_analyzer
+        assert optimizer.fixer == mock_fixer
+        assert optimizer.verbose is False
+
+    def test_optimize_success_no_conflicts(self, mock_analyzer, mock_fixer, mock_router, tmp_path):
+        """Test optimization succeeds when no conflicts and routing complete."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: mock_router,
+            drc_checker_factory=None,  # Skip DRC
+            verbose=False,
+        )
+
+        result = optimizer.optimize(max_iterations=5)
+
+        assert result.success is True
+        assert result.iterations == 1
+        assert len(result.routes) == 2
+
+    def test_optimize_max_iterations_exceeded(self, mock_analyzer, mock_fixer, tmp_path):
+        """Test optimization fails when max iterations exceeded."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Router that always fails to route some nets
+        def failing_router_factory():
+            router = MagicMock()
+            router.nets = {1: [("R1", "1"), ("R2", "1")]}
+            router.pads = {}
+            router.route_all.return_value = []  # No routes
+            return router
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=failing_router_factory,
+            verbose=False,
+        )
+
+        result = optimizer.optimize(max_iterations=3, allow_placement_changes=False)
+
+        assert result.success is False
+        assert "Could not route" in result.message
+
+    def test_optimize_with_drc_check(
+        self, mock_analyzer, mock_fixer, mock_router, mock_drc_results, tmp_path
+    ):
+        """Test optimization includes DRC checking."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_checker = MagicMock()
+        mock_checker.check_all.return_value = mock_drc_results
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: mock_router,
+            drc_checker_factory=lambda pcb: mock_checker,
+            verbose=False,
+        )
+
+        result = optimizer.optimize()
+
+        assert result.success is True
+        mock_checker.check_all.assert_called_once()
+
+    def test_optimize_drc_failure(self, mock_analyzer, mock_fixer, mock_router, tmp_path):
+        """Test optimization fails on DRC violations."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_drc_results = MagicMock()
+        mock_drc_results.passed = False
+        mock_drc_results.errors = [MagicMock()]
+        mock_drc_results.warnings = []
+
+        mock_checker = MagicMock()
+        mock_checker.check_all.return_value = mock_drc_results
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: mock_router,
+            drc_checker_factory=lambda pcb: mock_checker,
+            verbose=False,
+        )
+
+        result = optimizer.optimize(max_iterations=1)
+
+        assert result.success is False
+        assert "DRC violations" in result.message
+        assert result.drc_results == mock_drc_results
+
+    def test_optimize_skip_drc(self, mock_analyzer, mock_fixer, mock_router, tmp_path):
+        """Test optimization can skip DRC checking."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_checker = MagicMock()
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: mock_router,
+            drc_checker_factory=lambda pcb: mock_checker,
+            verbose=False,
+        )
+
+        result = optimizer.optimize(skip_drc=True)
+
+        assert result.success is True
+        mock_checker.check_all.assert_not_called()
+
+
+class TestPlaceRouteOptimizerIdentifyBlockers:
+    """Tests for _identify_blockers method."""
+
+    @pytest.fixture
+    def optimizer_with_components(self, tmp_path):
+        """Create optimizer with mock components."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Mock analyzer with components
+        mock_analyzer = MagicMock()
+        mock_comp1 = MagicMock()
+        mock_comp1.reference = "R1"
+        mock_comp1.position = MagicMock(x=95, y=100)
+
+        mock_comp2 = MagicMock()
+        mock_comp2.reference = "R2"
+        mock_comp2.position = MagicMock(x=105, y=100)
+
+        mock_comp3 = MagicMock()
+        mock_comp3.reference = "C1"
+        mock_comp3.position = MagicMock(x=100, y=100)  # Between R1 and R2
+
+        mock_analyzer.get_components.return_value = [mock_comp1, mock_comp2, mock_comp3]
+        mock_analyzer.find_conflicts.return_value = []
+
+        # Mock router with net information
+        def router_factory():
+            router = MagicMock()
+            router.nets = {
+                1: [("R1", "1"), ("R2", "1")],
+            }
+            mock_pad_r1 = MagicMock(x=95, y=100)
+            mock_pad_r2 = MagicMock(x=105, y=100)
+            router.pads = {
+                ("R1", "1"): mock_pad_r1,
+                ("R2", "1"): mock_pad_r2,
+            }
+            router.route_all.return_value = []
+            return router
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=MagicMock(),
+            router_factory=router_factory,
+            verbose=False,
+        )
+
+        return optimizer
+
+    def test_identify_blockers_finds_component_in_path(self, optimizer_with_components):
+        """Test that components between net pads are identified as blockers."""
+        blockers = optimizer_with_components._identify_blockers([1])
+
+        # C1 is at x=100, between R1 at x=95 and R2 at x=105
+        assert "C1" in blockers
+        # R1 and R2 are part of the net, should not be blockers
+        assert "R1" not in blockers
+        assert "R2" not in blockers
+
+    def test_identify_blockers_empty_for_no_failed_nets(self, optimizer_with_components):
+        """Test that no blockers found when no failed nets."""
+        blockers = optimizer_with_components._identify_blockers([])
+        assert blockers == []
+
+
+class TestPlaceRouteOptimizerNudgeBlockers:
+    """Tests for _nudge_blockers method."""
+
+    def test_nudge_blockers_creates_fixes(self, tmp_path):
+        """Test that nudge_blockers creates and applies fixes."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Mock component
+        mock_comp = MagicMock()
+        mock_comp.reference = "C1"
+        mock_comp.position = MagicMock(x=100, y=100)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.get_components.return_value = [mock_comp]
+        mock_analyzer.get_board_edge.return_value = MagicMock(
+            min_x=90, max_x=110, min_y=90, max_y=110
+        )
+        mock_analyzer.find_conflicts.return_value = []
+
+        mock_fixer = MagicMock()
+        mock_fixer.apply_fixes.return_value = MagicMock(fixes_applied=1)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+        )
+
+        optimizer._nudge_blockers(["C1"])
+
+        # Verify apply_fixes was called
+        mock_fixer.apply_fixes.assert_called_once()
+
+        # Get the fixes that were passed
+        call_args = mock_fixer.apply_fixes.call_args
+        fixes = call_args[0][1]  # Second positional arg
+
+        assert len(fixes) == 1
+        assert fixes[0].component == "C1"
+        # Should move away from center (center is at 100,100, so component at 100,100
+        # should move positively in both directions)
+
+
+class TestPlaceRouteOptimizerFromPcb:
+    """Tests for from_pcb factory method."""
+
+    def test_from_pcb_creates_optimizer(self, tmp_path):
+        """Test from_pcb creates a working optimizer."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        optimizer = PlaceRouteOptimizer.from_pcb(
+            pcb=pcb,
+            pcb_path=pcb_path,
+            manufacturer="jlcpcb",
+            layers=2,
+            verbose=False,
+        )
+
+        assert optimizer.pcb_path == pcb_path
+        assert optimizer.analyzer is not None
+        assert optimizer.fixer is not None
+        assert optimizer.router_factory is not None
+        assert optimizer.drc_checker_factory is not None
+
+    def test_from_pcb_auto_detects_dimensions(self, tmp_path):
+        """Test from_pcb auto-detects board dimensions from edge cuts."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        # Auto-detect dimensions from PCB
+        width, height = PlaceRouteOptimizer._detect_board_dimensions(pcb)
+
+        # Should detect non-zero reasonable dimensions
+        # The exact value depends on how the PCB parser interprets the edge cuts
+        assert width > 0
+        assert height > 0
+        # Should be reasonable for a small test board
+        assert width < 200  # mm
+        assert height < 200  # mm
+
+    def test_from_pcb_router_factory_loads_components(self, tmp_path):
+        """Test that the router factory loads PCB components."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        optimizer = PlaceRouteOptimizer.from_pcb(
+            pcb=pcb,
+            pcb_path=pcb_path,
+            verbose=False,
+        )
+
+        # Create router using factory
+        router = optimizer.router_factory()
+
+        # Should have loaded the two resistors (4 pads total, 2 nets)
+        assert len(router.pads) > 0
+        assert len(router.nets) > 0
+
+
+# =============================================================================
+# Integration tests
+# =============================================================================
+
+
+class TestPlaceRouteOptimizerIntegration:
+    """Integration tests for PlaceRouteOptimizer."""
+
+    def test_full_optimization_simple_pcb(self, tmp_path):
+        """Test full optimization on a simple PCB."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        optimizer = PlaceRouteOptimizer.from_pcb(
+            pcb=pcb,
+            pcb_path=pcb_path,
+            manufacturer="jlcpcb",
+            layers=2,
+            verbose=False,
+        )
+
+        # Run optimization with DRC skipped (DRC checker stubs return empty results)
+        result = optimizer.optimize(max_iterations=3, skip_drc=True)
+
+        # Should complete (may or may not fully route depending on routing complexity)
+        assert result.iterations > 0
+        assert result.pcb_path == pcb_path
+
+    def test_optimization_respects_max_iterations(self, tmp_path):
+        """Test that optimization respects max_iterations limit."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Create optimizer with a router that never completes
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = []
+
+        from kicad_tools.placement.analyzer import PlacementAnalyzer
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=PlacementAnalyzer(verbose=False),
+            fixer=PlacementFixer(verbose=False),
+            router_factory=lambda: mock_router,
+            verbose=False,
+        )
+
+        result = optimizer.optimize(max_iterations=2, allow_placement_changes=False)
+
+        assert result.success is False
+        assert "Could not route" in result.message
+
+
+class TestEscapeRoutingIntegration:
+    """Tests for escape routing integration in PlaceRouteOptimizer."""
+
+    def test_escape_routing_enabled_calls_route_with_escape(self, tmp_path):
+        """When escape_routing=True, optimizer calls route_with_escape."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.route_with_escape.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=True,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.route_with_escape.assert_called_once()
+        mock_router.route_all.assert_not_called()
+
+    def test_escape_routing_disabled_calls_route_all(self, tmp_path):
+        """When escape_routing=False, optimizer calls route_all."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=False,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.route_all.assert_called_once()
+        mock_router.route_with_escape.assert_not_called()
+
+    def test_escape_routing_auto_detects_dense(self, tmp_path):
+        """When escape_routing=None, auto-detection checks for dense packages."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.detect_dense_packages.return_value = [MagicMock(ref="U1")]
+        mock_router.route_with_escape.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=None,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.detect_dense_packages.assert_called_once()
+        mock_router.route_with_escape.assert_called_once()
+
+    def test_escape_routing_auto_no_dense_packages(self, tmp_path):
+        """When auto-detect finds no dense packages, uses route_all."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.detect_dense_packages.return_value = []
+        mock_router.route_all.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=None,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.detect_dense_packages.assert_called_once()
+        mock_router.route_all.assert_called_once()
+        mock_router.route_with_escape.assert_not_called()
+
+    def test_default_escape_routing_is_none(self, tmp_path):
+        """Verify escape_routing defaults to None (auto-detect)."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=MagicMock(),
+            router_factory=MagicMock,
+            verbose=False,
+        )
+
+        assert optimizer.escape_routing is None
+
+
+# =============================================================================
+# DRC fix-retry tests
+# =============================================================================
+
+
+class TestDRCResultsToReport:
+    """Tests for the drc_results_to_report adapter."""
+
+    def test_converts_violations(self):
+        """Adapter correctly converts validate DRCViolation fields."""
+        from kicad_tools.drc.compat import drc_results_to_report
+        from kicad_tools.validate.violations import DRCResults, DRCViolation
+
+        violations = [
+            DRCViolation(
+                rule_id="clearance_segment_segment",
+                severity="error",
+                message="Clearance violation (0.2mm required; actual 0.15mm)",
+                location=(10.0, 20.0),
+                layer="F.Cu",
+                actual_value=0.15,
+                required_value=0.2,
+                items=("Seg1", "Seg2"),
+            ),
+        ]
+        results = DRCResults(violations=violations, rules_checked=1)
+
+        report = drc_results_to_report(results, "/tmp/test.kicad_pcb")
+
+        assert len(report.violations) == 1
+        v = report.violations[0]
+        assert v.type_str == "clearance_segment_segment"
+        assert v.required_value_mm == 0.2
+        assert v.actual_value_mm == 0.15
+        assert len(v.locations) == 1
+        assert v.locations[0].x_mm == 10.0
+        assert v.locations[0].y_mm == 20.0
+        assert v.locations[0].layer == "F.Cu"
+        assert v.items == ["Seg1", "Seg2"]
+        assert report.pcb_name == "test.kicad_pcb"
+
+    def test_empty_violations(self):
+        """Empty DRCResults produces empty report without errors."""
+        from kicad_tools.drc.compat import drc_results_to_report
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults(violations=[], rules_checked=0)
+        report = drc_results_to_report(results)
+
+        assert len(report.violations) == 0
+        assert report.pcb_name == ""
+
+    def test_violation_without_location(self):
+        """Violation with no location produces empty location list."""
+        from kicad_tools.drc.compat import drc_results_to_report
+        from kicad_tools.validate.violations import DRCResults, DRCViolation
+
+        violations = [
+            DRCViolation(
+                rule_id="clearance_segment_segment",
+                severity="warning",
+                message="test",
+                location=None,
+                layer=None,
+            ),
+        ]
+        results = DRCResults(violations=violations)
+
+        report = drc_results_to_report(results)
+
+        assert len(report.violations) == 1
+        assert len(report.violations[0].locations) == 0
+
+
+class TestFixDrcViolations:
+    """Tests for PlaceRouteOptimizer._fix_drc_violations."""
+
+    @pytest.fixture
+    def optimizer(self, tmp_path):
+        """Create a basic optimizer for testing _fix_drc_violations."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            max_fix_attempts=3,
+        )
+        return optimizer
+
+    @patch("kicad_tools.optim.place_route.PlaceRouteOptimizer._fix_drc_violations")
+    def test_optimize_drc_failure_exercises_fix_path(self, mock_fix, tmp_path):
+        """DRC failure with fixable violations triggers fix attempt before failing."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_drc_results = MagicMock()
+        mock_drc_results.passed = False
+        mock_drc_results.errors = [MagicMock()]
+        mock_drc_results.warnings = []
+
+        mock_checker = MagicMock()
+        mock_checker.check_all.return_value = mock_drc_results
+
+        # _fix_drc_violations returns False (no fix possible)
+        mock_fix.return_value = False
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            drc_checker_factory=lambda pcb: mock_checker,
+            verbose=False,
+        )
+
+        result = optimizer.optimize(max_iterations=1)
+
+        # _fix_drc_violations should have been called with the DRC results
+        mock_fix.assert_called_once_with(mock_drc_results)
+        assert result.success is False
+
+    def test_returns_true_when_repairs_applied(self, optimizer):
+        """_fix_drc_violations returns True when ClearanceRepairer fixes violations."""
+        from kicad_tools.validate.violations import DRCResults, DRCViolation
+
+        violations = [
+            DRCViolation(
+                rule_id="clearance_segment_segment",
+                severity="error",
+                message="test",
+                location=(10.0, 20.0),
+                layer="F.Cu",
+                actual_value=0.15,
+                required_value=0.2,
+            ),
+        ]
+        drc_results = DRCResults(violations=violations)
+
+        mock_repair_result = MagicMock()
+        mock_repair_result.repaired = 1
+        mock_repair_result.total_violations = 1
+
+        mock_repairer = MagicMock()
+        mock_repairer.repair_from_report.return_value = mock_repair_result
+
+        with patch(
+            "kicad_tools.drc.repair_clearance.ClearanceRepairer",
+            return_value=mock_repairer,
+        ):
+            result = optimizer._fix_drc_violations(drc_results)
+
+        assert result is True
+        mock_repairer.save.assert_called_once()
+
+    def test_returns_false_when_no_repairs(self, optimizer):
+        """_fix_drc_violations returns False when ClearanceRepairer fixes nothing."""
+        from kicad_tools.validate.violations import DRCResults, DRCViolation
+
+        violations = [
+            DRCViolation(
+                rule_id="clearance_segment_segment",
+                severity="error",
+                message="test",
+                location=(10.0, 20.0),
+                layer="F.Cu",
+                actual_value=0.15,
+                required_value=0.2,
+            ),
+        ]
+        drc_results = DRCResults(violations=violations)
+
+        mock_repair_result = MagicMock()
+        mock_repair_result.repaired = 0
+        mock_repair_result.total_violations = 1
+
+        mock_repairer = MagicMock()
+        mock_repairer.repair_from_report.return_value = mock_repair_result
+
+        with patch(
+            "kicad_tools.drc.repair_clearance.ClearanceRepairer",
+            return_value=mock_repairer,
+        ):
+            result = optimizer._fix_drc_violations(drc_results)
+
+        assert result is False
+        mock_repairer.save.assert_not_called()
+
+    def test_returns_false_when_max_attempts_exceeded(self, optimizer):
+        """_fix_drc_violations returns False after max_fix_attempts."""
+        from kicad_tools.validate.violations import DRCResults, DRCViolation
+
+        violations = [
+            DRCViolation(
+                rule_id="clearance_segment_segment",
+                severity="error",
+                message="test",
+                location=(10.0, 20.0),
+                layer="F.Cu",
+            ),
+        ]
+        drc_results = DRCResults(violations=violations)
+
+        mock_repair_result = MagicMock()
+        mock_repair_result.repaired = 1
+        mock_repair_result.total_violations = 1
+
+        mock_repairer = MagicMock()
+        mock_repairer.repair_from_report.return_value = mock_repair_result
+
+        with patch(
+            "kicad_tools.drc.repair_clearance.ClearanceRepairer",
+            return_value=mock_repairer,
+        ):
+            # Call max_fix_attempts times -- all should return True
+            for _ in range(optimizer.max_fix_attempts):
+                assert optimizer._fix_drc_violations(drc_results) is True
+
+            # Next call should return False (limit exceeded)
+            assert optimizer._fix_drc_violations(drc_results) is False
+
+    def test_returns_false_for_empty_violations(self, optimizer):
+        """_fix_drc_violations returns False when no violations present."""
+        from kicad_tools.validate.violations import DRCResults
+
+        drc_results = DRCResults(violations=[])
+
+        result = optimizer._fix_drc_violations(drc_results)
+
+        assert result is False
+
+    def test_fix_attempts_reset_each_iteration(self, tmp_path):
+        """Per-iteration fix attempt counter resets at each optimize iteration."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        call_count = 0
+
+        # DRC checker that fails on first call, passes on second
+        def make_drc_results():
+            nonlocal call_count
+            call_count += 1
+            results = MagicMock()
+            if call_count <= 1:
+                results.passed = False
+                results.errors = [MagicMock()]
+                results.warnings = []
+                # Provide real violations so _fix_drc_violations can convert them
+                results.violations = []
+            else:
+                results.passed = True
+                results.errors = []
+                results.warnings = []
+            return results
+
+        mock_checker = MagicMock()
+        mock_checker.check_all = MagicMock(side_effect=lambda: make_drc_results())
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            drc_checker_factory=lambda pcb: mock_checker,
+            verbose=False,
+            max_fix_attempts=3,
+        )
+
+        # Set _fix_attempts to simulate previous iteration usage
+        optimizer._fix_attempts = 2
+
+        # optimize() should reset _fix_attempts at the start of each iteration
+        optimizer.optimize(max_iterations=2)
+
+        # After the first iteration starts, _fix_attempts should have been reset to 0
+        # (not carried over from the previous value of 2)
+        # We verify this indirectly: since violations is empty, _fix_drc_violations
+        # returns False immediately (no attempts consumed) and the counter reset
+        # ensures fresh attempts for each iteration.
+        # The important thing is that the optimize loop did not crash and ran.
+        assert call_count >= 1
+
+    def test_handles_repairer_exception_gracefully(self, optimizer):
+        """_fix_drc_violations returns False when ClearanceRepairer raises."""
+        from kicad_tools.validate.violations import DRCResults, DRCViolation
+
+        violations = [
+            DRCViolation(
+                rule_id="clearance_segment_segment",
+                severity="error",
+                message="test",
+                location=(10.0, 20.0),
+                layer="F.Cu",
+            ),
+        ]
+        drc_results = DRCResults(violations=violations)
+
+        with patch(
+            "kicad_tools.drc.repair_clearance.ClearanceRepairer",
+            side_effect=Exception("PCB parse error"),
+        ):
+            result = optimizer._fix_drc_violations(drc_results)
+
+        assert result is False
+
+
+class TestFixDrcViolationsIntegration:
+    """Integration test: full optimization loop with fix-retry path."""
+
+    def test_fix_retry_loop_converges(self, tmp_path):
+        """Optimization loop retries after DRC fix and converges to success."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        drc_call_count = 0
+
+        def make_checker(pcb):
+            checker = MagicMock()
+
+            def check_all():
+                nonlocal drc_call_count
+                drc_call_count += 1
+                results = MagicMock()
+                if drc_call_count == 1:
+                    # First check: violations found
+                    results.passed = False
+                    results.errors = [MagicMock()]
+                    results.warnings = []
+                    results.violations = [
+                        DRCViolation(
+                            rule_id="clearance_trace_trace",
+                            severity="error",
+                            message="Clearance violation between traces",
+                            location=(10.0, 20.0),
+                            layer="F.Cu",
+                            actual_value=0.15,
+                            required_value=0.2,
+                            items=("R1", "R2"),
+                        )
+                    ]
+                else:
+                    # Second check: clean
+                    results.passed = True
+                    results.errors = []
+                    results.warnings = []
+                    results.violations = []
+                return results
+
+            checker.check_all = check_all
+            return checker
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        mock_repair_result = MagicMock()
+        mock_repair_result.repaired = 1
+        mock_repair_result.total_violations = 1
+
+        mock_repairer = MagicMock()
+        mock_repairer.repair_from_report.return_value = mock_repair_result
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            drc_checker_factory=make_checker,
+            verbose=False,
+        )
+
+        with patch(
+            "kicad_tools.drc.repair_clearance.ClearanceRepairer",
+            return_value=mock_repairer,
+        ):
+            result = optimizer.optimize(max_iterations=5)
+
+        # Should succeed on the second DRC check
+        assert result.success is True
+        # DRC was checked twice (fail, then pass after fix)
+        assert drc_call_count == 2
+        # The repairer was called once
+        mock_repairer.repair_from_report.assert_called_once()
+
+
+# =============================================================================
+# Cooperative cancellation tests
+# =============================================================================
+
+
+class TestCooperativeCancellation:
+    """Tests for cancel_flag in PlaceRouteOptimizer.optimize()."""
+
+    def test_cancel_flag_stops_loop(self, tmp_path):
+        """Setting cancel_flag causes optimize() to return partial results."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Cancel immediately on first check
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+        )
+
+        result = optimizer.optimize(
+            max_iterations=100,
+            cancel_flag=lambda: True,
+        )
+
+        assert result.success is False
+        assert "Cancelled" in result.message
+        assert result.iterations == 0
+
+    def test_cancel_flag_not_set_runs_normally(self, tmp_path):
+        """When cancel_flag always returns False, optimization runs normally."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+        )
+
+        result = optimizer.optimize(
+            max_iterations=5,
+            cancel_flag=lambda: False,
+        )
+
+        assert result.success is True
+
+
+# =============================================================================
+# Periodic checkpoint tests
+# =============================================================================
+
+
+class TestPeriodicCheckpoint:
+    """Tests for checkpoint_interval in PlaceRouteOptimizer.optimize()."""
+
+    def test_checkpoint_file_created(self, tmp_path):
+        """Checkpoint file is created during optimization."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+        checkpoint_path = pcb_path.with_suffix(".checkpoint.kicad_pcb")
+
+        # DRC checker that always fails, forcing retry iterations.
+        # The router succeeds (all nets routed) so we reach the DRC/checkpoint code.
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        drc_results = MagicMock()
+        drc_results.passed = False
+        drc_results.errors = [MagicMock()]
+        drc_results.warnings = []
+        drc_results.violations = []
+
+        mock_checker = MagicMock()
+        mock_checker.check_all.return_value = drc_results
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            drc_checker_factory=lambda pcb: mock_checker,
+            verbose=False,
+        )
+
+        optimizer.optimize(
+            max_iterations=3,
+            checkpoint_interval=1,
+        )
+
+        assert checkpoint_path.exists()
+        content = checkpoint_path.read_text()
+        assert "kicad_pcb" in content
+
+    def test_no_checkpoint_when_interval_zero(self, tmp_path):
+        """No checkpoint file is created when checkpoint_interval is 0."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+        checkpoint_path = pcb_path.with_suffix(".checkpoint.kicad_pcb")
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")], 2: [("R1", "2"), ("R2", "2")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1), MagicMock(net=2)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(find_conflicts=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+        )
+
+        optimizer.optimize(max_iterations=3, checkpoint_interval=0)
+
+        assert not checkpoint_path.exists()
+
+
+# =============================================================================
+# fixed_refs plumbing tests (issue #2537)
+# =============================================================================
+
+
+class TestPlaceRouteOptimizerFixedRefs:
+    """Tests for the ``fixed_refs`` plumbing added in issue #2537.
+
+    The ``--fixed`` CLI flag was previously silently ignored when combined
+    with ``--routing-aware``. The fix adds ``fixed_refs`` plumbing through
+    ``PlaceRouteOptimizer.__init__``, ``from_pcb``, and ``_nudge_blockers``,
+    and wires it into the underlying ``PlacementFixer.anchored`` set.
+    """
+
+    def test_init_accepts_fixed_refs(self, tmp_path):
+        """``__init__`` accepts ``fixed_refs`` and stores it as a set."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        fixer = PlacementFixer(verbose=False)
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"J1", "U1"},
+        )
+
+        assert optimizer.fixed_refs == {"J1", "U1"}
+        # Anchored set was merged into the fixer.
+        assert "J1" in optimizer.fixer.anchored
+        assert "U1" in optimizer.fixer.anchored
+
+    def test_init_default_fixed_refs_is_empty(self, tmp_path):
+        """``fixed_refs`` defaults to an empty set."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=MagicMock(anchored=set()),
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+        )
+
+        assert optimizer.fixed_refs == set()
+
+    def test_init_accepts_list_for_fixed_refs(self, tmp_path):
+        """``fixed_refs`` accepts a list (not just a set)."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=PlacementFixer(verbose=False),
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs=["J1", "U1"],
+        )
+
+        assert optimizer.fixed_refs == {"J1", "U1"}
+
+    def test_init_merges_with_existing_fixer_anchored(self, tmp_path):
+        """``__init__`` merges fixed_refs with any pre-existing fixer.anchored."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        fixer = PlacementFixer(verbose=False, anchored={"H1"})
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"J1"},
+        )
+
+        # Both sets are merged.
+        assert "H1" in optimizer.fixer.anchored
+        assert "J1" in optimizer.fixer.anchored
+
+    def test_from_pcb_propagates_fixed_refs(self, tmp_path):
+        """``from_pcb`` accepts ``fixed_refs`` and forwards to the fixer."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        optimizer = PlaceRouteOptimizer.from_pcb(
+            pcb=pcb,
+            pcb_path=pcb_path,
+            verbose=False,
+            fixed_refs={"R1"},
+        )
+
+        assert optimizer.fixed_refs == {"R1"}
+        assert "R1" in optimizer.fixer.anchored
+
+    def test_from_pcb_default_fixed_refs(self, tmp_path):
+        """``from_pcb`` defaults to no fixed refs."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+
+        optimizer = PlaceRouteOptimizer.from_pcb(
+            pcb=pcb,
+            pcb_path=pcb_path,
+            verbose=False,
+        )
+
+        assert optimizer.fixed_refs == set()
+
+    def test_nudge_blockers_skips_fixed_refs(self, tmp_path):
+        """``_nudge_blockers`` filters out anchored components."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        # Mock components C1 (movable) and J1 (fixed)
+        comp_c1 = MagicMock()
+        comp_c1.reference = "C1"
+        comp_c1.position = MagicMock(x=100, y=100)
+        comp_j1 = MagicMock()
+        comp_j1.reference = "J1"
+        comp_j1.position = MagicMock(x=105, y=105)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.get_components.return_value = [comp_c1, comp_j1]
+        mock_analyzer.get_board_edge.return_value = MagicMock(
+            min_x=90, max_x=110, min_y=90, max_y=110
+        )
+
+        mock_fixer = MagicMock()
+        mock_fixer.apply_fixes.return_value = MagicMock(fixes_applied=1)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"J1"},
+        )
+
+        # Provide BOTH C1 and J1 as candidate blockers.
+        optimizer._nudge_blockers(["C1", "J1"])
+
+        # Only C1 should be moved; J1 must be skipped.
+        mock_fixer.apply_fixes.assert_called_once()
+        call_args = mock_fixer.apply_fixes.call_args
+        fixes = call_args[0][1]
+        assert len(fixes) == 1
+        assert fixes[0].component == "C1"
+        moved_refs = {f.component for f in fixes}
+        assert "J1" not in moved_refs
+
+    def test_nudge_blockers_no_fixes_when_all_fixed(self, tmp_path):
+        """If every blocker is in ``fixed_refs``, no fixes are applied."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.get_components.return_value = []
+        mock_analyzer.get_board_edge.return_value = MagicMock(
+            min_x=90, max_x=110, min_y=90, max_y=110
+        )
+
+        mock_fixer = MagicMock()
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            fixed_refs={"C1", "J1"},
+        )
+
+        optimizer._nudge_blockers(["C1", "J1"])
+
+        # No movable blockers means no apply_fixes call.
+        mock_fixer.apply_fixes.assert_not_called()
+
+    def test_nudge_blockers_unconstrained_path_unchanged(self, tmp_path):
+        """Without ``fixed_refs``, ``_nudge_blockers`` behaves as before."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        comp = MagicMock()
+        comp.reference = "C1"
+        comp.position = MagicMock(x=100, y=100)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.get_components.return_value = [comp]
+        mock_analyzer.get_board_edge.return_value = MagicMock(
+            min_x=90, max_x=110, min_y=90, max_y=110
+        )
+
+        mock_fixer = MagicMock()
+        mock_fixer.apply_fixes.return_value = MagicMock(fixes_applied=1)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=mock_analyzer,
+            fixer=mock_fixer,
+            router_factory=lambda: MagicMock(),
+            verbose=False,
+            # No fixed_refs at all
+        )
+
+        optimizer._nudge_blockers(["C1"])
+
+        mock_fixer.apply_fixes.assert_called_once()
+        fixes = mock_fixer.apply_fixes.call_args[0][1]
+        assert len(fixes) == 1
+        assert fixes[0].component == "C1"
+
+    def test_placement_fixer_honors_anchored_via_choose_component_to_move(self, tmp_path):
+        """End-to-end: fixer's ``_choose_component_to_move`` honors anchored.
+
+        This is a regression guard: confirms the existing ``PlacementFixer``
+        machinery is the correct landing spot for our new wiring.
+        """
+        from kicad_tools.placement.conflict import (
+            Conflict,
+            ConflictSeverity,
+            ConflictType,
+            Point,
+        )
+        from kicad_tools.placement.fixer import PlacementFixer
+
+        fixer = PlacementFixer(verbose=False, anchored={"J1"})
+
+        def make_conflict(c1: str, c2: str) -> Conflict:
+            return Conflict(
+                type=ConflictType.COURTYARD_OVERLAP,
+                severity=ConflictSeverity.ERROR,
+                component1=c1,
+                component2=c2,
+                message="test overlap",
+                location=Point(0.0, 0.0),
+                overlap_amount=0.5,
+            )
+
+        # Conflict between J1 (anchored) and R1: must move R1.
+        chosen = fixer._choose_component_to_move(make_conflict("J1", "R1"))
+        assert chosen == "R1"
+
+        # Conflict between R1 and J1 (anchored): must move R1.
+        chosen2 = fixer._choose_component_to_move(make_conflict("R1", "J1"))
+        assert chosen2 == "R1"
+
+        # Conflict between two anchored: returns None (cannot fix).
+        fixer2 = PlacementFixer(verbose=False, anchored={"J1", "U1"})
+        assert fixer2._choose_component_to_move(make_conflict("J1", "U1")) is None

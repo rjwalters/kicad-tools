@@ -1,0 +1,269 @@
+{
+  "$schema": "https://schemas.kicad.org/drc.v1.json",
+  "coordinate_units": "mm",
+  "date": "2026-01-01T00:00:00+0000",
+  "ignored_checks": [
+    {
+      "description": "Footprint has no courtyard defined",
+      "key": "missing_courtyard"
+    },
+    {
+      "description": "Track endpoint not centered on via",
+      "key": "track_not_centered_on_via"
+    },
+    {
+      "description": "Tuning profile track geometries",
+      "key": "tuning_profile_track_geometries"
+    },
+    {
+      "description": "Footprint doesn't match symbol's footprint filters",
+      "key": "footprint_filters_mismatch"
+    },
+    {
+      "description": "Footprint component type doesn't match footprint pads",
+      "key": "footprint_type_mismatch"
+    },
+    {
+      "description": "Footprint doesn't match copy in library",
+      "key": "lib_footprint_mismatch"
+    }
+  ],
+  "included_severities": [
+    "error",
+    "warning"
+  ],
+  "kicad_version": "10.0.1",
+  "schematic_parity": [],
+  "source": "oracle-sample.kicad_pcb",
+  "unconnected_items": [],
+  "violations": [
+    {
+      "description": "Clearance violation ( clearance 0.2000 mm; actual 0.1500 mm)",
+      "items": [
+        {
+          "description": "Via [V1] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.0,
+            "y": 10.5
+          },
+          "uuid": "454281af-c363-4635-8c94-cf2124957a99"
+        },
+        {
+          "description": "Via [V2] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.75,
+            "y": 10.5
+          },
+          "uuid": "7b1808bf-bb8d-4f78-9bab-06f7f7c6e955"
+        }
+      ],
+      "severity": "error",
+      "type": "clearance"
+    },
+    {
+      "description": "Clearance violation ( clearance 0.2000 mm; actual 0.1750 mm)",
+      "items": [
+        {
+          "description": "Track [T3] on F.Cu, length 10.0000 mm",
+          "pos": {
+            "x": 5.0,
+            "y": 14.0
+          },
+          "uuid": "2dd7f07d-096b-446a-9aea-a1059cdcb3e5"
+        },
+        {
+          "description": "Via [V3] on F.Cu - B.Cu",
+          "pos": {
+            "x": 12.0,
+            "y": 14.45
+          },
+          "uuid": "5b4bf7f2-068c-43b1-81ae-ddd3384b3b3f"
+        }
+      ],
+      "severity": "error",
+      "type": "clearance"
+    },
+    {
+      "description": "Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)",
+      "items": [
+        {
+          "description": "Via [V1] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.0,
+            "y": 10.5
+          },
+          "uuid": "454281af-c363-4635-8c94-cf2124957a99"
+        },
+        {
+          "description": "Track [T1] on F.Cu, length 10.0000 mm",
+          "pos": {
+            "x": 5.0,
+            "y": 10.0
+          },
+          "uuid": "4666c630-acc9-426b-aab5-18d4390e1f39"
+        }
+      ],
+      "severity": "error",
+      "type": "clearance"
+    },
+    {
+      "description": "Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)",
+      "items": [
+        {
+          "description": "Track [T1] on F.Cu, length 10.0000 mm",
+          "pos": {
+            "x": 5.0,
+            "y": 10.0
+          },
+          "uuid": "4666c630-acc9-426b-aab5-18d4390e1f39"
+        },
+        {
+          "description": "Via [V2] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.75,
+            "y": 10.5
+          },
+          "uuid": "7b1808bf-bb8d-4f78-9bab-06f7f7c6e955"
+        }
+      ],
+      "severity": "error",
+      "type": "clearance"
+    },
+    {
+      "description": "Board edge clearance violation (board setup constraints edge clearance 0.3000 mm; actual 0.0750 mm)",
+      "items": [
+        {
+          "description": "Segment on Edge.Cuts",
+          "pos": {
+            "x": 0.0,
+            "y": 0.0
+          },
+          "uuid": "6d3e5a2d-f3de-4d7e-a34b-9bc76b1536db"
+        },
+        {
+          "description": "Track [T2] on F.Cu, length 10.0000 mm",
+          "pos": {
+            "x": 5.0,
+            "y": 0.15
+          },
+          "uuid": "a09597eb-93e9-42f3-9b0f-e571985bfb3b"
+        }
+      ],
+      "severity": "error",
+      "type": "copper_edge_clearance"
+    },
+    {
+      "description": "Track has unconnected end",
+      "items": [
+        {
+          "description": "Track [T1] on F.Cu, length 10.0000 mm",
+          "pos": {
+            "x": 5.0,
+            "y": 10.0
+          },
+          "uuid": "4666c630-acc9-426b-aab5-18d4390e1f39"
+        }
+      ],
+      "severity": "warning",
+      "type": "track_dangling"
+    },
+    {
+      "description": "Track has unconnected end",
+      "items": [
+        {
+          "description": "Track [T2] on F.Cu, length 10.0000 mm",
+          "pos": {
+            "x": 5.0,
+            "y": 0.15
+          },
+          "uuid": "a09597eb-93e9-42f3-9b0f-e571985bfb3b"
+        }
+      ],
+      "severity": "warning",
+      "type": "track_dangling"
+    },
+    {
+      "description": "Track has unconnected end",
+      "items": [
+        {
+          "description": "Track [T3] on F.Cu, length 10.0000 mm",
+          "pos": {
+            "x": 5.0,
+            "y": 14.0
+          },
+          "uuid": "2dd7f07d-096b-446a-9aea-a1059cdcb3e5"
+        }
+      ],
+      "severity": "warning",
+      "type": "track_dangling"
+    },
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [V1] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.0,
+            "y": 10.5
+          },
+          "uuid": "454281af-c363-4635-8c94-cf2124957a99"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    },
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [V2] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.75,
+            "y": 10.5
+          },
+          "uuid": "7b1808bf-bb8d-4f78-9bab-06f7f7c6e955"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    },
+    {
+      "description": "Via is not connected or connected on only one layer",
+      "items": [
+        {
+          "description": "Via [V3] on F.Cu - B.Cu",
+          "pos": {
+            "x": 12.0,
+            "y": 14.45
+          },
+          "uuid": "5b4bf7f2-068c-43b1-81ae-ddd3384b3b3f"
+        }
+      ],
+      "severity": "warning",
+      "type": "via_dangling"
+    },
+    {
+      "description": "Drilled hole too close to other hole (board setup constraints min 0.4995 mm; actual 0.4500 mm)",
+      "items": [
+        {
+          "description": "Via [V1] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.0,
+            "y": 10.5
+          },
+          "uuid": "454281af-c363-4635-8c94-cf2124957a99"
+        },
+        {
+          "description": "Via [V2] on F.Cu - B.Cu",
+          "pos": {
+            "x": 8.75,
+            "y": 10.5
+          },
+          "uuid": "7b1808bf-bb8d-4f78-9bab-06f7f7c6e955"
+        }
+      ],
+      "severity": "warning",
+      "type": "hole_to_hole"
+    }
+  ]
+}

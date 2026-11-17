@@ -1,0 +1,845 @@
+#!/usr/bin/env python3
+"""
+KiCad S-Expression Builders
+
+Convenience functions for building KiCad schematic S-expressions.
+These builders produce SExp nodes that serialize to valid KiCad format.
+
+Usage:
+    from kicad_tools.sexp.builders import xy, at, stroke, effects, uuid_node
+
+    wire_node = SExp.list("wire",
+        SExp.list("pts", xy(10, 20), xy(30, 40)),
+        stroke(),
+        uuid_node(my_uuid)
+    )
+"""
+
+import logging
+
+from .parser import SExp
+
+logger = logging.getLogger(__name__)
+
+
+def fmt(val: float) -> int | float:
+    """Format coordinate with 2 decimal precision.
+
+    Rounds to 2 decimal places. Returns int if no fractional part
+    for cleaner output (e.g., 10 instead of 10.0).
+    """
+    rounded = round(val, 2)
+    if rounded == int(rounded):
+        return int(rounded)
+    return rounded
+
+
+def xy(x: float, y: float) -> SExp:
+    """Build an (xy X Y) coordinate node."""
+    return SExp.list("xy", fmt(x), fmt(y))
+
+
+def at(x: float, y: float, rotation: float = 0) -> SExp:
+    """Build an (at X Y ROTATION) position node.
+
+    Always includes rotation angle (required by KiCad GUI for symbols,
+    properties, labels, etc.). KiCad-cli is lenient but GUI parser fails
+    without explicit angle.
+    """
+    return SExp.list("at", fmt(x), fmt(y), int(rotation))
+
+
+def stroke(width: float = 0, stroke_type: str = "default") -> SExp:
+    """Build a (stroke (width W) (type T)) node."""
+    return SExp.list("stroke", SExp.list("width", width), SExp.list("type", stroke_type))
+
+
+def font(size: float = 1.27) -> SExp:
+    """Build a (font (size S S)) node."""
+    return SExp.list("font", SExp.list("size", size, size))
+
+
+def effects(font_size: float = 1.27, justify: str = None, hide: bool = False) -> SExp:
+    """Build an (effects (font ...) [justify] [hide]) node.
+
+    Args:
+        font_size: Font size in mm (default 1.27)
+        justify: Justification string (e.g., "left", "right", "left bottom")
+        hide: Whether to hide the text
+    """
+    eff = SExp.list("effects", font(font_size))
+
+    if justify:
+        # Handle multi-word justify like "left bottom"
+        parts = justify.split()
+        if len(parts) == 1:
+            eff.append(SExp.list("justify", parts[0]))
+        else:
+            justify_node = SExp.list("justify")
+            for part in parts:
+                justify_node.append(SExp.atom(part))
+            eff.append(justify_node)
+
+    if hide:
+        eff.append(SExp.list("hide", "yes"))
+
+    return eff
+
+
+def uuid_node(uuid_str: str) -> SExp:
+    """Build a (uuid "UUID") node."""
+    return SExp.list("uuid", uuid_str)
+
+
+def property_node(
+    name: str,
+    value: str,
+    x: float,
+    y: float,
+    rotation: float = 0,
+    font_size: float = 1.27,
+    hide: bool = False,
+) -> SExp:
+    """Build a complete property block for symbols.
+
+    Args:
+        name: Property name (e.g., "Reference", "Value")
+        value: Property value
+        x, y: Position
+        rotation: Text rotation in degrees
+        font_size: Font size in mm
+        hide: Whether to hide the property
+    """
+    prop = SExp.list(
+        "property", name, value, at(x, y, rotation), effects(font_size=font_size, hide=hide)
+    )
+    return prop
+
+
+def color(r: int = 0, g: int = 0, b: int = 0, a: int = 0) -> SExp:
+    """Build a (color R G B A) node."""
+    return SExp.list("color", r, g, b, a)
+
+
+def pts(*points: SExp) -> SExp:
+    """Build a (pts (xy ...) (xy ...) ...) node from xy nodes."""
+    node = SExp.list("pts")
+    for pt in points:
+        node.append(pt)
+    return node
+
+
+# =============================================================================
+# Higher-level builders for common schematic elements
+# =============================================================================
+
+
+def wire_node(x1: float, y1: float, x2: float, y2: float, uuid_str: str) -> SExp:
+    """Build a complete wire S-expression."""
+    return SExp.list("wire", pts(xy(x1, y1), xy(x2, y2)), stroke(), uuid_node(uuid_str))
+
+
+def junction_node(x: float, y: float, uuid_str: str) -> SExp:
+    """Build a complete junction S-expression.
+
+    Note: Junctions use simpler (at x y) format without rotation angle,
+    and don't include color field for compatibility with kicad-cli.
+    """
+    return SExp.list(
+        "junction",
+        SExp.list("at", fmt(x), fmt(y)),  # No rotation for junctions
+        SExp.list("diameter", 0),
+        uuid_node(uuid_str),
+    )
+
+
+def no_connect_node(x: float, y: float, uuid_str: str) -> SExp:
+    """Build a complete no_connect S-expression.
+
+    No-connect markers indicate that a pin is intentionally unconnected.
+    They silence ERC "pin not connected" warnings.
+
+    Note: Uses simpler (at x y) format without rotation angle.
+    """
+    return SExp.list(
+        "no_connect",
+        SExp.list("at", fmt(x), fmt(y)),
+        uuid_node(uuid_str),
+    )
+
+
+def label_node(text: str, x: float, y: float, rotation: float, uuid_str: str) -> SExp:
+    """Build a complete label S-expression."""
+    return SExp.list(
+        "label",
+        SExp.quoted_atom(str(text)),
+        at(x, y, rotation),
+        SExp.list("fields_autoplaced", "yes"),
+        effects(justify="left bottom"),
+        uuid_node(uuid_str),
+    )
+
+
+def hier_label_node(
+    text: str, x: float, y: float, shape: str, rotation: float, uuid_str: str
+) -> SExp:
+    """Build a complete hierarchical label S-expression."""
+    justify = "right" if rotation == 180 else "left"
+    return SExp.list(
+        "hierarchical_label",
+        SExp.quoted_atom(str(text)),
+        SExp.list("shape", shape),
+        at(x, y, rotation),
+        SExp.list("fields_autoplaced", "yes"),
+        effects(justify=justify),
+        uuid_node(uuid_str),
+    )
+
+
+def global_label_node(
+    text: str, x: float, y: float, shape: str, rotation: float, uuid_str: str
+) -> SExp:
+    """Build a complete global label S-expression.
+
+    Global labels connect nets by name across all sheets without requiring
+    sheet pins or explicit wiring on parent sheets. Commonly used for
+    power rails, buses, and shared control signals.
+
+    Args:
+        text: Label text (net name)
+        x: X position
+        y: Y position
+        shape: Signal type shape (input, output, bidirectional, tri_state, passive)
+        rotation: Rotation angle (0, 90, 180, 270)
+        uuid_str: Unique identifier
+    """
+    justify = "right" if rotation == 180 else "left"
+    return SExp.list(
+        "global_label",
+        SExp.quoted_atom(str(text)),
+        SExp.list("shape", shape),
+        at(x, y, rotation),
+        SExp.list("fields_autoplaced", "yes"),
+        effects(justify=justify),
+        uuid_node(uuid_str),
+    )
+
+
+def text_node(text: str, x: float, y: float, uuid_str: str) -> SExp:
+    """Build a complete text note S-expression."""
+    return SExp.list(
+        "text",
+        SExp.quoted_atom(str(text)),
+        SExp.list("exclude_from_sim", "no"),
+        at(x, y, 0),
+        effects(font_size=1.524, justify="left"),
+        uuid_node(uuid_str),
+    )
+
+
+# =============================================================================
+# Symbol builders
+# =============================================================================
+
+
+def symbol_property_node(
+    name: str, value: str, x: float, y: float, rotation: float = 0, hide: bool = False
+) -> SExp:
+    """Build a complete property block for symbols.
+
+    Both ``name`` and ``value`` are emitted as quoted-atom strings because
+    KiCad treats symbol property name/value fields as strict-typed strings:
+    a numeric-looking value (e.g. a resistor with ``value="330"``) must
+    serialize as ``"330"`` rather than the bare numeric ``330``. Without
+    the quoted-atom flag, the SExp serializer's textual heuristic would
+    emit a bare numeric, which causes ``kicad-cli sch erc`` to reject the
+    file with "Failed to load schematic" under KiCad 10.
+
+    Args:
+        name: Property name (e.g., "Reference", "Value")
+        value: Property value
+        x, y: Position
+        rotation: Text rotation in degrees
+        hide: Whether to hide the property
+    """
+    prop = SExp.list(
+        "property",
+        SExp.quoted_atom(str(name)),
+        SExp.quoted_atom(str(value)),
+        at(x, y, rotation),
+        effects(hide=hide),
+    )
+    return prop
+
+
+def pin_uuid_node(pin_number: str, pin_uuid: str) -> SExp:
+    """Build a pin UUID mapping node.
+
+    Pin number is quoted explicitly since KiCad treats it as a strict-typed
+    string token; otherwise numeric-looking numbers like "1" would emit bare.
+    """
+    return SExp.list("pin", SExp.quoted_atom(pin_number), uuid_node(pin_uuid))
+
+
+def symbol_instances_node(project_name: str, sheet_path: str, reference: str, unit: int) -> SExp:
+    """Build the instances section of a symbol."""
+    return SExp.list(
+        "instances",
+        SExp.list(
+            "project",
+            project_name,
+            SExp.list(
+                "path", sheet_path, SExp.list("reference", reference), SExp.list("unit", unit)
+            ),
+        ),
+    )
+
+
+# =============================================================================
+# Title block and document structure builders
+# =============================================================================
+
+
+def title_block(
+    title: str, date: str, revision: str, company: str = "", comment1: str = "", comment2: str = ""
+) -> SExp:
+    """Build a title_block S-expression."""
+    return SExp.list(
+        "title_block",
+        SExp.list("title", title),
+        SExp.list("date", date),
+        SExp.list("rev", revision),
+        SExp.list("company", company),
+        SExp.list("comment", 1, comment1),
+        SExp.list("comment", 2, comment2),
+    )
+
+
+def sheet_instances(sheet_path: str, page: str) -> SExp:
+    """Build a sheet_instances S-expression.
+
+    ``page`` is emitted as a quoted-atom string because KiCad treats the
+    sheet page field as a strict-typed string. A numeric-looking page
+    value like ``"1"`` must serialize as ``"1"`` rather than the bare
+    numeric ``1``; otherwise ``kicad-cli sch erc`` rejects the schematic
+    with "Failed to load schematic" under KiCad 10.
+    """
+    return SExp.list(
+        "sheet_instances",
+        SExp.list("path", sheet_path, SExp.list("page", SExp.quoted_atom(str(page)))),
+    )
+
+
+# =============================================================================
+# PCB element builders
+# =============================================================================
+
+
+def _net_node(net: int, net_name: str | None) -> SExp:
+    """Build a ``(net ...)`` child in the requested dialect (issue #4416).
+
+    When *net_name* is a non-empty string the reference is emitted in
+    KiCad-10 name-only form ``(net "name")``; otherwise the numeric
+    ``(net <int>)`` form is used.  ``None``/empty *net_name* preserves the
+    historical numeric behavior for every existing caller.
+    """
+    if net_name:
+        return SExp.list("net", SExp.quoted_atom(net_name))
+    return SExp.list("net", net)
+
+
+def segment_node(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    width: float,
+    layer: str,
+    net: int,
+    uuid_str: str,
+    net_name: str | None = None,
+) -> SExp:
+    """Build a PCB track segment S-expression.
+
+    Args:
+        start_x, start_y: Start point coordinates in mm
+        end_x, end_y: End point coordinates in mm
+        width: Track width in mm
+        layer: Copper layer (e.g., "F.Cu", "B.Cu")
+        net: Net number
+        uuid_str: Unique identifier
+        net_name: Optional net name (issue #4416).  When supplied (and
+            non-empty) the net reference is emitted in KiCad-10 name-only
+            ``(net "name")`` dialect so copper appended to a name-based
+            board stays name-based.  Defaults to ``None`` (numeric).
+
+    Example output:
+        (segment
+            (start 148.5 102.0)
+            (end 148.5 101.75)
+            (width 0.2)
+            (layer "F.Cu")
+            (net 6)
+            (uuid "...")
+        )
+    """
+    return SExp.list(
+        "segment",
+        SExp.list("start", fmt(start_x), fmt(start_y)),
+        SExp.list("end", fmt(end_x), fmt(end_y)),
+        SExp.list("width", fmt(width)),
+        SExp.list("layer", layer),
+        _net_node(net, net_name),
+        uuid_node(uuid_str),
+    )
+
+
+def via_node(
+    x: float,
+    y: float,
+    size: float,
+    drill: float,
+    layers: tuple[str, str],
+    net: int,
+    uuid_str: str,
+    via_type: str | None = None,
+    net_name: str | None = None,
+) -> SExp:
+    """Build a PCB via S-expression.
+
+    Args:
+        x, y: Via position in mm
+        size: Via pad size in mm
+        drill: Drill hole diameter in mm
+        layers: Tuple of layer names (e.g., ("F.Cu", "B.Cu"))
+        net: Net number
+        uuid_str: Unique identifier
+        via_type: Optional via type: ``"micro"``, ``"blind"`` or
+            ``"buried"`` (KiCad emits ``(via micro ...)`` etc.), or
+            ``"through"`` for an explicit through via.  When *None* (the
+            default) the type follows the layer pair (issue #6485): the
+            outer ``F.Cu``/``B.Cu`` pair is a through via and carries no
+            token, any other copper pair is written ``blind`` (one outer
+            end) or ``buried`` (two inner ends).  KiCad reads a
+            keyword-less via as a THROUGH via whatever its ``layers`` say,
+            so a partial span must never be written without its keyword --
+            see :func:`kicad_tools.core.layers.resolve_via_type`.
+        net_name: Optional net name (issue #4416).  When supplied (and
+            non-empty) the net reference is emitted in name-only
+            ``(net "name")`` dialect.  Defaults to ``None`` (numeric).
+
+    Example output (standard):
+        (via
+            (at 162.5 97.25)
+            (size 0.6)
+            (drill 0.3)
+            (layers "F.Cu" "B.Cu")
+            (net 12)
+            (uuid "...")
+        )
+
+    Example output (micro):
+        (via micro
+            (at 162.5 97.25)
+            (size 0.3)
+            (drill 0.15)
+            (layers "F.Cu" "In1.Cu")
+            (net 12)
+            (uuid "...")
+        )
+    """
+    # Issue #6485: one write-time rule for every new via node -- a partial
+    # span always carries its keyword, an explicit ``blind`` / ``buried`` is
+    # emitted rather than dropped.
+    from kicad_tools.core.layers import resolve_via_type, warn_derived_via_type
+
+    type_token, written_layers = resolve_via_type(layers, via_type)
+    if via_type is None:
+        # Deriving an HDI via type is never silent (same warning as add_via).
+        warn_derived_via_type(logger, "via_node", layers, x, y, type_token)
+    layers_node = SExp.list("layers", *written_layers)
+    net_node = _net_node(net, net_name)
+    if type_token is not None:
+        return SExp.list(
+            "via",
+            SExp.atom(type_token),
+            SExp.list("at", fmt(x), fmt(y)),
+            SExp.list("size", fmt(size)),
+            SExp.list("drill", fmt(drill)),
+            layers_node,
+            net_node,
+            uuid_node(uuid_str),
+        )
+    return SExp.list(
+        "via",
+        SExp.list("at", fmt(x), fmt(y)),
+        SExp.list("size", fmt(size)),
+        SExp.list("drill", fmt(drill)),
+        layers_node,
+        net_node,
+        uuid_node(uuid_str),
+    )
+
+
+def gr_line_node(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    layer: str,
+    width: float = 0.1,
+    uuid_str: str = "",
+) -> SExp:
+    """Build a PCB graphic line S-expression (gr_line).
+
+    Used for board outlines on Edge.Cuts layer and other graphic elements.
+
+    Args:
+        start_x, start_y: Start point coordinates in mm
+        end_x, end_y: End point coordinates in mm
+        layer: Layer name (e.g., "Edge.Cuts", "F.SilkS")
+        width: Stroke width in mm (default 0.1)
+        uuid_str: Unique identifier
+
+    Example output:
+        (gr_line
+            (start 100 100)
+            (end 200 100)
+            (stroke (width 0.1) (type default))
+            (layer "Edge.Cuts")
+            (uuid "...")
+        )
+    """
+    return SExp.list(
+        "gr_line",
+        SExp.list("start", fmt(start_x), fmt(start_y)),
+        SExp.list("end", fmt(end_x), fmt(end_y)),
+        SExp.list("stroke", SExp.list("width", fmt(width)), SExp.list("type", "default")),
+        SExp.list("layer", layer),
+        uuid_node(uuid_str),
+    )
+
+
+def gr_rect_node(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    layer: str,
+    width: float = 0.1,
+    uuid_str: str = "",
+) -> SExp:
+    """Build a PCB graphic rectangle S-expression (gr_rect).
+
+    Used for board outlines on Edge.Cuts layer.
+
+    Args:
+        start_x, start_y: Top-left corner coordinates in mm
+        end_x, end_y: Bottom-right corner coordinates in mm
+        layer: Layer name (e.g., "Edge.Cuts")
+        width: Stroke width in mm (default 0.1)
+        uuid_str: Unique identifier
+
+    Example output:
+        (gr_rect
+            (start 100 100)
+            (end 150 130)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "...")
+        )
+    """
+    return SExp.list(
+        "gr_rect",
+        SExp.list("start", fmt(start_x), fmt(start_y)),
+        SExp.list("end", fmt(end_x), fmt(end_y)),
+        SExp.list("stroke", SExp.list("width", fmt(width)), SExp.list("type", "default")),
+        SExp.list("fill", "none"),
+        SExp.list("layer", layer),
+        uuid_node(uuid_str),
+    )
+
+
+def gr_text_node(
+    text: str,
+    x: float,
+    y: float,
+    layer: str = "F.SilkS",
+    font_size: float = 1.0,
+    font_thickness: float = 0.15,
+    uuid_str: str = "",
+) -> SExp:
+    """Build a PCB board-level text S-expression (gr_text).
+
+    Used for board markings such as project name, revision, and date
+    on silkscreen layers.
+
+    Args:
+        text: Text content to display
+        x, y: Position coordinates in mm
+        layer: Layer name (default "F.SilkS")
+        font_size: Font height and width in mm (default 1.0)
+        font_thickness: Stroke thickness of font in mm (default 0.15)
+        uuid_str: Unique identifier
+
+    Example output:
+        (gr_text "Board v1.0"
+            (at 105 118)
+            (layer "F.SilkS")
+            (uuid "...")
+            (effects (font (size 1 1) (thickness 0.15)))
+        )
+    """
+    effects_node = SExp.list(
+        "effects",
+        SExp.list(
+            "font",
+            SExp.list("size", fmt(font_size), fmt(font_size)),
+            SExp.list("thickness", fmt(font_thickness)),
+        ),
+    )
+    return SExp.list(
+        "gr_text",
+        text,
+        SExp.list("at", fmt(x), fmt(y)),
+        SExp.list("layer", layer),
+        uuid_node(uuid_str),
+        effects_node,
+    )
+
+
+def zone_node(
+    net: int,
+    net_name: str,
+    layer: str,
+    points: list[tuple[float, float]],
+    uuid_str: str,
+    priority: int = 0,
+    min_thickness: float = 0.2,
+    clearance: float = 0.2,
+    thermal_gap: float = 0.3,
+    thermal_bridge_width: float = 0.3,
+    pad_connection: str = "",
+    name_only: bool = False,
+) -> SExp:
+    """Build a PCB copper zone (pour) S-expression.
+
+    Args:
+        net: Net number
+        net_name: Net name (e.g., "GND")
+        layer: Copper layer
+        points: List of (x, y) boundary points
+        uuid_str: Unique identifier
+        priority: Zone priority (higher fills later)
+        min_thickness: Minimum copper thickness in mm
+        clearance: Pad clearance in mm
+        thermal_gap: Thermal relief gap in mm
+        thermal_bridge_width: Thermal relief bridge width in mm
+        pad_connection: Zone-level pad-to-zone connection mode written into
+            ``(connect_pads ...)``.  KiCad understands:
+
+            * ``""`` (default keyword absent, the generator default) --
+              thermal relief for *all* pads at the zone level.  This pairs
+              with the **selective** per-pad policy (issue #3729): the zone
+              keeps thermal relief, while individual pads too small to host
+              the 2 spokes the geometric DRC requires get a per-pad
+              ``(zone_connect 2)`` solid override applied by
+              :func:`kicad_tools.zones.fill_clearance.normalize_zone_pad_connection`.
+              Pads that *can* host 2 spokes keep thermal relief (eases
+              hand-soldering / rework).  An empty mode here is therefore the
+              right default -- the per-pad overrides clear ``starved_thermal``
+              surgically rather than forcing solid on every pad.
+            * ``"yes"`` -- **solid** full-copper connection for *all* pads
+              (the #3728 blanket behavior, now an explicit override).  A
+              solid connection is strictly stronger than a 2-spoke thermal
+              relief, so it eliminates ``starved_thermal`` honestly (without
+              lowering the required spoke count).
+            * ``"thru_hole_only"`` -- thermal relief for through-hole pads
+              (eases hand-soldering) and solid for SMD pads.  Clears the
+              SMD ``starved_thermal`` errors but leaves single-spoke THT
+              power pads unaddressed.
+            * ``"no"`` -- no copper connection (pads isolated from the pour).
+        name_only: Write the KiCad-10 name-only net reference ``(net "NAME")``
+            instead of ``(net N) (net_name "NAME")``, for a board that has
+            no numeric net ids (issue #6989).
+
+    Example output:
+        (zone
+            (net 1)
+            (net_name "GND")
+            (layer "In1.Cu")
+            (uuid "...")
+            (hatch edge 0.5)
+            (connect_pads yes (clearance 0.2))
+            (min_thickness 0.2)
+            (filled_areas_thickness no)
+            (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+            (polygon (pts (xy 115.5 75.5) ...))
+        )
+    """
+    # Build polygon points
+    pts_children = [xy(x, y) for x, y in points]
+    polygon = SExp.list("polygon", SExp.list("pts", *pts_children))
+
+    net_refs = (
+        [SExp.list("net", net_name)]
+        if name_only
+        else [SExp.list("net", net), SExp.list("net_name", net_name)]
+    )
+    zone = SExp.list(
+        "zone",
+        *net_refs,
+        SExp.list("layer", layer),
+        uuid_node(uuid_str),
+        SExp.list("hatch", "edge", 0.5),
+    )
+
+    # Add priority if non-zero
+    if priority > 0:
+        zone.append(SExp.list("priority", priority))
+
+    # Add standard zone properties.  The optional pad-connection mode token
+    # (e.g. ``thru_hole_only``) sits between ``connect_pads`` and the
+    # ``(clearance ...)`` child, matching KiCad's S-expression grammar.  An
+    # empty string omits the token (legacy "thermal relief for all pads").
+    connect_pads = SExp.list("connect_pads")
+    if pad_connection:
+        # Bare keyword atom (e.g. ``yes`` / ``thru_hole_only``), not a
+        # named list -- it must render without surrounding quotes.
+        connect_pads.append(SExp(value=pad_connection))
+    connect_pads.append(SExp.list("clearance", fmt(clearance)))
+    zone.append(connect_pads)
+    zone.append(SExp.list("min_thickness", fmt(min_thickness)))
+    zone.append(SExp.list("filled_areas_thickness", "no"))
+    zone.append(
+        SExp.list(
+            "fill",
+            "yes",
+            SExp.list("thermal_gap", fmt(thermal_gap)),
+            SExp.list("thermal_bridge_width", fmt(thermal_bridge_width)),
+        )
+    )
+    zone.append(polygon)
+
+    return zone
+
+
+def keepout_node(
+    points: list[tuple[float, float]],
+    layers: list[str],
+    no_tracks: bool = True,
+    no_vias: bool = True,
+    no_pour: bool = True,
+    uuid_str: str = "",
+    name: str = "",
+) -> SExp:
+    """Build a PCB keepout zone S-expression.
+
+    Keepout zones prevent copper pours, tracks, and/or vias in the specified area.
+
+    Args:
+        points: List of (x, y) boundary points
+        layers: List of layer names this keepout applies to
+        no_tracks: Prevent tracks in this area
+        no_vias: Prevent vias in this area
+        no_pour: Prevent copper pour in this area
+        uuid_str: Unique identifier
+        name: Optional rule-area name (issue #4605) -- the key the
+            ``spatial_keepouts`` net-class-map sidecar block filters by
+
+    Example output:
+        (zone
+            (net 0)
+            (net_name "")
+            (layers "F.Cu" "B.Cu")
+            (uuid "...")
+            (hatch edge 0.5)
+            (connect_pads (clearance 0))
+            (min_thickness 0.25)
+            (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour not_allowed))
+            (polygon (pts (xy X Y) ...))
+        )
+    """
+    # Build polygon points
+    pts_children = [xy(x, y) for x, y in points]
+    polygon = SExp.list("polygon", SExp.list("pts", *pts_children))
+
+    # Build layers node
+    layers_node = SExp.list("layers", *layers)
+
+    zone = SExp.list(
+        "zone",
+        SExp.list("net", 0),
+        SExp.list("net_name", ""),
+        layers_node,
+        uuid_node(uuid_str),
+        SExp.list("hatch", "edge", 0.5),
+    )
+    if name:
+        zone.append(SExp.list("name", name))
+
+    # Add keepout settings
+    keepout = SExp.list(
+        "keepout",
+        SExp.list("tracks", "not_allowed" if no_tracks else "allowed"),
+        SExp.list("vias", "not_allowed" if no_vias else "allowed"),
+        SExp.list("pads", "allowed"),  # Pads are typically allowed
+        SExp.list("copperpour", "not_allowed" if no_pour else "allowed"),
+    )
+    zone.append(keepout)
+
+    # Add minimal zone properties.
+    #
+    # Note: a rule-area (keepout) zone must NOT carry a bare ``(fill yes)`` node.
+    # KiCad 10 writes the fill state for rule areas as ``(fill (thermal_gap ...)
+    # (thermal_bridge_width ...))`` with no ``yes`` token, and regenerates the
+    # node on save, so we omit it here entirely (Issue #4430). Emitting
+    # ``(fill yes)`` is non-canonical for rule areas.
+    zone.append(SExp.list("connect_pads", SExp.list("clearance", 0)))
+    zone.append(SExp.list("min_thickness", 0.25))
+    zone.append(polygon)
+
+    return zone
+
+
+def footprint_at_node(x: float, y: float, rotation: float = 0) -> SExp:
+    """Build an 'at' node for footprint positioning."""
+    if rotation != 0:
+        return SExp.list("at", fmt(x), fmt(y), fmt(rotation))
+    return SExp.list("at", fmt(x), fmt(y))
+
+
+if __name__ == "__main__":
+    # Quick self-test
+    print("Testing KiCad SExp Builders\n")
+
+    # Test basic builders
+    print("xy(10.5, 20.33):")
+    print(f"  {xy(10.5, 20.33).to_string(compact=True)}")
+
+    print("\nat(100, 200, 90):")
+    print(f"  {at(100, 200, 90).to_string(compact=True)}")
+
+    print("\nstroke():")
+    print(f"  {stroke().to_string(compact=True)}")
+
+    print("\neffects(justify='left bottom', hide=True):")
+    print(f"  {effects(justify='left bottom', hide=True).to_string()}")
+
+    print("\nwire_node(10, 20, 30, 40, 'test-uuid'):")
+    print(wire_node(10, 20, 30, 40, "test-uuid").to_string())
+
+    print("\njunction_node(50, 60, 'junc-uuid'):")
+    print(junction_node(50, 60, "junc-uuid").to_string())
+
+    print("\nlabel_node('GND', 100, 200, 0, 'label-uuid'):")
+    print(label_node("GND", 100, 200, 0, "label-uuid").to_string())
+
+    print("\nhier_label_node('MCLK', 100, 200, 'output', 180, 'hl-uuid'):")
+    print(hier_label_node("MCLK", 100, 200, "output", 180, "hl-uuid").to_string())
+
+    print("\nglobal_label_node('VCC_3V3', 100, 200, 'bidirectional', 0, 'gl-uuid'):")
+    print(global_label_node("VCC_3V3", 100, 200, "bidirectional", 0, "gl-uuid").to_string())
+
+    print("\n--- All tests passed ---")

@@ -1,0 +1,613 @@
+"""``kct creepage`` command handler (Issue #4327 phase 1, #4332 phase 2).
+
+Measures per-pair surface-path (creepage) distance between an HV net group
+and every other conductor / board edge, honoring milled Edge.Cuts slots, and
+reports a **census** (all pairs + margin, not just violations) with clearance
+(through-air) and creepage (over-surface) reported as distinct values.
+
+The required threshold comes from one of two sources:
+
+* ``--min`` -- the operator supplies the required creepage directly (phase 1).
+* ``--standard`` -- the required creepage AND clearance are *derived* from an
+  IEC 60664-1 / 62368-1 table for a ``(working voltage, pollution degree,
+  material group)`` triple (phase 2, #4332).
+
+When both are supplied the stricter (larger) creepage bound governs per pair.
+Exit is non-zero iff any pair fails its governing creepage bound or (in
+standard mode) its derived clearance bound.
+
+.. warning::
+   The derived values are an engineering aid, NOT a certification.  The
+   governing standard and a qualified engineer are authoritative.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.creepage.engine import CreepagePair, CreepageReport
+
+# Distinct exit code for "could not classify any HV net on a board that looks
+# like mains" (issue #4354).  Kept separate from 1 ("a measured pair failed its
+# bound") so CI / agent gates can tell an unclassifiable-HV vacuity from a real
+# creepage failure.
+EXIT_HV_UNCLASSIFIED = 2
+
+
+def run_creepage_command(args) -> int:
+    """Handle the ``creepage`` command.  Returns the process exit code."""
+    from kicad_tools._shapely import has_shapely
+    from kicad_tools.creepage.engine import (
+        SELV_WORKING_VOLTAGE_V,
+        apply_census_waivers,
+        compute_creepage_census,
+        mains_suspect_nets,
+        pair_bounds_from_dict,
+        pair_bounds_unmapped_nets,
+        resolve_hv_nets,
+        voltage_map_from_dict,
+    )
+    from kicad_tools.creepage.standards import (
+        DEFAULT_INSULATION,
+        DEFAULT_OVERVOLTAGE_CATEGORY,
+        StandardLookupError,
+        get_standard,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    fmt = getattr(args, "format", "table") or "table"
+
+    if not has_shapely():
+        # Consistent with segment_copper_polygon returning None: fail loud.
+        print(
+            "Error: creepage analysis requires shapely (a core dependency); "
+            "it is not importable in this environment.",
+            file=sys.stderr,
+        )
+        return 1
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    # --- Threshold-source resolution (phase 1 --min vs phase 2 --standard) ---
+    min_arg = getattr(args, "min", None)
+    min_mm = float(min_arg) if min_arg is not None else None
+    standard_id = getattr(args, "standard", None)
+
+    if standard_id is None and min_mm is None:
+        print(
+            "Error: provide either --standard (with --working-voltage and "
+            "--pollution-degree) or --min.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Optional per-net voltage map (#4371) --------------------------------
+    # When supplied, the required creepage/clearance is derived PER PAIR from
+    # |V_a - V_b| instead of a single global --working-voltage.  It requires a
+    # --standard (the table is the only source of a derived requirement) but
+    # makes --working-voltage optional (unmapped nets default to 0 V).
+    voltage_map: dict | None = None
+    pair_bounds: dict = {}
+    edge_voltage = 0.0
+    vmap_arg = getattr(args, "voltage_map", None)
+    if vmap_arg:
+        if standard_id is None:
+            print(
+                "Error: --voltage-map requires --standard (and --pollution-degree); "
+                "the per-pair requirement is derived from an IEC table.",
+                file=sys.stderr,
+            )
+            return 1
+        vmap_path = Path(vmap_arg)
+        if not vmap_path.exists():
+            print(f"Error: voltage-map file not found: {vmap_path}", file=sys.stderr)
+            return 1
+        try:
+            _vm_raw = json.loads(vmap_path.read_text())
+            voltage_map, edge_voltage = voltage_map_from_dict(_vm_raw)
+            pair_bounds = pair_bounds_from_dict(_vm_raw)  # #8043
+            for _n in pair_bounds_unmapped_nets(pair_bounds, voltage_map):
+                print(
+                    f"Warning: _pair_bounds names net {_n!r} absent from the voltage map",
+                    file=sys.stderr,
+                )
+        except json.JSONDecodeError as e:
+            print(f"Error: parsing voltage-map JSON: {e}", file=sys.stderr)
+            return 1
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid voltage-map structure: {e}", file=sys.stderr)
+            return 1
+
+    # Phase-2 derived requirements (None in phase-1 mode).
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    creepage_prov: dict | None = None
+    clearance_prov: dict | None = None
+    standard_edition: str | None = None
+    std = None
+    working_voltage = getattr(args, "working_voltage", None)
+    pollution_degree = getattr(args, "pollution_degree", None)
+    material_group = getattr(args, "material_group", "IIIa")
+    overvoltage_category = (
+        getattr(args, "overvoltage_category", None) or DEFAULT_OVERVOLTAGE_CATEGORY
+    )
+    insulation = getattr(args, "insulation", None) or DEFAULT_INSULATION
+
+    if standard_id is not None:
+        if voltage_map is None:
+            # Single-voltage mode: preserve the exact phase-2 requirement/message.
+            if working_voltage is None or pollution_degree is None:
+                print(
+                    "Error: --standard requires both --working-voltage and --pollution-degree.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            # Per-net voltage mode (#4371): --working-voltage is optional (each
+            # pair keys on its own |ΔV|), but --pollution-degree is still needed.
+            if pollution_degree is None:
+                print(
+                    "Error: --standard (with --voltage-map) requires --pollution-degree.",
+                    file=sys.stderr,
+                )
+                return 1
+        try:
+            std = get_standard(standard_id)
+            standard_edition = std.edition
+            if voltage_map is None:
+                # Single-voltage mode: derive the one global requirement up front.
+                # (working_voltage / pollution_degree were validated non-None above.)
+                assert working_voltage is not None and pollution_degree is not None
+                required_creepage_mm, creepage_prov = std.required_creepage(
+                    float(working_voltage), int(pollution_degree), material_group, insulation
+                )
+                # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at
+                # the steady-state peak, PD floor) -- issue #7057.
+                required_clearance_mm, clearance_prov = std.required_clearance(
+                    float(working_voltage),
+                    int(pollution_degree),
+                    overvoltage_category,
+                    insulation,
+                )
+        except StandardLookupError as e:
+            # Safety-critical: fail LOUD, never emit a guessed number.
+            print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
+            return 1
+
+    # Load the optional net-class map sidecar via the canonical loader
+    # (issue #4683): passing the board path resolves layer-name tokens like
+    # "B.Cu" against the board's ACTUAL copper count, exactly as `kct route`
+    # does -- one sidecar must be valid for every consumer.
+    net_class_map = None
+    # Mains-NAMED nets the map declares not mains/HV (issue #8278), exactly as
+    # ``kct audit`` reads them: they exempt only the name-based vacuity guard
+    # below, are always disclosed, and a malformed block is an error.
+    declared_non_hv: dict[str, str] = {}
+    ncm_arg = getattr(args, "net_class_map", None)
+    if ncm_arg:
+        from kicad_tools.creepage.engine import non_hv_nets_from_path
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        ncm_path = Path(ncm_arg)
+        if not ncm_path.exists():
+            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
+            return 1
+        try:
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=pcb_path)
+            declared_non_hv = non_hv_nets_from_path(ncm_path)
+        except json.JSONDecodeError as e:
+            print(f"Error: parsing net-class-map JSON: {e}", file=sys.stderr)
+            return 1
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
+            return 1
+
+    pcb = PCB.load(pcb_path)
+    net_class = getattr(args, "net_class", "HV") or "HV"
+
+    # Voltage-derived census membership (issue #4401): when a voltage map is
+    # supplied, a high-|V| net whose routing class is not HV must still enter
+    # the census.  Gate the union on the map's presence so the no-map path is
+    # byte-identical to before.
+    hv_nets = resolve_hv_nets(
+        pcb,
+        net_class,
+        net_class_map,
+        voltage_map=voltage_map,
+        edge_voltage=edge_voltage,
+        census_threshold=(
+            getattr(args, "census_threshold", 30.0) if voltage_map is not None else None
+        ),
+    )
+    # Attach-zone waiver (#8028): zones come from the SAME builder the router's
+    # #4506 exemption uses, so search, route gate and census agree on geometry.
+    attach_zones = None
+    if getattr(args, "waive_attach_zone", False):
+        from kicad_tools.router.pairwise_clearance import build_attach_zones
+
+        attach_zones = build_attach_zones(pcb.footprints)
+    try:
+        report = compute_creepage_census(
+            pcb,
+            hv_nets,
+            min_mm,
+            net_class=net_class,
+            board=str(pcb_path),
+            # In map mode the requirement varies per pair, so the report-level
+            # scalar requirement / working voltage are null (per-pair).
+            required_creepage_mm=required_creepage_mm,
+            required_clearance_mm=required_clearance_mm,
+            standard=standard_id,
+            standard_edition=standard_edition,
+            working_voltage=None if voltage_map is not None else working_voltage,
+            pollution_degree=pollution_degree,
+            material_group=material_group if standard_id is not None else None,
+            creepage_provenance=creepage_prov,
+            clearance_provenance=clearance_prov,
+            voltage_map=voltage_map,
+            standard_obj=std if voltage_map is not None else None,
+            edge_voltage=edge_voltage,
+            overvoltage_category=overvoltage_category,
+            insulation=insulation,
+            attach_zones=attach_zones,
+            pair_bounds=pair_bounds or None,
+        )
+    except StandardLookupError as e:
+        # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
+        # silently pass a safety-critical audit.
+        print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
+        return 1
+
+    # Same-footprint (#4403) / attach-zone (#8028) waivers: shared with
+    # ``kct readiness`` so both gates mark waivers identically.  Standalone-CLI
+    # opt-in only -- never touches report.passed, so the ``kct audit`` gate
+    # (which keys off the raw, un-waived result) is unaffected.
+    apply_census_waivers(
+        report, waive_same_footprint=bool(getattr(args, "waive_same_footprint", False))
+    )
+
+    # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
+    # legitimately "nothing to audit" on a genuinely low-voltage board.  When
+    # the board carries mains-named copper OR a mains-level working voltage was
+    # supplied, an empty HV group means the HV path was never evaluated -- a
+    # safety-gate FALSE PASS.  Fire loud and exit non-zero (distinct code) so
+    # this is never mistaken for a clean board.
+    mains_suspects: list[str] = []
+    guard_triggered = False
+    if not report.has_hv_nets:
+        from kicad_tools.creepage.engine import _norm_net_key
+
+        declared = {_norm_net_key(k): v for k, v in declared_non_hv.items()}
+        exempt = {}
+        for name in mains_suspect_nets(pcb):
+            if _norm_net_key(name) in declared:
+                exempt[name] = declared[_norm_net_key(name)]
+            else:
+                mains_suspects.append(name)
+        if exempt:
+            print(
+                "Note: mains-named net(s) declared non-HV by the net-class map: "
+                + "; ".join(f"{k} ({v})" for k, v in sorted(exempt.items())),
+                file=sys.stderr,
+            )
+        high_working_voltage = (
+            working_voltage is not None and float(working_voltage) >= SELV_WORKING_VOLTAGE_V
+        )
+        guard_triggered = bool(mains_suspects) or high_working_voltage
+
+    show_witness = bool(getattr(args, "witness", False))
+    if fmt == "json":
+        print(json.dumps(report.to_dict(), indent=2))
+    elif report.uses_standard:
+        _render_table_standard(report, guard_triggered=guard_triggered, show_witness=show_witness)
+    else:
+        _render_table(report, guard_triggered=guard_triggered, show_witness=show_witness)
+
+    if guard_triggered:
+        _warn_hv_unclassified(report, mains_suspects, working_voltage)
+        return EXIT_HV_UNCLASSIFIED
+
+    # Non-zero exit iff any NON-waived pair fails its governing bound(s) (#4403).
+    # ``gate_passed`` == ``passed`` unless --waive-same-footprint was supplied, so
+    # the default exit behavior is unchanged.  An empty census on a genuinely
+    # low-voltage board (no mains names, no HV working voltage) is a clean exit 0.
+    return 0 if report.gate_passed else 1
+
+
+def _warn_hv_unclassified(
+    report: CreepageReport,
+    mains_suspects: list[str],
+    working_voltage: float | None,
+) -> None:
+    """Loud stderr warning when the HV group is empty on a mains-looking board."""
+    from kicad_tools.creepage.engine import SELV_WORKING_VOLTAGE_V
+
+    print(
+        "WARNING: creepage resolved 0 HV nets, but this board looks like a "
+        "mains/HV design -- the HV insulation path was NOT evaluated.",
+        file=sys.stderr,
+    )
+    if mains_suspects:
+        shown = ", ".join(mains_suspects[:12])
+        more = "" if len(mains_suspects) <= 12 else f" (+{len(mains_suspects) - 12} more)"
+        print(f"  Mains/HV-suspect nets on the board: {shown}{more}", file=sys.stderr)
+    if working_voltage is not None and float(working_voltage) >= SELV_WORKING_VOLTAGE_V:
+        print(
+            f"  Working voltage {float(working_voltage):g} V is at/above the "
+            f"{SELV_WORKING_VOLTAGE_V:g} V SELV boundary -- an HV path is implied.",
+            file=sys.stderr,
+        )
+    print(
+        f"  None of these nets were classified as '{report.net_class}'.  Supply "
+        "--net-class-map (mapping the mains nets to the HV class) or --net-class "
+        "so the census can actually audit them.",
+        file=sys.stderr,
+    )
+    print(
+        f"  Exiting {EXIT_HV_UNCLASSIFIED} (HV-unclassified) rather than 0 to "
+        "avoid a safety-gate false pass.",
+        file=sys.stderr,
+    )
+
+
+def _result_token(p: CreepagePair) -> str:
+    """Per-row result token: WAIVED for a waived failing pair, else PASS/FAIL."""
+    if p.waived and not p.passed:
+        return "WAIVED"
+    return "PASS" if p.passed else "FAIL"
+
+
+def _rel_token(p: CreepagePair) -> str:
+    """Compact footprint-relationship token for the census tables (#4403)."""
+    if p.relationship == "attach_zone":
+        return "attach-zn"
+    return "same-ftpt" if p.relationship == "same_footprint" else "board"
+
+
+def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
+    """Print the pass/fail summary, honoring same-footprint waivers (#4403).
+
+    Silence is a false-pass, so the waived list is always surfaced.  When a
+    waiver is active the GATE result (``report.gate_passed``) is reported; the
+    raw ``report.passed`` still counts every pair (and still drives ``kct
+    audit``).
+    """
+    total = len(report.pairs)
+    waived = [p for p in report.pairs if p.waived]
+    gate_failures = [p for p in report.pairs if not p.passed and not p.waived]
+    same_fp = [p for p in report.pairs if p.relationship == "same_footprint"]
+
+    # Issue #8277: an ``attach-zn`` row is waived only when the copper OUTSIDE
+    # the zone still clears; say why one that is not waived still gates.
+    for p in report.pairs:
+        if p.relationship == "attach_zone" and not p.residual_passed:
+            where = ""
+            if p.residual_witness_mm is not None:
+                where = f" at ({p.residual_witness_mm[0]:.3f}, {p.residual_witness_mm[1]:.3f})"
+            print(
+                f"NOTE: {p.net_a} vs {p.net_b} is attach-zn but NOT waived: copper outside "
+                f"the attach zone is only {p.residual_creepage_mm:.3f} mm apart{where} "
+                f"(layer {p.residual_layer})."
+            )
+
+    if waived:
+        if gate_failures:
+            print(
+                f"FAIL (gate): {len(gate_failures)}/{total} board pair(s) fail "
+                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
+                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
+            )
+        else:
+            print(
+                f"PASS (gate): {total - len(waived)}/{total} pair(s) clear "
+                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
+                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
+            )
+        return
+
+    failures = [p for p in report.pairs if not p.passed]
+    if failures:
+        line = f"FAIL: {len(failures)}/{total} pair(s) fail {unit_desc}."
+    else:
+        line = f"PASS: all {total} pair(s) clear {unit_desc}."
+    if same_fp:
+        line += (
+            f"  ({len(same_fp)} same-footprint pair(s) present -- re-run with "
+            "--waive-same-footprint to exclude component-internal spacing from the gate.)"
+        )
+    print(line)
+
+
+def _witness_cell(p: CreepagePair) -> str:
+    """``x,y item_a -> item_b`` for the ``--witness`` column (#8301)."""
+    w = p.witness
+    if not w:
+        return "-"
+    x, y = w["point_a_mm"]
+    return f"{x:.3f},{y:.3f} {w['item_a']} -> {w['item_b']}"
+
+
+def _render_table(
+    report: CreepageReport, *, guard_triggered: bool = False, show_witness: bool = False
+) -> None:
+    """Print the human-readable census table (phase-1 / manual --min mode)."""
+    if not report.has_hv_nets:
+        print(
+            f"No '{report.net_class}' nets found "
+            "(supply --net-class-map to classify HV nets, or check --net-class)."
+        )
+        print(f"Board: {report.board}")
+        if guard_triggered:
+            # #4354: mains-looking board with an empty HV group -- do NOT claim
+            # a clean exit; the loud WARNING + non-zero exit follow.
+            print(
+                "Census: 0 pairs, but the board looks like mains/HV -- "
+                "HV classification FAILED (see WARNING below)."
+            )
+        else:
+            print("Census: 0 pairs.  Nothing to audit -- exit 0.")
+        return
+
+    print(f"HV creepage/clearance census  (net-class '{report.net_class}')")
+    print(f"Board: {report.board}")
+    print(f"Required minimum creepage (--min): {report.min_mm:.3f} mm")
+    print(f"HV nets ({len(report.hv_nets)}): {', '.join(report.hv_nets)}")
+    print()
+
+    if not report.pairs:
+        print("Census: 0 pairs (HV nets present but no other conductors / edge found).")
+        return
+
+    header = (
+        f"{'HV net':<16} {'Against':<16} {'Layer':<7} "
+        f"{'Clearance':>10} {'Creepage':>10} {'Margin':>10} {'Rel':>10} {'Result':>7}"
+    )
+    if show_witness:
+        header += "  Witness (A point, A item -> B item)"
+    print(header)
+    print("-" * len(header))
+    for p in report.pairs:
+        result = _result_token(p)
+        print(
+            f"{p.net_a:<16} {p.net_b:<16} {p.layer:<7} "
+            f"{p.clearance_mm:>9.3f}  {p.creepage_mm:>9.3f}  "
+            f"{p.margin_mm:>9.3f}  {_rel_token(p):>10}  {result:>7}"
+            + (f"  {_witness_cell(p)}" if show_witness else "")
+        )
+
+    print()
+    _print_gate_summary(report, f"{report.min_mm:.3f} mm creepage")
+
+
+def _render_table_standard(
+    report: CreepageReport, *, guard_triggered: bool = False, show_witness: bool = False
+) -> None:
+    """Print the census table with IEC-derived requirements (phase-2 mode)."""
+    from kicad_tools.creepage.standards import DISCLAIMER
+
+    if not report.has_hv_nets:
+        print(
+            f"No '{report.net_class}' nets found "
+            "(supply --net-class-map to classify HV nets, or check --net-class)."
+        )
+        print(f"Board: {report.board}")
+        if guard_triggered:
+            # #4354: mains-looking board with an empty HV group -- do NOT claim
+            # a clean exit; the loud WARNING + non-zero exit follow.
+            print(
+                "Census: 0 pairs, but the board looks like mains/HV -- "
+                "HV classification FAILED (see WARNING below)."
+            )
+        else:
+            print("Census: 0 pairs.  Nothing to audit -- exit 0.")
+        return
+
+    cp = report.creepage_provenance or {}
+    clp = report.clearance_provenance or {}
+    std_name = cp.get("standard", report.standard)
+    print(f"HV creepage/clearance census  (net-class '{report.net_class}')")
+    print(f"Board: {report.board}")
+    print(f"Standard: {std_name} {report.standard_edition}  (--standard {report.standard})")
+    print(f"Insulation: {report.insulation}  (--insulation; assumed for the derived requirement)")
+    if report.uses_voltage_map:
+        # Per-net voltage mode (#4371): the requirement is derived per pair from
+        # |ΔV|, so there is no single working voltage / derived requirement.
+        n_mapped = len(report.voltage_map or {})
+        print(
+            f"Voltage source: per-pair |dV| (voltage-map, {n_mapped} net(s) mapped, "
+            f"edge/earth = {report.edge_voltage:g} V)  |  "
+            f"Pollution degree: {report.pollution_degree}  |  "
+            f"Material group: {report.material_group}"
+        )
+        print(
+            "Derived requirement: per pair (see the ReqCr / ReqCl columns; nets at "
+            "equal potential require ~0)."
+        )
+    else:
+        print(
+            f"Working voltage: {report.working_voltage:g} V RMS  "
+            f"(peak ~ {clp.get('peak_voltage_v', 0.0):.0f} V)  |  "
+            f"Pollution degree: {report.pollution_degree}  |  "
+            f"Material group: {report.material_group}"
+        )
+        if report.required_creepage_mm is not None:
+            creep_factor = cp.get("insulation_factor", 1.0)
+            creep_note = (
+                f", x{creep_factor:g} {cp.get('insulation')}" if creep_factor != 1.0 else ""
+            )
+            print(
+                f"Derived required creepage: {report.required_creepage_mm:.3f} mm  "
+                f"[{cp.get('table_id', '?')}, {cp.get('voltage_row_used_v', '?')} V row, "
+                f"step-up{creep_note}]"
+            )
+        if report.required_clearance_mm is not None:
+            print(
+                f"Derived required clearance: {report.required_clearance_mm:.3f} mm  "
+                f"[{clp.get('table_id', '?')}, {clp.get('governing_component', '?')}, "
+                f"altitude {clp.get('altitude_assumption', '?')}]"
+            )
+            if "impulse_withstand_voltage_v" in clp:
+                u_imp = clp["impulse_withstand_voltage_v"]
+                u_req = clp.get("required_impulse_voltage_v", u_imp)
+                # Reinforced insulation (issue #7082) keys Table F.2 on the next
+                # preferred-series impulse voltage; show the step explicitly.
+                step_note = f"; reinforced step-up -> {u_req:.0f} V" if u_req != u_imp else ""
+                peak_v = clp.get("peak_voltage_v", 0.0)
+                steady_factor = clp.get("steady_state_factor", 1.0)
+                steady_v = clp.get("steady_state_voltage_v", peak_v)
+                steady_desc = (
+                    f"{steady_factor:g} x {peak_v:.0f} = {steady_v:.0f} V peak"
+                    if steady_factor != 1.0
+                    else f"{peak_v:.0f} V peak"
+                )
+                print(
+                    f"  Overvoltage category {clp.get('overvoltage_category', '?')}: "
+                    f"rated impulse {u_imp:.0f} V "
+                    f"({clp.get('impulse_table_id', '?')}{step_note}) -> "
+                    f"{clp.get('impulse_clearance_mm', 0.0):.3f} mm; steady-state "
+                    f"{steady_desc} "
+                    f"({clp.get('steady_state_table_id', '?')}) -> "
+                    f"{clp.get('steady_state_clearance_mm', 0.0):.3f} mm; "
+                    f"PD floor {clp.get('pd_floor_mm', 0.0):.3f} mm; "
+                    f"{clp.get('insulation', 'basic')} insulation"
+                )
+    if report.min_mm is not None:
+        print(f"Manual override (--min): {report.min_mm:.3f} mm  (stricter governs)")
+    print(f"HV nets ({len(report.hv_nets)}): {', '.join(report.hv_nets)}")
+    print(f"NOTE: {DISCLAIMER}")
+    print()
+
+    if not report.pairs:
+        print("Census: 0 pairs (HV nets present but no other conductors / edge found).")
+        return
+
+    header = (
+        f"{'HV net':<14} {'Against':<14} {'Layer':<6} "
+        f"{'Clnce':>8} {'ReqCl':>8} {'Creep':>8} {'ReqCr':>8} "
+        f"{'Margin':>8} {'Govern':>8} {'Rel':>10} {'Result':>7}"
+    )
+    if show_witness:
+        header += "  Witness (A point, A item -> B item)"
+    print(header)
+    print("-" * len(header))
+    for p in report.pairs:
+        result = _result_token(p)
+        req_cl = p.required_clearance_mm if p.required_clearance_mm is not None else 0.0
+        req_cr = p.required_creepage_mm if p.required_creepage_mm is not None else 0.0
+        print(
+            f"{p.net_a:<14} {p.net_b:<14} {p.layer:<6} "
+            f"{p.clearance_mm:>8.3f} {req_cl:>8.3f} "
+            f"{p.creepage_mm:>8.3f} {req_cr:>8.3f} "
+            f"{p.margin_mm:>8.3f} {p.governing_bound:>8} {_rel_token(p):>10} {result:>7}"
+            + (f"  {_witness_cell(p)}" if show_witness else "")
+        )
+
+    print()
+    _print_gate_summary(report, "the derived creepage/clearance requirement")

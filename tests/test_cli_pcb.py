@@ -1,0 +1,2329 @@
+"""Tests for PCB-related CLI commands."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+
+class TestPcbQuery:
+    """Tests for pcb_query.py CLI."""
+
+    def test_file_not_found(self, capsys, monkeypatch, tmp_path):
+        """Test handling of missing file."""
+        from kicad_tools.cli.pcb_query import main
+
+        missing_file = tmp_path / "definitely_missing" / "nonexistent.kicad_pcb"
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(missing_file), "summary"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err or "not found" in captured.err.lower()
+
+    def test_summary_command(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test summary command."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "summary"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "PCB:" in captured.out
+        assert len(captured.out) > 0
+
+    def test_summary_json(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test summary command with JSON output."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(minimal_pcb), "summary", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, dict)
+        assert "width_mm" in data
+        assert "height_mm" in data
+        assert "area_mm2" in data
+
+    def test_footprints_command(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test footprints command."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "footprints"])
+        main()
+
+        captured = capsys.readouterr()
+        # Should output footprint info or "no footprints"
+        assert len(captured.out) > 0
+
+    def test_footprints_json(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test footprints command with JSON output."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(minimal_pcb), "footprints", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, list)
+
+    def test_footprints_filter(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test footprints command with filter."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(minimal_pcb), "footprints", "--filter", "R*"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        # Should work without error
+        assert len(captured.out) > 0
+
+    def test_footprints_sorted(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test footprints command with sorting."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "footprints", "--sorted"])
+        main()
+
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_footprint_detail(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test footprint detail command."""
+        from kicad_tools.cli.pcb_query import main
+
+        # R1 exists in minimal_pcb fixture
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "footprint", "R1"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "R1" in captured.out
+
+    def test_nets_command(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test nets command."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets"])
+        main()
+
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_nets_json(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test nets command with JSON output."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--format", "json"])
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, list)
+
+    def test_nets_json_zone_fields_present(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test nets JSON output includes zone_connected and zone_layers fields."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--format", "json"])
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, list)
+        assert len(data) > 0
+        for net_entry in data:
+            assert "zone_connected" in net_entry
+            assert "zone_layers" in net_entry
+            assert isinstance(net_entry["zone_connected"], bool)
+            assert isinstance(net_entry["zone_layers"], list)
+
+    def test_nets_json_no_zones(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test nets JSON output on board with no zones shows zone_connected: false."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--format", "json"])
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # minimal_pcb has no zones, so all nets should be zone_connected: false
+        for net_entry in data:
+            assert net_entry["zone_connected"] is False
+            assert net_entry["zone_layers"] == []
+
+    def test_nets_json_with_zones(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test nets JSON output on board with zones shows zone connectivity."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(zone_test_pcb), "nets", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Build lookup by net name
+        by_name = {entry["name"]: entry for entry in data}
+
+        # GND has zones on F.Cu and B.Cu
+        assert by_name["GND"]["zone_connected"] is True
+        assert "F.Cu" in by_name["GND"]["zone_layers"]
+        assert "B.Cu" in by_name["GND"]["zone_layers"]
+
+        # +3.3V has a zone on B.Cu
+        assert by_name["+3.3V"]["zone_connected"] is True
+        assert "B.Cu" in by_name["+3.3V"]["zone_layers"]
+
+    def test_nets_text_zone_column(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test nets text output includes Zone column header and zone layers."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(zone_test_pcb), "nets"])
+        main()
+
+        captured = capsys.readouterr()
+        # Check header includes Zone column
+        assert "Zone" in captured.out
+        # GND should show its zone layers
+        assert "F.Cu" in captured.out or "B.Cu" in captured.out
+
+    def test_nets_sorted(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test nets command with sorting."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--sorted"])
+        main()
+
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_net_detail(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test net detail command."""
+        from kicad_tools.cli.pcb_query import main
+
+        # GND exists in minimal_pcb fixture
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "net", "GND"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "GND" in captured.out
+
+    def test_net_detail_json_zone_fields(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test net detail JSON output includes zone fields."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(zone_test_pcb), "net", "GND", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["zone_connected"] is True
+        assert "F.Cu" in data["zone_layers"]
+        assert "B.Cu" in data["zone_layers"]
+
+    def test_net_detail_text_zone_layers(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test net detail text output shows zone layers."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(zone_test_pcb), "net", "GND"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "Zone layers:" in captured.out
+        assert "F.Cu" in captured.out
+
+    def test_net_detail_text_no_zones(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test net detail text output shows (none) when no zones."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "net", "GND"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "Zone layers: (none)" in captured.out
+
+    def test_traces_command(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test traces command."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "traces"])
+        main()
+
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_traces_json(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test traces command with JSON output."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(minimal_pcb), "traces", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, dict)
+
+    def test_vias_command(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test vias command."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "vias"])
+        main()
+
+        captured = capsys.readouterr()
+        # May have "No vias" or via list
+        assert len(captured.out) > 0
+
+    def test_vias_json(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test vias command with JSON output."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "vias", "--format", "json"])
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, list)
+
+    def test_stackup_command(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test stackup command."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "stackup"])
+        main()
+
+        captured = capsys.readouterr()
+        # Should show layer stackup info
+        assert len(captured.out) > 0
+
+    def test_stackup_json(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Test stackup command with JSON output."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(minimal_pcb), "stackup", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, (list, dict))
+
+    def test_routing_test_pcb(self, routing_test_pcb: Path, capsys, monkeypatch):
+        """Test with routing test PCB fixture."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(routing_test_pcb), "summary"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "PCB:" in captured.out
+
+    def test_zone_test_pcb(self, zone_test_pcb: Path, capsys, monkeypatch):
+        """Test with zone test PCB fixture."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(zone_test_pcb), "summary"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "PCB:" in captured.out
+
+
+class TestPcbModify:
+    """Tests for pcb_modify.py CLI.
+
+    Covers both legacy fp_text references and modern Reference properties.
+    """
+
+    @pytest.fixture
+    def legacy_pcb(self, tmp_path):
+        """Create a PCB with legacy fp_text format for modify tests."""
+        pcb_content = """(kicad_pcb
+  (version 20231120)
+  (generator "test")
+  (generator_version "7.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (at 100 100)
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS"))
+    (fp_text value "10k" (at 0 1.5) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1))
+)"""
+        pcb_file = tmp_path / "legacy.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    def test_file_not_found(self, capsys, monkeypatch, tmp_path):
+        """Test handling of missing file."""
+        from kicad_tools.cli.pcb_modify import main
+
+        missing_file = tmp_path / "definitely_missing" / "nonexistent.kicad_pcb"
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-modify", str(missing_file), "move", "R1", "100", "100"]
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err or "not found" in captured.err.lower()
+
+    def test_move_dry_run(self, legacy_pcb: Path, capsys, monkeypatch):
+        """Test move command with dry run."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(legacy_pcb), "move", "R1", "120", "130", "--dry-run"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        assert "Moving R1" in captured.out
+        assert "120" in captured.out
+        assert "130" in captured.out
+
+    def test_move_to_output_file(self, legacy_pcb: Path, tmp_path, capsys, monkeypatch):
+        """Test move command writing to output file."""
+        from kicad_tools.cli.pcb_modify import main
+
+        output_file = tmp_path / "output.kicad_pcb"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "pcb-modify",
+                str(legacy_pcb),
+                "move",
+                "R1",
+                "120",
+                "130",
+                "-o",
+                str(output_file),
+            ],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        assert "Moving R1" in captured.out
+        assert output_file.exists()
+
+    def test_move_footprint_not_found(self, legacy_pcb: Path, capsys, monkeypatch):
+        """Test move command with non-existent footprint."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(legacy_pcb), "move", "NONEXISTENT", "100", "100", "--dry-run"],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err
+
+    def test_rotate_dry_run(self, legacy_pcb: Path, capsys, monkeypatch):
+        """Test rotate command with dry run."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(legacy_pcb), "rotate", "R1", "90", "--dry-run"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        assert "Rotating R1" in captured.out
+        assert "90" in captured.out
+
+    def test_flip_dry_run(self, legacy_pcb: Path, capsys, monkeypatch):
+        """Test flip command with dry run."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-modify", str(legacy_pcb), "flip", "R1", "--dry-run"])
+        main()
+
+        captured = capsys.readouterr()
+        assert "Flipping R1" in captured.out
+
+    def test_update_value_dry_run(self, legacy_pcb: Path, capsys, monkeypatch):
+        """Test update-value command with dry run."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(legacy_pcb), "update-value", "R1", "22k", "--dry-run"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        assert "Updating value" in captured.out or "R1" in captured.out
+
+    def test_rename_dry_run(self, legacy_pcb: Path, capsys, monkeypatch):
+        """Test rename command with dry run."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(legacy_pcb), "rename", "R1", "R10", "--dry-run"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        assert "Renaming" in captured.out or "R1" in captured.out
+
+    def test_delete_traces_dry_run(self, legacy_pcb: Path, capsys, monkeypatch):
+        """Test delete-traces command with dry run."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(legacy_pcb), "delete-traces", "GND", "--dry-run"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        # Should show "Deleting" or "deleted" info
+        assert "Deleting" in captured.out or "deleted" in captured.out.lower()
+
+    def test_delete_traces_actually_removes_segments(self, tmp_path, capsys, monkeypatch):
+        """Test delete-traces actually removes segments (not just dry-run).
+
+        This is a regression test for issue #552 where delete-traces reported
+        success but didn't actually remove segments due to deleting from a
+        computed property (sexp.values) instead of the actual list (sexp.children).
+        """
+        from kicad_tools.cli.pcb_modify import main
+
+        # Create a PCB with multiple segments on net GND
+        pcb_content = """(kicad_pcb
+  (version 20231120)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (segment (start 0 0) (end 10 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 10 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 20 0) (end 30 0) (width 0.2) (layer "F.Cu") (net 1))
+  (via (at 15 0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))
+  (segment (start 0 10) (end 10 10) (width 0.2) (layer "F.Cu") (net 2))
+)"""
+        pcb_file = tmp_path / "test_delete.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Run delete-traces on GND net (without dry-run)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(pcb_file), "delete-traces", "GND"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        assert "Segments: 3" in captured.out
+        assert "Vias:     1" in captured.out
+
+        # Read the modified file and verify segments are gone
+        modified_content = pcb_file.read_text()
+
+        # GND segments should be removed
+        assert "(net 1)" not in modified_content or modified_content.count("(net 1)") == 1
+        # The net definition itself should still exist (net 1 "GND")
+        assert '(net 1 "GND")' in modified_content
+        # VCC segment should still exist
+        assert "(net 2)" in modified_content
+
+    def test_kicad8_reference_is_found(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Modern Reference properties work for the shared lookup (#5019)."""
+        from kicad_tools.cli.pcb_modify import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(minimal_pcb), "move", "R1", "100", "100", "--dry-run"],
+        )
+        main()
+        captured = capsys.readouterr()
+        assert "Moving R1" in captured.out
+        assert "not found" not in captured.err
+
+
+class TestPcbStrip:
+    """Tests for 'kicad-tools pcb strip' command."""
+
+    def test_strip_dry_run(self, minimal_pcb: Path, capsys):
+        """Test strip command with dry run shows what would be removed."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "Removed:" in captured.out
+        assert "Segments:" in captured.out
+
+    def test_strip_creates_output_file(self, minimal_pcb: Path, tmp_path, capsys):
+        """Test strip command creates output file."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        assert output_file.exists()
+
+        # Verify the output file has no traces
+        from kicad_tools.schema.pcb import PCB
+
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 0
+
+    def test_strip_json_output(self, minimal_pcb: Path, tmp_path, capsys):
+        """Test strip command with JSON output format."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            keep_zones=True,
+            format="json",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "before" in data
+        assert "removed" in data
+        assert "after" in data
+        assert "segments" in data["removed"]
+        assert "vias" in data["removed"]
+
+    def test_strip_specific_nets(self, tmp_path, capsys):
+        """Test stripping only specific nets via CLI."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        # Create a PCB with traces on multiple nets
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 10.0),
+            width=0.25,
+            layer="F.Cu",
+            net="GND",
+        )
+        pcb.add_trace(
+            start=(10.0, 20.0),
+            end=(50.0, 20.0),
+            width=0.25,
+            layer="F.Cu",
+            net="VCC",
+        )
+
+        input_file = tmp_path / "multi_net.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets="GND",
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+
+        # Verify only GND trace was removed
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 1
+
+    def test_strip_removes_zones_when_requested(self, zone_test_pcb: Path, tmp_path, capsys):
+        """Test stripping zones with --no-keep-zones."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(zone_test_pcb),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            keep_zones=False,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+
+        # Verify zones were removed
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.zones) == 0
+
+    def test_strip_file_not_found(self, tmp_path, capsys):
+        """Test strip command with non-existent file."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        args = Namespace(
+            pcb=str(tmp_path / "nonexistent.kicad_pcb"),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower() or "error" in captured.err.lower()
+
+    def test_strip_default_output_suffix(self, minimal_pcb: Path, capsys):
+        """Test that strip creates output with -stripped suffix when no output specified."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        # minimal_pcb is already in tmp_path from the fixture
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+
+        # Check that the stripped file was created with the suffix
+        expected_output = minimal_pcb.with_stem(f"{minimal_pcb.stem}-stripped")
+        assert expected_output.exists()
+
+    def test_strip_layers_filter(self, tmp_path, capsys):
+        """Test --layers filter strips only specified layers."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_B")
+        pcb.add_trace(start=(10, 30), end=(50, 30), width=0.25, layer="B.Cu", net="SIG_C")
+
+        input_file = tmp_path / "multi_layer.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 2
+        remaining_layers = {seg.layer for seg in stripped_pcb.segments}
+        assert "In1.Cu" not in remaining_layers
+        assert "F.Cu" in remaining_layers
+        assert "B.Cu" in remaining_layers
+
+    def test_strip_layers_and_nets_combined_cli(self, tmp_path, capsys):
+        """Test combined --layers and --nets filter via CLI."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="AUDIO_R")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="AUDIO_L")
+        pcb.add_trace(start=(10, 30), end=(50, 30), width=0.25, layer="F.Cu", net="AUDIO_R")
+
+        input_file = tmp_path / "combined.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets="AUDIO_R",
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        # Only In1.Cu + AUDIO_R removed, others kept
+        assert len(stripped_pcb.segments) == 2
+
+    def test_strip_power_exclusion_cli(self, tmp_path, capsys):
+        """Test that --layers excludes power nets by default in CLI."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        input_file = tmp_path / "power_test.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            layers="In1.Cu",
+            include_power=False,  # default — power excluded
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        # GND preserved, SIG_A removed
+        assert len(stripped_pcb.segments) == 1
+        # The remaining segment should be on a GND net (check via net name lookup)
+        gnd_num = None
+        for num, net in stripped_pcb.nets.items():
+            if net.name == "GND":
+                gnd_num = num
+                break
+        assert stripped_pcb.segments[0].net_number == gnd_num
+
+    def test_strip_include_power_cli(self, tmp_path, capsys):
+        """Test --include-power overrides power exclusion."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        input_file = tmp_path / "power_include.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 0  # both stripped
+
+    def test_strip_json_output_includes_layers(self, tmp_path, capsys):
+        """Test JSON output includes layer filter info."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+
+        input_file = tmp_path / "json_test.kicad_pcb"
+        pcb.save(input_file)
+
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="json",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers_filtered"] == ["In1.Cu"]
+        assert "exclude_power" in data
+        assert data["removed"]["segments"] == 1
+
+    def test_strip_dry_run_with_layers(self, tmp_path, capsys):
+        """Test --dry-run with --layers shows correct removal count."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
+        pcb.add_trace(start=(10, 20), end=(50, 20), width=0.25, layer="F.Cu", net="SIG_B")
+
+        input_file = tmp_path / "dry_run_layers.kicad_pcb"
+        pcb.save(input_file)
+
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            layers="In1.Cu",
+            include_power=True,
+            power_pattern=None,
+            remove_orphan_vias=False,
+            keep_zones=True,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "Filtering layers: In1.Cu" in captured.out
+
+    def _region_strip_args(self, input_file, output_file, region, **overrides):
+        """Build a Namespace for a region strip invocation with sane defaults."""
+        from argparse import Namespace
+
+        defaults = {
+            "pcb": str(input_file),
+            "pcb_command": "strip",
+            "output": str(output_file) if output_file is not None else None,
+            "nets": None,
+            "layers": None,
+            "region": region,
+            "include_power": True,
+            "power_pattern": None,
+            "remove_orphan_vias": False,
+            "keep_zones": True,
+            "format": "text",
+            "dry_run": False,
+        }
+        defaults.update(overrides)
+        return Namespace(**defaults)
+
+    def test_strip_region_cli_removes_in_region_only(self, tmp_path, capsys):
+        """--region strips only geometry inside the box."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="SIG_A")
+        pcb.add_trace(start=(60, 60), end=(70, 60), width=0.25, layer="F.Cu", net="SIG_B")
+
+        input_file = tmp_path / "region_cli.kicad_pcb"
+        pcb.save(input_file)
+        output_file = tmp_path / "stripped.kicad_pcb"
+
+        args = self._region_strip_args(input_file, output_file, "10,10,40,40")
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped = PCB.load(output_file)
+        assert len(stripped.segments) == 1  # only the in-region SIG_A removed
+
+    def test_strip_region_cli_json_reports_region_stats(self, tmp_path, capsys):
+        """JSON output includes region and clip/skip counts."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        # Crossing segment: clipped at the x=40 boundary.
+        pcb.add_trace(start=(20, 20), end=(60, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        input_file = tmp_path / "region_json.kicad_pcb"
+        pcb.save(input_file)
+        output_file = tmp_path / "stripped.kicad_pcb"
+
+        args = self._region_strip_args(input_file, output_file, "10,10,40,40", format="json")
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["region"] == [10.0, 10.0, 40.0, 40.0]
+        assert data["removed"]["segments_clipped"] == 1
+
+    def test_strip_region_cli_dry_run_text(self, tmp_path, capsys):
+        """Dry-run text output mentions the region."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="SIG_A")
+
+        input_file = tmp_path / "region_dry.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "10,10,40,40", dry_run=True)
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "Region:" in captured.out
+
+    def test_strip_region_cli_and_nets_combined(self, tmp_path, capsys):
+        """--region composes with --nets (ANDed) via the CLI."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(20, 20), end=(30, 20), width=0.25, layer="F.Cu", net="NET_A")
+        pcb.add_trace(start=(20, 30), end=(30, 30), width=0.25, layer="F.Cu", net="NET_B")
+
+        input_file = tmp_path / "region_nets.kicad_pcb"
+        pcb.save(input_file)
+        output_file = tmp_path / "stripped.kicad_pcb"
+
+        args = self._region_strip_args(input_file, output_file, "10,10,40,40", nets="NET_A")
+        result = run_pcb_command(args)
+
+        assert result == 0
+        stripped = PCB.load(output_file)
+        assert len(stripped.segments) == 1  # NET_B in-region survives the net filter
+
+    def test_strip_region_cli_invalid_wrong_count(self, tmp_path, capsys):
+        """A --region with the wrong number of values fails fast."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        input_file = tmp_path / "bad_region.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "10,10,40")
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "region" in captured.err.lower()
+
+    def test_strip_region_cli_invalid_non_numeric(self, tmp_path, capsys):
+        """A non-numeric --region value fails fast."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        input_file = tmp_path / "bad_region2.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "10,10,foo,40")
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "numeric" in captured.err.lower()
+
+    def test_strip_region_cli_invalid_inverted(self, tmp_path, capsys):
+        """A --region with x1>=x2 or y1>=y2 fails fast (CLI validation)."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        input_file = tmp_path / "bad_region3.kicad_pcb"
+        pcb.save(input_file)
+
+        args = self._region_strip_args(input_file, None, "40,40,10,10")
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "x1 < x2" in captured.err or "region" in captured.err.lower()
+
+
+# PCB with multiple footprints for reannotation testing
+MULTI_FOOTPRINT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000101"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000102"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 110 100)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000201"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000202"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (at 120 100)
+    (property "Reference" "C3" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000301"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000302"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000004")
+    (at 130 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000401"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000402"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000005")
+    (at 140 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000501"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000502"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+)
+"""
+
+
+# KiCad 7 format PCB with fp_text instead of property
+KICAD7_MULTI_FOOTPRINT_PCB = """(kicad_pcb
+  (version 20230101)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 100 100)
+    (fp_text reference "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (fp_text value "10k" (at 0 1.5 0) (layer "F.Fab")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000020")
+    (at 110 100)
+    (fp_text reference "R2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (fp_text value "22k" (at 0 1.5 0) (layer "F.Fab")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def multi_fp_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with multiple footprints for reannotation testing."""
+    pcb_file = tmp_path / "multi.kicad_pcb"
+    pcb_file.write_text(MULTI_FOOTPRINT_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def kicad7_multi_fp_pcb(tmp_path: Path) -> Path:
+    """Create a KiCad 7 format PCB with multiple footprints."""
+    pcb_file = tmp_path / "kicad7_multi.kicad_pcb"
+    pcb_file.write_text(KICAD7_MULTI_FOOTPRINT_PCB)
+    return pcb_file
+
+
+# Pre-KiCad-6 (module ...) format PCB with multiple footprints (issue #4892)
+LEGACY_MODULE_MULTI_FOOTPRINT_PCB = """(kicad_pcb (version 4)
+  (general (thickness 1.6))
+  (page A4)
+  (layers (0 F.Cu signal) (31 B.Cu signal))
+  (net 0 "")
+  (net 1 GND)
+  (module Resistor_SMD:R_0402_1005Metric (layer F.Cu) (tedit 5A1F2B3C) (at 100 100)
+    (fp_text reference R1 (at 0 -1.5) (layer F.SilkS))
+    (fp_text value 10k (at 0 1.5) (layer F.Fab))
+    (pad 1 smd roundrect (at -0.51 0) (size 0.54 0.64) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+  )
+  (module Resistor_SMD:R_0402_1005Metric (layer F.Cu) (tedit 5A1F2B3D) (at 110 100)
+    (fp_text reference R2 (at 0 -1.5) (layer F.SilkS))
+    (fp_text value 10k (at 0 1.5) (layer F.Fab))
+    (pad 1 smd roundrect (at -0.51 0) (size 0.54 0.64) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+  )
+)
+"""
+
+
+@pytest.fixture
+def legacy_module_multi_fp_pcb(tmp_path: Path) -> Path:
+    """Create a pre-KiCad-6 ``(module ...)`` format PCB with multiple footprints."""
+    pcb_file = tmp_path / "legacy_module_multi.kicad_pcb"
+    pcb_file.write_text(LEGACY_MODULE_MULTI_FOOTPRINT_PCB)
+    return pcb_file
+
+
+class TestPcbDedupe:
+    """Tests for 'kicad-tools pcb dedupe' command (issue #4175)."""
+
+    def _bloated_board(self, path: Path):
+        """Create a board with pre-seeded exact-duplicate segments + vias."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        # 4 identical segments (route-auto retry pattern) + 1 distinct one.
+        for _ in range(4):
+            pcb.add_trace(
+                start=(10.0, 10.0),
+                end=(50.0, 10.0),
+                width=0.25,
+                layer="F.Cu",
+                net="Sig1",
+                dedupe=False,
+            )
+        pcb.add_trace(
+            start=(50.0, 10.0),
+            end=(50.0, 40.0),
+            width=0.25,
+            layer="F.Cu",
+            net="Sig1",
+            dedupe=False,
+        )
+        # 3 identical vias + 1 distinct via.
+        for _ in range(3):
+            pcb.add_via(x=50.0, y=10.0, net="Sig1", dedupe=False)
+        pcb.add_via(x=60.0, y=30.0, net="Sig1", dedupe=False)
+        pcb.save(path)
+        return pcb
+
+    def test_dedupe_removes_duplicates_in_place(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+
+        # Sanity: the seeded board is genuinely bloated.
+        seeded = PCB.load(board)
+        assert len(seeded.segments) == 5
+        assert len(seeded.vias) == 4
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        captured = capsys.readouterr()
+        assert "Segments: 3" in captured.out  # 3 duplicate segments removed
+        assert "Vias:     2" in captured.out  # 2 duplicate vias removed
+
+        # In-place: the input file now has one instance per geometry.
+        cleaned = PCB.load(board)
+        assert len(cleaned.segments) == 2
+        assert len(cleaned.vias) == 2
+
+    def test_dedupe_output_override(self, tmp_path):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+        out = tmp_path / "cleaned.kicad_pcb"
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=str(out),
+            format="text",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        # Input untouched, output deduplicated.
+        assert len(PCB.load(board).segments) == 5
+        assert len(PCB.load(out).segments) == 2
+        assert len(PCB.load(out).vias) == 2
+
+    def test_dedupe_json_reports_counts(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="json",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["removed"]["segments"] == 3
+        assert data["removed"]["vias"] == 2
+        assert data["after"]["segments"] == 2
+        assert data["after"]["vias"] == 2
+
+    def test_dedupe_noop_on_clean_board(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(start=(10.0, 10.0), end=(50.0, 10.0), net="Sig1")
+        pcb.add_via(x=30.0, y=20.0, net="Sig1")
+        board = tmp_path / "clean.kicad_pcb"
+        pcb.save(board)
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="json",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["removed"] == {"segments": 0, "vias": 0}
+        # Board is unchanged.
+        reloaded = PCB.load(board)
+        assert len(reloaded.segments) == 1
+        assert len(reloaded.vias) == 1
+
+    def test_dedupe_preserves_connectivity(self, tmp_path):
+        """Deduping keeps one copy of each distinct geometry, so nets stay wired."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+        before = PCB.load(board)
+        net_num = next(n.number for n in before.nets.values() if n.name == "Sig1")
+        before_geom = {
+            (round(s.start[0], 3), round(s.start[1], 3), round(s.end[0], 3), round(s.end[1], 3))
+            for s in before.segments_in_net(net_num)
+        }
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+        assert run_pcb_command(args) == 0
+
+        after = PCB.load(board)
+        after_geom = {
+            (round(s.start[0], 3), round(s.start[1], 3), round(s.end[0], 3), round(s.end[1], 3))
+            for s in after.segments_in_net(net_num)
+        }
+        # No distinct segment geometry lost -> connectivity unchanged.
+        assert before_geom == after_geom
+
+    def test_dedupe_dry_run_does_not_modify(self, tmp_path, capsys):
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        board = tmp_path / "bloated.kicad_pcb"
+        self._bloated_board(board)
+
+        args = Namespace(
+            pcb=str(board),
+            pcb_command="dedupe",
+            output=None,
+            format="text",
+            dry_run=True,
+        )
+        assert run_pcb_command(args) == 0
+        assert "dry run" in capsys.readouterr().out.lower()
+
+        # File untouched.
+        assert len(PCB.load(board).segments) == 5
+        assert len(PCB.load(board).vias) == 4
+
+
+class TestPcbReannotate:
+    """Tests for pcb reannotate command."""
+
+    def test_simple_rename(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test simple non-conflicting rename (A->B where B does not exist)."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        # Create mapping file
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10", "R1": "R10"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Verify renames applied
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C10" in refs
+        assert "R10" in refs
+        assert "C1" not in refs
+        assert "R1" not in refs
+        # Unchanged refs still present
+        assert "C2" in refs
+        assert "C3" in refs
+        assert "R2" in refs
+
+    def test_collision_chain(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test collision chain: A->B, B->C where B is both source and target."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        # C1->C2, C2->C3, C3->C10 (chain)
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C2", "C2": "C3", "C3": "C10"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Verify: original C1 should now be C2, original C2 should be C3,
+        # original C3 should be C10
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C2" in refs
+        assert "C3" in refs
+        assert "C10" in refs
+        assert "C1" not in refs
+
+    def test_cyclic_rename(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test cyclic rename: A->B, B->A (swap)."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C2", "C2": "C1"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Load and check: both C1 and C2 should still exist (swapped)
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C1" in refs
+        assert "C2" in refs
+
+    def test_three_way_cycle(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test 3-way cyclic rename: A->B, B->C, C->A."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C2", "C2": "C3", "C3": "C1"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        # All three should still exist after the cycle
+        assert "C1" in refs
+        assert "C2" in refs
+        assert "C3" in refs
+
+    def test_dry_run_no_modification(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test --dry-run produces output without modifying the file."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10"}))
+
+        # Read original content
+        original_content = multi_fp_pcb.read_text()
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # File should be unchanged
+        assert multi_fp_pcb.read_text() == original_content
+
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "C1" in captured.out
+        assert "C10" in captured.out
+
+    def test_dry_run_json_format(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test --dry-run with JSON output format."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10", "C2": "C20"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="json",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["dry_run"] is True
+        assert len(data["renames"]) > 0
+        assert data["mapping"] == {"C1": "C10", "C2": "C20"}
+
+    def test_json_output_format(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test JSON output format for actual renames."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="json",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["dry_run"] is False
+        assert data["output"] == str(output_file)
+        assert len(data["renames"]) == 1
+
+    def test_missing_source_ref_error(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error when source reference does not exist in PCB."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"NONEXISTENT": "C10"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "NONEXISTENT" in captured.err
+        assert "not found" in captured.err.lower()
+
+    def test_target_collides_with_existing_non_mapped_ref(
+        self, multi_fp_pcb: Path, tmp_path, capsys
+    ):
+        """Test error when target collides with existing ref not in the mapping."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        # C1 -> R1, but R1 exists and is NOT being renamed
+        # Actually R1 is in the PCB. Map C1 to R2 (R2 also exists and is not mapped).
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "R2"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "R2" in captured.err
+        assert "already exists" in captured.err.lower()
+
+    def test_empty_mapping(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test empty mapping file is a no-op."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text("{}")
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+    def test_empty_mapping_json_format(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test empty mapping with JSON output."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text("{}")
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="json",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "no-op"
+
+    def test_invalid_json_mapping(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error on invalid JSON mapping file."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text("not json at all")
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "invalid json" in captured.err.lower()
+
+    def test_mapping_file_not_found(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error when mapping file does not exist."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(tmp_path / "nonexistent.json"),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+
+    def test_overwrite_input_when_no_output(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test that without -o, the input file is overwritten."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Verify input file was modified
+        pcb = PCB.load(multi_fp_pcb)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C10" in refs
+        assert "C1" not in refs
+
+    def test_kicad7_format_rename(self, kicad7_multi_fp_pcb: Path, tmp_path, capsys):
+        """Test rename with KiCad 7 fp_text format."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"R1": "R10", "R2": "R20"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(kicad7_multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "R10" in refs
+        assert "R20" in refs
+        assert "R1" not in refs
+        assert "R2" not in refs
+
+    def test_legacy_module_format_rename(self, legacy_module_multi_fp_pcb: Path, tmp_path, capsys):
+        """Test rename with pre-KiCad-6 ``(module ...)`` format (issue #4892).
+
+        Before the fix, ``_update_footprint_reference``'s
+        ``pcb._sexp.find_all("footprint")`` call never matched a legacy
+        ``(module ...)`` node, so the rename silently found nothing to
+        update on a board sourced from a pre-KiCad-6 tool.
+        """
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"R1": "R10", "R2": "R20"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(legacy_module_multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "R10" in refs
+        assert "R20" in refs
+        assert "R1" not in refs
+        assert "R2" not in refs
+
+    def test_mapping_not_a_dict(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error when mapping file contains a non-dict JSON value."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text('["C1", "C2"]')
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "object" in captured.err.lower() or "dict" in captured.err.lower()
+
+
+# PCB fixture exercising padmap edge cases: NPTH pad (empty number, no net),
+# an unconnected numbered pad (no net child), and two pads sharing a number.
+PADMAP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (footprint "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "U5" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (property "Value" "UCC27211" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 2 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+    (pad "3" smd roundrect (at 1 0) (size 0.5 0.6)
+      (layers "F.Cu"))
+    (pad "" np_thru_hole circle (at 2 2) (size 1 1) (drill 0.8)
+      (layers "*.Cu"))
+    (pad "MP" smd roundrect (at 3 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+    (pad "MP" smd roundrect (at 4 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 110 100)
+    (property "Reference" "R10" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 2 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (at 120 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 2 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.5 0.6)
+      (layers "F.Cu") (net 1 "GND"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def padmap_pcb(tmp_path: Path) -> Path:
+    """PCB with NPTH, unconnected, and duplicate-number pads for padmap tests."""
+    pcb_file = tmp_path / "padmap.kicad_pcb"
+    pcb_file.write_text(PADMAP_PCB)
+    return pcb_file
+
+
+class TestPcbPadmap:
+    """Tests for the 'pcb padmap' command."""
+
+    def test_full_dump_text(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Full dump lists every footprint and pad, natural-ref-sorted."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap"])
+        main()
+
+        captured = capsys.readouterr()
+        out = captured.out
+        # All footprints present
+        assert "R2" in out
+        assert "R10" in out
+        assert "U5" in out
+        # Natural-ref sort: R2 before R10, both before U5
+        assert out.index("R2") < out.index("R10") < out.index("U5")
+        # Header includes value + library id
+        assert "UCC27211" in out
+        assert "[Package_SO:SOIC-8_3.9x4.9mm_P1.27mm]" in out
+        # Pad rows
+        assert "pad 1  VCC" in out
+        assert "pad 2  GND" in out
+
+    def test_full_dump_json(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Full dump JSON parses and contains every footprint/pad."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert isinstance(data, list)
+        refs = [entry["reference"] for entry in data]
+        assert refs == ["R2", "R10", "U5"]
+        u5 = next(e for e in data if e["reference"] == "U5")
+        # U5 has 6 pads (incl NPTH + duplicate MP)
+        assert len(u5["pads"]) == 6
+
+    def test_ref_scopes_to_single_footprint(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--ref limits output to one footprint."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--ref", "R10"])
+        main()
+
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "R10" in out
+        assert "U5" not in out
+        assert "R2\n" not in out
+
+    def test_ref_unknown_exits_1(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Unknown --ref exits 1 with an error on stderr."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--ref", "ZZ99"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+        assert "Available" in captured.err
+
+    def test_net_inversion(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--net inverts to net-owning-pads mode."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--net", "GND"])
+        main()
+
+        captured = capsys.readouterr()
+        lines = {line.strip() for line in captured.out.splitlines() if "." in line}
+        assert lines == {"U5.2", "U5.MP", "R10.2", "R2.2"}
+
+    def test_net_inversion_json(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--net JSON has {net, pads:[{ref, pad}]} shape; NPTH pads excluded."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--net", "VCC", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["net"] == "VCC"
+        got = {(p["ref"], p["pad"]) for p in data["pads"]}
+        assert got == {("U5", "1"), ("R10", "1"), ("R2", "1")}
+
+    def test_net_unknown_exits_1(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Unknown --net exits 1 with an error on stderr."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--net", "NOPE"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+        assert "Available" in captured.err
+
+    def test_ref_and_net_mutually_exclusive(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--ref and --net together is a usage error (exit 1)."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--net", "GND"],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "mutually exclusive" in captured.err.lower()
+
+    def test_no_net_pad_text(self, padmap_pcb: Path, capsys, monkeypatch):
+        """No-net / NPTH pads render as '(no net)' in text, sorted last."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5"])
+        main()
+
+        captured = capsys.readouterr()
+        out = captured.out
+        # Unconnected numbered pad 3 and NPTH pad both show (no net)
+        assert "pad 3  (no net)" in out
+        assert "(no net)" in out
+        # Empty-number pad string never emitted as an empty net string
+        assert '""' not in out
+
+    def test_no_net_pad_json_null(self, padmap_pcb: Path, capsys, monkeypatch):
+        """No-net pads serialize as JSON null, not empty string."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        pads = data[0]["pads"]
+        no_net = [p for p in pads if p["net"] is None]
+        # pad 3 (unconnected) + NPTH pad
+        assert len(no_net) == 2
+        # None of the nets is an empty string
+        assert all(p["net"] is None or p["net"] for p in pads)
+
+    def test_npth_pad_included_and_sorts_last(self, padmap_pcb: Path, capsys, monkeypatch):
+        """NPTH pad (empty number) is included and sorts last without crashing."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        numbers = [p["number"] for p in json.loads(captured.out)[0]["pads"]]
+        # Numeric pads first, then non-numeric/empty last
+        assert numbers[0] == "1"
+        assert numbers[1] == "2"
+        assert numbers[2] == "3"
+        assert "" in numbers[3:]
+
+    def test_duplicate_pad_numbers_all_present(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Both pads sharing number 'MP' appear (no silent de-dup)."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--ref", "U5", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        numbers = [p["number"] for p in json.loads(captured.out)[0]["pads"]]
+        assert numbers.count("MP") == 2
+
+    def test_json_schema_stability_full_dump(self, padmap_pcb: Path, capsys, monkeypatch):
+        """Full-dump JSON entries have the exact documented key schema."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv", ["pcb-query", str(padmap_pcb), "padmap", "--format", "json"]
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        for entry in data:
+            assert set(entry.keys()) == {"reference", "value", "footprint", "pads"}
+            for pad in entry["pads"]:
+                assert set(pad.keys()) == {"number", "net"}
+
+    def test_json_schema_stability_net_mode(self, padmap_pcb: Path, capsys, monkeypatch):
+        """--net JSON has the exact documented {net, pads:[{ref, pad}]} schema."""
+        from kicad_tools.cli.pcb_query import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-query", str(padmap_pcb), "padmap", "--net", "GND", "--format", "json"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert set(data.keys()) == {"net", "pads"}
+        for pad in data["pads"]:
+            assert set(pad.keys()) == {"ref", "pad"}
+
+    def test_dispatch_via_run_pcb_command(self, padmap_pcb: Path, capsys):
+        """padmap is reachable through run_pcb_command dispatch."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        args = Namespace(
+            pcb=str(padmap_pcb),
+            pcb_command="padmap",
+            format="json",
+            ref="R10",
+            net=None,
+        )
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data[0]["reference"] == "R10"

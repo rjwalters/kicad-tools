@@ -1,0 +1,2196 @@
+{
+  "schema_version": 1,
+  "board": "05",
+  "runs": {
+    "run1": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run1",
+      "harness_dumps": [],
+      "offline_replays": [],
+      "deadline_checkpoint": {
+        "file": "bldc_controller_routed_timeout_unverified_mkpn56z5.kicad_pcb",
+        "net_status_why": {
+          "skipped": "no captured net-status pass for this artifact"
+        }
+      },
+      "completed_board": {
+        "file": "bldc_controller_routed_completed_unverified_gm9chr8w.kicad_pcb",
+        "net_status_why": {
+          "skipped": "no captured net-status pass for this artifact"
+        }
+      }
+    },
+    "run2": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run2",
+      "times": [
+        "START 2026-09-21T05:45:56Z",
+        "END 2026-09-21T06:01:13Z RC=1"
+      ],
+      "harness_dumps": [],
+      "offline_replays": [],
+      "deadline_checkpoint": {
+        "file": "bldc_controller_routed_timeout_unverified_feqjcfct.kicad_pcb",
+        "net_status_why": {
+          "skipped": "no captured net-status pass for this artifact"
+        }
+      },
+      "completed_board": {
+        "file": "bldc_controller_routed_completed_unverified_wi6m_k20.kicad_pcb",
+        "net_status_why": {
+          "skipped": "no captured net-status pass for this artifact"
+        }
+      }
+    },
+    "run3": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3",
+      "times": [
+        "START 2026-09-21T06:07:28Z",
+        "END 2026-09-21T06:22:38Z RC=1"
+      ],
+      "harness_dumps": [
+        {
+          "file": "witness-board05-run3.atexit.03.json",
+          "marker": "atexit",
+          "captured_at": "2026-09-21T06:22:35Z",
+          "unwind_exception": null,
+          "record_count": 220,
+          "truncated": false,
+          "stage_histogram": {
+            "escape[0]": 52,
+            "initial[0]": 160,
+            "relief[0]": 8
+          },
+          "net_commit_order_first20": [
+            "ISENSE_B+",
+            "ISENSE_B-",
+            "ISENSE_A+",
+            "ISENSE_A-",
+            "ISENSE_C-",
+            "GATE_CL",
+            "GATE_DRV_CH",
+            "BST_C",
+            "GATE_BL",
+            "GATE_DRV_BH",
+            "BST_B",
+            "GATE_AL",
+            "GATE_DRV_AH",
+            "BST_A",
+            "SW_OUT",
+            "PWM_CL",
+            "PWM_CH",
+            "PWM_BL",
+            "PWM_BH",
+            "PWM_AL"
+          ],
+          "rules": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_override_count": 52,
+          "failed_nets_at_capture": []
+        },
+        {
+          "file": "witness-board05-run3.atexit.04.json",
+          "marker": "atexit",
+          "captured_at": "2026-09-21T06:22:35Z",
+          "unwind_exception": null,
+          "record_count": 216,
+          "truncated": false,
+          "stage_histogram": {
+            "escape[0]": 52,
+            "initial[0]": 160,
+            "relief[0]": 4
+          },
+          "net_commit_order_first20": [
+            "ISENSE_B+",
+            "ISENSE_B-",
+            "ISENSE_A+",
+            "ISENSE_A-",
+            "ISENSE_C-",
+            "GATE_CL",
+            "GATE_DRV_CH",
+            "BST_C",
+            "GATE_BL",
+            "GATE_DRV_BH",
+            "BST_B",
+            "GATE_AL",
+            "GATE_DRV_AH",
+            "BST_A",
+            "SW_OUT",
+            "PWM_CL",
+            "PWM_CH",
+            "PWM_BL",
+            "PWM_BH",
+            "PWM_AL"
+          ],
+          "rules": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_override_count": 52,
+          "failed_nets_at_capture": []
+        },
+        {
+          "file": "witness-board05-run3.escape-return.01.json",
+          "marker": "escape-return",
+          "captured_at": "2026-09-21T06:15:08Z",
+          "unwind_exception": null,
+          "record_count": 220,
+          "truncated": false,
+          "stage_histogram": {
+            "escape[0]": 52,
+            "initial[0]": 160,
+            "relief[0]": 8
+          },
+          "net_commit_order_first20": [
+            "ISENSE_B+",
+            "ISENSE_B-",
+            "ISENSE_A+",
+            "ISENSE_A-",
+            "ISENSE_C-",
+            "GATE_CL",
+            "GATE_DRV_CH",
+            "BST_C",
+            "GATE_BL",
+            "GATE_DRV_BH",
+            "BST_B",
+            "GATE_AL",
+            "GATE_DRV_AH",
+            "BST_A",
+            "SW_OUT",
+            "PWM_CL",
+            "PWM_CH",
+            "PWM_BL",
+            "PWM_BH",
+            "PWM_AL"
+          ],
+          "rules": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_override_count": 52,
+          "failed_nets_at_capture": []
+        },
+        {
+          "file": "witness-board05-run3.escape-unwind.02.json",
+          "marker": "escape-unwind",
+          "captured_at": "2026-09-21T06:22:35Z",
+          "unwind_exception": "RouteDeadlineExpired()",
+          "record_count": 216,
+          "truncated": false,
+          "stage_histogram": {
+            "escape[0]": 52,
+            "initial[0]": 160,
+            "relief[0]": 4
+          },
+          "net_commit_order_first20": [
+            "ISENSE_B+",
+            "ISENSE_B-",
+            "ISENSE_A+",
+            "ISENSE_A-",
+            "ISENSE_C-",
+            "GATE_CL",
+            "GATE_DRV_CH",
+            "BST_C",
+            "GATE_BL",
+            "GATE_DRV_BH",
+            "BST_B",
+            "GATE_AL",
+            "GATE_DRV_AH",
+            "BST_A",
+            "SW_OUT",
+            "PWM_CL",
+            "PWM_CH",
+            "PWM_BL",
+            "PWM_BH",
+            "PWM_AL"
+          ],
+          "rules": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_override_count": 52,
+          "failed_nets_at_capture": []
+        }
+      ],
+      "offline_replays": [
+        {
+          "schema_version": 1,
+          "label": "run3-attempt1",
+          "dump": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run3.escape-return.01.json",
+          "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
+          "replayed_at": "2026-09-21T09:49:37Z",
+          "rules_used": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "layer_stack": "sig-gnd-pwr-sig",
+          "escape_overrides_injected": 52,
+          "pad_keys_missing_from_router": [],
+          "replay_seconds": 823.5,
+          "witness": {
+            "schema_version": 1,
+            "record_count": 220,
+            "evaluations": 267,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "R12",
+                "pin": "2",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "5",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "33",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "44",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "R10",
+                "pin": "2",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "7",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "34",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "24",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J4",
+                "pin": "3",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          },
+          "replay_file": "offline-board05-run3-attempt1.json",
+          "layer_stack_stated": true
+        },
+        {
+          "schema_version": 1,
+          "label": "run3-attempt2",
+          "dump": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run3.escape-unwind.02.json",
+          "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
+          "replayed_at": "2026-09-21T10:03:49Z",
+          "rules_used": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "layer_stack": "all-sig",
+          "escape_overrides_injected": 52,
+          "pad_keys_missing_from_router": [],
+          "replay_seconds": 830.1,
+          "witness": {
+            "schema_version": 1,
+            "record_count": 216,
+            "evaluations": 259,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "R12",
+                "pin": "2",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "5",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "33",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "44",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "R10",
+                "pin": "2",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "7",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "34",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "24",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J4",
+                "pin": "3",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          },
+          "replay_file": "offline-board05-run3-attempt2.json",
+          "layer_stack_stated": true
+        },
+        {
+          "schema_version": 1,
+          "label": "run3-attempt1",
+          "dump": "5508-1c-scratch/witness-board05-run3.escape-return.01.json",
+          "input": "5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
+          "replayed_at": "2026-09-21T06:42:56Z",
+          "rules_used": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_overrides_injected": 52,
+          "pad_keys_missing_from_router": [],
+          "replay_seconds": 26.3,
+          "witness": {
+            "schema_version": 1,
+            "record_count": 220,
+            "evaluations": 267,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "R12",
+                "pin": "2",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "5",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "33",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "44",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "R10",
+                "pin": "2",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "7",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "34",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "24",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J4",
+                "pin": "3",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          },
+          "replay_file": "offline-board05-run3.attempt1.json",
+          "layer_stack_stated": false
+        },
+        {
+          "schema_version": 1,
+          "label": "run3-attempt2-unwind",
+          "dump": "5508-1c-scratch/witness-board05-run3.escape-unwind.02.json",
+          "input": "5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
+          "replayed_at": "2026-09-21T06:44:11Z",
+          "rules_used": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_overrides_injected": 52,
+          "pad_keys_missing_from_router": [],
+          "replay_seconds": 14.4,
+          "witness": {
+            "schema_version": 1,
+            "record_count": 216,
+            "evaluations": 145,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "R12",
+                "pin": "2",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "5",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "33",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "44",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          },
+          "replay_file": "offline-board05-run3.attempt2.json",
+          "layer_stack_stated": false
+        }
+      ],
+      "deadline_checkpoint": {
+        "file": "bldc_controller_routed_timeout_unverified_hymaa_8p.kicad_pcb",
+        "net_status_why": {
+          "skipped": "no captured net-status pass for this artifact"
+        }
+      },
+      "completed_board": {
+        "file": "bldc_controller_routed_completed_unverified_8cpb5npe.kicad_pcb",
+        "net_status_why": {
+          "returncode": 0,
+          "source": "captured:board05-run3-completed.json",
+          "payload": {
+            "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller_routed_completed_unverified_8cpb5npe.kicad_pcb",
+            "connectivity_model": "strict",
+            "summary": {
+              "stuck_nets": 11,
+              "counts": {
+                "escape_blocked": 0,
+                "congestion_saturated": 1,
+                "placement_bound": 5,
+                "budget_starved": 0,
+                "pour_discontinuous": 5
+              }
+            },
+            "nets": [
+              {
+                "net_name": "ISENSE_A-",
+                "net_number": 15,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "R12.2",
+                  "U10.5",
+                  "U3.44"
+                ],
+                "blocking_nets": [
+                  "BST_B",
+                  "GATE_AL",
+                  "PWM_BH"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 161 foreign obstructions, nearest strict blocker 0.500mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 161,
+                "nearest_blocker_mm": 0.5,
+                "same_group_congestion": 0,
+                "foreign_congestion": 161,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "ISENSE_C-",
+                "net_number": 19,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "R10.2",
+                  "U10.7"
+                ],
+                "blocking_nets": [
+                  "PWM_AH",
+                  "ISENSE_B-",
+                  "PWM_BH"
+                ],
+                "evidence": "pad reachable (292 deg lane) but in a dense cluster (0 same-group + 199 foreign obstructions, nearest strict blocker 0.219mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 292.5,
+                "local_congestion": 199,
+                "nearest_blocker_mm": 0.2195,
+                "same_group_congestion": 0,
+                "foreign_congestion": 199,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "PHASE_A",
+                "net_number": 5,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "C14.2",
+                  "J2.3",
+                  "Q5.3",
+                  "Q6.2"
+                ],
+                "blocking_nets": [
+                  "BST_A"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 47 foreign obstructions, nearest strict blocker 1.419mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 47,
+                "nearest_blocker_mm": 1.4192,
+                "same_group_congestion": 0,
+                "foreign_congestion": 47,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "PHASE_B",
+                "net_number": 6,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "C13.2",
+                  "J2.2",
+                  "Q3.3",
+                  "Q4.2"
+                ],
+                "blocking_nets": [
+                  "BST_B"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 25 foreign obstructions, nearest strict blocker 1.576mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 25,
+                "nearest_blocker_mm": 1.5758,
+                "same_group_congestion": 0,
+                "foreign_congestion": 25,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "PHASE_C",
+                "net_number": 7,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "C12.2",
+                  "J2.1",
+                  "Q1.3",
+                  "Q2.2"
+                ],
+                "blocking_nets": [
+                  "BST_C",
+                  "ISENSE_C+",
+                  "GATE_CL"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 27 foreign obstructions, nearest strict blocker 1.418mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 27,
+                "nearest_blocker_mm": 1.4181,
+                "same_group_congestion": 0,
+                "foreign_congestion": 27,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "SWCLK",
+                "net_number": 24,
+                "classification": "congestion_saturated",
+                "failure_cause": "congestion",
+                "unconnected_pads": [
+                  "J4.3"
+                ],
+                "blocking_nets": [
+                  "SWDIO"
+                ],
+                "evidence": "pad reachable (360 deg lane) but boxed in by committed strict copper (nearest blocker 1.844mm); ripping it would strand SWDIO (1:1 trade)",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 18,
+                "nearest_blocker_mm": 1.8445,
+                "same_group_congestion": 0,
+                "foreign_congestion": 18,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "widen_channel",
+                    "rationale": "foreign strict blocker -- widen the corridor (region rip-up-and-reroute is the primary existing remedy)",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "+24V",
+                "net_number": 1,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C1.1",
+                  "C2.1",
+                  "C3.1",
+                  "D1.1",
+                  "Q1.2",
+                  "Q3.2",
+                  "Q5.2",
+                  "U1.1",
+                  "U3.29",
+                  "U3.52",
+                  "U3.53",
+                  "U3.54"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 12 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "+3V3",
+                "net_number": 3,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C6.1",
+                  "C7.1",
+                  "C8.1",
+                  "C9.1",
+                  "D3.2",
+                  "D4.2",
+                  "J3.4",
+                  "J4.1",
+                  "R30.1",
+                  "R31.1",
+                  "R32.1",
+                  "U10.1",
+                  "U10.15",
+                  "U10.17",
+                  "U2.2",
+                  "U3.10",
+                  "U3.11",
+                  "U3.16",
+                  "U3.23",
+                  "U3.24",
+                  "U3.4",
+                  "U3.49",
+                  "U3.5",
+                  "U3.55",
+                  "U3.6",
+                  "U3.8",
+                  "U3.9"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 27 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "+5V",
+                "net_number": 2,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C15.1",
+                  "C16.1",
+                  "C4.1",
+                  "C5.1",
+                  "L1.2",
+                  "U2.3",
+                  "U3.13",
+                  "U3.14",
+                  "U3.15",
+                  "U3.27",
+                  "U3.3"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 11 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "GND",
+                "net_number": 4,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C1.2",
+                  "C10.2",
+                  "C11.2",
+                  "C15.2",
+                  "C16.2",
+                  "C2.2",
+                  "C3.2",
+                  "C30.2",
+                  "C31.2",
+                  "C32.2",
+                  "C4.2",
+                  "C5.2",
+                  "C6.2",
+                  "C7.2",
+                  "C8.2",
+                  "C9.2",
+                  "D1.2",
+                  "D2.2",
+                  "J3.5",
+                  "J4.6",
+                  "R3.2",
+                  "R4.2",
+                  "U1.3",
+                  "U1.5",
+                  "U10.14",
+                  "U10.16",
+                  "U10.32",
+                  "U2.1",
+                  "U3.1",
+                  "U3.12",
+                  "U3.2",
+                  "U3.28",
+                  "U3.56",
+                  "U3.57",
+                  "U3.7"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 35 pad(s) stranded from main connected island (layers: B.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "VIN",
+                "net_number": 41,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "F1.1"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 1 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              }
+            ]
+          }
+        }
+      }
+    },
+    "run4": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4",
+      "times": [
+        "START 2026-09-21T06:24:49Z",
+        "END 2026-09-21T06:39:59Z RC=1"
+      ],
+      "harness_dumps": [
+        {
+          "file": "witness-board05-run4.escape-return.01.json",
+          "marker": "escape-return",
+          "captured_at": "2026-09-21T06:32:28Z",
+          "unwind_exception": null,
+          "record_count": 220,
+          "truncated": false,
+          "stage_histogram": {
+            "escape[0]": 52,
+            "initial[0]": 160,
+            "relief[0]": 8
+          },
+          "net_commit_order_first20": [
+            "ISENSE_B+",
+            "ISENSE_B-",
+            "ISENSE_A+",
+            "ISENSE_A-",
+            "ISENSE_C-",
+            "GATE_CL",
+            "GATE_DRV_CH",
+            "BST_C",
+            "GATE_BL",
+            "GATE_DRV_BH",
+            "BST_B",
+            "GATE_AL",
+            "GATE_DRV_AH",
+            "BST_A",
+            "SW_OUT",
+            "PWM_CL",
+            "PWM_CH",
+            "PWM_BL",
+            "PWM_BH",
+            "PWM_AL"
+          ],
+          "rules": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_override_count": 52,
+          "failed_nets_at_capture": []
+        }
+      ],
+      "offline_replays": [
+        {
+          "schema_version": 1,
+          "label": "run4-attempt1",
+          "dump": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run4.escape-return.01.json",
+          "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4/bldc_controller.kicad_pcb",
+          "replayed_at": "2026-09-21T10:27:14Z",
+          "rules_used": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "layer_stack": "sig-gnd-pwr-sig",
+          "escape_overrides_injected": 52,
+          "pad_keys_missing_from_router": [],
+          "replay_seconds": 1379.6,
+          "witness": {
+            "schema_version": 1,
+            "record_count": 220,
+            "evaluations": 267,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "R12",
+                "pin": "2",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "5",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "33",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "44",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "R10",
+                "pin": "2",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "7",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "34",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "24",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J4",
+                "pin": "3",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          },
+          "replay_file": "offline-board05-run4-attempt1.json",
+          "layer_stack_stated": true
+        },
+        {
+          "schema_version": 1,
+          "label": "run4-attempt1",
+          "dump": "5508-1c-scratch/witness-board05-run4.escape-return.01.json",
+          "input": "5508-1c-scratch/out/05-run4/bldc_controller.kicad_pcb",
+          "replayed_at": "2026-09-21T06:43:55Z",
+          "rules_used": {
+            "grid_resolution": 0.0635,
+            "trace_width": 0.2,
+            "trace_clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb-tier1",
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "escape_overrides_injected": 52,
+          "pad_keys_missing_from_router": [],
+          "replay_seconds": 25.8,
+          "witness": {
+            "schema_version": 1,
+            "record_count": 220,
+            "evaluations": 267,
+            "truncated": false,
+            "clearance": {
+              "min_hole_to_hole": 0.5,
+              "trace_clearance": 0.15,
+              "trace_width": 0.2,
+              "via_clearance": 0.2
+            },
+            "pads": [
+              {
+                "ref": "R12",
+                "pin": "2",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "5",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "33",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "44",
+                "net": 15,
+                "net_name": "ISENSE_A-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "R10",
+                "pin": "2",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "7",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U3",
+                "pin": "34",
+                "net": 19,
+                "net_name": "ISENSE_C-",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "U10",
+                "pin": "24",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              },
+              {
+                "ref": "J4",
+                "pin": "3",
+                "net": 24,
+                "net_name": "SWCLK",
+                "access_at_escape_end": "non-empty",
+                "final_access": "non-empty",
+                "first_closed_at": null,
+                "first_closed_index": null,
+                "first_closed_kind": null,
+                "closing_nets": [],
+                "closing_refs": [],
+                "closing_copper_class": [],
+                "closing_markings": [],
+                "reopened": false
+              }
+            ]
+          },
+          "replay_file": "offline-board05-run4.attempt1.json",
+          "layer_stack_stated": false
+        }
+      ],
+      "deadline_checkpoint": {
+        "file": "bldc_controller_routed_timeout_unverified_nlgc3kr0.kicad_pcb",
+        "net_status_why": {
+          "skipped": "no captured net-status pass for this artifact"
+        }
+      },
+      "completed_board": {
+        "file": "bldc_controller_routed_completed_unverified_zavttb1r.kicad_pcb",
+        "net_status_why": {
+          "returncode": 0,
+          "source": "captured:board05-run4-completed.json",
+          "payload": {
+            "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4/bldc_controller_routed_completed_unverified_zavttb1r.kicad_pcb",
+            "connectivity_model": "strict",
+            "summary": {
+              "stuck_nets": 11,
+              "counts": {
+                "escape_blocked": 0,
+                "congestion_saturated": 1,
+                "placement_bound": 5,
+                "budget_starved": 0,
+                "pour_discontinuous": 5
+              }
+            },
+            "nets": [
+              {
+                "net_name": "ISENSE_A-",
+                "net_number": 15,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "R12.2",
+                  "U10.5",
+                  "U3.44"
+                ],
+                "blocking_nets": [
+                  "BST_B",
+                  "GATE_AL",
+                  "PWM_BH"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 161 foreign obstructions, nearest strict blocker 0.500mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 161,
+                "nearest_blocker_mm": 0.5,
+                "same_group_congestion": 0,
+                "foreign_congestion": 161,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "ISENSE_C-",
+                "net_number": 19,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "R10.2",
+                  "U10.7"
+                ],
+                "blocking_nets": [
+                  "PWM_AH",
+                  "ISENSE_B-",
+                  "PWM_BH"
+                ],
+                "evidence": "pad reachable (292 deg lane) but in a dense cluster (0 same-group + 199 foreign obstructions, nearest strict blocker 0.219mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 292.5,
+                "local_congestion": 199,
+                "nearest_blocker_mm": 0.2195,
+                "same_group_congestion": 0,
+                "foreign_congestion": 199,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "PHASE_A",
+                "net_number": 5,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "C14.2",
+                  "J2.3",
+                  "Q5.3",
+                  "Q6.2"
+                ],
+                "blocking_nets": [
+                  "BST_A"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 47 foreign obstructions, nearest strict blocker 1.419mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 47,
+                "nearest_blocker_mm": 1.4192,
+                "same_group_congestion": 0,
+                "foreign_congestion": 47,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "PHASE_B",
+                "net_number": 6,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "C13.2",
+                  "J2.2",
+                  "Q3.3",
+                  "Q4.2"
+                ],
+                "blocking_nets": [
+                  "BST_B"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 25 foreign obstructions, nearest strict blocker 1.576mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 25,
+                "nearest_blocker_mm": 1.5758,
+                "same_group_congestion": 0,
+                "foreign_congestion": 25,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "PHASE_C",
+                "net_number": 7,
+                "classification": "placement_bound",
+                "failure_cause": "routing_order",
+                "unconnected_pads": [
+                  "C12.2",
+                  "J2.1",
+                  "Q1.3",
+                  "Q2.2"
+                ],
+                "blocking_nets": [
+                  "BST_C",
+                  "ISENSE_C+",
+                  "GATE_CL"
+                ],
+                "evidence": "pad reachable (360 deg lane) but in a dense cluster (0 same-group + 27 foreign obstructions, nearest strict blocker 1.418mm); ripping the few strict blockers cannot clear the surrounding copper",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 27,
+                "nearest_blocker_mm": 1.4181,
+                "same_group_congestion": 0,
+                "foreign_congestion": 27,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "move_part",
+                    "rationale": "genuinely foreign copper walls the pad -- relocate the crowded part",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "widen_channel",
+                    "rationale": "open the routing corridor around the pad",
+                    "confidence": "medium"
+                  },
+                  {
+                    "action": "accept_plateau",
+                    "rationale": "if no placement lever helps, this is a plateau",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "SWCLK",
+                "net_number": 24,
+                "classification": "congestion_saturated",
+                "failure_cause": "congestion",
+                "unconnected_pads": [
+                  "J4.3"
+                ],
+                "blocking_nets": [
+                  "SWDIO"
+                ],
+                "evidence": "pad reachable (360 deg lane) but boxed in by committed strict copper (nearest blocker 1.844mm); ripping it would strand SWDIO (1:1 trade)",
+                "escape_lane_deg": 360.0,
+                "local_congestion": 18,
+                "nearest_blocker_mm": 1.8445,
+                "same_group_congestion": 0,
+                "foreign_congestion": 18,
+                "match_group": "",
+                "topology": "foreign_cluster",
+                "recommendation": [
+                  {
+                    "action": "widen_channel",
+                    "rationale": "foreign strict blocker -- widen the corridor (region rip-up-and-reroute is the primary existing remedy)",
+                    "confidence": "medium"
+                  }
+                ]
+              },
+              {
+                "net_name": "+24V",
+                "net_number": 1,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C1.1",
+                  "C2.1",
+                  "C3.1",
+                  "D1.1",
+                  "Q1.2",
+                  "Q3.2",
+                  "Q5.2",
+                  "U1.1",
+                  "U3.29",
+                  "U3.52",
+                  "U3.53",
+                  "U3.54"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 12 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "+3V3",
+                "net_number": 3,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C6.1",
+                  "C7.1",
+                  "C8.1",
+                  "C9.1",
+                  "D3.2",
+                  "D4.2",
+                  "J3.4",
+                  "J4.1",
+                  "R30.1",
+                  "R31.1",
+                  "R32.1",
+                  "U10.1",
+                  "U10.15",
+                  "U10.17",
+                  "U2.2",
+                  "U3.10",
+                  "U3.11",
+                  "U3.16",
+                  "U3.23",
+                  "U3.24",
+                  "U3.4",
+                  "U3.49",
+                  "U3.5",
+                  "U3.55",
+                  "U3.6",
+                  "U3.8",
+                  "U3.9"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 27 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "+5V",
+                "net_number": 2,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C15.1",
+                  "C16.1",
+                  "C4.1",
+                  "C5.1",
+                  "L1.2",
+                  "U2.3",
+                  "U3.13",
+                  "U3.14",
+                  "U3.15",
+                  "U3.27",
+                  "U3.3"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 11 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "GND",
+                "net_number": 4,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "C1.2",
+                  "C10.2",
+                  "C11.2",
+                  "C15.2",
+                  "C16.2",
+                  "C2.2",
+                  "C3.2",
+                  "C30.2",
+                  "C31.2",
+                  "C32.2",
+                  "C4.2",
+                  "C5.2",
+                  "C6.2",
+                  "C7.2",
+                  "C8.2",
+                  "C9.2",
+                  "D1.2",
+                  "D2.2",
+                  "J3.5",
+                  "J4.6",
+                  "R3.2",
+                  "R4.2",
+                  "U1.3",
+                  "U1.5",
+                  "U10.14",
+                  "U10.16",
+                  "U10.32",
+                  "U2.1",
+                  "U3.1",
+                  "U3.12",
+                  "U3.2",
+                  "U3.28",
+                  "U3.56",
+                  "U3.57",
+                  "U3.7"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 35 pad(s) stranded from main connected island (layers: B.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              },
+              {
+                "net_name": "VIN",
+                "net_number": 41,
+                "classification": "pour_discontinuous",
+                "failure_cause": "blocked_path",
+                "unconnected_pads": [
+                  "F1.1"
+                ],
+                "blocking_nets": [],
+                "evidence": "pour-carried net: 1 pad(s) stranded from main connected island (layers: F.Cu)",
+                "escape_lane_deg": 0.0,
+                "local_congestion": 0,
+                "nearest_blocker_mm": null,
+                "same_group_congestion": 0,
+                "foreign_congestion": 0,
+                "match_group": "",
+                "topology": "",
+                "recommendation": []
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

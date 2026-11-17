@@ -1,0 +1,13 @@
+name: ci
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

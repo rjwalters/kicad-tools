@@ -1,0 +1,1480 @@
+"""
+Tests for DRC-constraint emission on manufacturing export (issue #3719).
+
+``kct export`` must write a sibling ``<board>.kicad_pro`` (and
+``.kicad_dru``) next to the source board, populated from the target
+manufacturer profile, so that ``kicad-cli pcb drc`` checks the board
+against the fab's actual capabilities instead of KiCad's stricter
+built-in defaults.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import shutil
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.manufacturers import (
+    build_default_netclass,
+    build_project_data,
+    build_project_rules,
+    get_profile,
+    write_drc_constraints,
+)
+from kicad_tools.manufacturers.project_generator import (
+    _MICRO_VIA_FLOOR_ANNULAR_MM,
+    _MICRO_VIA_FLOOR_DIAMETER_MM,
+    _MICRO_VIA_FLOOR_HOLE_MM,
+    _NON_BLOCKING_SEVERITIES,
+    merge_project_rules,
+)
+
+
+def _legacy_design_rules():
+    # Pre-managed-block sidecars predate the explicit object rules (#5059).
+    # Keep legacy detection narrow: never expand its destructive grammar to
+    # classify new, potentially hand-authored rules as historical output.
+    return replace(
+        get_profile("jlcpcb").get_design_rules(layers=2),
+        min_silk_to_pad_clearance_mm=None,
+        min_smd_pad_clearance_mm=None,
+        min_pth_hole_to_track_mm=None,
+        min_inner_pth_hole_to_copper_mm=None,
+    )
+
+
+# Rules ``generate_dru`` emits today that a pre-#4600 generator never did.
+# The legacy detector's grammar is frozen, so the fixture strips these blocks
+# rather than the detector learning them.
+_POST_LEGACY_RULES = ("Max Hole Size",)
+
+
+def _legacy_dru_text() -> str:
+    """``generate_dru`` output as a pre-#4600 generator would have written it."""
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
+    text = generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb")
+    for name in _POST_LEGACY_RULES:
+        text = re.sub(
+            r'\(rule "'
+            + re.escape(name)
+            + r'[^"]*"\n(?:  \(condition [^\n]*\n)?  \(constraint [^\n]*\n',
+            "",
+            text,
+        )
+    return text
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BOARD_03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+BOARD_04 = REPO_ROOT / "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"
+
+
+# ---------------------------------------------------------------------------
+# build_project_rules: values come from the profile, not hardcoded
+# ---------------------------------------------------------------------------
+
+
+def test_project_rules_match_profile_minimums():
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+
+    pro_rules = build_project_rules(rules)
+
+    assert pro_rules["min_track_width"] == rules.min_trace_width_mm
+    assert pro_rules["min_clearance"] == rules.min_clearance_mm
+    # #3736: the built-in via *diameter* and *hole* floors stay at the
+    # manufacturer STANDARD minimum so kicad-cli's built-in checks catch
+    # sub-spec standard vias independently (the #3734 DRU backstop is masked
+    # by the solder_mask_margin quirk).  Micro vias are exempted from those
+    # two built-in checks via the dedicated min_microvia_* keys.
+    assert pro_rules["min_via_diameter"] == rules.min_via_diameter_mm
+    assert pro_rules["min_via_hole"] == rules.min_via_drill_mm
+    assert pro_rules["min_microvia_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
+    assert pro_rules["min_microvia_drill"] == _MICRO_VIA_FLOOR_HOLE_MM
+    # annular_width has no micro-via key in KiCad 10.0.1, so its built-in
+    # floor must stay at the micro minimum to avoid false positives on
+    # legitimate micro vias; standard-via annular is enforced by kct check.
+    assert pro_rules["min_via_annular_width"] == _MICRO_VIA_FLOOR_ANNULAR_MM
+    assert pro_rules["min_through_hole_diameter"] == rules.min_hole_diameter_mm
+    assert pro_rules["min_copper_edge_clearance"] == rules.min_copper_to_edge_mm
+    # #3842: min_hole_to_hole maps from the dedicated drill-to-drill spec,
+    # NOT the hole-to-edge spec (which is a different rule). For this profile
+    # the two differ (hole_to_edge=0.4, hole_to_hole=0.5), so this also
+    # guards against the old alias bug.
+    assert pro_rules["min_hole_to_hole"] == rules.min_hole_to_hole_mm
+    assert rules.min_hole_to_hole_mm != rules.min_hole_to_edge_mm
+
+
+def test_project_rules_change_with_layer_config():
+    """A 4-layer profile selects finer via/drill minimums than 2-layer.
+
+    The built-in ``min_via_*`` floors are now pinned to the micro-via
+    process minimum (Issue #3734), so the layer-dependent *standard*
+    via/drill floor is reflected in the ``Default`` netclass via size
+    instead -- that is what the .kicad_dru "Via Diameter" rule and KiCad's
+    via-size DRC enforce for non-micro vias.
+    """
+    profile = get_profile("jlcpcb-tier1")
+    rules_2l = profile.get_design_rules(layers=2, copper_oz=1.0)
+    rules_4l = profile.get_design_rules(layers=4, copper_oz=1.0)
+
+    nc_2l = build_default_netclass(rules_2l)
+    nc_4l = build_default_netclass(rules_4l)
+
+    # 4-layer JLCPCB allows smaller standard vias/holes than 2-layer.
+    assert nc_4l["via_diameter"] < nc_2l["via_diameter"]
+    assert nc_4l["via_drill"] < nc_2l["via_drill"]
+
+
+def test_project_rules_differ_by_manufacturer():
+    """Changing --mfr changes the emitted rules (not hardcoded)."""
+    jlc = get_profile("jlcpcb").get_design_rules(layers=2)
+    osh = get_profile("oshpark").get_design_rules(layers=2)
+
+    jlc_rules = build_project_rules(jlc)
+    osh_rules = build_project_rules(osh)
+
+    # The two fabs have different capabilities; at least one constraint
+    # must differ between the emitted rule sets.
+    assert jlc_rules != osh_rules
+
+
+# ---------------------------------------------------------------------------
+# Default netclass clearance (the load-bearing fix for false clearance errors)
+# ---------------------------------------------------------------------------
+
+
+def test_default_netclass_clearance_from_profile():
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+
+    nc = build_default_netclass(rules)
+
+    assert nc["name"] == "Default"
+    # The applied netclass clearance must reflect the profile, not KiCad's
+    # stock 0.20mm default.
+    assert nc["clearance"] == rules.min_clearance_mm
+    assert nc["track_width"] == rules.min_trace_width_mm
+    assert nc["via_diameter"] == rules.min_via_diameter_mm
+
+
+def test_build_project_data_structure():
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+
+    data = build_project_data(
+        rules, "myboard", manufacturer_id="jlcpcb-tier1", layers=4, copper_oz=1.0
+    )
+
+    ds = data["board"]["design_settings"]
+    assert ds["rules"]["min_clearance"] == rules.min_clearance_mm
+    assert ds["rule_severities"] == _NON_BLOCKING_SEVERITIES
+    assert data["net_settings"]["classes"][0]["clearance"] == rules.min_clearance_mm
+    assert data["meta"]["manufacturer"] == "jlcpcb-tier1"
+
+
+# ---------------------------------------------------------------------------
+# rule_severities downgrade non-blocking categories
+# ---------------------------------------------------------------------------
+
+
+def test_non_blocking_severities_downgraded():
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=2)
+    data = build_project_data(rules, "b")
+
+    sev = data["board"]["design_settings"]["rule_severities"]
+    assert sev["lib_footprint_mismatch"] == "ignore"
+    assert sev["isolated_copper"] == "warning"
+
+
+# ---------------------------------------------------------------------------
+# merge preserves an existing project's unrelated keys
+# ---------------------------------------------------------------------------
+
+
+def test_merge_preserves_existing_keys_and_relaxes_default_clearance():
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4)
+
+    existing = {
+        "meta": {"filename": "b.kicad_pro"},
+        "board": {
+            "design_settings": {
+                "rules": {"some_other_rule": 1.23},
+                "defaults": {},
+            }
+        },
+        "net_settings": {
+            "classes": [
+                # kct's pre-#5654 template Default netclass: a template
+                # signature, so the default mode still relaxes it (#6191).
+                {
+                    "name": "Default",
+                    "clearance": 0.20,
+                    "track_width": 0.25,
+                    "via_diameter": 0.6,
+                    "via_drill": 0.3,
+                },
+                {"name": "HV", "clearance": 0.5},
+            ]
+        },
+        "custom_top_level": {"keep": True},
+    }
+
+    merge_project_rules(existing, rules)
+
+    ds = existing["board"]["design_settings"]
+    # Unrelated rule preserved
+    assert ds["rules"]["some_other_rule"] == 1.23
+    # Profile rule applied
+    assert ds["rules"]["min_clearance"] == rules.min_clearance_mm
+    # Default netclass clearance relaxed to the profile
+    default_cls = next(c for c in existing["net_settings"]["classes"] if c["name"] == "Default")
+    assert default_cls["clearance"] == rules.min_clearance_mm
+    # Other netclass untouched
+    hv = next(c for c in existing["net_settings"]["classes"] if c["name"] == "HV")
+    assert hv["clearance"] == 0.5
+    # Unrelated top-level key preserved
+    assert existing["custom_top_level"] == {"keep": True}
+
+
+# ---------------------------------------------------------------------------
+# write_drc_constraints writes siblings next to the board
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["1", "true"])
+def test_reviewed_project_preserves_stricter_rules_on_repeated_export(tmp_path: Path, flag):
+    """Factory capabilities must not loosen reviewed fills (#5023)."""
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=6)
+    board = tmp_path / "reviewed.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(
+        json.dumps(
+            {
+                "text_variables": {"KCT_PRESERVE_BOARD_RULES": flag},
+                "board": {
+                    "design_settings": {
+                        "rules": {"min_clearance": 0.15, "min_track_width": 0.15},
+                        "defaults": {"clearance_min": 0.15, "via_min_diameter": 0.5},
+                        "rule_severities": {"isolated_copper": "error"},
+                    }
+                },
+                "net_settings": {
+                    "classes": [
+                        {
+                            "name": "Default",
+                            "clearance": 0.15,
+                            "track_width": 0.16,
+                            "via_diameter": 0.5,
+                            "via_drill": 0.2,
+                        },
+                        {"name": "HV", "clearance": 0.8},
+                    ]
+                },
+            }
+        )
+    )
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=6)
+    first = project.read_bytes()
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=6)
+    assert project.read_bytes() == first
+    data = json.loads(first)
+    settings = data["board"]["design_settings"]
+    assert settings["rules"]["min_clearance"] == 0.15
+    assert settings["rules"]["min_track_width"] == 0.15
+    assert settings["defaults"]["clearance_min"] == 0.15
+    assert settings["defaults"]["via_min_diameter"] == 0.5
+    assert settings["rule_severities"]["isolated_copper"] == "error"
+    assert data["net_settings"]["classes"] == [
+        {
+            "name": "Default",
+            "clearance": 0.15,
+            "track_width": 0.16,
+            "via_diameter": 0.5,
+            "via_drill": 0.2,
+        },
+        {"name": "HV", "clearance": 0.8},
+    ]
+    dru = board.with_suffix(".kicad_dru").read_text()
+    assert "(constraint clearance (min 0.15mm))" in dru
+    assert "(constraint clearance (min 0.0889mm))" not in dru
+    assert "(constraint clearance (min 0.8mm))" in dru
+    assert dru.index('"Reviewed clearance - Default"') < dru.index('"Reviewed clearance - HV"')
+
+
+def test_reviewed_project_still_enforces_stricter_factory_minimum():
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=6)
+    data = {
+        "text_variables": {"KCT_PRESERVE_BOARD_RULES": "1"},
+        "board": {"design_settings": {"rules": {"min_clearance": 0.01}}},
+        "net_settings": {"classes": [{"name": "Default", "clearance": 0.01}]},
+    }
+    merge_project_rules(data, rules)
+    assert data["board"]["design_settings"]["rules"]["min_clearance"] == rules.min_clearance_mm
+    assert data["net_settings"]["classes"][0]["clearance"] == rules.min_clearance_mm
+
+
+def test_write_drc_constraints_emits_siblings(tmp_path: Path):
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")  # content irrelevant for this helper
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4)
+
+    written = write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    pro = board.with_suffix(".kicad_pro")
+    dru = board.with_suffix(".kicad_dru")
+    assert pro in written and pro.exists()
+    assert dru in written and dru.exists()
+
+    data = json.loads(pro.read_text())
+    assert data["board"]["design_settings"]["rules"]["min_clearance"] == rules.min_clearance_mm
+
+
+def test_write_drc_constraints_threads_net_classes_to_dru(tmp_path: Path):
+    """``net_classes`` reach ``generate_dru`` so ampacity floors match (#4375).
+
+    Before #4375, ``write_drc_constraints`` called ``generate_dru`` WITHOUT
+    ``net_classes``, silently dropping the net-scoped ampacity min-width
+    rules -- so ``kicad-cli`` would not enforce the ampacity floors
+    ``kct check`` evaluated.  The emitted ``.kicad_dru`` must carry the
+    net-scoped rules for any class that declares a ``target_ampacity``.
+    """
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+    from kicad_tools.router.rules import NetClassRouting
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=2.0)
+    net_classes = [NetClassRouting(name="POWER", target_ampacity=15.0)]
+
+    write_drc_constraints(
+        board,
+        rules,
+        manufacturer_id="jlcpcb-tier1",
+        layers=4,
+        net_classes=net_classes,
+    )
+
+    dru_text = board.with_suffix(".kicad_dru").read_text()
+    # The net-scoped ampacity rules must be present...
+    assert "Ampacity Min Width (POWER, external)" in dru_text
+    assert "Ampacity Min Width (POWER, internal)" in dru_text
+    # ...and the emitted text must be byte-identical to a direct
+    # generate_dru call with the same net_classes wrapped in the managed
+    # fab-floors block (#4600) -- no drift in the wiring.
+    from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+
+    assert dru_text == merge_dru_floors(
+        None, generate_dru(rules, manufacturer_name="jlcpcb-tier1", net_classes=net_classes)
+    )
+
+
+def test_write_drc_constraints_without_net_classes_omits_ampacity(tmp_path: Path):
+    """Omitting ``net_classes`` preserves the byte-identical board-wide DRU."""
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    dru_text = board.with_suffix(".kicad_dru").read_text()
+    assert "Ampacity Min Width" not in dru_text
+    from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+
+    assert dru_text == merge_dru_floors(None, generate_dru(rules, manufacturer_name="jlcpcb-tier1"))
+
+
+# ---------------------------------------------------------------------------
+# SMD Pad Clearance minimum-KiCad-version warning (#5724)
+# ---------------------------------------------------------------------------
+#
+# The native ``SMD Pad Clearance`` rule is emitted unconditionally but is
+# SILENTLY INERT on KiCad 10.0.0/10.0.1 -- those builds do not give a pad its
+# parent footprint's ``Reference``, so ``A.Reference != B.Reference`` is
+# permanently false and ``kicad-cli pcb drc`` reports a CLEAN board rather
+# than a ``drc_rule_error``.  #5713 gated the test suite on that floor;
+# these tests cover the product-side warning that tells a user on an affected
+# KiCad that the sidecar ``kct`` just wrote for them will not enforce the
+# different-net SMD pad floor.
+
+
+_WARN_LOGGER = "kicad_tools.manufacturers.project_generator"
+
+
+@pytest.fixture
+def clear_kicad_version_cache():
+    """Isolate the process-wide ``kicad-cli`` version cache around a test."""
+    from kicad_tools.manufacturers import project_generator
+
+    project_generator._installed_kicad_cli_version.cache_clear()
+    yield
+    project_generator._installed_kicad_cli_version.cache_clear()
+
+
+def _stub_kicad_version(monkeypatch, raw: str | None) -> None:
+    """Pin what the installed ``kicad-cli`` reports, via the real lookup path.
+
+    Stubs the two helpers ``_installed_kicad_cli_version`` actually composes
+    (``find_kicad_cli`` + ``get_kicad_cli_version``) rather than the cached
+    wrapper itself, so the wiring between them is exercised too.
+    """
+    from kicad_tools.cli import runner
+    from kicad_tools.export import gerber
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/stub/kicad-cli"), raising=True)
+    monkeypatch.setattr(gerber, "get_kicad_cli_version", lambda _cli: raw, raising=True)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("10.0.6", (10, 0, 6)),
+        ("10.0.2\n", (10, 0, 2)),
+        # Distro packages decorate the version with a build/release suffix.
+        ("10.0.1-1~ubuntu24.04.1 release build", (10, 0, 1)),
+        ("9.0.3", (9, 0, 3)),
+        ("10", (10,)),
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("nightly", None),
+    ],
+)
+def test_parse_kicad_cli_version(raw, expected):
+    """Only the leading dotted-numeric run is significant (and never raises)."""
+    from kicad_tools.manufacturers.dru_generator import parse_kicad_cli_version
+
+    assert parse_kicad_cli_version(raw) == expected
+
+
+def test_min_kicad_version_str_tracks_the_tuple():
+    """The warning text's floor and the comparison floor cannot drift apart."""
+    from kicad_tools.manufacturers.dru_generator import (
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION,
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR,
+    )
+
+    rendered = tuple(int(part) for part in SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR.split("."))
+    assert rendered == SMD_PAD_CLEARANCE_MIN_KICAD_VERSION
+
+
+@pytest.mark.parametrize("raw", ["10.0.0", "10.0.1", "9.0.3"])
+def test_inert_reason_names_the_rule_and_the_floor(raw):
+    """Below the floor the explanation names the rule, the floor and the risk."""
+    from kicad_tools.manufacturers.dru_generator import (
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR,
+        smd_pad_clearance_inert_reason,
+    )
+
+    reason = smd_pad_clearance_inert_reason(raw)
+    assert reason is not None
+    assert "SMD Pad Clearance" in reason
+    assert SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR in reason
+    assert raw in reason
+
+
+@pytest.mark.parametrize("raw", ["10.0.2", "10.0.4", "10.0.6", "11.0.0", None, "", "nightly"])
+def test_inert_reason_is_silent_at_or_above_the_floor_or_when_unknown(raw):
+    """At/above the floor -- and for any version we cannot parse -- stay silent."""
+    from kicad_tools.manufacturers.dru_generator import smd_pad_clearance_inert_reason
+
+    assert smd_pad_clearance_inert_reason(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["10.0.0", "10.0.1"])
+def test_write_drc_constraints_warns_below_the_smd_floor(
+    tmp_path: Path, monkeypatch, caplog, raw, clear_kicad_version_cache
+):
+    """A user on 10.0.0/10.0.1 is told the emitted rule will never fire."""
+    from kicad_tools.manufacturers.dru_generator import (
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR,
+    )
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+    assert rules.min_smd_pad_clearance_mm is not None  # the rule IS emitted
+
+    _stub_kicad_version(monkeypatch, raw)
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, caplog.text
+    message = warnings[0].getMessage()
+    assert "SMD Pad Clearance" in message
+    assert SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR in message
+    assert raw in message
+    # The sidecar it is warning about is named, so the user knows which file.
+    assert str(board.with_suffix(".kicad_dru")) in message
+
+
+@pytest.mark.parametrize("raw", ["10.0.2", "10.0.4", "10.0.6"])
+def test_write_drc_constraints_silent_at_or_above_the_smd_floor(
+    tmp_path: Path, monkeypatch, caplog, raw, clear_kicad_version_cache
+):
+    """At/above 10.0.2 the rule genuinely fires -- no warning is emitted."""
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    _stub_kicad_version(monkeypatch, raw)
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_no_warning_when_the_smd_rule_is_not_emitted(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """No floor configured means no rule emitted -- so nothing to warn about."""
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = replace(
+        get_profile("jlcpcb-tier1").get_design_rules(layers=4),
+        min_smd_pad_clearance_mm=None,
+    )
+
+    _stub_kicad_version(monkeypatch, "10.0.1")
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert "SMD Pad Clearance" not in board.with_suffix(".kicad_dru").read_text()
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_no_warning_when_the_dru_is_not_written(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """``write_dru=False`` emits no rule, so the version dependency is moot."""
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    _stub_kicad_version(monkeypatch, "10.0.1")
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        written = write_drc_constraints(
+            board, rules, manufacturer_id="jlcpcb-tier1", layers=4, write_dru=False
+        )
+
+    assert not board.with_suffix(".kicad_dru").exists()
+    assert written == [board.with_suffix(".kicad_pro")]
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_missing_kicad_cli_degrades_silently(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """No ``kicad-cli`` on PATH: no baseline to compare, so no warning, no raise."""
+    from kicad_tools.cli import runner
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: None, raising=True)
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        written = write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert board.with_suffix(".kicad_dru") in written
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_unparseable_kicad_cli_version_degrades_silently(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """``kicad-cli version`` answering nothing usable is not evidence of a defect."""
+    from kicad_tools.cli import runner
+    from kicad_tools.export import gerber
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/usr/bin/kicad-cli"), raising=True)
+    monkeypatch.setattr(gerber, "get_kicad_cli_version", lambda _cli: None, raising=True)
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+@pytest.mark.parametrize("raw", ["10.0.1", "10.0.6", None])
+def test_warning_never_changes_the_emitted_sidecars(
+    tmp_path: Path, monkeypatch, raw, clear_kicad_version_cache
+):
+    """#5724 is warning-only: the ``.kicad_dru``/``.kicad_pro`` bytes are unchanged.
+
+    The rule must keep being emitted even on an affected KiCad -- the sidecar
+    travels with the board and stays correct for whoever opens it on a newer
+    build.
+    """
+    from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    _stub_kicad_version(monkeypatch, raw)
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    dru_text = board.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert "SMD Pad Clearance" in dru_text
+    assert dru_text == merge_dru_floors(None, generate_dru(rules, manufacturer_name="jlcpcb-tier1"))
+
+
+# ---------------------------------------------------------------------------
+# Managed fab-floors block: merge, never clobber (#4600)
+# ---------------------------------------------------------------------------
+
+
+class TestDruManagedBlockMerge:
+    """``write_drc_constraints`` merges the ``.kicad_dru``, never clobbers.
+
+    Issue #4600: the old blanket ``write_text`` silently destroyed the
+    marker-delimited HV creepage rules written by ``kct creepage
+    export-rules`` (#4508) and any hand-written custom rules.  The tier
+    floors now live in their own sentinel-delimited managed block (mirroring
+    the creepage exporter's ``merge_dru_block`` dialect) and re-emitting
+    replaces only that block.
+    """
+
+    def _emit(self, board: Path) -> str:
+        rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+        return board.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+
+    def test_fresh_write_wraps_rules_in_managed_block(self, tmp_path: Path):
+        from kicad_tools.manufacturers.dru_generator import (
+            DRU_FLOORS_BLOCK_BEGIN,
+            DRU_FLOORS_BLOCK_END,
+        )
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        dru_text = self._emit(board)
+
+        assert dru_text.startswith("(version 1)\n")
+        assert dru_text.count("(version 1)") == 1
+        assert DRU_FLOORS_BLOCK_BEGIN in dru_text
+        assert DRU_FLOORS_BLOCK_END in dru_text
+        # The floors are inside the block, after the BEGIN marker.
+        assert dru_text.index(DRU_FLOORS_BLOCK_BEGIN) < dru_text.index('(rule "Trace Width')
+
+    def test_reemit_is_idempotent(self, tmp_path: Path):
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        first = self._emit(board)
+        second = self._emit(board)
+        assert second == first
+
+    def test_reemit_replaces_only_the_managed_block(self, tmp_path: Path):
+        """A tier change swaps the block content; foreign rules survive."""
+        from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        first = self._emit(board)
+        # A user appends a hand-written rule after the managed block.
+        hand_rule = '(rule "My HV Gap"\n  (constraint clearance (min 2.5mm)))\n'
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(first + "\n" + hand_rule, encoding="utf-8")
+
+        # Re-emit at a different tier: the block floors change...
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb", layers=2)
+        merged = dru.read_text(encoding="utf-8")
+
+        assert '"Trace Width - jlcpcb"' in merged
+        assert '"Trace Width - jlcpcb-tier1"' not in merged
+        # ...exactly one block remains, and the hand-written rule survives.
+        assert merged.count(DRU_FLOORS_BLOCK_BEGIN) == 1
+        assert hand_rule.strip() in merged
+        assert merged.count("(version 1)") == 1
+
+    def test_creepage_block_survives_reemit(self, tmp_path: Path):
+        """The #4508 creepage managed block outlives a sidecar re-emit."""
+        from kicad_tools.creepage.export_rules import (
+            DRU_BLOCK_BEGIN,
+            DRU_BLOCK_END,
+            merge_dru_block,
+        )
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        creepage_body = (
+            '(rule "kct creepage 150V<->3p3V"\n'
+            "  (condition \"A.NetClass == 'kct_150V' && B.NetClass == 'kct_3p3V'\")\n"
+            "  (constraint clearance (min 1.5mm)))"
+        )
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(merge_dru_block(None, creepage_body), encoding="utf-8")
+
+        merged = self._emit(board)
+        assert DRU_BLOCK_BEGIN in merged
+        assert DRU_BLOCK_END in merged
+        assert creepage_body in merged
+        assert '(rule "Trace Width - jlcpcb-tier1"' in merged
+        assert merged.count("(version 1)") == 1
+
+    def test_legacy_generated_sidecar_is_replaced_not_appended(self, tmp_path: Path):
+        """A pre-#4600 clobber-written sidecar is replaced, not duplicated.
+
+        Issue #4667: our own generated ``.kicad_dru`` files written before
+        the managed-block merge carry no markers.  They must be recognized
+        as kct-owned and REPLACED by the managed block -- appending doubles
+        every tier floor on each re-emit and permanently dirties committed
+        board artifacts (the #3580 guard fired on board-05's sidecar).
+        """
+        from kicad_tools.manufacturers.dru_generator import (
+            DRU_FLOORS_BLOCK_BEGIN,
+        )
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        legacy = _legacy_dru_text()
+        assert DRU_FLOORS_BLOCK_BEGIN not in legacy
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(legacy, encoding="utf-8")
+
+        merged = self._emit(board)  # emits at jlcpcb-tier1
+
+        assert merged.count(DRU_FLOORS_BLOCK_BEGIN) == 1
+        # The legacy floors were replaced -- no duplicated rule families.
+        assert merged.count('(rule "Trace Width') == 1
+        assert '"Trace Width - jlcpcb"' not in merged
+        assert '"Trace Width - jlcpcb-tier1"' in merged
+        assert merged.count("(version 1)") == 1
+        # Re-emitting is byte-stable.
+        assert self._emit(board) == merged
+
+    def test_legacy_replace_warns_on_stderr_exactly_once(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        """The legacy-replace branch warns to stderr; all others are silent.
+
+        Issue #4676 (review follow-up to #4667): the strict legacy detector
+        has a narrow documented false-positive window -- a hand-authored
+        file matching exactly the generated grammar is replaced.  The
+        one-line stderr warning makes that replacement visible; it must
+        fire ONLY on the legacy branch so it is a reliable migration
+        signal, and it must name the file when a path is supplied.
+        """
+        from kicad_tools.manufacturers.dru_generator import (
+            generate_dru,
+            merge_dru_floors,
+        )
+
+        fresh = generate_dru(
+            get_profile("jlcpcb-tier1").get_design_rules(layers=4),
+            manufacturer_name="jlcpcb-tier1",
+        )
+        legacy = _legacy_dru_text()
+        dru_path = tmp_path / "demo.kicad_dru"
+
+        # Legacy branch with a path: exactly one stderr line naming the file.
+        warned = merge_dru_floors(legacy, fresh, path=dru_path)
+        err = capsys.readouterr().err
+        assert err.count("\n") == 1
+        assert str(dru_path) in err
+        assert "pre-#4600 generated sidecar" in err
+        assert "#4667" in err
+
+        # Legacy branch without a path: still warns, with a generic name.
+        merge_dru_floors(legacy, fresh)
+        err = capsys.readouterr().err
+        assert "pre-#4600 generated sidecar" in err
+        assert ".kicad_dru content" in err
+
+        # The warning is additive only: output is identical with/without path.
+        assert warned == merge_dru_floors(legacy, fresh)
+        capsys.readouterr()
+
+        # Silent: fresh write (existing=None) ...
+        marked = merge_dru_floors(None, fresh, path=dru_path)
+        # ... marked-block replace (also the idempotent second merge of a
+        # migrated file, so the warning fires at most once per migration) ...
+        assert merge_dru_floors(warned, fresh, path=dru_path) == warned
+        merge_dru_floors(marked, fresh, path=dru_path)
+        # ... and user-owned insert (silent like every non-legacy branch;
+        # the block is anchored below the version form, above the user's
+        # rules -- Issue #8937's ordering).
+        user_file = '(version 1)\n(rule "My HV Gap"\n  (constraint clearance (min 2.5mm)))\n'
+        appended = merge_dru_floors(user_file, fresh, path=dru_path)
+        assert appended.startswith("(version 1)\n")
+        assert '(rule "My HV Gap"' in appended
+        assert capsys.readouterr().err == ""
+
+    def test_legacy_replace_warning_reaches_stderr_via_write_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        """``write_drc_constraints`` threads the real path into the warning."""
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(
+            _legacy_dru_text(),
+            encoding="utf-8",
+        )
+
+        self._emit(board)
+        err = capsys.readouterr().err
+        assert str(dru) in err
+        assert "pre-#4600 generated sidecar" in err
+
+        # Second emit hits the marked-replace branch: silence.
+        self._emit(board)
+        assert capsys.readouterr().err == ""
+
+    def test_legacy_fixture_models_every_generated_rule(self):
+        """Guard: a new ``generate_dru`` rule must be accounted for here."""
+        from kicad_tools.manufacturers.dru_generator import _is_legacy_generated_dru
+
+        assert _is_legacy_generated_dru(_legacy_dru_text()), (
+            "generate_dru emitted a rule the legacy fixture does not model: "
+            "add it to _POST_LEGACY_RULES (do NOT widen the _LEGACY_* regexes)"
+        )
+
+    def test_committed_board_sidecars_are_marked(self):
+        """Every committed ``boards/*/output/*.kicad_dru`` uses the marked format.
+
+        Issue #4667 migrated the legacy sidecars; a legacy-shaped committed
+        artifact would be rewritten in place by export-path tests and trip
+        the #3580 committed-artifacts guard.
+        """
+        from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
+        repo_root = Path(__file__).resolve().parent.parent
+        sidecars = sorted(repo_root.glob("boards/*/output/*.kicad_dru"))
+        assert sidecars, "expected committed board .kicad_dru sidecars"
+        unmarked = [
+            str(p.relative_to(repo_root))
+            for p in sidecars
+            if DRU_FLOORS_BLOCK_BEGIN not in p.read_text(encoding="utf-8")
+        ]
+        assert not unmarked, f"legacy-unmarked committed sidecars: {unmarked}"
+
+    def test_user_owned_file_is_never_clobbered(self, tmp_path: Path):
+        """A no-marker, fully user-owned file keeps every byte of rule content.
+
+        The managed block is merged in ALONGSIDE the user's rules (the
+        stronger option from #4600's acceptance criteria) rather than
+        skipping the write -- the sidecar must still deliver the tier
+        floors for kicad-cli floor parity (#3919).  Since #8937 the block
+        is inserted ABOVE the user's rules (KiCad's last-match precedence
+        must let a hand-written clearance keep governing, not the fab
+        floor) but BELOW the leading ``(version ...)`` form -- a
+        design-rules file whose first element is not the version form
+        does not load.
+        """
+        from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        user_rule = '(rule "Antenna Keepout"\n  (constraint clearance (min 3mm)))'
+        user_content = f"(version 1)\n{user_rule}\n"
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(user_content, encoding="utf-8")
+
+        merged = self._emit(board)
+        assert merged.startswith("(version 1)\n")
+        assert user_rule in merged
+        assert '(rule "Trace Width - jlcpcb-tier1"' in merged
+        assert merged.count("(version 1)") == 1
+        # The block sits above the user's rule (its clearance keeps
+        # governing) and below the version header (the file stays loadable).
+        assert merged.index(DRU_FLOORS_BLOCK_BEGIN) < merged.index(user_rule)
+        assert merged.index("(version 1)") < merged.index(DRU_FLOORS_BLOCK_BEGIN)
+
+    def test_user_file_without_version_header_gains_exactly_one(self, tmp_path: Path):
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text('(rule "Bare"\n  (constraint clearance (min 1mm)))\n', encoding="utf-8")
+
+        merged = self._emit(board)
+        assert merged.startswith("(version 1)\n")
+        assert merged.count("(version 1)") == 1
+        assert '(rule "Bare"' in merged
+
+    def test_merged_file_still_parses_as_design_rules(self, tmp_path: Path):
+        """Creepage block + user rule + fab floors: still valid DRU syntax."""
+        from kicad_tools.core.sexp_file import load_design_rules
+        from kicad_tools.creepage.export_rules import merge_dru_block
+
+        board = tmp_path / "demo.kicad_pcb"
+        board.write_text("(kicad_pcb)")
+        seeded = merge_dru_block(
+            '(version 1)\n(rule "Hand Rule"\n  (constraint clearance (min 2mm)))\n',
+            '(rule "kct creepage"\n  (constraint clearance (min 1.5mm)))',
+        )
+        dru = board.with_suffix(".kicad_dru")
+        dru.write_text(seeded, encoding="utf-8")
+
+        self._emit(board)
+        sexp = load_design_rules(dru)
+        # version + 3 rule sources parsed (comments are skipped by the parser)
+        rule_tags = [v for v in sexp.values if getattr(v, "tag", None) == "rule"]
+        assert len(rule_tags) >= 3
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: kct export emits a sibling .kicad_pro reflecting the profile
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not BOARD_03.exists(), reason="board 03 routed PCB not available")
+def test_export_emits_sibling_kicad_pro(tmp_path: Path):
+    from kicad_tools.export.manufacturing import (
+        ManufacturingConfig,
+        ManufacturingPackage,
+    )
+    from kicad_tools.export.preflight import PreflightConfig
+
+    board = tmp_path / "usb_joystick_routed.kicad_pcb"
+    shutil.copy(BOARD_03, board)
+
+    config = ManufacturingConfig(
+        output_dir=tmp_path / "manufacturing",
+        include_bom=False,
+        include_pnp=False,
+        include_gerbers=False,
+        include_report=False,
+        include_project_zip=False,
+        include_readme=False,
+        include_manifest=False,
+        preflight=PreflightConfig(skip_drc=True, skip_erc=True),
+    )
+
+    pkg = ManufacturingPackage(
+        pcb_path=board,
+        manufacturer="jlcpcb-tier1",
+        config=config,
+    )
+    result = pkg.export(config.output_dir)
+
+    pro = board.with_suffix(".kicad_pro")
+    assert pro.exists(), "export must write a sibling .kicad_pro next to the board"
+    assert pro in result.drc_constraint_paths
+
+    data = json.loads(pro.read_text())
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4, copper_oz=1.0)
+    pro_rules = data["board"]["design_settings"]["rules"]
+    # The real ATmega32U4 board 03 uses four copper layers.
+    assert pro_rules["min_track_width"] == rules.min_trace_width_mm
+    assert pro_rules["min_clearance"] == rules.min_clearance_mm
+    # #3736: built-in via diameter floor stays at the standard four-layer
+    # minimum; micro vias are exempted via min_microvia_diameter.
+    assert pro_rules["min_via_diameter"] == rules.min_via_diameter_mm
+    assert pro_rules["min_microvia_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
+    assert data["net_settings"]["classes"][0]["via_diameter"] == rules.min_via_diameter_mm
+    assert data["net_settings"]["classes"][0]["clearance"] == rules.min_clearance_mm
+
+
+# ---------------------------------------------------------------------------
+# Regression (#3736): kicad-cli independently catches sub-spec STANDARD vias
+# ---------------------------------------------------------------------------
+#
+# #3734 lowered the built-in via floors to the micro minimum for ALL vias and
+# relied on the A.Via_Type != 'Micro' guarded .kicad_dru rules to gate
+# standard vias.  The board-04 judge found those DRU rules are silently
+# suppressed by the unconditional solder_mask_margin rule under kicad-cli
+# 10.0.1, so a sub-spec STANDARD via passed kicad-cli silently.  #3736 keeps
+# the built-in min_via_diameter / min_via_hole at the standard floor (built-in
+# checks are NOT masked) while exempting micro vias via min_microvia_*.
+
+
+def _kicad_cli() -> Path | None:
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    return find_kicad_cli()
+
+
+def _run_drc(cli: Path, pcb: Path, report: Path) -> str:
+    import subprocess
+
+    subprocess.run(
+        [
+            str(cli),
+            "pcb",
+            "drc",
+            "--severity-error",
+            str(pcb),
+            "-o",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return report.read_text()
+
+
+@pytest.mark.skipif(not BOARD_04.exists(), reason="board 04 routed PCB not available")
+@pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+def test_subspec_standard_via_fires_under_kicad_cli(tmp_path: Path):
+    """A sub-spec STANDARD via must fire via_diameter under kicad-cli on the
+    full emitted ruleset (regression for #3736)."""
+    cli = _kicad_cli()
+    assert cli is not None
+
+    pcb = tmp_path / "board.kicad_pcb"
+    text = BOARD_04.read_text()
+
+    # Shrink one legitimate standard 0.6 mm / 0.3 mm via to a sub-spec
+    # 0.4 mm diameter (0.05 mm annular) -- below the jlcpcb-tier1 standard
+    # 0.6 mm diameter / 0.15 mm annular floors.  This is NOT a micro via, so
+    # it must be caught by the built-in standard-via floor.
+    #
+    # The via sits at board origin + (16.5, 17.15); derive the absolute
+    # position from the same ``centered_origin(60, 40)`` helper board 04's
+    # generator uses so this pin cannot go stale against a sheet-position
+    # change (it was previously hardcoded to the historical (100, 100)
+    # origin, i.e. ``(at 116.5 117.15)`` -- PR #4015 judge feedback).
+    from kicad_tools.pcb.center_sheet import centered_origin
+
+    def _fmt(v: float) -> str:
+        # KiCad's minimal decimal formatting ("135" / "84.65").
+        return f"{v:.6f}".rstrip("0").rstrip(".")
+
+    ox, oy = centered_origin(60.0, 40.0)  # board 04 outline origin
+    via_at = f"(at {_fmt(ox + 16.5)} {_fmt(oy + 17.15)})"
+    needle = f"{via_at}\n\t\t(size 0.6)\n\t\t(drill 0.3)"
+    replacement = f"{via_at}\n\t\t(size 0.4)\n\t\t(drill 0.3)"
+    assert needle in text, f"expected standard via at {via_at} in board 04"
+    pcb.write_text(text.replace(needle, replacement, 1))
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+    write_drc_constraints(pcb, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    report = _run_drc(cli, pcb, tmp_path / "drc.rpt")
+
+    # The sub-spec standard via must be flagged on the FULL ruleset (which
+    # includes the solder_mask_margin rule that masks the custom DRU via
+    # rules).  Before #3736 this reported 0 via_diameter violations.
+    assert "via_diameter" in report, (
+        "sub-spec STANDARD via was not flagged by kicad-cli on the full "
+        f"ruleset -- #3736 regression. Report:\n{report}"
+    )
+
+
+@pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+def test_micro_vias_stay_exempt_under_kicad_cli(tmp_path: Path):
+    """A real adjacent-layer microvia preserves the #3736 exemption.
+
+    Board04 now uses ordinary paid small drills; pin this regression to an
+    explicit microvia instead of assuming the current demo fabrication process.
+    """
+    cli = _kicad_cli()
+    assert cli is not None
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("""(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (1 "In1.Cu" signal)
+        (2 "In2.Cu" signal) (31 "B.Cu" signal)
+        (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "A")
+      (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default))
+        (fill none) (layer "Edge.Cuts"))
+      (via micro (at 10 10) (size 0.2) (drill 0.1)
+        (layers "F.Cu" "In1.Cu") (net 1)))""")
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+    write_drc_constraints(pcb, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    report = _run_drc(cli, pcb, tmp_path / "drc.rpt")
+
+    # Micro vias must not trip via_diameter / annular_width.
+    assert "via_diameter" not in report, f"micro via flagged via_diameter:\n{report}"
+    assert "annular_width" not in report, f"micro via flagged annular_width:\n{report}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #3919: the route pipeline (not just export) must emit the sibling
+# .kicad_pro / .kicad_dru constraint sidecars, so every downstream kicad-cli
+# invocation judges with the intended manufacturer floors.
+# ---------------------------------------------------------------------------
+
+
+def test_route_emits_sibling_kicad_pro(monkeypatch, tmp_path: Path):
+    """``run_post_route_drc`` writes a sibling .kicad_pro with the profile floors.
+
+    Mirrors the export-side emission but through the route entry point.  The
+    internal DRCChecker and geometric DRC are mocked so no real board or
+    kicad-cli is required; the assertion is purely on the emitted sidecar.
+    """
+    import json
+
+    import kicad_tools.drc as drc_mod
+    import kicad_tools.validate as validate_mod
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.drc.geometric import GeometricDRCResult
+    from kicad_tools.schema import pcb as pcb_mod
+
+    # Mock the internal engine + geometric DRC so the function focuses on
+    # sidecar emission (no real PCB parse, no kicad-cli).
+    monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: object()))
+
+    class _Results:
+        error_count = 0
+        warning_count = 0
+
+    class _Checker:
+        def __init__(self, *a, **k):
+            pass
+
+        def check_all(self, *a, **k):
+            return _Results()
+
+    pro_exists_at_drc = {}
+
+    def _geo(output_path, *a, **k):
+        pro_exists_at_drc["ok"] = (output_path.parent / "board.kicad_pro").exists()
+        return GeometricDRCResult(ran=True, error_count=0)
+
+    monkeypatch.setattr(validate_mod, "DRCChecker", _Checker)
+    monkeypatch.setattr(drc_mod, "run_geometric_drc", _geo)
+
+    out = tmp_path / "board.kicad_pcb"
+    route_cmd.run_post_route_drc(output_path=out, manufacturer="jlcpcb-tier1", layers=4)
+
+    pro = tmp_path / "board.kicad_pro"
+    assert pro.exists()
+    # ordering: the .kicad_pro existed before kicad-cli DRC ran.
+    assert pro_exists_at_drc.get("ok") is True
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+    data = json.loads(pro.read_text())
+    defaults = data["board"]["design_settings"]["defaults"]
+    assert defaults["clearance_min"] == rules.min_clearance_mm
+    assert defaults["track_min_width"] == rules.min_trace_width_mm
+
+
+def test_route_drc_survives_results_without_an_errors_list(monkeypatch, tmp_path: Path):
+    """Issue #8674: recording the path_ampacity audit must not abort the DRC.
+
+    ``run_post_route_drc`` records the ``path_ampacity`` errors of the rule
+    pass for the chained completion pass.  A results object that record cannot
+    be built from (no ``errors``, or one that raises) must leave the geometric
+    DRC running and write NO record -- a missing record reads as "not audited",
+    never as a clean audit, and a stale one for the same path is dropped.
+    """
+    import kicad_tools.drc as drc_mod
+    import kicad_tools.validate as validate_mod
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.drc.geometric import GeometricDRCResult
+    from kicad_tools.schema import pcb as pcb_mod
+
+    monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: object()))
+
+    class _NoErrors:
+        error_count = 0
+        warning_count = 0
+
+    class _RaisingErrors(_NoErrors):
+        @property
+        def errors(self):
+            raise RuntimeError("boom")
+
+    class _CleanErrors(_NoErrors):
+        errors: list = []
+
+    geometric_ran = []
+
+    def _geo(output_path, *a, **k):
+        geometric_ran.append(output_path)
+        return GeometricDRCResult(ran=True, error_count=0)
+
+    monkeypatch.setattr(drc_mod, "run_geometric_drc", _geo)
+    monkeypatch.setattr(route_cmd, "_path_ampacity_errors", {})
+    out = tmp_path / "board.kicad_pcb"
+    key = str(out.resolve())
+
+    def _run(results_cls):
+        class _Checker:
+            def __init__(self, *a, **k):
+                pass
+
+            def check_all(self, *a, **k):
+                return results_cls()
+
+        monkeypatch.setattr(validate_mod, "DRCChecker", _Checker)
+        geometric_ran.clear()
+        verdict = route_cmd.run_post_route_drc(
+            output_path=out, manufacturer="jlcpcb-tier1", layers=4, quiet=True
+        )
+        assert geometric_ran == [out], "the geometric DRC must still run"
+        assert verdict == (0, 0)
+
+    _run(_CleanErrors)
+    assert route_cmd._path_ampacity_errors[key] == frozenset()
+    for unreadable in (_NoErrors, _RaisingErrors):
+        route_cmd._path_ampacity_errors[key] = frozenset({"stale"})
+        _run(unreadable)
+        assert key not in route_cmd._path_ampacity_errors
+
+
+@pytest.fixture
+def authored_route_source(tmp_path):
+    source = tmp_path / "source.kicad_pcb"
+    source.write_text("(kicad_pcb)")
+    source.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "text_variables": {"KCT_PRESERVE_BOARD_RULES": "1"},
+                "board": {
+                    "design_settings": {
+                        "rules": {
+                            "min_clearance": 0.15,
+                            "min_track_width": 0.15,
+                            "min_via_hole": 0.1,
+                        }
+                    }
+                },
+                "net_settings": {
+                    "classes": [
+                        {"name": "Default", "clearance": 0.15},
+                        {"name": "HV", "clearance": 0.8},
+                    ],
+                    "netclass_assignments": {"VCC": "HV"},
+                },
+            }
+        )
+    )
+    source.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "Custom width" (constraint track_width (min 0.2mm)))\n'
+    )
+    return source
+
+
+@pytest.mark.parametrize("subdir", ["", "fresh"])
+def test_renamed_route_preserves_source_rules(authored_route_source, subdir):
+    source = authored_route_source
+    before = {
+        suffix: source.with_suffix(suffix).read_bytes() for suffix in (".kicad_pro", ".kicad_dru")
+    }
+    output = source.parent / subdir / "renamed.kicad_pcb"
+    output.parent.mkdir(exist_ok=True)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    write_drc_constraints(output, rules, manufacturer_id="jlcpcb", source_pcb_path=source)
+    data = json.loads(output.with_suffix(".kicad_pro").read_text())
+    assert data["text_variables"]["KCT_PRESERVE_BOARD_RULES"] == "1"
+    assert data["board"]["design_settings"]["rules"]["min_clearance"] == 0.15
+    assert data["board"]["design_settings"]["rules"]["min_via_hole"] == rules.min_via_drill_mm
+    assert data["net_settings"]["netclass_assignments"] == {"VCC": "HV"}
+    dru = output.with_suffix(".kicad_dru").read_text()
+    assert '"Custom width"' in dru and "(min 0.15mm)" in dru and "(min 0.8mm)" in dru
+    first = {suffix: output.with_suffix(suffix).read_bytes() for suffix in before}
+    write_drc_constraints(output, rules, manufacturer_id="jlcpcb", source_pcb_path=source)
+    assert first == {suffix: output.with_suffix(suffix).read_bytes() for suffix in before}
+    assert before == {suffix: source.with_suffix(suffix).read_bytes() for suffix in before}
+
+
+@pytest.mark.parametrize("suffix", [".kicad_pro", ".kicad_dru"])
+def test_renamed_route_conflicts_leave_both_sidecars_untouched(authored_route_source, suffix):
+    source = authored_route_source
+    output = source.with_name("renamed.kicad_pcb")
+    target = output.with_suffix(suffix)
+    target.write_text("{}" if suffix == ".kicad_pro" else "(version 1)\n# other rules\n")
+    before = target.read_bytes()
+    with pytest.raises(ValueError, match="conflict"):
+        write_drc_constraints(
+            output, get_profile("jlcpcb").get_design_rules(layers=4), source_pcb_path=source
+        )
+    assert target.read_bytes() == before
+    other = ".kicad_dru" if suffix == ".kicad_pro" else ".kicad_pro"
+    assert not output.with_suffix(other).exists()
+
+
+def test_post_route_conflict_blocks_even_quiet(authored_route_source, capsys, monkeypatch):
+    from kicad_tools.cli import route_cmd
+
+    output = authored_route_source.with_name("renamed.kicad_pcb")
+    output.with_suffix(".kicad_pro").write_text("{}")
+
+    def route_then_auto_fix(argv):
+        route_cmd.run_post_route_drc(
+            output, "jlcpcb", 4, quiet=True, source_pcb_path=authored_route_source
+        )
+        pytest.fail("constraint conflicts must abort before auto-fix can erase the failure")
+
+    monkeypatch.setattr(route_cmd, "_main_impl", route_then_auto_fix)
+    assert route_cmd.main([]) == 1
+    assert "conflict" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+def test_renamed_native_drc_uses_authored_clearance(authored_route_source, tmp_path):
+    import shutil
+    import subprocess
+
+    source = authored_route_source
+    source.write_text("""(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "A") (net 2 "B")
+      (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default))
+        (fill none) (layer "Edge.Cuts"))
+      (segment (start 5 5) (end 10 5) (width 0.2) (layer "F.Cu") (net 1))
+      (segment (start 5 5.34) (end 10 5.34) (width 0.2) (layer "F.Cu") (net 2)))""")
+    output = tmp_path / "renamed.kicad_pcb"
+    shutil.copyfile(source, output)
+    rules = get_profile("jlcpcb").get_design_rules(layers=2)
+
+    def clearance_findings(board):
+        report = board.with_suffix(".json")
+        proc = subprocess.run(
+            [str(_kicad_cli()), "pcb", "drc", "--format", "json", "-o", str(report), str(board)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(report.read_text())
+        return [v for v in data["violations"] if v["type"] == "clearance"]
+
+    # At the ordinary factory minimum the exact same 0.14mm gap passes.
+    control = tmp_path / "factory.kicad_pcb"
+    shutil.copyfile(source, control)
+    write_drc_constraints(control, rules, manufacturer_id="jlcpcb")
+    assert clearance_findings(control) == []
+    write_drc_constraints(output, rules, manufacturer_id="jlcpcb", source_pcb_path=source)
+    findings = clearance_findings(output)
+    assert findings
+    assert any("0.1500" in v["description"] for v in findings), findings
+
+
+def test_renamed_source_alias_is_not_modified(authored_route_source):
+    source = authored_route_source
+    target = source.with_name("alias.kicad_pcb")
+    project = source.with_suffix(".kicad_pro")
+    before = project.read_bytes()
+    target.with_suffix(".kicad_pro").symlink_to(project)
+    with pytest.raises(ValueError, match="aliases source"):
+        write_drc_constraints(
+            target, get_profile("jlcpcb").get_design_rules(layers=4), source_pcb_path=source
+        )
+    assert project.read_bytes() == before
+
+
+def test_renamed_identical_authored_destination_is_accepted(authored_route_source):
+    import shutil
+
+    source = authored_route_source
+    target = source.with_name("copy.kicad_pcb")
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        shutil.copyfile(source.with_suffix(suffix), target.with_suffix(suffix))
+    write_drc_constraints(
+        target, get_profile("jlcpcb").get_design_rules(layers=4), source_pcb_path=source
+    )
+    assert (
+        json.loads(target.with_suffix(".kicad_pro").read_text())["text_variables"][
+            "KCT_PRESERVE_BOARD_RULES"
+        ]
+        == "1"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #6243 x #6191: one clearance rule per stricter netclass, per mode
+# ---------------------------------------------------------------------------
+
+_MODES = {None: "default", "1": "full", "0": "off"}
+
+
+def _hv_project(flag: str | None) -> dict:
+    from tests.router.test_authored_netclass_board import project
+
+    data = project("hv")
+    if flag is not None:
+        data["text_variables"] = {"KCT_PRESERVE_BOARD_RULES": flag}
+    return data
+
+
+@pytest.mark.parametrize("flag", list(_MODES))
+def test_each_preserve_mode_restates_each_class_at_most_once(flag):
+    """#6191's modes own the netclass restatement; #6243 adds none of its own.
+
+    default: only classes stricter than the clearance floor, once each (here
+    HV, and Default too -- #6191 keeps its authored 0.15 mm over jlcpcb's 0.127);
+    full: every class, once each; off: plain fab floors, none.
+    """
+    import re
+
+    from kicad_tools.manufacturers.project_generator import generate_project_dru
+
+    rules = get_profile("jlcpcb").get_design_rules(layers=2)
+    dru = generate_project_dru(rules, _hv_project(flag), manufacturer_id="jlcpcb")
+    names = re.findall(r'\(rule "([^"]*clearance - [^"]*)"', dru)
+    assert len(names) == len(set(names)), names
+    hv_rules = [n for n in names if n.endswith("- HV")]
+    expected = {"default": 1, "full": 1, "off": 0}[_MODES[flag]]
+    assert len(hv_rules) == expected, names
+
+
+@pytest.mark.parametrize("flag", list(_MODES))
+def test_kicad_cli_flags_a_045mm_hv_run_unless_the_project_opts_out(tmp_path, flag):
+    """The #6243 control board with HV routed straight through its 0.45 mm
+    corridor -- what the pre-#6243 router produced.  With the DRU kct writes,
+    KiCad's DRC must flag it in the default and full modes.  The opt-out mode
+    deliberately carries plain fab floors, and a custom rule outranks the
+    netclass, so KiCad does NOT flag it there; the router still refuses it."""
+    import subprocess
+
+    from tests.router.test_authored_netclass_board import (
+        HV_Y,
+        _kicad_cli,
+        board_text,
+    )
+
+    cli = _kicad_cli()
+    if cli is None:
+        pytest.skip("kicad-cli not available")
+    board = tmp_path / "hv.kicad_pcb"
+    text = board_text().rstrip().rstrip(")")
+    board.write_text(
+        text + f'  (segment (start 103 {HV_Y}) (end 127 {HV_Y}) (width 0.2) (layer "F.Cu") '
+        "(net 1))\n)\n"
+    )
+    board.with_suffix(".kicad_pro").write_text(json.dumps(_hv_project(flag)))
+    write_drc_constraints(
+        board, get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_id="jlcpcb", layers=2
+    )
+    report = tmp_path / "drc.json"
+    subprocess.run(
+        [cli, "pcb", "drc", "--format", "json", "--output", str(report), str(board)],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    clearance = [
+        v for v in json.loads(report.read_text())["violations"] if v["type"] == "clearance"
+    ]
+    if _MODES[flag] == "off":
+        assert clearance == []
+    else:
+        assert clearance, "KiCad must see HV's 0.5 mm class on the routed board"
+        assert all("0.5000 mm" in v["description"] for v in clearance), clearance

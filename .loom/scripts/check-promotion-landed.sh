@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# check-promotion-landed.sh — reconcile a Champion promotion whose verdict
+# comment posted but whose label write silently did not (issue #6862).
+#
+# Problem this closes: champion-issue-promo.md's Step 3b posts the "Champion
+# Review: APPROVED" verdict comment and writes the promotion labels
+# (`+loom:issue`, `-loom:evaluating`, `-<proposal label>`) as two
+# independent `gh` calls. Nothing checked that the label write actually landed
+# before this fix — a transient failure or rate limit could drop the label
+# edit silently while the comment still posted. Observed live on issue #6464
+# (approved 2026-08-18): the comment posted, `loom:issue` never landed, and
+# the issue sat invisible to Builder (which filters on `loom:issue`) for 6
+# days until a later pass noticed by reading the label timeline by hand — and
+# was then re-evaluated from scratch.
+#
+# Step 3b itself now does the label write FIRST and verifies it with its own
+# inline read-back before posting the comment (see champion-issue-promo.md),
+# which prevents NEW instances of this failure. This script is the backstop
+# for issues already stuck in the old (bad) state, and for any partial
+# failure Step 3b's own retry does not resolve: it finds a SINGLE issue that
+# carries a "Champion Review: APPROVED" verdict comment but is missing
+# `loom:issue`, and (with --apply) completes the promotion by applying it.
+#
+# Finding the CANDIDATE SET (which issues to check) is the caller's job — see
+# "Pass 0c" in champion-issue-promo.md, which uses `gh issue list --search`
+# with GitHub's `in:comments` qualifier to shortlist issues before calling
+# this script once per candidate. Mirrors the split every other classify-
+# script in this directory uses (detect-dependency-cycle.sh,
+# check-evaluating-staleness.sh): one script decides about ONE issue, the
+# caller owns the scan.
+#
+# Usage:
+#   check-promotion-landed.sh --issue <n>            # report only
+#   check-promotion-landed.sh --issue <n> --apply     # report + reconcile
+#
+# With --apply, on a MISMATCH this script:
+#   1. If the issue carries `loom:operator` (a human owns it), does
+#      nothing. DECISION=ALREADY_ESCALATED (#6942).
+#   2. Otherwise adds `loom:issue`, verifies the addition with a read-back,
+#      and posts a reconciliation comment. DECISION=COMPLETED. If the edit or
+#      its read-back fails: DECISION=ESCALATED (a later pass retries).
+#   Before #11512 the verdict named a `tier:*` label, which this script
+#   recovered from the verdict text and escalated to an operator when it
+#   could not; tiers are retired, so there is nothing left to recover.
+#
+# Output (stdout — one KEY=VALUE per line, machine-parseable):
+#   DECISION=OK|NOT_OPEN|MISMATCH|COMPLETED|ESCALATED|ALREADY_ESCALATED
+#   REASON=<short human-readable reason>
+#
+# Exit codes:
+#   0  = OK (no APPROVED verdict comment; loom:issue already present;
+#        loom:issue is currently absent but a later-lifecycle label
+#        (loom:building/loom:blocked) is currently present, proving the
+#        promotion landed and the issue has since progressed independent of
+#        the timeline read (#7299); or loom:issue is currently absent but the
+#        label timeline shows it WAS applied after the newest APPROVED
+#        comment and the issue has since legitimately progressed further,
+#        e.g. loom:issue -> loom:building or -> loom:blocked — nothing to
+#        reconcile in any of these cases, #6933).
+#        ALSO used for DECISION=ALREADY_ESCALATED (the issue carries
+#        loom:operator — a human already owns it, #6942).
+#   1  = usage or environment error (bad args, `gh`/`jq` missing, a required
+#        `gh` read failed)
+#   10 = NOT_OPEN (issue is closed — nothing left to reconcile)
+#   11 = MISMATCH (APPROVED comment present, loom:issue missing, --apply not
+#        passed — report only)
+#   12 = COMPLETED (--apply added loom:issue and confirmed the addition via
+#        read-back)
+#   13 = ESCALATED (--apply could not complete the promotion — the completing
+#        edit failed, or its own read-back still shows loom:issue missing)
+#
+# CALLERS MUST NOT SWALLOW THE EXIT CODE. OK (0), NOT_OPEN (10), and
+# ALREADY_ESCALATED (0) all mean "nothing to do here";
+# MISMATCH/COMPLETED/ESCALATED (11/12/13) are each distinct outcomes a caller
+# should account for separately, same as every other classify-then-caller-acts
+# script in this directory.
+
+set -uo pipefail
+
+ISSUE=""
+APPLY=0
+
+usage() {
+  echo "Usage: $0 --issue <n> [--apply]" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue) ISSUE="${2:-}"; shift 2 ;;
+    --apply) APPLY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$ISSUE" || ! "$ISSUE" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --issue <n> is required and must be numeric" >&2
+  usage
+  exit 1
+fi
+
+for bin in gh jq; do
+  command -v "$bin" >/dev/null 2>&1 || { echo "ERROR: '$bin' not found on PATH" >&2; exit 1; }
+done
+
+emit() {
+  echo "DECISION=$1"
+  echo "REASON=$2"
+}
+
+# Keep `gh`'s stdout (the JSON we parse) and stderr SEPARATE — `gh` writes
+# incidental content to stderr even on success (update-notifier banners,
+# rate-limit hints), and merging streams can corrupt the payload before jq
+# sees it (#5455).
+GH_STDERR="$(mktemp)"
+trap 'rm -f "$GH_STDERR" 2>/dev/null || true' EXIT
+
+# --- Step 1: current state and labels ----------------------------------------
+ISSUE_JSON="$(gh issue view "$ISSUE" --json state,labels 2>"$GH_STDERR")" || {
+  echo "ERROR: 'gh issue view $ISSUE --json state,labels' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
+
+STATE_UC="$(jq -r '.state // empty' <<<"$ISSUE_JSON" 2>/dev/null | tr '[:lower:]' '[:upper:]')"
+if [[ -n "$STATE_UC" && "$STATE_UC" != "OPEN" ]]; then
+  emit "NOT_OPEN" "issue state is $STATE_UC — nothing to reconcile"
+  exit 10
+fi
+
+HAS_ISSUE_LABEL="$(jq -e '.labels[] | select(.name=="loom:issue")' <<<"$ISSUE_JSON" >/dev/null 2>&1 && echo yes || echo no)"
+
+# --- Step 1a: the comments, TRUSTED AUTHORS ONLY (#9548) ---------------------
+# "Champion Review: APPROVED" is a control phrase: it makes this script apply
+# loom:issue. On a repo that accepts outside comments anyone can type it, and
+# another Loom fleet's Champion writes it too, so it counts only from a trusted
+# author (a repo insider by author_association, one of THIS fleet's Apps, this
+# daemon's own identity, or forge.trustedCommenters), decided by
+# `loom-daemon forge trusted-comments` (loom-daemon/src/comment_trust.rs).
+# The REST listing is used, not `gh issue view --json comments`: the latter
+# spells an App author as a bare login, so the fleet's own Champion verdicts
+# could not be told apart from a user who registered the App's name.
+# requires-daemon: forge optional   Without the `trusted-comments` verb (absent binary, or one predating #9548) no author can be verified, so the script exits 1 (environment error) and reconciles nothing, rather than acting on an unauthenticated verdict.
+COMMENTS_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/comments" --paginate 2>"$GH_STDERR" | "${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments 2>>"$GH_STDERR")" || {
+  echo "ERROR: could not read #$ISSUE's comments or authenticate their authors (loom-daemon forge trusted-comments, #9548): $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
+
+# Newest trusted comment (by created_at) whose body contains the APPROVED verdict
+# marker text Step 3b's template writes — compact JSON (`-c`, not `-r`) since
+# this is an object, not a scalar.
+#
+# EXCLUDE this script's own follow-up comments (the `<!-- champion:promotion-
+# landed-completed -->` / `<!-- champion:promotion-landed-mismatch -->`
+# markers written below): both of those templates quote the literal phrase
+# "Champion Review: APPROVED" in their own narrative text ("This issue
+# carried a `Champion Review: APPROVED` verdict comment, but ..."), so the
+# naive `contains()` match here would otherwise pick up a PRIOR RUN's own
+# comment as if it were a fresh Champion verdict once one exists. That
+# self-match moves APPROVED_AT forward to whenever this script itself last
+# ran — sometimes to mere seconds AFTER the very `labeled loom:issue`
+# timeline event Step 2 below is trying to confirm predates it — which is
+# exactly how issue #7287 got incorrectly re-escalated on a second run
+# despite the promotion having genuinely landed (#7299).
+APPROVED_COMMENT="$(jq -c '
+  [.[] | select(
+      .body != null
+      and (.body | contains("Champion Review: APPROVED"))
+      and (.body | contains("<!-- champion:promotion-landed-") | not)
+    )]
+  | sort_by(.created_at)
+  | last // empty
+' <<<"$COMMENTS_JSON" 2>/dev/null || true)"
+
+if [[ -z "$APPROVED_COMMENT" || "$APPROVED_COMMENT" == "null" ]]; then
+  emit "OK" "no 'Champion Review: APPROVED' verdict comment from a trusted author on this issue — nothing to reconcile"
+  exit 0
+fi
+
+if [[ "$HAS_ISSUE_LABEL" == "yes" ]]; then
+  emit "OK" "APPROVED verdict comment present and loom:issue is present — promotion landed"
+  exit 0
+fi
+
+# --- Step 1b: loom:issue is currently absent, but a LATER-lifecycle label is
+# present (loom:building, loom:blocked) — this is only reachable if loom:issue
+# was applied at some point and the issue has since legitimately progressed
+# past it (Builder's claim atomically swaps loom:issue -> loom:building, e.g.).
+# This is a strictly stronger, cheaper signal than the Step 2 timeline lookup
+# below: it needs no extra `gh api` call and does not depend on the timeline
+# read (or the APPROVED-comment match above) being reliable at all. Checked
+# BEFORE Step 2 so a timeline hiccup or a self-match on an old comment (the
+# exact #7287 failure this fix addresses) can never override it (#7299).
+if jq -e '.labels[] | select(.name=="loom:building" or .name=="loom:blocked")' <<<"$ISSUE_JSON" >/dev/null 2>&1; then
+  emit "OK" "loom:issue is currently absent but a later-lifecycle label (loom:building/loom:blocked) is present — promotion landed and the issue has since progressed"
+  exit 0
+fi
+
+# --- Step 2: loom:issue is currently absent — but it may have landed and the
+# issue has SINCE legitimately progressed further (loom:issue -> loom:building,
+# or -> loom:blocked), which looks identical to a lost write from labels alone
+# when judged from the current label set only. Before concluding MISMATCH,
+# check the label timeline for a `labeled loom:issue` event that happened
+# AFTER the newest APPROVED comment: if one exists, the promotion landed and
+# this is not #6862's failure mode at all (#6933).
+APPROVED_AT="$(jq -r '.created_at // empty' <<<"$APPROVED_COMMENT")"
+
+TIMELINE_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/timeline" --paginate 2>"$GH_STDERR")" || {
+  echo "ERROR: 'gh api .../issues/$ISSUE/timeline' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  exit 1
+}
+
+# Newest `labeled loom:issue` event (by created_at) in the timeline — mirrors
+# check-evaluating-staleness.sh's own `sort_by`-free `last` selection pattern.
+# RFC3339 UTC timestamps compare correctly as plain strings, so no epoch
+# conversion is needed just to find the max.
+LATEST_LABELED_AT="$(jq -r '
+  [.[] | select(.event=="labeled" and .label.name=="loom:issue") | .created_at]
+  | sort
+  | last // empty
+' <<<"$TIMELINE_JSON" 2>/dev/null || true)"
+
+if [[ -n "$LATEST_LABELED_AT" && -n "$APPROVED_AT" && "$LATEST_LABELED_AT" > "$APPROVED_AT" ]]; then
+  emit "OK" "loom:issue was applied after the APPROVED comment and the issue has since progressed — nothing to reconcile"
+  exit 0
+fi
+
+# --- MISMATCH: an APPROVED verdict exists but loom:issue never landed --------
+REASON="APPROVED verdict comment present but loom:issue is missing — the promotion's label write did not land (#6862)"
+
+if [[ "$APPLY" -eq 0 ]]; then
+  emit "MISMATCH" "$REASON"
+  exit 11
+fi
+
+# #9548: --apply writes Champion markers and labels. Vet the repo first
+# (forge-helpers.sh in a subshell: it sets -e) and name it on every write; a
+# refusal leaves this a report-only MISMATCH.
+WRITE_REPO="$(source "$(dirname "${BASH_SOURCE[0]}")/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}" 2>"$GH_STDERR")" || { emit "MISMATCH" "$REASON; --apply refused: loom-daemon forge may-write: $(tr '\n' ' ' <"$GH_STDERR")"; exit 11; }
+
+# A held issue is never promoted over (#6942): loom:operator (a run of this
+# script before #11512, which escalated when it could not recover a tier, or an
+# operator's own hold), or any other hold. The set is the registry's, with the
+# retired names `labels migrate` has not moved yet (#11795; #11843 drops
+# --with-retired); the fallback is for a missing or older daemon.
+# requires-daemon: labels optional   a missing or older binary takes the fallback list
+if HELD="$(jq -r --arg h "$("${LOOM_DAEMON_BIN:-loom-daemon}" labels list --property hold --with-retired 2>/dev/null || echo loom:blocked loom:operator loom:frozen loom:operator-only loom:operator-decision loom:operator-mechanical loom:operator-blocked loom:needs-capability)" '[.labels[].name | select(IN($h | splits("[ \n]+")))] | first // empty' <<<"$ISSUE_JSON" 2>/dev/null)" && [[ -n "$HELD" ]]; then
+  emit "ALREADY_ESCALATED" "$REASON; the issue carries the hold $HELD — a human owns it, nothing further to do"
+  exit 0
+fi
+
+# Author gate (#10827): a backstop promotion is still an automatic one, so an
+# issue whose author is not trusted (or cannot be verified) is left as it is —
+# a trusted maintainer adopts it by hand. Fail closed: only TRUSTED proceeds.
+GATE_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge promotion-author --number "$ISSUE" --repo "$WRITE_REPO" 2>"$GH_STDERR")" || GATE_OUT="UNKNOWN the author check failed: $(tr '\n' ' ' <"$GH_STDERR")"
+GATE="$(head -n1 <<<"$GATE_OUT")"
+if [[ "$GATE" != "TRUSTED" ]]; then
+  emit "ALREADY_ESCALATED" "$REASON; not completed: author gate says $GATE (#10827) — a trusted maintainer must adopt it by applying loom:issue"
+  exit 0
+fi
+
+# Complete the promotion: add loom:issue. Since #11512 the verdict names no
+# tier label, so there is nothing to recover from its text.
+if ! gh issue edit "$ISSUE" --repo "$WRITE_REPO" --add-label "loom:issue" >/dev/null 2>"$GH_STDERR"; then
+  echo "ERROR: failed to add loom:issue to #$ISSUE: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  emit "ESCALATED" "$REASON; the completing label edit FAILED"
+  exit 13
+fi
+
+# Verify the write actually landed — the whole point of this script. Never
+# trust the edit's own exit code alone (#6862's root cause).
+VERIFY_JSON="$(gh issue view "$ISSUE" --repo "$WRITE_REPO" --json labels 2>"$GH_STDERR")" || {
+  echo "ERROR: read-back after completing promotion on #$ISSUE failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+  emit "ESCALATED" "$REASON; completed the edit but the read-back verification itself failed"
+  exit 13
+}
+
+if ! jq -e '.labels[] | select(.name=="loom:issue")' <<<"$VERIFY_JSON" >/dev/null 2>&1; then
+  emit "ESCALATED" "$REASON; edit ran but the read-back STILL shows loom:issue missing"
+  exit 13
+fi
+
+gh issue comment "$ISSUE" --repo "$WRITE_REPO" --body "<!-- champion:promotion-landed-completed -->
+**Champion: Promotion completed — reconciled a missing label write**
+
+This issue carried a \`Champion Review: APPROVED\` verdict comment, but \`loom:issue\` had never been applied — the label write that was supposed to accompany that verdict silently did not land (#6862). This reconciliation pass applied \`loom:issue\` and confirmed it is present via a read-back.
+
+**Ready for Builder to claim.**
+
+---
+*Automated by check-promotion-landed.sh (#6862)*" >/dev/null 2>"$GH_STDERR" || \
+  echo "WARNING: promotion completed but the reconciliation comment failed to post on #$ISSUE: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+
+emit "COMPLETED" "$REASON; completed and verified via read-back"
+exit 12

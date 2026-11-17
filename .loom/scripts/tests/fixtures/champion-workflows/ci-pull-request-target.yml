@@ -1,0 +1,8 @@
+name: label
+on:
+  pull_request_target:
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo labeling

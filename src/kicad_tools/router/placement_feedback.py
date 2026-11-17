@@ -1,0 +1,3327 @@
+"""
+Closed-loop placement-routing feedback.
+
+This module implements the feedback loop between routing failures and
+placement optimization, enabling automatic recovery from placement-induced
+routing failures.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import copy
+import json
+import math
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.placement_delta import PlacementDelta
+    from kicad_tools.router.primitives import Route
+    from kicad_tools.router.rules import NetClassRouting
+    from kicad_tools.schema.pcb import PCB
+
+from kicad_tools.recovery import (
+    Action,
+    ApplicationResult,
+    Difficulty,
+    ResolutionStrategy,
+    StrategyApplicator,
+    StrategyGenerator,
+    StrategyType,
+)
+
+# Snapshot state shapes for the atomic keep/revert machinery (#3504 best
+# snapshot, #4518 pad angles, #4560 layers/pad positions for the mirror
+# delta).  Per-pad: ``(position, rotation, layers)`` with ``None`` marking an
+# attribute the pad object does not carry (test doubles).  Per-footprint:
+# ``((x, y), rotation, layer, [pad_state, ...])``.
+_PadState = tuple[tuple[float, float] | None, float | None, list[str] | None]
+_FootprintState = tuple[tuple[float, float], float, str | None, list[_PadState]]
+
+# Router-side pad->net rebinding for an applied ``reorder_pins`` delta (issue
+# #5536, Phase 2a of Epic #5511).  A binding is ``(pad, net_id, net_name)``;
+# applying a list of them returns the list of bindings they displaced, so the
+# return value is BOTH the "what changed" record and an exact restore token
+# (replaying it through the same function is the inverse operation).
+_RouterPadNetBinding = tuple[Any, int, str]
+
+
+@dataclass
+class _PadNetSnapshot:
+    """Pre-apply pad->net bindings a ``reorder_pins`` revert must restore.
+
+    ``reference`` is the authored footprint reference
+    ``PCB.assign_net_to_footprint_pad`` keys on; ``pcb_bindings`` is
+    ``{pad_number: net_name}`` for exactly the pads the delta rewrites; and
+    ``router_bindings`` is the router-side counterpart (issue #5536).
+    """
+
+    reference: str
+    pcb_bindings: dict[str, str]
+    router_bindings: list[_RouterPadNetBinding]
+
+
+_SEXP_MISSING = object()
+
+# Issue #8480: a placement-delta trial whose iteration-0 routed count is more
+# than this many nets below the accepted result is abandoned and its delta
+# reverted, rather than spending its remaining iterations (a from-scratch
+# re-negotiation can cost as much as the original run) on a clearly worse start.
+PD_ABANDON_ROUTED_MARGIN = 3
+
+
+# Delta kinds whose applicator path rewrites footprint silk/fab in a way the
+# placement restore cannot undo (issue #6557): ``mirror`` flips the cosmetics
+# (``StrategyApplicator._apply_mirror_component``), and both rotation kinds go
+# through ``StrategyApplicator._apply_rotate_component``.  Both end in
+# ``fp.keep_texts_upright()``, which turns board-absolute text angles by 180
+# degrees and swaps their justification -- the ``fp.rotation`` setter's rigid
+# ``-delta`` turn on revert does not take that flip back.  A trial of one of
+# these kinds snapshots the cosmetics (``_snapshot_cosmetics``) so the revert
+# can restore them absolutely.
+_COSMETIC_REWRITING_KINDS: frozenset[str] = frozenset({"mirror", "rotate_180", "rotate_align"})
+
+
+@dataclass
+class _CosmeticSnapshot:
+    """Absolute pre-trial state of one footprint's silk/fab (#6325, #6557).
+
+    A mirror flips the footprint's texts and graphics in two parallel
+    representations -- the parsed ``fp.texts``/``fp.graphics`` objects and the
+    raw ``property``/``fp_text``/``fp_*`` children of ``fp._sexp_node`` that
+    ``PCB.save`` writes -- and neither is in ``_snapshot_placement``.  This
+    records both, by object identity:
+
+    * ``objects``: each text/graphic object with a copy of its ``__dict__``;
+    * ``nodes``: EVERY node of each cosmetic S-expression subtree with all of
+      its slot values (``children`` as a shallow list copy).  The mirror only
+      rewrites values, replaces atoms and inserts/removes child nodes, so
+      putting back every original node's slots rebuilds the original object
+      graph exactly -- node identities included, which keeps the
+      ``_text_angle_synthetic`` id set (also recorded) valid.
+
+    :meth:`restore` only writes absolute values, so it is idempotent and safe
+    to interrupt and repeat.  That makes the undo independent of WHEN a signal
+    handler runs, and of which thread the kernel delivered the signal to.
+    """
+
+    footprint: Any
+    objects: list[tuple[Any, dict[str, Any]]]
+    nodes: list[tuple[Any, tuple[Any, ...]]]
+    synthetic: set[int] | None
+
+    @classmethod
+    def capture(cls, fp: Any, cosmetic_tags: frozenset[str]) -> _CosmeticSnapshot:
+        objects = [
+            (obj, copy.deepcopy(vars(obj)))
+            for obj in [*getattr(fp, "texts", []), *getattr(fp, "graphics", [])]
+            if hasattr(obj, "__dict__")
+        ]
+        nodes: list[tuple[Any, tuple[Any, ...]]] = []
+        sexp_node = getattr(fp, "_sexp_node", None)
+        if sexp_node is not None:
+            from kicad_tools.sexp import SExp
+
+            slots = SExp.__slots__
+            stack = [c for c in sexp_node.iter_children() if c.tag in cosmetic_tags]
+            while stack:
+                node = stack.pop()
+                state = tuple(
+                    list(node.children)
+                    if slot == "children"
+                    else getattr(node, slot, _SEXP_MISSING)
+                    for slot in slots
+                )
+                nodes.append((node, state))
+                stack.extend(node.children)
+        synthetic = getattr(fp, "__dict__", {}).get("_text_angle_synthetic")
+        return cls(
+            footprint=fp,
+            objects=objects,
+            nodes=nodes,
+            synthetic=set(synthetic) if synthetic is not None else None,
+        )
+
+    def restore(self) -> None:
+        for obj, attrs in self.objects:
+            vars(obj).update(copy.deepcopy(attrs))
+        if self.nodes:
+            from kicad_tools.sexp import SExp
+
+            slots = SExp.__slots__
+            for node, state in self.nodes:
+                for slot, value in zip(slots, state, strict=True):
+                    if value is _SEXP_MISSING:
+                        continue
+                    setattr(node, slot, list(value) if slot == "children" else value)
+        fp_state = getattr(self.footprint, "__dict__", None)
+        if fp_state is not None:
+            if self.synthetic is None:
+                fp_state.pop("_text_angle_synthetic", None)
+            else:
+                fp_state["_text_angle_synthetic"] = set(self.synthetic)
+
+
+@dataclass
+class _TrialInFlight:
+    """The last ACCEPTED state, held while a delta trial is in flight (#6314).
+
+    ``run_delta`` mutates the router and the board in place: it moves the
+    target's pads, clears every route and re-routes.  Until the trial is kept
+    or reverted, the live state is unaccepted and only partly re-routed, and
+    the state the run could stand behind exists only in these snapshots.  They
+    used to be locals of ``run_delta``, so an interrupt (a routing deadline or
+    Ctrl+C) that saved a partial board had nothing to restore from.
+
+    ``cosmetics`` covers what the placement snapshot cannot: a ``mirror``
+    also flips the footprint's silk/fab texts and graphics, and a
+    ``rotate_180``/``rotate_align`` ends in ``keep_texts_upright`` (Issue
+    #6557), and those live outside ``placement``.  It is an absolute snapshot
+    of them taken before the application starts (``None`` for every kind not
+    in ``_COSMETIC_REWRITING_KINDS``), so the undo
+    writes them back however far the application got and however the loop's
+    own revert and a signal handler's ``restore_last_accepted`` interleave
+    (Issue #6325).  It used to count re-applications of the mirror instead,
+    which a handler running between the flip and its count got wrong.
+    """
+
+    delta: PlacementDelta
+    strategy: ResolutionStrategy
+    placement: dict[str, _FootprintState]
+    router_pads: list[tuple[Any, float, float, Any]]
+    pad_nets: _PadNetSnapshot | None
+    routes: list[Route]
+    cosmetics: _CosmeticSnapshot | None = None
+    # Issue #6320: ``CommitJournal.mark()`` of the router's commit journal when
+    # the trial began -- ``(length, truncated)`` -- or ``None`` for a router
+    # without one.  A restore that skips the grid rebuild truncates the journal
+    # back to it, so the access-witness sidecar a partial save writes describes
+    # the copper that save contains rather than the discarded trial's.
+    journal_mark: tuple[int, bool] | None = None
+    # Set once a no-rebuild restore has truncated the journal to
+    # ``journal_mark``.  From then on the journal describes the restored
+    # routes while the grid still holds the trial's copper, so a later grid
+    # rebuild of this trial must not journal its reset-and-re-mark on top.
+    journal_rewound: bool = False
+
+
+def _journal_mark(router: Any) -> tuple[int, bool] | None:
+    """``router.commit_journal.mark()``, or ``None`` when there is no journal."""
+    journal = getattr(router, "commit_journal", None)
+    mark = getattr(journal, "mark", None)
+    if mark is None:
+        return None
+    length, truncated = mark()
+    return int(length), bool(truncated)
+
+
+def _safe_journal_mark(router: Any) -> tuple[int, bool] | None:
+    """:func:`_journal_mark`, or ``None`` for a router whose journal is unusable.
+
+    The blocker-geometry loop runs against many test doubles (``MagicMock``
+    routers among them); a mark it cannot take only means a later no-rebuild
+    restore leaves the journal alone (issue #6321).
+    """
+    try:
+        return _journal_mark(router)
+    except Exception:
+        return None
+
+
+def _truncate_journal_to(router: Any, journal_mark: tuple[int, bool] | None) -> None:
+    """Rewind ``router.commit_journal`` to *journal_mark* (issue #6320).
+
+    Drops the memoized access witness too when anything was cut: that cache is
+    keyed on the journal's length alone, which a re-grown journal could match.
+    """
+    if journal_mark is None:
+        return
+    journal = getattr(router, "commit_journal", None)
+    if journal is None:
+        return
+    length, truncated = journal_mark
+    if journal.truncate_to(length, truncated):
+        with contextlib.suppress(Exception):  # a frozen / slotted stub router
+            router._access_witness_cache = None
+
+
+def _router_pad_key(pad: Any) -> tuple[str, str]:
+    """The ``Autorouter.nets`` membership key for a router ``Pad``.
+
+    Mirrors :attr:`kicad_tools.router.primitives.Pad.key`, with a getattr
+    fallback so pad doubles that carry only ``ref``/``pin`` work too.
+    """
+    key = getattr(pad, "key", None)
+    if key is not None:
+        first, second = key
+        return (first, second)
+    ref = getattr(pad, "component_id", "") or getattr(pad, "ref", "")
+    return (ref, getattr(pad, "terminal_id", "") or getattr(pad, "pin", ""))
+
+
+def router_net_ids_by_name(router: Any) -> dict[str, int]:
+    """``{net_name: net_id}`` as the router's own flat pad list declares it.
+
+    The router routes against net *ids*; a swap proposal names its target
+    nets by *name*.  Every name a declared swap group re-binds to is, by
+    construction, already carried by one of the group's pads (the proposal is
+    a permutation WITHIN the group), so this pad-derived map resolves every
+    rebinding without consulting the PCB's net table.
+    """
+    pads = getattr(router, "all_pads", None) or list(getattr(router, "pads", {}).values())
+    ids: dict[str, int] = {}
+    for pad in pads:
+        name = getattr(pad, "net_name", "")
+        if name and name not in ids:
+            ids[name] = pad.net
+    return ids
+
+
+def resolve_router_swap_bindings(
+    router: Any,
+    target_key: str,
+    pad_map: dict[str, str],
+) -> list[_RouterPadNetBinding] | None:
+    """Translate a delta's ``{pad_number: net_name}`` map into router bindings.
+
+    Returns ``None`` when a pad_map entry names a net the router does not
+    carry -- applying a partial rebinding would desynchronise the router from
+    the PCB, so the caller must decline the delta instead (the loop skips it
+    with an explicit reason).  Pads of ``target_key`` that the map does not
+    name are left alone.
+
+    A pad_map key is an AUTHORED pad number (``schema.pcb.Pad.number``), so it
+    is matched against ``Pad.pin`` -- which "keeps its authored display name"
+    -- and never against ``Pad.terminal_id``, the internal physical land
+    identity that only :attr:`~kicad_tools.router.primitives.Pad.key` uses.
+    """
+    pads = getattr(router, "all_pads", None) or list(getattr(router, "pads", {}).values())
+    ids_by_name = router_net_ids_by_name(router)
+    bindings: list[_RouterPadNetBinding] = []
+    for pad in pads:
+        if (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) != target_key:
+            continue
+        new_name = pad_map.get(getattr(pad, "pin", ""))
+        if new_name is None:
+            continue
+        new_id = ids_by_name.get(new_name)
+        if new_id is None:
+            return None
+        bindings.append((pad, new_id, new_name))
+    return bindings
+
+
+def apply_router_pad_net_bindings(
+    router: Any,
+    bindings: list[_RouterPadNetBinding],
+) -> list[_RouterPadNetBinding]:
+    """Re-bind router pads to new nets, returning the displaced bindings.
+
+    Mutates ``pad.net`` / ``pad.net_name`` IN PLACE on the pathfinder's own
+    ``Pad`` objects and moves the pad's membership key between the affected
+    ``Autorouter.nets`` buckets -- the router decides which pads a net must
+    connect from that dict, so a pad rebinding that skipped it would re-route
+    the OLD netlist.  The returned list restores the exact prior state when
+    passed straight back in (the operation is its own inverse).
+
+    **The caller must re-stamp the routing grid before routing again.**  The
+    grid records each pad's cells under the net that owned them when the pad
+    was added, so routing straight after a rebinding would send a net at pads
+    the grid still attributes to its old net -- measured on the isolated DDR
+    bundle: 1/11 reached without a re-stamp versus 10/11 with one.  Inside
+    :class:`PlacementDeltaFeedbackLoop` this is already guaranteed -- the
+    keep path re-routes through ``_clear_routes`` and the revert path through
+    ``_rebuild_grid_for_routes``, both of which call
+    ``Autorouter._reset_for_new_trial`` (which re-adds every live pad).  A
+    caller driving these helpers directly has to do the same.
+    """
+    nets = getattr(router, "nets", None)
+    displaced: list[_RouterPadNetBinding] = []
+    for pad, new_id, new_name in bindings:
+        old_id, old_name = pad.net, getattr(pad, "net_name", "")
+        displaced.append((pad, old_id, old_name))
+        if old_id == new_id and old_name == new_name:
+            continue
+        pad.net = new_id
+        pad.net_name = new_name
+        if not isinstance(nets, dict):
+            continue
+        key = _router_pad_key(pad)
+        members = nets.get(old_id)
+        if members is not None and key in members:
+            members.remove(key)
+        new_members = nets.setdefault(new_id, [])
+        if key not in new_members:
+            new_members.append(key)
+    return displaced
+
+
+def detect_pf_stagnation(
+    routed_history: list[int],
+    *,
+    patience: int = 3,
+) -> bool:
+    """Return True if the last ``patience`` iterations all match the same routed count.
+
+    This is the placement-feedback-layer analogue of the inner-router rip-up
+    cohort stagnation detector added in #2597.  It compares the rolling
+    history of "fully routed net count" across consecutive outer
+    ``PlacementFeedbackLoop`` iterations and signals stagnation when no
+    progress has been made for ``patience`` iterations.
+
+    Need at least ``patience + 1`` entries to make a stagnation call -- the
+    first entry establishes a baseline and the next ``patience`` entries
+    must all match it.  Returns False on shorter histories.
+
+    The check uses strict equality on the last ``patience + 1`` entries
+    (``len(set(window)) == 1``).  A single non-matching entry anywhere in
+    the window resets the stagnation signal, even if the most recent
+    entries are flat (i.e. a recent improvement followed by flat counts is
+    not yet stagnated; the helper waits until ``patience + 1`` flat entries
+    line up).
+
+    Args:
+        routed_history: Per-iteration fully-routed-net counts, oldest first.
+        patience: Number of *consecutive identical follow-up* iterations
+            required to declare stagnation.  Default 3 means "baseline + 3
+            unchanged iterations" => 4 total entries with the same count.
+
+    Returns:
+        True if the most recent ``patience + 1`` entries all share a single
+        value; False otherwise (including when history is too short).
+
+    Examples:
+        >>> detect_pf_stagnation([46, 46, 46, 46], patience=3)
+        True
+        >>> detect_pf_stagnation([40, 43, 44, 45], patience=3)
+        False
+        >>> detect_pf_stagnation([46, 46, 46], patience=3)
+        False
+        >>> detect_pf_stagnation([46, 46, 46], patience=2)
+        True
+    """
+    if patience < 1:
+        return False
+    if len(routed_history) < patience + 1:
+        return False
+    last_window = routed_history[-(patience + 1) :]
+    return len(set(last_window)) == 1
+
+
+@dataclass
+class PlacementAdjustment:
+    """Record of a placement adjustment made during feedback loop.
+
+    Attributes:
+        iteration: Which iteration the adjustment was made.
+        strategy: The strategy that was applied.
+        result: Result of applying the strategy.
+        failed_nets_before: Net IDs that failed before this adjustment.
+        failed_nets_after: Net IDs that failed after this adjustment.
+    """
+
+    iteration: int
+    strategy: ResolutionStrategy
+    result: ApplicationResult
+    failed_nets_before: list[int]
+    failed_nets_after: list[int]
+
+
+@dataclass
+class PlacementDiffEntry:
+    """A single component placement change observed during feedback.
+
+    Captures the original position (before any feedback adjustments)
+    and the final position (after all adjustments).  Used to build the
+    ``<output>_placement_diff.json`` artifact that lets a human review
+    what moved before accepting the result.
+    """
+
+    ref: str
+    old_xy: tuple[float, float]
+    new_xy: tuple[float, float]
+    rotation_delta: float = 0.0
+    # Board side before/after (issue #4560): a kept mirror delta flips the
+    # component's layer, which position/rotation alone cannot express (a
+    # flip at rotation 90 leaves both unchanged).  ``None`` when the loop's
+    # board doubles carry no layer attribute.
+    old_layer: str | None = None
+    new_layer: str | None = None
+    component_id: str = ""
+
+    @property
+    def distance_mm(self) -> float:
+        """Euclidean distance moved, in mm."""
+        dx = self.new_xy[0] - self.old_xy[0]
+        dy = self.new_xy[1] - self.old_xy[1]
+        return math.hypot(dx, dy)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ref": self.ref,
+            "old_xy": [self.old_xy[0], self.old_xy[1]],
+            "new_xy": [self.new_xy[0], self.new_xy[1]],
+            "rotation_delta": self.rotation_delta,
+            "distance_mm": self.distance_mm,
+            "old_layer": self.old_layer,
+            "new_layer": self.new_layer,
+            **({"component_id": self.component_id} if self.component_id else {}),
+        }
+
+
+@dataclass
+class PlacementFeedbackResult:
+    """Result of the placement-routing feedback loop.
+
+    Attributes:
+        success: Whether all nets were successfully routed.
+        routes: Final list of routes.
+        iterations: Number of iterations performed.
+        adjustments: List of placement adjustments made.
+        failed_nets: Net IDs that remain unrouted.
+        total_components_moved: Total number of components moved.
+        placement_diff: Per-component before/after positions for every
+            component that moved at any point during the loop.  This is
+            distinct from ``adjustments`` (which records each step) --
+            ``placement_diff`` collapses multiple moves of the same
+            component into a single before/after entry suitable for
+            JSON-serializing as a diff artifact.
+        exit_reason: Why the outer feedback loop terminated.  One of:
+
+            * ``"pf_converged"`` -- ``failed_nets`` was empty after a
+              routing pass; the loop achieved 100% connectivity.
+            * ``"pf_max_iter"`` -- the loop reached
+              ``max_adjustments + 1`` iterations without converging, or
+              hit a non-stagnation early-exit condition (no PCB
+              provided, no suitable strategy found).  This is the
+              backwards-compatible default so old callers reading the
+              field always see something sensible.
+            * ``"pf_stagnated"`` -- ``detect_pf_stagnation`` fired:
+              fully-routed-net count was unchanged for
+              ``stagnation_patience`` consecutive iterations.  See
+              #2606.
+            * ``"pf_timeout"`` -- the optional outer wall-clock budget
+              passed via ``outer_timeout`` was exceeded between
+              iterations.
+            * ``"pf_interrupted"`` -- the optional ``stop_requested``
+              callback reported an interrupt (Ctrl+C / deadline) between
+              iterations (#6324).
+
+            Symmetric with the ``route_all_negotiated`` callback's
+            ``converged``/``stagnated``/``timeout`` strings (#2597) but
+            distinguished by the ``pf_`` prefix so callers / CI can tell
+            the layers apart.
+    """
+
+    success: bool
+    routes: list[Route]
+    iterations: int
+    adjustments: list[PlacementAdjustment] = field(default_factory=list)
+    failed_nets: list[int] = field(default_factory=list)
+    total_components_moved: int = 0
+    placement_diff: list[PlacementDiffEntry] = field(default_factory=list)
+    exit_reason: str = "pf_max_iter"
+
+    def summary(self) -> str:
+        """Generate a human-readable summary."""
+        lines = [
+            "Placement-Routing Feedback Result:",
+            f"  Success: {self.success}",
+            f"  Iterations: {self.iterations}",
+            f"  Exit reason: {self.exit_reason}",
+            f"  Routes: {len(self.routes)}",
+            f"  Components moved: {self.total_components_moved}",
+            f"  Failed nets: {len(self.failed_nets)}",
+        ]
+        if self.adjustments:
+            lines.append("  Adjustments:")
+            for adj in self.adjustments:
+                lines.append(
+                    f"    Iter {adj.iteration}: {adj.result.message} "
+                    f"({len(adj.failed_nets_before)} -> {len(adj.failed_nets_after)} failures)"
+                )
+        return "\n".join(lines)
+
+
+class PlacementFeedbackLoop:
+    """Implements closed-loop placement-routing feedback.
+
+    This class orchestrates the feedback loop between routing failures
+    and placement optimization. When routing fails, it:
+    1. Analyzes the failures to determine root causes
+    2. Generates placement strategies to resolve failures
+    3. Applies the best strategy to adjust placement
+    4. Clears routes and retries routing
+    5. Repeats until success or max iterations reached
+
+    Example::
+
+        from kicad_tools.router import Autorouter
+
+        router = Autorouter(100, 100)
+        # ... add components and pads ...
+
+        # Route with automatic placement feedback
+        result = router.route_with_placement_feedback(
+            pcb=pcb,
+            max_adjustments=3,
+        )
+
+        if result.success:
+            print(f"Routed successfully after {result.iterations} iterations")
+        else:
+            print(f"Failed to route {len(result.failed_nets)} nets")
+    """
+
+    def __init__(
+        self,
+        router: Autorouter,
+        pcb: PCB | None = None,
+        verbose: bool = True,
+        fixed_refs: set[str] | list[str] | None = None,
+        max_movement: float | None = 5.0,
+        stagnation_patience: int = 3,
+        outer_timeout: float | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+    ):
+        """Initialize the feedback loop.
+
+        Args:
+            router: The autorouter to use.
+            pcb: The PCB to modify placement on. If None, only routing
+                strategies will be attempted (no placement adjustment).
+            verbose: Whether to print progress information.
+            fixed_refs: Optional set/list of component references that
+                must NOT move during the feedback loop.  Strategies
+                whose ``affected_components`` intersect this set are
+                filtered out before application.  Typically populated
+                with connectors (J*), mechanically-fixed parts, and any
+                IC the caller has hand-placed (e.g. fine-pitch packages
+                where the human chose the position).  Default: empty.
+            max_movement: Hard cap on per-component movement distance,
+                in mm.  Strategies that would move any component by
+                more than this distance are filtered out.  Set to None
+                to disable the cap.  Default: 5.0mm.
+            stagnation_patience: Issue #2606: number of consecutive
+                outer iterations with no fully-routed-net-count
+                improvement before declaring ``pf_stagnated`` and
+                exiting the loop early.  Default 3.  Set to 0 to
+                disable stagnation detection.
+            outer_timeout: Issue #2606: optional hard wall-clock budget
+                for the entire outer feedback loop, in seconds.  When
+                exceeded between iterations the loop exits with
+                ``pf_timeout``.  Default None (no outer cap; only the
+                per-iteration negotiated-router ``timeout`` applies).
+            stop_requested: Issue #6324: optional predicate checked at the
+                top of each iteration, next to ``outer_timeout``.  When it
+                returns True the loop exits with ``pf_interrupted`` (best
+                snapshot restored as for a timeout) instead of starting
+                another re-route.  ``kct route`` passes "an interrupt was
+                delivered", so a Ctrl+C whose ``SystemExit`` was swallowed
+                still stops the loop.  Default None (never stops).
+        """
+        self.router = router
+        self.pcb = pcb
+        self.verbose = verbose
+        self.fixed_refs: set[str] = set(fixed_refs or [])
+        self.max_movement: float | None = max_movement
+        self.stagnation_patience: int = stagnation_patience
+        self.outer_timeout: float | None = outer_timeout
+        self.stop_requested: Callable[[], bool] | None = stop_requested
+        self._strategy_generator = StrategyGenerator()
+        self._strategy_applicator = StrategyApplicator()
+        # Snapshot of original positions, populated lazily the first time
+        # a strategy is applied.  Used to build the placement diff.
+        # ``ref -> ((x, y), rotation, layer)`` -- layer added by #4560 so a
+        # kept mirror (layer flip) is visible in the diff artifact.
+        self._original_positions: dict[str, tuple[tuple[float, float], float, str | None]] = {}
+        # Issue #6321: the best routed state ``run`` has seen, held on the
+        # loop (not in ``run``'s locals) so an interrupt's partial save can put
+        # it back while an iteration is re-routing.  ``_best_journal_mark`` is
+        # the router's commit-journal mark taken with the snapshot (#6320).
+        # ``_iteration_in_flight`` is the iteration whose live copper may NOT
+        # be the best snapshot (it cleared the routes and is re-routing, or
+        # re-routed to a result no better than the best), else ``None``.
+        # ``_best_rewound`` is set once ``restore_best_for_partial_save`` has
+        # rewound the live routes under ``run``.
+        self._best_routes: list[Route] = []
+        self._best_routed_count: int = -1
+        self._best_iteration: int = -1
+        self._best_journal_mark: tuple[int, bool] | None = None
+        self._iteration_in_flight: int | None = None
+        self._best_rewound: bool = False
+
+    # --- interrupt recovery (issue #6321) ----------------------------------
+
+    @property
+    def best_iteration(self) -> int:
+        """Iteration the best snapshot came from (``-1`` = the pre-loop input)."""
+        return self._best_iteration
+
+    def restore_best_for_partial_save(self) -> bool:
+        """Put the best routes ``run`` has seen back on the router, cheaply.
+
+        For ``kct route``'s deadline and Ctrl+C partial saves, which serialize
+        ``router.routes`` while ``run`` may be in the middle of an iteration:
+        every iteration clears all routes before it re-routes, so the live
+        copper there is a half-finished re-route rather than the best result
+        the run already had.  This loop moves footprints only on ``self.pcb``,
+        never the router's pads, so the best routes still match the board on
+        disk and only ``router.routes`` needs to be put back.
+
+        The routing grid is deliberately NOT rebuilt (it is the one step here
+        whose cost grows with the board -- ~380 ms on board 05 -- and a
+        partial save runs inside a 5 s kill window); the router's commit
+        journal is truncated to the snapshot's mark instead, so the
+        access-witness sidecar describes the saved copper (#6320).  If the
+        run nevertheless resumes (a ``SystemExit`` Python discarded, #6324),
+        ``run`` notices, does not judge the rewound iteration, stops and
+        restores the best state WITH a grid rebuild.
+
+        Returns:
+            ``True`` when an iteration was in flight and a best snapshot
+            existed, so the live routes were replaced; ``False`` otherwise
+            (nothing to restore, or the live routes already are the best).
+        """
+        if self._iteration_in_flight is None or self._best_routed_count < 0:
+            return False
+        # Published BEFORE the routes change, so ``run`` can always tell.
+        self._best_rewound = True
+        self.router.routes = copy.deepcopy(self._best_routes)
+        _truncate_journal_to(self.router, self._best_journal_mark)
+        return True
+
+    def _snapshot_best(self, routed_count: int, iteration: int) -> None:
+        """Record the live routes as the best state (issue #2840 / #6321)."""
+        self._best_routes = copy.deepcopy(list(self.router.routes))
+        self._best_journal_mark = _safe_journal_mark(self.router)
+        self._best_routed_count = routed_count
+        self._best_iteration = iteration
+
+    def run(
+        self,
+        max_adjustments: int = 3,
+        use_negotiated: bool = True,
+        min_confidence: float = 0.5,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
+    ) -> PlacementFeedbackResult:
+        """Run the placement-routing feedback loop.
+
+        Args:
+            max_adjustments: Maximum number of placement adjustments to try.
+            use_negotiated: Whether to use negotiated congestion routing.
+            min_confidence: Minimum confidence required to apply a strategy.
+            timeout: Optional total routing budget per iteration, in seconds.
+                Forwarded to ``Autorouter.route_all_negotiated`` so each
+                re-route inside the loop respects the same wall-time budget
+                the caller used for the initial routing pass.  Default: no
+                limit.
+            per_net_timeout: Optional per-net timeout, in seconds.  Same
+                semantics as the equivalent CLI flag.  Default: no limit.
+
+        Returns:
+            PlacementFeedbackResult with the final routing state.
+        """
+        adjustments: list[PlacementAdjustment] = []
+        total_moved = 0
+        # Issue #2606: rolling history of fully-routed-net counts across
+        # outer iterations.  Used by ``detect_pf_stagnation`` to decide
+        # whether the loop is making progress.
+        routed_history: list[int] = []
+        # Issue #2606: track outer wall-clock budget if requested.
+        start_time = time.time()
+        # Track exit reason; default to ``pf_max_iter`` to match the
+        # backwards-compatible default on ``PlacementFeedbackResult``.
+        exit_reason = "pf_max_iter"
+
+        # Issue #2840: best-known routed state across all iterations.
+        # The placement-feedback loop is non-monotonic by construction --
+        # each iteration calls ``_clear_routes()`` and routes fresh, so if
+        # iteration N+1 produces fewer routed nets than iteration N, the
+        # router's live ``self.routes`` ends up worse than a prior
+        # iteration's result.  To make the loop monotonic in routed-net
+        # count, snapshot the routes whenever a new iteration strictly
+        # improves on the best-known count, and restore the best snapshot
+        # before returning so callers always see the highest routed count
+        # observed in this run.
+        #
+        # Mirrors the deep-copy pattern from
+        # ``Autorouter.route_all_negotiated`` (core.py:4791-4838, PR #2805).
+        # Only deep-copies on strict improvement (Strategy B from #2803:
+        # minimal memory cost — at most ``max_adjustments + 1`` snapshots
+        # taken, only one retained).
+        #
+        # Issue #6321: the best state lives on the loop (``self._best_*``) so
+        # ``restore_best_for_partial_save`` can reach it mid-iteration.
+        self._best_routes = []
+        self._best_routed_count = -1
+        self._best_iteration = -1
+        self._best_journal_mark = None
+        self._iteration_in_flight = None
+        self._best_rewound = False
+
+        # Issue #3504: the routes snapshot above is only geometrically
+        # meaningful when paired with the component placement it was
+        # computed against.  Placement adjustments are applied to
+        # ``self.pcb`` in-place at the END of each iteration, so if the
+        # best snapshot came from iteration N (or the pre-loop input) and
+        # the loop moved components in iterations N..final, then restoring
+        # only ``self.router.routes`` pairs stale routes with a moved
+        # placement -- the saved artifact can contain opens/DRC at the new
+        # pad positions.  Snapshot the placement ALONGSIDE the routes and
+        # restore them together so the best snapshot is atomic.
+        best_placement_snapshot: dict[str, _FootprintState] = self._snapshot_placement()
+
+        # Issue #3474 (chorus R2): seed the best-known state with the
+        # PRE-LOOP routes.  The #2840 snapshot only made the loop
+        # monotonic across its own iterations -- iteration 0 still calls
+        # ``_clear_routes()`` and discards whatever the caller routed
+        # before engaging feedback.  On the auto-layers escalation path
+        # that input is the best escalation attempt (measured on
+        # chorus-test-revA: a 20/51 escalation best was replaced by a
+        # 15/51 iteration-0 re-route that moved zero components).
+        # Seeding the snapshot makes the whole loop monotonic with
+        # respect to its input: it can only ever return a state at
+        # least as good as the routes it was handed.  ``-1`` marks "the
+        # pre-feedback input state" in the restore log.
+        if self.router.routes:
+            pre_loop_failed = self.router.get_failed_nets()
+            self._snapshot_best(len(self.router.nets) - 1 - len(pre_loop_failed), -1)
+
+        if self.verbose:
+            print("\n=== Placement-Routing Feedback Loop ===")
+            print(f"  Max adjustments: {max_adjustments}")
+            print(f"  Use negotiated routing: {use_negotiated}")
+            if self.fixed_refs:
+                anchored_str = ", ".join(sorted(self.fixed_refs))
+                print(f"  Anchored refs:   {anchored_str}")
+            if self.max_movement is not None:
+                print(f"  Max movement:    {self.max_movement:.2f}mm")
+            if self.stagnation_patience > 0:
+                print(f"  Stagnation patience: {self.stagnation_patience}")
+            if self.outer_timeout is not None:
+                print(f"  Outer timeout:   {self.outer_timeout:.1f}s")
+
+        # Build kwargs for negotiated routing once -- avoids passing
+        # None when the underlying API expects positional defaults and
+        # keeps the per-iteration call site readable.
+        negotiated_kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            negotiated_kwargs["timeout"] = timeout
+        if per_net_timeout is not None:
+            negotiated_kwargs["per_net_timeout"] = per_net_timeout
+
+        # ``iteration`` must be defined outside the loop body so the
+        # final ``iteration + 1`` line still works when the loop exits
+        # without ever entering (e.g. ``max_adjustments=-1``).  In
+        # practice ``max_adjustments + 1 >= 1`` so the loop always runs
+        # at least once; the assignment is purely defensive.
+        iteration = 0
+        for iteration in range(max_adjustments + 1):
+            # Issue #2606: hard outer wall-clock guard.  Checked at the
+            # top of each iteration so we can bail out before kicking
+            # off another (potentially multi-minute) negotiated-router
+            # run.
+            if self.outer_timeout is not None and time.time() - start_time > self.outer_timeout:
+                if self.verbose:
+                    elapsed = time.time() - start_time
+                    print(
+                        f"\n  Outer timeout exceeded "
+                        f"({elapsed:.1f}s > {self.outer_timeout:.1f}s); "
+                        f"exiting placement feedback loop."
+                    )
+                exit_reason = "pf_timeout"
+                break
+            # Issue #6324: an interrupt the process did not act on.
+            if self.stop_requested is not None and self.stop_requested():
+                if self.verbose:
+                    print("\n  Interrupt requested; exiting placement feedback loop.")
+                exit_reason = "pf_interrupted"
+                break
+            # Issue #6321: a partial save rewound the live routes and the run
+            # did not stop (#6324).  Starting another re-route would only
+            # discard the state that save stood behind.
+            if self._best_rewound:
+                if self.verbose:
+                    print("\n  Routes rewound by a partial save; exiting placement feedback loop.")
+                exit_reason = "pf_interrupted"
+                break
+
+            if self.verbose:
+                print(f"\n--- Iteration {iteration} ---")
+
+            # Issue #6321: from here until this iteration's routes are known to
+            # be the best, ``router.routes`` is not a state the run stands
+            # behind; an interrupt's partial save restores the best instead.
+            self._iteration_in_flight = iteration
+
+            # Clear previous routes and reset grid
+            self._clear_routes()
+
+            # Attempt routing
+            if use_negotiated:
+                routes = self.router.route_all_negotiated(**negotiated_kwargs)
+            else:
+                routes = self.router.route_all()
+
+            # Issue #6321: the best routes were put back underneath this
+            # re-route.  Whatever it went on to produce is mixed with (or
+            # replaced by) that snapshot, so do not judge it: stop, and let the
+            # end-of-loop restore re-derive the best state with its grid.
+            if self._best_rewound:
+                if self.verbose:
+                    print("  Routes rewound by a partial save; abandoning this iteration.")
+                exit_reason = "pf_interrupted"
+                break
+
+            # Check for failures
+            failed_nets = self.router.get_failed_nets()
+            total_nets = len(self.router.nets) - 1  # -1 for net 0
+            routed_count = total_nets - len(failed_nets)
+            routed_history.append(routed_count)
+
+            # Issue #2840: snapshot the routed state on strict improvement
+            # so the loop is monotonic in routed-net count.  Without this,
+            # a later iteration that regresses (fewer nets routed) leaves
+            # ``self.router.routes`` in a worse state than a prior pass
+            # produced, and the final ``PlacementFeedbackResult`` reports
+            # the regression.  Deep-copy only on strict improvement.
+            if routed_count > self._best_routed_count:
+                improved = True
+                # Issue #3504: capture the placement these routes were
+                # computed against, atomically with the routes themselves.
+                # At this point in the iteration NO move has yet been
+                # applied for the current pass (moves happen at the bottom
+                # of the loop body), so ``self.pcb`` still reflects the
+                # placement that produced ``routes`` above.
+                best_placement_snapshot = self._snapshot_placement()
+                self._snapshot_best(routed_count, iteration)
+                # Issue #6321: the live routes ARE the best now.  A regressed
+                # iteration stays "in flight" until the next one starts (or
+                # the end-of-loop restore runs), so a save in between still
+                # gets the best routes rather than the regression.
+                self._iteration_in_flight = None
+            else:
+                improved = False
+
+            if self.verbose:
+                print(f"  Routed: {routed_count}/{total_nets} nets")
+                print(f"  Failed: {len(failed_nets)} nets")
+                if improved:
+                    print(
+                        f"  [iter {iteration}] routed={routed_count}/{total_nets} "
+                        f"(best={self._best_routed_count}); improved"
+                    )
+                else:
+                    delta = routed_count - self._best_routed_count
+                    tag = "tied" if delta == 0 else "reverted"
+                    print(
+                        f"  [iter {iteration}] routed={routed_count}/{total_nets} "
+                        f"(best={self._best_routed_count}, delta={delta:+d}); {tag}"
+                    )
+
+            # Success - all nets routed
+            if not failed_nets:
+                self._iteration_in_flight = None
+                if self.verbose:
+                    print("\n✓ All nets routed successfully!")
+                return PlacementFeedbackResult(
+                    success=True,
+                    routes=routes,
+                    iterations=iteration + 1,
+                    adjustments=adjustments,
+                    failed_nets=[],
+                    total_components_moved=total_moved,
+                    placement_diff=self._build_placement_diff(),
+                    exit_reason="pf_converged",
+                )
+
+            # Issue #2606: progress-based stagnation check.  After each
+            # iteration's routing call, see whether the rolling history
+            # of fully-routed-net counts shows ``patience`` consecutive
+            # iterations with no improvement; if so, exit the outer
+            # loop cleanly with ``pf_stagnated`` instead of burning
+            # another full negotiated-router run.
+            if self.stagnation_patience > 0 and detect_pf_stagnation(
+                routed_history, patience=self.stagnation_patience
+            ):
+                if self.verbose:
+                    print(
+                        f"\n  Placement feedback stagnated: routed count "
+                        f"{routed_count}/{total_nets} unchanged for "
+                        f"{self.stagnation_patience} iterations"
+                    )
+                exit_reason = "pf_stagnated"
+                break
+
+            # Check if we can make placement adjustments
+            if self.pcb is None:
+                if self.verbose:
+                    print("  Cannot adjust placement (no PCB provided)")
+                break
+
+            if iteration >= max_adjustments:
+                if self.verbose:
+                    print("  Reached maximum adjustment iterations")
+                break
+
+            # Analyze failures and generate strategies
+            strategy = self._find_best_placement_strategy(failed_nets, min_confidence)
+
+            if strategy is None:
+                # The detailed rejection breakdown is already printed by
+                # ``_find_best_placement_strategy`` when verbose -- avoid
+                # duplicating the generic "No suitable placement strategy
+                # found" message here.
+                break
+
+            # Apply the strategy
+            if self.verbose:
+                print(f"  Applying strategy: {strategy.type.value}")
+                print(f"    Confidence: {strategy.confidence:.2f}")
+                print(f"    Difficulty: {strategy.difficulty.value}")
+
+            # Snapshot original positions for every component this
+            # strategy might touch -- BEFORE applying.  We only record
+            # the first observation per ref so subsequent moves of the
+            # same ref still diff against the true original.
+            self._snapshot_positions(strategy.affected_components)
+
+            result = self._strategy_applicator.apply_strategy(self.pcb, strategy)
+
+            if not result.success:
+                if self.verbose:
+                    print(f"  Strategy application failed: {result.message}")
+                continue
+
+            if self.verbose:
+                print(f"  ✓ {result.message}")
+
+            # Record the adjustment
+            adjustment = PlacementAdjustment(
+                iteration=iteration,
+                strategy=strategy,
+                result=result,
+                failed_nets_before=failed_nets.copy(),
+                failed_nets_after=[],  # Will be updated after next routing attempt
+            )
+            adjustments.append(adjustment)
+            total_moved += len(result.components_moved)
+
+        # Issue #2840: restore the best-known routed state before
+        # reporting the result.  The placement-feedback loop is
+        # non-monotonic by construction (each iteration calls
+        # ``_clear_routes()`` and routes fresh), so ``self.router.routes``
+        # at this point reflects whichever iteration ran last -- not
+        # necessarily the best.  Restore the deep-copied snapshot whenever
+        # a strictly better state was observed earlier in the run.
+        #
+        # We restore by reassigning ``self.router.routes`` to a deep copy
+        # of the best snapshot.  ``get_failed_nets()`` derives solely from
+        # ``self.router.routes`` (core.py:8320), so that alone makes the
+        # reported failed-net count consistent with the snapshot.
+        #
+        # Issue #4468: the grid IS also rebuilt now.  The original note here
+        # claimed "no caller relies on grid state after the loop returns" --
+        # board-07 disproved it: the CLI's trace optimize builds its collision
+        # checker from ``router.grid``, and the DRC nudge and pre-save
+        # clearance validation read it too, so a grid still describing the
+        # discarded iteration silently degrades the copper the loop just
+        # promised to restore (measured there as a lost net after optimize).
+        #
+        # Issue #3504: ALSO restore the component placement captured
+        # alongside the routes.  The restored routes were computed against
+        # ``best_placement_snapshot``; if the loop applied moves after that
+        # snapshot was taken, ``self.pcb`` no longer matches.  Restoring
+        # the placement keeps the returned routes geometrically consistent
+        # with the placement (and with ``placement_diff``, which is built
+        # from ``self.pcb`` below).
+        #
+        # Issue #6321: a partial save that rewound the live routes underneath
+        # the loop (``restore_best_for_partial_save``) skipped the grid
+        # rebuild, and the iteration it interrupted may have gone on mixing
+        # its own copper into the restored routes, so the routed count is no
+        # guide then: restore unconditionally.
+        current_routed_count = len(self.router.nets) - 1 - len(self.router.get_failed_nets())
+        rewound = self._best_rewound and self._best_routed_count >= 0
+        if self._best_routed_count > current_routed_count or rewound:
+            if self.verbose:
+                best_label = (
+                    "the pre-feedback input state (#3474)"
+                    if self._best_iteration == -1
+                    else f"iter {self._best_iteration}"
+                )
+                print(
+                    f"  Restoring best snapshot from {best_label} "
+                    f"(routed={self._best_routed_count}) "
+                    f"instead of final iter (routed={current_routed_count})"
+                )
+            # Deep-copy the snapshot so the loop's internal best state
+            # cannot be mutated through ``self.router.routes`` after
+            # this call returns.
+            # Issue #3504: restore the placement those routes belong to.
+            # Placement first, so the grid rebuild below re-adds the pads at
+            # the coordinates the restored routes were computed against.
+            self._restore_placement(best_placement_snapshot)
+            self._rebuild_grid_for_routes(copy.deepcopy(self._best_routes))
+            if self._best_rewound:
+                # Issue #6320/#6321: the no-rebuild restore already cut the
+                # journal back to the best snapshot's mark, so it lists exactly
+                # the restored routes; this rebuild's reset-and-re-mark (and
+                # anything the resumed re-route journaled) would describe them
+                # twice.  Checked AFTER the rebuild: a signal-handler restore
+                # can land in the middle of it.
+                _truncate_journal_to(self.router, self._best_journal_mark)
+        self._iteration_in_flight = None
+
+        # Final failure analysis -- computed AFTER restoration so the
+        # result reflects the restored state, not the live last-iteration
+        # state.
+        failed_nets = self.router.get_failed_nets()
+        if adjustments:
+            adjustments[-1].failed_nets_after = failed_nets
+
+        if self.verbose:
+            print("\n=== Feedback Loop Complete ===")
+            print(f"  Final failed nets: {len(failed_nets)}")
+            print(f"  Total components moved: {total_moved}")
+            print(f"  Total iterations: {iteration + 1}")
+            print(f"  Exit reason: {exit_reason}")
+
+        return PlacementFeedbackResult(
+            success=len(failed_nets) == 0,
+            routes=list(self.router.routes),
+            iterations=iteration + 1,
+            adjustments=adjustments,
+            failed_nets=failed_nets,
+            total_components_moved=total_moved,
+            placement_diff=self._build_placement_diff(),
+            exit_reason=exit_reason,
+        )
+
+    def _clear_routes(self) -> None:
+        """Clear all routes and reset the routing grid."""
+        self.router._reset_for_new_trial()
+
+    def _rebuild_grid_for_routes(self, routes: list[Route]) -> None:
+        """Re-derive the routing grid from the CURRENT pads + *routes* (issue #4468).
+
+        Restoring ``router.routes`` and the pad coordinates is not a complete
+        revert: the routing **grid** still carries the occupancy and clearance
+        halos of the reverted attempt.  Nothing inside the loop notices (the next
+        pass calls ``_clear_routes`` first), but everything the CLI runs AFTER
+        the loop does -- trace optimize builds its collision checker from
+        ``router.grid``, and the DRC nudge and pre-save clearance validation read
+        it too.  Measured on board-07: with a stale grid the reverted run
+        optimized to 1096 segments and lost a net to the post-optimize
+        cross-net-short backstop (25/31) where the untouched baseline optimized
+        the SAME raw copper to 708 segments and kept 26/31.
+
+        Rebuilding is the same two steps the router itself performs between
+        trials: reset the grid from the (restored) pads, then re-mark every
+        restored route.  A router without those internals (test doubles) is left
+        alone -- the loop's own semantics do not depend on the grid.
+        """
+        reset = getattr(self.router, "_reset_for_new_trial", None)
+        mark = getattr(self.router, "_mark_route", None)
+        if reset is not None and mark is not None:
+            try:
+                reset()
+                for route in routes:
+                    mark(route)
+            except Exception as exc:  # pragma: no cover - defensive only
+                if self.verbose:
+                    print(f"  Warning: could not rebuild the routing grid after revert ({exc})")
+        # Assigned last (and unconditionally): ``_reset_for_new_trial`` clears
+        # ``router.routes``, and a router without the grid internals still owes
+        # the caller the restored routes.
+        self.router.routes = routes
+
+    def _find_best_placement_strategy(
+        self,
+        failed_nets: list[int],
+        min_confidence: float,
+    ) -> ResolutionStrategy | None:
+        """Find the best placement strategy to resolve routing failures.
+
+        Args:
+            failed_nets: List of net IDs that failed to route.
+            min_confidence: Minimum confidence required.
+
+        Returns:
+            Best placement strategy, or None if none suitable.
+        """
+        if self.pcb is None:
+            return None
+
+        all_strategies: list[ResolutionStrategy] = []
+
+        # Diagnostic counters (Issue #2604 acceptance criterion #4):
+        # when no strategy survives filtering, log a structured breakdown
+        # of WHY each candidate was rejected so silent failure becomes loud.
+        analyses_seen = 0
+        analyses_with_movable_blockers = 0
+        candidates_total = 0
+        rejected_low_confidence = 0
+        rejected_anchored = 0
+        rejected_over_budget = 0
+        rejected_unsafe = 0
+        accepted = 0
+
+        # Analyze each failed net and collect strategies
+        for net_id in failed_nets[:5]:  # Limit analysis to first 5 failures
+            analysis = self.router.analyze_routing_failure(net_id)
+            if analysis is None:
+                continue
+            analyses_seen += 1
+
+            # Track whether the analyzer reported movable blockers at all
+            # so we can distinguish "ref-population bug" from
+            # "all candidates filtered out".
+            if getattr(analysis, "has_movable_blockers", False):
+                analyses_with_movable_blockers += 1
+
+            strategies = self._strategy_generator.generate_strategies(
+                self.pcb, analysis, max_movement=self.max_movement
+            )
+
+            # Filter to placement-related strategies
+            for strategy in strategies:
+                if strategy.type not in [
+                    StrategyType.MOVE_COMPONENT,
+                    StrategyType.MOVE_MULTIPLE,
+                ]:
+                    continue
+                candidates_total += 1
+                if strategy.confidence < min_confidence:
+                    rejected_low_confidence += 1
+                    continue
+                # Reject strategies that touch any anchored ref.
+                if self._strategy_touches_fixed_refs(strategy):
+                    rejected_anchored += 1
+                    continue
+                # Reject strategies that exceed the max movement budget.
+                if not self._strategy_within_movement_budget(strategy):
+                    rejected_over_budget += 1
+                    continue
+                # Check if safe to apply (board bounds, etc.)
+                if not self._strategy_applicator.is_safe_to_apply(strategy, self.pcb):
+                    rejected_unsafe += 1
+                    continue
+                accepted += 1
+                all_strategies.append(strategy)
+
+        if not all_strategies:
+            # Issue #2604 follow-up: previously we only emitted the full
+            # breakdown when ``verbose`` was set, which left default
+            # (non-verbose) runs *more* silent than before -- the prior
+            # "No suitable placement strategy found" line had been removed
+            # entirely.  Restore a one-line summary in non-verbose mode so
+            # operators always see *something* when the loop bails out,
+            # while verbose users still get the full structured breakdown.
+            if self.verbose:
+                self._log_strategy_rejection_breakdown(
+                    analyses_seen=analyses_seen,
+                    analyses_with_movable_blockers=analyses_with_movable_blockers,
+                    candidates_total=candidates_total,
+                    rejected_low_confidence=rejected_low_confidence,
+                    rejected_anchored=rejected_anchored,
+                    rejected_over_budget=rejected_over_budget,
+                    rejected_unsafe=rejected_unsafe,
+                )
+            else:
+                print(
+                    self._format_strategy_rejection_summary(
+                        analyses_seen=analyses_seen,
+                        analyses_with_movable_blockers=analyses_with_movable_blockers,
+                        candidates_total=candidates_total,
+                        rejected_low_confidence=rejected_low_confidence,
+                        rejected_anchored=rejected_anchored,
+                        rejected_over_budget=rejected_over_budget,
+                        rejected_unsafe=rejected_unsafe,
+                    )
+                )
+            return None
+
+        # Sort by confidence (highest first) and pick the best
+        all_strategies.sort(key=lambda s: -s.confidence)
+        return all_strategies[0]
+
+    def _format_strategy_rejection_summary(
+        self,
+        *,
+        analyses_seen: int,
+        analyses_with_movable_blockers: int,
+        candidates_total: int,
+        rejected_low_confidence: int,
+        rejected_anchored: int,
+        rejected_over_budget: int,
+        rejected_unsafe: int,
+    ) -> str:
+        """Return a single-line summary of why no strategy survived filtering.
+
+        Used in non-verbose mode to keep default runs from being silently
+        unhelpful (see Issue #2604 review feedback).  Verbose mode still
+        gets the full structured breakdown via
+        ``_log_strategy_rejection_breakdown``.
+        """
+        if candidates_total == 0:
+            if analyses_seen == 0:
+                cause = "0 failure analyses produced by router"
+            elif analyses_with_movable_blockers == 0:
+                cause = f"{analyses_seen} analyses, 0 movable blockers (refs unresolved)"
+            else:
+                cause = (
+                    f"{analyses_with_movable_blockers}/{analyses_seen} "
+                    f"analyses with movable blockers, 0 MOVE_COMPONENT "
+                    f"candidates generated"
+                )
+            return f"  No suitable placement strategy: {cause}."
+
+        parts: list[str] = []
+        if rejected_low_confidence:
+            parts.append(f"{rejected_low_confidence} low-confidence")
+        if rejected_anchored:
+            parts.append(f"{rejected_anchored} anchored")
+        if rejected_over_budget:
+            cap = f"{self.max_movement:.2f}mm" if self.max_movement is not None else "n/a"
+            parts.append(f"{rejected_over_budget} over-budget({cap})")
+        if rejected_unsafe:
+            parts.append(f"{rejected_unsafe} unsafe")
+        breakdown = ", ".join(parts) if parts else "no reason recorded"
+        return (
+            f"  No suitable placement strategy: rejected {candidates_total} "
+            f"candidates ({breakdown}). Re-run with --verbose for details."
+        )
+
+    def _log_strategy_rejection_breakdown(
+        self,
+        *,
+        analyses_seen: int,
+        analyses_with_movable_blockers: int,
+        candidates_total: int,
+        rejected_low_confidence: int,
+        rejected_anchored: int,
+        rejected_over_budget: int,
+        rejected_unsafe: int,
+    ) -> None:
+        """Print a structured diagnostic when no strategy survives filtering.
+
+        Issue #2604 acceptance criterion #4: distinguish between
+        "no candidates generated" (ref-population bug),
+        "all anchored" (fixed_refs too aggressive),
+        "all over budget" (max_movement too tight),
+        and "all unsafe" (board-bounds reject).
+        """
+        if candidates_total == 0:
+            if analyses_seen == 0:
+                print(
+                    "  No suitable placement strategy: 0 failure analyses "
+                    "produced (router returned None for all failed nets)."
+                )
+            elif analyses_with_movable_blockers == 0:
+                print(
+                    f"  No suitable placement strategy: {analyses_seen} "
+                    f"analyses produced 0 movable blockers "
+                    f"(component refs unresolved -- see Issue #2604)."
+                )
+            else:
+                print(
+                    f"  No suitable placement strategy: {analyses_seen} "
+                    f"analyses, {analyses_with_movable_blockers} with "
+                    f"movable blockers, but 0 MOVE_COMPONENT candidates "
+                    f"generated (strategy generator may have rejected "
+                    f"every blocker)."
+                )
+            return
+
+        breakdown: list[str] = []
+        if rejected_low_confidence:
+            breakdown.append(f"{rejected_low_confidence} below confidence threshold")
+        if rejected_anchored:
+            breakdown.append(f"{rejected_anchored} anchored")
+        if rejected_over_budget:
+            cap = f"{self.max_movement:.2f}mm" if self.max_movement is not None else "n/a"
+            breakdown.append(f"{rejected_over_budget} over budget ({cap})")
+        if rejected_unsafe:
+            breakdown.append(f"{rejected_unsafe} unsafe (board bounds)")
+        breakdown_str = "; ".join(breakdown) if breakdown else "no reason recorded"
+        print(
+            f"  No suitable placement strategy: rejected "
+            f"{candidates_total} MOVE_COMPONENT candidates "
+            f"({breakdown_str})."
+        )
+
+    def _strategy_touches_fixed_refs(self, strategy: ResolutionStrategy) -> bool:
+        """Return True if any affected component is in ``fixed_refs``."""
+        if not self.fixed_refs:
+            return False
+        for ref in strategy.affected_components:
+            if self._target_is_fixed(ref):
+                return True
+        # Defensive: also check action targets in case affected_components
+        # was not populated by a custom generator.
+        for action in strategy.actions:
+            if action.type in {"move", "rotate", "mirror"} and self._target_is_fixed(action.target):
+                return True
+        return False
+
+    def _target_is_fixed(self, target: str) -> bool:
+        if target in self.fixed_refs:
+            return True
+        fp = self._find_footprint(target)
+        return fp is not None and fp.reference in self.fixed_refs
+
+    def _strategy_within_movement_budget(self, strategy: ResolutionStrategy) -> bool:
+        """Return True if every move action stays within ``max_movement``.
+
+        For any ``move`` action with ``x``/``y`` parameters, computes the
+        Euclidean distance from the component's current position to the
+        proposed position and checks it against ``self.max_movement``.
+        Strategies whose actions exceed the cap are rejected so the
+        feedback loop never produces drastic placement changes.
+        """
+        if self.max_movement is None or self.pcb is None:
+            return True
+        for action in strategy.actions:
+            if action.type != "move":
+                continue
+            ref = action.target
+            new_x = action.params.get("x")
+            new_y = action.params.get("y")
+            if new_x is None or new_y is None:
+                continue
+            fp = self._find_footprint(ref)
+            if fp is None:
+                continue
+            old_x, old_y = fp.position[0], fp.position[1]
+            distance = math.hypot(new_x - old_x, new_y - old_y)
+            if distance > self.max_movement:
+                return False
+        return True
+
+    def _find_footprint(self, ref: str) -> Any | None:
+        """Resolve a physical key or an unambiguous authored reference."""
+        from kicad_tools.router.placement_delta import _find_footprint
+
+        if self.pcb is None:
+            return None
+        return _find_footprint(self.pcb, ref)
+
+    def _snapshot_positions(self, refs: list[str]) -> None:
+        """Record the original (x, y, rotation, layer) for each ref, once."""
+        if self.pcb is None:
+            return
+        for ref in refs:
+            if ref in self._original_positions:
+                continue
+            fp = self._find_footprint(ref)
+            if fp is None:
+                continue
+            pos = fp.position
+            rotation = float(getattr(fp, "rotation", 0.0))
+            layer = getattr(fp, "layer", None)
+            self._original_positions[ref] = (
+                (pos[0], pos[1]),
+                rotation,
+                str(layer) if layer is not None else None,
+            )
+
+    def _snapshot_placement(self) -> dict[str, _FootprintState]:
+        """Capture every footprint's position, rotation, layer, and pad state.
+
+        Issue #3504: used to take an atomic best snapshot of the
+        component placement alongside the best routes.  Returns a mapping
+        ``ref -> ((x, y), rotation, layer, [pad_state, ...])``.  When no PCB is
+        attached (routing-strategies-only mode) this returns an empty dict,
+        which makes ``_restore_placement`` a no-op.
+
+        Issue #4518: per-pad rotations are captured alongside the
+        footprint-level rotation so that a reverted (non-improving) delta
+        restores each pad's ABSOLUTE ``(at x y ANGLE)`` orientation too.  The
+        applicator's ``rotate_180`` bumps every pad's ``.rotation`` in lockstep
+        with ``fp.rotation`` (see ``StrategyApplicator._apply_rotate_component``),
+        so restoring only the footprint angle would leave pad angles stale in the
+        other direction on revert.
+
+        Issue #4560: the mirror (layer-flip) delta additionally mutates the
+        footprint's ``layer``, every pad's local ``position`` and ``layers``
+        list, so all of those are captured too.  Each pad's state is a
+        ``(position | None, rotation | None, layers | None)`` triple over the
+        FULL ``fp.pads`` list (``None`` marks an attribute a test double does
+        not carry), so capture and restore are index-aligned by construction --
+        no hasattr-filtered parallel lists.
+        """
+        snapshot: dict[str, _FootprintState] = {}
+        if self.pcb is None:
+            return snapshot
+        from kicad_tools.schema.physical_identity import footprint_keys
+
+        footprints = list(getattr(self.pcb, "footprints", []))
+        for ref, fp in zip(footprint_keys(footprints), footprints, strict=True):
+            pos = fp.position
+            rotation = float(getattr(fp, "rotation", 0.0))
+            layer = getattr(fp, "layer", None)
+            pad_states: list[_PadState] = []
+            for pad in getattr(fp, "pads", []):
+                pad_pos = getattr(pad, "position", None)
+                pad_states.append(
+                    (
+                        (pad_pos[0], pad_pos[1]) if pad_pos is not None else None,
+                        float(pad.rotation) if hasattr(pad, "rotation") else None,
+                        list(pad.layers) if hasattr(pad, "layers") else None,
+                    )
+                )
+            snapshot[ref] = (
+                (pos[0], pos[1]),
+                rotation,
+                str(layer) if layer is not None else None,
+                pad_states,
+            )
+        return snapshot
+
+    def _restore_placement(self, snapshot: dict[str, _FootprintState]) -> None:
+        """Restore footprint position/rotation/layer/pad state from a snapshot.
+
+        Issue #3504: counterpart to :meth:`_snapshot_placement`.  Writes
+        the captured state back onto each footprint so the live ``self.pcb``
+        matches the placement the restored routes were computed against.
+        Refs present in the PCB but absent from the snapshot are left
+        untouched (defensive against footprints added mid-loop, which does
+        not happen in practice).
+
+        Issues #4518/#4560: also restores each pad's absolute ``.rotation``,
+        local ``.position`` and ``.layers`` plus the footprint's ``.layer``
+        (matched by ``fp.pads`` list order over the full list) so a reverted
+        mirror delta leaves the board on its original side with every pad's
+        geometry exactly as it was pre-delta.  ``None`` entries (attributes a
+        test double does not carry) are skipped.
+        """
+        if self.pcb is None or not snapshot:
+            return
+        from kicad_tools.schema.physical_identity import footprint_keys
+
+        footprints = list(getattr(self.pcb, "footprints", []))
+        for ref, fp in zip(footprint_keys(footprints), footprints, strict=True):
+            if ref not in snapshot:
+                continue
+            (x, y), rotation, layer, pad_states = snapshot[ref]
+            fp.position = (x, y)
+            if hasattr(fp, "rotation"):
+                fp.rotation = rotation
+            if layer is not None and hasattr(fp, "layer"):
+                fp.layer = layer
+            # strict=False: defensive against a pad-count change mid-loop
+            # (does not happen in practice) -- tolerate rather than raising
+            # mid-revert.  Index alignment is exact because capture iterates
+            # the same stable ``fp.pads`` list without filtering.
+            for pad, (pad_pos, pad_rotation, pad_layers) in zip(
+                getattr(fp, "pads", []), pad_states, strict=False
+            ):
+                if pad_pos is not None and hasattr(pad, "position"):
+                    pad.position = pad_pos
+                if pad_rotation is not None and hasattr(pad, "rotation"):
+                    pad.rotation = pad_rotation
+                if pad_layers is not None and hasattr(pad, "layers"):
+                    pad.layers = list(pad_layers)
+
+    def _build_placement_diff(self) -> list[PlacementDiffEntry]:
+        """Build the placement diff from snapshotted original positions.
+
+        Compares each snapshot against the current PCB state and emits
+        a ``PlacementDiffEntry`` for every component whose position or
+        rotation actually changed.  Components that the loop touched
+        but reverted (or that the strategy applicator failed to move)
+        are skipped.
+        """
+        if self.pcb is None:
+            return []
+        diff: list[PlacementDiffEntry] = []
+        for ref, (old_xy, old_rot, old_layer) in self._original_positions.items():
+            fp = self._find_footprint(ref)
+            if fp is None:
+                continue
+            new_xy = (fp.position[0], fp.position[1])
+            new_rot = float(getattr(fp, "rotation", 0.0))
+            new_layer_attr = getattr(fp, "layer", None)
+            new_layer = str(new_layer_attr) if new_layer_attr is not None else None
+            rotation_delta = new_rot - old_rot
+            # A mirror at rotation 90/270 changes NEITHER position nor rotation
+            # (180 - theta is a fixed point there), so the layer flip must be
+            # its own "moved" signal (issue #4560).
+            moved = (
+                abs(new_xy[0] - old_xy[0]) > 1e-6
+                or abs(new_xy[1] - old_xy[1]) > 1e-6
+                or abs(rotation_delta) > 1e-6
+                or old_layer != new_layer
+            )
+            if not moved:
+                continue
+            diff.append(
+                PlacementDiffEntry(
+                    ref=fp.reference,
+                    component_id=ref if ref != fp.reference else "",
+                    old_xy=old_xy,
+                    new_xy=new_xy,
+                    rotation_delta=rotation_delta,
+                    old_layer=old_layer,
+                    new_layer=new_layer,
+                )
+            )
+        # Sort by largest distance first so the most impactful moves
+        # appear at the top of the JSON artifact.
+        diff.sort(key=lambda e: e.distance_mm, reverse=True)
+        return diff
+
+    def analyze_placement_impact(
+        self,
+        strategy: ResolutionStrategy,
+    ) -> dict[str, Any]:
+        """Analyze the potential impact of a placement strategy.
+
+        Args:
+            strategy: The strategy to analyze.
+
+        Returns:
+            Dictionary with impact analysis including:
+            - components_affected: Number of components affected
+            - nets_affected: List of nets that would need rerouting
+            - estimated_improvement: Expected improvement score
+            - risks: List of potential risks
+        """
+        if self.pcb is None:
+            return {"error": "No PCB provided"}
+
+        components = strategy.affected_components
+        nets = strategy.affected_nets
+        risks = [effect.description for effect in strategy.side_effects]
+
+        return {
+            "components_affected": len(components),
+            "component_refs": components,
+            "nets_affected": len(nets),
+            "net_names": nets,
+            "estimated_improvement": strategy.estimated_improvement,
+            "confidence": strategy.confidence,
+            "difficulty": strategy.difficulty.value,
+            "risks": risks,
+        }
+
+
+@dataclass
+class PlacementDeltaFeedbackResult:
+    """Result of the classifier-driven placement-delta feedback loop (#4467).
+
+    Distinct from :class:`PlacementFeedbackResult` (the blocker-geometry loop):
+    this records the concrete :class:`~kicad_tools.router.placement_delta.PlacementDelta`
+    objects the classifier proposed and which of them the driver *kept* (a delta
+    is kept only when applying it + re-routing strictly increased the routed-net
+    count; otherwise it is reverted atomically and never appears in
+    ``applied_deltas``).
+
+    Attributes:
+        success: Whether all nets are routed in the returned state.
+        routes: Final list of routes (the best state observed).
+        iterations: Number of routing passes performed.
+        applied_deltas: Deltas that were applied AND kept (strict improvement).
+        proposed_deltas: Every delta the classifier proposed across iterations,
+            whether or not it was applied (superset of ``applied_deltas``).
+        skipped_deltas / skip_reasons: Parallel lists recording deltas the
+            selector declined (anchored ref, over ``max_movement``, unsafe, or a
+            non-applyable ``reorder_pins`` kind) and the one-line reason, so the
+            "skipped with a logged reason" contract is observable in tests.
+        failed_nets: Net IDs still unrouted in the returned state.
+        placement_diff: Per-component before/after positions for kept moves.
+        exit_reason: ``pd_converged`` | ``pd_reverted`` | ``pd_no_delta`` |
+            ``pd_no_pcb`` | ``pd_apply_failed`` | ``pd_max_iter`` |
+            ``pd_interrupted``.
+        interrupted_delta: The delta whose trial was discarded from outside
+            the loop (``restore_last_accepted``, called by an interrupt's
+            partial save) while the loop was still running it, or ``None``.
+            Implies ``exit_reason == "pd_interrupted"``.  It is not in
+            ``reverted_deltas``: no before/after measurement of it exists.
+    """
+
+    success: bool
+    routes: list[Route]
+    iterations: int
+    applied_deltas: list[PlacementDelta] = field(default_factory=list)
+    proposed_deltas: list[PlacementDelta] = field(default_factory=list)
+    skipped_deltas: list[PlacementDelta] = field(default_factory=list)
+    skip_reasons: list[str] = field(default_factory=list)
+    # Issue #4468: probes that WERE applied and re-routed but did not strictly
+    # improve reach, with their measured before/after routed-net counts.  A
+    # skipped delta was never tried; a reverted one was, and the measurement is
+    # the evidence for "the loop plateaued here".
+    reverted_deltas: list[PlacementDelta] = field(default_factory=list)
+    reverted_counts: list[tuple[int, int]] = field(default_factory=list)
+    reverted_reasons: list[str] = field(default_factory=list)
+    failed_nets: list[int] = field(default_factory=list)
+    placement_diff: list[PlacementDiffEntry] = field(default_factory=list)
+    exit_reason: str = "pd_max_iter"
+    interrupted_delta: PlacementDelta | None = None
+
+    def summary(self) -> str:
+        lines = [
+            "Placement-Delta Feedback Result:",
+            f"  Success: {self.success}",
+            f"  Iterations: {self.iterations}",
+            f"  Exit reason: {self.exit_reason}",
+            f"  Routes: {len(self.routes)}",
+            f"  Deltas proposed: {len(self.proposed_deltas)}",
+            f"  Deltas kept:     {len(self.applied_deltas)}",
+            f"  Deltas reverted: {len(self.reverted_deltas)}",
+            f"  Deltas skipped:  {len(self.skipped_deltas)}",
+            f"  Failed nets: {len(self.failed_nets)}",
+        ]
+        for delta in self.applied_deltas:
+            lines.append(f"    kept: {delta.target_ref} {delta.kind} ({delta.net_name})")
+        for delta, counts, reason in zip(
+            self.reverted_deltas,
+            self.reverted_counts,
+            self.reverted_reasons or [""] * len(self.reverted_deltas),
+            strict=False,
+        ):
+            lines.append(
+                f"    reverted: {delta.target_ref} {delta.kind} ({delta.net_name}) "
+                f"-- routed {counts[0]} -> {counts[1]}" + (f" ({reason})" if reason else "")
+            )
+        for delta, reason in zip(self.skipped_deltas, self.skip_reasons, strict=False):
+            lines.append(f"    skipped: {delta.target_ref} {delta.kind} -- {reason}")
+        if self.interrupted_delta is not None:
+            delta = self.interrupted_delta
+            lines.append(
+                f"    interrupted: {delta.target_ref} {delta.kind} ({delta.net_name}) "
+                "-- trial discarded by a partial save; not kept"
+            )
+        return "\n".join(lines)
+
+    def reverted_evidence(self) -> list[dict[str, Any]]:
+        """Serializable ``reverted`` payload for the delta artifact (#4468)."""
+        out: list[dict[str, Any]] = []
+        for delta, counts, reason in zip(
+            self.reverted_deltas,
+            self.reverted_counts,
+            self.reverted_reasons or [""] * len(self.reverted_deltas),
+            strict=False,
+        ):
+            entry = delta.to_dict()
+            entry["routed_before"] = counts[0]
+            entry["routed_after"] = counts[1]
+            entry["revert_reason"] = reason
+            out.append(entry)
+        return out
+
+
+def _delta_key(delta: PlacementDelta) -> tuple[str, str, float, float, float]:
+    """Identity of the MOVE a delta encodes (issue #4468).
+
+    Two diagnoses often propose the identical move -- board-07's DQ3 and DQ4
+    both ask for the same 180-degree rotation of U2 -- and a reverted probe
+    leaves the board where the classifier will propose it again.  Keying on the
+    geometry (not the net or the target alone) makes "already probed" mean
+    "this exact placement change was tried", so two different translates of the
+    same part remain two distinct probes.
+    """
+    return (
+        delta.target_key,
+        delta.kind,
+        round(delta.dx, 4),
+        round(delta.dy, 4),
+        round(delta.rotation_delta, 4),
+    )
+
+
+def write_placement_delta_json(
+    path: str | Path,
+    applied: list[PlacementDelta],
+    proposed: list[PlacementDelta],
+    reverted: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Write the ``<output>_placement_delta.json`` artifact (issue #4467).
+
+    Serializes the applied (kept) and proposed deltas via
+    :meth:`PlacementDelta.to_dict` so a propose-only recipe can reload them with
+    :meth:`PlacementDelta.from_dict` and apply them deterministically without
+    re-running the loop.  Returns the serialized dict for convenience/testing.
+
+    Issue #4468 adds ``reverted``: the probes that were actually applied and
+    re-routed but did not strictly improve reach, each with its measured
+    before/after routed-net count.  Without it a run that keeps nothing is
+    indistinguishable from a run that never tried, which is exactly the
+    evidence a "the loop plateaued here" claim needs.
+    """
+    data = {
+        "applied": [d.to_dict() for d in applied],
+        "proposed": [d.to_dict() for d in proposed],
+        "reverted": list(reverted or []),
+    }
+    Path(path).write_text(json.dumps(data, indent=2))
+    return data
+
+
+class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
+    """Classifier-driven placement-delta feedback loop (issue #4467).
+
+    Phase 2 of the board-07 router<->placement epic (#3438).  Where the base
+    :class:`PlacementFeedbackLoop` is driven by ``analyze_routing_failure`` ->
+    ``recovery.StrategyGenerator`` (blocker geometry, translation-only), this
+    subclass is driven by the stuck-net *classifier*
+    (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets_from_pcb`)
+    and Phase-1's translator
+    (:func:`~kicad_tools.router.placement_delta.deltas_from_result`).  That lets
+    it execute the ``mirror`` (layer-flip the reversed facing QFN to un-reverse
+    its pad column, #4560), ``rotate_180``, ``rotate_align`` (a bounded
+    +/-90 endpoint-orientation quarter turn, #4968) and ``reorder_pins`` (a
+    DECLARED swap group's pad->net rebinding, #5536) moves the
+    classifier-driven proposer emits -- moves the blocker-geometry loop cannot
+    express.  ``reorder_pins`` is the only one that changes no geometry at
+    all: it spends the netlist's own degrees of freedom instead.
+
+    Relationship to the file-based, subprocess-driven
+    :mod:`kicad_tools.router.placement_nudge` (#3865): both classify stuck nets
+    and gate a placement change on re-routed reach, but ``placement_nudge``
+    operates on a routed ``.kicad_pcb`` file via a chorus-runner subprocess and
+    is translation-only.  This loop runs *in process* on the live
+    :class:`~kicad_tools.router.core.Autorouter`, consumes typed
+    :class:`~kicad_tools.router.placement_delta.PlacementDelta` objects
+    (including ``rotate_180`` and ``mirror``), and reuses the base loop's
+    monotone best-snapshot machinery for atomic keep/revert.
+
+    Each outer iteration:
+
+    1. classify the current PCB placement, translate every PLACEMENT_BOUND /
+       CONGESTION_SATURATED diagnosis into a :class:`PlacementDelta`;
+    2. select the top applyable delta (skip ``reorder_pins`` -- no pad-remap
+       applicator exists yet -- and any delta whose target is anchored, exceeds
+       ``max_movement``, or is unsafe, each with a logged reason);
+    3. apply it to BOTH the PCB footprint (via
+       :class:`~kicad_tools.recovery.StrategyApplicator`) and the router's flat
+       pad coordinates, then clear routes and re-route;
+    4. keep the change only on a **strict** routed-net increase; otherwise revert
+       placement + router pads + routes atomically.
+    """
+
+    def __init__(
+        self,
+        router: Autorouter,
+        pcb: PCB | None = None,
+        verbose: bool = True,
+        fixed_refs: set[str] | list[str] | None = None,
+        max_movement: float | None = 5.0,
+        delta_proposer: Callable[[PCB], list[PlacementDelta]] | None = None,
+        excluded_nets: frozenset[str] | set[str] | list[str] | None = None,
+        net_class_map: dict[str, NetClassRouting] | None = None,
+        route_only_nets: frozenset[str] | set[str] | list[str] | None = None,
+    ):
+        super().__init__(
+            router=router,
+            pcb=pcb,
+            verbose=verbose,
+            fixed_refs=fixed_refs,
+            max_movement=max_movement,
+        )
+        # Issue #8566: the ``--nets`` set the pass was limited to, or ``None``
+        # for an unrestricted pass.  Nets outside it were never routed, so a
+        # "routed-count improvement" says nothing about a part that carries them.
+        self.route_only_nets: frozenset[str] | None = (
+            frozenset(route_only_nets) if route_only_nets else None
+        )
+        # Injectable so tests can drive the keep/revert logic with a known delta
+        # without constructing a full classifier fixture.  Defaults to the real
+        # classifier -> translator pipeline.
+        self._delta_proposer = delta_proposer
+        # Nets the router was told to skip (pour/plane nets).  They are carried
+        # by copper fill rather than traces, so classifying them as stuck signal
+        # nets would propose placement moves for a non-problem (issue #4468).
+        self.excluded_nets: frozenset[str] = frozenset(excluded_nets or ())
+        # Issue #5522 (Phase 1 of Epic #5511): optional sidecar map, forwarded
+        # to the classifier so a declared ``swap_group`` can surface a
+        # ``swap_proposal`` on the ``_placement_delta.json`` artifact.
+        # ``None`` (the default) is byte-identical to pre-#5522 behavior.
+        self.net_class_map: dict[str, NetClassRouting] | None = net_class_map
+        # Issue #6314: the deltas ``run_delta`` has KEPT so far, live while the
+        # loop runs (the result object only exists once it returns), and the
+        # pre-trial snapshot of the trial currently being probed, if any.
+        self.accepted_deltas: list[PlacementDelta] = []
+        self._trial: _TrialInFlight | None = None
+        # A trial ``restore_last_accepted`` discarded that ``run_delta`` has
+        # not yet acknowledged.  ``None`` almost always: the caller normally
+        # exits straight after.  See ``_abandon_rewound_trial``.
+        self._rewound: _TrialInFlight | None = None
+
+    # --- interrupt recovery (issue #6314) ----------------------------------
+
+    @property
+    def trial_in_flight(self) -> PlacementDelta | None:
+        """The delta being probed right now, or ``None`` between trials."""
+        return self._trial.delta if self._trial is not None else None
+
+    def restore_last_accepted(self, *, rebuild_grid: bool = False) -> bool:
+        """Discard an in-flight trial, putting back the last accepted state.
+
+        For a caller that reaches the loop while ``run_delta`` is stopped
+        mid-trial: ``kct route``'s deadline and Ctrl+C partial saves, and its
+        handler for a loop that raised.  Restores the pad->net bindings, the
+        placement, the router's pad geometry and ``router.routes`` from the
+        pre-trial snapshot -- the same state a revert restores -- so the copper
+        the router serializes and the footprints the board serializes agree
+        again.  Any delta kept earlier (:attr:`accepted_deltas`) stays applied.
+
+        Args:
+            rebuild_grid: Also re-derive the routing grid from the restored
+                routes, as a revert inside the loop does.  Off by default,
+                which is right for a caller that only serializes
+                ``router.routes`` and exits: the rebuild is the one step here
+                whose cost grows with the board (a routing-trial reset --
+                measured 380 ms on board 05 against 1-2 ms for everything
+                else), and a partial save runs inside a 5 s kill window.
+                Pass ``True`` when the run will carry on and later stages will
+                read ``router.grid``.
+
+        Returns:
+            ``True`` when a trial was in flight and has been undone, ``False``
+            when none was (the live routes, pads and placement already ARE the
+            last accepted state).  Safe to call repeatedly.
+
+        If the caller does NOT stop the run afterwards, ``run_delta`` is still
+        executing the trial this just discarded.  The loop finds out through
+        ``_rewound`` and abandons the trial instead of judging it
+        (:meth:`_abandon_rewound_trial`).  That is not hypothetical: ``kct
+        route``'s Ctrl+C handler saves and then raises ``SystemExit``, which
+        Python discards when the signal landed inside a ``__del__`` (#6324).
+        """
+        trial = self._trial
+        if trial is None:
+            rewound = self._rewound
+            if rebuild_grid and rewound is not None:
+                # Discarded earlier by a save that skipped the grid rebuild,
+                # and ``run_delta`` then died before it could finish the job
+                # (an ordinary exception out of the re-route it was still in).
+                # The code between the two calls may have moved pads again and
+                # has certainly left the grid describing the dead trial, so
+                # repeat the whole undo rather than only the rebuild.
+                self._undo_trial(rewound, rebuild_grid=True)
+                self._rewound = None
+            return False
+        # Published BEFORE anything is put back: from the first restored pad
+        # on, the loop must be able to tell its trial is gone.
+        self._rewound = trial
+        self._undo_trial(trial, rebuild_grid=rebuild_grid)
+        self._trial = None
+        return True
+
+    def _snapshot_cosmetics(
+        self, delta: PlacementDelta, strategy: ResolutionStrategy
+    ) -> _CosmeticSnapshot | None:
+        """Snapshot the silk/fab a *delta* is about to rewrite (#6325, #6557).
+
+        Taken for every kind in :data:`_COSMETIC_REWRITING_KINDS`: a
+        ``mirror`` flips the silk/fab, and both rotation kinds end in
+        ``fp.keep_texts_upright()``, whose 180-degree text flip and
+        justification swap the ``fp.rotation`` setter cannot undo on revert.
+        ``None`` for every other kind (they never touch the cosmetics beyond
+        what the placement restore puts back) and when the target cannot be
+        resolved -- the application then fails before mutating anything.  The
+        footprint is resolved exactly as the applicator resolves it, so the
+        snapshot is of the part it changes.
+        """
+        if self.pcb is None or delta.kind not in _COSMETIC_REWRITING_KINDS or not strategy.actions:
+            return None
+        applicator = self._strategy_applicator
+        try:
+            fp = applicator._find_footprint(self.pcb, strategy.actions[0].target)
+        except ValueError:
+            return None
+        if fp is None:
+            return None
+        return _CosmeticSnapshot.capture(fp, applicator._COSMETIC_SEXP_TAGS)
+
+    def _undo_trial(self, trial: _TrialInFlight, *, rebuild_grid: bool) -> None:
+        """Put back everything *trial* changed; idempotent and re-entrant.
+
+        The one implementation of "revert a trial", shared by the loop's own
+        revert and by :meth:`restore_last_accepted`, because a signal handler
+        can run the second in the middle of the first.  Every step writes
+        absolute snapshot values, so repeating or nesting them converges on
+        the same state, whichever step a signal handler lands in.
+
+        Issue #4560: a mirror ALSO moves the footprint's cosmetics (silk/fab
+        texts + graphics, in both the Python objects and the raw S-expression
+        children ``PCB.save`` writes), and those live OUTSIDE
+        ``_snapshot_placement``.  Without putting them back, a run that
+        reverts a mirror and later KEEPS another delta saves a board whose
+        copper is on the front while its silk/fab is mirrored onto the back.
+        Issue #6325: they are restored from ``_TrialInFlight.cosmetics``, an
+        absolute snapshot, right AFTER the placement restore, whose
+        ``fp.layer``/``fp.rotation`` setters turn text angles as a side
+        effect.  This used to re-apply the mirror (an involution) a counted
+        number of times; a handler that ran mid-application, between the flip
+        and its count, re-applied it once too often.  Masking the signals
+        around the application could not close that window: a process-directed
+        SIGINT/SIGTERM is delivered to any thread that does not block it (e.g.
+        an OpenBLAS worker), and Python still runs the handler on the main
+        thread mid-application.  An absolute restore needs no window at all.
+
+        Issue #5536: a ``reorder_pins`` delta's effect is entirely a pad->net
+        rebinding, which no geometry snapshot can see -- ``_restore_pad_nets``
+        puts the PCB pads (in memory AND in the S-expression tree) and the
+        router's pad/``nets`` membership back.  A no-op for every other kind.
+
+        Args:
+            rebuild_grid: Re-derive the routing grid from the restored routes
+                (issue #4468 -- the CLI's post-loop optimize / DRC-nudge /
+                clearance stages all read ``router.grid``).  When False the
+                router is handed a COPY of the snapshot routes: the caller may
+                be a signal handler with ``run_delta`` still inside a re-route
+                that goes on appending to ``router.routes`` once the handler
+                returns, and the snapshot is what the loop then reverts from.
+        """
+        self._restore_pad_nets(trial.pad_nets)
+        self._restore_placement(trial.placement)
+        if trial.cosmetics is not None:
+            trial.cosmetics.restore()
+        self._restore_router_pads(trial.router_pads)
+        if rebuild_grid:
+            self._rebuild_grid_for_routes(trial.routes)
+            if trial.journal_rewound:
+                # Issue #6320: a no-rebuild restore already cut the journal
+                # back to the trial's start, so it lists exactly the restored
+                # routes -- but the grid this rebuild reset still held the
+                # trial's copper.  Its reset journaled the removal of routes the
+                # journal no longer has and its re-mark journaled the restored
+                # routes a second time; drop both (and anything the resumed
+                # trial journaled in between).  Checked AFTER the rebuild: a
+                # signal-handler restore can land in the middle of it.
+                _truncate_journal_to(self.router, trial.journal_mark)
+        else:
+            self.router.routes = copy.deepcopy(trial.routes)
+            # Issue #6320: no grid event says the trial's copper is gone, so
+            # forget what the trial journaled instead.  A revert that rebuilds
+            # the grid needs no such step: it journals the removal and the
+            # re-mark itself.
+            trial.journal_rewound = True
+            _truncate_journal_to(self.router, trial.journal_mark)
+
+    def _abandon_rewound_trial(self, trial: _TrialInFlight) -> bool:
+        """Finish undoing *trial* if it was discarded under ``run_delta``.
+
+        ``restore_last_accepted`` rewinds the live router and board from
+        outside the loop.  When its caller then fails to stop the run, the
+        loop resumes in the middle of a trial whose pads, footprints and
+        routes were put back underneath it -- and whatever it was doing at
+        that moment (applying the delta, moving router pads, re-routing)
+        carries on over the rewound state and can leave it mixed: observed as
+        a KEPT delta with copper routed for the moved part against an unmoved
+        footprint.  So the loop asks, at each point where it would otherwise
+        build on the trial's state, whether the trial is still its own.
+
+        Returns ``False`` (and does nothing) when it is.  Otherwise repeats
+        the full undo from the loop's own snapshot -- this time with the grid
+        rebuild the interrupt's save skipped -- and returns ``True``; the
+        caller must then neither keep the delta nor start another trial.
+        """
+        if self._rewound is not trial:
+            return False
+        self._undo_trial(trial, rebuild_grid=True)
+        self._trial = None
+        self._rewound = None
+        return True
+
+    # --- delta proposal / selection ----------------------------------------
+
+    def _routed_pcb_view(self) -> PCB | None:
+        """Materialize ``self.pcb`` + the router's CURRENT copper for classification.
+
+        Issue #4468 (the composed-path gap Phase 2 could not see with a
+        ``FakeRouter``): the stuck-net classifier is a *routed-board*
+        diagnostic.  It reads ``NetStatusAnalyzer`` for the incomplete nets and
+        the committed segments/vias for the blocker geometry that separates
+        ``CONGESTION_SATURATED`` from ``PLACEMENT_BOUND``.  ``self.pcb`` is the
+        **unrouted** input board (the CLI loads it from the staged input so the
+        loop can mutate footprints), so classifying it directly reports every
+        signal net as stuck with zero blockers -- the diagnosis, and therefore
+        every proposed delta, would describe a board that does not exist.
+
+        This builds a throwaway view: the live placement (including any delta
+        applied so far) serialized out, the router's current routes merged in,
+        re-parsed.  Read-only with respect to ``self.pcb`` -- the returned PCB
+        is never the object the applicator mutates.
+
+        Returns ``self.pcb`` unchanged when the router has no routes yet (there
+        is nothing to merge) or when the view cannot be built, so the loop
+        degrades to the pre-#4468 behavior instead of failing.
+        """
+        if self.pcb is None:
+            return None
+        routes = getattr(self.router, "routes", None)
+        if not routes:
+            return self.pcb
+
+        import tempfile
+
+        from kicad_tools.router.io import merge_routes_into_pcb
+        from kicad_tools.schema.pcb import PCB as _PCB
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="kct-placement-delta-") as tmpdir:
+                placement_path = Path(tmpdir) / "placement.kicad_pcb"
+                self.pcb.save(placement_path)
+                # A board that already carries copper (``--preserve-existing``
+                # style inputs) would otherwise end up with the router's routes
+                # merged ON TOP of the stale copper, double-counting geometry.
+                if self.pcb.segments or self.pcb.vias:
+                    staged = _PCB.load(placement_path)
+                    staged.strip_traces(keep_zones=True)
+                    staged.save(placement_path)
+                text = placement_path.read_text()
+                # Issue #4416 dialect parity: emit ``(net "NAME")`` copper for a
+                # name-only board so the merged view parses back with net
+                # attribution intact.
+                name_only = bool(getattr(self.pcb, "_net_name_only_dialect", False))
+                route_sexp = self.router.to_sexp(skip_cleanup=True, name_only=name_only)
+                view_path = Path(tmpdir) / "routed_view.kicad_pcb"
+                view_path.write_text(merge_routes_into_pcb(text, route_sexp))
+                return _PCB.load(view_path)
+        except Exception as exc:  # pragma: no cover - defensive only
+            if self.verbose:
+                print(f"  Warning: could not build routed view for classification ({exc})")
+            return self.pcb
+
+    def _propose_deltas(self) -> list[PlacementDelta]:
+        """Classify the current routed state and translate diagnoses into deltas."""
+        if self.pcb is None:
+            return []
+        if self._delta_proposer is not None:
+            return list(self._delta_proposer(self.pcb))
+        from kicad_tools.router.placement_delta import deltas_from_result
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets_from_pcb
+
+        view = self._routed_pcb_view()
+        if view is None:
+            return []
+        result = classify_stuck_nets_from_pcb(
+            view, excluded_nets=self.excluded_nets, net_class_map=self.net_class_map
+        )
+        # ``fixed_refs`` is forwarded so the #4968 endpoint-orientation search
+        # never spends a candidate slot on a part the caller anchored -- the
+        # loop would only skip it again at selection time.
+        return deltas_from_result(view, result, fixed_refs=self.fixed_refs)
+
+    def _strategy_from_delta(self, delta: PlacementDelta) -> ResolutionStrategy | None:
+        """Build a recovery ``ResolutionStrategy`` for an applyable delta.
+
+        Returns ``None`` for an unknown kind, for a rationale-only
+        ``reorder_pins`` delta (no ``pad_map`` -- no swap group was declared),
+        or when the target footprint is missing.
+        """
+        fp = self._find_footprint(delta.target_key)
+        if fp is None:
+            return None
+        if delta.kind == "translate":
+            old_x, old_y = fp.position[0], fp.position[1]
+            return ResolutionStrategy(
+                type=StrategyType.MOVE_COMPONENT,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[
+                    Action(
+                        type="move",
+                        target=delta.target_key,
+                        params={"x": old_x + delta.dx, "y": old_y + delta.dy},
+                    )
+                ],
+                affected_components=[delta.target_key],
+                affected_nets=[delta.net_name],
+            )
+        if delta.kind in ("rotate_180", "rotate_align"):
+            # Both rotation kinds go through the SAME applicator primitive
+            # (``StrategyApplicator._apply_rotate_component``), which bumps
+            # ``fp.rotation`` *and* every pad's ABSOLUTE ``(at x y ANGLE)``
+            # third token.  Issue #4968 deliberately reuses it rather than
+            # adding a second rotation path: a fresh one would be a third
+            # caller of the stale-pad-angle defect class (#3902 -> #4518 ->
+            # #4966) the moment it forgot the pad loop.
+            return ResolutionStrategy(
+                type=StrategyType.ROTATE_COMPONENT,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[
+                    Action(
+                        type="rotate",
+                        target=delta.target_key,
+                        params={"rotation_delta": delta.rotation_delta},
+                    )
+                ],
+                affected_components=[delta.target_key],
+                affected_nets=[delta.net_name],
+            )
+        if delta.kind == "mirror":
+            return ResolutionStrategy(
+                type=StrategyType.MIRROR_COMPONENT,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[Action(type="mirror", target=delta.target_key, params={})],
+                affected_components=[delta.target_key],
+                affected_nets=[delta.net_name],
+            )
+        if delta.kind == "reorder_pins":
+            # Issue #5536 (Phase 2a of Epic #5511): a ``reorder_pins`` delta is
+            # applyable exactly when Phase 1 attached a ``pad_map`` to it --
+            # which the classifier only does for a DECLARED ``swap_group`` on a
+            # measured-reversed bundle.  Membership is never inferred, so a
+            # rationale-only delta (``pad_map`` unset) still has no applicator
+            # and falls through to ``None`` here, exactly as before.
+            if not delta.pad_map:
+                return None
+            return ResolutionStrategy(
+                type=StrategyType.REORDER_PINS,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[
+                    Action(
+                        type="reorder_pins",
+                        target=delta.target_key,
+                        params={"pad_map": dict(delta.pad_map)},
+                    )
+                ],
+                affected_components=[delta.target_key],
+                affected_nets=sorted({delta.net_name, *delta.pad_map.values()} - {""}),
+            )
+        # Any unknown kind.
+        return None
+
+    def _select_delta(
+        self,
+        deltas: list[PlacementDelta],
+        skipped: list[PlacementDelta],
+        skip_reasons: list[str],
+    ) -> tuple[PlacementDelta, ResolutionStrategy] | None:
+        """Return the first applyable ``(delta, strategy)``, logging skips.
+
+        Honors the ladder's omissions by construction: ``deltas`` only ever
+        contains moves the classifier's translator emitted, so a suppressed
+        action (e.g. ``WIDEN_CHANNEL`` for a reversed bus) is never present to
+        select.  Records every declined delta + reason on the parallel
+        ``skipped`` / ``skip_reasons`` lists so the skip is observable.
+
+        Issue #5536 lifted the unconditional ``reorder_pins`` skip: a delta
+        carrying a declared swap group's ``pad_map`` is now applyable, while a
+        rationale-only one (membership is NEVER inferred -- see
+        :meth:`_reorder_pins_skip_reason`) is still declined with a reason.
+        """
+
+        def _skip(delta: PlacementDelta, reason: str) -> None:
+            skipped.append(delta)
+            skip_reasons.append(reason)
+            if self.verbose:
+                print(f"  Skipping delta {delta.target_ref} ({delta.kind}): {reason}")
+
+        for delta in deltas:
+            if delta.kind == "reorder_pins":
+                reason = self._reorder_pins_skip_reason(delta)
+                if reason is not None:
+                    _skip(delta, reason)
+                    continue
+            if self._target_is_fixed(delta.target_key):
+                _skip(delta, f"target {delta.target_ref} is anchored (fixed_refs)")
+                continue
+            if delta.kind == "rotate_align" and self._target_is_locked(delta.target_key):
+                # Defence in depth (#4968): the proposer already declines
+                # locked parts, but a ``rotate_align`` delta replayed from a
+                # committed ``*_placement_delta.json`` artifact carries no such
+                # guarantee -- the board may have been locked since.  An
+                # explicit board-level lock outranks a stale proposal.
+                _skip(delta, f"target {delta.target_ref} is locked on the board")
+                continue
+            out_of_scope = self._out_of_scope_nets(delta.target_key)
+            if out_of_scope:
+                _skip(
+                    delta,
+                    f"target {delta.target_ref} carries nets outside the --nets set "
+                    f"({', '.join(out_of_scope[:4])}"
+                    f"{', ...' if len(out_of_scope) > 4 else ''}); their reach was not measured",
+                )
+                continue
+            strategy = self._strategy_from_delta(delta)
+            if strategy is None:
+                _skip(delta, f"no applyable strategy for kind={delta.kind!r}")
+                continue
+            if self._strategy_touches_fixed_refs(strategy):
+                _skip(delta, "strategy touches an anchored ref")
+                continue
+            if not self._strategy_within_movement_budget(strategy):
+                cap = f"{self.max_movement:.2f}mm" if self.max_movement is not None else "n/a"
+                _skip(delta, f"move exceeds max_movement cap ({cap})")
+                continue
+            if self.pcb is not None and not self._strategy_applicator.is_safe_to_apply(
+                strategy, self.pcb
+            ):
+                _skip(delta, "unsafe to apply (board bounds)")
+                continue
+            return delta, strategy
+        return None
+
+    def _reorder_pins_skip_reason(self, delta: PlacementDelta) -> str | None:
+        """Why a ``reorder_pins`` delta cannot be applied, or ``None`` to apply it.
+
+        Phase 2a (#5536) gates the applicator on everything the atomic
+        keep-or-revert contract needs to hold:
+
+        * a ``pad_map`` -- only a DECLARED ``swap_group`` produces one, so an
+          inferred/rationale-only delta is still never applied;
+        * a resolvable target footprint, carrying every pad the map names;
+        * a current net binding on each of those pads, so the pre-apply
+          snapshot can name the net a revert must restore them to;
+        * a router that already carries every net the map re-binds TO, so the
+          PCB and the router's own pad list cannot end up disagreeing.
+        """
+        pad_map = delta.pad_map or {}
+        if not pad_map:
+            return (
+                "reorder_pins delta is rationale-only (no declared swap_group, "
+                "so no pad_map to apply)"
+            )
+        fp = self._find_footprint(delta.target_key)
+        if fp is None:
+            return f"reorder_pins target {delta.target_ref} not found on the board"
+        bound: dict[str, str] = {}
+        for pad in getattr(fp, "pads", []):
+            number = getattr(pad, "number", None)
+            if number in pad_map and number not in bound:
+                bound[number] = getattr(pad, "net_name", "") or ""
+        missing = sorted(number for number in pad_map if number not in bound)
+        if missing:
+            return f"reorder_pins pad(s) {', '.join(missing)} not found on {delta.target_ref}"
+        unbound = sorted(number for number, net_name in bound.items() if not net_name)
+        if unbound:
+            return (
+                f"reorder_pins pad(s) {', '.join(unbound)} on {delta.target_ref} carry no "
+                "current net (a revert could not restore them)"
+            )
+        if resolve_router_swap_bindings(self.router, delta.target_key, pad_map) is None:
+            return (
+                f"reorder_pins pad_map for {delta.target_ref} names a net the router does not carry"
+            )
+        return None
+
+    def _target_is_locked(self, ref: str) -> bool:
+        """Whether the board marks ``ref`` as ``(locked yes)`` (issue #4968)."""
+        fp = self._find_footprint(ref)
+        return bool(getattr(fp, "locked", False)) if fp is not None else False
+
+    # --- zone-carried connectivity revalidation (issue #4968) ---------------
+
+    def _zone_connected_pad_count(self, ref: str) -> int | None:
+        """Pads of ``ref`` still landing inside a same-net copper pour.
+
+        Rotating a footprint moves power and mounting pads that are carried by
+        a **zone**, not by a routed trace, so the router's own reach count is
+        blind to breaking them: the router was told to skip those nets
+        (``excluded_nets``) precisely because copper fill serves them.  A
+        quarter turn that swings a mounting pad off its GND pour therefore
+        looks like a pure win to the reach test while silently disconnecting
+        the plane.
+
+        This counts, against the CURRENT fill geometry, how many of ``ref``'s
+        pads sit inside a filled polygon (falling back to the zone boundary for
+        an unfilled zone) of their own net on a compatible layer.  Comparing
+        the count before and after a rotation is the loop's in-process
+        revalidation; the authoritative refill remains the pipeline's
+        ``kicad-cli`` stage, which re-pours the zones around the new placement
+        before native DRC judges the board.  Returns ``None`` when the board
+        carries no copper zones at all (nothing to revalidate -> guard off).
+        """
+        if self.pcb is None:
+            return None
+        zones = [
+            z for z in getattr(self.pcb, "zones", []) or [] if getattr(z, "keepout", None) is None
+        ]
+        if not zones:
+            return None
+
+        from kicad_tools.router.mesh.geometry import point_in_polygon
+
+        fp = self._find_footprint(ref)
+        if fp is None:
+            return 0
+        fx, fy = fp.position[0], fp.position[1]
+        ang = math.radians(-float(getattr(fp, "rotation", 0.0) or 0.0))
+        cos_a, sin_a = math.cos(ang), math.sin(ang)
+
+        count = 0
+        for pad in getattr(fp, "pads", []) or []:
+            net_number = getattr(pad, "net_number", 0)
+            if not net_number:
+                continue
+            px, py = getattr(pad, "position", (0.0, 0.0))
+            point = (fx + px * cos_a - py * sin_a, fy + px * sin_a + py * cos_a)
+            pad_layers = [str(layer) for layer in (getattr(pad, "layers", []) or [])]
+            for zone in zones:
+                if getattr(zone, "net_number", 0) != net_number:
+                    continue
+                if not self._pad_layer_matches_zone(pad_layers, zone):
+                    continue
+                polys = list(getattr(zone, "filled_polygons", []) or []) or (
+                    [zone.polygon] if getattr(zone, "polygon", None) else []
+                )
+                if any(poly and point_in_polygon(point, list(poly)) for poly in polys):
+                    count += 1
+                    break
+        return count
+
+    @staticmethod
+    def _pad_layer_matches_zone(pad_layers: list[str], zone: Any) -> bool:
+        """Whether a pad's layer set overlaps ``zone``'s copper layer(s)."""
+        if not pad_layers:
+            return True
+        zone_layers = [str(layer) for layer in (getattr(zone, "layers", []) or [])]
+        if not zone_layers:
+            zone_layers = [str(getattr(zone, "layer", ""))]
+        for pad_layer in pad_layers:
+            # Through-hole pads spell their span as ``*.Cu`` (all copper).
+            if pad_layer in ("*.Cu", "*.Mask", "*"):
+                return True
+            for zone_layer in zone_layers:
+                if not zone_layer:
+                    continue
+                if zone_layer in ("*.Cu", "F&B.Cu") or pad_layer == zone_layer:
+                    return True
+        return False
+
+    # --- router-pad synchronization ----------------------------------------
+
+    def _router_pads(self) -> list[Any]:
+        """Flat list of the router's Pad objects (``all_pads`` if present)."""
+        pads = getattr(self.router, "all_pads", None)
+        if pads:
+            return list(pads)
+        return list(getattr(self.router, "pads", {}).values())
+
+    def _snapshot_router_pads(self) -> list[tuple[Any, float, float, Any]]:
+        """Capture each router Pad's ``(x, y, layer)`` for atomic restore.
+
+        Issue #4560: the mirror delta swaps an SMD pad's routing layer
+        (``F_CU <-> B_CU``), so a revert that restored only positions would
+        leave the router grid routing to phantom back-side pads.  ``layer`` is
+        ``None`` for pad doubles without the attribute (restore skips it).
+        """
+        return [(pad, pad.x, pad.y, getattr(pad, "layer", None)) for pad in self._router_pads()]
+
+    def _invalidate_router_pad_geometry(self) -> None:
+        """Drop pathfinder caches derived from Pad geometry after an in-place edit.
+
+        PR #5330 review: :meth:`_apply_delta_to_router_pads` and
+        :meth:`_restore_router_pads` mutate ``Pad.x``/``Pad.y``/``layer`` on
+        the SAME ``Pad`` objects the pathfinder holds, without changing the
+        pad count, while ``run()`` reuses one ``Autorouter`` (and therefore
+        one pathfinder ``Router``) across every iteration.  Any pathfinder
+        cache keyed on pad geometry -- notably the vectorized
+        non-through-hole pad arrays behind ``_check_via_placement_cached``
+        -- is stale the instant we return, so tell the pathfinder
+        explicitly rather than relying on a subsequent route call to clear
+        it.  Best-effort by design: pathfinder backends without these hooks
+        (the C++ pathfinder, test doubles) simply have nothing to drop.
+        """
+        pathfinder = getattr(self.router, "router", None)
+        if pathfinder is None:
+            return
+        for hook in ("invalidate_pad_geometry_cache", "clear_via_cache"):
+            fn = getattr(pathfinder, hook, None)
+            if callable(fn):
+                with contextlib.suppress(Exception):  # pragma: no cover - defensive
+                    fn()
+
+    def _snapshot_pad_nets(self, delta: PlacementDelta) -> _PadNetSnapshot | None:
+        """Capture the pad->net bindings a ``reorder_pins`` delta will rewrite.
+
+        Returns ``None`` for every other delta kind -- no other kind touches a
+        net binding, so the default path allocates and restores nothing and
+        behaves exactly as it did before issue #5536.
+
+        The snapshot is TARGETED: only the pads the delta's ``pad_map`` names,
+        on both sides of the mirror the loop has to keep in step --
+
+        * the PCB footprint's pads (``{pad_number: net_name}``), restored
+          through the same ``assign_net_to_footprint_pad`` writer the
+          applicator used, so the S-expression tree ``PCB.save`` serialises is
+          reverted along with the in-memory objects; and
+        * the router's own flat ``Pad`` objects plus their ``Autorouter.nets``
+          membership, restored by replaying the displaced bindings.
+
+        :meth:`_reorder_pins_skip_reason` has already refused any delta whose
+        pads lack a current net, so every captured name is restorable.
+        """
+        pad_map = delta.pad_map or {}
+        if delta.kind != "reorder_pins" or not pad_map:
+            return None
+        fp = self._find_footprint(delta.target_key)
+        if fp is None:
+            return None
+        pcb_bindings: dict[str, str] = {}
+        for pad in getattr(fp, "pads", []):
+            number = getattr(pad, "number", None)
+            if number in pad_map and number not in pcb_bindings:
+                pcb_bindings[number] = getattr(pad, "net_name", "") or ""
+        # The resolver reports the pads the rebinding will touch (with their
+        # NEW nets); the snapshot keeps those same pads' CURRENT nets, which is
+        # what a revert has to replay.
+        pending = resolve_router_swap_bindings(self.router, delta.target_key, pad_map) or []
+        router_bindings = [
+            (pad, pad.net, getattr(pad, "net_name", "") or "") for pad, _id, _name in pending
+        ]
+        return _PadNetSnapshot(
+            reference=fp.reference,
+            pcb_bindings=pcb_bindings,
+            router_bindings=router_bindings,
+        )
+
+    def _restore_pad_nets(self, snapshot: _PadNetSnapshot | None) -> None:
+        """Undo the pad->net rebinding captured by :meth:`_snapshot_pad_nets`."""
+        if snapshot is None:
+            return
+        if self.pcb is not None:
+            for pad_number, net_name in snapshot.pcb_bindings.items():
+                self.pcb.assign_net_to_footprint_pad(snapshot.reference, pad_number, net_name)
+        apply_router_pad_net_bindings(self.router, snapshot.router_bindings)
+
+    def _restore_router_pads(self, snapshot: list[tuple[Any, float, float, Any]]) -> None:
+        """Restore router Pad state captured by :meth:`_snapshot_router_pads`."""
+        for pad, x, y, layer in snapshot:
+            pad.x = x
+            pad.y = y
+            if layer is not None:
+                pad.layer = layer
+        self._invalidate_router_pad_geometry()
+
+    def _clearance_violation_count(self) -> int | None:
+        """Router-level clearance-violation count, or ``None`` when unavailable.
+
+        The same lightweight pre-save validator the CLI runs before writing the
+        routed board (:func:`kicad_tools.router.io.validate_routes`), so the
+        loop's accept/reject decision is measured with the same instrument the
+        pipeline will judge the output by.  Returns ``None`` for routers without
+        the state the validator needs (test doubles), which disables the
+        no-regression guard rather than failing the loop.
+        """
+        try:
+            from kicad_tools.router.io import validate_routes
+
+            return len(validate_routes(self.router))
+        except Exception:
+            return None
+
+    # --- HV / creepage and keepout awareness (Issue #5890, Epic #5511 P3) ----
+
+    def _pairwise_table(self) -> Any | None:
+        """The router's installed pairwise (HV / signal-spacing) requirement table.
+
+        ``None`` -- the overwhelmingly common case, no ``--voltage-map`` and no
+        signal-spacing table -- is the dormant signal that keeps both guards
+        below byte-identical to the pre-#5890 loop at zero cost.
+        """
+        return getattr(getattr(self.router, "rules", None), "pairwise_clearance", None)
+
+    def _creepage_violation_count(self) -> int | None:
+        """Pad-vs-pad pairwise (creepage) violation count of the CURRENT placement.
+
+        Issue #5890.  The clearance guard above
+        (:meth:`_clearance_violation_count`) and the router's own in-loop
+        pairwise gate both score *copper the router produced*, so neither can
+        see the one failure a placement move introduces directly: two
+        cross-domain **pads** pushed inside each other's creepage requirement.
+        A move that is legal by board bounds, keeps every net routable and
+        still destroys declared isolation would otherwise be KEPT.
+
+        Measured on ``self.pcb`` -- the board the applicator mutates -- with
+        :func:`~kicad_tools.router.pairwise_clearance.pad_pairwise_violations`,
+        and exempted by the same #4506 attach zones the routing-time gate uses,
+        so a deliberately domain-bridging package is not scored as a fail.
+
+        Returns ``None`` when there is nothing to measure (no pairwise table,
+        no PCB) or the scan cannot run, which disables the guard rather than
+        failing the loop -- matching :meth:`_clearance_violation_count`.
+        """
+        table = self._pairwise_table()
+        if table is None or self.pcb is None:
+            return None
+        try:
+            from kicad_tools.router.pairwise_clearance import (
+                pad_pairwise_violations,
+                pcb_pad_geometry,
+            )
+
+            zones = getattr(self.router, "_pairwise_attach_zones_cache", None) or ()
+            return len(
+                pad_pairwise_violations(
+                    pcb_pad_geometry(self.pcb),
+                    table,
+                    attach_zones=zones,
+                )
+            )
+        except Exception:
+            return None
+
+    def _keepout_intrusion_count(self, ref: str) -> int | None:
+        """Pads of ``ref`` whose centre sits inside a track-blocking keepout area.
+
+        Issue #5890.  A ``(zone ... (keepout (tracks not_allowed)))`` rule area
+        is an authored "no copper here" region -- the surface #4605 taught the
+        router to respect while *routing*.  Nothing stopped a placement move
+        from parking a footprint's pads inside one, which is unrouteable by
+        construction and a design defect even where the re-route happens to
+        find reach elsewhere.
+
+        Deliberately **layer-agnostic and conservative**: a pad centre inside
+        any track-blocking area counts, whatever layer the area names.  A
+        component body in a declared keepout is wrong regardless of which
+        copper layer the author scoped the area to, and over-counting only ever
+        *rejects* a candidate move -- it can never admit one.
+
+        Returns ``None`` when the board declares no such areas (the dormant
+        case) or the probe cannot run, which disables the guard.
+        """
+        try:
+            areas = self.router._keepout_rule_area_polygons()
+        except Exception:
+            return None
+        blocking = [area for area in areas if area.blocks_tracks]
+        if not blocking:
+            return None
+        from kicad_tools.router.mesh.geometry import point_in_polygon
+
+        count = 0
+        for pad in self._router_pads():
+            # ``ref`` is ``delta.target_key`` (physical identity), so match the
+            # pad's physical key, not its authored reference (Issue #5902).
+            if (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) != ref:
+                continue
+            x, y = float(pad.x), float(pad.y)
+            for area in blocking:
+                min_x, min_y, max_x, max_y = area.bbox
+                if not (min_x <= x <= max_x and min_y <= y <= max_y):
+                    continue
+                if point_in_polygon((x, y), list(area.polygon)):
+                    count += 1
+                    break
+        return count
+
+    def _out_of_scope_nets(self, ref: str) -> list[str]:
+        """Nets of ``ref`` outside the ``--nets`` set (Issue #8566), sorted.
+
+        Empty when the pass was not limited with ``--nets``.  Pour/plane nets
+        the router was told to skip (``excluded_nets``) and unconnected pads
+        are not counted: they are never routed in any pass.
+        """
+        if self.route_only_nets is None:
+            return []
+        found: set[str] = set()
+        for pad in self._router_pads():
+            if (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) != ref:
+                continue
+            name = getattr(pad, "net_name", "") or ""
+            if name and name not in self.route_only_nets and name not in self.excluded_nets:
+                found.add(name)
+        return sorted(found)
+
+    def _footprint_collision_count(self, ref: str) -> int:
+        """Pad-pad overlaps plus courtyard overlaps between ``ref`` and the rest.
+
+        Issue #8566.  Every other accept guard scores copper or authored zones,
+        so a translate that stacks the moved footprint's pads on a neighbour's
+        passed them all whenever routing improved.  Counts, for the footprint
+        identified by ``ref`` (physical key), each overlapping pad pair and
+        each overlapping courtyard.  Pad boxes are axis-aligned (the router's
+        own pad model); touching edges are not an overlap.  Measured before and
+        after a trial, so a board that is already illegal is not blanket-rejected.
+        """
+        count = 0
+        mine: list[Any] = []
+        others: list[Any] = []
+        for pad in self._router_pads():
+            key = getattr(pad, "component_id", "") or getattr(pad, "ref", "")
+            (mine if key == ref else others).append(pad)
+
+        def box(pad: Any) -> tuple[float, float, float, float]:
+            hw = float(getattr(pad, "width", 0.0) or 0.0) / 2.0
+            hh = float(getattr(pad, "height", 0.0) or 0.0) / 2.0
+            return (float(pad.x) - hw, float(pad.y) - hh, float(pad.x) + hw, float(pad.y) + hh)
+
+        def same_copper(a: Any, b: Any) -> bool:
+            if getattr(a, "through_hole", False) or getattr(b, "through_hole", False):
+                return True
+            return getattr(a, "layer", None) == getattr(b, "layer", None)
+
+        eps = 1e-6
+        # Pad doubles without a size (tests) have no footprint to collide.
+        other_boxes = [(o, box(o)) for o in others if getattr(o, "width", 0.0)]
+        for pad in mine:
+            if not getattr(pad, "width", 0.0):
+                continue
+            ax0, ay0, ax1, ay1 = box(pad)
+            for other, (bx0, by0, bx1, by1) in other_boxes:
+                if (
+                    ax0 < bx1 - eps
+                    and bx0 < ax1 - eps
+                    and ay0 < by1 - eps
+                    and by0 < ay1 - eps
+                    and same_copper(pad, other)
+                ):
+                    count += 1
+        return count + self._courtyard_collision_count(ref)
+
+    def _courtyard_collision_count(self, ref: str) -> int:
+        """Courtyards of other same-side footprints that overlap ``ref``'s."""
+        if self.pcb is None:
+            return 0
+        try:
+            from kicad_tools._shapely import has_shapely
+
+            if not has_shapely():
+                return 0
+            from shapely.geometry import Polygon  # type: ignore[import-untyped]
+
+            from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+        except Exception:
+            return 0
+
+        def poly(fp: Any) -> Any | None:
+            try:
+                side = "B" if str(fp.layer).startswith("B") else "F"
+                if not _side_has_geometry(fp, side):
+                    return None
+                return _courtyard_polygon(fp, side, Polygon)
+            except Exception:
+                return None
+
+        target = self._find_footprint(ref)
+        if target is None:
+            return 0
+        mine = poly(target)
+        if mine is None:
+            return 0
+        target_side = str(getattr(target, "layer", "")).startswith("B")
+        count = 0
+        for fp in getattr(self.pcb, "footprints", []):
+            if fp is target or str(getattr(fp, "layer", "")).startswith("B") != target_side:
+                continue
+            theirs = poly(fp)
+            if theirs is None or not mine.intersects(theirs):
+                continue
+            if mine.intersection(theirs).area > 1e-6:
+                count += 1
+        return count
+
+    def _apply_delta_to_router_pads(self, delta: PlacementDelta) -> None:
+        """Mutate the router's flat pad coordinates to match an applied delta.
+
+        The router routes against its own ``Pad`` objects (board-frame ``x``/
+        ``y``), NOT the PCB footprints, so a PCB-only mutation would leave the
+        re-route geometrically unchanged.  This mirrors the pad transform
+        ``optim.router_factory`` applies for candidate placements:
+
+        * ``translate`` -> shift every pad of the target ref by ``(dx, dy)``;
+        * ``rotate_180`` -> point-reflect every pad of the target ref through the
+          footprint origin (a 180-degree rotation about the origin is exactly a
+          reflection through it), matching what the PCB-frame classifier sees
+          after ``fp.rotation += 180``;
+        * ``rotate_align`` (#4968) -> the general form of the same thing: rotate
+          every pad of the target ref about the footprint anchor by
+          ``rotation_delta`` (always a bounded +/-90 quarter turn from the
+          endpoint-orientation proposer).  Board side and pad->net binding are
+          untouched -- a rotation moves pad *positions* only;
+        * ``mirror`` (#4560) -> reflect every pad of the target ref across the
+          VERTICAL axis through the footprint anchor (``x -> 2*cx - x``, ``y``
+          unchanged -- the absolute-frame image of KiCad's left/right flip,
+          pinned by the ``tests/fixtures/mirror_flip`` golden) and swap SMD pad
+          routing layers ``F_CU <-> B_CU``.  Through-hole pads mirror position
+          only (they span all layers).  Inner-layer SMD pads do not exist.
+        * ``reorder_pins`` (#5536) -> re-bind the declared swap group's pads on
+          the target ref to their new nets (``pad.net``/``pad.net_name`` plus
+          the ``Autorouter.nets`` membership the router derives connectivity
+          from).  Pad POSITIONS are untouched: a swap is a netlist move, the
+          exact dual of the geometric kinds above.
+
+        Every mutation here is IN PLACE on the pathfinder's own ``Pad``
+        objects and leaves the pad count unchanged, so
+        :meth:`_invalidate_router_pad_geometry` is called on the way out to
+        drop any pathfinder cache derived from that geometry (PR #5330
+        review).
+        """
+        pads = self._router_pads()
+        # Validate authored selectors before mutating any pad. An internal
+        # key may share a displayed reference with other physical footprints.
+        self._find_footprint(delta.target_key)
+
+        def is_target(pad: Any) -> bool:
+            return (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) == delta.target_key
+
+        try:
+            if delta.kind == "translate":
+                for pad in pads:
+                    if is_target(pad):
+                        pad.x += delta.dx
+                        pad.y += delta.dy
+            elif delta.kind == "rotate_180":
+                fp = self._find_footprint(delta.target_key)
+                if fp is None:
+                    return
+                cx, cy = fp.position[0], fp.position[1]
+                for pad in pads:
+                    if is_target(pad):
+                        pad.x = 2.0 * cx - pad.x
+                        pad.y = 2.0 * cy - pad.y
+            elif delta.kind == "rotate_align":
+                fp = self._find_footprint(delta.target_key)
+                if fp is None:
+                    return
+                cx, cy = fp.position[0], fp.position[1]
+                # KiCad negates the footprint orientation relative to standard
+                # CCW math (#3739), so a ``fp.rotation += d`` maps each pad's
+                # offset through ``R(-d)`` -- the same transform
+                # ``stuck_classifier._iter_board_pads`` and the #4968 proposer
+                # use.  At d == 180 this reduces exactly to the point
+                # reflection the ``rotate_180`` branch above performs.
+                ang = math.radians(-delta.rotation_delta)
+                cos_a, sin_a = math.cos(ang), math.sin(ang)
+                for pad in pads:
+                    if not is_target(pad):
+                        continue
+                    dx, dy = pad.x - cx, pad.y - cy
+                    pad.x = cx + dx * cos_a - dy * sin_a
+                    pad.y = cy + dx * sin_a + dy * cos_a
+            elif delta.kind == "reorder_pins":
+                # #5536: a swap moves no copper -- it re-binds pads to nets.
+                # The router decides what to connect from ``pad.net`` and its
+                # ``nets`` membership dict, so without this the re-route would
+                # solve the OLD netlist on unchanged geometry and the swap
+                # would read as a no-op.
+                bindings = resolve_router_swap_bindings(
+                    self.router, delta.target_key, delta.pad_map or {}
+                )
+                if bindings:
+                    apply_router_pad_net_bindings(self.router, bindings)
+            elif delta.kind == "mirror":
+                from kicad_tools.router.layers import Layer
+
+                fp = self._find_footprint(delta.target_key)
+                if fp is None:
+                    return
+                cx = fp.position[0]
+                for pad in pads:
+                    if not is_target(pad):
+                        continue
+                    pad.x = 2.0 * cx - pad.x
+                    if getattr(pad, "through_hole", False):
+                        continue
+                    layer = getattr(pad, "layer", None)
+                    if layer == Layer.F_CU:
+                        pad.layer = Layer.B_CU
+                    elif layer == Layer.B_CU:
+                        pad.layer = Layer.F_CU
+        finally:
+            self._invalidate_router_pad_geometry()
+
+    # --- driver ------------------------------------------------------------
+
+    def run_delta(
+        self,
+        max_adjustments: int = 3,
+        use_negotiated: bool = True,
+        timeout: float | None = None,
+        per_net_timeout: float | None = None,
+        reuse_existing_routes: bool = False,
+        require_no_clearance_regression: bool = True,
+        require_no_creepage_regression: bool = True,
+        require_no_keepout_intrusion: bool = True,
+        timeout_provider: Callable[[], float | None] | None = None,
+        min_trial_budget: float = 0.0,
+        abandon_margin: int | None = PD_ABANDON_ROUTED_MARGIN,
+        require_no_footprint_collision: bool = True,
+    ) -> PlacementDeltaFeedbackResult:
+        """Run the classifier-driven placement-delta feedback loop.
+
+        Args:
+            max_adjustments: Maximum number of delta apply/keep-or-revert
+                iterations to attempt after the initial routing pass.
+            use_negotiated: Use negotiated-congestion routing (vs plain
+                ``route_all``) for every routing pass.
+            timeout / per_net_timeout: Forwarded to the negotiated router so each
+                re-route respects the caller's wall-clock budget.
+            timeout_provider: Issue #8480.  Called at the start of every trial
+                to read the LIVE per-trial budget (the caller clamps it to the
+                time the stage still has).  Overrides ``timeout`` when it
+                returns a value; ``None`` keeps the fixed ``timeout``.
+            min_trial_budget: A trial whose live budget is below this many
+                seconds is not started; the loop stops with
+                ``exit_reason == "pd_budget_exhausted"`` and the accepted
+                state is left untouched.
+            abandon_margin: A trial whose iteration-0 routed count is more than
+                this many nets below the accepted result is abandoned (and its
+                delta reverted) instead of running its remaining iterations.
+                ``None`` disables the early abandon.
+            reuse_existing_routes: When True and the router already carries
+                routes, adopt them as the baseline instead of re-routing from
+                scratch (issue #4468).  The CLI invokes this loop immediately
+                after a completed routing pass, so the baseline re-route is a
+                full duplicate of work already done -- on board-07 that is
+                ~11 min of wall clock for a bit-identical result.  Leave False
+                (the default) when the caller has not routed yet.
+            require_no_clearance_regression: Keep a delta only if it ALSO does
+                not increase the router's clearance-violation count (issue
+                #4468).  Reach alone is the wrong acceptance test for a
+                placement change: on one board-07 host run (local macOS
+                arm64, seed 42), a kept 2 mm translate bought one net
+                (26/31 -> 27/31) while pushing two DDR-channel clearances
+                under the jlcpcb floor and breaking the ADDR_BUS
+                length-match the board exists to exercise -- a trade the
+                routed-DRC allowlist would have had to be WIDENED to absorb.
+                That motivating measurement is host-specific: both board-07
+                CI runs measured the same probe as routed 25 -> 25 (no
+                reach gain), so this guard never fired there (issue #4561).
+                Set False to restore the reach-only Phase-2 criterion.
+            require_no_creepage_regression: Keep a delta only if it ALSO does
+                not increase the **pad-vs-pad** pairwise (creepage) violation
+                count of the placement (Issue #5890, Epic #5511 Phase 3).
+                This is the HV guard the reach and routed-clearance tests
+                structurally cannot provide: both score copper the router
+                produced, so a move that pushes two cross-domain *pads* inside
+                each other's declared creepage requirement passes them both.
+                Dormant (no cost, no behaviour change) on a board with no
+                ``--voltage-map`` / signal-spacing table -- see
+                :meth:`_creepage_violation_count`.
+            require_no_keepout_intrusion: Keep a delta only if it does not move
+                MORE of the target's pads into a track-blocking
+                ``(zone ... (keepout ...))`` rule area (Issue #5890).  Dormant
+                on a board that declares no such areas.
+            require_no_footprint_collision: Keep a delta only if it does not
+                increase the number of pad-pad overlaps and courtyard overlaps
+                between the moved footprint and other footprints (Issue #8566).
+
+        Returns:
+            A :class:`PlacementDeltaFeedbackResult`.  The returned routes/placement
+            are always the best (highest routed-net) state observed -- a
+            non-improving delta is reverted atomically (placement, router pads,
+            and routes all restored).
+        """
+        negotiated_kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            negotiated_kwargs["timeout"] = timeout
+        if per_net_timeout is not None:
+            negotiated_kwargs["per_net_timeout"] = per_net_timeout
+
+        def _routed_count() -> int:
+            total = len(self.router.nets) - 1  # -1 for net 0
+            return total - len(self.router.get_failed_nets())
+
+        # Issue #8480: reference count the current trial's iteration 0 is
+        # judged against (``None`` = no early abandon armed).
+        abandon_below: list[int | None] = [None]
+        abandoned_early: list[bool] = [False]
+
+        def _trial_progress(progress: float, message: str, cont: bool) -> bool:
+            # The negotiated router calls this at the top of each rip-up
+            # iteration; the first such call is the end of iteration 0.
+            ref = abandon_below[0]
+            if ref is None or not message.startswith("Iteration "):
+                return True
+            abandon_below[0] = None  # judge iteration 0 only
+            if _routed_count() < ref:
+                abandoned_early[0] = True
+                return False
+            return True
+
+        def _route() -> list[Route]:
+            self._clear_routes()
+            if use_negotiated:
+                kwargs = dict(negotiated_kwargs)
+                if abandon_below[0] is not None:
+                    kwargs["progress_callback"] = _trial_progress
+                return self.router.route_all_negotiated(**kwargs)
+            return self.router.route_all()
+
+        # ``applied`` is the loop's own attribute, not a local, so a partial
+        # save that interrupts the loop can tell whether the accepted placement
+        # still is the source board's (issue #6314).
+        applied: list[PlacementDelta] = []
+        self.accepted_deltas = applied
+        self._trial = None
+        self._rewound = None
+        interrupted_delta: PlacementDelta | None = None
+        proposed: list[PlacementDelta] = []
+        skipped: list[PlacementDelta] = []
+        skip_reasons: list[str] = []
+        reverted: list[PlacementDelta] = []
+        reverted_counts: list[tuple[int, int]] = []
+        reverted_reasons: list[str] = []
+
+        if self.verbose:
+            print("\n=== Placement-Delta Feedback Loop (classifier-driven) ===")
+            print(f"  Max adjustments: {max_adjustments}")
+            if self.fixed_refs:
+                print(f"  Anchored refs:   {', '.join(sorted(self.fixed_refs))}")
+            if self.max_movement is not None:
+                print(f"  Max movement:    {self.max_movement:.2f}mm")
+
+        # Initial routing pass establishes the baseline / best state.  When the
+        # caller already routed (the CLI path), reuse that state verbatim.
+        if reuse_existing_routes and getattr(self.router, "routes", None):
+            if self.verbose:
+                print("  Reusing the caller's existing routes as the baseline (no re-route)")
+        else:
+            _route()
+        total_nets = len(self.router.nets) - 1
+        best_count = _routed_count()
+        best_routes = copy.deepcopy(list(self.router.routes))
+        best_placement = self._snapshot_placement()
+        best_pads = self._snapshot_router_pads()
+
+        if self.verbose:
+            print(f"  Baseline: routed {best_count}/{total_nets} nets")
+
+        exit_reason = "pd_max_iter"
+        iteration = 0
+        # Moves already probed.  A reverted delta puts the board back exactly
+        # where it was, so the classifier re-proposes the SAME ladder on the
+        # next iteration; without this the loop would probe one candidate
+        # forever.  Keyed on the move itself (not the target) so two different
+        # translates of one part are two distinct probes (issue #4468).
+        probed: set[tuple[str, str, float, float, float]] = set()
+        for iteration in range(max_adjustments):
+            if not self.router.get_failed_nets():
+                exit_reason = "pd_converged"
+                break
+            if self.pcb is None:
+                exit_reason = "pd_no_pcb"
+                break
+
+            # Issue #8480: re-read the per-trial budget NOW.  A fixed value
+            # resolved before the loop can exceed the time the stage has left
+            # by the time a later trial starts, guaranteeing the stage
+            # deadline kills it.
+            if timeout_provider is not None:
+                live_timeout = timeout_provider()
+                if live_timeout is not None:
+                    if live_timeout < min_trial_budget:
+                        exit_reason = "pd_budget_exhausted"
+                        if self.verbose:
+                            print(
+                                f"  Only {live_timeout:.0f}s of stage budget left "
+                                f"(< {min_trial_budget:.0f}s minimum per trial); "
+                                "stopping with the accepted result."
+                            )
+                        break
+                    negotiated_kwargs["timeout"] = live_timeout
+
+            deltas = self._propose_deltas()
+            proposed.extend(deltas)
+            candidates = [d for d in deltas if _delta_key(d) not in probed]
+            selection = self._select_delta(candidates, skipped, skip_reasons)
+            if selection is None:
+                # A revert already recorded the loop's outcome; running out of
+                # UNPROBED candidates afterwards does not change it.
+                if exit_reason != "pd_reverted":
+                    exit_reason = "pd_no_delta"
+                if self.verbose:
+                    print("  No applyable placement delta; stopping.")
+                break
+            delta, strategy = selection
+            probed.add(_delta_key(delta))
+
+            # Snapshot the pre-apply state so a non-improving delta reverts
+            # atomically (placement + router pads + routes together).
+            pre_placement = self._snapshot_placement()
+            pre_pads = self._snapshot_router_pads()
+            # #5536: pad->net bindings live outside the geometry snapshots
+            # above (a ``reorder_pins`` delta moves no pad).  ``None`` for
+            # every other kind, so the default path is unchanged.
+            pre_pad_nets = self._snapshot_pad_nets(delta)
+            pre_routes = copy.deepcopy(list(self.router.routes))
+            pre_count = _routed_count()
+            pre_violations = self._clearance_violation_count()
+            # Issue #5890 (Epic #5511 Phase 3): the HV / keepout half of the
+            # accept test.  Both are dormant (``None``) unless the board
+            # actually declares the constraint -- a pairwise requirement table
+            # (``--voltage-map`` / signal spacing) and a track-blocking rule
+            # area respectively -- so a board with neither is measured, and
+            # behaves, exactly as before.
+            pre_creepage = (
+                self._creepage_violation_count() if require_no_creepage_regression else None
+            )
+            pre_keepout = (
+                self._keepout_intrusion_count(delta.target_key)
+                if require_no_keepout_intrusion
+                else None
+            )
+            # Issue #8566: pad/courtyard collisions with other footprints.
+            pre_collision = (
+                self._footprint_collision_count(delta.target_key)
+                if require_no_footprint_collision
+                else None
+            )
+            # Issue #4968: a rotation swings power/mounting pads that are
+            # carried by copper pour rather than by routed traces, so the
+            # reach count cannot see them break.  Measured only for the
+            # rotation kinds -- a translate is already bounded to ~2 mm and
+            # the other kinds keep pad geometry inside the same pour.
+            pre_zone_pads = (
+                self._zone_connected_pad_count(delta.target_key)
+                if delta.kind in ("rotate_180", "rotate_align")
+                else None
+            )
+
+            # Record the pre-move position (once) for the placement diff.
+            self._snapshot_positions([delta.target_key])
+
+            if self.verbose:
+                print(
+                    f"\n--- Iteration {iteration} --- applying {delta.kind} "
+                    f"to {delta.target_ref} (net {delta.net_name})"
+                )
+
+            # Issue #6314: from here until the keep/revert decision the live
+            # router and board hold an UNACCEPTED trial.  Publish the pre-trial
+            # snapshot so ``restore_last_accepted`` can undo it if the run is
+            # interrupted (deadline / Ctrl+C) before that decision is reached.
+            trial = _TrialInFlight(
+                delta=delta,
+                strategy=strategy,
+                placement=pre_placement,
+                router_pads=pre_pads,
+                pad_nets=pre_pad_nets,
+                routes=pre_routes,
+                journal_mark=_journal_mark(self.router),
+                cosmetics=self._snapshot_cosmetics(delta, strategy),
+            )
+            self._trial = trial
+
+            result = self._strategy_applicator.apply_strategy(self.pcb, strategy)
+            if not result.success:
+                self._trial = None
+                # A rewind that landed inside the failed application has
+                # nothing left to finish: no router pad has moved and no route
+                # or grid cell has been touched yet.  Just acknowledge it.
+                self._rewound = None
+                exit_reason = "pd_apply_failed"
+                if self.verbose:
+                    print(f"  Delta application failed: {result.message}")
+                break
+            # Keep the router's flat pad geometry in lockstep with the PCB.
+            self._apply_delta_to_router_pads(delta)
+
+            # Issue #6314, checkpoint 1 of 3 -- the trial may have been
+            # discarded while the delta was being applied (to the board or to
+            # the router's pads), which leaves both half-moved.  Undo it now
+            # rather than spend a full re-route on a state nobody can keep.
+            if self._abandon_rewound_trial(trial):
+                interrupted_delta = delta
+                break
+
+            abandon_below[0] = (
+                pre_count - abandon_margin
+                if abandon_margin is not None and use_negotiated
+                else None
+            )
+            abandoned_early[0] = False
+            _route()
+            abandon_below[0] = None
+            new_count = _routed_count()
+            post_violations = self._clearance_violation_count()
+
+            regressed_drc = (
+                require_no_clearance_regression
+                and pre_violations is not None
+                and post_violations is not None
+                and post_violations > pre_violations
+            )
+            post_zone_pads = (
+                self._zone_connected_pad_count(delta.target_key)
+                if pre_zone_pads is not None
+                else None
+            )
+            regressed_zone_pads = (
+                pre_zone_pads is not None
+                and post_zone_pads is not None
+                and post_zone_pads < pre_zone_pads
+            )
+            post_creepage = self._creepage_violation_count() if pre_creepage is not None else None
+            regressed_creepage = (
+                pre_creepage is not None
+                and post_creepage is not None
+                and post_creepage > pre_creepage
+            )
+            post_keepout = (
+                self._keepout_intrusion_count(delta.target_key) if pre_keepout is not None else None
+            )
+            regressed_keepout = (
+                pre_keepout is not None and post_keepout is not None and post_keepout > pre_keepout
+            )
+
+            post_collision = (
+                self._footprint_collision_count(delta.target_key)
+                if pre_collision is not None
+                else None
+            )
+            regressed_collision = (
+                pre_collision is not None
+                and post_collision is not None
+                and post_collision > pre_collision
+            )
+
+            # Issue #6314, checkpoint 2 of 3 -- the trial may have been
+            # discarded during the re-route or the measurements above.  The
+            # counts just taken then describe a re-route that carried on over
+            # rewound pads, and the copper in ``router.routes`` belongs to no
+            # placement at all: never judge it, never keep it.
+            if self._abandon_rewound_trial(trial):
+                interrupted_delta = delta
+                break
+
+            if (
+                new_count > pre_count
+                and not regressed_drc
+                and not regressed_zone_pads
+                and not regressed_creepage
+                and not regressed_keepout
+                and not regressed_collision
+            ):
+                # Record the keep BEFORE retiring the snapshot (issue #6314):
+                # an interrupt between the two then restores the pre-trial
+                # state with the delta still listed, which only makes a
+                # partial save read the placement from the live board -- the
+                # truth either way.  The other order would leave a kept
+                # delta's copper paired with the source placement.
+                applied.append(delta)
+                # The commit point.  Before this assignment a rewind undoes
+                # the trial; after it there is nothing in flight to rewind.
+                self._trial = None
+                # Checkpoint 3 of 3 -- a rewind in the few instructions
+                # between checkpoint 2 and the commit undid the trial this
+                # branch just listed as kept.  Checked AFTER the commit so no
+                # gap is left: take the delta back off the list.
+                if self._rewound is trial:
+                    applied.pop()
+                    self._abandon_rewound_trial(trial)
+                    interrupted_delta = delta
+                    break
+                if self.verbose:
+                    print(f"  Kept: routed {pre_count} -> {new_count} (strict improvement)")
+                if new_count > best_count:
+                    best_count = new_count
+                    best_routes = copy.deepcopy(list(self.router.routes))
+                    best_placement = self._snapshot_placement()
+                    best_pads = self._snapshot_router_pads()
+            else:
+                # Revert atomically: placement, router pads, routes AND the
+                # routing grid (issue #4468 -- the CLI's post-loop optimize /
+                # DRC-nudge / clearance stages all read ``router.grid``, so a
+                # grid still holding the reverted attempt's occupancy silently
+                # degrades the output the loop just promised to leave
+                # untouched).  ``_undo_trial`` documents the mirror (#4560) and
+                # ``reorder_pins`` (#5536) halves.
+                self._undo_trial(trial, rebuild_grid=True)
+                # Issue #6314: the revert is complete; nothing is in flight.
+                self._trial = None
+                # A rewind that landed DURING this revert wrote the same
+                # snapshot values the revert was writing, and the revert's
+                # grid rebuild ran to its end afterwards, so the state is the
+                # pre-trial one either way.  But someone asked the run to
+                # stop: record this probe's result and start no other.
+                rewound_during_revert = self._rewound is trial
+                self._rewound = None
+                if regressed_drc:
+                    reason = f"clearance violations {pre_violations} -> {post_violations}"
+                elif regressed_creepage:
+                    reason = (
+                        f"pairwise creepage fails {pre_creepage} -> {post_creepage} "
+                        f"(pad-vs-pad, HV/signal-spacing table)"
+                    )
+                elif regressed_collision:
+                    reason = (
+                        f"{delta.target_ref} pad/courtyard overlaps with other footprints "
+                        f"{pre_collision} -> {post_collision}"
+                    )
+                elif regressed_keepout:
+                    reason = (
+                        f"pads of {delta.target_ref} inside a track-blocking keepout rule "
+                        f"area {pre_keepout} -> {post_keepout}"
+                    )
+                elif regressed_zone_pads:
+                    reason = (
+                        f"zone-carried pad connectivity {pre_zone_pads} -> {post_zone_pads} "
+                        f"on {delta.target_ref}"
+                    )
+                elif abandoned_early[0]:
+                    reason = (
+                        f"abandoned after iteration 0: routed {new_count} is more than "
+                        f"{abandon_margin} below the accepted {pre_count}"
+                    )
+                else:
+                    reason = "no strict routed-net increase"
+                reverted.append(delta)
+                reverted_counts.append((pre_count, new_count))
+                reverted_reasons.append(reason)
+                exit_reason = "pd_reverted"
+                if self.verbose:
+                    print(
+                        f"  Reverted: routed {pre_count} -> {new_count} "
+                        f"({reason}); placement + routes + grid restored"
+                    )
+                if rewound_during_revert:
+                    exit_reason = "pd_interrupted"
+                    break
+                # Continue with the NEXT unprobed candidate while budget
+                # remains (issue #4468): the classifier ranks a LADDER, and
+                # the top rung failing says nothing about the rungs below it.
+                # The keep-if-improves guarantee is unchanged -- every probe
+                # still has to beat the baseline to survive -- so a wider
+                # search costs wall clock, never reach.  ``max_adjustments``
+                # is the bound; callers that want the old stop-at-first-revert
+                # behaviour pass ``max_adjustments=1``.
+                continue
+
+        if interrupted_delta is not None:
+            exit_reason = "pd_interrupted"
+            if self.verbose:
+                print(
+                    f"  Interrupted: the {interrupted_delta.kind} trial on "
+                    f"{interrupted_delta.target_ref} was discarded by a partial save; "
+                    "not kept, placement + routes + grid restored, stopping."
+                )
+
+        # Restore the best observed state (routes + placement + router pads +
+        # grid together) so the returned result is monotone in routed-net count.
+        current_count = _routed_count()
+        if best_count > current_count:
+            self._restore_placement(best_placement)
+            self._restore_router_pads(best_pads)
+            self._rebuild_grid_for_routes(copy.deepcopy(best_routes))
+
+        failed_nets = self.router.get_failed_nets()
+        if self.verbose:
+            print("\n=== Placement-Delta Feedback Complete ===")
+            print(f"  Deltas kept: {len(applied)}  proposed: {len(proposed)}")
+            print(f"  Final failed nets: {len(failed_nets)}")
+            print(f"  Exit reason: {exit_reason}")
+
+        return PlacementDeltaFeedbackResult(
+            success=len(failed_nets) == 0,
+            routes=list(self.router.routes),
+            iterations=iteration + 1,
+            applied_deltas=applied,
+            proposed_deltas=proposed,
+            skipped_deltas=skipped,
+            skip_reasons=skip_reasons,
+            reverted_deltas=reverted,
+            reverted_counts=reverted_counts,
+            reverted_reasons=reverted_reasons,
+            failed_nets=failed_nets,
+            placement_diff=self._build_placement_diff(),
+            exit_reason=exit_reason,
+            interrupted_delta=interrupted_delta,
+        )

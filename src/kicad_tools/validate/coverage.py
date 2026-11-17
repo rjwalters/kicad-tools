@@ -1,0 +1,357 @@
+"""Per-check coverage states for ``kct check`` -- "unknown is not pass" (Issue #5946).
+
+A check category that reports zero findings can mean three different things:
+
+``checked``
+    The check ran against inputs it could actually evaluate.  Zero findings
+    really is a pass.
+
+``skipped:<reason>``
+    The check did not apply, by choice or by construction: deselected with
+    ``--only`` / ``--skip``, an opt-in check that was not requested, or nothing
+    to verify (for example no declared ampacity targets, or no differential
+    pairs on the board).  Not a claim either way, and not a gap.
+
+``unknown:<reason>``
+    The check *should* have something to say about this board but could not
+    evaluate it: a missing input (no net-class map while the board has
+    differential-pair nets, no schematic for the field lint), unusable
+    evidence (copper zones with no committed fill, so the zone-clearance rules
+    measured nothing), or an unreadable sidecar.  Zero findings here is **not**
+    a pass.
+
+Each entry also carries ``blocking``: whether the category guards fabrication
+or electrical correctness (it can emit error-severity findings).  Sign-off
+(``kct readiness`` / ``/kct:tapeout``) refuses to sign off while any
+*blocking* category is ``unknown``.  The ``kct check`` exit code itself is
+unchanged: coverage is reported, and sign-off decides.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .checker import DRCChecker
+
+CHECKED = "checked"
+SKIPPED = "skipped"
+UNKNOWN = "unknown"
+
+# Categories that can emit error-severity (fabrication / electrical) findings.
+# Advisory categories (silkscreen, pad_grid, pin1_marker, doc_drift,
+# sch_fields, ...) are deliberately absent: an unknown advisory check is
+# reported but never blocks sign-off.
+BLOCKING_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "ampacity",
+        "path_ampacity",
+        "reinforcement_incomplete",
+        "wire_run_courtyard_overlap",
+        "clearance",
+        "physical_copper_gap",
+        "connectivity",
+        "segment_zone",
+        "via_zone",
+        "copper_sliver",
+        "courtyard_overlap",
+        "diffpair_clearance_intra",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
+        "dimensions",
+        "edge",
+        "impedance",
+        "match_group_length_skew",
+        "netclass_clearance_copper",
+        "netclass_floor",
+        "netlist",
+        "removed_pad_scan",
+        "routing_policy",
+        "solder_mask",
+        "mask_to_copper",
+        "via_in_pad",
+        "via_type",
+        "zones",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Coverage:
+    """Coverage state of one check category."""
+
+    state: str
+    reason: str | None = None
+    blocking: bool = False
+
+    @property
+    def status(self) -> str:
+        """``checked`` or ``<state>:<reason>`` -- the compact form."""
+        if self.state == CHECKED or not self.reason:
+            return self.state
+        return f"{self.state}:{self.reason}"
+
+    @property
+    def is_blocking_unknown(self) -> bool:
+        return self.state == UNKNOWN and self.blocking
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "state": self.state,
+            "reason": self.reason,
+            "blocking": self.blocking,
+        }
+
+
+def checked(category: str) -> Coverage:
+    return Coverage(CHECKED, None, category in BLOCKING_CATEGORIES)
+
+
+def skipped(category: str, reason: str) -> Coverage:
+    return Coverage(SKIPPED, reason, category in BLOCKING_CATEGORIES)
+
+
+def unknown(category: str, reason: str) -> Coverage:
+    return Coverage(UNKNOWN, reason, category in BLOCKING_CATEGORIES)
+
+
+def _declares_ampacity(net_class_map: Any) -> bool:
+    if not net_class_map:
+        return False
+    return any(getattr(nc, "target_ampacity", None) is not None for nc in net_class_map.values())
+
+
+def ampacity_pour_unknown(unmeasured: dict[str, str]) -> Coverage:
+    """``ampacity`` coverage when declared nets' pours could not be rated.
+
+    ``AmpacityRule`` rates a net carried by a copper pour from the pour's
+    narrowest neck between the net's pads (Issue #7206, F3).  When no
+    defensible estimate exists -- no committed fill, fewer than two pads,
+    copper that does not join the pads -- the net was never measured, so
+    zero findings is not a pass (Issue #7210).
+    """
+    detail = "; ".join(f"{net}: {why}" for net, why in sorted(unmeasured.items()))
+    return unknown("ampacity", f"pour not measurable ({detail})")
+
+
+def collapse_reasons(reasons: Sequence[str], limit: int) -> str:
+    """De-duplicate reason strings (first-occurrence order) and truncate.
+
+    The one shared collapse rule behind every human-readable rendering of
+    mask-copper incompleteness (issue #8949): the live case carries reason
+    lists where 13 of 19 strings are the same
+    ``"F.Mask: unattributed native mask region"`` line, which buries the
+    distinct causes.  ``mask_copper_unknown`` composes this into its
+    coverage-row detail; ``kct check``'s stdout stanza composes it with a
+    wider bound.  An empty list renders the ``"no reason reported"``
+    placeholder, never a spurious ``(+0 more)``.
+    """
+    distinct = list(dict.fromkeys(reason for reason in reasons if reason))
+    shown = distinct[:limit]
+    detail = "; ".join(shown) if shown else "no reason reported"
+    if len(distinct) > len(shown):
+        detail += f" (+{len(distinct) - len(shown)} more)"
+    return detail
+
+
+def mask_copper_unknown(coverage: str, reasons: Sequence[str], *, limit: int = 3) -> Coverage:
+    """``mask_to_copper`` coverage when the assessment could not evaluate the board.
+
+    ``MaskCopperAssessment.coverage`` is the assessment's own verdict on
+    whether it saw the whole board: ``complete``, ``incomplete`` (it ran but
+    could not evaluate -- an unsupported native rule context, an unqualified
+    KiCad plot profile, unusable region geometry) or ``not_run`` (requested
+    via ``--only`` with no process policy, so it never evaluated anything).
+    Anything but ``complete`` means zero findings is **not** a pass, so the
+    row is ``unknown`` rather than ``checked`` (Issue #8924).
+
+    Keyed on ``coverage`` alone, never on ``MaskCopperAssessment.passed``:
+    ``passed`` is strictly stronger -- it also requires empty ``reasons``, a
+    policy and binding, and no ``violation``/``uncertain`` measurement.  A
+    board whose mask check ran fine and *found real violations* is a
+    ``checked`` row carrying error findings; reporting ``unknown`` there would
+    invert the row's meaning.  ``summarize_verdict`` keys on ``passed``, which
+    is correct for a *verdict* but not for this row.
+
+    The reason detail is de-duplicated (first-occurrence order) and truncated
+    via :func:`collapse_reasons` -- the shared collapse rule the CLI's
+    stdout stanza uses too (issue #8949).  This string lands verbatim in
+    every committed report, so its ``limit`` stays tight.
+    """
+    detail = collapse_reasons(reasons, limit=limit)
+    return unknown("mask_to_copper", f"assessment {coverage} ({detail})")
+
+
+def _unfilled_pour_zones(checker: DRCChecker) -> int:
+    count = 0
+    for zone in getattr(checker.pcb, "zones", []) or []:
+        if getattr(zone, "keepout", None) is not None:
+            continue  # rule area, not copper
+        if not getattr(zone, "net_name", ""):
+            continue  # unconnected pour: no foreign-net clearance to measure
+        if not getattr(zone, "filled_polygons", None):
+            count += 1
+    return count
+
+
+def _diff_pair_candidates(checker: DRCChecker) -> int:
+    try:
+        from kicad_tools.router.diffpair import detect_differential_pairs
+
+        names = {num: net.name for num, net in checker.pcb.nets.items() if net.name}
+        return len(detect_differential_pairs(names))
+    except Exception:  # noqa: BLE001 - detection is advisory input to coverage only
+        return 0
+
+
+def _unevaluated_courtyards(checker: DRCChecker) -> tuple[int, int]:
+    """``(N, M)``: non-exempt footprints whose courtyard overlap cannot be evaluated.
+
+    N counts footprints with no courtyard geometry plus those whose outline
+    does not resolve to a polygon; M is every non-exempt footprint (Issue #7204).
+    """
+    from kicad_tools._shapely import require_shapely
+    from kicad_tools.geometry.courtyard import unevaluated_courtyards
+
+    require_shapely("courtyard-overlap coverage")
+    from shapely.geometry import Polygon  # type: ignore[import-untyped]
+
+    missing, unresolved, total = unevaluated_courtyards(
+        list(getattr(checker.pcb, "footprints", []) or []), Polygon
+    )
+    return len(missing) + len(unresolved), total
+
+
+def precheck(
+    category: str,
+    checker: DRCChecker,
+    *,
+    pcb_path: Path | None = None,
+    sch_path: Path | None = None,
+    drc_only: bool = False,
+) -> Coverage | None:
+    """Coverage for a *selected* category whose inputs make it vacuous.
+
+    Returns ``None`` when the category can evaluate the board normally (the
+    caller records ``checked`` once it has run), otherwise the ``skipped`` /
+    ``unknown`` state explaining why its result says nothing.  The check is
+    still invoked by the caller either way, so findings are unchanged.
+    """
+    ncm = getattr(checker, "net_class_map", None)
+
+    if category == "ampacity" and not _declares_ampacity(ncm):
+        # Issue #7206: a spec that declares a current but maps it onto no net
+        # was never checked against it -- unknown, not a vacuous skip.
+        declared = getattr(checker, "declared_spec_currents", None) or []
+        if declared:
+            return unknown(
+                category,
+                f"needs_input:target_ampacity (project.kct declares {len(declared)} "
+                "current requirement(s))",
+            )
+        return skipped(category, "no_declared_targets")
+    if category == "path_ampacity" and not getattr(checker, "current_path_specs", None):
+        return skipped(category, "no_declared_current_paths")
+    if category in ("reinforcement_incomplete", "wire_run_courtyard_overlap") and not any(
+        getattr(s, "reinforcement_eligible", False)
+        for s in getattr(checker, "current_path_specs", None) or []
+    ):
+        return skipped(category, "no_reinforcement_eligible_paths")
+    if (
+        category == "physical_copper_gap"
+        and getattr(checker, "physical_copper_gap_mm", None) is None
+        and not getattr(checker, "fab_view", False)
+    ):
+        return skipped(category, "opt_in:--physical-copper-gap")
+    if category == "tht_smd_spacing" and not getattr(checker, "fab_view", False):
+        return skipped(category, "opt_in:--mfr jlcpcb")
+    if category == "routing_policy" and not getattr(checker, "require_routing_policy", False):
+        from kicad_tools.validate.rules.routing_policy import declares_routing_policy
+
+        if not ncm or not any(declares_routing_policy(nc) for nc in ncm.values()):
+            return skipped(category, "no_declared_policies")
+    if category == "match_group_length_skew" and ncm is None:
+        return skipped(category, "no_net_class_map")
+    if (
+        category
+        in ("diffpair_length_skew", "diffpair_routing_continuity", "diffpair_uncoupled_length")
+        and ncm is None
+    ):
+        pairs = _diff_pair_candidates(checker)
+        if pairs:
+            return unknown(category, f"needs_input:net_class_map ({pairs} diff-pair net(s))")
+        return skipped(category, "no_diff_pairs_detected")
+    if category in ("segment_zone", "via_zone", "thermal_asymmetry"):
+        # thermal_asymmetry (Issue #7220) reads the committed fill geometry
+        # too; it is advisory, so an unfilled board reports a non-blocking
+        # unknown rather than a vacuous ``checked``.
+        unfilled = _unfilled_pour_zones(checker)
+        if unfilled:
+            return unknown(category, f"zone_fills_absent ({unfilled} unfilled zone(s))")
+    if category == "courtyard_overlap":
+        # Issue #7204: a footprint with no resolvable courtyard was never
+        # tested against its neighbours, so zero overlaps is not a pass.
+        unevaluated, total = _unevaluated_courtyards(checker)
+        if unevaluated:
+            return unknown(category, f"no_courtyard_geometry ({unevaluated} of {total} footprints)")
+    if category in ("mask_negative_expansion", "mask_multi_segment"):
+        # Issue #8847: an unsaved board or unmodelled mask feature means the
+        # opening geometry is partial, so zero findings is not a pass.
+        snap_fn = getattr(checker, "mask_geometry_snapshot", None)
+        if snap_fn is not None:
+            snap = snap_fn()
+            reason = snap[1] if isinstance(snap, tuple) and len(snap) == 2 else None
+            if reason:
+                return unknown(category, reason)
+    if category == "sch_fields":
+        if drc_only:
+            return skipped(category, "drc_only")
+        if sch_path is None:
+            return unknown(category, "needs_input:schematic")
+    if category == "doc_drift" and pcb_path is None:
+        return unknown(category, "needs_input:pcb_path")
+    if category == "netclass_clearance_copper":
+        if pcb_path is None:
+            return unknown(category, "needs_input:pcb_path")
+        pro = pcb_path.with_suffix(".kicad_pro")
+        if not pro.is_file():
+            return skipped(category, "no_kicad_pro")
+        try:
+            json.loads(pro.read_text())
+        except (OSError, ValueError):
+            return unknown(category, "unreadable_kicad_pro")
+    if category == "spec_conformance":
+        from .spec_conformance import coverage_for
+
+        state = coverage_for(category, pcb_path)
+        return None if state.state == CHECKED else state
+    if category == "netclass_floor":
+        if pcb_path is None:
+            return unknown(category, "needs_input:pcb_path")
+        pro = pcb_path.with_suffix(".kicad_pro")
+        if not pro.is_file():
+            return skipped(category, "no_kicad_pro")
+        try:
+            json.loads(pro.read_text())
+        except (OSError, ValueError):
+            return unknown(category, "unreadable_kicad_pro")
+    return None
+
+
+def blocking_unknowns(coverage: dict[str, Any]) -> list[str]:
+    """Names of blocking categories reported ``unknown`` in a JSON coverage map."""
+    names = []
+    for name, entry in (coverage or {}).items():
+        if isinstance(entry, dict) and entry.get("state") == UNKNOWN and entry.get("blocking"):
+            names.append(name)
+    return sorted(names)
+
+
+def coverage_to_dict(coverage: dict[str, Coverage]) -> dict[str, dict[str, Any]]:
+    return {name: cov.to_dict() for name, cov in sorted(coverage.items())}

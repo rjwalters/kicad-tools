@@ -1,0 +1,1573 @@
+{
+  "description": "Benchmark test boards for placement optimizer validation",
+  "boards": {
+    "trivial_3_resistors": {
+      "description": "3 resistors in series, 1 net chain. Known-optimal: linear placement.",
+      "board_outline": {
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "max_x": 20.0,
+        "max_y": 10.0
+      },
+      "components": [
+        {
+          "reference": "R1",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R2",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R3",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        }
+      ],
+      "nets": [
+        {
+          "name": "IN",
+          "pins": [
+            [
+              "R1",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "N1",
+          "pins": [
+            [
+              "R1",
+              "2"
+            ],
+            [
+              "R2",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "N2",
+          "pins": [
+            [
+              "R2",
+              "2"
+            ],
+            [
+              "R3",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "OUT",
+          "pins": [
+            [
+              "R3",
+              "2"
+            ]
+          ]
+        }
+      ],
+      "known_optimal_placement": [
+        {
+          "reference": "R1",
+          "x": 4.0,
+          "y": 5.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R2",
+          "x": 10.0,
+          "y": 5.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R3",
+          "x": 16.0,
+          "y": 5.0,
+          "rotation": 0.0,
+          "side": 0
+        }
+      ],
+      "expected_scores": {
+        "optimal_wirelength": 7.2,
+        "optimal_overlap": 0.0,
+        "optimal_boundary": 0.0,
+        "wirelength_tolerance": 0.5
+      }
+    },
+    "simple_rc_filter": {
+      "description": "Simple RC low-pass filter: 4 resistors, 4 capacitors, 2 connectors. Multiple nets with power/ground.",
+      "board_outline": {
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "max_x": 40.0,
+        "max_y": 30.0
+      },
+      "components": [
+        {
+          "reference": "J1",
+          "width": 5.0,
+          "height": 8.0,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": 0.0,
+              "local_y": -2.54,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "2",
+              "local_x": 0.0,
+              "local_y": 0.0,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "3",
+              "local_x": 0.0,
+              "local_y": 2.54,
+              "size_x": 1.5,
+              "size_y": 1.5
+            }
+          ]
+        },
+        {
+          "reference": "R1",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R2",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R3",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R4",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "C1",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "C2",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "C3",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "C4",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "J2",
+          "width": 5.0,
+          "height": 8.0,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": 0.0,
+              "local_y": -2.54,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "2",
+              "local_x": 0.0,
+              "local_y": 0.0,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "3",
+              "local_x": 0.0,
+              "local_y": 2.54,
+              "size_x": 1.5,
+              "size_y": 1.5
+            }
+          ]
+        }
+      ],
+      "nets": [
+        {
+          "name": "VCC",
+          "pins": [
+            [
+              "J1",
+              "1"
+            ],
+            [
+              "R1",
+              "1"
+            ],
+            [
+              "R3",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GND",
+          "pins": [
+            [
+              "J1",
+              "3"
+            ],
+            [
+              "C1",
+              "2"
+            ],
+            [
+              "C2",
+              "2"
+            ],
+            [
+              "C3",
+              "2"
+            ],
+            [
+              "C4",
+              "2"
+            ],
+            [
+              "J2",
+              "3"
+            ]
+          ]
+        },
+        {
+          "name": "SIG_IN",
+          "pins": [
+            [
+              "J1",
+              "2"
+            ],
+            [
+              "R1",
+              "2"
+            ],
+            [
+              "R2",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "FILT1",
+          "pins": [
+            [
+              "R2",
+              "2"
+            ],
+            [
+              "C1",
+              "1"
+            ],
+            [
+              "R3",
+              "2"
+            ]
+          ]
+        },
+        {
+          "name": "FILT2",
+          "pins": [
+            [
+              "R3",
+              "2"
+            ],
+            [
+              "C2",
+              "1"
+            ],
+            [
+              "R4",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "FILT3",
+          "pins": [
+            [
+              "R4",
+              "2"
+            ],
+            [
+              "C3",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "SIG_OUT",
+          "pins": [
+            [
+              "C3",
+              "1"
+            ],
+            [
+              "C4",
+              "1"
+            ],
+            [
+              "J2",
+              "2"
+            ]
+          ]
+        },
+        {
+          "name": "OUT_PWR",
+          "pins": [
+            [
+              "J2",
+              "1"
+            ],
+            [
+              "R4",
+              "1"
+            ]
+          ]
+        }
+      ],
+      "reference_placement": [
+        {
+          "reference": "J1",
+          "x": 5.0,
+          "y": 15.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R1",
+          "x": 12.0,
+          "y": 8.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R2",
+          "x": 18.0,
+          "y": 8.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R3",
+          "x": 12.0,
+          "y": 15.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R4",
+          "x": 24.0,
+          "y": 15.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "C1",
+          "x": 18.0,
+          "y": 12.0,
+          "rotation": 270.0,
+          "side": 0
+        },
+        {
+          "reference": "C2",
+          "x": 24.0,
+          "y": 12.0,
+          "rotation": 270.0,
+          "side": 0
+        },
+        {
+          "reference": "C3",
+          "x": 30.0,
+          "y": 15.0,
+          "rotation": 270.0,
+          "side": 0
+        },
+        {
+          "reference": "C4",
+          "x": 30.0,
+          "y": 20.0,
+          "rotation": 270.0,
+          "side": 0
+        },
+        {
+          "reference": "J2",
+          "x": 35.0,
+          "y": 15.0,
+          "rotation": 0.0,
+          "side": 0
+        }
+      ],
+      "expected_scores": {
+        "reference_wirelength_max": 150.0,
+        "reference_overlap": 0.0,
+        "reference_boundary": 0.0
+      }
+    },
+    "medium_mcu_board": {
+      "description": "MCU + passives + connectors: 20 components, realistic mixed sizes. Tests optimizer scaling to 80D.",
+      "board_outline": {
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "max_x": 60.0,
+        "max_y": 40.0
+      },
+      "components": [
+        {
+          "reference": "U1",
+          "width": 10.0,
+          "height": 10.0,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -4.5,
+              "local_y": -3.75,
+              "size_x": 0.3,
+              "size_y": 1.5
+            },
+            {
+              "name": "2",
+              "local_x": -4.5,
+              "local_y": -1.25,
+              "size_x": 0.3,
+              "size_y": 1.5
+            },
+            {
+              "name": "3",
+              "local_x": -4.5,
+              "local_y": 1.25,
+              "size_x": 0.3,
+              "size_y": 1.5
+            },
+            {
+              "name": "4",
+              "local_x": -4.5,
+              "local_y": 3.75,
+              "size_x": 0.3,
+              "size_y": 1.5
+            },
+            {
+              "name": "5",
+              "local_x": 4.5,
+              "local_y": -3.75,
+              "size_x": 0.3,
+              "size_y": 1.5
+            },
+            {
+              "name": "6",
+              "local_x": 4.5,
+              "local_y": -1.25,
+              "size_x": 0.3,
+              "size_y": 1.5
+            },
+            {
+              "name": "7",
+              "local_x": 4.5,
+              "local_y": 1.25,
+              "size_x": 0.3,
+              "size_y": 1.5
+            },
+            {
+              "name": "8",
+              "local_x": 4.5,
+              "local_y": 3.75,
+              "size_x": 0.3,
+              "size_y": 1.5
+            }
+          ]
+        },
+        {
+          "reference": "C1",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "C2",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "C3",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "C4",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "2",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "R1",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R2",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R3",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R4",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R5",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R6",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R7",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "R8",
+          "width": 3.2,
+          "height": 1.6,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.2,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        },
+        {
+          "reference": "LED1",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "A",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "K",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "LED2",
+          "width": 2.0,
+          "height": 1.25,
+          "pads": [
+            {
+              "name": "A",
+              "local_x": -0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "K",
+              "local_x": 0.75,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "J1",
+          "width": 5.0,
+          "height": 12.0,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": 0.0,
+              "local_y": -3.81,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "2",
+              "local_x": 0.0,
+              "local_y": -1.27,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "3",
+              "local_x": 0.0,
+              "local_y": 1.27,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "4",
+              "local_x": 0.0,
+              "local_y": 3.81,
+              "size_x": 1.5,
+              "size_y": 1.5
+            }
+          ]
+        },
+        {
+          "reference": "J2",
+          "width": 5.0,
+          "height": 12.0,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": 0.0,
+              "local_y": -3.81,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "2",
+              "local_x": 0.0,
+              "local_y": -1.27,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "3",
+              "local_x": 0.0,
+              "local_y": 1.27,
+              "size_x": 1.5,
+              "size_y": 1.5
+            },
+            {
+              "name": "4",
+              "local_x": 0.0,
+              "local_y": 3.81,
+              "size_x": 1.5,
+              "size_y": 1.5
+            }
+          ]
+        },
+        {
+          "reference": "D1",
+          "width": 2.5,
+          "height": 1.5,
+          "pads": [
+            {
+              "name": "A",
+              "local_x": -0.9,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "K",
+              "local_x": 0.9,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "Q1",
+          "width": 3.0,
+          "height": 3.0,
+          "pads": [
+            {
+              "name": "G",
+              "local_x": -1.0,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "D",
+              "local_x": 0.0,
+              "local_y": -1.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            },
+            {
+              "name": "S",
+              "local_x": 1.0,
+              "local_y": 0.0,
+              "size_x": 0.6,
+              "size_y": 0.6
+            }
+          ]
+        },
+        {
+          "reference": "Y1",
+          "width": 5.0,
+          "height": 2.0,
+          "pads": [
+            {
+              "name": "1",
+              "local_x": -1.5,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            },
+            {
+              "name": "2",
+              "local_x": 1.5,
+              "local_y": 0.0,
+              "size_x": 0.8,
+              "size_y": 0.8
+            }
+          ]
+        }
+      ],
+      "nets": [
+        {
+          "name": "VCC",
+          "pins": [
+            [
+              "J1",
+              "1"
+            ],
+            [
+              "U1",
+              "8"
+            ],
+            [
+              "C1",
+              "1"
+            ],
+            [
+              "C2",
+              "1"
+            ],
+            [
+              "R5",
+              "1"
+            ],
+            [
+              "R6",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GND",
+          "pins": [
+            [
+              "J1",
+              "4"
+            ],
+            [
+              "U1",
+              "4"
+            ],
+            [
+              "C1",
+              "2"
+            ],
+            [
+              "C2",
+              "2"
+            ],
+            [
+              "C3",
+              "2"
+            ],
+            [
+              "C4",
+              "2"
+            ],
+            [
+              "LED1",
+              "K"
+            ],
+            [
+              "LED2",
+              "K"
+            ],
+            [
+              "Q1",
+              "S"
+            ],
+            [
+              "J2",
+              "4"
+            ]
+          ]
+        },
+        {
+          "name": "GPIO0",
+          "pins": [
+            [
+              "U1",
+              "1"
+            ],
+            [
+              "R1",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GPIO1",
+          "pins": [
+            [
+              "U1",
+              "2"
+            ],
+            [
+              "R2",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GPIO2",
+          "pins": [
+            [
+              "U1",
+              "3"
+            ],
+            [
+              "R3",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GPIO3",
+          "pins": [
+            [
+              "U1",
+              "5"
+            ],
+            [
+              "R4",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GPIO4",
+          "pins": [
+            [
+              "U1",
+              "6"
+            ],
+            [
+              "R7",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GPIO5",
+          "pins": [
+            [
+              "U1",
+              "7"
+            ],
+            [
+              "R8",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "LED1_A",
+          "pins": [
+            [
+              "R5",
+              "2"
+            ],
+            [
+              "LED1",
+              "A"
+            ]
+          ]
+        },
+        {
+          "name": "LED2_A",
+          "pins": [
+            [
+              "R6",
+              "2"
+            ],
+            [
+              "LED2",
+              "A"
+            ]
+          ]
+        },
+        {
+          "name": "SDA",
+          "pins": [
+            [
+              "R1",
+              "2"
+            ],
+            [
+              "J2",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "SCL",
+          "pins": [
+            [
+              "R2",
+              "2"
+            ],
+            [
+              "J2",
+              "2"
+            ]
+          ]
+        },
+        {
+          "name": "XTAL1",
+          "pins": [
+            [
+              "U1",
+              "1"
+            ],
+            [
+              "Y1",
+              "1"
+            ],
+            [
+              "C3",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "XTAL2",
+          "pins": [
+            [
+              "U1",
+              "2"
+            ],
+            [
+              "Y1",
+              "2"
+            ],
+            [
+              "C4",
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "GATE",
+          "pins": [
+            [
+              "R3",
+              "2"
+            ],
+            [
+              "Q1",
+              "G"
+            ]
+          ]
+        },
+        {
+          "name": "DRAIN",
+          "pins": [
+            [
+              "Q1",
+              "D"
+            ],
+            [
+              "D1",
+              "A"
+            ],
+            [
+              "J2",
+              "3"
+            ]
+          ]
+        },
+        {
+          "name": "PROTECT",
+          "pins": [
+            [
+              "D1",
+              "K"
+            ],
+            [
+              "R4",
+              "2"
+            ]
+          ]
+        }
+      ],
+      "reference_placement": [
+        {
+          "reference": "U1",
+          "x": 25.0,
+          "y": 20.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "C1",
+          "x": 20.0,
+          "y": 12.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "C2",
+          "x": 30.0,
+          "y": 12.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "C3",
+          "x": 18.0,
+          "y": 28.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "C4",
+          "x": 32.0,
+          "y": 28.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R1",
+          "x": 15.0,
+          "y": 16.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R2",
+          "x": 15.0,
+          "y": 19.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R3",
+          "x": 15.0,
+          "y": 22.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R4",
+          "x": 35.0,
+          "y": 16.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R5",
+          "x": 35.0,
+          "y": 22.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R6",
+          "x": 35.0,
+          "y": 25.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R7",
+          "x": 35.0,
+          "y": 19.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "R8",
+          "x": 35.0,
+          "y": 28.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "LED1",
+          "x": 42.0,
+          "y": 22.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "LED2",
+          "x": 42.0,
+          "y": 25.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "J1",
+          "x": 5.0,
+          "y": 20.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "J2",
+          "x": 55.0,
+          "y": 20.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "D1",
+          "x": 45.0,
+          "y": 16.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "Q1",
+          "x": 40.0,
+          "y": 16.0,
+          "rotation": 0.0,
+          "side": 0
+        },
+        {
+          "reference": "Y1",
+          "x": 25.0,
+          "y": 30.0,
+          "rotation": 0.0,
+          "side": 0
+        }
+      ],
+      "expected_scores": {
+        "reference_wirelength_max": 350.0,
+        "reference_overlap": 0.0,
+        "reference_boundary": 0.0,
+        "dimension_count": 80
+      }
+    },
+    "stress_50_components": {
+      "description": "Dense mixed-signal board: 50 components. Tests performance limits and convergence at scale.",
+      "board_outline": {
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "max_x": 100.0,
+        "max_y": 80.0
+      },
+      "component_generation": {
+        "description": "Generated programmatically in test code to avoid a huge JSON block.",
+        "mcu_count": 2,
+        "resistor_count": 20,
+        "capacitor_count": 15,
+        "connector_count": 4,
+        "led_count": 4,
+        "transistor_count": 3,
+        "diode_count": 2,
+        "total": 50
+      },
+      "expected_scores": {
+        "max_runtime_seconds": 300,
+        "seed_overlap_should_resolve": true,
+        "optimizer_should_improve_over_random": true,
+        "dimension_count": 200
+      }
+    }
+  }
+}

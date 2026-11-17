@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Shared helpers for footprint-aware schematic commands.
+
+The two callers today are:
+
+* ``sch_assign_footprints.run_assign_footprints`` — bulk auto-assignment.
+* ``sch_validate.check_missing_footprints`` — preflight enumeration.
+
+Both need to walk the schematic hierarchy and yield the same set of
+"missing-footprint" symbols. Centralising the predicate here keeps the
+two paths in lock-step: if one filter (power, DNP) drifts, the other
+silently drifts with it, which previously masked real gaps.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
+
+from kicad_tools.schema import Schematic
+from kicad_tools.schema.hierarchy import build_hierarchy
+from kicad_tools.sexp.power import is_power_symbol
+
+
+def is_missing_footprint(sym: Any) -> bool:
+    """Return ``True`` when a symbol has no concrete footprint assigned.
+
+    KiCad emits ``""`` for fresh placements and ``"~"`` as the legacy
+    placeholder; both are treated as "missing". A real ``Library:Name``
+    string is considered assigned even if the library does not exist on
+    disk — that is a different problem (handled by ``set-footprint`` /
+    DRC), not "missing".
+    """
+    fp = (sym.footprint or "").strip()
+    return fp == "" or fp == "~"
+
+
+def should_skip_symbol(
+    sym: Any,
+    *,
+    include_power: bool = False,
+    include_dnp: bool = False,
+    sch: Schematic | None = None,
+) -> bool:
+    """Mirror ``check_missing_footprints``'s skip rules.
+
+    By default power symbols and ``dnp`` (Do-Not-Populate) symbols are
+    skipped — they correctly have no footprint. Callers that need to
+    surface every reference (e.g. a "force-everything" audit pass) can
+    opt in via the keyword arguments.
+
+    "Power symbol" is defined by :func:`_is_power_symbol` (the shared
+    predicate behind :attr:`kicad_tools.schema.bom.BOMItem.is_power_symbol`;
+    pass *sch* so the library ``(power)`` flag is honoured). These are
+    footprint-less by design and must never trip the missing-footprint
+    gate (#3866).
+    """
+    if not include_power and _is_power_symbol(sym, sch):
+        return True
+    if not include_dnp and getattr(sym, "dnp", False):
+        return True
+    return False
+
+
+def _is_power_symbol(sym: Any, sch: Schematic | None = None) -> bool:
+    """Return ``True`` for power/virtual symbols (no footprint by design).
+
+    Delegates to :func:`kicad_tools.sexp.power.is_power_symbol`, the same
+    predicate :attr:`kicad_tools.schema.bom.BOMItem.is_power_symbol` uses:
+    the library ``(power)`` flag read from *sch*'s embedded ``lib_symbols``
+    (so a project-library ``PWR_FLAG`` counts, #7637), the stock ``power:``
+    / ``kicad_tools_pwr:`` prefixes, and a ``#`` reference when the symbol
+    has no embedded definition. Without *sch* only the prefix and reference
+    rules apply.
+    """
+    return is_power_symbol(
+        getattr(sym, "lib_id", "") or "",
+        getattr(sym, "reference", "") or "",
+        lookup=sch.get_lib_symbol if sch is not None else None,
+        placed=getattr(sym, "_sexp", None),
+    )
+
+
+def iter_missing_footprint_symbols(
+    schematic_path: Path | str,
+    *,
+    include_power: bool = False,
+    include_dnp: bool = False,
+    include_assigned: bool = False,
+    on_sheet_error: Callable[[Any, Exception], None] | None = None,
+) -> Iterator[tuple[Any, Any, Schematic]]:
+    """Yield ``(node, sym, sch)`` for every symbol needing a footprint.
+
+    Walks the full hierarchy via :func:`build_hierarchy`, loads each
+    sheet file once (not once per placement), and applies the same skip rules as
+    ``check_missing_footprints`` (power, dnp). Sheets that fail to load
+    are skipped; callers that need to surface those (the preflight path
+    emits ``info`` severity issues) can pass ``on_sheet_error``.
+
+    Args:
+        schematic_path: Path to the root ``.kicad_sch`` file.
+        include_power: Yield power symbols (default skip).
+        include_dnp: Yield DNP symbols (default skip).
+        include_assigned: Yield every symbol regardless of footprint
+            state. The default (``False``) restricts the iteration to
+            symbols whose footprint is empty or ``~``. ``--force`` in
+            the assign-footprints CLI flips this to ``True``.
+        on_sheet_error: Optional callback invoked as
+            ``on_sheet_error(node, exc)`` for every sheet that fails to
+            load, before that sheet is skipped. Lets callers surface
+            per-sheet load failures without re-walking the hierarchy.
+
+    Yields:
+        Triples of ``(node, sym, sch)`` where ``node`` is the
+        :class:`HierarchyNode`, ``sym`` is the parsed symbol instance,
+        and ``sch`` is the loaded :class:`Schematic` (caches one
+        load per sheet so callers can reuse it for
+        ``_resolve_target_pin_count`` / ``_get_fp_filters``).
+    """
+    root = build_hierarchy(str(schematic_path))
+    # One pass per sheet file: a repeated sheet's symbols are the same
+    # symbols on every placement, so yield (and edit) them once (#7616).
+    for node in root.unique_file_nodes():
+        try:
+            sch = Schematic.load(node.path)
+        except Exception as exc:
+            if on_sheet_error is not None:
+                on_sheet_error(node, exc)
+            continue
+        for sym in sch.symbols:
+            if should_skip_symbol(
+                sym,
+                include_power=include_power,
+                include_dnp=include_dnp,
+                sch=sch,
+            ):
+                continue
+            if not include_assigned and not is_missing_footprint(sym):
+                continue
+            yield node, sym, sch

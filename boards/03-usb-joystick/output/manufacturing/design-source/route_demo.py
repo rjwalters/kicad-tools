@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Replay the reviewed revision-B PCB routing and run fresh geometry checks.
+
+Usage: python route_demo.py [input_pcb] [output_pcb]
+The saved plan includes manual routing repairs and rejects changed physical
+geometry. It is not an autorouter benchmark; see DESIGN_REVIEW.md.
+"""
+
+import contextlib
+import subprocess
+import sys
+from pathlib import Path
+
+# Add src to path for development (ensures source version is used)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+
+from kicad_tools.dev import warn_if_stale
+
+# Warn if running source scripts with stale pipx install
+warn_if_stale()
+
+
+def run_drc(pcb_path: Path, *, refill: bool = False) -> tuple[bool, int, int]:
+    """Run DRC on the routed PCB and return a truthful (passed, errors, warnings).
+
+    Issue #3150 / #3308: align the local DRC summary with the
+    jlcpcb-tier1 profile this board ships and is gated against (see
+    ``.github/routed-drc-tolerance.yml`` and
+    ``generate_design.py:run_drc()``).
+
+    Issue #3969 (Bug B): this used to call ``kct check`` WITHOUT
+    ``--drc-only``.  That runs the *meta-check rollup* (DRC + ERC + LVS +
+    Manifest).  On a fresh route the PCB lives in a directory with no
+    ERC/LVS/Manifest artifacts, so those sub-checks are ``NOT RUN`` and
+    the rollup exits ``INCOMPLETE`` (exit code 2) even though the DRC
+    engine itself found ``Errors: 0``.  The old code read
+    ``returncode != 0`` as ``drc_passed=False``, parsed 0 errors, and the
+    caller then printed the logically impossible
+    ``"0 DRC violation(s) detected!"`` banner.
+
+    The fix mirrors ``generate_design.py:run_drc()``: add ``--drc-only``
+    so the exit code reflects *geometric DRC only* (non-zero iff
+    ``error_count > 0``).  This guarantees the invariant the caller relies
+    on -- ``passed`` is True iff ``errors == 0`` -- so the "0 violations
+    detected" message can never appear on a failing exit.
+
+    Returns:
+        Tuple of (passed, error_count, warning_count).  ``passed`` is True
+        exactly when ``error_count == 0``.  On a hard failure to run the
+        checker, returns ``(False, -1, -1)``.
+    """
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--mfr",
+                "jlcpcb-tier1",
+                # Issue #3969: scope to geometric DRC so a fresh-route temp
+                # dir without ERC/LVS/Manifest artifacts does not exit
+                # INCOMPLETE (2) and get misread as a DRC failure with 0
+                # parsed errors.  Matches generate_design.py:run_drc().
+                "--drc-only",
+                *(["--refill-zones", "--emit-drc-constraints"] if refill else []),
+                "--net-class-map",
+                str(pcb_path.parent / "net_class_map.json"),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        if refill:
+            from routing_plan import apply_native_fab_floor
+
+            apply_native_fab_floor(pcb_path)
+
+        # Parse the output to extract error/warning counts
+        error_count = 0
+        warning_count = 0
+        for line in result.stdout.split("\n"):
+            if "Errors:" in line:
+                with contextlib.suppress(ValueError):
+                    error_count = int(line.split(":")[-1].strip())
+            elif "Warnings:" in line:
+                with contextlib.suppress(ValueError):
+                    warning_count = int(line.split(":")[-1].strip())
+
+        # Issue #3969: derive ``passed`` from the parsed error count, not
+        # solely the exit code, so the (passed, errors) pair is always
+        # self-consistent.  With --drc-only the exit code already tracks
+        # error_count, but keying off the count as well makes the "0
+        # violations on a failing exit" banner structurally impossible.
+        passed = result.returncode == 0 and error_count == 0
+        return passed, error_count, warning_count
+
+    except Exception as e:
+        print(f"  Warning: DRC check failed: {e}")
+        return False, -1, -1
+
+
+def main():
+    """Run the routing demo via the canonical generate_design.py recipe.
+
+    Issue #3308: delegate to ``generate_design.py:route_pcb()`` so the
+    demo cannot drift from the end-to-end recipe.  ``kct build --step
+    route`` runs this script (per ``_run_step_route`` in
+    ``src/kicad_tools/cli/build_cmd.py``);
+    using the same code path that produced the committed routed PCB
+    guarantees a fresh ``kct build`` reproduces the shipped artifact.
+    """
+    # Import here (rather than at module scope) so the import path is
+    # set up before ``generate_design`` pulls in its router deps.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from generate_design import (  # noqa: E402
+        add_gnd_stitching_vias,
+        apply_manufacturing_profile,
+        fill_zones_in_routed_pcb,
+        route_pcb,
+    )
+
+    # Parse arguments
+    demo_dir = Path(__file__).parent
+    input_pcb = sys.argv[1] if len(sys.argv) > 1 else "output/usb_joystick.kicad_pcb"
+    output_pcb = sys.argv[2] if len(sys.argv) > 2 else "output/usb_joystick_routed.kicad_pcb"
+
+    input_path = demo_dir / input_pcb
+    output_path = demo_dir / output_pcb
+
+    if not input_path.exists():
+        print(f"Error: Input PCB not found: {input_path}")
+        print("Run generate_pcb.py first to create the PCB file.")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("USB Joystick Reviewed Routing (delegates to generate_design.py)")
+    print("=" * 60)
+    print(f"\nInput:  {input_path}")
+    print(f"Output: {output_path}")
+    print(
+        "\nIssue #3308: this demo delegates to "
+        "generate_design.py:route_pcb() so the demo and the canonical "
+        "build recipe share a single implementation."
+    )
+
+    # Delegate to the canonical recipe.  ``route_pcb()`` prints its own
+    # progress block and returns True on full success, False on partial.
+    success = route_pcb(input_path, output_path)
+
+    # Issue #6394: finish the board the way the recipe does (its Steps 5.4,
+    # 5.45 and 5.5) before checking it: stitch, persist the jlcpcb-tier1 sidecars --
+    # including the native zone-clearance block -- and fill under them.
+    # Without this the demo's refill ran under rules the shipped board does
+    # not carry, and kicad-cli reported starved thermals the shipped fill
+    # does not have.
+    if success:
+        add_gnd_stitching_vias(output_path)
+        apply_manufacturing_profile(output_path)
+        fill_zones_in_routed_pcb(output_path)
+
+    # Run DRC validation on the resulting routed PCB.  This is in addition
+    # to whatever the recipe does internally so the demo always surfaces
+    # a final DRC summary even when ``route_pcb()`` short-circuits.
+    print("\n--- DRC Validation ---")
+    drc_passed, drc_errors, drc_warnings = run_drc(output_path, refill=True)
+    # Issue #5981: a machine-readable record of the kct-check leg alone, so
+    # the regression test can tell a kct-check failure/crash (``errors=-1``)
+    # apart from a native-only failure.  Keep this format stable.
+    print(f"  kct check: passed={drc_passed} errors={drc_errors}")
+    # A second, independent check uses the now-emitted native project rules.
+    import json
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    native_report = output_path.parent / "native-drc.json"
+    native = subprocess.run(
+        [
+            str(find_kicad_cli()),
+            "pcb",
+            "drc",
+            str(output_path),
+            "--refill-zones",
+            "--save-board",
+            "--format",
+            "json",
+            "--output",
+            str(native_report),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if native.returncode != 0 or not native_report.is_file():
+        drc_passed = False
+        print(native.stderr)
+    else:
+        data = json.loads(native_report.read_text())
+        native_errors = sum(v["severity"] == "error" for v in data["violations"])
+        native_errors += len(data["unconnected_items"])
+        drc_passed = drc_passed and native_errors == 0
+        print(f"  Native errors and opens: {native_errors}")
+
+    if drc_passed:
+        print("  DRC PASSED")
+    else:
+        if drc_errors > 0:
+            print(f"  Errors:   {drc_errors}")
+        if drc_warnings > 0:
+            print(f"  Warnings: {drc_warnings}")
+        print(f"\n  Run 'kct check {output_path} --mfr jlcpcb-tier1' for full details")
+
+    # Final tally that the regression test parser (#2744) keys off of.
+    # ``route_pcb`` prints its own "PARTIAL: Routed N/M signal nets"
+    # line, so we add a top-level SUCCESS / PARTIAL banner here.
+    print("\n" + "=" * 60)
+    if success and drc_passed:
+        print("SUCCESS: All nets routed, DRC passed!")
+        exit_code = 0
+    elif success and not drc_passed:
+        # Issue #3969 (Bug B): never claim "0 DRC violation(s) detected!"
+        # on a failing path.  run_drc() now guarantees drc_passed is False
+        # only when errors are present (drc_errors > 0) or the checker
+        # could not run (drc_errors == -1).  Word the banner to match
+        # whichever case actually occurred instead of blindly printing the
+        # count.
+        if drc_errors > 0:
+            print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
+            print("  Review DRC errors before manufacturing.")
+        else:
+            print("WARNING: All nets routed, but the DRC check could not be completed.")
+            print("  Re-run 'kct check' manually before manufacturing.")
+        exit_code = 1
+    else:
+        # ``route_pcb`` already printed the per-net partial line; here we
+        # just consolidate.  Match ``generate_design.py``'s success rule:
+        # PARTIAL routing is acceptable so long as the routed-DRC summary
+        # is within the jlcpcb-tier1 ceiling.
+        print("PARTIAL: not all nets routed (see route_pcb output above)")
+        if not drc_passed:
+            # Issue #3969: only report a violation *count* when there
+            # actually is one; otherwise say the DRC could not complete.
+            if drc_errors > 0:
+                print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
+            else:
+                print("  Additionally, the DRC check could not be completed.")
+        # Partial routing is acceptable for this board; the USB-C
+        # connector pad density exceeds what a 2-layer autorouter can
+        # fully handle.  Match the approach used by generate_design.py:
+        # success if DRC passes.
+        exit_code = 1
+    print("=" * 60)
+
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

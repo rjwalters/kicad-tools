@@ -1,0 +1,104 @@
+"""DRC (Design Rule Check) report parsing and validation.
+
+This module provides tools for parsing KiCad DRC reports and validating
+PCB designs against manufacturer design rules.
+
+Example:
+    >>> from kicad_tools.drc import DRCReport, DRCViolation
+    >>> report = DRCReport.load("design-drc.rpt")
+    >>> print(f"Found {report.violation_count} violations")
+    >>> for v in report.errors:
+    ...     print(f"  {v.type}: {v.message}")
+
+With fix suggestions:
+    >>> from kicad_tools.drc import generate_fix_suggestions
+    >>> for v in report.errors:
+    ...     suggestion = generate_fix_suggestions(v)
+    ...     if suggestion:
+    ...         print(f"  Fix: {suggestion.description}")
+"""
+
+from .checker import (
+    CheckResult,
+    ManufacturerCheck,
+    check_manufacturer_rules,
+)
+from .geometric import (
+    GeometricDRCResult,
+    SavedFillCheck,
+    check_saved_fill,
+    run_geometric_drc,
+    saved_fill_regressions,
+)
+from .incremental import (
+    DRCDelta,
+    DRCState,
+    IncrementalDRC,
+    SpatialIndex,
+)
+from .net_compat import resolve_net_atom
+from .predictive import PredictiveAnalyzer, PredictiveWarning
+from .repair_clearance import ClearanceRepairer, NudgeResult, RepairResult
+from .repair_drill_clearance import DrillClearanceRepairer, DrillRepairAction, DrillRepairResult
+from .report import (
+    DRCReport,
+    parse_json_report,
+    parse_text_report,
+)
+from .suggestions import (
+    FixAction,
+    FixSuggestion,
+    generate_fix_suggestions,
+)
+from .violation import (
+    DRCViolation,
+    Location,
+    Severity,
+    ViolationCategory,
+    ViolationType,
+)
+
+__all__ = [
+    # Violation types
+    "DRCViolation",
+    "ViolationType",
+    "ViolationCategory",
+    "Severity",
+    "Location",
+    # Report parsing
+    "DRCReport",
+    "parse_text_report",
+    "parse_json_report",
+    # Rule checking
+    "check_manufacturer_rules",
+    "ManufacturerCheck",
+    "CheckResult",
+    # Fix suggestions
+    "FixSuggestion",
+    "FixAction",
+    "generate_fix_suggestions",
+    # Incremental DRC
+    "IncrementalDRC",
+    "DRCState",
+    "DRCDelta",
+    "SpatialIndex",
+    # Predictive analysis
+    "PredictiveAnalyzer",
+    "PredictiveWarning",
+    # Clearance repair
+    "ClearanceRepairer",
+    "NudgeResult",
+    "RepairResult",
+    # Drill clearance repair
+    "DrillClearanceRepairer",
+    "DrillRepairAction",
+    "DrillRepairResult",
+    # Net compatibility
+    "resolve_net_atom",
+    # Native (kicad-cli) geometric DRC reconciliation
+    "GeometricDRCResult",
+    "run_geometric_drc",
+    "SavedFillCheck",
+    "check_saved_fill",
+    "saved_fill_regressions",
+]

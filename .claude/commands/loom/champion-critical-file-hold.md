@@ -1,0 +1,377 @@
+# Champion: Critical-File Durable Hold (#6879, #9016)
+
+A sub-step of [`champion-pr-merge.md`](champion-pr-merge.md) → "Safety Criteria"
+→ "`critical-files`: Critical File Exclusion Check". Read it once that check-loop has run,
+whatever the verdict: FAIL opens/maintains the hold, PASS alone closes an open
+episode. It owns one label (`loom:blocked` + a reason-only park record,
+#11861) and three markers on one PR; it never merges and never removes
+`loom:pr`.
+
+Rationale: `.loom/docs/critical-file-hold.md`.
+## The rules
+
+- A critical-file FAIL is a **one-way terminal state**, so it gets a durable
+  `loom:blocked` hold on the `merge-risk` criterion's pattern — **never** the "Transient
+  failures" template, nor the `merge-risk` criterion's sticky-hold machinery (#4742).
+- A FAIL skips Steps 2-3 for this PR **in every state, `released` included** —
+  with one exception (#13321): on a **merge-queue repo** a released PR gets the queue
+  handoff (below), because the operator has no way to finish a queue-mode merge by hand.
+  Elsewhere releasing hands the merge to the operator, never back to Champion.
+  `loom:auto-merge-ok` does not release it (the `merge-risk` criterion's override).
+- **The operator's release is the label's ABSENCE** (#9016): a hand-removed
+  `loom:blocked`, while this episode is open and the change has not moved, IS
+  the release: Champion never removes it mid-episode (#11861 keeps it on
+  through the Doctor round-trip).
+- The release is scoped to a **diff, not a commit id** (#9416): this verdict is a
+  pure function of the file list, so the operator decided about that change.
+
+## Repo-declared critical paths (#13542)
+
+A repo may add its own critical paths in `.loom/config.json` → `champion.extraCriticalPaths`
+(bash globs on the full path, matched against `filename` and `previous_filename`). A hit
+fails `critical-files` on any edit and enters this machine like a built-in hit; the hold
+comment names the matched glob. It is checked before `standing_auth_eval`, so no
+standing-authorization class or carve-out can waive it, and it never joins the kept set:
+the human release below is the only release.
+
+## A covering standing authorization means no hold (#12528)
+
+The FAIL above is "one-way terminal" only for a PR no operator pre-authorized.
+`champion-pr-merge.md`'s `critical-files` criterion runs `standing_auth_eval critical` first: a
+`champion.standingAuthorizations` class with `"coversCriticalFiles": true` that
+matches the whole diff (`filePatterns` exact subset; no `excludeFilePatterns`
+file; no `forbiddenDiffPatterns` line in any added/removed line; no kept-set
+path; `judgeApproval` and `greenCi` holding) passes `critical-files`, so this tick receives
+`$CRITICAL_FILES_RESULT="PASS"` and writes no hold. Any open episode closes through
+the ordinary PASS row (cleared notice + remove `loom:blocked`), naming the class
+id. One file outside the class, an excluded file, a forbidden line or an
+unreadable diff restores the FAIL and this whole machine. A `dependabot-bumps` class (`authorIsDependabot`, manifest and lockfile `filePatterns`; #12948) is the fleet-default example: Dependabot's own manifest bumps pass `critical-files`, a human PR with the same diff does not. The kept set (the
+merge gate, guard hooks, credential selection, installers/updaters,
+migrations) is never satisfiable by a class, with one exception (#13102): an opt-in
+`"additiveMigrations": true` class lifts the `*migrations/*` entry for a PR that
+`loom-daemon forge additive-migrations <pr>` clears (only newly added `.sql` files holding
+`CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN` or `INSERT OR IGNORE INTO … SELECT`);
+any other statement, an edited or deleted migration, or a failed read keeps the hold.
+
+A second opt-in class key, `"lockedDepsOnly": true` (2am#6942, operator ruling 2026-11-07), lets a
+class cover a `Cargo.toml` hit for a PR that `loom-daemon forge locked-deps-only <pr>` clears: a new
+workspace crate whose dependencies are all already in `Cargo.lock`. A new registry or git package,
+a version bump, a `git =`/`registry =`/`build =`/`links =`/`[patch]`/`[replace]` line, an out-of-repo
+`path =`, or a manifest change with no `Cargo.lock` change keeps the hold. It does not touch the kept set.
+
+A `"criticalFilesOnly": true` class (#12648) passes `critical-files` the same way, but is
+matched against the critical-file hits alone (the files `critical-files` flags, and each
+one's `previous_filename`): every hit must match its `filePatterns`, none its
+`excludeFilePatterns`, no forbidden line in the hits' patches, no kept-set path
+anywhere in the PR, conditions holding. Several such classes compose per hit
+(#13042): the criterion passes when each hit is covered by at least one passing
+class, each class checked over its own hits, and the PASS names every class used
+(the `auth=` digest stays the whole-list `--digest`). The hold comment quotes the
+evaluator's `STANDING_AUTH_WHY` (class, hit and failed check) instead of asserting
+that no class covers the PR. The other changed files are left to
+the `merge-risk` criterion, which this class never satisfies. A PASS under it closes an open
+episode through the same ordinary PASS row; if the `merge-risk` criterion then holds the PR,
+that is the `merge-risk` criterion's own hold, not this machine's.
+
+## The state machine
+
+The state is whichever of these three markers is the **latest** trusted comment
+(`startswith`, never `contains` — #5371):
+
+| Latest marker | State |
+|---|---|
+| `<!-- champion:critical-file-hold -->` | `held` — a hold notice is standing |
+| `<!-- champion:critical-file-release-respected -->` | `released` — at the head that comment records |
+| `<!-- champion:critical-file-hold-cleared -->`, or none | `none` — no open episode |
+
+Both `held` and `released` comments carry
+`<!-- champion:hold-state head=<sha> -->` as their second line — the marker `merge-risk`
+records and `merge-pr.sh` reads back at merge time (#7419).
+
+On **PASS** the state alone decides: `held`/`released` closes the episode (cleared
+notice + remove `loom:blocked`); `none` is an ordinary pass. On **FAIL**, first
+matching row wins:
+
+| State | Action on FAIL |
+|---|---|
+| `released`, recorded head == current head | nothing at all: no label, no comment |
+| either, label present (a human put it back) | hold stands, silently — except that a changed standing-authorization digest is recorded once (#12933) |
+| `held`, label absent, recorded head == current head | **respect the release**: acknowledge once, do **not** re-add the label |
+| `none` | fresh hold: notice + `loom:blocked` |
+| either, head moved but the PR's own change provably did not (#9416), or only the operator's `release-scope:` paths changed (#13114) | **respect, re-recorded at the new head** with the equivalence kind |
+| either, anything else (or no head recorded — a legacy hold) | re-arm: a new hold episode at the current head |
+
+The #9416 row: `loom-daemon forge verdict-equivalent <pr> <recorded> <head>`
+(Judge's staleness verb; never re-derive it here) proves from the repository
+that the change survived the move (`tree`, `clean-merge`,
+`rebase-patch-identical`). An unreadable forge compare is retried (2×), then compared from local git
+(#13359: equal non-empty merge-base-relative patches keep the release); only if
+both reads fail does it re-arm, naming each failed read, with `equivalence=unread` in the notice and in the
+`hold.transition` trigger. **Requested-change carry (#13114)**: a trusted human
+(never a bot or Champion) comment posted after the hold may carry one
+`release-scope: <path> [<path>...]` line; the tick passes those paths as
+`--allowed-paths`, and the verb answers `EQUIVALENCE_KIND=requested-change`
+**iff** the PR's per-file delta lies wholly inside them. Any other delta, or no
+line, re-arms; both kill switches disable it. **FAIL CLOSED**: only a literal `EQUIVALENCE_KIND=`
+line respects the release; anything else re-arms, naming why.
+CI is never exempted.
+
+## The tick
+
+With the check-loop's verdict in `$CRITICAL_FILES_RESULT`:
+
+```bash
+PR_NUMBER=<number>
+HOLD_MARKER="<!-- champion:critical-file-hold -->"
+CLEARED_MARKER="<!-- champion:critical-file-hold-cleared -->"
+RELEASED_MARKER="<!-- champion:critical-file-release-respected -->"
+
+# Plain `gh` (a cached label set misses a human's decision). TRUSTED markers
+# only (#9548); unfiltered, the raw read may hold but never release (#10875).
+CF_JSON=$(gh pr view "$PR_NUMBER" --json comments,labels,headRefOid)
+CF_TRUST=raw; T=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) && CF_JSON=$(jq --argjson c "$T" '.comments = $c' <<<"$CF_JSON") && CF_TRUST=ok
+HEAD_SHA=$(jq -r '.headRefOid' <<<"$CF_JSON")
+HOLD_LABEL_NOW=$(jq -r '[.labels[].name] | any(. == "loom:blocked")' <<<"$CF_JSON")
+cf_park() {
+  LOOM_HOLD_EQUIVALENCE="${CF_EQUIV_CAUSE:-}" loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion critical-file hold" --by champion >/dev/null 2>&1 || true
+  # #10937: an OPEN issue/PR the hold waits on, if the notice names one; inert (Guide skips a standing Champion hold)
+  for N in ${CF_BLOCKER_NUMBERS:-}; do loom-daemon park-record apply --pr "$PR_NUMBER" --blocked-by "$N" \
+    --reason "champion critical-file hold: human evidence gate" --by champion >/dev/null 2>&1 || true; done
+}
+
+LAST_STATE=$(jq -r --arg h "$HOLD_MARKER" --arg c "$CLEARED_MARKER" --arg r "$RELEASED_MARKER" \
+  '[.comments[] | select((.body | startswith($h)) or (.body | startswith($c)) or (.body | startswith($r)))] | last | .body // ""' <<<"$CF_JSON")
+case "$LAST_STATE" in
+  "$RELEASED_MARKER"*) CF_STATE=released ;;
+  "$HOLD_MARKER"*)     CF_STATE=held ;;
+  *)                   CF_STATE=none ;;   # cleared, or never held
+esac
+
+# Head the state was recorded against; empty (legacy hold) => re-arm.
+STATE_HEAD=$(printf '%s' "$LAST_STATE" \
+  | sed -n 's/.*champion:hold-state head=\([0-9a-f]*\).*/\1/p' | head -1)
+
+# The operator's `release-scope: <path> [<path>...]` line (#13114): the paths the
+# Doctor was asked to change. Only a TRUSTED, non-bot, non-Champion comment posted
+# AFTER the latest hold/release record counts; a marker is never evidence.
+CF_SCOPE=$(jq -r --arg h "$HOLD_MARKER" --arg r "$RELEASED_MARKER" '
+  .comments as $c
+  | ([range(0; $c | length) | select(($c[.].body | startswith($h)) or ($c[.].body | startswith($r)))] | last // -1) as $i
+  | [$c[($i + 1):][]
+     | select((.author.login | test("\\[bot\\]$") | not) and (.body | test("^<!-- champion:|Automated by [A-Za-z]+ role") | not))
+     | .body | split("\n")[] | capture("^release-scope:[ \\t]+(?<p>.+)$").p][-1] // ""
+  | split(" ")[] | select(test("^[A-Za-z0-9._/@+-]+$"))' <<<"$CF_JSON" 2>/dev/null | head -50 | paste -sd' ')
+
+# Head moved; did the PR's change? Sets CF_EQUIV_KIND (empty => re-arm), CF_EQUIV_WHY,
+# CF_EQUIV_CAUSE (`unread`: the forge compare never answered, #13114; `base-unread`: the PR base branch was unreadable, #13149).
+# requires-daemon: forge optional   Without `forge verdict-equivalent` an equivalent head move re-arms (pre-#9416 behavior: one extra removal, never an unreviewed merge).
+cf_change_unmoved() {
+  CF_EQUIV_KIND="" CF_EQUIV_WHY="no head recorded (legacy hold)" CF_EQUIV_CAUSE=""
+  [ -n "$STATE_HEAD" ] || return 1
+  # shellcheck disable=SC2086  # CF_SCOPE is a space-joined, charset-checked path list
+  # #13150: pass --repo when LOOM_REPO is known; a daemon predating the flag (clap usage error
+  # naming `--repo`) is retried once without it so the fail-safe is not widened.
+  CF_EQUIV_WHY=$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent ${LOOM_REPO:+--repo "$LOOM_REPO"} \
+    "$PR_NUMBER" "$STATE_HEAD" "$HEAD_SHA" ${CF_SCOPE:+--allowed-paths $CF_SCOPE} 2>&1)
+  if [ -n "${LOOM_REPO:-}" ] && ! grep -q '^EQUIVALENCE_KIND=' <<<"$CF_EQUIV_WHY" && grep -q -- '--repo' <<<"$CF_EQUIV_WHY"; then
+    CF_EQUIV_WHY=$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent \
+      "$PR_NUMBER" "$STATE_HEAD" "$HEAD_SHA" ${CF_SCOPE:+--allowed-paths $CF_SCOPE} 2>&1)
+  fi
+  CF_EQUIV_KIND=$(sed -n 's/^EQUIVALENCE_KIND=//p' <<<"$CF_EQUIV_WHY")
+  CF_EQUIV_WHY=$(grep -v '^[A-Z_]*=' <<<"$CF_EQUIV_WHY" | tail -1)
+  # First `equivalence=<cause>` token wins; only a fixed list becomes a cause, never raw text.
+  case "$(grep -o 'equivalence=[a-z-]*' <<<"$CF_EQUIV_WHY" | head -1)" in
+    equivalence=unread) CF_EQUIV_CAUSE=unread ;;
+    equivalence=base-unread) CF_EQUIV_CAUSE=base-unread ;;
+  esac
+  [ -n "$CF_EQUIV_KIND" ]
+}
+
+CF_HANDOFF=0; CF_HANDOFF_SHA=""   # reset every tick, whatever the verdict (#13321)
+if [ "$CRITICAL_FILES_RESULT" = "FAIL" ]; then
+  CF_EQUIV_KIND=""
+  if [ "$CF_STATE" = released ] && [ "$STATE_HEAD" = "$HEAD_SHA" ]; then
+    CF_ACTION=none          # released at this head, already acknowledged
+  elif [ "$HOLD_LABEL_NOW" = true ] && [ "$CF_STATE" != none ]; then
+    CF_ACTION=stands        # label back on: a human re-asserted the hold
+  elif [ "$CF_STATE" = held ] && [ -n "$STATE_HEAD" ] && [ "$STATE_HEAD" = "$HEAD_SHA" ]; then
+    CF_ACTION=respect
+  elif [ "$CF_STATE" = none ]; then
+    CF_ACTION=hold          # fresh episode
+  elif cf_change_unmoved; then
+    CF_ACTION=respect       # head moved, the PR's own change did not (#9416)
+  else
+    CF_ACTION=rearm         # a genuinely different diff, or a legacy hold
+  fi
+  [ "$CF_TRUST" = ok ] || case "$CF_ACTION" in none|respect) CF_ACTION=defer ;; esac
+
+  # Queue-mode repo (#13321): only a literal `mode=queue` answer counts; direct, an older
+  # daemon, or no answer is NOT queue (fail closed: the operator merges, as before).
+  CF_QUEUE=0; CF_QM=$(loom-daemon forge merge-queue mode 2>/dev/null | head -n1)
+  [ "${CF_QM%% source=*}" = "merge-queue: mode=queue" ] && CF_QUEUE=1
+
+  case "$CF_ACTION" in
+    none)
+      echo "Critical-file hold for #$PR_NUMBER was released at $HEAD_SHA — not re-holding (#9016)"
+      ;;
+    defer) echo "#$PR_NUMBER: untrusted markers, no release honored (#10875)" ;;
+    stands)
+      # Idempotent; this and hold|rearm alone assert the hold.
+      echo "Critical-file hold already posted for #$PR_NUMBER — hold stands, no comment"
+      # #12933: the daemon drew this hold because the standing-authorization
+      # digest moved (or a legacy record has none). No class covered it, so
+      # record the current digest ONCE at this head — the daemon reads the
+      # LAST trusted `champion:hold-state` record — or every later tick
+      # redraws it (the #12901 no-op loop). Not one of the three state
+      # markers, so LAST_STATE / STATE_HEAD are unchanged.
+      HOLD_AUTH=$(loom-daemon config get champion.standingAuthorizations --digest 2>/dev/null)
+      RECORDED_AUTH=$(jq -r '[.comments[].body | capture("<!-- champion:hold-state head=[0-9a-f]+(?: auth=(?<a>[0-9a-f]+))?")] | last | .a // ""' <<<"$CF_JSON")
+      if [ -n "$HOLD_AUTH" ] && [ "$RECORDED_AUTH" != "$HOLD_AUTH" ]; then
+        ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "<!-- champion:hold-state head=$HEAD_SHA auth=$HOLD_AUTH -->
+**Champion: critical-file hold re-read under changed standing authorizations (#12933)** — no class covers this PR's critical-file hits; the hold notice above still applies. The digest is recorded so this re-read happens once per policy change."
+      fi
+      cf_park
+      ;;
+    hold|rearm)
+      if [ "$CF_ACTION" = rearm ]; then
+        CF_REARM_NOTE="The head moved to \`$HEAD_SHA\` after a release of \`$STATE_HEAD\`, and the change it makes is not provably the one you saw, so the hold is **re-armed** (#9416 fails closed). Why: ${CF_EQUIV_WHY:-the change differs}
+"
+      else
+        CF_REARM_NOTE=""
+      fi
+      # #12999: name the suspect line the `critical-files` criterion matched, not just the file.
+      # Empty when the hold is a plain pattern hit (migrations, workflows, no patch).
+      CF_SUSPECT_NOTE=""
+      [ -n "${CRITERION3_SUSPECT_LINE:-}" ] &&
+        CF_SUSPECT_NOTE="
+- **Matched suspect line** (in \`[${CRITERION3_SUSPECT_SECTION:-?}]\`): \`${CRITERION3_SUSPECT_LINE}\`"
+      # #13296: a forge read failure holds too; show its HTTP status/message, not just "could not read".
+      [ -n "${CRITERION3_SUSPECT_ERROR:-}" ] &&
+        CF_SUSPECT_NOTE="${CF_SUSPECT_NOTE}
+- **Suspect-line check error**: \`${CRITERION3_SUSPECT_ERROR}\`"
+      # #13542: a repo-declared path (`champion.extraCriticalPaths`) held it: name the glob. Such a
+      # hold is never waivable by a class; only the operator's release applies. Empty otherwise.
+      CF_DECLARED_NOTE=""
+      [ -n "${CRITERION3_DECLARED_PATH:-}" ] &&
+        CF_DECLARED_NOTE="
+- **Declared critical path** (\`champion.extraCriticalPaths\`): \`${CRITERION3_DECLARED_FILE}\` matches \`${CRITERION3_DECLARED_PATH}\`"
+      CF_WF_NOTE=""   # #10539
+      gh pr diff "$PR_NUMBER" --name-only 2>/dev/null | grep -q '^\.github/workflows/' &&
+        CF_WF_NOTE="
+Merging workflow files needs the \`workflow\` token scope: \`gh auth refresh -h github.com -s workflow\`
+"
+      # Standing-authorization digest (#12933): a later change to
+      # `champion.standingAuthorizations` differs from it and re-reads this hold once.
+      HOLD_AUTH=$(loom-daemon config get champion.standingAuthorizations --digest 2>/dev/null)
+      HOLD_AUTH_FIELD=""; [ -n "$HOLD_AUTH" ] && HOLD_AUTH_FIELD=" auth=$HOLD_AUTH"
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$HOLD_MARKER
+<!-- champion:hold-state head=$HEAD_SHA${HOLD_AUTH_FIELD} -->
+**Champion: Holding for Human Merge — Critical File**
+
+${CF_REARM_NOTE}This PR modifies a critical file and cannot be automatically merged:
+
+- **Critical File Exclusion Check**: <FILE_PATH> matches critical-file pattern \`<PATTERN>\`${CF_SUSPECT_NOTE}${CF_DECLARED_NOTE}
+
+**Next steps** — to merge it yourself, one audited command (#13517):
+
+\`\`\`bash
+./.loom/scripts/merge-pr.sh $PR_NUMBER --release-hold
+\`\`\`
+
+It refuses if the head moved since this hold or the Judge approval, and records who released it.
+
+On a merge-queue repo, skip \`merge-pr.sh\`: after your release Champion hands the PR to the queue itself (#13321).
+
+Removing \`loom:blocked\` is your release, and it is durable (#9016): Champion
+will **not** put it back while this PR's change is the one this notice
+describes. A push that changes the diff re-arms the hold (a tree-identical push or a
+clean merge of \`main\` does not, #9416); one that leaves every critical-file
+pattern clears it. \`loom:pr\` stays: Judge's approval stands.
+${CF_WF_NOTE}
+---
+*Automated by Champion role*"
+      cf_park
+      ;;
+    respect)
+      # Do NOT re-add `loom:blocked`; this records the release at the current head.
+      if [ -n "$CF_EQUIV_KIND" ]; then
+        CF_EQUIV_LINE="<!-- champion:hold-equivalence kind=$CF_EQUIV_KIND from=$STATE_HEAD to=$HEAD_SHA -->"
+        CF_EQUIV_NOTE=" — carried from \`$STATE_HEAD\` by equivalence \`$CF_EQUIV_KIND\`, re-derived from the repository (#9416)"
+        [ "$CF_EQUIV_KIND" = requested-change ] && CF_EQUIV_NOTE=" — carried from \`$STATE_HEAD\` by \`requested-change\` (#13114): the only paths whose diff moved are the ones your \`release-scope:\` line named (\`$CF_SCOPE\`). Judge's re-verdict confirms the change itself; CI is not exempted"
+      else
+        CF_EQUIV_LINE="<!-- champion:hold-equivalence kind=same-head -->"
+        CF_EQUIV_NOTE=""
+      fi
+      if [ "$CF_QUEUE" = 1 ]; then
+        CF_MERGE_NOTE="This repo merges through the merge queue, so Champion hands the PR to the queue pinned to \`$HEAD_SHA\` on its next pass if every other criterion passes (#13321); do not run \`merge-pr.sh\`. "
+      else
+        CF_MERGE_NOTE="Merge with \`./.loom/scripts/merge-pr.sh $PR_NUMBER\`. "
+      fi
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$RELEASED_MARKER
+<!-- champion:hold-state head=$HEAD_SHA -->
+$CF_EQUIV_LINE
+**Champion: Critical-File Hold Released by Operator (#9016)**
+
+\`loom:blocked\` was removed by hand while this hold stood, and the change is still the one the hold described${CF_EQUIV_NOTE}: your release. Champion is **not** re-adding the label. ${CF_MERGE_NOTE}A push that changes the diff re-arms the hold.
+
+---
+*Automated by Champion role*"
+      echo "Critical-file release respected for #$PR_NUMBER at $HEAD_SHA (${CF_EQUIV_KIND:-same-head}) — not reapplying loom:blocked (#9016)"
+      ;;
+  esac
+
+  # Queue handoff (#13321). Emitted ONLY for a release proven by a trusted record at the
+  # CURRENT head (`none`, or `respect` just re-recorded at it), label absent (a label present,
+  # shared with a merge-risk hold, is never a release), queue mode proven. `defer`, `stands`,
+  # `hold`, `rearm` never reach it. The consumer is Step 3, which pins `--approved-sha` to
+  # $CF_HANDOFF_SHA and never falls back to `merge-pr.sh` for this PR.
+  if [ "$CF_QUEUE" = 1 ] && [ "$CF_TRUST" = ok ] && [ "$HOLD_LABEL_NOW" = false ] \
+     && { [ "$CF_ACTION" = none ] || [ "$CF_ACTION" = respect ]; }; then
+    CF_HANDOFF=1; CF_HANDOFF_SHA=$HEAD_SHA
+    echo "CF-RELEASED-HANDOFF pr=$PR_NUMBER head=$CF_HANDOFF_SHA: operator-released critical-file PR on a merge-queue repo (#13321)"
+  fi
+elif [ "$CF_TRUST" != ok ] && { [ "$CF_STATE" = held ] || [ "$CF_STATE" = released ]; }; then
+  echo "#$PR_NUMBER: trusted comments unreadable — clear deferred, loom:blocked kept (#11861)"
+elif [ "$CF_STATE" = held ] || [ "$CF_STATE" = released ]; then
+  # PASS with an episode open — a push narrowed the diff. Post a one-time
+  # reversal notice, then continue as an ordinary PASS. The label is shared
+  # with the merge-risk hold: remove it only if no merge-risk hold stands
+  # (#11861), or the merge-risk criterion would read Champion's removal as a human release.
+  MR_STANDS=$(jq -r '[.comments[].body] | (map(startswith("<!-- champion:merge-risk-hold -->")) | rindex(true)) as $h
+    | (map(contains("<!-- champion:merge-risk-hold-cleared -->")) | rindex(true)) as $c | $h != null and ($c == null or $h > $c)' <<<"$CF_JSON")
+  [ "$MR_STANDS" = true ] || gh pr edit "$PR_NUMBER" --remove-label "loom:blocked" 2>/dev/null || true
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$CLEARED_MARKER
+**Champion: Critical-File Hold Cleared**
+
+A later push narrowed this PR off every critical-file pattern. Re-evaluating normally going forward.
+
+---
+*Automated by Champion role*"
+  echo "Critical-file hold cleared for #$PR_NUMBER — re-evaluating normally"
+fi
+```
+
+## Queue handoff for a released PR (#13321)
+
+On a `merge-queue` repo the operator cannot finish the merge (`merge-pr.sh` holds for the
+missing `loom/merge-authorization` context, which only the queue handoff posts), so a
+released PR would sit approved forever. The release is the human decision; the handoff is
+mechanical. When the tick prints `CF-RELEASED-HANDOFF pr=N head=<sha>` (`CF_HANDOFF=1`),
+`champion-pr-merge.md` treats `critical-files` as passed **for this pass only**, runs the
+remaining criteria as usual, and Step 3 calls `forge merge-queue step --approved-sha <sha>`
+with the released head. It adds no marker, flag or config key, and nothing else changes:
+
+- **Unreleased is never enqueued**: `held`, `none`, `rearm`, `hold`, `stands`, `defer`, an
+  untrusted or unreadable marker read, or `loom:blocked` present (it is shared with the
+  `merge-risk` hold) all leave `CF_HANDOFF=0`.
+- **A moved head re-arms**: the handoff exists only at the head the release record names,
+  or one proven equivalent by the same #9416/#13114 rules, re-recorded first.
+- **Direct mode is unchanged**: anything but a literal `mode=queue` answer is not queue; the
+  operator merges with `merge-pr.sh`. In Step 3 a released PR whose step answers direct
+  (or an older daemon) is **not** merged by Champion.
+
+A cleared notice ends an episode; a later FAIL is a **fresh** episode, never a
+permanent exemption. A re-arm is likewise a new hold notice: no marker comment is
+ever rewritten or deleted.
+
+Regression: `defaults/scripts/tests/test-critical-file-hold-tick.sh` runs this tick.

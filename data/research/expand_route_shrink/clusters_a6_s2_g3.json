@@ -1,0 +1,239 @@
+{
+  "rows": [
+    {
+      "board": "03",
+      "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6312/boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+      "rule": {
+        "anchor_min_pads": 6,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 3.0
+      },
+      "footprints": 38,
+      "pad_count_histogram": {
+        "2": 27,
+        "4": 6,
+        "6": 2,
+        "7": 1,
+        "20": 1,
+        "44": 1
+      },
+      "anchors": 5,
+      "small_parts": 27,
+      "small_parts_near_an_anchor": 12,
+      "small_parts_near_and_sharing_a_net": 12,
+      "multi_part_clusters": 4,
+      "cluster_sizes": [
+        9,
+        3,
+        2,
+        2
+      ],
+      "footprints_in_multi_part_clusters": 16,
+      "clusters": [
+        {
+          "anchor": "U1",
+          "anchor_pads": 44,
+          "satellites": {
+            "R3": [
+              "USB_MCU_D-"
+            ],
+            "R4": [
+              "USB_MCU_D+"
+            ],
+            "C1": [
+              "GND",
+              "VCC"
+            ],
+            "C2": [
+              "GND",
+              "VCC"
+            ],
+            "C3": [
+              "GND",
+              "VCC"
+            ],
+            "C4": [
+              "GND",
+              "VCC"
+            ],
+            "C5": [
+              "GND",
+              "VCC"
+            ],
+            "C7": [
+              "AREF",
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "J1",
+          "anchor_pads": 20,
+          "satellites": {
+            "R2": [
+              "GND",
+              "USB_CC2"
+            ]
+          }
+        },
+        {
+          "anchor": "U2",
+          "anchor_pads": 6,
+          "satellites": {
+            "C13": [
+              "GND",
+              "VBUS"
+            ]
+          }
+        },
+        {
+          "anchor": "J2",
+          "anchor_pads": 7,
+          "satellites": {
+            "R11": [
+              "JOY_Y_RAW"
+            ],
+            "C11": [
+              "GND"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "board": "05",
+      "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6312/boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
+      "rule": {
+        "anchor_min_pads": 6,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 3.0
+      },
+      "footprints": 42,
+      "pad_count_histogram": {
+        "2": 35,
+        "3": 2,
+        "6": 2,
+        "18": 1,
+        "32": 1,
+        "59": 1
+      },
+      "anchors": 5,
+      "small_parts": 35,
+      "small_parts_near_an_anchor": 10,
+      "small_parts_near_and_sharing_a_net": 10,
+      "multi_part_clusters": 4,
+      "cluster_sizes": [
+        5,
+        5,
+        2,
+        2
+      ],
+      "footprints_in_multi_part_clusters": 14,
+      "clusters": [
+        {
+          "anchor": "U1",
+          "anchor_pads": 32,
+          "satellites": {
+            "C9": [
+              "+5V",
+              "GND"
+            ],
+            "C10": [
+              "+5V",
+              "GND"
+            ],
+            "C11": [
+              "+5V",
+              "GND"
+            ],
+            "C12": [
+              "AREF",
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "U2",
+          "anchor_pads": 59,
+          "satellites": {
+            "C2": [
+              "GND",
+              "VM"
+            ],
+            "C3": [
+              "GND",
+              "VM"
+            ],
+            "C5": [
+              "VCP",
+              "VM"
+            ],
+            "C6": [
+              "GND",
+              "V3P3"
+            ]
+          }
+        },
+        {
+          "anchor": "U3",
+          "anchor_pads": 18,
+          "satellites": {
+            "C8": [
+              "+5V",
+              "GND"
+            ]
+          }
+        },
+        {
+          "anchor": "J3",
+          "anchor_pads": 6,
+          "satellites": {
+            "C16": [
+              "+5V",
+              "GND"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "board": "chorus",
+      "input": "/Users/rwalters/GitHub/chorus/hardware/chorus-test-revA/kicad/chorus-test-revA_v21_stripped.kicad_pcb",
+      "rule": {
+        "anchor_min_pads": 6,
+        "satellite_max_pads": 2,
+        "max_gap_mm": 3.0
+      },
+      "footprints": 90,
+      "pad_count_histogram": {
+        "2": 76,
+        "3": 1,
+        "4": 2,
+        "5": 8,
+        "20": 1,
+        "28": 1,
+        "40": 1
+      },
+      "anchors": 3,
+      "small_parts": 76,
+      "small_parts_near_an_anchor": 4,
+      "small_parts_near_and_sharing_a_net": 1,
+      "multi_part_clusters": 1,
+      "cluster_sizes": [
+        2
+      ],
+      "footprints_in_multi_part_clusters": 2,
+      "clusters": [
+        {
+          "anchor": "U5",
+          "anchor_pads": 28,
+          "satellites": {
+            "R10": [
+              "+3.3V"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

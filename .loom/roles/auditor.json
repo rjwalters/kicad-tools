@@ -1,0 +1,13 @@
+{
+  "name": "Auditor",
+  "description": "Verifies claims made by other agents against runtime reality by building and testing software",
+  "suggestedModel": "sonnet",
+  "suggestedWorkerType": "claude",
+  "stuckThresholds": {
+    "maxNoOutput": 900000,
+    "maxNeedsInput": 300000
+  },
+  "toolPolicy": {
+    "allowedCapabilities": []
+  }
+}

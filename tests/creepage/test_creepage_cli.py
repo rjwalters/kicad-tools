@@ -1,0 +1,781 @@
+"""CLI tests for ``kct creepage`` (Issue #4327, phase 1 MVP).
+
+Covers exit codes (0 when all pairs clear ``--min``, non-zero when one is
+below), the ``--format json`` census schema (all pairs present, per-pair pass
+flag, distinct numeric clearance/creepage/margin), and the "no HV nets found"
+path (clean exit 0, no crash).
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from kicad_tools._shapely import has_shapely
+from kicad_tools.cli.commands.creepage import run_creepage_command
+from kicad_tools.cli.parser import create_parser
+
+from .fixtures import (
+    board_attach_zone_source,
+    board_benign_suspect_names_source,
+    board_mains_named_source,
+    board_no_hv_source,
+    board_other_layer_board_gap_source,
+    board_same_footprint_fail_source,
+    board_same_footprint_hides_board_source,
+    board_same_footprint_only_source,
+    board_source,
+    board_two_sharing_footprints_source,
+)
+
+pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+
+
+def _write(tmp_path, source, name="board.kicad_pcb"):
+    p = tmp_path / name
+    p.write_text(source)
+    return p
+
+
+def _hv_map_file(tmp_path):
+    p = tmp_path / "net_class_map.json"
+    p.write_text(json.dumps({"L_MAINS": {"name": "HV"}}))
+    return p
+
+
+def _run(argv):
+    args = create_parser().parse_args(argv)
+    return run_creepage_command(args)
+
+
+def test_exit_zero_when_all_pairs_clear(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PASS" in out
+    assert "L_MAINS" in out
+    # Distinction is explicit in the human output.
+    assert "Clearance" in out and "Creepage" in out
+
+
+def test_exit_nonzero_when_a_pair_below_min(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    # Require 100 mm creepage -- the 18 mm pad gap cannot satisfy it.
+    rc = _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "100"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL" in out
+
+
+def test_json_census_schema(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=True))
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+
+    assert payload["net_class"] == "HV"
+    assert payload["min_mm"] == 1.5
+    assert payload["hv_nets"] == ["L_MAINS"]
+    assert payload["pair_count"] == len(payload["pairs"])
+    assert payload["pair_count"] >= 2  # HV-vs-GND and HV-vs-edge
+    assert payload["passed"] is True
+    # #4687: the exit-code verdict + waived count are always serialized; with no
+    # waiver active gate_passed is identical to the raw passed.
+    assert payload["gate_passed"] is True
+    assert payload["waived_count"] == 0
+
+    kinds = {p["kind"] for p in payload["pairs"]}
+    assert {"conductor", "edge"} <= kinds
+
+    for pair in payload["pairs"]:
+        # Full census: every pair carries numeric fields + a pass flag.
+        assert isinstance(pair["clearance_mm"], (int, float))
+        assert isinstance(pair["creepage_mm"], (int, float))
+        assert isinstance(pair["margin_mm"], (int, float))
+        assert isinstance(pair["pass"], bool)
+        assert pair["creepage_mm"] >= pair["clearance_mm"] - 1e-6
+
+    gnd = next(p for p in payload["pairs"] if p["kind"] == "conductor" and p["net_b"] == "GND")
+    # The slot makes clearance and creepage genuinely different values.
+    assert gnd["creepage_mm"] > gnd["clearance_mm"] + 2.0
+
+
+def test_json_census_no_slot_equals(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    gnd = next(p for p in payload["pairs"] if p["kind"] == "conductor" and p["net_b"] == "GND")
+    assert gnd["creepage_mm"] == pytest.approx(gnd["clearance_mm"], abs=1e-4)
+
+
+def test_no_hv_nets_message_and_exit_zero(tmp_path, capsys):
+    pcb = _write(tmp_path, board_no_hv_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "No 'HV' nets found" in out
+
+
+def test_no_hv_nets_json_empty_census(tmp_path, capsys):
+    pcb = _write(tmp_path, board_no_hv_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["pairs"] == []
+    assert payload["pair_count"] == 0
+    assert payload["passed"] is True
+    assert payload["gate_passed"] is True  # vacuously true, like passed (#4687)
+    assert payload["waived_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #4354 vacuity guard: a mains-looking board must never silently exit 0.
+# ---------------------------------------------------------------------------
+
+
+def test_mains_named_board_no_map_exits_nonzero(tmp_path, capsys):
+    # Realistic invocation #1 from the report: NO net-class-map.  The broadened
+    # HV name fallback classifies AC_LINE/AC_NEUTRAL/FUSED_LINE, the ~1 mm
+    # AC_LINE<->GND gap fails the 250 V IIIa/PD2 requirement -> exit 1 (a real
+    # measured failure), NOT a silent exit 0.
+    pcb = _write(tmp_path, board_mains_named_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+            "--material-group",
+            "IIIa",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "Nothing to audit -- exit 0" not in captured.out
+    # The mains nets were actually classified and audited.
+    assert "AC_LINE" in captured.out
+
+
+def test_generic_map_hiding_mains_fires_vacuity_guard(tmp_path, capsys):
+    # Realistic invocation #2 from the report: a GENERIC net-class-map that
+    # names Power/Digital but never HV.  The mains nets are mapped away from HV,
+    # so 0 HV nets resolve -- but the board is obviously mains, so the vacuity
+    # guard fires with the distinct exit code 2 (NOT a silent 0).
+    pcb = _write(tmp_path, board_mains_named_source())
+    gmap = tmp_path / "generic_map.json"
+    gmap.write_text(
+        json.dumps(
+            {
+                "AC_LINE": {"name": "Power"},
+                "AC_NEUTRAL": {"name": "Power"},
+                "FUSED_LINE": {"name": "Power"},
+            }
+        )
+    )
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(gmap),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2  # distinct "HV unclassified" code, not 0 and not 1
+    assert "Nothing to audit -- exit 0" not in captured.out
+    assert "WARNING" in captured.err
+    assert "AC_LINE" in captured.err
+    assert "--net-class-map" in captured.err
+
+
+def test_high_working_voltage_without_mains_names_fires_guard(tmp_path, capsys):
+    # The repro board's real HV nets (TRK_POS/V_RSV_POS) do NOT match mains
+    # name patterns.  A mains-level --working-voltage with 0 resolved HV nets
+    # must still fire the guard (exit 2), never silent 0.
+    pcb = _write(tmp_path, board_no_hv_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "WARNING" in captured.err
+    assert "250" in captured.err
+    assert "Nothing to audit -- exit 0" not in captured.out
+
+
+def test_low_voltage_non_hv_board_still_exits_zero(tmp_path, capsys):
+    # Negative control: a genuinely low-voltage board (no mains names, working
+    # voltage below the 50 V SELV boundary) must still exit 0 with the inert
+    # "Nothing to audit" message -- no false alarms.
+    pcb = _write(tmp_path, board_no_hv_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "24",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Nothing to audit -- exit 0" in captured.out
+    assert "WARNING" not in captured.err
+
+
+def test_benign_suspect_named_board_exits_zero(tmp_path, capsys):
+    # Issue #4365: a board whose only suspect-shaped nets are benign
+    # (SPI_LINE / HOT_SWAP / PRIMARY_CLK) with no mains-level working voltage
+    # must NOT trip the #4354 vacuity guard -- the tightened MAINS_NAME_RE no
+    # longer flags bare LINE / HOT / PRIMARY tokens, so this exits 0.
+    pcb = _write(tmp_path, board_benign_suspect_names_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "24",
+            "--pollution-degree",
+            "2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Nothing to audit -- exit 0" in captured.out
+    assert "WARNING" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# #4403 same-footprint waiver: classify + gate on --waive-same-footprint.
+# ---------------------------------------------------------------------------
+
+
+def test_same_footprint_tagged_in_json(tmp_path, capsys):
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.0", "--format", "json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    src = next(p for p in payload["pairs"] if p["net_b"] == "SRC_NEG")
+    gnd = next(p for p in payload["pairs"] if p["net_b"] == "GND")
+    assert src["relationship"] == "same_footprint"
+    assert gnd["relationship"] == "board"
+    # Without the waiver flag nothing is marked waived.
+    assert "waived" not in src
+    # #4687: no waiver -> gate_passed mirrors the raw passed and both agree with
+    # the exit code.
+    assert rc == 1
+    assert payload["passed"] is False
+    assert payload["gate_passed"] is False
+    assert payload["waived_count"] == 0
+
+
+def test_waiver_off_same_footprint_fail_exits_nonzero(tmp_path, capsys):
+    # Default (flag absent): a same-footprint fail still fails the gate (exit 1),
+    # exactly as before -- the waiver is opt-in.
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.0"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL" in out
+    # The relationship split is surfaced to prompt the operator toward the flag.
+    assert "same-footprint" in out
+
+
+def test_waiver_on_only_same_footprint_fail_exits_zero(tmp_path, capsys):
+    # With --waive-same-footprint and the ONLY fail being same-footprint, the
+    # gate passes (exit 0) but the pair is still listed (annotated WAIVED).
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WAIVED" in out
+    assert "SRC_NEG" in out  # still listed, never dropped
+    assert "PASS (gate)" in out
+
+
+def test_waiver_on_board_fail_still_exits_nonzero(tmp_path, capsys):
+    # A board-level fail must still fail the gate even when same-footprint pairs
+    # are waived.
+    pcb = _write(tmp_path, board_same_footprint_fail_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL (gate)" in out
+    assert "WAIVED" in out  # the same-footprint pair is annotated but excluded
+
+
+def test_waiver_on_json_marks_waived_true(tmp_path, capsys):
+    pcb = _write(tmp_path, board_same_footprint_only_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    src = next(p for p in payload["pairs"] if p["net_b"] == "SRC_NEG")
+    gnd = next(p for p in payload["pairs"] if p["net_b"] == "GND")
+    assert src["waived"] is True
+    assert "waived" not in gnd  # board pairs are never waived
+    # The report-level passed stays False (raw) -- only the exit code (gate) flips.
+    assert payload["passed"] is False
+    # #4687: the JSON now also carries the verdict the exit code was computed
+    # from, so a CI consumer keying on gate_passed agrees with the process.
+    assert rc == 0
+    assert payload["gate_passed"] is True
+    assert payload["waived_count"] == sum(1 for p in payload["pairs"] if p.get("waived"))
+    assert payload["waived_count"] >= 1
+
+
+def test_waiver_on_board_fail_json_gate_passed_false(tmp_path, capsys):
+    # A board-level fail keeps gate_passed False even with waived pairs (#4687).
+    pcb = _write(tmp_path, board_same_footprint_fail_source())
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--waive-same-footprint",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["passed"] is False
+    assert payload["gate_passed"] is False
+    assert payload["waived_count"] == sum(1 for p in payload["pairs"] if p.get("waived"))
+    assert payload["waived_count"] >= 1
+
+
+def test_missing_pcb_file_errors(tmp_path, capsys):
+    rc = _run(["creepage", str(tmp_path / "nope.kicad_pcb"), "--min", "1.5"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "not found" in err
+
+
+def test_missing_net_class_map_errors(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    rc = _run(
+        ["creepage", str(pcb), "--net-class-map", str(tmp_path / "absent.json"), "--min", "1.5"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "net-class-map file not found" in err
+
+
+# ---------------------------------------------------------------------------
+# #4401 voltage-derived census membership: a high-|V| net whose routing class
+# is not HV must still enter the census when a --voltage-map is supplied.
+# ---------------------------------------------------------------------------
+
+
+def _vmap_file(tmp_path, mapping, name="vmap.json"):
+    p = tmp_path / name
+    p.write_text(json.dumps(mapping))
+    return p
+
+
+def test_census_threshold_pulls_high_v_non_hv_net_into_census(tmp_path, capsys):
+    # board_no_hv_source ships SIG + GND -- neither is mains-named nor class-HV,
+    # so without a voltage map the census is empty (see
+    # test_high_working_voltage_without_mains_names_fires_guard).  Mapping SIG at
+    # 150 V with the default 30 V --census-threshold pulls it into hv_nets and
+    # produces audited pair rows (against GND and the board edge).
+    pcb = _write(tmp_path, board_no_hv_source())
+    vmap = _vmap_file(tmp_path, {"SIG": 150.0})
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--voltage-map",
+            str(vmap),
+            "--pollution-degree",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0  # 18 mm gap clears the 150 V requirement
+    assert "SIG" in payload["hv_nets"]
+    assert payload["pair_count"] >= 2  # SIG-vs-GND and SIG-vs-edge
+    kinds = {p["kind"] for p in payload["pairs"]}
+    assert {"conductor", "edge"} <= kinds
+
+
+def test_census_threshold_above_voltage_excludes_net(tmp_path, capsys):
+    # A --census-threshold above the mapped potential leaves the net out: SIG at
+    # 150 V with a 200 V threshold resolves an empty census (no mains names, no
+    # working voltage -> no vacuity guard) -> inert exit 0.
+    pcb = _write(tmp_path, board_no_hv_source())
+    vmap = _vmap_file(tmp_path, {"SIG": 150.0})
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--voltage-map",
+            str(vmap),
+            "--pollution-degree",
+            "2",
+            "--census-threshold",
+            "200",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["hv_nets"] == []
+    assert payload["pairs"] == []
+
+
+def test_census_edge_voltage_reference_honored_via_cli(tmp_path, capsys):
+    # The reserved _edge_voltage key shifts the reference: with _edge_voltage=140
+    # a 150 V net is only 10 V above it -> below the default 30 V threshold ->
+    # not a census member.
+    pcb = _write(tmp_path, board_no_hv_source())
+    vmap = _vmap_file(tmp_path, {"SIG": 150.0, "_edge_voltage": 140.0})
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--voltage-map",
+            str(vmap),
+            "--pollution-degree",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["hv_nets"] == []
+
+
+def test_census_threshold_inert_without_voltage_map(tmp_path, capsys):
+    # Without --voltage-map the flag has no effect: the class/name selection
+    # alone governs.  A mains-named board still resolves its HV nets exactly as
+    # before, regardless of --census-threshold.
+    pcb = _write(tmp_path, board_mains_named_source())
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--standard",
+            "iec60664",
+            "--working-voltage",
+            "250",
+            "--pollution-degree",
+            "2",
+            "--census-threshold",
+            "5",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    # Mains nets still classified via the #4354 name fallback (not the voltage
+    # union), the ~1 mm AC_LINE<->GND gap fails -> exit 1.
+    assert rc == 1
+    assert "AC_LINE" in payload["hv_nets"]
+
+
+def test_census_threshold_defaults_to_thirty(tmp_path):
+    # The flag default matches optimize-placement --hv-threshold (30.0).
+    args = create_parser().parse_args(["creepage", "board.kicad_pcb", "--min", "1.5"])
+    assert args.census_threshold == 30.0
+
+
+# ---------------------------------------------------------------------------
+# #8028 attach-zone waiver: census agrees with the router's #4506 exemption.
+# ---------------------------------------------------------------------------
+
+
+def _attach_argv(pcb, ncm, *extra):
+    return [
+        "creepage",
+        str(pcb),
+        "--net-class-map",
+        str(ncm),
+        "--min",
+        "1.0",
+        "--format",
+        "json",
+        *extra,
+    ]
+
+
+def _gnd_row(payload):
+    return next(r for r in payload["pairs"] if r["net_b"] == "GND" and r["kind"] == "conductor")
+
+
+def test_attach_zone_off_by_default_stays_board_fail(tmp_path, capsys):
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=False))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path)))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert rc != 0
+    assert row["relationship"] == "board"
+    assert "residual_pass" not in row
+    assert payload["waived_count"] == 0
+
+
+def test_attach_zone_waived_when_residual_passes(tmp_path, capsys):
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=False))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert row["relationship"] == "attach_zone"
+    assert row["waived"] is True
+    assert row["residual_pass"] is True
+    assert payload["waived_count"] == 1
+    # raw verdict stays waiver-blind (kct audit); only gate_passed/exit honour it.
+    assert payload["passed"] is False
+    assert payload["gate_passed"] is True
+    assert rc == 0
+
+
+@pytest.mark.parametrize("split_x", [None, 111.0, 112.0])
+def test_attach_zone_verdict_independent_of_trace_segmentation(tmp_path, capsys, split_x):
+    """#8303: a straight GND run split into collinear fragments judges as whole."""
+    pcb = _write(
+        tmp_path, board_attach_zone_source(outside_shortfall=False, tail=True, split_x=split_x)
+    )
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    row = _gnd_row(json.loads(capsys.readouterr().out))
+    assert row["relationship"] == "attach_zone"
+    assert row["waived"] is True
+    assert row["residual_pass"] is True
+    assert rc == 0
+
+
+def test_attach_zone_does_not_mask_shortfall_outside_zone(tmp_path, capsys):
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=True))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert row["relationship"] == "attach_zone"
+    assert row["residual_pass"] is False
+    assert "waived" not in row
+    assert row["residual_creepage_mm"] == pytest.approx(0.8, abs=0.01)
+    assert row["residual_witness_mm"][0] > 25  # board-relative: at P3/P4, not Q1 (x~10)
+    assert payload["gate_passed"] is False
+    assert rc != 0
+
+
+def test_attach_zone_cross_term_catches_out_of_zone_via(tmp_path, capsys):
+    """#8292: out-of-zone foreign copper vs an in-zone pad gates the pair."""
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=False, edge_via=True))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert row["relationship"] == "attach_zone"
+    assert row["residual_pass"] is False
+    assert "waived" not in row
+    assert row["residual_creepage_mm"] == pytest.approx(0.7, abs=0.02)
+    assert row["residual_witness_mm"][0] == pytest.approx(
+        10.65, abs=0.05
+    )  # pad-edge/via-edge midpoint
+    assert payload["gate_passed"] is False
+    assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# #8232: a same_footprint minimum must not hide a board-level approach.
+# ---------------------------------------------------------------------------
+
+
+def _hidden_board_run(tmp_path, capsys, board_gap_mm, *extra):
+    pcb = _write(tmp_path, board_same_footprint_hides_board_source(board_gap_mm=board_gap_mm))
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--format",
+            "json",
+            *extra,
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    rows = [p for p in payload["pairs"] if p["net_b"] == "DIV_MID"]
+    return rc, payload, rows
+
+
+def test_same_footprint_pair_also_reports_board_row(tmp_path, capsys):
+    _, _, rows = _hidden_board_run(tmp_path, capsys, 1.2)
+    assert sorted(r["relationship"] for r in rows) == ["board", "same_footprint"]
+    board = next(r for r in rows if r["relationship"] == "board")
+    sfp = next(r for r in rows if r["relationship"] == "same_footprint")
+    assert board["creepage_mm"] > sfp["creepage_mm"]
+    assert abs(board["creepage_mm"] - 1.2) < 0.05
+
+
+def test_waiver_does_not_hide_failing_board_row(tmp_path, capsys):
+    rc, payload, rows = _hidden_board_run(tmp_path, capsys, 0.8, "--waive-same-footprint")
+    board = next(r for r in rows if r["relationship"] == "board")
+    assert board["pass"] is False
+    assert not board.get("waived")
+    assert payload["gate_passed"] is False
+    assert rc == 1
+
+
+def test_waiver_passes_when_board_row_clears(tmp_path, capsys):
+    rc, payload, rows = _hidden_board_run(tmp_path, capsys, 1.2, "--waive-same-footprint")
+    sfp = next(r for r in rows if r["relationship"] == "same_footprint")
+    assert sfp["waived"] is True
+    assert payload["gate_passed"] is True
+    assert rc == 0
+
+
+def _waived_run(tmp_path, capsys, source):
+    pcb = _write(tmp_path, source)
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--format",
+            "json",
+            "--waive-same-footprint",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    return rc, payload, [p for p in payload["pairs"] if p["net_b"] == "DIV_MID"]
+
+
+def test_two_sharing_footprints_cross_approach_reported(tmp_path, capsys):
+    rc, payload, rows = _waived_run(tmp_path, capsys, board_two_sharing_footprints_source())
+    board = next(r for r in rows if r["relationship"] == "board")
+    assert abs(board["creepage_mm"] - 0.8) < 0.05
+    assert board["pass"] is False
+    assert payload["gate_passed"] is False
+    assert rc == 1
+
+
+def test_board_gap_on_layer_without_sharing_footprint_reported(tmp_path, capsys):
+    rc, payload, rows = _waived_run(tmp_path, capsys, board_other_layer_board_gap_source())
+    board = next(r for r in rows if r["relationship"] == "board")
+    assert board["layer"] == "B.Cu"
+    assert abs(board["creepage_mm"] - 0.8) < 0.05
+    assert payload["gate_passed"] is False
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# --witness (Issue #8301)
+# ---------------------------------------------------------------------------
+
+
+def test_json_rows_all_carry_witness(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pairs"]
+    for row in payload["pairs"]:
+        assert set(row["witness"]) == {"point_a_mm", "point_b_mm", "item_a", "item_b"}
+
+
+def test_witness_column_only_with_flag(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    base = ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5"]
+    _run(base)
+    plain = capsys.readouterr().out
+    _run([*base, "--witness"])
+    with_w = capsys.readouterr().out
+    assert "Witness" not in plain
+    assert "Edge.Cuts" not in plain
+    assert "Witness" in with_w
+    assert "11.000," in with_w
+    assert "Edge.Cuts" in with_w

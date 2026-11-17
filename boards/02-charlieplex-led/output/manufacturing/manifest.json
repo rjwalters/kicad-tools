@@ -1,0 +1,164 @@
+{
+  "version": "1.0",
+  "kicad_tools_version": "0.29.0",
+  "generated_at": "2026-11-11T21:18:04.174526+00:00",
+  "manufacturer": "jlcpcb",
+  "files": {
+    "HARDWARE.md": {
+      "sha256": "03cc0a3b9c4b58cede788dd0c066c33709a2df1a0c2c970fbc508b41da3c59cf",
+      "size": 5328
+    },
+    "README.txt": {
+      "sha256": "3b1b27da0f8735e63917b53e215e2b864131348e238d8a2bd14a798c857fcd85",
+      "size": 1141
+    },
+    "assembly-back.pdf": {
+      "sha256": "984f5d58d989feb5450b15f43130039e16a9d132a32fd091abbb72bf98b5bb43",
+      "size": 20911
+    },
+    "assembly-front.pdf": {
+      "sha256": "60ab1d5837110d6de35f52bb1dea2b7febb90de6f1568326007028a89eb5c1c6",
+      "size": 31052
+    },
+    "bom_jlcpcb.csv": {
+      "sha256": "40cca22f95ebb76f0deabf943bc2fff9e33f6e7fe087b6491a34bc90f9a50dc3",
+      "size": 512
+    },
+    "check-report.json": {
+      "sha256": "02ed5ac3ce7f8318030527de8b1b7d673e382dd6562b415bbb9ed50228d37698",
+      "size": 10019
+    },
+    "cpl_jlcpcb.csv": {
+      "sha256": "bab27ea04189910c0aa014a8200fdf3a9efff7da682dd9d5b30909215ebbab81",
+      "size": 1423
+    },
+    "design-source.zip": {
+      "sha256": "ced5151a35ea26e46e8082be33bc16dda23cf9e82c9980b158c2180199fa7176",
+      "size": 35586
+    },
+    "fill-consistency.json": {
+      "sha256": "8f1ceac99ec20c388680d9e5f0bae4bb3ff8080930016bdb187d81cce86d729c",
+      "size": 972
+    },
+    "firmware/Makefile": {
+      "sha256": "8f2c32f565080e8423a872dcb5c236a3a297a705a729f3d2585e0f6b21428f64",
+      "size": 363
+    },
+    "firmware/charlieplex.hex": {
+      "sha256": "7956fb57f17750f476cd50460e275e6282ca35babb4b9f62f08c0eedb862c9ad",
+      "size": 623
+    },
+    "firmware/main.c": {
+      "sha256": "352605415b7d26e64ed0f1e279f43645fd858809b4667382508ac001b38426cd",
+      "size": 1064
+    },
+    "gerbers/gerbers.zip": {
+      "sha256": "82d6b7622d32c3fab4084a7cf4f11f62fc53f11e15468ea8815850ffece59333",
+      "size": 18423
+    },
+    "images/assembly.png": {
+      "sha256": "03d4a73e42b4dcd0979b3cf18ccc77cb22283bc7d221de10fa088a9c201cad3a",
+      "size": 318408
+    },
+    "images/layer_B_Cu.png": {
+      "sha256": "1aa0e6ee3914c19edc2fca57e2d37d556f3710e54febe01f5955aa3ec36baf2e",
+      "size": 144346
+    },
+    "images/layer_F_Cu.png": {
+      "sha256": "29b03300e12d8251ef01c45b3fec5ff169602b0fa707924bccf03c69ad139f84",
+      "size": 170934
+    },
+    "images/pcb_back.png": {
+      "sha256": "b07d21a0218ff34366d05001f0538db13146b3b72c99e85be3f5affdc207eda5",
+      "size": 148523
+    },
+    "images/pcb_copper.png": {
+      "sha256": "4caf78bdb83d765d0a30903de7c658ebfc3eedae3898b30a9c03fa3c3be28bf5",
+      "size": 205369
+    },
+    "images/pcb_front.png": {
+      "sha256": "86b219c63f8a2c88619d23e72c8e854fc39678dfdeff6afb687dbb967bd01149",
+      "size": 297185
+    },
+    "images/schematic_charlieplex_3x3.png": {
+      "sha256": "3fc41dbd279b466326dc7960c912eb589cb17d17dc511f78962842ef38772193",
+      "size": 277629
+    },
+    "kct-check.json": {
+      "sha256": "02ed5ac3ce7f8318030527de8b1b7d673e382dd6562b415bbb9ed50228d37698",
+      "size": 10019
+    },
+    "kicad_project.zip": {
+      "sha256": "4e6178daca5fd614bd38a4474607b5139ece079934ea062516b75974dfe047f1",
+      "size": 34000
+    },
+    "lvs.json": {
+      "sha256": "356b61ec235c657fe133747d662656d6f96f88531c6e0e77250dee36c9dab123",
+      "size": 214
+    },
+    "native-drc.json": {
+      "sha256": "7a5497b70cc619a7a6573d9e02e10c743066210cefb484d6e5ce95001a524120",
+      "size": 252
+    },
+    "native-erc.json": {
+      "sha256": "5e9bb098d5127b6d32aefb00e84873be4444c2b2797402e02acb76d8803519a7",
+      "size": 988
+    },
+    "project.kct": {
+      "sha256": "ad81a3e98f42c046320478e23207dedcde13832d39765b062d9e0e094e539093",
+      "size": 5126
+    },
+    "renders/3d-back.png": {
+      "sha256": "693b35456fff9101078ef1e1a2200acaf361246307eaca132f513be0ba0f264a",
+      "size": 200705
+    },
+    "renders/3d-front.png": {
+      "sha256": "1cd0e464ef277ad064d81f4bcd26b9a85c2e09ba8fa4900ebd3bc23b735a4132",
+      "size": 324140
+    },
+    "renders/pcb-back.svg": {
+      "sha256": "67cfdd2131c08aeada3b7580ab8776729d369f9436c6bbd208bc192402983206",
+      "size": 86532
+    },
+    "renders/pcb-front.svg": {
+      "sha256": "8d1c4ffcccdff133fe261c3c448f036382418f5f5d9287e2d2fa9e2cff89291d",
+      "size": 125204
+    },
+    "report.md": {
+      "sha256": "383716768ecd209bcc3360a4ca16680e99d7cfd1224d0cb67cb12a63be33d7ce",
+      "size": 3191
+    },
+    "report.pdf": {
+      "sha256": "0b4a8a34a90d1d35ad749badf55d788e4185cc5c462a39d961997c2141b127c3",
+      "size": 1759363
+    },
+    "schematic.pdf": {
+      "sha256": "9014c73285816e5e8be34df83d8e004ee85fc0daee1b0aba0e08875717218768",
+      "size": 85899
+    }
+  },
+  "board": {
+    "name": "charlieplex_3x3_routed",
+    "pcb_file": "charlieplex_3x3_routed.kicad_pcb"
+  },
+  "ordered_copper": {
+    "layers": 2,
+    "stackup_outer_oz": null,
+    "stackup_inner_oz": null,
+    "profile_options": [
+      [
+        1.0,
+        0.0
+      ],
+      [
+        2.0,
+        0.0
+      ]
+    ],
+    "ordered_outer_oz": 1.0,
+    "ordered_inner_oz": 0.0,
+    "status": "undeclared",
+    "source": "https://jlcpcb.com/help/article/jlcpcb-copper-weight",
+    "source_verified": "2026-10-18"
+  }
+}

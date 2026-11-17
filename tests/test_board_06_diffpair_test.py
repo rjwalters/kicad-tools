@@ -1,0 +1,1269 @@
+"""Regression tests for ``boards/06-diffpair-test/`` (Epic #2556 Phase 4L).
+
+These tests pin the on-disk artifacts produced by the diff-pair testbench
+board so future changes to:
+
+- the router (net-class consumer code)
+- the validator (DRC rules)
+- the impedance solver
+- the diff-pair detector
+
+cannot silently drop any of the Phase 1-3 features the board exercises.
+
+These archived artifacts retain the historical synthetic regression coverage;
+the current gallery assembly is tested in test_board06_real_hardware.py.  See ``boards/06-diffpair-test/README.md`` for the
+testbench rationale.
+
+Acceptance criteria covered (see issue #2658):
+
+- AC#1: routed PCB exists and is a valid KiCad 9 PCB
+- AC#3: PCB contains at least 9 routed diff pairs
+  (1 USB2 + 4 USB3 + 2 PCIe + 2 MIPI)
+- AC#4: file is regeneratable deterministically (modulo UUIDs)
+- AC#6: ``test_phase_features_exercised`` enumerates the net-class
+  settings and asserts each Phase 1-3 feature is engaged on at least
+  one pair
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+# =============================================================================
+# Module loading helpers
+# =============================================================================
+# The board's helper scripts live in ``boards/06-diffpair-test/`` and are not
+# part of the installed ``kicad_tools`` package.  We load them via
+# ``importlib`` so the tests can inspect the canonical ``NETS`` / ``DIFFPAIRS``
+# dicts and the ``build_net_class_map`` function without touching ``sys.path``.
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BOARD_DIR = REPO_ROOT / "boards" / "06-diffpair-test"
+OUTPUT_DIR = BOARD_DIR / "regression-fixture"
+
+
+def _load_module(name: str, path: Path):
+    """Load a board script as a module from its absolute path."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module {name!r} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    # generate_design.py imports generate_pcb / generate_schematic by name
+    # from its sibling directory --- prepopulate sys.modules with the right
+    # absolute-path references so the import chain succeeds.
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def generate_pcb_mod():
+    """Load ``boards/06-diffpair-test/generate_pcb.py`` as a module."""
+    return _load_module("board_06_generate_pcb", BOARD_DIR / "generate_pcb.py")
+
+
+@pytest.fixture(scope="module")
+def generate_design_mod(generate_pcb_mod):
+    """Load ``boards/06-diffpair-test/generate_design.py`` as a module.
+
+    Depends on ``generate_pcb_mod`` so ``generate_pcb`` is already in
+    ``sys.modules`` by the time ``generate_design.py`` runs its top-level
+    ``import generate_pcb`` statement.  We alias both names so the import
+    inside the script resolves to our pre-loaded module.
+    """
+    sys.modules["generate_pcb"] = generate_pcb_mod
+    # generate_schematic is imported by generate_design but isn't needed for
+    # the net-class assertions.  Provide a stub so the import succeeds.
+    sch_path = BOARD_DIR / "generate_schematic.py"
+    sch_mod = _load_module("board_06_generate_schematic", sch_path)
+    sys.modules["generate_schematic"] = sch_mod
+    return _load_module("board_06_generate_design", BOARD_DIR / "generate_design.py")
+
+
+# =============================================================================
+# AC#1 + AC#3: routed PCB exists and contains the expected diff pairs
+# =============================================================================
+
+
+class TestRoutedPcbArtifact:
+    """The committed routed PCB is the test fixture (AC#1, AC#3)."""
+
+    @pytest.fixture
+    def routed_pcb_text(self) -> str:
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        assert routed.exists(), (
+            f"Routed PCB artifact missing: {routed}.\n"
+            "Re-run: python boards/06-diffpair-test/generate_design.py"
+        )
+        return routed.read_text()
+
+    def test_routed_pcb_is_kicad10_format(self, routed_pcb_text: str) -> None:
+        """AC#1: routed PCB is valid KiCad 10 format."""
+        # KiCad 10 PCBs start with ``(kicad_pcb`` and declare the version.
+        assert routed_pcb_text.startswith("(kicad_pcb")
+        assert "(version 20260206)" in routed_pcb_text
+
+    def test_routed_pcb_declares_4layer_stackup(self, routed_pcb_text: str) -> None:
+        """AC#1 corollary: stackup is the 4-layer JLCPCB tier-1 layout
+        (F.Cu / In1.Cu / In2.Cu / B.Cu) that the Phase 3K impedance
+        formulas were calibrated against.
+
+        Issue #3413 phase 4: assertions are name-based rather than
+        pinning numeric layer IDs.  The recipe's zone-fill round trip
+        re-serialises the PCB through ``schema.pcb``'s writer, which
+        normalises copper layer IDs to the modern KiCad numbering
+        (F.Cu=0, B.Cu=2, In1.Cu=4, In2.Cu=6) -- the generator's
+        original 0/1/2/31 numbering does not survive, and both forms
+        are valid KiCad 10.
+        """
+        for layer_name in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+            assert re.search(rf'\(\d+ "{re.escape(layer_name)}" signal\)', routed_pcb_text), (
+                f"Copper layer {layer_name} missing from the routed PCB stackup"
+            )
+
+    @pytest.mark.parametrize(
+        "net_name",
+        [
+            # USB 2.0 pair (1)
+            "USB2_D+",
+            "USB2_D-",
+            # USB 3.0 pairs (4: TX1, RX1, TX2, RX2 = 8 nets)
+            "USB3_TX1+",
+            "USB3_TX1-",
+            "USB3_RX1+",
+            "USB3_RX1-",
+            "USB3_TX2+",
+            "USB3_TX2-",
+            "USB3_RX2+",
+            "USB3_RX2-",
+            # PCIe pairs (2: TX, RX = 4 nets)
+            "PCIE_TX+",
+            "PCIE_TX-",
+            "PCIE_RX+",
+            "PCIE_RX-",
+            # MIPI lanes (2: CLK, D0 = 4 nets)
+            "MIPI_CLK+",
+            "MIPI_CLK-",
+            "MIPI_D0+",
+            "MIPI_D0-",
+        ],
+    )
+    def test_routed_pcb_declares_each_diffpair_net(
+        self, routed_pcb_text: str, net_name: str
+    ) -> None:
+        """AC#3: every declared differential-pair net appears in the PCB.
+
+        Whether a given pair was *routed* (i.e. has emitted segments) is
+        a separate question --- this test only asserts that all 18 paired
+        nets are *declared* in the net table, so the board's intent is
+        preserved on disk.
+        """
+        # KiCad net entries look like ``(net N "name")`` --- match the name
+        # specifically to avoid spurious matches inside pad declarations.
+        pattern = re.compile(rf'\(net \d+ "{re.escape(net_name)}"\)')
+        assert pattern.search(routed_pcb_text), f"Net '{net_name}' not found in routed PCB"
+
+    def test_routed_pcb_has_at_least_9_pair_pads(self, routed_pcb_text: str) -> None:
+        """AC#3: at least 9 diff pairs (= 18 paired nets) have pads in the PCB.
+
+        Each pair must have at least 2 pads (P + N).  We count pads by
+        their ``(net N "name")`` references inside pad declarations.
+        """
+        pair_nets = [
+            "USB2_D+",
+            "USB2_D-",
+            "USB3_TX1+",
+            "USB3_TX1-",
+            "USB3_RX1+",
+            "USB3_RX1-",
+            "USB3_TX2+",
+            "USB3_TX2-",
+            "USB3_RX2+",
+            "USB3_RX2-",
+            "PCIE_TX+",
+            "PCIE_TX-",
+            "PCIE_RX+",
+            "PCIE_RX-",
+            "MIPI_CLK+",
+            "MIPI_CLK-",
+            "MIPI_D0+",
+            "MIPI_D0-",
+        ]
+        for net_name in pair_nets:
+            # Match any ``(pad ... (net N "name"))`` block.  Pads may be
+            # serialized on a single line (KiCad source) or across
+            # multiple lines (after a SExp round-trip during zone
+            # generation, see #2835), so we use DOTALL + a non-greedy
+            # body to span newlines while still scoping each match to
+            # one pad declaration.
+            line_pattern = re.compile(
+                rf'\(pad\b.*?\(net \d+ "{re.escape(net_name)}"\)',
+                re.DOTALL,
+            )
+            matches = line_pattern.findall(routed_pcb_text)
+            assert len(matches) >= 1, (
+                f"Net {net_name} has no pads in routed PCB (expected at least 1)"
+            )
+
+
+# =============================================================================
+# AC#4: deterministic regeneration (modulo UUIDs)
+# =============================================================================
+
+
+class TestDeterministicGeneration:
+    """``generate_pcb.generate_pcb()`` is deterministic modulo UUIDs."""
+
+    def test_generate_pcb_emits_stable_non_uuid_content(self, generate_pcb_mod) -> None:
+        """AC#4: regenerating produces byte-identical output up to UUIDs.
+
+        Strip all UUIDs from two invocations and compare the remainder.
+        This is the deterministic-regeneration assertion the issue spec
+        requires.
+        """
+        first = generate_pcb_mod.generate_pcb()
+        second = generate_pcb_mod.generate_pcb()
+
+        # Strip UUIDs to compare structure.
+        uuid_pattern = re.compile(r'"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"')
+        first_stripped = uuid_pattern.sub('"UUID"', first)
+        second_stripped = uuid_pattern.sub('"UUID"', second)
+
+        assert first_stripped == second_stripped, (
+            "generate_pcb() is not deterministic modulo UUIDs --- "
+            "two invocations produced different non-UUID content"
+        )
+
+
+# =============================================================================
+# AC#6: each Phase 1-3 feature is engaged on at least one pair
+# =============================================================================
+
+
+class TestPhaseFeatureCoverage:
+    """The net-class map exercises every Phase 1-3 feature.
+
+    This is the keystone test for AC#6: it asserts that
+    ``build_net_class_map()`` (the single source of truth shared between
+    the autorouter and the test) declares each Phase 1-3 net-class
+    feature on at least one differential pair.
+
+    By construction, the test mirrors what the autorouter consumes ---
+    if this passes, the routing pipeline is mechanically guaranteed to
+    see the feature flags on the disk-committed routed PCB.
+    """
+
+    @pytest.fixture
+    def net_class_map(self, generate_design_mod):
+        return generate_design_mod.build_net_class_map()
+
+    def test_phase1c_intra_pair_clearance_engaged(self, net_class_map) -> None:
+        """Phase 1C: at least one pair sets ``intra_pair_clearance``."""
+        engaged = [
+            (net, nc)
+            for net, nc in net_class_map.items()
+            if "+" in net and nc.intra_pair_clearance is not None
+        ]
+        assert engaged, (
+            "Phase 1C: no diff-pair net class declares intra_pair_clearance. "
+            "Expected at least USB2/USB3/PCIe/MIPI to set this."
+        )
+        # Sanity-check the values are in the expected range (< 0.15mm = below the
+        # inter-pair clearance, but >= 0.05mm = JLCPCB minimum).
+        for net, nc in engaged:
+            assert 0.05 <= nc.intra_pair_clearance < 0.15, (
+                f"{net} intra_pair_clearance={nc.intra_pair_clearance} "
+                "out of expected HSDI range [0.05, 0.15) mm"
+            )
+
+    def test_phase2e_coupled_routing_engaged(self, net_class_map) -> None:
+        """Phase 2E: at least one pair sets ``coupled_routing=True``."""
+        engaged = [
+            (net, nc) for net, nc in net_class_map.items() if "+" in net and nc.coupled_routing
+        ]
+        assert engaged, (
+            "Phase 2E: no diff-pair net class has coupled_routing=True. "
+            "Expected USB2/USB3/PCIe/MIPI all opt in."
+        )
+
+    def test_phase2g_coupled_continuity_threshold_engaged(self, net_class_map) -> None:
+        """Phase 2G: at least one pair sets a per-class continuity threshold."""
+        engaged = [
+            (net, nc)
+            for net, nc in net_class_map.items()
+            if "+" in net and nc.coupled_continuity_threshold is not None
+        ]
+        assert engaged, "Phase 2G: no diff-pair net class declares coupled_continuity_threshold."
+        # Each threshold should be a valid fraction in (0.0, 1.0].
+        for net, nc in engaged:
+            t = nc.coupled_continuity_threshold
+            assert 0.0 < t <= 1.0, f"{net} coupled_continuity_threshold={t} out of (0, 1] range"
+
+    def test_phase3h_skew_budget_is_derived(self, net_class_map) -> None:
+        """Issue #7894: every pair declares ``pair_protocol``; none hand-sets a skew limit.
+
+        The derived ps budget is the pair's skew limit (ruling Q-d on #7883).
+        MIPI declares its real 1 Gb/s lane rate, so its budget is an error.
+        """
+        pairs = {net: nc for net, nc in net_class_map.items() if net[-1] in "+-"}
+        assert pairs
+        missing = sorted(net for net, nc in pairs.items() if not nc.pair_protocol)
+        assert missing == [], f"pair classes without pair_protocol: {missing}"
+        hand_set = sorted(net for net, nc in pairs.items() if nc.skew_tolerance_mm is not None)
+        assert hand_set == [], f"hand-set skew_tolerance_mm on: {hand_set}"
+        assert {nc.data_rate_gbps for net, nc in pairs.items() if net.startswith("MIPI")} == {1.0}
+
+    def test_phase3k_target_diff_impedance_engaged(self, net_class_map) -> None:
+        """Phase 3K: at least one pair sets ``target_diff_impedance``."""
+        engaged = [
+            (net, nc)
+            for net, nc in net_class_map.items()
+            if "+" in net and nc.target_diff_impedance is not None
+        ]
+        assert engaged, (
+            "Phase 3K: no diff-pair net class declares target_diff_impedance. "
+            "Expected USB2 (90), USB3 (90), PCIe (100), MIPI (100)."
+        )
+        # All declared values should be plausible HSDI targets (50..120 Ohm).
+        for net, nc in engaged:
+            assert 50.0 <= nc.target_diff_impedance <= 120.0, (
+                f"{net} target_diff_impedance={nc.target_diff_impedance} "
+                "out of HSDI range [50, 120] Ohm"
+            )
+
+    def test_phase3k_target_single_impedance_engaged(self, net_class_map) -> None:
+        """Phase 3K: at least one single-ended net sets ``target_single_impedance``.
+
+        This is the orthogonal axis to ``target_diff_impedance`` --- the
+        sideband nets (USB_CC1, USB_CC2, MIPI_RST) exercise it.
+        """
+        engaged = [
+            (net, nc) for net, nc in net_class_map.items() if nc.target_single_impedance is not None
+        ]
+        assert engaged, (
+            "Phase 3K: no net class declares target_single_impedance. "
+            "Expected the sideband class to set this for USB_CC1/CC2 + MIPI_RST."
+        )
+
+    def test_protocol_diversity_per_phase_3k(self, net_class_map) -> None:
+        """At least two distinct ``target_diff_impedance`` values are used.
+
+        AC#6 wants demonstrable diversity: USB at 90 Ohm, PCIe / MIPI at
+        100 Ohm.  A single value would technically pass the "at least
+        one" assertion above but would fail to actually exercise the
+        impedance-target field as a discriminating axis.
+        """
+        targets = {
+            nc.target_diff_impedance
+            for nc in net_class_map.values()
+            if nc.target_diff_impedance is not None
+        }
+        assert len(targets) >= 2, (
+            f"Phase 3K diversity: only {len(targets)} distinct diff-impedance "
+            f"target(s) declared ({targets}).  Expected >= 2 (e.g. USB=90, PCIe=100)."
+        )
+
+
+# =============================================================================
+# Net count sanity
+# =============================================================================
+
+
+class TestNetCountBudget:
+    """The board has the budgeted ~25 nets the curator approved."""
+
+    def test_net_count_within_budget(self, generate_pcb_mod) -> None:
+        """Nets dict has approximately 25 nets (24..27 acceptable range).
+
+        Per the curator review on #2658:
+            ``18 paired + GND + 4-5 power rails + 2-3 single-ended sideband -> ~24-26 nets``
+
+        This test pins the budget so accidental net-explosion is caught early.
+        """
+        nets = generate_pcb_mod.NETS
+        signal_nets = [n for n in nets if n != ""]
+        count = len(signal_nets)
+        assert 24 <= count <= 28, f"Net count {count} out of curator-approved budget [24, 28]"
+
+    def test_nine_diffpairs_declared(self, generate_pcb_mod) -> None:
+        """AC#3 lower bound: at least 9 diff pairs are declared.
+
+        Issue #2658 spec: 1 USB2 + 4 USB3 + 2 PCIe + 2 MIPI = 9 pairs.
+        """
+        diffpairs = generate_pcb_mod.DIFFPAIRS
+        assert len(diffpairs) >= 9, f"Expected at least 9 diff pairs declared, got {len(diffpairs)}"
+
+    def test_diffpair_partner_consistency(self, generate_pcb_mod) -> None:
+        """Each declared pair has its partner net in NETS.
+
+        ``DIFFPAIRS`` maps ``{P_name: N_name}``; both names must be
+        registered in NETS or routing breaks.
+        """
+        nets = generate_pcb_mod.NETS
+        diffpairs = generate_pcb_mod.DIFFPAIRS
+        for p_name, n_name in diffpairs.items():
+            assert p_name in nets, f"Diff pair positive net {p_name!r} not in NETS"
+            assert n_name in nets, f"Diff pair negative net {n_name!r} not in NETS"
+
+
+# =============================================================================
+# Manufacturability floor (Issue #3262)
+# =============================================================================
+
+
+class TestManufacturabilityFloor:
+    """Pin the committed routed PCB's signal-net completion floor.
+
+    These assertions are about the *artifact* committed in
+    ``boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb`` --
+    not the routing algorithm's worst-case output.  The CI gate
+    ``check_diffpair_coverage.py`` re-routes the board from scratch and
+    enforces a DRC error allowlist + rule-coverage assertion.  These
+    tests are the complementary "what we shipped" assertions: they catch
+    a PR that accidentally commits a worse routed PCB even if the
+    algorithm itself is fine.
+
+    The floor is pinned at the Issue #3262 baseline.  When the routing
+    algorithm improves and a tighter floor lands, raise these values in
+    the same PR that improves the route.
+    """
+
+    @pytest.fixture(scope="class")
+    def pcb_segments_by_net(self) -> dict[str, int]:
+        """Count segments per net name in the committed routed PCB.
+
+        Returns a dict of ``{net_name: segment_count}``.  A net with
+        ``>= 1`` segment is considered to have at least begun routing;
+        a net with ``0`` is unrouted.  This is a structural check (the
+        connectivity-based ``kct net-status`` check is what the fleet
+        report uses, but it requires a heavier loader); for a regression
+        floor, "has at least one segment" is a cheap, stable proxy.
+        """
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        assert routed.exists(), f"Routed PCB artifact missing: {routed}"
+        text = routed.read_text()
+
+        # Build a (net_number, net_name) map.
+        net_id_to_name: dict[int, str] = {}
+        for m in re.finditer(r'\(net (\d+) "([^"]+)"\)', text):
+            net_id_to_name[int(m.group(1))] = m.group(2)
+
+        # Count segments per net id.  KiCad segments are emitted as
+        # multi-line s-expressions:
+        #
+        #     (segment
+        #         (start X Y)
+        #         (end   X Y)
+        #         (width W)
+        #         (layer "F.Cu")
+        #         (net N)
+        #         (uuid "...")
+        #     )
+        #
+        # so we find each ``(segment`` opener and capture the
+        # subsequent ``(net N)`` on a later line.  DOTALL is needed
+        # because the body spans newlines; the non-greedy match keeps
+        # each capture scoped to one segment.
+        counts_by_id: dict[int, int] = {}
+        seg_pattern = re.compile(r"\(segment\b.*?\(net (\d+)\)", re.DOTALL)
+        for m in seg_pattern.finditer(text):
+            nid = int(m.group(1))
+            counts_by_id[nid] = counts_by_id.get(nid, 0) + 1
+        # Also count via-only nets (occur for pad-bottom escapes).
+        via_pattern = re.compile(r"\(via\b.*?\(net (\d+)\)", re.DOTALL)
+        for m in via_pattern.finditer(text):
+            nid = int(m.group(1))
+            counts_by_id[nid] = counts_by_id.get(nid, 0) + 1
+
+        return {
+            net_id_to_name[nid]: count
+            for nid, count in counts_by_id.items()
+            if nid in net_id_to_name
+        }
+
+    def test_at_least_14_signal_nets_have_segments(
+        self, pcb_segments_by_net: dict[str, int]
+    ) -> None:
+        """At least 14 of the 21 declared signal nets carry routing.
+
+        Per the #3262 baseline (committed PCB on main):
+        - 18 diff-pair nets (9 pairs)
+        - 3 single-ended sideband nets (USB_CC1, USB_CC2, MIPI_RST)
+        = 21 signal nets
+
+        Post-#3313 (impedance-driven sizing enabled), the committed
+        PCB routes 18-20 signal nets depending on seed-dependent
+        per-net timeout ordering -- which specific pair gets timed out
+        shifts because wider traces (0.375-0.475 mm impedance-resolved
+        widths vs the pre-#3313 0.20 mm uniform width) take slightly
+        longer per net.  The total-routed count is preserved or
+        improved.
+
+        Before #3313, 17 of 21 routed (USB3_RX1-, USB3_TX2-, USB3_RX2-,
+        MIPI_RST were the residual unrouted signal nets, primarily
+        BGA-49 escape gaps -- see #3270).  We pin the floor at 14 so a
+        regression that drops 3+ more nets gets flagged while leaving
+        headroom for minor seed-dependent variance.
+
+        Note: a refresh attempt under PR #3273 produced a route that
+        looked better on net-count but regressed impedance compliance
+        10x (315 errors vs main's 30) because trace widths drifted off
+        the 50 ohm target.  This floor catches *coverage* regressions;
+        impedance regressions are caught by the strict CI sidecar gate
+        (see #3151).
+        """
+        signal_nets = [
+            "USB2_D+",
+            "USB2_D-",
+            "USB3_TX1+",
+            "USB3_TX1-",
+            "USB3_RX1+",
+            "USB3_RX1-",
+            "USB3_TX2+",
+            "USB3_TX2-",
+            "USB3_RX2+",
+            "USB3_RX2-",
+            "PCIE_TX+",
+            "PCIE_TX-",
+            "PCIE_RX+",
+            "PCIE_RX-",
+            "MIPI_CLK+",
+            "MIPI_CLK-",
+            "MIPI_D0+",
+            "MIPI_D0-",
+            "USB_CC1",
+            "USB_CC2",
+            "MIPI_RST",
+        ]
+        routed = [n for n in signal_nets if pcb_segments_by_net.get(n, 0) >= 1]
+        assert len(routed) >= 14, (
+            f"Manufacturability floor: only {len(routed)}/21 signal nets "
+            f"have segments in the committed routed PCB.  Baseline is 17/21 "
+            f"(see #3262).  Unrouted nets: "
+            f"{[n for n in signal_nets if n not in routed]}"
+        )
+
+    def test_each_diffpair_has_at_least_one_side_routed(
+        self, pcb_segments_by_net: dict[str, int]
+    ) -> None:
+        """At most one declared diff pair has BOTH halves unrouted.
+
+        A pair with NEITHER half routed indicates the diff-pair
+        detection or coupled-routing path failed catastrophically.
+        With both halves unrouted, the diff-pair DRC rules cannot fire
+        on the pair at all -- a silent regression that would slip past
+        the rule-coverage gate.
+
+        Issue #3313: Post-impedance-driven-sizing the wider corridor
+        traces (0.375-0.475 mm) take longer to route than the
+        pre-#3313 0.20 mm uniform width.  The negotiated-routing
+        wall-clock timeout (240 s) occasionally consumes the budget
+        before one pair (typically USB3_TX1+/-) gets routed.  The
+        committed PCB chose a different pair-coverage trade-off (it
+        had USB3_TX1 routed but missed USB3_RX1-, USB3_TX2-, USB3_RX2-
+        instead).  Both have at most ONE pair fully-dropped, so we
+        pin the floor at "<= 1 dropped pair" rather than "0 dropped
+        pairs" to be robust against this seed-dependent swap while
+        still catching catastrophic regressions (2+ pairs lost).
+        """
+        pairs = [
+            ("USB2_D+", "USB2_D-"),
+            ("USB3_TX1+", "USB3_TX1-"),
+            ("USB3_RX1+", "USB3_RX1-"),
+            ("USB3_TX2+", "USB3_TX2-"),
+            ("USB3_RX2+", "USB3_RX2-"),
+            ("PCIE_TX+", "PCIE_TX-"),
+            ("PCIE_RX+", "PCIE_RX-"),
+            ("MIPI_CLK+", "MIPI_CLK-"),
+            ("MIPI_D0+", "MIPI_D0-"),
+        ]
+        dropped: list[tuple[str, str]] = []
+        for p, n in pairs:
+            if pcb_segments_by_net.get(p, 0) < 1 and pcb_segments_by_net.get(n, 0) < 1:
+                dropped.append((p, n))
+        max_dropped_pairs = 1
+        assert len(dropped) <= max_dropped_pairs, (
+            f"Manufacturability floor: {len(dropped)} diff pair(s) have "
+            f"NEITHER side routed in the committed PCB (max allowed: "
+            f"{max_dropped_pairs}): {dropped}.  This usually indicates a "
+            "regression in diff-pair detection or the coupled-routing "
+            "path."
+        )
+
+    def test_impedance_sidecar_trap_lifted(self) -> None:
+        """Tripwire test documenting the PR #3273 / PR #3315 impedance-sidecar lift.
+
+        **Trap (historical, lifted by Issue #3313)**: Before #3313 landed
+        the committed PCB's trace widths were uniformly ``0.20mm`` for
+        the impedance-targeted nets.  At the JLCPCB tier-1 4-layer
+        stackup the impedance rule computed 68 Ω against the 50 Ω
+        single-ended target (36 % deviation) -- 30 impedance violations
+        under ``kct check --net-class-map`` on the committed PCB, ~588
+        on a fresh re-route.
+
+        ``kct check`` WITHOUT ``--net-class-map`` did not load the
+        impedance solver, so the fresh route looked like an improvement
+        (3 errors vs 34) when measured naively -- PR #3273 fell into
+        this trap.  PR #3315 codified the tripwire (pinning the modal
+        width at 0.20 mm so a future refresh PR would have to explicitly
+        touch this assertion).
+
+        **Lift (Issue #3313)**: ``boards/06-diffpair-test/generate_design.py``
+        now sets ``APPLY_IMPEDANCE_DRIVEN_SIZING = True`` and the
+        refreshed PCB carries the impedance-resolved widths:
+
+        * ``Sideband`` (50 Ω SE -- USB_CC1/CC2, MIPI_RST) -> 0.375 mm
+        * ``PCIe`` / ``MIPI`` (100 Ω diff) -> 0.375 mm
+        * ``USB2`` / ``USB3`` (90 Ω diff) -> 0.475 mm
+        * other nets -> 0.20 mm (unchanged)
+
+        The sidecar measurement reports **0 impedance violations** on
+        the refreshed PCB.  Pad-adjacent escape segments taper to
+        ``min_trace_width = 0.10 mm`` via the existing neck-down
+        mechanic (escape.py:3303-3304 + rules.py:get_neck_down_width's
+        new ``base_width`` parameter from #3313) so the BGA-49 / QFN /
+        FFC escapes still fit despite the wider corridor traces.
+
+        This assertion pins the new modal width.  If a future PR
+        intentionally widens the route again (e.g. switches stackup so
+        the 50 Ω SE width changes), the PR must update this test AND
+        re-run ``scripts/ci/check_routed_drc.py`` WITH the sidecar to
+        prove the impedance-rule count stays at the floor.
+        """
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        assert routed.exists(), f"Routed PCB artifact missing: {routed}"
+        text = routed.read_text()
+
+        # Sample width values used by segments.  We do not assert a count
+        # because the absolute count varies with router output; we assert
+        # the modal value matches the impedance-resolved 50 Ω SE width.
+        seg_widths = re.findall(r"\(segment\b[^)]*?\(width ([0-9.]+)\)", text, re.DOTALL)
+        if not seg_widths:
+            # Pattern matched zero segments -- the regex needs to span
+            # newlines, fall back to a permissive search.
+            seg_widths = re.findall(r"\(segment\b.*?\(width ([0-9.]+)\)", text, re.DOTALL)
+
+        # Convert to floats and count.
+        from collections import Counter
+
+        width_counts = Counter(float(w) for w in seg_widths)
+        if not width_counts:
+            pytest.fail(
+                "Could not extract any segment widths from the committed PCB; "
+                "the routed PCB may have been replaced with a fundamentally "
+                "different structure.  Re-validate the impedance trap "
+                "before loosening this test."
+            )
+
+        # Issue #3413 phase 6 update: the diff classes are now sized on
+        # the TIGHTLY-COUPLED branch (width solved for the target Zdiff
+        # at the recipe's intra_pair_clearance):
+        #   USB3  90 Ω @ 0.100 mm gap -> 0.275 mm
+        #   USB2  90 Ω @ 0.075 mm gap -> 0.250 mm
+        #   PCIe/MIPI 100 Ω @ 0.100 mm gap -> 0.225 mm
+        #   Sideband 50 Ω SE (resolver) -> 0.375 mm (unchanged)
+        # Issue #7060: under the two-conductor field solve the recipe
+        # HOLDS these diff widths and re-solves the gap instead (USB2
+        # 0.105, USB3 0.125, PCIe/MIPI 0.135 mm), so the width canaries
+        # below are unchanged.
+        # The historical loosely-coupled 0.475 mm width must be GONE:
+        # combined with the recipe's tight gap it measured ~62 Ω (31%
+        # off target) and geometrically sealed J1's 0.7 mm channels
+        # (0.475 + 2x0.15 clearance = 0.775 mm) -- the root cause of the
+        # USB3_RX1- residual.  Modal width is NOT asserted anymore: the
+        # phase-4 plane stitching adds ~100 pad-to-via stub traces at
+        # 0.2 mm which dominate the modal count and carry no impedance
+        # meaning.
+        for canary, label in (
+            (0.275, "90 Ω tightly-coupled USB3"),
+            (0.250, "90 Ω tightly-coupled USB2"),
+            (0.225, "100 Ω tightly-coupled PCIe/MIPI"),
+            (0.375, "50 Ω SE sideband"),
+        ):
+            assert any(abs(w - canary) < 0.001 for w in width_counts), (
+                f"Committed PCB does not carry the {label} impedance width "
+                f"({canary} mm) on any segment.  This is the canary that "
+                f"the impedance pipeline (tightly-coupled re-solve, Issue "
+                f"#3413 phase 6) is wired through to the emitted geometry. "
+                f"Width distribution: {dict(width_counts)}"
+            )
+        assert not any(abs(w - 0.475) < 0.001 for w in width_counts), (
+            f"Committed PCB carries the loosely-coupled 0.475 mm width -- "
+            f"the Issue #3413 phase-6 tightly-coupled re-solve regressed "
+            f"(see boards/06-diffpair-test/generate_design.py).  Width "
+            f"distribution: {dict(width_counts)}"
+        )
+
+
+# =============================================================================
+# Issue #3338: strict-gate guard for the committed routed PCB
+# =============================================================================
+
+
+# Issue #4853: the ``strict_gate_result`` fixture below budgets 180 s for its
+# ``kct check`` subprocess, but CI runs ``pytest ... --timeout=60``, so
+# pytest-timeout reaped the fixture at 60 s and the stated budget was
+# unreachable.  A ``timeout`` marker takes precedence over the command-line
+# value, so this makes the two numbers agree at the fixture's stated 180 s.
+# The class scope means the whole subprocess cost is charged to the FIRST
+# test's setup; the tests themselves are pure assertions over the parsed JSON.
+@pytest.mark.timeout(180)
+class TestBoard06StrictGateGuard:
+    """The real assembled demo has a strict zero-error release gate.
+
+    Historical capability tests above use regression-fixture/. This gate
+    deliberately checks output/, the same path selected by manufacturing CI.
+    """
+
+    @pytest.fixture(scope="class")
+    def strict_gate_result(self) -> dict:
+        import json
+        import subprocess
+
+        routed = BOARD_DIR / "output" / "diffpair_test_routed.kicad_pcb"
+        sidecar = routed.parent / "net_class_map.json"
+        assert routed.is_file() and sidecar.is_file()
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(routed),
+                "--mfr",
+                "jlcpcb",
+                "--skip",
+                "mask_to_copper",
+                "--errors-only",
+                "--format",
+                "json",
+                "--net-class-map",
+                str(sidecar),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=REPO_ROOT,
+            timeout=180,
+        )
+        assert proc.returncode in (0, 2), proc.stderr
+        return json.loads(proc.stdout)
+
+    def test_strict_gate_blocking_count_pinned(self, strict_gate_result: dict) -> None:
+        from kicad_tools.validate.checker import DRCChecker
+
+        blocking = [
+            v
+            for v in strict_gate_result["violations"]
+            if v.get("severity") == "error"
+            and not DRCChecker.is_advisory_rule(v.get("rule_id", ""))
+        ]
+        assert blocking == [], blocking
+
+    def test_strict_gate_within_allowlist(self, strict_gate_result: dict) -> None:
+        import yaml
+
+        data = yaml.safe_load((REPO_ROOT / ".github/routed-drc-tolerance.yml").read_text())
+        key = "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb"
+        assert key not in (data.get("tolerances") or {}), (
+            "Released board must have no error allowance"
+        )
+        self.test_strict_gate_blocking_count_pinned(strict_gate_result)
+
+    def test_advisory_connectivity_pinned(self, strict_gate_result: dict) -> None:
+        assert not [
+            v for v in strict_gate_result["violations"] if v.get("rule_id") == "connectivity"
+        ]
+
+
+class TestPourCopperUnionAudit:
+    """Characterize the historical saved fixture without hiding real opens.
+
+    The regression-fixture is intentionally unchanged. Native saved-board
+    DRC and the canonical connectivity model report one missing connection
+    each on +3V3 and +1V8 (see TestDefaultNetStatusOnCommittedArtifact below,
+    #5362/#5382). Its modern solid-fill outlines do not electrically bond
+    merely by touching. The recipe audit must report the same islands,
+    while still rejecting missing fill geometry. Fresh generated boards
+    remain subject to the recipe's all-pours-connected and copper-LVS gates.
+    """
+
+    def test_committed_artifact_pour_audit_matches_saved_copper(self, generate_design_mod):
+        pytest.importorskip("shapely")
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        assert routed.exists(), f"Routed PCB artifact missing: {routed}"
+
+        pour_nets = list(generate_design_mod.POUR_NETS)
+        audit = generate_design_mod._audit_pour_nets(routed, pour_nets)
+        assert {net: info["zero_fill_zones"] for net, info in audit.items()} == dict.fromkeys(
+            pour_nets, 0
+        ), "A fill-enabled zone without saved copper is a dead pour"
+        assert {
+            net: len(info["pad_groups"]) - 1 for net, info in audit.items() if not info["connected"]
+        } == {"+3V3": 1, "+1V8": 1}
+        assert {
+            net: [frozenset(pad for pad, _ in group) for group in info["pad_groups"][1:]]
+            for net, info in audit.items()
+            if not info["connected"]
+        } == {
+            "+3V3": [frozenset({"U1.1", "U1.17", "J1.A8", "J1.B8"})],
+            "+1V8": [frozenset({"U4.6"})],
+        }
+        assert {
+            net: sum(len(group) for group in info["pad_groups"]) for net, info in audit.items()
+        } == {"GND": 122, "VBUS_USB": 5, "+3V3": 11, "+1V8": 3, "+1V2": 13}
+
+
+# =============================================================================
+# Issue #3913: post-quantize clearance re-validation gate (step 12d)
+# =============================================================================
+
+
+_GATE_HEADER_4L = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (4 "In1.Cu" signal)
+    (6 "In2.Cu" signal)
+    (2 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+"""
+
+
+def _gate_pcb(seg_x: float) -> str:
+    """4-layer board: net-1 through-via at (100,100), net-2 In1.Cu segment.
+
+    Edge-to-edge clearance is ``|seg_x - 100| - 0.4`` (via radius 0.3 +
+    trace half-width 0.1).  ``seg_x=100.3`` -> -0.1 mm (hard graze, a
+    clearance violation); ``seg_x=101`` -> +0.6 mm (clean).
+    """
+    return (
+        _GATE_HEADER_4L
+        + "  (via (at 100 100) (size 0.6) (drill 0.3)"
+        + ' (layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))\n'
+        + f"  (segment (start {seg_x} 99) (end {seg_x} 101) (width 0.2)"
+        + ' (layer "In1.Cu") (net 2 "SIG2") (uuid "seg-1"))\n'
+        + ")\n"
+    )
+
+
+class TestPostQuantizeClearanceGate:
+    """The step-12d gate flags dogleg-introduced grazes (issue #3913).
+
+    ``quantize.py``'s ``dogleg_points()`` docstring obliges callers that
+    mutate committed copper to re-verify clearances afterward.  Board 06's
+    pipeline previously returned from step 12 with no clearance gate,
+    certifying a segment-to-via short that ``kicad-cli`` flagged.  These
+    tests exercise the two helper functions the gate is built from.
+    """
+
+    def test_new_graze_vs_empty_baseline_fails(self, generate_design_mod, tmp_path: Path):
+        """A grazing segment absent from the baseline aborts the build."""
+        pcb_path = tmp_path / "grazed.kicad_pcb"
+        pcb_path.write_text(_gate_pcb(seg_x=100.3))  # -0.1 mm clearance
+        # Empty baseline => the graze is a NEW violation => gate returns False.
+        ok = generate_design_mod._check_post_quantize_clearances(pcb_path, set())
+        assert ok is False, (
+            "A segment grazing a foreign via barrel (-0.1 mm clearance) that "
+            "is absent from the pre-quantize baseline must fail the step-12d "
+            "gate (issue #3913)."
+        )
+
+    def test_baseline_violation_is_tolerated(self, generate_design_mod, tmp_path: Path):
+        """A violation already in the baseline does NOT re-trigger the gate.
+
+        The board ships a documented, allowlisted marginal-clearance
+        baseline; the gate must fire only on NEW violations the quantize
+        mutation introduces, not re-flag pre-existing copper.
+        """
+        pcb_path = tmp_path / "grazed.kicad_pcb"
+        pcb_path.write_text(_gate_pcb(seg_x=100.3))
+        baseline = generate_design_mod._clearance_signature(pcb_path)
+        assert baseline, "fixture must have at least one baseline violation"
+        # Same file => post == baseline => no NEW violation => gate passes.
+        ok = generate_design_mod._check_post_quantize_clearances(pcb_path, baseline)
+        assert ok is True, (
+            "A clearance violation present in the pre-quantize baseline must "
+            "be tolerated by the gate (only NEW grazes abort). "
+        )
+
+    def test_clean_board_passes(self, generate_design_mod, tmp_path: Path):
+        """No violations anywhere => gate passes with an empty baseline."""
+        pcb_path = tmp_path / "clean.kicad_pcb"
+        pcb_path.write_text(_gate_pcb(seg_x=101.0))  # +0.6 mm clearance
+        assert generate_design_mod._clearance_signature(pcb_path) == set()
+        ok = generate_design_mod._check_post_quantize_clearances(pcb_path, set())
+        assert ok is True
+
+
+# =============================================================================
+# Issue #5274: the step-12 treatment search must be able to REVISE a chord
+# =============================================================================
+
+
+def _corridor_via(x: float, y: float, uuid: str) -> str:
+    """A net-1 through via (size 0.6 / drill 0.3) at ``(x, y)``."""
+    return (
+        f"  (via (at {x} {y}) (size 0.6) (drill 0.3) "
+        f'(layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "{uuid}"))\n'
+    )
+
+
+def _offangle_chord(uuid: str = "chord-1", width: float = 0.2) -> str:
+    """An off-angle net-2 chord ``(100,100) -> (101,98)`` (18.4 deg off 45).
+
+    Emitted in KiCad's multi-line ``(segment ...)`` dialect because that is
+    the only form ``quantize.py``'s block regex (and therefore the whole
+    quantizer) recognises.
+
+    Its two dogleg variants leave the chord's corridor on opposite sides:
+
+    * diag-first (the default) bulges RIGHT, through ``(101, 99)``;
+    * axis-first (the flip) bulges LEFT, through ``(100, 99)``.
+    """
+    return (
+        "  (segment\n"
+        "    (start 100 100)\n"
+        "    (end 101 98)\n"
+        f"    (width {width})\n"
+        '    (layer "F.Cu")\n'
+        f'    (uuid "{uuid}")\n'
+        "    (net 2)\n"
+        "  )\n"
+    )
+
+
+def _corridor_pcb(vias: str, chord: str = "") -> str:
+    return _GATE_HEADER_4L + vias + (chord or _offangle_chord()) + ")\n"
+
+
+class TestQuantizeTreatmentIsRevisable:
+    """A partially-clearing flip must not lock out the skip that clears (#5274).
+
+    PR #5219's SMD via-in-pad enforcement pushed a board-06 via off-pad into
+    the axis-first corridor of the net USB2_D- chord ``(113,57.5) ->
+    (114,55.5)``.  That produced exactly the shape these fixtures reproduce:
+    the chord's default dogleg grazes several neighbours, its flip grazes
+    strictly fewer but not zero, and leaving it off-angle grazes none.
+
+    The original resolver committed a chord's treatment the first time it
+    strictly reduced the global graze count and then excluded that chord
+    from every later round, so it took the "fewer" and could never reach the
+    "none" -- and step 12d aborted the Board 06 / Diff-Pair CI jobs on a
+    residual its own vocabulary could express.
+    """
+
+    # Two vias in the diag-first (default) corridor, one in the axis-first
+    # (flip) corridor: default -> 3 new grazes, flip -> 1, skip -> 0.
+    TRAP_VIAS = (
+        _corridor_via(101.0, 99.5, "via-a")
+        + _corridor_via(101.4, 98.5, "via-b")
+        + _corridor_via(99.65, 99.5, "via-c")
+    )
+
+    def _resolved_residual(self, mod, pcb_path: Path):
+        """Resolve treatment, quantize, and return the NEW-graze set."""
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        baseline = mod._clearance_signature(pcb_path)
+        axis_first, skip = mod._resolve_quantize_treatment(pcb_path, baseline)
+        quantize_pcb_file(
+            pcb_path,
+            axis_first_uuids=frozenset(axis_first),
+            skip_uuids=frozenset(skip),
+        )
+        return baseline, axis_first, skip, mod._clearance_signature(pcb_path) - baseline
+
+    def test_fixture_reproduces_the_partial_flip_trap(self, generate_design_mod, tmp_path: Path):
+        """Guard the fixture itself: default > flip > skip == 0 new grazes."""
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        counts = {}
+        for name, kwargs in (
+            ("default", {}),
+            ("flip", {"axis_first_uuids": frozenset({"chord-1"})}),
+            ("skip", {"skip_uuids": frozenset({"chord-1"})}),
+        ):
+            pcb_path = tmp_path / f"{name}.kicad_pcb"
+            pcb_path.write_text(_corridor_pcb(self.TRAP_VIAS))
+            baseline = generate_design_mod._clearance_signature(pcb_path)
+            assert baseline == set(), "the unquantized chord must start clean"
+            quantize_pcb_file(pcb_path, **kwargs)
+            counts[name] = len(generate_design_mod._clearance_signature(pcb_path) - baseline)
+        assert counts["default"] > counts["flip"] > counts["skip"] == 0, (
+            "fixture must reproduce the #5274 trap (a flip that only PARTIALLY "
+            f"clears the chord): got {counts}"
+        )
+
+    def test_resolver_escalates_a_partial_flip_to_a_clearing_skip(
+        self, generate_design_mod, tmp_path: Path
+    ):
+        """The resolved treatment must leave ZERO new grazes."""
+        pcb_path = tmp_path / "trap.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(self.TRAP_VIAS))
+        _baseline, axis_first, skip, residual = self._resolved_residual(
+            generate_design_mod, pcb_path
+        )
+        assert residual == set(), (
+            "the step-12 treatment search settled for a partially-clearing "
+            f"flip: axis_first={axis_first} skip={skip} left {residual}. A "
+            "chord already carrying a treatment must be re-treatable (#5274)."
+        )
+        assert "chord-1" in skip and "chord-1" not in axis_first
+
+    def test_resolver_keeps_the_45_preserving_flip_when_it_fully_clears(
+        self, generate_design_mod, tmp_path: Path
+    ):
+        """Only the flip-side corridor is occupied -> flip, not skip.
+
+        The revision mechanism must not make the resolver trigger-happy: a
+        flip that clears everything is strictly better than a skip (it keeps
+        the chord on the 45 set, so step 13 has nothing left to mid-split).
+        """
+        pcb_path = tmp_path / "diag_only.kicad_pcb"
+        pcb_path.write_text(
+            _corridor_pcb(_corridor_via(101.0, 99.5, "via-a") + _corridor_via(101.4, 98.5, "via-b"))
+        )
+        _baseline, axis_first, skip, residual = self._resolved_residual(
+            generate_design_mod, pcb_path
+        )
+        assert residual == set()
+        assert "chord-1" in axis_first and "chord-1" not in skip
+
+    def test_clean_corridor_needs_no_treatment_at_all(self, generate_design_mod, tmp_path: Path):
+        """No graze anywhere -> the resolver must not invent a treatment."""
+        pcb_path = tmp_path / "clean.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(_corridor_via(105.0, 105.0, "via-far")))
+        _baseline, axis_first, skip, residual = self._resolved_residual(
+            generate_design_mod, pcb_path
+        )
+        assert residual == set()
+        assert not axis_first and not skip
+
+
+class TestOffAngleChordReroute:
+    """``_reroute_offangle_chord`` is the step-12 re-route escape (#5274).
+
+    The step-12d abort message has always prescribed a re-route of the
+    offending chord; this is the pass that can perform one.  It must be
+    gate-equivalent (a candidate is written only when it introduces NOTHING
+    beyond the baseline) and transactional (no partial write on refusal).
+    """
+
+    def test_reroute_lands_the_chord_on_the_45_set(self, generate_design_mod, tmp_path: Path):
+        from kicad_tools.router.quantize import segment_angle_census
+
+        pcb_path = tmp_path / "reroute.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(_corridor_via(105.0, 105.0, "via-far")))
+        baseline = generate_design_mod._clearance_signature(pcb_path)
+        assert generate_design_mod._reroute_offangle_chord(pcb_path, baseline, "chord-1") is True
+        _total, off_angle = segment_angle_census(pcb_path)
+        assert off_angle == [], "the re-routed chord must leave the off-angle population"
+        assert generate_design_mod._clearance_signature(pcb_path) - baseline == set()
+        # Endpoints are preserved bit-for-bit, so connectivity is unchanged.
+        text = pcb_path.read_text()
+        assert "(start 100.000 100.000)" in text and "(end 101.000 98.000)" in text
+
+    def test_reroute_refuses_without_mutating_when_every_candidate_grazes(
+        self, generate_design_mod, tmp_path: Path
+    ):
+        """A fully-walled corridor must be refused, not written anyway."""
+        # A dense picket of foreign drills along the whole chord: no
+        # mid-split fraction (and neither narrowed width) can clear them.
+        vias = "".join(
+            _corridor_via(round(100 + i * 0.05, 3), round(100 - i * 0.1, 3), f"wall-{i}")
+            for i in range(1, 20)
+        )
+        pcb_path = tmp_path / "walled.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(vias))
+        before = pcb_path.read_bytes()
+        baseline = generate_design_mod._clearance_signature(pcb_path)
+        assert generate_design_mod._reroute_offangle_chord(pcb_path, baseline, "chord-1") is False
+        assert pcb_path.read_bytes() == before, "refusal must not mutate the artifact"
+
+    def test_reroute_of_an_unknown_uuid_is_a_no_op(self, generate_design_mod, tmp_path: Path):
+        pcb_path = tmp_path / "absent.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(_corridor_via(105.0, 105.0, "via-far")))
+        before = pcb_path.read_bytes()
+        assert generate_design_mod._reroute_offangle_chord(pcb_path, set(), "not-a-uuid") is False
+        assert pcb_path.read_bytes() == before
+
+
+# =============================================================================
+# Issue #4557: default connectivity model = strict (real copper geometry)
+# =============================================================================
+
+
+class TestDefaultNetStatusOnCommittedArtifact:
+    """The DEFAULT ``NetStatusAnalyzer`` path matches native DRC on board 06.
+
+    Issue #4557: the legacy endpoint-proximity model (0.01mm radius against
+    pad *centers*) false-flagged 16 open pads on the committed routed
+    artifact (``GND`` 14, ``+1V2`` 1, ``VBUS_USB`` 1) because the router
+    lands trace endpoints inside pad copper but away from pad centers
+    (e.g. ``+1V2`` pad U2.C3 entered 0.125mm off-center).  Those three nets
+    are genuinely connected and the default (``strict=True``) model must
+    keep reporting them complete -- that is #4557's contract, pinned by
+    ``test_previously_false_open_nets_complete`` below.
+
+    The artifact is **not** open-free, though, and #5362 corrected the
+    expectation that it was.  It declares ``(version 20260206)`` and its
+    zones omit ``filled_areas_thickness``, which from KiCad's ``20250210``
+    boundary onward means the stored ``filled_polygon`` outlines are already
+    solid copper -- so two fill fragments of one zone are not bonded to each
+    other by adjacency.  Native ``kicad-cli pcb drc`` 10.0.5 on these exact
+    bytes (no ``--refill-zones``, hash unchanged) reports::
+
+        Found 2 unconnected items
+          Track [+3V3] on B.Cu, length 3.4400 mm
+            <-> Track [+3V3] on F.Cu, length 0.5500 mm
+          Track [+1V8] on F.Cu, length 0.6500 mm
+            <-> Track [+1V8] on F.Cu, length 0.6500 mm
+
+    one missing connection each on ``+3V3`` and ``+1V8``, which is exactly
+    what the default path reports below.
+
+    These tests pin the *default* code path -- no ``strict`` argument may
+    appear anywhere in them.
+    """
+
+    @pytest.fixture(scope="class")
+    def routed_pcb_path(self) -> Path:
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        if not routed.exists():
+            pytest.skip(f"Routed PCB artifact missing: {routed}")
+        return routed
+
+    @pytest.fixture(scope="class")
+    def default_result(self, routed_pcb_path: Path):
+        pytest.importorskip("shapely")
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        # Default construction -- the path every no-kwargs consumer hits.
+        return NetStatusAnalyzer(routed_pcb_path).analyze()
+
+    def test_default_path_matches_native_open_connections(self, default_result) -> None:
+        """The default path reproduces native DRC's two missing connections.
+
+        Asserted as *open connections* (``island_count - 1`` per net), which
+        is the quantity native reports as ``unconnected_items`` -- not the
+        pad count, which counts every pad outside a net's largest island and
+        so is not comparable to the native number.
+        """
+        incomplete = sorted(n.net_name for n in default_result.incomplete)
+        unrouted = [n.net_name for n in default_result.unrouted]
+        assert incomplete == ["+1V8", "+3V3"] and unrouted == [], (
+            f"Default (strict) connectivity must report exactly the two nets "
+            f"native kicad-cli reports unconnected_items on (+1V8, +3V3) and "
+            f"no unrouted nets; got incomplete={incomplete}, "
+            f"unrouted={unrouted}. A regression here means the default "
+            f"connectivity model diverged from real copper geometry again "
+            f"(issue #4557 / #5362)."
+        )
+        per_net = {
+            n.net_name: (n.island_count, n.open_connections) for n in default_result.incomplete
+        }
+        assert per_net == {"+1V8": (2, 1), "+3V3": (2, 1)}, (
+            f"each net must split into exactly 2 copper islands / 1 missing "
+            f"connection, matching native's one unconnected_items row per "
+            f"net; got {per_net}"
+        )
+        assert sum(n.open_connections for n in default_result.nets) == 2, (
+            "total missing connections must equal native's 2 unconnected_items"
+        )
+
+    @pytest.mark.parametrize("net_name", ["GND", "+1V2", "VBUS_USB"])
+    def test_previously_false_open_nets_complete(self, default_result, net_name: str) -> None:
+        """The three nets the legacy model false-flagged are complete."""
+        status = default_result.get_net(net_name)
+        assert status is not None, f"net {net_name!r} missing from analysis"
+        assert status.status == "complete", (
+            f"{net_name} must be complete under the default (strict) model "
+            f"(it is connected through zone pours; the legacy proximity model "
+            f"false-flagged it open, issue #4557); got {status.status} with "
+            f"{status.unconnected_count} unconnected pads."
+        )
+
+    def test_legacy_opt_out_reproduces_historical_false_opens(self, routed_pcb_path: Path) -> None:
+        """Characterization: ``strict=False`` still shows the legacy false opens.
+
+        Pins the explicit legacy opt-out's divergence so a silent behavior
+        change in either model is caught.  If the committed artifact is ever
+        regenerated with pad-center trace landings this count may change --
+        update the pin alongside the artifact refresh.
+
+        The GND count moved 14 -> 21 under Issue #5031: the fixture's GND
+        zone has two fill fragments that do not geometrically touch (they
+        are bridged only through a via/trace, which the legacy endpoint-
+        proximity chain-following does not resolve as reliably as strict
+        mode's real-copper-geometry check).  Before #5031 those fragments
+        were unconditionally unioned as one group purely on shared zone
+        identity, which incidentally papered over that legacy-mode gap.
+        Removing that blanket union (the whole point of #5031, since it
+        also hid genuinely disjoint islands) exposes the legacy heuristic's
+        pre-existing inaccuracy more fully here.
+
+        ``+1V8`` (1) and ``+3V3`` (4) joined the pin under Issue #5362:
+        this artifact is ``(version 20260206)`` with no
+        ``filled_areas_thickness`` token, so its fills are stored solid and
+        same-zone fragments are not bonded by adjacency.  Those two are
+        **not** legacy-model artefacts -- native ``kicad-cli pcb drc``
+        reports one unconnected connection on each of those nets, and the
+        *default* (strict) model reports exactly the same (see
+        ``test_default_path_matches_native_open_connections``).  The three
+        nets #4557 is about -- GND, +1V2, VBUS_USB -- remain false opens of
+        the legacy path only.
+        """
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        result = NetStatusAnalyzer(routed_pcb_path, strict=False).analyze()
+        opens_by_net = {n.net_name: n.unconnected_count for n in result.incomplete}
+        assert opens_by_net == {
+            "GND": 21,
+            "+1V2": 1,
+            "VBUS_USB": 1,
+            "+1V8": 1,
+            "+3V3": 4,
+        }, (
+            f"Legacy proximity model characterization drifted: expected the "
+            f"historical 23 false opens (GND 21, +1V2 1, VBUS_USB 1) plus the "
+            f"two real solid-fill opens native also reports (+1V8 1, +3V3 4); "
+            f"got {opens_by_net}."
+        )
+
+    def test_default_path_deterministic(self, routed_pcb_path: Path, default_result) -> None:
+        """Two default runs produce identical per-net verdicts and pad lists."""
+        pytest.importorskip("shapely")
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        second = NetStatusAnalyzer(routed_pcb_path).analyze()
+
+        def _snapshot(result):
+            return [
+                (
+                    n.net_name,
+                    n.status,
+                    tuple(p.full_name for p in n.unconnected_pads),
+                )
+                for n in result.nets
+            ]
+
+        assert _snapshot(default_result) == _snapshot(second), (
+            "Default (strict) net-status output must be deterministic across "
+            "runs on the same artifact (issue #4557 AC)."
+        )

@@ -1,0 +1,852 @@
+"""Impedance validation DRC rule.
+
+Uses the physics module to verify that trace widths match target
+impedance requirements based on net class specifications.
+
+Example::
+
+    from kicad_tools.validate.rules.impedance import ImpedanceRule
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.manufacturers import DesignRules
+
+    pcb = PCB.load("board.kicad_pcb")
+    design_rules = DesignRules.jlcpcb_4layer()
+
+    rule = ImpedanceRule()
+    results = rule.check(pcb, design_rules)
+
+    if results.errors:
+        for err in results.errors:
+            print(f"Impedance error: {err.message}")
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from ..violations import DRCResults, DRCViolation
+from .base import DRCRule
+from .diffpair_routing_continuity import DEFAULT_COUPLING_WINDOW_MM
+
+if TYPE_CHECKING:
+    from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.physics import CoupledLines, Stackup, TransmissionLine
+    from kicad_tools.router.diffpair import DifferentialPair
+    from kicad_tools.schema.pcb import PCB
+
+
+@dataclass
+class NetImpedanceSpec:
+    """Impedance specification for a net or net class.
+
+    Attributes:
+        net_pattern: Regex pattern to match net names
+        target_z0: Target characteristic impedance (single-ended)
+        target_zdiff: Target differential impedance (for diff pairs)
+        tolerance_percent: Allowed deviation from target (default 10%)
+        exclude_current_sense: Suppress polarity-only heuristics on confirmed sense nets.
+        advisory: Built-in name-pattern default rather than a declared target;
+            findings are capped at ``warning`` and the spec only applies on
+            boards that opt into controlled impedance (Issue #7293).
+    """
+
+    net_pattern: str
+    target_z0: float | None = None
+    target_zdiff: float | None = None
+    tolerance_percent: float = 10.0
+    exclude_current_sense: bool = False
+    advisory: bool = False
+
+    def matches(self, net_name: str, *, has_kelvin_root: bool = False) -> bool:
+        """Match a name, excluding sense nets only with resistor-pad evidence."""
+        if self.exclude_current_sense and has_kelvin_root:
+            from kicad_tools.router.kelvin import is_sense_net_name
+
+            if is_sense_net_name(net_name):
+                return False
+        return bool(re.match(self.net_pattern, net_name, re.IGNORECASE))
+
+
+@dataclass
+class ImpedanceCheckResult:
+    """Result of checking a single trace for impedance compliance.
+
+    Attributes:
+        net_name: Net name that was checked
+        layer: Layer the trace is on
+        width_mm: Actual trace width
+        calculated_z0: Calculated impedance for this width
+        target_z0: Target impedance
+        deviation_percent: Percentage deviation from target
+        compliant: Whether the trace meets the tolerance
+    """
+
+    net_name: str
+    layer: str
+    width_mm: float
+    calculated_z0: float
+    target_z0: float
+    deviation_percent: float
+    compliant: bool
+
+
+class ImpedanceRule(DRCRule):
+    """DRC rule for verifying trace impedance matches target specifications.
+
+    Uses the physics module to calculate actual trace impedance based on
+    the PCB stackup, then compares against net class specifications.
+
+    The rule checks:
+    1. Single-ended traces against Z0 targets
+    2. Differential pairs against Zdiff targets
+    3. Trace width consistency across layers
+
+    Attributes:
+        rule_id: "impedance"
+        name: "Impedance Control"
+        description: Rule description
+        specs: List of impedance specifications to check against
+    """
+
+    rule_id = "impedance"
+    name = "Impedance Control"
+    description = "Verify trace widths match target impedance requirements"
+
+    # Issue #3413 (artifact-refresh prerequisite): neck-down taper exemption.
+    #
+    # The autorouter's neck-down mechanic (``DesignRules.min_trace_width``
+    # + ``neck_down_distance`` / ``neck_down_threshold``) deliberately
+    # tapers a controlled-impedance trace below its impedance-resolved
+    # width for the last <= ``neck_down_distance`` (typically 1.0 mm)
+    # approaching a fine-pitch pad: the resolved width physically does
+    # not fit through the pad field (see Issue #3313).  Those short taper
+    # segments are *electrically insignificant* discontinuities -- a 1 mm
+    # mismatched section is far below the lambda/10 critical length for
+    # the 50-100 ohm digital-signalling targets this rule checks -- so
+    # flagging them is a false positive.  Measured: 3 spurious errors on
+    # board 06's MIPI_RST at J4/U4 (segments 0.32-0.78 mm long at
+    # 0.10-0.19 mm width; PR #3500 artifact-refresh notes).
+    #
+    # ``check()`` skips segments shorter than this threshold.  The trunk
+    # of any real controlled-impedance net is orders of magnitude longer
+    # than 1 mm, so a genuinely mis-sized net still fails on its long
+    # segments.
+    NECK_DOWN_EXEMPT_LENGTH_MM: float = 1.0
+
+    # Single-ended heuristic name patterns (Issue #3157).  These regexes
+    # encode the *assumption* "a net whose name ends in CLK / MCLK / ETH
+    # is a high-speed 50Ω single-ended signal".  That assumption is
+    # routinely wrong: slow I2S / DAC clocks on low-speed audio boards
+    # (``DAC_CLK``, ``BCLK``, ``MCLK``, ``I2S_LRCLK``) match it but need
+    # no controlled impedance.  We keep the patterns in the default spec
+    # list (so ``_find_matching_spec`` and the impedance-driven sizing
+    # bridge can still resolve a 50Ω target for a net that genuinely is
+    # high-speed) but ``check()`` no longer *evaluates* them as DRC
+    # errors unless the caller opts in (explicit ``specs=`` or a net
+    # declared controlled-impedance via ``net_class_map``).
+    _SINGLE_ENDED_HEURISTIC_PATTERNS: tuple[str, ...] = (
+        r".*CLK$",
+        r".*MCLK$",
+        r".*ETH.*",
+    )
+
+    @classmethod
+    def _is_single_ended_heuristic_spec(cls, spec: NetImpedanceSpec) -> bool:
+        """Return True if ``spec`` is one of the built-in SE heuristic specs.
+
+        Used by :meth:`check` to suppress the name-pattern single-ended
+        50Ω assumption (Issue #3157) unless the caller opted in.  Keys on
+        the exact regex string so user-supplied or net-class-derived specs
+        (which arrive via ``specs=`` and therefore bypass this gate
+        entirely) are never accidentally classified as heuristic.
+        """
+        return spec.net_pattern in cls._SINGLE_ENDED_HEURISTIC_PATTERNS
+
+    @classmethod
+    def _get_default_specs(cls) -> list[NetImpedanceSpec]:
+        """Return default impedance specifications for common signal types.
+
+        Ordering note (Issue #2970): the ``+/-`` and ``_P/_N`` diff-pair
+        suffix patterns are placed BEFORE the single-ended ``.*CLK$``
+        catch-all so that nets like ``MIPI_CLK+`` resolve to 100Ω
+        differential (their actual electrical role) rather than 50Ω
+        single-ended. The ``.*CLK$`` anchor (vs. the prior ``.*CLK.*``)
+        further ensures ``MIPI_CLK+`` does not match the single-ended
+        pattern at all -- the trailing ``+`` is required to live in
+        ``.*[+\\-]$``'s diff-pair pattern.
+
+        Issue #3157 note: the single-ended ``.*CLK$`` / ``.*MCLK$`` /
+        ``.*ETH.*`` patterns remain in this list so ``_find_matching_spec``
+        keeps resolving a 50Ω target for genuinely high-speed nets, but
+        :meth:`check` no longer evaluates them as DRC errors by default
+        (they were producing false positives on slow audio clock nets).
+        Single-ended impedance is now opt-in via ``net_class_map`` /
+        explicit ``specs=``.
+        """
+        return [
+            # USB differential pairs - 90Ω differential (covers + / - / P / M / D+/D-)
+            NetImpedanceSpec(r"USB.*D[PM\+\-]?", target_zdiff=90.0, advisory=True),
+            # LVDS/high-speed diff pairs - 100Ω differential.
+            NetImpedanceSpec(r".*LVDS.*", target_zdiff=100.0, advisory=True),
+            # Generic diff-pair suffix conventions - 100Ω differential.
+            # NOTE: these must come BEFORE the single-ended ``.*CLK$``
+            # spec so e.g. ``MIPI_CLK+`` resolves to diff, not 50Ω SE.
+            # A shunt's polarity labels do not imply controlled impedance.
+            # Explicit specs keep their default exclusion=False.
+            NetImpedanceSpec(
+                r".*_[PN]$", target_zdiff=100.0, exclude_current_sense=True, advisory=True
+            ),
+            NetImpedanceSpec(
+                r".*[+\-]$", target_zdiff=100.0, exclude_current_sense=True, advisory=True
+            ),
+            # High-speed single-ended - 50Ω.  ``.*CLK$`` (anchored) so
+            # ``MIPI_CLK+`` does NOT mis-match as single-ended.  These
+            # are SUPPRESSED in check() by default (Issue #3157).
+            NetImpedanceSpec(r".*CLK$", target_z0=50.0),
+            NetImpedanceSpec(r".*MCLK$", target_z0=50.0),
+            NetImpedanceSpec(r".*ETH.*", target_z0=50.0),
+        ]
+
+    def __init__(
+        self,
+        specs: list[NetImpedanceSpec] | None = None,
+        stackup: Stackup | None = None,
+        detected_pairs: list[DifferentialPair] | None = None,
+    ) -> None:
+        """Initialize the impedance rule.
+
+        Args:
+            specs: Impedance specifications to check. If not provided,
+                uses default specs for common signal types.  The defaults
+                are auto-applied via net-name regex (``.*CLK.*`` -> 50Ω,
+                ``USB.*D[PM]?`` -> 90Ω differential, etc.). On boards
+                without a controlled-impedance stackup, these defaults
+                are suppressed (see :meth:`check`) — this prevents the
+                rule from demanding ~2.8mm-wide SWCLK traces on a generic
+                hobbyist 2-layer board (Issue #2696). Pass an explicit
+                ``specs`` list to force the rule to evaluate them
+                regardless of stackup.
+            stackup: PCB stackup for impedance calculations. If not provided,
+                will try to extract from PCB during check.
+            detected_pairs: Optional list of detected differential pairs
+                (per ``router/diffpair.detect_diff_pairs``).  When provided,
+                nets that are part of a detected pair are checked against
+                ``target_zdiff`` using the coupled-lines model rather than
+                the single-ended microstrip / stripline model.  This is the
+                Phase 3K diff-pair-awareness extension (Issue #2650); when
+                ``None`` (the default), the rule falls back to its pre-Phase
+                3K single-ended-only behavior, which preserves backward
+                compatibility for standalone ``kct check`` invocations.
+        """
+        # Remember whether the caller passed explicit specs.  When True,
+        # the rule unconditionally evaluates them.  When False, the rule
+        # uses its built-in defaults but suppresses them on boards that
+        # don't opt into controlled-impedance routing (see check()).
+        self._using_default_specs = specs is None
+        self.specs = specs if specs is not None else self._get_default_specs()
+        self._stackup = stackup
+        self._tl: TransmissionLine | None = None
+        self._cl: CoupledLines | None = None
+        self._detected_pairs = detected_pairs or []
+        # Detected pairs that matched a differential spec but had no
+        # judged segment on either net; populated by :meth:`check`
+        # (Issue #7293).
+        self.unmeasured_pairs: list[tuple[str, str]] = []
+        # Map net name -> partner net name for fast diff-pair lookup.
+        self._partner_map: dict[str, str] = {}
+        for pair in self._detected_pairs:
+            p_name = pair.positive.net_name
+            n_name = pair.negative.net_name
+            self._partner_map[p_name] = n_name
+            self._partner_map[n_name] = p_name
+
+    def add_spec(self, spec: NetImpedanceSpec) -> None:
+        """Add an impedance specification to check."""
+        self.specs.append(spec)
+
+    def _init_physics(self, pcb: PCB) -> bool:
+        """Initialize physics module from PCB or provided stackup.
+
+        Args:
+            pcb: PCB to extract stackup from
+
+        Returns:
+            True if physics module is available, False otherwise
+        """
+        if self._tl is not None:
+            return True
+
+        try:
+            from kicad_tools.physics import CoupledLines, Stackup, TransmissionLine
+
+            if self._stackup is None:
+                self._stackup = Stackup.from_pcb(pcb)
+            self._tl = TransmissionLine(self._stackup)
+            self._cl = CoupledLines(self._stackup)
+            return True
+        except ImportError:
+            return False
+        except Exception:
+            return False
+
+    def _board_has_controlled_impedance(self) -> bool:
+        """Decide whether the current board "opts in" to controlled impedance.
+
+        A board opts in when either:
+
+        - The PCB file has an explicit ``(setup (stackup ...))`` block —
+          the designer took the trouble to declare dielectric thicknesses
+          and Er values, which is the standard signal of impedance-control
+          intent (``Stackup.has_explicit_data``); or
+        - The board has 4 or more copper layers — multi-layer boards have
+          reference planes close to signal layers, so 50Ω widths are
+          physically feasible at the geometric scales the autorouter
+          produces (~0.20 - 0.40 mm), and applying defaults does not
+          impose unrealistic constraints.
+
+        2-layer boards without an explicit stackup do NOT opt in.  On
+        such boards, 50Ω on a generic FR4 1.6mm core requires ~2.8 mm
+        wide traces — infeasible for typical 0.5 mm pad pitch — so
+        auto-applying the default ``.*CLK.*`` -> 50Ω rule produces
+        spurious DRC errors that the board can never satisfy (see
+        Issue #2696 for the board-04 SWCLK case).
+
+        Returns:
+            True when defaults should be applied; False when the board
+            looks like a generic hobbyist 2-layer and defaults should
+            be suppressed.
+        """
+        if self._stackup is None:
+            # Without a stackup we have no signal at all — preserve the
+            # original "apply defaults" behavior for backward compat.
+            return True
+        if getattr(self._stackup, "has_explicit_data", False):
+            return True
+        # No explicit stackup: opt in iff 4+ copper layers.
+        try:
+            return self._stackup.num_copper_layers >= 4
+        except AttributeError:
+            return True
+
+    def check(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+    ) -> DRCResults:
+        """Check PCB traces for impedance compliance.
+
+        Args:
+            pcb: The PCB to check
+            design_rules: Design rules from the manufacturer profile
+
+        Returns:
+            DRCResults containing any impedance violations
+        """
+        results = DRCResults(rules_checked=1)
+        self.unmeasured_pairs = []
+
+        # Initialize physics module
+        if not self._init_physics(pcb):
+            # Physics module not available - add warning and return
+            results.add(
+                DRCViolation(
+                    rule_id=self.rule_id,
+                    severity="warning",
+                    message="Impedance check skipped: physics module not available",
+                    location=None,
+                )
+            )
+            return results
+
+        # Gate auto-applied defaults on a controlled-impedance opt-in.
+        # When the caller did not pass explicit ``specs``, only apply
+        # built-in name-pattern defaults (``.*CLK.*`` -> 50Ω, etc.) if
+        # the board's stackup declares controlled-impedance intent.
+        # Otherwise return empty results — a hobbyist 2-layer board
+        # never claimed to be impedance-controlled and should not fail
+        # DRC over a target it didn't set (Issue #2696).
+        if self._using_default_specs and not self._board_has_controlled_impedance():
+            return results
+
+        # Collect all traces from PCB
+        trace_data = self._collect_traces(pcb)
+
+        current_sense_nets = self._collect_current_sense_nets(pcb)
+        # Advisory (built-in default) specs honour the same opt-in gate as
+        # the default spec list, even when appended to explicit specs.
+        advisory_allowed = self._board_has_controlled_impedance()
+        judged_diff_nets: set[str] = set()
+
+        # Check each net against matching specs
+        for net_name, traces in trace_data.items():
+            spec = self._find_matching_spec(
+                net_name, has_kelvin_root=net_name in current_sense_nets
+            )
+            if spec is None:
+                continue
+            if spec.advisory and not advisory_allowed:
+                continue
+
+            # Issue #2973 follow-up: skip differential-only specs (those
+            # carrying only ``target_zdiff``) when the rule has no
+            # diff-pair detection context (``self._detected_pairs`` is
+            # empty / ``self._partner_map`` does not contain this net).
+            # Without coupling information, the single-ended fallback in
+            # ``_check_trace_impedance`` evaluates the trace against a
+            # bogus ``target_z = spec.target_z0 or 50.0`` (i.e. 50Ω),
+            # which produces spurious "target is 50.0Ω" errors on routed
+            # diff-pair signals like ``PCIE_TX+``.  This is the standalone
+            # ``kct check`` code path (``DRCChecker.check_impedance``
+            # constructs ``ImpedanceRule()`` with no ``detected_pairs``)
+            # which board 06's CI gate exercises.  Skipping diff-only
+            # specs in this context mirrors the Phase 3K docstring's
+            # contract: "when ``None`` (the default), the rule falls
+            # back to its pre-Phase 3K single-ended-only behavior",
+            # which should NOT mean "evaluate a diff target against a
+            # single-ended fallback".  Diff-pair impedance is still
+            # validated when the router supplies ``detected_pairs``
+            # (the autorouter integration path), and single-ended
+            # specs (``target_z0`` set) continue to fire unconditionally
+            # -- this preserves the #2964 SWCLK use case and the
+            # impedance-driven sizing bridge in PR #2966.
+            if (
+                spec.target_z0 is None
+                and spec.target_zdiff is not None
+                and net_name not in self._partner_map
+            ):
+                continue
+
+            # Issue #3157: when running on the built-in default spec list
+            # (no explicit ``specs=`` from the caller), suppress the
+            # single-ended name-pattern heuristics (``.*CLK$`` /
+            # ``.*MCLK$`` / ``.*ETH.*`` -> 50Ω).  These assume "ends in
+            # CLK == high-speed 50Ω", which is wrong for slow I2S / DAC
+            # clock nets (``DAC_CLK``, ``BCLK``, ``MCLK``, ``I2S_LRCLK``)
+            # on low-speed audio boards -- they produced 32 false-positive
+            # impedance errors on chorus-test.  Single-ended impedance is
+            # now declarative / opt-in: a net only gets a single-ended
+            # impedance target when the caller passes an explicit ``specs=``
+            # list (e.g. derived from a net class's
+            # ``target_single_impedance`` via ``check_impedance()``'s
+            # ``net_class_map`` wiring), which sets ``_using_default_specs``
+            # to False and bypasses this gate.  The diff-pair path
+            # (``target_zdiff`` + ``detected_pairs``) is untouched.
+            if self._using_default_specs and self._is_single_ended_heuristic_spec(spec):
+                continue
+
+            for trace in traces:
+                # Neck-down taper exemption (Issue #3413): skip segments
+                # shorter than NECK_DOWN_EXEMPT_LENGTH_MM -- they are the
+                # router's deliberate fine-pitch taper product and are
+                # electrically insignificant (see class attribute docs).
+                if self._segment_length_mm(trace) < self.NECK_DOWN_EXEMPT_LENGTH_MM:
+                    continue
+                check_result = self._check_trace_impedance(trace, spec)
+                if check_result is None:
+                    continue
+                if spec.target_zdiff is not None and net_name in self._partner_map:
+                    judged_diff_nets.add(net_name)
+                if not check_result.compliant:
+                    results.add(self._create_violation(check_result, spec))
+
+        self.unmeasured_pairs = self._find_unmeasured_pairs(
+            judged_diff_nets, advisory_allowed, current_sense_nets
+        )
+        return results
+
+    def _find_unmeasured_pairs(
+        self,
+        judged_nets: set[str],
+        advisory_allowed: bool,
+        current_sense_nets: set[str],
+    ) -> list[tuple[str, str]]:
+        """Detected pairs matching a differential spec with nothing judged.
+
+        A pair whose partner is unrouted, or whose runs are all outside the
+        coupling window, was never measured, so the check says nothing
+        about it (Issue #7293).
+        """
+        unmeasured: list[tuple[str, str]] = []
+        for pair in self._detected_pairs:
+            p_name = pair.positive.net_name
+            n_name = pair.negative.net_name
+            if p_name in judged_nets or n_name in judged_nets:
+                continue
+            for name in (p_name, n_name):
+                spec = self._find_matching_spec(name, has_kelvin_root=name in current_sense_nets)
+                if spec is None or spec.target_zdiff is None:
+                    continue
+                if spec.advisory and not advisory_allowed:
+                    continue
+                unmeasured.append((p_name, n_name))
+                break
+        return unmeasured
+
+    @staticmethod
+    def _segment_length_mm(trace: dict) -> float:
+        """Geometric length of a collected trace segment in mm.
+
+        ``_collect_traces`` records ``start`` / ``end`` tuples for every
+        segment; absent coordinates (defensive: a caller-synthesised
+        trace dict) yield 0.0/0.0 endpoints and a 0.0 length, which the
+        neck-down exemption would skip -- so callers that synthesise
+        trace dicts for testing should include real endpoints (or set
+        them further apart than ``NECK_DOWN_EXEMPT_LENGTH_MM``).
+        """
+        import math
+
+        x1, y1 = trace.get("start", (0.0, 0.0))
+        x2, y2 = trace.get("end", (0.0, 0.0))
+        return math.hypot(x2 - x1, y2 - y1)
+
+    def _collect_traces(
+        self,
+        pcb: PCB,
+    ) -> dict[str, list[dict]]:
+        """Collect trace information from PCB.
+
+        Args:
+            pcb: PCB to extract traces from
+
+        Returns:
+            Dictionary mapping net names to list of trace dictionaries
+        """
+        trace_data: dict[str, list[dict]] = {}
+
+        # Extract traces from PCB segments
+        for segment in getattr(pcb, "segments", []):
+            net_name = getattr(segment, "net_name", None)
+            if not net_name:
+                continue
+
+            if net_name not in trace_data:
+                trace_data[net_name] = []
+
+            # ``schema.pcb.Segment`` carries ``start`` / ``end`` tuples
+            # (NOT ``x1``/``y1`` attributes -- the historical getattr
+            # defaults silently recorded (0, 0) for every endpoint,
+            # which would make the Issue #3413 neck-down length
+            # exemption skip everything).
+            trace_data[net_name].append(
+                {
+                    "net_name": net_name,
+                    "width_mm": getattr(segment, "width", 0.2),
+                    "layer": getattr(segment, "layer", "F.Cu"),
+                    "start": tuple(getattr(segment, "start", (0.0, 0.0))),
+                    "end": tuple(getattr(segment, "end", (0.0, 0.0))),
+                }
+            )
+
+        self._annotate_intra_pair_clearance(trace_data)
+
+        return trace_data
+
+    # Segments whose directions differ by more than this (sine of the
+    # angle between them) are not treated as a coupled run.
+    _PARALLEL_SIN_TOLERANCE = 0.1
+
+    def _annotate_intra_pair_clearance(self, trace_data: dict[str, list[dict]]) -> None:
+        """Record each pair-net segment's edge-to-edge gap to its partner.
+
+        The gap is the smallest perpendicular distance between this
+        segment's centreline and any parallel, longitudinally overlapping
+        same-layer segment of the partner net, minus both half-widths.  It
+        is stored as ``intra_pair_clearance_mm`` when it is within
+        :data:`DEFAULT_COUPLING_WINDOW_MM`; segments with no measurable
+        partner run, or one farther away, are left without the key so the check can
+        decline to judge them rather than assume a spacing (Issue #7079).
+        """
+        import math
+
+        for net_name, traces in trace_data.items():
+            partner_traces = trace_data.get(self._partner_map.get(net_name, ""), [])
+            if not partner_traces:
+                continue
+            for trace in traces:
+                x1, y1 = trace["start"]
+                x2, y2 = trace["end"]
+                length = math.hypot(x2 - x1, y2 - y1)
+                if length == 0.0:
+                    continue
+                ux, uy = (x2 - x1) / length, (y2 - y1) / length
+                # (lo, hi, gap) of each parallel partner piece in the window.
+                runs: list[tuple[float, float, float]] = []
+                min_width = trace["width_mm"]
+                for other in partner_traces:
+                    if other["layer"] != trace["layer"]:
+                        continue
+                    ox1, oy1 = other["start"]
+                    ox2, oy2 = other["end"]
+                    olen = math.hypot(ox2 - ox1, oy2 - oy1)
+                    if olen == 0.0:
+                        continue
+                    if (
+                        abs(ux * (oy2 - oy1) - uy * (ox2 - ox1)) / olen
+                        > self._PARALLEL_SIN_TOLERANCE
+                    ):
+                        continue
+                    # Longitudinal overlap of the partner on this segment.
+                    t1 = (ox1 - x1) * ux + (oy1 - y1) * uy
+                    t2 = (ox2 - x1) * ux + (oy2 - y1) * uy
+                    lo, hi = max(min(t1, t2), 0.0), min(max(t1, t2), length)
+                    if hi <= lo:
+                        continue
+                    mx, my = (ox1 + ox2) / 2, (oy1 + oy2) / 2
+                    centre = abs((mx - x1) * uy - (my - y1) * ux)
+                    gap = centre - trace["width_mm"] / 2 - other["width_mm"] / 2
+                    # Beyond the coupling window the run is a breakout, not a
+                    # coupled segment: leave it unjudged (Issue #7293).
+                    if 0 < gap <= DEFAULT_COUPLING_WINDOW_MM:
+                        runs.append((lo, hi, gap))
+                        min_width = max(min_width, other["width_mm"])
+                if not runs:
+                    continue
+                # Router output is fragmented into grid-step pieces, so the
+                # coupled length is the union of the partner pieces' intervals,
+                # not any single piece's overlap.  A union shorter than the
+                # trace is wide is a pad escape stub, not a coupled run; a long
+                # run with a fragmented partner stays judged (Issue #7575).
+                runs.sort()
+                coupled = 0.0
+                cur_lo, cur_hi = runs[0][0], runs[0][1]
+                for lo, hi, _ in runs[1:]:
+                    if lo > cur_hi:
+                        coupled += cur_hi - cur_lo
+                        cur_lo, cur_hi = lo, hi
+                    else:
+                        cur_hi = max(cur_hi, hi)
+                coupled += cur_hi - cur_lo
+                if coupled >= min_width:
+                    trace["intra_pair_clearance_mm"] = min(g for _, _, g in runs)
+
+    @staticmethod
+    def _collect_current_sense_nets(pcb: PCB) -> set[str]:
+        """Find sense nets with an actual resistor pad, using the router's gate.
+
+        Schema pads store their component identity on the parent footprint.
+        Adapt each candidate to a router pad; only root existence matters here,
+        so there is no need to select the most central pad of a full net.
+        Recompute per board check so reused rules cannot retain stale topology.
+        """
+        from kicad_tools.router.kelvin import find_kelvin_root, is_sense_net_name
+        from kicad_tools.router.primitives import Pad
+
+        names: set[str] = set()
+        for footprint in getattr(pcb, "footprints", []):
+            for pad in footprint.pads:
+                if pad.net_name in names or not is_sense_net_name(pad.net_name):
+                    continue
+                candidate = Pad(
+                    x=pad.position[0],
+                    y=pad.position[1],
+                    width=pad.size[0],
+                    height=pad.size[1],
+                    net=pad.net_number,
+                    net_name=pad.net_name,
+                    ref=footprint.reference,
+                    footprint_name=footprint.name,
+                )
+                if find_kelvin_root([candidate]) is not None:
+                    names.add(pad.net_name)
+        return names
+
+    def _find_matching_spec(
+        self, net_name: str, *, has_kelvin_root: bool = False
+    ) -> NetImpedanceSpec | None:
+        """Find the first matching impedance spec for a net name.
+
+        Args:
+            net_name: Net name to match
+            has_kelvin_root: Whether an actual resistor pad exists on this net
+
+        Returns:
+            Matching spec or None
+        """
+        for spec in self.specs:
+            if spec.matches(net_name, has_kelvin_root=has_kelvin_root):
+                return spec
+        return None
+
+    def _check_trace_impedance(
+        self,
+        trace: dict,
+        spec: NetImpedanceSpec,
+    ) -> ImpedanceCheckResult | None:
+        """Check a single trace against an impedance specification.
+
+        When the trace's net is part of a detected differential pair
+        (per ``self._detected_pairs``) AND the spec has a ``target_zdiff``
+        set, the rule uses the coupled-lines model and compares against
+        the differential target.  Otherwise it falls back to the
+        single-ended microstrip / stripline model.
+
+        Args:
+            trace: Trace dictionary with width_mm and layer
+            spec: Impedance specification to check against
+
+        Returns:
+            ImpedanceCheckResult with calculated values, or ``None`` when the
+            impedance cannot be determined (no measurable partner gap, or the
+            solver rejected the geometry) -- the trace is then not judged.
+        """
+        width_mm = trace["width_mm"]
+        layer = trace["layer"]
+        net_name = trace.get("net_name", "unknown")
+
+        is_diff_pair = (
+            net_name in self._partner_map and spec.target_zdiff is not None and self._cl is not None
+        )
+
+        if is_diff_pair:
+            # The gap is measured from the routed partner net by
+            # ``_annotate_intra_pair_clearance``; without one there is
+            # nothing to judge (Issue #7079).
+            gap_mm = trace.get("intra_pair_clearance_mm")
+            if gap_mm is None:
+                return None
+            try:
+                if self._stackup.is_outer_layer(layer):
+                    result = self._cl.edge_coupled_microstrip(width_mm, gap_mm, layer)
+                else:
+                    result = self._cl.edge_coupled_stripline(width_mm, gap_mm, layer)
+            except (ValueError, AttributeError):
+                return None
+            calculated_z = result.zdiff
+            target_z = spec.target_zdiff
+        else:
+            try:
+                if self._stackup.is_outer_layer(layer):
+                    result = self._tl.microstrip(width_mm, layer)
+                else:
+                    result = self._tl.stripline(width_mm, layer)
+            except (ValueError, AttributeError):
+                return None
+            calculated_z = result.z0
+            target_z = spec.target_z0 or 50.0
+
+        # Calculate deviation
+        deviation_percent = abs(calculated_z - target_z) / target_z * 100
+
+        # Check compliance
+        compliant = deviation_percent <= spec.tolerance_percent
+
+        return ImpedanceCheckResult(
+            net_name=net_name,
+            layer=layer,
+            width_mm=width_mm,
+            calculated_z0=calculated_z,
+            target_z0=target_z,
+            deviation_percent=deviation_percent,
+            compliant=compliant,
+        )
+
+    def _create_violation(
+        self,
+        result: ImpedanceCheckResult,
+        spec: NetImpedanceSpec,
+    ) -> DRCViolation:
+        """Create a DRC violation for an impedance mismatch.
+
+        Args:
+            result: Check result showing the mismatch
+            spec: Spec that was violated
+
+        Returns:
+            DRCViolation for the impedance mismatch
+        """
+        # The single-ended solver cannot size a differential target, so
+        # pair violations carry no width hint (Issue #7079).
+        is_diff_pair = (
+            result.net_name in self._partner_map
+            and spec.target_zdiff is not None
+            and self._cl is not None
+        )
+        try:
+            if is_diff_pair:
+                raise ValueError("no width hint for differential targets")
+            required_width = self._tl.width_for_impedance(
+                result.target_z0,
+                result.layer,
+            )
+            width_hint = f" (requires {required_width:.3f}mm)"
+        except (ValueError, AttributeError):
+            width_hint = ""
+
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity=(
+                "error" if result.deviation_percent > 20 and not spec.advisory else "warning"
+            ),
+            message=(
+                f"Trace impedance mismatch on {result.layer}: "
+                f"width {result.width_mm:.3f}mm gives {result.calculated_z0:.1f}Ω, "
+                f"target is {result.target_z0:.1f}Ω "
+                f"({result.deviation_percent:.1f}% deviation){width_hint}"
+            ),
+            layer=result.layer,
+            actual_value=result.calculated_z0,
+            required_value=result.target_z0,
+            items=(result.net_name,),
+        )
+
+    def get_required_width(
+        self,
+        target_z0: float,
+        layer: str,
+    ) -> float | None:
+        """Calculate required trace width for target impedance.
+
+        Convenience method for calculating trace width.
+
+        Args:
+            target_z0: Target impedance in ohms
+            layer: Layer to calculate for
+
+        Returns:
+            Width in mm, or None if physics not available
+        """
+        if self._tl is None:
+            return None
+
+        try:
+            return self._tl.width_for_impedance(target_z0, layer)
+        except (ValueError, AttributeError):
+            return None
+
+    def get_layer_impedances(
+        self,
+        width_mm: float,
+        layers: list[str] | None = None,
+    ) -> dict[str, float]:
+        """Calculate impedance for a given width across all layers.
+
+        Useful for understanding how impedance varies by layer for
+        a fixed trace width.
+
+        Args:
+            width_mm: Trace width in mm
+            layers: Layers to calculate for (defaults to common copper layers)
+
+        Returns:
+            Dictionary mapping layer names to impedance values
+        """
+        if self._tl is None:
+            return {}
+
+        if layers is None:
+            layers = ["F.Cu", "B.Cu", "In1.Cu", "In2.Cu"]
+
+        impedances: dict[str, float] = {}
+        for layer in layers:
+            try:
+                if self._stackup.is_outer_layer(layer):
+                    result = self._tl.microstrip(width_mm, layer)
+                else:
+                    result = self._tl.stripline(width_mm, layer)
+                impedances[layer] = result.z0
+            except (ValueError, AttributeError):
+                continue
+
+        return impedances

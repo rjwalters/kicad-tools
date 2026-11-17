@@ -1,0 +1,449 @@
+"""Process supervision for the route CLI's end-to-end wall-clock budget.
+
+The parent can terminate native calls that cannot service Python signals. A
+separate five-second grace permits a raw partial save; it never permits more
+routing or validation work. No timed-out output is promoted as canonical.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import math
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from kicad_tools.router.access_witness import ACCESS_WITNESS_SIDECAR_SUFFIX
+from kicad_tools.router.reporting import RouteAttemptResult
+
+DEADLINE_ENV = "KCT_ROUTE_INVOCATION_DEADLINE"
+CONTROL_ENV = "KCT_ROUTE_DEADLINE_CONTROL"
+SAVE_SECONDS = 5.0
+TIMEOUT_EXIT = 124
+
+
+class RouteDeadlineExpired(BaseException):
+    """Unwind routing even through fallback handlers catching Exception."""
+
+
+def _read_control(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {"stage": "startup"}
+    except (OSError, ValueError):
+        return {"stage": "startup"}
+
+
+def record_stage(stage: str, **fields) -> None:
+    """Publish only small control metadata; no geometry or router serialization."""
+    name = os.environ.get(CONTROL_ENV)
+    if not name:
+        return
+    path = Path(name)
+    state = _read_control(path)
+    state.update(fields, stage=stage)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state))
+    temporary.replace(path)
+
+
+def current_stage() -> str | None:
+    """Return the stage currently published to the control file.
+
+    ``None`` when no supervisor is attached (``CONTROL_ENV`` unset), which is
+    also the "nothing to restore" signal :func:`restore_stage` keys on.
+    """
+    name = os.environ.get(CONTROL_ENV)
+    if not name:
+        return None
+    stage = _read_control(Path(name)).get("stage")
+    return stage if isinstance(stage, str) else None
+
+
+@contextlib.contextmanager
+def restore_stage():
+    """Snapshot the published stage and restore it when the block exits.
+
+    Issue #5266.  Some work is a *transient excursion* out of the stage the
+    invocation is really in -- most importantly a best-so-far checkpoint
+    write, which routes through ``_write_routed_pcb`` and therefore stamps
+    ``serialization`` even though the router is mid-search.  Without a
+    restore, the very first checkpoint leaves ``serialization`` published for
+    the rest of the run and a later timeout is misattributed to it (the stale
+    label that made the #5164 Board 07 evidence unreadable).
+
+    The restore is deliberately *not* a substitute for the interrupt record:
+    :func:`_deadline_signal` stamps ``interrupted_stage`` at signal time and
+    :func:`_supervise` prefers that field, so a timeout that genuinely lands
+    *inside* the checkpoint write is still reported as ``serialization``.
+    """
+    previous = current_stage()
+    try:
+        yield previous
+    finally:
+        if previous is not None:
+            record_stage(previous)
+
+
+def _paths_alias(left: Path, right: Path) -> bool:
+    """Compare names, symlink destinations and existing hardlink identities."""
+    return left.resolve() == right.resolve() or (
+        left.exists() and right.exists() and left.samefile(right)
+    )
+
+
+def _output_identity(args) -> dict:
+    # Retain the requested stem: derived outputs use this name even if the
+    # canonical PCB is a symlink. Resolve only when comparing identities.
+    source = Path(args.pcb).absolute()
+    # Issue #6090: under --lint-gate, args.output names a staging file; the
+    # supervisor must still see (and quarantine) the requested output.
+    requested = getattr(args, "_lint_gate_output", None) or args.output
+    output = Path(requested).absolute() if requested else source.with_stem(source.stem + "_routed")
+    protected = set()
+    for board in (source, source.resolve()):
+        protected.add(board)
+        protected.update(
+            board.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru", ".kicad_prl")
+        )
+    partial = output.with_stem(output.stem + "_partial")
+    targets = {
+        output,
+        output.with_suffix(output.suffix + ".tmp"),
+        partial,
+        partial.with_suffix(partial.suffix + ".tmp"),
+        output.with_suffix(".timeout.json"),
+        *(output.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru", ".kicad_prl")),
+        output.with_name(output.stem + "_placement_diff.json"),
+        output.with_name(output.stem + "_placement_delta.json"),
+        # The escalation pipeline removes these stale output siblings.
+        *(
+            output.with_name(f"{output.stem}_{layers}layer{suffix}")
+            for layers in (4, 6)
+            for suffix in (".kicad_pcb", ".kicad_prl")
+        ),
+    }
+    for target in sorted(targets):
+        for original in sorted(protected):
+            if _paths_alias(target, original):
+                raise ValueError(
+                    "Timed routing requires a separate output path and derived artifacts: "
+                    f"{target} aliases protected input {original}"
+                )
+    return {"input": str(source), "output": str(output), "snapshot_saved": False}
+
+
+def configure_output(args) -> None:
+    if CONTROL_ENV in os.environ:
+        record_stage("setup", **_output_identity(args))
+
+
+def remaining_deadline() -> float | None:
+    value = os.environ.get(DEADLINE_ENV)
+    return float(value) if value is not None else None
+
+
+# Issue #6324: a ``RouteDeadlineExpired`` raised from a signal handler is
+# discarded by the interpreter when the signal lands inside a ``__del__``
+# ("Exception ignored in ...").  Recording that the deadline fired lets the
+# route flows' stage-boundary polls re-raise it, so a swallowed deadline still
+# ends in the partial-save handler instead of routing on until the SIGKILL.
+_deadline_state: dict[str, bool] = {"fired": False}
+
+
+def deadline_fired() -> bool:
+    """Whether the supervisor's deadline signal has been delivered."""
+    return _deadline_state["fired"]
+
+
+def reset_deadline_state() -> None:
+    """Forget a delivered deadline (end of an in-process invocation)."""
+    _deadline_state["fired"] = False
+
+
+def _deadline_signal(signum, frame) -> None:
+    # Record first: everything after this line may itself be interrupted.
+    _deadline_state["fired"] = True
+    stage = _read_control(Path(os.environ[CONTROL_ENV])).get("stage", "routing")
+    record_stage(
+        stage, interrupted_stage=stage, interrupted_function=frame.f_code.co_name if frame else None
+    )
+    raise RouteDeadlineExpired()
+
+
+def _signal_group(process: subprocess.Popen, *, kill: bool) -> None:
+    if os.name == "posix":
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL if kill else signal.SIGTERM)
+    elif kill:  # pragma: no cover - Windows process-tree termination
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    else:  # pragma: no cover - Windows console process group
+        process.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+
+
+def _fresh_partial(partial: Path, launched_at: float) -> bool:
+    """Whether ``partial`` is a complete board written after ``launched_at``."""
+    try:
+        if partial.with_suffix(partial.suffix + ".tmp").exists():
+            return False
+        return partial.stat().st_mtime >= launched_at
+    except OSError:
+        return False
+
+
+def _supervise(
+    command: list[str], budget: float, control: Path, *, save_seconds=SAVE_SECONDS
+) -> int:
+    """Run and reap one process group against a single monotonic deadline."""
+    deadline = time.monotonic() + budget
+    launched_at = time.time()
+    env = dict(os.environ, **{DEADLINE_ENV: str(deadline), CONTROL_ENV: str(control)})
+    process = subprocess.Popen(
+        command,
+        env=env,
+        start_new_session=os.name == "posix",
+        creationflags=0 if os.name == "posix" else subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+    )
+    timed_out = False
+    group_killed = False
+    try:
+        try:
+            result = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            timed_out = result == TIMEOUT_EXIT
+            if not timed_out:
+                return result
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _signal_group(process, kill=False)
+            try:
+                process.wait(timeout=save_seconds)
+            except subprocess.TimeoutExpired:
+                _signal_group(process, kill=True)
+                group_killed = True
+                process.wait()
+    except KeyboardInterrupt:
+        _signal_group(process, kill=False)
+        try:
+            process.wait(timeout=save_seconds)
+        except subprocess.TimeoutExpired:
+            _signal_group(process, kill=True)
+            group_killed = True
+            process.wait()
+        return 130
+    finally:
+        # Also terminate descendants left behind by a worker that exited first.
+        # Do not signal the same numeric group again after hard-kill + reap:
+        # it no longer identifies a live worker group and may be recycled.
+        if not group_killed:
+            _signal_group(process, kill=True)
+        process.wait()
+    if timed_out:
+        state = _read_control(control)
+        state.setdefault("snapshot_saved", False)
+        state["stage"] = state.get("interrupted_stage", state.get("stage", "startup"))
+        state.update(
+            status="partial",
+            reason="timeout",
+            timeout_seconds=budget,
+            serialization_budget_seconds=save_seconds,
+            manufacturing_ready=False,
+        )
+        output_name = state.get("output")
+        if output_name:
+            output = Path(output_name)
+            # Issue #6308: the copper-bearing board is ``snapshot`` (the raw
+            # ``<stem>_partial``); ``unverified_output`` is only the quarantined
+            # canonical output and may hold no copper.  A worker hard-killed
+            # after writing the partial but before recording it must still be
+            # named, so recover it here -- only if written by THIS invocation
+            # and not a torn ``.tmp`` leftover.
+            partial = output.with_stem(output.stem + "_partial")
+            if not state.get("snapshot_saved") and _fresh_partial(partial, launched_at):
+                state["snapshot"] = str(partial)
+                state["snapshot_saved"] = True
+            # Preserve even a pre-existing successful result, but remove its
+            # canonical name so it cannot masquerade as this invocation's result.
+            if output.exists():
+                fd, name = tempfile.mkstemp(
+                    prefix=output.stem + "_timeout_unverified_",
+                    suffix=output.suffix,
+                    dir=output.parent,
+                )
+                os.close(fd)
+                output.replace(name)
+                state["unverified_output"] = name
+                # Issue #8258: the worker prints the checkpoint as the user
+                # typed it (possibly relative); ``output`` is absolute.
+                checkpoint = state.get("checkpoint")
+                if isinstance(checkpoint, str) and checkpoint:
+                    if Path(checkpoint).resolve() == output.resolve():
+                        state["checkpoint"] = name
+                # Keep authored context beside the quarantined checkpoint. It
+                # remains unverified; these copies do not authorize promotion.
+                sidecars = []
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    source = output.with_suffix(suffix)
+                    if source.exists():
+                        destination = Path(name).with_suffix(suffix)
+                        try:
+                            shutil.copyfile(source, destination)
+                            sidecars.append(str(destination))
+                        except OSError as exc:
+                            state.setdefault("quarantine_context_errors", []).append(str(exc))
+                # Issue #5639: the access-witness sidecar is stem-keyed, so it
+                # names the board it describes.  MOVE it with the quarantined
+                # checkpoint -- left behind under the canonical stem it would
+                # describe an output that no longer exists, and a reader
+                # discovering it from the quarantined board would find nothing.
+                witness_source = output.parent / f"{output.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+                if witness_source.exists():
+                    quarantined = Path(name)
+                    witness_target = (
+                        quarantined.parent / f"{quarantined.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+                    )
+                    try:
+                        os.replace(witness_source, witness_target)
+                        sidecars.append(str(witness_target))
+                        if state.get("access_witness") == str(witness_source):
+                            state["access_witness"] = str(witness_target)
+                    except OSError as exc:
+                        state.setdefault("quarantine_context_errors", []).append(str(exc))
+                state["unverified_sidecars"] = sidecars
+            report = output.with_suffix(".timeout.json")
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(json.dumps(state, indent=2) + "\n")
+            print(
+                f"PARTIAL: routing deadline exceeded during {state.get('stage')}; report: {report}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "PARTIAL: routing deadline exceeded during startup; no snapshot available",
+                file=sys.stderr,
+            )
+        return TIMEOUT_EXIT
+    raise AssertionError("unreachable")
+
+
+def run(argv: list[str] | None = None) -> int:
+    """Preserve the public CLI integer exit contract."""
+    return run_attempt(argv).exit_code
+
+
+def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
+    """Return metadata from this invocation, including a supervised worker."""
+    from .route_cmd import _in_process_main, _route_parser
+    from .route_placement import capture_disposition, disposition_from_control, finish
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument("--timeout", type=float)
+    timeout_args, _ = probe.parse_known_args(argv)
+    budget = timeout_args.timeout
+    if budget is None or budget <= 0 or "--help" in argv or "-h" in argv:
+        with capture_disposition() as values:
+            code = _in_process_main(argv)
+            return RouteAttemptResult(code, values[-1] if values else None)
+    if not math.isfinite(budget):
+        print("Error: --timeout must be finite", file=sys.stderr)
+        return RouteAttemptResult(1)
+    parsed = _route_parser().parse_args(argv)
+    try:
+        state = _output_identity(parsed)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return RouteAttemptResult(1)
+    with tempfile.TemporaryDirectory(prefix="kct-route-deadline-") as directory:
+        control = Path(directory) / "control.json"
+        # Bind output before launching: even startup timeout cannot leave a
+        # previous canonical result masquerading as this invocation's output.
+        control.write_text(json.dumps(dict(state, stage="startup")))
+        # Capture report identities before the worker can replace stale files.
+        for option, attribute in (
+            ("complete_report", "_placement_report_before"),
+            ("export_failed_nets", "_placement_failed_before"),
+        ):
+            value = getattr(parsed, option, None)
+            path = Path(value) if value else None
+            setattr(parsed, attribute, path.stat() if path and path.exists() else None)
+        code = _supervise([sys.executable, "-m", __name__, *argv], budget, control)
+        disposition = disposition_from_control(_read_control(control))
+        if code == TIMEOUT_EXIT and disposition is not None:
+            parsed._placement_disposition = disposition
+            parsed._placement_output = Path(state["output"])
+            output = parsed._placement_output
+            # Even a checkpoint written before unwinding is unverified.
+            parsed._placement_output_before = output.stat() if output.exists() else None
+            finish(parsed, code)
+        if code == TIMEOUT_EXIT:
+            # After ``finish()``: it may write the ``--export-failed-nets``
+            # target itself, and the note must describe the final state.
+            _note_skipped_failed_export(parsed, state)
+        return RouteAttemptResult(code, disposition)
+
+
+def _note_skipped_failed_export(parsed, state: dict) -> None:
+    """Issue #8258: say so when ``--export-failed-nets`` wrote nothing on timeout."""
+    target = getattr(parsed, "export_failed_nets", None)
+    if not target:
+        return
+    path = Path(target)
+    if path.exists() and path.stat() != getattr(parsed, "_placement_failed_before", None):
+        return
+    report = Path(state["output"]).with_suffix(".timeout.json")
+    if not report.exists():
+        return
+    try:
+        data = json.loads(report.read_text())
+        output = Path(state["output"])
+        sidecar = output.with_stem(output.stem + "_partial").with_suffix(".search_failures.json")
+        note = {
+            "requested": str(path.absolute()),
+            "written": False,
+            "reason": "routing deadline exceeded; the failed-net set of an "
+            "unverified partial result is not exported",
+        }
+        # timeout.json never names a path that does not exist: the deadline can
+        # land before the search-failures sidecar is written.
+        if sidecar.exists():
+            note["search_failures"] = str(sidecar)
+        else:
+            note["search_failures"] = None
+            note["search_failures_reason"] = (
+                "no search-failures sidecar was written before the deadline"
+            )
+        data["export_failed_nets"] = note
+        report.write_text(json.dumps(data, indent=2) + "\n")
+    except (OSError, ValueError):
+        pass
+
+
+def _worker() -> int:
+    from .route_cmd import _in_process_main
+
+    signal.signal(signal.SIGTERM, _deadline_signal)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _deadline_signal)
+    try:
+        return _in_process_main(sys.argv[1:])
+    except RouteDeadlineExpired:
+        return TIMEOUT_EXIT
+
+
+if __name__ == "__main__":
+    # Use the canonical module identity so the exception type is shared.
+    from kicad_tools.cli.route_deadline import _worker as worker
+
+    sys.exit(worker())

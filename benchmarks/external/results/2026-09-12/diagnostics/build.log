@@ -1,0 +1,9 @@
+Building C++ router backend...
+
+C++ backend installed successfully!
+
+  Extension: router_cpp.cpython-312-x86_64-linux-gnu.so
+  Placement extension: placement_cpp.cpython-312-x86_64-linux-gnu.so
+  DRC extension: drc_cpp.cpython-312-x86_64-linux-gnu.so
+
+Run `kct route --backend cpp` to use the C++ backend.

@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+# test-loom-status.sh — Tests for loom-status.sh's machine-daemon integration
+# and expanded work-queue label counting (Issue #4793).
+#
+# Before #4793, `loom status` inspected ONLY the local tmux agent pool: a repo
+# actively managed by a separate machine-level `loom-daemon` fleet (zero local
+# tmux sessions, autonomous work-finder / role-runner dispatching sweeps)
+# still printed a bare "No agents running" — misleadingly implying nothing
+# would pick up open issues. This suite drives loom-status.sh entirely from a
+# scratch workspace + a stubbed `loom-daemon` binary (pinned via
+# LOOM_DAEMON_BIN) and a stubbed `gh` (pinned via PATH) — no real daemon, no
+# real forge, no real tmux agent pool.
+#
+# Style matches the other CLI test suites (test-blame-issue.sh,
+# test-loom-daemon-watchdog.sh) — plain bash, hand-rolled assertions. Bats is
+# NOT used in this repository.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATUS_SCRIPT="$(cd "$SCRIPT_DIR/../cli" && pwd)/loom-status.sh"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+TESTS_RUN=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "${GREEN}✓${NC} $1"; }
+fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "${RED}✗${NC} $1"; }
+
+assert_eq() { # <expected> <actual> <msg>
+    if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$1', got '$2')"; fi
+}
+
+assert_contains() { # <needle> <haystack> <msg>
+    if [[ "$2" == *"$1"* ]]; then pass "$3"; else fail "$3 (expected to find '$1')"; fi
+}
+
+assert_not_contains() { # <needle> <haystack> <msg>
+    if [[ "$2" != *"$1"* ]]; then pass "$3"; else fail "$3 (did NOT expect to find '$1')"; fi
+}
+
+if [[ ! -x "$STATUS_SCRIPT" ]]; then
+    echo -e "${RED}FATAL${NC}: $STATUS_SCRIPT not found or not executable" >&2
+    exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "jq not found on PATH -- skipping (loom-status.sh hard-requires jq for these code paths)"
+    exit 0
+fi
+
+# ---- Scratch workspace -------------------------------------------------------
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/test-loom-status.XXXXXX")"
+# shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
+cleanup() { rm -rf "$WORKDIR" 2>/dev/null || true; }
+trap cleanup EXIT
+
+REPO="$WORKDIR/repo"
+mkdir -p "$REPO/.loom"
+cat > "$REPO/.loom/config.json" <<'EOF'
+{"terminals": []}
+EOF
+
+# Canonical (symlink-resolved) repo root -- loom-status.sh matches against
+# THIS form (mirrors its own REPO_ROOT_CANON computation via `pwd -P`), so
+# every stub below must embed this exact path, not the raw $REPO.
+REPO_CANON="$(cd "$REPO" && pwd -P)"
+
+FAKE_BIN="$WORKDIR/bin"
+mkdir -p "$FAKE_BIN"
+
+# ---- Fake `gh` stub -----------------------------------------------------------
+# Answers `gh issue list --label <label> --state open --json number --jq length`
+# and the `pr` equivalent with a fixed count per label, driven by the
+# GH_LABEL_COUNTS env var (space-separated "label=count" pairs). With
+# `--jq '.[].number'` (the Parked line's per-name listing, #11861) it prints
+# the item numbers instead: GH_LABEL_NUMBERS ("label=1,2,3" pairs) when set
+# for the label, else 1..count.
+cat > "$FAKE_BIN/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+kind="$1"; shift
+label=""; jqx=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --label) label="$2"; shift 2 ;;
+        --jq) jqx="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [[ "$jqx" == '.[].number' ]]; then
+    for pair in $GH_LABEL_NUMBERS; do
+        [[ "${pair%%=*}" == "$label" ]] && { tr ',' '\n' <<<"${pair#*=}"; exit 0; }
+    done
+fi
+for pair in $GH_LABEL_COUNTS; do
+    key="${pair%%=*}"
+    val="${pair#*=}"
+    if [[ "$key" == "$label" ]]; then
+        if [[ "$jqx" == '.[].number' ]]; then seq 1 "$val"; else echo "$val"; fi
+        exit 0
+    fi
+done
+[[ "$jqx" == '.[].number' ]] || echo "0"
+FAKEGH
+chmod +x "$FAKE_BIN/gh"
+
+# ---- Fake `loom-daemon` stub factory -------------------------------------------
+# Writes a stub binary at $WORKDIR/daemon-<mode>/loom-daemon-mock that answers
+# `status --json` per the named scenario. Echoes the stub's path.
+#
+# Named `loom-daemon-mock`, NOT `loom-daemon` (#5548): this stub is invoked
+# solely via its full path (pinned into LOOM_DAEMON_BIN below, never looked
+# up by name on PATH), so the name has no bearing on what loom-status.sh
+# resolves. A fixture literally named `loom-daemon` that leaked past this
+# suite's cleanup would be indistinguishable, to a production `pgrep -f
+# loom-daemon`-style liveness check, from the real daemon -- exactly the
+# failure mode #5548 describes. A distinct name means a leak can never forge
+# that check.
+make_daemon_stub() { # <mode>
+    local mode="$1"
+    local dir="$WORKDIR/daemon-$mode"
+    mkdir -p "$dir"
+    case "$mode" in
+        managed)
+            cat > "$dir/loom-daemon-mock" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "status" && "\$2" == "--json" ]]; then
+  cat <<JSON
+{"per_repo":[{"root":"$REPO_CANON","priority":100,"in_flight_count":3,"health_gate_halted":false}],
+ "role_tick_records":[{"root":"$REPO_CANON","role":"champion","at":"2026-07-31T00:00:00Z","ok":true}],
+ "work_finder_enabled":true}
+JSON
+  exit 0
+fi
+exit 1
+EOF
+            ;;
+        managed-halted)
+            cat > "$dir/loom-daemon-mock" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "status" && "\$2" == "--json" ]]; then
+  cat <<JSON
+{"per_repo":[{"root":"$REPO_CANON","priority":100,"in_flight_count":0,"health_gate_halted":true}],
+ "role_tick_records":[],"work_finder_enabled":true}
+JSON
+  exit 0
+fi
+exit 1
+EOF
+            ;;
+        unmanaged)
+            cat > "$dir/loom-daemon-mock" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "status" && "$2" == "--json" ]]; then
+  echo '{"per_repo":[{"root":"/some/other/repo","priority":100,"in_flight_count":0,"health_gate_halted":false}],"role_tick_records":[],"work_finder_enabled":true}'
+  exit 0
+fi
+exit 1
+EOF
+            ;;
+        unreachable)
+            cat > "$dir/loom-daemon-mock" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "status" && "$2" == "--json" ]]; then
+  echo '{"error":"could not reach loom-daemon at /tmp/x.sock: connect failed","install_state":{"state":"ExpectedButDead","started_at":"2026-07-30T00:00:00Z","pid":null,"liveness_detail":"no live pid file"}}'
+  exit 74
+fi
+exit 1
+EOF
+            ;;
+        *) echo "unknown stub mode $mode" >&2; return 1 ;;
+    esac
+    chmod +x "$dir/loom-daemon-mock"
+    echo "$dir/loom-daemon-mock"
+}
+
+# Run loom-status.sh from $REPO with the given extra env assignments (as
+# "KEY=VAL" args) and GH_LABEL_COUNTS pinned to a benign default (all zero).
+# Sets globals OUT (combined stdout) and RC.
+run_status() {
+    OUT="$( (cd "$REPO" && env PATH="$FAKE_BIN:$PATH" GH_LABEL_COUNTS="${GH_LABEL_COUNTS:-}" "$@" bash "$STATUS_SCRIPT") 2>&1 )"
+    RC=$?
+}
+
+run_status_json() {
+    OUT="$( (cd "$REPO" && env PATH="$FAKE_BIN:$PATH" GH_LABEL_COUNTS="${GH_LABEL_COUNTS:-}" "$@" bash "$STATUS_SCRIPT" --json) 2>&1 )"
+    RC=$?
+}
+
+TMUX_MISSING=false
+command -v tmux >/dev/null 2>&1 || TMUX_MISSING=true
+
+# ===================================================================
+# 1. Script sanity: executable, --help.
+# ===================================================================
+echo "Test 1: script exists and is executable"
+if [[ -x "$STATUS_SCRIPT" ]]; then pass "loom-status.sh is executable"; else fail "loom-status.sh is not executable"; fi
+
+echo "Test 2: --help exits 0 and documents the Machine Daemon section"
+OUT="$( (cd "$REPO" && bash "$STATUS_SCRIPT" --help) 2>&1 )"; RC=$?
+assert_eq 0 "$RC" "--help exits 0"
+assert_contains "Machine Daemon" "$OUT" "--help documents the Machine Daemon section"
+assert_contains "loom:architect" "$OUT" "--help documents the expanded work-queue labels"
+
+if [[ "$TMUX_MISSING" == "true" ]]; then
+    echo "tmux not found on PATH -- skipping tests 3-9 (loom-status.sh's daemon/work-queue sections run only past the tmux-availability check)"
+else
+
+# ===================================================================
+# 3. No loom-daemon binary resolvable at all: falls back to the ORIGINAL
+#    "No agents running." message, and the JSON `daemon` block reports
+#    binary_found:false. No Machine Daemon section is printed.
+# ===================================================================
+echo "Test 3: no loom-daemon binary resolvable -- original message, section omitted"
+run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq 0 "$RC" "no-binary case exits 0"
+assert_contains "No agents running." "$OUT" "no-binary case prints the ORIGINAL unscoped message"
+assert_not_contains "Machine Daemon:" "$OUT" "no-binary case omits the Machine Daemon section"
+
+run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq 0 "$RC" "no-binary --json case exits 0"
+bf="$(echo "$OUT" | jq -r '.daemon.binary_found' 2>/dev/null)"
+assert_eq "false" "$bf" "no-binary --json: daemon.binary_found is false"
+
+# ===================================================================
+# 4. Daemon reachable and this repo IS a managed workspace: the empty local
+#    pool is named explicitly (AC2), and the Machine Daemon section reports
+#    liveness + in-flight count + open gate.
+# ===================================================================
+echo "Test 4: daemon reachable, repo IS managed -- scoped message + daemon detail"
+bin="$(make_daemon_stub managed)"
+run_status LOOM_DAEMON_BIN="$bin" LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq 0 "$RC" "managed case exits 0"
+assert_contains "local agent pool: none" "$OUT" "managed case scopes the empty-pool message"
+assert_contains "machine daemon manages this repo" "$OUT" "managed case names the daemon explicitly"
+assert_contains "Machine Daemon:" "$OUT" "managed case prints the Machine Daemon section"
+assert_contains "in-flight sweeps: 3" "$OUT" "managed case reports the in-flight sweep count"
+assert_contains "champion" "$OUT" "managed case lists the recently-ticked role"
+
+run_status_json LOOM_DAEMON_BIN="$bin" LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+manages="$(echo "$OUT" | jq -r '.daemon.manages_repo' 2>/dev/null)"
+in_flight="$(echo "$OUT" | jq -r '.daemon.in_flight' 2>/dev/null)"
+assert_eq "true" "$manages" "managed --json: daemon.manages_repo is true"
+assert_eq "3" "$in_flight" "managed --json: daemon.in_flight is 3"
+
+# ===================================================================
+# 5. Daemon reachable, gate HALTED for this repo.
+# ===================================================================
+echo "Test 5: daemon reachable, this repo's dispatch gate is HALTED"
+bin="$(make_daemon_stub managed-halted)"
+run_status LOOM_DAEMON_BIN="$bin" LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_contains "HALTED" "$OUT" "halted-gate case reports HALTED"
+
+# ===================================================================
+# 6. Daemon reachable but this repo is NOT a registered workspace: the
+#    original unscoped message is kept (nothing IS managing this repo).
+# ===================================================================
+echo "Test 6: daemon reachable, repo NOT managed -- original message kept"
+bin="$(make_daemon_stub unmanaged)"
+run_status LOOM_DAEMON_BIN="$bin" LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_contains "No agents running." "$OUT" "unmanaged case keeps the original unscoped message"
+assert_contains "NOT a registered/managed workspace" "$OUT" "unmanaged case names the gap explicitly"
+
+# ===================================================================
+# 7. Daemon UNREACHABLE, but the on-disk registry lists this repo: the
+#    registry-file fallback (#4793 AC) still surfaces "registered but not
+#    answering" instead of silently reporting nothing.
+# ===================================================================
+echo "Test 7: daemon unreachable, registry file lists this repo"
+bin="$(make_daemon_stub unreachable)"
+registry="$WORKDIR/workspaces.json"
+jq -n --arg root "$REPO_CANON" '{version:1, workspaces:[{root:$root, priority:100}]}' > "$registry"
+run_status LOOM_DAEMON_BIN="$bin" LOOM_WORKSPACES_PATH="$registry"
+assert_contains "unreachable" "$OUT" "unreachable case reports the daemon as unreachable"
+assert_contains "ExpectedButDead" "$OUT" "unreachable case surfaces the install_state classification"
+assert_contains "this repo IS registered" "$OUT" "unreachable case still reports registry membership"
+
+run_status_json LOOM_DAEMON_BIN="$bin" LOOM_WORKSPACES_PATH="$registry"
+manages="$(echo "$OUT" | jq -r '.daemon.manages_repo' 2>/dev/null)"
+reachable="$(echo "$OUT" | jq -r '.daemon.reachable' 2>/dev/null)"
+install_state="$(echo "$OUT" | jq -r '.daemon.install_state' 2>/dev/null)"
+assert_eq "true" "$manages" "unreachable --json: daemon.manages_repo is true via the registry fallback"
+assert_eq "false" "$reachable" "unreachable --json: daemon.reachable is false"
+assert_eq "ExpectedButDead" "$install_state" "unreachable --json: daemon.install_state is ExpectedButDead"
+
+# ===================================================================
+# 8. Work-queue label counting: the four proposal labels
+#    (loom:architect/hermit/curated/auditor) are counted and rendered
+#    alongside the original three, never all-zero when the fixture gh
+#    stub reports non-zero counts.
+# ===================================================================
+echo "Test 8: work queue counts + renders the proposal labels"
+GH_LABEL_COUNTS="loom:issue=1 loom:review-requested=2 loom:pr=3 loom:architect=4 loom:hermit=5 loom:curated=6 loom:auditor=7 loom:operator=8 loom:blocked=3 loom:frozen=5"
+run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_contains "Pending proposals:" "$OUT" "work queue prints the Pending proposals line"
+assert_contains "loom:architect 4" "$OUT" "work queue reports the loom:architect count"
+assert_contains "loom:hermit 5" "$OUT" "work queue reports the loom:hermit count"
+assert_contains "loom:curated 6" "$OUT" "work queue reports the loom:curated count"
+assert_contains "loom:auditor 7" "$OUT" "work queue reports the loom:auditor count"
+assert_contains "Parked:" "$OUT" "work queue prints the Parked line (#5664)"
+assert_contains "loom:operator 8" "$OUT" "work queue reports the loom:operator count"
+assert_contains "loom:blocked 3" "$OUT" "work queue reports the loom:blocked count"
+assert_contains "loom:frozen 5" "$OUT" "work queue reports the loom:frozen count"
+assert_not_contains "operator-only" "$OUT" "no retired hold label in the Parked line (#11795)"
+unset GH_LABEL_COUNTS
+
+run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json" GH_LABEL_COUNTS="loom:architect=9"
+architect="$(echo "$OUT" | jq -r '.work_queue."loom:architect"' 2>/dev/null)"
+assert_eq "9" "$architect" "work_queue --json includes loom:architect"
+
+# ===================================================================
+# 8b. Parked work (#5664) is ALWAYS present (even at zero) -- a repo with
+#     nothing parked must still show "0", not omit the line, so "0" and "N"
+#     are both visible without reading labels.
+# ===================================================================
+run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_contains "Parked:" "$OUT" "the Parked line is shown even when nothing is parked"
+assert_contains "loom:operator 0" "$OUT" "an empty backlog reports zero parked, not an omitted line"
+
+run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json" GH_LABEL_COUNTS="loom:operator=2 loom:blocked=2"
+held_operator="$(echo "$OUT" | jq -r '.work_queue."loom:operator"' 2>/dev/null)"
+held_blocked="$(echo "$OUT" | jq -r '.work_queue."loom:blocked"' 2>/dev/null)"
+held_frozen="$(echo "$OUT" | jq -r '.work_queue."loom:frozen"' 2>/dev/null)"
+assert_eq "2" "$held_operator" "work_queue --json includes loom:operator"
+assert_eq "2" "$held_blocked" "work_queue --json includes loom:blocked"
+assert_eq "0" "$held_frozen" "work_queue --json defaults loom:frozen to 0 when unset (stub default)"
+
+# #11861: during the migration an issue may still carry a retired name. The
+# Parked counts read every name that folds into a hold (`labels aliases`),
+# deduplicated by number, so they neither undercount nor double-count.
+ALIAS_BIN="$WORKDIR/alias-daemon"
+cat > "$ALIAS_BIN" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1 $2" == "labels aliases" ]] || exit 1
+case "$3" in
+  loom:operator) printf 'loom:operator\nloom:operator-only\n' ;;
+  loom:blocked) printf 'loom:blocked\nloom:needs-capability\n' ;;
+  *) echo "$3" ;;
+esac
+STUB
+chmod +x "$ALIAS_BIN"
+run_status_json LOOM_DAEMON_BIN="$ALIAS_BIN" LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json" \
+    GH_LABEL_NUMBERS="loom:operator=1,2 loom:operator-only=2,3,4 loom:blocked=7 loom:needs-capability=8"
+assert_eq "4" "$(echo "$OUT" | jq -r '.work_queue."loom:operator"' 2>/dev/null)" \
+    "loom:operator counts retired-name items too, deduplicated (#11861)"
+assert_eq "2" "$(echo "$OUT" | jq -r '.work_queue."loom:blocked"' 2>/dev/null)" \
+    "loom:blocked counts loom:needs-capability items too (#11861)"
+
+# ===================================================================
+# 9. LOOM_DAEMON_BIN pointed at a non-executable path: treated identically
+#    to "no binary resolvable" (never errors, never crashes the script).
+# ===================================================================
+echo "Test 9: LOOM_DAEMON_BIN set but not executable -- degrades gracefully"
+run_status LOOM_DAEMON_BIN="$WORKDIR/does-not-exist" LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq 0 "$RC" "non-executable LOOM_DAEMON_BIN still exits 0"
+assert_contains "No agents running." "$OUT" "non-executable LOOM_DAEMON_BIN falls back to the original message"
+
+# ===================================================================
+# 10. Outstanding quarantine stashes (#5185). A quarantined contamination
+#     used to leave NO operator-facing trace outside a structured log, so
+#     rescue stashes accumulated unreconciled for days. `loom status` now
+#     delegates to check-main-clean.sh --list-quarantined; the report is
+#     stubbed here so the assertions are about loom-status.sh's rendering
+#     and its degradation behavior, not about git stash mechanics (those
+#     are covered by test-check-main-clean.sh).
+# ===================================================================
+# write_quarantine_stub <exit-code> [json-payload]
+write_quarantine_stub() {
+    local target="$REPO/.loom/scripts/check-main-clean.sh"
+    mkdir -p "$REPO/.loom/scripts"
+    printf '#!/usr/bin/env bash\n' > "$target"
+    printf "cat <<'JSONEOF'\n%s\nJSONEOF\n" "${2:-}" >> "$target"
+    printf 'exit %s\n' "$1" >> "$target"
+    chmod +x "$target"
+}
+
+echo "Test 10: no check-main-clean.sh present -- section omitted, JSON null"
+rm -f "$REPO/.loom/scripts/check-main-clean.sh"
+run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq 0 "$RC" "missing check-main-clean.sh still exits 0"
+assert_not_contains "Quarantined work" "$OUT" "no quarantine section without check-main-clean.sh"
+run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq "null" "$(echo "$OUT" | jq -r '.quarantine_stashes' 2>/dev/null)" \
+    "quarantine_stashes is null when the report is unavailable"
+
+echo "Test 11: outstanding entries are surfaced with count and attribution"
+write_quarantine_stub 0 '{"main":"/tmp/repo","count":2,"empty_count":1,"stashes":[{"ref":"stash@{0}","commit":"abcdef0123456789","age":"4 hours ago","producer":"quarantine","empty":false,"issue":"5137","run":"sweep-X","message":"On main: loom-quarantine: run=sweep-X issue=5137"},{"ref":"stash@{1}","commit":"fedcba9876543210","age":"2 days ago","producer":"quarantine","empty":true,"issue":"5021","run":null,"message":"On main: loom-quarantine: issue=5021"}]}'
+run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq 0 "$RC" "quarantine section case exits 0"
+assert_contains "Quarantined work (unreconciled): 2" "$OUT" "human output names the outstanding count"
+assert_contains "abcdef012345" "$OUT" "human output identifies the entry by commit, not just index"
+assert_contains "issue=5137" "$OUT" "human output carries the issue attribution"
+assert_contains "[EMPTY]" "$OUT" "human output flags an entry that captured nothing"
+assert_contains "--list-quarantined" "$OUT" "human output points at the full listing command"
+run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq "2" "$(echo "$OUT" | jq -r '.quarantine_stashes.count' 2>/dev/null)" \
+    "quarantine_stashes.count is passed through to --json"
+assert_eq "5137" "$(echo "$OUT" | jq -r '.quarantine_stashes.stashes[0].issue' 2>/dev/null)" \
+    "quarantine_stashes entries are passed through to --json"
+
+echo "Test 12: a quiet stack prints nothing; an older installed copy degrades"
+write_quarantine_stub 0 '{"main":"/tmp/repo","count":0,"empty_count":0,"stashes":[]}'
+run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_not_contains "Quarantined work" "$OUT" "no section when nothing is outstanding"
+# An installed copy predating --list-quarantined exits 2 on the unknown flag.
+write_quarantine_stub 2 ''
+run_status LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq 0 "$RC" "an older check-main-clean.sh does not break loom status"
+assert_not_contains "Quarantined work" "$OUT" "no section when the report flag is unsupported"
+run_status_json LOOM_DAEMON_BIN=/nonexistent LOOM_WORKSPACES_PATH="$WORKDIR/no-such-registry.json"
+assert_eq "null" "$(echo "$OUT" | jq -r '.quarantine_stashes' 2>/dev/null)" \
+    "quarantine_stashes is null when the flag is unsupported"
+rm -f "$REPO/.loom/scripts/check-main-clean.sh"
+
+fi # TMUX_MISSING
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== $TESTS_PASSED/$TESTS_RUN tests passed ==="
+if [[ "$TESTS_FAILED" -gt 0 ]]; then
+    exit 1
+fi
+exit 0

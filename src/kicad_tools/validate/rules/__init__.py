@@ -1,0 +1,158 @@
+"""DRC rule implementations.
+
+This subpackage contains the base rule class and individual rule
+implementations for the pure Python DRC checker.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .base import DRC_TOLERANCE, DRCRule
+    from .board_id import BoardIdRule
+    from .clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
+    from .connector_access import ConnectorEdgeAccessRule
+    from .dangling_copper import DanglingCopperRule
+    from .diffpair_clearance_intra import DiffPairClearanceIntraRule
+    from .diffpair_length_skew import DiffPairLengthSkewRule
+    from .diffpair_routing_continuity import DiffPairRoutingContinuityRule
+    from .diffpair_uncoupled_length import DiffPairUncoupledLengthRule
+    from .dimensions import DimensionRules
+    from .edge import EdgeClearanceRule
+    from .fiducials import FiducialsRule
+    from .impedance import ImpedanceRule, NetImpedanceSpec
+    from .match_group_length_skew import MatchGroupLengthSkewRule
+    from .missing_plated_hole import MissingPlatedHoleRule
+    from .pin1_marker import Pin1MarkerRule
+    from .pour_slot import PourSlotRule
+    from .redundant_copper import RedundantCopperRule
+    from .schematic_fields import check_schematic_fields
+    from .schematic_wire_symbol import check_schematic_wire_symbol
+    from .sharp_trace_corner import SharpTraceCornerRule
+    from .silkscreen import (
+        check_all_silkscreen,
+        check_silk_edge_clearance,
+        check_silk_hole_overlap,
+        check_silk_over_copper,
+        check_silk_over_mask_opening,
+        check_silkscreen_line_width,
+        check_silkscreen_over_pads,
+        check_silkscreen_text_height,
+    )
+    from .single_pad_net import SinglePadNetRule
+    from .solder_mask import SolderMaskPadRules
+    from .tht_smd_spacing import check_tht_smd_spacing
+    from .via_in_pad import ViaInPadRule
+    from .via_type_capability import ViaTypeCapabilityRule
+    from .via_under_body import ViaUnderBodyRule
+    from .width_consistency import WidthConsistencyRule
+    from .zone_fill import IsolatedCopperRule, ZoneFillRule
+
+# Resolve only the requested public export. DRCChecker still imports and runs
+# its full set of rules when a caller requests a real DRC pass.
+_EXPORT_MODULES: dict[str, str] = {
+    "DRC_TOLERANCE": ".base",
+    "DRCRule": ".base",
+    "ClearanceRule": ".clearance",
+    "SegmentZoneClearanceRule": ".clearance",
+    "ViaZoneClearanceRule": ".clearance",
+    "ConnectorEdgeAccessRule": ".connector_access",
+    "DanglingCopperRule": ".dangling_copper",
+    "DiffPairClearanceIntraRule": ".diffpair_clearance_intra",
+    "DiffPairLengthSkewRule": ".diffpair_length_skew",
+    "DiffPairRoutingContinuityRule": ".diffpair_routing_continuity",
+    "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
+    "BoardIdRule": ".board_id",
+    "FiducialsRule": ".fiducials",
+    "DimensionRules": ".dimensions",
+    "EdgeClearanceRule": ".edge",
+    "ImpedanceRule": ".impedance",
+    "NetImpedanceSpec": ".impedance",
+    "MatchGroupLengthSkewRule": ".match_group_length_skew",
+    "MissingPlatedHoleRule": ".missing_plated_hole",
+    "SharpTraceCornerRule": ".sharp_trace_corner",
+    "Pin1MarkerRule": ".pin1_marker",
+    "PourSlotRule": ".pour_slot",
+    "RedundantCopperRule": ".redundant_copper",
+    "check_schematic_fields": ".schematic_fields",
+    "check_schematic_wire_symbol": ".schematic_wire_symbol",
+    "check_all_silkscreen": ".silkscreen",
+    "check_silk_edge_clearance": ".silkscreen",
+    "check_silk_hole_overlap": ".silkscreen",
+    "check_silk_over_copper": ".silkscreen",
+    "check_silk_over_mask_opening": ".silkscreen",
+    "check_silkscreen_line_width": ".silkscreen",
+    "check_silkscreen_over_pads": ".silkscreen",
+    "check_silkscreen_text_height": ".silkscreen",
+    "SinglePadNetRule": ".single_pad_net",
+    "SolderMaskPadRules": ".solder_mask",
+    "check_tht_smd_spacing": ".tht_smd_spacing",
+    "ViaInPadRule": ".via_in_pad",
+    "ViaTypeCapabilityRule": ".via_type_capability",
+    "ViaUnderBodyRule": ".via_under_body",
+    "WidthConsistencyRule": ".width_consistency",
+    "IsolatedCopperRule": ".zone_fill",
+    "ZoneFillRule": ".zone_fill",
+}
+
+__all__ = [
+    "DRC_TOLERANCE",
+    "DRCRule",
+    "ClearanceRule",
+    "SegmentZoneClearanceRule",
+    "ViaZoneClearanceRule",
+    "ConnectorEdgeAccessRule",
+    "DanglingCopperRule",
+    "DiffPairClearanceIntraRule",
+    "DiffPairLengthSkewRule",
+    "DiffPairRoutingContinuityRule",
+    "DiffPairUncoupledLengthRule",
+    "DimensionRules",
+    "EdgeClearanceRule",
+    "BoardIdRule",
+    "FiducialsRule",
+    "ImpedanceRule",
+    "IsolatedCopperRule",
+    "MatchGroupLengthSkewRule",
+    "MissingPlatedHoleRule",
+    "SharpTraceCornerRule",
+    "NetImpedanceSpec",
+    "Pin1MarkerRule",
+    "PourSlotRule",
+    "RedundantCopperRule",
+    "SinglePadNetRule",
+    "SolderMaskPadRules",
+    "ViaInPadRule",
+    "ViaTypeCapabilityRule",
+    "ViaUnderBodyRule",
+    "WidthConsistencyRule",
+    "check_all_silkscreen",
+    "check_schematic_fields",
+    "check_schematic_wire_symbol",
+    "check_silk_edge_clearance",
+    "check_silk_hole_overlap",
+    "check_silk_over_copper",
+    "check_silk_over_mask_opening",
+    "check_silkscreen_line_width",
+    "check_silkscreen_over_pads",
+    "check_silkscreen_text_height",
+    "check_tht_smd_spacing",
+    "ZoneFillRule",
+]
+
+
+def __getattr__(name: str) -> Any:
+    """Load a public export on first access, preserving its original identity."""
+    try:
+        module_name = _EXPORT_MODULES[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

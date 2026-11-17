@@ -1,0 +1,198 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# STM32 Development Board - End-to-End Example
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "STM32F103 Development Board"
+  revision: "A"
+  created: 2025-01-08
+  author: "kicad-tools"
+  description: |
+    Minimal STM32F103C8 "Blue Pill" style development board demonstrating
+    programmatic schematic generation with kicad-tools.
+  artifacts:
+    schematic: "output/stm32_devboard.kicad_sch"
+
+intent:
+  summary: |
+    A minimal STM32 development board for learning and prototyping,
+    featuring USB power, 3.3V regulation, crystal oscillator, SWD debug,
+    and a user LED. Demonstrates end-to-end programmatic PCB design.
+
+  use_cases:
+    - Learning embedded development
+    - Rapid prototyping
+    - kicad-tools API demonstration
+    - Educational example for programmatic PCB design
+
+  interfaces:
+    - name: USB_POWER
+      type: power_rail
+      description: "5V input from USB connector"
+      voltage: "5V"
+      current_max: "500mA"
+
+    - name: REGULATED_3V3
+      type: power_rail
+      description: "3.3V regulated output for MCU"
+      voltage: "3.3V"
+      current_max: "300mA"
+
+    - name: SWD
+      type: debug
+      description: "Serial Wire Debug interface"
+      protocol: "ARM SWD"
+      pins: ["SWCLK", "SWDIO", "RESET", "VCC", "GND"]
+
+    - name: OSC
+      type: clock
+      description: "8MHz crystal oscillator"
+      pins: ["OSC_IN", "OSC_OUT"]
+
+  constraints:
+    - "Must use widely available components"
+    - "2-layer PCB for cost efficiency"
+    - "Compatible with standard STM32F103C8T6"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "5V"
+        min: "4.5V"
+        max: "5.5V"
+      current:
+        max: "500mA"
+    outputs:
+      - rail: "3.3V"
+        tolerance: "5%"
+        current_max: "300mA"
+        ripple_max: "100mV_pp"
+
+  mechanical:
+    dimensions:
+      width: "60mm"
+      height: "40mm"
+
+  manufacturing:
+    target_fab: jlcpcb-tier1
+    layers:
+      preferred: 2
+    min_trace: "0.127mm"
+    min_space: "0.15mm"
+    assembly: both
+
+  compliance:
+    rohs: true
+
+suggestions:
+  components:
+    regulator:
+      preferred: ["MCP1825S-3302E/DB"]
+      rationale: "Widely available, low dropout, sufficient current"
+    crystal:
+      preferred: ["8MHz HC49"]
+      rationale: "Common frequency for STM32, easy to source"
+    debug_header:
+      preferred: ["2.54mm pitch 6-pin"]
+      rationale: "Compatible with standard SWD debuggers"
+
+  layout:
+    - "Place LDO between USB input and MCU"
+    - "Crystal close to MCU OSC pins"
+    - "Decoupling caps within 3mm of power pins"
+    - "Debug header at board edge for easy access"
+
+  notes:
+    - "Complete STM32F103C8T6 circuit with real MCP1825S power pinout"
+    - "Select the paid 0.15mm mechanical drilling option; no via-in-pad process required"
+
+bom_entries:
+  - ref: U1
+    part: MCP1825S-3302E/DB
+    lcsc: C148031
+  - ref: U2
+    part: STM32F103C8T6
+    lcsc: C8734
+  - ref: C1
+    part: CL21A106KAYNNNE
+    lcsc: C15850
+  - ref: C2
+    part: CL21A106KAYNNNE
+    lcsc: C15850
+  - ref: C3
+    part: CC0805KRX7R9BB104
+    lcsc: C49678
+  - ref: Y1
+    part: X49SD8MSB2SC
+    lcsc: C114147
+  - ref: C10
+    part: CL21C200JBANNNC
+    lcsc: C1798
+  - ref: C11
+    part: CL21C200JBANNNC
+    lcsc: C1798
+  - ref: C12-C15
+    part: CC0805KRX7R9BB104
+    lcsc: C49678
+  - ref: C16
+    part: CL21A475KAQNNNE
+    lcsc: C1779
+  - ref: R1
+    part: 0805W8F3300T5E
+    lcsc: C17630
+  - ref: R2
+    part: 0805W8F1002T5E
+    lcsc: C17414
+  - ref: D1
+    part: 17-21SURC/S530-A2/TR8
+    lcsc: C131244
+  - ref: J1
+    part: 2.54-1x6P
+    lcsc: C37208
+
+decisions:
+  - date: 2025-01-08
+    phase: concept
+    topic: "Voltage Regulator Selection"
+    choice: "MCP1825S-3302E/DB"
+    rationale: "Low cost, widely available, sufficient current for dev board"
+    alternatives: ["AP2112K-3.3", "MIC5219-3.3"]
+
+  - date: 2025-01-08
+    phase: concept
+    topic: "Crystal Frequency"
+    choice: "8MHz"
+    rationale: "Standard frequency for STM32, allows PLL to 72MHz"
+    alternatives: ["16MHz", "12MHz"]
+
+progress:
+  phase: layout
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define power requirements"
+        - "[x] Select regulator topology (linear LDO)"
+        - "[x] Determine debug interface (SWD)"
+        - "[x] Choose crystal frequency"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] Power input section"
+        - "[x] LDO with decoupling"
+        - "[x] Crystal oscillator block"
+        - "[x] Debug header"
+        - "[x] User LED"
+        - "[x] Add MCU symbol"
+        - "[x] Connect MCU to peripherals"
+    layout:
+      status: completed
+      checklist:
+        - "[x] Component placement"
+        - "[x] Power routing"
+        - "[x] Signal routing"
+        - "[x] DRC clean (kicad-cli 0 violations, 2026-07-05)"

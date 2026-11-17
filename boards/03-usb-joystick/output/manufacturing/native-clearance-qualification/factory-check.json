@@ -1,0 +1,175 @@
+{
+  "file": "/tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "layers": 4,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 6,
+    "waived": 0,
+    "rules_checked": 54,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "diffpair_clearance_intra": 2,
+      "diffpair_length_skew": 2,
+      "diffpair_routing_continuity": 2,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1
+    },
+    "passed": true
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
+      "location": [
+        123.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 7.4,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.166 mm within tolerance 0.500 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.1657,
+      "required_value": 0.5,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.000 mm within tolerance 0.500 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.0,
+      "required_value": 0.5,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- coupled 34.2% of its length (>= 25.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.3425,
+      "required_value": 0.25,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 73.0% of its length (>= 70.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.7296,
+      "required_value": 0.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false
+    }
+  ],
+  "mask_copper_assessments": [],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "54 rules checked, 0 error(s), 0 warning(s)"
+    },
+    "erc": {
+      "status": "NOT RUN",
+      "detail": "kicad-cli not found in PATH; install KiCad 8+ to enable ERC"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 129,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
+    },
+    "overall": "INCOMPLETE",
+    "schematic_missing": false
+  },
+  "routing_quality": {
+    "total_segments": 2050,
+    "nets_with_copper": 27,
+    "segments_per_net": 75.92592592592592,
+    "zero_length_count": 0,
+    "median_length_mm": 0.07071067811867084,
+    "fragment_count": 1613,
+    "fragment_fraction": 0.786829268292683,
+    "orthogonal_count": 430,
+    "diagonal_45_count": 1620,
+    "off_axis_count": 0,
+    "staircase_step_count": 8,
+    "staircase_fraction": 0.003902439024390244
+  }
+}

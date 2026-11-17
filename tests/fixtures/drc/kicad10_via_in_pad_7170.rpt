@@ -1,0 +1,36 @@
+** Drc report for simple_led_routed.kicad_pcb **
+** Created on 2026-10-18T02:19:02 **
+** Report includes: Errors, Warnings, Exclusions **
+
+** Found 5 DRC violations **
+[annular_width]: Annular width (rule 'Annular Ring - jlcpcb' min annular width 0.1500 mm; actual 0.0500 mm)
+    Rule: Annular Ring - jlcpcb; error
+    @(155.6000 mm, 87.5000 mm): Via [GND] on F.Cu - B.Cu
+[via_diameter]: Via diameter (rule 'Via Diameter - jlcpcb' min diameter 0.6000 mm; actual 0.4000 mm)
+    Rule: Via Diameter - jlcpcb; error
+    @(155.6000 mm, 87.5000 mm): Via [GND] on F.Cu - B.Cu
+[via_dangling]: Via is not connected or connected on only one layer
+    Local override; warning
+    @(155.6000 mm, 87.5000 mm): Via [GND] on F.Cu - B.Cu
+[hole_to_hole]: Drilled hole too close to other hole (board setup constraints min 0.5000 mm; actual 0.2700 mm)
+    Rule: board setup constraints; warning
+    @(154.7300 mm, 87.5000 mm): PTH pad 1 [GND] of D1
+    @(155.6000 mm, 87.5000 mm): Via [GND] on F.Cu - B.Cu
+[hole_to_hole]: Drilled hole too close to other hole (board setup constraints min 0.5000 mm; actual 0.2700 mm)
+    Rule: board setup constraints; warning
+    @(154.7300 mm, 87.5000 mm): PTH pad 1 [GND] of D1
+    @(155.6000 mm, 87.5000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 unconnected pads **
+
+** Found 0 Footprint errors **
+
+** Ignored checks **
+    - Footprint has no courtyard defined
+    - Track endpoint not centered on via
+    - Tuning profile track geometries
+    - Footprint doesn't match symbol's footprint filters
+    - Footprint component type doesn't match footprint pads
+    - Footprint doesn't match copy in library
+
+** End of Report **

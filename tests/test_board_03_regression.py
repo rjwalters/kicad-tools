@@ -1,0 +1,1700 @@
+"""Regression tests for ``boards/03-usb-joystick/``.
+
+This module pins two independent regressions that both surfaced during
+the May 2026 board-03 audit:
+
+* **Issue #2744** — Generator parts drift.  The PCB generator at
+  ``boards/03-usb-joystick/generate_pcb.py`` was silently dropping seven
+  components that the matching schematic emits:
+
+  - ``C5`` / ``C6`` (22 pF crystal load caps) — from
+    ``create_crystal_with_loads(cap_ref_start=5)``
+  - ``R10`` / ``C10``, ``R11`` / ``C11``, ``R12`` (joystick anti-alias
+    RC filter + BTN pull-up) — from
+    ``create_analog_joystick(filter_ref_start=10)``
+
+  The drift caused ``kct validate --sync`` to flag seven schematic-only
+  refs and the BOM<->PCB export preflight to block manufacturing output,
+  even though the build chain reported "OK verify".
+
+* **Issue #2760** — USB diff-pair routing.  ``route_demo.py`` was calling
+  plain ``router.route_all()`` instead of the diff-pair-aware
+  ``router.route_all_with_diffpairs()``.  Without the coupled-pair pass,
+  the router scheduled USB_D- before USB_D+ via per-net priority
+  ordering and laid down a USB_D- via at ~0.31 mm from J1.A6 / U1.29.
+  That via blocked USB_D+'s only remaining pad-access corridor,
+  leaving USB_D+ as a partial 2-of-3-pads stub and producing 4
+  ``diffpair_clearance_intra`` DRC violations at the J1 connector.
+
+The fix for #2744 lives in ``generate_pcb.py`` (new
+``generate_xtal_load_caps`` + ``generate_joystick_filter`` helpers).
+The fix for #2760 is a one-line change in ``route_demo.py``: call
+``route_all_with_diffpairs(DifferentialPairConfig(enabled=True))``
+instead of ``route_all()``.
+
+The test classes below pin each regression independently:
+
+* ``test_usb_diff_pair_routes_via_coupled_pathfinder`` (#2760 / #3308) —
+  loads the committed unrouted PCB and routes it in-process.  Post-#3308
+  this uses the canonical generate_design.py:route_pcb() recipe (0.05mm
+  grid, in-pad escape rescues on U1) which is much slower than the
+  pre-fix 0.1mm path -- runtime is ~5-10 min, so this test is marked
+  ``@pytest.mark.slow`` and runs in nightly CI only.
+* ``test_generated_pcb_contains_required_refs`` /
+  ``test_pcb_sync_clean_against_schematic`` (#2744) — regenerate the
+  board's schematic + PCB from source via subprocess and assert the
+  parts are present and sync is clean.  These are fast (~20s) and run
+  in PR-time CI.
+* ``test_route_demo_achieves_minimum_completion`` (#2744 / #3308) —
+  Post-#3308 ``route_demo.py`` delegates to ``generate_design.py:route_pcb()``
+  (0.05mm grid, in-pad escape rescues on U1) which is slower than the
+  pre-#3308 0.1mm recipe -- runtime is ~2 min, so this test is marked
+  ``@pytest.mark.slow``.
+
+References:
+- ``boards/03-usb-joystick/generate_pcb.py`` -- the #2744 fix lives here
+- ``boards/03-usb-joystick/route_demo.py`` -- the #2760 fix lives here
+- ``src/kicad_tools/router/diffpair_routing.py:1751`` --
+  ``route_all_with_diffpairs`` entry point
+- ``src/kicad_tools/router/diffpair.py:553`` -- ``DifferentialPairConfig``
+- Issue #2744 -- generator parts drift acceptance criteria
+- Issue #2760 -- diff-pair routing root-cause analysis
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.router import (
+    DesignRules,
+    create_net_class_map,
+    load_pcb_for_routing,
+)
+
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  Board
+# generation / real-library scans beat 60s alone, but on the 4-core CI
+# runner under full-suite xdist contention the wall-clock reaper killed
+# them spuriously.  The marker overrides the CLI default with a
+# contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(600)
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BOARD_DIR = REPO_ROOT / "boards" / "03-usb-joystick"
+GEN_PCB_SCRIPT = BOARD_DIR / "generate_pcb.py"
+GEN_SCH_SCRIPT = BOARD_DIR / "generate_schematic.py"
+ROUTE_DEMO_SCRIPT = BOARD_DIR / "route_demo.py"
+OUTPUT_DIR = BOARD_DIR / "output"
+SCH_FILE = OUTPUT_DIR / "usb_joystick.kicad_sch"
+PCB_FILE = OUTPUT_DIR / "usb_joystick.kicad_pcb"
+ROUTED_PCB_FILE = OUTPUT_DIR / "usb_joystick_routed.kicad_pcb"
+UNROUTED_PCB = BOARD_DIR / "regression-fixture" / "usb_joystick.kicad_pcb"
+
+# Issue #3410: ``generate_design.py:route_pcb()`` now delegates to the
+# production ``kct route`` CLI invocation (pinned by
+# ``tests/router/test_board03_routing_baseline.py``), so the in-process
+# ``route_all`` fixture below is no longer "the recipe" -- it is kept
+# as a ROUTER-CAPABILITY regression net for the in-pad-rescue /
+# intra-IC-consolidation code paths on this board's geometry.  Only
+# VCC / GND / VBUS are skipped (served by the generator's pour zones).
+SKIP_NETS = ["VCC", "GND", "VBUS"]
+
+# Minimum number of multi-pad signal nets the demo router must fully
+# connect.  Issue #3410 (June 9 2026): the canonical recipe now
+# delegates to the production ``kct route`` invocation (see
+# ``generate_design.py:route_pcb``) and, after the J1 USB-C re-spin +
+# MST tie-group fix + escape-defer + auto-pour zone-preservation fix,
+# reaches 13/13 with 0 DRC errors at jlcpcb-tier1.  This matches the
+# floor pinned by ``tests/router/test_board03_routing_baseline.py``
+# (``REQUIRED_NETS_ROUTED = 13``).
+MIN_FULLY_ROUTED_NETS = 13
+
+# Issue #5981: kicad-cli 10.0.1 mis-measures the annular ring of the four
+# J1 USB-C shield (``SH``) pads.  Those are oval PTH pads (0.9 mm wide,
+# 0.6 mm oval drill), so the nominal ring is (0.9 - 0.6) / 2 = 0.150 mm --
+# exactly the jlcpcb-tier1 ``PTH Annular Ring`` floor.  10.0.1 measures
+# 0.1462 mm (an oval-hole polygon-approximation error) and reports four
+# ``annular_width`` errors.  On the committed routed board with its project
+# rules, ``kicad-cli pcb drc --refill-zones --severity-all`` reports 0 errors
+# and 0 unconnected on the ``kicad/kicad`` 10.0.2, 10.0.4, 10.0.5 and 10.0.6
+# images (CI pins 10.0.6), while 10.0.1 reports exactly the 4 J1 SH errors
+# with the same 2 warnings.  The same four errors reproduce on 10.0.1 at
+# a73d3a0e (where #5191 closed green on 10.0.6), so this is toolchain skew,
+# not board drift.  10.0.2 is the first version verified clean (10.0.3 was
+# not tested).  Below it we XFAIL -- never pass -- when, and only when,
+# those exact false positives are the sole errors.
+ANNULAR_OVAL_MIN_KICAD_VERSION = (10, 0, 2)
+_J1_SHIELD_PAD_RE = re.compile(r"\bpad SH\b.*\bof J1\b")
+# The mis-measurement is ~4 um; anything larger is a real deficit.
+_ANNULAR_MEASUREMENT_SLOP_MM = 0.01
+
+
+def _parse_kicad_version(raw: object) -> tuple[int, ...] | None:
+    """Parse ``"10.0.1"`` (or ``"10.0.6-1"``) into ``(10, 0, 1)``; else ``None``."""
+    match = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", raw if isinstance(raw, str) else "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _kicad_cli_version_tuple() -> tuple[int, ...] | None:
+    """Return the installed kicad-cli version as ``(major, minor, patch)``."""
+    from kicad_tools.cli.runner import get_kicad_version
+
+    return _parse_kicad_version(get_kicad_version())
+
+
+def _old_kicad_annular_xfail_reason(
+    errors: list[tuple[str, list[str], float | None, float | None]],
+    version: tuple[int, ...] | None,
+) -> str | None:
+    """Explain why ``errors`` are the known pre-10.0.2 J1 shield false positive.
+
+    ``errors`` holds ``(type, item_descriptions, actual_mm, required_mm)`` for
+    every error-severity violation.  ``version`` is the kicad-cli version that
+    produced those errors -- the report's own ``kicad_version`` where the
+    caller has the report, so the gate and the report come from the same
+    binary.  Returns ``None`` (so the caller fails normally) unless that
+    version is older than :data:`ANNULAR_OVAL_MIN_KICAD_VERSION` AND every
+    error is an ``annular_width`` on a J1 ``SH`` pad within measurement slop
+    of the rule.
+    """
+    if not errors or version is None or version >= ANNULAR_OVAL_MIN_KICAD_VERSION:
+        return None
+    for type_str, items, actual, required in errors:
+        if type_str != "annular_width":
+            return None
+        if not items or not all(_J1_SHIELD_PAD_RE.search(item) for item in items):
+            return None
+        if actual is None or required is None:
+            return None
+        if required - actual > _ANNULAR_MEASUREMENT_SLOP_MM:
+            return None
+    floor = ".".join(str(part) for part in ANNULAR_OVAL_MIN_KICAD_VERSION)
+    found = ".".join(str(part) for part in version)
+    return (
+        f"kicad-cli {found} < {floor} (first version verified clean) mis-measures the "
+        f"oval-drill annular ring of the J1 USB-C SH pads (nominal 0.150 mm) and "
+        f"reports {len(errors)} false-positive annular_width error(s); "
+        f"upgrade kicad-cli to >= {floor} to run this check (issue #5981)."
+    )
+
+
+_ANNULAR_DESC_RE = re.compile(r"min annular width ([\d.]+) mm; actual ([\d.]+) mm")
+
+
+def _native_violation_summary(
+    violation: dict,
+) -> tuple[str, list[str], float | None, float | None]:
+    """Reduce a raw kicad-cli JSON violation to the tuple the xfail check takes."""
+    match = _ANNULAR_DESC_RE.search(violation.get("description", ""))
+    required, actual = (float(match.group(1)), float(match.group(2))) if match else (None, None)
+    items = [item.get("description", "") for item in violation.get("items", [])]
+    return violation.get("type", ""), items, actual, required
+
+
+# route_demo.py prints the kct-check leg's own result on this line (#5981).
+_KCT_CHECK_RESULT_RE = re.compile(
+    r"^\s*kct check: passed=(True|False) errors=(-?\d+)\s*$", re.MULTILINE
+)
+
+
+def _route_demo_xfail_reason(
+    returncode: int, stdout: str, native_report: dict | None
+) -> str | None:
+    """Decide whether a failed ``route_demo.py`` run is the #5981 false positive.
+
+    ``route_demo`` fails its DRC when EITHER leg fails: ``kct check
+    --drc-only`` or the native kicad-cli pass that writes ``native_report``.
+    Only the native leg is affected by the old-kicad-cli oval-ring bug, so
+    the XFAIL requires all of:
+
+    * every net routed;
+    * the kct-check leg's own line reads exactly ``passed=True errors=0`` --
+      a kct-check DRC regression (``errors>0``) or crash/failure to run
+      (``errors=-1`` / ``passed=False``) fails normally, as does a missing
+      line;
+    * a native report with no unconnected items, produced by a kicad-cli
+      older than the floor (read from the report's ``kicad_version``), whose
+      only errors are the J1 SH annular false positives.
+    """
+    if returncode == 0 or "All nets routed" not in stdout:
+        return None
+    kct_lines = _KCT_CHECK_RESULT_RE.findall(stdout)
+    if kct_lines != [("True", "0")]:
+        return None
+    if not isinstance(native_report, dict) or native_report.get("unconnected_items"):
+        return None
+    return _old_kicad_annular_xfail_reason(
+        [
+            _native_violation_summary(v)
+            for v in native_report.get("violations", [])
+            if v.get("severity") == "error"
+        ],
+        _parse_kicad_version(native_report.get("kicad_version")),
+    )
+
+
+# References the schematic emits that the PCB generator MUST also emit
+# to keep sync clean.  This is the explicit anti-regression list from
+# the issue #2744 curator: drift in any of these refs blocks export.
+REQUIRED_PCB_REFS = ("C5", "C6", "C10", "C11", "R10", "R11", "R12")
+
+
+# ---------------------------------------------------------------------------
+# Issue #2760: USB diff-pair routing (in-process, fast)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def unrouted_pcb_path() -> Path:
+    """Keep old 32-pad escape regressions on their frozen historical geometry."""
+    assert UNROUTED_PCB.is_file(), "Historical board03 routing fixture is missing"
+    return UNROUTED_PCB
+
+
+@pytest.fixture(scope="module")
+def routed_board_03(unrouted_pcb_path: Path, tmp_path_factory):
+    """Route the frozen synthetic board03 geometry with ``route_all``.
+
+    Revision B has a real 44-pin MCU and different connections. Applying
+    this fixture's old 32-pad rescue list to revision B is not a regression
+    comparison and can cause unbounded searches.
+
+    Issue #3308: this fixture WAS introduced as a mirror of
+    ``generate_design.py:route_pcb()``.  It no longer mirrors that recipe
+    -- it intentionally exercises the per-net ``route_all`` path with
+    in-pad escape rescues as a standalone ROUTER-CAPABILITY regression net
+    for the #2760 USB_D+ stub failure mode.  (Issue #3922 restored
+    ``--differential-pairs`` to the CLI recipe, but on board 03 that flag
+    is inert at routing time -- the escape-routing dispatch never reaches
+    the CoupledPathfinder pre-pass, tracked in #3952.)  The end-to-end CLI
+    recipe reach is pinned separately by
+    ``tests/router/test_board03_routing_baseline.py``.
+
+    Key differences from the legacy pre-#3308 fixture:
+
+      * 0.05mm grid (was 0.1mm) -- needed for J1 USB-C off-grid pad
+        escape (#3095).
+      * 0.15mm trace width / 0.15mm trace clearance (was 0.2 / 0.2).
+      * ``manufacturer="jlcpcb-tier1"`` declared on DesignRules so the
+        EscapeRouter can resolve ``via_in_pad_supported`` (#3183).
+      * fine-pitch clearance 0.08mm at 0.8mm threshold (#3095).
+      * ``USB_CC1`` / ``USB_CC2`` NO LONGER skipped (#3095 made them
+        reachable on the finer grid).
+      * ``intra_pair_clearance=0.15mm`` on USB_D+/USB_D-.
+      * ``random.seed(42)`` for determinism (#3065 plumbing).
+      * Uses ``route_all`` with ``enable_in_pad_escape_rescues=True``
+        and explicit rescue pins (U1 12-15, 26-27).  This fixture
+        deliberately exercises the per-net A* path (with 0.15mm
+        intra_pair_clearance widening + lateral offset) as a capability
+        net.  The CLI recipe requests ``--differential-pairs`` (#3922) but
+        the CoupledPathfinder is currently gated behind route_cmd's
+        escape-routing dispatch on this board (#3952); the recipe reach is
+        validated end-to-end by ``test_board03_routing_baseline.py``.
+
+    Returns the populated ``Autorouter`` instance plus the net_map dict.
+    """
+    import os as _os
+    import random as _random
+    from dataclasses import replace as _dc_replace
+
+    rules = DesignRules(
+        grid_resolution=0.05,
+        trace_width=0.15,
+        trace_clearance=0.15,
+        via_drill=0.3,
+        via_diameter=0.6,
+        fine_pitch_clearance=0.08,
+        fine_pitch_threshold=0.8,
+        manufacturer="jlcpcb-tier1",
+    )
+    net_class_map = create_net_class_map(
+        power_nets=["VCC", "VBUS", "GND"],
+        high_speed_nets=["USB_D+", "USB_D-"],
+        clock_nets=["XTAL1", "XTAL2"],
+    )
+
+    # Annotate the diff-pair partners on the USB pair so the validate-side
+    # diff-pair rules engage from the routed-PCB sidecar (#2684).  Widen
+    # ``intra_pair_clearance`` to 0.15mm so the JLCPCB
+    # ``diffpair_clearance_intra`` rule clears (#3095).
+    if "USB_D+" in net_class_map and "USB_D-" in net_class_map:
+        net_class_map["USB_D+"] = _dc_replace(
+            net_class_map["USB_D+"],
+            diffpair_partner="USB_D-",
+            intra_pair_clearance=0.15,
+        )
+        net_class_map["USB_D-"] = _dc_replace(
+            net_class_map["USB_D-"],
+            diffpair_partner="USB_D+",
+            intra_pair_clearance=0.15,
+        )
+
+    router, net_map = load_pcb_for_routing(
+        str(unrouted_pcb_path),
+        skip_nets=SKIP_NETS,
+        rules=rules,
+    )
+    router.net_class_map.update(net_class_map)
+
+    # Deterministic seed (#3065 plumbing).
+    _random.seed(42)
+
+    # Enable the extended-pitch in-pad fallback so U1's TQFP-32 inner-row
+    # pins reach the EscapeRouter's in-pad rescue path (#3183).
+    _prior_extended = _os.environ.get("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK")
+    _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = "1"
+    diagnostics = tmp_path_factory.mktemp("board03-capability") / "routing-statistics.json"
+    try:
+        # Force lazy escape router re-init now that the env var is set.
+        router._escape_router = None
+        router.route_all(
+            enable_in_pad_escape_rescues=True,
+            in_pad_escape_rescue_pins={"U1": ["12", "13", "14", "15", "26", "27"]},
+            timeout=480,
+        )
+    finally:
+        if _prior_extended is None:
+            _os.environ.pop("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", None)
+        else:
+            _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = _prior_extended
+        # route_all returns partial routes at its outer deadline; pytest
+        # enforces the 600s hard backstop for a single stuck A* search.
+        diagnostics.write_text(json.dumps(router.get_statistics(), indent=2, default=str))
+        print(f"Historical board03 partial routing statistics: {diagnostics}")
+
+    return router, net_map
+
+
+def test_historical_route_interruption_preserves_statistics(monkeypatch, tmp_path_factory):
+    from types import SimpleNamespace
+
+    def interrupted_route(**kwargs):
+        assert kwargs["timeout"] == 480
+        raise TimeoutError("simulated interrupted A* search")
+
+    router = SimpleNamespace(
+        net_class_map={},
+        route_all=interrupted_route,
+        get_statistics=lambda: {"nets_routed": 3, "nets_failed": 10},
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__], "load_pcb_for_routing", lambda *a, **kw: (router, {})
+    )
+    monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "original")
+    with pytest.raises(TimeoutError, match="simulated interrupted"):
+        routed_board_03.__wrapped__(UNROUTED_PCB, tmp_path_factory)
+    assert os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] == "original"
+    diagnostics = list(
+        tmp_path_factory.getbasetemp().glob("board03-capability*/routing-statistics.json")
+    )
+    assert diagnostics
+    assert json.loads(diagnostics[-1].read_text()) == {"nets_routed": 3, "nets_failed": 10}
+
+
+@pytest.mark.slow
+@pytest.mark.xdist_group("board03_regression_routed")
+def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
+    """USB_D+ and USB_D- both have non-zero segment count after routing.
+
+    Issue #2760: Without diff-pair-aware routing, USB_D+ was left as
+    a 2-of-3-pads stub (J1.A6 -> J1.B6 only) because the USB_D- via near
+    U1.29 blocked the only remaining pad-access corridor.
+
+    Issue #3095 / #3308 (June 2026): this in-process fixture uses the
+    per-net ``route_all`` path (NOT the CLI recipe -- see the fixture
+    docstring).  USB_D+ routes via per-net A* with explicit
+    ``intra_pair_clearance=0.15mm`` widening and in-pad escape rescues on
+    U1.  USB_D- may be partial under this per-net path -- that is a
+    property of this capability fixture, not the CLI recipe.  The CLI
+    recipe requests ``--differential-pairs`` (#3922) though the coupled
+    pre-pass is currently gated on board 03 (#3952); its reach is pinned
+    by ``test_board03_routing_baseline.py``.
+
+    This test asserts the minimum viable success criterion (the original
+    #2760 floor): USB_D+ has > 0 routed segments AND is not in
+    ``routing_failures``.  We do NOT assert USB_D- completeness here
+    because the current canonical recipe leaves USB_D- partial under
+    HEAD; the aggregate floor of 11/13 in ``test_board03_routing_baseline``
+    catches further USB_D-/CC1 regressions.
+    """
+    router, net_map = routed_board_03
+
+    usb_dp_id = net_map.get("USB_D+")
+    usb_dn_id = net_map.get("USB_D-")
+    assert usb_dp_id is not None, (
+        "USB_D+ net missing from board 03 unrouted PCB -- expected this "
+        "is one of the canonical example board's signals.  If the "
+        "schematic / PCB generator no longer emits USB_D+, this test "
+        "needs to be updated to reflect the new net topology."
+    )
+    assert usb_dn_id is not None, "USB_D- net missing from board 03 unrouted PCB -- same as above."
+
+    routes_by_net: dict[int, int] = {}
+    for route in router.routes:
+        routes_by_net[route.net] = routes_by_net.get(route.net, 0) + len(route.segments)
+
+    dp_segments = routes_by_net.get(usb_dp_id, 0)
+    dn_segments = routes_by_net.get(usb_dn_id, 0)
+
+    assert dp_segments > 0, (
+        f"USB_D+ (net {usb_dp_id}) routed with 0 segments.  This is the "
+        "original Issue #2760 regression mode: USB_D+ becoming a stub "
+        "between J1.A6 and J1.B6 only.  Check that the canonical recipe "
+        "in boards/03-usb-joystick/generate_design.py:route_pcb() is "
+        "still calling router.route_all() with "
+        "enable_in_pad_escape_rescues=True and in_pad_escape_rescue_pins "
+        "for U1 (pins 12-15, 26-27), and that USB_D+/USB_D- are still "
+        "tagged with intra_pair_clearance=0.15."
+    )
+    # USB_D- may be partial under current router HEAD (issue #3308 AC
+    # #2/#3 -- separate router regression tracked under that issue's
+    # follow-up bisect work).  We only assert it has at least one
+    # segment -- a zero-segment USB_D- IS catastrophic.
+    assert dn_segments > 0, (
+        f"USB_D- (net {usb_dn_id}) routed with 0 segments -- "
+        "catastrophic regression: even partial routes are missing.  "
+        "See USB_D+ note above for diagnostic guidance."
+    )
+
+    # USB_D+ specific failure-list check: USB_D+ MUST NOT be in
+    # routing_failures.  This is the partial-route variant of the
+    # original #2760 regression (USB_D+ 2-of-3-pads stub).  We do NOT
+    # assert this for USB_D- because the canonical recipe currently
+    # leaves it partial under HEAD; the aggregate 11/13 floor in
+    # test_board03_routing_baseline.py catches further degradation.
+    failed_net_ids = {failure.net for failure in router.routing_failures}
+    assert usb_dp_id not in failed_net_ids, (
+        f"USB_D+ (net {usb_dp_id}) appears in router.routing_failures.  "
+        "This is the partial-route variant of the Issue #2760 "
+        "regression: USB_D+ may have some segments but is not connected "
+        "to all of its pads.  Pre-fix this typically manifested as "
+        "USB_D+ being a 2-of-3-pads stub between J1.A6 and J1.B6 with "
+        "U1.29 unconnected due to a USB_D- via blocking pad access.  "
+        "Post-#3095 / #3183 the in-pad escape rescue on U1.29 was the "
+        "expected fix; check the rescue pin list in the canonical "
+        "recipe (boards/03-usb-joystick/generate_design.py:route_pcb)."
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.xdist_group("board03_regression_routed")
+def test_no_python_fallbacks(routed_board_03) -> None:
+    """Issue #3456: board 03 routes entirely on the C++ backend.
+
+    Pre-fix, the standard-mode branch of the C++
+    ``Pathfinder::is_trace_blocked`` rejected trace centerlines within
+    trace-half-width of the net's OWN ``is_obstacle`` pad copper
+    (``cell.is_obstacle || cell.net != net`` instead of the Python
+    Issue #864 semantics ``cell.net != net``).  On this board's J1
+    USB-C pads at the 0.05mm canonical grid that sealed the connector
+    pad pockets: the standard-mode C++ open set exhausted within ~800
+    iterations on the J1->U1 USB edges (and JOY/BTN nets burned up to
+    6M iterations before FAILURE_NO_PATH), silently handing those nets
+    to the 10-100x-slower pure-Python fallback -- 3-7 MINUTES per net
+    at default verbosity, indistinguishable from "router is slow".
+
+    Build version 12 aligns the predicate with Python; this board now
+    routes with ZERO fallback attempts.  Both halves of the #3456 fix
+    are pinned here:
+
+      * the wrongful fallback is gone (``fallback_reasons`` empty --
+        it records every ATTEMPT, including ones whose Python fallback
+        also failed), and
+      * if a future regression reintroduces one, it will be LOUD
+        (once-per-net WARNING -- unit contract in
+        tests/test_router_cpp_fallback_warning_3456.py).
+    """
+    router, _net_map = routed_board_03
+
+    info = router.backend_info
+    if info.get("active") != "cpp":
+        pytest.skip("C++ backend not active; fallback pinning not applicable")
+
+    stats = info["fallback_stats"]
+    assert "fallback_reasons" in stats, (
+        "Issue #3456: fallback_stats must expose 'fallback_reasons' "
+        "(stale router_cpp .so or pre-#3456 cpp_backend.py?)"
+    )
+
+    assert stats["fallback_count"] == 0 and not stats["fallback_reasons"], (
+        f"Issue #3456 regression: nets fell back to the pure-Python A* "
+        f"(fallback_nets={stats['fallback_nets']}, "
+        f"reasons={stats['fallback_reasons']!r}).  The C++ standard-mode "
+        "is_trace_blocked/is_diagonal_blocked predicates must admit "
+        "same-net is_obstacle cells (build version >= 12).  A stale "
+        "router_cpp .so is the most likely cause -- note that "
+        "`kct build-native` SKIPS the rebuild when a matching-version "
+        ".so is already installed; use `kct build-native --force` after "
+        "editing C++ sources."
+    )
+
+
+@pytest.mark.skipif(
+    not __import__(
+        "kicad_tools.router.via_conflict", fromlist=["TRACE_RIP_REROUTE_ENABLED"]
+    ).TRACE_RIP_REROUTE_ENABLED,
+    reason=(
+        "Issue #2872 round-2 (PR #2876 Judge feedback): the trace "
+        "rip-reroute branch is default-disabled because the "
+        "transactional wrapper's per-route validate_segment_clearance "
+        "/ validate_via_clearance primitives do not catch diff-pair "
+        "intra-pair clearance (rule_id diffpair_clearance_intra) or "
+        "match-group length-skew (rule_id match_group_length_skew) "
+        "violations -- both surfaced as +6 / +9 DRC errors on boards "
+        "06 / 07 in CI.  The transactional wrapper itself is sound "
+        "(snapshot/rollback covers all required state) and ships in "
+        "this PR; enabling the flag is deferred to a follow-up that "
+        "extends _TraceResolverTransaction.validate_committed_geometry "
+        "to detect the missing rule categories.  Set "
+        "KICAD_TOOLS_TRACE_RIP_REROUTE_ENABLED=1 to run this test.  "
+        "When the validator extension lands, the default flips back "
+        "to True and this skipif drops."
+    ),
+)
+def test_xtal2_unblocks_via_conflict_resolution(routed_board_03) -> None:
+    """XTAL2 routes via ``ViaConflictManager`` trace rip-and-reroute.
+
+    Issue #2838 (closes #2761 gap): wired ``ViaConflictManager`` into
+    ``Autorouter.route_net``'s PIN_ACCESS retry path.
+
+    Issue #2858: fixed the misclassification of XTAL2's XTAL1 blocker
+    so it correctly emits ``blocking_type == "trace"`` instead of
+    ``"via"``.  Pre-#2858 the via-only resolver fired but found no
+    vias to relocate (the nearest XTAL1 via is 7.5 mm away from U1.3),
+    so XTAL2 stayed unrouted.
+
+    Issue #2859 (this PR): extends ``ViaConflictManager`` with a
+    trace-blocker branch (``find_blocking_traces`` /
+    ``try_trace_rip_reroute``).  ``Autorouter._resolve_via_conflicts_for_net``
+    now dispatches to that branch when the failure analyser reports a
+    ``"trace"`` blocker (the case on board 03 for XTAL2).  Net result:
+    the resolver rips the XTAL1 trace, routes XTAL2, and re-routes
+    XTAL1.
+
+    Acceptance criteria (Issue #2859):
+      1. ``hasattr(router, "_via_manager")`` -- structural wiring still
+         in place (the #2838 minimum bar).
+      2. XTAL1 still routes -- the rip-reroute may temporarily un-mark
+         the XTAL1 route but must restore or re-route it (the rip-
+         reroute pattern restores on failure; on success it re-routes).
+      3. XTAL2 is no longer in ``router.routing_failures`` and has at
+         least one route -- the canonical "XTAL2 unblocked" assertion.
+      4. The resolver's success counter
+         (``trace_rip_reroutes_succeeded + rip_reroutes_succeeded``)
+         is ``>= 1`` -- proves the resolver actually fired and the
+         success is not accidental.
+    """
+    router, net_map = routed_board_03
+
+    xtal1_id = net_map.get("XTAL1")
+    xtal2_id = net_map.get("XTAL2")
+    assert xtal1_id is not None, (
+        "XTAL1 net missing from board 03 unrouted PCB.  Expected this "
+        "is one of the canonical example board's clock signals; if the "
+        "schematic / PCB generator no longer emits XTAL1, this test "
+        "needs to be updated."
+    )
+    assert xtal2_id is not None, "XTAL2 net missing from board 03 unrouted PCB -- see XTAL1 note."
+
+    routes_by_net: dict[int, int] = {}
+    for route in router.routes:
+        routes_by_net[route.net] = routes_by_net.get(route.net, 0) + len(route.segments)
+
+    # No regression on XTAL1: it routed first under pre-fix main and
+    # must continue to route post-fix (the trace rip-and-reroute
+    # branch may rip XTAL1 to free U1.3, but it must re-route XTAL1
+    # before returning success -- otherwise the rip-reroute restore-on-
+    # failure path would have triggered).
+    xtal1_segments = routes_by_net.get(xtal1_id, 0)
+    assert xtal1_segments > 0, (
+        f"XTAL1 (net {xtal1_id}) routed with 0 segments after the "
+        "trace-conflict fix.  Either rip-and-reroute removed XTAL1's "
+        "route to free U1.3 but failed to find an alternate path on "
+        "retry (the restore-on-failure path should have kicked in), or "
+        "the routing order changed and XTAL1 is now being scheduled "
+        "after XTAL2 (which would make this test the wrong test for "
+        "the regression)."
+    )
+
+    # Structural wiring assertion (the #2838 minimum bar): the
+    # ``Autorouter._via_manager`` attribute must exist.  This is what
+    # makes the test fail on ``main`` at the branch point -- the
+    # attribute is entirely absent.
+    assert hasattr(router, "_via_manager"), (
+        "Autorouter is missing the _via_manager attribute.  This is "
+        "the Issue #2838 structural regression: the ViaConflictManager "
+        "wiring is entirely absent from Autorouter.  Check that "
+        "core.py imports ViaConflictManager and __init__ initializes "
+        "self._via_manager."
+    )
+
+    # Issue #2859 acceptance criterion: XTAL2 must route to completion.
+    failed_net_ids = {failure.net for failure in router.routing_failures}
+    assert xtal2_id not in failed_net_ids, (
+        f"XTAL2 (net {xtal2_id}) is still in routing_failures after "
+        "the trace-conflict fix.  This is the Issue #2859 regression: "
+        "the trace rip-and-reroute branch should have ripped the XTAL1 "
+        "trace blocker at U1.3, routed XTAL2, and re-routed XTAL1.  "
+        "Check core.py:_resolve_via_conflicts_for_net's trace branch "
+        "and via_conflict.py:try_trace_rip_reroute."
+    )
+    xtal2_segments = routes_by_net.get(xtal2_id, 0)
+    assert xtal2_segments > 0, (
+        f"XTAL2 (net {xtal2_id}) has 0 segments after the trace "
+        "rip-and-reroute claimed success.  This is inconsistent: the "
+        "resolver returned routes for XTAL2 but they were not added "
+        "to router.routes.  Check the recursive route_net call inside "
+        "_resolve_via_conflicts_for_net's trace branch."
+    )
+
+    # Issue #2859 / #2872 canonical acceptance counter: when the
+    # resolver fires, it must have successfully completed (the
+    # acceptance gate is *if-fired-then-succeeded*, not *must-fire*).
+    # The actual primary acceptance is XTAL2 routing 11/11 above
+    # (``xtal2 not in failed_net_ids`` and ``xtal2_segments > 0``).
+    #
+    # Issue #2872 follow-up: subsequent fixes (#2866 narrow-channel
+    # guard, #2868 C++ validator narrow-channel guard, #2870
+    # net-aware halo carve-out) improved board 03 routing enough
+    # that XTAL2 may now succeed on the first pass without
+    # PIN_ACCESS failure, in which case ``_via_manager`` stays
+    # ``None`` (lazy-init) and the resolver's success counters are
+    # both zero.  That's a desirable side effect of the upstream
+    # improvements -- the test must not regress to "trace resolver
+    # had to fire", because then routing improvement turns this
+    # test red for the wrong reason.
+    if router._via_manager is not None:
+        manager_stats = router._via_manager.stats
+        resolver_attempted_count = (
+            manager_stats.trace_rip_reroutes_attempted
+            + manager_stats.rip_reroutes_attempted
+            + manager_stats.relocations_attempted
+        )
+        resolver_fired_count = (
+            manager_stats.trace_rip_reroutes_succeeded
+            + manager_stats.rip_reroutes_succeeded
+            + manager_stats.relocations_succeeded
+        )
+        # If the resolver attempted a rip-reroute, at least one of
+        # those attempts must have succeeded (otherwise the resolver
+        # is doing destructive surgery without payoff).  This guards
+        # against the Issue #2872 round-1 regression where the
+        # transactional wrapper rolled back every attempt.
+        if resolver_attempted_count > 0:
+            assert resolver_fired_count >= 1, (
+                f"Issue #2859 / #2872 acceptance counter: resolver "
+                f"attempted {resolver_attempted_count} resolution(s) but "
+                f"none succeeded.  Stats: "
+                f"trace_conflicts_found={manager_stats.trace_conflicts_found}, "
+                f"trace_rip_reroutes_attempted="
+                f"{manager_stats.trace_rip_reroutes_attempted}, "
+                f"trace_rip_reroutes_succeeded="
+                f"{manager_stats.trace_rip_reroutes_succeeded}, "
+                f"conflicts_found={manager_stats.conflicts_found}, "
+                f"rip_reroutes_attempted={manager_stats.rip_reroutes_attempted}, "
+                f"rip_reroutes_succeeded={manager_stats.rip_reroutes_succeeded}, "
+                f"relocations_attempted={manager_stats.relocations_attempted}, "
+                f"relocations_succeeded={manager_stats.relocations_succeeded}.  "
+                "Either the restore-on-failure path in "
+                "try_trace_rip_reroute is broken, or the Issue #2872 "
+                "transactional wrapper is rolling back every attempt."
+            )
+
+
+@pytest.mark.slow
+@pytest.mark.xdist_group("board03_regression_routed")
+def test_xtal2_failure_classified_as_trace_blocker(routed_board_03) -> None:
+    """Issue #2858: XTAL2's pad-access blocker (if any) must surface as ``"trace"``.
+
+    Pre-fix behaviour (the bug):
+      The failure analyser at ``failure_analysis.py:1546`` defaulted to
+      ``blocking_type == "via"`` for any cell that wasn't a pad, trace
+      centerline, or pad-clearance zone.  XTAL2's U1.3 pad was blocked
+      by a XTAL1 *trace* clearance halo (~0.3-0.9 mm from the pad), not
+      a via (nearest XTAL1 via is 7.5 mm away).  Reporting ``"via"``
+      misrouted the failure to ``ViaConflictManager`` which then found
+      nothing to relocate, leaving the failure terminal.
+
+    Post-fix behaviour (two valid outcomes -- both pass this test):
+
+      A. **XTAL2 routes fully.**  The classifier fix changes the
+         ``_resolve_via_conflicts_for_net`` early-return point, which
+         in turn changes the downstream negotiated-routing strategy's
+         exploration path enough that XTAL2 finds a working route.
+         This is a positive side effect of the fix: with the spurious
+         ``ViaConflictManager`` engagement gone, the negotiated /
+         rip-up-and-reroute strategy has more iterations available
+         and can solve the routing.
+
+      B. **XTAL2 fails with a ``"trace"``-classified blocker.**  If
+         the routing strategy still cannot solve XTAL2 (e.g. on a
+         different machine or after future strategy tuning that
+         changes iteration counts), the failure record must report
+         the XTAL1 blocker as ``blocking_type == "trace"`` rather
+         than ``"via"`` -- the actual Issue #2858 acceptance criterion.
+
+    Either outcome confirms the fix: outcome A is empirical evidence
+    the misclassification was load-bearing in the resolver flow, and
+    outcome B directly pins the classifier change.  The fail case is
+    "blocker classified as 'via'" -- which would mean the classifier
+    fix regressed.
+
+    References:
+      - Issue #2858 (this fix)
+      - PR #2856 / Issue #2838 (XTAL2 wiring fix that exposed this bug)
+      - Issue #2859 (trace-clearance resolver, dependent on this fix)
+    """
+    router, net_map = routed_board_03
+
+    xtal1_id = net_map.get("XTAL1")
+    xtal2_id = net_map.get("XTAL2")
+    assert xtal1_id is not None and xtal2_id is not None, (
+        "XTAL1 / XTAL2 nets missing from board 03; see "
+        "test_xtal2_unblocks_via_conflict_resolution for the canonical "
+        "skip path."
+    )
+
+    xtal2_failures = [f for f in router.routing_failures if f.net == xtal2_id]
+
+    # Outcome A: XTAL2 routes fully (no failures recorded).  This is a
+    # legitimate post-fix outcome; the classifier acceptance is then
+    # pinned by the synthetic tests in
+    # ``tests/test_failure_analysis.py::TestBlockerGeometryClassifier``.
+    if not xtal2_failures:
+        # Verify XTAL2 actually has routes (not just absent from
+        # routing_failures due to never being attempted).
+        xtal2_segs = sum(len(r.segments) for r in router.routes if r.net == xtal2_id)
+        assert xtal2_segs > 0, (
+            "XTAL2 has no failures AND no routes -- it was skipped "
+            "entirely, not routed.  Check that the routing pass still "
+            "attempts XTAL2; if the skip list grew, update SKIP_NETS."
+        )
+        return
+
+    # Outcome B: XTAL2 still fails -- the classifier fix must surface
+    # the XTAL1 blocker as ``"trace"`` rather than ``"via"``.
+    xtal1_blockers = []
+    for failure in xtal2_failures:
+        if failure.analysis is None:
+            continue
+        for blocker in failure.analysis.pad_access_blockers:
+            if blocker.blocking_net == xtal1_id:
+                xtal1_blockers.append(blocker)
+
+    assert len(xtal1_blockers) >= 1, (
+        f"XTAL2 failed but no XTAL1 blocker appears in its "
+        f"pad_access_blockers records: {[f.analysis for f in xtal2_failures]!r}. "
+        "If the failure analyser is no longer emitting pad_access_blockers "
+        "for this case, this test needs to be updated; see issue #2858 "
+        "for what changed in the analyser."
+    )
+
+    # The Issue #2858 acceptance criterion: at least one XTAL1 blocker on
+    # XTAL2's failure must be classified ``"trace"``, not ``"via"``.
+    # Pre-fix ALL of these would be classified ``"via"``; post-fix the
+    # closest blocker (the segment halo) must be ``"trace"``.
+    trace_classified = [b for b in xtal1_blockers if b.blocking_type == "trace"]
+    assert len(trace_classified) >= 1, (
+        "Issue #2858 acceptance criterion: XTAL2's failure must report a "
+        "XTAL1 blocker with blocking_type='trace' (the real obstacle is a "
+        "XTAL1 trace segment clearance halo, ~0.3-0.9 mm from U1.3).  Got "
+        f"blocker types: {[b.blocking_type for b in xtal1_blockers]!r}.  "
+        "If this test fails, check that "
+        "_classify_blocker_geometry (failure_analysis.py) was invoked "
+        "from the else branch of analyze_pad_access_blockers's cascade."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2744: Generator parts drift (subprocess, slower but bounded)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def regenerated_board(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Regenerate the board's schematic + PCB into a TEMP dir and return it.
+
+    Running the generators from scratch is the most direct way to assert
+    "the generator emits the right components" — relying on the committed
+    output files would let a generator regression slip through if someone
+    happens to manually re-export the PCB later.
+
+    Issue #3580: the generators MUST NOT write into the committed
+    ``boards/03-usb-joystick/output/`` directory.  Under ``pytest -n
+    auto`` (xdist) other workers read the committed artifacts in
+    parallel (e.g. ``tests/test_fleet_45_census.py``,
+    ``tests/test_manifest_integrity.py``) and can observe a truncated
+    mid-write file; an in-place rewrite also silently clobbers the
+    committed artifact in the working tree (the board-03 incident on
+    PR #3589).  Both generator scripts accept an explicit output path,
+    so we regenerate into a per-module temp dir instead.
+
+    Skips the test if a generator script is missing (e.g. the board was
+    relocated by a future refactor without updating this test), or if no
+    KiCad symbol libraries are installed (generate_schematic.py resolves
+    symbols like Connector_Generic from the system libraries; the nightly
+    slow-tests runner installs the ``kicad-symbols`` apt package -- see
+    .github/workflows/slow-tests.yml and the issue #3458 inventory).
+    """
+    for required in (GEN_SCH_SCRIPT, GEN_PCB_SCRIPT, ROUTE_DEMO_SCRIPT):
+        if not required.exists():
+            pytest.skip(f"Required board 03 script missing: {required}")
+
+    from kicad_tools.schematic.registry import _default_symbol_paths
+
+    if not _default_symbol_paths():
+        pytest.skip(
+            "No KiCad symbol libraries found (see "
+            "kicad_tools.schematic.registry._default_symbol_paths); "
+            "generate_schematic.py cannot resolve symbols. Install the "
+            "system KiCad symbol libraries (apt: kicad-symbols) or set "
+            "KICAD_SYMBOL_DIR."
+        )
+
+    out_dir = tmp_path_factory.mktemp("board03_regen")
+
+    # Regenerate schematic FIRST so the PCB sync check below compares
+    # against a same-run schematic (avoids false negatives from stale
+    # committed output files that pre-date a generator change).
+    # ``generate_schematic.py`` accepts a directory and appends the
+    # default filename (``usb_joystick.kicad_sch``).
+    sch_proc = subprocess.run(
+        [sys.executable, str(GEN_SCH_SCRIPT), str(out_dir)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        cwd=str(BOARD_DIR),
+    )
+    if sch_proc.returncode != 0:
+        pytest.fail(
+            "generate_schematic.py failed:\n"
+            f"stdout:\n{sch_proc.stdout[-2000:]}\n"
+            f"stderr:\n{sch_proc.stderr[-2000:]}"
+        )
+
+    # ``generate_pcb.py`` joins its positional arg onto the script dir;
+    # passing an ABSOLUTE path short-circuits the join (pathlib
+    # semantics), so the PCB lands in the temp dir, never in
+    # ``boards/03-usb-joystick/output/``.
+    pcb_proc = subprocess.run(
+        [sys.executable, str(GEN_PCB_SCRIPT), str(out_dir / "usb_joystick.kicad_pcb")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=str(BOARD_DIR),
+    )
+    if pcb_proc.returncode != 0:
+        pytest.fail(
+            "generate_pcb.py failed:\n"
+            f"stdout:\n{pcb_proc.stdout[-2000:]}\n"
+            f"stderr:\n{pcb_proc.stderr[-2000:]}"
+        )
+
+    return out_dir
+
+
+def test_generated_pcb_contains_required_refs(regenerated_board: Path) -> None:
+    """Real-package revision B preserves the clock/filter/support placements."""
+    footprints = _revision_b_footprints(regenerated_board)
+    assert set(REQUIRED_PCB_REFS) <= footprints.keys()
+    assert {"U2", "F1", "J3", "C8", "C9", "C12", "R16", "SW5"} <= footprints.keys()
+
+
+def test_pcb_sync_clean_against_schematic(regenerated_board: Path) -> None:
+    """``kct validate --sync`` reports zero errors and zero warnings.
+
+    This is the canonical schematic<->PCB drift check.  Issue #2744
+    surfaced because the build chain reported "OK" while sync was
+    actually broken; this test catches a re-introduction of that drift
+    at PR time so a future regression doesn't slip into ``main`` and
+    block board 03 export downstream.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "validate",
+            "--sync",
+            str(regenerated_board / "usb_joystick.kicad_sch"),
+            str(regenerated_board / "usb_joystick.kicad_pcb"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        "kct validate --sync returned non-zero exit code "
+        f"{proc.returncode} — schematic<->PCB drift detected.\n"
+        f"stdout:\n{proc.stdout}\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    assert "NETLIST IN SYNC" in proc.stdout, (
+        f"kct validate --sync did not report 'NETLIST IN SYNC'.\nstdout:\n{proc.stdout}"
+    )
+
+
+def test_schematic_pcb_lvs_clean_and_net_counts_match(regenerated_board: Path) -> None:
+    """Schematic↔PCB netlist reconciles pad-for-pad (issue #3764).
+
+    The board-03 fleet-parity audit (#3763 gap A) found three diverging
+    net models on this board: ``generate_schematic.py``,
+    ``generate_pcb.py``, and a third simplified inline schematic inside
+    ``generate_design.py:main()``.  After the #3764 reconciliation the
+    schematic and PCB must agree on every ``(ref, pad)`` net AND expose
+    the same revision-B 27-net label set, so that ``kct fleet ship-ready`` no longer
+    reports a schematic-drift blocker.
+
+    This pins both halves so a future generator edit that re-diverges the
+    two sides (e.g. a changed MCU pinout, a re-introduced ``+5V`` power
+    symbol, or an unwired joystick pin) fails at PR time.
+    """
+    from kicad_tools.cli.fleet_cmd import (
+        _extract_pcb_named_nets,
+        _extract_schematic_nets,
+    )
+    from kicad_tools.lvs import compare_netlists
+
+    sch = regenerated_board / "usb_joystick.kicad_sch"
+    pcb = regenerated_board / "usb_joystick.kicad_pcb"
+
+    # 1. Per-(ref, pad) LVS must be perfectly clean (0 mismatches).
+    result = compare_netlists(sch, pcb)
+    assert result.clean, (
+        "schematic↔PCB LVS is dirty (regression of issue #3764): "
+        f"{len(result.mismatches)} mismatch(es); first few: "
+        f"{[(m.ref, m.pad, m.schematic_net, m.pcb_net) for m in result.mismatches[:8]]}"
+    )
+
+    # 2. Named-net label sets must be identical and both equal to the
+    #    revision-B 27-net model (drift detector parity).
+    sch_nets = _extract_schematic_nets(sch)
+    pcb_nets = _extract_pcb_named_nets(pcb)
+    assert sch_nets is not None and pcb_nets is not None
+    assert sch_nets == pcb_nets, (
+        "schematic vs PCB named-net sets diverge (issue #3764): "
+        f"only-in-sch={sorted(sch_nets - pcb_nets)}, "
+        f"only-in-pcb={sorted(pcb_nets - sch_nets)}"
+    )
+    assert len(sch_nets) == 27, (
+        f"expected the revision-B 27-net board-03 model, got "
+        f"{len(sch_nets)} schematic nets: {sorted(sch_nets)}"
+    )
+    # The spurious ``+5V`` rail must be gone (folded into VCC).
+    assert "+5V" not in sch_nets, (
+        "the +5V power symbol leaked back into the schematic net set "
+        "(issue #3764 required replacing power:+5V with power:VCC)"
+    )
+
+
+def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
+    """Extract ``Routed N/M [signal] nets`` from route_demo.py output.
+
+    Issue #3308: ``route_demo.py`` now delegates to
+    ``generate_design.py:route_pcb()`` which emits ``PARTIAL: Routed
+    N/M signal nets`` (with the word ``signal`` in between).  We accept
+    both ``Routed N/M nets`` and ``Routed N/M signal nets`` so this
+    parser keeps working across the recipe consolidation.
+
+    The script emits a summary line of the form::
+
+        PARTIAL: Routed 11/13 signal nets
+
+    or, on full completion (issue #3453 closed board 03 to 13/13)::
+
+        Nets routed:     13/13
+           SUCCESS: All signal nets routed!
+
+    Note the 100%-success wording inserts the word ``signal``
+    ("All **signal** nets routed!"), so a literal match on
+    "All nets routed" misses it (issue #3655).
+
+    Returns ``(routed, total)`` or ``None`` if no match.
+    """
+    partial = re.search(r"Routed\s+(\d+)/(\d+)(?:\s+\w+)?\s+nets", stdout)
+    if partial:
+        return int(partial.group(1)), int(partial.group(2))
+    # Full-completion branch.  The recipe emits the 100%-success banner
+    # with the word ``signal`` inserted ("All signal nets routed!") and
+    # may omit any explicit "Routed N/M" line, so recover the count from
+    # the ``Nets routed: N/M`` breakdown that the echoed ``kct route``
+    # output always prints (issue #3655).
+    if re.search(r"SUCCESS: All (?:signal )?nets routed", stdout):
+        # Prefer an explicit ``Nets routed: N/M`` pair (last occurrence
+        # reflects the final saved state under escalation mode).
+        nm_matches = re.findall(r"Nets routed:\s+(\d+)/(\d+)", stdout)
+        if nm_matches:
+            return int(nm_matches[-1][0]), int(nm_matches[-1][1])
+        # Fall back to a single-count breakdown line: on full success
+        # routed == total.
+        for pattern in (r"Nets to route:\s+(\d+)", r"Nets routed:\s+(\d+)"):
+            m = re.search(pattern, stdout)
+            if m:
+                total = int(m.group(1))
+                return total, total
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Issue #3655: parser unit tests (fast — no router run)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_routed_net_count_recognizes_100pct_signal_success() -> None:
+    """Issue #3655: the 100%-success banner says "All *signal* nets routed!".
+
+    Once board 03 reaches full completion (#3453, 13/13) the recipe emits
+    ``SUCCESS: All signal nets routed!`` (note the inserted word
+    ``signal``) and no ``PARTIAL: Routed N/M`` line.  The pre-fix parser
+    only matched the literal ``"SUCCESS: All nets routed"`` and returned
+    ``None`` here, so the slow completion test failed even though routing
+    succeeded.  The count must be recovered from the echoed ``kct route``
+    ``Nets routed: N/M`` breakdown.
+    """
+    stdout = (
+        "Routing board...\n"
+        "Nets to route: 13\n"
+        "Nets routed:     13/13\n"
+        "\n   SUCCESS: All signal nets routed!\n"
+        "WARNING: All nets routed, but 14 DRC violation(s) detected!\n"
+    )
+    assert _parse_routed_net_count(stdout) == (13, 13)
+
+
+def test_parse_routed_net_count_uses_last_nets_routed_under_escalation() -> None:
+    """Escalation mode emits several ``Nets routed: N/M`` lines.
+
+    The final saved state is the LAST occurrence, so the parser must
+    return that one when the 100%-success banner is present.
+    """
+    stdout = (
+        "Nets routed:     11/13\n"
+        "Escalating grid resolution...\n"
+        "Nets routed:     13/13\n"
+        "   SUCCESS: All signal nets routed!\n"
+    )
+    assert _parse_routed_net_count(stdout) == (13, 13)
+
+
+def test_parse_routed_net_count_still_handles_partial() -> None:
+    """Issue #3655 AC: partial wording must keep working post-fix."""
+    stdout = "   PARTIAL: Routed 11/13 signal nets\n"
+    assert _parse_routed_net_count(stdout) == (11, 13)
+
+
+def test_parse_routed_net_count_handles_legacy_drc_passed_banner() -> None:
+    """The DRC-clean banner (``SUCCESS: All ... nets routed, DRC passed!``)
+    must also parse, whether or not the word ``signal`` is present."""
+    legacy = "Nets routed:     13/13\nSUCCESS: All nets routed, DRC passed!\n"
+    assert _parse_routed_net_count(legacy) == (13, 13)
+    signal = "Nets routed:     13/13\nSUCCESS: All signal nets routed, DRC passed!\n"
+    assert _parse_routed_net_count(signal) == (13, 13)
+
+
+def test_parse_routed_net_count_returns_none_without_summary() -> None:
+    """No summary line at all (router crashed) -> ``None``."""
+    assert _parse_routed_net_count("Routing board...\nsegfault\n") is None
+
+
+@pytest.mark.slow
+def test_route_demo_achieves_minimum_completion(regenerated_board: Path) -> None:
+    """The reviewed revision-B routing replays cleanly in an isolated directory.
+
+    Revision B is a real circuit with saved manual repairs; generic autorouter
+    reach counts from the revision-A synthetic fixture do not describe it.
+    """
+    routed_tmp = regenerated_board / "usb_joystick_routed.kicad_pcb"
+    # PYTHONDONTWRITEBYTECODE: route_demo.py imports generate_design
+    # from the board dir; without this the import drops a __pycache__/
+    # into boards/03-usb-joystick/, dirtying the working tree.
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROUTE_DEMO_SCRIPT),
+            str(regenerated_board / "usb_joystick.kicad_pcb"),
+            str(routed_tmp),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+        cwd=str(BOARD_DIR),
+        env=env,
+    )
+    # Unrelated to #5981, so asserted before any XFAIL can short-circuit it.
+    assert "Applying reviewed routing plan" in proc.stdout, (
+        proc.stdout[-4000:] + proc.stderr[-2000:]
+    )
+    # Issue #5981: route_demo's second, native kicad-cli DRC pass writes its
+    # report beside the routed board.  XFAIL only when the kct-check leg is
+    # clean and the native report's sole errors are the known old-kicad-cli
+    # J1 SH oval-ring false positives.
+    native_report_path = routed_tmp.parent / "native-drc.json"
+    native_report = (
+        json.loads(native_report_path.read_text()) if native_report_path.is_file() else None
+    )
+    xfail_reason = _route_demo_xfail_reason(proc.returncode, proc.stdout, native_report)
+    if xfail_reason is not None:
+        pytest.xfail(xfail_reason)
+    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
+    assert "SUCCESS: All nets routed, DRC passed!" in proc.stdout
+    assert "Native errors and opens: 0" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Issue #2851: granular rollback preserves non-regressing fixes
+# ---------------------------------------------------------------------------
+
+
+def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
+    """Issue #2851: ``kct fix-drc`` repairs >0 violations on board 03.
+
+    Layer-3 acceptance criterion from issue #2839 / parent #2833.
+
+    Pre-#2851, board 03's routed PCB had 18 clearance nudges available
+    (max 0.1880 mm, well under the 2.0 mm cap), of which only a small
+    handful broke connectivity.  Under the bulk-snapshot rollback, all
+    18 nudges were thrown away whenever the connectivity check fired,
+    leaving the user with "Repaired 0/N" even though the majority were
+    safe.
+
+    With granular per-nudge rollback in place, ``fix-drc`` must keep at
+    least one nudge that did NOT touch a regressed net, so the post-fix
+    summary reports ``Repaired K/N`` with K > 0.
+
+    This test loads the frozen historical routed PCB and runs ``fix-drc``
+    in-process via the CLI module; no router invocation is required.
+    The board 03 routed PCB has ~4 clearance violations clustered around
+    the USB diff-pair flip-routing corridor; some of those nudges touch
+    USB_D+ (whose connectivity is fragile due to the 2-of-3-pads stub
+    geometry) and some do not.  The granular rollback should preserve
+    the latter group.
+    """
+    historical_routed = BOARD_DIR / "regression-fixture" / "usb_joystick_routed.kicad_pcb"
+    assert historical_routed.is_file(), "Historical routed board03 missing; restore it from git"
+
+    output_file = tmp_path / "usb_joystick_repaired.kicad_pcb"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "fix-drc",
+            str(historical_routed),
+            "-o",
+            str(output_file),
+            "--format",
+            "json",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    # fix-drc exit codes: 0 = clean, 2 = partial, 3 = full rollback.
+    # We accept anything except 3 -- a full rollback would mean granular
+    # attribution failed and the legacy bulk path fired.
+    assert proc.returncode != 3, (
+        "fix-drc full-rolled-back on board 03: this is the issue #2851 "
+        "regression we are trying to prevent.  Expected granular "
+        "rollback to preserve at least 1 nudge.\n"
+        f"stdout:\n{proc.stdout[-2000:]}\nstderr:\n{proc.stderr[-2000:]}"
+    )
+
+    # Parse JSON to assert at least one nudge was applied.  ``fix-drc``
+    # may report ``total_repaired = 0`` when there are no violations at
+    # all (clean board), in which case the test is vacuously satisfied
+    # by the exit-code check above.
+    import json as _json
+
+    if not proc.stdout.strip():
+        return  # No JSON output (likely no violations).
+
+    # ``fix-drc`` prints a ``Running DRC on:`` preamble to stdout before
+    # the JSON document when ``--drc-report`` is not supplied.  Find the
+    # first ``{`` to locate the JSON body.
+    json_start = proc.stdout.find("{")
+    if json_start < 0:
+        return  # No JSON document emitted -- no violations to repair.
+    json_text = proc.stdout[json_start:]
+
+    try:
+        data = _json.loads(json_text)
+    except _json.JSONDecodeError:
+        pytest.fail(f"Could not parse fix-drc JSON output:\n{proc.stdout[-2000:]}")
+
+    total_violations = data.get("total_violations", 0)
+    total_repaired = data.get("total_repaired", 0)
+
+    if total_violations == 0:
+        return  # No work to do; vacuously satisfied.
+
+    assert total_repaired > 0, (
+        "fix-drc on board 03 reported total_violations="
+        f"{total_violations} but total_repaired={total_repaired}.  "
+        "This is the issue #2851 layer-3 contract: granular rollback "
+        "must preserve at least 1 nudge that does not touch a regressed "
+        "net.  A zero count here means the granular path attributed the "
+        "regression to every nudge (legitimate full rollback) OR the "
+        "granular path fell back to bulk snapshot restore."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2918: Crystal placement must be on the MCU's XTAL-pin side
+# ---------------------------------------------------------------------------
+#
+# Root cause: ``boards/03-usb-joystick/generate_pcb.py::generate_crystal()``
+# hardcoded ``x = BOARD_ORIGIN_X + 55`` (east of the MCU), but the TQFP-32
+# MCU's XTAL pins (pin 2 = XTAL1, pin 3 = XTAL2) sit on the WEST edge of
+# the package (pad offset = -4.5 mm from U1 centre).  This forced the
+# autorouter to drive 17-22 mm channel-blocked traces across the MCU body,
+# leaving XTAL1 and XTAL2 unrouted.
+#
+# Fix: relocate Y1 to ``BOARD_ORIGIN_X + 22`` (west of U1) with
+# ``y = BOARD_ORIGIN_Y + 30`` aligned to the XTAL pad row; load caps
+# C5/C6 follow via the shared ``xtal_cx`` / ``xtal_cy`` references.
+#
+# This unit test pins the literal so a future hand-edit can't silently
+# re-introduce the east-side placement.  Integration coverage (the route
+# actually completing on XTAL1) is provided by the existing
+# ``test_route_demo_achieves_minimum_completion`` test above -- with the
+# fix in place that test's 9-net floor is reached, whereas with the
+# east-side placement only 7-8 nets route.
+
+
+def test_crystal_placed_west_of_mcu(regenerated_board: Path) -> None:
+    """Keep the crystal and load caps close to the real west-facing XTAL pins."""
+    parts = _revision_b_footprints(regenerated_board)
+    x, y = parts["Y1"].find_child("at").get_float(0), parts["Y1"].find_child("at").get_float(1)
+    mcu_x = parts["U1"].find_child("at").get_float(0)
+    assert 0 < mcu_x - x <= 12
+    for ref in ("C8", "C9"):
+        at = parts[ref].find_child("at")
+        assert abs(at.get_float(0) - x) <= 6
+        assert abs(at.get_float(1) - y) <= 4
+
+
+def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> None:
+    """The revision-B TQFP44 clock pins are on the west side after rotation."""
+    parts = _revision_b_footprints(regenerated_board)
+    assert parts["Y1"].find_child("at").get_float(0) < parts["U1"].find_child("at").get_float(0)
+
+
+# ---------------------------------------------------------------------------
+# Issue #2943: J2 west-side nudge to clear JOY_Y channel past J2-5
+# ---------------------------------------------------------------------------
+#
+# Root cause: After issue #2918's west-side crystal placement
+# (Y1 at BOARD_ORIGIN_X + 22), the routing channel between Y1's south
+# pad metal and J2-5's north pad metal was only ~3.4 mm tall at
+# x = 19..22 -- the exact corridor JOY_Y needs to thread from the
+# filter column (filt_cx = BOARD_ORIGIN_X + 27) westward to J2-4
+# (x = BOARD_ORIGIN_X + 17 pre-nudge).  The result was 6
+# ``clearance_pad_segment`` errors where JOY_Y segments clipped
+# J2-5 (JOY_BTN, 1.6 mm dia pad).
+#
+# Fix: nudge J2 west by 2 mm (joy_cx: BOARD_ORIGIN_X + 15 ->
+# BOARD_ORIGIN_X + 13).  This walks J2-5 from x = 19 to x = 17
+# and opens a clean >5 mm channel.  PR #2941 (merged same day)
+# explicitly forbids router-side relaxation of these errors:
+# the same-component carve-out now correctly rejects negative-
+# clearance segments, so the fix MUST be geometric.
+#
+# This unit test pins the literal joy_cx = BOARD_ORIGIN_X + 13 so a
+# future hand-edit can't silently re-introduce the J2-5 channel
+# clip.  Integration coverage (the DRC count actually dropping to
+# the 4-error baseline) comes from the .github/routed-drc-tolerance.yml
+# floor of 4 set in the same PR.
+
+
+def test_joystick_nudged_west_to_clear_joy_y_channel(regenerated_board: Path) -> None:
+    """Keep the real joystick connector out of the MCU/clock escape region."""
+    parts = _revision_b_footprints(regenerated_board)
+    assert parts["J2"].find_child("at").get_float(0) + 10 < parts["U1"].find_child("at").get_float(
+        0
+    )
+
+
+def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
+    """All actual JST connector pads must remain inside the board outline."""
+    import math
+
+    from kicad_tools.pcb.center_sheet import centered_origin
+
+    parts = _revision_b_footprints(regenerated_board)
+    j2 = parts["J2"]
+    at = j2.find_child("at")
+    theta = math.radians(at.get_float(2) or 0)
+    ox, oy = centered_origin(80, 60)
+    for pad in j2.find_children("pad"):
+        local, size = pad.find_child("at"), pad.find_child("size")
+        x = (
+            at.get_float(0)
+            + local.get_float(0) * math.cos(theta)
+            + local.get_float(1) * math.sin(theta)
+        )
+        y = (
+            at.get_float(1)
+            - local.get_float(0) * math.sin(theta)
+            + local.get_float(1) * math.cos(theta)
+        )
+        radius = max(size.get_float(0), size.get_float(1)) / 2
+        assert ox + radius < x < ox + 80 - radius
+        assert oy + radius < y < oy + 60 - radius
+
+
+# ---------------------------------------------------------------------------
+# Issue #3969: two defects on a fresh board-03 build.
+#
+#   Bug A -- ``kicad-cli pcb drc`` was run WITHOUT ``--refill-zones`` in the
+#   shared ``run_geometric_drc`` helper, so it judged the stale persisted
+#   pour polygons.  Those can differ from a fresh fill by sub-micron
+#   rounding, manufacturing a phantom ``clearance`` violation (board 03:
+#   ``zone clearance 0.3000 mm; actual 0.2996 mm`` -- a 0.4 um gap that is
+#   present in the COMMITTED artifact too and vanishes on refill).  The fix
+#   adds ``--refill-zones`` so both engines and the shipped manufacturing
+#   bundle judge the same geometry.
+#
+#   Bug B -- ``route_demo.py:run_drc()`` called ``kct check`` WITHOUT
+#   ``--drc-only``; the meta-check rollup exits INCOMPLETE (2) on a fresh
+#   temp-dir route (no ERC/LVS/Manifest artifacts) even though DRC found 0
+#   errors, and the caller then printed the impossible "0 DRC violation(s)
+#   detected!" banner.  The fix scopes the call to ``--drc-only`` and keys
+#   the ``passed`` verdict off the parsed error count.
+# ---------------------------------------------------------------------------
+
+
+def test_run_geometric_drc_passes_refill_zones() -> None:
+    """Bug A (#3969): the shared helper must invoke kicad-cli with
+    ``--refill-zones`` so clearance is judged against a fresh pour fill,
+    not the stale persisted zone polygons.
+
+    Pure command-construction assertion -- no kicad-cli required.  We
+    capture the ``subprocess.run`` argv the helper builds and assert the
+    refill flag is present.  Without it, the sub-micron stale-fill phantom
+    (``zone clearance 0.3000; actual 0.2996``) re-appears on board 03.
+    """
+    import kicad_tools.drc.geometric as geo_mod
+
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = list(cmd)
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    # Force the helper past the kicad-cli discovery guard, then intercept
+    # the subprocess call so no real kicad-cli is needed.
+    fake_cli = Path("/usr/bin/kicad-cli")
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(geo_mod.subprocess, "run", _fake_run)
+        # Issue #6724: --refill-zones is passed only to a kicad-cli that
+        # supports it (KiCad 10+); model one.
+        monkey.setattr("kicad_tools.cli.runner._kicad_drc_supports_refill", lambda _cli: True)
+        # The report file never gets written by our fake, so the helper
+        # returns ran=False -- that is fine; we only assert on the argv.
+        geo_mod.run_geometric_drc(
+            REPO_ROOT / "boards" / "03-usb-joystick" / "output" / "usb_joystick_routed.kicad_pcb",
+            kicad_cli=fake_cli,
+        )
+    finally:
+        monkey.undo()
+
+    cmd = captured.get("cmd")
+    assert cmd is not None, "run_geometric_drc did not invoke subprocess.run"
+    assert "--refill-zones" in cmd, (
+        "run_geometric_drc must pass --refill-zones so kicad-cli judges a "
+        "fresh zone fill (issue #3969); otherwise the stale-fill sub-micron "
+        f"clearance phantom returns.  argv was: {cmd}"
+    )
+    # The refill flag must precede the DRC evaluation flags in the same
+    # invocation (it is a mode flag on `pcb drc`, not a separate step).
+    assert cmd.index("--refill-zones") < cmd.index("--format")
+
+
+_J1_SH_FALSE_POSITIVE = (
+    "annular_width",
+    ["PTH pad SH [GND] of J1"],
+    0.1462,
+    0.15,
+)
+
+
+@pytest.mark.parametrize(
+    ("version", "errors", "expect_xfail"),
+    [
+        # The exact #5981 signature on 10.0.1 -> xfail with a reason.
+        ((10, 0, 1), [_J1_SH_FALSE_POSITIVE] * 4, True),
+        # The first verified-clean version (and newer) never gets the escape hatch.
+        ((10, 0, 2), [_J1_SH_FALSE_POSITIVE] * 4, False),
+        ((10, 0, 6), [_J1_SH_FALSE_POSITIVE] * 4, False),
+        ((11, 0, 0), [_J1_SH_FALSE_POSITIVE] * 4, False),
+        # Unknown version -> fail normally.
+        (None, [_J1_SH_FALSE_POSITIVE], False),
+        # No errors -> nothing to excuse.
+        ((10, 0, 1), [], False),
+        # Any other error type alongside the false positive -> real failure.
+        ((10, 0, 1), [_J1_SH_FALSE_POSITIVE, ("clearance", ["Track [GND]"], None, None)], False),
+        # Annular error on a different pad -> real failure.
+        ((10, 0, 1), [("annular_width", ["PTH pad 1 [VCC] of J2"], 0.1462, 0.15)], False),
+        # A genuine (larger than measurement slop) deficit -> real failure.
+        ((10, 0, 1), [("annular_width", ["PTH pad SH [GND] of J1"], 0.10, 0.15)], False),
+        # One violation naming J1 SH AND another pad -> real failure.
+        (
+            (10, 0, 1),
+            [("annular_width", ["PTH pad SH [GND] of J1", "PTH pad 1 [VCC] of J10"], 0.1462, 0.15)],
+            False,
+        ),
+    ],
+)
+def test_old_kicad_annular_xfail_gate(version, errors, expect_xfail) -> None:
+    """Issue #5981: the old-kicad-cli escape hatch is narrow and version-gated."""
+    reason = _old_kicad_annular_xfail_reason(errors, version)
+    if expect_xfail:
+        assert reason is not None
+        assert f"10.0.1 < {_FLOOR_STR}" in reason
+        assert "#5981" in reason
+    else:
+        assert reason is None
+
+
+_FLOOR_STR = ".".join(str(part) for part in ANNULAR_OVAL_MIN_KICAD_VERSION)
+
+
+def _j1_sh_native_violation() -> dict:
+    return {
+        "type": "annular_width",
+        "severity": "error",
+        "description": (
+            "Annular width (rule 'PTH Annular Ring - jlcpcb-tier1' min annular "
+            "width 0.1500 mm; actual 0.1462 mm)"
+        ),
+        "items": [{"description": "PTH pad SH [GND] of J1", "pos": {"x": 1, "y": 2}}],
+    }
+
+
+def _native_report(version: str | None = "10.0.1", **overrides) -> dict:
+    report: dict = {
+        "violations": [_j1_sh_native_violation() for _ in range(4)],
+        "unconnected_items": [],
+    }
+    if version is not None:
+        report["kicad_version"] = version
+    report.update(overrides)
+    return report
+
+
+# The real 10.0.1 route_demo tail (#5981): kct leg clean, native leg fails.
+_ROUTE_DEMO_OLD_KICAD_STDOUT = (
+    "Applying reviewed routing plan\n"
+    "--- DRC Validation ---\n"
+    "  kct check: passed=True errors=0\n"
+    "  Native errors and opens: 4\n"
+    "WARNING: All nets routed, but the DRC check could not be completed.\n"
+)
+
+
+def test_route_demo_xfail_gate_accepts_only_the_known_false_positive() -> None:
+    """Issue #5981: the exact 10.0.1 signature, with a clean kct leg, XFAILs."""
+    reason = _route_demo_xfail_reason(1, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report())
+    assert reason is not None
+    assert f"10.0.1 < {_FLOOR_STR}" in reason
+    assert "#5981" in reason
+
+
+@pytest.mark.parametrize(
+    ("kct_line", "why"),
+    [
+        # kct-check found real DRC errors -> must FAIL, not XFAIL.
+        ("  kct check: passed=False errors=3", "kct-check DRC regression"),
+        # run_drc() crashed / could not run: (False, -1, -1).
+        ("  kct check: passed=False errors=-1", "kct-check crash"),
+        # Non-zero exit with no parsed errors: (False, 0, _).
+        ("  kct check: passed=False errors=0", "kct-check non-zero exit"),
+        # route_demo died before (or without) reporting the kct leg.
+        ("", "kct-check line missing"),
+    ],
+)
+def test_route_demo_xfail_gate_fails_on_kct_check_failure(kct_line, why) -> None:
+    """Issue #5981 (review): on old kicad-cli, a failing/crashed kct-check
+    leg is NOT masked by the native-only false positive -- it still FAILs."""
+    stdout = _ROUTE_DEMO_OLD_KICAD_STDOUT.replace("  kct check: passed=True errors=0", kct_line)
+    assert _route_demo_xfail_reason(1, stdout, _native_report()) is None, why
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "report", "why"),
+    [
+        (0, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report(), "run passed"),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT.replace("All nets routed", "Routed 12/13"),
+            _native_report(),
+            "incomplete routing",
+        ),
+        (1, _ROUTE_DEMO_OLD_KICAD_STDOUT, None, "native report missing"),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT,
+            _native_report(unconnected_items=[{"type": "unconnected_items"}]),
+            "native opens",
+        ),
+        (1, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report(_FLOOR_STR), "report from floor version"),
+        (1, _ROUTE_DEMO_OLD_KICAD_STDOUT, _native_report(None), "report without kicad_version"),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT,
+            _native_report(
+                violations=[
+                    _j1_sh_native_violation(),
+                    {"type": "clearance", "severity": "error", "description": "", "items": []},
+                ]
+            ),
+            "extra native error",
+        ),
+        (
+            1,
+            _ROUTE_DEMO_OLD_KICAD_STDOUT + "  kct check: passed=True errors=0\n",
+            _native_report(),
+            "ambiguous duplicate kct line",
+        ),
+    ],
+)
+def test_route_demo_xfail_gate_rejects_other_failures(returncode, stdout, report, why) -> None:
+    """Issue #5981: every other route_demo failure shape fails normally."""
+    assert _route_demo_xfail_reason(returncode, stdout, report) is None, why
+
+
+def test_route_demo_prints_parseable_kct_check_line() -> None:
+    """Issue #5981: route_demo.py emits the line the XFAIL gate keys off of."""
+    source = ROUTE_DEMO_SCRIPT.read_text()
+    assert 'print(f"  kct check: passed={drc_passed} errors={drc_errors}")' in source
+    assert _KCT_CHECK_RESULT_RE.search("  kct check: passed=True errors=0\n")
+
+
+def test_native_violation_summary_parses_kicad_cli_json() -> None:
+    """Issue #5981: the raw kicad-cli JSON record feeds the same gate."""
+    summary = _native_violation_summary(
+        {
+            "type": "annular_width",
+            "severity": "error",
+            "description": (
+                "Annular width (rule 'PTH Annular Ring - jlcpcb-tier1' min annular "
+                "width 0.1500 mm; actual 0.1462 mm)"
+            ),
+            "items": [{"description": "PTH pad SH [GND] of J1", "pos": {"x": 1, "y": 2}}],
+        }
+    )
+    assert summary == ("annular_width", ["PTH pad SH [GND] of J1"], 0.1462, 0.15)
+
+
+def test_committed_routed_board_is_geometrically_clean_with_refill() -> None:
+    """Bug A (#3969) end-to-end: the committed board-03 routed PCB reports
+    0 error-severity geometric violations from the shared helper.
+
+    This is the AC5 guard: the committed artifact must pass
+    ``kicad-cli pcb drc --refill-zones`` at 0 violations.  It exercises the
+    real ``run_geometric_drc`` (now refill-aware) against the committed
+    PCB.  Skipped when kicad-cli is unavailable (CI without KiCad).
+    """
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.drc import run_geometric_drc
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not installed")
+    if not ROUTED_PCB_FILE.exists():
+        pytest.skip(f"committed routed board not found at {ROUTED_PCB_FILE!s}")
+
+    result = run_geometric_drc(ROUTED_PCB_FILE)
+
+    assert result.ran is True, f"geometric DRC did not run: {result.note}"
+    xfail_reason = _old_kicad_annular_xfail_reason(
+        [
+            (v.type_str, list(v.items), v.actual_value_mm, v.required_value_mm)
+            for v in result.error_violations
+        ],
+        # run_geometric_drc() runs find_kicad_cli() and discards its report,
+        # so the installed binary's version is the report's version here.
+        _kicad_cli_version_tuple(),
+    )
+    if xfail_reason is not None:
+        pytest.xfail(xfail_reason)
+    assert result.error_count == 0, (
+        "Committed board-03 routed PCB has "
+        f"{result.error_count} error-severity geometric violation(s) after "
+        f"zone refill: {result.by_type}.  Before #3969 this reported a "
+        "phantom 'clearance' violation because zones were not refilled."
+    )
+
+
+def test_route_demo_run_drc_never_reports_zero_errors_on_failure() -> None:
+    """Bug B (#3969): ``route_demo.run_drc()`` must never return the
+    logically impossible ``(passed=False, errors=0)`` pair.
+
+    We drive the function against the (clean) committed board and assert
+    the invariant ``passed == (errors == 0)`` holds.  Because run_drc now
+    uses ``--drc-only``, the meta-check INCOMPLETE (exit 2) path that used
+    to yield ``(False, 0)`` cannot occur.  Skipped without kicad-cli /
+    committed artifact.
+    """
+    import importlib.util
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not installed")
+    if not ROUTED_PCB_FILE.exists():
+        pytest.skip(f"committed routed board not found at {ROUTED_PCB_FILE!s}")
+
+    # Import route_demo.py by path (it is a board script, not a package).
+    spec = importlib.util.spec_from_file_location("board03_route_demo", str(ROUTE_DEMO_SCRIPT))
+    assert spec is not None and spec.loader is not None
+    route_demo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(route_demo)
+
+    passed, errors, _warnings = route_demo.run_drc(ROUTED_PCB_FILE)
+
+    # The core anti-regression: passed is True IFF there are zero errors.
+    # This makes "0 DRC violation(s) detected!" on a failing exit
+    # structurally impossible.
+    assert passed == (errors == 0), (
+        f"run_drc returned inconsistent (passed={passed}, errors={errors}); "
+        "the 'N DRC violation(s) detected' banner would lie.  passed must be "
+        "True exactly when errors == 0 (issue #3969 Bug B)."
+    )
+    # The committed board is clean (#6394 closed): no allowance remains.
+    assert passed is True and errors == 0, (
+        f"committed board-03 expected DRC-clean, got passed={passed}, errors={errors}"
+    )
+
+
+def _revision_b_footprints(output: Path):
+    """Read library-style Reference properties without depending on serialization."""
+    from kicad_tools.sexp import parse_file
+
+    doc = parse_file(output / "usb_joystick.kicad_pcb")
+    return {
+        p.get_string(1): fp
+        for fp in doc.find_children("footprint")
+        for p in fp.find_children("property")
+        if p.get_string(0) == "Reference"
+    }

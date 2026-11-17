@@ -1,0 +1,252 @@
+"""
+PCB Layout - Container for placing and routing multiple PCB blocks.
+
+This module provides the PCBLayout class for arranging blocks and
+routing between them.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .blocks.base import PCBBlock
+from .geometry import Layer, Point
+from .primitives import TraceSegment, Via
+
+if TYPE_CHECKING:
+    from .exporter import LayoutApplyReport
+
+
+class PCBLayout:
+    """
+    Container for placing and routing multiple PCB blocks.
+    """
+
+    def __init__(self, name: str = "layout"):
+        self.name = name
+        self.blocks: dict[str, PCBBlock] = {}
+        self.inter_block_traces: list[TraceSegment] = []
+        self.inter_block_vias: list[Via] = []
+
+    def add_block(self, block: PCBBlock, name: str | None = None) -> PCBBlock:
+        """Add a block to the layout."""
+        if name is None:
+            name = block.name
+        self.blocks[name] = block
+        return block
+
+    def route(
+        self,
+        from_block: str,
+        from_port: str,
+        to_block: str,
+        to_port: str,
+        width: float = 0.25,
+        layer: Layer = Layer.F_CU,
+        net: str | None = None,
+        waypoints: Sequence[Point] | None = None,
+    ):
+        """
+        Route between two block ports.
+
+        Without ``waypoints`` this creates one direct trace and returns it.
+        With ``waypoints`` (board coordinates, in order) it creates a polyline
+        start -> waypoints -> end and returns the list of segments; the caller
+        supplies the dogleg, no obstacle search is done.
+
+        Where a port names an ``internal_pad``, a short stub from that pad's
+        board position to the port point is also added (on the port's layer
+        and the route's net) so neither end is left floating. Stubs are not
+        part of the return value.
+        """
+        src = self.blocks[from_block]
+        dst = self.blocks[to_block]
+        start = src.port(from_port)
+        end = dst.port(to_port)
+
+        for block, port_name, point in ((src, from_port, start), (dst, to_port, end)):
+            port = block.ports[port_name]
+            if port.internal_pad is None:
+                continue
+            pad_pos = block.pad_board_position(port.internal_pad)
+            if pad_pos != point:
+                self.inter_block_traces.append(
+                    TraceSegment(
+                        start=pad_pos,
+                        end=point,
+                        width=width,
+                        layer=port.layer,
+                        net=net if net is not None else port.net,
+                    )
+                )
+
+        if waypoints is None:
+            trace = TraceSegment(start=start, end=end, width=width, layer=layer, net=net)
+            self.inter_block_traces.append(trace)
+            return trace
+
+        points = [start, *waypoints, end]
+        traces = [
+            TraceSegment(start=a, end=b, width=width, layer=layer, net=net)
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+        self.inter_block_traces.extend(traces)
+        return traces
+
+    def export_placements(self) -> list[dict]:
+        """Export all component placements."""
+        result = []
+        for block in self.blocks.values():
+            result.extend(block.get_placed_components())
+        return result
+
+    def export_traces(self) -> list[dict]:
+        """Export all traces (internal + inter-block)."""
+        result = []
+
+        # Internal traces from each block
+        for block in self.blocks.values():
+            result.extend(block.get_placed_traces())
+
+        # Inter-block traces
+        for trace in self.inter_block_traces:
+            result.append(
+                {
+                    "start": trace.start.tuple(),
+                    "end": trace.end.tuple(),
+                    "width": trace.width,
+                    "layer": trace.layer.value,
+                    "net": trace.net,
+                    "block_id": None,
+                }
+            )
+
+        return result
+
+    def export_vias(self) -> list[dict]:
+        """Export all vias (block-internal + inter-block), sheet-absolute.
+
+        Each dict has ``x``, ``y``, ``size``, ``drill``, ``layers`` (a pair of
+        layer-name strings), ``net`` and ``block_id`` (``None`` for
+        inter-block vias).  Block vias get the same rotate-then-translate
+        transform as block traces.
+        """
+        result = []
+        for block in self.blocks.values():
+            for via in block.vias:
+                pos = block.to_board(via.position)
+                result.append(self._via_dict(via, pos.x, pos.y, block.block_id))
+
+        for via in self.inter_block_vias:
+            result.append(self._via_dict(via, via.position.x, via.position.y, None))
+
+        return result
+
+    @staticmethod
+    def _via_dict(via: Via, x: float, y: float, block_id: str | None) -> dict:
+        return {
+            "x": x,
+            "y": y,
+            "size": via.size,
+            "drill": via.drill,
+            "layers": (via.layers[0].value, via.layers[1].value),
+            "net": via.net,
+            "block_id": block_id,
+        }
+
+    def apply_to_pcb(
+        self,
+        source: str | Path,
+        output: str | Path,
+        *,
+        net_map: Mapping[str, str] | None = None,
+        strict: bool = True,
+        traces: bool = True,
+        vias: bool = True,
+    ) -> LayoutApplyReport:
+        """Apply this layout to an existing board and save the result.
+
+        Moves the block footprints already on ``source`` to their layout
+        placements and writes the block and inter-block traces and vias on
+        the board's existing nets (``net_map`` maps block net names such as
+        ``VOUT`` to board net names such as ``+3V3``).  The board must already
+        contain every block footprint; nothing is created.  See
+        :class:`~kicad_tools.pcb.exporter.KiCadPCBExporter` for the strict /
+        lenient error policy.
+
+        Returns:
+            A :class:`~kicad_tools.pcb.exporter.LayoutApplyReport`.
+
+        Raises:
+            LayoutApplyError: In strict mode, listing every problem; ``output``
+                is not written.
+        """
+        # Lazy: exporter imports this module.
+        from .exporter import KiCadPCBExporter
+
+        exporter = KiCadPCBExporter(self, net_map=net_map, strict=strict)
+        return exporter.apply(source, output, traces=traces, vias=vias)
+
+    def to_block_groups(self) -> list:
+        """Extract :class:`BlockGroupDef` instances from registered blocks.
+
+        Each ``PCBBlock`` is converted to a ``BlockGroupDef`` with relative
+        component offsets suitable for the placement optimizer's
+        reduced-dimensionality encoding.
+
+        Returns:
+            List of ``BlockGroupDef`` instances (one per block).
+        """
+        from kicad_tools.placement.vector import BlockGroupDef, RelativeOffset
+
+        groups: list[BlockGroupDef] = []
+        for name, block in self.blocks.items():
+            members: list[RelativeOffset] = []
+            for ref, comp in block.components.items():
+                members.append(
+                    RelativeOffset(
+                        reference=ref,
+                        dx=comp.position.x,
+                        dy=comp.position.y,
+                        rotation=comp.rotation,
+                        side=0,  # default front side
+                    )
+                )
+            groups.append(
+                BlockGroupDef(
+                    block_id=name,
+                    members=tuple(members),
+                )
+            )
+        return groups
+
+    def summary(self) -> str:
+        """Print layout summary."""
+        lines = [f"PCB Layout: {self.name}", "=" * 40]
+
+        total_components = 0
+        total_internal_traces = 0
+
+        for name, block in self.blocks.items():
+            n_comp = len(block.components)
+            n_traces = len(block.traces)
+            total_components += n_comp
+            total_internal_traces += n_traces
+
+            pos = f"({block.origin.x}, {block.origin.y})" if block.placed else "not placed"
+            lines.append(f"\n{name}: {pos}")
+            lines.append(f"  Components: {n_comp}")
+            lines.append(f"  Internal traces: {n_traces}")
+            lines.append(f"  Ports: {', '.join(block.ports.keys())}")
+
+        lines.append(f"\n{'=' * 40}")
+        lines.append(f"Total components: {total_components}")
+        lines.append(f"Total internal traces: {total_internal_traces}")
+        lines.append(f"Inter-block traces: {len(self.inter_block_traces)}")
+
+        return "\n".join(lines)
+
+
+__all__ = ["PCBLayout"]

@@ -1,0 +1,122 @@
+{
+  "boards": {
+    "charlieplex_3x3": {
+      "fitted_in_sample": 0.6052631578947368,
+      "fitted_lobo": 0.6109022556390977,
+      "hpwl": 0.6203007518796992,
+      "overlap": 0.4943609022556391,
+      "placement_cost": 0.6033834586466166,
+      "rudy_overflow": 0.5545112781954887,
+      "rudy_peak": 0.41353383458646614,
+      "steiner_signal_length": 0.5657894736842105
+    },
+    "voltage_divider": {
+      "fitted_in_sample": 0.6553524804177546,
+      "fitted_lobo": 0.5509138381201044,
+      "hpwl": 0.5326370757180157,
+      "overlap": 0.6279373368146214,
+      "placement_cost": 0.7676240208877284,
+      "rudy_overflow": 0.5926892950391645,
+      "rudy_peak": 0.5300261096605744,
+      "steiner_signal_length": 0.5300261096605744
+    }
+  },
+  "bootstrap_95ci_pooled": {
+    "hpwl": [
+      0.4620123203285421,
+      0.7130801687763713
+    ],
+    "overlap": [
+      0.46435845213849286,
+      0.6221335992023929
+    ],
+    "placement_cost": [
+      0.556872037914692,
+      0.7725225225225225
+    ],
+    "rudy_overflow": [
+      0.46563814866760167,
+      0.6834451901565995
+    ],
+    "rudy_peak": [
+      0.3656998738965952,
+      0.5766871165644172
+    ],
+    "steiner_signal_length": [
+      0.436986301369863,
+      0.6745635910224439
+    ]
+  },
+  "n_pairs": {
+    "charlieplex_3x3": 532,
+    "matchgroup_test": 0,
+    "stm32_devboard": 0,
+    "usb_joystick": 0,
+    "voltage_divider": 383
+  },
+  "n_samples": {
+    "charlieplex_3x3": 40,
+    "matchgroup_test": 25,
+    "stm32_devboard": 25,
+    "usb_joystick": 25,
+    "voltage_divider": 40
+  },
+  "pooled": {
+    "fitted_in_sample": 0.6262295081967213,
+    "fitted_lobo": 0.585792349726776,
+    "hpwl": 0.5836065573770491,
+    "overlap": 0.5502732240437158,
+    "placement_cost": 0.6721311475409836,
+    "rudy_overflow": 0.5704918032786885,
+    "rudy_peak": 0.46229508196721314,
+    "steiner_signal_length": 0.5508196721311476
+  },
+  "pooled_n_pairs": 915,
+  "severity_counts": {
+    "charlieplex_3x3": {
+      "clean": 4,
+      "route_failed": 21,
+      "routed_with_drc": 15
+    },
+    "matchgroup_test": {
+      "clean": 0,
+      "route_failed": 25,
+      "routed_with_drc": 0
+    },
+    "stm32_devboard": {
+      "clean": 0,
+      "route_failed": 25,
+      "routed_with_drc": 0
+    },
+    "usb_joystick": {
+      "clean": 0,
+      "route_failed": 25,
+      "routed_with_drc": 0
+    },
+    "voltage_divider": {
+      "clean": 28,
+      "route_failed": 3,
+      "routed_with_drc": 9
+    }
+  },
+  "weights_in_sample": {
+    "hpwl": 0.30006620614003027,
+    "overlap": 0.31255076616817107,
+    "rudy_overflow": 0.036682714071149036,
+    "rudy_peak": -0.032284881181663797
+  },
+  "weights_lobo": {
+    "charlieplex_3x3": {
+      "hpwl": 0.22392382464410823,
+      "overlap": 1.2359874069142205,
+      "rudy_overflow": 0.25685761968788146,
+      "rudy_peak": -0.08654884353929651
+    },
+    "voltage_divider": {
+      "hpwl": 0.32680706660674347,
+      "overlap": 0.02413824628765121,
+      "rudy_overflow": 0.024019016298909988,
+      "rudy_peak": -0.10439271517779436
+    }
+  }
+}

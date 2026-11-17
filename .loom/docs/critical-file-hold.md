@@ -1,0 +1,205 @@
+# Champion's Critical-File Durable Hold — Rationale and History
+
+Reference material for
+`defaults/.claude/commands/loom/champion-critical-file-hold.md`, which carries
+the normative rules and the tick itself. Nothing here is an instruction; this
+file exists so the prompt that *is* inlined into every Champion session does not
+have to carry the incident narrative that explains it (issues #6879, #9016,
+#9416; same motivation as `champion-file-split-history.md`).
+
+## Why a durable hold and not a transient retry (#6879)
+
+The `judge-approval`, `mergeable`, `recency` and `ci-green` criteria of `champion-pr-merge.md` → "Safety Criteria" are mechanical
+failures: they clear on their own, or on the next push, so they use the shared
+"Transient failures" template in that file's "PR Rejection Workflow". A
+critical-file FAIL is not like them. It is a **one-way terminal state** —
+nothing about a diff's critical-file-ness changes without a human decision or a
+later push that narrows the diff — so it gets a durable hold on the `merge-risk` criterion's
+pattern instead: `loom:blocked` with a reason-only park record (#11861; it was
+`loom:operator` before that label became a no-op for every role).
+
+It does **not** need the `merge-risk` criterion's sticky-hold judgment-call machinery (#4742).
+That machinery exists because `merge-risk` is a judgment call that a later re-read might
+answer differently, so a hold has to be pinned lest it "silently evaporate".
+The `critical-files` criterion's check-loop is a deterministic file-pattern match: the same diff
+always produces the same verdict, and nothing but the file list can change it.
+
+## Why the operator's release is the label's ABSENCE (#9016)
+
+The hold's whole purpose is "a human merges this one by hand". Until #9016 that
+path did not work, for a reason that is worth recording because the fix had two
+plausible shapes and only one was safe:
+
+The hold keeps `loom:pr` (Judge really did approve) and adds the hold label
+(`loom:operator` until #11861, `loom:blocked` since).
+`merge-pr.sh` refuses any PR carrying both at once — the verdict-contradiction
+guard #8112, which has **no** override flag by design. So the operator's only
+route was to remove the label and merge; but the next Champion tick
+re-added it, because the `critical-files` criterion verdict is deterministic and nothing on the
+PR recorded that a human had already decided. On merge train #8996 (2026-09-26)
+the label came back 1m42s after the operator's release comment; the PR merged
+only by removing the label and running `merge-pr.sh` in the *same* shell command.
+
+The tempting fix — relax #8112 — was rejected: that guard is the thing standing
+between the fleet and a merge of a PR whose verdict state contradicts itself.
+#9016 left it exactly as strict and made the **release** durable instead: a
+hand-removed hold label, while the episode is open and the change the PR
+makes has not moved, *is* the release signal. Champion records it, stands down on
+the label, and says so once.
+
+That inference is sound because Champion never removes the hold label while
+an episode is open: since #11861 the label is `loom:blocked` and it stays on
+through a Doctor round-trip too, so "an open episode + the label absent" can
+only mean a human removed it.
+
+### Two other shapes that were rejected
+
+- **Dropping `loom:pr` while on hold.** Its human path is `merge-pr.sh
+  --allow-unapproved`, which asserts "nobody reviewed this". That is false here:
+  Judge did approve, and the hold is about the *file list*, not the review.
+- **A distinct `loom:critical-file-hold` label.** A new fleet-wide label plus a
+  `merge-pr.sh` guard change, to carry state the existing marker and label
+  already carry between them.
+
+## Why the release survives an equivalent head move (#9416)
+
+#9016 scoped the release to a head SHA. That was one step too literal: it made
+every tree-identical re-date push (#8248's freshness remedy, #8508, retired by
+#12063) re-arm a hold
+the operator had already released on a byte-identical diff. #9348 paid that tax
+four times to land one PR on 2026-09-28.
+
+The `critical-files` criterion verdict is a pure function of the PR's **file list**, so the
+operator's decision is a decision about the *change*, not about a commit id. The
+release is therefore scoped to the change, and whether the change survived a head
+move is re-derived from the repository by `loom-daemon forge verdict-equivalent`
+— the same evidence function the Judge-verdict staleness machine uses
+(`loom-daemon/src/verdict_equivalence/`, exposed to shell callers as one verb so
+no second comparison can drift from it; that drift is exactly what #9576 cost).
+
+An audit of 16 merged PRs whose heads moved after approval found six moved
+heads: four clean fleet merges of `main`, two rebases, all six with
+byte-identical patches.
+
+### Unreadable compares and the requested-change carry (#13114)
+
+Two further cases cost operators a second release for the same concern:
+
+- **An unreadable forge compare.** `patch_identity` retries a compare that gives
+  no parsable answer twice (fixed short backoff, no loop) before answering
+  "could not tell", then (#13359) compares the two heads' merge-base-relative
+  patches from local git (hunk headers ignored; equal non-empty patches keep the
+  release, anything else is "could not tell"). Only when both reads fail does the
+  hold re-arm (fail closed), naming each failed read, and its reason line carries `equivalence=unread`, and the re-arm's
+  `hold.transition` record uses the trigger `champion_role_equivalence_unread`,
+  so an outage is countable apart from a real change. An unreadable PR base
+  branch likewise carries `equivalence=base-unread` and the trigger
+  `champion_role_equivalence_base_unread` (#13149); any other `equivalence=…`
+  text maps to plain `champion_role`, never to the raw string.
+- **A Doctor push that makes only the requested change.** A trusted human
+  comment (the #9548 rule; never a bot or Champion) posted after the hold may
+  carry one `release-scope: <path> [<path>...]` line naming the paths the Doctor
+  was asked to change. The tick passes them as `forge verdict-equivalent
+  [--repo "$LOOM_REPO"] --allowed-paths`; the verb answers `EQUIVALENCE_KIND=requested-change` only
+  when the per-file delta between the two three-dot compares is non-empty and
+  lies wholly inside that set. The release comment records the kind and the
+  paths so the Judge's re-verdict can confirm the change. Any other delta, no
+  line, or either kill switch (`LOOM_VERDICT_EQUIVALENCE`,
+  `LOOM_VERDICT_TREE_CARVEOUT`) re-arms as before. Judge verdicts never carry on
+  this kind (`verdict-staleness-guard.sh` passes no paths), and CI is not
+  exempted.
+
+Three properties are not negotiable, and the prompt restates each one:
+
+1. **Evidence, never shape.** No commit message, author, or ref-update shape is
+   read, and a marker is never evidence — on a public repo an outsider or a
+   foreign Loom install can write any marker (#9548).
+2. **Fail closed.** Only a literal `EQUIVALENCE_KIND=` line respects the release.
+   An absent binary, a daemon predating the verb, a `gh` outage, a shallow clone,
+   a missing object, a `merge-tree` conflict, or either kill switch re-arms the
+   hold — the pre-#9416 behavior, which costs one extra operator removal and
+   never an unreviewed merge. The re-arm notice quotes the verb's one-line
+   reason (#10875), so "could not compare" is never mistaken for a real change.
+3. **The hold is what is exempted, never a check.** CI re-runs against the new
+   head regardless of which equivalence carried the release.
+
+The conservative arm is still needed for what evidence cannot settle: a push that
+really did change the diff between the operator's removal and the next tick.
+Re-arming costs one more removal; reading it as a release for an unseen diff
+would cost a critical-file change merged with nobody having looked at it.
+
+## Re-dates around a merge, and untrusted reads (#10875)
+
+On #10857 (2026-10-08) a released hold re-armed twice. The trace from the
+trusted comments, the label timeline and the recorded vs live heads showed both
+re-arms were fail-closed on real evidence: one span carried a Doctor commit that
+edited `ci.yml`, the other a merge of `main` with a hand-resolved conflict. Each
+re-arm landed minutes after a re-date push, so it looked like the re-date
+re-armed it. The trace also showed a real gap. That history (no-op, no-op,
+merge, no-op, no-op) could never be proven even when the merge was clean,
+because `clean-merge` accepted only `head = merge(recorded, base)`. That kind
+now peels tree-identical single-parent commits on either side of each merge,
+and through earlier clean merges, using git objects only. A real commit, a
+hand edit or a conflict anywhere in the chain still refutes.
+
+When `forge trusted-comments` cannot run, the tick reads the raw comments. Those
+may hold but never release: a `none`/`respect` decision on an unfiltered read
+becomes `defer` (no write), so a forged release marker can neither suppress a
+hold durably nor be re-recorded as one. Coverage:
+`defaults/scripts/tests/test-critical-file-hold-tick.sh` executes the shipped
+tick, and `verdict_equivalence/noop_chain_tests.rs` covers the proof.
+
+## The audit trail
+
+A respected release posts a `<!-- champion:critical-file-release-respected -->`
+comment carrying two further markers:
+
+- `<!-- champion:hold-state head=<sha> -->` — the same marker the `merge-risk` criterion
+  records and `merge-pr.sh` reads back at merge time (#7419), so an operator
+  merging some other head already gets a staleness warning for free. On an
+  equivalent head move this line is **re-anchored** at the new head, which is
+  also what lets the next tick take the cheap same-head arm with no API call.
+- `<!-- champion:hold-equivalence kind=<kind> [from=<sha> to=<sha>] -->` — which
+  equivalence carried the release (`tree`, `clean-merge`,
+  `rebase-patch-identical`, or `same-head`). An audit record only: no code path
+  reads it back as evidence, for the #9548 reason above.
+
+No marker comment is ever rewritten or deleted. A cleared notice ends an episode;
+a later FAIL is a fresh episode, never a permanent exemption.
+
+## Queue-mode handoff for a released PR (#13321)
+
+The release is the operator's decision; on a `merge-queue` repo the merge itself is
+not the operator's to finish. `merge-pr.sh` holds (exit 5) for lack of the
+`loom/merge-authorization` context that only the queue handoff posts, and
+`forge merge-queue step` needs the status-posting credential, which lives on fleet
+hosts by design. Left alone, a released PR sat green and approved forever, and the only
+exit was disabling the ruleset by hand.
+
+So when the tick finds `loom-daemon forge merge-queue mode` answering a literal
+`mode=queue`, a **released** PR is handed to the queue by Champion, exactly as an
+ordinary approved PR is: the tick prints `CF-RELEASED-HANDOFF pr=N head=<sha>`,
+`critical-files` is treated as passed for that pass, the other criteria run as usual,
+and Step 3 calls `forge merge-queue step --approved-sha <sha>` with the released head.
+No new marker, flag or config key: the existing release record is the evidence.
+
+The handoff is gated, each leg failing closed:
+
+| Case | Result |
+|---|---|
+| `released` at the current head (or carried there by #9416/#13114 equivalence), trusted record, `loom:blocked` absent | handoff |
+| `held`, `none`, `stands`, `rearm`, `defer` (untrusted or unreadable marker read) | no handoff |
+| `loom:blocked` present (it is shared with the `merge-risk` hold) | no handoff |
+| head moved after the release and not provably equivalent | re-armed hold, no handoff; Step 3 also re-reads the head and refuses a mismatch |
+| direct mode, an older daemon, an unreadable `mode` answer | no handoff; the operator merges with `merge-pr.sh`, as before |
+
+Step 3 never merges a handed-off PR directly: a `DIRECT` answer from `merge-queue step`
+is not a merge for it. Who may release and the hold criteria are unchanged.
+
+## Workflow files need the `workflow` token scope (#10539)
+
+A hold whose PR touches `.github/workflows/` ends in a human `merge-pr.sh`, and
+GitHub 403s that merge unless the operator's `gh` token has the `workflow` scope
+(see `github-authentication.md`). The hold comment therefore appends the fix
+(`gh auth refresh -h github.com -s workflow`) for such PRs, and only for them;
+`merge-pr.sh` also refuses up front with the same command.

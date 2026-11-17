@@ -1,0 +1,717 @@
+"""Offline tests for the submit-jlcpcb workflow; any network contact fails the test."""
+
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.export import submission_workflow as wf
+from kicad_tools.parts.jlcpcb_api import ComponentInventory
+from tests.test_submission_plan import csv_bytes
+
+PCB = (
+    '(kicad_pcb\n  (layers\n    (0 "F.Cu" signal)\n    (1 "In1.Cu" signal)\n'
+    '    (2 "In2.Cu" signal)\n    (31 "B.Cu" signal)\n    (44 "Edge.Cuts" user)\n  )\n)\n'
+)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+class Source:
+    def __init__(self, stock):
+        self.stock = stock
+        self.calls = 0
+
+    def get_component_inventory(self, codes):
+        self.calls += 1
+        rows = tuple(
+            {"componentCode": c, "stockCount": self.stock[c]} for c in codes if c in self.stock
+        )
+        return ComponentInventory(rows, datetime.now(timezone.utc))
+
+
+class Boom:
+    def get_component_inventory(self, codes):
+        pytest.fail("network contacted")
+
+
+@pytest.fixture
+def env(tmp_path):
+    src = tmp_path / "src"
+    bundle = src / "output" / "manufacturing"
+    bundle.mkdir(parents=True)
+    (src / "b.kicad_pcb").write_text(PCB)
+    (src / "b.kicad_sch").write_text("(kicad_sch)\n")
+    (bundle / "bom.csv").write_bytes(
+        csv_bytes(
+            ["Comment", "Designator", "Footprint", "LCSC Part #", "Quantity"],
+            [["10k", "R1,R2", "R_0402", "C1", 2], ["1u", "C1", "C_0402", "C2", 1]],
+        )
+    )
+    (bundle / "cpl.csv").write_bytes(
+        csv_bytes(
+            ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"],
+            [
+                ["R1", "10k", "R_0402", "1mm", "1mm", "0", "Top"],
+                ["R2", "10k", "R_0402", "2mm", "1mm", "0", "Top"],
+                ["C1", "1u", "C_0402", "3mm", "1mm", "0", "Top"],
+            ],
+        )
+    )
+    (bundle / "gerbers.zip").write_bytes(b"PK\x03\x04gerber")
+    return {"bundle": bundle, "src": src, "out": tmp_path / "out"}
+
+
+def write_manifest(env, signoff=True, board_sha=None):
+    files = {
+        p.name: {"sha256": sha(p.read_bytes()), "size": p.stat().st_size}
+        for p in env["bundle"].iterdir()
+        if p.name != "manifest.json"
+    }
+    tapeout = {
+        "board_sha256": board_sha or sha((env["src"] / "b.kicad_pcb").read_bytes()),
+        "readiness_sha256": "a" * 64,
+    }
+    if signoff:
+        tapeout["human_signoff"] = {"reviewer": "Ann", "signed_at": "2026-11-01T00:00:00Z"}
+    (env["bundle"] / "manifest.json").write_text(json.dumps({"files": files, "tapeout": tapeout}))
+
+
+def run(env, source=None, **kw):
+    return wf.run_submission(
+        bundle_root=env["bundle"],
+        board=env["src"] / "b.kicad_pcb",
+        schematic=env["src"] / "b.kicad_sch",
+        quantity=kw.pop("quantity", 10),
+        output_dir=env["out"],
+        inventory_source=source,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize("fault", ["tamper", "nosignoff", "boardsha"])
+def test_preflight_refusals_make_no_network_calls(env, fault):
+    write_manifest(
+        env, signoff=fault != "nosignoff", board_sha="0" * 64 if fault == "boardsha" else None
+    )
+    if fault == "tamper":
+        (env["bundle"] / "bom.csv").write_bytes(b"changed")
+    with pytest.raises(wf.WorkflowError):
+        run(env, Boom(), dry_run=True)
+    assert not (env["out"] / "handoff").exists()
+
+
+def test_settings_come_from_board_and_cpl(env):
+    write_manifest(env)
+    facts = wf.preflight(env["bundle"], env["src"] / "b.kicad_pcb")
+    assert facts.board_layers == 4
+    assert facts.assembly_sides == ("top",)
+
+
+def test_dry_run_passes_and_writes_review_page(env):
+    write_manifest(env)
+    source = Source({"C1": 100, "C2": 100})
+    result = run(env, source, dry_run=True)
+    assert not result.stock.blocked
+    assert result.states == {
+        "prepared": "prepared",
+        "stock_check": "stock-checked",
+        "upload": "not-performed",
+    }
+    index = (result.page.directory / "index.md").read_text()
+    assert "## Stock check" in index and "ordered" not in index.lower().replace("order: not", "")
+    plan = json.loads(result.plan.plan_bytes)
+    assert plan["settings"]["board_layers"] == 4
+    assert plan["board_quantity"] == 10
+
+
+def test_short_and_unknown_stock_block_and_are_listed(env):
+    write_manifest(env)
+    result = run(env, Source({"C1": 5}), dry_run=True)  # C1 needs 20, C2 unreturned
+    assert result.stock.blocked
+    failures = wf.format_stock_failures(result.stock)
+    assert any("C1: need 20, stock 5" in f for f in failures)
+    assert any("C2: need 10, stock unknown" in f for f in failures)
+    assert result.states["stock_check"] == "blocked"
+
+
+def test_no_credentials_means_unknown_blocks(env):
+    write_manifest(env)
+    result = run(env, None, dry_run=True)
+    assert result.stock.blocked
+    assert {line.status for line in result.stock.lines} == {"unknown"}
+
+
+def test_inventory_covered_line_is_acknowledged(env):
+    write_manifest(env)
+    result = run(env, Source({"C1": 100}), dry_run=True, inventory_covered=["C2"])
+    assert not result.stock.blocked
+    assert {line.catalog_id: line.status for line in result.stock.lines} == {
+        "C1": "ok",
+        "C2": "covered",
+    }
+
+
+def test_upload_refused_when_blocked_or_dry_run(env):
+    write_manifest(env)
+    with pytest.raises(wf.WorkflowError):
+        run(env, Source({}), dry_run=True, upload=True, reviewer="A", credentials=object())
+    with pytest.raises(wf.WorkflowError, match="Stock gate blocked"):
+        run(env, Source({}), dry_run=False, upload=True, reviewer="A", credentials=object())
+
+
+def test_upload_leg_records_receipt_via_mock_transport(env):
+    from kicad_tools.manufacturers import jlc_upload
+
+    write_manifest(env)
+    creds = wf.JLCCredentials("app", "ak", "sk")
+    result = run(
+        env,
+        Source({"C1": 100, "C2": 100}),
+        dry_run=False,
+        upload=True,
+        reviewer="Ann",
+        credentials=creds,
+        transport=MockTransport(),
+    )
+    assert result.upload["state"] != "not-performed"
+    assert result.upload["factory_receipt"] is False
+    ledger = jlc_upload.UploadLedger.open(env["out"] / "upload-ledger.jsonl")
+    assert len(ledger.attempts()) == 1
+    assert "ordered" not in result.states.values()
+
+
+class MockTransport:
+    """Scripted protocol responses; never touches a socket."""
+
+    def __init__(self):
+        from kicad_tools.manufacturers import jlc_upload as ju
+
+        self.identity = ju.TransportIdentity("fake-mock-protocol", False)
+        self._responses = [
+            ju.TransportResponse(
+                200, {}, json.dumps({"code": 200, "success": True, "data": "key-1"}).encode()
+            ),
+            ju.TransportResponse(
+                200,
+                {},
+                json.dumps({"code": 200, "success": True, "data": {"layers": 4}}).encode(),
+            ),
+        ]
+        self.calls = 0
+
+    def _next(self):
+        self.calls += 1
+        return self._responses.pop(0)
+
+    def post_multipart(self, url, *, headers, fields, files):
+        return self._next()
+
+    def post_json(self, url, *, headers, body):
+        return self._next()
+
+
+def test_review_page_renders_site_handoff_without_order_state(env):
+    from kicad_tools.export.submission_review import render_review_page
+
+    write_manifest(env)
+    result = run(env, Source({"C1": 100, "C2": 100}), dry_run=True)
+    site = {
+        "state": "in-cart",
+        "driver_version": "jlc-site-driver-1",
+        "cart_url": "https://cart.jlcpcb.com/x",
+        "quote_total": "$42.10",
+        "lead_time": "5 days",
+        "uploaded_hashes": {"bom.csv": "ab" * 32},
+        "steps": [{"name": "upload-bom", "screenshot": "01-upload-bom.png", "detail": {}}],
+        "match_diff": [],
+        "remaining_human_steps": ["Place and pay for the order yourself"],
+    }
+    with pytest.raises(Exception, match="fab-view sign-off"):
+        render_review_page(result.plan, destination=env["out"] / "cart-refused", site=site)
+    page = render_review_page(
+        result.plan,
+        destination=env["out"] / "cart-page",
+        site=site,
+        fab_review_signoff={"reviewer": "Ann"},
+    )
+    text = (page.directory / "index.md").read_text()
+    assert "https://cart.jlcpcb.com/x" in text and "$42.10" in text and "5 days" in text
+    assert "- cart: in-cart" in text and "- factory_matching: factory-matched" in text
+    assert "order: ordered" not in text
+    assert "- [ ] Place and pay for the order yourself" in text
+
+
+# --- Issue #8537: sign-off producer, split preflight errors, stock export shape ---
+
+
+def export_shaped_manifest(env):
+    """Manifest as ``kct export`` writes it: files only, no ``tapeout`` block."""
+    bundle = env["bundle"]
+    files = {
+        p.relative_to(bundle).as_posix(): {"sha256": sha(p.read_bytes()), "size": p.stat().st_size}
+        for p in bundle.rglob("*")
+        if p.is_file() and p.name != "manifest.json"
+    }
+    (bundle / "manifest.json").write_text(json.dumps({"version": "1.0", "files": files}))
+
+
+GATES = ("kct_check", "native_drc", "artifacts", "bom")
+
+
+def write_receipt(
+    env,
+    *,
+    status="ready",
+    board=None,
+    gates=GATES,
+    failed=(),
+    cover=True,
+    blockers=(),
+    extra_inputs=(),
+):
+    """A ``kct readiness``-shaped receipt at ``<board>/output/readiness.json``.
+
+    ``inputs`` are board-relative paths hashed from disk (board, bundle files,
+    manifest.json, plus any ``extra_inputs`` paths).
+    """
+    bundle = env["bundle"]
+    board_file = env["src"] / "b.kicad_pcb"
+    src = env["src"]
+    inputs = {"b.kicad_pcb": sha(board if board is not None else board_file.read_bytes())}
+    if cover:
+        for p in bundle.rglob("*"):
+            if p.is_file():
+                inputs[p.relative_to(src).as_posix()] = sha(p.read_bytes())
+    for extra in extra_inputs:
+        inputs[extra] = sha((src / extra).read_bytes())
+    checks = [{"name": g, "status": "failed" if g in failed else "passed"} for g in gates]
+    path = src / "output" / "readiness.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": status,
+                "blockers": list(blockers),
+                "checks": checks,
+                "inputs": inputs,
+            }
+        )
+    )
+    return path
+
+
+def test_export_bundle_plus_signoff_passes_preflight_and_dry_run(env):
+    (env["bundle"] / "gerbers").mkdir()
+    (env["bundle"] / "gerbers" / "gerbers.zip").write_bytes(b"PK\x03\x04gerber")
+    (env["bundle"] / "gerbers.zip").unlink()
+    (env["bundle"] / "kicad_project.zip").write_bytes(b"PK\x03\x04project")
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    with pytest.raises(wf.WorkflowError, match="human sign-off"):
+        wf.preflight(env["bundle"], board)
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+    facts = wf.preflight(env["bundle"], board)
+    assert facts.artifacts["gerber"] == "gerbers/gerbers.zip"
+    result = run(env, Source({"C1": 100, "C2": 100}), dry_run=True)
+    assert not result.stock.blocked
+
+
+def test_signoff_is_idempotent_and_updates_signed_at(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    wf.sign_off_bundle(
+        env["bundle"], board, "Ann", readiness=write_receipt(env), signed_at="2026-01-01T00:00:00Z"
+    )
+    rec = wf.sign_off_bundle(
+        env["bundle"], board, "Bob", readiness=write_receipt(env), signed_at="2026-02-01T00:00:00Z"
+    )
+    gerber_sha = hashlib.sha256((env["bundle"] / "gerbers.zip").read_bytes()).hexdigest()
+    assert rec["human_signoff"] == {
+        "reviewer": "Bob",
+        "signed_at": "2026-02-01T00:00:00Z",
+        "gerber_sha256": gerber_sha,
+    }
+    wf.preflight(env["bundle"], board)
+
+
+def _released(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+    return board
+
+
+def test_fab_review_requires_release_signoff(env):
+    export_shaped_manifest(env)
+    with pytest.raises(wf.WorkflowError, match="release sign-off"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", stage="fab-review")
+
+
+def test_release_only_preflights_without_fab_review(env):
+    board = _released(env)
+    assert wf.preflight(env["bundle"], board).fab_review_signoff is None
+
+
+def test_fab_review_signoff_recorded_and_bound(env):
+    board = _released(env)
+    rec = wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    assert rec["fab_review_signoff"]["reviewer"] == "Bob"
+    assert rec["fab_review_signoff"]["gerber_sha256"] == rec["human_signoff"]["gerber_sha256"]
+    assert wf.preflight(env["bundle"], board).fab_review_signoff["reviewer"] == "Bob"
+    with pytest.raises(wf.WorkflowError, match="non-blank"):
+        wf.sign_off_bundle(env["bundle"], board, " ", stage="fab-review")
+
+
+def test_board_change_invalidates_both_signoffs(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    board.write_text(board.read_text() + "\n; edited\n")
+    with pytest.raises(wf.WorkflowError, match="Board file sha256"):
+        wf.preflight(env["bundle"], board)
+
+
+def test_gerber_change_invalidates_both_signoffs(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    manifest_path = env["bundle"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    # Re-hash the manifest record so only the sign-off binding can catch the change.
+    (env["bundle"] / "gerbers.zip").write_bytes(b"PK\x03\x04other")
+    manifest["files"]["gerbers.zip"] = {
+        "sha256": hashlib.sha256(b"PK\x03\x04other").hexdigest(),
+        "size": len(b"PK\x03\x04other"),
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(wf.WorkflowError, match="gerber_sha256"):
+        wf.preflight(env["bundle"], board)
+
+
+def test_rerunning_release_signoff_drops_fab_review(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+    assert wf.preflight(env["bundle"], board).fab_review_signoff is None
+
+
+@pytest.mark.parametrize("reviewer", ["", "   "])
+def test_signoff_refuses_blank_reviewer(env, reviewer):
+    export_shaped_manifest(env)
+    with pytest.raises(wf.WorkflowError, match="reviewer"):
+        wf.sign_off_bundle(
+            env["bundle"], env["src"] / "b.kicad_pcb", reviewer, readiness=write_receipt(env)
+        )
+    assert "tapeout" not in json.loads((env["bundle"] / "manifest.json").read_text())
+
+
+def test_signoff_refuses_extra_or_missing_bundle_file(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    (env["bundle"] / "extra.txt").write_text("x")
+    with pytest.raises(wf.WorkflowError, match="extra.txt"):
+        wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+    (env["bundle"] / "extra.txt").unlink()
+    (env["bundle"] / "cpl.csv").unlink()
+    with pytest.raises(wf.WorkflowError, match="cpl.csv"):
+        wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+
+
+def test_board_changed_after_signoff_refuses(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+    board.write_text(PCB + "; edited\n")
+    with pytest.raises(wf.WorkflowError, match="board_sha256"):
+        wf.preflight(env["bundle"], board)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda m: m["files"].__setitem__("bom.csv", "oops"), "bom.csv is not an object"),
+        (lambda m: m["files"]["bom.csv"].pop("size"), "bom.csv is missing required key 'size'"),
+        (lambda m: m["files"]["bom.csv"].pop("sha256"), "bom.csv is missing required key 'sha256'"),
+        (
+            lambda m: m["files"]["bom.csv"].__setitem__("sha256", "0" * 64),
+            "sha256 mismatch for bom.csv",
+        ),
+        (lambda m: m["files"]["bom.csv"].__setitem__("size", 1), "size mismatch for bom.csv"),
+    ],
+)
+def test_preflight_distinct_record_errors(env, mutate, message):
+    write_manifest(env)
+    path = env["bundle"] / "manifest.json"
+    manifest = json.loads(path.read_text())
+    mutate(manifest)
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(wf.WorkflowError) as err:
+        wf.preflight(env["bundle"], env["src"] / "b.kicad_pcb")
+    assert message.replace(" is not an object", "") in str(err.value) or message in str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"status": "blocked"}, "not 'ready'"),
+        ({"failed": ("native_drc",)}, "not passed"),
+        ({"gates": ("kct_check", "bom")}, "missing"),
+        ({"board": b"(kicad_pcb)\n"}, "stale: b.kicad_pcb"),
+        ({"cover": False}, "does not cover bundle files"),
+        ({"blockers": ["something open"]}, "has blockers"),
+    ],
+)
+def test_signoff_refuses_bad_receipt_and_leaves_manifest_untouched(env, kwargs, message):
+    export_shaped_manifest(env)
+    manifest = (env["bundle"] / "manifest.json").read_bytes()
+    receipt = write_receipt(env, **kwargs)
+    with pytest.raises(wf.WorkflowError, match=message):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=receipt)
+    assert (env["bundle"] / "manifest.json").read_bytes() == manifest
+
+
+def test_signoff_refuses_missing_receipt(env):
+    export_shaped_manifest(env)
+    with pytest.raises(wf.WorkflowError, match="receipt not found"):
+        wf.sign_off_bundle(
+            env["bundle"],
+            env["src"] / "b.kicad_pcb",
+            "Ann",
+            readiness=env["src"] / "output" / "nope.json",
+        )
+
+
+def test_signoff_records_receipt_sha_and_preflight_requires_it(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    receipt = write_receipt(env)
+    rec = wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=receipt)
+    assert rec["readiness_sha256"] == sha(receipt.read_bytes())
+    path = env["bundle"] / "manifest.json"
+    manifest = json.loads(path.read_text())
+    del manifest["tapeout"]["readiness_sha256"]
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(wf.WorkflowError, match="readiness receipt"):
+        wf.preflight(env["bundle"], board)
+
+
+@pytest.mark.parametrize("victim", ["b.kicad_sch", "rules.kicad_dru"])
+def test_signoff_refuses_receipt_stale_for_design_inputs(env, victim):
+    """A schematic/rules file edited after the receipt must refuse, manifest untouched."""
+    (env["src"] / "rules.kicad_dru").write_text("(version 1)\n")
+    (env["src"] / "b.kicad_sch").write_text("(kicad_sch)\n")
+    export_shaped_manifest(env)
+    receipt = write_receipt(env, extra_inputs=("b.kicad_sch", "rules.kicad_dru"))
+    (env["src"] / victim).write_text("; edited after receipt\n")
+    manifest = (env["bundle"] / "manifest.json").read_bytes()
+    with pytest.raises(wf.WorkflowError, match=f"stale: {victim}"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=receipt)
+    assert (env["bundle"] / "manifest.json").read_bytes() == manifest
+
+
+def test_signoff_refuses_receipt_outside_board_output_dir(env):
+    export_shaped_manifest(env)
+    receipt = write_receipt(env)
+    moved = env["src"] / "elsewhere.json"
+    moved.write_bytes(receipt.read_bytes())
+    with pytest.raises(wf.WorkflowError, match="output/readiness.json"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=moved)
+
+
+def test_signoff_accepts_verify_receipt_location_and_relative_path(env, monkeypatch):
+    """Issue #8592: `--verify`'s receipt location and a relative --readiness both work."""
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    receipt = write_receipt(env)
+    verify_dir = env["src"] / "output" / "readiness-verification"
+    verify_dir.mkdir()
+    moved = verify_dir / "readiness.json"
+    moved.write_bytes(receipt.read_bytes())
+    receipt.unlink()
+    monkeypatch.chdir(verify_dir)
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=Path("readiness.json"))
+    wf.preflight(env["bundle"], board)
+
+
+def test_signoff_refusal_names_both_receipt_locations(env):
+    export_shaped_manifest(env)
+    moved = env["src"] / "elsewhere" / "readiness.json"
+    moved.parent.mkdir()
+    moved.write_bytes(write_receipt(env).read_bytes())
+    with pytest.raises(wf.WorkflowError, match="readiness-verification/readiness.json"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=moved)
+
+
+def test_resigning_signed_bundle_still_succeeds_with_manifest_in_receipt(env):
+    """The receipt hashes manifest.json (as kct readiness does); sign-off rewrites it."""
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    receipt = write_receipt(env)
+    assert "output/manufacturing/manifest.json" in json.loads(receipt.read_text())["inputs"]
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=receipt)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", readiness=receipt)
+    wf.preflight(env["bundle"], board)
+
+
+def test_signoff_refuses_receipt_for_a_different_board_file(env):
+    export_shaped_manifest(env)
+    receipt = write_receipt(env)
+    other = env["src"] / "other.kicad_pcb"
+    other.write_text(PCB + "; a different board\n")
+    with pytest.raises(wf.WorkflowError, match="not produced for this --board"):
+        wf.sign_off_bundle(env["bundle"], other, "Ann", readiness=receipt)
+
+
+# --- fab-dfm attestation (issue #8841) ---------------------------------------
+
+
+def _full(**over):
+    """All 14 categories attested clean (0/0/N), with ``over`` replacing rows."""
+    out = {c: {"danger": 0, "warning": 0, "good": 1} for c in wf.DFM_CATEGORY_RULES}
+    out.update(over)
+    return out
+
+
+DFM = _full(
+    silkscreen_to_pad={"danger": 3, "warning": 1, "good": 5},  # covered by silk_over_copper
+    tht_to_smd={"danger": 5, "warning": 5, "good": 0},  # no kct rule
+)
+
+
+def _kct(board, violations=None):
+    sha = hashlib.sha256(Path(board).read_bytes()).hexdigest()
+    v = (
+        [{"rule_id": "silk_over_copper", "severity": "warning"}]
+        if violations is None
+        else violations
+    )
+    return {"pcb_sha256": sha, "violations": v}
+
+
+def _dfm(env, board, counts=DFM, report=None, reviewer="Bob"):
+    return wf.sign_off_bundle(
+        env["bundle"],
+        board,
+        reviewer,
+        stage="fab-dfm",
+        dfm_counts=counts,
+        kct_report=_kct(board) if report is None else report,
+    )
+
+
+def test_fab_dfm_records_counts_and_lists_uncovered_mismatch(env):
+    board = _released(env)
+    receipt = env["src"] / "output" / "readiness.json"
+    before = receipt.read_bytes()
+    rec = _dfm(env, board)["fab_dfm"]
+    assert rec["counts"] == DFM
+    assert rec["kct_counts"] == {"silk_over_copper": 1}
+    assert [m["category"] for m in rec["mismatches"]] == ["tht_to_smd"]
+    assert rec["gerber_sha256"] and rec["board_sha256"]
+    assert rec["kct_report_pcb_sha256"] == rec["board_sha256"]
+    assert rec["source"] == "JLCDFM, manual attestation"
+    assert receipt.read_bytes() == before
+    assert wf.preflight(env["bundle"], board).fab_dfm["reviewer"] == "Bob"
+
+
+def test_fab_dfm_covered_category_with_zero_kct_is_mismatch(env):
+    board = _released(env)
+    rec = _dfm(env, board, report=_kct(board, []))["fab_dfm"]
+    assert {m["category"] for m in rec["mismatches"]} == {"silkscreen_to_pad", "tht_to_smd"}
+
+
+_ROW = {"danger": 1, "warning": 0, "good": 0}
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        _full(nope=_ROW),
+        _full(tht_to_smd={"danger": -1, "warning": 0, "good": 0}),
+        _full(tht_to_smd={"danger": 1.5, "warning": 0, "good": 0}),
+        _full(tht_to_smd={"danger": True, "warning": 0, "good": 0}),
+        _full(tht_to_smd={"bad": 1, "danger": 0, "warning": 0, "good": 0}),
+        _full(trace_spacing={}),  # no levels: never zero-filled
+        _full(trace_spacing={"warning": 4}),  # danger/good omitted
+        {"fiducial": {"danger": 0, "warning": 0, "good": 2}},  # 1 of 14 categories
+        {},
+    ],
+)
+def test_fab_dfm_invalid_input_refused_and_manifest_untouched(env, counts):
+    board = _released(env)
+    before = (env["bundle"] / "manifest.json").read_bytes()
+    with pytest.raises(wf.WorkflowError):
+        _dfm(env, board, counts=counts)
+    assert (env["bundle"] / "manifest.json").read_bytes() == before
+
+
+def test_fab_dfm_partial_categories_name_the_missing_ones(env):
+    board = _released(env)
+    with pytest.raises(wf.WorkflowError, match="missing: .*trace_spacing"):
+        _dfm(env, board, counts={"fiducial": _ROW})
+
+
+def test_fab_dfm_refuses_kct_report_for_another_board(env):
+    board = _released(env)
+    before = (env["bundle"] / "manifest.json").read_bytes()
+    other = _kct(board)
+    other["pcb_sha256"] = "0" * 64
+    for bad in (other, {"violations": []}):  # wrong board; no pcb_sha256 at all
+        with pytest.raises(wf.WorkflowError, match="not for this --board"):
+            _dfm(env, board, report=bad)
+    assert (env["bundle"] / "manifest.json").read_bytes() == before
+
+
+def test_fab_dfm_invalidated_by_gerber_change(env):
+    board = _released(env)
+    _dfm(env, board)
+    m = json.loads((env["bundle"] / "manifest.json").read_text())
+    m["tapeout"]["fab_dfm"]["gerber_sha256"] = "1" * 64
+    (env["bundle"] / "manifest.json").write_text(json.dumps(m))
+    with pytest.raises(wf.WorkflowError):
+        wf.preflight(env["bundle"], board)
+
+
+@pytest.mark.parametrize(
+    "breakage", ["counts_str", "row_str", "mismatch_missing_key", "no_mismatches"]
+)
+def test_fab_dfm_hand_edited_record_is_clean_error(env, breakage):
+    board = _released(env)
+    _dfm(env, board)
+    path = env["bundle"] / "manifest.json"
+    m = json.loads(path.read_text())
+    rec = m["tapeout"]["fab_dfm"]
+    if breakage == "counts_str":
+        rec["counts"] = "x"
+    elif breakage == "row_str":
+        rec["counts"]["fiducial"] = "x"
+    elif breakage == "mismatch_missing_key":
+        rec["mismatches"] = [{"fab_danger": 1}]
+    else:
+        del rec["mismatches"]
+    path.write_text(json.dumps(m))
+    with pytest.raises(wf.WorkflowError, match="Malformed tapeout.fab_dfm"):
+        wf.preflight(env["bundle"], board)
+
+
+def test_fab_dfm_requires_release_signoff(env):
+    export_shaped_manifest(env)
+    with pytest.raises(wf.WorkflowError, match="release sign-off"):
+        _dfm(env, env["src"] / "b.kicad_pcb")
+
+
+def test_fab_dfm_invalidated_by_board_change(env):
+    board = _released(env)
+    _dfm(env, board)
+    board.write_bytes(board.read_bytes() + b"\n; changed")
+    with pytest.raises(wf.WorkflowError):
+        wf.preflight(env["bundle"], board)
+
+
+def test_fab_dfm_not_required_by_fab_review(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    assert wf.preflight(env["bundle"], board).fab_dfm is None

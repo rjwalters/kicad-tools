@@ -1,0 +1,1135 @@
+"""Tests for dimension DRC rules (trace width, via drill, annular ring)."""
+
+import pytest
+
+from kicad_tools.validate.rules.dimensions import DimensionRules
+
+
+class MockDesignRules:
+    """Mock design rules for testing."""
+
+    def __init__(
+        self,
+        min_trace_width_mm: float = 0.127,
+        min_via_drill_mm: float = 0.3,
+        min_via_diameter_mm: float = 0.6,
+        min_annular_ring_mm: float = 0.15,
+        min_clearance_mm: float = 0.127,
+        min_hole_to_hole_mm: float | None = None,
+    ):
+        self.min_trace_width_mm = min_trace_width_mm
+        self.min_via_drill_mm = min_via_drill_mm
+        self.min_via_diameter_mm = min_via_diameter_mm
+        self.min_annular_ring_mm = min_annular_ring_mm
+        self.min_clearance_mm = min_clearance_mm
+        # Drill-to-drill spec. When unset, mirror min_clearance_mm so the
+        # legacy drill-clearance tests (which pass min_clearance_mm as the
+        # intended drill threshold) keep their semantics. Real DesignRules
+        # defaults this to 0.5 independently of min_clearance_mm.
+        self.min_hole_to_hole_mm = (
+            min_clearance_mm if min_hole_to_hole_mm is None else min_hole_to_hole_mm
+        )
+
+
+class MockNet:
+    """Mock net for testing."""
+
+    def __init__(self, number: int, name: str):
+        self.number = number
+        self.name = name
+
+
+class MockSegment:
+    """Mock trace segment for testing."""
+
+    def __init__(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        width: float,
+        layer: str,
+        net_number: int,
+    ):
+        self.start = start
+        self.end = end
+        self.width = width
+        self.layer = layer
+        self.net_number = net_number
+
+
+class MockVia:
+    """Mock via for testing."""
+
+    def __init__(
+        self,
+        position: tuple[float, float],
+        size: float,
+        drill: float,
+        layers: list[str],
+        net_number: int,
+        via_type: str | None = None,
+        is_micro: bool = False,
+    ):
+        self.position = position
+        self.size = size
+        self.drill = drill
+        self.layers = layers
+        self.net_number = net_number
+        # Issue #3118: micro-via tag.  The schema :class:`Via` carries
+        # ``via_type == "micro"`` when parsed from ``(via micro ...)``
+        # (round-trip preserved by #3124/#3126); the router primitive
+        # :class:`Via` carries ``is_micro=True`` when emitted by the
+        # router's micro-via fallback.  When either is set, the
+        # DimensionRules check exempts this via from the standard
+        # min-via floors (drill, diameter, annular ring) --
+        # jlcpcb-tier1's Capability+ process supports 0.1 mm drill /
+        # 0.2 mm OD natively so a flat exemption matches the
+        # manufacturer's published capability.
+        self.via_type = via_type
+        self.is_micro = is_micro
+
+
+class MockPad:
+    """Mock pad for testing."""
+
+    def __init__(
+        self,
+        number: str,
+        type: str,
+        position: tuple[float, float],
+        drill: float,
+        net_name: str,
+        net_number: int,
+    ):
+        self.number = number
+        self.type = type
+        self.position = position
+        self.drill = drill
+        self.net_name = net_name
+        self.net_number = net_number
+
+
+class MockFootprint:
+    """Mock footprint for testing."""
+
+    def __init__(
+        self,
+        reference: str,
+        position: tuple[float, float],
+        pads: list[MockPad],
+        rotation: float = 0.0,
+    ):
+        self.reference = reference
+        self.position = position
+        self.pads = pads
+        # Footprint orientation in degrees. Pad positions are stored
+        # footprint-local and must be rotated by this angle before
+        # translation to board coordinates (issue #4044). Defaults to 0.0
+        # so existing tests are unaffected.
+        self.rotation = rotation
+
+
+class MockPCB:
+    """Mock PCB for testing dimension rules."""
+
+    def __init__(
+        self,
+        segments: list[MockSegment] | None = None,
+        vias: list[MockVia] | None = None,
+        footprints: list[MockFootprint] | None = None,
+        nets: dict[int, MockNet] | None = None,
+    ):
+        self.segments = segments or []
+        self.vias = vias or []
+        self.footprints = footprints or []
+        self._nets = nets or {}
+
+    def get_net(self, number: int) -> MockNet | None:
+        return self._nets.get(number)
+
+
+class TestDimensionRulesMetadata:
+    """Test DimensionRules class metadata."""
+
+    def test_rule_id(self):
+        """Test rule has correct ID."""
+        rule = DimensionRules()
+        assert rule.rule_id == "dimensions"
+
+    def test_rule_name(self):
+        """Test rule has correct name."""
+        rule = DimensionRules()
+        assert rule.name == "Dimension Rules"
+
+    def test_rule_description(self):
+        """Test rule has a description."""
+        rule = DimensionRules()
+        assert len(rule.description) > 0
+
+
+class TestTraceWidthCheck:
+    """Tests for trace width validation."""
+
+    def test_trace_width_passes(self):
+        """Test that valid trace widths pass."""
+        pcb = MockPCB(
+            segments=[
+                MockSegment((0, 0), (10, 0), width=0.2, layer="F.Cu", net_number=1),
+                MockSegment((10, 0), (10, 10), width=0.15, layer="F.Cu", net_number=1),
+            ],
+            nets={1: MockNet(1, "VCC")},
+        )
+        rules = MockDesignRules(min_trace_width_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        trace_violations = [v for v in results.violations if v.rule_id == "dimension_trace_width"]
+        assert len(trace_violations) == 0
+
+    def test_trace_width_undersized(self):
+        """Test that undersized traces are detected."""
+        pcb = MockPCB(
+            segments=[
+                MockSegment((0, 0), (10, 0), width=0.10, layer="F.Cu", net_number=1),
+            ],
+            nets={1: MockNet(1, "SIG")},
+        )
+        rules = MockDesignRules(min_trace_width_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        trace_violations = [v for v in results.violations if v.rule_id == "dimension_trace_width"]
+        assert len(trace_violations) == 1
+        assert trace_violations[0].severity == "error"
+        assert trace_violations[0].actual_value == pytest.approx(0.10)
+        assert trace_violations[0].required_value == pytest.approx(0.127)
+        assert trace_violations[0].layer == "F.Cu"
+        assert "SIG" in trace_violations[0].items
+
+    def test_multiple_undersized_traces(self):
+        """Test that multiple undersized traces are all detected."""
+        pcb = MockPCB(
+            segments=[
+                MockSegment((0, 0), (10, 0), width=0.05, layer="F.Cu", net_number=1),
+                MockSegment((10, 0), (10, 10), width=0.08, layer="B.Cu", net_number=2),
+                MockSegment((10, 10), (20, 10), width=0.20, layer="F.Cu", net_number=1),  # Valid
+            ],
+            nets={1: MockNet(1, "VCC"), 2: MockNet(2, "GND")},
+        )
+        rules = MockDesignRules(min_trace_width_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        trace_violations = [v for v in results.violations if v.rule_id == "dimension_trace_width"]
+        assert len(trace_violations) == 2
+
+
+class TestViaDimensionChecks:
+    """Tests for via dimension validation."""
+
+    def test_via_passes_all_checks(self):
+        """Test that valid vias pass all checks."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((5, 5), size=0.8, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "VCC")},
+        )
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        via_violations = [v for v in results.violations if v.rule_id.startswith("dimension_via")]
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
+        assert len(via_violations) == 0
+        assert len(annular_violations) == 0
+
+    def test_via_drill_undersized(self):
+        """Test that undersized via drill is detected."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((5, 5), size=0.5, drill=0.2, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "NET1")},
+        )
+        rules = MockDesignRules(min_via_drill_mm=0.3)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        drill_violations = [v for v in results.violations if v.rule_id == "dimension_via_drill"]
+        assert len(drill_violations) == 1
+        assert drill_violations[0].actual_value == pytest.approx(0.2)
+        assert drill_violations[0].required_value == pytest.approx(0.3)
+
+    def test_via_diameter_undersized(self):
+        """Test that undersized via outer diameter is detected."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((5, 5), size=0.5, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "NET1")},
+        )
+        rules = MockDesignRules(min_via_diameter_mm=0.6)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        diameter_violations = [
+            v for v in results.violations if v.rule_id == "dimension_via_diameter"
+        ]
+        assert len(diameter_violations) == 1
+        assert diameter_violations[0].actual_value == pytest.approx(0.5)
+        assert diameter_violations[0].required_value == pytest.approx(0.6)
+
+    def test_annular_ring_undersized(self):
+        """Test that undersized annular ring is detected."""
+        # Via with size=0.5, drill=0.3 has annular ring = (0.5-0.3)/2 = 0.1mm
+        pcb = MockPCB(
+            vias=[
+                MockVia((5, 5), size=0.5, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "NET1")},
+        )
+        rules = MockDesignRules(min_annular_ring_mm=0.15)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
+        assert len(annular_violations) == 1
+        assert annular_violations[0].actual_value == pytest.approx(0.1)
+        assert annular_violations[0].required_value == pytest.approx(0.15)
+
+
+class TestMicroViaDimensionExemption:
+    """Tests for the micro-via dimensions DRC exemption (Issue #3118).
+
+    Pins the contract that vias tagged as micro vias -- either via the
+    schema-side ``via_type == "micro"`` (round-trip from ``(via micro
+    ...)`` per #3124/#3126) or the router-primitive-side ``is_micro =
+    True`` -- are exempt from the standard min-via floors
+    (``dimension_via_drill`` / ``dimension_via_diameter`` /
+    ``dimension_annular_ring``).
+
+    Pairs with a regression guard: an untagged 0.3 / 0.15 via still
+    trips both checks, so the exemption rides specifically on the
+    tag, not on the dimensions themselves.
+    """
+
+    def test_tagged_micro_via_exempt_from_floors_via_type(self):
+        """A 0.3 mm OD / 0.15 mm drill via tagged ``via_type="micro"``
+        (the schema parse path: ``(via micro ...)``) does NOT trip the
+        dimensions DRC against jlcpcb-tier1's 0.6 / 0.3 / 0.15 floors.
+        This is the exemption that lets the in-pad micro-via fallback
+        land DRC-clean on board 04 after the routed PCB is re-loaded
+        through ``schema.pcb.Via.from_sexp``.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia(
+                    (5, 5),
+                    size=0.3,
+                    drill=0.15,
+                    layers=["F.Cu", "In1.Cu"],
+                    net_number=1,
+                    via_type="micro",
+                ),
+            ],
+            nets={1: MockNet(1, "OSC_OUT")},
+        )
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        via_violations = [v for v in results.violations if v.rule_id.startswith("dimension_via")]
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
+        assert len(via_violations) == 0, (
+            "Tagged micro-via must be exempt from dimension_via_drill "
+            "and dimension_via_diameter checks (Issue #3118); got "
+            f"{[v.rule_id for v in via_violations]}"
+        )
+        assert len(annular_violations) == 0, (
+            "Tagged micro-via must be exempt from the annular-ring "
+            "check too -- the exemption is a flat skip per the "
+            "manufacturer's published Capability+ floor."
+        )
+
+    def test_tagged_micro_via_exempt_from_floors_is_micro(self):
+        """Same as above but using the router-primitive-side
+        ``is_micro=True`` tag (the in-memory ``router.primitives.Via``
+        path that the validator sees when running on a freshly-routed
+        PCB without going through serialise/parse).
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia(
+                    (5, 5),
+                    size=0.3,
+                    drill=0.15,
+                    layers=["F.Cu", "In1.Cu"],
+                    net_number=1,
+                    is_micro=True,
+                ),
+            ],
+            nets={1: MockNet(1, "OSC_OUT")},
+        )
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        via_violations = [v for v in results.violations if v.rule_id.startswith("dimension_via")]
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
+        assert len(via_violations) == 0, (
+            "Router-side is_micro=True must also exempt the via "
+            "from dimension_via_drill / dimension_via_diameter"
+        )
+        assert len(annular_violations) == 0
+
+    def test_untagged_undersize_via_still_flagged(self):
+        """A 0.3 mm OD / 0.15 mm drill via WITHOUT any micro tag still
+        trips both standard floor checks.  This is the regression
+        guard ensuring the exemption rides on the tag specifically.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia(
+                    (5, 5),
+                    size=0.3,
+                    drill=0.15,
+                    layers=["F.Cu", "B.Cu"],
+                    net_number=1,
+                ),
+            ],
+            nets={1: MockNet(1, "STRAY")},
+        )
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        drill_violations = [v for v in results.violations if v.rule_id == "dimension_via_drill"]
+        diameter_violations = [
+            v for v in results.violations if v.rule_id == "dimension_via_diameter"
+        ]
+        assert len(drill_violations) == 1, (
+            "Untagged 0.15 mm drill must still trip dimension_via_drill"
+        )
+        assert len(diameter_violations) == 1, (
+            "Untagged 0.3 mm diameter must still trip dimension_via_diameter"
+        )
+
+
+class TestDrillClearanceCheck:
+    """Tests for drill-to-drill clearance validation."""
+
+    def test_drills_with_sufficient_clearance(self):
+        """Test that well-spaced drills pass."""
+        # Two vias 10mm apart with 0.4mm drills = 10 - 0.4 = 9.6mm edge clearance
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((10, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=2),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 0
+
+    def test_drills_too_close(self):
+        """Test that close drills are detected."""
+        # Two vias 0.5mm apart with 0.3mm drills = 0.5 - 0.3 = 0.2mm edge clearance
+        # But actually edge-to-edge = 0.5 - (0.15 + 0.15) = 0.2mm
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((0.4, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=2),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # center distance = 0.4, edge distance = 0.4 - 0.15 - 0.15 = 0.1mm
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].actual_value == pytest.approx(0.1)
+        assert "NET1" in clearance_violations[0].items
+        assert "NET2" in clearance_violations[0].items
+
+    def test_through_hole_pad_clearance(self):
+        """Test that through-hole pad clearance is checked."""
+        # Via at origin, through-hole pad nearby
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="R1",
+                    position=(0.6, 0),  # Footprint position
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),  # Pad relative to footprint
+                            drill=0.4,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # Via at (0,0) with drill=0.4, pad at (0.6, 0) with drill=0.4
+        # center distance = 0.6mm, edge distance = 0.6 - 0.2 - 0.2 = 0.2mm
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+
+    def test_rotated_footprint_no_false_positive(self):
+        """Issue #4044: a rotated THT footprint must not phantom-flag.
+
+        A footprint at (10, 10) rotated 90 deg has pad 1 at local offset
+        (0, 4). KiCad's negated-angle convention (rotate_pad_offset) maps
+        that to board offset (4, 0), so the true hole center is (14, 10).
+
+        - Naive (buggy) add:  fp.position + pad.position = (10, 14)
+        - Rotation-correct:                                 (14, 10)
+
+        A via is placed at (14, 1.0) -- i.e. 9.0mm from the *true* pad
+        position (safe: 9.0 - 0.2 - 0.2 = 8.6mm >> 0.5mm) but only 1.0mm
+        from the *naive* (14 vs 10 in x is 4mm; but y 14 vs 1 is 13mm...).
+
+        Concretely the via is placed 0.7mm from the buggy position and
+        far from the true one, so the naive code flags a hole-to-hole
+        violation that does not exist in the rotated geometry.
+        """
+        # Buggy position: (10, 14). True position: (14, 10).
+        # Via placed at (10, 14.7): 0.7mm from buggy pos (would flag),
+        # but sqrt((14-10)^2 + (10-14.7)^2) = sqrt(16 + 22.09) = 6.17mm
+        # from the true pos (edge = 6.17 - 0.4 = 5.77mm, safe).
+        pcb = MockPCB(
+            vias=[
+                MockVia((10, 14.7), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(10, 10),
+                    rotation=90.0,
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 4),  # local; rotates to board (4, 0)
+                            drill=0.4,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.127, min_hole_to_hole_mm=0.5)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        # Buggy code would find the via 0.7mm from the (10,14) pad -> flag.
+        # Correct code measures against (14,10) -> 5.77mm edge -> no flag.
+        assert len(clearance_violations) == 0
+
+    def test_rotated_footprint_genuine_violation_detected(self):
+        """Issue #4044: a real hole-to-hole conflict at rotation still flags.
+
+        Same 90 deg footprint whose pad 1 true hole center is (14, 10).
+        A via placed at (14.7, 10) is a genuine 0.3mm edge-to-edge conflict
+        (0.7 center - 0.2 - 0.2) with the *true* rotated pad position. The
+        fix must not silently disable the check (guard against a false
+        negative).
+        """
+        # True pad pos (14, 10). Via at (14.7, 10): center dist 0.7mm,
+        # edge = 0.7 - 0.2 - 0.2 = 0.3mm < 0.5mm -> genuine violation.
+        pcb = MockPCB(
+            vias=[
+                MockVia((14.7, 10), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(10, 10),
+                    rotation=90.0,
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 4),  # local; rotates to board (4, 0)
+                            drill=0.4,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.127, min_hole_to_hole_mm=0.5)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].actual_value == pytest.approx(0.3)
+        assert clearance_violations[0].required_value == pytest.approx(0.5)
+
+    def test_smd_pads_not_checked(self):
+        """Test that SMD pads are not included in drill clearance check."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="C1",
+                    position=(0.5, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="smd",  # SMD - no drill
+                            position=(0, 0),
+                            drill=0,  # No drill for SMD
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 0
+
+    def test_drill_clearance_keys_off_hole_to_hole_not_min_clearance(self):
+        """The drill check must compare against min_hole_to_hole_mm, not min_clearance_mm.
+
+        Pair sits at 0.3mm edge-to-edge: above min_clearance_mm (0.127) but
+        below the dedicated hole-to-hole spec (0.5). It must flag.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((0.7, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=2),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # center distance = 0.7, edge distance = 0.7 - 0.2 - 0.2 = 0.3mm
+        rules = MockDesignRules(min_clearance_mm=0.127, min_hole_to_hole_mm=0.5)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].actual_value == pytest.approx(0.3)
+        assert clearance_violations[0].required_value == pytest.approx(0.5)
+        assert clearance_violations[0].severity == "error"
+
+    def test_pair_compliant_with_hole_to_hole_passes(self):
+        """A pair >= min_hole_to_hole_mm edge-to-edge produces no violation."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((1.0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=2),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # edge distance = 1.0 - 0.2 - 0.2 = 0.6mm >= 0.5
+        rules = MockDesignRules(min_clearance_mm=0.127, min_hole_to_hole_mm=0.5)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 0
+
+    def test_softstart_via_to_pth_pad_case(self):
+        """Regression for the softstart NRST-via / SW1-PTH-pad case.
+
+        A via ~0.1516mm edge-to-edge from a cross-footprint through-hole pad
+        must flag as an error against the 0.5mm hole-to-hole spec.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="SW1",
+                    position=(0.4516, 0),
+                    pads=[
+                        MockPad(
+                            number="2",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=0.3,
+                            net_name="GND",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NRST"), 2: MockNet(2, "GND")},
+        )
+        # center distance = 0.4516, edge = 0.4516 - 0.15 - 0.15 = 0.1516mm
+        rules = MockDesignRules(min_clearance_mm=0.127, min_hole_to_hole_mm=0.5)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "error"
+        assert clearance_violations[0].required_value == pytest.approx(0.5)
+
+
+class TestSameFootprintDrillClearance:
+    """Tests for same-footprint drill clearance downgrade."""
+
+    def test_same_footprint_pads_produce_warning(self):
+        """Same-footprint pads closer than min clearance should produce warning, not error."""
+        # A 2-pin connector with 2.54mm pitch and 1.0mm drills:
+        # edge distance = 2.54 - 0.5 - 0.5 = 1.54mm -- that passes.
+        # Use tighter spacing to trigger a violation.
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                        MockPad(
+                            number="2",
+                            type="thru_hole",
+                            position=(1.2, 0),  # edge distance = 1.2 - 0.5 - 0.5 = 0.2mm
+                            drill=1.0,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "warning"
+        assert "(same-footprint)" in clearance_violations[0].message
+
+    def test_cross_footprint_pads_remain_errors(self):
+        """Pads from different footprints closer than min clearance should produce error."""
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                    ],
+                ),
+                MockFootprint(
+                    reference="J2",
+                    position=(1.2, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # edge distance = 1.2 - 0.5 - 0.5 = 0.2mm < 0.25
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "error"
+        assert "(same-footprint)" not in clearance_violations[0].message
+
+    def test_via_to_pad_remains_error(self):
+        """Via near a through-hole pad should remain error (vias have no footprint)."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0.5, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=0.4,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # edge distance = 0.5 - 0.2 - 0.2 = 0.1mm < 0.127
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "error"
+
+    def test_via_to_via_remains_error(self):
+        """Two close vias should produce error (no footprint context)."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((0.4, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=2),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # edge distance = 0.4 - 0.15 - 0.15 = 0.1mm < 0.127
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "error"
+
+    def test_same_net_via_pair_remains_error_and_carries_nets(self):
+        """Two close vias on the SAME net stay error and carry both net names.
+
+        Issue #4102 / #2976: same-net drill-to-drill proximity is still a
+        manufacturing defect (overlapping drills break the drill file), so the
+        severity must NOT be downgraded for same-net pairs.  This guards against
+        a future accidental downgrade and confirms both endpoints' nets are
+        attached so the report can label the pair as ``same-net``.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((0.4, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "GND")},
+        )
+        # edge distance = 0.4 - 0.15 - 0.15 = 0.1mm < 0.127
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        v = clearance_violations[0]
+        # Same-net pairs must remain error (no downgrade).
+        assert v.severity == "error"
+        # Both endpoints carry the same net name -> report labels it same-net.
+        assert v.nets == ("GND", "GND")
+
+    def test_single_pad_footprint_no_same_footprint_pair(self):
+        """A footprint with only 1 thru-hole pad cannot trigger same-footprint logic."""
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 0
+
+    def test_same_footprint_pads_with_sufficient_clearance_no_violation(self):
+        """Same-footprint pads with enough clearance should produce no violation."""
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                        MockPad(
+                            number="2",
+                            type="thru_hole",
+                            position=(2.54, 0),  # edge distance = 2.54 - 0.5 - 0.5 = 1.54mm
+                            drill=1.0,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 0
+
+
+class TestEmptyPCB:
+    """Tests for edge cases with empty PCB."""
+
+    def test_empty_pcb(self):
+        """Test that empty PCB produces no violations."""
+        pcb = MockPCB()
+        rules = MockDesignRules()
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        assert len(results.violations) == 0
+        assert results.rules_checked == 5
+
+    def test_pcb_with_no_vias(self):
+        """Test PCB with traces but no vias."""
+        pcb = MockPCB(
+            segments=[
+                MockSegment((0, 0), (10, 0), width=0.2, layer="F.Cu", net_number=1),
+            ],
+            nets={1: MockNet(1, "VCC")},
+        )
+        rules = MockDesignRules()
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        via_violations = [v for v in results.violations if "via" in v.rule_id.lower()]
+        assert len(via_violations) == 0
+
+    def test_pcb_with_no_traces(self):
+        """Test PCB with vias but no traces."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((5, 5), size=0.8, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "VCC")},
+        )
+        rules = MockDesignRules()
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        trace_violations = [v for v in results.violations if v.rule_id == "dimension_trace_width"]
+        assert len(trace_violations) == 0
+
+
+class TestRulesCheckedCount:
+    """Tests for rules_checked count."""
+
+    def test_rules_checked_count(self):
+        """Test that 5 rule categories are counted."""
+        pcb = MockPCB()
+        rules = MockDesignRules()
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        # 5 rules: trace width, via drill, via diameter, annular ring, drill clearance
+        assert results.rules_checked == 5
+
+
+class TestViolationLocation:
+    """Tests for violation location reporting."""
+
+    def test_trace_violation_location(self):
+        """Test that trace violation reports segment start position."""
+        pcb = MockPCB(
+            segments=[
+                MockSegment((15.5, 22.3), (25.0, 22.3), width=0.05, layer="F.Cu", net_number=1),
+            ],
+            nets={1: MockNet(1, "NET")},
+        )
+        rules = MockDesignRules(min_trace_width_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        violation = results.violations[0]
+        assert violation.location == (15.5, 22.3)
+
+    def test_via_violation_location(self):
+        """Test that via violation reports via position."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((42.5, 18.2), size=0.4, drill=0.2, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            nets={1: MockNet(1, "NET")},
+        )
+        rules = MockDesignRules(min_via_drill_mm=0.3)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        violation = results.violations[0]
+        assert violation.location == (42.5, 18.2)
+
+    def test_drill_clearance_violation_location(self):
+        """Test that drill clearance violation reports midpoint."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((0.4, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=2),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.15)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "hole_to_hole_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        # Midpoint of (0,0) and (0.4, 0) is (0.2, 0)
+        assert clearance_violations[0].location == pytest.approx((0.2, 0.0))

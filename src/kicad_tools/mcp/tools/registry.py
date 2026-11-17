@@ -1,0 +1,2763 @@
+"""Unified tool registry for MCP server.
+
+Provides a single source of truth for tool definitions used by both
+stdio and HTTP transports. This eliminates duplication between MCPServer
+and create_fastmcp_server() implementations.
+
+Example:
+    >>> from kicad_tools.mcp.tools.registry import TOOL_REGISTRY, get_tool
+    >>> tool = get_tool("export_gerbers")
+    >>> result = tool.handler({"pcb_path": "/path/to/board.kicad_pcb", ...})
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+@dataclass
+class ToolSpec:
+    """Specification for an MCP tool.
+
+    Attributes:
+        name: Unique tool identifier
+        description: Human-readable description for LLM context
+        parameters: JSON Schema for tool input validation
+        handler: Function that executes the tool
+        category: Optional category for grouping tools
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    handler: Callable[..., Any]
+    category: str = "general"
+
+
+# Global tool registry
+TOOL_REGISTRY: dict[str, ToolSpec] = {}
+
+
+def register_tool(
+    name: str,
+    description: str,
+    parameters: dict[str, Any],
+    handler: Callable[..., Any],
+    category: str = "general",
+) -> ToolSpec:
+    """Register a tool in the global registry.
+
+    Args:
+        name: Unique tool identifier
+        description: Human-readable description
+        parameters: JSON Schema for input validation
+        handler: Function that executes the tool
+        category: Optional category for grouping
+
+    Returns:
+        The registered ToolSpec
+
+    Raises:
+        ValueError: If tool with same name already registered
+    """
+    if name in TOOL_REGISTRY:
+        raise ValueError(f"Tool already registered: {name}")
+
+    spec = ToolSpec(
+        name=name,
+        description=description,
+        parameters=parameters,
+        handler=handler,
+        category=category,
+    )
+    TOOL_REGISTRY[name] = spec
+    return spec
+
+
+def get_tool(name: str) -> ToolSpec | None:
+    """Get a tool specification by name.
+
+    Args:
+        name: Tool identifier
+
+    Returns:
+        ToolSpec or None if not found
+    """
+    return TOOL_REGISTRY.get(name)
+
+
+def list_tools(category: str | None = None) -> list[ToolSpec]:
+    """List all registered tools.
+
+    Args:
+        category: Optional filter by category
+
+    Returns:
+        List of ToolSpec objects
+    """
+    if category is None:
+        return list(TOOL_REGISTRY.values())
+    return [t for t in TOOL_REGISTRY.values() if t.category == category]
+
+
+def clear_registry() -> None:
+    """Clear all registered tools (for testing)."""
+    TOOL_REGISTRY.clear()
+
+
+# =============================================================================
+# Tool Definitions
+# =============================================================================
+
+# Helper to create JSON Schema for tool parameters
+
+
+def _make_params(
+    properties: dict[str, Any],
+    required: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create a JSON Schema object for tool parameters."""
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required or [],
+        "additionalProperties": False,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Export Tools
+# -----------------------------------------------------------------------------
+
+# Manufacturer id enums come from the registry, not a hard-coded list, so the
+# MCP tools accept exactly what the CLI's ``--mfr`` does (Issue #7276).
+from kicad_tools.manufacturers import get_all_manufacturer_names  # noqa: E402
+
+_DRC_MANUFACTURER_IDS: list[str] = get_all_manufacturer_names()
+_EXPORT_MANUFACTURER_IDS: list[str] = [*_DRC_MANUFACTURER_IDS, "generic"]
+
+
+def _handler_validate_assembly_bom(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle validate_assembly_bom tool call."""
+    from kicad_tools.mcp.tools.export import validate_assembly_bom
+
+    return validate_assembly_bom(
+        schematic_path=params["schematic_path"],
+        quantity=params.get("quantity", 1),
+        pcb_path=params.get("pcb_path"),
+    )
+
+
+register_tool(
+    name="validate_assembly_bom",
+    description=(
+        "Validate a BOM for JLCPCB assembly. Checks all components against the "
+        "LCSC/JLCPCB parts library and categorizes them by tier (Basic/Extended), "
+        "stock status, and availability. Returns a summary of parts that are "
+        "available, out of stock, or missing LCSC part numbers. When a PCB is given "
+        "or found next to the schematic, also returns `kct export`'s bom_lcsc_values and bom_lcsc_stock "
+        "check (assigned LCSC part value/package vs the BOM row and PCB footprint); "
+        "a FAIL sets summary.assembly_ready false. Use this to verify assembly "
+        "readiness before ordering."
+    ),
+    parameters=_make_params(
+        properties={
+            "schematic_path": {
+                "type": "string",
+                "description": "Path to .kicad_sch file",
+            },
+            "quantity": {
+                "type": "integer",
+                "description": "Number of boards (multiplies component quantities)",
+                "default": 1,
+            },
+            "pcb_path": {
+                "type": "string",
+                "description": (
+                    "Path to .kicad_pcb for the bom_lcsc_values package check "
+                    "(default: <stem>_routed.kicad_pcb or <stem>.kicad_pcb next to "
+                    "the schematic)"
+                ),
+            },
+        },
+        required=["schematic_path"],
+    ),
+    handler=_handler_validate_assembly_bom,
+    category="export",
+)
+
+
+def _handler_export_gerbers(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle export_gerbers tool call."""
+    from kicad_tools.mcp.tools.export import export_gerbers
+
+    result = export_gerbers(
+        pcb_path=params["pcb_path"],
+        output_dir=params["output_dir"],
+        manufacturer=params.get("manufacturer", "generic"),
+        include_drill=params.get("include_drill", True),
+        zip_output=params.get("zip_output", True),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="export_gerbers",
+    description=(
+        "Export Gerber files for PCB manufacturing. Generates all required "
+        "Gerber layers (copper, soldermask, silkscreen, outline) and optionally "
+        "drill files. Supports manufacturer presets for JLCPCB, OSHPark, PCBWay, and Seeed."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "output_dir": {
+                "type": "string",
+                "description": "Directory for output files",
+            },
+            "manufacturer": {
+                "type": "string",
+                "description": (
+                    "Manufacturer preset or tier id (the ids `kct export --mfr` accepts, "
+                    "e.g. jlcpcb, jlcpcb-tier1, oshpark, generic)"
+                ),
+                "enum": _EXPORT_MANUFACTURER_IDS,
+                "default": "generic",
+            },
+            "include_drill": {
+                "type": "boolean",
+                "description": "Include drill files (Excellon format)",
+                "default": True,
+            },
+            "zip_output": {
+                "type": "boolean",
+                "description": "Create zip archive of all files",
+                "default": True,
+            },
+        },
+        required=["pcb_path", "output_dir"],
+    ),
+    handler=_handler_export_gerbers,
+    category="export",
+)
+
+
+def _handler_export_bom(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle export_bom tool call."""
+    from kicad_tools.mcp.tools.export import export_bom
+
+    result = export_bom(
+        schematic_path=params["schematic_path"],
+        output_path=params.get("output_path"),
+        format=params.get("format", "csv"),
+        group_by=params.get("group_by", "value+footprint"),
+        include_dnp=params.get("include_dnp", False),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="export_bom",
+    description=(
+        "Export Bill of Materials (BOM) from a KiCad schematic file. "
+        "Generates a component list with quantities, values, footprints, and "
+        "part numbers. Supports multiple output formats including CSV, JSON, "
+        "and manufacturer-specific formats (JLCPCB, PCBWay, Seeed). "
+        "Automatically extracts LCSC part numbers from component fields."
+    ),
+    parameters=_make_params(
+        properties={
+            "schematic_path": {
+                "type": "string",
+                "description": "Path to .kicad_sch file",
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output file path (optional - omit for data-only response)",
+            },
+            "format": {
+                "type": "string",
+                "description": "Output format",
+                "enum": ["csv", "json", "jlcpcb", "pcbway", "seeed"],
+                "default": "csv",
+            },
+            "group_by": {
+                "type": "string",
+                "description": "Component grouping strategy",
+                "enum": ["value", "footprint", "value+footprint", "mpn", "none"],
+                "default": "value+footprint",
+            },
+            "include_dnp": {
+                "type": "boolean",
+                "description": "Include Do Not Place components",
+                "default": False,
+            },
+        },
+        required=["schematic_path"],
+    ),
+    handler=_handler_export_bom,
+    category="export",
+)
+
+
+def _handler_export_assembly(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle export_assembly tool call."""
+    from kicad_tools.mcp.tools.export import export_assembly
+
+    result = export_assembly(
+        pcb_path=params["pcb_path"],
+        schematic_path=params["schematic_path"],
+        output_dir=params["output_dir"],
+        manufacturer=params.get("manufacturer"),
+        strict_preflight=params.get("strict_preflight", True),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="export_assembly",
+    description=(
+        "Generate complete assembly package for manufacturing. Creates Gerber files, "
+        "bill of materials (BOM), and pick-and-place (PnP/CPL) files tailored to "
+        "specific manufacturers, plus a single zip file ready for upload to "
+        "JLCPCB, PCBWay, Seeed, or generic assembly services. Runs the same pipeline "
+        "as `kct export`: the DRC short/open safety floor and every preflight check "
+        "(returned in `preflight`). A preflight FAIL refuses the export by default "
+        "(strict_preflight); an unbuildable BOM or a DRC-floor failure always refuses. "
+        "A refused export returns success=false and writes no BOM, CPL, Gerbers or "
+        "zip. Side effect: writes sibling <board>.kicad_pro / <board>.kicad_dru "
+        "(the manufacturer's DRC constraints) next to the source PCB, as `kct export` does."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "schematic_path": {
+                "type": "string",
+                "description": "Path to .kicad_sch file",
+            },
+            "output_dir": {
+                "type": "string",
+                "description": "Directory for output files",
+            },
+            "manufacturer": {
+                "type": "string",
+                "description": (
+                    "Target manufacturer or tier id (the ids `kct export --mfr` accepts, "
+                    "e.g. jlcpcb, jlcpcb-tier1, pcbway, seeed, generic). Omit to use the "
+                    "board's project.kct target_fab (resolved like `kct check`, falling "
+                    "back to jlcpcb); the resolved id is returned as `manufacturer`."
+                ),
+                "enum": _EXPORT_MANUFACTURER_IDS,
+            },
+            "strict_preflight": {
+                "type": "boolean",
+                "description": (
+                    "Any preflight FAIL blocks the export (default true). false "
+                    "matches `kct export` without --strict-preflight: FAILs become "
+                    "warnings, except the unbuildable-BOM block and the DRC safety floor."
+                ),
+                "default": True,
+            },
+        },
+        required=["pcb_path", "schematic_path", "output_dir"],
+    ),
+    handler=_handler_export_assembly,
+    category="export",
+)
+
+
+# -----------------------------------------------------------------------------
+# Placement Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_placement_analyze(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle placement_analyze tool call."""
+    from kicad_tools.mcp.tools.placement import placement_analyze
+
+    result = placement_analyze(
+        pcb_path=params["pcb_path"],
+        check_thermal=params.get("check_thermal", True),
+        check_signal_integrity=params.get("check_signal_integrity", True),
+        check_manufacturing=params.get("check_manufacturing", True),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="placement_analyze",
+    description=(
+        "Analyze current component placement quality. Evaluates placement with "
+        "metrics for wire length, congestion, thermal characteristics, signal "
+        "integrity, and manufacturing concerns. Returns an overall score, "
+        "category scores, identified issues with suggestions, detected functional "
+        "clusters, and routing difficulty estimates."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "check_thermal": {
+                "type": "boolean",
+                "description": "Include thermal analysis (power components, heat spreading)",
+                "default": True,
+            },
+            "check_signal_integrity": {
+                "type": "boolean",
+                "description": "Include signal integrity hints (high-speed nets, crosstalk)",
+                "default": True,
+            },
+            "check_manufacturing": {
+                "type": "boolean",
+                "description": "Include DFM checks (clearances, assembly)",
+                "default": True,
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_placement_analyze,
+    category="placement",
+)
+
+
+def _handler_placement_place_unplaced(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle placement_place_unplaced tool call."""
+    from kicad_tools.mcp.tools.placement import placement_place_unplaced
+
+    return placement_place_unplaced(
+        pcb_path=params["pcb_path"],
+        margin=params.get("margin", 2.0),
+        spacing=params.get("spacing", 2.0),
+        cluster=params.get("cluster", False),
+        dry_run=params.get("dry_run", False),
+        output_path=params.get("output_path"),
+    )
+
+
+register_tool(
+    name="placement_place_unplaced",
+    description=(
+        "Detect and place unplaced components on a PCB. Finds components at the "
+        "sheet origin or outside the board outline (typically added by sync-netlist) "
+        "and arranges them in a grid within the board bounds. Supports dry-run mode "
+        "to preview changes, adjustable margin/spacing, and optional net-based "
+        "clustering to place related components adjacently."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "margin": {
+                "type": "number",
+                "description": "Inward margin from board edge in mm (default: 2.0)",
+                "default": 2.0,
+            },
+            "spacing": {
+                "type": "number",
+                "description": "Spacing between grid cells in mm (default: 2.0)",
+                "default": 2.0,
+            },
+            "cluster": {
+                "type": "boolean",
+                "description": "Group components by shared net connectivity before placing (default: false)",
+                "default": False,
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "Report what would change without modifying the PCB (default: false)",
+                "default": False,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output file path (optional, overwrites original if not specified)",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_placement_place_unplaced,
+    category="placement",
+)
+
+
+def _handler_placement_suggestions(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle placement_suggestions tool call."""
+    from kicad_tools.mcp.tools.placement import placement_suggestions
+
+    result = placement_suggestions(
+        pcb_path=params["pcb_path"],
+        component=params.get("component"),
+        max_suggestions=params.get("max_suggestions", 10),
+    )
+    return result
+
+
+register_tool(
+    name="placement_suggestions",
+    description=(
+        "Get AI-friendly placement improvement suggestions for a PCB. "
+        "Analyzes component placement and returns actionable recommendations "
+        "ranked by priority."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "component": {
+                "type": "string",
+                "description": "Specific component reference to analyze (optional)",
+            },
+            "max_suggestions": {
+                "type": "integer",
+                "description": "Maximum number of suggestions (1-50)",
+                "default": 10,
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_placement_suggestions,
+    category="placement",
+)
+
+
+# -----------------------------------------------------------------------------
+# Session Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_start_session(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle start_session tool call."""
+    from kicad_tools.mcp.tools.session import start_session
+
+    result = start_session(
+        pcb_path=params["pcb_path"],
+        fixed_refs=params.get("fixed_refs"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="start_session",
+    description=(
+        "Start a new placement refinement session. Creates a stateful session "
+        "for interactively refining component placement through query-before-commit "
+        "operations. Returns a session ID used for subsequent operations."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "fixed_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Component references to keep fixed (optional)",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_start_session,
+    category="session",
+)
+
+
+def _handler_query_move(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle query_move tool call."""
+    from kicad_tools.mcp.tools.session import query_move
+
+    result = query_move(
+        session_id=params["session_id"],
+        ref=params["ref"],
+        x=params["x"],
+        y=params["y"],
+        rotation=params.get("rotation"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="query_move",
+    description=(
+        "Query the impact of a hypothetical component move without applying it. "
+        "Returns score changes, new/resolved violations, and routing impact. "
+        "Use this to evaluate moves before applying them."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "ref": {
+                "type": "string",
+                "description": "Component reference designator (e.g., 'C1', 'R5')",
+            },
+            "x": {
+                "type": "number",
+                "description": "Target X position in millimeters",
+            },
+            "y": {
+                "type": "number",
+                "description": "Target Y position in millimeters",
+            },
+            "rotation": {
+                "type": "number",
+                "description": "Target rotation in degrees (optional, keeps current if not specified)",
+            },
+        },
+        required=["session_id", "ref", "x", "y"],
+    ),
+    handler=_handler_query_move,
+    category="session",
+)
+
+
+def _handler_apply_move(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle apply_move tool call."""
+    from kicad_tools.mcp.tools.session import apply_move
+
+    result = apply_move(
+        session_id=params["session_id"],
+        ref=params["ref"],
+        x=params["x"],
+        y=params["y"],
+        rotation=params.get("rotation"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="apply_move",
+    description=(
+        "Apply a component move within the session. The move can be undone with "
+        "undo_move and is not written to disk until commit_session is called. "
+        "Returns updated component position and score delta."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "ref": {
+                "type": "string",
+                "description": "Component reference designator",
+            },
+            "x": {
+                "type": "number",
+                "description": "New X position in millimeters",
+            },
+            "y": {
+                "type": "number",
+                "description": "New Y position in millimeters",
+            },
+            "rotation": {
+                "type": "number",
+                "description": "New rotation in degrees (optional)",
+            },
+        },
+        required=["session_id", "ref", "x", "y"],
+    ),
+    handler=_handler_apply_move,
+    category="session",
+)
+
+
+def _handler_undo_move(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle undo_move tool call."""
+    from kicad_tools.mcp.tools.session import undo_move
+
+    result = undo_move(session_id=params["session_id"])
+    return result.to_dict()
+
+
+register_tool(
+    name="undo_move",
+    description=(
+        "Undo the last applied move in the session. Restores the component "
+        "to its previous position. Can be called multiple times to undo "
+        "multiple moves."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_undo_move,
+    category="session",
+)
+
+
+def _handler_commit_session(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle commit_session tool call."""
+    from kicad_tools.mcp.tools.session import commit_session
+
+    result = commit_session(
+        session_id=params["session_id"],
+        output_path=params.get("output_path"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="commit_session",
+    description=(
+        "Commit all pending moves to the PCB file and close the session. "
+        "Writes changes to disk. Optionally specify output_path to save to "
+        "a different file instead of overwriting the original."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output file path (optional, overwrites original if not specified)",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_commit_session,
+    category="session",
+)
+
+
+def _handler_rollback_session(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle rollback_session tool call."""
+    from kicad_tools.mcp.tools.session import rollback_session
+
+    result = rollback_session(session_id=params["session_id"])
+    return result.to_dict()
+
+
+register_tool(
+    name="rollback_session",
+    description=(
+        "Discard all pending moves and close the session. No changes are "
+        "written to disk. Use this to abandon a session without saving."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_rollback_session,
+    category="session",
+)
+
+
+def _handler_declare_interface(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle declare_interface tool call."""
+    from kicad_tools.mcp.tools.session import declare_interface
+
+    result = declare_interface(
+        session_id=params["session_id"],
+        interface_type=params["interface_type"],
+        nets=params["nets"],
+        params=params.get("params"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="declare_interface",
+    description=(
+        "Declare a typed interface intent for nets in an active placement session. "
+        "Derives interface constraints used by subsequent session operations."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+            "interface_type": {
+                "type": "string",
+                "description": "Interface type, e.g. usb2_high_speed or spi_standard",
+            },
+            "nets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Net names forming the interface",
+            },
+            "params": {
+                "type": ["object", "null"],
+                "description": "Optional interface-specific parameters",
+            },
+        },
+        required=["session_id", "interface_type", "nets"],
+    ),
+    handler=_handler_declare_interface,
+    category="session",
+)
+
+
+def _handler_declare_power_rail(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle declare_power_rail tool call."""
+    from kicad_tools.mcp.tools.session import declare_power_rail
+
+    result = declare_power_rail(
+        session_id=params["session_id"],
+        net=params["net"],
+        voltage=params["voltage"],
+        max_current=params.get("max_current", 0.5),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="declare_power_rail",
+    description=(
+        "Declare a power rail in an active placement session with voltage and "
+        "maximum current requirements, deriving width and decoupling constraints."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+            "net": {"type": "string", "description": "Power net name"},
+            "voltage": {"type": "number", "description": "Rail voltage in volts"},
+            "max_current": {
+                "type": "number",
+                "default": 0.5,
+                "description": "Maximum expected current in amperes (default 0.5)",
+            },
+        },
+        required=["session_id", "net", "voltage"],
+    ),
+    handler=_handler_declare_power_rail,
+    category="session",
+)
+
+
+def _handler_list_intents(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle list_intents tool call."""
+    from kicad_tools.mcp.tools.session import list_intents
+
+    result = list_intents(session_id=params["session_id"])
+    return result.to_dict()
+
+
+register_tool(
+    name="list_intents",
+    description="List declared interface and power intents and their constraints in a session.",
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_list_intents,
+    category="session",
+)
+
+
+def _handler_clear_intent(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle clear_intent tool call."""
+    from kicad_tools.mcp.tools.session import clear_intent
+
+    result = clear_intent(
+        session_id=params["session_id"],
+        interface_type=params.get("interface_type"),
+        nets=params.get("nets"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="clear_intent",
+    description=(
+        "Remove session intents matching optional interface-type and net filters. "
+        "Omitting both filters removes all intents."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+            "interface_type": {
+                "type": ["string", "null"],
+                "description": "Optional interface type to remove",
+            },
+            "nets": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "description": "Optional net names selecting intents to remove",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_clear_intent,
+    category="session",
+)
+
+
+# -----------------------------------------------------------------------------
+# Context Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_record_decision(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle record_decision tool call."""
+    from kicad_tools.mcp.tools.context import record_decision
+
+    result = record_decision(
+        session_id=params["session_id"],
+        action=params["action"],
+        target=params["target"],
+        rationale=params.get("rationale"),
+        alternatives=params.get("alternatives"),
+        confidence=params.get("confidence", 0.8),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="record_decision",
+    description=(
+        "Record a design decision with rationale. Creates a permanent record "
+        "of a design decision, including reasoning and alternatives considered. "
+        "Use this to build a decision history for learning and context."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "action": {
+                "type": "string",
+                "description": "Action type (e.g., 'move', 'route', 'place')",
+            },
+            "target": {
+                "type": "string",
+                "description": "Target of action (component ref, net name, etc.)",
+            },
+            "rationale": {
+                "type": "string",
+                "description": "Why this decision was made (optional)",
+            },
+            "alternatives": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Other options considered (optional)",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Agent confidence in decision (0.0-1.0)",
+                "default": 0.8,
+            },
+        },
+        required=["session_id", "action", "target"],
+    ),
+    handler=_handler_record_decision,
+    category="context",
+)
+
+
+def _handler_get_decision_history(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_decision_history tool call."""
+    from kicad_tools.mcp.tools.context import get_decision_history
+
+    result = get_decision_history(
+        session_id=params["session_id"],
+        limit=params.get("limit", 20),
+        filter_action=params.get("filter_action"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="get_decision_history",
+    description=(
+        "Get recent decisions in session. Returns decision history with "
+        "detected patterns. Optionally filter by action type."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum decisions to return",
+                "default": 20,
+            },
+            "filter_action": {
+                "type": "string",
+                "description": "Filter by action type (optional)",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_get_decision_history,
+    category="context",
+)
+
+
+def _handler_annotate_decision(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle annotate_decision tool call."""
+    from kicad_tools.mcp.tools.context import annotate_decision
+
+    result = annotate_decision(
+        session_id=params["session_id"],
+        decision_id=params["decision_id"],
+        feedback=params["feedback"],
+        outcome=params.get("outcome"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="annotate_decision",
+    description=(
+        "Add feedback to a past decision. Updates the decision record "
+        "with feedback and optionally changes its outcome status."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "decision_id": {
+                "type": "string",
+                "description": "ID of the decision to annotate",
+            },
+            "feedback": {
+                "type": "string",
+                "description": "Feedback text to add",
+            },
+            "outcome": {
+                "type": "string",
+                "enum": ["success", "partial", "reverted", "pending"],
+                "description": "New outcome status (optional)",
+            },
+        },
+        required=["session_id", "decision_id", "feedback"],
+    ),
+    handler=_handler_annotate_decision,
+    category="context",
+)
+
+
+def _handler_get_session_context(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_session_context tool call."""
+    from kicad_tools.mcp.tools.context import get_session_context
+
+    result = get_session_context(
+        session_id=params["session_id"],
+        detail_level=params.get("detail_level", "summary"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="get_session_context",
+    description=(
+        "Get session context at specified detail level. Returns session "
+        "state including decisions, preferences, and patterns. Detail levels: "
+        "'summary' for quick overview, 'detailed' for recent decisions and "
+        "patterns, 'full' for complete state dump."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "detail_level": {
+                "type": "string",
+                "enum": ["summary", "detailed", "full"],
+                "description": "Level of detail",
+                "default": "summary",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_get_session_context,
+    category="context",
+)
+
+
+def _handler_create_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle create_checkpoint tool call."""
+    from kicad_tools.mcp.tools.context import create_checkpoint
+
+    result = create_checkpoint(
+        session_id=params["session_id"],
+        name=params.get("name"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="create_checkpoint",
+    description=(
+        "Create named checkpoint for potential rollback. Captures the live "
+        "placement state (positions, score, violations, move depth) so "
+        "restore_checkpoint can restore it."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "name": {
+                "type": "string",
+                "description": "Human-readable checkpoint name (optional)",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_create_checkpoint,
+    category="context",
+)
+
+
+def _handler_restore_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle restore_checkpoint tool call."""
+    from kicad_tools.mcp.tools.context import restore_checkpoint
+
+    result = restore_checkpoint(
+        session_id=params["session_id"],
+        checkpoint_id=params["checkpoint_id"],
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="restore_checkpoint",
+    description=(
+        "Restore the placement session to a checkpoint: moves made after it "
+        "are undone or reverted, and success is reported only if live "
+        "positions match the snapshot."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "checkpoint_id": {
+                "type": "string",
+                "description": "ID of the checkpoint to restore",
+            },
+        },
+        required=["session_id", "checkpoint_id"],
+    ),
+    handler=_handler_restore_checkpoint,
+    category="context",
+)
+
+
+def _handler_get_session_summary(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_session_summary tool call."""
+    from kicad_tools.mcp.tools.context import get_session_summary
+
+    result = get_session_summary(
+        session_id=params["session_id"],
+        max_tokens=params.get("max_tokens", 500),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="get_session_summary",
+    description=(
+        "Get token-efficient session summary for LLM context. Returns "
+        "a compact representation focusing on recent changes and "
+        "important decisions, optimized to fit within token budgets."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {
+                "type": "string",
+                "description": "Session ID from start_session",
+            },
+            "max_tokens": {
+                "type": "integer",
+                "description": "Approximate maximum tokens for summary",
+                "default": 500,
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_get_session_summary,
+    category="context",
+)
+
+
+def _handler_get_design_intent(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_design_intent tool call."""
+    from kicad_tools.mcp.tools.design_intent import get_design_intent
+
+    return get_design_intent(spec_path=params["spec_path"])
+
+
+register_tool(
+    name="get_design_intent",
+    description=(
+        "Read the standing design guidance and decision history persisted in a "
+        "project's .kct specification file. Returns the project's intent summary, "
+        "'constraints' (standing project guidance the author wrote down, e.g. fab "
+        "or form-factor limits -- distinct from session-scoped electrical "
+        "constraints), and 'decisions' (the project's own append-only historical "
+        "log of material design choices with rationale -- distinct from session "
+        "decision history). Read-only: the caller must supply the exact spec_path; "
+        "no active project is inferred from server or session state, and the file "
+        "is never modified. Absent or null constraints/decisions normalize to "
+        "empty arrays; a missing file, unreadable/directory path, malformed YAML, "
+        "or schema-invalid content (e.g. an intent block missing its required "
+        "summary) raises a tool error rather than returning an empty result."
+    ),
+    parameters=_make_params(
+        properties={
+            "spec_path": {
+                "type": "string",
+                "description": "Path to the .kct project specification file to read",
+            },
+        },
+        required=["spec_path"],
+    ),
+    handler=_handler_get_design_intent,
+    category="context",
+)
+
+
+# -----------------------------------------------------------------------------
+# Analysis Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_measure_clearance(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle measure_clearance tool call."""
+    from kicad_tools.mcp.tools.analysis import measure_clearance
+
+    result = measure_clearance(
+        pcb_path=params["pcb_path"],
+        item1=params["item1"],
+        item2=params.get("item2"),
+        layer=params.get("layer"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="measure_clearance",
+    description=(
+        "Measure clearance between items on the PCB. Measures the minimum "
+        "edge-to-edge clearance between two items (components or nets) on the PCB. "
+        "If item2 is not specified, finds the nearest neighbor to item1. "
+        "Returns detailed measurements and design rule pass/fail status."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "item1": {
+                "type": "string",
+                "description": "Component reference (e.g., 'U1') or net name (e.g., 'GND')",
+            },
+            "item2": {
+                "type": "string",
+                "description": "Second item, or omit for nearest neighbor search",
+            },
+            "layer": {
+                "type": "string",
+                "description": "Specific layer to check (e.g., 'F.Cu'), or omit for all layers",
+            },
+        },
+        required=["pcb_path", "item1"],
+    ),
+    handler=_handler_measure_clearance,
+    category="analysis",
+)
+
+
+def _handler_get_drc_violations(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_drc_violations tool call."""
+    from kicad_tools.mcp.tools.analysis import get_drc_violations
+
+    result = get_drc_violations(
+        pcb_path=params["pcb_path"],
+        rules=params.get("manufacturer"),
+        severity_filter=params.get("severity_filter", "all"),
+        allow_incomplete=params.get("allow_incomplete", False),
+        schematic_path=params.get("schematic_path"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="get_drc_violations",
+    description=(
+        "Run `kct check`'s design rule check on a KiCad PCB and return violations with "
+        "locations and fix suggestions, plus `kct check`'s verdict (pass/fail/incomplete) "
+        "and exit code. Uses the same rule set as `kct check`: layer count from the board, "
+        "stackup copper, fabrication-floor override, waiver and net-class sidecars, and the "
+        "ERC + LVS + manifest meta rollup. `passed` is true only when the verdict is pass; "
+        "a board whose ERC/LVS cannot run (no kicad-cli or schematic) is incomplete."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "manufacturer": {
+                "type": "string",
+                "description": (
+                    "Manufacturer preset or tier id (any registry id, e.g. jlcpcb, "
+                    "jlcpcb-tier1, oshpark, pcbway, seeed). Omit to resolve it like "
+                    "`kct check` (fab_profile.json > project.kct > jlcpcb)."
+                ),
+                "enum": _DRC_MANUFACTURER_IDS,
+            },
+            "severity_filter": {
+                "type": "string",
+                "description": (
+                    "Which violations to return (a view filter; the verdict always "
+                    "counts every violation)"
+                ),
+                "enum": ["all", "error", "warning"],
+                "default": "all",
+            },
+            "allow_incomplete": {
+                "type": "boolean",
+                "description": (
+                    "Like `kct check --allow-incomplete`: an incomplete verdict "
+                    "(ERC/LVS not run) returns exit_code 0. `passed` stays false."
+                ),
+                "default": False,
+            },
+            "schematic_path": {
+                "type": "string",
+                "description": (
+                    "Explicit .kicad_sch for the ERC/LVS meta rollup (default: "
+                    "discovered next to the PCB, as `kct check` does)"
+                ),
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_get_drc_violations,
+    category="analysis",
+)
+
+
+def _handler_board_summary(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle board_summary tool call."""
+    from kicad_tools.mcp.tools.analysis import analyze_board
+
+    result = analyze_board(pcb_path=params["pcb_path"])
+    return result.to_dict()
+
+
+register_tool(
+    name="board_summary",
+    description=(
+        "Get a comprehensive summary of a KiCad PCB file. Returns board dimensions, "
+        "layer information, component counts by type, net summary with routing status, "
+        "zone list, and overall routing completion percentage. Works entirely offline "
+        "(no running KiCad required). Use this as a first step to understand a board "
+        "before performing more detailed inspection or analysis."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_board_summary,
+    category="analysis",
+)
+
+
+def _handler_board_inspect(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle board_inspect tool call."""
+    from kicad_tools.mcp.tools.analysis import board_inspect
+
+    return board_inspect(
+        pcb_path=params["pcb_path"],
+        aspect=params["aspect"],
+        layer=params.get("layer"),
+        reference_prefix=params.get("reference_prefix"),
+        unrouted_only=params.get("unrouted_only", False),
+        net_name=params.get("net_name"),
+    )
+
+
+register_tool(
+    name="board_inspect",
+    description=(
+        "Inspect a specific aspect of a KiCad PCB file in detail. Unlike board_summary "
+        "which returns a high-level overview, board_inspect returns focused, detailed "
+        "data for one aspect at a time: footprints (with position, type, pads), nets "
+        "(with per-net routing status), layers (with stackup info), design_rules "
+        "(setup parameters), or zones (with thermal relief settings). Supports "
+        "optional filters to narrow results. Works entirely offline."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "aspect": {
+                "type": "string",
+                "description": "Which aspect to inspect",
+                "enum": ["footprints", "nets", "layers", "design_rules", "zones"],
+            },
+            "layer": {
+                "type": "string",
+                "description": (
+                    "Filter by layer name (e.g., 'F.Cu', 'B.Cu'). "
+                    "Applies to footprints and zones aspects."
+                ),
+            },
+            "reference_prefix": {
+                "type": "string",
+                "description": (
+                    "Filter footprints by reference prefix (e.g., 'R' for resistors, "
+                    "'C' for capacitors, 'U' for ICs). Applies to footprints aspect only."
+                ),
+            },
+            "unrouted_only": {
+                "type": "boolean",
+                "description": (
+                    "If true, only return unrouted or incomplete nets. Applies to nets aspect only."
+                ),
+                "default": False,
+            },
+            "net_name": {
+                "type": "string",
+                "description": (
+                    "Filter zones by net name (e.g., 'GND'). Applies to zones aspect only."
+                ),
+            },
+        },
+        required=["pcb_path", "aspect"],
+    ),
+    handler=_handler_board_inspect,
+    category="analysis",
+)
+
+
+# -----------------------------------------------------------------------------
+# Routing Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_get_unrouted_nets(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_unrouted_nets tool call."""
+    from kicad_tools.mcp.tools.routing import get_unrouted_nets
+
+    result = get_unrouted_nets(
+        pcb_path=params["pcb_path"],
+        include_partial=params.get("include_partial", True),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="get_unrouted_nets",
+    description=(
+        "List nets that need routing. Analyzes a PCB file to identify nets "
+        "that are unrouted or partially routed. Provides difficulty estimates "
+        "and routing recommendations for AI-driven routing workflows."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "include_partial": {
+                "type": "boolean",
+                "description": "Include partially routed nets in results",
+                "default": True,
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_get_unrouted_nets,
+    category="routing",
+)
+
+
+def _handler_route_net(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle route_net tool call."""
+    from kicad_tools.mcp.tools.routing import route_net
+
+    result = route_net(
+        pcb_path=params["pcb_path"],
+        net_name=params["net_name"],
+        output_path=params.get("output_path"),
+        strategy=params.get("strategy", "auto"),
+        layer_preference=params.get("layer_preference"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="route_net",
+    description=(
+        "Route a specific net. Attempts to route all unconnected pads on the "
+        "specified net using the autorouter. Returns routing details including "
+        "success status, trace length, vias used, and suggestions if routing failed."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "net_name": {
+                "type": "string",
+                "description": "Name of the net to route (e.g., 'GND', 'SPI_CLK')",
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output file path (optional). Defaults to <stem>_routed.kicad_pcb next to the input; the input is overwritten only if output_path equals pcb_path",
+            },
+            "strategy": {
+                "type": "string",
+                "description": "Routing strategy",
+                "enum": ["auto", "shortest", "avoid_vias"],
+                "default": "auto",
+            },
+            "layer_preference": {
+                "type": "string",
+                "description": "Preferred layer for routing (e.g., 'F.Cu', 'B.Cu')",
+            },
+        },
+        required=["pcb_path", "net_name"],
+    ),
+    handler=_handler_route_net,
+    category="routing",
+)
+
+
+def _handler_route_net_auto(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle route_net_auto tool call."""
+    from kicad_tools.mcp.tools.routing import route_net_auto
+
+    return route_net_auto(
+        pcb_path=params["pcb_path"],
+        net_name=params["net_name"],
+        output_path=params.get("output_path"),
+        strategy=params.get("strategy", "auto"),
+        enable_repair=params.get("enable_repair", True),
+        enable_via_resolution=params.get("enable_via_resolution", True),
+        diagnose_unrouted_budget=params.get("diagnose_unrouted_budget"),
+    )
+
+
+register_tool(
+    name="route_net_auto",
+    description=(
+        "Route a specific net using the RoutingOrchestrator with smart strategy "
+        "selection. Unlike route_net (which uses the simple Autorouter), this tool "
+        "analyzes net characteristics (pin pitch, differential pairs, density, via "
+        "conflicts) and automatically selects the optimal routing strategy. Returns "
+        "rich feedback including the strategy used, repair actions taken, and "
+        "performance statistics."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "net_name": {
+                "type": "string",
+                "description": "Name of the net to route (e.g., 'GND', 'SPI_CLK')",
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output file path (optional, result not saved if not specified)",
+            },
+            "strategy": {
+                "type": "string",
+                "description": (
+                    "Strategy override. 'auto' (default) lets the orchestrator select. "
+                    "Other options: 'global', 'escape', 'hierarchical', 'subgrid', "
+                    "'via_resolution'."
+                ),
+                "enum": ["auto", "global", "escape", "hierarchical", "subgrid", "via_resolution"],
+                "default": "auto",
+            },
+            "enable_repair": {
+                "type": "boolean",
+                "description": "Enable automatic clearance repair after routing (default: true)",
+                "default": True,
+            },
+            "enable_via_resolution": {
+                "type": "boolean",
+                "description": "Enable via conflict resolution (default: true)",
+                "default": True,
+            },
+            "diagnose_unrouted_budget": {
+                "type": "number",
+                "description": (
+                    "Seconds to spend classifying what a partial or failed net left "
+                    "unrouted as 'congested' (contenders: the nets in the way) or "
+                    "'blocked' (blockers: pads, keepouts, board edge), reported "
+                    "under 'unrouted' / 'unrouted_diagnosis' (Issue #6001). "
+                    "Omit or 0 to skip."
+                ),
+            },
+        },
+        required=["pcb_path", "net_name"],
+    ),
+    handler=_handler_route_net_auto,
+    category="routing",
+)
+
+
+# -----------------------------------------------------------------------------
+# Pattern Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_validate_pattern(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle validate_pattern tool call."""
+    from kicad_tools.mcp.tools.patterns import validate_pattern
+
+    return validate_pattern(
+        pcb_path=params["pcb_path"],
+        pattern_type=params["pattern_type"],
+        components=params["components"],
+    )
+
+
+register_tool(
+    name="validate_pattern",
+    description=(
+        "Validate a circuit pattern implementation against design requirements. "
+        "Checks placement rules, routing constraints, and component values for "
+        "patterns like LDO power supplies, decoupling networks, and buck converters. "
+        "Returns violations with severity levels, locations, and fix suggestions."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "pattern_type": {
+                "type": "string",
+                "description": "Type of pattern to validate",
+                "enum": ["ldo", "decoupling", "buck"],
+            },
+            "components": {
+                "type": "object",
+                "description": (
+                    "Pattern-specific component references. "
+                    "For LDO: {regulator, input_cap, output_caps}. "
+                    "For Decoupling: {ic, capacitors}. "
+                    "For Buck: {regulator, inductor, input_cap, output_cap, diode}."
+                ),
+            },
+        },
+        required=["pcb_path", "pattern_type", "components"],
+    ),
+    handler=_handler_validate_pattern,
+    category="patterns",
+)
+
+
+def _handler_adapt_pattern(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle adapt_pattern tool call."""
+    from kicad_tools.mcp.tools.patterns import adapt_pattern
+
+    return adapt_pattern(
+        pattern_type=params["pattern_type"],
+        component_mpn=params["component_mpn"],
+        overrides=params.get("overrides"),
+    )
+
+
+register_tool(
+    name="adapt_pattern",
+    description=(
+        "Get adapted parameters for a circuit pattern based on component requirements. "
+        "Loads component specifications from the database and generates appropriate "
+        "capacitor values, thermal requirements, and other parameters for the pattern."
+    ),
+    parameters=_make_params(
+        properties={
+            "pattern_type": {
+                "type": "string",
+                "description": "Type of pattern (LDO, BuckConverter, Decoupling)",
+            },
+            "component_mpn": {
+                "type": "string",
+                "description": "Manufacturer part number of the main component",
+            },
+            "overrides": {
+                "type": "object",
+                "description": "Optional parameter overrides",
+            },
+        },
+        required=["pattern_type", "component_mpn"],
+    ),
+    handler=_handler_adapt_pattern,
+    category="patterns",
+)
+
+
+def _handler_get_requirements(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_component_requirements tool call."""
+    from kicad_tools.mcp.tools.patterns import get_requirements
+
+    return get_requirements(params["component_mpn"])
+
+
+register_tool(
+    name="get_component_requirements",
+    description=(
+        "Get design requirements for a specific component from the database. "
+        "Returns specifications like capacitor requirements, thermal needs, "
+        "dropout voltage, and application notes."
+    ),
+    parameters=_make_params(
+        properties={
+            "component_mpn": {
+                "type": "string",
+                "description": "Manufacturer part number (e.g., 'AMS1117-3.3')",
+            },
+        },
+        required=["component_mpn"],
+    ),
+    handler=_handler_get_requirements,
+    category="patterns",
+)
+
+
+def _handler_list_components(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle list_pattern_components tool call."""
+    from kicad_tools.mcp.tools.patterns import list_available_components
+
+    return list_available_components(params.get("component_type"))
+
+
+register_tool(
+    name="list_pattern_components",
+    description=(
+        "List components available in the pattern database. "
+        "Optionally filter by component type (LDO, BuckConverter, IC)."
+    ),
+    parameters=_make_params(
+        properties={
+            "component_type": {
+                "type": "string",
+                "description": "Optional filter by type",
+                "enum": ["LDO", "BuckConverter", "IC", "LinearRegulator"],
+            },
+        },
+        required=[],
+    ),
+    handler=_handler_list_components,
+    category="patterns",
+)
+
+
+# -----------------------------------------------------------------------------
+# Mistake Detection Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_detect_mistakes(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle detect_mistakes tool call."""
+    from kicad_tools.mcp.tools.mistakes import detect_mistakes
+
+    return detect_mistakes(
+        pcb_path=params["pcb_path"],
+        category=params.get("category"),
+        severity=params.get("severity"),
+    )
+
+
+register_tool(
+    name="detect_mistakes",
+    description=(
+        "Detect common PCB design mistakes with educational explanations. "
+        "Analyzes a PCB file and identifies issues like bypass capacitor "
+        "placement, crystal trace length, differential pair skew, power "
+        "trace width, thermal pad connections, via-in-pad, acid traps, "
+        "and tombstoning risks. Each mistake includes an explanation "
+        "of why it's a problem and how to fix it."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file to analyze",
+            },
+            "category": {
+                "type": "string",
+                "description": "Only check specific category",
+                "enum": [
+                    "bypass_capacitor",
+                    "crystal_oscillator",
+                    "differential_pair",
+                    "power_trace",
+                    "thermal_management",
+                    "via_placement",
+                    "manufacturability",
+                ],
+            },
+            "severity": {
+                "type": "string",
+                "description": "Only show issues of this severity or higher",
+                "enum": ["error", "warning", "info"],
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_detect_mistakes,
+    category="mistakes",
+)
+
+
+def _handler_list_mistake_categories(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle list_mistake_categories tool call."""
+    from kicad_tools.mcp.tools.mistakes import list_mistake_categories
+
+    return list_mistake_categories()
+
+
+register_tool(
+    name="list_mistake_categories",
+    description=(
+        "List all available mistake detection categories. "
+        "Returns information about each category of design mistakes "
+        "that can be detected, along with the number of checks."
+    ),
+    parameters=_make_params(
+        properties={},
+        required=[],
+    ),
+    handler=_handler_list_mistake_categories,
+    category="mistakes",
+)
+
+
+# -----------------------------------------------------------------------------
+# Placement Optimization Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle optimize_placement tool call."""
+    from kicad_tools.mcp.tools.optimize_placement import optimize_placement
+
+    return optimize_placement(
+        pcb_path=params["pcb_path"],
+        strategy=params.get("strategy", "cmaes"),
+        max_iterations=params.get("max_iterations", 200),
+        weights=params.get("weights"),
+        seed_method=params.get("seed_method", "force-directed"),
+        output_path=params.get("output_path"),
+        pre_slide_off=params.get("pre_slide_off", True),
+        route_check=params.get("route_check", False),
+        **(
+            {"route_check_budget": params["route_check_budget"]}
+            if "route_check_budget" in params
+            else {}
+        ),
+    )
+
+
+register_tool(
+    name="optimize_placement",
+    description=(
+        "Optimize PCB component placement using CMA-ES evolutionary optimization. "
+        "Reads component positions and net connectivity from the board file, generates "
+        "a seed placement, and runs iterative optimization to minimize wirelength, "
+        "overlap, DRC violations, and boundary violations. Returns the optimized score "
+        "with convergence data. Use evaluate_placement first to assess whether "
+        "optimization is needed. Decoupling capacitors are pulled onto the IC supply "
+        "pin they serve (affinity term, default weight 2.0, plus a post-optimize snap "
+        'pass), same as `kct optimize-placement`; pass weights={"decoupling": 0} to '
+        "turn it off. Reports the per-cap result under 'decoupling'."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "strategy": {
+                "type": "string",
+                "description": (
+                    "Optimization strategy: cmaes (default) or bayesian "
+                    "(Ax/BoTorch; needs the optional 'bayesian' extra)"
+                ),
+                "enum": ["cmaes", "bayesian"],
+                "default": "cmaes",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": (
+                    "Maximum optimization iterations. Higher values give better results "
+                    "but take longer. 200 is a good default for quick optimization."
+                ),
+                "default": 200,
+            },
+            "weights": {
+                "type": "object",
+                "description": (
+                    "Cost function weight overrides. Keys: overlap, drc, boundary, "
+                    "wirelength, area, creepage, cohesion, decoupling. Higher weights "
+                    "penalize that metric more. 'decoupling' (default 2.0) is the "
+                    "decoupling-cap affinity term and its post-optimize snap pass; "
+                    "set it to 0 to disable both."
+                ),
+                "properties": {
+                    "overlap": {"type": "number", "description": "Overlap weight (default: 1e6)"},
+                    "drc": {"type": "number", "description": "DRC violation weight (default: 1e4)"},
+                    "boundary": {
+                        "type": "number",
+                        "description": "Boundary violation weight (default: 1e5)",
+                    },
+                    "wirelength": {
+                        "type": "number",
+                        "description": "Wirelength weight (default: 1.0)",
+                    },
+                    "area": {"type": "number", "description": "Area weight (default: 0.1)"},
+                    "decoupling": {
+                        "type": "number",
+                        "description": (
+                            "Decoupling-cap affinity weight (default: 2.0). 0 disables "
+                            "the term and the post-optimize snap pass."
+                        ),
+                    },
+                },
+            },
+            "seed_method": {
+                "type": "string",
+                "description": "Initial placement seed method",
+                "enum": ["force-directed", "random"],
+                "default": "force-directed",
+            },
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Path for output .kicad_pcb file with optimized placements. "
+                    "If not specified, the result is not written to disk."
+                ),
+            },
+            "pre_slide_off": {
+                "type": "boolean",
+                "description": (
+                    "If true, run slide-off overlap resolution on the seed "
+                    "placement before optimization. Reduces initial overlap "
+                    "penalty for faster convergence. Default: true."
+                ),
+                "default": True,
+            },
+            "route_check": {
+                "type": "boolean",
+                "description": (
+                    "Confirm the result with bounded real routes before "
+                    "accepting it, like `kct optimize-placement --route-check`. "
+                    "The board as read is the incumbent; the optimizer result "
+                    "and then the decoupling snap each replace it only if a "
+                    "check route reaches at least its completion with no more "
+                    "DRC errors. At most 3 routes per call. Default: false."
+                ),
+                "default": False,
+            },
+            "route_check_budget": {
+                "type": "integer",
+                "description": (
+                    "Per-net A* node-expansion cap of each route_check route "
+                    "(default 100000). Iteration-bounded, so the verdict is "
+                    "reproducible."
+                ),
+                "default": 100000,
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_optimize_placement,
+    category="placement",
+)
+
+
+def _handler_evaluate_placement(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle evaluate_placement tool call."""
+    from kicad_tools.mcp.tools.optimize_placement import evaluate_placement
+
+    return evaluate_placement(
+        pcb_path=params["pcb_path"],
+        weights=params.get("weights"),
+    )
+
+
+register_tool(
+    name="evaluate_placement",
+    description=(
+        "Evaluate current PCB placement quality without optimizing. Returns a "
+        "placement score breakdown including wirelength, component overlap, DRC "
+        "violations, boundary violations, and bounding area. Use this to assess "
+        "board quality before deciding whether to run optimize_placement. Also "
+        "reports 'wirelength_estimators': the same layout measured both between "
+        "component centres and between real pads, for comparison only."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "weights": {
+                "type": "object",
+                "description": (
+                    "Cost function weight overrides. Keys: overlap, drc, boundary, "
+                    "wirelength, area. Higher weights penalize that metric more."
+                ),
+                "properties": {
+                    "overlap": {"type": "number", "description": "Overlap weight (default: 1e6)"},
+                    "drc": {"type": "number", "description": "DRC violation weight (default: 1e4)"},
+                    "boundary": {
+                        "type": "number",
+                        "description": "Boundary violation weight (default: 1e5)",
+                    },
+                    "wirelength": {
+                        "type": "number",
+                        "description": "Wirelength weight (default: 1.0)",
+                    },
+                    "area": {"type": "number", "description": "Area weight (default: 0.1)"},
+                },
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_evaluate_placement,
+    category="placement",
+)
+
+
+def _handler_resolve_placement_overlaps(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle resolve_placement_overlaps tool call."""
+    from kicad_tools.mcp.tools.optimize_placement import resolve_placement_overlaps
+
+    return resolve_placement_overlaps(
+        pcb_path=params["pcb_path"],
+        output_path=params.get("output_path"),
+        margin_mm=params.get("margin_mm", 0.5),
+        max_iterations=params.get("max_iterations", 5),
+        max_displacement_mm=params.get("max_displacement_mm", 20.0),
+    )
+
+
+register_tool(
+    name="resolve_placement_overlaps",
+    description=(
+        "Resolve component placement overlaps using the slide-off algorithm. "
+        "Iteratively pushes overlapping component bounding boxes apart until "
+        "no overlaps remain or limits are reached. Components on opposite "
+        "board sides are not affected. Useful as a standalone cleanup step "
+        "or before running full placement optimization."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Path for output .kicad_pcb file with resolved placements. "
+                    "If not specified, the result is not written to disk."
+                ),
+            },
+            "margin_mm": {
+                "type": "number",
+                "description": ("Extra clearance margin in mm beyond zero overlap. Default: 0.5"),
+                "default": 0.5,
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": ("Maximum number of settling iterations. Default: 5"),
+                "default": 5,
+            },
+            "max_displacement_mm": {
+                "type": "number",
+                "description": ("Maximum displacement per component in mm. Default: 20.0"),
+                "default": 20.0,
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_resolve_placement_overlaps,
+    category="placement",
+)
+
+
+# -----------------------------------------------------------------------------
+# Screenshot Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_screenshot_board(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle screenshot_board tool call.
+
+    Returns a dict with a special ``_mcp_content`` key so that the MCP
+    server can emit an ``image`` content block alongside the JSON text.
+    """
+    from kicad_tools.mcp.tools.screenshot import screenshot_board
+
+    result = screenshot_board(
+        pcb_path=params["pcb_path"],
+        layers=params.get("layers"),
+        max_size_px=params.get("max_size_px", 1568),
+        output_path=params.get("output_path"),
+        black_and_white=params.get("black_and_white", False),
+        theme=params.get("theme"),
+    )
+
+    # Build MCP content blocks: text metadata + image if available
+    if result.get("success") and result.get("image_base64"):
+        meta = {k: v for k, v in result.items() if k != "image_base64"}
+        content = [
+            {"type": "text", "text": json.dumps(meta, indent=2)},
+            {
+                "type": "image",
+                "data": result["image_base64"],
+                "mimeType": "image/png",
+            },
+        ]
+        result["_mcp_content"] = content
+
+    return result
+
+
+register_tool(
+    name="screenshot_board",
+    description=(
+        "Capture a screenshot of a KiCad PCB board. Exports the board as SVG "
+        "using kicad-cli, converts to PNG, and returns a base64-encoded image "
+        "suitable for vision API analysis. Supports layer selection via named "
+        "presets ('default', 'copper', 'assembly', 'front', 'back') or explicit "
+        "layer lists. The image is automatically resized to fit within the vision "
+        "API maximum dimension (1568px). Use this to visually inspect board layout, "
+        "component placement, and routing before or after modifications."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "layers": {
+                "type": "string",
+                "description": (
+                    "Layer specification. Either a preset name ('default', 'copper', "
+                    "'assembly', 'front', 'back') or a comma-separated list of KiCad "
+                    "layer names (e.g. 'F.Cu,B.Cu,Edge.Cuts'). Default: composite view "
+                    "with copper, silkscreen, mask, and edge cuts."
+                ),
+            },
+            "max_size_px": {
+                "type": "integer",
+                "description": (
+                    "Maximum image dimension in pixels. Default: 1568 (fits common vision-model input limits)."
+                ),
+                "default": 1568,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional file path to save the PNG image to disk.",
+            },
+            "black_and_white": {
+                "type": "boolean",
+                "description": "Use black and white rendering for compact, high-contrast images.",
+                "default": False,
+            },
+            "theme": {
+                "type": "string",
+                "description": "KiCad color theme name (optional, uses default if not specified).",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_screenshot_board,
+    category="screenshot",
+)
+
+
+def _handler_board_view(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle board_view tool call (issue #6316).
+
+    Same result shape as ``screenshot_board`` (``image_base64``, size,
+    ``output_path``) plus the frame and the missing-link list.  The ``list``
+    view returns no image, so it carries no ``_mcp_content``.
+    """
+    from kicad_tools.boardview import board_view
+
+    result = board_view(
+        params["pcb_path"],
+        params.get("view", "overview"),
+        net=params.get("net"),
+        window=params.get("window"),
+        absolute=params.get("absolute", False),
+        margin_mm=params.get("margin_mm", 4.0),
+        max_size_px=params.get("max_size_px", 1568),
+        output_path=params.get("output_path"),
+        zones=params.get("zones", False),
+        drc_report=params.get("drc_report"),
+        net_classes=params.get("net_classes", False),
+        compare_to=params.get("compare_to"),
+        compare_drc_report=params.get("compare_drc_report"),
+    )
+
+    if result.get("success") and result.get("image_base64"):
+        meta = {k: v for k, v in result.items() if k != "image_base64"}
+        result["_mcp_content"] = [
+            {"type": "text", "text": json.dumps(meta, indent=2)},
+            {
+                "type": "image",
+                "data": result["image_base64"],
+                "mimeType": "image/png",
+            },
+        ]
+
+    return result
+
+
+register_tool(
+    name="board_view",
+    description=(
+        "Draw a routed or partly routed PCB to answer a routing question. Unlike "
+        "screenshot_board, the image carries net identity: mm axes, reference "
+        "designators, pad net labels, one net highlighted, and the connections "
+        "still missing drawn as ratsnest lines. Views: 'overview' (whole board, "
+        "every missing link), 'net' (crop round one net's missing links, or its "
+        "pads if it is complete), 'layers' (that crop as one panel per copper "
+        "layer), 'crop' (an explicit window), 'list' (missing links as data, no "
+        "image). Good for: why is this net stuck, where could a via go, is the "
+        "placement sensible, is one layer carrying everything. Not for clearances, "
+        "widths, connectivity or counts, which DRC and LVS compute exactly. Treat "
+        "anything read off the image as a hypothesis and confirm it with "
+        "net_status or a DRC check before acting on it. Axes are board-relative "
+        "by default (origin at the Edge.Cuts minimum corner, the frame net-status "
+        "and move-footprint use); DRC locations are sheet-absolute, which "
+        "'absolute' selects. The result names the frame and gives board_origin_mm. "
+        "Missing links come from the same connectivity model as the connectivity "
+        "check, so the two cannot disagree; pour nets whose fill misses a pad are "
+        "listed under pour_advisory with no link. Zone pours are drawn only when 'zones' is "
+        "set. Optional overlays: 'drc_report', 'net_classes', 'compare_to'. Needs "
+        "matplotlib, not kicad-cli."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "view": {
+                "type": "string",
+                "enum": ["overview", "net", "layers", "crop", "list"],
+                "description": "Which view to draw. Default: overview.",
+                "default": "overview",
+            },
+            "net": {
+                "type": "string",
+                "description": (
+                    "Net to highlight. Required for 'net' and 'layers', optional for 'crop'."
+                ),
+            },
+            "window": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4,
+                "description": (
+                    "Window for the 'crop' view as [x0, y0, x1, y1] in mm, in the selected frame."
+                ),
+            },
+            "absolute": {
+                "type": "boolean",
+                "description": (
+                    "Use sheet-absolute coordinates (the frame DRC locations are "
+                    "reported in) instead of board-relative ones."
+                ),
+                "default": False,
+            },
+            "margin_mm": {
+                "type": "number",
+                "description": "Margin round the net for 'net' and 'layers', in mm. Default: 4.",
+                "default": 4.0,
+            },
+            "max_size_px": {
+                "type": "integer",
+                "description": (
+                    "Maximum image dimension in pixels. Default: 1568 (fits common vision-model input limits)."
+                ),
+                "default": 1568,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional file path to save the PNG image to disk.",
+            },
+            "zones": {
+                "type": "boolean",
+                "description": "Draw filled zone pours, translucent, in their layer's colour.",
+                "default": False,
+            },
+            "drc_report": {
+                "type": "string",
+                "description": (
+                    "Path to a DRC report (JSON or text); violation locations are marked "
+                    "(sheet-absolute in the report, shifted by the board origin when drawn "
+                    "board-relative)."
+                ),
+            },
+            "net_classes": {
+                "type": "boolean",
+                "description": "Colour copper by net class instead of by layer.",
+                "default": False,
+            },
+            "compare_to": {
+                "type": "string",
+                "description": (
+                    "Second .kicad_pcb: pcb_path is drawn as 'before' (left) and this as "
+                    "'after' (right), over one shared window. Not for 'layers'."
+                ),
+            },
+            "compare_drc_report": {
+                "type": "string",
+                "description": "DRC report for the compare_to board.",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_board_view,
+    category="screenshot",
+)
+
+
+def _handler_screenshot_schematic(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle screenshot_schematic tool call."""
+    from kicad_tools.mcp.tools.screenshot import screenshot_schematic
+
+    result = screenshot_schematic(
+        sch_path=params["sch_path"],
+        max_size_px=params.get("max_size_px", 1568),
+        output_path=params.get("output_path"),
+        black_and_white=params.get("black_and_white", False),
+        theme=params.get("theme"),
+    )
+
+    if result.get("success") and result.get("image_base64"):
+        meta = {k: v for k, v in result.items() if k != "image_base64"}
+        content = [
+            {"type": "text", "text": json.dumps(meta, indent=2)},
+            {
+                "type": "image",
+                "data": result["image_base64"],
+                "mimeType": "image/png",
+            },
+        ]
+        result["_mcp_content"] = content
+
+    return result
+
+
+register_tool(
+    name="screenshot_schematic",
+    description=(
+        "Capture a screenshot of a KiCad schematic. Exports the schematic as SVG "
+        "using kicad-cli, converts to PNG, and returns a base64-encoded image. "
+        "Useful for reviewing circuit design, verifying connections, and providing "
+        "visual context to AI agents."
+    ),
+    parameters=_make_params(
+        properties={
+            "sch_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_sch file",
+            },
+            "max_size_px": {
+                "type": "integer",
+                "description": (
+                    "Maximum image dimension in pixels. Default: 1568 (fits common vision-model input limits)."
+                ),
+                "default": 1568,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional file path to save the PNG image to disk.",
+            },
+            "black_and_white": {
+                "type": "boolean",
+                "description": "Use black and white rendering.",
+                "default": False,
+            },
+            "theme": {
+                "type": "string",
+                "description": "KiCad color theme name (optional).",
+            },
+        },
+        required=["sch_path"],
+    ),
+    handler=_handler_screenshot_schematic,
+    category="screenshot",
+)
+
+# -----------------------------------------------------------------------------
+# Workflow Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_create_pcb_from_schematic(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle create_pcb_from_schematic tool call."""
+    from kicad_tools.mcp.tools.workflow import create_pcb_from_schematic
+
+    return create_pcb_from_schematic(
+        schematic_path=params["schematic_path"],
+        output_path=params.get("output_path"),
+        width=params.get("width", 100.0),
+        height=params.get("height", 100.0),
+        layers=params.get("layers", 2),
+        title=params.get("title", ""),
+        revision=params.get("revision", "1.0"),
+        company=params.get("company", ""),
+        auto_place=params.get("auto_place", True),
+        placement_spacing=params.get("placement_spacing", 15.0),
+        placement_columns=params.get("placement_columns", 10),
+    )
+
+
+register_tool(
+    name="create_pcb_from_schematic",
+    description=(
+        "Create a PCB from a KiCad schematic file. Extracts netlist data, "
+        "creates a blank PCB with specified dimensions, places footprints "
+        "for all components in a grid layout, and assigns nets based on "
+        "schematic connectivity. Returns the path to the saved PCB file "
+        "along with placement and net assignment statistics."
+    ),
+    parameters=_make_params(
+        properties={
+            "schematic_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_sch schematic file",
+            },
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Output .kicad_pcb file path. "
+                    "Default: <schematic-stem>.kicad_pcb in the same directory."
+                ),
+            },
+            "width": {
+                "type": "number",
+                "description": "Board width in mm (default: 100.0)",
+                "default": 100.0,
+            },
+            "height": {
+                "type": "number",
+                "description": "Board height in mm (default: 100.0)",
+                "default": 100.0,
+            },
+            "layers": {
+                "type": "integer",
+                "description": "Number of copper layers, 2 or 4 (default: 2)",
+                "default": 2,
+                "enum": [2, 4],
+            },
+            "title": {
+                "type": "string",
+                "description": "Board title for title block (default: schematic filename)",
+            },
+            "revision": {
+                "type": "string",
+                "description": "Board revision (default: 1.0)",
+                "default": "1.0",
+            },
+            "company": {
+                "type": "string",
+                "description": "Company name for title block",
+            },
+            "auto_place": {
+                "type": "boolean",
+                "description": "Whether to automatically place components in a grid (default: true)",
+                "default": True,
+            },
+            "placement_spacing": {
+                "type": "number",
+                "description": "Spacing between auto-placed components in mm (default: 15.0)",
+                "default": 15.0,
+            },
+            "placement_columns": {
+                "type": "integer",
+                "description": "Number of columns for auto-placement grid (default: 10)",
+                "default": 10,
+            },
+        },
+        required=["schematic_path"],
+    ),
+    handler=_handler_create_pcb_from_schematic,
+    category="workflow",
+)
+
+
+# -----------------------------------------------------------------------------
+# Observability Tools (issue #4897)
+# -----------------------------------------------------------------------------
+
+
+def _handler_get_recent_calls(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_recent_calls tool call."""
+    from kicad_tools.mcp.tools.observability import get_recent_calls
+
+    return get_recent_calls(
+        limit=params.get("limit", 20),
+        tool_name=params.get("tool_name"),
+        status=params.get("status"),
+    )
+
+
+register_tool(
+    name="get_recent_calls",
+    description=(
+        "Get recent MCP tool call history and aggregate statistics for "
+        "self-diagnosis. Returns a bounded, most-recent-first list of tool "
+        "calls (name, duration, status, error kind, error message) backed "
+        "by an in-memory ring buffer, plus all-time totals (calls per tool, "
+        "errors per kind, error rate). Use this after a tool call fails or "
+        "behaves unexpectedly to see exactly what happened, without relying "
+        "on stderr logs."
+    ),
+    parameters=_make_params(
+        properties={
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Maximum number of call records to return, most-recent-first (default: 20)"
+                ),
+                "default": 20,
+            },
+            "tool_name": {
+                "type": "string",
+                "description": "Optional filter: only return calls to this tool",
+            },
+            "status": {
+                "type": "string",
+                "description": "Optional filter: only return calls with this status",
+                "enum": ["ok", "error"],
+            },
+        },
+        required=[],
+    ),
+    handler=_handler_get_recent_calls,
+    category="observability",
+)
+
+
+# -----------------------------------------------------------------------------
+# Ecosystem Tools (Issue #5839)
+# -----------------------------------------------------------------------------
+
+
+def _handler_ecosystem_list(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle ecosystem_list tool call."""
+    from kicad_tools.mcp.tools.ecosystem import ecosystem_list
+
+    return ecosystem_list(
+        category=params.get("category"),
+        relation=params.get("relation"),
+        verdict=params.get("verdict"),
+        license_compat=params.get("license_compat"),
+    )
+
+
+register_tool(
+    name="ecosystem_list",
+    description=(
+        "List the projects kicad-tools tracks in the KiCad automation ecosystem, "
+        "with our verdict on each, whether its license permits code reuse, and "
+        "paths to any evaluation we have already written. Use this before "
+        "researching or reimplementing something a neighbouring project already "
+        "does. Also returns our own invariants and non-goals."
+    ),
+    parameters=_make_params(
+        properties={
+            "category": {
+                "type": "string",
+                "description": "Optional filter by kind of tool",
+                "enum": [
+                    "autorouter",
+                    "design-as-code",
+                    "agent-interface",
+                    "fabrication",
+                    "bindings",
+                    "benchmark",
+                ],
+            },
+            "relation": {
+                "type": "string",
+                "description": ("Optional filter by pipeline position relative to kicad-tools"),
+                "enum": ["upstream", "peer", "downstream", "reference"],
+            },
+            "verdict": {
+                "type": "string",
+                "description": "Optional filter by what we concluded about the project",
+                "enum": [
+                    "complementary",
+                    "benchmarked",
+                    "ideas-adopted",
+                    "evaluated-not-adopted",
+                    "watch",
+                ],
+            },
+            "license_compat": {
+                "type": "string",
+                "description": "Optional filter by whether upstream code may be reused",
+                "enum": [
+                    "mit-clean",
+                    "permissive-ideas-only",
+                    "copyleft-ideas-only",
+                    "unlicensed",
+                    "cloud-service",
+                ],
+            },
+        },
+        required=[],
+    ),
+    handler=_handler_ecosystem_list,
+    category="ecosystem",
+)
+
+
+def _handler_ecosystem_show(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle ecosystem_show tool call."""
+    from kicad_tools.mcp.tools.ecosystem import ecosystem_show
+
+    return ecosystem_show(project_id=params["project_id"])
+
+
+register_tool(
+    name="ecosystem_show",
+    description=(
+        "Show one tracked ecosystem project in full: our verdict, its license "
+        "and whether its code may be reused here, the commit we benchmarked (if "
+        "any), and the repo-relative paths of our own evaluation notes."
+    ),
+    parameters=_make_params(
+        properties={
+            "project_id": {
+                "type": "string",
+                "description": "Registry id, e.g. 'kicadroutingtools' (see ecosystem_list)",
+            },
+        },
+        required=["project_id"],
+    ),
+    handler=_handler_ecosystem_show,
+    category="ecosystem",
+)
+
+
+# -----------------------------------------------------------------------------
+# Parts Tools (Issue #7993)
+# -----------------------------------------------------------------------------
+
+
+def _handler_parts_search(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle parts_search tool call."""
+    from kicad_tools.mcp.tools.parts import parts_search
+
+    return parts_search(
+        query=params["query"],
+        package=params.get("package"),
+        in_stock=params.get("in_stock", False),
+        basic_only=params.get("basic_only", False),
+        page=params.get("page", 1),
+        page_size=params.get("page_size", 20),
+    )
+
+
+register_tool(
+    name="parts_search",
+    description=(
+        "Search JLCPCB/LCSC parts by free-text query (value + package). Uses the "
+        "live API and falls back to the offline jlcparts catalog; the result's "
+        "'coverage' (live/offline/incomplete) says which. An empty list is a "
+        "verified miss only when coverage is 'live'. Returns an error when no "
+        "source is available."
+    ),
+    parameters=_make_params(
+        properties={
+            "query": {"type": "string", "description": "Search text, e.g. '10k 0402'"},
+            "package": {"type": "string", "description": "Package filter, e.g. '0402'"},
+            "in_stock": {"type": "boolean", "description": "Only parts with stock"},
+            "basic_only": {"type": "boolean", "description": "Only JLCPCB basic parts"},
+            "page": {"type": "integer", "description": "1-based page (default 1)"},
+            "page_size": {"type": "integer", "description": "Results per page, 1-100 (default 20)"},
+        },
+        required=["query"],
+    ),
+    handler=_handler_parts_search,
+    category="parts",
+)
+
+
+def _handler_parts_lookup(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle parts_lookup tool call."""
+    from kicad_tools.mcp.tools.parts import parts_lookup
+
+    return parts_lookup(lcsc_part=params["lcsc_part"])
+
+
+register_tool(
+    name="parts_lookup",
+    description=(
+        "Look up one part by LCSC number (e.g. 'C25804'): specs, stock, price "
+        "breaks and datasheet. Uses the live API with offline catalog fallback; "
+        "'status' is found, not_found (verified), offline_miss or unavailable — "
+        "the last two are NOT confirmed absence and also carry an error."
+    ),
+    parameters=_make_params(
+        properties={
+            "lcsc_part": {
+                "type": "string",
+                "description": "LCSC part number; the 'C' prefix is optional",
+            },
+        },
+        required=["lcsc_part"],
+    ),
+    handler=_handler_parts_lookup,
+    category="parts",
+)

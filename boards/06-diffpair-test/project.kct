@@ -1,0 +1,130 @@
+kct_version: '1.0'
+project:
+  name: Four-channel LVDS link demonstrator
+  revision: C
+  description: Real SN65LVDS1DR drivers and SN65LVDS2DR receivers, four terminated
+    differential links. External regulated 3.3V and LVTTL stimulus required. No firmware.
+  artifacts:
+    pcb: output/diffpair_test.kicad_pcb
+    pcb_routed: output/diffpair_test_routed.kicad_pcb
+    schematic: output/diffpair_test.kicad_sch
+requirements:
+  manufacturing:
+    target_fab: jlcpcb-tier1
+    layers:
+      preferred: 4
+    assembly: both
+bom_entries:
+- ref: J1
+  part: PZ254V-11-02P
+  lcsc: C492401
+- ref: J2
+  part: PZ254V-11-08P
+  lcsc: C492407
+- ref: J3
+  part: PZ254V-11-08P
+  lcsc: C492407
+- ref: C17
+  part: CL21A106KAYNNNE
+  lcsc: C15850
+- ref: U1
+  part: SN65LVDS1DR
+  lcsc: C2671256
+- ref: U2
+  part: SN65LVDS2DR
+  lcsc: C2671054
+- ref: C1
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C2
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: C3
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C4
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: R1
+  part: 0603WAF1000T5E
+  lcsc: C22775
+- ref: R5
+  part: 0603WAF1003T5E
+  lcsc: C25803
+- ref: U3
+  part: SN65LVDS1DR
+  lcsc: C2671256
+- ref: U4
+  part: SN65LVDS2DR
+  lcsc: C2671054
+- ref: C5
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C6
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: C7
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C8
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: R2
+  part: 0603WAF1000T5E
+  lcsc: C22775
+- ref: R6
+  part: 0603WAF1003T5E
+  lcsc: C25803
+- ref: U5
+  part: SN65LVDS1DR
+  lcsc: C2671256
+- ref: U6
+  part: SN65LVDS2DR
+  lcsc: C2671054
+- ref: C9
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C10
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: C11
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C12
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: R3
+  part: 0603WAF1000T5E
+  lcsc: C22775
+- ref: R7
+  part: 0603WAF1003T5E
+  lcsc: C25803
+- ref: U7
+  part: SN65LVDS1DR
+  lcsc: C2671256
+- ref: U8
+  part: SN65LVDS2DR
+  lcsc: C2671054
+- ref: C13
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C14
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: C15
+  part: CL10B102KB8NNNC
+  lcsc: C1588
+- ref: C16
+  part: CC0603KRX7R9BB104
+  lcsc: C14663
+- ref: R4
+  part: 0603WAF1000T5E
+  lcsc: C22775
+- ref: R8
+  part: 0603WAF1003T5E
+  lcsc: C25803
+build:
+  route_recipe: assembled-demo/build.py --step route
+intent:
+  summary: Four working 3.3V LVTTL-to-LVDS-to-LVTTL channels with 100-ohm receiver
+    terminations. External regulated power and logic stimulus; no firmware.

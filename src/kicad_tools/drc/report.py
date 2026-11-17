@@ -1,0 +1,785 @@
+"""DRC report parsing for KiCad text and JSON formats."""
+
+import contextlib
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+from .parity import SchematicParityStatus, schematic_parity_status
+from .violation import DRCViolation, Location, Severity, ViolationType
+
+if TYPE_CHECKING:
+    from kicad_tools.validate.filters import ViolationFilter
+
+
+@dataclass
+class DRCReport:
+    """Parsed DRC report from KiCad.
+
+    ``violations`` holds **geometric** DRC findings only.  KiCad's JSON
+    report carries connectivity relationships (ratsnest "missing
+    connection" entries) in a sibling top-level ``unconnected_items``
+    array; those are parsed into the dedicated :attr:`unconnected_items`
+    collection instead of being merged into ``violations`` (issue #4498).
+
+    Keeping the two collections separate preserves the established
+    geometric-DRC contract: every consumer of ``violations`` /
+    :attr:`error_count` (``run_geometric_drc``, the route gate, the audit
+    reconciliation, the "board is geometrically clean" regressions) keeps
+    asking exactly the question it asked before, while connectivity
+    consumers (:class:`~kicad_tools.validate.connectivity.ConnectivityValidator`)
+    read the connectivity collection explicitly.
+    """
+
+    source_file: str
+    created_at: datetime | None
+    pcb_name: str
+    violations: list[DRCViolation] = field(default_factory=list)
+    footprint_errors: int = 0
+    #: Connectivity relationships from KiCad's ``unconnected_items`` array.
+    #: Deliberately NOT part of ``violations`` -- see the class docstring.
+    unconnected_items: list[DRCViolation] = field(default_factory=list)
+    mask_copper_assessments: list[MaskCopperAssessment] = field(default_factory=list)
+    #: Board/schematic mismatches from KiCad's ``schematic_parity`` array
+    #: (Issue #7077).  Like :attr:`unconnected_items`, deliberately NOT part
+    #: of ``violations``; entries keep their kicad-cli severity.
+    schematic_parity: list[DRCViolation] = field(default_factory=list)
+    #: Whether kicad-cli actually ran the parity checks: ``True``/``False``
+    #: when this process ran kicad-cli and saw its output, ``None`` when
+    #: unknown (a report loaded from disk -- an empty ``schematic_parity``
+    #: array cannot tell "clean" from "never ran").
+    schematic_parity_ran: bool | None = None
+    #: Why parity did NOT RUN, when the run knows the cause (Issue #7147).
+    schematic_parity_reason: str | None = None
+    #: The schematic kicad-cli ran parity against, when known (Issue #7147).
+    schematic_parity_schematic: str | None = None
+    #: Manufacturer/tier id whose rules produced this report (issue #7153).
+    #: Parsed from the kct-check JSON ``manufacturer`` key; ``None`` for
+    #: kicad-cli reports, which do not record one.
+    manufacturer: str | None = None
+    #: sha256 of the checked PCB's raw bytes, from the report's top-level
+    #: ``pcb_sha256`` key (issue #7190).  ``kct check --output`` writes it;
+    #: ``None`` when absent (kicad-cli reports, older kct reports).  Binds
+    #: the report to the PCB content it describes -- see
+    #: :mod:`kicad_tools.drc.report_binding`.
+    pcb_sha256: str | None = None
+    #: The kct-check JSON ``fabrication_overrides`` block (board-local paid
+    #: factory options the report was checked under), or ``None``.
+    fabrication_overrides: dict | None = None
+
+    @property
+    def schematic_parity_status(self) -> SchematicParityStatus:
+        """PASSED / FAILED / NOT RUN, derived in one place (Issue #7077)."""
+        return schematic_parity_status(
+            self.schematic_parity,
+            self.schematic_parity_ran,
+            self.schematic_parity_reason,
+            self.schematic_parity_schematic,
+        )
+
+    @property
+    def passed(self) -> bool:
+        return self.error_count == 0 and all(a.passed for a in self.mask_copper_assessments)
+
+    @property
+    def violation_count(self) -> int:
+        """Total number of geometric violations."""
+        return len(self.violations)
+
+    @property
+    def unconnected_item_count(self) -> int:
+        """Number of connectivity relationships reported by KiCad."""
+        return len(self.unconnected_items)
+
+    def connectivity_items(self) -> list[DRCViolation]:
+        """Return every connectivity ("missing connection") entry.
+
+        Combines the dedicated :attr:`unconnected_items` collection (KiCad
+        JSON reports) with any ``unconnected_items``-typed entry that a
+        *text*-format report placed in ``violations`` -- the text ``.rpt``
+        format has a single flat violation list, and that legacy shape is
+        unchanged.  The two sources are disjoint by construction, so
+        nothing is double counted.
+        """
+        return [
+            *self.unconnected_items,
+            *(v for v in self.violations if v.type == ViolationType.UNCONNECTED_ITEMS),
+        ]
+
+    def connectivity_errors(self) -> list[DRCViolation]:
+        """Return the unwaived, error-severity connectivity entries (Issue #7188).
+
+        :meth:`connectivity_items` filtered by :attr:`DRCViolation.is_error`,
+        covering both the KiCad JSON shape (:attr:`unconnected_items`) and the
+        text ``.rpt`` shape (opens inside :attr:`violations`).  This is the
+        single definition of "this board has blocking opens" shared by
+        ``kct drc``, export preflight and the manufacturing package.
+        """
+        return [v for v in self.connectivity_items() if v.is_error]
+
+    def blocking_items(self) -> list[DRCViolation]:
+        """Return every finding that should block fabrication (Issue #7188).
+
+        That is :attr:`errors` (error-severity geometric violations, which for
+        a text ``.rpt`` already include its opens) plus the error-severity
+        entries of :attr:`unconnected_items` (KiCad JSON opens).  The two
+        sources are disjoint by construction, so nothing is double counted.
+
+        :attr:`error_count` / :attr:`passed` deliberately keep their
+        geometric-only meaning (#4498); this is the wider gate count.
+
+        Not included, on purpose:
+
+        * :attr:`schematic_parity` -- parity has its own PASSED / FAILED /
+          NOT RUN gate (:attr:`schematic_parity_status`, #7077).
+        * :attr:`mask_copper_assessments` -- already gated by :attr:`passed`.
+        """
+        return [*self.errors, *(v for v in self.unconnected_items if v.is_error)]
+
+    @property
+    def blocking_count(self) -> int:
+        """Number of :meth:`blocking_items` (Issue #7188)."""
+        return len(self.blocking_items())
+
+    @property
+    def error_count(self) -> int:
+        """Number of error-level violations."""
+        return sum(1 for v in self.violations if v.is_error)
+
+    @property
+    def warning_count(self) -> int:
+        """Number of warning-level violations."""
+        return sum(1 for v in self.violations if not v.is_error)
+
+    @property
+    def errors(self) -> list[DRCViolation]:
+        """Get only error-level violations."""
+        return [v for v in self.violations if v.is_error]
+
+    @property
+    def warnings(self) -> list[DRCViolation]:
+        """Get only warning-level violations."""
+        return [v for v in self.violations if not v.is_error]
+
+    def by_type(self, vtype: ViolationType) -> list[DRCViolation]:
+        """Get violations of a specific type."""
+        return [v for v in self.violations if v.type == vtype]
+
+    def by_net(self, net_name: str) -> list[DRCViolation]:
+        """Get violations involving a specific net."""
+        return [v for v in self.violations if net_name in v.nets]
+
+    def violations_by_type(self) -> dict[ViolationType, list[DRCViolation]]:
+        """Group violations by type."""
+        result: dict[ViolationType, list[DRCViolation]] = {}
+        for v in self.violations:
+            if v.type not in result:
+                result[v.type] = []
+            result[v.type].append(v)
+        return result
+
+    def violations_near(
+        self, x_mm: float, y_mm: float, radius_mm: float = 5.0
+    ) -> list[DRCViolation]:
+        """Find violations within a radius of a point."""
+        result = []
+        for v in self.violations:
+            for loc in v.locations:
+                dx = loc.x_mm - x_mm
+                dy = loc.y_mm - y_mm
+                if (dx * dx + dy * dy) <= (radius_mm * radius_mm):
+                    result.append(v)
+                    break
+        return result
+
+    def apply_filters(
+        self,
+        filters: "list[ViolationFilter]",
+    ) -> "DRCReport":
+        """Return a new report with violations filtered/reclassified.
+
+        Args:
+            filters: List of :class:`ViolationFilter` rules to apply.
+
+        Returns:
+            A new :class:`DRCReport` containing only the kept violations
+            (those not suppressed by ``action="ignore"`` rules).  Violations
+            matched by ``action="warning"`` or ``action="error"`` rules have
+            their severity reclassified in-place.
+        """
+        from kicad_tools.validate.filters import FilterEngine
+
+        engine = FilterEngine(filters)
+        result = engine.apply(self.violations)
+        return DRCReport(
+            source_file=self.source_file,
+            created_at=self.created_at,
+            pcb_name=self.pcb_name,
+            mask_copper_assessments=list(self.mask_copper_assessments),
+            violations=result.kept,
+            footprint_errors=self.footprint_errors,
+            # Connectivity relationships are not geometric violations and
+            # are carried through the geometric filter pipeline untouched.
+            unconnected_items=list(self.unconnected_items),
+            schematic_parity=list(self.schematic_parity),
+            schematic_parity_ran=self.schematic_parity_ran,
+            schematic_parity_reason=self.schematic_parity_reason,
+            schematic_parity_schematic=self.schematic_parity_schematic,
+            pcb_sha256=self.pcb_sha256,
+        )
+
+    def summary(self) -> dict:
+        """Generate a summary of the report."""
+        by_type = self.violations_by_type()
+        return {
+            "pcb_name": self.pcb_name,
+            "total_violations": self.violation_count,
+            "errors": self.error_count,
+            "warnings": self.warning_count,
+            "footprint_errors": self.footprint_errors,
+            "by_type": {
+                vtype.value: len(violations)
+                for vtype, violations in sorted(
+                    by_type.items(), key=lambda x: len(x[1]), reverse=True
+                )
+            },
+        }
+
+    def to_dict(self) -> dict:
+        """Convert report to dictionary."""
+        return {
+            "source_file": self.source_file,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "pcb_name": self.pcb_name,
+            "violation_count": self.violation_count,
+            "error_count": self.error_count,
+            "warning_count": self.warning_count,
+            "footprint_errors": self.footprint_errors,
+            "violations": [v.to_dict() for v in self.violations],
+            "passed": self.passed,
+            "mask_copper_assessments": [a.to_dict() for a in self.mask_copper_assessments],
+        }
+
+    @classmethod
+    def load(cls, path: Path | str) -> "DRCReport":
+        """Load a DRC report from file (auto-detects format)."""
+        path = Path(path)
+        content = path.read_text()
+
+        # Detect format
+        if content.strip().startswith("{") or _is_json(content):
+            return parse_json_report(content, str(path))
+        else:
+            return parse_text_report(content, str(path))
+
+
+def _is_json(content: str) -> bool:
+    """True for any valid JSON document, so non-object JSON is rejected rather
+    than silently parsed as an empty text report (issue #8133)."""
+    try:
+        json.loads(content)
+    except ValueError:
+        return False
+    return True
+
+
+_EMPTY_SOURCE_CLEARANCE = re.compile(r"\(\s+clearance\s+[\d.]+\s*mm")
+
+
+def netclass_only_attribution(report: DRCReport) -> tuple[int, int]:
+    """Count ``(netclass-attributed, rule-attributed)`` violations (#8039).
+
+    KiCad names the constraint source of each finding, e.g. ``netclass
+    'Default'`` or ``rule 'Reviewed clearance - X'``.  When a ``.kicad_dru``
+    is present, a report with netclass-attributed findings and zero
+    custom-rule-attributed ones suggests KiCad never loaded the rules file.
+    Findings naming neither source (opens, parity) are not counted.
+
+    Live kicad-cli 10.0.6 JSON has no ``rule`` key, and once it drops a rules
+    file the default-netclass findings carry an *empty* source
+    (``Clearance violation ( clearance 0.2000 mm; actual 0.1657 mm)``), so that
+    shape counts as netclass-attributed too.
+    """
+    netclass = rule = 0
+    for v in report.violations:
+        text = f"{v.message} {v.rule}".lower()
+        if "rule '" in text or (v.rule and not v.rule.lower().startswith("netclass '")):
+            rule += 1
+        elif "netclass '" in text or _EMPTY_SOURCE_CLEARANCE.search(v.message):
+            netclass += 1
+    return netclass, rule
+
+
+def parse_text_report(content: str, source_file: str = "") -> DRCReport:
+    """Parse KiCad text-format DRC report (.rpt).
+
+    Format example:
+        ** Drc report for board.kicad_pcb **
+        ** Created on 2025-12-28T21:29:34-0800 **
+
+        ** Found 606 DRC violations **
+        [clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1154 mm)
+            Rule: netclass 'Default'; error
+            @(162.4500 mm, 100.3250 mm): Pad 6 [<no net>] of U3 on F.Cu
+            @(161.6000 mm, 100.9000 mm): Via [SPI_NSS] on F.Cu - B.Cu
+
+        ** Found 0 Footprint errors **
+        ** End of Report **
+    """
+    lines = content.splitlines()
+    violations: list[DRCViolation] = []
+
+    # Parse header
+    pcb_name = ""
+    created_at = None
+    footprint_errors = 0
+
+    header_pcb = re.search(r"\*\* Drc report for (.+?) \*\*", content)
+    if header_pcb:
+        pcb_name = header_pcb.group(1)
+
+    header_date = re.search(r"\*\* Created on (.+?) \*\*", content)
+    if header_date:
+        date_str = header_date.group(1).strip()
+        try:
+            # Python 3.10 fromisoformat doesn't handle all timezone formats
+            # Try to normalize the timezone format first
+            if re.match(r".*[+-]\d{4}$", date_str):
+                # Convert -0800 to -08:00 format
+                date_str = date_str[:-2] + ":" + date_str[-2:]
+            created_at = datetime.fromisoformat(date_str)
+        except ValueError:
+            pass
+
+    # Parse footprint error count
+    fp_match = re.search(r"\*\* Found (\d+) Footprint errors \*\*", content)
+    if fp_match:
+        footprint_errors = int(fp_match.group(1))
+
+    # Parse violations
+    current_violation: dict | None = None
+
+    for line in lines:
+        # Skip header lines
+        if line.startswith("**"):
+            continue
+
+        # Start of new violation: [type]: message
+        violation_match = re.match(r"\[(\w+)\]:\s*(.+)", line)
+        if violation_match:
+            # Save previous violation
+            if current_violation:
+                violations.append(_build_violation(current_violation))
+
+            current_violation = {
+                "type_str": violation_match.group(1),
+                "message": violation_match.group(2),
+                "rule": "",
+                "severity": Severity.ERROR,
+                "locations": [],
+                "items": [],
+                "nets": [],
+            }
+
+            # Extract values from message
+            _extract_values(current_violation, current_violation["message"])
+            continue
+
+        if current_violation is None:
+            continue
+
+        # Rule line: Rule: ...; severity
+        rule_match = re.match(r"\s+Rule:\s*(.+);\s*(error|warning)", line, re.IGNORECASE)
+        if rule_match:
+            current_violation["rule"] = rule_match.group(1)
+            current_violation["severity"] = Severity.from_string(rule_match.group(2))
+            continue
+
+        # Severity line without a rule: "Local override; warning" (kicad-cli 10
+        # writes it for e.g. via_dangling).  Without this the violation kept
+        # the default ERROR severity (Issue #7170).
+        override_match = re.match(r"\s+Local override;\s*(error|warning)", line, re.IGNORECASE)
+        if override_match:
+            current_violation["severity"] = Severity.from_string(override_match.group(1))
+            continue
+
+        # Location line: @(x mm, y mm): description
+        loc_match = re.match(r"\s+@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\):\s*(.+)", line)
+        if loc_match:
+            x_mm = float(loc_match.group(1))
+            y_mm = float(loc_match.group(2))
+            description = loc_match.group(3)
+
+            # Extract layer from description
+            layer = ""
+            layer_match = re.search(r"on\s+(F\.Cu|B\.Cu|[\w.]+)", description)
+            if layer_match:
+                layer = layer_match.group(1)
+
+            current_violation["locations"].append(Location(x_mm, y_mm, layer))
+            current_violation["items"].append(description)
+
+            # Extract net names from [NetName] pattern
+            net_matches = re.findall(r"\[([^\]]+)\]", description)
+            for net in net_matches:
+                if net != "<no net>" and net not in current_violation["nets"]:
+                    current_violation["nets"].append(net)
+
+    # Don't forget the last violation
+    if current_violation:
+        violations.append(_build_violation(current_violation))
+
+    return DRCReport(
+        source_file=source_file,
+        created_at=created_at,
+        pcb_name=pcb_name,
+        violations=violations,
+        footprint_errors=footprint_errors,
+    )
+
+
+def parse_json_report(content: str, source_file: str = "") -> DRCReport:
+    """Parse JSON-format DRC report (KiCad-cli or kct-check format).
+
+    Supports two JSON schemas:
+    - KiCad-cli format: has "source", "date", violations with "type"/"description"
+      and dict items with "description"/"pos"/"net" keys.
+    - kct-check format: has "summary", "manufacturer", violations with "rule_id"/
+      "message" and string items (e.g., ["Pad 1", "Pad 2"]).
+    """
+    data = json.loads(content)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Not a DRC report: expected a JSON object, got {type(data).__name__}")
+
+    # Detect kct-check format by presence of "summary" or "manufacturer" keys
+    if "summary" in data or "manufacturer" in data:
+        return _parse_kct_check_json(data, source_file)
+
+    # Without a kicad-cli section, the lenient parser below would return an
+    # empty report -- a silent pass for a mis-pointed file (issue #8133).
+    if not any(k in data for k in ("violations", "unconnected_items", "schematic_parity")):
+        raise ValueError(
+            "Not a DRC report: JSON has none of the 'violations', "
+            "'unconnected_items' or 'schematic_parity' sections"
+        )
+
+    return _parse_kicad_cli_json(data, source_file)
+
+
+def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
+    """Parse kct-check JSON format written by ``kct check --output``.
+
+    Expected schema::
+
+        {
+            "file": "/path/to/board.kicad_pcb",
+            "manufacturer": "jlcpcb",
+            "layers": 2,
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 4, "passed": true},
+            "violations": [
+                {
+                    "rule_id": "clearance_pad_pad",
+                    "severity": "warning",
+                    "message": "...",
+                    "location": [x, y],
+                    "layer": "F.Cu",
+                    "actual_value": 0.15,
+                    "required_value": 0.2,
+                    "items": ["Pad 1", "Pad 2"]
+                }
+            ]
+        }
+    """
+    pcb_name = data.get("file", "")
+
+    violations: list[DRCViolation] = []
+
+    for item in data.get("violations", []):
+        type_str = item.get("rule_id", "unknown")
+        message = item.get("message", "")
+        severity = Severity.from_string(item.get("severity", "error"))
+
+        locations: list[Location] = []
+
+        # Parse location from [x, y] tuple
+        loc = item.get("location")
+        if loc and isinstance(loc, (list, tuple)) and len(loc) >= 2:
+            layer = item.get("layer", "")
+            locations.append(Location(x_mm=loc[0], y_mm=loc[1], layer=layer))
+
+        # Items are plain strings in kct-check format
+        raw_items = item.get("items", [])
+        items = [str(i) for i in raw_items]
+
+        raw_type = ViolationType.from_string(type_str)
+        refined_type = _infer_segment_via_type(raw_type, items)
+
+        violation = DRCViolation(
+            type=refined_type,
+            type_str=type_str,
+            severity=severity,
+            message=message,
+            rule=type_str,
+            locations=locations,
+            items=items,
+            nets=[str(n) for n in item.get("nets", [])],
+            required_value_mm=item.get("required_value"),
+            actual_value_mm=item.get("actual_value"),
+        )
+        _extract_values(violation.__dict__, message)
+        # Generate fix suggestions
+        from kicad_tools.feedback import generate_drc_suggestions
+
+        violation.suggestions = generate_drc_suggestions(violation)
+        violations.append(violation)
+
+    return DRCReport(
+        source_file=source_file,
+        created_at=None,
+        pcb_name=pcb_name,
+        violations=violations,
+        mask_copper_assessments=[
+            MaskCopperAssessment.from_dict(a) for a in data.get("mask_copper_assessments", [])
+        ],
+        footprint_errors=0,
+        manufacturer=_optional_str(data.get("manufacturer")),
+        pcb_sha256=_optional_str(data.get("pcb_sha256")),
+        fabrication_overrides=(
+            data["fabrication_overrides"]
+            if isinstance(data.get("fabrication_overrides"), dict)
+            else None
+        ),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    """Return a stripped non-empty string, else ``None``."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
+    """Parse KiCad-cli JSON-format DRC report.
+
+    KiCad 8+ can output DRC reports in JSON format with --format json.
+    """
+    # Extract metadata
+    pcb_name = data.get("source", "")
+    created_at = None
+    if "date" in data:
+        with contextlib.suppress(ValueError):
+            created_at = datetime.fromisoformat(data["date"])
+
+    violations: list[DRCViolation] = []
+    unconnected: list[DRCViolation] = []
+    parity: list[DRCViolation] = []
+
+    # KiCad stores connectivity relationships in a sibling top-level array,
+    # not in ``violations``.  Both are parsed through the same typed
+    # representation, but they land in *separate* collections: merging them
+    # would silently redefine every geometric-DRC consumer of
+    # ``DRCReport.violations`` / ``error_count`` as a combined
+    # geometry+connectivity check (issue #4498).  Schematic-parity findings
+    # get their own collection for the same reason (issue #7077).
+    for item, bucket in [
+        *((v, violations) for v in data.get("violations", [])),
+        *((u, unconnected) for u in data.get("unconnected_items", [])),
+        *((p, parity) for p in data.get("schematic_parity", [])),
+    ]:
+        type_str = item.get("type", "unknown")
+        message = item.get("description", "")
+        severity = Severity.from_string(item.get("severity", "error"))
+        rule = item.get("rule", "")
+
+        locations: list[Location] = []
+        items: list[str] = []
+        item_uuids: list[str] = []
+        nets: list[str] = []
+
+        # Parse position
+        if "pos" in item:
+            pos = item["pos"]
+            locations.append(
+                Location(
+                    x_mm=pos.get("x", 0),
+                    y_mm=pos.get("y", 0),
+                )
+            )
+
+        # Parse items
+        for item_data in item.get("items", []):
+            desc = item_data.get("description", "")
+            items.append(desc)
+            item_uuids.append(str(item_data.get("uuid") or ""))
+
+            if "pos" in item_data:
+                pos = item_data["pos"]
+                locations.append(
+                    Location(
+                        x_mm=pos.get("x", 0),
+                        y_mm=pos.get("y", 0),
+                    )
+                )
+
+            # Extract nets from the [NetName] token(s) in the description.
+            # Real KiCad-cli JSON has no per-item "net" key; the net lives
+            # inside the description, e.g. "Track [Net-(C11-2)] on F.Cu".
+            # Mirrors the plain-text parser above (parse_text_report).
+            net_matches = re.findall(r"\[([^\]]+)\]", desc)
+            for net in net_matches:
+                if net != "<no net>" and net not in nets:
+                    nets.append(net)
+
+            # Forward-compat fallback: honor a per-item "net" key if a
+            # future KiCad schema provides one directly.
+            if "net" in item_data:
+                net = item_data["net"]
+                if net and net not in nets:
+                    nets.append(net)
+
+        raw_type = ViolationType.from_string(type_str)
+        refined_type = _infer_segment_via_type(raw_type, items)
+
+        violation = DRCViolation(
+            type=refined_type,
+            type_str=type_str,
+            severity=severity,
+            message=message,
+            rule=rule,
+            locations=locations,
+            items=items,
+            nets=nets,
+            item_uuids=item_uuids,
+        )
+        _extract_values(violation.__dict__, message)
+        # Generate fix suggestions
+        from kicad_tools.feedback import generate_drc_suggestions
+
+        violation.suggestions = generate_drc_suggestions(violation)
+        bucket.append(violation)
+
+    return DRCReport(
+        source_file=source_file,
+        created_at=created_at,
+        pcb_name=pcb_name,
+        violations=violations,
+        footprint_errors=data.get("footprint_errors", 0),
+        unconnected_items=unconnected,
+        schematic_parity=parity,
+        pcb_sha256=_optional_str(data.get("pcb_sha256")),
+    )
+
+
+def _extract_values(data: dict, message: str) -> None:
+    """Extract numeric values from violation message."""
+    # Pattern: "clearance X.XXXX mm; actual Y.YYYY mm"
+    clearance_match = re.search(
+        r"clearance\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
+    )
+    if clearance_match:
+        data["required_value_mm"] = float(clearance_match.group(1))
+        data["actual_value_mm"] = float(clearance_match.group(2))
+        return
+
+    # Pattern: "minimum X.XXXX mm; actual Y.YYYY mm" (drill clearance format)
+    minimum_match = re.search(
+        r"minimum\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
+    )
+    if minimum_match:
+        data["required_value_mm"] = float(minimum_match.group(1))
+        data["actual_value_mm"] = float(minimum_match.group(2))
+        return
+
+    # Pattern: "width X.XXXX mm; actual Y.YYYY mm"
+    width_match = re.search(
+        r"width\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
+    )
+    if width_match:
+        data["required_value_mm"] = float(width_match.group(1))
+        data["actual_value_mm"] = float(width_match.group(2))
+        return
+
+    # Pattern: "min X.XXXX mm; actual Y.YYYY mm" (kicad-cli 10 hole-to-hole
+    # wording), also with words between ``min`` and the number -- "min
+    # diameter 0.6000 mm; actual 0.4000 mm" (via_diameter) and "min hole
+    # 0.3000 mm; actual ..." (drill_out_of_range).  Issue #7170.
+    min_actual_match = re.search(
+        r"\bmin(?:imum)?\s+(?:[a-z]+\s+)*?([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm",
+        message,
+        re.IGNORECASE,
+    )
+    if min_actual_match:
+        data["required_value_mm"] = float(min_actual_match.group(1))
+        data["actual_value_mm"] = float(min_actual_match.group(2))
+        return
+
+    # Pattern: "max hole X.XXXX mm; actual Y.YYYY mm" (upper-bound constraints,
+    # e.g. drill_out_of_range on a too-large hole).  Issue #7170.
+    max_actual_match = re.search(
+        r"\bmax(?:imum)?\s+(?:[a-z]+\s+)*?([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm",
+        message,
+        re.IGNORECASE,
+    )
+    if max_actual_match:
+        data["required_value_mm"] = float(max_actual_match.group(1))
+        data["actual_value_mm"] = float(max_actual_match.group(2))
+        return
+
+
+def _infer_segment_via_type(vtype: ViolationType, items: list[str]) -> ViolationType:
+    """Refine a generic CLEARANCE type to CLEARANCE_SEGMENT_VIA when items indicate it.
+
+    kicad-cli emits ``[clearance]`` for all clearance sub-types in its text
+    and JSON reports.  The item descriptions, however, distinguish "Track"
+    (segment) from "Via".  When one item is a Track and the other is a Via
+    the violation is actually segment-to-via and should be classified as
+    ``CLEARANCE_SEGMENT_VIA`` so that ``fix-drc`` can detect and repair it.
+    """
+    if vtype != ViolationType.CLEARANCE:
+        return vtype
+
+    has_track = False
+    has_via = False
+    for item in items:
+        item_lower = item.lower()
+        if item_lower.startswith("track ") or item_lower.startswith("track\t"):
+            has_track = True
+        elif item_lower.startswith("via ") or item_lower.startswith("via\t"):
+            has_via = True
+
+    if has_track and has_via:
+        return ViolationType.CLEARANCE_SEGMENT_VIA
+
+    return vtype
+
+
+def _build_violation(data: dict) -> DRCViolation:
+    """Build a DRCViolation from parsed data."""
+    from kicad_tools.feedback import generate_drc_suggestions
+
+    raw_type = ViolationType.from_string(data["type_str"])
+    items = data.get("items", [])
+    refined_type = _infer_segment_via_type(raw_type, items)
+
+    violation = DRCViolation(
+        type=refined_type,
+        type_str=data["type_str"],
+        severity=data["severity"],
+        message=data["message"],
+        rule=data.get("rule", ""),
+        locations=data.get("locations", []),
+        items=items,
+        nets=data.get("nets", []),
+        required_value_mm=data.get("required_value_mm"),
+        actual_value_mm=data.get("actual_value_mm"),
+    )
+    # Generate fix suggestions
+    violation.suggestions = generate_drc_suggestions(violation)
+    return violation

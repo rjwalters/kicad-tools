@@ -1,0 +1,18 @@
+(kicad_pcb
+  (version 20240108)
+  (generator "pcbnew")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "f.silkscreen")
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (gr_rect (start 0 0) (end 20 20) (stroke (width 0.05) (type solid)) (fill none) (layer "Edge.Cuts"))
+  (segment (start 5 5) (end 15 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 5 5.28) (end 15 5.28) (width 0.2) (layer "F.Cu") (net 1))
+)

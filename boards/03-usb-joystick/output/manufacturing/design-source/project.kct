@@ -1,0 +1,326 @@
+kct_version: '1.0'
+project:
+  name: USB Joystick Controller
+  revision: B
+  created: 2025-01-08
+  author: kicad-tools
+  description: Real ATmega32U4-AU USB HID joystick hardware with protected USB-C bus
+    power, crystal, AVR ISP, two filtered ADC axes and five active-low inputs.
+  artifacts:
+    schematic: output/usb_joystick.kicad_sch
+    pcb: output/usb_joystick.kicad_pcb
+    pcb_routed: output/usb_joystick_routed.kicad_pcb
+intent:
+  summary: 'A USB HID game controller featuring a 2-axis analog joystick,
+
+    multiple tactile buttons, and USB-C connectivity. Designed to
+
+    demonstrate kicad-tools autorouting capabilities with mixed
+
+    signal types requiring different routing considerations.
+
+    '
+  use_cases:
+  - Game controller
+  - Autorouter demonstration
+  - Mixed-signal routing example
+  - USB HID device example
+  interfaces:
+  - name: USB_C
+    type: usb_device
+    description: USB Type-C for data and power
+    protocol: USB 2.0 Full Speed
+    voltage: 5V
+    current_max: 100mA
+  - name: JOYSTICK
+    type: analog
+    description: 2-axis analog joystick with button
+    pins:
+    - JOY_X
+    - JOY_Y
+    - JOY_BTN
+    - VCC
+    - GND
+  - name: BUTTONS
+    type: gpio
+    description: Tactile button inputs
+    pins:
+    - BTN1
+    - BTN2
+    - BTN3
+    - BTN4
+  constraints:
+  - USB differential pair must be length-matched
+  - Crystal traces must be short and isolated
+  - Analog signals separated from high-speed digital
+  - 4-layer PCB with inner ground and VCC planes
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: 5V
+      current:
+        max: 100mA
+    signals:
+      usb:
+        impedance: 90ohm_differential
+        max_length: 50mm
+      analog:
+        bandwidth: DC-1kHz
+        resolution: 10-bit ADC
+  mechanical:
+    dimensions:
+      width: 80mm
+      height: 60mm
+  manufacturing:
+    target_fab: jlcpcb-tier1
+    layers:
+      preferred: 4
+    min_trace: 0.15mm
+    min_space: 0.15mm
+    min_via: 0.3mm
+    assembly: mixed
+  compliance:
+    standards:
+    - USB_2.0
+    rohs: true
+suggestions:
+  components:
+    mcu:
+      preferred:
+      - ATmega32U4
+      rationale: Native USB, adequate I/O, actual TQFP-44 package with fixed manufacturer
+        pinout
+    usb_connector:
+      preferred:
+      - USB-C receptacle
+      rationale: Modern, reversible, robust
+    crystal:
+      preferred:
+      - ECS-80-12-33-JGN-TR
+      rationale: Required for USB timing
+  layout:
+  - USB connector at board edge
+  - MCU centered with room for breakout
+  - Crystal close to MCU XTAL pins
+  - Keep each supply bypass close to its corresponding VCC pin
+  - Joystick connector opposite USB for ergonomics
+  - Keep USB D+/D- traces short and matched
+  - Route analog signals away from digital switching
+  bom:
+    preferred_vendors:
+    - LCSC
+    - Digikey
+    cost_target: $5/board
+  crystal:
+    preferred:
+    - ECS-80-12-33-JGN-TR
+    rationale: 8MHz crystal for full-speed USB and low-VBUS operation; 12pF load target
+bom_entries:
+- ref: U1
+  part: ATMEGA32U4-AU
+  manufacturer: Microchip
+  lcsc: C44854
+- ref: J1
+  part: USB4085-GF-A
+  manufacturer: GCT
+  lcsc: C7095263
+- ref: U2
+  part: USBLC6-2SC6
+  manufacturer: STMicroelectronics
+  lcsc: C7519
+- ref: F1
+  part: 1206L035/16YR
+  manufacturer: Littelfuse
+  lcsc: C126817
+- ref: Y1
+  part: ECS-80-12-33-JGN-TR
+  manufacturer: ECS
+  lcsc: C2442665
+- ref: J2
+  part: S5B-PH-SM4-TB(LF)(SN)
+  manufacturer: JST
+  lcsc: C265104
+- ref: J3
+  part: TSM-103-01-T-DV-P-TR
+  manufacturer: Samtec
+  lcsc: C21285200
+- ref: R1
+  part: RC0603FR-075K1L
+  manufacturer: Yageo
+  lcsc: C105580
+- ref: R2
+  part: RC0603FR-075K1L
+  manufacturer: Yageo
+  lcsc: C105580
+- ref: R3
+  part: RC0402FR-0722RL
+  manufacturer: Yageo
+  lcsc: C114765
+- ref: R4
+  part: RC0402FR-0722RL
+  manufacturer: Yageo
+  lcsc: C114765
+- ref: R5
+  part: RC0603FR-0710KL
+  manufacturer: Yageo
+  lcsc: C98220
+- ref: R6
+  part: RC0603FR-0710KL
+  manufacturer: Yageo
+  lcsc: C98220
+- ref: R10
+  part: RC0603FR-071KL
+  manufacturer: Yageo
+  lcsc: C22548
+- ref: R11
+  part: RC0603FR-071KL
+  manufacturer: Yageo
+  lcsc: C22548
+- ref: C1
+  part: GRM188R71C104KA01D
+  manufacturer: Murata
+  lcsc: C45000
+- ref: C2
+  part: GRM188R71C104KA01D
+  manufacturer: Murata
+  lcsc: C45000
+- ref: C3
+  part: GRM188R71C104KA01D
+  manufacturer: Murata
+  lcsc: C45000
+- ref: C4
+  part: GRM188R71C104KA01D
+  manufacturer: Murata
+  lcsc: C45000
+- ref: C5
+  part: GRM188R71C104KA01D
+  manufacturer: Murata
+  lcsc: C45000
+- ref: C6
+  part: GRM188R71A105KA61D
+  manufacturer: Murata
+  lcsc: C97888
+- ref: C7
+  part: GRM188R71C104KA01D
+  manufacturer: Murata
+  lcsc: C45000
+- ref: C8
+  part: GRM1885C1H150JA01D
+  manufacturer: Murata
+  lcsc: C71651
+- ref: C9
+  part: GRM1885C1H150JA01D
+  manufacturer: Murata
+  lcsc: C71651
+- ref: C10
+  part: GRM188R71H103KA01D
+  manufacturer: Murata
+  lcsc: C77053
+- ref: C11
+  part: GRM188R71H103KA01D
+  manufacturer: Murata
+  lcsc: C77053
+- ref: C12
+  part: GRM188R61A475KE15D
+  manufacturer: Murata
+  lcsc: C71633
+- ref: C13
+  part: GRM188R71C104KA01D
+  manufacturer: Murata
+  lcsc: C45000
+- ref: SW1
+  part: TL3342F160QG
+  manufacturer: E-Switch
+  lcsc: C2886898
+- ref: R12
+  part: RC0603FR-0710KL
+  manufacturer: Yageo
+  lcsc: C98220
+- ref: SW2
+  part: TL3342F160QG
+  manufacturer: E-Switch
+  lcsc: C2886898
+- ref: R13
+  part: RC0603FR-0710KL
+  manufacturer: Yageo
+  lcsc: C98220
+- ref: SW3
+  part: TL3342F160QG
+  manufacturer: E-Switch
+  lcsc: C2886898
+- ref: R14
+  part: RC0603FR-0710KL
+  manufacturer: Yageo
+  lcsc: C98220
+- ref: SW4
+  part: TL3342F160QG
+  manufacturer: E-Switch
+  lcsc: C2886898
+- ref: R15
+  part: RC0603FR-0710KL
+  manufacturer: Yageo
+  lcsc: C98220
+- ref: R16
+  part: RC0603FR-0710KL
+  manufacturer: Yageo
+  lcsc: C98220
+- ref: SW5
+  part: TL3342F160QG
+  manufacturer: E-Switch
+  lcsc: C2886898
+decisions:
+- date: 2025-01-08
+  phase: concept
+  topic: MCU Selection
+  choice: ATmega32U4
+  rationale: Native USB support, widely available, good for HID devices
+  alternatives:
+  - STM32F103
+  - RP2040
+- date: 2025-01-08
+  phase: concept
+  topic: USB Connector Type
+  choice: USB Type-C
+  rationale: Modern standard, reversible, demonstrates complex routing
+  alternatives:
+  - Micro-USB
+  - Mini-USB
+- date: 2025-01-08
+  phase: layout
+  topic: Routing Grid Resolution
+  choice: 0.1mm
+  rationale: Required for TQFP-32 0.8mm pitch routing
+  alternatives:
+  - 0.25mm
+- date: '2026-09-09'
+  phase: schematic
+  topic: Replace nonphysical MCU fixture
+  choice: ATmega32U4-AU TQFP44 real pinout with complete USB, clock and ISP support
+  rationale: Revision A claimed ATmega32U4 but used a freely repinned 32-pin connector
+    symbol. Revision B has fixed, datasheet-derived pins and no invented LCSC mappings.
+progress:
+  phase: layout
+  phases:
+    concept:
+      status: completed
+      checklist:
+      - '[x] Define controller features'
+      - '[x] Select MCU with USB support'
+      - '[x] Determine input types (analog + digital)'
+    schematic:
+      status: completed
+      checklist:
+      - '[x] USB connector and ESD protection'
+      - '[x] MCU with decoupling'
+      - '[x] Crystal oscillator'
+      - '[x] Joystick interface'
+      - '[x] Button inputs'
+    layout:
+      status: in_progress
+      checklist:
+      - '[x] Actual manufacturer pinout and library footprints'
+      - '[ ] Fresh complete routing'
+      - '[ ] Native DRC and electrical verification'
+      - '[ ] Procurement and assembly review'
+      - '[ ] USB HID firmware/hardware bring-up'

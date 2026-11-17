@@ -1,0 +1,54 @@
+name: Changelog
+
+# Per-PR changelog-fragment check (issue #5775, Phase 1 of epic #5774).
+#
+# A separate workflow rather than a job in ci.yml because the verdict depends
+# on PR *metadata* -- the `changelog:skip` label, the title's conventional-
+# commit type, the body's `Closes #N` -- so it must re-run on `labeled`,
+# `unlabeled` and `edited`. Adding those event types to ci.yml would re-run
+# all of its heavy KiCad jobs on every label change (Loom relabels PRs several
+# times each). Hosted, stdlib-only Python, no `uv sync`: it finishes in
+# seconds. Deliberately NOT gated by ci.yml's `changes` path filter -- a
+# docs-only or fragment-only PR must still be evaluated.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fragment-check:
+    name: Changelog Fragment Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The PR merge commit, its first parent (the base, so `--base HEAD^1`
+      # diffs exactly the PR's own changes) and the PR branch's full history:
+      # every commit in `HEAD^1..HEAD` has its trailers checked (issue #8099).
+      # `tree:0` fetches commits only -- trees and blobs arrive on demand -- so
+      # full history costs a few MB instead of the ~900 MB pack.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: tree:0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Validate fragment names
+        run: python scripts/changelog_assemble.py --check
+
+      - name: Check this PR has a changelog fragment (or is internal)
+        env:
+          # Only for a commit whose subject ends in `(#PR)` (resolved to that
+          # PR's branch issue, as the release gate does); usually unused.
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/changelog_gap_report.py --pr-event "$GITHUB_EVENT_PATH" --base HEAD^1

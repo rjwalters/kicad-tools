@@ -1,0 +1,633 @@
+"""kicad-cli's verdict on the four committed named fixtures.
+
+**Only ground truth is asserted here.** Consumer comparisons arrive with the
+adapters, carry ``@pytest.mark.consumer``, and are auto-``xfail``ed by
+``conftest.py`` -- this module is the hard gate that says "and KiCad really
+does think this".
+
+Two classes of assertion:
+
+1. *Verdict* -- what kicad-cli reports for each fixture, at both fill states.
+   These are the anchors every later phase measures against; if one of them
+   changes, either a fixture drifted or a KiCad version changed its mind, and
+   in both cases the epic's evidence needs re-reading.
+2. *Rule values* -- each fixture still carries exactly the constants it was
+   built to probe. A later change that silences a disagreement by relaxing the
+   fixture's clearance instead of fixing the consumer must fail loudly here.
+
+Consumer comparisons live at the bottom of the file, clearly separated: they
+carry ``@pytest.mark.consumer`` and are auto-``xfail``ed, because a measured
+disagreement is this epic's *output*, not a broken build -- **unless** the
+consumer's group appears in ``report.MIGRATED_GROUPS``, in which case its
+phase has landed and its rows are gated exactly as ``test_corpus`` gates them:
+driven at kicad-cli's own clearance, zero under-rejection, and no
+over-rejection beyond :data:`FIXTURE_QUANTISATION_LEDGER` (which only the
+cell-set groups in ``report.QUANTISED_GROUPS`` may carry).
+"""
+
+from __future__ import annotations
+
+import math
+from functools import cache
+from pathlib import Path
+
+import pytest
+
+from tests.conformance.board import FIXTURES_DIR
+from tests.conformance.conftest import (
+    assert_migrated_group_agrees,
+    requires_adapter,
+    requires_kicad_cli,
+)
+from tests.conformance.fixtures import (
+    GRID_RESOLUTION_MM,
+    HOLE_TO_HOLE_MM,
+    NAMED_FIXTURES,
+    PROJECT_CLEARANCE_MM,
+    TRACE_CLEARANCE_MM,
+    VIA_CLEARANCE_MM,
+    build_named_fixture,
+    fixture_stem,
+    roundrect_corner_support,
+)
+from tests.conformance.generator import pad_shape
+from tests.conformance.oracle import run_oracle
+from tests.conformance.report import ADAPTERS, MIGRATED_GROUPS, QUANTISED_GROUPS
+
+pytestmark = requires_kicad_cli
+
+# Fixtures that must be completely clean of clearance-family findings.
+_CLEAN_FIXTURES = (
+    "issue5410-dqs-n-halo-vs-legal-via",
+    "search-vs-commit-seg-via-max",
+    "roundrect-corner-gap",
+)
+
+_FILL_STATES = (False, True)
+
+
+def _fixture_board(name: str) -> Path:
+    case = build_named_fixture(name)
+    return FIXTURES_DIR / f"{fixture_stem(case)}.kicad_pcb"
+
+
+# ---------------------------------------------------------------------------
+# The fixtures exist and are committed, not regenerated at test time
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
+def test_fixture_files_are_committed(name: str) -> None:
+    pcb = _fixture_board(name)
+    project = pcb.with_suffix(".kicad_pro")
+    assert pcb.exists(), f"missing committed fixture board {pcb}"
+    assert project.exists(), (
+        f"missing sibling project {project} -- kicad-cli reads the applied "
+        "clearance from the project's Default netclass, not from the board"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rule-value guard
+# ---------------------------------------------------------------------------
+
+
+def test_fixture_rule_values_are_pinned() -> None:
+    """The numbers under test have not drifted.
+
+    These five constants *are* the disagreements: 0.15 mm is what the route
+    resolver returns, 0.20 mm is what the project's Default class says, and
+    0.127 mm is the grid pitch that turned #5410's via halo into a six-cell
+    square. Editing a fixture's clearance instead of a consumer's arithmetic
+    would make a later phase's rows go green for the wrong reason.
+    """
+    assert TRACE_CLEARANCE_MM == 0.15
+    assert VIA_CLEARANCE_MM == 0.20
+    assert PROJECT_CLEARANCE_MM == 0.20
+    assert HOLE_TO_HOLE_MM == 0.50
+    assert GRID_RESOLUTION_MM == 0.127
+
+    rules_5398 = build_named_fixture("issue5398-seg-via-0p18-order").rules
+    assert rules_5398.project_clearance == PROJECT_CLEARANCE_MM
+    assert rules_5398.trace_clearance == TRACE_CLEARANCE_MM
+    assert rules_5398.via_clearance == VIA_CLEARANCE_MM
+
+    # The search-vs-commit fixture deliberately drops the *project* class to
+    # 0.15 so kicad-cli is clean while the router's search-time predicate
+    # still raises the bar to via_clearance.
+    rules_svc = build_named_fixture("search-vs-commit-seg-via-max").rules
+    assert rules_svc.project_clearance == TRACE_CLEARANCE_MM
+    assert rules_svc.via_clearance == VIA_CLEARANCE_MM
+
+
+# ---------------------------------------------------------------------------
+# Geometry the fixtures claim, verified independently of KiCad
+# ---------------------------------------------------------------------------
+
+
+def test_issue5410_geometry_is_legal_on_both_counts() -> None:
+    """0.213 mm copper and 0.513 mm drill -- above 0.20 / 0.50."""
+    case = build_named_fixture("issue5410-dqs-n-halo-vs-legal-via")
+    a, b = case.vias
+    centre = math.dist((a.x, a.y), (b.x, b.y))
+    copper_gap = centre - a.diameter
+    drill_gap = centre - a.drill
+    assert copper_gap == pytest.approx(0.213, abs=0.001)
+    assert drill_gap == pytest.approx(0.513, abs=0.001)
+    assert copper_gap > PROJECT_CLEARANCE_MM
+    assert drill_gap > HOLE_TO_HOLE_MM
+
+
+def test_roundrect_corner_fixture_straddles_the_two_pad_models() -> None:
+    """Legal against the exact outline, illegal against the bounding rect.
+
+    This is the fixture's whole reason to exist, so it is checked here in
+    closed form rather than inferred from whichever model happens to answer.
+    """
+    case = build_named_fixture("roundrect-corner-gap")
+    (pad,) = case.pads
+    (segment,) = case.segments
+    shape = pad_shape(pad.footprint)
+    assert shape.roundrect_rratio is not None
+
+    width, height = shape.size
+    outline_support = roundrect_corner_support(width, height, shape.roundrect_rratio)
+    rect_support = math.hypot(width / 2.0, height / 2.0)
+    assert rect_support > outline_support  # rounding the corners pulls copper in
+
+    centreline_offset = segment.start[0] - pad.x
+    exact_gap = centreline_offset - outline_support - segment.width / 2.0
+    rect_gap = centreline_offset - rect_support - segment.width / 2.0
+
+    assert exact_gap == pytest.approx(0.22, abs=1e-6)
+    assert exact_gap > PROJECT_CLEARANCE_MM, "kicad-cli must find this clean"
+    assert rect_gap < PROJECT_CLEARANCE_MM, (
+        "the rectangle-bounded router pad model must find this too close -- "
+        "otherwise the fixture no longer demonstrates the disagreement"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ground truth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("refill", _FILL_STATES, ids=["asis", "refilled"])
+def test_issue5398_fixture_is_flagged_by_kicad_cli(refill: bool) -> None:
+    """One clearance violation at 0.180 mm against a 0.20 mm requirement.
+
+    The router accepts or rejects this same pair depending on which object was
+    committed first (#5398). kicad-cli has no notion of insertion order: the
+    project's Default class is 0.20 mm, so it is a violation, full stop.
+    """
+    case = build_named_fixture("issue5398-seg-via-0p18-order")
+    result = run_oracle(_fixture_board(case.name), refill=refill)
+
+    # One *pair*, not one row: kicad-cli's row multiplicity for a given board
+    # is not stable between runs, so the verdict set is the stable unit.
+    clearance = sorted(result.of_kind("clearance"), key=lambda v: sorted(v.nets))
+    assert len(clearance) == 1, (
+        f"expected exactly one flagged clearance pair, got {len(clearance)}:\n{result.describe()}"
+    )
+    verdict = clearance[0]
+    assert verdict.nets == frozenset({"SENSE_TRACK", "SENSE_VIA"})
+    assert verdict.required_mm == pytest.approx(0.20, abs=1e-6)
+    assert verdict.gap_mm == pytest.approx(0.180, abs=0.001)
+    assert not result.dropped, f"unmapped clearance rows: {result.dropped}"
+
+
+@pytest.mark.parametrize("name", _CLEAN_FIXTURES)
+@pytest.mark.parametrize("refill", _FILL_STATES, ids=["asis", "refilled"])
+def test_clean_fixtures_have_no_clearance_findings(name: str, refill: bool) -> None:
+    """Three fixtures KiCad finds legal -- and at least one consumer does not.
+
+    Each of these is copper the router refuses (or would refuse) today. If
+    kicad-cli ever starts flagging one, the fixture no longer demonstrates an
+    over-rejection and the epic's evidence has to be revisited.
+    """
+    result = run_oracle(_fixture_board(name), refill=refill)
+    assert not result.verdicts, (
+        f"{name} is supposed to be clean for kicad-cli:\n{result.describe()}"
+    )
+    assert not result.dropped, f"unmapped clearance rows: {result.dropped}"
+
+
+def test_no_named_fixture_carries_a_zone() -> None:
+    """Fill state cannot change these fixtures' verdicts, by construction.
+
+    Every verdict assertion above is parametrized over both fill states, which
+    is the fill-independence check -- and it is exact rather than approximate
+    precisely because none of these boards has a pour for a refill to change.
+    A fixture that grows a zone later needs its own zone-aware expectations,
+    so this guards that assumption instead of leaving it implicit.
+    """
+    for name in NAMED_FIXTURES:
+        assert build_named_fixture(name).zone is None, name
+
+
+def test_oracle_runs_leave_the_fixture_directory_untouched() -> None:
+    """Measuring a fixture must not write anything into its directory.
+
+    Two distinct ways kicad-cli writes to a board's directory, both of which
+    would quietly rewrite the evidence under test on every CI run:
+
+    * ``run_refill_zones`` passes ``--refill-zones --save-board``, rewriting
+      the board in place;
+    * *any* kicad-cli run drops a ``.kicad_prl`` local-settings file next to
+      the project.
+
+    The oracle therefore measures a scratch copy. This checks both the file
+    contents and the directory listing, because the second failure mode leaves
+    the board itself byte-identical.
+    """
+    board = _fixture_board("issue5398-seg-via-0p18-order")
+    directory = board.parent
+    before_bytes = board.read_bytes()
+    before_listing = sorted(p.name for p in directory.iterdir())
+
+    run_oracle(board, refill=True)
+
+    assert board.read_bytes() == before_bytes, "an oracle run mutated the committed fixture board"
+    assert sorted(p.name for p in directory.iterdir()) == before_listing, (
+        "an oracle run wrote a new file into the committed fixture directory"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Consumer rows -- report-only, auto-xfail
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is a hard assertion about kicad-cli. Everything
+# below compares an in-tree consumer against it, carries
+# ``@pytest.mark.consumer``, and is therefore turned into
+# ``xfail(strict=False)`` by ``conftest.py``. A disagreement recorded here is
+# evidence for Epic #5509's table, not a build failure: the consumer becomes a
+# merge gate only in its own epic phase.
+#
+# The ``notes`` on each fixture in ``fixtures.py`` predict *which* consumer
+# disagrees and *in which direction*. Those predictions are hypotheses, not
+# assertions (curator note on #5533 section 7): a prediction that does not
+# reproduce must show up as an xfail with the real answer in the message, and
+# the published table records what actually happened -- never a green tick for
+# a disagreement that has quietly gone away.
+
+
+_ADAPTERS_BY_NAME = {adapter.name: adapter for adapter in ADAPTERS}
+
+# fixture -> ((adapter name, adapter is expected to REJECT the pair), ...)
+#
+# Verbatim from each fixture's ``notes``, from #5533's acceptance criteria, and
+# -- for the fourteen consumer groups #5515 (Phase 1c) wired -- from that phase's
+# own measured run.  Epic #5509 Phase 1c's criterion is that each named fixture
+# lists its disagreeing consumers *by name*; this table is that listing, and
+# because the suite drives it, the listing cannot go stale silently.
+#
+# ``True`` means "this consumer rejects the pair", whatever kicad-cli said; read
+# it against each fixture's own kicad-cli verdict in the comment above it to see
+# which direction the disagreement runs.
+_PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
+    # kicad-cli FLAGS this pair (0.18 mm against the project's 0.20 mm class).
+    # Under the via-first insertion order the commit gates compare the
+    # candidate segment against ``trace_clearance`` (0.15) and accept it -- and
+    # so does every other consumer whose threshold is the trace rule.  The
+    # kernel, resolving the project's own 0.20 mm, agrees with kicad-cli.
+    #
+    # Epic #5509 Phase 3b (#5661) flipped ``route_halo`` / ``route_geometry_cpp``
+    # from REJECT to ACCEPT here, and that flip is the whole point of the phase:
+    # the search-time refinement used to widen a trace-vs-via requirement to
+    # ``max(required, via_clearance)`` = 0.20 and so rejected a pair its own
+    # commit gates accept at 0.15.  On the kernel it resolves the same 0.15 the
+    # commit gates do, so search and commit now give one answer.  Against
+    # kicad-cli that answer is an UNDER-rejection at the consumer's own rule
+    # values -- the #5398/#5654 rule-resolution gap no Phase 3 PR may close --
+    # and ``test_named_fixture_adapter_agrees_with_kicad_cli`` drives these two
+    # migrated rows at the project's own 0.20 mm, where they reject and agree.
+    #
+    # Issue #6272 closed that under-rejection at the router's own values: every
+    # trace/via gate (commit and search, Python and C++, either insertion
+    # order) now resolves ``max(trace_clearance, via_clearance)`` = 0.20, so
+    # ``grid_py`` / ``grid_cpp`` / ``route_halo`` / ``route_geometry_cpp`` all
+    # REJECT and agree with kicad-cli outright.
+    "issue5398-seg-via-0p18-order": (
+        ("clearance_kernel", True),
+        ("diffpair", True),
+        ("lattice", False),
+        ("grid_py", True),
+        ("grid_cpp", True),
+        ("via_clearance", False),
+        ("pairwise", False),
+        ("drc_nudge", False),
+        ("occupancy", True),
+        ("grid_cpp_marking", True),
+        ("cpp_blocked_kernel", True),
+        ("route_halo", True),
+        ("route_geometry_cpp", True),
+        ("optimizer_collision", True),
+        ("match_group", True),
+        ("kct_check", True),
+    ),
+    # kicad-cli finds this CLEAN (0.213 mm copper, 0.513 mm drill). The grid
+    # occupancy rows reject the candidate anyway -- in both languages, and the
+    # C++ disc-kernel read side does not rescue it.
+    #
+    # #5660 (Phase 3a) changed the *reason* without changing the prediction,
+    # and the distinction matters for anyone reading this row as #5410
+    # evidence.  DQS_N's own via halo no longer covers the DQ3 candidate cell:
+    # it is Euclidean 6.40 cells away, outside the six-cell disc the kernel
+    # now stamps, where the Chebyshev square covered it at a corner (pinned in
+    # `tests/router/test_halo_kernel_geometry.py`).  This adapter still says
+    # REJECT because its rule dilates the *candidate* as well, and two
+    # six-cell discs 6.40 cells apart still intersect.  What rescues the
+    # candidate in production is the refinement pass (groups 4/5), which
+    # accepts it here and does so through the shared kernel since Phase 3b
+    # (#5661) -- not a finer halo, so these cell-set rows stay REJECT and stay
+    # pinned in ``FIXTURE_QUANTISATION_LEDGER``.
+    "issue5410-dqs-n-halo-vs-legal-via": (
+        ("clearance_kernel", False),
+        ("diffpair", False),
+        ("lattice", False),
+        ("occupancy", True),
+        ("grid_cpp_marking", True),
+        ("cpp_blocked_kernel", True),
+        ("route_halo", False),
+        ("route_geometry_cpp", False),
+        ("via_clearance", False),
+        ("grid_py", False),
+        ("grid_cpp", False),
+        ("kct_check", False),
+    ),
+    # kicad-cli finds this CLEAN (project Default class is 0.15 mm here).
+    # Search-time refinement USED TO raise the bar to
+    # max(required, via_clearance) -- group 4's Python path and group 5's C++
+    # path both did -- while the commit gates accepted.  That is the asymmetry
+    # this fixture was captured for, and Epic #5509 Phase 3b (#5661) removed
+    # it: both now ask the shared kernel for the same 0.15 mm verdict the
+    # commit gates resolve, so both ACCEPT and agree with kicad-cli.  The
+    # prediction is kept (rather than the fixture deleted) because it is the
+    # regression guard: a future consumer that re-derives its own ``max(...)``
+    # would turn these two rows back to REJECT and redden here.
+    #
+    # Issue #6272 deliberately turned them back to REJECT -- together with the
+    # commit gates, which is what keeps search and commit in step.  The commit
+    # gates were the order-dependent half: via-first held the trace to
+    # ``trace_clearance`` (0.15), trace-first held the via to ``via_clearance``
+    # (0.20).  Every trace/via gate now resolves ``max(trace, via)`` = 0.20 in
+    # both orders, so all four rows below REJECT at the router's own rules.
+    # That is stricter than this fixture's 0.15 mm project class (the router's
+    # own ``via_clearance`` default is the stricter rule), and
+    # ``test_named_fixture_adapter_agrees_with_kicad_cli`` still drives the
+    # migrated rows at the project's values, where they accept and agree.
+    "search-vs-commit-seg-via-max": (
+        ("clearance_kernel", False),
+        ("diffpair", True),
+        ("lattice", False),
+        ("route_halo", True),
+        ("route_geometry_cpp", True),
+        ("grid_py", True),
+        ("grid_cpp", True),
+        ("via_clearance", False),
+        ("pairwise", False),
+        ("drc_nudge", False),
+        ("kct_check", False),
+        ("occupancy", True),
+        ("grid_cpp_marking", True),
+        ("cpp_blocked_kernel", True),
+        ("optimizer_collision", True),
+        ("match_group", True),
+    ),
+    # kicad-cli finds this CLEAN (0.22 mm to the exact roundrect outline).
+    # The C++ grid models the pad as its bounding rectangle: 0.1164 mm.  Group
+    # 6's fixed-copper predicate accepts it -- it is fed the exact polygon --
+    # and so does the kernel; the raster-based rows reject it.
+    #
+    # ``diffpair`` (group 8, Phase 3c) and ``mesh`` (group 10, Phase 3e) used to
+    # reject it too, and both now ACCEPT: their migrations measure a foreign pad
+    # through the kernel's exact pad model instead of a raster / bounding-box
+    # approximation.  The flip went unnoticed while these rows were
+    # auto-xfailed for everyone; since #5660 a migrated group's named-fixture
+    # rows are gated like its corpus rows, so the prediction has to be true.
+    #
+    # ``optimizer_collision`` (group 15, Phase 4a / #5854) is the third such
+    # flip, and the only one on a *post-route* consumer.  Both of its checkers
+    # judged pad copper off the raster -- the pad's metal grown by its own
+    # clearance halo, with the candidate grown again by ``width / 2 +
+    # trace_clearance`` -- so it rejected a track 0.22 mm from the true
+    # roundrect outline.  It now measures the pad through the same exact pad
+    # model and ACCEPTS, which is why this row moved from REJECT to ACCEPT in
+    # that phase rather than in a later one.
+    "roundrect-corner-gap": (
+        ("clearance_kernel", False),
+        ("diffpair", False),
+        ("mesh", False),
+        ("grid_cpp", True),
+        ("grid_py", True),
+        ("occupancy", True),
+        ("optimizer_collision", False),
+        ("fixed_copper", False),
+        ("match_group", False),
+        ("pairwise", False),
+        ("kct_check", False),
+    ),
+}
+
+# The named-fixture half of ``test_corpus.QUANTISATION_LEDGER``: what a
+# migrated *cell-set* group (``report.QUANTISED_GROUPS``) is still allowed to
+# over-reject on each committed fixture, keyed ``(group, fixture)`` and
+# measured on the gated reading (``verdicts_at_project_rules``).  Entries are
+# the ``sorted(pair)`` list the failure message prints; a key that is absent is
+# held to an empty set, which is every other migrated group.
+#
+# Groups 1 and 2 answer with a cell set, and the adapter's rejection rule
+# dilates both the existing copper *and* the candidate before intersecting
+# them, so every entry below is two halo radii of outward rounding, not the
+# Chebyshev corner #5660 removed.  The #5410 row is the one worth reading
+# twice: after Phase 3a DQS_N's via halo genuinely no longer covers the DQ3
+# candidate *cell* -- ``tests/router/test_halo_kernel_geometry.py`` pins that
+# in both backends, and it is the search-time rejection the issue reported --
+# but the adapter also grows DQ3's own 6-cell halo, and two 6-cell discs
+# 6.40 cells apart still touch.  Closing this row needs the refinement pass
+# (groups 4/5, Phase 3b), not a finer halo.
+FIXTURE_QUANTISATION_LEDGER: dict[tuple[int, str], tuple[str, ...]] = {
+    # ``issue5398-seg-via-0p18-order`` carries no key: kicad-cli FLAGS that
+    # pair and both grids reject it, which is agreement, so it is held to the
+    # empty default like every other migrated row.
+    (1, "issue5410-dqs-n-halo-vs-legal-via"): ("['DQ3', 'DQS_N']",),
+    (2, "issue5410-dqs-n-halo-vs-legal-via"): ("['DQ3', 'DQS_N']",),
+    (1, "search-vs-commit-seg-via-max"): ("['COMMIT_VIA', 'SEARCH_TRACK']",),
+    (2, "search-vs-commit-seg-via-max"): ("['COMMIT_VIA', 'SEARCH_TRACK']",),
+    # Group 2 never sees a pad pair (``ROUTED_COPPER_KINDS``), so its
+    # ``roundrect-corner-gap`` row skips before the ledger is consulted.
+    (1, "roundrect-corner-gap"): ("['CORNER_TRACK', 'PAD_ROUNDRECT']",),
+}
+
+
+def test_the_fixture_quantisation_ledger_only_names_quantised_rows() -> None:
+    """Every ledger key is a cell-set group on a fixture that exists.
+
+    Same contract as
+    ``test_corpus.test_the_quantisation_ledger_only_names_migrated_cell_set_rows``:
+    the gate already fails when a recorded entry stops reproducing, so this
+    guards the ways a ledger rots silently -- a key for a group that is not a
+    quantised one, or for a fixture that was renamed away.
+    """
+    stale = sorted(
+        key
+        for key in FIXTURE_QUANTISATION_LEDGER
+        if key[0] not in QUANTISED_GROUPS or key[1] not in NAMED_FIXTURES
+    )
+    assert not stale, f"fixture-ledger entries no gated row consults: {stale}"
+    assert all(FIXTURE_QUANTISATION_LEDGER.values()), (
+        "an empty ledger entry is the default -- drop the key"
+    )
+
+
+_ADAPTER_PARAMS = [
+    pytest.param(adapter.name, id=adapter.name, marks=(requires_adapter(adapter),))
+    for adapter in ADAPTERS
+]
+
+_PREDICTION_PARAMS = [
+    pytest.param(
+        fixture,
+        adapter_name,
+        expect_reject,
+        id=f"{fixture}-{adapter_name}",
+        marks=(requires_adapter(_ADAPTERS_BY_NAME[adapter_name]),),
+    )
+    for fixture, predictions in _PREDICTIONS.items()
+    for adapter_name, expect_reject in predictions
+]
+
+
+@cache
+def _truth_pairs(name: str) -> frozenset[frozenset[str]]:
+    """Net pairs kicad-cli flags on a committed fixture (cached per session).
+
+    No named fixture carries a zone (``test_no_named_fixture_carries_a_zone``),
+    so one unrefilled run is the whole answer and twenty consumer rows cost
+    four kicad-cli processes instead of twenty.
+    """
+    result = run_oracle(_fixture_board(name), refill=False)
+    return frozenset(v.nets for v in result.without_zones())
+
+
+@cache
+def _adapter_pairs(adapter_name: str, fixture_name: str) -> frozenset[frozenset[str]]:
+    """Net pairs one adapter's consumer rejects on a fixture (cached)."""
+    adapter = _ADAPTERS_BY_NAME[adapter_name]
+    case = build_named_fixture(fixture_name)
+    return frozenset(v.nets for v in adapter.verdicts(case))
+
+
+@cache
+def _adapter_pairs_at_project_rules(
+    adapter_name: str, fixture_name: str
+) -> frozenset[frozenset[str]]:
+    """The gated reading of one migrated adapter on a fixture (cached)."""
+    adapter = _ADAPTERS_BY_NAME[adapter_name]
+    case = build_named_fixture(fixture_name)
+    return frozenset(v.nets for v in adapter.verdicts_at_project_rules(case))
+
+
+@pytest.mark.consumer
+@pytest.mark.parametrize("fixture,adapter_name,expect_reject", _PREDICTION_PARAMS)
+def test_named_fixture_reproduces_its_predicted_disagreement(
+    fixture: str, adapter_name: str, expect_reject: bool
+) -> None:
+    """The consumer behaviour each fixture's ``notes`` predict, still happens.
+
+    This is the acceptance criterion that keeps the evidence alive: a fixture
+    whose predicted disagreement has stopped reproducing is no longer showing
+    what it claims to show, and that has to be visible rather than silent.
+    """
+    adapter = _ADAPTERS_BY_NAME[adapter_name]
+    case = build_named_fixture(fixture)
+    (pair,) = case.pairs
+    rejected = pair.nets in _adapter_pairs(adapter_name, fixture)
+
+    verb = "REJECT" if expect_reject else "ACCEPT"
+    got = "rejected" if rejected else "accepted"
+    assert rejected is expect_reject, (
+        f"{fixture}: predicted that `{adapter.name}` (group {adapter.group}) "
+        f"would {verb} {sorted(pair.nets)}, but it {got} it. The prediction is "
+        f"a hypothesis -- if the consumer has genuinely changed, update the "
+        f"fixture's notes and this table rather than the fixture's geometry."
+    )
+
+
+@pytest.mark.consumer
+@pytest.mark.parametrize("adapter_name", _ADAPTER_PARAMS)
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
+def test_named_fixture_adapter_agrees_with_kicad_cli(name: str, adapter_name: str) -> None:
+    """Each adapter against ground truth on each fixture.
+
+    The predictions above say what *should* disagree; this says what does, for
+    every adapter/fixture combination, which is what fills the table's cells
+    for the named-fixture half of the corpus.
+    """
+    adapter = _ADAPTERS_BY_NAME[adapter_name]
+    case = build_named_fixture(name)
+    if not any(pair.kind in adapter.pair_kinds for pair in case.pairs):
+        pytest.skip(f"{adapter.name} is not consulted for {case.pairs[0].kind} pairs")
+
+    truth = _truth_pairs(name)
+    consumer = _adapter_pairs(adapter_name, name)
+
+    if adapter.group in MIGRATED_GROUPS:
+        # The gated reading, for the reason ``test_corpus._consumer_verdicts``
+        # gives: a migration moved geometry, never a rule value.
+        consumer = _adapter_pairs_at_project_rules(adapter_name, name)
+
+    over = sorted(sorted(p) for p in consumer - truth)
+    under = sorted(sorted(p) for p in truth - consumer)
+
+    if adapter.group in MIGRATED_GROUPS:
+        assert_migrated_group_agrees(
+            adapter,
+            over=[str(pair) for pair in over],
+            under=[str(pair) for pair in under],
+            expected_over=FIXTURE_QUANTISATION_LEDGER.get((adapter.group, name), ()),
+            what=f"fixture {name}",
+        )
+        return
+
+    assert not over and not under, (
+        f"{name}: `{adapter.name}` (group {adapter.group}) disagrees with kicad-cli\n"
+        f"  over-rejected (consumer flags, KiCad clean): {over}\n"
+        f"  under-rejected (KiCad flags, consumer clean): {under}"
+    )
+
+
+@requires_kicad_cli
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
+def test_kernel_agrees_with_kicad_cli_on_every_named_fixture(name: str) -> None:
+    """The Phase 1b kernel, on the hardest four boards we have, with no xfail.
+
+    The named fixtures are not random cases: each one was captured *because*
+    some consumer gets it wrong, so they are exactly where a unified model is
+    most likely to get it wrong too.  The kernel has to agree with kicad-cli
+    on all four, and unlike every consumer row that assertion is a **hard**
+    one -- see ``test_corpus.test_kernel_agrees_with_kicad_cli`` for why the
+    control row is the one exception to this suite's report-only rule.
+
+    This caught a real bug during Phase 1c: the kernel adapter was comparing
+    ``hole_gap``'s *one-sided* drill-to-copper reading against
+    ``min_hole_to_hole``, which flagged ``search-vs-commit-seg-via-max``'s
+    perfectly legal 0.33 mm drill-to-track distance.  The corpus seeds did not
+    expose it (their via-via drill spacing is comfortable by design); this
+    fixture did.
+    """
+    kernel = _ADAPTERS_BY_NAME["clearance_kernel"]
+    truth = _truth_pairs(name)
+    verdicts = _adapter_pairs("clearance_kernel", name)
+
+    over = sorted(sorted(p) for p in verdicts - truth)
+    under = sorted(sorted(p) for p in truth - verdicts)
+    assert not over and not under, (
+        f"{name}: the Phase 1b clearance kernel disagrees with kicad-cli "
+        "-- this is a KERNEL bug, not a consumer finding\n"
+        f"  over-rejected (kernel flags, KiCad clean): {over}\n"
+        f"  under-rejected (KiCad flags, kernel clean): {under}\n"
+        f"Capture the case and fix `{kernel.name}` through "
+        "tests/router/test_clearance_kernel_parity.py, never by relaxing this."
+    )

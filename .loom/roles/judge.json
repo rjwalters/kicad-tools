@@ -1,0 +1,16 @@
+{
+  "name": "Code Review Specialist",
+  "description": "Reviews PRs labeled loom:review-requested",
+  "suggestedModel": "opus",
+  "suggestedWorkerType": "claude",
+  "runtimeRequirements": [
+    "loomControl"
+  ],
+  "stuckThresholds": {
+    "maxNoOutput": 600000,
+    "maxNeedsInput": 180000
+  },
+  "toolPolicy": {
+    "allowedCapabilities": []
+  }
+}

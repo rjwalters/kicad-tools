@@ -1,0 +1,63 @@
+{
+  "source": "https://github.com/rjwalters/kicad-tools/issues/8838",
+  "retrieved": "2026-11-12",
+  "board": "4-layer 2 oz board, READY 9/9 under kct, JLCDFM via jlcdfm.com",
+  "counts": {
+    "trace_spacing": {
+      "danger": 2,
+      "warning": 0
+    },
+    "pad_spacing": {
+      "danger": 8,
+      "warning": 2
+    },
+    "solder_mask_opening_exposing_trace": {
+      "danger": 5,
+      "warning": 8
+    },
+    "tht_to_smd": {
+      "danger": 5,
+      "warning": 5
+    },
+    "silkscreen_to_pad": {
+      "danger": 54,
+      "warning": 14
+    },
+    "silkscreen_to_hole": {
+      "danger": 75,
+      "warning": 0
+    },
+    "annular_ring": {
+      "danger": 0,
+      "warning": 100
+    },
+    "negative_soldermask_expansion": {
+      "danger": 0,
+      "warning": 4
+    },
+    "soldermask_opening_multiple_segments": {
+      "danger": 0,
+      "warning": 21
+    },
+    "unconnected_trace_end": {
+      "danger": 0,
+      "warning": 5
+    },
+    "sharp_trace_corner": {
+      "danger": 0,
+      "warning": 3
+    },
+    "missing_plated_through_hole": {
+      "danger": 0,
+      "warning": 2
+    },
+    "silkscreen_line_width": {
+      "danger": 0,
+      "warning": 63
+    },
+    "fiducial": {
+      "danger": 0,
+      "warning": 6
+    }
+  }
+}

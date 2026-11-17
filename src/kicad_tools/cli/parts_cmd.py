@@ -1,0 +1,1401 @@
+"""
+CLI commands for parts lookup and management.
+
+Usage:
+    kct parts lookup C123456              - Look up LCSC part
+    kct parts search "100nF 0402"         - Search for parts
+    kct parts alternatives C123456        - Suggest Basic alternatives (offline)
+    kct parts availability design.kicad_sch - Check BOM availability
+    kct parts suggest design.kicad_sch    - Suggest LCSC parts based on value/footprint
+    kct parts suggest design.kicad_sch --apply - Apply suggestions to schematic
+    kct parts import STM32F103C8T6 --library myproject.kicad_sym
+    kct parts cache stats                 - Show cache statistics
+    kct parts cache clear                 - Clear the cache
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from kicad_tools.cli.format_options import add_format_flag, emit_json
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parts command entry point."""
+    parser = argparse.ArgumentParser(
+        prog="kct parts",
+        description="LCSC/JLCPCB parts lookup and management",
+    )
+
+    subparsers = parser.add_subparsers(dest="action", help="Parts commands")
+
+    # lookup subcommand
+    lookup_parser = subparsers.add_parser("lookup", help="Look up part by LCSC number")
+    lookup_parser.add_argument("part", help="LCSC part number (e.g., C123456)")
+    lookup_parser.add_argument("--format", choices=["text", "json"], default="text")
+    lookup_parser.add_argument("--no-cache", action="store_true", help="Bypass cache")
+
+    # search subcommand
+    search_parser = subparsers.add_parser("search", help="Search for parts")
+    search_parser.add_argument("query", help="Search query")
+    search_parser.add_argument("--format", choices=["text", "json", "table"], default="table")
+    search_parser.add_argument("--limit", type=int, default=20, help="Max results")
+    search_parser.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
+    search_parser.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
+
+    # import subcommand
+    import_parser = subparsers.add_parser("import", help="Import part from datasheet to library")
+    import_parser.add_argument(
+        "parts", nargs="+", help="Part number(s) to import (e.g., STM32F103C8T6)"
+    )
+    import_parser.add_argument(
+        "--library", "-l", required=True, help="Output symbol library (.kicad_sym)"
+    )
+    import_parser.add_argument(
+        "--symbol-lib",
+        dest="symbol_library",
+        help="Symbol library (alias for --library)",
+    )
+    import_parser.add_argument(
+        "--footprint-lib", help="Project footprint library (.pretty directory)"
+    )
+    import_parser.add_argument("--package", "-p", help="Specific package variant (e.g., LQFP48)")
+    import_parser.add_argument(
+        "--layout",
+        choices=["functional", "physical", "simple"],
+        default="functional",
+        help="Pin layout style (default: functional)",
+    )
+    import_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what would be imported without making changes",
+    )
+    import_parser.add_argument(
+        "--interactive", "-i", action="store_true", help="Deprecated: not implemented; ignored"
+    )
+    import_parser.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing symbols"
+    )
+    import_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    # availability subcommand
+    avail_parser = subparsers.add_parser("availability", help="Check BOM part availability on LCSC")
+    avail_parser.add_argument("schematic", help="Path to .kicad_sch file or BOM CSV")
+    avail_parser.add_argument(
+        "--quantity", "-q", type=int, default=1, help="Number of boards to manufacture (default: 1)"
+    )
+    avail_parser.add_argument(
+        "--format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    avail_parser.add_argument(
+        "--no-alternatives", action="store_true", help="Don't search for alternative parts"
+    )
+    avail_parser.add_argument(
+        "--issues-only", action="store_true", help="Only show parts with availability issues"
+    )
+    avail_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the parts cache and fetch every part live",
+    )
+
+    # suggest subcommand
+    suggest_parser = subparsers.add_parser(
+        "suggest", help="Suggest LCSC part numbers based on value/footprint"
+    )
+    suggest_parser.add_argument("schematic", help="Path to .kicad_sch file")
+    suggest_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    suggest_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply suggested LCSC numbers to the schematic",
+    )
+    suggest_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Show all components, not just those missing LCSC numbers",
+    )
+    suggest_parser.add_argument(
+        "--min-stock",
+        type=int,
+        default=100,
+        help="Minimum stock level to consider (default: 100)",
+    )
+    suggest_parser.add_argument(
+        "--no-prefer-basic",
+        action="store_true",
+        help="Don't prefer JLCPCB Basic parts",
+    )
+
+    # sync-catalog subcommand
+    sync_parser = subparsers.add_parser(
+        "sync-catalog",
+        help="Download the offline jlcparts catalog for offline/rate-limited lookups",
+    )
+    sync_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if a catalog already exists",
+    )
+    sync_parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Override dataset base URL (advanced/testing)",
+    )
+    add_format_flag(sync_parser)
+
+    # alternatives subcommand
+    alt_parser = subparsers.add_parser(
+        "alternatives",
+        help="Suggest Basic/Preferred JLCPCB alternatives for an LCSC part (offline)",
+        description=(
+            "Suggest in-stock substitutes from the offline jlcparts catalog "
+            "(same package and value). Candidates rank Basic, then Preferred, "
+            "then Extended, then lowest unit price; only a strictly better "
+            "library tier, or the same tier at a lower price, is shown. "
+            "Requires 'kct parts sync-catalog'."
+        ),
+    )
+    alt_parser.add_argument("part", help="LCSC part number (e.g., C123456)")
+    alt_parser.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    add_format_flag(alt_parser)
+
+    # stock subcommand
+    stock_parser = subparsers.add_parser(
+        "stock",
+        help="Distributor stock/price/lead time (Mouser, DigiKey; BYO API keys)",
+        description=(
+            "Look up manufacturer part numbers at authorised distributors via their "
+            "official APIs. Credentials come from the environment only: "
+            "MOUSER_API_KEY; DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET. Sources "
+            "without credentials are skipped. Several MPNs give a comparison sorted "
+            "by availability, then unit price."
+        ),
+    )
+    stock_parser.add_argument("mpns", nargs="+", help="Manufacturer part number(s)")
+    stock_parser.add_argument(
+        "-q", "--quantity", type=int, default=1, help="Quantity to price (default: 1)"
+    )
+    stock_parser.add_argument("--no-cache", action="store_true", help="Bypass the local cache")
+    stock_parser.add_argument(
+        "--cache-ttl-minutes",
+        type=float,
+        default=60.0,
+        help="Reuse cached offers younger than this (default: 60)",
+    )
+    add_format_flag(stock_parser, choices=("text", "table", "json"))
+
+    # cache subcommand
+    cache_parser = subparsers.add_parser("cache", help="Cache management")
+    add_format_flag(cache_parser)
+    cache_subparsers = cache_parser.add_subparsers(dest="cache_action", help="Cache commands")
+
+    for _action in ("stats", "clear", "clear-expired"):
+        _action_parser = cache_subparsers.add_parser(
+            _action,
+            help={
+                "stats": "Show cache statistics",
+                "clear": "Clear all cached parts",
+                "clear-expired": "Clear expired entries only",
+            }[_action],
+        )
+        # SUPPRESS (not the usual "text" default) so an unspecified
+        # --format on the action subparser does not clobber the value
+        # parsed by ``cache_parser``: both ``parts cache --format json
+        # stats`` and ``parts cache stats --format json`` must work.
+        add_format_flag(_action_parser, default=argparse.SUPPRESS)
+
+    args = parser.parse_args(argv)
+
+    if not args.action:
+        parser.print_help()
+        return 0
+
+    if args.action == "lookup":
+        return _lookup(args)
+    elif args.action == "search":
+        return _search(args)
+    elif args.action == "import":
+        return _import(args)
+    elif args.action == "availability":
+        return _availability(args)
+    elif args.action == "suggest":
+        return _suggest(args)
+    elif args.action == "stock":
+        return _stock(args)
+    elif args.action == "alternatives":
+        return _alternatives(args)
+    elif args.action == "cache":
+        return _cache(args)
+    elif args.action == "sync-catalog":
+        return _sync_catalog(args)
+
+    return 0
+
+
+def _format_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "live"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    return f"{seconds / 3600:.1f}h ago"
+
+
+def _stock(args) -> int:
+    """Handle the stock command (Mouser/DigiKey official APIs)."""
+    from ..parts.distributors import query_stock
+
+    if args.quantity < 1:
+        print("Error: --quantity must be >= 1", file=sys.stderr)
+        return 1
+    report = query_stock(
+        args.mpns,
+        args.quantity,
+        use_cache=not args.no_cache,
+        ttl_seconds=args.cache_ttl_minutes * 60,
+    )
+    # Notices go to stderr so JSON on stdout stays machine-readable.
+    for note in report.notices:
+        print(note, file=sys.stderr)
+    if args.format == "json":
+        emit_json(
+            {
+                "command": "stock",
+                "quantity": args.quantity,
+                "offers": [o.to_dict() for o in report.offers],
+                "not_found": report.not_found,
+                "notices": report.notices,
+                "success": bool(report.offers),
+            }
+        )
+        return 0 if report.offers else 1
+    if not report.offers:
+        print("No distributor offers found.")
+        for nf in report.not_found:
+            print(f"  not found: {nf}")
+        return 1
+    header = (
+        f"{'MPN':<22} {'Source':<8} {'Dist PN':<22} {'Stock':>8} "
+        f"{'Unit':>10} {'Lead':<12} {'Region':<10} {'Read':<9}"
+    )
+    print(f"Quantity: {args.quantity}")
+    print(header)
+    print("-" * len(header))
+    for o in report.offers:
+        price = f"{o.unit_price:.4f} {o.currency}" if o.unit_price is not None else "-"
+        flag = "" if o.purchasable else "  (stock < qty)"
+        print(
+            f"{o.mpn[:22]:<22} {o.distributor:<8} {o.distributor_pn[:22]:<22} {o.stock:>8} "
+            f"{price:>10} {(o.lead_time or '-')[:12]:<12} {o.region[:10]:<10} "
+            f"{_format_age(o.age_seconds):<9}{flag}"
+        )
+        if o.price_flag:
+            print(f"    note: {o.price_flag}")
+    for nf in report.not_found:
+        print(f"not found: {nf}")
+    print("Figures are point-in-time reads; stock moves.")
+    return 0
+
+
+def _alternatives(args) -> int:
+    """Handle the alternatives command (offline catalog only)."""
+    from ..parts.alternatives import library_tier_name, suggest_alternatives
+    from ..parts.jlcparts_catalog import JlcpartsCatalog
+
+    as_json = args.format == "json"
+
+    def fail(message: str) -> int:
+        hint = "Run 'kct parts sync-catalog' to download the offline catalog."
+        if as_json:
+            emit_json({"command": "alternatives", "error": message, "success": False})
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+            if "catalog" in message and "not found" not in message:
+                print(hint, file=sys.stderr)
+        return 1
+
+    catalog = JlcpartsCatalog()
+    if not catalog.available:
+        return fail(f"offline jlcparts catalog not installed at {catalog.db_path}")
+    source = catalog.lookup(args.part)
+    if source is None:
+        return fail(f"{args.part} not found in the offline jlcparts catalog")
+
+    alts = suggest_alternatives(catalog, source, limit=args.limit)
+
+    def row(p) -> dict:
+        return {
+            "lcsc": p.lcsc_part,
+            "mfr_part": p.mfr_part,
+            "package": p.package,
+            "library_type": library_tier_name(p),
+            "stock": p.stock,
+            "unit_price": p.best_price,
+        }
+
+    if as_json:
+        emit_json(
+            {
+                "command": "alternatives",
+                "success": True,
+                "source": row(source),
+                "alternatives": [row(p) for p in alts],
+            }
+        )
+        return 0
+
+    print(
+        f"Source: {source.lcsc_part} {source.mfr_part} "
+        f"({source.package}, {library_tier_name(source)})"
+    )
+    if not alts:
+        print("No better in-stock alternatives found.")
+        return 0
+    print(f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} {'Stock':>8} {'Price':>9}")
+    print("-" * 78)
+    for p in alts:
+        price = f"${p.best_price:.4f}" if p.best_price is not None else "N/A"
+        print(
+            f"{p.lcsc_part:<10} {p.mfr_part[:25]:<25} {p.package:<12} "
+            f"{library_tier_name(p):<10} {p.stock:>8} {price:>9}"
+        )
+    return 0
+
+
+def _sync_catalog(args) -> int:
+    """Handle the sync-catalog command."""
+    as_json = getattr(args, "format", "text") == "json"
+
+    def fail(message: str, hint: str | None = None) -> int:
+        if as_json:
+            payload = {
+                "command": "sync-catalog",
+                "error": message,
+                "success": False,
+            }
+            if hint:
+                payload["hint"] = hint
+            emit_json(payload)
+            return 1
+        print(f"Error: {message}", file=sys.stderr)
+        if hint:
+            print(hint, file=sys.stderr)
+        return 1
+
+    try:
+        from ..parts.jlcparts_catalog import JLCPARTS_DATA_BASE, sync_catalog
+    except ImportError as e:
+        return fail(str(e), "Install with: pip install kicad-tools[parts]")
+
+    base_url = args.base_url or JLCPARTS_DATA_BASE
+    try:
+        # Progress chatter goes to stdout, which must stay a single JSON
+        # document in machine mode.
+        dest = sync_catalog(base_url=base_url, force=args.force, progress=not as_json)
+    except ImportError as e:
+        return fail(str(e), "Install with: pip install kicad-tools[parts]")
+    except Exception as e:
+        return fail(f"failed to sync jlcparts catalog: {e}")
+
+    if as_json:
+        from ..parts.jlcparts_catalog import JlcpartsCatalog, catalog_coverage_warning
+
+        emit_json(
+            {
+                "command": "sync-catalog",
+                "base_url": base_url,
+                "force": bool(args.force),
+                "path": str(dest),
+                "count": JlcpartsCatalog(dest).count(),
+                # Issue #7166: a partial upstream scrape must not pass for a
+                # full catalog; None when the canary basic parts are present.
+                "coverage_warning": catalog_coverage_warning(dest),
+                "success": True,
+            }
+        )
+        return 0
+
+    print(f"Offline catalog available at: {dest}")
+    return 0
+
+
+def _lookup(args) -> int:
+    """Handle parts lookup command."""
+    try:
+        from ..parts import LCSCClient
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+
+    client = LCSCClient()
+    from ..parts.lcsc import LCSCDependencyMissingError
+
+    try:
+        lookup = client.lookup_result(args.part, bypass_cache=args.no_cache)
+    except LCSCDependencyMissingError as exc:
+        if args.format == "json":
+            print(json.dumps({"status": "unavailable", "error": str(exc)}))
+        else:
+            print(f"Parts lookup unavailable: {exc}", file=sys.stderr)
+        return 1
+    part = lookup.part
+    coverage = {"status": lookup.status, "source": lookup.source, "diagnostics": lookup.diagnostics}
+    if part is None:
+        if args.format == "json":
+            print(json.dumps({"lookup": coverage, "part": None}))
+        else:
+            label = (
+                "Verified live no-match"
+                if lookup.status == "not_found"
+                else "Lookup unavailable; catalog absence not verified"
+            )
+            print(f"{label}: {args.part}", file=sys.stderr)
+            for diagnostic in lookup.diagnostics:
+                print(diagnostic, file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        data = {
+            "lookup": coverage,
+            "lcsc_part": part.lcsc_part,
+            "mfr_part": part.mfr_part,
+            "manufacturer": part.manufacturer,
+            "description": part.description,
+            "category": part.category.value,
+            "package": part.package,
+            "package_type": part.package_type.value,
+            "stock": part.stock,
+            "inventory": part.inventory_provenance(),
+            "is_basic": part.is_basic,
+            "is_preferred": part.is_preferred,
+            "prices": [{"quantity": p.quantity, "unit_price": p.unit_price} for p in part.prices],
+            "datasheet_url": part.datasheet_url,
+            "product_url": part.product_url,
+        }
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"Lookup source: {lookup.source}")
+        for diagnostic in lookup.diagnostics:
+            print(diagnostic, file=sys.stderr)
+        print(f"LCSC Part:    {part.lcsc_part}")
+        print(f"MFR Part:     {part.mfr_part}")
+        print(f"Manufacturer: {part.manufacturer}")
+        print(f"Description:  {part.description}")
+        print(f"Category:     {part.category.value}")
+        print(f"Package:      {part.package} ({part.package_type.value})")
+        print(f"Stock:        {part.stock:,}")
+        if not part.stock_verified:
+            print(
+                "Stock unverified: catalog identity only; refresh live inventory before ordering."
+            )
+        if part.is_basic:
+            print("Type:         JLCPCB Basic (no extra fee)")
+        elif part.is_preferred:
+            print("Type:         JLCPCB Preferred")
+        else:
+            print("Type:         Extended")
+        if part.prices:
+            print("Pricing:")
+            for price in part.prices[:5]:  # Show first 5 price breaks
+                print(f"  {price.quantity:>6} pcs: ${price.unit_price:.4f} ea")
+        if part.datasheet_url:
+            print(f"Datasheet:    {part.datasheet_url}")
+        print(f"Product URL:  {part.product_url}")
+
+    return 0
+
+
+def _search(args) -> int:
+    """Handle parts search command."""
+    try:
+        from ..parts import LCSCClient
+        from ..parts.lcsc import LCSCDependencyMissingError
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+
+    from ..parts.lcsc import LCSCUnavailableError
+
+    client = LCSCClient()
+    try:
+        results = client.search(
+            args.query,
+            page_size=args.limit,
+            in_stock=args.in_stock,
+            basic_only=args.basic,
+        )
+    except (LCSCDependencyMissingError, LCSCUnavailableError) as e:
+        # Backend genuinely unavailable (no ``requests`` extra AND no synced
+        # offline catalog).  Surface this distinctly from a legitimate empty
+        # result so the user isn't misled by a bare "No parts found" (#4296).
+        if args.format == "json":
+            print(json.dumps({"status": "unavailable", "error": str(e)}))
+        else:
+            print(f"Error: parts search backend unavailable: {e}", file=sys.stderr)
+        return 1
+
+    if not results.parts and args.format != "json":
+        label = (
+            "No parts found"
+            if results.coverage == "live"
+            else "No candidates in incomplete source coverage; catalog absence not verified"
+        )
+        print(f"{label} for: {args.query}", file=sys.stderr)
+        for diagnostic in results.diagnostics:
+            print(diagnostic, file=sys.stderr)
+        return 1
+    if args.format != "json":
+        for diagnostic in results.diagnostics:
+            print(diagnostic, file=sys.stderr)
+
+    if args.format != "json" and any(not p.stock_verified for p in results.parts):
+        print("Warning: snapshot/unknown stock is unverified; matches establish identity only.")
+
+    if args.format == "json":
+        data = {
+            "source": results.source,
+            "coverage": results.coverage,
+            "diagnostics": results.diagnostics,
+            "query": results.query,
+            "total": results.total_count,
+            "parts": [
+                {
+                    "lcsc_part": p.lcsc_part,
+                    "mfr_part": p.mfr_part,
+                    "description": p.description,
+                    "package": p.package,
+                    "stock": p.stock,
+                    "inventory": p.inventory_provenance(),
+                    "is_basic": p.is_basic,
+                    "best_price": p.best_price,
+                }
+                for p in results.parts
+            ],
+        }
+        print(json.dumps(data, indent=2))
+    elif args.format == "table":
+        print(f"Found {results.total_count} results for '{args.query}':")
+        print()
+        # Header
+        print(
+            f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Stock':>8} {'Price':>8} {'Type':<8}"
+        )
+        print("-" * 80)
+        for part in results.parts:
+            price_str = f"${part.best_price:.4f}" if part.best_price else "N/A"
+            type_str = "Basic" if part.is_basic else ("Pref" if part.is_preferred else "Ext")
+            # Truncate long strings
+            mfr = part.mfr_part[:24] if len(part.mfr_part) > 24 else part.mfr_part
+            pkg = part.package[:11] if len(part.package) > 11 else part.package
+            print(
+                f"{part.lcsc_part:<10} {mfr:<25} {pkg:<12} {part.stock:>8,} {price_str:>8} {type_str:<8}"
+            )
+    else:  # text
+        print(f"Found {results.total_count} results for '{args.query}':")
+        print()
+        for part in results.parts:
+            price_str = f"${part.best_price:.4f}" if part.best_price else "N/A"
+            basic_str = " [Basic]" if part.is_basic else ""
+            print(
+                f"{part.lcsc_part}: {part.mfr_part} - {part.package} - {part.stock:,} in stock - {price_str}{basic_str}"
+            )
+
+    return 0 if results.parts else 1
+
+
+def _cache(args) -> int:
+    """Handle cache commands."""
+    from ..parts import PartsCache
+
+    cache = PartsCache()
+
+    if getattr(args, "format", "text") == "json":
+        action = args.cache_action or "stats"
+        payload: dict = {"command": "cache", "action": action, "success": True}
+        if action == "stats":
+            stats = cache.stats()
+            payload.update(
+                {
+                    "db_path": str(stats["db_path"]),
+                    "total": stats["total"],
+                    "valid": stats["valid"],
+                    "expired": stats["expired"],
+                    "ttl_days": stats["ttl_days"],
+                    "oldest": stats["oldest"],
+                    "newest": stats["newest"],
+                    "categories": dict(sorted(stats["categories"].items())),
+                }
+            )
+        elif action == "clear":
+            payload["cleared"] = cache.clear()
+        elif action == "clear-expired":
+            payload["cleared"] = cache.clear_expired()
+        emit_json(payload)
+        return 0
+
+    if not args.cache_action or args.cache_action == "stats":
+        stats = cache.stats()
+        print("Parts Cache Statistics:")
+        print(f"  Database:     {stats['db_path']}")
+        print(f"  Total parts:  {stats['total']:,}")
+        print(f"  Valid:        {stats['valid']:,}")
+        print(f"  Expired:      {stats['expired']:,}")
+        print(f"  TTL:          {stats['ttl_days']} days")
+        if stats["oldest"]:
+            print(f"  Oldest entry: {stats['oldest']}")
+        if stats["newest"]:
+            print(f"  Newest entry: {stats['newest']}")
+        if stats["categories"]:
+            print("  Categories:")
+            for cat, count in sorted(stats["categories"].items()):
+                print(f"    {cat}: {count}")
+
+    elif args.cache_action == "clear":
+        count = cache.clear()
+        print(f"Cleared {count} parts from cache")
+
+    elif args.cache_action == "clear-expired":
+        count = cache.clear_expired()
+        print(f"Cleared {count} expired entries")
+
+    return 0
+
+
+def _import(args) -> int:
+    """Handle parts import command."""
+    if getattr(args, "interactive", False):
+        print(
+            "Warning: --interactive/-i is deprecated, not implemented, and ignored.",
+            file=sys.stderr,
+        )
+
+    try:
+        from ..parts import ImportOptions, LayoutStyle, PartImporter
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts,datasheet]", file=sys.stderr)
+        return 1
+
+    # Determine symbol library path
+    symbol_lib = Path(args.symbol_library or args.library)
+
+    # Create import options
+    layout_map = {
+        "functional": LayoutStyle.FUNCTIONAL,
+        "physical": LayoutStyle.PHYSICAL,
+        "simple": LayoutStyle.SIMPLE,
+    }
+    options = ImportOptions(
+        package=args.package,
+        layout=layout_map.get(args.layout, LayoutStyle.FUNCTIONAL),
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
+    )
+
+    # Create importer
+    importer = PartImporter(
+        symbol_library=symbol_lib,
+        footprint_library=Path(args.footprint_lib) if args.footprint_lib else None,
+    )
+
+    # Track results for summary
+    success_count = 0
+    failure_count = 0
+    all_results = []
+
+    def progress_callback(current: int, total: int, part_number: str):
+        if args.format == "text":
+            print(f"[{current}/{total}] Importing {part_number}...")
+
+    try:
+        # Import parts
+        if len(args.parts) == 1:
+            # Single part - show detailed progress
+            def stage_callback(stage, msg):
+                if args.format == "text":
+                    print(f"  {stage.value}: {msg}")
+
+            result = importer.import_part(args.parts[0], options, progress_callback=stage_callback)
+            all_results.append(result)
+        else:
+            # Multiple parts
+            all_results = importer.import_parts(
+                args.parts, options, progress_callback=progress_callback
+            )
+
+        # Count results
+        for result in all_results:
+            if result.success:
+                success_count += 1
+            else:
+                failure_count += 1
+
+        # Output results
+        if args.format == "json":
+            data = {
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "results": [
+                    {
+                        "part_number": r.part_number,
+                        "success": r.success,
+                        "message": r.message,
+                        "symbol_name": r.symbol_name,
+                        "footprint_match": r.footprint_match,
+                        "footprint_confidence": r.footprint_confidence,
+                        "pin_count": r.pin_count,
+                        "error_stage": r.error_stage.value if r.error_stage else None,
+                        "error_details": r.error_details,
+                        "warnings": r.warnings,
+                    }
+                    for r in all_results
+                ],
+            }
+            print(json.dumps(data, indent=2))
+        else:
+            # Text format
+            print()
+            if args.dry_run:
+                print("DRY RUN - No changes were made")
+                print()
+
+            for result in all_results:
+                status = "✓" if result.success else "✗"
+                print(f"{status} {result.part_number}: {result.message}")
+
+                if result.success:
+                    if result.symbol_name:
+                        print(f"    Symbol: {result.symbol_name}")
+                    if result.footprint_match:
+                        conf = (
+                            f"{result.footprint_confidence:.0%}"
+                            if result.footprint_confidence
+                            else "?"
+                        )
+                        print(f"    Footprint: {result.footprint_match} ({conf} match)")
+                    if result.pin_count:
+                        print(f"    Pins: {result.pin_count}")
+                    if result.datasheet_path:
+                        print(f"    Datasheet: {result.datasheet_path}")
+
+                if result.warnings:
+                    for warning in result.warnings:
+                        print(f"    ⚠ {warning}")
+
+                if result.error_details:
+                    print(f"    Error: {result.error_details}")
+
+            # Summary
+            print()
+            if len(args.parts) > 1:
+                print(f"Summary: {success_count} succeeded, {failure_count} failed")
+
+            if not args.dry_run and success_count > 0:
+                print(f"Library updated: {symbol_lib}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        importer.close()
+
+    return 0 if failure_count == 0 else 1
+
+
+def _availability(args) -> int:
+    """Handle parts availability command."""
+    try:
+        from ..cost.availability import (
+            AvailabilityStatus,
+            LCSCAvailabilityChecker,
+        )
+        from ..schema.bom import extract_bom
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+
+    schematic_path = Path(args.schematic)
+    if not schematic_path.exists():
+        print(f"Error: File not found: {schematic_path}", file=sys.stderr)
+        return 1
+
+    # Extract BOM
+    try:
+        bom = extract_bom(str(schematic_path))
+    except Exception as e:
+        print(f"Error loading schematic: {e}", file=sys.stderr)
+        return 1
+
+    if not bom.items:
+        print("No components found in schematic", file=sys.stderr)
+        return 1
+
+    # Auto-match LCSC numbers for lines lacking one, as `kct export` does for
+    # JLCPCB (same defaults), so both commands resolve the same BOM.
+    auto_sources: dict[str, str] = {}
+    if not getattr(args, "no_auto_lcsc", False):
+        from ..export.bom_enrich import enrich_bom_lcsc
+        from ..parts.lcsc import LCSCDependencyMissingError
+
+        try:
+            report = enrich_bom_lcsc(bom.items, prefer_basic=True, min_stock=100)
+        except LCSCDependencyMissingError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Warning: LCSC auto-matching failed (continuing without): {e}", file=sys.stderr)
+        else:
+            for entry in report.entries:
+                if entry.source in ("auto", "cache"):
+                    for ref in entry.references:
+                        auto_sources[ref] = entry.source
+
+    # Check availability
+    checker = LCSCAvailabilityChecker(
+        find_alternatives=not args.no_alternatives,
+    )
+
+    try:
+        if getattr(args, "no_cache", False):
+            result = checker.check_bom(bom, quantity=args.quantity, bypass_cache=True)
+        else:
+            result = checker.check_bom(bom, quantity=args.quantity)
+    finally:
+        checker.close()
+
+    for item in result.items:
+        item.lcsc_source = auto_sources.get(item.reference, "")
+
+    # Filter if requested
+    items = result.items
+    if args.issues_only:
+        items = [item for item in items if item.status != AvailabilityStatus.AVAILABLE]
+
+    # Output
+    if args.format == "json":
+        _availability_json(result, items)
+    elif args.format == "summary":
+        _availability_summary(result, schematic_path)
+    else:
+        _availability_table(result, items, schematic_path, args.quantity)
+
+    # Return error code if issues found
+    if not result.all_available:
+        return 1
+    return 0
+
+
+def _availability_json(result, items) -> None:
+    """Output availability as JSON."""
+    output = result.to_dict()
+    output["items"] = [item.to_dict() for item in items]
+    print(json.dumps(output, indent=2))
+
+
+def _availability_summary(result, schematic_path: Path) -> None:
+    """Output availability summary."""
+    summary = result.summary()
+
+    print(f"Part Availability Check: {schematic_path.name}")
+    print("=" * 50)
+    print(f"Boards:        {summary['quantity_multiplier']}")
+    print(f"Total parts:   {summary['total_items']}")
+    print()
+    print(f"  ✓ Available:    {summary['available']}")
+    print(f"  ⚠ Low stock:    {summary['low_stock']}")
+    print(f"  ✗ Out of stock: {summary['out_of_stock']}")
+    print(f"  ? Unverified:   {summary['unverified']}")
+    print(f"  ? Unavailable:  {summary['unavailable']}")
+    if summary.get("discontinued"):
+        print(f"  ✗ Discontinued: {summary['discontinued']}")
+    print(f"  ? Missing:      {summary['missing']}")
+    print()
+
+    if summary["total_cost"] is not None:
+        print(f"Est. cost:     ${summary['total_cost']:.2f}")
+
+    if summary["all_available"]:
+        print("\n✓ All parts available")
+    else:
+        print("\n✗ Some parts have availability issues")
+
+
+def _suggest(args) -> int:
+    """Handle parts suggest command."""
+    try:
+        from ..cost.suggest import PartSuggester
+        from ..schema.bom import extract_bom
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+
+    schematic_path = Path(args.schematic)
+    if not schematic_path.exists():
+        print(f"Error: File not found: {schematic_path}", file=sys.stderr)
+        return 1
+
+    # Extract BOM
+    try:
+        bom = extract_bom(str(schematic_path))
+    except Exception as e:
+        print(f"Error loading schematic: {e}", file=sys.stderr)
+        return 1
+
+    if not bom.items:
+        print("No components found in schematic", file=sys.stderr)
+        return 1
+
+    # Create suggester
+    suggester = PartSuggester(
+        prefer_basic=not args.no_prefer_basic,
+        min_stock=args.min_stock,
+    )
+
+    try:
+        result = suggester.suggest_for_bom(bom)
+    finally:
+        suggester.close()
+
+    # Filter suggestions
+    suggestions = result.suggestions
+    if not args.all:
+        suggestions = [s for s in suggestions if s.needs_lcsc]
+
+    if not suggestions:
+        if args.all:
+            print("No components found in schematic")
+        else:
+            print("All components already have LCSC part numbers")
+        return 0
+
+    # Output results
+    if args.format == "json":
+        _suggest_json(result, suggestions)
+    else:
+        _suggest_table(result, suggestions, schematic_path)
+
+    # Apply if requested
+    if args.apply:
+        return _apply_suggestions(schematic_path, result)
+
+    return 0
+
+
+def _suggest_json(result, suggestions) -> None:
+    """Output suggestions as JSON."""
+    output = {
+        "summary": {
+            "total_components": result.total_components,
+            "missing_lcsc": result.missing_lcsc,
+            "found_suggestions": result.found_suggestions,
+            "no_suggestions": result.no_suggestions,
+        },
+        "suggestions": [],
+    }
+
+    for s in suggestions:
+        item = {
+            "reference": s.reference,
+            "value": s.value,
+            "footprint": s.footprint,
+            "package": s.package,
+            "existing_lcsc": s.existing_lcsc,
+            "search_query": s.search_query,
+            "error": s.error,
+            "warnings": s.warnings,
+            "best_suggestion": None,
+            "all_suggestions": [],
+        }
+
+        if s.best_suggestion:
+            item["best_suggestion"] = {
+                "lcsc_part": s.best_suggestion.lcsc_part,
+                "mfr_part": s.best_suggestion.mfr_part,
+                "description": s.best_suggestion.description,
+                "package": s.best_suggestion.package,
+                "stock": s.best_suggestion.stock,
+                "inventory": s.best_suggestion.inventory,
+                "is_basic": s.best_suggestion.is_basic,
+                "unit_price": s.best_suggestion.unit_price,
+                "confidence": s.best_suggestion.confidence,
+            }
+
+        for sug in s.suggestions:
+            item["all_suggestions"].append(
+                {
+                    "lcsc_part": sug.lcsc_part,
+                    "mfr_part": sug.mfr_part,
+                    "description": sug.description,
+                    "package": sug.package,
+                    "stock": sug.stock,
+                    "inventory": sug.inventory,
+                    "is_basic": sug.is_basic,
+                    "unit_price": sug.unit_price,
+                    "confidence": sug.confidence,
+                }
+            )
+
+        output["suggestions"].append(item)
+
+    print(json.dumps(output, indent=2))
+
+
+def _suggest_table(result, suggestions, schematic_path: Path) -> None:
+    """Output suggestions as formatted table."""
+    if any(
+        s.best_suggestion and not s.best_suggestion.inventory.get("stock_verified", False)
+        for s in suggestions
+    ):
+        print(
+            "Warning: suggested part identities include unverified stock; refresh before ordering."
+        )
+    print()
+    print("=" * 90)
+    print("LCSC PART SUGGESTIONS")
+    print("=" * 90)
+    print(f"Schematic: {schematic_path.name}")
+    print(f"Components analyzed: {result.total_components}")
+    print(f"Missing LCSC numbers: {result.missing_lcsc}")
+    print()
+
+    # Table header
+    print(
+        f"{'Ref':<6} {'Value':<12} {'Footprint':<18} {'Suggested LCSC':<12} "
+        f"{'Stock':>8} {'Type':<6}"
+    )
+    print("-" * 90)
+
+    # Group by status
+    found = [s for s in suggestions if s.has_suggestion]
+    not_found = [s for s in suggestions if not s.has_suggestion and s.needs_lcsc]
+    has_lcsc = [s for s in suggestions if not s.needs_lcsc]
+
+    # Show found suggestions
+    for s in found:
+        for warning in s.warnings:
+            print(f"Warning: {s.reference}: {warning}", file=sys.stderr)
+        best = s.best_suggestion
+        # Truncate long values
+        value = s.value[:11] if len(s.value) > 11 else s.value
+        fp = s.package[:17] if len(s.package) > 17 else s.package
+
+        stock_str = _format_stock(best.stock)
+        print(
+            f"{s.reference:<6} {value:<12} {fp:<18} {best.lcsc_part:<12} "
+            f"{stock_str:>8} {best.type_str:<6}"
+        )
+
+    # Show not found
+    if not_found:
+        print()
+        print("? NO SUGGESTIONS FOUND:")
+        for s in not_found:
+            value = s.value[:11] if len(s.value) > 11 else s.value
+            error = s.error or "No matching parts"
+            print(f"  {s.reference}: {value} - {error}")
+
+    # Show already has LCSC (if --all)
+    if has_lcsc:
+        print()
+        print(f"✓ ALREADY HAS LCSC ({len(has_lcsc)} components)")
+
+    # Summary
+    print()
+    print("-" * 90)
+    print(f"Summary: {result.found_suggestions}/{result.missing_lcsc} suggestions found")
+
+    if result.found_suggestions > 0:
+        print()
+        print("Run with --apply to update schematic with suggested LCSC numbers")
+
+
+def _format_stock(stock: int) -> str:
+    """Format stock number for display."""
+    if stock >= 1_000_000:
+        return f"{stock / 1_000_000:.1f}M"
+    elif stock >= 1000:
+        return f"{stock / 1000:.1f}k"
+    else:
+        return str(stock)
+
+
+def _apply_suggestions(schematic_path: Path, result) -> int:
+    """Apply suggested LCSC numbers to the schematic."""
+    from ..schema.hierarchy import build_hierarchy
+    from ..schema.schematic import Schematic
+
+    # Build mapping of reference -> suggested LCSC
+    lcsc_map = {}
+    for s in result.suggestions:
+        if s.has_suggestion and s.needs_lcsc:
+            lcsc_map[s.reference] = s.best_suggestion.lcsc_part
+
+    if not lcsc_map:
+        print("No suggestions to apply")
+        return 0
+
+    # Load hierarchy and update all sheets
+    hierarchy = build_hierarchy(str(schematic_path))
+    updated_count = 0
+
+    # One pass per sheet file: a repeated sheet is one file to edit (#7616).
+    for node in hierarchy.unique_file_nodes():
+        try:
+            sch = Schematic.load(node.path)
+            sheet_updated = False
+
+            for symbol in sch.sexp.find_all("symbol"):
+                # Get reference
+                ref = None
+                for prop in symbol.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref = prop.get_string(1)
+                        break
+
+                if not ref or ref not in lcsc_map:
+                    continue
+
+                # Check if already has LCSC property
+                has_lcsc = False
+                for prop in symbol.find_all("property"):
+                    name = prop.get_string(0)
+                    if name and name.lower() in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
+                        has_lcsc = True
+                        break
+
+                if has_lcsc:
+                    continue
+
+                # Add LCSC property
+                lcsc_value = lcsc_map[ref]
+                _add_lcsc_property(symbol, lcsc_value)
+                updated_count += 1
+                sheet_updated = True
+
+            if sheet_updated:
+                sch.save()
+
+        except Exception as e:
+            print(f"Warning: Failed to update {node.path}: {e}", file=sys.stderr)
+
+    print(f"\n✓ Applied {updated_count} LCSC part numbers to schematic")
+    return 0
+
+
+def _add_lcsc_property(symbol, lcsc_value: str) -> None:
+    """Add LCSC property to a symbol S-expression."""
+    from kicad_tools.sexp import SExp
+
+    # Find position from existing properties
+    pos = (0.0, 0.0)
+    for prop in symbol.find_all("property"):
+        if at := prop.find("at"):
+            pos = (at.get_float(0) or 0, at.get_float(1) or 0)
+            break
+
+    # Create LCSC property
+    prop = SExp("property")
+    prop.add("LCSC")
+    prop.add(lcsc_value)
+
+    # Add position (offset from reference position)
+    at = SExp("at")
+    at.add(pos[0])
+    at.add(pos[1] + 2.54)  # Offset below
+    at.add(0)
+    prop.add(at)
+
+    # Add effects (hidden by default)
+    effects = SExp("effects")
+    font = SExp("font")
+    size = SExp("size")
+    size.add(1.27)
+    size.add(1.27)
+    font.add(size)
+    effects.add(font)
+    effects.add(SExp("hide"))
+    prop.add(effects)
+
+    symbol.add(prop)
+
+
+def _auto_tag(item) -> str:
+    """Label parts whose LCSC number was auto-matched rather than in the schematic."""
+    return f" [auto-matched: {item.lcsc_source}]" if getattr(item, "lcsc_source", "") else ""
+
+
+def _availability_table(result, items, schematic_path: Path, quantity: int) -> None:
+    """Output availability as formatted table."""
+    from ..cost.availability import AvailabilityStatus
+
+    summary = result.summary()
+
+    print()
+    print("=" * 70)
+    print("PART AVAILABILITY CHECK (LCSC)")
+    print("=" * 70)
+    print(f"Schematic: {schematic_path.name}")
+    print(f"Quantity:  {quantity} board(s)")
+    print()
+
+    # Group by status
+    available = [i for i in items if i.status == AvailabilityStatus.AVAILABLE]
+    low_stock = [i for i in items if i.status == AvailabilityStatus.LOW_STOCK]
+    out_of_stock = [i for i in items if i.status == AvailabilityStatus.OUT_OF_STOCK]
+    missing = [
+        i for i in items if i.status in (AvailabilityStatus.NO_LCSC, AvailabilityStatus.NOT_FOUND)
+    ]
+    if any(
+        not alt.inventory.get("stock_verified", False)
+        for item in low_stock + out_of_stock
+        for alt in item.alternatives
+    ):
+        print("Stock unverified for alternatives: refresh live inventory before ordering.")
+        print()
+
+    # Available parts (collapsed)
+    if available:
+        print(f"✓ AVAILABLE ({len(available)} parts)")
+        print()
+
+    # Low stock parts
+    if low_stock:
+        print(f"⚠ LOW STOCK ({len(low_stock)} parts):")
+        for item in low_stock:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
+            print(f"    Stock: {item.quantity_available:,} (need {item.quantity_needed:,})")
+            if item.alternatives:
+                print("    Alternatives:")
+                for alt in item.alternatives:
+                    price_info = ""
+                    if alt.price_diff is not None:
+                        if alt.price_diff > 0:
+                            price_info = f", +${alt.price_diff:.4f}"
+                        elif alt.price_diff < 0:
+                            price_info = f", -${abs(alt.price_diff):.4f}"
+                    basic = " [Basic]" if alt.is_basic else ""
+                    stock_status = (
+                        "in stock"
+                        if alt.inventory.get("stock_verified", False)
+                        else "reported (stock unverified)"
+                    )
+                    print(
+                        f"      • {alt.lcsc_part}: {alt.stock:,} {stock_status}{price_info}{basic}"
+                    )
+        print()
+
+    # Out of stock parts
+    if out_of_stock:
+        print(f"✗ OUT OF STOCK ({len(out_of_stock)} parts):")
+        for item in out_of_stock:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
+            if item.lead_time_days:
+                print(f"    Lead time: {item.lead_time_days} days")
+            if item.alternatives:
+                print("    Alternatives:")
+                for alt in item.alternatives:
+                    price_info = ""
+                    if alt.price_diff is not None:
+                        if alt.price_diff > 0:
+                            price_info = f", +${alt.price_diff:.4f}"
+                        elif alt.price_diff < 0:
+                            price_info = f", -${abs(alt.price_diff):.4f}"
+                    basic = " [Basic]" if alt.is_basic else ""
+                    stock_status = (
+                        "in stock"
+                        if alt.inventory.get("stock_verified", False)
+                        else "reported (stock unverified)"
+                    )
+                    print(
+                        f"      • {alt.lcsc_part}: {alt.stock:,} {stock_status}{price_info}{basic}"
+                    )
+            else:
+                print("    No alternatives found")
+        print()
+
+    unverified = [i for i in items if i.status == AvailabilityStatus.UNKNOWN]
+    if unverified:
+        print(f"? STOCK UNVERIFIED ({len(unverified)} parts):")
+        for item in unverified:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
+        print()
+
+    discontinued = [i for i in items if i.status == AvailabilityStatus.DISCONTINUED]
+    if discontinued:
+        print(f"✗ DISCONTINUED ({len(discontinued)} parts):")
+        for item in discontinued:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
+        print()
+
+    unavailable = [i for i in items if i.status == AvailabilityStatus.UNAVAILABLE]
+    if unavailable:
+        print(f"? LOOKUP UNAVAILABLE ({len(unavailable)} parts):")
+        for item in unavailable:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}): {item.error}")
+        print()
+
+    # Missing parts (no LCSC number or not found)
+    if missing:
+        print(f"? MISSING ({len(missing)} parts):")
+        for item in missing:
+            lcsc_info = f" ({item.lcsc_part})" if item.lcsc_part else ""
+            print(f"  {item.reference}: {item.value}{lcsc_info}")
+            if item.error:
+                print(f"    {item.error}")
+        print()
+
+    # Summary
+    print("-" * 70)
+    print("Summary:")
+    print(f"  • {summary['available']}/{summary['total_items']} parts available")
+    if summary["low_stock"] > 0:
+        print(f"  • {summary['low_stock']} parts low stock")
+    if summary["out_of_stock"] > 0:
+        print(f"  • {summary['out_of_stock']} parts out of stock")
+    if summary["unverified"] > 0:
+        print(f"  • {summary['unverified']} parts stock unverified")
+    if summary["unavailable"] > 0:
+        print(f"  • {summary['unavailable']} parts lookup unavailable")
+    if summary.get("discontinued", 0) > 0:
+        print(f"  • {summary['discontinued']} parts discontinued")
+    if summary["missing"] > 0:
+        print(f"  • {summary['missing']} parts missing LCSC number or not found")
+    auto = [i for i in result.items if i.lcsc_source]
+    if auto:
+        print(f"  • {len(auto)} parts LCSC auto-matched (not in schematic)")
+
+    if summary["total_cost"] is not None:
+        print(f"  • Estimated component cost: ${summary['total_cost']:.2f}")
+
+    print()
+    if summary["all_available"]:
+        print("✓ All parts available for ordering")
+    elif summary.get("unverified", 0) > 0:
+        print("Stock unverified: refresh live inventory before ordering.")
+    elif summary["out_of_stock"] > 0:
+        print("✗ Some parts out of stock - check alternatives above")
+    else:
+        print("⚠ Low stock on some parts - order soon")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

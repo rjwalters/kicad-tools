@@ -1,0 +1,9 @@
+{
+  "name": "Hermit",
+  "description": "Identifies and proposes removal of unnecessary complexity, bloat, and over-engineering",
+  "suggestedModel": "sonnet",
+  "suggestedWorkerType": "claude",
+  "toolPolicy": {
+    "allowedCapabilities": []
+  }
+}

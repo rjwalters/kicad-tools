@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "states": {
+    "startup": {
+      "BANK_POS": 0,
+      "SRC_POS": 0,
+      "GATE_A": 0
+    },
+    "mains-negative": {
+      "BANK_POS": 90,
+      "SRC_POS": -169.3,
+      "GATE_A": -169.5
+    }
+  }
+}

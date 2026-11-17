@@ -1,0 +1,85 @@
+# USB 2.0 High Speed Interface Specifications
+# Reference: Universal Serial Bus Specification Revision 2.0
+
+interface: USB 2.0 High Speed
+spec_document: "Universal Serial Bus Specification Revision 2.0"
+spec_url: https://www.usb.org/document-library/usb-20-specification
+
+constraints:
+  differential_impedance:
+    section: "7.1.2 Data Signaling"
+    value: 90Ω
+    tolerance: "±10%"
+    severity: error
+    explanation: |
+      USB 2.0 high-speed signaling requires 90Ω differential impedance
+      for proper signal integrity. Impedance mismatch causes reflections
+      that corrupt data transmission. The trace geometry (width, spacing,
+      and stackup) must be calculated to achieve this impedance.
+    fix_templates:
+      - "Use an impedance calculator to determine trace width for your stackup"
+      - "For FR-4 1.6mm 2-layer: approximately 0.3mm trace width with 0.15mm gap"
+      - "Verify impedance with a TDR measurement if available"
+
+  trace_length_matching:
+    section: "7.1.5 Cable and Connector"
+    max_skew_ps: 100
+    severity: error
+    explanation: |
+      USB D+ and D- differential pairs must be length-matched to maintain
+      signal timing. Excessive skew (length mismatch) causes bit errors
+      at high speed. Maximum skew of 100ps corresponds to approximately
+      15mm length difference.
+    fix_templates:
+      - "Match D+ and D- trace lengths to within 2mm"
+      - "Use serpentine routing on the shorter trace to add length"
+      - "Keep differential pair routed together with minimal separation"
+
+  trace_spacing:
+    section: "7.1.2 Data Signaling"
+    value: 0.15mm
+    severity: error
+    explanation: |
+      The spacing between D+ and D- traces affects the differential
+      impedance. Maintain consistent spacing throughout the route.
+      The traces should be routed as a tightly coupled pair.
+    fix_templates:
+      - "Maintain {value}mm spacing between D+ and D- for the entire route"
+      - "Use differential pair routing mode in your PCB editor"
+
+  reference_plane:
+    section: "7.1.2 Data Signaling"
+    value: "continuous ground plane"
+    severity: warning
+    explanation: |
+      USB differential pairs should be routed over a continuous ground
+      reference plane. Gaps or splits in the ground plane under the
+      traces will cause impedance discontinuities and EMI issues.
+    fix_templates:
+      - "Ensure solid ground plane under entire USB trace route"
+      - "Avoid routing over splits in the ground plane"
+      - "Place ground vias near any layer transitions"
+
+  termination:
+    section: "7.1.4 Termination"
+    value: "45Ω series resistors"
+    severity: warning
+    explanation: |
+      USB 2.0 high-speed requires 45Ω series resistors on D+ and D-
+      placed close to the USB transceiver IC. These resistors provide
+      impedance matching and help with signal integrity.
+    fix_templates:
+      - "Place 45Ω resistors in series with D+ and D- near the IC"
+      - "Keep resistor placement within 10mm of the transceiver"
+
+  max_trace_length:
+    section: "7.1.1 Cable Characteristics"
+    value: 100mm
+    severity: warning
+    explanation: |
+      USB 2.0 high-speed signals should be kept short on the PCB to
+      minimize losses and reflections. The total PCB trace length
+      should typically not exceed 100mm.
+    fix_templates:
+      - "Minimize trace length between USB connector and transceiver"
+      - "Place USB transceiver IC close to the connector"

@@ -1,0 +1,77 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "child-hlabels-uuid-0001")
+	(paper "A4")
+	(title_block
+		(title "Child With Hierarchical Labels")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 80 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "child-r5-uuid")
+		(property "Reference" "R5"
+			(at 82 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "4.7k"
+			(at 82 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 80 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "child-r5-pin1"))
+		(pin "2" (uuid "child-r5-pin2"))
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "child-r6-uuid")
+		(property "Reference" "R6"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10k"
+			(at 102 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "child-r6-pin1"))
+		(pin "2" (uuid "child-r6-pin2"))
+	)
+	(wire (pts (xy 50 50) (xy 80 46.19))
+		(stroke (width 0) (type default))
+		(uuid "wire-hlabel-to-r5")
+	)
+	(hierarchical_label "SDA"
+		(shape input)
+		(at 50 50 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "child-hlabel-sda-uuid")
+	)
+)

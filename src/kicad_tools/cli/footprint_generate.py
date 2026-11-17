@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+"""
+Footprint generation CLI commands.
+
+Usage:
+    kct footprint generate <type> [options]
+
+Examples:
+    # Generate SOIC footprint
+    kct footprint generate soic --pins 8 --pitch 1.27 --output MyPart.kicad_mod
+
+    # Generate QFP footprint
+    kct footprint generate qfp --pins 48 --pitch 0.5 --output LQFP48.kicad_mod
+
+    # Generate chip (passive) footprint
+    kct footprint generate chip --size 0402 --output R_0402.kicad_mod
+
+    # Generate SOT footprint
+    kct footprint generate sot --variant SOT-23 --output SOT23.kicad_mod
+
+    # Generate through-hole DIP
+    kct footprint generate dip --pins 8 --pitch 2.54 --output DIP8.kicad_mod
+
+    # List available generators
+    kct footprint generate --list
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+from kicad_tools.cli.format_options import add_format_flag, normalize_format_alias
+from kicad_tools.library.generators import (
+    create_chip,
+    create_dip,
+    create_pin_header,
+    create_qfn,
+    create_qfp,
+    create_rpi_hat,
+    create_soic,
+    create_sot,
+)
+from kicad_tools.library.generators.standards import CHIP_SIZES, SOT_STANDARDS
+from kicad_tools.utils import ensure_parent_dir
+
+# Generator info for --list and help
+GENERATORS = {
+    "soic": {
+        "description": "SOIC (Small Outline Integrated Circuit) packages",
+        "function": create_soic,
+        "params": ["pins", "pitch", "body_width", "body_length"],
+        "example": "kct footprint generate soic --pins 8",
+    },
+    "qfp": {
+        "description": "LQFP/TQFP (Quad Flat Package) packages",
+        "function": create_qfp,
+        "params": ["pins", "pitch", "body_size"],
+        "example": "kct footprint generate qfp --pins 48 --pitch 0.5",
+    },
+    "qfn": {
+        "description": "QFN (Quad Flat No-lead) packages with optional exposed pad",
+        "function": create_qfn,
+        "params": ["pins", "pitch", "body_size", "exposed_pad"],
+        "example": "kct footprint generate qfn --pins 16 --body-size 3.0 --exposed-pad 1.7",
+    },
+    "chip": {
+        "description": "Chip passives (0201, 0402, 0603, 0805, 1206, etc.)",
+        "function": create_chip,
+        "params": ["size", "prefix"],
+        "example": "kct footprint generate chip --size 0402 --prefix R",
+        "sizes": list(CHIP_SIZES.keys()),
+    },
+    "sot": {
+        "description": "SOT (Small Outline Transistor) packages",
+        "function": create_sot,
+        "params": ["variant"],
+        "example": "kct footprint generate sot --variant SOT-23",
+        "variants": list(SOT_STANDARDS.keys()),
+    },
+    "dip": {
+        "description": "DIP (Dual In-line Package) through-hole packages",
+        "function": create_dip,
+        "params": ["pins", "pitch", "row_spacing"],
+        "example": "kct footprint generate dip --pins 8",
+    },
+    "pin-header": {
+        "description": "Pin header through-hole connectors",
+        "function": create_pin_header,
+        "params": ["pins", "rows", "pitch"],
+        "example": "kct footprint generate pin-header --pins 10 --rows 2",
+    },
+    "rpi-hat": {
+        "description": "Raspberry Pi HAT: 2x20 header + four mounting holes (one rigid part)",
+        "function": create_rpi_hat,
+        "params": ["keepout_diameter"],
+        "example": "kct footprint generate rpi-hat --output RPi_HAT.kicad_mod",
+    },
+}
+
+
+def list_generators(output_format: str = "text") -> int:
+    """List available footprint generators."""
+    if output_format == "json":
+        data = {
+            name: {
+                "description": info["description"],
+                "parameters": info["params"],
+                "example": info["example"],
+                **({"sizes": info["sizes"]} if "sizes" in info else {}),
+                **({"variants": info["variants"]} if "variants" in info else {}),
+            }
+            for name, info in GENERATORS.items()
+        }
+        print(json.dumps(data, indent=2))
+    else:
+        print("\nAvailable footprint generators:\n")
+        for name, info in GENERATORS.items():
+            print(f"  {name:<12} - {info['description']}")
+            if "sizes" in info:
+                print(f"               Sizes: {', '.join(info['sizes'])}")
+            if "variants" in info:
+                print(f"               Variants: {', '.join(info['variants'])}")
+            print(f"               Example: {info['example']}")
+            print()
+    return 0
+
+
+def build_footprint(footprint_type: str, params: dict[str, Any]):
+    """Build a :class:`~kicad_tools.library.footprint.Footprint` from CLI-style params.
+
+    This is the single implementation behind both ``kct footprint generate``
+    and ``kct lib generate-footprint`` (Issue #7175).  *params* uses the
+    generator keyword names (``pins``, ``pitch``, ``body_width``, ...); keys
+    whose value is ``None`` fall back to the generator defaults.
+
+    Raises:
+        ValueError: unknown type, a required parameter is missing (the message
+            names the flag), or the generator rejects the values.
+    """
+    if footprint_type not in GENERATORS:
+        raise ValueError(
+            f"Unknown footprint type '{footprint_type}' (valid: {', '.join(GENERATORS)})"
+        )
+
+    def p(key: str) -> Any:
+        return params.get(key)
+
+    def require(key: str, flag: str, label: str) -> None:
+        if p(key) is None:
+            raise ValueError(f"{flag} is required for {label}")
+
+    name = p("name")
+    if footprint_type == "soic":
+        require("pins", "--pins", "SOIC")
+        return create_soic(
+            pins=p("pins"),
+            pitch=p("pitch"),
+            body_width=p("body_width"),
+            body_length=p("body_length"),
+            name=name,
+        )
+    if footprint_type == "qfp":
+        require("pins", "--pins", "QFP")
+        return create_qfp(pins=p("pins"), pitch=p("pitch"), body_size=p("body_size"), name=name)
+    if footprint_type == "qfn":
+        require("pins", "--pins", "QFN")
+        return create_qfn(
+            pins=p("pins"),
+            pitch=p("pitch"),
+            body_size=p("body_size"),
+            exposed_pad=p("exposed_pad"),
+            name=name,
+        )
+    if footprint_type == "chip":
+        if p("size") is None:
+            raise ValueError(
+                "--size is required for chip footprints "
+                f"(valid sizes: {', '.join(CHIP_SIZES.keys())})"
+            )
+        return create_chip(
+            size=p("size"),
+            prefix=p("prefix") or "",
+            metric=bool(p("metric")),
+            name=name,
+        )
+    if footprint_type == "sot":
+        if p("variant") is None:
+            raise ValueError(
+                "--variant is required for SOT footprints "
+                f"(valid variants: {', '.join(SOT_STANDARDS.keys())})"
+            )
+        return create_sot(variant=p("variant"), name=name)
+    if footprint_type == "dip":
+        require("pins", "--pins", "DIP")
+        return create_dip(pins=p("pins"), pitch=p("pitch"), row_spacing=p("row_spacing"), name=name)
+    if footprint_type == "rpi-hat":
+        keepout = p("keepout_diameter")
+        return create_rpi_hat(keepout_diameter=6.2 if keepout is None else keepout, name=name)
+    # pin-header
+    require("pins", "--pins", "pin-header")
+    return create_pin_header(
+        pins=p("pins"), rows=p("rows") or 1, pitch=p("pitch") or 2.54, name=name
+    )
+
+
+def _generate_from_args(footprint_type: str, args) -> int:
+    """Shared body of the per-type ``generate_*`` handlers."""
+    params = {
+        key: getattr(args, key, None)
+        for key in (
+            "pins",
+            "pitch",
+            "body_width",
+            "body_length",
+            "body_size",
+            "exposed_pad",
+            "size",
+            "prefix",
+            "metric",
+            "variant",
+            "row_spacing",
+            "rows",
+            "keepout_diameter",
+            "name",
+        )
+    }
+    try:
+        fp = build_footprint(footprint_type, params)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return _output_footprint(fp, args)
+
+
+def generate_soic(args) -> int:
+    """Generate SOIC footprint."""
+    return _generate_from_args("soic", args)
+
+
+def generate_qfp(args) -> int:
+    """Generate QFP/LQFP footprint."""
+    return _generate_from_args("qfp", args)
+
+
+def generate_qfn(args) -> int:
+    """Generate QFN footprint."""
+    return _generate_from_args("qfn", args)
+
+
+def generate_chip(args) -> int:
+    """Generate chip passive footprint."""
+    return _generate_from_args("chip", args)
+
+
+def generate_sot(args) -> int:
+    """Generate SOT footprint."""
+    return _generate_from_args("sot", args)
+
+
+def generate_dip(args) -> int:
+    """Generate DIP footprint."""
+    return _generate_from_args("dip", args)
+
+
+def generate_pin_header(args) -> int:
+    """Generate pin header footprint."""
+    return _generate_from_args("pin-header", args)
+
+
+def generate_rpi_hat(args) -> int:
+    """Generate Raspberry Pi HAT footprint (2x20 header + four mounting holes)."""
+    return _generate_from_args("rpi-hat", args)
+
+
+def _output_footprint(fp, args) -> int:
+    """Output the generated footprint."""
+    if args.json:
+        # Output footprint data as JSON
+        data = {
+            "name": fp.name,
+            "description": fp.description,
+            "tags": fp.tags,
+            "attr": fp.attr,
+            "pads": [
+                {
+                    "name": p.name,
+                    "x": p.x,
+                    "y": p.y,
+                    "width": p.width,
+                    "height": p.height,
+                    "shape": p.shape,
+                    "type": p.pad_type,
+                }
+                for p in fp.pads
+            ],
+        }
+        print(json.dumps(data, indent=2))
+        return 0
+
+    if args.output:
+        # Write to file
+        output_path = Path(args.output)
+
+        # Ensure .kicad_mod extension
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(".kicad_mod")
+
+        ensure_parent_dir(output_path)
+
+        try:
+            fp.save(str(output_path))
+            print(f"Saved: {output_path}")
+            return 0
+        except Exception as e:
+            print(f"Error saving footprint: {e}", file=sys.stderr)
+            return 1
+    else:
+        # Output to stdout
+        print(fp.to_sexp())
+        return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for footprint generate command."""
+    parser = argparse.ArgumentParser(
+        prog="kct footprint generate",
+        description="Generate parametric KiCad footprints",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    # List option at top level
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List available generators",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text); json is the same as --json",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output footprint data as JSON instead of .kicad_mod format (same as --format json)",
+    )
+
+    subparsers = parser.add_subparsers(dest="generator_type", help="Footprint type")
+
+    # SOIC subcommand
+    soic_parser = subparsers.add_parser("soic", help="Generate SOIC footprint")
+    soic_parser.add_argument("--pins", type=int, required=True, help="Number of pins (4-32, even)")
+    soic_parser.add_argument("--pitch", type=float, help="Pin pitch in mm (default: 1.27)")
+    soic_parser.add_argument("--body-width", type=float, dest="body_width", help="Body width in mm")
+    soic_parser.add_argument(
+        "--body-length", type=float, dest="body_length", help="Body length in mm"
+    )
+    soic_parser.add_argument("--name", help="Custom footprint name")
+    soic_parser.add_argument("-o", "--output", help="Output file path")
+    soic_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    soic_parser.set_defaults(func=generate_soic)
+
+    # QFP subcommand
+    qfp_parser = subparsers.add_parser("qfp", help="Generate LQFP/TQFP footprint")
+    qfp_parser.add_argument(
+        "--pins", type=int, required=True, help="Number of pins (divisible by 4)"
+    )
+    qfp_parser.add_argument("--pitch", type=float, help="Pin pitch in mm (default: 0.5)")
+    qfp_parser.add_argument(
+        "--body-size", type=float, dest="body_size", help="Body size in mm (square)"
+    )
+    qfp_parser.add_argument("--name", help="Custom footprint name")
+    qfp_parser.add_argument("-o", "--output", help="Output file path")
+    qfp_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    qfp_parser.set_defaults(func=generate_qfp)
+
+    # QFN subcommand
+    qfn_parser = subparsers.add_parser("qfn", help="Generate QFN footprint")
+    qfn_parser.add_argument(
+        "--pins", type=int, required=True, help="Number of pins (divisible by 4)"
+    )
+    qfn_parser.add_argument("--pitch", type=float, help="Pin pitch in mm (default: 0.5)")
+    qfn_parser.add_argument(
+        "--body-size", type=float, dest="body_size", help="Body size in mm (square)"
+    )
+    qfn_parser.add_argument(
+        "--exposed-pad", type=float, dest="exposed_pad", help="Exposed pad size in mm"
+    )
+    qfn_parser.add_argument("--name", help="Custom footprint name")
+    qfn_parser.add_argument("-o", "--output", help="Output file path")
+    qfn_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    qfn_parser.set_defaults(func=generate_qfn)
+
+    # Chip subcommand
+    chip_parser = subparsers.add_parser("chip", help="Generate chip passive footprint")
+    chip_parser.add_argument(
+        "--size",
+        required=True,
+        choices=list(CHIP_SIZES.keys()),
+        help="Imperial size code (0201, 0402, 0603, 0805, 1206, etc.)",
+    )
+    chip_parser.add_argument("--prefix", help="Component prefix (R, C, L, etc.)")
+    chip_parser.add_argument("--metric", action="store_true", help="Use metric naming convention")
+    chip_parser.add_argument("--name", help="Custom footprint name")
+    chip_parser.add_argument("-o", "--output", help="Output file path")
+    chip_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    chip_parser.set_defaults(func=generate_chip)
+
+    # SOT subcommand
+    sot_parser = subparsers.add_parser("sot", help="Generate SOT footprint")
+    sot_parser.add_argument(
+        "--variant",
+        required=True,
+        choices=list(SOT_STANDARDS.keys()),
+        help="SOT variant (SOT-23, SOT-23-5, SOT-23-6, SOT-223, SOT-89)",
+    )
+    sot_parser.add_argument("--name", help="Custom footprint name")
+    sot_parser.add_argument("-o", "--output", help="Output file path")
+    sot_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    sot_parser.set_defaults(func=generate_sot)
+
+    # DIP subcommand
+    dip_parser = subparsers.add_parser("dip", help="Generate DIP footprint")
+    dip_parser.add_argument("--pins", type=int, required=True, help="Number of pins (even)")
+    dip_parser.add_argument("--pitch", type=float, help="Pin pitch in mm (default: 2.54)")
+    dip_parser.add_argument(
+        "--row-spacing", type=float, dest="row_spacing", help="Row spacing in mm"
+    )
+    dip_parser.add_argument("--name", help="Custom footprint name")
+    dip_parser.add_argument("-o", "--output", help="Output file path")
+    dip_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    dip_parser.set_defaults(func=generate_dip)
+
+    # Pin header subcommand
+    header_parser = subparsers.add_parser("pin-header", help="Generate pin header footprint")
+    header_parser.add_argument("--pins", type=int, required=True, help="Total number of pins")
+    header_parser.add_argument("--rows", type=int, choices=[1, 2], help="Number of rows (1 or 2)")
+    header_parser.add_argument("--pitch", type=float, help="Pin pitch in mm (default: 2.54)")
+    header_parser.add_argument("--name", help="Custom footprint name")
+    header_parser.add_argument("-o", "--output", help="Output file path")
+    header_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    header_parser.set_defaults(func=generate_pin_header)
+
+    # Raspberry Pi HAT subcommand
+    hat_parser = subparsers.add_parser(
+        "rpi-hat", help="Generate Raspberry Pi HAT footprint (2x20 header + 4 mounting holes)"
+    )
+    hat_parser.add_argument(
+        "--keepout-diameter",
+        type=float,
+        dest="keepout_diameter",
+        help="Copper keep-out diameter around each mounting hole in mm (default: 6.2, the spec minimum land; 0=none)",
+    )
+    hat_parser.add_argument("--name", help="Custom footprint name")
+    hat_parser.add_argument("-o", "--output", help="Output file path")
+    hat_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    hat_parser.set_defaults(func=generate_rpi_hat)
+
+    # Canonical machine-output spelling on every shape subparser
+    # (--format json; the per-shape --json flags above are legacy aliases).
+    # See docs/reference/machine-output.md.
+    for shape_parser in (
+        soic_parser,
+        qfp_parser,
+        qfn_parser,
+        chip_parser,
+        sot_parser,
+        dip_parser,
+        header_parser,
+        hat_parser,
+    ):
+        add_format_flag(shape_parser)
+
+    args = parser.parse_args(argv)
+
+    # Either spelling requesting JSON wins; after this call args.json is
+    # True when --format json or --json was given.
+    normalize_format_alias(args)
+
+    # Handle --list at top level
+    if args.list:
+        return list_generators("json" if args.json else "text")
+
+    # No subcommand selected
+    if not args.generator_type:
+        parser.print_help()
+        return 0
+
+    # Call the appropriate generator function
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

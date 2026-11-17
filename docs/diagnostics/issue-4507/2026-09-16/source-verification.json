@@ -1,0 +1,25 @@
+{
+  "commit": "2fb4ebdc8ed9ef0d9f4890c71b5cb38b110ecc02",
+  "files": [
+    {
+      "path": "src/kicad_tools/router/pairwise_clearance.py",
+      "equal": true,
+      "sha256": "d2aa49b481b9548215190ff92ac673c92f21ab08c550f3da41f8f3ed1802c85d"
+    },
+    {
+      "path": "src/kicad_tools/geometry/copper.py",
+      "equal": true,
+      "sha256": "785c3babc3dc2af9706304ec54817db5ec6af4c6bd661f64ef6443e0db0579aa"
+    },
+    {
+      "path": "src/kicad_tools/placement/hv_domains.py",
+      "equal": true,
+      "sha256": "4c6eb24f8d85a2ada2a093dc488f8d3e1fbda9e53c4e7419c7f0f9e9f6c44222"
+    },
+    {
+      "path": "src/kicad_tools/schema/pcb.py",
+      "equal": true,
+      "sha256": "4ccf718e2c16b73667eb074ae25d960039aafc629b18bc4235bd7f8a7ea84c91"
+    }
+  ]
+}

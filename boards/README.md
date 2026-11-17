@@ -1,0 +1,517 @@
+# kicad-tools Demo Boards
+
+PCB designs and developing examples demonstrating kicad-tools capabilities. Each board includes a `.kct` project specification file describing the design intent, requirements, and progress.
+
+## Quick Start
+
+The easiest way to build any demo is using the `kct build` command:
+
+```bash
+# Build any project (runs full pipeline: schematic → PCB → route → verify)
+kct build boards/01-voltage-divider
+
+# Or specify a .kct file directly
+kct build boards/02-charlieplex-led/project.kct
+
+# Run individual steps
+kct build boards/01-voltage-divider --step schematic
+kct build boards/01-voltage-divider --step pcb
+kct build boards/01-voltage-divider --step route
+kct build boards/01-voltage-divider --step verify
+
+# Preview what would happen without running
+kct build boards/01-voltage-divider --dry-run
+
+# Target a specific manufacturer for DRC verification
+kct build boards/01-voltage-divider --mfr jlcpcb
+```
+
+## Board Status
+
+| # | Board | Status | Components | Nets | Notes |
+|---|-------|--------|------------|------|-------|
+| 00 | [Simple LED](00-simple-led/) | Assembly ready | 3 | 3 | THT parts fab-assembled (procurement review). |
+| 01 | [Voltage Divider](01-voltage-divider/) | Assembly ready | 4 | 3 | THT parts fab-assembled (procurement review). |
+| 02 | [Charlieplex LED](02-charlieplex-led/) | Assembly ready · 1 known issue | 19 | 12 | Real ATtiny85, compiled firmware; THT MCU and headers fab-assembled (procurement review). Advisory [#7220] (vias at R3/R4 pad edges). |
+| 03 | [USB Joystick](03-usb-joystick/) | **Not ready** (known defect) | 38 | 27 | Real ATmega32U4 HID circuit; four-layer filled/capped via process. Defect [#7250]: USB pair 71.6 Ω vs the 90 Ω spec. Advisory [#7220]. |
+| 04 | [STM32 Dev Board](04-stm32-devboard/) | Assembly ready · 1 known issue | 17 | 12 | Correct MCP1825S regulator; paid 0.15 mm mechanical drills (exception [#6269], ruling #7147). |
+| 05 | [BLDC Motor Controller](05-bldc-motor-controller/) | Assembly ready · 2 known issues | 42 | 37 | DRV8313 + ATmega328P; firmware and conservative bring-up limits supplied. Order 1 oz inner copper (advisory [#7209]). Advisory [#7220]. |
+| 06 | [Four-channel LVDS demo](06-diffpair-test/) | Assembly ready | 36 | 18 | Real SN65LVDS1/2, four-layer stack with outer-layer signals; three manual headers. |
+| 07 | [8 MiB SDRAM exerciser](07-matchgroup-test/) | Assembly ready | 43 | 55 | STM32F429 + IS42S16400J, six layers, 48 MHz SDRAM; legacy Epic [#2661] fixture archived. |
+| 08 | [Precision acquisition](08-precision-acquisition/) | Planned | — | — | Four simultaneous differential ADC channels with USB streaming. |
+| 09 | [USB-C PD power supply](09-usbc-pd-power/) | Development | 47 | 32 | Real PD sink, 5 V / 3 A target buck and Kelvin telemetry; routing/procurement pending. |
+
+Assembly readiness applies only to the exact checked source and manufacturing
+package bound by each `output/readiness.json`. Each report also records its
+board's open `known_issues` (Issue #7261): an open **defect** keeps the board
+not ready; **exceptions** and **advisories** are disclosed but keep it ready.
+`kct fleet status` shows them (`YES*` / `known: #N`). Hardware testing remains pending.
+Follow each board's fabrication process and manual-assembly instructions;
+regenerating a board requires fresh validation and export. See the
+[readiness audit](../docs/demo-readiness-2026-09-09.md) for evidence and tool issues.
+
+## Prerequisites for Manual Build
+
+Before running board generation scripts directly, set up the development environment:
+
+```bash
+# From repository root
+uv sync --extra dev
+```
+
+This installs kicad-tools and all dependencies. See the [main README](../README.md#development) for details.
+
+## Advanced: Manual Build
+
+For more control, you can run individual Python scripts directly:
+
+```bash
+# Run any board's generation script (from repo root)
+uv run python boards/01-voltage-divider/generate_design.py
+
+# Or activate the virtual environment first
+source .venv/bin/activate  # Linux/macOS
+python boards/01-voltage-divider/generate_design.py
+```
+
+### Post-Build Commands
+
+After building, you can run additional verification and export commands:
+
+```bash
+# Check for DRC violations with manufacturer rules
+kct check output/voltage_divider_routed.kicad_pcb --mfr jlcpcb
+
+# Generate BOM
+kct bom output/voltage_divider.kicad_sch --format csv
+
+# Export Gerbers (via KiCad or kicad-cli)
+# Open the .kicad_pcb file in KiCad and use File > Plot
+```
+
+See individual board READMEs for board-specific details.
+
+## Routing Entry Point Conventions
+
+When writing a new board's `generate_design.py`, pick the routing entry point
+that matches the design's signal characteristics.  The recommended pattern,
+derived from the architectural review in [#3072], is:
+
+| Design has... | Recommended entry | Boards using this pattern |
+|---|---|---|
+| No differential pairs and no length-matching | `subprocess.run(["kct", "route", ...])` *or* in-process `router.route_all()` | 00, 01, 02, 04 |
+| Differential pairs (USB2/USB3/PCIe/MIPI/HDMI/etc.) | `subprocess.run(["kct", "route", ..., "--differential-pairs"])` *or* in-process `router.route_all_with_diffpairs(diffpair_config=...)` | 03, 05, 06 |
+| Match-groups (SDR SDRAM) | See `boards/07-matchgroup-test/real_design/` for the reviewed six-layer source and independent timing/load checks | 07 |
+
+### Why this matters
+
+`router.route_all()` (and `kct route` without `--differential-pairs`) run a
+per-net A* loop that is unaware of `DifferentialPair` metadata.  On a board
+with diff pairs, this path silently bypasses Phase A (`CoupledPathfinder`)
+and Phase B (intra-pair clearance rip-up), producing routes that violate
+the `intra_pair_clearance`, `coupled_continuity_threshold`, and
+`target_diff_impedance` constraints declared in the project.
+
+`router.route_all_with_diffpairs()` (and `kct route --differential-pairs`)
+invoke the Phase A/B pipeline explicitly.  PR #3069 (board 03) and PR #3090
+(board 06) migrated to this entry after the bypass bug was diagnosed.
+
+> **✅ Recipe restored ([#3922]):** the #3308/#3410 recipe consolidation had
+> silently dropped `--differential-pairs` from board 03's routing recipe
+> (`generate_design.py:route_pcb()`), so the recipe no longer even *requested*
+> diff-pair routing and this README's claim went false. The flag (plus
+> `--net-class-map`, which forwards the D+/D- `intra_pair_clearance` metadata
+> and engages the validate-side diff-pair DRC rules) is now restored and
+> mirrored in `tests/router/test_board03_routing_baseline.py`, guarded by
+> `test_recipe_includes_differential_pairs_flag()` so a future consolidation
+> cannot drop it silently again.
+>
+> **Known limitation — runtime coupling gated on [#3952]:** on board 03 the
+> flag is currently **inert at routing time**. The board's fine-pitch USB-C
+> (J1) and QFP-32 (U1) force the CLI's escape-routing dispatch, and
+> `route_cmd`'s escape / auto-layers-escalation paths do not consult
+> `args.differential_pairs` — so the `CoupledPathfinder` pre-pass
+> (`route_all_with_diffpairs`) never runs and the D+/D- skew remains
+> coincidental rather than constructed. The recipe deliberately keeps
+> `--auto-layers` (the default) because it preserves the escape pre-phase
+> board 03 needs for **13/13 + 0 native DRC**; forcing the diff-pair path with
+> `--no-auto-layers` *does* invoke Phase A but drops escape routing and
+> reintroduces a `kicad-cli` clearance violation. Integrating diff-pair
+> routing into the escape path (so Phase A runs *with* escape routing at 0
+> DRC) is tracked in [#3952] (adjacent to the `CoupledPathfinder` convergence
+> work in [#3921]). The behavior is pinned by an xfail'd
+> `test_coupled_pathfinder_phase_a_invoked` that will flip to XPASS when
+> [#3952] lands.
+
+### Determinism and artifact churn (`--seed`)
+
+Routing is deterministic **per router version**: two runs that share a
+`--seed` at the same code version emit a byte-identical routed
+`.kicad_pcb`. This is what lets a same-seed regen produce a zero-line
+`git diff` and what the board-06 determinism harness
+(`scripts/ci/board06_determinism_smoke.sh`,
+`tests/router/test_board06_determinism.py`) relies on. The property is
+implemented by `enable_deterministic_uuids()` in
+`router/primitives.py`, which derives every segment/via UUID from the
+seeded global RNG instead of `uuid.uuid4()`.
+
+Two caveats:
+
+- **Determinism is per-router-version, not forever.** A regen produced by
+  a *newer* router may legitimately differ from a committed artifact
+  (geometry improvements, quantization changes, new escape logic). An
+  artifact-vs-regen diff across router versions is expected; only
+  fresh-vs-fresh at the *same* version is guaranteed byte-identical.
+- **Segment/via serialization matches KiCad's canonical field order**
+  (`... uuid net`, uuid before net; issue #3925). Emitting `net` before
+  `uuid` used to churn every segment and via on the first KiCad open/save
+  round-trip, drowning real changes in reformat noise. If you regenerate a
+  board and see a large diff with no geometric change, confirm you are
+  comparing same-version fresh-vs-fresh before assuming a router bug.
+- **Board 06 is a known exception downstream of its coupled diff-pair
+  pre-phase**: full-regen output is run-to-run nondeterministic even at a
+  fixed version and seed (issue #4536, open). The pre-phase itself
+  (shadow construction) *is* deterministic and is the correct surface to
+  measure a change against --- see [`boards/06-diffpair-test/README.md`
+  "Measuring Changes"](06-diffpair-test/README.md#measuring-changes-the-shadow-phase-is-deterministic-full-regen-is-not-4536)
+  for the two stable downstream modes and the paired-comparison
+  convention. Do not assume the smoke test above proves full-board
+  byte-identity on this one board.
+
+### Subprocess (`kct route`) vs. in-process (`router.route_all_*`)
+
+Both are supported.  The subprocess path (`subprocess.run(["kct", "route", ...])`)
+is preferred for new boards because:
+
+- It is the production routing path; in-process tests can drift from it.
+- CLI flags (`--strategy`, `--iterations`, `--differential-pairs`,
+  `--net-class-map`, `--seed`) are validated end-to-end by CI.
+- Zone-fill, post-route DRC, and routed-PCB artifact emission are handled
+  automatically (see `route_cmd._fill_zones_after_route`).
+
+The in-process path remains the right choice when a board needs to:
+
+- Inject custom logic between routing and post-processing (e.g. board 06's
+  custom diff-pair config plumbing).
+- Exercise router internals that the CLI does not yet expose (e.g.
+  `DifferentialPairConfig.per_pair_max_iterations`,
+  `enable_shadow_construction`, or board 06's tightly-coupled width
+  re-solve). Note: per-class values like `intra_pair_clearance` **do**
+  survive the CLI's JSON sidecar round-trip (`kct route --net-class-map`,
+  #2996) — an earlier version of this section claimed otherwise; that claim
+  was verified false in the 2026-07-05 sweep.
+
+### Architectural decision: auto-detect was rejected
+
+[#3072] explicitly considered teaching `router.route_all()` (and the CLI's
+default path) to auto-detect diff pairs and short-circuit to the
+Phase-A/B-aware entry.  The decision was to **not** auto-detect, for two
+reasons:
+
+1. The remaining footgun is procedural (new boards forget the right entry).
+   **Update 2026-07-05: the footgun bit** --- board 03 lost its
+   diff-pair-aware entry in a later recipe consolidation without anyone
+   noticing ([#3922]), exactly the failure mode auto-detect would have
+   prevented. The flag was restored and a recipe-contract test now guards
+   it ([#3922]); note the restored flag is still inert on board 03 until the
+   route_cmd escape/diff-pair dispatch is fixed ([#3952]). The procedural
+   footgun remains for the *next* new board — weigh this when re-promoting
+   the auto-detect work.
+2. An auto-detect change would have to land on both surfaces (in-process
+   and CLI) to be complete, and the `CoupledPathfinder` latency issue
+   tracked in [#3089] makes a CLI-default flip premature.
+
+Re-promote the auto-detect work as a separate issue once [#3089] resolves
+and a regression baseline exists for board 06's escape-time behavior.
+
+[#3072]: https://github.com/rjwalters/kicad-tools/issues/3072
+[#3089]: https://github.com/rjwalters/kicad-tools/issues/3089
+
+## Known Issues
+
+These are known limitations that may affect your experience:
+
+| Issue | Affects | Description |
+|-------|---------|-------------|
+| [#659] | 02, 03 | Trace optimization may be needed for dense designs (02 now routes 8/8 as of 2026-07-05) |
+| [#661] | All | Router doesn't always warn about DRC violations |
+| [#3918] | All | `kct build` currently cannot complete on any demo board — use each board's `generate_design.py`/`design.py` recipe until the orchestrator fixes land |
+
+[#659]: https://github.com/rjwalters/kicad-tools/issues/659
+[#661]: https://github.com/rjwalters/kicad-tools/issues/661
+[#3918]: https://github.com/rjwalters/kicad-tools/issues/3918
+[#3921]: https://github.com/rjwalters/kicad-tools/issues/3921
+[#3922]: https://github.com/rjwalters/kicad-tools/issues/3922
+[#3766]: https://github.com/rjwalters/kicad-tools/issues/3766
+[#3952]: https://github.com/rjwalters/kicad-tools/issues/3952
+
+## Pad pin types (`pintype`)
+
+KiCad's "Update PCB from Schematic" writes each schematic pin's name and
+electrical type onto its pad (`(pinfunction "VDD") (pintype "power_in")`).
+`kct detect-mistakes` treats `power_in`/`power_out` pads as power-rail
+evidence, which catches rails the name heuristic misses (`VREG_1V2`, `VCAP1`).
+The generators write PCBs directly, so they have to add this data
+themselves ([#5985]):
+
+- **Board 09** calls `annotate_pcb_file_pintypes(pcb_path, sch_path)` right
+  after it writes the PCB, and its committed output carries `pintype` ([#5998]). A buck converter's switch-node pin
+  (`SW`, `LX`, `PH`) is typed `power_out`, but `kct detect-mistakes` does not
+  treat the switch node as a rail.
+- **Boards 00 and 01** call it right after they write the unrouted PCB, and
+  their committed unrouted and routed outputs carry `pintype` ([#6025]).
+  Every pin on these boards is `passive`, so no new rails appear.
+- **Board 02** calls it right after it writes the unrouted PCB. Its
+  committed unrouted and routed outputs carry `pintype`, annotated in place
+  so the committed copper is unchanged, and `package_release.py` rewrote its
+  readiness package ([#6025]).
+- **Board 03** calls it from `generate_design.py` right after it writes the
+  unrouted PCB (`write_pcb`). The reviewed routing plan is replayed onto that
+  PCB, so the routed PCB inherits the annotation. Its committed unrouted and
+  routed PCBs and the `readiness-verification/fill-*` copies carry `pintype`,
+  regenerated through `scripts/boards/regenerate_boards_03_04_6076.py`; copper
+  is byte-identical in count and position. The two joystick mounting pads
+  `J2.MP` have no schematic pin and carry none ([#6025]).
+- **Boards 04, 05 and 06** call it right after they write the unrouted PCB
+  (`generate_design.py`, `redesign/hardware.py`, `assembled-demo/generate.py`).
+  Their routed copper is reviewed and hash-bound, so it was not re-routed:
+  `scripts/boards/annotate_pintypes_6025.py` regenerates each unrouted PCB
+  with the board's generator, annotates the routed PCB in place, and swaps in
+  re-plotted copper Gerbers. It refuses any change beyond the pads'
+  `pinfunction`/`pintype` children and the Gerber `%TO.P` pad attributes.
+  `refresh_readiness.py` then re-pinned each `readiness.json` ([#6025]).
+- **Board 07**'s `real_design/build_source.py` and `build.py` annotate the
+  copies they make of the hash-bound authored and reviewed-routing fixtures,
+  which stay unannotated. `refresh_bundles_6404.py` published the routed PCB
+  `build.py` validated, with its evidence (`output/readiness/checked.*`).
+  `output/matchgroup_test.kicad_pcb` has no producer and was annotated in
+  place ([#6025]).
+- **Board 08** has no committed PCB yet. To annotate a new or external
+  board by hand, run this on its unrouted and routed PCBs. It edits only the
+  pads' `pinfunction`/`pintype` children and keeps every other byte:
+
+  ```bash
+  uv run kct pcb annotate-pintypes boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb \
+      --schematic boards/04-stm32-devboard/output/stm32_devboard.kicad_sch
+  ```
+
+  It prints the rails it found by pin-type evidence. Annotating a PCB changes
+  its bytes, so refresh the board's `readiness.json` by re-running its
+  generator.
+
+[#5985]: https://github.com/rjwalters/kicad-tools/issues/5985
+[#5998]: https://github.com/rjwalters/kicad-tools/issues/5998
+[#6025]: https://github.com/rjwalters/kicad-tools/issues/6025
+
+## Project Files (.kct)
+
+Each board includes a `project.kct` file with:
+
+- **Project metadata**: Name, revision, author, description
+- **Intent**: Use cases, interfaces, constraints
+- **Requirements**: Electrical, mechanical, manufacturing specs
+- **Suggestions**: Component choices, layout guidelines
+- **Decisions**: Design choices with rationale
+- **Progress**: Current phase and checklist
+
+Example:
+```yaml
+kct_version: "1.0"
+
+project:
+  name: "Voltage Divider"
+  revision: "A"
+  artifacts:
+    schematic: "output/voltage_divider.kicad_sch"
+    pcb: "output/voltage_divider.kicad_pcb"
+
+intent:
+  summary: |
+    Minimal test circuit for validating the complete
+    kicad-tools pipeline.
+```
+
+### Spec precondition: recipes refuse to mutate a board with no captured intent
+
+Every board recipe entry point calls
+`kicad_tools.recipes.precondition.require_spec(__file__)` as its **first**
+statement, before any file is written. It is the pre-condition half of the
+recipe contract (`kicad_tools.recipes.gate.evaluate_pipeline_gate` is the
+post-condition half). The check is strictly **read-only** — it never writes,
+repairs or rewrites a `.kct` file.
+
+Discovery walks **up from the recipe script's own directory**
+(`Path(__file__).parent`, bounded to 6 ancestors) looking for `project.kct`.
+It deliberately does **not** anchor on the current working directory or on the
+output directory, because CI invokes recipes from the repo root with an
+out-of-tree output dir:
+
+```bash
+uv run python boards/00-simple-led/generate_design.py /tmp/board00-ci
+```
+
+**Gate strength:**
+
+| Level | Check | Default | Strict |
+|-------|-------|---------|--------|
+| L0 | `project.kct` exists and is non-empty | required | required |
+| L1 | + `load_spec()` parses it | **required** | required |
+| L2 | + `validate_spec()` reports no errors | not checked | **required** |
+
+- **Default is L1 and advisory.** A missing / empty / unparseable spec prints a
+  labelled `⚠️ spec precondition` warning to stderr and returns a falsy
+  `SpecPreconditionResult`. It does **not** raise and does **not** change the
+  recipe's exit code. An unexpected error inside the helper itself is swallowed
+  and reported as "could not check" — the gate never crashes a recipe.
+- **Strict mode is opt-in** via the `KCT_REQUIRE_SPEC` environment variable
+  (`KCT_REQUIRE_SPEC=1`) or `require_spec(__file__, strict=True)`. It raises the
+  bar to L2 and exits non-zero **before** the recipe's first write.
+
+```bash
+# advisory (default)
+uv run python boards/00-simple-led/generate_design.py /tmp/out
+
+# hard gate: abort unless the spec also validates semantically
+KCT_REQUIRE_SPEC=1 uv run python boards/00-simple-led/generate_design.py /tmp/out
+```
+
+All 10 boards currently pass L0, L1 and L2 (`validate_spec` returns
+`(True, [])` for every `boards/*/project.kct`). Whether L2 should become the
+default is a separate decision; it remains strict-mode only.
+
+**Non-goal — this is not a schema-completeness check.** The precondition asks
+only *"does this board carry captured intent that parses?"*. It deliberately
+does **not** check whether the spec *models* the board's requirements (i.e. it
+does not reject unrecognized / unmodelled `.kct` keys). What `.kct` should model
+is a separate, open schema-design question.
+
+**Consumer-repo escape hatch:** a project whose intent artifact lives elsewhere
+or is named something else passes it explicitly:
+
+```python
+require_spec(__file__, spec_path=Path("docs/ENGINEERING_PLAN.kct"))
+```
+
+## Board Details
+
+### 00 - Simple LED (Hello World)
+
+The minimal 3-component "Hello World" of electronics:
+- Power connector, current-limit resistor, LED
+- Exercises the full project → schematic → PCB → route → verify pipeline
+- End-to-end result is pinned in CI (`scripts/ci/check_board_00_e2e.py`)
+
+**Demonstrates**: The complete kicad-tools workflow at the smallest possible scale
+
+### 01 - Voltage Divider (Simplest)
+
+A minimal 4-component design for validating the complete kicad-tools workflow:
+- 2 connectors (input/output)
+- 2 resistors (10k/10k divider)
+- 5V → 2.5V conversion
+
+**Demonstrates**: Schematic generation, PCB creation, autorouting, DRC checking
+
+### 02 - Charlieplex LED (Medium)
+
+3x3 LED matrix using charlieplexing to drive 9 LEDs with 4 GPIO pins:
+- Dense interconnected topology
+- Many crossing nets requiring vias
+- Intentionally challenging routing
+
+**Demonstrates**: Monte Carlo routing, congestion handling, dense layouts
+
+### 03 - USB Joystick (Complex)
+
+USB HID game controller with mixed signal types:
+- USB Type-C with differential pairs
+- Analog joystick inputs
+- Digital button inputs
+- ATmega32U4 MCU
+
+**Demonstrates**: Mixed-signal routing, impedance requirements, complex placement
+
+### 04 - STM32 Dev Board (Most Complex)
+
+STM32F103 "Blue Pill" style development board:
+- Power regulation (USB → 3.3V LDO)
+- Crystal oscillator
+- SWD debug interface
+- User LED
+
+**Demonstrates**: Programmatic schematic generation with circuit blocks
+
+### 05 - BLDC Motor Controller (High-Current / HV Bench)
+
+Three-phase brushless DC motor controller (STM32G431K8 MCU + DRV8301
+gate driver, QFN-56):
+- 2.0mm high-current motor-phase trees (PHASE_A/B/C routed)
+- Kelvin current-sense (ISENSE) routing rules; 3 ISENSE nets still open
+  pending level-2 escalation ([#3766])
+- Thermal analysis, zone generation, and HV/creepage work happen here
+- Blocking status pinned in CI (`scripts/ci/check_board_05_blocking.py`)
+
+**Demonstrates**: High-current routing, thermal/zone generation, HV-isolation loop
+
+### 06 - Differential Pair Test (Routing Testbench)
+
+Multi-protocol HSDI regression testbench:
+- USB 2.0 D+/D- pair (USB-C → QFN-32)
+- USB 3.0 SuperSpeed (4 pairs: USB-C → BGA-49 simulator)
+- PCIe Gen1 (2 pairs: mini-PCIe edge → QFP-48)
+- MIPI D-PHY (2 lanes: FFC → QFN-24)
+- 4-layer JLCPCB tier-1 stackup (F.Cu / In1.Cu GND / In2.Cu PWR / B.Cu)
+
+**Demonstrates**: Epic [#2556] Phase 1-3 differential-pair subsystem (per-class
+`intra_pair_clearance`, `coupled_routing`, `coupled_continuity_threshold`,
+`target_diff_impedance`, `target_single_impedance`, `skew_tolerance_mm`).
+Not a working device --- synthetic sinks drive routing exercise only.
+
+[#2556]: https://github.com/rjwalters/kicad-tools/issues/2556
+
+### 07 - SDRAM exerciser and archived match-group fixture
+
+The current assembly is the real six-layer SDRAM exerciser described in
+[board07's README](07-matchgroup-test/README.md). The following description
+applies only to the archived `regression-fixture/` used by legacy CI:
+
+Multi-protocol N-trace match-group regression testbench:
+- DDR data byte (10 nets: DQ0-7 + DM0 + DQS_P/N pair) -- N-trace + diff-pair group composition
+- MIPI CSI lanes (3 pairs: CLK + DAT0 + DAT1)
+- HDMI TMDS lanes (3 pairs: D0 + D1 + D2)
+- Address bus A0-A7 (single-ended N-trace group)
+- 4-layer JLCPCB tier-1 stackup (F.Cu / In1.Cu GND / In2.Cu PWR / B.Cu)
+
+**Demonstrates**: Epic [#2661] Phase 1-2 match-group routing subsystem
+(per-class `length_match_group`, `length_match_reference`,
+`length_match_tolerance_mm` + diff-pair `skew_tolerance_mm` for pair
+members within a group).  Not a working device --- synthetic
+sources/sinks drive routing exercise only.
+
+[#2661]: https://github.com/rjwalters/kicad-tools/issues/2661
+
+## Other Contents
+
+- `synthetic-mains-complete/` — fully synthetic mains-style fixture for
+  `--complete` creepage verification (#8422). Not a demo board, so it is not in
+  the status table above; see its [README](synthetic-mains-complete/README.md).
+- `release_package.py` — shared plumbing for the per-board
+  `package_release.py` release scripts, which rebuild a board's shipped
+  manufacturing package through `kct readiness --generate`.
+
+## External Boards (`external/`)
+
+`external/` holds **local-only symlinks** to consumer-repo board fixtures
+(`chorus-test-revA`, `softstart`). The symlinks are tracked, but their
+targets live outside this repository and are not available in CI or fresh
+worktrees — they dangle unless the sibling repos are checked out locally.
+
+## See Also
+
+- [examples/](../examples/) - Feature-specific demos (BOM, DRC, placement, etc.)
+- [examples/04-autorouter/](../examples/04-autorouter/) - Routing strategy comparisons
+
+[#6269]: https://github.com/rjwalters/kicad-tools/issues/6269
+[#7209]: https://github.com/rjwalters/kicad-tools/issues/7209
+[#7220]: https://github.com/rjwalters/kicad-tools/issues/7220
+[#7250]: https://github.com/rjwalters/kicad-tools/issues/7250

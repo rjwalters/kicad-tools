@@ -1,0 +1,83 @@
+{
+  "source_head": "c78ddb5bc34774d999ffd1d14f80536762481e18",
+  "source_sha256": "32924707f239f406bc53c2a5bd23184ea922d9dfb9db7a79faa32d946547f5e1",
+  "stage": "first saved PCB after optimization and group tuning, before recipe pours",
+  "coordinate_frame": "PCB loader coordinates relative to board origin (100,100 mm)",
+  "findings": [
+    {
+      "segment": {
+        "x1": 25.799999999999997,
+        "y1": 21.768,
+        "x2": 25.799999999999997,
+        "y2": 22.655699999999996,
+        "width": 0.15,
+        "layer": "B_CU",
+        "net": 10
+      },
+      "via": {
+        "x": 25.997,
+        "y": 22.911,
+        "drill": 0.3,
+        "diameter": 0.6,
+        "layers": [
+          "F_CU",
+          "IN2_CU"
+        ],
+        "net": 9,
+        "net_name": "DQ5",
+        "is_micro": false
+      },
+      "gap_mm": -0.052529706794557804
+    },
+    {
+      "segment": {
+        "x1": 25.799999999999997,
+        "y1": 22.655699999999996,
+        "x2": 26.200000000000003,
+        "y2": 22.655699999999996,
+        "width": 0.15,
+        "layer": "B_CU",
+        "net": 10
+      },
+      "via": {
+        "x": 25.997,
+        "y": 22.911,
+        "drill": 0.3,
+        "diameter": 0.6,
+        "layers": [
+          "F_CU",
+          "IN2_CU"
+        ],
+        "net": 9,
+        "net_name": "DQ5",
+        "is_micro": false
+      },
+      "gap_mm": -0.11969999999999457
+    },
+    {
+      "segment": {
+        "x1": 26.200000000000003,
+        "y1": 22.655699999999996,
+        "x2": 26.200000000000003,
+        "y2": 21.768,
+        "width": 0.15,
+        "layer": "B_CU",
+        "net": 10
+      },
+      "via": {
+        "x": 25.997,
+        "y": 22.911,
+        "drill": 0.3,
+        "diameter": 0.6,
+        "layers": [
+          "F_CU",
+          "IN2_CU"
+        ],
+        "net": 9,
+        "net_name": "DQ5",
+        "is_micro": false
+      },
+      "gap_mm": -0.048829661066485106
+    }
+  ]
+}

@@ -1,0 +1,3454 @@
+"""Tests for kicad_tools.sync.reconciler module."""
+
+import json
+import math
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from kicad_tools.schema.bom import BOM, BOMItem
+from kicad_tools.sync.reconciler import (
+    Reconciler,
+    SyncAnalysis,
+    SyncChange,
+    SyncMatch,
+    _is_mounting_hole,
+    _values_equivalent,
+)
+
+
+class TestValuesEquivalent:
+    """Tests for the value-equivalence helper (issue #4351).
+
+    A PCB value that merely appends a voltage/tolerance/rating suffix must not
+    be reported as a value mismatch, while genuinely different values still are.
+    """
+
+    def test_suffix_only_capacitor_is_equivalent(self):
+        assert _values_equivalent("100nF", "100nF 25V", "C13")
+        assert _values_equivalent("10uF", "10uF 16V", "C14")
+
+    def test_tolerance_suffix_resistor_is_equivalent(self):
+        assert _values_equivalent("4.7k", "4.7k 1%", "R1")
+
+    def test_unit_normalized_capacitor_is_equivalent(self):
+        # 0.1uF == 100nF -> not a mismatch.
+        assert _values_equivalent("100nF", "0.1uF", "C1")
+
+    def test_genuinely_different_capacitor_is_mismatch(self):
+        assert not _values_equivalent("100nF", "2.2nF 50V", "C15")
+        assert not _values_equivalent("100nF", "10nF", "C36")
+        assert not _values_equivalent("10uF", "1uF 25V", "C39")
+
+    def test_non_numeric_ic_values_fall_back_to_string_strictness(self):
+        # Different part numbers must still flag.
+        assert not _values_equivalent("AP2112K-3.3", "XC6206-3.3V", "U1")
+        # Identical IC values are equivalent.
+        assert _values_equivalent("AP2112K-3.3", "AP2112K-3.3", "U2")
+
+    def test_whitespace_and_case_only_differences_are_equivalent(self):
+        assert _values_equivalent("100nF", "100NF", "C1")
+        assert _values_equivalent("  100nF ", "100nF", "C1")
+        assert _values_equivalent("LM358", "lm358", "U5")
+
+    def test_empty_value_is_not_equivalent_to_nonempty(self):
+        assert not _values_equivalent("", "100nF", "C1")
+        assert not _values_equivalent("100nF", "", "C1")
+
+
+class TestIsMountingHole:
+    """Tests for the mounting-hole detector used to filter benign PCB-only drift."""
+
+    def test_mounting_hole_by_reference(self):
+        for ref in ("MH1", "MH4", "H1", "MK2", "MP3", "MTG1", "mh1"):
+            assert _is_mounting_hole(ref), ref
+
+    def test_mounting_hole_by_footprint_name(self):
+        assert _is_mounting_hole("X1", "MountingHole:MountingHole_3.2mm_M3")
+        assert _is_mounting_hole("FOO", "Mounting_Hole_M3")
+
+    def test_real_components_not_mounting_holes(self):
+        # Refs that merely start with the same letters but carry no mounting
+        # semantics must not be filtered (M is not a mounting-hole prefix).
+        for ref in ("R1", "C30", "D_TVS1", "U5", "J3", "MH"):
+            assert not _is_mounting_hole(ref, "Capacitor_SMD:C_0805_2012Metric"), ref
+
+    def test_name_heuristic_skipped_for_netted_pads(self):
+        # A header whose library name embeds "MountingHoles" has netted pads
+        # and a schematic symbol: it must not be filtered (#8669).
+        name = "PinSocket_2x20_P2.54mm_Vertical_MountingHoles"
+        assert not _is_mounting_hole("J1", name, has_netted_pads=True)
+        assert _is_mounting_hole("J1", name, has_netted_pads=False)
+
+    def test_reference_heuristic_kept_for_netted_pads(self):
+        assert _is_mounting_hole("MH1", "", has_netted_pads=True)
+
+    def test_get_pcb_components_keeps_netted_mountingholes_footprint(self):
+        header = MagicMock()
+        header.reference = "J1"
+        header.value = "GPIO"
+        header.name = "PinSocket_2x20_MountingHoles"
+        header.attr_flags = []
+        pad = MagicMock()
+        pad.net_name = "GND"
+        header.pads = [pad]
+
+        hole = MagicMock()
+        hole.reference = "X9"
+        hole.value = ""
+        hole.name = "MountingHole:MountingHole_3.2mm_M3"
+        hole.attr_flags = []
+        hole.pads = []
+
+        checker = MagicMock()
+        checker.pcb.footprints = [header, hole]
+        reconciler = Reconciler.__new__(Reconciler)
+        comps = reconciler._get_pcb_components(checker)
+        assert "J1" in comps
+        assert "X9" not in comps
+
+
+class TestSyncMatch:
+    """Tests for SyncMatch dataclass."""
+
+    def test_valid_match_creation(self):
+        """Test creating a valid sync match."""
+        match = SyncMatch(
+            schematic_ref="R1",
+            pcb_ref="R1",
+            confidence="high",
+            match_type="exact",
+        )
+        assert match.schematic_ref == "R1"
+        assert match.pcb_ref == "R1"
+        assert match.confidence == "high"
+        assert match.match_type == "exact"
+        assert match.actions == ()
+
+    def test_match_with_actions(self):
+        """Test creating a match with actions."""
+        actions = (
+            {"type": "update_value", "reference": "R1", "old_value": "10k", "new_value": "4.7k"},
+        )
+        match = SyncMatch(
+            schematic_ref="R1",
+            pcb_ref="R1",
+            confidence="high",
+            match_type="exact",
+            actions=actions,
+        )
+        assert len(match.actions) == 1
+        assert match.actions[0]["type"] == "update_value"
+
+    def test_invalid_confidence_raises(self):
+        """Test that invalid confidence raises ValueError."""
+        with pytest.raises(ValueError, match="confidence must be"):
+            SyncMatch(
+                schematic_ref="R1",
+                pcb_ref="R1",
+                confidence="invalid",
+                match_type="exact",
+            )
+
+    def test_invalid_match_type_raises(self):
+        """Test that invalid match_type raises ValueError."""
+        with pytest.raises(ValueError, match="match_type must be"):
+            SyncMatch(
+                schematic_ref="R1",
+                pcb_ref="R1",
+                confidence="high",
+                match_type="invalid",
+            )
+
+    def test_to_dict(self):
+        """Test JSON serialization."""
+        match = SyncMatch(
+            schematic_ref="R1",
+            pcb_ref="R2",
+            confidence="medium",
+            match_type="value_footprint",
+            actions=({"type": "rename", "old_value": "R2", "new_value": "R1"},),
+        )
+        d = match.to_dict()
+        assert d["schematic_ref"] == "R1"
+        assert d["pcb_ref"] == "R2"
+        assert d["confidence"] == "medium"
+        assert d["match_type"] == "value_footprint"
+        assert len(d["actions"]) == 1
+
+
+class TestSyncChange:
+    """Tests for SyncChange dataclass."""
+
+    def test_change_creation(self):
+        """Test creating a sync change record."""
+        change = SyncChange(
+            reference="R1",
+            change_type="update_value",
+            old_value="10k",
+            new_value="4.7k",
+            applied=True,
+        )
+        assert change.reference == "R1"
+        assert change.applied is True
+
+    def test_change_default_not_applied(self):
+        """Test that applied defaults to False."""
+        change = SyncChange(
+            reference="R1",
+            change_type="rename",
+            old_value="R2",
+            new_value="R1",
+        )
+        assert change.applied is False
+
+    def test_to_dict(self):
+        """Test JSON serialization."""
+        change = SyncChange(
+            reference="R1",
+            change_type="update_value",
+            old_value="10k",
+            new_value="4.7k",
+        )
+        d = change.to_dict()
+        assert d["change_type"] == "update_value"
+        assert d["old_value"] == "10k"
+        assert d["new_value"] == "4.7k"
+
+
+class TestSyncAnalysis:
+    """Tests for SyncAnalysis dataclass."""
+
+    def test_empty_analysis_is_in_sync(self):
+        """Test that empty analysis reports in-sync."""
+        analysis = SyncAnalysis()
+        assert analysis.is_in_sync
+        assert not analysis.has_actionable_items
+
+    def test_analysis_with_orphans_not_in_sync(self):
+        """Test that orphans make analysis out-of-sync."""
+        analysis = SyncAnalysis(schematic_orphans=["R5"])
+        assert not analysis.is_in_sync
+
+    def test_analysis_with_value_mismatches(self):
+        """Test analysis with value mismatches."""
+        analysis = SyncAnalysis(
+            value_mismatches=[{"reference": "R1", "schematic_value": "10k", "pcb_value": "4.7k"}]
+        )
+        assert not analysis.is_in_sync
+        assert analysis.has_actionable_items
+
+    def test_confidence_filtering(self):
+        """Test filtering matches by confidence level."""
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch("R1", "R1", "high", "exact"),
+                SyncMatch("R2", "R3", "medium", "value_footprint"),
+                SyncMatch("C1", "C5", "low", "footprint_only"),
+            ]
+        )
+        assert len(analysis.high_confidence_matches) == 1
+        assert len(analysis.medium_confidence_matches) == 1
+        assert len(analysis.low_confidence_matches) == 1
+
+    def test_summary_in_sync(self):
+        """Test summary when in sync."""
+        analysis = SyncAnalysis()
+        assert "in sync" in analysis.summary().lower()
+
+    def test_summary_with_mismatches(self):
+        """Test summary with mismatches."""
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact")],
+            schematic_orphans=["R5"],
+        )
+        summary = analysis.summary()
+        assert "Matched components:" in summary
+        assert "Schematic-only:" in summary
+
+    def test_to_dict(self):
+        """Test JSON serialization round-trip."""
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact")],
+            schematic_orphans=["R5"],
+            pcb_orphans=["C3"],
+            value_mismatches=[{"reference": "U1", "schematic_value": "ATmega", "pcb_value": "LM"}],
+        )
+        d = analysis.to_dict()
+        assert d["is_in_sync"] is False
+        assert len(d["matches"]) == 1
+        assert d["schematic_orphans"] == ["R5"]
+        assert d["pcb_orphans"] == ["C3"]
+        assert d["summary"]["total_matches"] == 1
+
+    def test_add_footprint_actions_in_has_actionable(self):
+        """Test that add_footprint_actions makes analysis actionable."""
+        analysis = SyncAnalysis(
+            add_footprint_actions=[
+                {"type": "add_footprint", "reference": "R5", "footprint": "R_0402", "value": "10k"}
+            ]
+        )
+        assert analysis.has_actionable_items
+
+    def test_add_footprint_actions_in_to_dict(self):
+        """Test that add_footprint_actions appear in to_dict output."""
+        actions = [
+            {"type": "add_footprint", "reference": "R5", "footprint": "R_0402", "value": "10k"}
+        ]
+        analysis = SyncAnalysis(add_footprint_actions=actions)
+        d = analysis.to_dict()
+        assert d["add_footprint_actions"] == actions
+        assert d["summary"]["add_footprint"] == 1
+
+    def test_summary_with_add_footprint(self):
+        """Test summary includes add_footprint count."""
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact")],
+            schematic_orphans=["R5"],
+            add_footprint_actions=[
+                {"type": "add_footprint", "reference": "R5", "footprint": "R_0402", "value": "10k"}
+            ],
+        )
+        summary = analysis.summary()
+        assert "Add footprint:" in summary
+
+
+class TestReconciler:
+    """Tests for Reconciler class."""
+
+    def test_init_requires_paths(self):
+        """Test that Reconciler requires project or both schematic+pcb."""
+        with pytest.raises(ValueError, match="Must provide"):
+            Reconciler()
+
+    def test_init_missing_project_file(self):
+        """Test that missing project file raises FileNotFoundError."""
+        with pytest.raises(FileNotFoundError, match="Project file not found"):
+            Reconciler(project="/nonexistent/project.kicad_pro")
+
+    def test_init_missing_schematic(self):
+        """Test that missing schematic file raises FileNotFoundError."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as f:
+            pcb_path = f.name
+        try:
+            with pytest.raises(FileNotFoundError, match="Schematic not found"):
+                Reconciler(schematic="/nonexistent.kicad_sch", pcb=pcb_path)
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_init_missing_pcb(self):
+        """Test that missing PCB file raises FileNotFoundError."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as f:
+            sch_path = f.name
+        try:
+            with pytest.raises(FileNotFoundError, match="PCB not found"):
+                Reconciler(schematic=sch_path, pcb="/nonexistent.kicad_pcb")
+        finally:
+            Path(sch_path).unlink()
+
+    def test_init_project_loaded_but_pcb_unresolved_lists_candidates(self, tmp_path):
+        """When project loads but resolves to no PCB and multi-candidate scan would
+        also fail to disambiguate at Project.load(), the project loader itself
+        raises with a candidate list. We assert the candidate names appear."""
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        sib1 = tmp_path / "foo_v1.kicad_pcb"
+        sib2 = tmp_path / "foo_v2.kicad_pcb"
+
+        pro_path.write_text("{}")
+        sch_path.write_text("")
+        sib1.write_text("")
+        sib2.write_text("")
+
+        # Project.load raises in the ambiguous case; the reconciler surfaces it.
+        with pytest.raises(FileNotFoundError) as exc_info:
+            Reconciler(project=str(pro_path))
+
+        msg = str(exc_info.value)
+        assert "foo_v1.kicad_pcb" in msg
+        assert "foo_v2.kicad_pcb" in msg
+        assert "--pcb" in msg
+
+    def test_init_project_loaded_but_no_pcb_names_project_file(self, tmp_path):
+        """When project loads but no PCB resolves (e.g. no .kicad_pcb files at all),
+        the reconciler error must name the project file and the candidate list."""
+        pro_path = tmp_path / "foo.kicad_pro"
+        sch_path = tmp_path / "foo.kicad_sch"
+        pro_path.write_text("{}")
+        sch_path.write_text("")
+        # No PCB files anywhere -> Project.load logs warning, returns _pcb_path=None.
+
+        with pytest.raises(ValueError) as exc_info:
+            Reconciler(project=str(pro_path))
+
+        msg = str(exc_info.value)
+        assert "foo.kicad_pro" in msg
+        assert "PCB" in msg
+        assert "(none)" in msg
+        assert "--pcb" in msg
+
+    def test_init_no_args_still_raises_generic_error(self):
+        """When neither project nor schematic+pcb provided, the generic error
+        message is still surfaced (no project context to enrich it with)."""
+        with pytest.raises(ValueError, match="Must provide either a project file"):
+            Reconciler()
+
+
+class TestReconcilerAnalyze:
+    """Tests for Reconciler.analyze() using mocked schematic/PCB data."""
+
+    def _make_bom_item(self, ref: str, value: str = "", footprint: str = "", lib_id: str = ""):
+        """Create a BOMItem for mocking extract_bom."""
+        return BOMItem(
+            reference=ref,
+            value=value,
+            footprint=footprint,
+            lib_id=lib_id or "",
+            in_bom=True,
+        )
+
+    def _make_mock_footprint(self, ref: str, value: str = "", name: str = ""):
+        """Create a mock PCB footprint."""
+        fp = MagicMock()
+        fp.reference = ref
+        fp.value = value
+        fp.name = name
+        fp.pads = []
+        return fp
+
+    def _make_reconciler_with_mocks(self, bom_items, footprints):
+        """Create a Reconciler with mocked file loading and extract_bom."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        mock_bom = BOM(items=bom_items, source=sch_path)
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = footprints
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+
+        return reconciler, mock_bom, mock_pcb, sch_path, pcb_path
+
+    def _run_analyze(self, reconciler, mock_bom, mock_pcb):
+        """Run analyze() with mocked dependencies."""
+        mock_checker = MagicMock()
+        mock_checker.pcb = mock_pcb
+        mock_checker.check.return_value = MagicMock(issues=[])
+
+        with (
+            patch(
+                "kicad_tools.validate.consistency.SchematicPCBChecker",
+                return_value=mock_checker,
+            ),
+            patch(
+                "kicad_tools.sync.reconciler.extract_bom",
+                return_value=mock_bom,
+            ),
+        ):
+            return reconciler.analyze()
+
+    def test_analyze_in_sync(self):
+        """Test analysis when schematic and PCB are in sync."""
+        bom_items = [self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402")]
+        footprints = [self._make_mock_footprint("R1", "10k", "Resistor_SMD:R_0402")]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 1
+        assert analysis.matches[0].confidence == "high"
+        assert len(analysis.schematic_orphans) == 0
+        assert len(analysis.pcb_orphans) == 0
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_value_mismatch(self):
+        """Test analysis detects value mismatches."""
+        bom_items = [self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402")]
+        footprints = [self._make_mock_footprint("R1", "4.7k", "Resistor_SMD:R_0402")]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert not analysis.is_in_sync
+        assert len(analysis.value_mismatches) == 1
+        assert analysis.value_mismatches[0]["schematic_value"] == "10k"
+        assert analysis.value_mismatches[0]["pcb_value"] == "4.7k"
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_suffix_only_value_is_not_a_mismatch(self):
+        """Issue #4351: a PCB rating suffix is informational, not a mismatch."""
+        bom_items = [self._make_bom_item("C13", "100nF", "Capacitor_SMD:C_0402")]
+        footprints = [self._make_mock_footprint("C13", "100nF 25V", "Capacitor_SMD:C_0402")]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        # No genuine value mismatch, and no update_value action queued.
+        assert analysis.value_mismatches == []
+        assert not any(a["type"] == "update_value" for m in analysis.matches for a in m.actions)
+        # Surfaced as an informational suffix note instead.
+        assert len(analysis.value_suffix_notes) == 1
+        note = analysis.value_suffix_notes[0]
+        assert note["reference"] == "C13"
+        assert note["schematic_value"] == "100nF"
+        assert note["pcb_value"] == "100nF 25V"
+        # Suffix notes are informational -> board is still in sync.
+        assert analysis.is_in_sync
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_genuine_mismatch_still_flagged_amid_suffix_notes(self):
+        """Genuine value divergence remains visible while suffix-only rows do not."""
+        bom_items = [
+            self._make_bom_item("C13", "100nF", "Capacitor_SMD:C_0402"),  # suffix-only
+            self._make_bom_item("C15", "100nF", "Capacitor_SMD:C_0402"),  # genuine
+            self._make_bom_item("U1", "AP2112K-3.3", "Package_TO_SOT_SMD:SOT-23-5"),  # genuine
+        ]
+        footprints = [
+            self._make_mock_footprint("C13", "100nF 25V", "Capacitor_SMD:C_0402"),
+            self._make_mock_footprint("C15", "2.2nF 50V", "Capacitor_SMD:C_0402"),
+            self._make_mock_footprint("U1", "XC6206-3.3V", "Package_TO_SOT_SMD:SOT-23-5"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        mismatched_refs = {m["reference"] for m in analysis.value_mismatches}
+        assert mismatched_refs == {"C15", "U1"}
+        suffix_refs = {m["reference"] for m in analysis.value_suffix_notes}
+        assert suffix_refs == {"C13"}
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_orphans(self):
+        """Test analysis detects orphans in both directions."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402"),
+            self._make_bom_item("R2", "22k", "R_0402"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint("C1", "100nF", "C_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert "R2" in analysis.schematic_orphans
+        assert "C1" in analysis.pcb_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_medium_confidence_match(self):
+        """Test that value+footprint matching produces medium confidence."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402"),
+            self._make_bom_item("R5", "22k", "Resistor_SMD:R_0402"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "Resistor_SMD:R_0402"),
+            self._make_mock_footprint("R99", "22k", "Resistor_SMD:R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        medium = analysis.medium_confidence_matches
+        assert len(medium) == 1
+        assert medium[0].schematic_ref == "R5"
+        assert medium[0].pcb_ref == "R99"
+        assert medium[0].match_type == "value_footprint"
+
+        # R5 and R99 should not appear in orphans anymore
+        assert "R5" not in analysis.schematic_orphans
+        assert "R99" not in analysis.pcb_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_no_mismatches_is_in_sync(self):
+        """Test that matching refs with same properties reports in-sync."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402"),
+            self._make_bom_item("C1", "100nF", "C_0402"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint("C1", "100nF", "C_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_hierarchical_components(self):
+        """Test that hierarchical sub-sheet components are included via extract_bom."""
+        # Simulate components from root sheet and a sub-sheet
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("U1", "ATmega328P", "TQFP-32", lib_id="MCU:ATmega328P"),
+            # Sub-sheet component
+            self._make_bom_item("R10", "4.7k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("C5", "100nF", "C_0402", lib_id="Device:C"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint("U1", "ATmega328P", "TQFP-32"),
+            self._make_mock_footprint("R10", "4.7k", "R_0402"),
+            self._make_mock_footprint("C5", "100nF", "C_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 4
+        assert len(analysis.schematic_orphans) == 0
+        assert len(analysis.pcb_orphans) == 0
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_hierarchical_missing_from_pcb(self):
+        """Test that sub-sheet components missing from PCB are reported as orphans."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            # Sub-sheet components not in PCB
+            self._make_bom_item("R10", "4.7k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("C5", "100nF", "C_0402", lib_id="Device:C"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert not analysis.is_in_sync
+        assert "R10" in analysis.schematic_orphans
+        assert "C5" in analysis.schematic_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_skips_power_and_off_board(self):
+        """Test that power symbols and on_board=False components are skipped."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="PWR1",
+                value="+3V3",
+                footprint="",
+                lib_id="power:+3V3",
+                in_bom=False,
+                on_board=False,
+            ),
+            BOMItem(
+                reference="SIM1",
+                value="TestPoint",
+                footprint="",
+                lib_id="Simulation:VSIN",
+                in_bom=False,
+                on_board=False,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 1
+        # PWR1 and SIM1 (on_board=False) should not appear anywhere
+        assert "PWR1" not in analysis.schematic_orphans
+        assert "SIM1" not in analysis.schematic_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_includes_net_tie_in_bom_no(self):
+        """Test that net ties (in_bom=no, on_board=yes) are included in sync."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="NT2",
+                value="NetTie_2",
+                footprint="NetTie:NetTie-2_SMD_Pad0.5mm",
+                lib_id="Device:NetTie_2",
+                in_bom=False,
+                on_board=True,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint("NT2", "NetTie_2", "NetTie:NetTie-2_SMD_Pad0.5mm"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 2
+        matched_refs = {m.schematic_ref for m in analysis.matches}
+        assert "NT2" in matched_refs
+        assert "NT2" not in analysis.pcb_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_includes_dnp_on_board(self):
+        """Test that DNP components with on_board=yes are included in sync."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="J5",
+                value="Conn_01x03_Pin",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x03",
+                lib_id="Connector:Conn_01x03_Pin",
+                dnp=True,
+                on_board=True,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint(
+                "J5", "Conn_01x03_Pin", "Connector_PinHeader_2.54mm:PinHeader_1x03"
+            ),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 2
+        matched_refs = {m.schematic_ref for m in analysis.matches}
+        assert "J5" in matched_refs
+        assert "J5" not in analysis.pcb_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_excludes_on_board_no(self):
+        """Test that components with on_board=no are excluded from sync."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="SIM1",
+                value="VSIN",
+                footprint="",
+                lib_id="Simulation:VSIN",
+                in_bom=False,
+                on_board=False,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 1
+        assert "SIM1" not in analysis.schematic_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_add_footprint_actions(self):
+        """Test that add_footprint actions are generated for schematic orphans."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("R2", "22k", "Resistor_SMD:R_0402", lib_id="Device:R"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert len(analysis.add_footprint_actions) == 1
+        action = analysis.add_footprint_actions[0]
+        assert action["type"] == "add_footprint"
+        assert action["reference"] == "R2"
+        assert action["footprint"] == "Resistor_SMD:R_0402"
+        assert action["value"] == "22k"
+        assert action["lib_id"] == "Device:R"
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+
+class TestReconcilerApplyAddFootprint:
+    """Tests for Reconciler._apply_add_footprint() method."""
+
+    def test_add_footprint_dry_run(self):
+        """Test that add_footprint in dry-run mode produces unapplied SyncChange."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "add_footprint",
+            "reference": "R5",
+            "footprint": "Resistor_SMD:R_0402",
+            "value": "10k",
+            "lib_id": "Device:R",
+        }
+
+        mock_pcb = MagicMock()
+        change = reconciler._apply_add_footprint(mock_pcb, action, dry_run=True, x=10.0, y=100.0)
+
+        assert change is not None
+        assert change.change_type == "add_footprint"
+        assert change.reference == "R5"
+        assert change.old_value == ""
+        assert "Resistor_SMD:R_0402" in change.new_value
+        assert "10k" in change.new_value
+        assert change.applied is False
+        # PCB.add_footprint() should NOT be called in dry-run
+        mock_pcb.add_footprint.assert_not_called()
+
+    def test_add_footprint_applied(self):
+        """Test that add_footprint calls pcb.add_footprint when not dry-run."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "add_footprint",
+            "reference": "C1",
+            "footprint": "Capacitor_SMD:C_0402",
+            "value": "100nF",
+        }
+
+        mock_pcb = MagicMock()
+        change = reconciler._apply_add_footprint(mock_pcb, action, dry_run=False, x=20.0, y=110.0)
+
+        assert change is not None
+        assert change.applied is True
+        assert change.change_type == "add_footprint"
+        assert change.reference == "C1"
+        mock_pcb.add_footprint.assert_called_once_with(
+            library_id="Capacitor_SMD:C_0402",
+            reference="C1",
+            x=20.0,
+            y=110.0,
+            rotation=0.0,
+            layer="F.Cu",
+            value="100nF",
+        )
+
+    def test_add_footprint_library_not_found(self):
+        """Test graceful fallback when library is not found."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "add_footprint",
+            "reference": "U1",
+            "footprint": "CustomLib:CustomPart",
+            "value": "MyChip",
+        }
+
+        mock_pcb = MagicMock()
+        mock_pcb.add_footprint.side_effect = FileNotFoundError("Footprint not found")
+        change = reconciler._apply_add_footprint(mock_pcb, action, dry_run=False, x=10.0, y=10.0)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+        assert change.reference == "U1"
+
+    def test_add_footprint_value_error(self):
+        """Test graceful fallback when KiCad libraries are not installed."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "add_footprint",
+            "reference": "R1",
+            "footprint": "R_0402",
+            "value": "10k",
+        }
+
+        mock_pcb = MagicMock()
+        mock_pcb.add_footprint.side_effect = ValueError("KiCad library path not found")
+        change = reconciler._apply_add_footprint(mock_pcb, action, dry_run=False, x=10.0, y=10.0)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+
+
+class TestReconcilerApplyIntegration:
+    """Integration tests for Reconciler.apply() with add_footprint actions."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler with temp file paths."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+        return reconciler, sch_path, pcb_path
+
+    def test_apply_add_footprint_to_pcb(self):
+        """Test that apply() adds footprints to the PCB via PCB.add_footprint()."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "R5",
+                    "footprint": "Resistor_SMD:R_0402",
+                    "value": "10k",
+                    "lib_id": "Device:R",
+                },
+                {
+                    "type": "add_footprint",
+                    "reference": "C3",
+                    "footprint": "Capacitor_SMD:C_0402",
+                    "value": "100nF",
+                    "lib_id": "Device:C",
+                },
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb._sexp = MagicMock()
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 2
+        assert all(c.change_type == "add_footprint" for c in changes)
+        assert all(c.applied for c in changes)
+        assert changes[0].reference == "R5"
+        assert changes[1].reference == "C3"
+
+        # Verify add_footprint was called twice with grid positions
+        assert mock_pcb.add_footprint.call_count == 2
+        # Verify save was called
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_dry_run_no_file_changes(self):
+        """Test that dry-run mode does not modify the PCB file."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "R5",
+                    "footprint": "Resistor_SMD:R_0402",
+                    "value": "10k",
+                    "lib_id": "Device:R",
+                },
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        # PCB.add_footprint() should NOT be called
+        mock_pcb.add_footprint.assert_not_called()
+        # PCB.save() should NOT be called
+        mock_pcb.save.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_preserves_existing_actions(self):
+        """Test that rename and update_value actions still work after refactor."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        mock_fp = MagicMock()
+        mock_fp_text_ref = MagicMock()
+        mock_fp_text_ref.get_string.return_value = "reference"
+        mock_fp_text_val = MagicMock()
+        mock_fp_text_val.get_string.return_value = "value"
+        mock_fp.find_children.return_value = [mock_fp_text_ref, mock_fp_text_val]
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="R1",
+                    pcb_ref="R99",
+                    confidence="high",
+                    match_type="value_footprint",
+                    actions=(
+                        {
+                            "type": "rename",
+                            "reference": "R99",
+                            "old_value": "R99",
+                            "new_value": "R1",
+                        },
+                    ),
+                ),
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_value",
+                            "reference": "C1",
+                            "old_value": "100nF",
+                            "new_value": "10nF",
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb._sexp = MagicMock()
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.cli.pcb_modify.find_footprint_sexp",
+                return_value=mock_fp,
+            ),
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 2
+        assert changes[0].change_type == "rename"
+        assert changes[0].applied is True
+        assert changes[1].change_type == "update_value"
+        assert changes[1].applied is True
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_mixed_add_and_rename(self):
+        """Test applying both rename and add_footprint actions together."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        mock_fp = MagicMock()
+        mock_fp_text_ref = MagicMock()
+        mock_fp_text_ref.get_string.return_value = "reference"
+        mock_fp.find_children.return_value = [mock_fp_text_ref]
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="R1",
+                    pcb_ref="R99",
+                    confidence="high",
+                    match_type="value_footprint",
+                    actions=(
+                        {
+                            "type": "rename",
+                            "reference": "R99",
+                            "old_value": "R99",
+                            "new_value": "R1",
+                        },
+                    ),
+                ),
+            ],
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "C5",
+                    "footprint": "Capacitor_SMD:C_0402",
+                    "value": "100nF",
+                    "lib_id": "Device:C",
+                },
+            ],
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb._sexp = MagicMock()
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.cli.pcb_modify.find_footprint_sexp",
+                return_value=mock_fp,
+            ),
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 2
+        rename_changes = [c for c in changes if c.change_type == "rename"]
+        add_changes = [c for c in changes if c.change_type == "add_footprint"]
+        assert len(rename_changes) == 1
+        assert len(add_changes) == 1
+        assert rename_changes[0].applied is True
+        assert add_changes[0].applied is True
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_net_assignment_called_after_add(self):
+        """Test that net assignment is performed after adding footprints."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "R1",
+                    "footprint": "Resistor_SMD:R_0402",
+                    "value": "10k",
+                    "lib_id": "Device:R",
+                },
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.operations.netlist.export_netlist",
+                return_value=mock_netlist,
+            ) as mock_export,
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 1
+        assert changes[0].applied is True
+        # Verify export_netlist was called (for smart placement and net assignment)
+        assert mock_export.call_count >= 1
+        # The schematic is still the first positional argument, but the
+        # kicad-cli byproduct is now routed into a temp dir (#4795) rather
+        # than landing beside the user's schematic.
+        call_args, call_kwargs = mock_export.call_args
+        assert call_args[0] == sch_path
+        byproduct = Path(call_kwargs["output_path"])
+        assert byproduct.parent != Path(sch_path).parent
+        mock_pcb.assign_nets_from_netlist.assert_called_once_with(mock_netlist)
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_library_not_found_continues(self):
+        """Test that when one footprint fails, others still proceed."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "U1",
+                    "footprint": "CustomLib:NoSuchPart",
+                    "value": "MyChip",
+                },
+                {
+                    "type": "add_footprint",
+                    "reference": "R1",
+                    "footprint": "Resistor_SMD:R_0402",
+                    "value": "10k",
+                },
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        # First call fails, second succeeds
+        mock_pcb.add_footprint.side_effect = [
+            FileNotFoundError("Not found"),
+            MagicMock(),
+        ]
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.operations.netlist.export_netlist",
+                return_value=mock_netlist,
+            ),
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 2
+        assert changes[0].applied is False  # U1 failed
+        assert changes[0].reference == "U1"
+        assert changes[1].applied is True  # R1 succeeded
+        assert changes[1].reference == "R1"
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_backup_created(self):
+        """Test that a .bak file is created before modifying."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "R1",
+                    "footprint": "Resistor_SMD:R_0402",
+                    "value": "10k",
+                },
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch("kicad_tools.sync.reconciler.shutil.copy2") as mock_copy,
+        ):
+            reconciler.apply(analysis, dry_run=False)
+
+        # Verify backup was created
+        mock_copy.assert_called_once()
+        backup_call = mock_copy.call_args
+        assert str(backup_call[0][1]).endswith(".kicad_pcb.bak")
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_compute_placement_with_board_outline(self):
+        """Test placement position is computed below the board outline.
+
+        get_board_outline() now returns board-relative coordinates, so
+        the mock returns (0,0)-(100,80) instead of sheet-absolute coords.
+        """
+        reconciler = Reconciler.__new__(Reconciler)
+
+        mock_pcb = MagicMock()
+        # Board outline: a 100x80mm rectangle, already board-relative
+        mock_pcb.get_board_outline.return_value = [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 80.0),
+            (0.0, 80.0),
+        ]
+        mock_pcb.board_origin = (50.0, 50.0)
+
+        x, y, col = reconciler._compute_placement_start(mock_pcb)
+
+        # min_x=0 -> start_x = 0
+        assert x == 0.0
+        # max_y=80 -> start_y = 80 + 10 = 90
+        assert y == 90.0
+        assert col == 0
+
+    def test_compute_placement_no_outline(self):
+        """Test default placement when no board outline exists."""
+        reconciler = Reconciler.__new__(Reconciler)
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        x, y, col = reconciler._compute_placement_start(mock_pcb)
+
+        assert x == 10.0
+        assert y == 10.0
+        assert col == 0
+
+
+class TestReconcilerApplyUpdateFootprint:
+    """Tests for Reconciler._apply_update_footprint() method."""
+
+    def test_update_footprint_dry_run(self):
+        """Test that update_footprint in dry-run mode produces unapplied SyncChange."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "Capacitor_SMD:C_0402_1005Metric",
+            "new_value": "Capacitor_SMD:C_0805_2012Metric",
+        }
+
+        mock_pcb = MagicMock()
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=True)
+
+        assert change is not None
+        assert change.change_type == "update_footprint"
+        assert change.reference == "C1"
+        assert change.old_value == "Capacitor_SMD:C_0402_1005Metric"
+        assert change.new_value == "Capacitor_SMD:C_0805_2012Metric"
+        assert change.applied is False
+        # PCB should NOT be modified in dry-run
+        mock_pcb.get_footprint.assert_not_called()
+        mock_pcb.remove_footprint.assert_not_called()
+        mock_pcb.add_footprint.assert_not_called()
+
+    def test_update_footprint_applied(self):
+        """Test that update_footprint swaps the footprint preserving position."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "Capacitor_SMD:C_0402_1005Metric",
+            "new_value": "Capacitor_SMD:C_0805_2012Metric",
+        }
+
+        # Mock old footprint
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 90.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_pad1 = MagicMock()
+        mock_pad1.number = "1"
+        mock_pad1.net_number = 1
+        mock_pad1.net_name = "GND"
+        mock_pad2 = MagicMock()
+        mock_pad2.number = "2"
+        mock_pad2.net_number = 2
+        mock_pad2.net_name = "+3V3"
+        mock_old_fp.pads = [mock_pad1, mock_pad2]
+
+        # Mock new footprint (returned by add_footprint)
+        mock_new_fp = MagicMock()
+        mock_new_pad1 = MagicMock()
+        mock_new_pad1.number = "1"
+        mock_new_pad2 = MagicMock()
+        mock_new_pad2.number = "2"
+        mock_new_fp.pads = [mock_new_pad1, mock_new_pad2]
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.get_pad_position.return_value = (50.0, 30.0)
+        mock_pcb.segments_in_net.return_value = []
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        assert change.change_type == "update_footprint"
+        assert change.reference == "C1"
+
+        # Verify old footprint was removed
+        mock_pcb.remove_footprint.assert_called_once_with("C1")
+
+        # Verify new footprint was added with a temporary reference to avoid
+        # remove_footprint accidentally deleting both old and new
+        mock_pcb.add_footprint.assert_called_once_with(
+            library_id="Capacitor_SMD:C_0805_2012Metric",
+            reference="__SWAP_TEMP__C1",
+            x=50.0,
+            y=30.0,
+            rotation=90.0,
+            layer="F.Cu",
+            value="100nF",
+        )
+
+        # Verify the temporary reference was renamed to the real one
+        mock_pcb.update_footprint_reference.assert_called_once_with("__SWAP_TEMP__C1", "C1")
+
+        # Verify net assignment was called for each pad
+        mock_pcb.assign_net_to_footprint_pad.assert_any_call("C1", "1", "GND")
+        mock_pcb.assign_net_to_footprint_pad.assert_any_call("C1", "2", "+3V3")
+
+    def test_update_footprint_preserves_back_layer(self):
+        """Test that B.Cu layer is preserved during swap."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "R1",
+            "old_value": "Resistor_SMD:R_0402",
+            "new_value": "Resistor_SMD:R_0805",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 20.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "B.Cu"
+        mock_old_fp.value = "10k"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        # Verify layer was preserved
+        call_kwargs = mock_pcb.add_footprint.call_args
+        assert call_kwargs[1]["layer"] == "B.Cu"
+
+    def test_update_footprint_removes_connected_traces(self):
+        """Test that traces connected to old pad positions are removed."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "Capacitor_SMD:C_0402",
+            "new_value": "Capacitor_SMD:C_0805",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_pad1 = MagicMock()
+        mock_pad1.number = "1"
+        mock_pad1.net_number = 1
+        mock_pad1.net_name = "GND"
+        mock_old_fp.pads = [mock_pad1]
+
+        # Create a segment that touches the pad position
+        mock_seg = MagicMock()
+        mock_seg.start = (49.49, 30.0)  # Close to pad position
+        mock_seg.end = (45.0, 30.0)
+        mock_seg.uuid = "seg-uuid-1"
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = [MagicMock(number="1")]
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.get_pad_position.return_value = (49.49, 30.0)
+        mock_pcb.segments_in_net.return_value = [mock_seg]
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        # Verify connected segments were removed
+        mock_pcb.remove_segments.assert_called_once()
+        removed_segs = mock_pcb.remove_segments.call_args[0][0]
+        assert len(removed_segs) == 1
+        assert removed_segs[0].uuid == "seg-uuid-1"
+
+    def test_update_footprint_reports_affected_nets(self):
+        """Test that affected nets are reported in the new_value field."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "C1",
+            "old_value": "C_0402",
+            "new_value": "C_0805",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_pad1 = MagicMock()
+        mock_pad1.number = "1"
+        mock_pad1.net_number = 1
+        mock_pad1.net_name = "GND"
+        mock_pad2 = MagicMock()
+        mock_pad2.number = "2"
+        mock_pad2.net_number = 2
+        mock_pad2.net_name = "+3V3"
+        mock_old_fp.pads = [mock_pad1, mock_pad2]
+
+        # Create segments touching each pad
+        mock_seg1 = MagicMock()
+        mock_seg1.start = (49.49, 30.0)
+        mock_seg1.end = (45.0, 30.0)
+        mock_seg1.uuid = "seg-1"
+        mock_seg2 = MagicMock()
+        mock_seg2.start = (50.51, 30.0)
+        mock_seg2.end = (55.0, 30.0)
+        mock_seg2.uuid = "seg-2"
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = [MagicMock(number="1"), MagicMock(number="2")]
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.get_pad_position.side_effect = lambda ref, pad: {
+            "1": (49.49, 30.0),
+            "2": (50.51, 30.0),
+        }.get(pad)
+        mock_pcb.segments_in_net.side_effect = lambda net: {
+            1: [mock_seg1],
+            2: [mock_seg2],
+        }.get(net, [])
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is True
+        assert "re-route" in change.new_value
+        assert "GND" in change.new_value
+        assert "+3V3" in change.new_value
+
+    def test_update_footprint_missing_reference(self):
+        """Test that missing footprint reference returns None."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "MISSING",
+            "old_value": "C_0402",
+            "new_value": "C_0805",
+        }
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = None
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is None
+
+    def test_update_footprint_library_not_found(self):
+        """Test graceful fallback when new footprint library is not found."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "U1",
+            "old_value": "Package_SO:SOIC-8",
+            "new_value": "CustomLib:NoSuchPart",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 10.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "IC1"
+        mock_old_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.side_effect = FileNotFoundError("Not found")
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+
+    def test_update_footprint_no_removal_on_add_failure(self):
+        """Test that old footprint is NOT removed when add_footprint fails.
+
+        Regression test: previously, remove_footprint was called before
+        add_footprint, so a failure in add_footprint would leave the board
+        with the old footprint deleted — data loss.
+        """
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "U1",
+            "old_value": "Package_SO:SOIC-8",
+            "new_value": "CustomLib:BadFootprint",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 20.0)
+        mock_old_fp.rotation = 90.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "IC1"
+        mock_old_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.side_effect = FileNotFoundError("library not found")
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+        # The critical assertion: remove_footprint must NOT have been called
+        mock_pcb.remove_footprint.assert_not_called()
+
+    def test_update_footprint_no_removal_on_value_error(self):
+        """Test that old footprint is NOT removed when add_footprint raises ValueError."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_footprint",
+            "reference": "R5",
+            "old_value": "Resistor_SMD:R_0402",
+            "new_value": "Resistor_SMD:R_invalid",
+        }
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (5.0, 5.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "10k"
+        mock_old_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.side_effect = ValueError("invalid footprint")
+
+        change = reconciler._apply_update_footprint(mock_pcb, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is False
+        assert "error:" in change.new_value
+        mock_pcb.remove_footprint.assert_not_called()
+
+
+class TestReconcilerApplyUpdateFootprintIntegration:
+    """Integration tests for update_footprint via Reconciler.apply()."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler with temp file paths."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+        return reconciler, sch_path, pcb_path
+
+    def test_apply_update_footprint_to_pcb(self):
+        """Test that apply() swaps footprints via update_footprint actions."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "C1",
+                            "old_value": "Capacitor_SMD:C_0402",
+                            "new_value": "Capacitor_SMD:C_0805",
+                        },
+                    ),
+                ),
+            ],
+            footprint_mismatches=[
+                {
+                    "reference": "C1",
+                    "schematic_footprint": "Capacitor_SMD:C_0805",
+                    "pcb_footprint": "Capacitor_SMD:C_0402",
+                },
+            ],
+        )
+
+        # Mock old footprint
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+        mock_pcb._sexp = MagicMock()
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.operations.netlist.export_netlist",
+                return_value=mock_netlist,
+            ),
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 1
+        assert changes[0].change_type == "update_footprint"
+        assert changes[0].applied is True
+        assert changes[0].reference == "C1"
+
+        # Verify PCB was saved
+        mock_pcb.save.assert_called_once()
+        # Verify net assignment was run
+        mock_pcb.assign_nets_from_netlist.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_update_footprint_dry_run(self):
+        """Test that dry-run does not modify the PCB for update_footprint."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "C1",
+                            "old_value": "C_0402",
+                            "new_value": "C_0805",
+                        },
+                    ),
+                ),
+            ],
+            footprint_mismatches=[
+                {
+                    "reference": "C1",
+                    "schematic_footprint": "C_0805",
+                    "pcb_footprint": "C_0402",
+                },
+            ],
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert changes[0].change_type == "update_footprint"
+        # PCB should NOT be modified
+        mock_pcb.get_footprint.assert_not_called()
+        mock_pcb.remove_footprint.assert_not_called()
+        mock_pcb.add_footprint.assert_not_called()
+        mock_pcb.save.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_mixed_update_and_add_footprint(self):
+        """Test applying both update_footprint and add_footprint actions."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (50.0, 30.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "100nF"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "C1",
+                            "old_value": "C_0402",
+                            "new_value": "C_0805",
+                        },
+                    ),
+                ),
+            ],
+            add_footprint_actions=[
+                {
+                    "type": "add_footprint",
+                    "reference": "R5",
+                    "footprint": "Resistor_SMD:R_0402",
+                    "value": "10k",
+                },
+            ],
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+        mock_pcb._sexp = MagicMock()
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch(
+                "kicad_tools.operations.netlist.export_netlist",
+                return_value=mock_netlist,
+            ),
+        ):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        update_changes = [c for c in changes if c.change_type == "update_footprint"]
+        add_changes = [c for c in changes if c.change_type == "add_footprint"]
+        assert len(update_changes) == 1
+        assert len(add_changes) == 1
+        assert update_changes[0].applied is True
+        assert add_changes[0].applied is True
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_apply_update_footprint_creates_backup(self):
+        """Test that a backup file is created before modifying for update_footprint."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        mock_old_fp = MagicMock()
+        mock_old_fp.position = (10.0, 10.0)
+        mock_old_fp.rotation = 0.0
+        mock_old_fp.layer = "F.Cu"
+        mock_old_fp.value = "1k"
+        mock_old_fp.pads = []
+
+        mock_new_fp = MagicMock()
+        mock_new_fp.pads = []
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="R1",
+                    pcb_ref="R1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_footprint",
+                            "reference": "R1",
+                            "old_value": "R_0402",
+                            "new_value": "R_0805",
+                        },
+                    ),
+                ),
+            ],
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.get_footprint.return_value = mock_old_fp
+        mock_pcb.add_footprint.return_value = mock_new_fp
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb),
+            patch("kicad_tools.sync.reconciler.shutil.copy2") as mock_copy,
+        ):
+            reconciler.apply(analysis, dry_run=False)
+
+        mock_copy.assert_called_once()
+        backup_call = mock_copy.call_args
+        assert str(backup_call[0][1]).endswith(".kicad_pcb.bak")
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+
+class TestUpdateFootprintSwapRegression:
+    """Regression test for duplicate-reference bug during footprint swap.
+
+    When add_footprint and remove_footprint both use the same reference,
+    remove_footprint filters _footprints by name and deletes ALL matching
+    entries -- including the just-added new footprint.  The fix uses a
+    temporary reference for the new footprint, removes the old one, then
+    renames the new one to the correct reference.
+    """
+
+    def test_remove_does_not_delete_new_footprint(self, tmp_path):
+        """Verify that the swap keeps exactly one footprint with the target ref.
+
+        Uses a real PCB._footprints list (not mocks) to prove that the
+        temporary-reference strategy avoids the accidental double-delete.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        # Load a real PCB with one footprint (R1)
+        from tests.conftest import MINIMAL_PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(MINIMAL_PCB)
+        pcb = PCB.load(str(pcb_file))
+
+        # Sanity: we start with exactly one footprint "R1"
+        assert pcb.get_footprint("R1") is not None
+        assert len([fp for fp in pcb.footprints if fp.reference == "R1"]) == 1
+
+        # Simulate the temp-ref swap pattern used by _apply_update_footprint:
+        # 1. Add new footprint with a temporary reference
+        temp_ref = "__SWAP_TEMP__R1"
+        # We cannot call add_footprint (needs KiCad libs), so replicate the
+        # critical _footprints bookkeeping directly.
+        from kicad_tools.schema.pcb import Footprint
+
+        new_fp = Footprint(
+            name="Resistor_SMD:R_0805_2012Metric",
+            layer="F.Cu",
+            position=(50.0, 50.0),
+            rotation=0.0,
+            reference=temp_ref,
+            value="10k",
+        )
+        pcb._footprints.append(new_fp)
+
+        # 2. Remove old footprint by its real reference
+        removed = pcb.remove_footprint("R1")
+        assert removed is True
+
+        # 3. The new footprint (temp_ref) must still be present
+        remaining = [fp for fp in pcb._footprints if fp.reference == temp_ref]
+        assert len(remaining) == 1, (
+            "Temporary-reference footprint was incorrectly removed by remove_footprint('R1')"
+        )
+
+        # 4. No footprint with the original reference should remain
+        assert pcb.get_footprint("R1") is None
+
+        # 5. Rename temp -> real (manually, since the test footprint has no
+        #    sexp node -- the real code path uses update_footprint_reference
+        #    which handles both sexp and _footprints)
+        remaining[0].reference = "R1"
+        assert pcb.get_footprint("R1") is not None
+        assert pcb.get_footprint("R1") is remaining[0]
+
+    def test_old_pattern_would_delete_both(self, tmp_path):
+        """Demonstrate that using the SAME reference for add then remove loses
+        the new footprint -- the exact bug this fix prevents."""
+        from kicad_tools.schema.pcb import PCB, Footprint
+        from tests.conftest import MINIMAL_PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(MINIMAL_PCB)
+        pcb = PCB.load(str(pcb_file))
+
+        # Simulate the OLD (broken) pattern: add new fp with the SAME ref
+        new_fp = Footprint(
+            name="Resistor_SMD:R_0805_2012Metric",
+            layer="F.Cu",
+            position=(50.0, 50.0),
+            rotation=0.0,
+            reference="R1",
+            value="10k",
+        )
+        pcb._footprints.append(new_fp)
+
+        # Both footprints now have reference "R1"
+        assert len([fp for fp in pcb._footprints if fp.reference == "R1"]) == 2
+
+        # remove_footprint("R1") wipes ALL of them from _footprints
+        pcb.remove_footprint("R1")
+
+        r1_remaining = [fp for fp in pcb._footprints if fp.reference == "R1"]
+        assert len(r1_remaining) == 0, (
+            "This test documents the bug: remove_footprint deletes ALL "
+            "footprints sharing the same reference, including the new one."
+        )
+
+
+class TestReconcilerApplyUpdateValueViaPCBAPI:
+    """Tests for update_value routing through PCB.update_footprint_value()."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler with temp file paths."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+        return reconciler, sch_path, pcb_path
+
+    def test_update_value_calls_pcb_api(self):
+        """Test that update_value uses pcb.update_footprint_value() instead of raw sexp."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_value",
+                            "reference": "C1",
+                            "old_value": "2.2nF 50V",
+                            "new_value": "100nF 50V",
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.update_footprint_value.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 1
+        assert changes[0].change_type == "update_value"
+        assert changes[0].applied is True
+        assert changes[0].old_value == "2.2nF 50V"
+        assert changes[0].new_value == "100nF 50V"
+        # Verify PCB API was called (not raw sexp manipulation)
+        mock_pcb.update_footprint_value.assert_called_once_with("C1", "100nF 50V")
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_update_value_dry_run(self):
+        """Test that update_value in dry-run does not call PCB API."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="C1",
+                    pcb_ref="C1",
+                    confidence="high",
+                    match_type="exact",
+                    actions=(
+                        {
+                            "type": "update_value",
+                            "reference": "C1",
+                            "old_value": "2.2nF",
+                            "new_value": "100nF",
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        mock_pcb.update_footprint_value.assert_not_called()
+        mock_pcb.save.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_rename_calls_pcb_api(self):
+        """Test that rename uses pcb.update_footprint_reference() instead of raw sexp."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(
+            matches=[
+                SyncMatch(
+                    schematic_ref="R1",
+                    pcb_ref="R99",
+                    confidence="high",
+                    match_type="value_footprint",
+                    actions=(
+                        {
+                            "type": "rename",
+                            "reference": "R99",
+                            "old_value": "R99",
+                            "new_value": "R1",
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.update_footprint_reference.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 1
+        assert changes[0].change_type == "rename"
+        assert changes[0].applied is True
+        mock_pcb.update_footprint_reference.assert_called_once_with("R99", "R1")
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_update_value_footprint_not_found_returns_none(self):
+        """Test that update_value returns None when footprint is not found."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "update_value",
+            "reference": "MISSING",
+            "old_value": "10k",
+            "new_value": "4.7k",
+        }
+
+        mock_pcb = MagicMock()
+        mock_pcb.update_footprint_value.return_value = False
+
+        change = reconciler._apply_update_value(mock_pcb, action, dry_run=False)
+        assert change is None
+
+
+class TestReconcilerApplyRemoveOrphans:
+    """Tests for orphan removal in Reconciler.apply()."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler with temp file paths."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+        return reconciler, sch_path, pcb_path
+
+    def test_remove_orphans_applied(self):
+        """Test that orphans are removed when remove_orphans=True."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["J5", "R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = False
+        mock_pcb.remove_footprint.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True)
+
+        assert len(changes) == 2
+        assert all(c.change_type == "remove_orphan" for c in changes)
+        assert all(c.applied for c in changes)
+        assert changes[0].reference == "J5"
+        assert changes[1].reference == "R11"
+        assert mock_pcb.remove_footprint.call_count == 2
+        mock_pcb.save.assert_called_once()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_dry_run(self):
+        """Test that dry-run does not remove orphans."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["J5"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = False
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True, remove_orphans=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert changes[0].change_type == "remove_orphan"
+        assert changes[0].new_value == "removed"
+        mock_pcb.remove_footprint.assert_not_called()
+        mock_pcb.save.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_skips_traced_without_force(self):
+        """Test that orphans with traces are skipped without --force."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert "has traces" in changes[0].new_value
+        mock_pcb.remove_footprint.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_force_removes_traced(self):
+        """Test that --force removes orphans even with routed traces."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = True
+        mock_pcb.remove_footprint.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True, force=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is True
+        assert "forced" in changes[0].new_value
+        mock_pcb.remove_footprint.assert_called_once_with("R11")
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_not_enabled_by_default(self):
+        """Test that orphans are NOT removed without remove_orphans=True."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["J5", "R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False)
+
+        assert len(changes) == 0
+        mock_pcb.remove_footprint.assert_not_called()
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_empty_list_no_error(self):
+        """Test that empty orphan list with remove_orphans=True produces no errors."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=[])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True)
+
+        assert len(changes) == 0
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_remove_orphans_dry_run_traced_shows_skip(self):
+        """Test dry-run with traced orphans shows skip message."""
+        reconciler, sch_path, pcb_path = self._make_reconciler()
+
+        analysis = SyncAnalysis(pcb_orphans=["R11"])
+
+        mock_pcb = MagicMock()
+        mock_pcb.get_board_outline.return_value = []
+        mock_pcb.footprint_has_traces.return_value = True
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
+            changes = reconciler.apply(analysis, dry_run=True, remove_orphans=True)
+
+        assert len(changes) == 1
+        assert changes[0].applied is False
+        assert "has traces" in changes[0].new_value
+        assert "--force" in changes[0].new_value
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+
+class TestReconcilerSaveMapping:
+    """Tests for Reconciler.save_mapping()."""
+
+    def test_save_mapping_creates_valid_json(self):
+        """Test that save_mapping creates a valid JSON file."""
+        with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
+            sch_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
+            pcb_path = pf.name
+
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
+
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact")],
+            schematic_orphans=["R5"],
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as out:
+            output_path = out.name
+
+        reconciler.save_mapping(analysis, output_path)
+
+        with open(output_path) as f:
+            data = json.load(f)
+
+        assert "matches" in data
+        assert "schematic_orphans" in data
+        assert data["schematic"] == sch_path
+        assert data["pcb"] == pcb_path
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+        Path(output_path).unlink()
+
+
+class TestSmartPlacement:
+    """Tests for net-adjacency-based proximity placement of new components."""
+
+    def _make_reconciler(self):
+        """Create a Reconciler instance without file validation."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+        return reconciler
+
+    def _make_mock_pcb(self, footprints=None, board_origin=(0.0, 0.0), outline=None):
+        """Create a mock PCB with the given footprints."""
+        mock_pcb = MagicMock()
+        mock_pcb.board_origin = board_origin
+
+        if footprints is None:
+            footprints = []
+        mock_fps = []
+        for ref, x, y in footprints:
+            fp = MagicMock()
+            fp.reference = ref
+            fp.position = (x, y)
+            mock_fps.append(fp)
+        mock_pcb.footprints = mock_fps
+        mock_pcb.get_board_outline.return_value = outline or []
+        return mock_pcb
+
+    def test_find_non_overlapping_clear_centroid(self):
+        """When centroid is clear, it should be returned directly."""
+        x, y = Reconciler._find_non_overlapping_position(10.0, 20.0, [], 5.0)
+        assert x == 10.0
+        assert y == 20.0
+
+    def test_find_non_overlapping_occupied_centroid(self):
+        """When centroid is occupied, a nearby clear position should be found."""
+        occupied = [(10.0, 20.0)]
+        x, y = Reconciler._find_non_overlapping_position(10.0, 20.0, occupied, 5.0)
+        dist = math.sqrt((x - 10.0) ** 2 + (y - 20.0) ** 2)
+        # Must be at least min_spacing away from the occupied position
+        assert dist >= 5.0
+        # But should be close -- within the first ring (radius = 5.0)
+        assert dist <= 6.0
+
+    def test_find_non_overlapping_multiple_occupied(self):
+        """Position found should be clear of all occupied positions."""
+        occupied = [(10.0, 20.0), (15.0, 20.0), (10.0, 25.0)]
+        x, y = Reconciler._find_non_overlapping_position(10.0, 20.0, occupied, 5.0)
+        for ox, oy in occupied:
+            dist = math.sqrt((x - ox) ** 2 + (y - oy) ** 2)
+            assert dist >= 5.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_build_net_adjacency_basic(self, mock_export):
+        """Components sharing nets should appear as neighbors."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        # U1 and C1 share VCC net, U1 and R1 share SIG net
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                    NetNode(reference="C2", pin="1"),
+                ],
+            ),
+            NetlistNet(
+                code=2,
+                name="GND",
+                nodes=[
+                    NetNode(reference="U1", pin="2"),
+                    NetNode(reference="C1", pin="2"),
+                    NetNode(reference="C2", pin="2"),
+                ],
+            ),
+            NetlistNet(
+                code=3,
+                name="SIG",
+                nodes=[
+                    NetNode(reference="U1", pin="3"),
+                    NetNode(reference="R1", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # C1 and R1 are new; U1 and C2 are existing
+        adjacency = reconciler._build_net_adjacency({"C1", "R1"})
+
+        # C1 should have U1 and C2 as neighbors (shares VCC and GND)
+        assert "U1" in adjacency["C1"]
+        assert "C2" in adjacency["C1"]
+        # R1 should have U1 as neighbor (shares SIG)
+        assert "U1" in adjacency["R1"]
+        # U1 is not new, so should not be in adjacency
+        assert "U1" not in adjacency
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_build_net_adjacency_no_placed_neighbors(self, mock_export):
+        """New components sharing nets only with other new components get no neighbors."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="C1", pin="1"),
+                    NetNode(reference="C2", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        adjacency = reconciler._build_net_adjacency({"C1", "C2"})
+
+        # Both are new, so neither has placed neighbors
+        assert adjacency.get("C1", set()) == set()
+        assert adjacency.get("C2", set()) == set()
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_near_neighbor(self, mock_export):
+        """New component should be placed near its net-neighbor."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # U1 is at sheet-absolute (50, 60), board origin is (0, 0)
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 60.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        # Should be within 10mm of U1's position (the acceptance criterion)
+        dist = math.sqrt((cx - 50.0) ** 2 + (cy - 60.0) ** 2)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_centroid_of_multiple_neighbors(self, mock_export):
+        """New component with multiple neighbors should be near their centroid."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="U2", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # U1 at (20, 30), U2 at (40, 30) -> centroid at (30, 30)
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 20.0, 30.0), ("U2", 40.0, 30.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        # Should be within 10mm of the centroid (30, 30)
+        dist = math.sqrt((cx - 30.0) ** 2 + (cy - 30.0) ** 2)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_no_neighbors_returns_empty(self, mock_export):
+        """Component with no net-neighbors should not appear in smart positions."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 60.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        # C1 shares no net with any existing component
+        assert "C1" not in positions
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_compute_smart_placement_with_board_origin(self, mock_export):
+        """Smart placement should account for board origin offset."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        # U1 at sheet-absolute (150, 160), board origin at (100, 100)
+        # -> board-relative position is (50, 60)
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 150.0, 160.0)],
+            board_origin=(100.0, 100.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        # Board-relative centroid should be near (50, 60)
+        dist = math.sqrt((cx - 50.0) ** 2 + (cy - 60.0) ** 2)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_smart_placement_no_overlap(self, mock_export):
+        """Multiple new components should not overlap each other."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                    NetNode(reference="C2", pin="1"),
+                    NetNode(reference="C3", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 50.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1", "C2", "C3"])
+
+        assert len(positions) == 3
+        # Verify no two new positions are too close (min_spacing = 5.0)
+        placed = list(positions.values())
+        for i in range(len(placed)):
+            for j in range(i + 1, len(placed)):
+                dist = math.sqrt(
+                    (placed[i][0] - placed[j][0]) ** 2 + (placed[i][1] - placed[j][1]) ** 2
+                )
+                assert dist >= 5.0, (
+                    f"Components too close: {placed[i]} and {placed[j]}, dist={dist}"
+                )
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_decoupling_cap_placed_near_ic(self, mock_export):
+        """Decoupling capacitor for an IC should be placed adjacent to it."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        # IC U1 and decoupling cap C1 share VCC and GND nets
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="14"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
+            NetlistNet(
+                code=2,
+                name="GND",
+                nodes=[
+                    NetNode(reference="U1", pin="7"),
+                    NetNode(reference="C1", pin="2"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 80.0, 80.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1"])
+
+        assert "C1" in positions
+        cx, cy = positions["C1"]
+        dist = math.sqrt((cx - 80.0) ** 2 + (cy - 80.0) ** 2)
+        # Decoupling cap must be within 10mm of the IC (acceptance criterion)
+        assert dist < 10.0
+
+    @patch("kicad_tools.operations.netlist.export_netlist")
+    def test_grid_fallback_for_orphan_components(self, mock_export):
+        """Components with no net-neighbors should fall back to grid placement."""
+        from kicad_tools.operations.netlist import NetlistNet, NetNode
+
+        # C1 shares a net with U1, C2 is isolated (no shared nets)
+        mock_netlist = MagicMock()
+        mock_netlist.nets = [
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
+        ]
+        mock_export.return_value = mock_netlist
+
+        reconciler = self._make_reconciler()
+        mock_pcb = self._make_mock_pcb(
+            footprints=[("U1", 50.0, 50.0)],
+            board_origin=(0.0, 0.0),
+        )
+
+        positions = reconciler._compute_smart_placement(mock_pcb, ["C1", "C2"])
+
+        # C1 should get smart placement
+        assert "C1" in positions
+        # C2 has no neighbors, so it should not appear (grid fallback in apply())
+        assert "C2" not in positions
+
+
+class TestComputePlacementStart:
+    """Tests for Reconciler._compute_placement_start coordinate handling."""
+
+    def test_nonzero_origin_no_double_subtraction(self, tmp_path):
+        """Placement start must use board-relative coords directly.
+
+        get_board_outline() returns board-relative coordinates, so
+        _compute_placement_start must NOT subtract the origin again.
+        """
+        mock_pcb = MagicMock()
+        mock_pcb.board_origin = (100.0, 80.0)
+        # Board-relative outline (already transformed by get_board_outline)
+        mock_pcb.get_board_outline.return_value = [
+            (0, 0),
+            (50, 0),
+            (50, 30),
+            (0, 30),
+        ]
+
+        # Create minimal files so Reconciler can be instantiated
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text("(kicad_sch (version 20231120) (generator test) (uuid x))")
+        pcb.write_text("(kicad_pcb (version 20240108) (generator test))")
+
+        reconciler = Reconciler(schematic=str(sch), pcb=str(pcb))
+        x, y, col = reconciler._compute_placement_start(mock_pcb)
+
+        assert x == pytest.approx(0.0)
+        assert y == pytest.approx(40.0)
+        assert col == 0
+
+    def test_no_outline_returns_defaults(self, tmp_path):
+        """Without outline, placement defaults to (10, 10)."""
+        mock_pcb = MagicMock()
+        mock_pcb.board_origin = (0.0, 0.0)
+        mock_pcb.get_board_outline.return_value = []
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text("(kicad_sch (version 20231120) (generator test) (uuid x))")
+        pcb.write_text("(kicad_pcb (version 20240108) (generator test))")
+
+        reconciler = Reconciler(schematic=str(sch), pcb=str(pcb))
+        x, y, col = reconciler._compute_placement_start(mock_pcb)
+
+        assert x == pytest.approx(10.0)
+        assert y == pytest.approx(10.0)
+        assert col == 0
+
+
+# ---------------------------------------------------------------------------
+# Netlist byproduct location (#4795)
+# ---------------------------------------------------------------------------
+
+_MINIMAL_SCHEMATIC = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 100 100 0) (effects (hide yes)))
+  )
+  (symbol
+    (lib_id "Device:C")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (property "Reference" "C1" (at 120 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100n" (at 120 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402" (at 120 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# Minimal kicad-cli-shaped netlist matching _MINIMAL_SCHEMATIC (R1 + C1).
+_FAKE_EXPORTED_NETLIST = """(export (version "E")
+  (design (source "design.kicad_sch") (tool "Eeschema"))
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402"))
+    (comp (ref "C1") (value "100n") (footprint "Capacitor_SMD:C_0402")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1"))
+      (node (ref "C1") (pin "1")))))
+"""
+
+
+class TestNetlistByproductLocation:
+    """``Reconciler`` must not litter the user's project dir (#4795).
+
+    ``export_netlist`` defaults ``output_path`` to
+    ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it, so
+    the bare calls in ``_build_net_adjacency`` and ``_assign_nets`` dropped
+    an unrequested netlist file beside the user's schematic on every sync.
+    Both sites consume the parsed ``Netlist`` object only, never the file.
+    """
+
+    @pytest.fixture
+    def schematic(self, tmp_path: Path) -> Path:
+        """A schematic in its own 'project' directory."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        sch = proj / "design.kicad_sch"
+        sch.write_text(_MINIMAL_SCHEMATIC)
+        return sch
+
+    @pytest.fixture
+    def fake_kicad_cli(self, monkeypatch) -> list[Path]:
+        """Force the kicad-cli export path with a stubbed subprocess.
+
+        The stub writes a real netlist file to whatever ``--output`` path it
+        is handed, exactly like kicad-cli does -- so the byproduct lands
+        wherever ``export_netlist`` decided it should, which is the behavior
+        under test.  Returns the list of captured output paths.
+        """
+        import subprocess as _subprocess
+
+        captured_outputs: list[Path] = []
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            captured_outputs.append(out)
+            out.write_text(_FAKE_EXPORTED_NETLIST)
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return captured_outputs
+
+    def _make_reconciler(self, schematic: Path) -> Reconciler:
+        """Create a Reconciler bound to ``schematic`` without file validation."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = schematic
+        reconciler._pcb_path = schematic.with_suffix(".kicad_pcb")
+        return reconciler
+
+    def test_build_net_adjacency_leaves_no_byproduct(self, schematic, fake_kicad_cli):
+        """``_build_net_adjacency`` must not write beside the schematic."""
+        reconciler = self._make_reconciler(schematic)
+        before = {p.name for p in schematic.parent.iterdir()}
+
+        adjacency = reconciler._build_net_adjacency({"C1"})
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+        # The netlist was really consumed: C1 is new, R1 is placed.
+        assert adjacency == {"C1": {"R1"}}
+        stray = sorted(p.name for p in schematic.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"adjacency build left byproducts beside the schematic: {stray}"
+        assert {p.name for p in schematic.parent.iterdir()} == before
+
+    def test_build_net_adjacency_temp_export_is_cleaned_up(self, schematic, fake_kicad_cli):
+        """The temp directory is torn down before ``_build_net_adjacency`` returns."""
+        reconciler = self._make_reconciler(schematic)
+
+        reconciler._build_net_adjacency({"C1"})
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != schematic.parent, f"export wrote into the project dir: {out}"
+            assert not out.exists(), f"temp netlist survived the call: {out}"
+            assert not out.parent.exists(), f"temp dir survived the call: {out.parent}"
+
+    def test_build_net_adjacency_still_swallows_failures(self, schematic, monkeypatch):
+        """Export failures still degrade to an empty adjacency map, not a raise."""
+        import kicad_tools.operations.netlist as netlist_mod
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("kicad-cli failed: synthetic")
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _boom)
+
+        reconciler = self._make_reconciler(schematic)
+        assert reconciler._build_net_adjacency({"C1"}) == {}
+
+    def test_assign_nets_leaves_no_byproduct(self, schematic, fake_kicad_cli):
+        """``_assign_nets`` must not write beside the schematic."""
+        reconciler = self._make_reconciler(schematic)
+        pcb = MagicMock()
+        before = {p.name for p in schematic.parent.iterdir()}
+
+        reconciler._assign_nets(pcb)
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+        # The netlist was really consumed (best-effort path swallows errors,
+        # so this assertion is what proves the call actually succeeded).
+        pcb.add_net.assert_called_once_with("/N1")
+        pcb.assign_nets_from_netlist.assert_called_once()
+        stray = sorted(p.name for p in schematic.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"net assignment left byproducts beside the schematic: {stray}"
+        assert {p.name for p in schematic.parent.iterdir()} == before
+
+    def test_assign_nets_temp_export_is_cleaned_up(self, schematic, fake_kicad_cli):
+        """The temp directory is torn down before ``_assign_nets`` returns."""
+        reconciler = self._make_reconciler(schematic)
+
+        reconciler._assign_nets(MagicMock())
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != schematic.parent, f"export wrote into the project dir: {out}"
+            assert not out.exists(), f"temp netlist survived the call: {out}"
+            assert not out.parent.exists(), f"temp dir survived the call: {out.parent}"
+
+    def test_assign_nets_still_swallows_failures(self, schematic, monkeypatch):
+        """Net assignment stays best-effort when the export fails."""
+        import kicad_tools.operations.netlist as netlist_mod
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("kicad-cli failed: synthetic")
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _boom)
+
+        reconciler = self._make_reconciler(schematic)
+        pcb = MagicMock()
+
+        reconciler._assign_nets(pcb)  # must not raise
+
+        pcb.assign_nets_from_netlist.assert_not_called()
+
+
+class TestFootprintsEquivalent:
+    """Nickname-aware footprint comparison (issue #7213)."""
+
+    def test_nickname_drift_flagged(self):
+        from kicad_tools.sync.reconciler import _footprints_equivalent
+
+        assert not _footprints_equivalent("Capacitor_SMD:C_0603", "Resistor_SMD:C_0603")
+
+    def test_matching_lib_ids_equivalent(self):
+        from kicad_tools.sync.reconciler import _footprints_equivalent
+
+        assert _footprints_equivalent("Capacitor_SMD:C_0603", "Capacitor_SMD:C_0603")
+
+    def test_legacy_bare_name_tolerated(self):
+        from kicad_tools.sync.reconciler import _footprints_equivalent
+
+        assert _footprints_equivalent("Capacitor_SMD:C_0603", "C_0603")
+        assert _footprints_equivalent("C_0603", "Capacitor_SMD:C_0603")
+        assert not _footprints_equivalent("Capacitor_SMD:C_0603", "C_0402")
+
+
+class TestPadNetMismatches:
+    """Pad-net mismatch detection and apply (Issue #8703)."""
+
+    MM = {"reference": "R1", "pad": "2", "pcb_net": "GND", "schematic_net": "VCC"}
+
+    def test_mismatch_breaks_sync_and_is_actionable(self):
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        assert not analysis.is_in_sync
+        assert analysis.has_actionable_items
+
+    def test_to_dict_and_summary(self):
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        d = analysis.to_dict()
+        assert d["pad_net_mismatches"] == [self.MM]
+        assert d["summary"]["pad_net_mismatches"] == 1
+        assert "R1.2: GND -> VCC" in analysis.summary()
+
+    def test_find_uses_validator_and_filters_unconnected_schematic(self):
+        from kicad_tools.validate.netlist import SyncIssue
+
+        issues = [
+            SyncIssue("error", "net_mismatch", "m", "s", "R1", "VCC", "GND", "2"),
+            SyncIssue("error", "net_mismatch", "m", "s", "R2", "", "GND", "1"),
+        ]
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        with patch("kicad_tools.validate.netlist.NetlistValidator") as nv:
+            nv.return_value.pad_net_mismatches.return_value = issues
+            assert rec._find_pad_net_mismatches() == [self.MM]
+
+    def _reconciler(self):
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        return rec
+
+    def test_apply_dry_run_reports_without_assigning(self):
+        rec = self._reconciler()
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load") as load,
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets") as assign,
+        ):
+            changes = rec.apply(analysis, dry_run=True)
+        load.assert_called_once()
+        assign.assert_not_called()
+        assert len(changes) == 1
+        c = changes[0]
+        assert (c.reference, c.change_type, c.old_value, c.new_value, c.applied) == (
+            "R1.2",
+            "assign_pad_net",
+            "GND",
+            "VCC",
+            False,
+        )
+
+    def test_apply_assigns_nets_and_saves(self, tmp_path):
+        rec = self._reconciler()
+        out = tmp_path / "out.kicad_pcb"
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load") as load,
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets") as assign,
+        ):
+            changes = rec.apply(analysis, dry_run=False, output=out)
+        assign.assert_called_once_with(load.return_value, strict=True)
+        load.return_value.save.assert_called_once_with(str(out))
+        assert changes[0].applied
+
+    def test_strict_assign_failure_is_reported(self):
+        rec = self._reconciler()
+        with patch("kicad_tools.operations.netlist.export_netlist", side_effect=OSError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                rec._assign_nets(MagicMock(), strict=True)
+            rec._assign_nets(MagicMock())  # non-strict stays best-effort
+
+
+class TestStrandedCopper:
+    """Issue #8705: copper stranded by a pad-net change."""
+
+    MM = {"reference": "R1", "pad": "2", "pcb_net": "GND", "schematic_net": "VCC"}
+
+    @staticmethod
+    def _pcb(segs, vias=(), pads=None):
+        from types import SimpleNamespace as NS
+
+        from kicad_tools.schema.pcb import Segment, Via
+
+        positions = {
+            ("R1", "2"): (0.0, 0.0),
+            ("R2", "1"): (10.0, 0.0),
+            ("R3", "1"): (10.0, 10.0),
+            ("R4", "1"): (0.0, 10.0),
+        }
+        pcb = MagicMock()
+        pcb._nets = {}
+        pcb.get_pad_position.side_effect = lambda r, p: positions.get((r, p))
+        pcb.footprints = [
+            NS(reference="R1", pads=[NS(number="2", net_name="GND")]),
+            NS(reference="R2", pads=[NS(number="1", net_name="GND")]),
+            NS(reference="R3", pads=[NS(number="1", net_name="GND")]),
+            NS(reference="R4", pads=[NS(number="1", net_name="GND")]),
+        ]
+        pcb.segments = [
+            Segment(
+                start=a, end=b, width=0.2, layer="F.Cu", net_number=1, net_name=n, uuid=u, locked=lk
+            )
+            for (a, b, n, u, lk) in segs
+        ]
+        pcb.vias = [
+            Via(
+                position=p,
+                size=0.6,
+                drill=0.3,
+                layers=["F.Cu", "B.Cu"],
+                net_number=1,
+                net_name=n,
+                uuid=u,
+            )
+            for (p, n, u) in vias
+        ]
+        return pcb
+
+    def test_pour_stub_track_and_via_reported(self):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False)], vias=[((1, 0), "GND", "v1")])
+        found = Reconciler._collect_stranded(pcb, [self.MM])
+        assert {i["uuid"] for _o, i in found} == {"s1", "v1"}
+        assert all(i["pad"] == "R1.2" for _o, i in found)
+
+    def test_copper_reaching_correct_pad_is_not_stranded_beyond_it(self):
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "s1", False),
+                ((5, 0), (10, 0), "GND", "s2", False),
+                ((10, 0), (20, 0), "GND", "s3", False),  # beyond R2.1: legit
+            ]
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert "s3" not in uuids and {"s1", "s2"} <= uuids
+
+    def test_t_junction_keeps_branches_to_legit_pads(self):
+        # R1.2 -A- J; J -B- R2.1; J -C- K -D- R3.1 (Issue #8705 review)
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),
+                ((5, 0), (5, 10), "GND", "C", False),
+                ((5, 10), (10, 10), "GND", "D", False),
+            ]
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert uuids == {"A"}
+
+    def test_via_junction_keeps_continuation_to_legit_pad(self):
+        # Net continues on B.Cu from the via to R2.1: only the pad-side stub goes.
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),  # second branch at the via
+                ((5, 0), (5, 10), "GND", "C", False),
+                ((5, 10), (10, 10), "GND", "D", False),
+            ],
+            vias=[((5, 0), "GND", "V")],
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert uuids == {"A"}
+
+    def test_via_bridged_chain_to_legit_pad_is_stranded_only_up_to_pad(self):
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),
+                ((10, 0), (10, 5), "GND", "legit", False),  # R2.1's own routing
+            ],
+            vias=[((5, 0), "GND", "V")],
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        # The via is a pass-through between A and B, so the chain to R2.1 is the
+        # old R1.2 connection; R2.1's own copper beyond the pad stays.
+        assert uuids == {"A", "V", "B"}
+
+    def test_segment_between_two_mismatched_pads_reported_once(self):
+        mm2 = {"reference": "R2", "pad": "1", "pcb_net": "GND", "schematic_net": "VCC"}
+        pcb = self._pcb([((0, 0), (10, 0), "GND", "s1", False)])
+        found = Reconciler._collect_stranded(pcb, [self.MM, mm2])
+        assert [i["uuid"] for _o, i in found] == ["s1"]
+
+    def test_real_pcb_object(self, tmp_path):
+        from kicad_tools.schema.pcb import PCB, Segment, Via
+        from tests.conftest import MINIMAL_PCB
+
+        f = tmp_path / "a.kicad_pcb"
+        f.write_text(MINIMAL_PCB)
+        pcb = PCB.load(str(f))
+        x, y = pcb.get_pad_position("R1", "1")
+        pcb._segments = [
+            Segment(
+                start=(x, y),
+                end=(x + 2, y),
+                width=0.2,
+                layer="F.Cu",
+                net_number=0,
+                net_name="GND",
+                uuid="rs1",
+            )
+        ]
+        pcb._vias = [
+            Via(
+                position=(x + 2, y),
+                size=0.6,
+                drill=0.3,
+                layers=["F.Cu", "B.Cu"],
+                net_number=0,
+                net_name="GND",
+                uuid="rv1",
+            )
+        ]
+        mm = {"reference": "R1", "pad": "1", "pcb_net": "GND", "schematic_net": "VCC"}
+        found = Reconciler._collect_stranded(pcb, [mm])
+        assert {i["uuid"] for _o, i in found} == {"rs1", "rv1"}
+
+    def test_other_net_and_clean_board(self):
+        pcb = self._pcb([((0, 0), (1, 0), "VCC", "s1", False)])
+        assert Reconciler._collect_stranded(pcb, [self.MM]) == []
+        assert Reconciler._collect_stranded(pcb, []) == []
+
+    def test_locked_reported_and_flagged(self):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", True)])
+        ((_o, info),) = Reconciler._collect_stranded(pcb, [self.MM])
+        assert info["locked"] == "true"
+
+    def _apply(self, rec, pcb, analysis, **kw):
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=pcb),
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets"),
+        ):
+            return rec.apply(analysis, **kw)
+
+    def _rec(self):
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        return rec
+
+    def test_apply_without_flag_never_removes(self, tmp_path):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False)])
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM], stranded_copper=[{"kind": "segment"}])
+        changes = self._apply(self._rec(), pcb, analysis, dry_run=False, output=tmp_path / "o")
+        pcb.remove_segments.assert_not_called()
+        assert all(c.change_type != "remove_stranded_copper" for c in changes)
+
+    def test_apply_dry_run_lists_without_removing(self):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False)])
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM], stranded_copper=[{"kind": "segment"}])
+        changes = self._apply(self._rec(), pcb, analysis, dry_run=True, remove_stranded=True)
+        pcb.remove_segments.assert_not_called()
+        rm = [c for c in changes if c.change_type == "remove_stranded_copper"]
+        assert len(rm) == 1 and not rm[0].applied and rm[0].new_value == "would remove"
+
+    def test_apply_confirm_removes_unlocked_keeps_locked(self, tmp_path):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False), ((0, 0), (0, 1), "GND", "s2", True)])
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM], stranded_copper=[{"kind": "segment"}])
+        changes = self._apply(
+            self._rec(), pcb, analysis, dry_run=False, remove_stranded=True, output=tmp_path / "o"
+        )
+        removed = pcb.remove_segments.call_args[0][0]
+        assert [s.uuid for s in removed] == ["s1"]
+        vals = {
+            c.reference: c.new_value for c in changes if c.change_type == "remove_stranded_copper"
+        }
+        assert vals["segment:s2"] == "locked (skipped)"
+
+    SWAP = {
+        "type": "update_footprint",
+        "reference": "R1",
+        "old_value": "Old:FP",
+        "new_value": "New:FP",
+    }
+
+    def _swap_pcb(self, segs, vias, new_pad_numbers):
+        """PCB whose R1 has pads 1 and 2 on GND; the swap keeps only new_pad_numbers."""
+        from types import SimpleNamespace as NS
+
+        pcb = self._pcb(segs, vias)
+        old_fp = NS(
+            reference="R1",
+            position=(0.0, 0.0),
+            rotation=0.0,
+            layer="F.Cu",
+            value="",
+            pads=[
+                NS(number="1", net_name="GND", net_number=1),
+                NS(number="2", net_name="GND", net_number=1),
+            ],
+        )
+        pcb.footprints = [old_fp, *pcb.footprints[1:]]
+        pcb.get_footprint.side_effect = lambda r: old_fp if r == "R1" else None
+        pcb.get_pad_position.side_effect = lambda r, n: {
+            ("R1", "2"): (0.0, 0.0),
+            ("R1", "1"): (0.0, 5.0),
+            ("R2", "1"): (10.0, 0.0),
+        }.get((r, n))
+        scratch = MagicMock()
+        from types import SimpleNamespace as NS2
+
+        scratch.add_footprint.return_value = NS2(pads=[NS2(number=n) for n in new_pad_numbers])
+        return pcb, scratch
+
+    def test_removed_pad_seed_only_for_pads_absent_from_new_footprint(self):
+        pcb, scratch = self._swap_pcb([], [], ["1"])
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
+            seeds, gaps = rec._removed_pad_seeds(pcb, [self.SWAP])
+        assert seeds == [{"reference": "R1", "pad": "2", "pcb_net": "GND"}]
+        assert gaps == []
+
+    def test_pad_present_in_both_footprints_is_not_seeded(self):
+        pcb, scratch = self._swap_pcb([], [((0, 0), "GND", "v1")], ["1", "2"])
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
+            seeds, gaps = rec._removed_pad_seeds(pcb, [self.SWAP])
+        assert seeds == [] and gaps == []
+
+    def test_via_stub_on_removed_pad_is_reported_and_removed_on_apply(self, tmp_path):
+        # Segment is deleted by the swap itself; the via at the pad is not.
+        pcb, scratch = self._swap_pcb(
+            [((0, 0), (1, 0), "GND", "s1", False)], [((1, 0), "GND", "v1")], ["1"]
+        )
+        rec = self._rec()
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact", actions=(self.SWAP,))],
+            stranded_copper=[{"kind": "via"}],
+        )
+        pcb.remove_footprint.side_effect = lambda r: None
+        pcb.add_footprint.return_value = scratch.add_footprint.return_value
+        with patch("kicad_tools.schema.pcb.PCB.load", side_effect=[pcb, scratch]):
+            with (
+                patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+                patch.object(rec, "_assign_nets"),
+            ):
+                changes = rec.apply(
+                    analysis, dry_run=False, remove_stranded=True, output=tmp_path / "o"
+                )
+        removed_vias = pcb.remove_vias.call_args[0][0]
+        assert [v.uuid for v in removed_vias] == ["v1"]
+        assert any(c.change_type == "remove_stranded_copper" for c in changes)
+
+    def test_analysis_wiring(self):
+        a = SyncAnalysis(stranded_copper=[{"kind": "via"}])
+        assert not a.is_in_sync and a.has_actionable_items
+        assert a.to_dict()["summary"]["stranded_copper"] == 1
+        assert "Stranded copper" in a.summary()
+
+    def test_cli_requires_apply(self, capsys):
+        from kicad_tools.cli.sync_cmd import main
+
+        assert main(["--analyze", "--remove-stranded", "--schematic", "a", "--pcb", "b"]) == 1
+        assert "--remove-stranded requires --apply" in capsys.readouterr().err
+
+
+class TestRemovedPadScanProjectLib:
+    """Issue #8942: replacement footprints from a project fp-lib-table library.
+
+    These tests use the real fixture at ``tests/fixtures/removed_pad_scan_project``
+    and never mock ``add_footprint`` -- the mocked ``TestStrandedCopper`` cases
+    above are exactly why the project-library gap was invisible to the suite.
+    """
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "removed_pad_scan_project"
+
+    SWAP_TO_PROJ = {
+        "type": "update_footprint",
+        "reference": "R1",
+        "old_value": "OldLib:OldFP",
+        "new_value": "scanlib:ProjFP",
+    }
+
+    def _rec(self):
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = self.FIXTURE / "removed_pad_scan.kicad_sch"
+        rec._pcb_path = self.FIXTURE / "removed_pad_scan.kicad_pcb"
+        return rec
+
+    def test_project_library_replacement_resolves_and_seeds(self):
+        from kicad_tools.schema.pcb import PCB
+
+        rec = self._rec()
+        pcb = PCB.load(str(rec._pcb_path))
+        seeds, gaps = rec._removed_pad_seeds(pcb, [self.SWAP_TO_PROJ])
+        # ProjFP has only pad 1, so old pad 2 (on GND) is seeded.
+        assert seeds == [{"reference": "R1", "pad": "2", "pcb_net": "GND"}]
+        assert gaps == []
+
+    def test_unresolvable_replacement_records_scan_gap(self):
+        from kicad_tools.schema.pcb import PCB
+
+        swap = {**self.SWAP_TO_PROJ, "new_value": "Nonexistent:BogusFP"}
+        rec = self._rec()
+        pcb = PCB.load(str(rec._pcb_path))
+        seeds, gaps = rec._removed_pad_seeds(pcb, [swap])
+        assert seeds == []
+        assert [g["reference"] for g in gaps] == ["R1"]
+        assert "BogusFP" in gaps[0]["reason"]
+
+    def test_whole_scan_failure_records_scan_gap(self):
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", side_effect=OSError("disk gone")):
+            stranded, gaps = rec._find_stranded_copper([], [self.SWAP_TO_PROJ])
+        assert stranded == []
+        assert [g["reference"] for g in gaps] == ["*"]
+
+    def test_analysis_reports_scan_gaps(self):
+        gap = {"reference": "R1", "reason": "Footprint 'X' not found"}
+        a = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact", actions=(self.SWAP_TO_PROJ,))],
+            scan_gaps=[gap],
+        )
+        assert a.to_dict()["scan_gaps"] == [gap]
+        assert a.to_dict()["summary"]["scan_gaps"] == 1
+        assert "Removed-pad scan gaps" in a.summary()

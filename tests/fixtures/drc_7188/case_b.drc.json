@@ -1,0 +1,211 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-10-18T03:05:23",
+    "ignored_checks": [
+        {
+            "description": "Footprint has no courtyard defined",
+            "key": "missing_courtyard"
+        },
+        {
+            "description": "Track endpoint not centered on via",
+            "key": "track_not_centered_on_via"
+        },
+        {
+            "description": "Tuning profile track geometries",
+            "key": "tuning_profile_track_geometries"
+        },
+        {
+            "description": "Footprint doesn't match symbol's footprint filters",
+            "key": "footprint_filters_mismatch"
+        },
+        {
+            "description": "Footprint component type doesn't match footprint pads",
+            "key": "footprint_type_mismatch"
+        },
+        {
+            "description": "Footprint doesn't match copy in library",
+            "key": "lib_footprint_mismatch"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning",
+        "exclusion"
+    ],
+    "kicad_version": "10.0.6",
+    "schematic_parity": [
+        {
+            "description": "Pad net (LED_ANODE) doesn't match net given by schematic (/LED_ANODE)",
+            "items": [
+                {
+                    "description": "PTH pad 2 [LED_ANODE] of D1",
+                    "pos": {
+                        "x": 157.27,
+                        "y": 87.5
+                    },
+                    "uuid": "a0ca3eb3-a60b-5458-9531-e7b0a329e7d2"
+                }
+            ],
+            "severity": "warning",
+            "type": "net_conflict"
+        },
+        {
+            "description": "Pad net (LED_ANODE) doesn't match net given by schematic (/LED_ANODE)",
+            "items": [
+                {
+                    "description": "Pad 2 [LED_ANODE] of R1 on F.Cu",
+                    "pos": {
+                        "x": 149.5,
+                        "y": 85.5
+                    },
+                    "uuid": "44d6ac9f-90ee-5bb7-beeb-dc9efbb91ae6"
+                }
+            ],
+            "severity": "warning",
+            "type": "net_conflict"
+        }
+    ],
+    "source": "simple_led_routed.kicad_pcb",
+    "unconnected_items": [],
+    "violations": [
+        {
+            "description": "Clearance violation (rule 'Reviewed clearance - Power' clearance 0.2000 mm; actual 0.0500 mm)",
+            "items": [
+                {
+                    "description": "Via [VCC] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 88.75
+                    },
+                    "uuid": "11111111-2222-3333-4444-555555555555"
+                },
+                {
+                    "description": "PTH pad 1 [GND] of D1",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 87.5
+                    },
+                    "uuid": "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                }
+            ],
+            "severity": "error",
+            "type": "clearance"
+        },
+        {
+            "description": "Clearance violation (rule 'Reviewed clearance - Power' clearance 0.2000 mm; actual 0.0500 mm)",
+            "items": [
+                {
+                    "description": "Via [VCC] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 88.75
+                    },
+                    "uuid": "11111111-2222-3333-4444-555555555555"
+                },
+                {
+                    "description": "PTH pad 1 [GND] of D1",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 87.5
+                    },
+                    "uuid": "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                }
+            ],
+            "severity": "error",
+            "type": "clearance"
+        },
+        {
+            "description": "Clearance violation (rule 'Reviewed clearance - Power' clearance 0.2000 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [VCC] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 88.75
+                    },
+                    "uuid": "11111111-2222-3333-4444-555555555555"
+                },
+                {
+                    "description": "Zone [GND] on B.Cu, priority 1",
+                    "pos": {
+                        "x": 136.3,
+                        "y": 77.8
+                    },
+                    "uuid": "d8d8efe2-a45a-5150-91bd-d377cd5e0752"
+                }
+            ],
+            "severity": "error",
+            "type": "clearance"
+        },
+        {
+            "description": "Hole clearance violation (board setup constraints hole clearance 0.2500 mm; actual 0.0000 mm)",
+            "items": [
+                {
+                    "description": "Via [VCC] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 88.75
+                    },
+                    "uuid": "11111111-2222-3333-4444-555555555555"
+                },
+                {
+                    "description": "Zone [GND] on B.Cu, priority 1",
+                    "pos": {
+                        "x": 136.3,
+                        "y": 77.8
+                    },
+                    "uuid": "d8d8efe2-a45a-5150-91bd-d377cd5e0752"
+                }
+            ],
+            "severity": "error",
+            "type": "hole_clearance"
+        },
+        {
+            "description": "Hole clearance violation (board setup constraints hole clearance 0.2500 mm; actual 0.2000 mm)",
+            "items": [
+                {
+                    "description": "PTH pad 1 [GND] of D1",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 87.5
+                    },
+                    "uuid": "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                },
+                {
+                    "description": "Via [VCC] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 88.75
+                    },
+                    "uuid": "11111111-2222-3333-4444-555555555555"
+                }
+            ],
+            "severity": "error",
+            "type": "hole_clearance"
+        },
+        {
+            "description": "Hole clearance violation (board setup constraints hole clearance 0.2500 mm; actual 0.2000 mm)",
+            "items": [
+                {
+                    "description": "PTH pad 1 [GND] of D1",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 87.5
+                    },
+                    "uuid": "64fc289f-9d09-5741-886f-9dab05a0ae7e"
+                },
+                {
+                    "description": "Via [VCC] on F.Cu - B.Cu",
+                    "pos": {
+                        "x": 154.73,
+                        "y": 88.75
+                    },
+                    "uuid": "11111111-2222-3333-4444-555555555555"
+                }
+            ],
+            "severity": "error",
+            "type": "hole_clearance"
+        }
+    ]
+}

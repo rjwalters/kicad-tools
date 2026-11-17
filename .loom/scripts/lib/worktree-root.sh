@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# worktree-root.sh — Resolve the base directory that holds Loom worktrees.
+#
+# Source this file (do not exec). Defines a single function:
+#
+#   loom_worktree_root <repo_root> -> echoes the absolute worktree base dir
+#
+# Resolution precedence (first match wins), all opt-in:
+#
+#   1. LOOM_WORKTREE_ROOT env var          — highest priority
+#   2. .loom/config.json → worktree.root   — jq-guarded, same namespace as
+#                                            worktree.linkPaths (#3534)
+#   3. ${repo_root}/.loom/worktrees        — default, UNCHANGED behavior
+#
+# When an override (env var or config key) is set, the returned path is
+# namespaced by repo basename so multiple workspaces can share one external
+# volume without colliding:
+#
+#     ${override%/}/<repo-basename>
+#
+# Callers then append `issue-<N>` / `pr-<N>` as before. With neither override
+# set, the function returns `${repo_root}/.loom/worktrees` verbatim — the
+# result is byte-for-byte identical to the historical hardcoded path, so
+# default installations (including the sandboxed macOS app, see ADR-0004) see
+# zero behavior change.
+#
+# Design notes:
+#   - The env-var branch imitates other Loom env overrides (e.g.
+#     LOOM_WORKTREE_ALWAYS_INCLUDE) and always wins over config.
+#   - The config read reuses the exact guard pattern worktree.sh uses for
+#     worktree.linkPaths: only attempt jq when it exists AND the config file
+#     is present, and fall through softly (missing jq / missing key / malformed
+#     JSON → default) so a broken config never breaks worktree creation.
+#   - A RELATIVE override is rejected with a stderr warning and the function
+#     falls back to the default. An external worktree root must be absolute so
+#     that cleanup/GC comparison sites (which resolve absolute paths) match.
+#   - Repo namespacing uses `basename "$repo_root"`. Two repos whose basenames
+#     collide under the same override root would share a namespace; that is a
+#     documented v1 limitation (see the issue), not a bug this helper guards.
+#   - This helper never creates directories; callers `mkdir -p` the parent as
+#     needed (git worktree add creates only the leaf).
+#
+# Config resolution (#4062): the `worktree.root` key is read through the
+# config-resolver tier chain (loom_config_get) instead of a hand-rolled
+# single-tier `.loom/config.json` read, so an override in
+# `.loom-project/project.json` / `.loom-local/local.json` is honored too.
+# `worktree.root` is a plain string, so a single loom_config_get call is
+# correct here (no array/object multi-field re-merge concern — see
+# config-resolver.sh's docstring on non-scalar values).
+#
+# ${BASH_SOURCE[0]:-$0} (not bare ${BASH_SOURCE[0]}) -- the bash+zsh-portable
+# self-path idiom from #3680: disk-headroom.sh sources this file, and
+# disk-headroom.sh is itself sourced DIRECTLY into the invoking shell by
+# sweep.md's Stage -1, which on macOS is often zsh. Under zsh, BASH_SOURCE is
+# unset, so a bare ${BASH_SOURCE[0]} resolves to the shell's CWD instead of
+# this lib dir and the source below fails (zsh sets $0 to the sourced file's
+# own path, which recovers it).
+_LOOM_WORKTREE_ROOT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=./config-resolver.sh
+source "$_LOOM_WORKTREE_ROOT_LIB_DIR/config-resolver.sh"
+
+# _loom_root_unreadable <dir> — true if the path exists (stat succeeds) but
+# readdir fails (e.g. macOS TCC removable-volumes denial: stat/df keep
+# succeeding while `ls`/readdir returns EPERM). A `-d` check alone cannot
+# detect this state.
+_loom_root_unreadable() {
+    [[ -d "$1" ]] && ! command ls "$1" >/dev/null 2>&1
+}
+
+# _loom_root_unusable <target> — true if worktrees could not be created at
+# <target> on this host (#13639): the dir exists but is not writable, or it does
+# not exist and its nearest existing ancestor is not a writable directory (e.g.
+# a committed `/Volumes/Stripe` on a Linux worker: `/Volumes` is absent and `/`
+# is not writable). Side-effect free — never mkdirs. A nonexistent leaf under a
+# writable ancestor is usable (callers `mkdir -p` it).
+_loom_root_unusable() {
+    local p="$1" parent
+    while [[ ! -e "$p" ]]; do
+        parent="$(dirname "$p")"
+        [[ "$parent" == "$p" ]] && return 0
+        p="$parent"
+    done
+    [[ -d "$p" && -w "$p" && -x "$p" ]] && return 1
+    return 0
+}
+
+# loom_worktree_root <repo_root>
+#
+# Echoes the absolute worktree base directory. `repo_root` must be an absolute
+# path to the main workspace (the parent of the git common dir).
+loom_worktree_root() {
+    local repo_root="$1"
+
+    # 1. Env var override — highest priority.
+    if [[ -n "${LOOM_WORKTREE_ROOT:-}" ]]; then
+        if [[ "$LOOM_WORKTREE_ROOT" == /* ]]; then
+            local env_target="${LOOM_WORKTREE_ROOT%/}/$(basename "$repo_root")"
+            if _loom_root_unreadable "$env_target"; then
+                echo "loom_worktree_root: LOOM_WORKTREE_ROOT target exists but is unreadable (readdir failed, e.g. macOS TCC removable-volumes denial): '$env_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            if _loom_root_unusable "$env_target"; then
+                echo "loom_worktree_root: LOOM_WORKTREE_ROOT target is missing or not writable on this host: '$env_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            echo "$env_target"
+            return 0
+        fi
+        echo "loom_worktree_root: LOOM_WORKTREE_ROOT must be an absolute path (got: '$LOOM_WORKTREE_ROOT'); falling back to default" >&2
+        echo "$repo_root/.loom/worktrees"
+        return 0
+    fi
+
+    # 2. Config key override — worktree.root, resolved through the config
+    #    tier chain (legacy .loom/config.json, .loom-project/project.json,
+    #    .loom-local/local.json, private defaults).
+    local cfg_root
+    cfg_root=$(loom_config_get "$repo_root" "worktree.root" "")
+    if [[ -n "$cfg_root" ]]; then
+        if [[ "$cfg_root" == /* ]]; then
+            local cfg_target="${cfg_root%/}/$(basename "$repo_root")"
+            if _loom_root_unreadable "$cfg_target"; then
+                echo "loom_worktree_root: worktree.root target exists but is unreadable (readdir failed, e.g. macOS TCC removable-volumes denial): '$cfg_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            if _loom_root_unusable "$cfg_target"; then
+                echo "loom_worktree_root: worktree.root target is missing or not writable on this host: '$cfg_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            echo "$cfg_target"
+            return 0
+        fi
+        echo "loom_worktree_root: worktree.root in the resolved config must be an absolute path (got: '$cfg_root'); falling back to default" >&2
+        echo "$repo_root/.loom/worktrees"
+        return 0
+    fi
+
+    # 3. Default — unchanged historical behavior.
+    echo "$repo_root/.loom/worktrees"
+}

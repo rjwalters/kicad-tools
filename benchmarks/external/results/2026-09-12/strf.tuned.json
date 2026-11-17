@@ -1,0 +1,110 @@
+{
+  "$schema": "https://kicad-tools.org/schemas/benchmark-external/v1.json",
+  "schema_version": 1,
+  "generated_at": "2026-09-12T10:52:37.878412+00:00",
+  "board_id": "strf",
+  "board_commit": "0525ef655e460ff6d91d770582b47925e7852e7a",
+  "board_source": "https://github.com/pms67/STRF-Kicad",
+  "board_file": "strf.tuned.kicad_pcb",
+  "protocol": "tuned",
+  "tool_commit": "696315f",
+  "route_outcome": {
+    "outcome": "partial",
+    "artifact_source": "router_output",
+    "exit_code": 1,
+    "reason": "the router exited 1 (non-zero) but wrote an output file for this attempt -- measuring the partial progress it made, not treating this as success"
+  },
+  "completion": {
+    "connections_routed": 23,
+    "connections_total": 98,
+    "completion_pct": 23.47,
+    "nets_total": 49,
+    "nets_complete": 17,
+    "nets_incomplete": 32,
+    "nets_unrouted": 0,
+    "nets_blocking_incomplete": 29
+  },
+  "pre_route_completion": {
+    "connections_routed": 23,
+    "connections_total": 98,
+    "completion_pct": 23.47,
+    "nets_total": 49,
+    "nets_complete": 17,
+    "nets_incomplete": 32,
+    "nets_unrouted": 0,
+    "nets_blocking_incomplete": 29
+  },
+  "newly_routed_connections": 0,
+  "copper": {
+    "via_count": 0,
+    "wirelength_mm": 70.25,
+    "segment_count": 1,
+    "arc_count": 0,
+    "wirelength_by_layer_mm": {
+      "F.Cu": 70.25
+    }
+  },
+  "timing": {
+    "wall_clock_s": 1260.101,
+    "valid": true,
+    "refusal_reason": null,
+    "measured_phase": "partial"
+  },
+  "backend": {
+    "backend": "cpp",
+    "available": true,
+    "version": "1.0.0",
+    "build_version": 23,
+    "unavailable_reason": null
+  },
+  "kct_check": {
+    "ran": true,
+    "passed": false,
+    "error_count": 95,
+    "warning_count": 8,
+    "errors_by_rule": {
+      "connectivity": 30,
+      "edge_clearance_zone": 52,
+      "single_pad_net": 13
+    },
+    "note": null
+  },
+  "kicad_cli_drc": {
+    "ran": true,
+    "violation_count": 144,
+    "by_type": {
+      "copper_edge_clearance": 11,
+      "solder_mask_bridge": 128,
+      "starved_thermal": 5
+    },
+    "note": null
+  },
+  "diff_pairs": {
+    "pairs_total": 2,
+    "pairs_complete": 0,
+    "completion_pct": 0.0,
+    "pairs": [
+      {
+        "net_positive": "USB_D+",
+        "net_negative": "USB_D-",
+        "positive_complete": false,
+        "negative_complete": false,
+        "complete": false
+      },
+      {
+        "net_positive": "USB_CONN_D+",
+        "net_negative": "USB_CONN_D-",
+        "positive_complete": false,
+        "negative_complete": false,
+        "complete": false
+      }
+    ]
+  },
+  "notes": [
+    "seed=42",
+    "router exit code: 1",
+    "human baseline (pre-rip-up): 346 segments, 70 vias, 287.8mm, 17 unrouted pads",
+    "DeepPCB published reference: {'airwires': 98, 'completion_pct': 100, 'vias': 68, 'wall_clock_minutes_max': 3}",
+    "tuned protocol: applied declared net-class-map (/evidence/cases/strf.tuned/output/tuned/strf.net_class_map.json) via --net-class-map --differential-pairs -- see benchmarks/external/tuned_rules.py for the source values and schema-mapping caveats"
+  ]
+}

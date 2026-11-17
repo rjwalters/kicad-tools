@@ -1,0 +1,77 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "parent-pins-uuid-0001")
+	(paper "A4")
+	(title_block
+		(title "Parent With Sheet Pins Test")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 80 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "parent-r1-uuid")
+		(property "Reference" "R1"
+			(at 82 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10k"
+			(at 82 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 80 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "parent-r1-pin1"))
+		(pin "2" (uuid "parent-r1-pin2"))
+	)
+	(wire (pts (xy 80 46.19) (xy 80 40))
+		(stroke (width 0) (type default))
+		(uuid "wire-r1-to-label")
+	)
+	(label "I2C_SDA"
+		(at 80 40 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "parent-label-sda")
+	)
+	(wire (pts (xy 80 40) (xy 130 40))
+		(stroke (width 0) (type default))
+		(uuid "wire-label-to-sheet-pin")
+	)
+	(sheet
+		(at 130 30) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-child-pins-uuid")
+		(property "Sheetname" "ChildWithLabels"
+			(at 130 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "child_with_hlabels.kicad_sch"
+			(at 130 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(pin "SDA" input
+			(at 130 40 180)
+			(effects (font (size 1.27 1.27)) (justify right))
+			(uuid "sheet-pin-sda-uuid")
+		)
+	)
+)

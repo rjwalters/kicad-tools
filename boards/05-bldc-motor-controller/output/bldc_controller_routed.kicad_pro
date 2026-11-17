@@ -1,0 +1,258 @@
+{
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_clearance": 0.1016,
+        "min_through_hole_diameter": 0.2,
+        "min_track_width": 0.15,
+        "min_via_diameter": 0.45,
+        "min_via_annular_width": 0.1,
+        "min_via_hole": 0.2,
+        "min_copper_edge_clearance": 0.3,
+        "min_hole_to_hole": 0.5,
+        "min_microvia_diameter": 0.2,
+        "min_microvia_drill": 0.1,
+        "min_silk_clearance": 0.05,
+        "min_text_thickness": 0.15,
+        "min_text_height": 1.0
+      },
+      "rule_severities": {
+        "lib_footprint_mismatch": "ignore",
+        "isolated_copper": "warning"
+      },
+      "defaults": {
+        "track_min_width": 0.1016,
+        "clearance_min": 0.1016,
+        "via_min_diameter": 0.45,
+        "via_min_drill": 0.2
+      }
+    }
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "name": "Default",
+        "clearance": 0.1016,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "Audio",
+        "clearance": 0.15,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "Clock",
+        "clearance": 0.2,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "Debug",
+        "clearance": 0.15,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "Differential",
+        "clearance": 0.15,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "Digital",
+        "clearance": 0.15,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "HighCurrentSignal",
+        "clearance": 0.2,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      },
+      {
+        "name": "Power",
+        "clearance": 0.2,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      }
+    ],
+    "netclass_assignments": {
+      "+5V": [
+        "Power"
+      ],
+      "AREF": [
+        "Digital"
+      ],
+      "CPH": [
+        "Digital"
+      ],
+      "CPL": [
+        "Digital"
+      ],
+      "DRIVER_SLEEP": [
+        "Differential"
+      ],
+      "EN_A": [
+        "Digital"
+      ],
+      "EN_B": [
+        "Digital"
+      ],
+      "EN_C": [
+        "Digital"
+      ],
+      "FUSED": [
+        "Digital"
+      ],
+      "GND": [
+        "Power"
+      ],
+      "GND_SENSE": [
+        "Audio"
+      ],
+      "HALL_A": [
+        "Digital"
+      ],
+      "HALL_B": [
+        "Digital"
+      ],
+      "HALL_C": [
+        "Digital"
+      ],
+      "IREF": [
+        "Digital"
+      ],
+      "LED_A": [
+        "Digital"
+      ],
+      "MISO": [
+        "Digital"
+      ],
+      "MOSI": [
+        "Digital"
+      ],
+      "PG_DELAY": [
+        "Digital"
+      ],
+      "PHASE_A": [
+        "HighCurrentSignal"
+      ],
+      "PHASE_B": [
+        "HighCurrentSignal"
+      ],
+      "PHASE_C": [
+        "HighCurrentSignal"
+      ],
+      "PWM_A": [
+        "Digital"
+      ],
+      "PWM_B": [
+        "Digital"
+      ],
+      "PWM_C": [
+        "Digital"
+      ],
+      "RESET": [
+        "Debug"
+      ],
+      "RUN": [
+        "Differential"
+      ],
+      "SCK": [
+        "Clock"
+      ],
+      "SENSE_IN": [
+        "Audio"
+      ],
+      "SPEED": [
+        "Digital"
+      ],
+      "STATUS_LED": [
+        "Digital"
+      ],
+      "V3P3": [
+        "Power"
+      ],
+      "VCP": [
+        "Differential"
+      ],
+      "VIN": [
+        "Power"
+      ],
+      "VM": [
+        "Digital"
+      ],
+      "nFAULT": [
+        "Digital"
+      ],
+      "nTRIP": [
+        "Differential"
+      ]
+    }
+  },
+  "meta": {
+    "manufacturer": "jlcpcb",
+    "kct_router_netclasses": {
+      "classes": [
+        "Audio",
+        "Clock",
+        "Debug",
+        "Differential",
+        "Digital",
+        "HighCurrentSignal",
+        "Power"
+      ],
+      "assignments": [
+        "+5V",
+        "AREF",
+        "CPH",
+        "CPL",
+        "DRIVER_SLEEP",
+        "EN_A",
+        "EN_B",
+        "EN_C",
+        "FUSED",
+        "GND",
+        "GND_SENSE",
+        "HALL_A",
+        "HALL_B",
+        "HALL_C",
+        "IREF",
+        "LED_A",
+        "MISO",
+        "MOSI",
+        "PG_DELAY",
+        "PHASE_A",
+        "PHASE_B",
+        "PHASE_C",
+        "PWM_A",
+        "PWM_B",
+        "PWM_C",
+        "RESET",
+        "RUN",
+        "SCK",
+        "SENSE_IN",
+        "SPEED",
+        "STATUS_LED",
+        "V3P3",
+        "VCP",
+        "VIN",
+        "VM",
+        "nFAULT",
+        "nTRIP"
+      ]
+    },
+    "kct_sidecar_sha256": "65dfbac3f4161241f2430a0068f5841dbbf986b37d58a2640f0716eebbdd0b12"
+  }
+}

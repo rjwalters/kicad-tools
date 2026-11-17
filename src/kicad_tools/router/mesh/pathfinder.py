@@ -1,0 +1,1397 @@
+"""``MeshPathfinder`` -- the mesh-router route contract (#4268 P1 / #4269 P2).
+
+Exposes the same "route between two pads" contract as
+``CppPathfinder.route`` (``cpp_backend.py:1322``) and returns an ordinary
+:class:`~kicad_tools.router.primitives.Route`, so the emission tail and DRC
+gate see a normal route object.  The full pipeline:
+
+    static navmesh (built ONCE per board)  (router_cpp.constrained_delaunay)
+      -> triangle-dual portal-midpoint A*    (NavMesh.astar, congestion-aware)
+      -> Simple Stupid Funnel                (string_pull)
+      -> clearance-aware 45-degree best-fit  (octilinear_fit)
+      -> Route of 45-legal Segments
+
+**P2 (#4269) -- multi-net capacity + negotiation.**  The load-bearing risk (e)
+constraint is *static mesh + dynamic portal cost*: the poly2tri CDT and the
+:class:`NavMesh` are built **once per board** (:meth:`build`, cached on
+``self``) and reused across every net and every negotiation iteration.
+Committed copper only raises **portal cost / occupancy** -- it never
+re-triangulates.  :attr:`triangulation_calls` counts the CDT invocations so an
+acceptance test can assert it stays at 1.  Multi-net negotiation
+(:meth:`route_netset`) is a PathFinder/VPR-style present+history rip-up loop
+over the shared portals, mirroring the grid negotiator's per-cell congestion
+per **portal** instead.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..layers import LayerStack
+from ..primitives import Pad, Route, Segment, Via, pad_half_extents
+from ..rules import DesignRules, layer_permitted
+from .geometry import (
+    Pt,
+    merge_intervals,
+    point_in_polygon,
+    segment_polygon_interval,
+)
+from .navmesh import NavMesh
+from .obstacles import ObstacleModel, Rect
+from .octilinear import octilinear_fit
+
+
+@dataclass(frozen=True)
+class MeshNegotiationStats:
+    """Outcome of a :meth:`MeshPathfinder.route_netset` negotiation run."""
+
+    iterations: int
+    converged: bool
+    routed: int
+    total: int
+    triangulation_calls: int
+
+    @property
+    def completion(self) -> float:
+        return self.routed / self.total if self.total else 0.0
+
+
+# A negotiation connection: (opaque hashable key, start pad, end pad, net_class).
+Connection = tuple[object, Pad, Pad, object]
+
+
+class MeshPathfinder:
+    """Navmesh pathfinder returning ordinary ``Route`` objects.
+
+    The navmesh is built once per board and reused; per-net routing consults a
+    cheap per-net obstacle model (rectangular pad keep-outs + pour polygons) --
+    no re-triangulation.
+    """
+
+    # Capability flag mirroring ``CppPathfinder.supports_waypoint_injection``
+    # (cpp_backend.py:819).  The mesh strategy does its own off-grid handling
+    # (pads enter the mesh as exact Steiner vertices), so the grid waypoint /
+    # sub-grid escape machinery does not apply.
+    supports_waypoint_injection: bool = False
+
+    def __init__(
+        self,
+        outline: list[Pt],
+        pads: list[Pad],
+        rules: DesignRules | None = None,
+        pours: list[list[Pt]] | None = None,
+        layer_stack: LayerStack | None = None,
+        *,
+        cutouts: list[list[Pt]] | None = None,
+        cutout_margin: float = 0.0,
+        cutout_floor: float = 0.0,
+    ) -> None:
+        from ..fixed_copper import FixedFillObstacles
+
+        self.fixed_fills = FixedFillObstacles()
+        self.outline = outline
+        self.pads = pads
+        self.rules = rules or DesignRules()
+        # Copper stack the 2.5D via injection replicates the mesh across
+        # (issue #4276).  Consumed from the board's real routing-layer count --
+        # NOT hardcoded to 2 -- so via edges span any number of adjacent layers.
+        self.layer_stack = layer_stack or LayerStack.two_layer()
+        # Per-via-hop layer-change cost (mm-equivalent).  Kept well above a
+        # typical in-layer portal step so the search only dips when a layer is
+        # actually blocked, never gratuitously (the via-soup guard, risk 3).
+        self.via_cost = 5.0
+        # Filled-copper pour outlines (issue #4269).  Modeled BOTH as poly2tri
+        # mesh holes (so corridors route around them) and as obstacle-model
+        # polygons (so the 45-fit declines any leg entering a pour).
+        self.pours: list[list[Pt]] = [list(p) for p in (pours or [])]
+        # Slightly-inset outline bbox used to clamp keep-out holes so poly2tri
+        # never sees a hole that pokes through the outer boundary.
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        self._bbox: Rect = (min(xs), min(ys), max(xs), max(ys))
+        # Copper-to-board-edge requirement the 45-fit applies, in mm (Epic
+        # #5509 Phase 3e).  Set by the router that owns this pathfinder from
+        # its ALREADY-resolved ``Autorouter._edge_clearance`` -- the same value
+        # the grid's ``add_edge_keepout`` and the lattice's
+        # ``set_escape_boundary`` are given -- so the mesh engine cannot
+        # disagree with them about the floor.  ``0.0`` (the default, and the
+        # value for a pathfinder built standalone) means no board-edge rule was
+        # resolved and the outline branch stays the pure containment test it
+        # was before that phase: inventing a rule value here is exactly what
+        # the epic's scope guard #1 forbids.
+        self.edge_clearance: float = 0.0
+        # Interior Edge.Cuts loops -- board windows, cutouts, round holes
+        # (issue #6822).  ``outline`` is only the outer bounding box, so
+        # without these the mesh happily routed straight across a cut.  Each
+        # enters the navmesh as a hole and every emitted leg and via is
+        # measured against it at ``edge_clearance + cutout_margin``, or -- when
+        # no clearance was resolved -- the #6043 physical floor
+        # ``cutout_floor`` (a centreline radius, ``_edge_keepout_floor``).
+        # ``cutout_margin`` is the certified chord error of a curved loop
+        # (``OutlineSegments.max_error_mm``), as the lattice's
+        # ``EscapeBoundary`` adds it.
+        self.cutouts: list[list[Pt]] = [list(c) for c in (cutouts or []) if len(c) >= 3]
+        self.cutout_margin: float = max(float(cutout_margin), 0.0)
+        self.cutout_floor: float = max(float(cutout_floor), 0.0)
+        # Static navmesh + triangulation-call counter (built lazily, once).
+        self._navmesh: NavMesh | None = None
+        self.triangulation_calls: int = 0
+
+    # -- construction from a board ----------------------------------------
+
+    @classmethod
+    def from_board(
+        cls,
+        pcb_path_or_text: str | Path,
+        rules: DesignRules | None = None,
+        pours: list[list[Pt]] | None = None,
+        layer_stack: LayerStack | None = None,
+    ) -> MeshPathfinder:
+        """Build a pathfinder from a ``.kicad_pcb`` file or text."""
+        from ..io import _extract_edge_segments, load_pads_for_analysis
+
+        if isinstance(pcb_path_or_text, Path):
+            text = pcb_path_or_text.read_text()
+        elif not pcb_path_or_text.lstrip().startswith("("):
+            text = Path(pcb_path_or_text).read_text()
+        else:
+            text = pcb_path_or_text
+
+        pads = load_pads_for_analysis(text)
+        segments = _extract_edge_segments(text)
+        # This constructor still represents the board as a bounding box.
+        # A certified chord chain does not make that box equivalent to a
+        # curved outer boundary or an interior cutout. Keep the formerly
+        # unsupported geometry explicit rather than silently losing it.
+        if getattr(segments, "max_error_mm", 0.0) > 0:
+            raise ValueError(
+                "Unsupported curved Edge.Cuts in this bounding box constructor; "
+                "use the grid router to preserve the curved boundary"
+            )
+        outline = _outline_from_edges(segments)
+        return cls(outline, pads, rules, pours, layer_stack, cutouts=interior_edge_loops(segments))
+
+    # -- static mesh ------------------------------------------------------
+
+    @property
+    def channel(self) -> float:
+        """Lane pitch used for portal capacity: trace width + 2*clearance."""
+        return self.rules.trace_width + 2.0 * self.rules.trace_clearance
+
+    def build(self) -> NavMesh:
+        """Build (once) and return the static per-board navmesh.
+
+        Every pad centre enters as a Steiner vertex (so any pad is a locatable
+        routing endpoint) and every in-bounds pour polygon enters as a hole (so
+        corridors route around filled copper).  This is the resolution of risk
+        (e): the triangulation happens **once** -- subsequent negotiation passes
+        mutate only portal occupancy/cost on the returned :class:`NavMesh`.
+        """
+        if self._navmesh is not None:
+            return self._navmesh
+
+        import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
+
+        steiner = [(p.x, p.y) for p in self.pads]
+        if self.fixed_fills:
+            # Insert true buffered-ring vertices as navigation hints, not
+            # all-layer holes. Physical legality remains layer-specific and
+            # hole-aware in every search edge and emitted fit below.
+            from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
+
+            board = Polygon(self.outline)
+            for fill in self.fixed_fills.fills:
+                grown = fill.geometry.buffer(
+                    self.rules.trace_width / 2
+                    + max(self.rules.trace_clearance, fill.clearance)
+                    + 1e-4
+                )
+                polys = grown.geoms if grown.geom_type == "MultiPolygon" else (grown,)
+                for poly in polys:
+                    for ring in (poly.exterior, *poly.interiors):
+                        steiner.extend(
+                            (x, y) for x, y in ring.coords if board.contains(Point(x, y))
+                        )
+            steiner = list(dict.fromkeys(steiner))
+        holes = self._pour_holes()
+        if self.cutouts:
+            holes, steiner = self._merge_cutout_holes(holes, steiner)
+        self.triangulation_calls += 1
+        verts, tris = router_cpp.constrained_delaunay(self.outline, holes, steiner)
+        if not verts or not tris:
+            self._navmesh = NavMesh([], [], channel=self.channel)
+        else:
+            vertices: list[Pt] = [(float(v[0]), float(v[1])) for v in verts]
+            triangles = [(int(t[0]), int(t[1]), int(t[2])) for t in tris]
+            self._navmesh = NavMesh(vertices, triangles, channel=self.channel)
+        return self._navmesh
+
+    def _pour_holes(self) -> list[list[Pt]]:
+        """Inflated pour polygons that lie inside the outline (poly2tri holes).
+
+        Pours are inflated by the agent radius (half-trace + clearance): the
+        mesh hole is grown so the navmesh corridor is pushed a full clearance
+        off the *true* pour boundary and the funnel geodesic never hugs the
+        copper edge.  The obstacle model then re-checks each emitted leg against
+        the true (un-inflated) pour outline, so a leg the corridor steered close
+        to one is still declined if it actually enters it.
+
+        These holes are the only inflation left in the mesh engine's *pad*
+        handling too: Epic #5509 Phase 3e retired the inflated pad keep-out
+        rectangles in favour of exact kernel measurements (see
+        :meth:`_foreign_pads`).  Corridor planning is a heuristic and inflation
+        is the right tool for it; the emitted-copper verdict is not.
+        """
+        bx0, by0, bx1, by1 = self._bbox
+        margin = 1e-3
+        agent_radius = self.rules.trace_width / 2.0 + self.rules.trace_clearance
+        holes: list[list[Pt]] = []
+        for poly in self.pours:
+            if len(poly) < 3:
+                continue
+            inflated = _inflate_polygon([(pt[0], pt[1]) for pt in poly], agent_radius)
+            # Only keep pours fully inside the (slightly inset) outline: poly2tri
+            # holes must not touch or cross the outer boundary.
+            if all(
+                bx0 + margin <= x <= bx1 - margin and by0 + margin <= y <= by1 - margin
+                for (x, y) in inflated
+            ):
+                holes.append(inflated)
+        return holes
+
+    @property
+    def cutout_clearance(self) -> float:
+        """Copper-to-cut clearance for :attr:`cutouts` in mm (issue #6822).
+
+        The router's resolved ``edge_clearance`` plus the curved-loop chord
+        error.  When no clearance was resolved this is just the chord error
+        and :attr:`cutout_floor` (applied per copper width by the obstacle
+        model and :meth:`_via_clears_cutouts`) carries the requirement.
+        Either way the cut is measured: copper never overlaps it.
+        """
+        return max(self.edge_clearance, 0.0) + self.cutout_margin
+
+    def _cutout_requirement(self, half: float) -> float:
+        """Copper gap a copper shape of half-extent ``half`` must keep from a cut."""
+        return max(self.cutout_clearance, self.cutout_floor + self.cutout_margin - half, 0.0)
+
+    def _merge_cutout_holes(
+        self, pour_holes: list[list[Pt]], steiner: list[Pt]
+    ) -> tuple[list[list[Pt]], list[Pt]]:
+        """Navmesh holes with the interior Edge.Cuts loops added (issue #6822).
+
+        Each loop is grown by the trace half-width plus :attr:`cutout_clearance`
+        so the corridor (a centreline heuristic) keeps off the cut, exactly as
+        :meth:`_pour_holes` grows pours.  A grown loop that would swallow a pad
+        centre falls back to the bare loop so the pad stays a locatable
+        endpoint; the obstacle model still enforces the real requirement on
+        every emitted leg.  Overlapping holes are unioned and the result is
+        clipped to the slightly-inset outline so poly2tri never sees touching,
+        crossing or out-of-bounds holes.  Steiner points inside a hole are
+        dropped.  Only called when the board has cutouts, so a board without
+        one triangulates byte-identically.
+        """
+        from shapely.geometry import MultiPoint, Point, Polygon, box
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+        bx0, by0, bx1, by1 = self._bbox
+        margin = 1e-3
+        inner = box(bx0 + margin, by0 + margin, bx1 - margin, by1 - margin)
+        half = self.rules.trace_width / 2.0
+        grow = half + self._cutout_requirement(half)
+        pad_points = MultiPoint([(p.x, p.y) for p in self.pads]) if self.pads else None
+        shapes = [Polygon(h) for h in pour_holes]
+        for ring in self.cutouts:
+            bare = Polygon(ring).buffer(0)
+            if bare.is_empty:
+                continue
+            grown = bare.buffer(grow, join_style=2, mitre_limit=2.0)
+            if pad_points is not None and grown.intersects(pad_points):
+                grown = bare
+            # Curved loops arrive as dense chord chains; thin them for the CDT
+            # (the heuristic corridor only -- legs are measured exactly).
+            shapes.append(grown.simplify(min(0.01, grow / 4.0), preserve_topology=True))
+        merged = unary_union(shapes).intersection(inner)
+        polys = [g for g in getattr(merged, "geoms", [merged]) if g.geom_type == "Polygon"]
+        holes = [
+            [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
+            for poly in polys
+            if not poly.is_empty and poly.area > 0
+        ]
+        guard = unary_union([Polygon(h) for h in holes]).buffer(1e-6) if holes else None
+        if guard is not None:
+            steiner = [pt for pt in steiner if not guard.contains(Point(pt))]
+        return holes, steiner
+
+    # -- the route contract -----------------------------------------------
+
+    def route(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None = None,
+        *,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        **_ignored: object,
+    ) -> Route | None:
+        """Route a single net between two pads; ``None`` if it cannot.
+
+        ``negotiated_mode`` / ``present_cost_factor`` mirror
+        ``CppPathfinder.route`` (``cpp_backend.py:1327-1328``): when enabled the
+        A* consults per-portal congestion so committed copper (higher portal
+        occupancy / history) steers this net onto a different corridor.  The
+        defaults reproduce the P1 single-net behaviour exactly.
+        """
+        result = self._route_with_portals(
+            start,
+            end,
+            net_class,
+            negotiated_mode=negotiated_mode,
+            present_cost_factor=present_cost_factor,
+        )
+        return result[0] if result is not None else None
+
+    def _route_with_portals(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None,
+        *,
+        negotiated_mode: bool,
+        present_cost_factor: float,
+        committed: list[list[Pt]] | None = None,
+        consumed: dict[tuple[int, int], list[tuple[float, float]]] | None = None,
+    ) -> tuple[Route, list[tuple[int, int]]] | None:
+        """Route + report the portal keys the route crosses (for occupancy).
+
+        ``committed`` carries inflated polygons of copper already laid down by
+        OTHER nets in this negotiation pass; the octilinear fit treats them as
+        obstacles so a net that would cross committed copper is declined rather
+        than shipped as a short (the #3906 "never ship a short" invariant, now
+        enforced net-vs-net).  The static mesh is untouched -- committed copper
+        only narrows the per-net obstacle model, never re-triangulates.
+
+        ``consumed`` (issue #4274) maps each portal edge to the parametric
+        intervals already occupied by committed copper; it narrows this net's
+        portal openings to their residual sub-segments so the funnel yields a
+        *parallel* geodesic (an actual lane) instead of the same taut path a
+        prior net already claimed.  When ``None`` it is derived from
+        ``committed`` for this net's own corridor (each portal edge intersected
+        with every committed capsule); an empty/absent model reproduces the P2
+        full-opening funnel exactly.
+        """
+        navmesh = self.build()
+        if not navmesh.triangles:
+            return None
+
+        # Issue #6360: a single-layer route runs on the start pad's layer; it
+        # is declined when that layer is reserved / hard-avoided for this net
+        # (the layered via-injection fallback then handles the net).
+        if (start_li := self._layer_index(start.layer)) is not None and (
+            start_li in self._blocked_layers(net_class)
+        ):
+            return None
+
+        trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
+        clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
+        # Issue #6243: the net's authored netclass minimum is its own side.
+        clearance = max(clearance, self.rules.authored_floor(start.net))
+
+        net = start.net
+        start_pt: Pt = (start.x, start.y)
+        end_pt: Pt = (end.x, end.y)
+
+        # Authoritative per-net obstacle model: EVERY other-net pad (measured
+        # exactly through the clearance kernel since Epic #5509 Phase 3e), plus
+        # every pour polygon and every committed cross-net trace.  Cheap to
+        # rebuild (pad + polygon lists, no triangulation).  This is the model
+        # the octilinear fit validates each leg against -- a route that cannot
+        # clear it is declined (None).
+        pour_obstacles = self.pours + (committed or [])
+        obstacles = ObstacleModel(
+            self.outline,
+            [],
+            pour_obstacles,
+            fixed_fills=self.fixed_fills,
+            layer=self._layer_index(start.layer) or 0,
+            half=trace_w / 2,
+            clearance=clearance,
+            pads=self._foreign_pads(net),
+            edge_clearance=self.edge_clearance,
+            pad_floors=self.rules.net_clearance_floors,
+            cutouts=self.cutouts,
+            cutout_clearance=self._cutout_requirement(trace_w / 2),
+        )
+
+        cost_congestion = self.rules.cost_congestion if negotiated_mode else 0.0
+        congestion_threshold = self.rules.congestion_threshold
+        pcf = present_cost_factor if negotiated_mode else 0.0
+
+        corridor = navmesh.astar(
+            start_pt,
+            end_pt,
+            present_cost_factor=pcf,
+            cost_congestion=cost_congestion,
+            congestion_threshold=congestion_threshold,
+            edge_clear=obstacles.is_clear if self.fixed_fills else None,
+        )
+        if corridor is None:
+            return None
+
+        # First try the full-opening funnel (the P2 geodesic).  When no copper
+        # is committed yet -- the first net, and every net on ``--route-engine``
+        # paths that never narrow -- this is the only attempt and the result is
+        # byte-identical to P2.
+        fitted = self._fit_corridor(navmesh, corridor, start_pt, end_pt, obstacles, consumed)
+
+        # Issue #4274 re-funnel: if the taut geodesic collides with copper a
+        # prior net committed this pass, narrow this net's portals to their
+        # residual openings and re-run the funnel.  Narrowing only *adds* a lane
+        # candidate -- the straight geodesic was already tried -- so completion
+        # can only rise, never regress, and a lane that still cannot clear
+        # declines (``None``) rather than crossing.
+        if fitted is None and consumed is None and committed:
+            derived: dict[tuple[int, int], list[tuple[float, float]]] = {}
+            for edge in navmesh.corridor_portals(corridor):
+                bands = _edge_consumed_bands(navmesh, edge, committed)
+                if bands:
+                    derived[edge] = bands
+            if derived:
+                # Re-funnel with a small family of parallel-lane candidates
+                # (widest gap, then each one-wall packing); accept the first
+                # that clears.  Every candidate is validated against the true
+                # obstacle model, so a lane that cannot clear still declines.
+                for pack in ("largest", "left", "right"):
+                    fitted = self._fit_corridor(
+                        navmesh, corridor, start_pt, end_pt, obstacles, derived, pack
+                    )
+                    if fitted is not None:
+                        break
+
+        if fitted is None or len(fitted) < 2:
+            return None
+
+        route = self._build_route(start, net, trace_w, fitted)
+        return route, navmesh.corridor_portals(corridor)
+
+    def _fit_corridor(
+        self,
+        navmesh: NavMesh,
+        corridor: list[int],
+        start_pt: Pt,
+        end_pt: Pt,
+        obstacles: ObstacleModel,
+        consumed: dict[tuple[int, int], list[tuple[float, float]]] | None,
+        pack: str = "largest",
+    ) -> list[Pt] | None:
+        """Funnel + clearance-clean 45-fit for one corridor (optionally narrowed)."""
+        geodesic = _pull(navmesh, corridor, start_pt, end_pt, consumed, pack)
+        fitted = octilinear_fit(geodesic, obstacles.is_clear)
+        if fitted is None or len(fitted) < 2:
+            return None
+        return fitted
+
+    # -- multi-net negotiation (issue #4269) ------------------------------
+
+    def route_netset(
+        self,
+        connections: list[Connection],
+        *,
+        fixed_copper: list[Route] | None = None,
+        max_iterations: int = 8,
+        present_cost_initial: float = 0.5,
+        present_cost_growth: float = 1.6,
+        history_increment_factor: float = 1.0,
+    ) -> tuple[dict[object, Route], MeshNegotiationStats]:
+        """PathFinder/VPR negotiation over the shared portals.
+
+        Nets compete for corridor capacity instead of committing first-come:
+        each pass routes every connection (shortest-first) against the current
+        portal occupancy/history AND the copper already committed this pass, so
+        a net that would short a committed trace is declined rather than
+        crossed.  Between passes two congestion signals ratchet up history:
+        over-capacity portals (PathFinder present+history), and the *desired*
+        corridor portals of nets that FAILED -- the latter pressures the nets
+        currently occupying a contested corridor to detour next pass and free
+        it for the blocked net.  The loop keeps the best (most-routed) pass and
+        stops early when every net routes or the routed set stops improving.
+        The mesh is built **once** (see :meth:`build`); only portal cost changes
+        between passes -- never the triangulation (risk (e)).
+
+        Issue #4364: ``fixed_copper`` is the preserved copper of NON-listed
+        nets (``Autorouter.existing_routes`` minus the routable set, loaded
+        under ``--nets`` / ``--preserve-existing`` after #4355).  Because the
+        per-pass ``committed_by_layer`` obstacle dict is reset empty at the top
+        of every pass, the fixed copper is **re-seeded into it each pass** via
+        the same :meth:`_route_obstacles_by_layer` capsule conversion the
+        commit loop uses -- so a negotiated net routes AROUND foreign copper or
+        is honestly declined, never emitted overlapping it.  The mesh committed
+        model is net-AGNOSTIC (plain polygons, no same-net exemption); this is
+        safe only because ``fixed_copper`` is pre-filtered to non-listed nets
+        by the driver, so a net being routed never self-blocks on its own seed.
+
+        Issue #6566: committed copper is now tracked per net and a connection
+        sees only OTHER nets' copper, so a multi-pad net's later star legs are
+        not blocked by the copper of its earlier legs (shared anchor pad).
+        ``fixed_copper=None`` / ``[]`` seeds nothing and is a byte-identical
+        no-op relative to the pre-#4364 negotiation.
+
+        Returns ``(routes_by_key, stats)`` for the best iteration seen.
+        """
+        navmesh = self.build()
+        # Fresh negotiation: clear any stale occupancy/history from a prior run.
+        navmesh.reset_occupancy()
+        navmesh._history.clear()
+
+        # Shortest-first: short nets are easier and fence off less area, which
+        # materially lifts the completion rate under committed-copper blocking.
+        ordered = sorted(
+            connections,
+            key=lambda c: math.hypot(c[1].x - c[2].x, c[1].y - c[2].y),
+        )
+
+        best_routes: dict[object, Route] = {}
+        best_count = -1
+        converged = False
+        iterations_run = 0
+        present = present_cost_initial
+
+        for it in range(max_iterations):
+            iterations_run = it + 1
+            navmesh.reset_occupancy()
+            routes: dict[object, Route] = {}
+            failed: list[Connection] = []
+            # Inflated copper committed by earlier nets THIS pass, bucketed by
+            # routing-graph layer index (issue #4276) -- later nets must clear
+            # it (net-vs-net short avoidance).  Per-layer so an F.Cu net is not
+            # blocked by another net's B.Cu cross-under.  Reset each pass so a
+            # rip-up genuinely frees the corridor.
+            # Issue #6566: kept PER NET (net -> layer -> capsules) so a
+            # connection never treats its own net's committed copper (an
+            # earlier star leg sharing its anchor pad) as an obstacle.
+            committed_by_net: dict[int, dict[int, list[list[Pt]]]] = {}
+            # Issue #6566: via sites each net has committed this pass, so a
+            # later star leg of the same net never stacks a second via on the
+            # same portal midpoint (coincident holes -> hole_to_hole errors).
+            committed_via_sites: dict[int, list[Pt]] = {}
+            # Issue #4364: pre-seed the preserved copper of NON-listed nets as
+            # an immovable hard obstacle.  The dict is reset every pass (so a
+            # rip-up frees listed-net corridors), therefore the fixed seed must
+            # be re-applied every pass.  Reusing ``_route_obstacles_by_layer``
+            # inflates and layer-buckets it identically to same-pass committed
+            # copper, so both the in-layer fit and ``_route_via_injection``
+            # (which reads the whole dict) honor it.
+            for fixed in fixed_copper or []:
+                self._seed_fixed_copper(committed_by_net.setdefault(fixed.net, {}), [fixed])
+            for key, start, end, net_class in ordered:
+                start_L = self._layer_index(start.layer) or 0
+                # Issue #6566: only copper of OTHER nets is an obstacle.
+                committed_by_layer: dict[int, list[list[Pt]]] = {}
+                for other_net, by_layer in committed_by_net.items():
+                    if other_net == start.net:
+                        continue
+                    for lidx, polys in by_layer.items():
+                        committed_by_layer.setdefault(lidx, []).extend(polys)
+                # Issue #4274: the net's own-layer committed copper doubles as
+                # the lane-assignment model -- ``_route_with_portals`` narrows
+                # this net's portals by that copper so its funnel produces a
+                # parallel lane rather than the geodesic a prior net occupies.
+                result = self._route_with_portals(
+                    start,
+                    end,
+                    net_class,
+                    negotiated_mode=True,
+                    present_cost_factor=present,
+                    committed=committed_by_layer.get(start_L, []),
+                )
+                # Issue #4276: when the in-layer attempt declines (a transverse
+                # crossing the lane allocator cannot resolve), retry by dipping
+                # layers -- via down, cross under, via up.  Additive: the
+                # single-layer geodesic was already tried, so completion can only
+                # rise and a dip that still cannot clear declines, never crosses.
+                if result is None:
+                    result = self._route_via_injection(
+                        start,
+                        end,
+                        net_class,
+                        committed_by_layer,
+                        present_cost_factor=present,
+                    )
+                if result is not None and not self._authored_route_clear(
+                    result[0], [*(fixed_copper or ()), *routes.values()]
+                ):
+                    # Issue #6243: the mesh's committed-copper capsules are
+                    # net-agnostic, so a strict net's own side against them is
+                    # verified on the emitted copper and declined honestly.
+                    result = None
+                if result is None:
+                    failed.append((key, start, end, net_class))
+                    continue
+                route, portals = result
+                # Issue #6566: drop a via coinciding with one this net already
+                # committed (the earlier via already joins the same layers).
+                sites = committed_via_sites.setdefault(route.net, [])
+                route.vias = [
+                    v
+                    for v in route.vias
+                    if not any(math.hypot(v.x - sx, v.y - sy) < 1e-3 for sx, sy in sites)
+                ]
+                sites.extend((v.x, v.y) for v in route.vias)
+                routes[key] = route
+                for edge in portals:
+                    navmesh.commit_portal(edge)
+                net_committed = committed_by_net.setdefault(route.net, {})
+                for lidx, polys in self._route_obstacles_by_layer(route).items():
+                    net_committed.setdefault(lidx, []).extend(polys)
+                # Issue #6566: a placed via is copper on every layer; make it a
+                # keep-out for OTHER nets (own-net copper is exempt above).
+                for via in route.vias:
+                    keepout = _via_keepout(
+                        (via.x, via.y),
+                        via.diameter / 2 + self.rules.trace_width / 2 + self.rules.trace_clearance,
+                    )
+                    for lidx in range(self.layer_stack.num_layers):
+                        net_committed.setdefault(lidx, []).append(keepout)
+
+            if len(routes) > best_count:
+                best_count = len(routes)
+                best_routes = routes
+
+            if not failed:
+                converged = True
+                break
+            if it == max_iterations - 1:
+                break
+
+            # Signal 1: over-capacity portals (classic PathFinder present+history).
+            for edge in navmesh.occupied_portals():
+                over = navmesh.occupancy(edge) - navmesh.capacity(edge)
+                if over > 0:
+                    navmesh.add_history(
+                        edge,
+                        history_increment_factor * self.rules.cost_congestion * over,
+                    )
+            # Signal 2: failed-net demand.  Bump history on the portals each
+            # blocked net *wants* (its congestion-free corridor) so whoever is
+            # sitting in that corridor is nudged elsewhere next pass.
+            for _key, start, end, _nc in failed:
+                corridor = navmesh.astar((start.x, start.y), (end.x, end.y))
+                if corridor is None:
+                    continue
+                for edge in navmesh.corridor_portals(corridor):
+                    navmesh.add_history(edge, history_increment_factor * self.rules.cost_congestion)
+            present *= present_cost_growth
+
+        stats = MeshNegotiationStats(
+            iterations=iterations_run,
+            converged=converged,
+            routed=len(best_routes),
+            total=len(connections),
+            triangulation_calls=self.triangulation_calls,
+        )
+        return best_routes, stats
+
+    # -- helpers ----------------------------------------------------------
+
+    def _authored_route_clear(self, route: Route, committed: list[Route]) -> bool:
+        """Does ``route`` keep every authored netclass minimum (Issue #6243)?
+
+        The kernel-backed census against every pad and the copper already
+        committed this pass.  ``True`` immediately when nothing carries a
+        floor, so floor-free boards are untouched.
+        """
+        floors = self.rules.net_clearance_floors
+        if not floors and not any(p.authored_clearance > 0.0 for p in self.pads):
+            return True
+        from ..authored_clearance import AuthoredCopperIndex
+
+        index = AuthoredCopperIndex(floors, self.pads, committed)
+        return all(index.segment_clear(seg, route.net) for seg in route.segments) and all(
+            index.via_clear(via, route.net) for via in route.vias
+        )
+
+    def _foreign_pads(self, net: int) -> list[Pad]:
+        """Every OTHER-net pad, verbatim -- the exact copper the fit clears.
+
+        Epic #5509 Phase 3e: this replaced ``_keepouts``, which grew each pad's
+        ``pad_half_extents`` **bounding box** by the agent radius and handed the
+        resulting rectangle to :class:`~.obstacles.ObstacleModel` as a touch
+        obstacle.  That box is strictly larger than the pad's copper for every
+        circle, oval, roundrect or rotated pad, so the 45-fit refused legs
+        ``kicad-cli pcb drc`` finds clean -- the #5410 failure mode, quantified
+        against ground truth in ``docs/clearance-conformance.md``'s group-10
+        row.
+
+        The model now measures the pad exactly through the shared clearance
+        kernel (:func:`~.kernel_adapter.pad_of`), so there is nothing left to
+        inflate here and nothing to clamp: the bounding-box clamp and the
+        overlap merge existed only to keep the *rectangles* well-formed for
+        poly2tri.  Corridor planning is unaffected -- the navmesh's holes come
+        from :meth:`_pour_holes`, never from these.
+
+        Args:
+            net: The net being routed; its own pads are not obstacles.
+
+        Returns:
+            The foreign pads, in board order.
+        """
+        return [pad for pad in self.pads if pad.net != net]
+
+    # -- 2.5D via injection (issue #4276) ---------------------------------
+
+    @property
+    def _via_in_pad_allowed(self) -> bool:
+        """Whether the configured fab tier permits via-in-pad (else OFF).
+
+        Read from the real fab model exactly as the grid escape router does:
+        ``rules.manufacturer`` -> ``MfrLimits.via_in_pad_supported`` (base
+        ``jlcpcb`` = False, ``jlcpcb-tier1`` = True).  With no manufacturer
+        configured the conservative default is False, so pad-site vias are
+        pruned and only free-space portal-midpoint through-vias are injected.
+        """
+        mfr = self.rules.manufacturer
+        if not mfr:
+            return False
+        try:
+            from ..mfr_limits import get_mfr_limits
+
+            return bool(get_mfr_limits(mfr).via_in_pad_supported)
+        except Exception:
+            return False
+
+    def _blocked_layers(self, net_class: object | None) -> frozenset[int]:
+        """Routing-graph layer indices no copper may be laid on (issue #6360).
+
+        Union of layers outside ``DesignRules.allowed_layers`` (plane-layer
+        reservation) and the net class's hard-avoided layers (auto-hard with
+        ``target_ampacity`` or ``strict_layers``, as the grid engine does).
+        Empty when neither applies, so unreserved boards are unchanged.
+
+        Issue #6876: a layer the class opted in to via ``allow_plane_layers``
+        is not reservation-blocked (shared ``layer_permitted``); hard
+        ``avoid_layers`` still wins.
+        """
+        blocked: set[int] = set()
+        allowed = self.rules.allowed_layers
+        if allowed is not None:
+            blocked.update(
+                ld.index
+                for ld in self.layer_stack.layers
+                if not layer_permitted(self.rules, net_class, ld.index, ld.name)
+            )
+        hard = getattr(net_class, "hard_avoided_layer_indices", None)
+        if callable(hard):
+            blocked.update(hard(self.rules.strict_layers))
+        return frozenset(blocked)
+
+    def _layer_index(self, layer: object) -> int | None:
+        """Routing-graph layer index for a KiCad layer enum (None if off-stack)."""
+        try:
+            return self.layer_stack.layer_enum_to_index(layer)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+    def _foreign_pads_layer(self, net: int, layer_idx: int) -> list[Pad]:
+        """Per-layer foreign pad copper (issue #4276 section 3).
+
+        An SMD pad blocks only its own copper layer; a through-hole pad blocks
+        EVERY layer.  Same-net copper is never an obstacle.  The triangulation
+        is shared across layers -- only this obstacle set is per-layer.
+
+        The per-layer twin of :meth:`_foreign_pads`; see that method on why Epic
+        #5509 Phase 3e retired the inflated rectangles these used to return.
+        The layer mask stays HERE rather than moving onto the kernel shape, so
+        there is exactly one model of "which pads does this layer see".
+
+        Args:
+            net: The net being routed.
+            layer_idx: Routing-graph layer index the model is built for.
+
+        Returns:
+            The foreign pads present on that layer.
+        """
+        try:
+            layer_enum = self.layer_stack.index_to_layer_enum(layer_idx)
+        except Exception:
+            layer_enum = None
+
+        return [
+            pad
+            for pad in self.pads
+            if pad.net != net
+            and (pad.through_hole or layer_enum is None or pad.layer == layer_enum)
+        ]
+
+    def _via_allowed_at(
+        self,
+        site: Pt,
+        net: int,
+        via_radius: float,
+        layers: tuple[int, int],
+        committed_by_layer: dict[int, list[list[Pt]]],
+    ) -> bool:
+        """Obstacle-aware via placement test (issue #4276 section 5, #3906).
+
+        A via at ``site`` joining ``layers`` is admitted only when its body is
+        DRC-legal on BOTH layers it spans:
+
+        * inside a DIFFERENT net's pad -> a short, never allowed;
+        * inside its OWN net's pad -> via-in-pad, allowed only when the fab tier
+          permits it (default OFF -> pruned, so pad-site vias never ship);
+        * over copper another net committed on either spanned layer -> declined.
+
+        Portal midpoints are free-space by construction, so the default result
+        is "allowed"; this gate exists to prune the pathological sites.
+        """
+        for pad in self.pads:
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + via_radius
+            hy = half_h + via_radius
+            if abs(site[0] - pad.x) <= hx and abs(site[1] - pad.y) <= hy:
+                if pad.net == net:
+                    if not self._via_in_pad_allowed:
+                        return False
+                else:
+                    return False
+        if self.cutouts and not self._via_clears_cutouts(site):
+            return False
+        if not self.fixed_fills.via_clear(
+            site,
+            tuple(range(self.layer_stack.num_layers)),
+            self.rules.via_diameter / 2,
+            self.rules.via_clearance,
+        ):
+            return False
+        # A through-via spans every copper layer, so its body must clear
+        # committed cross-net copper on ALL layers -- not just the two the A*
+        # hop nominally joins.  Check every layer with committed copper.
+        # Issue #6566: the capsules are sized for a trace CENTRELINE
+        # (``trace_width + clearance``), but a via body is wider -- require the
+        # extra ``via_radius - trace_width / 2`` standoff from every polygon.
+        standoff = max(via_radius - self.rules.trace_width / 2, 0.0)
+        for caps in committed_by_layer.values():
+            for poly in caps:
+                if point_in_polygon(site, poly):
+                    return False
+                if standoff > 0.0 and _point_polygon_distance(site, poly) < standoff:
+                    return False
+        return True
+
+    def _via_clears_cutouts(self, site: Pt) -> bool:
+        """True when a via body at ``site`` keeps off every cutout (issue #6822).
+
+        A through-via drills every layer, so its pad copper must sit outside
+        each interior Edge.Cuts loop and keep :attr:`cutout_clearance` from it.
+        """
+        from .kernel_adapter import clears_cut, copper_leg, outline_of
+
+        radius = self.rules.via_diameter / 2.0
+        body = copper_leg(site, site, radius)
+        required = self._cutout_requirement(radius)
+        for ring in self.cutouts:
+            cut = outline_of(ring)
+            if cut is None:
+                continue
+            if cut.contains(site) or not clears_cut(body, cut, required):
+                return False
+        return True
+
+    def _route_via_injection(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None,
+        committed_by_layer: dict[int, list[list[Pt]]],
+        *,
+        present_cost_factor: float,
+    ) -> tuple[Route, list[tuple[int, int]]] | None:
+        """Route by dipping layers when the in-layer geodesic is blocked (#4276).
+
+        This is the 2.5D fallback the negotiator reaches for only after the
+        single-layer attempt declines: it runs the ``(triangle, layer)`` A*
+        (mesh replicated across ``layer_stack.num_layers``), splits the returned
+        multi-layer corridor at its via sites, funnels + 45-fits EACH per-layer
+        run against that layer's own obstacle model, and stitches the runs with
+        through-vias.  If ANY run cannot be made clearance-clean the whole route
+        declines (``None``) -- never a short (the authoritative octilinear gate
+        stays in force per layer).
+        """
+        navmesh = self.build()
+        num_layers = self.layer_stack.num_layers
+        if not navmesh.triangles or num_layers < 2:
+            return None
+
+        start_layer = self._layer_index(start.layer)
+        goal_layer = self._layer_index(end.layer)
+        if start_layer is None or goal_layer is None:
+            return None
+
+        trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
+        clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
+        clearance = max(clearance, self.rules.authored_floor(start.net))  # Issue #6243
+        via_radius = self.rules.via_diameter / 2.0 + clearance
+        net = start.net
+        start_pt: Pt = (start.x, start.y)
+        end_pt: Pt = (end.x, end.y)
+
+        # Per-layer obstacle model for the authoritative octilinear fit.
+        obstacles_by_layer: dict[int, ObstacleModel] = {}
+        for lidx in range(num_layers):
+            pour_obstacles = self.pours + committed_by_layer.get(lidx, [])
+            obstacles_by_layer[lidx] = ObstacleModel(
+                self.outline,
+                [],
+                pour_obstacles,
+                fixed_fills=self.fixed_fills,
+                layer=lidx,
+                half=trace_w / 2,
+                clearance=clearance,
+                pads=self._foreign_pads_layer(net, lidx),
+                edge_clearance=self.edge_clearance,
+                pad_floors=self.rules.net_clearance_floors,
+                cutouts=self.cutouts,
+                cutout_clearance=self._cutout_requirement(trace_w / 2),
+            )
+
+        # Per-layer portal blocking (issue #4276 section 3): a portal is blocked
+        # on a layer when a trace cannot thread it there -- tested with the SAME
+        # per-layer obstacle model the octilinear fit uses, on the segment
+        # joining the two incident triangle centroids.  This gives A* a cost
+        # reason to DIP where a layer is obstructed (by committed copper OR an
+        # other-net pad on that layer) to a clear layer, rather than ploughing on
+        # and declining at the fit.  Same-net pads are not obstacles, so a net's
+        # own pad-escape portals stay open.  The authoritative per-layer fit
+        # still gates every emitted leg, so this heuristic can only steer, never
+        # ship a short.
+        centroids = navmesh._centroids
+
+        def portal_blocked(edge: tuple[int, int], layer: int) -> bool:
+            tris = navmesh._edge_tris.get(edge)
+            if not tris or len(tris) < 2:
+                return False
+            return not obstacles_by_layer[layer].is_clear(centroids[tris[0]], centroids[tris[1]])
+
+        def via_allowed(site: Pt, layer_a: int, layer_b: int) -> bool:
+            return self._via_allowed_at(
+                site, net, via_radius, (layer_a, layer_b), committed_by_layer
+            )
+
+        pcf = present_cost_factor
+        corridor = navmesh.astar_layered(
+            start_pt,
+            end_pt,
+            start_layer,
+            goal_layer,
+            num_layers,
+            portal_blocked,
+            via_allowed,
+            self.via_cost,
+            present_cost_factor=pcf,
+            cost_congestion=self.rules.cost_congestion if pcf else 0.0,
+            congestion_threshold=self.rules.congestion_threshold,
+            blocked_layers=self._blocked_layers(net_class),
+        )
+        if corridor is None:
+            return None
+
+        route = self._build_multilayer_route(
+            navmesh, corridor, start, end, net, trace_w, obstacles_by_layer, committed_by_layer
+        )
+        if route is None:
+            return None
+
+        portals = [
+            edge
+            for i in range(len(corridor) - 1)
+            if not corridor[i + 1][3]
+            and (edge := navmesh._shared_edge(corridor[i][0], corridor[i + 1][0])) is not None
+        ]
+        return route, portals
+
+    def _fit_layer_run(
+        self,
+        navmesh: NavMesh,
+        tris: list[int],
+        s_pt: Pt,
+        e_pt: Pt,
+        obstacles: ObstacleModel,
+        committed_on_layer: list[list[Pt]],
+    ) -> list[Pt] | None:
+        """Funnel + 45-fit one per-layer run, with the P2.5 lane-narrowing retry.
+
+        Mirrors the single-layer re-funnel (``_route_with_portals``): try the
+        taut geodesic first, and if it collides copper committed on THIS layer,
+        narrow the run's portals to their residual openings and retry the widest
+        gap then each one-wall packing.  Every candidate is validated against the
+        authoritative per-layer obstacle model, so a run that still cannot clear
+        declines (``None``) rather than shipping a short.
+        """
+        fitted = self._fit_corridor(navmesh, tris, s_pt, e_pt, obstacles, None)
+        if fitted is not None:
+            return fitted
+        if not committed_on_layer:
+            return None
+        derived: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for edge in navmesh.corridor_portals(tris):
+            bands = _edge_consumed_bands(navmesh, edge, committed_on_layer)
+            if bands:
+                derived[edge] = bands
+        if not derived:
+            return None
+        for pack in ("largest", "left", "right"):
+            fitted = self._fit_corridor(navmesh, tris, s_pt, e_pt, obstacles, derived, pack)
+            if fitted is not None:
+                return fitted
+        return None
+
+    def _build_multilayer_route(
+        self,
+        navmesh: NavMesh,
+        corridor: list[tuple[int, int, Pt, bool]],
+        start: Pad,
+        end: Pad,
+        net: int,
+        trace_w: float,
+        obstacles_by_layer: dict[int, ObstacleModel],
+        committed_by_layer: dict[int, list[list[Pt]]],
+    ) -> Route | None:
+        """Split a layered corridor into per-layer runs; funnel/fit/stitch (#4276)."""
+        start_pt: Pt = (start.x, start.y)
+        end_pt: Pt = (end.x, end.y)
+
+        # Break the corridor into maximal same-layer runs, recording the
+        # portal-midpoint via site at each layer change.
+        runs: list[tuple[int, list[int], Pt, Pt]] = []
+        via_sites: list[Pt] = []
+        cur_layer = corridor[0][1]
+        cur_tris = [corridor[0][0]]
+        run_start = start_pt
+        for k in range(1, len(corridor)):
+            tri, layer, entry, via_into = corridor[k]
+            if via_into:
+                runs.append((cur_layer, cur_tris, run_start, entry))
+                via_sites.append(entry)
+                cur_layer = layer
+                cur_tris = [tri]
+                run_start = entry
+            else:
+                cur_tris.append(tri)
+        runs.append((cur_layer, cur_tris, run_start, end_pt))
+
+        route = Route(net=net, net_name=start.net_name)
+        for layer_idx, tris, s_pt, e_pt in runs:
+            if math.hypot(e_pt[0] - s_pt[0], e_pt[1] - s_pt[1]) < 1e-6:
+                continue  # degenerate run (through-via passing this layer)
+            try:
+                layer_enum = self.layer_stack.index_to_layer_enum(layer_idx)
+            except Exception:
+                return None
+            fitted = self._fit_layer_run(
+                navmesh,
+                tris,
+                s_pt,
+                e_pt,
+                obstacles_by_layer[layer_idx],
+                committed_by_layer.get(layer_idx, []),
+            )
+            if fitted is None or len(fitted) < 2:
+                return None
+            for i in range(len(fitted) - 1):
+                a, b = fitted[i], fitted[i + 1]
+                route.segments.append(
+                    Segment(
+                        x1=a[0],
+                        y1=a[1],
+                        x2=b[0],
+                        y2=b[1],
+                        width=trace_w,
+                        layer=layer_enum,
+                        net=net,
+                        net_name=start.net_name,
+                    )
+                )
+
+        if not route.segments or not via_sites:
+            return None
+
+        # Through-via per distinct site (default manufacturable via).  Blind /
+        # buried are tier-gated and out of scope -- a placed via spans the whole
+        # copper stack, so one Via joins the top and bottom outer layers.
+        top = self.layer_stack.index_to_layer_enum(0)
+        bottom = self.layer_stack.index_to_layer_enum(self.layer_stack.num_layers - 1)
+        seen: set[tuple[float, float]] = set()
+        for site in via_sites:
+            key = (round(site[0], 4), round(site[1], 4))
+            if key in seen:
+                continue
+            seen.add(key)
+            route.vias.append(
+                Via(
+                    x=site[0],
+                    y=site[1],
+                    drill=self.rules.via_drill,
+                    diameter=self.rules.via_diameter,
+                    layers=(top, bottom),
+                    net=net,
+                    net_name=start.net_name,
+                )
+            )
+        return route
+
+    def _route_obstacles(self, route: Route) -> list[list[Pt]]:
+        """Inflated capsule polygons for each segment of a committed route.
+
+        Each segment is grown by ``trace_width + clearance`` (covers both
+        traces' half-widths plus the clearance gap on a single-width board) so
+        another net's centreline staying outside keeps full copper clearance.
+        """
+        half = self.rules.trace_width + self.rules.trace_clearance
+        polys: list[list[Pt]] = []
+        for seg in route.segments:
+            poly = _segment_capsule((seg.x1, seg.y1), (seg.x2, seg.y2), half)
+            if poly is not None:
+                polys.append(poly)
+        return polys
+
+    def _route_obstacles_by_layer(self, route: Route) -> dict[int, list[list[Pt]]]:
+        """Committed-copper capsules bucketed by routing-graph layer index (#4276).
+
+        A via-injected route lays copper on several layers; committed copper
+        must be tracked per layer so later nets see it only where it actually
+        sits (an F.Cu net is not blocked by another net's B.Cu cross-under).
+        """
+        half = self.rules.trace_width + max(
+            self.rules.trace_clearance,
+            # Issue #6243: committed strict copper keeps its own side.
+            self.rules.authored_floor(route.net),
+            float(getattr(route, "authored_clearance", 0.0) or 0.0),
+        )
+        out: dict[int, list[list[Pt]]] = {}
+        for seg in route.segments:
+            lidx = self._layer_index(seg.layer)
+            if lidx is None:
+                continue
+            poly = _segment_capsule((seg.x1, seg.y1), (seg.x2, seg.y2), half)
+            if poly is not None:
+                out.setdefault(lidx, []).append(poly)
+        return out
+
+    def _seed_fixed_copper(
+        self,
+        committed_by_layer: dict[int, list[list[Pt]]],
+        fixed_copper: list[Route] | None,
+    ) -> None:
+        """Pre-seed ``committed_by_layer`` with preserved non-listed copper (#4364).
+
+        Mirrors the same-pass commit loop's use of
+        :meth:`_route_obstacles_by_layer`: each fixed route's segments become
+        inflated per-layer capsule polygons so later listed nets clear them.
+        Called at the top of every negotiation pass (the dict is reset each
+        pass), so the seed is re-applied per pass.  A ``None`` / empty seed adds
+        nothing and is a byte-identical no-op.
+
+        Issue #4597 (scope note): unlike the lattice engine, this seed does NOT
+        carry the preserved net's ``--net-class-map`` clearance -- the capsules
+        are inflated at the board-global ``trace_width + trace_clearance`` and
+        the mesh committed model is net-AGNOSTIC (plain polygons with no per-net
+        field), so it cannot express a per-net clearance without a model change.
+        Multi-step ``--preserve-existing`` composition therefore still spaces
+        cross-step pairs at the DRU floor on ``--engine mesh``.
+        """
+        for route in fixed_copper or []:
+            for lidx, polys in self._route_obstacles_by_layer(route).items():
+                committed_by_layer.setdefault(lidx, []).extend(polys)
+
+    def _build_route(self, start: Pad, net: int, trace_w: float, fitted: list[Pt]) -> Route:
+        route = Route(net=net, net_name=start.net_name)
+        layer = start.layer
+        for i in range(len(fitted) - 1):
+            a, b = fitted[i], fitted[i + 1]
+            route.segments.append(
+                Segment(
+                    x1=a[0],
+                    y1=a[1],
+                    x2=b[0],
+                    y2=b[1],
+                    width=trace_w,
+                    layer=layer,
+                    net=net,
+                    net_name=start.net_name,
+                )
+            )
+        return route
+
+
+def _segment_capsule(a: Pt, b: Pt, half_width: float) -> list[Pt] | None:
+    """Rectangle (rounded-cap approximation) around segment ``a-b``.
+
+    The rectangle is the segment inflated by ``half_width`` sideways and its
+    ends extended by ``half_width`` (a cheap capsule/Minkowski approximation),
+    returned CCW as a 4-point polygon.  ``None`` for a degenerate segment.
+    """
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-12:
+        return None
+    ux, uy = dx / length, dy / length  # along
+    nx, ny = -uy, ux  # left normal
+    ax = a[0] - ux * half_width
+    ay = a[1] - uy * half_width
+    bx = b[0] + ux * half_width
+    by = b[1] + uy * half_width
+    return [
+        (ax + nx * half_width, ay + ny * half_width),
+        (bx + nx * half_width, by + ny * half_width),
+        (bx - nx * half_width, by - ny * half_width),
+        (ax - nx * half_width, ay - ny * half_width),
+    ]
+
+
+def _via_keepout(centre: Pt, radius: float) -> list[Pt]:
+    """Octagon circumscribing the disc of ``radius`` about ``centre`` (#6566)."""
+    vertex_r = radius / math.cos(math.pi / 8)
+    return [
+        (
+            centre[0] + vertex_r * math.cos(math.pi / 8 + k * math.pi / 4),
+            centre[1] + vertex_r * math.sin(math.pi / 8 + k * math.pi / 4),
+        )
+        for k in range(8)
+    ]
+
+
+def _point_polygon_distance(p: Pt, poly: list[Pt]) -> float:
+    """Distance from ``p`` to the polygon boundary (0 when on/inside it)."""
+    if point_in_polygon(p, poly):
+        return 0.0
+    best = math.inf
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        len2 = dx * dx + dy * dy
+        t = (
+            0.0
+            if len2 < 1e-18
+            else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / len2))
+        )
+        best = min(best, math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy)))
+    return best
+
+
+def _inflate_polygon(poly: list[Pt], margin: float) -> list[Pt]:
+    """Grow a polygon outward by ``margin`` by pushing each vertex off the centroid.
+
+    A cheap, conservative disc-inflation good enough for the rectangular /
+    convex pour outlines in scope: each vertex moves radially outward from the
+    polygon centroid by ``margin`` (corners -- the clearance-critical points a
+    corridor rounds -- get the full margin).  Degenerate (centroid-coincident)
+    vertices are left in place.
+    """
+    if margin <= 0.0 or len(poly) < 3:
+        return [(p[0], p[1]) for p in poly]
+    cx = sum(p[0] for p in poly) / len(poly)
+    cy = sum(p[1] for p in poly) / len(poly)
+    out: list[Pt] = []
+    for x, y in poly:
+        dx, dy = x - cx, y - cy
+        d = math.hypot(dx, dy)
+        if d < 1e-12:
+            out.append((x, y))
+        else:
+            scale = (d + margin) / d
+            out.append((cx + dx * scale, cy + dy * scale))
+    return out
+
+
+def _edge_consumed_bands(
+    navmesh: NavMesh, edge: tuple[int, int], capsules: list[list[Pt]]
+) -> list[tuple[float, float]]:
+    """Parametric ``[t0, t1]`` intervals a route's copper carves out of a portal.
+
+    Intersects each committed capsule (inflated by ``trace_width + clearance``,
+    the same width the octilinear fit clears against) with the portal edge
+    ``vertices[edge[0]] -> vertices[edge[1]]`` and unions the covered spans.
+    These are the openings :func:`NavMesh.corridor_to_portals` subtracts so the
+    next net funnels through the residual sub-segment (issue #4274).
+    """
+    a = navmesh.vertices[edge[0]]
+    b = navmesh.vertices[edge[1]]
+    ivals: list[tuple[float, float]] = []
+    for poly in capsules:
+        iv = segment_polygon_interval(a, b, poly)
+        if iv is not None:
+            ivals.append(iv)
+    return merge_intervals(ivals)
+
+
+def _pull(
+    navmesh: NavMesh,
+    corridor: list[int],
+    start: Pt,
+    end: Pt,
+    consumed: dict[tuple[int, int], list[tuple[float, float]]] | None = None,
+    pack: str = "largest",
+) -> list[Pt]:
+    from .funnel import string_pull
+
+    return string_pull(navmesh.corridor_to_portals(corridor, start, end, consumed, pack))
+
+
+def _outline_from_edges(
+    segments: list[tuple[tuple[float, float], tuple[float, float]]],
+) -> list[Pt]:
+    """Board outline as a CCW bbox rectangle from Edge.Cuts segments.
+
+    P1 uses the Edge.Cuts bounding box as the outer boundary.  Every committed
+    fleet board in scope is rectangular, so the bbox is the exact outline; a
+    concave outline would only over-constrain the free space conservatively.
+    """
+    if not segments:
+        return []
+    xs: list[float] = []
+    ys: list[float] = []
+    for (x1, y1), (x2, y2) in segments:
+        xs.extend((x1, x2))
+        ys.extend((y1, y2))
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    return [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+
+
+def interior_edge_loops(
+    segments: list[tuple[tuple[float, float], tuple[float, float]]],
+) -> list[list[Pt]]:
+    """The interior closed loops of an Edge.Cuts segment set (issue #6822).
+
+    Board windows, cutouts and round holes: every closed ring the segments
+    polygonize into, other than the outer outline, that sits at an odd
+    nesting depth (inside the board, not an island inside a window).  The
+    outer outline is the ring with the largest enclosed area.  Rings are
+    returned WITHOUT a repeated final vertex.  Open or degenerate geometry
+    yields ``[]``, i.e. no cutouts -- the pre-#6822 behaviour.
+    """
+    if not segments:
+        return []
+    from shapely.geometry import MultiLineString, Polygon
+    from shapely.ops import polygonize
+
+    try:
+        lines = MultiLineString([[tuple(a), tuple(b)] for a, b in segments if a != b])
+        faces = list(polygonize(lines.union(lines)))
+    except Exception:  # pragma: no cover - malformed geometry: no cutouts
+        return []
+    rings = [Polygon(face.exterior) for face in faces if face.area > 0]
+    if len(rings) < 2:
+        return []
+    rings.sort(key=lambda ring: ring.area, reverse=True)
+    loops: list[list[Pt]] = []
+    for idx, ring in enumerate(rings[1:], start=1):
+        probe = ring.representative_point()
+        depth = sum(1 for other in rings[:idx] if other.contains(probe))
+        if depth % 2 == 1:
+            loops.append([(float(x), float(y)) for x, y in ring.exterior.coords[:-1]])
+    return loops

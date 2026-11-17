@@ -1,0 +1,6111 @@
+"""
+C++ router backend with Python fallback.
+
+This module provides a unified interface to the router that automatically
+uses the C++ implementation when available, falling back to pure Python.
+
+The C++ backend provides 10-100x speedup for the core A* loop and grid
+operations, making fine-grid routing (0.0635mm) practical for production use.
+
+If you are seeing slow routing performance, the C++ backend is likely not
+installed. Build it with:
+
+    kct build-native
+
+Or check its status with:
+
+    kct build-native --check
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import math
+import os
+import time
+import zlib
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, NamedTuple
+
+from . import wall_deadline as _wall_deadline
+from .pad_landing import pad_landing_geometry
+from .resource_guard import reraise_if_resource_exhaustion
+from .search_radius import search_radius_cells
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from .grid import CarveoutMode, RoutingGrid
+    from .pairwise_clearance import AttachZone
+    from .pathfinder import Router
+    from .primitives import Pad, Route
+    from .rules import DesignRules, NetClassRouting
+
+logger = logging.getLogger(__name__)
+
+# Issue #8485: Python-fallback repeat bounds.  A REPEAT fallback of a request
+# whose Python A* already failed runs on ``FRACTION`` of the first attempt's
+# wall time (never below ``FLOOR``) instead of the full per-net timeout, and a
+# timed negotiated stage caps its total fallback spend at ``STAGE_FRACTION``
+# of the stage ``--timeout``; past that cap repeats are skipped outright.
+# First attempts of never-tried requests always keep their full budget.
+REPEAT_FALLBACK_BUDGET_FRACTION: float = 0.10
+REPEAT_FALLBACK_BUDGET_FLOOR_S: float = 5.0
+# Under ``--deterministic-budget`` the repeat is bounded by
+# ``FRACTION`` of the tuned per-net iteration cap instead (never below this).
+REPEAT_FALLBACK_ITERATION_FLOOR: int = 10_000
+STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
+
+# Required C++ binding-surface version (Issue #2501).
+#
+# This MUST match ``ROUTER_CPP_BUILD_VERSION`` in
+# ``src/kicad_tools/router/cpp/include/types.hpp``.  Bump both constants in any
+# PR that changes the bindings.cpp surface (added/removed/renamed symbols,
+# struct fields, function signatures).
+#
+# When ``router_cpp.BUILD_VERSION`` does not match this value, the compiled
+# ``.so`` is older than the source tree and would otherwise raise
+# ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
+# missing).  The guard below catches that at import time and falls back to the
+# pure-Python router with an actionable ``kct build-native`` hint.
+#
+# v42 (Issue #5599): ``RouteResult.goal_gx/goal_gy/goal_layer`` -- the goal
+# node the A* actually accepted, consumed by the resume loop to reject the
+# correct goal cell (the last-segment endpoint derivation always produced the
+# end-pad center, a no-op rejection after the first attempt).
+# v45 (Issue #5711, part of #5410): ``CoupledPathfinder::set_halo_net_dimensions``
+# gained ``partner_net`` / ``partner_clearance`` so the coupled halo refinement
+# applies the same diff-pair intra-pair waiver ``RouteHaloRefiner.trace_clear``
+# applies.  A v44 .so silently drops the waiver, so it must be rejected.
+# v46 (Issue #5786): the pose-based centerline search
+# (``CoupledPathfinder.route_centerline`` and friends) and the
+# ``dubins_path_length`` bindings.  A v45 .so lacks them.
+# v47 (Issue #6008): ``Grid3D.add_rule_area_keepout`` and friends -- board-file
+# keepout rule areas enforced by the grid engine.  A v46 .so lacks them.
+# v48 (Issue #6243): authored per-net clearance minima -- the
+# ``Grid3D.authored_*`` gate, ``set_net_clearance_floors`` /
+# ``set_pad_authored``, and the search / coupled / validate_route consults.
+# A v47 .so would route straight through a stricter netclass's clearance.
+# v49 (Issue #6272): every native trace-vs-via gate resolves
+# ``trace_via_clearance`` (max of the two floors) in both insertion orders, a
+# diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
+# gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
+# A v48 .so would let a trace land inside an earlier via's floor.
+# v51 (Issue #6375): ``Pathfinder.set_search_own_pad_gate`` /
+# ``own_pad_step_clear`` and ``Grid3D.segment_pads_clear`` -- the A* holds
+# steps on the routing net's own pad cells to the validator's seg-vs-pad
+# verdict.  ``route()`` calls the setter on every search; a v50 .so lacks it.
+# v52 (Issue #6368): ``PadBounds.centre_gx`` / ``centre_gy`` / ``long_axis``
+# -- both A* loops charge an off-centreline pad landing.  A v51 .so lacks the
+# fields.
+# v53 (Issue #6464): both A* loops and ``Grid3D.validate_route`` hold a via to
+# the fab hole-to-hole floor against the route's OWN earlier vias.  A v52 .so
+# commits same-route via pairs below the floor.
+# v54 (Issue #6473): ``CoupledPathfinder.route`` holds a layer change to the
+# fab hole-to-hole floor against the pair's own earlier vias and between the
+# P and N via of the move.  A v53 .so returns coupled via pairs below it.
+# v56 (Issue #6718): ``Grid3D.set_pad_authored`` takes a trailing ``rratio``
+# (the file's roundrect corner ratio); a v55 .so rejects the argument.
+# v57 (Issue #6761): both A* loops honour hard escape fences -- a
+# ``PadChannelBudget`` with an infinite penalty refuses the cell, and
+# ``layer == -2`` is a via-only fence.  A v56 .so would price the fences as
+# an ordinary (infinite) cost and read ``layer == -2`` as out of range.
+# v58 (Issue #6826): ``CoupledPathfinder.route`` bounds the endpoint zones'
+# spacing tolerance by each end's pad-pitch delta + 1, not the zone radius.  A
+# v57 .so diverges from the Python coupled mirror.
+# v59 (Issue #6840): ``CoupledPathfinder.set_partner_via_clearance`` -- the
+# joint search keeps each rail clear of the partner's via barrels on every
+# layer.  A v58 .so lacks the setter and diverges from the Python mirror.
+# v60 (Issue #6994): native A* search radii use the guarded
+# ``search_radius_cells`` rule shared with Python (new binding
+# ``router_cpp.search_radius_cells``).  A v59 .so searches one ring wider on
+# float-noise inputs (Default rules @ 0.1 mm) than the Python mirror.
+# v61 (Issue #7296): ``DesignRules.min_via_pad_edge_gap`` + the coupled
+# pathfinder's mask-dam refusal; v62: the same floor in the single-ended A*'s
+# via check.  A v61 .so lets single-ended vias into the dam zone.
+# v63 (Issue #7491): the coupled pose search's rail gate measures the partner
+# net's pads exactly (``Grid3D.pad_geometry_clear(..., only_net=)``).  A v62
+# .so lets a pose trunk thread a sub-pitch gap between partner pads that the
+# finished-copper check then refuses (``derived-rails-blocked``).
+# v64 (Issue #7569): ``Grid3D.set_pad_class_clearances`` + the
+# ``PadInfo::class_clearance`` field -- the exact pad test holds each pad to
+# its own net class.  A v63 .so keeps the board-wide largest-class floor.
+# v65 (Issue #7887): the own-pad step gate attributes a refusal decided by the
+# pairwise (HV) floor alone, so an HV pad walled in by LV pads drains as
+# ``FAILURE_PAIRWISE_BLOCKED``.  A v64 .so still reports a bare NO_PATH.
+# v66 (Issue #8994): ``DesignRules.same_net_pad_gap_band_edge_mm`` + the
+# same-net pad slit-band refusal in both A* via checks.  A v65 .so seats via
+# annuli in the (0, edge) slit band beside their own SMD pads (board 06's
+# d0.25/s0.6 PCIE_RX+/USB2_D- population).
+# v67 (Issue #8999): ``GridCell::airwire_cost`` + the ``clear_airwire_costs``
+# / ``set_airwire_cells`` verbs -- the prospective airwire-separation term
+# summed inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated
+# cells without the term, silently breaking Python/C++ cost parity.
+_REQUIRED_CPP_BUILD_VERSION = 67
+
+
+# Issue #5599: human-readable names for the ``ValidationResult::violation_type``
+# codes the C++ validator assigns (see the field comment on the struct in
+# ``cpp/include/types.hpp``).  Used by the resume-loop instrumentation so
+# ``fallback_stats['resume_diagnostics']`` records WHY each post-route
+# validation attempt failed (spacing vs via-clearance vs same-net drill ...),
+# not just where.
+_CPP_VIOLATION_KINDS: dict[int, str] = {
+    0: "none",
+    1: "seg-pad",
+    2: "seg-seg",
+    3: "seg-via",
+    4: "via-seg",
+    5: "via-via",
+    6: "drill",
+    7: "reserved",
+    8: "via-pad",
+    9: "authored-floor",  # Issue #6243
+}
+
+
+class RouteClearanceViolation(NamedTuple):
+    """A post-route clearance violation found by ``_validate_route_clearance``.
+
+    Issue #5599: the validator previously returned a bare ``(x, y)`` tuple --
+    a location but no KIND.  The resume-loop instrumentation needs both to
+    answer "what specifically fails clearance on the resume attempts".
+    Tuple-compatible with the old return (``v[0]``/``v[1]`` are x/y), so
+    existing positional consumers keep working.
+
+    Attributes:
+        x: World X of the violation site (mm).
+        y: World Y of the violation site (mm).
+        kind: Human-readable violation kind.  C++ validator results map
+            through ``_CPP_VIOLATION_KINDS`` (e.g. ``"seg-pad"``); the
+            Python-side post-checks carry their own labels (e.g.
+            ``"seg_vs_foreign_via"``).
+        type_code: Raw ``ValidationResult::violation_type`` code when the
+            violation came from the C++ validator, ``None`` for the
+            Python-side post-checks.
+        min_clearance: The measured gap at the violation site when the C++
+            validator reports one (``ValidationResult::min_clearance``),
+            ``None`` otherwise.  Issue #5599 diagnostics: quantifies HOW far
+            below the clearance threshold each rejected candidate sat.
+    """
+
+    x: float
+    y: float
+    kind: str
+    type_code: int | None = None
+    min_clearance: float | None = None
+
+
+# Issue #5599: avoidance-boost escalation for the post-route clearance resume
+# loop.  The historical flat 20.0 per failed attempt accumulates too slowly
+# (five overlapping boosts still let board 04's USER_LED/BOOT0 re-enter the
+# goal through the identical seg-pad violation window), so each REPEATED
+# failure at the same violation site multiplies the amount by 4:
+# 20 -> 80 -> 320 -> 1280 -> 5120.  A first-time site keeps the historical
+# 20.0 exactly.
+_RESUME_BOOST_BASE_AMOUNT = 20.0
+_RESUME_BOOST_ESCALATION = 4.0
+
+
+# Try to import C++ module with detailed error tracking
+_CPP_IMPORT_ERROR: str | None = None
+# Issue #4589: diagnostics captured at import time so ``get_backend_info()``
+# can report the numbers the staleness guard actually cares about, even after
+# the version guard below nulls out ``router_cpp``.
+_CPP_BUILD_VERSION: int | None = None
+
+
+def _allow_smd_vias(rules) -> bool:
+    """May a via be drilled into an SMD pad under ``rules.manufacturer``?
+
+    Unknown manufacturer -> unspecified capability is retained (permissive),
+    matching ``pathfinder.Router``'s fallback.  Shared by the single-ended and
+    the coupled (Issue #6840) rules marshalling.
+    """
+    from .mfr_limits import get_mfr_limits
+
+    allow = True
+    if getattr(rules, "manufacturer", None):
+        with contextlib.suppress(ValueError):
+            allow = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
+    return allow
+
+
+_CPP_EXTENSION_PATH: str | None = None
+try:
+    if TYPE_CHECKING:
+        import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
+    else:
+        # Preserve the package-cached native module during backend reloads.
+        # Reinitializing nanobind after sys.modules eviction loses its types.
+        from . import router_cpp
+
+    _CPP_AVAILABLE = True
+    _CPP_BUILD_VERSION = getattr(router_cpp, "BUILD_VERSION", None)
+    _CPP_EXTENSION_PATH = getattr(router_cpp, "__file__", None)
+except ImportError as e:
+    _CPP_AVAILABLE = False
+    _CPP_IMPORT_ERROR = str(e)
+    router_cpp = None  # type: ignore
+
+    # Check for common cause: .so built for a different Python version
+    import glob
+    import pathlib
+    import sys
+
+    _so_files = glob.glob(
+        str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-darwin.so")
+    ) + glob.glob(str(pathlib.Path(__file__).parent / "router_cpp.cpython-*-linux-*.so"))
+    # Issue #2514: Distinguish "no compiled extension" from a genuine
+    # circular import.  When ``from . import router_cpp`` runs while
+    # ``kicad_tools.router.__init__`` is still mid-import, Python's
+    # ``ImportError.__str__`` mentions "partially initialized module
+    # (most likely due to a circular import)" -- even when the actual
+    # root cause is a missing ``.so`` file (e.g. fresh checkout where
+    # ``kct build-native`` was never run).  Replace the misleading
+    # message with an actionable hint when no ``.so`` is present at all.
+    if not _so_files:
+        _CPP_IMPORT_ERROR = (
+            "C++ router extension not built (no router_cpp.*.so found in "
+            f"{pathlib.Path(__file__).parent}). "
+            "Run: kct build-native"
+        )
+    else:
+        _running_tag = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
+        if _running_tag not in " ".join(_so_files):
+            _CPP_IMPORT_ERROR = (
+                f"C++ backend was built for {', '.join(pathlib.Path(f).name for f in _so_files)} "
+                f"but running Python {sys.version_info.major}.{sys.version_info.minor} "
+                f"({_running_tag}). Rebuild with: kicad-tools build-native"
+            )
+
+# Stale-.so guard (Issue #2501): the import succeeded, but the compiled
+# binding surface may predate the current source tree.  A mismatch here
+# means new symbols (e.g. ``PadBounds``, ``FAILURE_NONE``) referenced by
+# this module are absent from the loaded ``.so`` and would otherwise
+# raise ``AttributeError`` at routing time.  Disable the backend cleanly
+# with a clear rebuild hint that routes through the existing fallback path.
+if _CPP_AVAILABLE:
+    _actual_build_version = getattr(router_cpp, "BUILD_VERSION", None)
+    if _actual_build_version != _REQUIRED_CPP_BUILD_VERSION:
+        _CPP_AVAILABLE = False
+        _CPP_IMPORT_ERROR = (
+            f"router_cpp build version {_actual_build_version!r} does not match "
+            f"required {_REQUIRED_CPP_BUILD_VERSION}. The compiled .so is stale "
+            f"relative to the C++ source tree. Rebuild with: kct build-native"
+        )
+        router_cpp = None  # type: ignore
+
+
+def is_cpp_available() -> bool:
+    """Check if the C++ router backend is available."""
+    return _CPP_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Fresh-interpreter availability probe (Issue #4589)
+# ---------------------------------------------------------------------------
+#
+# ``kct build-native`` used to verify its own work with an in-process
+# ``sys.modules.pop`` + ``importlib.reload`` dance.  That cannot work for a C
+# extension: once ``router_cpp.*.so`` has been ``dlopen``'d, CPython keeps the
+# initialised module in a runtime-level extension cache keyed by
+# ``(filename, module name)`` which neither ``sys.modules.pop`` nor
+# ``importlib.invalidate_caches`` clears, and the loader will not re-read the
+# file.  The re-import therefore returns the *identical* module object, so the
+# probe reports on the PRE-build extension:
+#
+#   * version-stale rebuild  -> false NEGATIVE ("installed but not loading
+#     correctly") even though every later process loads it fine;
+#   * mtime-stale rebuild    -> false POSITIVE (the build is "verified"
+#     against code that was never loaded).
+#
+# The only reliable way to answer "what will the next process see?" is to ask
+# a *fresh* interpreter -- which is exactly what ``build-native --check``
+# already did implicitly by being a new process.  ``probe_backend_info()``
+# below is that single shared probe: ``--check`` and the post-build
+# verification both go through it, so they cannot disagree for the same
+# on-disk state.
+_PROBE_SOURCE = (
+    "import json, sys\n"
+    "from kicad_tools.router.cpp_backend import get_backend_info\n"
+    "sys.stdout.write(json.dumps(get_backend_info()))\n"
+)
+
+# Set once this process has replaced the on-disk extension (i.e. after
+# ``build_native()`` installs a new ``.so``).  From that moment the in-process
+# view is stale BY CONSTRUCTION and ``probe_backend_info()`` must spawn a
+# subprocess instead of trusting it.
+_EXTENSION_REPLACED = False
+
+
+def note_extension_replaced() -> None:
+    """Record that this process overwrote the on-disk ``router_cpp`` extension.
+
+    Called by ``build_native()`` right after installing a freshly compiled
+    ``.so``.  It permanently poisons the in-process fast path of
+    :func:`probe_backend_info` for this interpreter, because the already
+    ``dlopen``'d extension can no longer describe what is on disk.
+    """
+    global _EXTENSION_REPLACED
+    _EXTENSION_REPLACED = True
+
+
+def extension_replaced_in_process() -> bool:
+    """Whether this process has replaced the on-disk extension (see above)."""
+    return _EXTENSION_REPLACED
+
+
+def probe_backend_info(
+    *,
+    executable: str | None = None,
+    timeout: float = 60.0,
+    allow_in_process: bool = True,
+) -> dict:
+    """Return the backend info a *freshly started* interpreter would report.
+
+    This is the single availability probe shared by ``kct build-native``'s
+    post-build verification and ``kct build-native --check`` (Issue #4589).
+
+    The returned dict is exactly what :func:`get_backend_info` produces, plus a
+    ``"probe"`` sub-dict describing how the answer was obtained::
+
+        {"mode": "in-process" | "subprocess",
+         "interpreter": "/path/to/python",
+         "failed": bool,          # True only when the probe could not run
+         "error": str | None}     # populated when ``failed`` is True
+
+    Args:
+        executable: Interpreter to probe with (defaults to ``sys.executable``).
+        timeout: Seconds to wait for the subprocess probe.
+        allow_in_process: Permit the in-process fast path when it is provably
+            equivalent to a fresh interpreter -- that is, when this process has
+            not replaced the extension on disk (see
+            :func:`extension_replaced_in_process`).  Pass ``False`` to force a
+            subprocess (what the post-build verification does).
+
+    Never raises: a probe that cannot run reports ``probe.failed`` with the
+    real error text rather than claiming the extension is broken.
+    """
+    import json
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    interpreter = executable or sys.executable
+
+    # Fast path: nothing has replaced the extension under this process, so the
+    # module state we already hold IS what a fresh interpreter would compute
+    # from the same files.  This keeps ``--check`` a sub-second, no-subprocess,
+    # no-compilation status query.
+    info: dict
+    if allow_in_process and not _EXTENSION_REPLACED:
+        info = get_backend_info()
+        info["probe"] = {
+            "mode": "in-process",
+            "interpreter": interpreter,
+            "failed": False,
+            "error": None,
+        }
+        return info
+
+    env = os.environ.copy()
+    # Make sure the child can import ``kicad_tools`` even when this process
+    # found it via a cwd-relative entry on ``sys.path``.
+    try:
+        import kicad_tools
+
+        pkg_parent = str(pathlib.Path(kicad_tools.__file__).resolve().parent.parent)
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = pkg_parent + (os.pathsep + existing if existing else "")
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    probe_meta = {
+        "mode": "subprocess",
+        "interpreter": interpreter,
+        "failed": False,
+        "error": None,
+    }
+
+    try:
+        completed = subprocess.run(
+            [interpreter, "-c", _PROBE_SOURCE],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except Exception as exc:
+        probe_meta["failed"] = True
+        probe_meta["error"] = f"{type(exc).__name__}: {exc}"
+        return _probe_failure_info(probe_meta)
+
+    if completed.returncode != 0:
+        probe_meta["failed"] = True
+        probe_meta["error"] = (
+            f"probe interpreter exited {completed.returncode}: "
+            f"{(completed.stderr or '').strip() or '<no stderr>'}"
+        )
+        return _probe_failure_info(probe_meta)
+
+    try:
+        info = json.loads(completed.stdout)
+    except Exception as exc:
+        probe_meta["failed"] = True
+        probe_meta["error"] = (
+            f"could not parse probe output ({type(exc).__name__}: {exc}): "
+            f"{(completed.stdout or '').strip()[:200]!r}"
+        )
+        return _probe_failure_info(probe_meta)
+
+    info["probe"] = probe_meta
+    return info
+
+
+def _probe_failure_info(probe_meta: dict) -> dict:
+    """Build the info dict returned when the probe itself could not run.
+
+    ``available`` is ``False`` (we genuinely do not know), but the reason
+    names the probe failure so callers never report a working extension as
+    broken on the strength of a subprocess that never ran.
+    """
+    return {
+        "backend": "unknown",
+        "version": "unknown",
+        "available": False,
+        "unavailable_reason": f"backend probe did not run: {probe_meta['error']}",
+        "probe": probe_meta,
+    }
+
+
+def get_cpp_unavailable_reason() -> str | None:
+    """Get the reason why C++ backend is unavailable.
+
+    Returns:
+        Error message if C++ backend failed to load, None if available.
+    """
+    if _CPP_AVAILABLE:
+        return None
+    return _CPP_IMPORT_ERROR
+
+
+def _reload_cpp_backend() -> bool:
+    """Reload the cpp_backend module after a successful build.
+
+    After ``build_native()`` writes a new ``router_cpp.*.so`` into the
+    package directory, the in-process module-level globals
+    ``_CPP_AVAILABLE`` and ``router_cpp`` are still ``False`` / ``None``
+    from the original failed import.  Reloading the module re-runs the
+    top-level import block, populating those globals so subsequent calls
+    to :func:`is_cpp_available` return ``True`` and the C++ backend is
+    actually used by the routing code.
+
+    Issue #2594: ``importlib.reload(cpp_backend)`` alone is *not* enough.
+    The original ``from . import router_cpp`` failed at startup, leaving:
+
+      1. A negative/partially-initialised entry for
+         ``kicad_tools.router.router_cpp`` in :data:`sys.modules` that
+         Python re-uses on subsequent imports instead of re-running the
+         module finder.
+      2. A cached directory listing on the parent package's
+         ``FileFinder`` that does not yet contain the freshly-written
+         ``router_cpp.*.so``.
+
+    To pick up the new ``.so`` in the same process we MUST drop the
+    stale ``sys.modules`` entry AND call
+    :func:`importlib.invalidate_caches` before the reload.  This is the
+    safe case: the previous attempt never succeeded, so there is no
+    initialised native module to clash with.
+
+    .. important:: **This only works when the extension was never
+       successfully imported in this process.**  Once ``router_cpp.*.so``
+       has been ``dlopen``'d, CPython's runtime extension cache returns the
+       *identical* module object on re-import, so a replaced ``.so`` (e.g. a
+       ``BUILD_VERSION``-mismatch rebuild) is invisible here -- the reload
+       re-reports the pre-build extension.  Never use the result of this
+       function to decide whether a *build* succeeded; use
+       :func:`probe_backend_info` (a fresh interpreter) for that.  This
+       function answers only the narrower question "can THIS process use the
+       backend now?" (Issue #4589).
+
+    Returns:
+        ``True`` if the backend is available in *this process* after the
+        reload, ``False`` otherwise.
+    """
+    global _CPP_AVAILABLE, _CPP_IMPORT_ERROR, router_cpp, _EXTENSION_REPLACED
+
+    import importlib
+    import sys as _sys
+
+    # ``importlib.reload`` re-executes this module's top level, which would
+    # reset the sticky "we replaced the .so" flag back to its initial False.
+    was_replaced = _EXTENSION_REPLACED
+
+    # 1. Drop any stale negative/partial entry for the C++ extension itself.
+    #    A failed ``from . import router_cpp`` at startup leaves a None or
+    #    partially-initialised module in sys.modules that Python re-uses
+    #    on subsequent imports.
+    _sys.modules.pop("kicad_tools.router.router_cpp", None)
+
+    # 2. Tell the import machinery to re-scan filesystem-based finders
+    #    for the freshly-written .so. Without this, the parent package's
+    #    FileFinder may keep its cached directory listing from before the
+    #    build wrote the new file.
+    importlib.invalidate_caches()
+
+    module_name = __name__  # "kicad_tools.router.cpp_backend"
+    module = _sys.modules.get(module_name)
+    if module is None:
+        return _CPP_AVAILABLE
+
+    try:
+        importlib.reload(module)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to reload cpp_backend after build: %s", exc)
+        _EXTENSION_REPLACED = _EXTENSION_REPLACED or was_replaced
+        return _CPP_AVAILABLE
+
+    # Mirror the freshly-imported globals into this module's namespace so
+    # callers that already have references to functions in this module
+    # (e.g. ``is_cpp_available``) see the new state.
+    _CPP_AVAILABLE = getattr(module, "_CPP_AVAILABLE", False)
+    _CPP_IMPORT_ERROR = getattr(module, "_CPP_IMPORT_ERROR", None)
+    router_cpp = getattr(module, "router_cpp", None)
+    _EXTENSION_REPLACED = _EXTENSION_REPLACED or was_replaced
+    return _CPP_AVAILABLE
+
+
+def ensure_cpp_backend_available(
+    *,
+    backend: str = "auto",
+    quiet: bool = False,
+    allow_auto_build: bool = True,
+) -> tuple[bool, bool, int | None]:
+    """Resolve C++ backend availability, auto-building if needed (Issue #2549).
+
+    Consolidates the four near-identical "Handle backend selection" blocks
+    that previously lived in ``route_cmd.py``.  Honors the user's explicit
+    ``--backend`` choice and silently auto-builds the C++ extension on first
+    use when ``--backend`` is ``auto`` (the default) and the ``router_cpp.*.so``
+    is missing or stale.
+
+    Auto-build is skipped under any of:
+      - ``backend == "python"`` (user explicitly chose Python)
+      - ``backend == "cpp"`` (handled separately: hard error if unavailable)
+      - ``allow_auto_build=False`` (caller opt-out, e.g. ``--no-auto-build-native``)
+      - ``KICAD_TOOLS_NO_AUTO_BUILD=1`` env var (sandbox / CI escape hatch)
+      - cmake or a C++ compiler not present on PATH (cheap pre-check)
+
+    On build failure (any reason: missing toolchain, timeout, verification
+    error, sandbox without write permission), this function falls through
+    to the existing Python-fallback warning path.  It never raises -- the
+    intent is to keep ``kct route`` working even when the build fails.
+
+    Args:
+        backend: One of ``"auto"``, ``"cpp"``, or ``"python"``.  Mirrors the
+            ``--backend`` CLI flag.
+        quiet: Suppress informational and warning output.
+        allow_auto_build: If ``False``, never attempt auto-build.  Used by
+            tests and ``--no-auto-build-native``.
+
+    Returns:
+        A tuple ``(ok, force_python, exit_code)`` where:
+          - ``ok``: ``True`` if the caller should proceed with routing.
+            ``False`` only when ``backend=="cpp"`` and the backend is
+            unavailable (caller should ``return exit_code``).
+          - ``force_python``: ``True`` when the Python backend should be
+            used (``--backend python`` or auto-fallback after build failure).
+          - ``exit_code``: ``1`` when ``backend=="cpp"`` and unavailable,
+            ``None`` otherwise.
+    """
+    import sys
+
+    def _emit(msg: str, *, file=None) -> None:
+        if quiet:
+            return
+        if file is None:
+            print(msg, flush=True)
+        else:
+            print(msg, file=file, flush=True)
+
+    # --backend python: honor user intent, never attempt auto-build.
+    if backend == "python":
+        return True, True, None
+
+    # --backend cpp: hard error if unavailable (existing behavior).  We
+    # still attempt an auto-build when the user explicitly selected cpp,
+    # because that matches the user's intent ("I want C++"), but we
+    # surface a hard error if the build fails so the user knows the
+    # request was honored as best as possible.
+    if backend == "cpp":
+        if is_cpp_available():
+            return True, False, None
+        outcome: AutoBuildOutcome | None = None
+        if allow_auto_build and _auto_build_allowed_by_env():
+            outcome = _attempt_auto_build(quiet=quiet)
+            if outcome.available_in_process:
+                return True, False, None
+        # Build either disallowed or failed -- preserve the original
+        # hard-error behavior so ``--backend cpp`` never silently falls
+        # back to Python.  Issue #4589: when the build DID succeed and only
+        # the in-process hot-swap was impossible, say so instead of the
+        # misleading "not available".
+        if outcome is not None and outcome.available_on_disk:
+            _emit(
+                "Error: the C++ backend was just built and a fresh interpreter loads it,\n"
+                "but this already-running process cannot swap in the replaced extension.\n"
+                "Re-run this command to use the C++ backend.",
+                file=sys.stderr,
+            )
+        else:
+            _emit(
+                "Error: C++ backend requested but not available.\n"
+                "Build the C++ extension or use --backend auto/python.\n"
+                "See README for build instructions.",
+                file=sys.stderr,
+            )
+        return False, False, 1
+
+    # --backend auto (default): try to auto-build if not available.
+    if is_cpp_available():
+        return True, False, None
+
+    if allow_auto_build and _auto_build_allowed_by_env():
+        outcome = _attempt_auto_build(quiet=quiet)
+        if outcome.available_in_process:
+            return True, False, None
+        if outcome.available_on_disk:
+            # Issue #4589: the extension IS installed -- _attempt_auto_build
+            # already explained why this process cannot use it.  Emitting
+            # "C++ router backend not installed" here would contradict
+            # ``kct build-native --check`` seconds later.
+            return True, False, None
+
+    # Backend still unavailable: emit the existing warning and continue
+    # with Python.  Build failures (toolchain missing, timeout, etc.)
+    # share this path so ``kct route`` never crashes due to a failed
+    # auto-build attempt.
+    if not quiet:
+        _emit("WARNING: C++ router backend not installed -- using Python (10-100x slower).")
+        _emit("  Build it now:  kct build-native")
+        _emit("  Check status:  kct build-native --check")
+        _emit("")
+    return True, False, None
+
+
+def _auto_build_allowed_by_env() -> bool:
+    """Check the ``KICAD_TOOLS_NO_AUTO_BUILD`` environment opt-out.
+
+    Returns ``False`` when the variable is set to a truthy value
+    (``1``, ``true``, ``yes``, ``on`` -- case-insensitive).
+    """
+    import os
+
+    val = os.environ.get("KICAD_TOOLS_NO_AUTO_BUILD", "").strip().lower()
+    return val not in ("1", "true", "yes", "on")
+
+
+def _toolchain_available() -> bool:
+    """Cheap pre-check for cmake + C++ compiler on PATH.
+
+    Avoids spending ~5-10s invoking cmake in environments where the build
+    is guaranteed to fail (sandboxes, CI runners without dev tools).
+    """
+    import shutil
+
+    if shutil.which("cmake") is None:
+        return False
+    return any(shutil.which(compiler) is not None for compiler in ("clang++", "g++"))
+
+
+@dataclass(frozen=True)
+class AutoBuildOutcome:
+    """Result of the silent ``kct route`` auto-build (Issue #4589).
+
+    Two *different* questions have to be answered separately, because a C
+    extension that was already ``dlopen``'d in this process cannot be swapped
+    out for a rebuilt file:
+
+    Attributes:
+        available_in_process: The running process can use the C++ backend now
+            (``is_cpp_available()`` is True after the reload).
+        available_on_disk: A *fresh interpreter* reports the backend as
+            available -- i.e. the build genuinely succeeded, even if this
+            process cannot hot-swap it.
+        reason: Human-readable explanation when ``available_on_disk`` is False.
+    """
+
+    available_in_process: bool
+    available_on_disk: bool
+    reason: str | None = None
+
+    def __bool__(self) -> bool:  # pragma: no cover - convenience
+        return self.available_in_process
+
+
+def _attempt_auto_build(*, quiet: bool) -> AutoBuildOutcome:
+    """Run ``build_native(force=False)`` and reload this module on success.
+
+    Never raises.  The ``build_native`` call short-circuits in milliseconds
+    when the backend is already loaded and up to date, so repeat invocations
+    are effectively free once the ``.so`` exists.
+
+    Issue #4589: the return value distinguishes "this process can use the
+    backend" from "the build succeeded".  Previously both collapsed into a
+    single ``False``, so a successful build that merely could not be
+    hot-swapped into the running interpreter was announced as a build failure
+    followed by ``C++ router backend not installed`` -- the same false
+    negative ``kct build-native`` printed.
+    """
+    if not _toolchain_available():
+        if not quiet:
+            print(
+                "Note: C++ router toolchain (cmake + clang++/g++) not found; skipping auto-build.",
+                flush=True,
+            )
+        return AutoBuildOutcome(
+            available_in_process=False,
+            available_on_disk=False,
+            reason="C++ toolchain (cmake + clang++/g++) not found",
+        )
+
+    if not quiet:
+        print(
+            "C++ router extension missing -- building (~30s, one-time)...",
+            flush=True,
+        )
+
+    try:
+        from kicad_tools.cli.build_native_cmd import build_native
+
+        result = build_native(verbose=False, force=False)
+    except Exception as exc:
+        if not quiet:
+            print(
+                f"Note: auto-build raised {type(exc).__name__}: {exc}; falling back to Python.",
+                flush=True,
+            )
+        return AutoBuildOutcome(
+            available_in_process=False,
+            available_on_disk=False,
+            reason=f"auto-build raised {type(exc).__name__}: {exc}",
+        )
+
+    if not getattr(result, "success", False):
+        err = getattr(result, "error_message", None) or "unknown error"
+        if not quiet:
+            print(
+                f"Note: C++ auto-build failed: {err}; falling back to Python.",
+                flush=True,
+            )
+        return AutoBuildOutcome(
+            available_in_process=False,
+            available_on_disk=False,
+            reason=f"auto-build failed: {err}",
+        )
+
+    # Build succeeded -- reload this module so module-level globals
+    # (``_CPP_AVAILABLE``, ``router_cpp``) reflect the freshly written
+    # ``.so``.  Without this, ``is_cpp_available()`` continues to return
+    # ``False`` for the rest of the process.
+    #
+    # Issue #2594: ``_reload_cpp_backend`` now invalidates the import
+    # caches and pops the stale ``router_cpp`` entry from ``sys.modules``
+    # before reloading, so this is expected to succeed in the same
+    # process.  The ``not available`` branch is retained as a defensive
+    # diagnostic for genuinely pathological reload failures (e.g. a
+    # platform where dlopen of the new .so itself fails after the build
+    # wrote it to disk).
+    available = _reload_cpp_backend()
+    if available:
+        return AutoBuildOutcome(available_in_process=True, available_on_disk=True)
+
+    # The in-process reload could not pick it up.  Before blaming the build,
+    # ask the SAME fresh-interpreter probe ``kct build-native --check`` uses
+    # what is actually on disk (Issue #4589) -- an already-``dlopen``'d
+    # extension can never be replaced in-process, so this is the expected
+    # outcome of a version-guard rebuild, not a failure.
+    probe = probe_backend_info(allow_in_process=False)
+    if probe.get("available"):
+        if not quiet:
+            print(
+                "Note: the C++ backend was built successfully and verified in a fresh "
+                "interpreter, but this already-running process cannot load the replaced "
+                "extension (CPython keeps the original dlopen handle). Using Python for "
+                "THIS run only -- re-run the command to get the C++ backend.",
+                flush=True,
+            )
+        return AutoBuildOutcome(available_in_process=False, available_on_disk=True)
+
+    reason = probe.get("unavailable_reason") or "unknown reason"
+    if not quiet:
+        print(
+            f"Note: C++ build reported success but a fresh interpreter still cannot "
+            f"load the extension ({reason}); falling back to Python.",
+            flush=True,
+        )
+    return AutoBuildOutcome(available_in_process=False, available_on_disk=False, reason=reason)
+
+
+def get_backend_info() -> dict:
+    """Get information about the active backend.
+
+    Returns a dictionary with:
+        - backend: "cpp" or "python"
+        - version: version string (the extension's ``version()`` string, e.g.
+          ``"1.0.0"`` -- NOT the number the staleness guard checks)
+        - build_version: the compiled ``router_cpp.BUILD_VERSION`` integer, or
+          ``None`` when the extension could not be imported at all
+        - required_build_version: ``_REQUIRED_CPP_BUILD_VERSION`` -- the value
+          ``build_version`` must equal for the backend to be enabled
+        - extension_path: the ``.so``/``.pyd`` this interpreter actually
+          imported, or ``None``
+        - available: True if C++ backend is available
+        - unavailable_reason: Error message if C++ unavailable (only if available=False)
+        - platform: Current platform info (for diagnostics)
+
+    Issue #4589: ``build_version`` / ``required_build_version`` /
+    ``extension_path`` are reported in BOTH the available and unavailable
+    branches, because "version 1.0.0" alone could not explain a
+    ``BUILD_VERSION``-mismatch disable.
+    """
+    import platform
+    import sys
+
+    platform_info = {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "python_version": sys.version.split()[0],
+    }
+
+    if _CPP_AVAILABLE:
+        return {
+            "backend": "cpp",
+            "version": router_cpp.version(),
+            "build_version": _CPP_BUILD_VERSION,
+            "required_build_version": _REQUIRED_CPP_BUILD_VERSION,
+            "extension_path": _CPP_EXTENSION_PATH,
+            "available": True,
+            "platform": platform_info,
+        }
+
+    # Build detailed unavailability info
+    reason = _CPP_IMPORT_ERROR or "Unknown error"
+
+    # Always provide an actionable build hint
+    build_hint = (
+        "Build the C++ extension for 10-100x faster routing:\n"
+        "  kct build-native\n"
+        "Or install with native support:\n"
+        "  pip install kicad-tools[native]"
+    )
+
+    # Provide platform-specific diagnostics for common issues
+    diagnostic_hint = None
+    if "arm64" in platform.machine().lower() or "aarch64" in platform.machine().lower():
+        if "darwin" in platform.system().lower():
+            diagnostic_hint = (
+                "On Apple Silicon, the C++ extension must be built locally. "
+                "Run 'kct build-native' to build (requires Xcode Command Line Tools)."
+            )
+    elif "cannot open shared object" in reason.lower() or "dll" in reason.lower():
+        diagnostic_hint = (
+            "The compiled C++ extension was not found for this platform. "
+            "Run 'kct build-native' to build from source."
+        )
+
+    result = {
+        "backend": "python",
+        "version": "pure-python",
+        "build_version": _CPP_BUILD_VERSION,
+        "required_build_version": _REQUIRED_CPP_BUILD_VERSION,
+        "extension_path": _CPP_EXTENSION_PATH,
+        "available": False,
+        "unavailable_reason": reason,
+        "build_hint": build_hint,
+        "platform": platform_info,
+    }
+
+    if diagnostic_hint:
+        result["diagnostic_hint"] = diagnostic_hint
+
+    return result
+
+
+# Threshold for warning about Python backend performance (grid cells)
+LARGE_GRID_THRESHOLD = 50_000
+
+
+def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
+    """Format a human-readable backend status string for CLI output.
+
+    Provides actionable guidance when the C++ backend is not available,
+    especially when routing large grids where performance matters.
+
+    Args:
+        backend_info: Dictionary from get_backend_info().
+        grid_cells: Total number of grid cells being routed (0 to skip
+            the large-grid performance warning).
+
+    Returns:
+        Formatted status string suitable for printing to console.
+    """
+    active = backend_info.get("active", backend_info["backend"])
+    available = backend_info.get("available", False)
+
+    if active == "cpp":
+        version = backend_info.get("version", "unknown")
+        return f"cpp v{version} (native, 10-100x faster)"
+
+    # Python backend - provide helpful context
+    parts = ["python (pure Python)"]
+
+    if not available:
+        parts.append("C++ backend not installed")
+        if grid_cells > LARGE_GRID_THRESHOLD:
+            parts.append(
+                f"WARNING: Routing {grid_cells:,} grid cells with Python backend "
+                f"will be slow. Build C++ backend for 10-100x speedup: kct build-native"
+            )
+        else:
+            parts.append("Tip: Run 'kct build-native' for 10-100x faster routing")
+
+    return " | ".join(parts)
+
+
+class CppGrid:
+    """C++ Grid3D wrapper matching RoutingGrid interface.
+
+    This class wraps the C++ Grid3D implementation, providing the same
+    interface as the Python RoutingGrid for drop-in replacement.
+    """
+
+    def __init__(
+        self,
+        cols: int,
+        rows: int,
+        layers: int,
+        resolution: float,
+        origin_x: float = 0.0,
+        origin_y: float = 0.0,
+    ):
+        if not _CPP_AVAILABLE:
+            raise RuntimeError("C++ router backend not available")
+        self._impl = router_cpp.Grid3D(cols, rows, layers, resolution, origin_x, origin_y)
+        self.cols = cols
+        self.rows = rows
+        self.num_layers = layers
+        self.resolution = resolution
+        self.origin_x = origin_x
+        self.origin_y = origin_y
+        # Initialize layer mappings (identity by default, overridden by from_routing_grid)
+        self._index_to_layer: dict[int, int] = {i: i for i in range(layers)}
+        self._layer_to_index: dict[int, int] = {i: i for i in range(layers)}
+        self._off_grid_stored_segments: list = []
+        # Routable layer indices (all layers by default, refined by from_routing_grid)
+        self._routable_layers: list[int] = list(range(layers))
+        # Reference to original Python grid (set by from_routing_grid for
+        # post-route validation and pad_blocked lookups during relaxed
+        # blocker identification, see find_blocking_nets_relaxed).
+        self._py_grid: RoutingGrid | None = None
+        # Track synced route count for incremental stored segment/via updates
+        # (Issue #2439: C++ geometric validation)
+        self._synced_route_count: int = 0
+        # Issue #8769: authored route-floor version last synced to C++.
+        self._stored_route_floor_version: int = 0
+        # Issue #6243: what ``sync_authored_floors`` last installed.
+        self._authored_key: tuple | None = None
+
+    def install_fixed_fills(self, fills) -> None:
+        if not hasattr(self._impl, "add_fixed_fill"):
+            if fills:
+                raise RuntimeError("Rebuild native router: fixed filled-copper support required")
+            return
+        self._impl.clear_fixed_fills()
+        for layer, clearance, rings in fills.native_polygons():
+            self._impl.add_fixed_fill(layer, clearance, rings)
+
+    @classmethod
+    def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
+        """Create a CppGrid from an existing RoutingGrid."""
+        cpp_grid = cls(
+            cols=grid.cols,
+            rows=grid.rows,
+            layers=grid.num_layers,
+            resolution=grid.resolution,
+            origin_x=grid.origin_x,
+            origin_y=grid.origin_y,
+        )
+
+        # Store reference to original Python grid for post-route validation
+        cpp_grid._py_grid = grid
+        cpp_grid.install_fixed_fills(grid.fixed_fills)
+
+        # Issue #2481: Establish the back-reference from the Python grid
+        # to this CppGrid so ``RoutingGrid.unmark_route`` can invalidate
+        # the C++ stored-via/segment snapshot whenever a route is ripped
+        # up.  Without this, ``Pathfinder::is_via_blocked_diag`` would
+        # consult stale ``stored_vias_`` entries and either reject
+        # legitimate via candidates or silently allow placements that
+        # collide with newly-placed sibling vias the cpp side never saw.
+        grid._cpp_grid = cpp_grid
+
+        # Copy layer index mappings for layer conversion
+        cpp_grid._index_to_layer = dict(grid._index_to_layer)
+        cpp_grid._layer_to_index = dict(grid._layer_to_index)
+
+        # Copy routable layer indices from Python grid
+        cpp_grid._routable_layers = grid.get_routable_indices()
+
+        # Copy blocked cells from Python grid to C++ grid.
+        #
+        # Issue #3224: Forward the ``pad_blocked`` bit (set by
+        # ``RoutingGrid._add_pad_unsafe`` at grid.py:4458 for cells inside a
+        # pad's metal area) so the C++ A* clearance branch at
+        # ``pathfinder.cpp:680`` (one-shot) and ``pathfinder.cpp:1173``
+        # (resumable / negotiated) can distinguish pad metal from pad
+        # clearance halo.  Without this bit, ``cell.pad_blocked`` defaults to
+        # ``false`` on every C++ cell and the pad-exit exemption admits
+        # traces stepping through foreign pad copper -- the
+        # ``clearance_pad_segment`` regression on board 05 (16 errors at HEAD
+        # with --backend cpp vs 1 on python).  The bulk sync here is
+        # complemented by the incremental sync at
+        # ``grid.py::_sync_pad_to_cpp_grid`` for pads added AFTER this
+        # bulk-copy completes (the typical ``Autorouter.add_component``
+        # flow).
+        # Issue #5240: visit only the BLOCKED cells, not every cell.
+        #
+        # The previous form walked ``layers * rows * cols`` in a triple Python
+        # loop, building a throwaway ``_CellView`` per cell (via ``cell_at``,
+        # itself the #5307 improvement over the three chained ``__getitem__``
+        # views) purely to read ``.blocked`` and discard the ~84% of cells that
+        # are free.  On board 06 that is 2001 x 1601 x 4 = 12.8M iterations,
+        # and an instrumented board-06 re-route measured a single
+        # ``from_routing_grid`` call at 19-23 s -- while the C++ coupled A*
+        # search it feeds completed its whole 1000-iteration budget in 0.03 s.
+        # Because ``CoupledPathfinder`` is constructed once per differential
+        # pair, that marshalling cost was paid nine times over in board 06's
+        # diff-pair pre-phase alone.
+        #
+        # ``_CellView.blocked`` / ``.net`` / ``.is_obstacle`` are thin readers
+        # over ``grid._blocked`` / ``grid._net`` / ``grid._is_obstacle``
+        # (grid.py ``_CellView``), so ``np.nonzero`` on the blocked plane
+        # selects exactly the cells the old loop's ``if py_cell.blocked``
+        # admitted.  ``np.nonzero`` returns indices in C order -- layer, then
+        # y, then x, ascending -- which is the identical visit order, so
+        # ``mark_blocked`` is called with the same arguments in the same
+        # sequence and the resulting C++ grid is unchanged.  ``to_numpy``
+        # keeps the GPU/MLX array backends (``RoutingGrid._backend``) working
+        # by materialising a host copy first.
+        #
+        # The rows are consumed in chunks so the temporary index / gathered
+        # value arrays stay bounded on very large boards instead of
+        # materialising one list per array over every blocked cell at once.
+        import numpy as np
+
+        from ..acceleration.backend import to_numpy
+
+        blocked_np = to_numpy(grid._blocked)
+        if blocked_np.size:
+            net_np = to_numpy(grid._net)
+            obstacle_np = to_numpy(grid._is_obstacle)
+            pad_blocked_np = to_numpy(grid._pad_blocked)
+            # Named ``blocked_layer_idx`` (not ``layer_idx``): the pad loop
+            # a little further down in this same function assigns a plain
+            # ``int`` to a variable of that name, and mypy infers a single
+            # type per function-scope variable across its first assignment
+            # -- reusing ``layer_idx`` here for this ndarray made that
+            # unrelated downstream ``int`` assignment a NEW mypy error
+            # (variable has type "ndarray", not "int").
+            blocked_layer_idx, y_idx, x_idx = np.nonzero(blocked_np)
+            mark_blocked = cpp_grid._impl.mark_blocked
+            chunk = 1 << 20
+            for lo in range(0, x_idx.shape[0], chunk):
+                hi = lo + chunk
+                ls = blocked_layer_idx[lo:hi]
+                ys = y_idx[lo:hi]
+                xs = x_idx[lo:hi]
+                # ``.tolist()`` converts each block to plain Python
+                # int/bool objects in one C-level pass, so the inner loop
+                # never pays per-element NumPy scalar boxing.
+                for x, y, layer, net, is_obstacle, pad_blocked in zip(
+                    xs.tolist(),
+                    ys.tolist(),
+                    ls.tolist(),
+                    net_np[ls, ys, xs].tolist(),
+                    obstacle_np[ls, ys, xs].tolist(),
+                    pad_blocked_np[ls, ys, xs].tolist(),
+                    strict=True,
+                ):
+                    mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
+
+        # Issue #4071: marshal corridor reservations into the C++ grid.
+        # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
+        # net frozenset, written by ``EscapeRouter``'s reservation helpers
+        # (#2677 pair-continuation, #2983 inner-corner lane, #4053 bundle
+        # river) BEFORE routing begins.  The C++ ``Grid3D::mark_via`` keep-out
+        # skip and the A* corridor attractor both read the per-cell owner set,
+        # so the reservations must be mirrored across the boundary.  Empty
+        # dict => zero iterations (byte-identical to pre-#4071 boards).
+        #
+        # PR #4078 Path B: skip cells whose reservation opted out of C++
+        # mirroring (``mirror_to_cpp=False`` -- the single-ended #2983
+        # inner-corner / #4053 bundle-river byte-lane reservations that
+        # regress board 07 into copper shorts when honoured on C++).  The
+        # incremental ``reserve_corridor_cells`` path already skips them; this
+        # guard covers any that already existed when the C++ grid was built.
+        suppressed = getattr(grid, "_cpp_suppressed_reservations", None) or set()
+        # Issue #4079: mirror the per-reservation HARD vs SOFT strength so the
+        # C++ ``is_reserved_excluding`` keep-out and attractor match Python.
+        soft_reservations = getattr(grid, "_soft_reservations", None) or set()
+        for (layer_idx, y, x), owners in grid._reserved_for_nets.items():
+            key = (layer_idx, y, x)
+            if key in suppressed:
+                continue
+            cpp_grid._impl.reserve_cell(
+                x, y, layer_idx, [int(n) for n in owners], key in soft_reservations
+            )
+
+        # Issue #2439: Populate pad data for C++ geometric validation.
+        # Pre-compute per-component clearance overrides and FNV-1a ref hashes
+        # so the C++ side never calls back into Python during validation.
+        # Issue #2908: Pre-compute plane-net classification on Python side
+        # (C++ has no net-name string table) so the C++ validator can use
+        # the same carve-out as the Python ``_is_plane_net_pad`` helper.
+        from .fine_pitch_escape import resolve_clearance_with_escape_region
+        from .grid import _is_plane_net_pad
+
+        component_pitches = grid.compute_component_pitches()
+        grid._component_pitch_cache = component_pitches
+
+        # Issue #3371 / P_FP2: Fine-pitch escape regions installed on the
+        # grid (empty list when the detector has not run, which is the
+        # default until P_FP3 wires the autorouter to populate them).
+        # Threaded into ``resolve_clearance_with_escape_region`` for every
+        # pad's clearance lookup so the per-net-class escape clearance can
+        # land at the C++ pad-segment validator's clearance source.
+        #
+        # Important: this bulk-copy runs at grid construction time, BEFORE
+        # any specific net is being routed.  We therefore cannot pass a
+        # per-net :class:`NetClassRouting` here -- the bulk clearance is a
+        # *board-wide default*.  ``net_class=None`` in the call below
+        # means "use the region's escape_clearance default at detection
+        # time" (which already encodes the manufacturer floor + safety
+        # margin via :func:`get_default_escape_clearance`).  P_FP3 will
+        # add the per-net override path via either (a) a separate set of
+        # add_pad calls per net during the A* boundary, or (b) a tighter
+        # ``clearance_override`` carrier on the C++ Pad struct that the
+        # search-side can interpret per net.  P_FP2 only opens the seam.
+        regions = grid.get_fine_pitch_regions()
+
+        for pad in grid._pads:
+            # Compute layer index (-1 for through-hole pads = all layers)
+            if pad.through_hole:
+                layer_idx = -1
+            else:
+                try:
+                    layer_idx = grid.layer_to_index(pad.layer.value)
+                except (KeyError, ValueError):
+                    layer_idx = 0
+
+            # Pre-compute clearance for this pad's component (Issue #1016)
+            # threaded with the fine-pitch escape regions (Issue #3371 / P_FP2).
+            # When ``regions`` is empty (the default) this call delegates to
+            # the standard :meth:`DesignRules.get_clearance_for_component`
+            # path -- byte-for-byte identical to the pre-#3371 line.
+            pin_pitch = component_pitches.get(pad.component_key) if pad.component_key else None
+            clearance_override = resolve_clearance_with_escape_region(
+                grid.rules,
+                pad,
+                net_class=None,
+                regions=regions,
+                pin_pitch=pin_pitch,
+            )
+
+            # Deterministic FNV-1a hash of component reference
+            ref_hash = router_cpp.fnv1a_hash(pad.component_key) if pad.component_key else 0
+
+            # Issue #2908: Pre-compute plane-net classification on the Python
+            # side (the C++ Pad struct has no net-name string table).  Used
+            # by ``Grid3D::validate_route`` to keep plane pads in the
+            # validator even when their component is in the exclude set --
+            # the same fix as the Python-side ``_is_plane_net_pad`` carve-out
+            # at ``grid.py::validate_segment_clearance``.
+            is_plane_net = _is_plane_net_pad(pad)
+
+            cpp_grid._impl.add_pad(
+                pad.x,
+                pad.y,
+                pad.width,
+                pad.height,
+                pad.net,
+                layer_idx,
+                ref_hash,
+                clearance_override,
+                is_plane_net,
+                pad.rotation,
+                pad.shape == "circle",
+            )
+
+        cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
+        for hole in grid._component_hole_index.holes:
+            cpp_grid._impl.add_component_hole(*hole)
+
+        from .grid import _sync_pad_via_policies
+
+        _sync_pad_via_policies(grid, cpp_grid)
+
+        # Issue #6008: keepout rule areas the occupancy planes cannot carry
+        # (net-filtered track rules, every via rule).  The all-nets track
+        # cells already crossed over with the blocked-cell bulk copy above.
+        if getattr(grid, "_rule_area_keepouts", None):
+            from .rule_area_grid import mirror_rule_areas_to_cpp
+
+            mirror_rule_areas_to_cpp(grid, cpp_grid)
+        # Issue #6243: authored per-net minima (dormant without floors).
+        sync_authored_floors(cpp_grid, grid)
+        return cpp_grid
+
+    def index_to_layer(self, index: int) -> int:
+        """Convert grid index to Layer enum value."""
+        return self._index_to_layer.get(index, index)
+
+    def layer_to_index(self, layer_enum_value: int) -> int:
+        """Map Layer enum value to grid index.
+
+        Mirrors :meth:`RoutingGrid.layer_to_index` for parity. Falls back
+        to identity mapping when the enum value is not in the mapping
+        (e.g. a CppGrid built without ``from_routing_grid``).
+        """
+        return self._layer_to_index.get(layer_enum_value, layer_enum_value)
+
+    def get_routable_indices(self) -> list[int]:
+        """Get indices of routable layers (matching RoutingGrid interface)."""
+        return self._routable_layers
+
+    def world_to_grid(self, x: float, y: float) -> tuple[int, int]:
+        """Convert world coordinates to grid indices."""
+        return self._impl.world_to_grid(x, y)
+
+    def grid_to_world(self, gx: int, gy: int) -> tuple[float, float]:
+        """Convert grid indices to world coordinates."""
+        return self._impl.grid_to_world(gx, gy)
+
+    def is_blocked(self, x: int, y: int, layer: int) -> bool:
+        """Check if a cell is blocked."""
+        if self._impl.is_valid(x, y, layer):
+            return self._impl.at(x, y, layer).blocked
+        return True
+
+    def is_blocked_for_net(self, x: int, y: int, layer: int, net: int) -> bool:
+        """Check if a cell is blocked for routing a specific net.
+
+        Mirrors the Python ``RoutingGrid.is_blocked(gx, gy, layer, net)``
+        semantics: a cell occupied by the SAME net's copper is not
+        considered blocked (A* may legally terminate or pass there),
+        while net-0 obstacles (component bodies, pad keepouts) and
+        foreign-net copper block.  Issue #3471: used by the Steiner
+        branch-point relocation in ``route_net_negotiated`` so synthetic
+        branch points are not parked on obstacle cells.
+        """
+        if not self._impl.is_valid(x, y, layer):
+            return True
+        cell = self._impl.at(x, y, layer)
+        if not cell.blocked:
+            return False
+        return cell.net == 0 or cell.net != net
+
+    def mark_segment(
+        self, x1: int, y1: int, x2: int, y2: int, layer: int, net: int, clearance_cells: int
+    ) -> None:
+        """Mark cells along a segment as blocked."""
+        self._impl.mark_segment(x1, y1, x2, y2, layer, net, clearance_cells)
+
+    def mark_via(self, x: int, y: int, net: int, radius_cells: int) -> None:
+        """Mark cells around a via as blocked on all layers."""
+        self._impl.mark_via(x, y, net, radius_cells)
+
+    def get_congestion(self, x: int, y: int, layer: int) -> float:
+        """Get congestion level for a cell."""
+        return self._impl.get_congestion(x, y, layer)
+
+    def get_statistics(self) -> dict:
+        """Get grid statistics."""
+        return {
+            "cols": self.cols,
+            "rows": self.rows,
+            "layers": self.num_layers,
+            "total_cells": self._impl.total_cells,
+            "blocked_cells": self._impl.count_blocked(),
+            "memory_mb": self._impl.memory_mb(),
+        }
+
+    def invalidate_stored_routes(self) -> None:
+        """Drop the cached stored-routes snapshot used by validation.
+
+        Issue #2481: ``CppPathfinder._sync_stored_routes`` is append-only
+        and tracks ``self._synced_route_count`` to skip already-copied
+        routes.  When the Python side rips up a route via
+        :meth:`RoutingGrid.unmark_route`, the C++ ``stored_vias_`` /
+        ``stored_segments_`` vectors retain the ripped-up route's
+        entries, and the next call to ``_sync_stored_routes`` would
+        early-return because ``len(py_grid.routes)`` may have decreased.
+
+        This method clears the C++ side's stored routes and resets the
+        sync watermark to 0 so the *next* call to ``_sync_stored_routes``
+        rebuilds the full snapshot from the surviving
+        ``py_grid.routes``.  It is intentionally cheap: clearing two
+        vectors and resetting a counter; the actual rebuild only happens
+        the next time the cpp pathfinder needs to validate a candidate.
+
+        This is called from ``RoutingGrid.unmark_route`` via the
+        ``_cpp_grid`` back-reference established by ``from_routing_grid``.
+        """
+        self._impl.clear_stored_routes()
+        self._synced_route_count = 0
+        self._off_grid_stored_segments.clear()
+
+
+class CppPathfinder:
+    """C++ Pathfinder wrapper.
+
+    This class wraps the C++ Pathfinder implementation for high-performance
+    A* routing.
+    """
+
+    # Issue #6366: per-net A* heuristic-weight overrides (net id -> weight),
+    # consulted by ``route`` when the caller passes the default weight.
+    # ``Autorouter`` installs its own dict here; the empty class default is
+    # never mutated.
+    net_astar_weights: dict[int, float] = {}
+
+    # Issue #6366: the native A* has NO per-net layer-preference cost -- it
+    # never reads ``NetClassRouting.preferred_layers`` (only hard
+    # ``avoid_layers``, #4433).  The evolutionary optimiser checks this flag
+    # and evolves no ``preferred_layers`` gene on this backend rather than
+    # carrying a gene that silently does nothing.  Flip to True if/when a
+    # layer-preference cost is ported to ``cpp/src/pathfinder.cpp``.
+    supports_layer_preferences: bool = False
+
+    # Issue #3441: the C++ pathfinder has NO waypoint-injection support
+    # (#2330 was implemented only in the pure-Python ``Router``).  This
+    # capability flag keeps ``Autorouter.use_waypoint_injection`` honest:
+    # under the C++ backend the sub-grid escape pre-pass and PIN_ACCESS
+    # sub-grid retry (#1603) remain the active off-grid pad recovery
+    # mechanisms.  Flip to True if/when waypoints are ported to
+    # ``cpp/src/pathfinder.cpp``.
+    supports_waypoint_injection: bool = False
+
+    def _sync_pad_class_clearances(self) -> bool:
+        """Push each pad's own net-class clearance to the native pad test (#7569).
+
+        The pair rule is ``max(own class, pad's class)`` (Python #6389, DRC).
+        A pad's class is resolved from ``pad.net_name`` so a pour pad
+        neutralised to net 0 keeps its class.  Returns False on a stale
+        extension without the setter.  Cached on the inputs that feed it.
+        """
+        if not hasattr(self._grid._impl, "set_pad_class_clearances"):
+            return False
+        py_grid = self._grid._py_grid
+        if py_grid is None:
+            # No Python grid to resolve pad net names from: the caller keeps
+            # the board-wide largest-class floor.
+            return False
+        pads = py_grid._pads
+        key = (
+            id(self._net_class_map),
+            len(pads),
+            len(self._net_class_map),
+            self._rules.trace_clearance,
+        )
+        if getattr(self, "_pad_class_key", None) == key:
+            return True
+        values = []
+        for pad in pads:
+            net_class = self._net_class_map.get(pad.net_name) if pad.net_name else None
+            values.append(float(getattr(net_class, "clearance", 0.0) or 0.0) if net_class else 0.0)
+        self._grid._impl.set_pad_class_clearances(values)
+        self._pad_class_key = key
+        return True
+
+    def __init__(
+        self,
+        grid: CppGrid,
+        rules: DesignRules,
+        diagonal_routing: bool = True,
+        net_class_map: dict[str, NetClassRouting] | None = None,
+        max_search_iterations: int = 0,
+        per_net_iterations: int = 0,
+    ):
+        if not _CPP_AVAILABLE:
+            raise RuntimeError("C++ router backend not available")
+
+        # Net class map for per-net trace width lookup
+        self._net_class_map = net_class_map or {}
+
+        # Issue #2610: Override for the C++ A* iteration backstop.  ``0`` (the
+        # default) preserves the historical ``cols * rows * 4`` cap; positive
+        # values let users trade memory for completeness on dense boards via
+        # the ``--max-search-iterations`` CLI flag.  Threaded into every
+        # ``route_resumable()`` call below so a per-pathfinder override
+        # covers all subsequent nets without per-call plumbing through
+        # the strategy layer.
+        self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
+
+        # Issue #3881: the TUNED per-net iteration cap, distinct from the memory
+        # backstop above.  When set (>0) it becomes the BINDING per-net cap: the
+        # C++ A* is given ``min(per_net_iterations, backstop)`` node expansions,
+        # so a hard net gives up deterministically at the tuned cap (returning
+        # FAILURE_ITERATION_LIMIT) instead of grinding to the 12M backstop and
+        # monopolising the budget.  ``_per_net_iteration_cap_active`` tells the
+        # Python fallback to treat a FAILURE_ITERATION_LIMIT as a deterministic
+        # give-up and SKIP the fallback (so a capped net does not then burn
+        # minutes in the 10-100x-slower Python A*, re-introducing the slowness).
+        self._per_net_iterations = int(per_net_iterations) if per_net_iterations else 0
+        self._per_net_iteration_cap_active = self._per_net_iterations > 0
+        # Effective cap threaded to the C++ search.  When the tuned per-net cap
+        # is set it binds (clamped by the memory backstop when that is also
+        # positive); otherwise the memory backstop / heuristic applies.
+        if self._per_net_iterations > 0:
+            if self._max_search_iterations > 0:
+                self._effective_search_iterations = min(
+                    self._per_net_iterations, self._max_search_iterations
+                )
+            else:
+                self._effective_search_iterations = self._per_net_iterations
+        else:
+            self._effective_search_iterations = self._max_search_iterations
+
+        # Convert Python rules to C++ DesignRules
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = rules.trace_width
+        cpp_rules.trace_clearance = rules.trace_clearance
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
+        cpp_rules.via_drill = rules.via_drill
+        cpp_rules.via_diameter = rules.via_diameter
+        cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.min_drill_clearance = rules.min_drill_clearance
+        cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
+        # Issue #7296: the mask-dam floor for the single-ended via check.
+        cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the caller-resolved same-net pad slit-band edge for the
+        # single-ended via check (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        cpp_rules.grid_resolution = rules.grid_resolution
+        cpp_rules.cost_straight = rules.cost_straight
+        cpp_rules.cost_turn = rules.cost_turn
+        cpp_rules.cost_via = rules.cost_via
+        cpp_rules.cost_congestion = rules.cost_congestion
+        cpp_rules.congestion_threshold = rules.congestion_threshold
+        # Issue #4071: soft corridor-attractor bonus (default 3.0).
+        cpp_rules.cost_corridor_attractor = rules.cost_corridor_attractor
+
+        self._impl = router_cpp.Pathfinder(grid._impl, cpp_rules, diagonal_routing)
+        self._grid = grid
+        self._rules = rules
+        self._diagonal_routing = diagonal_routing
+
+        # Issue #3622 follow-up: restrict the C++ via-expansion to the layers
+        # actually permitted by ``allowed_layers`` (Issue #715 single-layer
+        # constraint).  The pathfinder defaults ``routable_layers_`` to every
+        # grid layer, so without this the via loop in ``pathfinder.cpp`` will
+        # attempt a layer change even when only one copper layer is routable.
+        #
+        # Pre-#3622 this leaked no vias because the strict standard-mode
+        # ``is_via_blocked`` rejected via candidates whose clearance disc
+        # touched the routing net's OWN ``is_obstacle`` pad copper.  The #864
+        # parity relaxation (own-net obstacle cells now passable for vias)
+        # removes that incidental suppression, so a single-layer route would
+        # begin emitting vias that land back on the only routable layer.
+        # Filtering the routable-layer set here enforces the real single-layer
+        # invariant ("a via requires >= 2 routable layers") WITHOUT touching
+        # the parity predicate -- with a one-element routable set the via
+        # loop's ``new_layer == current.layer`` skip leaves no via target.
+        #
+        # ``_routable_layers`` mirrors the C++ ``routable_layers_`` vector,
+        # defaulting to the grid's routable indices (the pathfinder ctor's
+        # own default) until/unless the allowed-layers filter narrows it.
+        self._routable_layers: list[int] = list(grid.get_routable_indices())
+        self._apply_allowed_layers_to_routable()
+        # Issue #6876: the construction-time set, so the per-call plane opt-in
+        # widening can tell it apart from a caller's own narrowing (a lock).
+        self._construction_routable_layers: list[int] = list(self._routable_layers)
+
+        # Lazy Python fallback router (constructed on first fallback)
+        self._py_router: Router | None = None
+        # Fallback statistics
+        self._fallback_count: int = 0
+        self._fallback_nets: list[str] = []
+        # Issue #3456: per-net fallback reasons + warn-once bookkeeping.
+        # ``_fallback_reasons`` records WHY the C++ search handed each net
+        # to the Python fallback (first reason per net, including attempts
+        # where the Python fallback ultimately failed too).
+        # ``_fallback_warned`` dedupes the loud per-net WARNING so
+        # negotiated-mode rip-up retries of the same net do not spam the
+        # log -- each net warns at most once per run.
+        self._fallback_reasons: dict[str, str] = {}
+        self._fallback_warned: set[str] = set()
+
+        # Issue #3923: per-net count of case-1 (clearance-exhaustion) fallbacks.
+        # The FIRST time a net exhausts its resume attempts on a clearance
+        # violation we still run the Python fallback -- a fresh full A* with the
+        # 45-degree / waypoint expansion measurably rescues real nets/pads at
+        # that point (e.g. board-07 GND pad U1.24).  Only on the SECOND+
+        # identical clearance-exhaustion for the SAME net -- once the fresh
+        # Python A* has already had its shot and the negotiated rip-up loop has
+        # merely re-presented the same clearance obstruction -- do we
+        # short-circuit, because that repeat is the genuine 60-200s/net dead
+        # loss the optimization targets.
+        self._resume_clearance_exhaustions: dict[str, int] = {}
+
+        # Issue #5599: per-net record of the MOST RECENT post-route
+        # clearance-validation resume loop that had at least one failed
+        # validation attempt.  Each entry is a dict with:
+        #   - ``attempts``: list of per-attempt records (violation kind +
+        #     world/grid location + the goal cell rejected after that
+        #     attempt)
+        #   - ``exhausted``: True when the loop burned all
+        #     ``max_resume_attempts`` and handed the net to the Python
+        #     fallback (the #5599 give-up path)
+        #   - ``resume_failed``: True when a resumed search died with a
+        #     search failure (the #3923 case-2 path) instead of exhausting
+        # Overwritten on each subsequent resume loop for the same net, so
+        # memory stays bounded under negotiated rip-up retries.  Surfaced
+        # via ``fallback_stats['resume_diagnostics']``.
+        self._resume_diagnostics: dict[str, dict] = {}
+
+        # Issue #5617: aggregate wall-clock attribution for the post-route
+        # clearance-validation resume loop and the Python fallback it can
+        # trigger.  Pure timing telemetry (no search/threshold behaviour
+        # changes) -- added to answer the issue's own question ("are the
+        # exhausted resume attempts genuinely converging, or is this time
+        # provably thrown away?") with a whole-board measurement instead of
+        # the single hand-picked net a prior profiling pass inspected.
+        # ``_resume_loop_exhausted_seconds`` sums the wall time spent inside
+        # ``_route_impl``'s resume loop for every net that burned the full
+        # ``max_resume_attempts`` budget before falling back (the "gave up"
+        # path) -- that entire span's search work is discarded.
+        # ``_python_fallback_seconds_by_reason`` sums the wall time spent in
+        # ``_try_python_fallback`` itself, bucketed by whether the fallback
+        # was triggered by resume-loop exhaustion (bucket
+        # ``"resume_exhaustion"``, matching the ``"resume attempts"``
+        # substring check already used at the #3923 short-circuit site) or by
+        # any other reason (bucket ``"other"``).  Both reset per
+        # ``CppPathfinder`` instance (i.e. per board route), matching the
+        # existing ``_fallback_count`` / ``_resume_diagnostics`` lifetime.
+        self._resume_loop_exhausted_seconds: float = 0.0
+        self._python_fallback_seconds_by_reason: dict[str, float] = {}
+
+        # Issue #6098: memo of nets the pure-Python fallback has PROVEN
+        # unreachable.  When the Python A* drains its open set without ever
+        # popping a goal (``Router.last_route_exhausted``), the goal is
+        # unreachable under the Python search's own passability on that exact
+        # grid state.  The negotiated loop re-presents an unroutable net on
+        # every iteration, rescue pass and rip-up probe; re-running the
+        # 10-100x-slower search on an UNCHANGED grid can only repeat the proof
+        # (one walled-in net cost ~70 s of a 73 s ``route-auto
+        # --strategy hierarchical`` run).  Keyed by the request (pads, net
+        # class, mode, extra goals) and stamped with a fingerprint of the
+        # grid's passability state (:meth:`_py_grid_state_stamp`); any
+        # occupancy change misses the memo and the fallback runs again.
+        # Value: ``(stamp, seconds the proving search took)``.
+        self._python_unreachable: dict[tuple, tuple[tuple, float]] = {}
+        self._python_fallback_proven_skips: int = 0
+        self._python_fallback_seconds_saved: float = 0.0
+        # Issue #8370: per-net fallback wall time (including failed
+        # fallbacks), and the pad-pair requests whose Python A* has already
+        # drained (``last_route_exhausted``) after a C++ NO_PATH /
+        # PAIRWISE_BLOCKED.  Keyed on the request (Issue #8377), not the net:
+        # on a multi-pad net a drained pair A must not suppress the first
+        # attempt of never-tried pair B.  Unlike the #6098 memo this record is
+        # NOT stamped with the grid state, so it survives the grid changes
+        # negotiated rip-up makes between iterations.  Key:
+        # :meth:`_python_unreachable_key`.  Value: seconds the search took.
+        self._python_fallback_seconds_by_net: dict[str, float] = {}
+        self._python_drained_nets: dict[tuple, float] = {}
+        self._python_fallback_repeat_skips: int = 0
+        # Issue #8485: every pad-pair request whose Python A* returned no
+        # route for ANY reason -- drained or, the case the two memos above
+        # miss, ended by the per-net wall-clock deadline.  A deadline-ended
+        # search records no proof, so before #8485 it re-ran at the full
+        # per-net budget (100-650 s on a 97-net HV board) every negotiated
+        # iteration.  Key: :meth:`_python_unreachable_key`.  Value: seconds
+        # the FIRST failed attempt took (kept, so the reduced repeat budget
+        # does not decay).  Cleared for a request when a fallback routes it.
+        self._python_failed_attempts: dict[tuple, float] = {}
+        self._python_fallback_reduced_repeats: int = 0
+        self._python_fallback_reduced_seconds_saved: float = 0.0
+        # Issue #8485: stage-level fallback budget.  ``None`` = no cap (the
+        # default outside a timed negotiated stage).  Once the stage's
+        # fallback spend reaches it, REPEAT fallbacks of already-failed
+        # requests are skipped; first attempts of new requests still run.
+        self._python_fallback_stage_budget: float | None = None
+        self._python_fallback_stage_spent: float = 0.0
+        self._python_fallback_stage_budget_skips: int = 0
+        # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
+        # deadline while the tuned per-net iteration cap was active (i.e.
+        # under ``--deterministic-budget``).  Net name -> what bound.  Each
+        # entry is a point where the routed result depends on machine load.
+        self._wall_bound_under_cap: dict[str, str] = {}
+
+        # Issue #3545: lazy cache for ``compute_component_pitches`` used
+        # by the net-aware same-component carve-out gate in
+        # ``_same_component_carveout_eligible``.
+        self._component_pitches_cache: dict[str, float] | None = None
+
+        # Issue #3438: relief-probe mode flag (mirrored into the C++
+        # Pathfinder AND the lazy Python fallback router so both backends
+        # apply identical relief semantics during a probe).
+        self._relief_mode: bool = False
+
+        # Issue #2476: Capture structured failure diagnostics from the most
+        # recent failed route() call so the negotiated strategy can
+        # dispatch targeted retry/rip-up.  Reset at the start of every
+        # route() invocation; populated when route() returns None.
+        #
+        # Schema: {
+        #   "failure_reason": int,           # FAILURE_* constant
+        #   "blocking_via_net": int,         # 0 if not via-blocked
+        #   "blocking_net_name": str | None, # #4507: the id resolved through
+        #                                    # set_net_name_to_id, or None
+        #   "failure_x": float,              # world-coord (mm)
+        #   "failure_y": float,
+        # } or ``None`` if no diagnostic was captured.
+        self._last_failure_info: dict | None = None
+        # Issue #6369: {net_id: last FAILURE_* code}, filled by the negotiated
+        # router; persisted to ``<stem>.search_failures.json`` by ``kct route``.
+        self.search_failures_by_net: dict[int, int] = {}
+
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Reverse map for diff-pair
+        # partner resolution.  The autorouter populates this via
+        # :meth:`set_net_name_to_id` before routing begins so that
+        # ``NetClassRouting.diffpair_partner`` (a *name*) can be resolved to
+        # the partner *id* required by the C++ ``partner_net`` plumbing.
+        #
+        # When the map is empty (the default) or the source net has no
+        # ``diffpair_partner`` declaration, :meth:`_resolve_partner_net_id`
+        # returns ``None`` and the C++ search uses the wider inter-pair
+        # ``clearance`` for every other net (the pre-Phase-1C contract).
+        self._net_name_to_id: dict[str, int] = {}
+        # Issue #4507: memoised inverse of the map above, built on demand by
+        # :meth:`_resolve_net_id` so a blocker-naming failure can report the
+        # board's net NAME rather than a raw id.  ``None`` = not built yet.
+        self._net_id_to_name_cache: dict[int, str] | None = None
+        self._attach_zones: tuple[AttachZone, ...] = ()
+
+        # Issue #4510 / Epic #4431 Phase 2a: lazily-built C++ payload for the
+        # pairwise (HV-isolation) domain matrix + net-id-translated attach
+        # zones.  ``None`` = not built yet; ``False`` = built and found empty
+        # (nothing to install -- the C++ validator stays dormant).  Invalidated
+        # whenever the reverse net map or the attach zones change, since both
+        # feed the translation.
+        self._pairwise_cpp_payload: (
+            tuple[list[int], list[list[float]], list] | Literal[False] | None
+        ) = None
+        # Issue #4530: tracks whether the *currently cached* payload above has
+        # actually been pushed to the live ``Grid3D``.  ``Grid3D::pairwise_active_``
+        # only records "some matrix was ever installed on this grid", not "the
+        # current one is installed", so it cannot be used to gate the reinstall
+        # after a mid-session net-map / attach-zone change.  Cleared alongside
+        # ``_pairwise_cpp_payload`` in both invalidating setters.
+        self._pairwise_cpp_installed: bool = False
+
+        # Issue #2929: Per-A*-call wall-clock instrumentation, mirroring the
+        # Python pathfinder's instrumentation surface so callers can audit
+        # deadline behavior regardless of which backend handles the call.
+        # Disabled by default (zero overhead on the production hot path);
+        # toggled via :meth:`enable_per_call_timing` and drained via
+        # :meth:`get_and_clear_per_call_timings`.
+        self._per_call_timing_enabled: bool = False
+        # Issue #3474 R1: ``KCT_DEBUG_PNT=1`` enables the #2929 per-call
+        # timing instrumentation (previously unreachable from the CLI)
+        # and prints any route() call whose wall time grossly exceeds its
+        # per-net budget.  This is the diagnostic that located the
+        # chorus-test deadline leak (per-net cap honored by A* but blown
+        # by un-budgeted failure analysis); keep it available for future
+        # budget-integrity triage.
+        if os.environ.get("KCT_DEBUG_PNT"):
+            self._per_call_timing_enabled = True
+        self._per_call_timings: list[dict] = []
+
+        # Issue #3002 (PR #3006 follow-up): Foreign-net via context for the
+        # segment-vs-foreign-via clearance gate.  Mirrors the Python
+        # pathfinder's ``_foreign_vias`` attribute (see
+        # ``pathfinder.py:set_segment_foreign_context``).  Populated by
+        # ``Autorouter._update_router_segment_foreign_context`` via
+        # :meth:`set_segment_foreign_context` below; consumed during
+        # :meth:`_validate_route_clearance` as a Python-side post-check
+        # after the C++ validator returns (the C++ validator already
+        # walks ``self.routes`` vias, but the Python-side list lets the
+        # Autorouter push richer context -- e.g. vias surfaced by the
+        # negotiated post-iteration re-validation hook that may not yet
+        # appear in ``grid.routes`` when a sibling iteration's segment
+        # commits).
+        self._foreign_vias: list = []  # list[Via]
+
+        # Issue #3143: Per-pad lateral-channel budget storage.  Populated
+        # by :meth:`set_pad_channel_budgets` from
+        # ``router.core.Router.route_with_escape`` after the dense-package
+        # escape pre-pass runs.  Each entry is a ``PadChannelBudget`` that
+        # tags a rectangular escape-channel region with a soft per-cell
+        # penalty consulted on every A* neighbor expansion.  Empty (the
+        # default) means no per-pad budget is configured and the C++
+        # search uses the pre-#3143 cost function identically.
+        self._pad_channel_budgets: list = []  # list[router_cpp.PadChannelBudget]
+        # Issue #6382: fine-pitch neighbour entry-lane budgets, set by
+        # :meth:`set_pad_lane_budgets` from ``Autorouter.route_all_negotiated``.
+        # Kept separate from the #3143 list so neither setter clobbers the
+        # other; :meth:`_filter_pad_channel_budgets_for_net` concatenates.
+        self._pad_lane_budgets: list = []  # list[router_cpp.PadChannelBudget]
+        # Issue #6761: fine-pitch lanes for the hard escape fences, set by
+        # :meth:`set_pad_lane_fences`; turned into per-connection budgets by
+        # :meth:`_escape_fence_budgets`.
+        self._pad_lane_fences: list = []  # list[pad_lanes.FenceLane]
+        self._escape_fence_fallbacks = 0
+
+    def set_segment_foreign_context(
+        self,
+        foreign_vias: list | None = None,
+    ) -> None:
+        """Set foreign-net via context for new-segment clearance gating.
+
+        Issue #3002 (PR #3006 follow-up): C++ backend sibling of
+        :meth:`pathfinder.Router.set_segment_foreign_context`.  Without
+        this method on ``CppPathfinder`` the ``hasattr`` guard in
+        ``Autorouter._update_router_segment_foreign_context`` silently
+        no-ops the entire segment-vs-foreign-via gate when the C++
+        backend is active (the production default).
+
+        The C++ ``validate_route`` call invoked by
+        :meth:`_validate_route_clearance` already walks the C++ side's
+        stored vias against new segments, so vias that are *already* in
+        ``grid.routes`` at the time a new route is validated will be
+        caught by C++.  However, the negotiated post-iteration
+        re-validation hook (Issue #3002) surfaces vias whose presence
+        the pre-commit gate needs to react to in the NEXT iteration's
+        re-routes -- and those vias may not be in ``grid.routes`` from
+        the C++ side's perspective until the autorouter pushes the
+        explicit foreign-via list here.  This setter stores that list
+        for the Python-side post-validation pass in
+        :meth:`_validate_route_clearance`.
+
+        Same-net filtering is the CALLER's responsibility (matches
+        :meth:`pathfinder.Router.set_segment_foreign_context`).
+
+        Args:
+            foreign_vias: List of :class:`Via` objects whose net differs
+                from the segment's own net.  Pass ``None`` to clear.
+        """
+        self._foreign_vias = list(foreign_vias) if foreign_vias else []
+
+    def _filter_pad_channel_budgets_for_net(self, net: int) -> list:
+        """Return the per-pad budget list with the current net's own
+        entries filtered out (Issue #3143).
+
+        The pad channel budget is a per-cell cost penalty that nudges the
+        A* search away from contested escape channels.  But the
+        originating net of each escape pad cannot legitimately route
+        anywhere except through its own escape endpoint -- so penalising
+        cells around its own endpoint just adds dead-weight cost to the
+        only valid exit.  We filter out budgets whose ``source_net``
+        equals the current net before forwarding.
+
+        Args:
+            net: The integer net id of the route being computed.
+
+        Returns:
+            A filtered copy of ``self._pad_channel_budgets`` (or the
+            original list when no filtering is needed -- the empty-list
+            short-circuit avoids allocating a copy on the hot path when
+            no budget is configured at all).
+        """
+        if not self._pad_channel_budgets and not self._pad_lane_budgets:
+            return self._pad_channel_budgets
+        # Use list comprehension; the budget lists are bounded by the
+        # number of dense-package escape pads / fine-pitch lane pads
+        # (typically < 100) so even the O(N) scan is cheap relative to the
+        # surrounding A* cost.  Issue #6382: the lane budgets are appended
+        # after the #3143 channel budgets under the same own-net filter.
+        return [
+            b
+            for b in (*self._pad_channel_budgets, *self._pad_lane_budgets)
+            if getattr(b, "source_net", 0) != net
+        ]
+
+    def set_pad_channel_budgets(self, budgets: list | None) -> None:
+        """Inject the per-pad lateral-channel budget list (Issue #3143).
+
+        The budgets are consulted by the C++ A* search via the
+        ``pad_channel_budgets`` parameter on
+        :meth:`router_cpp.Pathfinder.route_resumable`.  Each budget tags
+        a rectangular escape-channel region with a soft per-cell
+        penalty; the search prefers less-contested escape paths in the
+        lateral channels adjacent to dense-package pad rows.
+
+        This setter is the per-board configuration entry point used by
+        :meth:`router.core.Router.route_with_escape` after the dense-
+        package escape pre-pass runs.  Calling with ``None`` or an empty
+        list disables the per-pad-budget cost term (the C++ search uses
+        the pre-#3143 cost function identically).
+
+        Idempotent and may be called multiple times.  Each call replaces
+        the previously-stored list.  The Python side stores the budgets
+        and forwards them on every subsequent :meth:`_route_impl` call
+        as a positional argument to ``route_resumable()``.
+
+        Args:
+            budgets: List of ``router_cpp.PadChannelBudget`` instances
+                (or anything duck-typed against the binding's struct).
+                Pass ``None`` or ``[]`` to clear.
+        """
+        self._pad_channel_budgets = list(budgets) if budgets else []
+
+    def set_pad_lane_budgets(self, budgets: list | None) -> None:
+        """Inject the fine-pitch neighbour entry-lane budgets (Issue #6382).
+
+        Same struct and per-net filter as :meth:`set_pad_channel_budgets`,
+        but stored in a separate list so the lane budgets (installed by
+        ``Autorouter.route_all_negotiated``) and the #3143 escape-channel
+        budgets (installed by the dense-package escape pre-phase) coexist:
+        setting one never drops the other.  Each call replaces only the
+        lane list.  Pass ``None`` or ``[]`` to clear.
+        """
+        self._pad_lane_budgets = list(budgets) if budgets else []
+
+    def set_pad_lane_fences(self, fence_lanes: list | None) -> None:
+        """Install the fine-pitch lanes the escape fences are built from (Issue #6761).
+
+        Pass ``None`` or ``[]`` to clear (no connection is fenced).  See
+        :func:`kicad_tools.router.pad_lanes.escape_fence_rects`.
+        """
+        self._pad_lane_fences = list(fence_lanes) if fence_lanes else []
+
+    def _escape_fence_budgets(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        trace_width: float,
+        trace_clearance: float,
+        via_size: float,
+    ) -> list:
+        """Hard escape fences for one connection (Issue #6761).
+
+        Empty unless ``start`` or ``end`` is a pad of a fine-pitch column.
+        The bands leave room for a minimum-width (``rules.trace_width``)
+        straight exit along every other-net lane centreline of that column.
+        """
+        fence_lanes = getattr(self, "_pad_lane_fences", None)
+        if not fence_lanes:
+            return []
+        from .pad_lanes import build_escape_fence_budgets
+
+        foreign_half = float(self._rules.trace_width) / 2.0
+        return build_escape_fence_budgets(
+            fence_lanes,
+            (getattr(start, "key", None), getattr(end, "key", None)),
+            int(start.net),
+            self._grid,
+            trace_band_mm=float(trace_width) / 2.0 + float(trace_clearance) + foreign_half,
+            via_band_mm=float(via_size) / 2.0 + float(self._rules.via_clearance) + foreign_half,
+        )
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Mirror changed physical drills before the next native via query."""
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is not None:
+            py_grid.refresh_component_holes()
+        if self._py_router is not None:
+            self._py_router.clear_via_cache()
+
+    def enable_per_call_timing(self, enabled: bool = True) -> None:
+        """Enable or disable per-A*-call wall-clock instrumentation.
+
+        Issue #2929: When enabled, every ``route()`` call records a timing
+        entry capturing the wall-clock duration, the per-net deadline (if
+        any), and whether the deadline was honored within the 1.2x slack
+        bound from the issue's acceptance criteria.  Disabled by default
+        so production routing pays zero overhead.
+
+        Args:
+            enabled: True to start recording; False to stop and drop any
+                accumulated records.
+        """
+        self._per_call_timing_enabled = bool(enabled)
+        if not enabled:
+            self._per_call_timings = []
+
+    def get_and_clear_per_call_timings(self) -> list[dict]:
+        """Drain and return the recorded per-A*-call timing records.
+
+        Issue #2929: Each record is a dict with keys
+        ``net``, ``net_name``, ``elapsed``, ``per_net_timeout``,
+        ``deadline_violated``, and ``succeeded``.  Note that a record may
+        include time spent in the Python fallback (triggered after a C++
+        failure); the elapsed clock starts when ``route()`` enters and
+        stops when it returns.  This is the deliberate "what the caller
+        actually waited" measurement (a deadline-honoring inner search
+        will still be bracketed by the timeout, plus a small fixed setup
+        cost).
+
+        Returns:
+            The list of timing records since the last drain (or since
+            instrumentation was enabled).  Empty list if instrumentation
+            is disabled or no calls have been made.
+        """
+        result = self._per_call_timings
+        self._per_call_timings = []
+        return result
+
+    # ------------------------------------------------------------------
+    # Diff-pair partner resolution (Issue #2587 / Epic #2556 Phase 1C-cont)
+    # ------------------------------------------------------------------
+
+    def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
+        """Inject a net-name -> net-id reverse map for partner resolution.
+
+        Mirrors :meth:`Pathfinder.set_net_name_to_id`.  Phase 1C threads
+        ``NetClassRouting.intra_pair_clearance`` through the C++ A* search
+        via the ``partner_net`` parameter on ``route_resumable()`` and
+        ``validate_route()``.  The clearance is configured per-source-net
+        but applies only when the *other* net is the named partner.
+        Resolving partner-name to partner-id requires this reverse map,
+        which the ``Autorouter`` builds from its ``net_names`` dict.
+
+        Idempotent and may be called multiple times.  Passing an empty
+        dict disables partner detection (the C++ search falls back to
+        ``clearance`` for every other net).
+        """
+        self._net_name_to_id = dict(mapping)
+        # Issue #4507: the id -> name inverse used by the blocker diagnostics
+        # is derived from this map -- drop it so the next lookup rebuilds.
+        self._net_id_to_name_cache = None
+        # Issue #4510: the C++ domain matrix / attach zones are keyed by net
+        # ID, translated through this map -- rebuild them on the next validate.
+        self._pairwise_cpp_payload = None
+        # Issue #4530: the rebuilt payload must be re-pushed to the C++ grid.
+        self._pairwise_cpp_installed = False
+        # Issue #4507: the pure-Python fallback router projects its own
+        # search-time pairwise (HV) domains through the same map -- keep it
+        # in lock-step so a fallback search on an HV board is not HV-blind.
+        if self._py_router is not None:
+            self._py_router.set_net_name_to_id(self._net_name_to_id)
+
+    def set_attach_zones(self, zones) -> None:
+        """Install precomputed rated-footprint necking regions."""
+        self._attach_zones = tuple(zones)
+        # Issue #4510: invalidate the translated C++ zone payload.
+        self._pairwise_cpp_payload = None
+        # Issue #4530: the rebuilt payload must be re-pushed to the C++ grid.
+        self._pairwise_cpp_installed = False
+        if self._py_router is not None:
+            self._py_router.set_attach_zones(self._attach_zones)
+
+    def _grid_layer_indices(self) -> dict[str, int] | None:
+        """KiCad copper-layer name -> C++ grid layer index (Issue #4507).
+
+        The #4506 attach zones record their pad layers by KiCad *name*
+        (``"F.Cu"``), while ``Grid3D`` speaks only grid layer indices.  The
+        grid's own ``_index_to_layer`` map is the authority for that
+        translation -- it is the same mapping ``layer_to_index`` inverts when
+        segments and vias cross the boundary, so a zone can never be scoped to
+        a layer index the stored copper does not use.
+
+        Returns ``None`` when the mapping is unavailable (a bare ``CppGrid``
+        built without ``from_routing_grid``), which keeps the zones
+        layer-agnostic -- exactly the pre-#4507 verdict.
+        """
+        index_to_layer = getattr(self._grid, "_index_to_layer", None)
+        if not index_to_layer:
+            return None
+        from .layers import Layer
+
+        names: dict[str, int] = {}
+        for index, enum_value in index_to_layer.items():
+            try:
+                names[Layer(enum_value).kicad_name] = int(index)
+            except ValueError:  # pragma: no cover - defensive
+                continue
+        return names or None
+
+    def _sync_pairwise_domains_to_cpp(self) -> None:
+        """Install the pairwise domain matrix + attach zones on the C++ grid.
+
+        Issue #4510 / Epic #4431 Phase 2a.  ``Grid3D::validate_route`` gains
+        cross-domain (HV-isolation) widening only when a domain matrix has been
+        installed; this is where :attr:`DesignRules.pairwise_clearance` and
+        :attr:`_attach_zones` cross the Python/C++ boundary, translated from
+        net *names* to the integer net ids the grid speaks.
+
+        Fully dormant without a voltage map: no ``pairwise_clearance`` table
+        means the setters are never called and the C++ validator behaves
+        byte-identically to the pre-#4510 code path.  The translated payload is
+        cached (it depends only on the table, the reverse net map and the
+        zones) and re-pushed whenever either (a) the grid reports itself
+        dormant -- exactly the case after the C++ grid has been rebuilt
+        underneath us -- or (b) the cache was invalidated by a mid-session
+        net-map / attach-zone change (Issue #4530), tracked explicitly via
+        :attr:`_pairwise_cpp_installed`.
+        """
+        impl = getattr(self._grid, "_impl", None)
+        if impl is None or not hasattr(impl, "set_pairwise_domains"):
+            return  # Stale .so without the #4510 surface -- stay dormant.
+
+        payload = self._pairwise_cpp_payload
+        if payload is False:
+            return  # Already determined: nothing to install.
+
+        if payload is None:
+            table = getattr(self._rules, "pairwise_clearance", None)
+            if table is None:
+                return  # No voltage map -- leave the cache unset (may arrive later).
+            from .pairwise_clearance import attach_zones_to_net_ids, build_cpp_domain_matrix
+
+            domains = build_cpp_domain_matrix(table, self._net_name_to_id)
+            if domains is None:
+                self._pairwise_cpp_payload = False
+                return
+            cpp_zones = []
+            for min_x, min_y, max_x, max_y, net_ids, net_layers in attach_zones_to_net_ids(
+                self._attach_zones, self._net_name_to_id, self._grid_layer_indices()
+            ):
+                zone = router_cpp.AttachZone()
+                zone.min_x = min_x
+                zone.min_y = min_y
+                zone.max_x = max_x
+                zone.max_y = max_y
+                zone.net_ids = net_ids
+                # Issue #4507: per-net pad layers, so the C++ waiver is scoped
+                # to the layers the rated part actually has copper on -- the
+                # same scoping the Python acceptance check applies (#4699).
+                # ``None`` leaves the map empty = layer-agnostic (unchanged).
+                if net_layers:
+                    zone.net_layers = {
+                        net_id: sorted(indices) for net_id, indices in net_layers.items()
+                    }
+                cpp_zones.append(zone)
+            payload = (domains.net_to_domain, domains.matrix, cpp_zones)
+            self._pairwise_cpp_payload = payload
+
+        # ``pairwise_active`` is False on a freshly-built grid, so it installs
+        # on first use and reinstalls after a grid rebuild.  But it latches
+        # True once any matrix is pushed and never resets on the same grid, so
+        # it cannot detect a payload rebuilt after a mid-session invalidation
+        # (Issue #4530).  ``_pairwise_cpp_installed`` closes that gap: it is
+        # cleared by both invalidating setters and set True only once the
+        # freshly-(re)built payload has been pushed -- so a rebuilt payload is
+        # re-pushed even while ``pairwise_active`` is already True, without
+        # re-pushing on every single validation call.
+        if not impl.pairwise_active or not self._pairwise_cpp_installed:
+            net_to_domain, matrix, cpp_zones = payload
+            impl.set_pairwise_domains(net_to_domain, matrix)
+            impl.set_attach_zones(cpp_zones)
+            self._pairwise_cpp_installed = True
+
+    def _resolve_partner_net_id(self, net_name: str) -> int | None:
+        """Look up the integer net id of the diff-pair partner of *net_name*.
+
+        Reads :attr:`NetClassRouting.diffpair_partner` and resolves the
+        partner-name to a partner-id via :attr:`_net_name_to_id`.  Returns
+        ``None`` when:
+
+        * the source net has no net class (or the class has no
+          ``diffpair_partner`` set), or
+        * the partner-name is missing from :attr:`_net_name_to_id` (e.g.
+          the autorouter has not populated the reverse map yet).
+
+        ``None`` is the dormant signal for the C++ wiring sites: when
+        partner is unknown, the search uses the wider ``clearance`` for
+        every other net, matching pre-#2559 / pre-#2587 behavior.
+        """
+        net_class = self._net_class_map.get(net_name)
+        if net_class is None or net_class.diffpair_partner is None:
+            return None
+        return self._net_name_to_id.get(net_class.diffpair_partner)
+
+    def set_routable_layers(self, layers: list[int]) -> None:
+        """Set which layers are routable (skip plane layers)."""
+        self._impl.set_routable_layers(layers)
+        # Mirror the value pushed to the C++ ``routable_layers_`` vector so
+        # Python callers (and tests) can introspect the active set without a
+        # dedicated C++ getter binding.
+        self._routable_layers = list(layers)
+
+    def _apply_allowed_layers_to_routable(self) -> None:
+        """Restrict the C++ via-expansion to ``allowed_layers`` (Issue #715).
+
+        When ``DesignRules.allowed_layers`` constrains routing to a subset of
+        copper layers (e.g. a single-layer ``["F.Cu"]`` board), the C++
+        pathfinder must not consider a layer change to a disallowed layer.
+        The pathfinder defaults its routable-layer set to every grid layer, so
+        we intersect that default with the ``allowed_layers``-permitted indices
+        and push the result down to the C++ ``routable_layers_`` vector.
+
+        With a single allowed layer the resulting set has one element, and the
+        via loop's ``new_layer == current.layer`` skip leaves no via target --
+        which is exactly the single-layer invariant ("a via requires >= 2
+        routable layers"). This keeps the Issue #3622 / #864 own-net-obstacle
+        via relaxation intact while preventing it from leaking vias onto
+        single-layer routes.
+        """
+        if self._rules.allowed_layers is None:
+            return  # No restriction; keep the pathfinder default (all layers).
+
+        base = self._grid.get_routable_indices()
+        permitted = [idx for idx in base if self._is_layer_allowed(idx)]
+        # Defensive: never push an empty set (would make every route fail);
+        # leave the default in place and let the start/end-layer filter in
+        # the routing path reject impossible routes instead.
+        if permitted and permitted != list(base):
+            self.set_routable_layers(permitted)
+
+    def _opted_in_plane_layers(
+        self, net_class: NetClassRouting | None, hard_avoided: frozenset[int]
+    ) -> list[int]:
+        """Layers to add to the routable vector for this net's opt-in (#6876).
+
+        Exactly the class's ``allow_plane_layers`` that ``rules.allowed_layers``
+        excludes and the net does not hard-avoid, and only while the shared
+        vector is still the construction-time set -- a caller-narrowed vector
+        (a single-layer lock) is never widened.
+        """
+        from .layers import Layer
+        from .rules import allowed_plane_layer_indices
+
+        allowed = self._rules.allowed_layers
+        if allowed is None or net_class is None:
+            return []
+        opted = allowed_plane_layer_indices(net_class)
+        if not opted:
+            return []
+        if self._routable_layers != getattr(
+            self, "_construction_routable_layers", self._routable_layers
+        ):
+            return []
+        out: list[int] = []
+        for idx in self._grid.get_routable_indices():
+            if idx not in opted or idx in hard_avoided or idx in self._routable_layers:
+                continue
+            if Layer(self._grid.index_to_layer(idx)).kicad_name in allowed:
+                continue
+            out.append(idx)
+        return out
+
+    def _hard_avoided_layers(self, net_class: NetClassRouting | None) -> frozenset[int]:
+        """Grid-layer indices to HARD-block for this net (Issue #4433).
+
+        The C++ (default) backend previously had NO per-net ``avoid_layers``
+        enforcement at all -- neither the soft cost bias the Python pathfinder
+        applies nor a hard block -- so a net escalated onto the
+        ``four_layer_all_signal`` rung (In1/In2 routable) could drop straight
+        onto a thin inner plane.  This helper returns the subset of
+        ``net_class.avoid_layers`` that must be enforced as a hard constraint:
+        auto-hard when the class declares ``target_ampacity`` (an
+        ampacity-bearing net cannot use 0.5 oz inner copper), opt-in hard for
+        the ampacity-free case via ``--strict-layers`` /
+        ``DesignRules.strict_layers``.  An empty set is a no-op (the historical
+        native behaviour -- inner planes remain routable for that net).
+
+        Args:
+            net_class: The routing net class for the net being routed, or None.
+
+        Returns:
+            Frozen set of grid-layer indices the net must not be routed on.
+        """
+        if net_class is None:
+            return frozenset()
+        return net_class.hard_avoided_layer_indices(self._rules.strict_layers)
+
+    def _is_layer_allowed(self, layer_idx: int, net_class: NetClassRouting | None = None) -> bool:
+        """Check if routing on this layer is allowed by allowed_layers constraint.
+
+        Issue #6876: ``net_class``'s ``allow_plane_layers`` opt-in widens the
+        gate for the named layers (shared :func:`~.rules.layer_permitted`).
+
+        Args:
+            layer_idx: Grid layer index
+            net_class: The routed net's class, or None (no opt-in).
+
+        Returns:
+            True if layer is allowed (or no restriction), False if blocked
+        """
+        from .layers import Layer
+        from .rules import layer_permitted
+
+        if self._rules.allowed_layers is None:
+            return True  # No restriction
+
+        # Convert grid index to Layer enum value, then to KiCad name for comparison
+        layer_value = self._grid.index_to_layer(layer_idx)
+        layer = Layer(layer_value)
+        return layer_permitted(self._rules, net_class, layer_idx, layer.kicad_name)
+
+    def _compute_pad_bounds(
+        self, pad: Pad, trace_width: float | None = None
+    ) -> router_cpp.PadBounds:
+        """Compute pad metal area and approach zone bounds in grid coordinates.
+
+        This mirrors the Python pathfinder's ``_get_pad_metal_bounds()`` logic
+        (Issue #956/#977) so the C++ A* search can:
+        - Accept any cell within the end pad's metal area as a goal (Phase 1)
+        - Seed start nodes from all cells within the start pad's metal area
+        - Define geometry-derived approach zones for clearance relaxation (Phase 2)
+
+        Args:
+            pad: The pad to compute bounds for.
+
+        Returns:
+            A ``router_cpp.PadBounds`` struct with metal and approach grid bounds.
+        """
+        # Calculate effective pad dimensions (same logic as grid._add_pad_unsafe)
+        if getattr(pad, "through_hole", False):
+            if pad.width > 0 and pad.height > 0:
+                effective_width = pad.width
+                effective_height = pad.height
+            elif getattr(pad, "drill", 0) > 0:
+                effective_width = pad.drill + 0.7
+                effective_height = effective_width
+            else:
+                effective_width = 1.7
+                effective_height = 1.7
+        else:
+            effective_width = pad.width
+            effective_height = pad.height
+
+        # Match Python: inset unexempted fine-pitch seeds and all strict-mode
+        # pads to keep reconstructed tails clear of dense neighboring copper.
+        # Standard-pitch seeds retain their search freedom; the exact foreign-
+        # pad validator still enforces their authored clearance.
+        py_grid = getattr(self._grid, "_py_grid", None)
+        pitch = self._get_component_pitches().get(pad.component_key)
+        threshold = self._rules.fine_pitch_threshold
+        if (
+            trace_width is not None
+            and not pad.escape_terminal
+            and (
+                self._rules.strict_pad_clearance
+                or (pitch is not None and threshold is not None and pitch < threshold)
+            )
+            and not self._same_component_carveout_eligible(py_grid, pad.component_key)
+        ):
+            # Physical pad-center tails emit the local neck-down width.
+            # Escape terminals already bound committed conductor copper;
+            # shrinking them again can erase every seed (Board 04, #5398).
+            # Eroding by the wider trunk can erase every legal narrow-pad seed.
+            seed_width = trace_width
+            if self._rules.should_apply_neck_down(pad.ref, pitch):
+                seed_width = self._rules.get_neck_down_width(0.0, pitch, base_width=trace_width)
+            effective_width = max(0.0, effective_width - seed_width)
+            effective_height = max(0.0, effective_height - seed_width)
+
+        # Metal area bounds in world coordinates
+        metal_x1 = pad.x - effective_width / 2
+        metal_y1 = pad.y - effective_height / 2
+        metal_x2 = pad.x + effective_width / 2
+        metal_y2 = pad.y + effective_height / 2
+
+        # Convert to grid coordinates using ceil/floor to include only cells
+        # whose CENTER is inside the metal area (Issue #996).
+        resolution = self._grid.resolution
+        origin_x = self._grid.origin_x
+        origin_y = self._grid.origin_y
+
+        gx1 = max(0, math.ceil((metal_x1 - origin_x) / resolution))
+        gy1 = max(0, math.ceil((metal_y1 - origin_y) / resolution))
+        gx2 = min(self._grid.cols - 1, math.floor((metal_x2 - origin_x) / resolution))
+        gy2 = min(self._grid.rows - 1, math.floor((metal_y2 - origin_y) / resolution))
+
+        # Issue #3471: degenerate (zero-area) pads -- Steiner branch
+        # points are virtual pads with width == height == 0 -- produce
+        # EMPTY metal bounds whenever ``(pad.x - origin) / resolution``
+        # is not exactly integral in floating point: ceil(v) > floor(v)
+        # leaves ``gx1 > gx2`` and the C++ A* seeds ZERO start nodes,
+        # failing the edge with FAILURE_NO_PATH at 0 iterations.  Board
+        # 05's ISENSE cluster (4-pad nets whose RSMT always synthesises
+        # branch points) lost every Steiner-incident edge this way, on
+        # every route of the board.  Clamp empty spans to the nearest
+        # grid cell so a degenerate pad always seeds exactly one cell.
+        # Escape terminals describe actual conductor copper, unlike virtual
+        # Steiner points. Empty bounds must remain empty: the native search
+        # can fail immediately and use the Python off-grid waypoint fallback,
+        # without granting a clearance waiver at a nearby bare-board cell.
+        if gx1 > gx2 and not pad.escape_terminal:
+            gc = int(round((pad.x - origin_x) / resolution))
+            gx1 = gx2 = max(0, min(self._grid.cols - 1, gc))
+        if gy1 > gy2 and not pad.escape_terminal:
+            gc = int(round((pad.y - origin_y) / resolution))
+            gy1 = gy2 = max(0, min(self._grid.rows - 1, gc))
+
+        # Approach zone: metal area + 2-cell escape margin (Issue #1618)
+        pad_escape_margin = 2
+        bounds = router_cpp.PadBounds()
+        bounds.metal_gx1 = int(gx1)
+        bounds.metal_gy1 = int(gy1)
+        bounds.metal_gx2 = int(gx2)
+        bounds.metal_gy2 = int(gy2)
+        bounds.approach_gx1 = int(gx1) - pad_escape_margin
+        bounds.approach_gy1 = int(gy1) - pad_escape_margin
+        bounds.approach_gx2 = int(gx2) + pad_escape_margin
+        bounds.approach_gy2 = int(gy2) + pad_escape_margin
+        # Issue #6368: centreline landing cost inputs (see ``pad_landing``).
+        landing = pad_landing_geometry(pad, self._grid)
+        bounds.long_axis = int(landing.long_axis)
+        bounds.centre_gx = float(landing.centre_gx)
+        bounds.centre_gy = float(landing.centre_gy)
+        bounds.lane_half_cells = float(landing.lane_half_cells)
+        bounds.tip_lo = int(landing.tip_lo)
+        bounds.tip_hi = int(landing.tip_hi)
+        return bounds
+
+    def route(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        start_layers: list[int] | None = None,
+        end_layers: list[int] | None = None,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+        *,
+        clear_avoidance_after_connection: bool = True,
+    ) -> Route | None:
+        """Route between two pads.
+
+        Issue #2929: When per-A*-call timing instrumentation is enabled via
+        :meth:`enable_per_call_timing`, this method records each call's
+        elapsed wall-clock time alongside the deadline budget so callers
+        can audit deadline-honor behavior.  The actual routing logic lives
+        in :meth:`_route_impl`.
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            net_class: Optional net class for routing parameters (used to
+                compute per-net trace/via clearance radii for the C++ A* search)
+            negotiated_mode: Enable negotiated congestion routing
+            present_cost_factor: Multiplier for sharing penalty
+            weight: A* weight (1.0 = optimal, >1.0 = faster)
+            start_layers: Valid start layers (for PTH pads)
+            end_layers: Valid end layers (for PTH pads)
+            extra_goal_cells: Additional goal cells for early termination
+                (accepted for API compatibility but not yet used by C++ backend)
+
+            clear_avoidance_after_connection: Clear this connection's clearance
+                retry penalties when ``route()`` exits (success, failure and
+                exception paths alike).  Defaults to ``True`` (#5504): the
+                penalties ``_boost_avoidance_at`` accumulates are scoped to one
+                connection's resumable search and must not price the grid for
+                the next pad pair.  Callers keep their own net-end
+                ``clear_avoidance_costs()`` (``Autorouter._route_net``, #2438);
+                the two compose -- this one just clears more often.  Pass
+                ``False`` only to reproduce the pre-#5504 leaking behaviour.
+
+        Returns:
+            Route object if successful, None if no path found
+        """
+        # Issue #5923: inside a bounded excursion (the corridor-yield re-run)
+        # no single search may run past the excursion's wall deadline.
+        # Identity when no deadline is installed.
+        per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #6366: per-net A* weight override (evolutionary gene).
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
+        if not self._per_call_timing_enabled:
+            try:
+                return self._route_impl(
+                    start,
+                    end,
+                    net_class=net_class,
+                    negotiated_mode=negotiated_mode,
+                    present_cost_factor=present_cost_factor,
+                    weight=weight,
+                    start_layers=start_layers,
+                    end_layers=end_layers,
+                    per_net_timeout=per_net_timeout,
+                    extra_goal_cells=extra_goal_cells,
+                )
+            finally:
+                if clear_avoidance_after_connection:
+                    self.clear_avoidance_costs()
+
+        t0 = time.monotonic()
+        succeeded = False
+        try:
+            result = self._route_impl(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                start_layers=start_layers,
+                end_layers=end_layers,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+            succeeded = result is not None
+            return result
+        finally:
+            if clear_avoidance_after_connection:
+                self.clear_avoidance_costs()
+            elapsed = time.monotonic() - t0
+            # 1.2x slack matches the Issue #2929 acceptance criterion: the
+            # C++ deadline check fires every 1024 iterations, plus the
+            # Python wrapper has a fixed setup cost (~ms-scale), so a 20%
+            # margin is enough that a deadline-honoring backend never
+            # trips this flag.  Note: when the C++ search fails, the
+            # Python fallback runs after with its OWN ``per_net_timeout``
+            # budget; the elapsed clock covers BOTH, which is the
+            # "wall-clock the caller actually waited" measurement.
+            deadline_violated = (
+                per_net_timeout is not None
+                and per_net_timeout > 0
+                and elapsed > per_net_timeout * 1.2 + 0.5
+            )
+            self._per_call_timings.append(
+                {
+                    "net": start.net,
+                    "net_name": start.net_name,
+                    "elapsed": elapsed,
+                    "per_net_timeout": per_net_timeout,
+                    "deadline_violated": deadline_violated,
+                    "succeeded": succeeded,
+                }
+            )
+            # Issue #3474 R1: live slow-call tracing under KCT_DEBUG_PNT.
+            if os.environ.get("KCT_DEBUG_PNT") and (deadline_violated or elapsed > 5.0):
+                print(
+                    f"    [PNT-DEBUG] route() net={start.net_name} elapsed={elapsed:.1f}s "
+                    f"budget={per_net_timeout} violated={deadline_violated} ok={succeeded}",
+                    flush=True,
+                )
+
+    def _route_impl(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        start_layers: list[int] | None = None,
+        end_layers: list[int] | None = None,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+    ) -> Route | None:
+        """Inner C++-backed route implementation -- see :meth:`route` for the
+        public wrapper that adds optional per-call wall-clock instrumentation.
+        """
+        # Get layer indices
+        start_layer = self._grid.num_layers // 2  # Default to middle
+        end_layer = self._grid.num_layers // 2
+
+        # Try to get actual layer from pad.
+        #
+        # Issue #3304: Use the grid's ``layer_to_index`` mapping rather than
+        # ``layer.value % num_layers``.  The modulo trick happens to give
+        # the correct index for ``F.Cu`` (value=0) and for B.Cu only on
+        # 6-layer stacks (5 % 6 == 5).  For ALL other layer counts it
+        # produces the WRONG index for ``B.Cu`` (value=5):
+        #
+        #   - 2-layer: 5 % 2 = 1 ✓ (also happens to be correct)
+        #   - 4-layer: 5 % 4 = 1 ✗ (should be 3; In1.Cu picked instead)
+        #   - 6-layer: 5 % 6 = 5 ✓
+        #
+        # On 4-layer boards this caused the C++ A* to terminate on
+        # ``In1.Cu`` (the wrongly-mapped goal layer) whenever the
+        # destination virtual_pad was on ``B.Cu`` (the inner escape layer
+        # the 4L SIG-GND-PWR-SIG stack falls back to when no inner SIGNAL
+        # layers are present in ``_select_inner_escape_layer``).  The
+        # escape route lays its inner stub on B.Cu but the main router
+        # ends on In1.Cu -- they share an XY but no via bridges the layer
+        # gap, so the union-find connectivity check counts the pad as
+        # disconnected.  This was the root cause of the board 03
+        # USB_CC2 regression after #3278 narrowed the escape stub: the
+        # narrower stub stops blocking the main router's path so the
+        # A* now finds the wrong-layer goal cell instead of failing
+        # and falling back to a path that ends correctly.
+        #
+        # The ``layer_to_index`` lookup is what
+        # :meth:`Router.route` in ``pathfinder.py`` already uses
+        # (line 2348), so this brings the C++ backend into parity with
+        # the Python reference path.
+        if hasattr(start.layer, "value"):
+            start_layer = self._grid.layer_to_index(start.layer.value)
+        if hasattr(end.layer, "value"):
+            end_layer = self._grid.layer_to_index(end.layer.value)
+
+        # Compute start/end layers for through-hole pads if not provided
+        # Through-hole pads can be accessed on any routable layer
+        routable_layers = self._grid.get_routable_indices()
+        if start_layers is None:
+            start_layers = (
+                routable_layers
+                if (
+                    getattr(start, "through_hole", False) or getattr(start, "layer_agnostic", False)
+                )
+                else [start_layer]
+            )
+        if end_layers is None:
+            end_layers = (
+                routable_layers
+                if (getattr(end, "through_hole", False) or getattr(end, "layer_agnostic", False))
+                else [end_layer]
+            )
+
+        # Filter start/end layers by allowed_layers constraint.  Issue #6876:
+        # per net, so a class's ``allow_plane_layers`` opt-in is honoured.
+        if self._rules.allowed_layers is not None:
+            seed_class = self._net_class_map.get(start.net_name)
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, seed_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, seed_class)]
+            # If no valid layers remain, routing is impossible
+            if not start_layers or not end_layers:
+                return None
+
+        # Issue #1702 Gap 2: Compute per-net trace and via clearance radii.
+        # Use the net class trace width / via size (if available) instead of
+        # the global defaults so wider nets correctly reserve space during
+        # pathfinding in the C++ A* search.
+        net_class = self._net_class_map.get(start.net_name)
+        net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
+        # Issue #6994: the same guarded radius as the Python Router (was a
+        # bare ceil that added a phantom cell on float-noise inputs, e.g.
+        # Default rules @ 0.1 mm gave 4 cells instead of 3).
+        trace_radius_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self._grid.resolution
+        )
+
+        net_via_size = net_class.via_size if net_class else self._rules.via_diameter
+        via_radius_cells = search_radius_cells(
+            net_via_size / 2, self._rules.via_clearance, self._grid.resolution
+        )
+
+        # Issue #4433: hard per-net avoid_layers for the NATIVE backend (the
+        # default backend that previously ignored ``avoid_layers`` entirely).
+        # When the net's ``avoid_layers`` must be hard (declared
+        # ``target_ampacity``, or ``--strict-layers``), drop the avoided layers
+        # from the start/end seed sets AND narrow the C++ routable-layer vector
+        # for the DURATION of this route call (restored in the finally below,
+        # because the Pathfinder's ``routable_layers_`` vector is reused for
+        # every net on the board).  Empty set => no-op: the native backend
+        # behaves byte-for-byte as before for nets without ampacity/strict.
+        hard_avoided_layers = self._hard_avoided_layers(net_class)
+        if hard_avoided_layers:
+            start_layers = [l for l in (start_layers or []) if l not in hard_avoided_layers]
+            end_layers = [l for l in (end_layers or []) if l not in hard_avoided_layers]
+            # No legal start/end layer left -> fail LOUD (unrouted report)
+            # rather than dropping unmanufacturable copper on an inner plane.
+            if not start_layers or not end_layers:
+                return None
+
+        # Issue #3130: per-net emit widths/diameters.  Forward the per-net
+        # ``trace_width`` and ``via_size`` so the C++-internal Segment /
+        # Via objects returned from route_resumable() carry per-net values
+        # instead of the global ``rules_`` defaults.  Adapter overrides at
+        # ``_convert_result_to_route`` remain in place as a defensive
+        # fallback (used only when emit_* == 0).  ``via_drill`` is not yet
+        # a per-net attribute on ``NetClassRouting``; fall back to the
+        # global default so behavior matches pre-#3130 callers.
+        emit_trace_width = float(net_trace_width) if net_class else 0.0
+        emit_via_diameter = float(net_via_size) if net_class else 0.0
+        emit_via_drill = 0.0
+
+        # Issue #2587 / Epic #2556 Phase 1C-cont: Resolve the diff-pair partner
+        # net id and compute a tighter within-pair search radius.  When the
+        # source net's ``NetClassRouting`` declares a ``diffpair_partner`` AND
+        # the partner-id is known (via ``set_net_name_to_id`` populated by the
+        # autorouter), the C++ search uses ``intra_pair_radius_cells`` for
+        # cells belonging to the partner net only.  All other foreign nets
+        # continue to see the wider ``trace_radius_cells`` radius.  When
+        # ``partner_net == -1`` (the dormant default) the C++ side preserves
+        # pre-#2559 behavior identically.
+        #
+        # Issue #5613: the override is engaged ONLY when it is genuinely
+        # tighter than the clearance this search would otherwise apply --
+        # see :meth:`_resolve_intra_pair_override`.
+        partner_net_id = -1
+        intra_pair_radius_cells = 0
+        search_intra_pair_clearance = -1.0
+        if net_class is not None and net_class.diffpair_partner is not None:
+            partner_id = self._net_name_to_id.get(net_class.diffpair_partner)
+            if partner_id is not None:
+                intra_pair_clearance = self._resolve_intra_pair_override(
+                    net_class, net_trace_clearance
+                )
+                if intra_pair_clearance is not None:
+                    partner_net_id = int(partner_id)
+                    search_intra_pair_clearance = intra_pair_clearance
+                    intra_pair_radius_cells = search_radius_cells(
+                        net_trace_width / 2, intra_pair_clearance, self._grid.resolution
+                    )
+
+        # Issue #2427: Compute pad metal bounds and approach zones.
+        # This mirrors the Python pathfinder's _get_pad_metal_bounds() logic
+        # so the C++ A* search can use expanded goal/start regions and
+        # geometry-derived approach zone relaxation.
+        start_pad_bounds = self._compute_pad_bounds(start, net_trace_width)
+        end_pad_bounds = self._compute_pad_bounds(end, net_trace_width)
+
+        # Issue #2447: Use resumable A* so that when post-route validation
+        # fails, the search continues from the preserved open set rather
+        # than restarting from scratch. This mirrors the Python pathfinder's
+        # behavior where validation failure leads to `continue` in the A*
+        # main loop, finding an alternative approach path.
+        #
+        # Maximum number of resume attempts before giving up.
+        max_resume_attempts = 5
+
+        # Issue #2476: Reset failure-info at the start of every route() call
+        # so the negotiated strategy never sees stale diagnostics from a
+        # previous net.
+        self._last_failure_info = None
+
+        # Issue #5599: reset the evidence-gated strict foreign-pad kernel at
+        # the start of every route() call -- a fresh search keeps the full
+        # historical relaxation surface (the kernel is cell-center
+        # conservative and can close corridors that would validate; e.g.
+        # NRST on board 04 loses its only C++ corridor when it is armed
+        # unconditionally).  The resume loop arms it below, ONLY after a
+        # post-route clearance violation has repeated at the same site.
+        if hasattr(self._impl, "set_search_strict_pad_kernel"):
+            self._impl.set_search_strict_pad_kernel(False)
+
+        # Issue #2610: Convert the per-net timeout into the (seconds, float)
+        # contract the C++ binding expects.  ``None`` or ``0`` => no deadline
+        # (the C++ search runs until success / open-set exhaustion / the
+        # iteration backstop).  Positive values establish a wall-clock
+        # deadline that is shared across the initial ``route_resumable()``
+        # call and all subsequent ``resume()`` invocations, so a single
+        # per-net budget covers the whole retry sequence.
+        timeout_seconds = float(per_net_timeout) if per_net_timeout else 0.0
+
+        # Issue #3474 R1: the SAME deadline also bounds the Python
+        # fallback.  Previously the fallback received a fresh
+        # ``per_net_timeout`` budget after the C++ search had already
+        # consumed its own, so one ``route()`` call could legally spend
+        # 2x the cap (and the 10-100x-slower Python A* is exactly where
+        # capped searches go to die).  ``None`` => unbudgeted (legacy).
+        route_deadline = time.monotonic() + float(per_net_timeout) if per_net_timeout else None
+
+        # Issue #4433: narrow the C++ routable-layer vector to exclude this
+        # net's hard-avoided layers for the duration of the search (initial
+        # route_resumable + every resume).  Saved and restored in the finally
+        # so the shared Pathfinder's ``routable_layers_`` reverts for the next
+        # net.  The Python fallback constructs its own Router that re-derives
+        # the hard block from the same net_class, so it stays enforced there
+        # too regardless of this narrowing.
+        #
+        # Issue #6876: the construction-time ``_apply_allowed_layers_to_routable``
+        # narrowed the shared vector to ``rules.allowed_layers`` for every net.
+        # When this net's class opts in to reserved plane layers
+        # (``allow_plane_layers``), WIDEN the vector for this call by exactly
+        # those opted-in layers that the board-wide gate excludes (hard-avoided
+        # layers still removed -- hard avoid wins).  Only the construction-time
+        # set is widened: a caller that narrowed the vector itself (e.g.
+        # ``DiffPairRouter._layer_locked_router``'s single-layer, no-via probe)
+        # keeps its lock.  The change is applied inside the ``try`` below and
+        # restored by its ``finally``.  No C++ source change.
+        saved_routable_layers: list[int] | None = None
+        pending_routable: list[int] | None = None
+        opted_in_layers = self._opted_in_plane_layers(net_class, hard_avoided_layers)
+        if hard_avoided_layers or opted_in_layers:
+            if opted_in_layers:
+                widened = set(self._routable_layers) | set(opted_in_layers)
+                candidate = [idx for idx in self._grid.get_routable_indices() if idx in widened]
+            else:
+                candidate = list(self._routable_layers)
+            narrowed_routable = [idx for idx in candidate if idx not in hard_avoided_layers]
+            if narrowed_routable and narrowed_routable != self._routable_layers:
+                pending_routable = narrowed_routable
+
+        # Issue #4511 / Epic #4431 Phase 2b: search-time pairwise (HV-isolation)
+        # avoidance.  Phase 2a wired ``_sync_pairwise_domains_to_cpp()`` only
+        # into the post-route ``validate_route`` call site, so the domain matrix
+        # was never installed on the live grid *before* the A* search ran --
+        # ``Grid3D::pairwise_active()`` read False throughout the search and the
+        # new domain-aware blocking kernels silently no-op'd in production.
+        # Push the matrix here, once per route() call, so the search sees it.
+        # The call is idempotent and fully dormant without a voltage map (it
+        # returns after a single ``pairwise_clearance is None`` check), so the
+        # no-voltage-map hot path is unaffected.
+        #
+        # Issue #5599: the whole search-time state push + the
+        # ``route_resumable`` launch are wrapped in ``_run_fresh_search`` so a
+        # resume-strategy RESTART can re-run a full search (with the
+        # accumulated avoidance boosts and remaining budget) instead of only
+        # continuing the preserved open set.  Every pushed setter is
+        # idempotent, so calling them again before a restart is safe.
+        # Issue #6761: hard escape fences when this connection starts or ends
+        # on a fine-pitch column pad.  ``fence_state`` lets the first failed
+        # search drop them (see the retry below).
+        escape_fences = self._escape_fence_budgets(
+            start,
+            end,
+            trace_width=net_trace_width,
+            trace_clearance=net_trace_clearance,
+            via_size=net_via_size,
+        )
+        fence_state = {"on": bool(escape_fences)}
+
+        def _run_fresh_search(timeout_s: float, max_iters: int):
+            self._sync_pairwise_domains_to_cpp()
+            # Give the C++ search the routing net's copper half-extents so the
+            # cross-domain widening measures its widened radius from the SAME
+            # half-width the scalar ``trace_radius_cells`` used (0.0 => rules
+            # fallback on a stale .so without the #4511 setter).
+            if hasattr(self._impl, "set_search_pair_widths"):
+                self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
+            if hasattr(self._impl, "set_search_fill_clearances"):
+                # Issue #6243: the routing net's own authored minimum is its
+                # side of every fill pair (the fill carries its own side).
+                own_floor = self._rules.authored_floor(start.net)
+                self._impl.set_search_fill_clearances(
+                    max(net_trace_clearance, own_floor),
+                    max(self._rules.via_clearance, own_floor),
+                )
+            if hasattr(self._impl, "set_search_pad_clearance_floor"):
+                # Issue #6315: the exact pad test must hold a pad to the pair
+                # rule max(own class, pad's class).  With per-pad classes
+                # pushed (#7569) the floor is 0; a stale .so without that
+                # setter falls back to the largest class on the board.
+                if self._sync_pad_class_clearances():
+                    self._impl.set_search_pad_clearance_floor(0.0)
+                else:
+                    self._impl.set_search_pad_clearance_floor(
+                        max(
+                            [self._rules.trace_clearance]
+                            + [
+                                float(getattr(nc, "clearance", 0.0) or 0.0)
+                                for nc in (self._net_class_map or {}).values()
+                            ]
+                        )
+                    )
+            if hasattr(self._impl, "set_search_own_pad_gate"):
+                # Issue #6375: steps on this net's own pad copper/halo are
+                # held to the validator's own seg-vs-pad verdict -- with the
+                # validator's carve-outs and the narrowest width the route
+                # conversion can emit, so the gate is never the stricter one.
+                gate_exclude, gate_clamp = self._carveout_ref_hashes(
+                    self._grid._py_grid, start, end
+                )
+                self._impl.set_search_own_pad_gate(
+                    gate_exclude,
+                    gate_clamp,
+                    self._narrowest_emit_width(start, end, net_trace_width),
+                )
+
+            if self._grid._py_grid is not None:
+                self._sync_stored_routes(self._grid._py_grid)
+                sync_authored_floors(self._grid, self._grid._py_grid)
+            self._impl.set_search_partner_clearance(
+                partner_net_id,
+                search_intra_pair_clearance if partner_net_id >= 0 else -1.0,
+            )
+            return self._impl.route_resumable(
+                start.x,
+                start.y,
+                start_layer,
+                end.x,
+                end.y,
+                end_layer,
+                start.net,
+                start_layers or [],
+                end_layers or [],
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                trace_radius_cells,
+                via_radius_cells,
+                start_pad_bounds,
+                end_pad_bounds,
+                # Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair
+                # clearance.  When ``partner_net == -1`` (the dormant default
+                # before #2587 wired in the partner map), the C++ search uses
+                # ``trace_radius_cells`` for every other net.  When set, cells
+                # belonging to ``partner_net`` are checked against
+                # ``intra_pair_radius_cells`` (the tighter within-pair radius).
+                partner_net_id,
+                intra_pair_radius_cells,
+                # Issue #2610: per-net wall-clock deadline + iteration override.
+                # Issue #3881: use the EFFECTIVE cap -- when the tuned per-net
+                # iteration cap is set it binds (clamped by the memory
+                # backstop); otherwise this is the memory backstop / heuristic.
+                timeout_s,
+                max_iters,
+                # Issue #3130: per-net emit widths/diameters.  Forwarded so the
+                # C++-internal RouteResult carries per-net Segment.width and
+                # Via.diameter/drill matching the source net class instead of
+                # the global ``rules_`` defaults.  When ``net_class is None``
+                # all three are 0.0 and the C++ falls back to ``rules_.*``
+                # (pre-#3130 behavior).
+                emit_trace_width,
+                emit_via_diameter,
+                emit_via_drill,
+                # Issue #3143: per-pad lateral-channel budget.  Populated
+                # once per board by ``Router.route_with_escape`` via
+                # :meth:`set_pad_channel_budgets`.  Empty list (the
+                # default) keeps the C++ cost function pre-#3143
+                # identical; populated list nudges the search away from
+                # contested escape channels adjacent to dense-package
+                # pad rows.  Filtered per-net so the originating net of
+                # an escape pad is not penalised for routing through its
+                # OWN escape endpoint -- only contention from OTHER nets
+                # is shaped.
+                self._filter_pad_channel_budgets_for_net(start.net)
+                + (escape_fences if fence_state["on"] else []),
+            )
+
+        try:
+            if pending_routable is not None:
+                saved_routable_layers = list(self._routable_layers)
+                self.set_routable_layers(pending_routable)
+            result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            if not result.success and fence_state["on"]:
+                # Issue #6761: a fence reshapes an escape, it must never lose
+                # a connection -- when the fenced search finds nothing (e.g.
+                # an obstacle inside the lane forces an early turn), retry
+                # once on the unfenced cost function.
+                fence_state["on"] = False
+                self._escape_fence_fallbacks = getattr(self, "_escape_fence_fallbacks", 0) + 1
+                result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+
+            if not result.success:
+                # Issue #2476: Capture structured failure diagnostics from
+                # the C++ pathfinder.  In particular, FAILURE_VIA_VIA_BLOCKED
+                # carries the offending stored-via net so the negotiated
+                # strategy can target rip-up at that net rather than a
+                # blanket retry.  We capture even when the Python fallback
+                # also fails, since the cpp diagnostic is still actionable.
+                self._capture_failure_info(result)
+                return self._try_python_fallback(
+                    start,
+                    end,
+                    net_class=net_class,
+                    negotiated_mode=negotiated_mode,
+                    present_cost_factor=present_cost_factor,
+                    weight=weight,
+                    per_net_timeout=per_net_timeout,
+                    extra_goal_cells=extra_goal_cells,
+                    deadline=route_deadline,
+                    reason=self._describe_cpp_failure(result),
+                    cpp_failure_reason=getattr(result, "failure_reason", None),
+                )
+
+            # Issue #5599: per-attempt instrumentation for the post-route
+            # clearance-validation resume loop.  ``resume_attempts`` records,
+            # for each validation failure in this loop, the violation KIND +
+            # location and the goal cell rejected afterwards -- the data the
+            # issue's "instrument first" directive requires to distinguish
+            # "five near-clone resumes against the same mid-path violation"
+            # (hypothesis 1) from a search/validation clearance-model
+            # disagreement (hypothesis 2).  Published through
+            # ``fallback_stats['resume_diagnostics']`` only when at least one
+            # attempt failed, so clean first-try routes stay free of noise.
+            resume_attempts: list[dict] = []
+            # Issue #5599 fix state: the plain reject-one-goal-cell + flat 20.0
+            # avoidance-boost resume strategy produces near-clone candidates
+            # when the violation sits mid-corridor (or at a fixed pad-approach
+            # window): every resume re-enters the goal through the same
+            # clearance-violating approach because (a) the preserved open set
+            # has the shared corridor prefix already CLOSED (g-scores frozen,
+            # immune to the fresh avoidance cost) and (b) the flat boost is too
+            # weak to make the search buy a materially longer corridor.  The
+            # fix: escalate the boost exponentially while the SAME violation
+            # site keeps rejecting candidates, and -- once the site has repeated
+            # -- RESTART the search from scratch (fresh open/closed sets with
+            # every accumulated avoidance boost and goal rejection active)
+            # instead of continuing the frozen frontier.  A fresh C++ restart
+            # is exactly the "materially different candidate generator" the
+            # 10-100x-slower Python fallback was accidentally providing.
+            rejected_goal_cells: list[tuple[int, int, int]] = []
+            iterations_spent_prior = 0
+            last_violation_cell: tuple[int, int] | None = None
+            site_repeat_run = 0
+            # Issue #5617: wall-clock start of this net's resume loop, so an
+            # exhausted run (below) can attribute its span to
+            # ``_resume_loop_exhausted_seconds``.  Pure measurement -- read
+            # once here and once at the exhaustion exit, never compared
+            # against a budget.
+            _resume_loop_t0 = time.monotonic()
+            for attempt in range(max_resume_attempts + 1):
+                route = self._convert_result_to_route(result, start, end, net_class)
+
+                # Issue #3438: relief PROBES deliberately cross foreign
+                # copper/halos -- post-route clearance validation would
+                # reject every probe path (and pollute the avoidance-cost
+                # state via _boost_avoidance_at).  Probe routes are never
+                # committed, so skip validation entirely in relief mode.
+                if self._relief_mode:
+                    return route
+
+                # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
+                # clearance validation via C++ validate_route().  Issue #2587
+                # threads the partner net id + intra-pair clearance so the
+                # validator does not reject diff-pair routes that legitimately
+                # sit at the tighter within-pair distance.
+                violation_location = self._validate_route_clearance(
+                    route,
+                    start,
+                    end,
+                    trace_radius_cells,
+                    net_class=net_class,
+                )
+
+                if violation_location is None:
+                    # Route passed validation
+                    if resume_attempts:
+                        # Issue #5599: a resume loop that recovered after one
+                        # or more failed validation attempts -- record it so
+                        # post-hoc analysis can see which violations the
+                        # boost+reject strategy DID steer around.
+                        self._resume_diagnostics[start.net_name] = {
+                            "attempts": resume_attempts,
+                            "exhausted": False,
+                        }
+                    return route
+
+                # Validation failed. Boost avoidance cost at violation location
+                # (complementary mechanism to resumable search).
+                #
+                # Issue #5599: ESCALATE the boost while the SAME violation
+                # site keeps rejecting candidates.  The historical flat 20.0
+                # proved insufficient: on board 04 the USER_LED/BOOT0 nets saw
+                # the identical seg-pad violation six times in a row -- five
+                # overlapping 20.0 boosts never made the alternative corridor
+                # cheaper than re-entering the goal through the violating
+                # approach.  20 * 4**run (20 -> 80 -> 320 -> ...) turns each
+                # repeated rejection into a decisively more expensive
+                # violation window.  A FIRST-time violation keeps the
+                # historical 20.0 (byte-identical behavior for healthy nets).
+                try:
+                    _vgx, _vgy = self._grid._impl.world_to_grid(
+                        violation_location.x, violation_location.y
+                    )
+                    violation_cell = (int(_vgx), int(_vgy))
+                except Exception:  # pragma: no cover - world_to_grid is total
+                    violation_cell = None
+                if violation_cell is not None and violation_cell == last_violation_cell:
+                    site_repeat_run += 1
+                else:
+                    last_violation_cell = violation_cell
+                    site_repeat_run = 0
+                # Issue #5599: arm the evidence-gated strict foreign-pad
+                # check once the same violation site has repeated -- the
+                # relaxation surface (same-net corridors from this net's own
+                # escape stub, approach zones) keeps producing candidates the
+                # validator rejects, so the remaining resumes/restarts search
+                # with the validator's OWN segment-vs-pad geometry inside a
+                # LOCALIZED disc around the violation site.  Localization
+                # matters: the relaxation is load-bearing for C++ reach
+                # elsewhere on dense pad arrays (board 07's DDR byte bundle
+                # lost its whole search when strictness was global), so the
+                # disc is scoped to the one place the validator proved the
+                # disagreement.  The flag is read live per neighbor
+                # expansion, so it applies to the very next resume()/restart;
+                # it is reset at the start of every route() call (see above)
+                # so fresh nets keep the historical reach.
+                if (
+                    site_repeat_run >= 1
+                    and violation_cell is not None
+                    and hasattr(self._impl, "set_search_strict_pad_kernel")
+                ):
+                    # Disc radius: the violation is REPORTED at the neighbor
+                    # pad's center, but the failing steps can run the whole
+                    # own-pad-to-neighbor corridor -- up to a pad pitch plus
+                    # a pad length away (board 04 BOOT0's under-tip diagonal
+                    # sits ~18 cells from the reported center; a 16-cell disc
+                    # missed it).  Two trace radii + 24 cells (~1.7mm at a
+                    # 0.05mm grid) covers the pad pair; still local enough to
+                    # leave the rest of a dense pad array untouched.
+                    strict_radius = 2 * trace_radius_cells + 24
+                    self._impl.set_search_strict_pad_kernel(
+                        True, violation_cell[0], violation_cell[1], strict_radius
+                    )
+                boost_amount = _RESUME_BOOST_BASE_AMOUNT * (
+                    _RESUME_BOOST_ESCALATION ** min(site_repeat_run, 6)
+                )
+                # Issue #5599: grow the DISC as well as the amount.  A
+                # seg-pad violation is reported at the pad center; the
+                # corridor that keeps failing can lie just past the pad's
+                # own corners (Chebyshev ~half-height of the pad + a
+                # couple of cells), OUTSIDE the historical
+                # radius-3*trace disc -- in which case no amount
+                # escalation can reach it.  4 cells per repeat keeps
+                # step-0 byte-identical while covering the corner
+                # corridors from the first repeat on.
+                boost_extra_radius = 4 * site_repeat_run
+                self._boost_avoidance_at(
+                    violation_location,
+                    trace_radius_cells,
+                    amount=boost_amount,
+                    radius_extra_cells=boost_extra_radius,
+                )
+
+                if attempt >= max_resume_attempts:
+                    # Issue #5599: final per-attempt record for the attempt
+                    # that exhausted the budget (no goal cell is rejected
+                    # after it -- the net moves to the Python fallback).
+                    resume_attempts.append(
+                        self._resume_attempt_record(attempt, violation_location, None)
+                    )
+                    resume_attempts[-1]["strategy"] = "exhausted"
+                    resume_attempts[-1]["boost_amount"] = boost_amount
+                    # Issue #5617: attribute this net's ENTIRE resume-loop
+                    # span (every attempt above, all discarded once the
+                    # Python fallback takes over) to the aggregate.  Recorded
+                    # on the per-attempt dict too so a caller inspecting one
+                    # net's ``resume_diagnostics`` entry does not need the
+                    # pathfinder-level aggregate for a single-net answer.
+                    _resume_loop_seconds = time.monotonic() - _resume_loop_t0
+                    resume_attempts[-1]["resume_loop_seconds"] = _resume_loop_seconds
+                    self._resume_loop_exhausted_seconds += _resume_loop_seconds
+                    self._resume_diagnostics[start.net_name] = {
+                        "attempts": resume_attempts,
+                        "exhausted": True,
+                    }
+                    # Issue #5599: surface the per-attempt violation kinds +
+                    # locations next to (and deduped like) the #3456 fallback
+                    # WARNING, so a plain `kct route` log carries the "what
+                    # kept failing" answer without a debugger.  Repeated
+                    # exhaustions of the same net stay at DEBUG to match the
+                    # #3456/#3923 noise discipline.
+                    summary = ", ".join(self._format_resume_attempt(a) for a in resume_attempts)
+                    _exhaust_log = (
+                        logger.warning
+                        if start.net_name not in self._fallback_warned
+                        else logger.debug
+                    )
+                    _exhaust_log(
+                        "Net %s: post-route clearance validation rejected "
+                        "every candidate (%d attempts); per-attempt "
+                        "violations: %s. See backend_info['fallback_stats']"
+                        "['resume_diagnostics'] for the rejected goal cells.",
+                        start.net_name,
+                        len(resume_attempts),
+                        summary,
+                    )
+                    # Exhausted resume attempts, try Python fallback.
+                    # Issue #2476: Capture failure-info before falling back
+                    # so the negotiated strategy can still see the cpp-side
+                    # via-blocked diagnostic.
+                    self._capture_failure_info(result)
+                    return self._try_python_fallback(
+                        start,
+                        end,
+                        net_class=net_class,
+                        negotiated_mode=negotiated_mode,
+                        present_cost_factor=present_cost_factor,
+                        weight=weight,
+                        per_net_timeout=per_net_timeout,
+                        extra_goal_cells=extra_goal_cells,
+                        deadline=route_deadline,
+                        reason=(
+                            "post-route clearance validation failed; "
+                            f"exhausted {max_resume_attempts} resume attempts"
+                        ),
+                        cpp_failure_reason=getattr(result, "failure_reason", None),
+                    )
+
+                # Find the goal cell of the failed path and reject it.
+                #
+                # Issue #5599: use the goal node the A* actually ACCEPTED
+                # (``RouteResult.goal_gx/gy/layer``, exposed in binding-surface
+                # v42).  The historical derivation from the last segment's
+                # endpoint always produced the END PAD CENTER cell --
+                # ``reconstruct_path`` draws a final segment to the pad center
+                # regardless of which goal node was popped -- so every resume
+                # re-rejected the same center cell while the search kept
+                # accepting neighboring goal nodes: the reject-goal-cell
+                # mechanism (#2447) was a no-op after its first use, and the
+                # five resumes were near-clones by construction.  The
+                # last-segment derivation remains as a defensive fallback.
+                goal_gx = int(getattr(result, "goal_gx", -1))
+                goal_gy = int(getattr(result, "goal_gy", -1))
+                goal_layer = int(getattr(result, "goal_layer", -1))
+                if goal_gx >= 0 and goal_gy >= 0 and goal_layer >= 0:
+                    reject_gx, reject_gy, reject_layer = goal_gx, goal_gy, goal_layer
+                else:
+                    last_seg = result.segments[-1] if result.segments else None
+                    if last_seg is not None:
+                        reject_gx, reject_gy = self._grid._impl.world_to_grid(
+                            last_seg.x2, last_seg.y2
+                        )
+                        reject_layer = last_seg.layer
+                    else:
+                        # Fallback: use end pad grid coords
+                        reject_gx, reject_gy = self._grid._impl.world_to_grid(end.x, end.y)
+                        reject_layer = end_layer
+
+                # Issue #5599: LANDING-BAND REJECTION was evaluated here and
+                # REMOVED: it never fired for the observed failure class
+                # (board 04's violations sat at the START pad's neighbor,
+                # outside the end-pad margin) while aggressively consuming
+                # goal cells.  The strict localized pad check above is the
+                # mechanism that actually closes the failing class.
+                new_rejections: list[tuple[int, int, int]] = [(reject_gx, reject_gy, reject_layer)]
+                rejected_goal_cells.extend(new_rejections)
+
+                # Issue #5599: record this failed attempt (kind + location +
+                # the goal cell about to be rejected) before resuming.
+                resume_attempts.append(
+                    self._resume_attempt_record(
+                        attempt,
+                        violation_location,
+                        (reject_gx, reject_gy, reject_layer),
+                    )
+                )
+                resume_attempts[-1]["rejected_goal_count"] = len(new_rejections)
+
+                # Issue #5599: pick the next-candidate strategy.  A repeated
+                # violation site (site_repeat_run >= 2, i.e. the third
+                # consecutive candidate failing on the same site) is the
+                # near-clone signature -- a plain resume would once again
+                # inherit the frozen closed-set prefix that funnels every
+                # path through the violating approach.  RESTART instead:
+                # a fresh search sees every accumulated avoidance boost from
+                # expansion #1 and has no frozen prefix, so its candidates
+                # are materially different.  Budget discipline (all
+                # deterministic -- no wall-clock branch beyond the pre-existing
+                # per-net deadline):
+                #   - iterations: the restart draws from the REMAINING
+                #     per-net iteration budget (initial + prior sequences +
+                #     the sequence just ended), split evenly over the attempts
+                #     still eligible to restart, so one restart cannot starve
+                #     the later ones.  When no explicit cap is configured
+                #     (0 => C++ default per search) the restart keeps that
+                #     convention.
+                #   - wall-clock: when a per-net deadline exists, the restart
+                #     receives only the unspent remainder (issue #2610's
+                #     "one budget covers the retry sequence" contract); with
+                #     <= 0.05s left the restart is skipped in favor of a
+                #     plain resume, which fails fast on the ORIGINAL deadline
+                #     (FAILURE_TIMEOUT) instead of silently resetting it.
+                strategy = "resume"
+                remaining_timeout: float | None = None
+                restart_cap = 0
+                if site_repeat_run >= 2:
+                    total_spent = iterations_spent_prior + self._impl.iterations
+                    if self._effective_search_iterations > 0:
+                        attempts_left = max(1, max_resume_attempts - attempt)
+                        restart_cap = max(
+                            0,
+                            (self._effective_search_iterations - total_spent) // attempts_left,
+                        )
+                    if route_deadline is not None:
+                        remaining_timeout = route_deadline - time.monotonic()
+                    if (
+                        self._effective_search_iterations > 0 and restart_cap > 0
+                    ) or self._effective_search_iterations <= 0:
+                        if remaining_timeout is None or remaining_timeout > 0.05:
+                            strategy = "restart"
+                resume_attempts[-1]["strategy"] = strategy
+                resume_attempts[-1]["boost_amount"] = boost_amount
+
+                if strategy == "restart":
+                    iterations_spent_prior += self._impl.iterations
+                    result = _run_fresh_search(
+                        remaining_timeout if remaining_timeout is not None else 0.0,
+                        int(restart_cap),
+                    )
+                    if result.success and rejected_goal_cells:
+                        # Replay every goal rejection collected so far so the
+                        # fresh search cannot simply re-find the previously
+                        # rejected landings (resume() inserts each cell into
+                        # the freshly-cleared rejected_goals_ set and returns
+                        # the next acceptable goal; intermediate results are
+                        # discarded by design).
+                        for rx, ry, rl in rejected_goal_cells:
+                            result = self._impl.resume(rx, ry, rl)
+                            if not result.success:
+                                break
+                else:
+                    # Resume A* from the preserved open set, skipping the
+                    # rejected goal cell(s) -- the landing cell plus, for a
+                    # repeated goal-vicinity violation, its rejected band.
+                    # Each resume() call inserts one rejection and returns
+                    # the next acceptable goal; only the final result is the
+                    # next candidate (intermediates are discarded).
+                    for rx, ry, rl in new_rejections:
+                        result = self._impl.resume(rx, ry, rl)
+                        if not result.success:
+                            break
+
+                if not result.success:
+                    # Issue #5599: the resumed search died (the #3923 case-2
+                    # path) -- persist the attempt history with the resume
+                    # failure annotated.
+                    self._resume_diagnostics[start.net_name] = {
+                        "attempts": resume_attempts,
+                        "exhausted": False,
+                        "resume_failed": True,
+                        "resume_failure": self._describe_cpp_failure(result),
+                    }
+                    # Issue #2476: Capture failure diagnostics; resume()
+                    # accumulates trackers from the original
+                    # route_resumable() call so the most recent via-blocker
+                    # is still reported.
+                    self._capture_failure_info(result)
+                    return self._try_python_fallback(
+                        start,
+                        end,
+                        net_class=net_class,
+                        negotiated_mode=negotiated_mode,
+                        present_cost_factor=present_cost_factor,
+                        weight=weight,
+                        per_net_timeout=per_net_timeout,
+                        extra_goal_cells=extra_goal_cells,
+                        deadline=route_deadline,
+                        reason=(
+                            "resume after rejected goal cell failed: "
+                            + self._describe_cpp_failure(result)
+                        ),
+                        cpp_failure_reason=getattr(result, "failure_reason", None),
+                    )
+
+            return None
+        finally:
+            # Always clear search state to release memory (Issue #2447 risk).
+            self._impl.clear_search_state()
+            # Issue #4433: restore the routable-layer vector narrowed above so
+            # the shared Pathfinder reverts to its full set for the next net.
+            if saved_routable_layers is not None:
+                self.set_routable_layers(saved_routable_layers)
+
+    def _capture_failure_info(self, result: router_cpp.RouteResult) -> None:
+        """Record structured failure diagnostics from a failed C++ route.
+
+        Issue #2476: When the C++ A* search fails (open set exhausted or
+        all via candidates were refused by stored-via geometry), the
+        ``RouteResult`` carries a ``failure_reason`` and -- for the
+        via-vs-via case -- the offending stored-via net.  We stash this on
+        the pathfinder so ``get_last_failure_info()`` can return it to the
+        negotiated strategy after ``route()`` returns ``None``.
+
+        Issue #2610: ``failure_reason`` may now be ``FAILURE_TIMEOUT`` when
+        the wall-clock per-net deadline expired (vs. ``FAILURE_ITERATION_LIMIT``
+        for the memory-backstop cap, vs. ``FAILURE_NO_PATH`` for a genuine
+        unreachable goal).  We also record the C++ pathfinder's iteration
+        counter so callers can log "aborted at N iterations" cleanly.
+
+        Issue #4507: ``failure_reason`` may also be
+        ``FAILURE_PAIRWISE_BLOCKED`` -- the open set drained while
+        cross-domain (HV-isolation) widening refused expansions.  It uses the
+        same ``blocking_via_net`` field (the foreign-domain net whose copper
+        refused the candidate), so the negotiated strategy's targeted rip-up
+        works on it unchanged.
+
+        Note: We capture even when we are about to fall back to the Python
+        router.  If the Python fallback also fails, the cpp-side
+        diagnostic is still actionable (the via blocker has not moved).
+
+        Args:
+            result: The failed C++ ``RouteResult`` to capture diagnostics
+                from.  ``failure_reason == FAILURE_NONE`` is silently
+                ignored (no useful info).
+        """
+        # router_cpp may be None if the import failed; guard so this method
+        # is safe to call from anywhere on the failure path.
+        if router_cpp is None:
+            return
+
+        reason = getattr(result, "failure_reason", router_cpp.FAILURE_NONE)
+        if reason == router_cpp.FAILURE_NONE:
+            return
+
+        # Issue #2610: iteration counter is a Pathfinder property, not a
+        # field of RouteResult.  Read it off ``self._impl`` so callers can
+        # see how close the search came to the memory cap.
+        iterations = int(getattr(self._impl, "iterations", 0))
+
+        blocking_net = int(getattr(result, "blocking_via_net", 0))
+        self._last_failure_info = {
+            "failure_reason": int(reason),
+            "blocking_via_net": blocking_net,
+            # Issue #4507 (T4 re-score): the id alone is not actionable in a
+            # router log or a caller's report -- ten softstart rev-C nets
+            # drained on cross-domain refusals and named only "net id 51".
+            # ``None`` when the id is 0 or absent from the reverse map.
+            "blocking_net_name": self._resolve_net_id(blocking_net),
+            "failure_x": float(getattr(result, "failure_x", 0.0)),
+            "failure_y": float(getattr(result, "failure_y", 0.0)),
+            "iterations": iterations,
+        }
+
+    def _resolve_net_id(self, net_id: int) -> str | None:
+        """Return the board net name for *net_id*, or ``None`` (Issue #4507).
+
+        The C++ kernels speak net **ids**; every operator-facing surface
+        (router log lines, failure-info dicts) wants the board's own net
+        name.  :meth:`set_net_name_to_id` already carries the forward map,
+        so the inverse is derivable -- built lazily and memoised, because a
+        blocker-naming failure is rare relative to the search itself.
+
+        Returns ``None`` for id ``0`` (the "no blocker named" sentinel) and
+        for any id the map does not cover (an un-threaded map, or a net the
+        Autorouter never registered), so callers can fall back to the id.
+        """
+        if not net_id:
+            return None
+        cache = self._net_id_to_name_cache
+        if cache is None:
+            cache = {nid: name for name, nid in self._net_name_to_id.items()}
+            self._net_id_to_name_cache = cache
+        return cache.get(net_id)
+
+    def _describe_cpp_failure(self, result: router_cpp.RouteResult) -> str:
+        """Return a human-readable description of a failed C++ route result.
+
+        Issue #3456: Used to surface WHY a net is being handed to the
+        10-100x-slower Python fallback.  Maps the ``FAILURE_*`` constants
+        from ``types.hpp`` to short explanations; unknown/absent reasons
+        degrade to a generic message rather than raising.
+        """
+        if router_cpp is None:
+            return "C++ backend unavailable"
+
+        reason = int(getattr(result, "failure_reason", router_cpp.FAILURE_NONE))
+        descriptions = {
+            int(router_cpp.FAILURE_NO_PATH): ("no path (C++ A* open set exhausted)"),
+            int(router_cpp.FAILURE_ITERATION_LIMIT): (
+                "iteration limit reached (memory backstop cap)"
+            ),
+            int(router_cpp.FAILURE_TIMEOUT): ("per-net wall-clock deadline exceeded"),
+            int(router_cpp.FAILURE_VIA_VIA_BLOCKED): (
+                "all via candidates blocked by stored-via geometry"
+            ),
+            # Issue #4507: the cross-domain (HV-isolation) sibling.
+            int(router_cpp.FAILURE_PAIRWISE_BLOCKED): (
+                "open set drained with expansions refused by pairwise (HV-isolation) clearance"
+            ),
+        }
+        desc = descriptions.get(reason)
+        if desc is None:
+            return f"C++ search failed (failure_reason={reason})"
+        blocking_net = int(getattr(result, "blocking_via_net", 0))
+        if (
+            reason
+            in (
+                int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
+                int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+            )
+            and blocking_net
+        ):
+            # Issue #4507: name the blocker when the reverse net map is
+            # threaded (it is on every ``Autorouter`` path).  "blocking net
+            # id 51" is not actionable on a real board -- the operator has to
+            # go look the id up before they can rip anything up.  The bare id
+            # remains the fallback for an un-threaded map so the diagnostic
+            # never gets *less* informative than it was.
+            name = self._resolve_net_id(blocking_net)
+            desc += f" (blocking net {name})" if name else f" (blocking net id {blocking_net})"
+        return desc
+
+    def get_last_failure_info(self) -> dict | None:
+        """Return structured failure diagnostics from the most recent failed route().
+
+        Issue #2476: The negotiated strategy uses this to decide between
+        blanket retry and targeted rip-up of a specific blocking net.
+        Returns ``None`` if the last route() succeeded or the failure had
+        no actionable signal (e.g. an unrelated grid-cell rejection).
+
+        Returns:
+            Dict with keys ``failure_reason``, ``blocking_via_net``,
+            ``blocking_net_name``, ``failure_x``, ``failure_y`` -- or
+            ``None`` if no diagnostic is available.  ``failure_reason``
+            matches the ``FAILURE_*`` constants in the ``router_cpp``
+            module (see ``types.hpp``).  ``blocking_net_name`` (#4507) is
+            the board net name for ``blocking_via_net``, or ``None`` when
+            no blocker was named / the reverse map does not cover the id.
+        """
+        return self._last_failure_info
+
+    def _get_component_pitches(self) -> dict[str, float]:
+        """Lazily compute and cache per-component pin pitches.
+
+        Shared by the same-component carve-out gate (Issue #3545) and the
+        Issue #1018 neck-down post-processing in
+        :meth:`_convert_result_to_route`.  Returns an empty dict (without
+        caching) when no Python source grid is attached, so a later
+        attachment can still populate the cache.
+
+        Issue #4724: the empty-dict fallback is CACHED and feeds two
+        routing decisions (neck-down widths and the fine-pitch clearance
+        carve-out), so absorbing a host ``MemoryError`` here would change
+        the emitted copper for the rest of the run on a loaded machine
+        only.  Exhaustion re-raises; a genuine data defect still degrades
+        to ``{}`` exactly as before.
+        """
+        pitches = self._component_pitches_cache
+        if pitches is not None:
+            return pitches
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is None:
+            return {}
+        try:
+            pitches = py_grid.compute_component_pitches()
+        except Exception:
+            reraise_if_resource_exhaustion("cpp_backend: component-pitch computation")
+            pitches = {}
+        self._component_pitches_cache = pitches
+        return pitches
+
+    def _convert_result_to_route(
+        self,
+        result: router_cpp.RouteResult,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None,
+    ) -> Route:
+        """Convert a C++ RouteResult to a Python Route object.
+
+        Args:
+            result: C++ route result with segments and vias.
+            start: Source pad (provides net and net_name).
+            end: Destination pad (needed for Issue #1018 neck-down taper).
+            net_class: Optional net class for trace width override.
+
+        Returns:
+            Python Route object with segments, vias, and validated layer transitions.
+        """
+        from .layers import Layer
+        from .primitives import Route, Segment, Via
+        from .quantize import dogleg_points
+
+        route = Route(net=start.net, net_name=start.net_name)
+
+        # Issue #3456 follow-up: echo the requested float64 trace width
+        # verbatim instead of reading back ``cpp_seg.width``.  The C++
+        # Segment stores float32, so a requested 0.2 mm would round-trip
+        # as 0.20000000298023224.  The width the C++ search emitted is
+        # always known on the Python side: the per-net-class width when a
+        # class is mapped (forwarded as ``emit_trace_width``, Issue #3130),
+        # else the global ``rules.trace_width`` (the C++ ``rules_`` default
+        # was populated from this same Python value).  This mirrors the
+        # Python backend's ``_get_trace_width_for_net`` (Issue #1543).
+        base_trace_width = float(net_class.trace_width if net_class else self._rules.trace_width)
+
+        # Issue #1018 parity: the C++ pathfinder has no neck-down support.
+        # Apply the same width taper as the Python backend
+        # (``PathFinder._convert_path_to_route``) as post-processing on the
+        # C++-returned segments.  Semantics match exactly: per-segment
+        # width is the minimum over both pads of
+        # ``rules.get_neck_down_width(min endpoint distance, pitch,
+        # base_width=net-class width)``, gated per pad by
+        # ``rules.should_apply_neck_down``.
+        pitches = self._get_component_pitches()
+        start_pitch = pitches.get(start.ref) if start.ref else None
+        end_pitch = pitches.get(end.ref) if end.ref else None
+        start_needs_neckdown = self._rules.should_apply_neck_down(start.ref, start_pitch)
+        end_needs_neckdown = self._rules.should_apply_neck_down(end.ref, end_pitch)
+
+        def _segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
+            """Trace width for one segment, with Issue #1018 neck-down taper."""
+            if not start_needs_neckdown and not end_needs_neckdown:
+                return base_trace_width
+            min_width = base_trace_width
+            if start_needs_neckdown:
+                min_dist_start = min(
+                    math.hypot(x1 - start.x, y1 - start.y),
+                    math.hypot(x2 - start.x, y2 - start.y),
+                )
+                min_width = min(
+                    min_width,
+                    self._rules.get_neck_down_width(
+                        min_dist_start, start_pitch, base_width=base_trace_width
+                    ),
+                )
+            if end_needs_neckdown:
+                min_dist_end = min(
+                    math.hypot(x1 - end.x, y1 - end.y),
+                    math.hypot(x2 - end.x, y2 - end.y),
+                )
+                min_width = min(
+                    min_width,
+                    self._rules.get_neck_down_width(
+                        min_dist_end, end_pitch, base_width=base_trace_width
+                    ),
+                )
+            return min_width
+
+        for cpp_seg in result.segments:
+            layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
+            # Issue #3532: the C++ ``reconstruct_path`` connects the
+            # exact (off-grid) pad centres to the first/last grid cell
+            # with a single straight tail, which is off the 0/45/90/135
+            # angle set in general.  Split such segments into an exact
+            # two-leg dogleg HERE, in float64 -- the C++ side stores
+            # float32 coordinates whose ulp at board scale (~1.5e-5 mm)
+            # is too coarse to construct exactly-aligned legs.
+            points = dogleg_points(
+                float(cpp_seg.x1),
+                float(cpp_seg.y1),
+                float(cpp_seg.x2),
+                float(cpp_seg.y2),
+            )
+            from .neck_down import taper_points
+
+            centers = []
+            if start_needs_neckdown:
+                centers.append((start.x, start.y))
+            if end_needs_neckdown:
+                centers.append((end.x, end.y))
+            split_points = [points[0]]
+            for a, b in zip(points, points[1:], strict=False):
+                split_points.extend(
+                    taper_points(
+                        a,
+                        b,
+                        centers,
+                        self._rules.neck_down_distance,
+                        self._rules.grid_resolution,
+                    )[1:]
+                )
+            for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
+                seg_width = _segment_width(sx, sy, ex, ey)
+                if sx == ex and sy == ey:
+                    continue
+                seg = Segment(
+                    x1=sx,
+                    y1=sy,
+                    x2=ex,
+                    y2=ey,
+                    width=seg_width,
+                    layer=Layer(layer_enum_value),
+                    net=cpp_seg.net,
+                    net_name=start.net_name,
+                )
+                route.segments.append(seg)
+
+        # Issue #3130: Mirror the segment-width override for via diameter.
+        # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
+        # regardless of net class; this caused POWER-class nets (which declare
+        # ``via_size=0.8mm``) to emit vias at the global default.
+        # Issue #3456 follow-up: like segment widths, echo the requested
+        # float64 values verbatim instead of the C++ float32 round-trip.
+        # Both are always known on the Python side: the per-net-class
+        # ``via_size`` (forwarded as ``emit_via_diameter``) or the global
+        # ``rules.via_diameter``; ``via_drill`` is not yet a per-net
+        # attribute, so the C++ always emits ``rules_.via_drill`` (populated
+        # from ``rules.via_drill``).
+        via_diameter = float(net_class.via_size if net_class else self._rules.via_diameter)
+        via_drill = float(self._rules.via_drill)
+
+        # Issue #5013: ``cpp_via.layer_from``/``layer_to`` are the LOGICAL
+        # search transition (e.g. F.Cu -> In2.Cu), not the via's physical
+        # drilled span.  The C++ pathfinder has no blind/buried process
+        # selection (Issue #4007: ``blind_buried_supported`` is False for
+        # every current board -- ``hdi_4layer`` via rules are defined but
+        # never instantiated), so every via this loop constructs is
+        # manufactured as an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom,
+        # regardless of which two layers the search happened to bridge.
+        # Emitting the logical pair verbatim under-reported the drilled
+        # span (e.g. ``F.Cu``/``In2.Cu`` on a 4-layer board): DRC and
+        # connectivity code treat ``via.layers`` as the physical barrel
+        # extent (see ``validate/connectivity.py::_via_bridged_layers``,
+        # ``validate/rules/clearance.py``), so a truncated span silently
+        # skipped barrel-vs-foreign-copper clearance checks on the layers
+        # the via actually passes through.  Router counterpart of stitch
+        # issue #5001 (``ViaPlacement`` normalization in
+        # ``cli/stitch_cmd.py``).
+        #
+        # The search/obstacle-avoidance side already treats every via as
+        # full-stack -- ``Grid3D::mark_via`` / ``Pathfinder::is_via_blocked_diag``
+        # (cpp/src/grid.cpp, cpp/src/pathfinder.cpp) iterate ALL grid
+        # layers unconditionally -- so no route is newly accepted against
+        # copper this fix "discovers"; only the *reported* span was wrong.
+        # Normalize HERE, at ``Route`` construction (upstream of
+        # acceptance and export), so every downstream consumer of
+        # ``route.vias`` sees the correct physical span, not just the
+        # final saved ``.kicad_pcb``.
+        physical_top_layer = Layer(self._grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self._grid.index_to_layer(self._grid.num_layers - 1))
+
+        for cpp_via in result.vias:
+            via = Via(
+                x=cpp_via.x,
+                y=cpp_via.y,
+                drill=via_drill,
+                diameter=via_diameter,
+                layers=(physical_top_layer, physical_bottom_layer),
+                net=cpp_via.net,
+                net_name=start.net_name,
+            )
+            route.vias.append(via)
+
+        route.validate_layer_transitions(
+            via_drill=self._rules.via_drill,
+            via_diameter=self._rules.via_diameter,
+        )
+        return route
+
+    def _same_component_carveout_eligible(self, py_grid, ref: str) -> bool:
+        """Return True when ``ref`` may keep the same-component carve-out.
+
+        Issue #3545: the carve-out (skipping clearance checks against
+        same-component pads) is only legitimate where a clearance
+        relaxation is actually in effect for the component:
+
+        1. The component's inter-pad corridor was relaxed by
+           ``_relax_same_component_clearance`` (Issue #2452), or
+        2. A fine-pitch / explicit per-component clearance relaxation
+           applies (``get_clearance_for_component`` returns less than
+           the default ``trace_clearance``, Issue #1764).
+
+        Issue #5004: a third, pitch-only branch used to grant the
+        carve-out to ANY component below ``rules.fine_pitch_threshold``,
+        even when ``fine_pitch_clearance`` was unset (the default) and no
+        relaxation was actually requested for that component -- silently
+        exempting fine-pitch NC and signal pads alike from clearance
+        checks the authored board/net-class rules required.  That branch
+        is now gated behind ``rules.legacy_fine_pitch_carveout`` (default
+        ``False``); leave it unset to get full authored-clearance
+        enforcement for fine-pitch parts with no configured relaxation.
+
+        Standard-pitch components (and fine-pitch components with no
+        relaxation configured) return False, so their FOREIGN-net pads
+        stay in the C++ validator and sub-clearance copper is rejected at
+        route construction time.  Mirrors
+        ``RoutingGrid._same_component_carveout_active``.
+
+        Issue #5166: this stays the "is the carve-out active at all"
+        question.  Callers that must distinguish the full-skip
+        corridor-relief flavour from the clamp-to-configured-override
+        flavour use :meth:`_same_component_carveout_mode` instead.
+        """
+        return self._same_component_carveout_mode(py_grid, ref) != "none"
+
+    def _same_component_carveout_mode(self, py_grid, ref: str) -> CarveoutMode:
+        """Return the same-component carve-out STRENGTH for ``ref`` (#5166).
+
+        C++-side mirror of ``RoutingGrid._same_component_carveout_mode``;
+        see that docstring for the full rationale.  Summary:
+
+        ``"skip"``
+            Corridor relief (``_relax_same_component_clearance``, #2452)
+            physically unblocked the same-component overlap corridor down
+            to a ``trace_width / 2`` floor without shrinking any
+            clearance value, so the pad check must be skipped outright --
+            the ref goes into ``exclude_ref_hashes``.  The opt-in legacy
+            pitch-only carve-out is also ``"skip"``.
+        ``"clamp"``
+            A configured override (``component_clearances`` /
+            ``fine_pitch_clearance`` / net-class ``escape_clearance``)
+            resolved smaller than the default ``trace_clearance``.  That
+            authored value is enforced as a hard floor, so the ref goes
+            into ``clamp_ref_hashes`` and ``Grid3D::validate_route``
+            compares against the pad's own resolved
+            ``clearance_override`` instead of skipping.
+        ``"none"``
+            No carve-out; the pad stays in the validator at full
+            clearance.
+        """
+        if self._rules.strict_pad_clearance:
+            return "none"
+        relaxed_refs = getattr(py_grid, "_relaxed_clearance_refs", None)
+        if relaxed_refs and ref in relaxed_refs:
+            return "skip"
+        pitch = self._get_component_pitches().get(ref)
+        authored_ref = py_grid._authored_component_ref(ref) if py_grid is not None else ref
+        required = self._rules.get_clearance_for_component(authored_ref, pitch)
+        if required < self._rules.trace_clearance:
+            return "clamp"
+        if not self._rules.legacy_fine_pitch_carveout:
+            return "none"
+        threshold = getattr(self._rules, "fine_pitch_threshold", None)
+        if pitch is not None and threshold is not None and pitch < threshold:
+            return "skip"
+        return "none"
+
+    def _resume_attempt_record(
+        self,
+        attempt: int,
+        violation: RouteClearanceViolation,
+        rejected_goal: tuple[int, int, int] | None,
+    ) -> dict:
+        """Build one Issue #5599 per-attempt instrumentation record.
+
+        Args:
+            attempt: 0-based index of the validation attempt inside the
+                post-route clearance resume loop.
+            violation: The violation the validator reported for this
+                candidate path.
+            rejected_goal: The ``(gx, gy, layer)`` goal cell rejected after
+                this attempt (None on the final, budget-exhausting attempt).
+
+        Returns:
+            JSON-friendly dict with the violation kind + world/grid location
+            and the rejected goal cell.
+        """
+        violation_cell: list[int] | None = None
+        try:
+            vgx, vgy = self._grid._impl.world_to_grid(violation.x, violation.y)
+            violation_cell = [int(vgx), int(vgy)]
+        except Exception:  # pragma: no cover - defensive, world_to_grid is total
+            violation_cell = None
+        min_clearance = getattr(violation, "min_clearance", None)
+        return {
+            "attempt": attempt,
+            "violation_kind": violation.kind,
+            "violation_type_code": violation.type_code,
+            "violation_xy": [round(float(violation.x), 4), round(float(violation.y), 4)],
+            "violation_cell": violation_cell,
+            "min_clearance": (
+                round(float(min_clearance), 4) if min_clearance is not None else None
+            ),
+            "rejected_goal": (
+                [int(rejected_goal[0]), int(rejected_goal[1]), int(rejected_goal[2])]
+                if rejected_goal is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _format_resume_attempt(record: dict) -> str:
+        """Render one Issue #5599 resume-attempt record for the log summary.
+
+        Args:
+            record: A record built by :meth:`_resume_attempt_record` (plus the
+                ``strategy`` / ``boost_amount`` keys the resume loop annotates
+                it with).
+
+        Returns:
+            A compact one-line form, e.g.
+            ``#2:seg-pad@(12.450,9.300) gap=0.1120/restart@320 reject=[248, 186, 0]``.
+        """
+        x, y = record["violation_xy"]
+        parts = [f"#{record['attempt']}:{record['violation_kind']}@({x:.3f},{y:.3f})"]
+        gap = record.get("min_clearance")
+        if gap is not None:
+            parts.append(f" gap={gap:.4f}")
+        parts.append(f"/{record.get('strategy')}@{record.get('boost_amount', 0.0):.0f}")
+        if record.get("rejected_goal"):
+            parts.append(f" reject={record['rejected_goal']}")
+        return "".join(parts)
+
+    def _resolve_intra_pair_override(
+        self,
+        net_class: NetClassRouting | None,
+        default_clearance: float,
+    ) -> float | None:
+        """Resolve the within-pair clearance override, honoring its contract.
+
+        Issue #2559 / Epic #2556 Phase 1C introduced ``partner_net`` +
+        ``intra_pair_clearance`` so the C++ search and validator do not
+        reject the two legs of a differential pair for sitting at the
+        **tighter** within-pair distance the pair's coupling requires.
+        ``Grid3D::validate_route`` states that contract explicitly: "the
+        partner branch is active when ``partner_net`` is a real net id and
+        ``intra_pair_clearance`` is a *tighter* (non-negative) override".
+
+        Issue #5613: nothing enforced the "tighter" half of that contract on
+        the Python side.  ``effective_intra_pair_clearance()`` reports the
+        pair's *coupling gap*, which the impedance resolver
+        (:func:`diffpair_impedance.resolve_impedance_for_net_classes`) writes
+        from the solver.  When a class declares a differential target but no
+        authored ``intra_pair_clearance``, the unconstrained branch solves
+        the width from Z0/2 and then the gap for the differential target --
+        which lands in the essentially-uncoupled regime and yields gaps of
+        several millimetres (``apply_impedance_driven_sizing`` documents the
+        "~8mm gap" pathology directly).  Passed through unchecked, that
+        coupling target became a HARD floor: the C++ validator demanded
+        8.425 mm between DQS_P and DQS_N on board 07's DDR byte, rejecting
+        every candidate route for a pair whose pads are 0.8 mm apart.
+
+        A coupling gap is not a clearance floor.  Refuse an override that
+        exceeds ``default_clearance`` and return ``None``, so the caller
+        leaves ``partner_net`` dormant and the partner is checked like any
+        other foreign net at the normal clearance.  The comparison is
+        deliberately STRICT: an override equal to the default is kept
+        engaged, which is byte-identical to passing it through (both make
+        the partner's required clearance ``default_clearance``) and keeps
+        boards that author the two to the same value -- e.g. board 03's
+        0.15 mm USB D+/D- sidecar against the 0.15 mm ``HighSpeed``
+        class -- on exactly their historical code path.
+
+        Args:
+            net_class: Net class of the net being routed / validated.
+            default_clearance: Clearance the caller applies to every other
+                foreign net in the same C++ call.
+
+        Returns:
+            The override in mm when it does not exceed ``default_clearance``,
+            else ``None``.
+        """
+        if net_class is None or net_class.diffpair_partner is None:
+            return None
+        try:
+            intra = float(net_class.effective_intra_pair_clearance())
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
+        if not math.isfinite(intra) or intra < 0.0:
+            return None
+        if intra > float(default_clearance):
+            return None
+        return intra
+
+    def _carveout_ref_hashes(self, py_grid, start: Pad, end: Pad) -> tuple[list[int], list[int]]:
+        """``(exclude_ref_hashes, clamp_ref_hashes)`` for ``validate_route``.
+
+        Issue #6375: shared by :meth:`_validate_route_clearance` and the A*
+        own-pad step gate (``set_search_own_pad_gate``) so the search applies
+        exactly the same-component carve-outs the validator does.  See the
+        Issue #3545 / #5166 notes in :meth:`_validate_route_clearance`.
+        """
+        exclude_ref_hashes: list[int] = []
+        clamp_ref_hashes: list[int] = []
+        for pad in (start, end):
+            if not pad.component_key:
+                continue
+            mode = self._same_component_carveout_mode(py_grid, pad.component_key)
+            if mode == "skip":
+                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+            elif mode == "clamp":
+                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
+        return exclude_ref_hashes, clamp_ref_hashes
+
+    def _narrowest_emit_width(self, start: Pad, end: Pad, base_width: float) -> float:
+        """Narrowest trace width :meth:`_convert_result_to_route` can emit.
+
+        Issue #6375: the Issue #1018 neck-down taper only ever NARROWS a
+        segment near a pad, so a search-side check at this width is never
+        stricter than the post-route validator measuring the emitted copper.
+        """
+        width = float(base_width)
+        pitches = self._get_component_pitches()
+        for pad in (start, end):
+            pitch = pitches.get(pad.ref) if pad.ref else None
+            if self._rules.should_apply_neck_down(pad.ref, pitch):
+                width = min(
+                    width,
+                    float(self._rules.get_neck_down_width(0.0, pitch, base_width=base_width)),
+                )
+        return width
+
+    def _validate_route_clearance(
+        self,
+        route: Route,
+        start: Pad,
+        end: Pad,
+        trace_radius_cells: int,
+        net_class: NetClassRouting | None = None,
+    ) -> RouteClearanceViolation | None:
+        """Validate post-route geometric clearance using C++ validation.
+
+        Issue #2439: Uses the C++ validate_route() call which runs
+        validation checks (segment-pad, segment-segment, via-pad, via-segment,
+        via-via, same-net drill spacing) in a single C++ call, eliminating
+        Python callback overhead.
+
+        Issue #2587 / Epic #2556 Phase 1C-cont: When ``net_class`` declares a
+        ``diffpair_partner`` AND the partner-id is resolvable via the reverse
+        map populated by :meth:`set_net_name_to_id`, the C++ validator is
+        instructed to compare against ``intra_pair_clearance`` (instead of
+        ``trace_clearance``) for cells belonging to the partner net.  This is
+        the post-route geometric companion to the search-time
+        ``intra_pair_radius_cells`` plumbing in :meth:`route`.
+
+        Args:
+            route: Route to validate.
+            start: Source pad (for component reference exclusion).
+            end: Destination pad (for component reference exclusion).
+            trace_radius_cells: Trace half-width in grid cells (for avoidance).
+            net_class: Optional net class for the source net.  When set with a
+                resolvable ``diffpair_partner``, supplies the tighter
+                within-pair clearance to the C++ validator.
+
+        Returns:
+            Issue #5599: a :class:`RouteClearanceViolation` carrying the
+            world coordinates AND the violation kind (C++
+            ``violation_type`` mapped through ``_CPP_VIOLATION_KINDS`` for
+            the native checks; a per-check label for the Python-side
+            post-checks), or None if route is valid.  Tuple-compatible with
+            the historical ``(x, y)`` return.
+        """
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is None:
+            return None
+
+        # Sync stored segments/vias from completed routes to C++
+        self._sync_stored_routes(py_grid)
+        # Issue #6243: the native validator enforces the authored minima too.
+        sync_authored_floors(self._grid, py_grid)
+
+        # Build exclude_ref_hashes for start/end pad components (Issue #1764)
+        #
+        # Issue #3545: NET-AWARE tightening.  The C++ validator's
+        # same-component carve-out (``is_excluded_ref`` in
+        # ``Grid3D::validate_route``) silently exempted FOREIGN-net pads
+        # on the route's own components (same-net pads are skipped by
+        # ``pad.net == exclude_net`` anyway), masking sub-clearance
+        # copper like the routing-diagnostic NET3-vs-J1.1 0.127mm gap.
+        # The carve-out's legitimate use is fine-pitch escape (#1764)
+        # and relaxed same-component corridors (#2452) -- include a ref
+        # in the exclusion set ONLY when one of those relaxations is
+        # actually in effect for that component.  Mirrors the Python
+        # validator gate in ``RoutingGrid.validate_segment_clearance``.
+        #
+        # Issue #5166: the exclusion set is now SPLIT by carve-out
+        # strength.  ``exclude_ref_hashes`` keeps the full-skip semantics
+        # for a ref relaxed by ``_relax_same_component_clearance`` (#2452
+        # corridor relief -- its real floor is the ``trace_width / 2``
+        # blocked-cell construction the search already applied, and no
+        # clearance value was ever shrunk).  ``clamp_ref_hashes`` carries
+        # refs eligible only because a CONFIGURED override resolved
+        # smaller than the default clearance: ``Grid3D::validate_route``
+        # enforces that resolved per-pad value as a hard floor there,
+        # instead of the pre-#5166 unconditional skip that accepted any
+        # positive gap (e.g. 0.02mm against an authored 0.10mm).
+        exclude_ref_hashes, clamp_ref_hashes = self._carveout_ref_hashes(py_grid, start, end)
+
+        # Build C++ segment/via lists from route
+        cpp_segs: list[router_cpp.Segment] = []
+        for seg in route.segments:
+            cs = router_cpp.Segment()
+            cs.x1, cs.y1, cs.x2, cs.y2 = seg.x1, seg.y1, seg.x2, seg.y2
+            cs.width = seg.width
+            cs.layer = self._grid.layer_to_index(seg.layer.value)
+            cs.net = seg.net
+            cpp_segs.append(cs)
+
+        cpp_vias: list[router_cpp.Via] = []
+        for via in route.vias:
+            # Issue #6485: the DRILLED span.  A non-micro via is a through
+            # barrel whatever logical pair ``via.layers`` records, so the
+            # native validator must judge it on every layer -- the same
+            # span ``RoutingGrid.worst_via_pad_deficit`` /
+            # ``validate_via_clearance`` use and ``Via.to_sexp`` writes.
+            for layer_from, layer_to in self._project_via_spans(via.drilled_layers):
+                cv = router_cpp.Via()
+                cv.x, cv.y = via.x, via.y
+                cv.drill = via.drill
+                cv.diameter = via.diameter
+                cv.layer_from, cv.layer_to = layer_from, layer_to
+                cv.net = via.net
+                cpp_vias.append(cv)
+
+        # Issue #2587 / Phase 1C-cont: Resolve partner net id for the source
+        # net so the C++ validator does not reject within-pair edges of a
+        # legitimate diff pair.  Defaults preserve pre-#2559 behavior
+        # identically (partner_net == -1 -> no relaxation).
+        #
+        # Issue #5613: the override is engaged ONLY when it is genuinely
+        # tighter than ``rules.trace_clearance`` -- the clearance this call
+        # enforces against every other foreign net.  See
+        # :meth:`_resolve_intra_pair_override`.
+        partner_net_id = -1
+        intra_pair_clearance = 0.0
+        if net_class is not None and net_class.diffpair_partner is not None:
+            partner_id = self._net_name_to_id.get(net_class.diffpair_partner)
+            if partner_id is not None:
+                override = self._resolve_intra_pair_override(net_class, self._rules.trace_clearance)
+                if override is not None:
+                    partner_net_id = int(partner_id)
+                    intra_pair_clearance = override
+
+        # Issue #4510 / Epic #4431 Phase 2a: install the pairwise (HV) domain
+        # matrix and the net-id-translated rated-footprint attach zones on the
+        # C++ grid alongside the partner plumbing above, so ``validate_route``
+        # enforces max(effective_scalar, matrix[dom_a][dom_b]) itself instead
+        # of relying solely on the Python post-check below (which sees only
+        # trace-vs-trace copper, not pads and vias).  No-op without a voltage
+        # map.
+        self._sync_pairwise_domains_to_cpp()
+
+        if route.vias and py_grid is not None:
+            from .grid import _sync_pad_via_policies
+
+            _sync_pad_via_policies(py_grid, self._grid)
+
+        if py_grid is not None and py_grid.fixed_fills:
+            fill_class = self._net_class_map.get(start.net_name)
+            fill_clearance = fill_class.clearance if fill_class else self._rules.trace_clearance
+            fill_clearance = max(fill_clearance, self._rules.authored_floor(start.net))
+            for segment in route.segments:
+                layer = py_grid.layer_to_index(segment.layer.value)
+                if not py_grid.fixed_fills.segment_clear(
+                    (segment.x1, segment.y1),
+                    (segment.x2, segment.y2),
+                    layer,
+                    segment.width / 2,
+                    fill_clearance,
+                ):
+                    return RouteClearanceViolation(segment.x1, segment.y1, "fixed_fill", None)
+
+        vresult = self._grid._impl.validate_route(
+            cpp_segs,
+            cpp_vias,
+            start.net,
+            exclude_ref_hashes,
+            self._rules.trace_clearance,
+            self._rules.via_clearance,
+            self._rules.min_drill_clearance,
+            partner_net_id,
+            intra_pair_clearance,
+            clamp_ref_hashes,
+            self._rules.min_hole_to_hole,
+        )
+
+        if not vresult.valid:
+            type_code = int(getattr(vresult, "violation_type", 0))
+            raw_min = getattr(vresult, "min_clearance", None)
+            min_clearance = (
+                float(raw_min) if raw_min is not None and math.isfinite(float(raw_min)) else None
+            )
+            return RouteClearanceViolation(
+                vresult.violation_x,
+                vresult.violation_y,
+                _CPP_VIOLATION_KINDS.get(type_code, f"cpp:{type_code}"),
+                type_code,
+                min_clearance,
+            )
+
+        # Issue #6243: the Python twin of the native authored gate over the
+        # Python grid's complete copper (including any off-grid segment the
+        # native index has no planar slot for).  Dormant without floors.
+        for item in (*route.segments, *route.vias):
+            authored = py_grid.authored_violation(item, start.net)
+            if authored is not None:
+                return RouteClearanceViolation(
+                    authored.x, authored.y, "authored-floor", 9, authored.actual
+                )
+
+        # A selected-layer grid has no native planar slot for omitted copper.
+        # A physical via can still cross that copper between its endpoints.
+        # Retain the scalar guard in physical layer space for those segments;
+        # full-stack grids keep the native path alone. Pairwise widening below
+        # continues to cover the same complete Python route collection.
+        if route.vias and self._grid._off_grid_stored_segments:
+            from .clearance_resolver import trace_via_clearance_mm
+            from .via_clearance import via_clears_foreign_segment
+
+            # Issue #6272: one trace/via floor in either insertion order.
+            via_floor = trace_via_clearance_mm(
+                self._rules.trace_clearance, self._rules.via_clearance
+            )
+            for segment in self._grid._off_grid_stored_segments:
+                if segment.net == start.net:
+                    continue
+                for via in route.vias:
+                    if not via_clears_foreign_segment(via, segment, trace_clearance=via_floor):
+                        return RouteClearanceViolation(via.x, via.y, "via_vs_offgrid_segment", None)
+
+        # Issue #3002 (PR #3006 follow-up): Python-side segment-vs-foreign-via
+        # post-check.  ``validate_route`` already walks the C++ side's
+        # stored vias, but the autorouter can push additional foreign-net
+        # vias via :meth:`set_segment_foreign_context` -- e.g. vias that
+        # the negotiated post-iteration re-validation hook has surfaced
+        # but that are not yet in the C++ side's ``stored_vias_`` snapshot.
+        # Walks ``self._foreign_vias`` with the STANDARD threshold,
+        # mirroring the predicate consumed by the Python pathfinder at
+        # ``pathfinder.py:_validate_route_clearance``.
+        if self._foreign_vias:
+            from .clearance_resolver import trace_via_clearance_mm
+            from .via_clearance import segment_clears_foreign_via
+
+            # Issue #6272: the trace/via floor, not the bare trace floor.
+            foreign_via_floor = trace_via_clearance_mm(
+                self._rules.trace_clearance, self._rules.via_clearance
+            )
+            for seg in route.segments:
+                for via in self._foreign_vias:
+                    if via.net == start.net:
+                        continue  # Same-net via -- skipped by convention.
+                    if not segment_clears_foreign_via(
+                        seg,
+                        via,
+                        trace_clearance=foreign_via_floor,
+                        hard_intersection_only=False,
+                    ):
+                        return RouteClearanceViolation(via.x, via.y, "seg_vs_foreign_via", None)
+
+        # Issue #4431 (Phase 1): additive pairwise HV-isolation post-check on the
+        # Python validation path (no C++ change in this slice).  When a
+        # voltage-map-derived pairwise table is attached, reject a route segment
+        # that runs closer than max(dru, IEC creepage @ |ΔV|) to foreign copper.
+        # The C++ ``validate_route`` above already enforced the scalar clearance
+        # against ``py_grid.routes``; this layer adds only the HV widening for
+        # net pairs whose requirement exceeds the scalar floor.  Absent the
+        # table (``None``) this is a no-op -- the scalar path is byte-identical.
+        pairwise = getattr(self._rules, "pairwise_clearance", None)
+        if pairwise is not None:
+            from .pairwise_clearance import route_pairwise_violation
+
+            id_to_name = {nid: name for name, nid in self._net_name_to_id.items()}
+            violation = route_pairwise_violation(
+                route,
+                start.net,
+                py_grid.routes,
+                pairwise,
+                id_to_name=id_to_name,
+                attach_zones=self._attach_zones,
+            )
+            if violation is not None:
+                return RouteClearanceViolation(violation.x, violation.y, "pairwise_hv", None)
+
+        return None
+
+    def _boost_avoidance_at(
+        self,
+        location: RouteClearanceViolation | tuple[float, float] | None,
+        trace_radius_cells: int,
+        amount: float = 20.0,
+        radius_extra_cells: int = 0,
+    ) -> None:
+        """Boost avoidance cost around a DRC violation location.
+
+        When post-route validation detects a clearance violation, this method
+        marks the region in the C++ grid so subsequent A* searches incur a
+        cost penalty and explore alternative paths.  ``location`` may be the
+        Issue-#5599 ``RouteClearanceViolation`` (a NamedTuple -- positional
+        ``[0]``/``[1]`` access is unchanged) or the historical bare
+        ``(x, y)`` pair.
+
+        Args:
+            location: (x, y) world coordinates of the violation, or None.
+            trace_radius_cells: Trace half-width in grid cells (used to
+                scale the avoidance radius).
+            amount: Boost amount at the region center (tapering with
+                Chebyshev distance).  Historically a fixed 20.0; issue #5599
+                passes an exponentially escalated amount when the SAME
+                violation site keeps rejecting resume candidates.
+            radius_extra_cells: Extra radius (cells) beyond the historical
+                ``3 * trace_radius_cells`` disc.  Issue #5599: the seg-pad
+                violation is REPORTED at the pad's center, but the violating
+                corridor can sit just past the pad's own corners (board 04's
+                BOOT0 escaped under the neighbor pad's tip at Chebyshev ~16
+                cells from the center -- one cell OUTSIDE the historical
+                radius-15 disc, so no amount escalation could reach it).  A
+                repeated site grows the disc so the corridor that keeps
+                failing is actually inside it.
+        """
+        if location is None:
+            return
+        vx, vy = float(location[0]), float(location[1])
+        gx, gy = self._grid._impl.world_to_grid(vx, vy)
+        # Boost on all layers since violations may affect via transitions
+        radius = max(1, trace_radius_cells * 3 + max(0, int(radius_extra_cells)))
+        for layer in range(self._grid.num_layers):
+            self._grid._impl.boost_region_cost(gx, gy, layer, radius, amount)
+
+    def clear_avoidance_costs(self) -> None:
+        """Clear all avoidance costs from the grid.
+
+        Each connection clears these penalties when route() exits, including
+        failure and exception paths. Penalties remain active throughout that
+        connection's resumable search, but must not obstruct another pad pair
+        on the same net.
+        """
+        self._grid._impl.clear_avoidance_costs()
+
+    def clear_airwire_costs(self) -> None:
+        """Zero the C++ airwire-separation plane (Issue #8999).
+
+        Thin passthrough for ``Grid3D::clear_airwire_costs``; the plane is
+        normally managed end-to-end by
+        :func:`kicad_tools.router.airwire_cost.refresh_airwire_cost`.
+        """
+        self._grid._impl.clear_airwire_costs()
+
+    def set_airwire_cells(self, xs: list[int], ys: list[int], costs: list[float]) -> None:
+        """Push the weighted sparse airwire plane onto the C++ grid (Issue #8999).
+
+        ``xs``/``ys``/``costs`` are parallel lists; each column is written to
+        every layer (a desire line is layer-less).  Callers must
+        ``clear_airwire_costs()`` first -- the refresh contract is a full
+        clear + rewrite, never an increment, so the native plane stays a
+        pure function of the committed set.
+        """
+        self._grid._impl.set_airwire_cells(xs, ys, costs)
+
+    def _try_python_fallback(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+        deadline: float | None = None,
+        reason: str = "unknown",
+        cpp_failure_reason: int | None = None,
+    ) -> Route | None:
+        """Attempt to route using the Python pathfinder as a fallback.
+
+        Called when the C++ A* search fails to find a path.  The Python
+        pathfinder uses different neighbor expansion and clearance relaxation
+        logic that can handle single-corridor geometries where the C++
+        cost-based avoidance steering cannot.
+
+        The Python ``Router`` operates on ``_py_grid`` which is kept in sync
+        by :meth:`core.Autorouter._mark_route` (updates both grids after
+        every committed route).
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            net_class: Optional net class for routing parameters
+            negotiated_mode: Enable negotiated congestion routing
+            present_cost_factor: Multiplier for sharing penalty
+            weight: A* weight
+            per_net_timeout: Optional per-net timeout in seconds
+            extra_goal_cells: Additional goal cells for early termination
+            deadline: Optional ``time.monotonic()`` deadline shared with
+                the C++ search that preceded this fallback (issue #3474
+                R1).  The fallback only receives whatever budget the C++
+                search left unspent; when none remains it is skipped so a
+                single ``route()`` call can never double-spend its per-net
+                cap inside the 10-100x-slower Python A*.
+            reason: Human-readable explanation of WHY the C++ search
+                handed this net to the Python fallback (issue #3456).
+                Surfaced in the once-per-net WARNING and recorded in
+                ``fallback_stats['fallback_reasons']``.
+            cpp_failure_reason: The ``FAILURE_*`` code from the failed C++
+                ``RouteResult`` (issue #3876).  When this is
+                ``FAILURE_TIMEOUT`` -- a WALL-CLOCK artifact, not a
+                geometric dead-end -- the Python fallback is short-circuited
+                (returns ``None`` immediately, before constructing the
+                Python ``Router`` or running the 10-100x-slower A*).  A
+                wall-clock timeout means ~``per_net_timeout`` has already
+                elapsed, so the fallback would start with ~0 budget and
+                immediately time out itself, wasting deadline that
+                subsequent nets need.  Geometric failures
+                (``FAILURE_NO_PATH``, ``FAILURE_VIA_VIA_BLOCKED``) are NOT
+                short-circuited -- the Python A*'s different neighbor expansion
+                is exactly the value-add there (issue #3456).
+                ``FAILURE_ITERATION_LIMIT`` is short-circuited ONLY when a tuned
+                per-net iteration cap is active (``_per_net_iteration_cap_active``,
+                issue #3881): a capped give-up is deterministic and running the
+                slow Python A* would re-introduce the per-net slowness the cap
+                prevents.  When the iteration limit is the 12M MEMORY backstop
+                (no tuned cap) the fallback still runs.  ``None`` (the default)
+                preserves pre-#3876 behavior.
+
+        Returns:
+            Route object if fallback succeeds, None if also fails (or the
+            shared per-net deadline is already exhausted, or the C++ failure
+            was a wall-clock timeout per issue #3876).
+        """
+        py_grid = self._grid._py_grid
+        if py_grid is None:
+            return None
+
+        net_name = getattr(start, "net_name", "?")
+
+        # Issue #3876: a wall-clock FAILURE_TIMEOUT is a load artifact, not a
+        # geometric dead-end -- on an idle machine the C++ search would have
+        # found the path at the same (deterministic) iteration count.  The
+        # Python fallback shares the SAME per-net deadline, so on a timeout it
+        # would start with ~0 remaining budget and immediately time out
+        # itself, burning deadline that later nets need.  Short-circuit BEFORE
+        # constructing the Python ``Router`` / running the A* so the deadline
+        # is a hard budget rather than a reason to grind 10-100x longer.  This
+        # is a strict subset of the #3474 ``remaining <= 0.05`` skip below and
+        # cannot reduce routed reach.  ``router_cpp`` may be ``None`` (import
+        # failed); guard the constant lookup as the other failure-path helpers
+        # do.  Geometric failures fall through and keep the fallback.
+        if (
+            cpp_failure_reason is not None
+            and router_cpp is not None
+            and int(cpp_failure_reason) == int(router_cpp.FAILURE_TIMEOUT)
+        ):
+            self._note_wall_bound_under_cap(net_name, "C++ A* hit the per-net wall-clock deadline")
+            logger.debug(
+                "Net %s: C++ search hit the per-net wall-clock deadline "
+                "(FAILURE_TIMEOUT); skipping Python fallback so the budget is "
+                "hard (issue #3876)",
+                net_name,
+            )
+            return None
+
+        # Issue #3881: when a TUNED per-net iteration cap is active, a
+        # FAILURE_ITERATION_LIMIT is a DETERMINISTIC give-up -- the C++ search
+        # was deliberately bounded so the net fails fast and the NEXT net gets
+        # budget.  Running the 10-100x-slower Python A* here would re-introduce
+        # exactly the per-net slowness the cap exists to prevent (a capped net
+        # burning minutes in Python), so short-circuit before constructing the
+        # Python ``Router``.  This keeps the per-net cap a HARD per-net bound
+        # and is load-independent (iteration count), so determinism is
+        # preserved.  Note: this only fires when ``_per_net_iteration_cap_active``
+        # -- when the iteration limit is the 12M MEMORY backstop (no tuned cap),
+        # the fallback still runs as before so genuine dense escapes are not
+        # silently dropped.
+        if (
+            self._per_net_iteration_cap_active
+            and cpp_failure_reason is not None
+            and router_cpp is not None
+            and int(cpp_failure_reason) == int(router_cpp.FAILURE_ITERATION_LIMIT)
+        ):
+            logger.debug(
+                "Net %s: C++ search hit the tuned per-net iteration cap "
+                "(%d expansions, FAILURE_ITERATION_LIMIT); skipping Python "
+                "fallback so the cap is a hard per-net bound and the next net "
+                "gets budget (issue #3881)",
+                net_name,
+                self._effective_search_iterations,
+            )
+            return None
+
+        # Issue #3923: resume-exhaustion cascade.  The C++ resumable
+        # pathfinder runs a post-route clearance-validation loop: after each A*
+        # result it checks the path for clearance violations, boosts avoidance
+        # cost at the violation site, and resumes the search.  Two dead-end
+        # outcomes hand the net to this fallback (see ``route()``):
+        #
+        #   CASE 1 -- "post-route clearance validation failed; exhausted 5
+        #      resume attempts": 5 boosted resumes each produced a
+        #      geometrically VALID path that still violated clearance.  A path
+        #      EXISTS; the obstruction is a clearance the avoidance boosting
+        #      could not steer around.  The pure-Python A* shares the SAME
+        #      ``_py_grid`` and the SAME clearance model, so once its fresh
+        #      full A* has failed the net it cannot honour a clearance the C++
+        #      validator keeps rejecting -- repeated exhaustions merely
+        #      reproduce the same clearance violation 10-100x more slowly
+        #      (60-200s/net; board-07 spent the bulk of its pipeline seconds
+        #      here in the 2026-07-05 sweep).  We short-circuit ONLY the
+        #      REPEAT (2nd+) clearance-exhaustion of a given net (see the
+        #      per-net counter below); the FIRST one still falls back, because
+        #      the fresh Python A* demonstrably rescues real nets/pads there.
+        #
+        #   CASE 2 -- "resume after rejected goal cell failed: no path (...)":
+        #      a RESUMED search exhausted its already-avoidance-boosted,
+        #      partially-consumed open set with FAILURE_NO_PATH.  This is NOT a
+        #      clearance dead-end: it is a *path-finding* failure on a search
+        #      frontier that has been distorted by prior goal-cell rejections
+        #      and avoidance boosts.  A FRESH full Python A* from scratch --
+        #      with the 45-degree / waypoint neighbour expansion and an
+        #      un-distorted open set -- explores differently and DOES rescue
+        #      real nets here (measured: USB-joystick 5->7 nets).  So we NEVER
+        #      skip case 2; it always keeps its Python fallback.
+        #
+        # (An earlier revision of this guard skipped case 2 AND skipped case 1
+        # on the FIRST exhaustion; both regressed real routes -- PR #3956 judge
+        # review: USB-joystick dropped to 5/16 and board-07 GND stranded pad
+        # U1.24.  The narrowing below -- case-1 only, repeat-only -- fixes both
+        # while keeping the bulk of the perf win, since the wasteful grind is
+        # the REPEATED re-exhaustion of the same net across rip-up rounds.)
+        #
+        # The guard therefore keys ONLY on the case-1 clearance-exhaustion
+        # marker ("... exhausted N resume attempts", i.e. "resume attempts" in
+        # the reason string), NOT on FAILURE_NO_PATH and NOT on the case-2
+        # "resume after rejected goal cell failed" phrasing.  It never fires
+        # for the INITIAL-search failure ("no path (C++ A* open set
+        # exhausted)", no "resume attempts" phrasing) -- single-corridor
+        # geometries the Python expansion legitimately rescues still fall back.
+        # It also excludes FAILURE_VIA_VIA_BLOCKED (all via candidates refused
+        # by stored-via geometry -- a distinct obstruction the negotiated
+        # strategy targets with rip-up, and one where the Python router's via
+        # placement can differ) and FAILURE_TIMEOUT (already short-circuited
+        # above -- a wall-clock artifact, not a geometric dead-end).  Opt out
+        # with KICAD_ROUTER_SKIP_RESUME_FALLBACK=0 to restore the pre-#3923
+        # grind.
+        _resume_exhausted = "resume attempts" in reason
+        _excluded_code = (
+            cpp_failure_reason is not None
+            and router_cpp is not None
+            and (
+                int(cpp_failure_reason)
+                in (
+                    int(router_cpp.FAILURE_TIMEOUT),
+                    int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
+                )
+            )
+        )
+        if (
+            _resume_exhausted
+            and not _excluded_code
+            and os.environ.get("KICAD_ROUTER_SKIP_RESUME_FALLBACK", "1").strip() != "0"
+        ):
+            # Skip only on the SECOND+ clearance-exhaustion for THIS net.  The
+            # first exhaustion still runs the Python fallback: the fresh full
+            # A* (45-degree / waypoint expansion, un-distorted open set)
+            # measurably rescues real nets/pads there (board-07 GND pad U1.24,
+            # USB-joystick nets).  A repeat exhaustion of the SAME net means the
+            # negotiated rip-up loop re-presented the same clearance
+            # obstruction that the fresh Python A* already failed to resolve --
+            # that is the 60-200s/net dead loss the optimization targets.
+            _seen = self._resume_clearance_exhaustions.get(net_name, 0)
+            self._resume_clearance_exhaustions[net_name] = _seen + 1
+            if _seen >= 1:
+                logger.debug(
+                    "Net %s: C++ resumable search exhausted its clearance-validation "
+                    "resume attempts again (occurrence %d, reason=%r); skipping "
+                    "Python fallback -- the same grid + clearance model already "
+                    "failed this net once and will violate the same clearance "
+                    "10-100x slower (issue #3923 case 1, repeat)",
+                    net_name,
+                    _seen + 1,
+                    reason,
+                )
+                return None
+
+        # Issue #6098: the Python A* already PROVED this exact request
+        # unreachable on this exact grid state (its open set drained with no
+        # goal popped).  The search is deterministic in passability, so the
+        # rerun can only fail again, 10-100x slower than the C++ search that
+        # just failed.  This runs only after a real C++ give-up, so the first
+        # failure of every request on every grid state still gets its Python
+        # attempt -- the fallback keeps its rescue value (#3456) wherever the
+        # Python search could genuinely do better.  Opt out with
+        # KICAD_ROUTER_SKIP_PROVEN_FALLBACK=0.
+        _memo_enabled = os.environ.get("KICAD_ROUTER_SKIP_PROVEN_FALLBACK", "1").strip() != "0"
+        _pair_key = self._python_unreachable_key(
+            start,
+            end,
+            net_class=net_class,
+            negotiated_mode=negotiated_mode,
+            extra_goal_cells=extra_goal_cells,
+        )
+        _memo_key = _pair_key if _memo_enabled else None
+        _proof = self._python_unreachable.get(_memo_key) if _memo_key is not None else None
+        if _proof is not None and _proof[0] == self._py_grid_state_stamp(py_grid):
+            self._python_fallback_proven_skips += 1
+            self._python_fallback_seconds_saved += _proof[1]
+            logger.debug(
+                "Net %s: C++ pathfinder gave up (%s); skipping Python fallback "
+                "-- the Python A* already drained its open set for this request "
+                "on an unchanged grid (issue #6098)",
+                net_name,
+                reason,
+            )
+            return None
+
+        # Issue #8370: repeat-only skip.  The first NO_PATH / PAIRWISE_BLOCKED
+        # hand-off of a net still falls back (it rescues real nets, #3456/
+        # #3956).  Once the Python A* has DRAINED its open set for this net,
+        # re-running it every negotiated iteration (the grid stamp changes with
+        # each rip-up, so the #6098 memo misses) cost 45-100 min/iteration on a
+        # 97-net HV board.  Never in relief-probe mode, which stresses the
+        # search without being committed.  Opt out: KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0.
+        if (
+            not self._relief_mode
+            and cpp_failure_reason is not None
+            and router_cpp is not None
+            and int(cpp_failure_reason)
+            in (
+                int(router_cpp.FAILURE_NO_PATH),
+                int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+            )
+            and _pair_key in self._python_drained_nets
+            and os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() != "0"
+        ):
+            self._python_fallback_repeat_skips += 1
+            self._python_fallback_seconds_saved += self._python_drained_nets[_pair_key]
+            logger.debug(
+                "Net %s: C++ pathfinder gave up (%s); skipping Python fallback "
+                "-- the Python A* already drained its open set for this pad-pair "
+                "request (issues #8370, #8377)",
+                net_name,
+                reason,
+            )
+            return None
+
+        # Issue #3456: the silent C++ -> Python downgrade is the bug.
+        # A net grinding 3-7 minutes in the pure-Python A* is otherwise
+        # indistinguishable from "router is slow" at default verbosity.
+        # Warn LOUDLY, once per net per run (negotiated rip-up retries
+        # the same net many times -- dedupe keeps the log readable), and
+        # record the reason for ``fallback_stats`` consumers.  Skipped in
+        # relief-probe mode: probes deliberately stress the search, are
+        # never committed, and a probe-time fallback is not a
+        # user-facing performance event.
+
+        # Issue #3474 R1: clamp the fallback budget to the unspent
+        # remainder of the shared per-net deadline.
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.05:
+                logger.debug(
+                    "Net %s: per-net budget exhausted by C++ search; "
+                    "skipping Python fallback (issue #3474)",
+                    net_name,
+                )
+                return None
+            per_net_timeout = (
+                min(per_net_timeout, remaining) if per_net_timeout is not None else remaining
+            )
+
+        # Issue #8485: bound REPEAT fallbacks of a request whose Python A*
+        # already failed without a proof (typically ended by the per-net
+        # wall-clock deadline, which the #6098 / #8370 memos never record).
+        # The first attempt of every request keeps its full budget -- the
+        # Python search's different expansion rescues real nets there
+        # (#3456/#3956) and a C++ drain is NOT a proof for it.  A repeat gets
+        # a small fraction of what the first attempt spent, and none at all
+        # once the stage's fallback budget is spent.  Never in relief-probe
+        # mode.  Opt out: KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0.
+        _bound_repeats = (
+            not self._relief_mode
+            and os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() != "0"
+        )
+        _prior_failed_s = self._python_failed_attempts.get(_pair_key) if _bound_repeats else None
+        _reduced_budget: float | None = None
+        _reduced_iterations: int | None = None
+        if _prior_failed_s is not None and self._per_net_iteration_cap_active:
+            # ``--deterministic-budget``: bound the repeat by a fraction of the
+            # tuned iteration cap, not by wall time, so the result stays
+            # load-independent (#3881/#6329).  The stage cap is wall-time
+            # based and is therefore not applied here.
+            _reduced_iterations = max(
+                REPEAT_FALLBACK_ITERATION_FLOOR,
+                int(REPEAT_FALLBACK_BUDGET_FRACTION * self._effective_search_iterations),
+            )
+            if _reduced_iterations >= self._effective_search_iterations:
+                _reduced_iterations = None
+        elif _prior_failed_s is not None:
+            if (
+                self._python_fallback_stage_budget is not None
+                and self._python_fallback_stage_spent >= self._python_fallback_stage_budget
+            ):
+                self._python_fallback_stage_budget_skips += 1
+                self._python_fallback_seconds_saved += _prior_failed_s
+                logger.debug(
+                    "Net %s: C++ pathfinder gave up (%s); skipping repeat Python "
+                    "fallback -- stage fallback budget spent (%.1f of %.1fs, "
+                    "issue #8485)",
+                    net_name,
+                    reason,
+                    self._python_fallback_stage_spent,
+                    self._python_fallback_stage_budget,
+                )
+                return None
+            if per_net_timeout is not None and per_net_timeout > 0:
+                _reduced_budget = max(
+                    REPEAT_FALLBACK_BUDGET_FLOOR_S,
+                    REPEAT_FALLBACK_BUDGET_FRACTION * _prior_failed_s,
+                )
+                if _reduced_budget < per_net_timeout:
+                    per_net_timeout = _reduced_budget
+                else:
+                    _reduced_budget = None
+
+        # The fallback is actually going to run -- make it LOUD.  This
+        # sits after the deadline-exhaustion early-return above so a
+        # skipped fallback (no grind) stays quiet, and is suppressed in
+        # relief-probe mode (probes deliberately stress the search, are
+        # never committed, and a probe-time fallback is not a
+        # user-facing performance event).
+        if not self._relief_mode:
+            self._fallback_reasons.setdefault(net_name, reason)
+            if net_name not in self._fallback_warned:
+                self._fallback_warned.add(net_name)
+                logger.warning(
+                    "Net %s: C++ pathfinder gave up (%s); falling back to "
+                    "the pure-Python A* (typically 10-100x slower -- this "
+                    "net may take minutes). See "
+                    "router.backend_info['fallback_stats'] for details.",
+                    net_name,
+                    reason,
+                )
+
+        # Lazy-construct the Python Router on first fallback
+        if self._py_router is None:
+            from .pathfinder import Router
+
+            self._py_router = Router(
+                py_grid,
+                self._rules,
+                net_class_map=self._net_class_map,
+                diagonal_routing=self._diagonal_routing,
+            )
+            self._py_router.set_attach_zones(self._attach_zones)
+            # Issue #4507: thread the net-name map through so the fallback
+            # A* can arm its search-time pairwise (HV-isolation) kernels --
+            # without it the domain projection is empty and the fallback
+            # stays HV-blind, thrashing against the Phase-1 post-route gate.
+            self._py_router.set_net_name_to_id(self._net_name_to_id)
+
+        # Issue #3438: keep the fallback router's relief-probe mode in
+        # lock-step with the C++ side (set via ``set_relief_mode``).
+        self._py_router.set_relief_mode(self._relief_mode)
+
+        # Issue #3881: when a tuned per-net iteration cap is active, bound the
+        # Python A* DETERMINISTICALLY by the same iteration budget.  A
+        # geometric-failure net (post-route-clearance / no-path) is NOT
+        # short-circuited above -- the Python A*'s different neighbor expansion
+        # is the value-add (#3456) and legitimately recovers nets the C++
+        # search cannot (e.g. board-03's USB diff pairs).  But under
+        # --deterministic-budget there is NO per-net wall-clock deadline, so an
+        # UNBOUNDED Python fallback grinds for minutes and monopolises the
+        # overall --timeout exactly as the C++ search would have (chorus
+        # observed nets jumping 192s -> 375s -> 471s in the fallback).  An
+        # iteration cap keeps the fallback's reach where the net is quick to
+        # route in Python while cutting off the grinders deterministically
+        # (load-independent), so more nets get a turn.  ``None`` (no tuned cap)
+        # preserves the historical ``cols*rows*4`` self-bound.
+        if _reduced_iterations is not None:
+            self._py_router._max_iterations_override = _reduced_iterations
+        elif self._per_net_iteration_cap_active:
+            self._py_router._max_iterations_override = self._effective_search_iterations
+        else:
+            self._py_router._max_iterations_override = None
+
+        t0 = time.monotonic()
+        # Python Router.route() does not accept start_layers/end_layers;
+        # it derives layer information internally from pad attributes.
+        # Issue #6527: bidirectional A* (one-way retry on failure) for the
+        # fallback, on by default; ``--no-fallback-bidirectional`` restores
+        # the one-way search.
+        _py_rules = self._py_router.rules
+        # Diff-pair legs and match-group members stay on the one-way search:
+        # the bidirectional path perturbs their length/impedance symmetry
+        # (board 07 TMDS lanes regress under it).
+        _nc = net_class
+        if _nc is None:
+            _nc = self._py_router._get_net_class(net_name)
+        _length_constrained = _nc is not None and (
+            getattr(_nc, "diffpair_partner", None) is not None
+            or getattr(_nc, "length_match_group", None) is not None
+        )
+        if getattr(_py_rules, "fallback_bidirectional", False) is True and not _length_constrained:
+            route = self._py_router.route_auto(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+                threshold=getattr(_py_rules, "fallback_bidirectional_threshold", 0),
+            )
+        else:
+            route = self._py_router.route(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+        dt = time.monotonic() - t0
+
+        # Issue #6329: the fallback is iteration-bounded under a tuned cap,
+        # but ``per_net_timeout`` still bounds it by wall clock.  When the
+        # wall clock fires first, the expansions reached (and so whether the
+        # net lands) depend on machine load.
+        if route is None and getattr(self._py_router, "last_route_deadline_hit", False) is True:
+            self._note_wall_bound_under_cap(
+                net_name,
+                "Python fallback A* stopped by the per-net wall-clock deadline after "
+                f"{self._py_router.last_route_deadline_iterations:,} of "
+                f"{self._effective_search_iterations:,} expansions",
+            )
+
+        # Issue #5617: aggregate this fallback's wall time by WHY it ran --
+        # ``_resume_exhausted`` (computed above) is the exact "case 1"
+        # substring test the #3923 short-circuit already uses, so the
+        # bucketing is consistent with that guard's own classification
+        # rather than a new, possibly-drifting heuristic.  Pure
+        # measurement: does not affect ``route`` or control flow.
+        _fallback_bucket = "resume_exhaustion" if _resume_exhausted else "other"
+        self._python_fallback_seconds_by_reason[_fallback_bucket] = (
+            self._python_fallback_seconds_by_reason.get(_fallback_bucket, 0.0) + dt
+        )
+
+        # Issue #8370: per-net fallback time (successful or not), and remember
+        # pad-pair requests whose Python A* drained for the repeat-only skip above.
+        if not self._relief_mode:
+            self._python_fallback_seconds_by_net[net_name] = (
+                self._python_fallback_seconds_by_net.get(net_name, 0.0) + dt
+            )
+            if (
+                route is None
+                and cpp_failure_reason is not None
+                and router_cpp is not None
+                and int(cpp_failure_reason)
+                in (
+                    int(router_cpp.FAILURE_NO_PATH),
+                    int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+                )
+                and getattr(self._py_router, "last_route_exhausted", False) is True
+            ):
+                self._python_drained_nets[_pair_key] = dt
+            # Issue #8485: failed-attempt record (any failure cause), the
+            # reduced-repeat saving, and the stage fallback spend.
+            self._python_fallback_stage_spent += dt
+            if route is None:
+                self._python_failed_attempts.setdefault(_pair_key, dt)
+            else:
+                self._python_failed_attempts.pop(_pair_key, None)
+            if _prior_failed_s is not None and (
+                _reduced_budget is not None or _reduced_iterations is not None
+            ):
+                self._python_fallback_reduced_repeats += 1
+                _saved = max(0.0, _prior_failed_s - dt)
+                self._python_fallback_reduced_seconds_saved += _saved
+                self._python_fallback_seconds_saved += _saved
+
+        # Issue #6098: record a drained search as an unreachability proof for
+        # this request on the current grid state.  ``route`` does not mutate
+        # the grid, so the post-search stamp is the state it searched.
+        if (
+            route is None
+            and _memo_key is not None
+            and getattr(self._py_router, "last_route_exhausted", False) is True
+        ):
+            self._python_unreachable[_memo_key] = (self._py_grid_state_stamp(py_grid), dt)
+
+        if route is not None:
+            self._fallback_count += 1
+            self._fallback_nets.append(net_name)
+            logger.info(
+                "Net %s: C++ pathfinder failed, routed via Python fallback (%.1fs)",
+                net_name,
+                dt,
+            )
+        else:
+            logger.debug(
+                "Net %s: C++ pathfinder failed, Python fallback also failed (%.1fs)",
+                net_name,
+                dt,
+            )
+
+        return route
+
+    def _note_wall_bound_under_cap(self, net_name: str, detail: str) -> None:
+        """Record a per-net wall-clock bind under the tuned iteration cap.
+
+        Issue #6329: ``--deterministic-budget`` pins every per-net search to
+        a node-expansion cap, but the negotiated loop still hands each
+        search a WALL-CLOCK budget (``derive_iter_per_net_cap``: 10% of the
+        remaining stage budget, issue #3989; the relief rescue's 10 s
+        sub-search clock).  The pure-Python fallback runs ~10-100x slower
+        than the C++ search, so on board 05 that wall clock fires long
+        before the expansion cap (measured: 106,496 of 1,000,000 expansions
+        in a 57 s budget).  Whether such a search lands its net then depends
+        on machine load, which is how two same-seed runs diverge.  This is
+        a no-op without an active tuned cap (the wall clock is then the
+        intended bound, not a determinism loss).  Logged once per net.
+        """
+        if not self._per_net_iteration_cap_active:
+            return
+        if net_name in self._wall_bound_under_cap:
+            return
+        self._wall_bound_under_cap[net_name] = detail
+        logger.warning(
+            "[deterministic-budget] per-net wall clock bound net %s before the "
+            "iteration cap (%s) -- this net's result depends on machine load "
+            "(issue #6329)",
+            net_name,
+            detail,
+        )
+
+    def _python_unreachable_key(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        net_class: NetClassRouting | None,
+        negotiated_mode: bool,
+        extra_goal_cells: set[tuple[int, int, int]] | None,
+    ) -> tuple:
+        """Identify a Python fallback request for the #6098 proof memo.
+
+        Covers every input that shapes the Python search's PASSABILITY: the
+        two pads (full dataclass ``repr`` -- position, size, layers, net), the
+        net class (trace width / clearance / avoided layers), negotiated
+        sharing, relief-probe mode and the Steiner extra goals.  Pure cost
+        knobs (``present_cost_factor``, ``weight``) are deliberately absent:
+        they reorder a drained search but cannot change which cells it
+        reaches.
+        """
+        return (
+            repr(start),
+            repr(end),
+            repr(net_class),
+            bool(negotiated_mode),
+            bool(self._relief_mode),
+            frozenset(extra_goal_cells) if extra_goal_cells else None,
+        )
+
+    # Grid arrays that only feed search COSTS, never passability, and change
+    # on every negotiated iteration -- fingerprinting them would defeat the
+    # #6098 memo without making it any safer.  ``_saved_*`` are rip-up
+    # snapshots the search never reads.
+    _COST_ONLY_GRID_ARRAYS = frozenset(
+        {
+            "_history_cost",
+            "_congestion",
+            "_congestion_counted",
+            "_present_cost_ema",
+            # Issue #8999: the airwire-separation crossing-count plane feeds
+            # negotiated-cell COSTS only (never passability) and is rewritten
+            # on every negotiated refresh, so fingerprinting it would churn
+            # the #6098 fallback memo for no safety benefit.
+            "_airwire_cost",
+        }
+    )
+
+    def _py_grid_state_stamp(self, py_grid) -> tuple:
+        """Fingerprint the Python grid state a fallback search reads (#6098).
+
+        Fingerprints CONTENT, not the #4794 occupancy generation: the
+        negotiated loop's rip-up/restore bumps the generation every iteration
+        even when the restored planes are byte-identical, which would make
+        every unroutable net miss the memo.  Covered state:
+
+        * a CRC of every passability array on the grid (``_blocked``,
+          ``_net``, pad copper, obstacles, zones, usage counts, ...);
+        * the stored-route halo registry (``_route_halo.marks``: every
+          committed segment / via and its radius), which the search's
+          route-aware clearance test reads beyond the rasterised planes;
+        * the content of the fixed-fill obstacles and keepout rule areas,
+          the corridor reservations, and the net-name map / attach zones
+          (#6133).
+
+        Cheap next to the fallback it guards (~tens of ms on a 70x90 mm
+        4-layer board vs. seconds of pure-Python A*), and only computed after
+        a C++ give-up.
+        """
+        import numpy as np
+
+        cls = type(self)
+        crcs = tuple(
+            (name, zlib.crc32(np.ascontiguousarray(value).data))
+            for name, value in sorted(vars(py_grid).items())
+            if isinstance(value, np.ndarray)
+            and name not in cls._COST_ONLY_GRID_ARRAYS
+            and not name.startswith("_saved")
+        )
+        halo = getattr(py_grid, "_route_halo", None)
+        marks = getattr(halo, "marks", None)
+        halo_print = hash(frozenset(marks.items())) if marks is not None else None
+        rule_areas = getattr(py_grid, "_rule_area_keepouts", None)
+        return (
+            id(py_grid),
+            crcs,
+            halo_print,
+            # Issue #6133: fills and keepouts by CONTENT (they were identity
+            # only), plus the corridor reservations and router-side maps.
+            self._reservation_print(py_grid),
+            self._fixed_fills_print(py_grid),
+            self._keepouts_print(rule_areas),
+            self._router_maps_print(),
+        )
+
+    @staticmethod
+    def _reservation_print(py_grid) -> tuple:
+        """Count + content hash of the corridor reservations (#4079, #2677).
+
+        Hard reservations fence foreign nets out of a cell outright and soft
+        ones only attract, so the owner sets, the soft-key set and the
+        C++-suppressed set all shape Python passability.
+        """
+        reserved = getattr(py_grid, "_reserved_for_nets", None) or {}
+        soft = getattr(py_grid, "_soft_reservations", None) or ()
+        suppressed = getattr(py_grid, "_cpp_suppressed_reservations", None) or ()
+        return (
+            len(reserved),
+            hash(frozenset(reserved.items())),
+            hash(frozenset(soft)),
+            hash(frozenset(suppressed)),
+        )
+
+    def _fixed_fills_print(self, py_grid) -> tuple | None:
+        """Content hash of the fixed-fill obstacles (geometry included).
+
+        The fills are frozen and their shapely geometry immutable, so the hash
+        is computed once per ``fills`` tuple.  The cache holds the tuple, which
+        keeps its ``id`` from being recycled by a different object.
+        """
+        fills = getattr(getattr(py_grid, "fixed_fills", None), "fills", None)
+        if fills is None:
+            return None
+        cached = getattr(self, "_fixed_fills_print_cache", None)
+        if cached is not None and cached[0] is fills:
+            cached_print: tuple[int, int] = cached[1]
+            return cached_print
+        parts = []
+        for fill in fills:
+            geometry = fill.geometry
+            geom_key: bytes | str
+            try:
+                geom_key = bytes(geometry.wkb)
+            except Exception:
+                geom_key = repr(geometry)
+            parts.append(
+                (
+                    fill.source_net,
+                    fill.source_net_id,
+                    fill.layer,
+                    fill.clearance,
+                    fill.source_zone_id,
+                    fill.source_kind,
+                    fill.source_object_id,
+                    geom_key,
+                )
+            )
+        print_ = (len(fills), hash(tuple(parts)))
+        self._fixed_fills_print_cache = (fills, print_)
+        return print_
+
+    @staticmethod
+    def _keepouts_print(rule_areas) -> tuple | None:
+        """Content hash of the keepout rule areas (fields and raster mask)."""
+        if rule_areas is None:
+            return None
+        import numpy as np
+
+        parts = []
+        for area in rule_areas:
+            mask = getattr(area, "mask", None)
+            parts.append(
+                (
+                    getattr(area, "name", None),
+                    getattr(area, "polygon", None),
+                    getattr(area, "layers", None),
+                    getattr(area, "blocks_tracks", None),
+                    getattr(area, "blocks_vias", None),
+                    getattr(area, "only", None),
+                    getattr(area, "exempt", None),
+                    getattr(area, "gx0", None),
+                    getattr(area, "gy0", None),
+                    getattr(area, "static_tracks", None),
+                    zlib.crc32(np.ascontiguousarray(mask).data) if mask is not None else None,
+                    getattr(mask, "shape", None),
+                )
+            )
+        return (len(parts), hash(tuple(parts)))
+
+    def _router_maps_print(self) -> tuple:
+        """Net-name map and attach zones the Python router consults."""
+        return (
+            hash(frozenset(self._net_name_to_id.items())),
+            hash(tuple(repr(z) for z in self._attach_zones)),
+        )
+
+    def set_python_fallback_stage_budget(self, seconds: float | None) -> None:
+        """Start a fallback stage with a total fallback-seconds cap (Issue #8485).
+
+        Resets the stage spend.  ``None`` / ``<= 0`` removes the cap.  Once
+        the stage's fallback spend reaches the cap, repeat fallbacks of
+        requests whose Python A* already failed are skipped; first attempts
+        of never-tried requests still run.  Reported as
+        ``python_fallback_stage_budget_s`` / ``python_fallback_stage_spent_s``
+        in :attr:`fallback_stats`.
+        """
+        self._python_fallback_stage_budget = (
+            float(seconds) if seconds is not None and seconds > 0 else None
+        )
+        self._python_fallback_stage_spent = 0.0
+
+    def set_relief_mode(self, enabled: bool) -> None:
+        """Enable/disable the relief-probe mode (Issue #3438).
+
+        In relief mode, sharing-mode foreign usage-0 non-obstacle cells
+        (escape stubs, route clearance halos, via halo rings) become
+        passable at a finite per-step penalty instead of hard-blocking,
+        so a zero-overflow hard failure can produce a min-conflict probe
+        path.  Applied to BOTH the C++ pathfinder and the lazy Python
+        fallback router so probe semantics are backend-independent.
+
+        Probe-only: the negotiated outer loop never commits a route found
+        in relief mode -- it extracts the conflicted owner nets along the
+        probe path and feeds them to the transactional targeted rip-up.
+        """
+        self._relief_mode = bool(enabled)
+        self._impl.set_relief_mode(self._relief_mode)
+        if self._py_router is not None:
+            self._py_router.set_relief_mode(self._relief_mode)
+
+    @property
+    def fallback_stats(self) -> dict:
+        """Get statistics about Python fallback usage.
+
+        Returns:
+            Dictionary with:
+                - fallback_count: Number of nets routed via Python fallback
+                - fallback_nets: List of net names that used fallback
+                - fallback_reasons: Mapping of net name -> human-readable
+                  reason the C++ search handed that net to the Python
+                  fallback (issue #3456).  Includes nets where the Python
+                  fallback was attempted but ALSO failed (those do not
+                  appear in ``fallback_nets``), so slow failed grinds are
+                  attributable too.
+                - resume_diagnostics: Mapping of net name -> record of the
+                  most recent post-route clearance-validation resume loop
+                  that failed at least one attempt (issue #5599).  Each
+                  record carries the per-attempt violation kind + location
+                  and the rejected goal cell, plus ``exhausted`` /
+                  ``resume_failed`` markers for how the loop ended.
+                - resume_loop_exhausted_seconds: Issue #5617.  Summed
+                  wall-clock time spent inside the post-route
+                  clearance-validation resume loop (all attempts) across
+                  every net whose loop burned the full ``max_resume_attempts``
+                  budget before handing off to the Python fallback -- i.e.
+                  work that is provably discarded (a search that never
+                  produced a committed route). ``0.0`` when no net exhausted
+                  its resume budget this run.
+                - python_fallback_seconds_by_reason: Issue #5617.  Summed
+                  wall-clock time spent inside ``_try_python_fallback``
+                  itself, bucketed under ``"resume_exhaustion"`` (the fallback
+                  was triggered by the case-1 clearance-exhaustion path this
+                  issue profiles -- the same ``"resume attempts" in reason``
+                  test the #3923 short-circuit uses) or ``"other"`` (every
+                  other fallback trigger: initial-search dead end,
+                  resume-after-rejected-goal-cell failure, etc).  Distinct
+                  from ``resume_loop_exhausted_seconds`` -- that aggregate is
+                  the discarded C++ search time *before* the fallback is
+                  even invoked; this one is the fallback's own run time.
+                - python_fallback_proven_skips: Issue #6098.  Number of
+                  fallbacks skipped because the Python A* had already
+                  drained its open set for the same request on an unchanged
+                  grid (an unreachability proof).
+                - python_fallback_seconds_saved: Issue #6098.  Summed run time
+                  of the proving searches those skips did not repeat -- an
+                  estimate of the wall time saved.
+                - wall_bound_under_cap: Issue #6329.  Mapping of net name ->
+                  description of a search that a per-net WALL-CLOCK deadline
+                  ended while the tuned per-net iteration cap was active
+                  (``--deterministic-budget``).  Non-empty means the run's
+                  copper can depend on machine load.
+                - python_fallback_seconds_by_net: Issue #8370.  Net name ->
+                  summed wall time of its Python fallbacks, successful or not.
+                - python_fallback_repeat_skips: Issue #8370.  Fallbacks skipped
+                  because the Python A* had already drained for that net after
+                  a C++ NO_PATH / PAIRWISE_BLOCKED (seconds saved are added to
+                  ``python_fallback_seconds_saved``).
+                - python_fallback_reduced_repeats: Issue #8485.  Repeat
+                  fallbacks of a request whose Python A* already failed (any
+                  cause, including the per-net deadline) that ran on the
+                  reduced repeat budget instead of the full per-net timeout.
+                - python_fallback_reduced_seconds_saved: Issue #8485.  First
+                  attempt seconds minus reduced-repeat seconds, summed (also
+                  added to ``python_fallback_seconds_saved``).
+                - python_fallback_stage_budget_s: Issue #8485.  Stage-level
+                  fallback budget in seconds, or ``None`` when uncapped.
+                - python_fallback_stage_spent_s: Issue #8485.  Fallback
+                  seconds spent in the current stage (since the budget was
+                  last set; whole run when it never was).
+                - python_fallback_stage_budget_skips: Issue #8485.  Repeat
+                  fallbacks skipped because the stage budget was spent (their
+                  first-attempt seconds are added to
+                  ``python_fallback_seconds_saved``).
+        """
+        return {
+            "fallback_count": self._fallback_count,
+            "fallback_nets": list(self._fallback_nets),
+            "fallback_reasons": dict(self._fallback_reasons),
+            "resume_diagnostics": {
+                net: {
+                    **record,
+                    "attempts": list(record.get("attempts", ())),
+                }
+                for net, record in self._resume_diagnostics.items()
+            },
+            "resume_loop_exhausted_seconds": self._resume_loop_exhausted_seconds,
+            "python_fallback_seconds_by_reason": dict(self._python_fallback_seconds_by_reason),
+            "python_fallback_proven_skips": self._python_fallback_proven_skips,
+            "python_fallback_seconds_saved": self._python_fallback_seconds_saved,
+            "python_fallback_seconds_by_net": dict(self._python_fallback_seconds_by_net),
+            "python_fallback_repeat_skips": self._python_fallback_repeat_skips,
+            "python_fallback_reduced_repeats": self._python_fallback_reduced_repeats,
+            "python_fallback_reduced_seconds_saved": self._python_fallback_reduced_seconds_saved,
+            "python_fallback_stage_budget_s": self._python_fallback_stage_budget,
+            "python_fallback_stage_spent_s": self._python_fallback_stage_spent,
+            "python_fallback_stage_budget_skips": self._python_fallback_stage_budget_skips,
+            "wall_bound_under_cap": dict(self._wall_bound_under_cap),
+        }
+
+    @property
+    def iterations(self) -> int:
+        """Number of iterations in last route."""
+        return self._impl.iterations
+
+    @property
+    def nodes_explored(self) -> int:
+        """Number of nodes explored in last route."""
+        return self._impl.nodes_explored
+
+    def _project_via_spans(self, layers) -> list[tuple[int, int]]:
+        """Project physical copper onto contiguous runs of selected grid indices.
+
+        CopperLayer.stack_order is physical stack order (F through inner to B;
+        Issue #6099 -- ``value`` is not, past In4.Cu),
+        unlike the dense indices of a selected-layer grid. Reordered stacks
+        may require multiple runs: an intervening grid index is not necessarily
+        an intervening physical layer. Keep an off-grid sentinel when no layer
+        is selected; native global via/drill spacing still needs that hole.
+        """
+        from .layers import Layer
+
+        lo, hi = sorted(layer.stack_order for layer in layers)
+        indices = sorted(
+            index
+            for value, index in self._grid._layer_to_index.items()
+            if lo <= Layer(value).stack_order <= hi
+        )
+        if not indices:
+            return [(self._grid.num_layers, self._grid.num_layers)]
+        spans = []
+        start = previous = indices[0]
+        for index in indices[1:]:
+            if index != previous + 1:
+                spans.append((start, previous))
+                start = index
+            previous = index
+        spans.append((start, previous))
+        # Preserve the original endpoint order on ordinary full-stack calls.
+        if layers[0].stack_order > layers[1].stack_order:
+            spans = [(end, start) for start, end in reversed(spans)]
+        return spans
+
+    def _sync_stored_routes(self, py_grid: RoutingGrid) -> None:
+        """Sync stored segments and vias from completed routes to C++.
+
+        Issue #2439: Incrementally adds new route data to the C++ Grid3D
+        so that validate_route() can check clearances without Python callbacks.
+        Only copies routes added since the last sync.
+        """
+        sync_stored_routes(self._grid, py_grid, self._project_via_spans)
+
+    def find_blocking_nets(
+        self,
+        start: Pad,
+        end: Pad,
+        layer: int | None = None,
+        net_class: NetClassRouting | None = None,
+    ) -> set[int]:
+        """Find which nets block the direct path from start to end.
+
+        Uses Bresenham's line algorithm to trace the ideal direct path,
+        then identifies which net IDs are blocking cells along that path.
+        This is used for targeted rip-up in negotiated routing.
+
+        Issue #2587 / Epic #2556 Phase 1C-cont: When the source net has a
+        diff-pair partner (resolvable via :meth:`_resolve_partner_net_id`),
+        the partner net is excluded from the blocker set.  The partner's
+        copper is *expected* to sit close to this route at the within-pair
+        clearance; treating it as a blocker would trigger spurious rip-up
+        of the partner during negotiated routing.  Unlike the search-time
+        plumbing, this filter does not need a tighter radius -- the
+        partner is simply not a candidate for rip-up.
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            layer: Optional layer index (uses pad layer if not specified)
+            net_class: Optional net class for per-net trace width (Issue #1692).
+
+        Returns:
+            Set of net IDs that block the path (excluding net 0, the source
+            net, and -- when configured -- the diff-pair partner net).
+        """
+        blocking_nets: set[int] = set()
+        source_net = start.net
+
+        # Issue #2587 / Phase 1C-cont: Resolve the diff-pair partner net id
+        # (or -1 when no partner is configured).  Cells belonging to the
+        # partner are skipped below so they are not flagged for rip-up.
+        partner_net_id = self._resolve_partner_net_id(start.net_name) or -1
+
+        # Convert to grid coordinates
+        start_gx, start_gy = self._grid._impl.world_to_grid(start.x, start.y)
+        end_gx, end_gy = self._grid._impl.world_to_grid(end.x, end.y)
+
+        if layer is None:
+            # Issue #3304: use ``layer_to_index`` not ``layer.value %
+            # num_layers``.  See the comment in ``_route_impl`` for the
+            # full explanation of why the modulo trick mismaps B.Cu to
+            # an inner layer on 4-layer stacks.
+            layer = self._grid.layer_to_index(start.layer.value)
+
+        # Trace a direct line from start to end using Bresenham's algorithm
+        gx1, gy1 = start_gx, start_gy
+        gx2, gy2 = end_gx, end_gy
+
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+        gx, gy = gx1, gy1
+
+        # Determine trace half width in cells
+        # Issue #1692: Use per-net-class trace width when available,
+        # falling back to the global rules.trace_width.
+        net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
+        # Issue #6994: scan the same guarded radius the search was blocked
+        # at.  The old round-to-nearest rule scanned one ring too few
+        # (Default rules @ 0.127 mm: 2 cells vs 3), so outer-ring nets that
+        # blocked the route were never offered for rip-up.
+        trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self._grid.resolution
+        )
+
+        while True:
+            # Check this cell and nearby cells (accounting for trace width)
+            for check_dy in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                for check_dx in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                    cx, cy = gx + check_dx, gy + check_dy
+                    if 0 <= cx < self._grid.cols and 0 <= cy < self._grid.rows:
+                        if self._grid._impl.is_valid(cx, cy, layer):
+                            cell = self._grid._impl.at(cx, cy, layer)
+                            if (
+                                cell.blocked
+                                and cell.net != source_net
+                                and cell.net != 0
+                                and cell.net != partner_net_id
+                            ):
+                                # This cell is blocked by another net's route
+                                if cell.usage_count > 0:
+                                    blocking_nets.add(cell.net)
+
+            if gx == gx2 and gy == gy2:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+
+        return blocking_nets
+
+    def find_blocking_nets_relaxed(
+        self,
+        start: Pad,
+        end: Pad,
+        saved_blocked: np.ndarray,
+        saved_net: np.ndarray,
+        per_net_timeout: float | None = None,
+    ) -> set[int]:
+        """Find blocking nets using relaxed A* (Issue #2274 / #2386).
+
+        Python-side mirror of :meth:`Router.find_blocking_nets_relaxed` for
+        the C++ backend. Re-uses the existing C++ ``route`` path; only the
+        segment-walking and original-grid lookup happens in Python.
+
+        Runs A* with routed-net obstacles temporarily removed (the caller is
+        responsible for invoking this inside a
+        ``grid.temporarily_unblock_routed_nets()`` context manager). If a
+        path is found, examines the *original* blocked/net arrays to
+        determine which routed nets occupy cells along that path.
+
+        Args:
+            start: Source pad.
+            end: Destination pad.
+            saved_blocked: The *original* blocked array before unblocking
+                (numpy bool 3D: layers x rows x cols).
+            saved_net: The *original* net array before unblocking
+                (numpy int32 3D: layers x rows x cols).
+            per_net_timeout: Optional timeout for the relaxed A* search.
+
+        Returns:
+            Set of routed-net IDs whose cells lie along the relaxed path.
+        """
+        # 1. Run C++ A* with negotiated_mode and zero present-cost to find a
+        #    relaxed path. Grid has been unblocked by the caller's
+        #    temporarily_unblock_routed_nets() context.
+        route = self.route(
+            start,
+            end,
+            negotiated_mode=True,
+            present_cost_factor=0.0,
+            per_net_timeout=per_net_timeout,
+        )
+        if route is None:
+            return set()
+
+        blocking: set[int] = set()
+        source_net = start.net
+
+        # Compute trace half-width in cells (mirrors pathfinder.py:117).
+        # CppPathfinder doesn't currently cache _trace_half_width_cells,
+        # so compute it here on demand.
+        trace_half_width_cells = search_radius_cells(
+            self._rules.trace_width / 2, self._rules.trace_clearance, self._grid.resolution
+        )
+
+        # _pad_blocked lookup requires the original Python RoutingGrid.
+        # CppGrid.from_routing_grid stores it on self._py_grid. If the
+        # CppGrid was built without a Python source, fall back to False
+        # (slightly looser, but safe -- at worst a few extra blockers).
+        py_grid = getattr(self._grid, "_py_grid", None)
+
+        def _pad_blocked_at(layer_idx: int, cy: int, cx: int) -> bool:
+            if py_grid is None:
+                return False
+            return bool(py_grid._pad_blocked[layer_idx, cy, cx])
+
+        # 2. Walk every cell along every segment of the relaxed path and
+        #    check the *original* (saved) blocked/net arrays to find which
+        #    routed nets occupied those cells.
+        for seg in route.segments:
+            gx1, gy1 = self._grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self._grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self._grid.layer_to_index(seg.layer.value)
+
+            # Walk segment cells (Bresenham)
+            dx = abs(gx2 - gx1)
+            dy = abs(gy2 - gy1)
+            sx = 1 if gx1 < gx2 else -1
+            sy = 1 if gy1 < gy2 else -1
+            err = dx - dy
+            gx, gy = gx1, gy1
+            while True:
+                # Check this cell and clearance envelope
+                for cdy in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                    for cdx in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                        cx, cy = gx + cdx, gy + cdy
+                        if 0 <= cx < self._grid.cols and 0 <= cy < self._grid.rows:
+                            was_blocked = bool(saved_blocked[layer_idx, cy, cx])
+                            orig_net = int(saved_net[layer_idx, cy, cx])
+                            if (
+                                was_blocked
+                                and orig_net != 0
+                                and orig_net != source_net
+                                and not _pad_blocked_at(layer_idx, cy, cx)
+                            ):
+                                blocking.add(orig_net)
+
+                if gx == gx2 and gy == gy2:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    gx += sx
+                if e2 < dx:
+                    err += dx
+                    gy += sy
+
+        # 3. Also check via locations on every layer
+        for via in route.vias:
+            vgx, vgy = self._grid.world_to_grid(via.x, via.y)
+            for layer_idx in range(self._grid.num_layers):
+                if 0 <= vgx < self._grid.cols and 0 <= vgy < self._grid.rows:
+                    was_blocked = bool(saved_blocked[layer_idx, vgy, vgx])
+                    orig_net = int(saved_net[layer_idx, vgy, vgx])
+                    if (
+                        was_blocked
+                        and orig_net != 0
+                        and orig_net != source_net
+                        and not _pad_blocked_at(layer_idx, vgy, vgx)
+                    ):
+                        blocking.add(orig_net)
+
+        return blocking
+
+
+def create_hybrid_router(
+    grid: RoutingGrid,
+    rules: DesignRules,
+    diagonal_routing: bool = True,
+    force_python: bool = False,
+    net_class_map: dict[str, NetClassRouting] | None = None,
+    max_search_iterations: int = 0,
+    per_net_iterations: int = 0,
+):
+    """Create a router, preferring C++ backend if available.
+
+    This is the recommended way to create a router for maximum performance.
+    It will automatically use the C++ backend when available and fall back
+    to the pure Python implementation otherwise.
+
+    Args:
+        grid: Routing grid
+        rules: Design rules
+        diagonal_routing: Enable 45-degree diagonal routing
+        force_python: Force use of Python backend (for testing)
+        net_class_map: Optional net class map for per-net trace widths
+        max_search_iterations: Issue #2610 -- override for the C++ A*
+            iteration backstop.  ``0`` (default) preserves the historical
+            ``cols * rows * 4`` cap.  Positive values let dense boards
+            trade memory for completeness via ``--max-search-iterations``.
+        per_net_iterations: Issue #3881 -- tuned per-net iteration cap
+            (``0`` = unset).  When set, each net gives up deterministically at
+            the cap and its Python fallback is skipped.
+
+    Returns:
+        Either CppPathfinder or Python Router instance
+    """
+    construction_error: str | None = None
+    if _CPP_AVAILABLE and not force_python:
+        try:
+            cpp_grid = CppGrid.from_routing_grid(grid)
+            return CppPathfinder(
+                cpp_grid,
+                rules,
+                diagonal_routing,
+                net_class_map=net_class_map,
+                max_search_iterations=max_search_iterations,
+                per_net_iterations=per_net_iterations,
+            )
+        except Exception as exc:
+            # Fall back to Python if C++ initialization fails.
+            #
+            # Issue #4724: NOT for a host allocation failure.  Building the
+            # C++ grid mirror is the largest single allocation in a route,
+            # so it is the likeliest place for memory pressure to land --
+            # and swapping the backend mid-run swaps the SEARCH, i.e. the
+            # run silently becomes a different (and 10-100x slower) run.
+            # Exhaustion aborts; a genuine construction defect still falls
+            # back, now with its type named in the log instead of being
+            # reported as "unknown reason".
+            reraise_if_resource_exhaustion("cpp_backend: C++ grid mirror construction")
+            construction_error = f"C++ backend construction failed: {type(exc).__name__}: {exc}"
+
+    # Fall back to Python implementation
+    if not force_python:
+        reason = construction_error or _CPP_IMPORT_ERROR or "unknown reason"
+        logger.warning(
+            "C++ router backend not available -- using pure Python (10-100x slower). Reason: %s",
+            reason,
+        )
+
+    from .pathfinder import Router
+
+    py_router = Router(grid, rules, net_class_map=net_class_map, diagonal_routing=diagonal_routing)
+    # Issue #6217: honour the tuned per-net iteration cap (#3881) on the pure
+    # Python backend too.  Before this, ``--per-net-iterations`` /
+    # ``--deterministic-budget`` only reached the Python A* when it ran as the
+    # C++ wrapper's fallback (``_max_iterations_override`` set per call there),
+    # so ``--backend python`` silently kept a wall-clock-only per-net budget
+    # (and none at all under --deterministic-budget, which zeroes
+    # --per-net-timeout).  The override only ever tightens the historical
+    # ``cols * rows * 4`` bound.
+    if per_net_iterations and int(per_net_iterations) > 0:
+        py_router._max_iterations_override = int(per_net_iterations)
+    return py_router
+
+
+# ---------------------------------------------------------------------------
+# Coupled diff-pair pathfinder (Issue #4065)
+# ---------------------------------------------------------------------------
+
+
+def grid_layer_indices(cpp_grid: CppGrid) -> dict[str, int] | None:
+    """KiCad copper-layer name -> C++ grid layer index (module-level, #5410)."""
+    index_to_layer = getattr(cpp_grid, "_index_to_layer", None)
+    if not index_to_layer:
+        return None
+    from .layers import Layer
+
+    names: dict[str, int] = {}
+    for index, enum_value in index_to_layer.items():
+        try:
+            names[Layer(enum_value).kicad_name] = int(index)
+        except ValueError:  # pragma: no cover - defensive
+            continue
+    return names or None
+
+
+def install_pairwise_domains(
+    cpp_grid: CppGrid, rules, net_name_to_id: dict[str, int], attach_zones=()
+) -> bool:
+    """Install the pairwise (HV-isolation) matrix + attach zones on *cpp_grid*.
+
+    Module-level sibling of ``CppPathfinder._sync_pairwise_domains_to_cpp``, for
+    a ``CppGrid`` that has no ``CppPathfinder`` -- the coupled diff-pair search
+    builds its own (Issue #5410).
+
+    Returns True when the grid's cross-domain widening is faithful: either
+    there is no table at all (dormant by construction, the pre-#4510 verdict),
+    or the translated payload was pushed.  Returns **False** when a table
+    exists but could not be installed -- the caller must then keep any
+    geometry-based clearance refinement switched off, because the C++ grid
+    would answer with the scalar clearance where the Python side would widen.
+    """
+    table = getattr(rules, "pairwise_clearance", None)
+    if table is None:
+        return True
+    impl = getattr(cpp_grid, "_impl", None)
+    if impl is None or not hasattr(impl, "set_pairwise_domains"):
+        return False
+    from .pairwise_clearance import attach_zones_to_net_ids, build_cpp_domain_matrix
+
+    domains = build_cpp_domain_matrix(table, net_name_to_id)
+    if domains is None:
+        return False
+    cpp_zones = []
+    for min_x, min_y, max_x, max_y, net_ids, net_layers in attach_zones_to_net_ids(
+        attach_zones, net_name_to_id, grid_layer_indices(cpp_grid)
+    ):
+        zone = router_cpp.AttachZone()
+        zone.min_x = min_x
+        zone.min_y = min_y
+        zone.max_x = max_x
+        zone.max_y = max_y
+        zone.net_ids = net_ids
+        if net_layers:
+            zone.net_layers = {net_id: sorted(indices) for net_id, indices in net_layers.items()}
+        cpp_zones.append(zone)
+    impl.set_pairwise_domains(domains.net_to_domain, domains.matrix)
+    impl.set_attach_zones(cpp_zones)
+    return True
+
+
+def project_via_spans(cpp_grid: CppGrid, layers) -> list[tuple[int, int]]:
+    """Project physical via copper onto contiguous runs of grid layer indices.
+
+    Module-level form of ``CppPathfinder._project_via_spans`` so the coupled
+    pathfinder's own ``CppGrid`` can be populated without a ``CppPathfinder``
+    (Issue #5410).
+    """
+    from .layers import Layer
+
+    lo, hi = sorted(layer.stack_order for layer in layers)
+    indices = sorted(
+        index
+        for value, index in cpp_grid._layer_to_index.items()
+        if lo <= Layer(value).stack_order <= hi
+    )
+    if not indices:
+        return [(cpp_grid.num_layers, cpp_grid.num_layers)]
+    spans = []
+    start = previous = indices[0]
+    for index in indices[1:]:
+        if index != previous + 1:
+            spans.append((start, previous))
+            start = index
+        previous = index
+    spans.append((start, previous))
+    if layers[0].stack_order > layers[1].stack_order:
+        spans = [(end, start) for start, end in reversed(spans)]
+    return spans
+
+
+def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
+    """Mirror the Python grid's authored per-net minima onto *cpp_grid* (#6243).
+
+    Installs ``rules.net_clearance_floors`` and every pad's exact kernel
+    copper plus its item-level floor (``Pad.authored_clearance``), so
+    ``Grid3D``'s authored gate judges the same copper with the same kernel as
+    :mod:`kicad_tools.router.authored_clearance`.  Keyed on the floors and the
+    pad count, so the common no-floor board pays one tuple compare per call
+    and never touches the native side.
+    """
+    impl = cpp_grid._impl
+    floors = dict(getattr(py_grid.rules, "net_clearance_floors", None) or {})
+    active = bool(floors) or getattr(py_grid, "_authored_item_floors", False) is True
+    # Issue #8577: a class map merged after loading can change a neutralised
+    # pad's item floor without touching the net floors or the pad count.
+    pad_version = getattr(py_grid, "_authored_pad_floor_version", 0)
+    key = (tuple(sorted(floors.items())), len(py_grid._pads), active, pad_version)
+    previous = getattr(cpp_grid, "_authored_key", None)
+    if previous == key or (previous is None and not active):
+        cpp_grid._authored_key = key
+        return
+    if not hasattr(impl, "set_net_clearance_floors"):
+        raise RuntimeError(
+            "Rebuild the native router (`kct build-native`): authored netclass "
+            "clearance support (Issue #6243) is required"
+        )
+    from .clearance_shapes import pad_kernel_params
+
+    for index, pad in enumerate(py_grid._pads):
+        # Issue #6718: the same effective (shape, rratio) ``pad_shape`` uses.
+        shape, rratio = pad_kernel_params(pad)
+        impl.set_pad_authored(
+            index,
+            shape,
+            pad.width,
+            pad.height,
+            pad.rotation,
+            pad.x,
+            pad.y,
+            pad.drill if pad.through_hole else 0.0,
+            float(pad.authored_clearance),
+            rratio,
+        )
+    # Installs the floors and rebuilds the native index (or drops it when
+    # nothing is active any more).
+    impl.set_net_clearance_floors(list(floors), [float(v) for v in floors.values()])
+    cpp_grid._authored_key = key
+
+
+def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) -> None:
+    """Copy committed route copper into *cpp_grid*'s stored-geometry index.
+
+    Issue #2439: incremental -- only routes added since the last sync are
+    copied, tracked by ``cpp_grid._synced_route_count``.
+    """
+    if project is None:
+
+        def project(layers):
+            return project_via_spans(cpp_grid, layers)
+
+    # Issue #8769: a class map merged after loading can change a kept route's
+    # item floor without changing the route count; rebuild the stored copper.
+    floor_version = getattr(py_grid, "_authored_route_floor_version", 0)
+    if floor_version != getattr(cpp_grid, "_stored_route_floor_version", 0):
+        cpp_grid.invalidate_stored_routes()
+        cpp_grid._stored_route_floor_version = floor_version
+
+    current_count = len(py_grid.routes)
+    if current_count <= cpp_grid._synced_route_count:
+        return
+
+    for route in py_grid.routes[cpp_grid._synced_route_count :]:
+        # Issue #6243: neutralised copper keeps its authored minimum.  Only
+        # passed when set, so a pre-#6243 call shape is unchanged.
+        item_floor = float(getattr(route, "authored_clearance", 0.0) or 0.0)
+        extra = {"authored_floor": item_floor} if item_floor > 0.0 else {}
+        for seg in route.segments:
+            layer_idx = cpp_grid._layer_to_index.get(seg.layer.value)
+            if layer_idx is None:
+                # No planar copper on an active layer. Candidate vias
+                # still check this physical segment in final validation.
+                cpp_grid._off_grid_stored_segments.append(seg)
+                continue
+            cpp_grid._impl.add_stored_segment(
+                seg.x1,
+                seg.y1,
+                seg.x2,
+                seg.y2,
+                seg.width,
+                layer_idx,
+                seg.net,
+                (
+                    *py_grid.world_to_grid(seg.x1, seg.y1),
+                    *py_grid.world_to_grid(seg.x2, seg.y2),
+                ),
+                **extra,
+            )
+        for via in route.vias:
+            # Issue #6485: store the DRILLED span (see ``validate_route``'s
+            # via projection) so later candidates are judged against the
+            # barrel that is fabricated, not the logical layer pair.
+            for span in project(via.drilled_layers):
+                cpp_grid._impl.add_stored_via(
+                    via.x,
+                    via.y,
+                    via.drill,
+                    via.diameter,
+                    via.net,
+                    py_grid.world_to_grid(via.x, via.y),
+                    *span,
+                    **extra,
+                )
+
+    cpp_grid._synced_route_count = current_count
+
+
+def replay_route_halo_marks(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
+    """Replay ``RoutingGrid._route_halo``'s active marks onto *cpp_grid* (#5410).
+
+    ``CppGrid.from_routing_grid`` bulk-copies the occupancy raster but never
+    replays the ``mark_segment`` / ``mark_via`` calls that produced it, so the
+    C++ grid has no record of WHICH halo covers a cell.  Search-time physical
+    refinement needs exactly that provenance: ``route_cell_has_geometry``
+    answers false for every cell until the covering marks are known, which
+    leaves the copy permanently pinned to the conservative raster verdict.
+
+    Pairs with :func:`sync_stored_routes` -- marks establish coverage, stored
+    segments/vias establish that the covering copper is registered.  A mark
+    without registered geometry is, correctly, treated as unverifiable.
+    """
+    halo = getattr(py_grid, "_route_halo", None)
+    if halo is None:
+        return
+
+    # ``mark_blocked`` -- the only entry point ``from_routing_grid`` has --
+    # records every cell as static board geometry.  Restore the Python grid's
+    # own split first; without it every route-halo cell reads as a hard static
+    # blockage and no mark can make it refinable.
+    static_np = getattr(py_grid, "_static_blocked", None)
+    if static_np is not None:
+        import numpy as np
+
+        from ..acceleration.backend import to_numpy
+
+        dynamic = to_numpy(py_grid._blocked) & ~to_numpy(static_np)
+        layers, ys, xs = np.nonzero(dynamic)
+        if xs.size:
+            cpp_grid._impl.set_cells_static_blocked(
+                xs.tolist(), ys.tolist(), layers.tolist(), False
+            )
+
+    register = cpp_grid._impl.register_route_mark
+    for (key, radius), count in halo.marks.items():
+        kind, net, layer, x1, y1, x2, y2 = key[:7]
+        for _ in range(count):
+            register(
+                int(kind),
+                int(net),
+                int(layer),
+                int(x1),
+                int(y1),
+                int(x2),
+                int(y2),
+                int(radius),
+                True,
+            )
+
+
+class CppCoupledPathfinder:
+    """C++ wrapper for the coupled differential-pair joint-state A* search.
+
+    Mirrors the marshalling contract of :class:`CppPathfinder`: a
+    :class:`CppGrid` is built once from the Python :class:`RoutingGrid` (or
+    reused), the derived clearance radii + rule scalars are passed in once,
+    and each :meth:`route` call marshals the per-pair pad grid coordinates,
+    the corridor bitset and the budgets across the nanobind boundary.
+
+    The C++ side returns a joint grid-cell path (``CoupledRouteResult.path``);
+    :meth:`route` returns that path as a list of
+    ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples plus a
+    diagnostics dict.  The pure-Python ``CoupledPathfinder.route_coupled``
+    caller unpacks this into the same ``p_path`` / ``n_path`` lists its own
+    ``_reconstruct_coupled_routes`` produces and builds the two
+    :class:`Route` objects with the unchanged Python ``_build_route_from_path``
+    -- so C++ and Python produce byte-identical routes for the same joint
+    path (Issue #4065 curator guidance: do NOT port ``_reconstruct``).
+
+    v1 scope (deferred features stay on the Python fallback): this wrapper is
+    only used for the ``partner_aware`` heuristic; the Python caller checks
+    that precondition before dispatching here.
+    """
+
+    def __init__(
+        self,
+        cpp_grid: CppGrid,
+        rules: DesignRules,
+        target_spacing_cells: int,
+        min_spacing_cells: int,
+        trace_half_width_cells: int,
+        via_extra_cells: int,
+        via_drill_cells: int,
+        spacing_penalty_factor: float,
+        heuristic_weight: float,
+    ):
+        if not _CPP_AVAILABLE:
+            raise RuntimeError("C++ router backend not available")
+        self._grid = cpp_grid
+        # Marshal the DesignRules scalars into the C++ struct (mirrors the
+        # single-ended CppPathfinder rules marshalling).
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = float(rules.trace_width)
+        cpp_rules.trace_clearance = float(rules.trace_clearance)
+        cpp_rules.via_drill = float(rules.via_drill)
+        cpp_rules.via_diameter = float(rules.via_diameter)
+        cpp_rules.via_clearance = float(rules.via_clearance)
+        cpp_rules.min_drill_clearance = float(rules.min_drill_clearance)
+        cpp_rules.min_hole_to_hole = float(rules.min_hole_to_hole)
+        cpp_rules.grid_resolution = float(rules.grid_resolution)
+        cpp_rules.cost_straight = float(rules.cost_straight)
+        cpp_rules.cost_turn = float(rules.cost_turn)
+        cpp_rules.cost_via = float(rules.cost_via)
+        # Issue #4071: marshal the attractor bonus for struct consistency.
+        # NOTE: the coupled joint-state A* (#4069) does not yet consume the
+        # corridor attractor -- porting it into ``coupled_pathfinder.cpp``'s
+        # cost loop is deferred (single-ended ``Pathfinder`` is the consumer
+        # this issue wires up).  Marshalled here so a future coupled-attractor
+        # port needs no additional plumbing.
+        cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
+        # Issue #6840: the fab's via-in-pad capability, resolved exactly as the
+        # single-ended marshalling does, so the coupled via move can refuse a
+        # barrel drilled into an SMD pad (its endpoint waiver let one through).
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
+        # Issue #7296: the mask-dam floor, so the coupled via move refuses a
+        # drill edge within the fab's dam of an SMD pad.
+        cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the same-net pad slit-band edge, so the coupled via
+        # move keeps each rail's annulus out of the band beside its own SMD
+        # pads (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        self._impl = router_cpp.CoupledPathfinder(
+            cpp_grid._impl,
+            cpp_rules,
+            int(target_spacing_cells),
+            int(min_spacing_cells),
+            int(trace_half_width_cells),
+            int(via_extra_cells),
+            int(via_drill_cells),
+            float(spacing_penalty_factor),
+            float(heuristic_weight),
+        )
+
+    def trace_blocked(
+        self, gx: int, gy: int, layer: int, net: int, from_cell: tuple[int, int] | None = None
+    ) -> bool:
+        """Probe the coupled trace predicate (Issue #5410 parity testing)."""
+        fx, fy = from_cell if from_cell is not None else (-1, -1)
+        return bool(self._impl.trace_blocked(gx, gy, layer, net, fx, fy))
+
+    def via_blocked(self, gx: int, gy: int, net: int) -> bool:
+        """Probe the coupled via predicate (Issue #5410 parity testing)."""
+        return bool(self._impl.via_blocked(gx, gy, net))
+
+    def set_partner_via_clearance(
+        self, p_trace_vs_n_via: float, n_trace_vs_p_via: float, via_vs_via: float
+    ) -> None:
+        """Install the via-aware partner clearance radii (Issue #6840).
+
+        All three are centre-to-centre distances in GRID CELLS (unrounded):
+        P centreline vs an N via, N centreline vs a P via, and P via vs N
+        via.  ``0`` disables a check.  See
+        :meth:`CoupledPathfinder._partner_via_radii_cells`.
+        """
+        self._impl.set_partner_via_clearance(
+            float(p_trace_vs_n_via), float(n_trace_vs_p_via), float(via_vs_via)
+        )
+
+    def set_halo_net_dimensions(
+        self,
+        net: int,
+        trace_width: float,
+        trace_clearance: float,
+        via_diameter: float,
+        partner_net: int | None = None,
+        partner_clearance: float | None = None,
+    ) -> None:
+        """Install one net's effective net-class dimensions (Issue #5410).
+
+        The dynamic route-halo refinement *waives* a raster rejection, so it
+        must re-measure with the same effective rule the raster halo was
+        dilated with -- the candidate's **net-class** trace width / clearance /
+        via size, exactly as :meth:`RouteHaloRefiner.trace_clear` and
+        :meth:`RouteHaloRefiner.via_clear` build their candidates on the
+        Python side.  A net with no entry keeps the global ``DesignRules``
+        scalars, which is the pre-existing behaviour for class-less nets.
+
+        Not installing these on a class-bearing net is an **under-blocking**
+        divergence from the Python arm, not merely a parity nit: a class whose
+        ``clearance`` exceeds ``rules.trace_clearance`` would have its halo
+        waived against the narrower global value.
+
+        Issue #5711: ``partner_net`` / ``partner_clearance`` carry the
+        diff-pair intra-pair waiver :meth:`RouteHaloRefiner.trace_clear` passes
+        to :meth:`RouteHaloGeometry.clear` -- the resolved
+        ``nc.diffpair_partner`` net id and ``nc.effective_intra_pair_clearance()``.
+        Omitting them is an **over-blocking** divergence (the partner rail's
+        committed copper demands the wider class clearance), so it cannot
+        cause a DRC violation, but it costs the C++ arm reach the Python arm
+        has.  ``None`` on either argument means "no waiver" and is the
+        ``partner is None`` branch on the Python side.
+        """
+        self._impl.set_halo_net_dimensions(
+            int(net),
+            float(trace_width),
+            float(trace_clearance),
+            float(via_diameter),
+            -1 if partner_net is None or partner_clearance is None else int(partner_net),
+            -1.0 if partner_net is None or partner_clearance is None else float(partner_clearance),
+        )
+
+    def clear_halo_net_dimensions(self) -> None:
+        """Drop every installed net-class halo dimension (Issue #5410)."""
+        self._impl.clear_halo_net_dimensions()
+
+    def route(
+        self,
+        *,
+        p_start_xy: tuple[int, int],
+        n_start_xy: tuple[int, int],
+        start_layer: int,
+        p_goal_xy: tuple[int, int],
+        n_goal_xy: tuple[int, int],
+        end_layer: int,
+        p_net: int,
+        n_net: int,
+        effective_target_spacing: int,
+        effective_approach_radius: int,
+        effective_departure_radius: int,
+        routable_layers: list[int],
+        corridor_bitset: list[int],
+        max_iterations_budget: int,
+        timeout_seconds: float,
+        p_goal_any_layer: bool = False,
+        n_goal_any_layer: bool = False,
+    ) -> tuple[list[tuple[int, int, int, int, int, int, bool]] | None, dict]:
+        """Run the coupled C++ search.
+
+        Returns ``(path, diagnostics)`` where ``path`` is a list of
+        ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples in
+        root->goal order (or ``None`` when the search failed), and
+        ``diagnostics`` carries ``iterations`` / ``best_progress`` /
+        ``timeout_exceeded`` / ``iteration_limited`` and (Issue #4459) the
+        per-reason ``rejections`` histogram for the caller's ``last_*``
+        bookkeeping.
+        """
+        res = self._impl.route(
+            int(p_start_xy[0]),
+            int(p_start_xy[1]),
+            int(n_start_xy[0]),
+            int(n_start_xy[1]),
+            int(start_layer),
+            int(p_goal_xy[0]),
+            int(p_goal_xy[1]),
+            int(n_goal_xy[0]),
+            int(n_goal_xy[1]),
+            int(end_layer),
+            int(p_net),
+            int(n_net),
+            int(effective_target_spacing),
+            int(effective_approach_radius),
+            int(effective_departure_radius),
+            list(routable_layers),
+            corridor_bitset,
+            int(max_iterations_budget),
+            float(timeout_seconds),
+            bool(p_goal_any_layer),
+            bool(n_goal_any_layer),
+        )
+        diagnostics = {
+            "iterations": int(res.iterations),
+            "best_progress": float(res.best_progress),
+            "timeout_exceeded": bool(res.timeout_exceeded),
+            "iteration_limited": bool(res.iteration_limited),
+            # Issue #4459: per-reason move-rejection histogram (reason -> count).
+            # Surfaces WHICH guard pruned the frontier on the C++ path so a
+            # budget-exit is triageable (was hard-emptied on the C++ path,
+            # forcing the caller's ``last_rejections`` to a categorically-empty
+            # dict).  ``res.rejections`` is a ``dict[str, int]`` from nanobind.
+            "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
+        }
+        if not res.success:
+            return None, diagnostics
+        path = [
+            (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent) for n in res.path
+        ]
+        return path, diagnostics
+
+    def rail_clear_world(
+        self,
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+        layer: int,
+        net: int,
+        partner_net: int = -1,
+        rail_half: float = -1.0,
+        rail_gap: float = -1.0,
+        is_via: bool = False,
+    ) -> bool:
+        """The Epic #5509 rail clearance gate in world millimetres (Issue #5786)."""
+        return bool(
+            self._impl.rail_clear_world(
+                float(ax),
+                float(ay),
+                float(bx),
+                float(by),
+                int(layer),
+                int(net),
+                int(partner_net),
+                float(rail_half),
+                float(rail_gap),
+                bool(is_via),
+            )
+        )
+
+    def rail_segment_clear(
+        self,
+        sx: float,
+        sy: float,
+        ex: float,
+        ey: float,
+        layer: int,
+        net: int,
+        partner_net: int,
+        half: float,
+        gap: float,
+    ) -> bool:
+        """Raster + kernel verdict for one rail segment (Issue #5786)."""
+        return bool(
+            self._impl.rail_segment_clear(
+                float(sx),
+                float(sy),
+                float(ex),
+                float(ey),
+                int(layer),
+                int(net),
+                int(partner_net),
+                float(half),
+                float(gap),
+            )
+        )
+
+    def route_centerline(
+        self,
+        *,
+        starts: list[tuple[int, int, int, int, float]],
+        goals: list[tuple[int, int, int, int, float]],
+        p_net: int,
+        n_net: int,
+        half_pitch: float,
+        p_side: int,
+        p_half: float,
+        p_gap: float,
+        n_half: float,
+        n_gap: float,
+        min_radius_cells: float = 1.0,
+        turn_penalty: float = 2.0,
+        heuristic_weight: float = 1.0,
+        max_iterations_budget: int = 0,
+        timeout_seconds: float = 0.0,
+    ) -> tuple[list[tuple[int, int, int, int]] | None, dict]:
+        """Pose-based centerline search with a Dubins heuristic (Issue #5786).
+
+        ``starts`` / ``goals`` are ``(x, y, heading, layer, cost)`` tuples in
+        GRID coordinates; ``heading`` is in 45-degree steps (0 = +x,
+        counter-clockwise in grid space).  A goal pose's heading is the
+        direction of travel on ARRIVAL.  Returns ``(path, diagnostics)`` with
+        ``path`` a list of ``(x, y, heading, layer)`` poses, or ``None`` when
+        the search failed.  C++-only: there is no pure-Python implementation
+        of this search (the Python fallback skips the rescue).
+        """
+
+        def _endpoints(items):
+            out = []
+            for x, y, h, layer, cost in items:
+                out.append(
+                    router_cpp.CenterlineEndpoint(
+                        router_cpp.CenterlinePose(int(x), int(y), int(h), int(layer)),
+                        float(cost),
+                    )
+                )
+            return out
+
+        res = self._impl.route_centerline(
+            _endpoints(starts),
+            _endpoints(goals),
+            int(p_net),
+            int(n_net),
+            float(half_pitch),
+            int(p_side),
+            float(p_half),
+            float(p_gap),
+            float(n_half),
+            float(n_gap),
+            float(min_radius_cells),
+            float(turn_penalty),
+            float(heuristic_weight),
+            int(max_iterations_budget),
+            float(timeout_seconds),
+        )
+        diagnostics = {
+            "iterations": int(res.iterations),
+            "best_progress": float(res.best_progress),
+            "timeout_exceeded": bool(res.timeout_exceeded),
+            "iteration_limited": bool(res.iteration_limited),
+            "start_index": int(res.start_index),
+            "goal_index": int(res.goal_index),
+            "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
+        }
+        if not res.success:
+            return None, diagnostics
+        return [(p.x, p.y, p.heading, p.layer) for p in res.path], diagnostics

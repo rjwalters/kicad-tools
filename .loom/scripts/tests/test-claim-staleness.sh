@@ -1,0 +1,546 @@
+#!/usr/bin/env bash
+# test-claim-staleness.sh - Unit tests for claim-staleness.sh (#6514), the
+# shared staleness evaluator behind judge.md's "Stale `loom:reviewing` Claim
+# Check", doctor.md's "Stale `loom:treating` Claim Check" and curator.md's
+# "Stale `loom:curating` Claim Check".
+#
+# The regression under test is the PR #6513 livelock: a single routine Builder
+# post-push status comment landing after the claim used to pin that claim
+# "fresh" forever (`COMMENTS_AFTER > 0`), while duplicate stand-down
+# suppression simultaneously starved `STANDDOWN_COUNT` so the bounded fallback
+# could never fire either. T3/T7/T8/T9 are the direct regression tests.
+#
+# Strategy: stub `gh` on PATH so the script never touches the network. The stub
+# serves canned issue/timeline/comments fixtures from $LOOM_TEST_STUB_DIR and
+# records every mutating call (POST/PATCH) with its payload.
+#
+# Usage:
+#   ./.loom/scripts/tests/test-claim-staleness.sh
+
+set -euo pipefail
+# shellcheck source=lib/write-scope-fixture.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET_SCRIPT="$HELPERS_DIR/claim-staleness.sh"
+
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
+
+[[ -x "$TARGET_SCRIPT" ]] || {
+    echo -e "${RED}FATAL${NC}: $TARGET_SCRIPT missing or not executable"
+    exit 2
+}
+command -v jq >/dev/null 2>&1 || {
+    echo -e "${RED}FATAL${NC}: jq required"
+    exit 2
+}
+
+STUB_DIR="$(mktemp -d)"
+trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
+
+cat >"$STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+# Stub gh for test-claim-staleness.sh.
+set -uo pipefail
+D="${LOOM_TEST_STUB_DIR:?stub gh: LOOM_TEST_STUB_DIR not set}"
+LOG="$D/gh-calls.log"
+
+[[ "${1:-}" == "api" ]] || { echo "stub gh: unhandled args: $*" >&2; exit 3; }
+shift
+
+path="" jq_expr="" method="GET" read_stdin=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --jq|-q) jq_expr="${2:-}"; shift 2 ;;
+    --method|-X) method="${2:-GET}"; shift 2 ;;
+    --input) read_stdin=1; shift 2 ;;
+    --paginate|--silent) shift ;;
+    -*) shift ;;
+    *) [[ -z "$path" ]] && path="$1"; shift ;;
+  esac
+done
+
+if [[ "$method" == "POST" || "$method" == "PATCH" ]]; then
+  payload=""
+  [[ $read_stdin -eq 1 ]] && payload="$(cat)"
+  if [[ -n "${LOOM_TEST_MUTATION_FAILS:-}" ]]; then
+    echo '{"message":"boom"}' >&2
+    exit 1
+  fi
+  {
+    echo "$method $path"
+    printf '%s\n' "$payload"
+  } >>"$LOG"
+  echo '{}'
+  exit 0
+fi
+
+serve() { # <fixture-file>
+  local f="$D/$1"
+  [[ -f "$f" ]] || { echo "stub gh: missing fixture $1" >&2; exit 1; }
+  if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr" "$f"; else cat "$f"; fi
+}
+
+case "$path" in
+  *"/timeline"*) serve timeline.json ;;
+  *"/comments"*) serve comments.json ;;
+  */issues/[0-9]*)
+    if [[ "${LOOM_TEST_ISSUE_READ_FAILS:-}" == "1" ]]; then
+      echo '{"message":"Not Found"}' >&2
+      exit 1
+    fi
+    serve issue.json
+    ;;
+  *) echo "stub gh: unhandled path: $path" >&2; exit 3 ;;
+esac
+STUB
+chmod +x "$STUB_DIR/gh"
+# #9548: `loom-daemon forge trusted-comments` stub, mirroring the predicate for
+# these fixtures (insider association, or the default fleet App App-spelled).
+# $LOOM_TEST_NO_TRUST_VERB=1 simulates a binary predating the verb.
+echo '#!/usr/bin/env bash' >"$STUB_DIR/loom-daemon"
+# #9548: `forge may-write` goes to a real daemon when WRITE_SCOPE_DAEMON names
+# one (lib/write-scope-fixture.sh), else answers as a pre-verb binary.
+write_scope_stub_verb_snippet >>"$STUB_DIR/loom-daemon"
+cat >>"$STUB_DIR/loom-daemon" <<'STUB'
+# #10235: `forge claim-liveness` is the daemon's extra liveness evidence.
+if [[ "$1 $2" == "forge claim-liveness" ]]; then
+  # Record the target repo the caller named; answer only for that repo.
+  want=""; prev=""; for a in "$@"; do [[ "$prev" == "--repo" ]] && want="$a"; prev="$a"; done
+  printf '%s\n' "$want" >"$LOOM_TEST_STUB_DIR/liveness-repo"
+  [[ -z "${LOOM_TEST_EXTRA_LIVENESS_REPO:-}" || "$want" == "$LOOM_TEST_EXTRA_LIVENESS_REPO" ]] && printf '%s' "${LOOM_TEST_EXTRA_LIVENESS:-}"
+  exit 0
+fi
+# #11947: `lease pr check` stub. $LOOM_TEST_LEASE_STATE is the PR_LEASE_STATE
+# to print (unset => binary without the verb); the role asked for is recorded.
+if [[ "$1 $2 $3" == "lease pr check" ]]; then
+  prev=""; for a in "$@"; do [[ "$prev" == "--role" ]] && printf '%s\n' "$a" >"$LOOM_TEST_STUB_DIR/lease-role"; prev="$a"; done
+  [[ -z "${LOOM_TEST_LEASE_STATE:-}" ]] && exit 64
+  echo "PR_LEASE_STATE=$LOOM_TEST_LEASE_STATE"
+  [[ "$LOOM_TEST_LEASE_STATE" == "held-peer" ]] && exit 4
+  [[ "$LOOM_TEST_LEASE_STATE" == "unknown" ]] && exit 5
+  exit 0
+fi
+[[ "$1 $2" == "forge trusted-comments" ]] || { echo "stub loom-daemon: $*" >&2; exit 64; }
+[[ "${LOOM_TEST_NO_TRUST_VERB:-}" == "1" ]] && exit 2
+exec jq -c '[.[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))
+    or ((.user.login // "") | test("^loom-fleet-dispatch(-[0-9]+)?\\[bot\\]$")))]'
+STUB
+chmod +x "$STUB_DIR/loom-daemon"
+unset LOOM_DAEMON_BIN
+export LOOM_TEST_STUB_DIR="$STUB_DIR"
+export PATH="$STUB_DIR:$PATH"
+# #9548: The script vets its write target through the write scope before it
+# writes. It runs from a checkout registered as owner/repo (origin, .loom/, push
+# reported to the permission probe), so the real decision admits it.
+write_scope_register "$STUB_DIR/checkout" owner/repo
+cd "$STUB_DIR/checkout"
+
+# Deterministic defaults regardless of the ambient environment.
+export LOOM_STALE_REVIEWING_MINUTES=30
+export LOOM_STALE_TREATING_MINUTES=60
+export LOOM_STALE_CURATING_MINUTES=30
+export LOOM_MAX_STANDDOWN_STREAK=3
+
+ago() { # <minutes> -> RFC3339 UTC timestamp that many minutes in the past
+    date -u -d "-$1 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+        date -u -v-"$1"M +%Y-%m-%dT%H:%M:%SZ
+}
+
+set_labels() { # <label>...
+    printf '%s\n' "$*" | jq -R 'split(" ") | map(select(length > 0) | {name: .}) | {labels: .}' \
+        >"$STUB_DIR/issue.json"
+}
+
+set_claim() { # <label> <iso-ts>  (empty ts => no claim event in the timeline)
+    if [[ -z "${2:-}" ]]; then
+        echo '[]' >"$STUB_DIR/timeline.json"
+    else
+        jq -n --arg l "$1" --arg t "$2" \
+            '[{event:"labeled", label:{name:$l}, created_at:$t}]' >"$STUB_DIR/timeline.json"
+    fi
+}
+
+set_comments() { # reads a JSON array on stdin; an item without `user` is the fleet's App
+    jq 'map(if has("user") then . else . + {user: {login: "loom-fleet-dispatch[bot]", type: "Bot"}} end)' \
+        >"$STUB_DIR/comments.json"
+}
+
+reset() {
+    : >"$STUB_DIR/gh-calls.log"
+    unset LOOM_TEST_MUTATION_FAILS LOOM_TEST_ISSUE_READ_FAILS LOOM_TEST_NO_TRUST_VERB LOOM_TEST_EXTRA_LIVENESS LOOM_TEST_LEASE_STATE
+    set_labels "loom:reviewing"
+    echo '[]' >"$STUB_DIR/comments.json"
+}
+read_log() { cat "$STUB_DIR/gh-calls.log" 2>/dev/null || true; }
+
+field() { # <output> <KEY>
+    grep -E "^$2=" <<<"$1" | head -n 1 | cut -d= -f2-
+}
+
+echo "Testing claim-staleness.sh..."
+echo ""
+
+# --- T0: usage errors ------------------------------------------------------
+reset
+rc=0
+"$TARGET_SCRIPT" check --number abc --label loom:reviewing >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0a: non-numeric --number is a usage error"
+rc=0
+"$TARGET_SCRIPT" check --number 1 --label reviewing >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0b: a non-loom label is a usage error"
+rc=0
+"$TARGET_SCRIPT" bogus --number 1 --label loom:reviewing >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0c: unknown subcommand is a usage error"
+
+# --- T1: no claim label -> unclaimed --------------------------------------
+reset
+set_labels "loom:review-requested"
+set_claim loom:reviewing ""
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "unclaimed" "$(field "$out" CLAIM_STATE)" "T1: an unclaimed PR reports CLAIM_STATE=unclaimed"
+
+# --- T2: fresh claim, nothing else ----------------------------------------
+reset
+set_claim loom:reviewing "$(ago 5)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T2: a 5-minute-old claim is fresh"
+
+# --- T3: THE #6513 REGRESSION ---------------------------------------------
+# Claim 40 minutes old; a single routine Builder post-push status comment
+# landed 32 minutes ago. Under the old `COMMENTS_AFTER > 0` rule this pinned
+# the claim "fresh" forever. It must now read STALE.
+reset
+set_claim loom:reviewing "$(ago 40)"
+jq -n --arg t "$(ago 32)" '[{id: 101, created_at: $t,
+  body: "Post-push status (Builder, in-turn verification): rebased onto main, CI green."}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" \
+    "T3: a non-claimant Builder comment no longer pins a 40-minute-old claim fresh (#6513)"
+assert_eq "0" "$(field "$out" ACTIVITY_COUNT)" "T3: the Builder comment is not counted as claimant activity"
+
+# --- T4: multiple non-claimant comments still do not compound --------------
+reset
+set_claim loom:reviewing "$(ago 40)"
+jq -n --arg a "$(ago 35)" --arg b "$(ago 20)" --arg c "$(ago 2)" \
+    '[{id:101,created_at:$a,body:"Builder: pushed."},
+      {id:102,created_at:$b,body:"Champion: merge-risk hold notice."},
+      {id:103,created_at:$c,body:"Someone: unrelated chatter."}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" \
+    "T4: three non-claimant comments (one 2 minutes old) still leave the claim stale"
+
+# --- T5: a genuine claimant heartbeat DOES keep the claim fresh ------------
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 3)" --arg m "<!-- loom:claim-activity claim=$CLAIM_TS -->" \
+    '[{id:201,created_at:$t,body:("Judge: still running the test suite.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" \
+    "T5: a marked claimant heartbeat 3 minutes ago keeps a 40-minute-old claim fresh"
+assert_eq "1" "$(field "$out" ACTIVITY_COUNT)" "T5: the heartbeat is counted as claimant activity"
+
+# --- T6: a heartbeat only extends the claim, it never pins it --------------
+reset
+CLAIM_TS="$(ago 120)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 45)" --arg m "<!-- loom:claim-activity claim=$CLAIM_TS -->" \
+    '[{id:201,created_at:$t,body:("Judge: mid-review.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" \
+    "T6: a heartbeat 45 minutes ago (> 30m idle) leaves the claim stale"
+
+# --- T7: first stand-down POSTs a seq=1 comment ---------------------------
+reset
+set_claim loom:reviewing "$(ago 5)"
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+log="$(read_log)"
+assert_eq "posted:1" "$(field "$out" STANDDOWN_ACTION)" "T7: first stand-down posts seq=1"
+assert_contains "$log" "POST repos/owner/repo/issues/6513/comments" "T7: it POSTs a new comment"
+assert_contains "$log" "loom:standdown claim=" "T7: the comment carries the stand-down marker"
+assert_contains "$log" "seq=1" "T7: the marker records seq=1"
+assert_contains "$log" "1 of 3 (streak cap NOT met)" "T7: the message reports the streak against the cap (#9927)"
+assert_contains "$log" "of 30m (age floor NOT met)" "T7: the message also reports the claim-age floor (#9927)"
+
+# --- T8: THE STREAK-STARVATION REGRESSION ---------------------------------
+# A stand-down comment already exists for this claim. The old logic skipped
+# silently, so STANDDOWN_COUNT froze at 1 forever. It must now bump seq in
+# place: one visible comment (the #5123 goal), a growing streak (the #4618
+# AC3 goal).
+reset
+CLAIM_TS="$(ago 5)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 2)" --arg m "<!-- loom:standdown claim=$CLAIM_TS seq=1 -->" \
+    '[{id:301,created_at:$t,body:("Judge pass: standing down.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+log="$(read_log)"
+assert_eq "bumped:301:2" "$(field "$out" STANDDOWN_ACTION)" \
+    "T8: a duplicate stand-down bumps the existing comment to seq=2 instead of freezing the streak"
+assert_contains "$log" "PATCH repos/owner/repo/issues/comments/301" "T8: it PATCHes the existing comment"
+assert_not_contains "$log" "POST repos/owner/repo/issues/6513/comments" \
+    "T8: it does NOT post a duplicate comment (#5123 still holds)"
+assert_contains "$log" "seq=2" "T8: the bumped marker records seq=2"
+
+# --- T9: a legacy seq-less marker counts as seq=1 and bumps to 2 -----------
+reset
+CLAIM_TS="$(ago 5)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 2)" --arg m "<!-- loom:standdown claim=$CLAIM_TS -->" \
+    '[{id:302,created_at:$t,body:("Judge pass: standing down.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "1" "$(field "$out" STANDDOWN_COUNT)" "T9: a legacy seq-less stand-down marker counts as 1"
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "bumped:302:2" "$(field "$out" STANDDOWN_ACTION)" "T9: it is bumped to seq=2 in place"
+
+# --- T10: bounded fallback fires once the streak AND the age floor are met --
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 2)" --arg m "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" \
+    --arg b "$(ago 30)" \
+    '[{id:401,created_at:$b,body:"Builder: pushed a fixup."},
+      {id:402,created_at:$t,body:("Judge pass: standing down.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale-bounded-fallback" "$(field "$out" CLAIM_STATE)" \
+    "T10: seq=3 plus a 40-minute-old claim force-reclaims despite a non-claimant comment"
+assert_eq "3" "$(field "$out" STANDDOWN_COUNT)" "T10: the streak reads 3 from the bumped marker alone"
+
+# --- T11: the fallback still respects the #4790 age floor ------------------
+reset
+CLAIM_TS="$(ago 10)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 1)" --arg m "<!-- loom:standdown claim=$CLAIM_TS seq=5 -->" \
+    '[{id:501,created_at:$t,body:("Judge pass: standing down.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" \
+    "T11: a high peer-arrival streak on a 10-minute-old claim does NOT force-reclaim (#4790)"
+
+# --- T11b: #9927 — a capped streak under the age floor says which gate binds -
+# 2am#1138 read "4 of 3" as an overdue force-reclaim; the message must name the
+# age floor as the outstanding condition, and the marker must stay unchanged.
+reset
+CLAIM_TS="$(ago 23)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 1)" --arg m "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" \
+    '[{id:551,created_at:$t,body:("Judge pass: standing down.\n" + $m)}]' | set_comments
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+log="$(read_log)"
+assert_eq "bumped:551:4" "$(field "$out" STANDDOWN_ACTION)" "T11b: the under-floor claim stays fresh and is bumped to seq=4"
+assert_contains "$log" "4 of 3 (streak cap met)" "T11b: the streak cap is reported as met"
+assert_contains "$log" "claim age 23m of 30m (age floor NOT met)" "T11b: the age floor is named as the binding gate"
+assert_contains "$log" "only once BOTH are met" "T11b: the message states the fallback needs both gates"
+assert_contains "$log" "<!-- loom:standdown claim=$CLAIM_TS seq=4 -->" "T11b: the marker format is unchanged"
+
+# --- T12: the fallback beats an activity-marker-spamming zombie ------------
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 1)" --arg am "<!-- loom:claim-activity claim=$CLAIM_TS -->" \
+    --arg sm "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" --arg s "$(ago 2)" \
+    '[{id:601,created_at:$t,body:("Judge: still working.\n" + $am)},
+      {id:602,created_at:$s,body:("Judge pass: standing down.\n" + $sm)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale-bounded-fallback" "$(field "$out" CLAIM_STATE)" \
+    "T12: the fallback keys on claim age, so a heartbeat loop cannot hold the claim forever"
+
+# --- T13: fail-safe paths --------------------------------------------------
+reset
+set_claim loom:reviewing ""
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" \
+    "T13a: a labelled item with no claim event in the timeline fails safe to unknown"
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "skipped-unknown-claim" "$(field "$out" STANDDOWN_ACTION)" \
+    "T13b: standdown posts nothing when the claim timestamp is unknown"
+assert_eq "" "$(read_log)" "T13c: no mutating call is made on the unknown path"
+
+reset
+set_claim loom:reviewing "$(ago 5)"
+export LOOM_TEST_ISSUE_READ_FAILS=1
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+unset LOOM_TEST_ISSUE_READ_FAILS
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" "T13d: a failed label read fails safe to unknown"
+
+# --- T14: standdown is a no-op once the claim is stale ---------------------
+reset
+set_claim loom:reviewing "$(ago 40)"
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "skipped-not-fresh" "$(field "$out" STANDDOWN_ACTION)" \
+    "T14: a stale claim is not stood down (the caller reclaims instead)"
+assert_eq "" "$(read_log)" "T14: no comment is posted for a stale claim"
+
+# --- T15: --dry-run mutates nothing ---------------------------------------
+reset
+set_claim loom:reviewing "$(ago 5)"
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing --dry-run)"
+assert_eq "would-post:1" "$(field "$out" STANDDOWN_ACTION)" "T15: --dry-run reports would-post:1"
+assert_eq "" "$(read_log)" "T15: --dry-run makes zero mutating calls"
+
+# --- T16: the marker subcommand prints the activity marker ----------------
+reset
+CLAIM_TS="$(ago 5)"
+set_claim loom:reviewing "$CLAIM_TS"
+out="$("$TARGET_SCRIPT" marker --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "<!-- loom:claim-activity claim=$CLAIM_TS -->" "$out" \
+    "T16: marker prints the activity marker for the live claim"
+set_labels "loom:review-requested"
+out="$(env -u LOOM_SWEEP_ID "$TARGET_SCRIPT" marker --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "" "$out" "T16: marker prints nothing when there is no live claim and no sweep id"
+out="$(LOOM_SWEEP_ID=step-judge-6513-1 "$TARGET_SCRIPT" marker --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "<!-- loom:claim-activity sweep=step-judge-6513-1 -->" "$out" \
+    "T16: marker falls back to a sweep-identified marker when there is no claim (#13134)"
+
+# --- T17: per-label thresholds -------------------------------------------
+reset
+set_labels "loom:treating"
+set_claim loom:treating "$(ago 45)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:treating)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" \
+    "T17a: loom:treating uses the 60-minute Doctor threshold (45m is still fresh)"
+assert_eq "60" "$(field "$out" STALE_MINUTES)" "T17b: STALE_MINUTES reports the Doctor default"
+reset
+set_labels "loom:curating"
+set_claim loom:curating "$(ago 45)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:curating)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" \
+    "T17c: loom:curating uses the 30-minute Curator threshold (45m is stale)"
+
+# --- T18: --json output ---------------------------------------------------
+# Regression coverage for #8293: the jq filter binds the label via `--arg
+# label`/`$label`, which is a reserved word on jq 1.6 and fails to parse
+# there (renamed to `claim_label` internally; the output field stays
+# `label`). These cases exercise --json across every documented claim_state
+# so a reintroduced reserved-word bind would fail loudly here even without a
+# jq 1.6 binary on PATH.
+reset
+set_claim loom:reviewing "$(ago 40)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "stale" "$(jq -r '.claim_state' <<<"$out")" "T18a: --json reports claim_state"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18b: --json reports the label"
+assert_eq "30" "$(jq -r '.stale_minutes' <<<"$out")" "T18c: --json reports stale_minutes"
+
+reset
+set_labels "loom:review-requested"
+set_claim loom:reviewing ""
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "unclaimed" "$(jq -r '.claim_state' <<<"$out")" "T18d: --json reports claim_state=unclaimed"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18d: --json reports the label when unclaimed"
+
+reset
+set_claim loom:reviewing "$(ago 5)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "fresh" "$(jq -r '.claim_state' <<<"$out")" "T18e: --json reports claim_state=fresh"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18e: --json reports the label when fresh"
+
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 1)" --arg am "<!-- loom:claim-activity claim=$CLAIM_TS -->" \
+    --arg sm "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" --arg s "$(ago 2)" \
+    '[{id:601,created_at:$t,body:("Judge: still working.\n" + $am)},
+      {id:602,created_at:$s,body:("Judge pass: standing down.\n" + $sm)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "stale-bounded-fallback" "$(jq -r '.claim_state' <<<"$out")" \
+    "T18f: --json reports claim_state=stale-bounded-fallback"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" \
+    "T18f: --json reports the label under the bounded fallback"
+
+reset
+set_claim loom:reviewing ""
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "unknown" "$(jq -r '.claim_state' <<<"$out")" "T18g: --json reports claim_state=unknown"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18g: --json reports the label when unknown"
+
+# --- T19: a mutation failure is reported, not swallowed as success --------
+reset
+set_claim loom:reviewing "$(ago 5)"
+export LOOM_TEST_MUTATION_FAILS=1
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
+unset LOOM_TEST_MUTATION_FAILS
+assert_eq "failed-post" "$(field "$out" STANDDOWN_ACTION)" "T19: a failed POST reports failed-post"
+
+# --- T20: an untrusted author's activity marker is prose (#9548) -----------
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 3)" --arg m "<!-- loom:claim-activity claim=$CLAIM_TS -->" \
+    '[{id:301,created_at:$t,body:("still here " + $m),user:{login:"drive-by",type:"User"},author_association:"NONE"},
+      {id:302,created_at:$t,body:$m,user:{login:"loom-fleet-dispatch",type:"User"},author_association:"CONTRIBUTOR"}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T20a: outsider / bare-slug activity markers do not keep a claim fresh"
+assert_eq "0" "$(field "$out" ACTIVITY_COUNT)" "T20b: neither is counted as claimant activity"
+out="$(LOOM_TEST_NO_TRUST_VERB=1 "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" "T20c: no trust filter -> unknown (fail safe, never stomp)"
+
+# --- T21: the daemon's extra liveness evidence keeps a claim fresh (#10235) --
+# A Judge-progress comment / claimant force-push after the claim (what
+# `loom-daemon forge claim-liveness` reports) resets the idle clock, exactly as
+# the daemon's own anchor does; with none, the same claim is stale.
+reset
+set_claim loom:reviewing "$(ago 40)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T21a: no extra evidence -> a 40m-old claim is stale"
+out="$(LOOM_TEST_EXTRA_LIVENESS="$(ago 5)" "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T21b: a recent Judge-progress/force-push signal keeps it fresh"
+assert_eq "5" "$(field "$out" IDLE_MINUTES)" "T21c: the idle clock anchors on that signal"
+assert_eq "0" "$(field "$out" ACTIVITY_COUNT)" "T21d: it is not counted as a claim-activity marker"
+out="$(LOOM_TEST_EXTRA_LIVENESS="not a timestamp" "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T21e: a malformed daemon answer is ignored"
+
+# --- T22: the explicit --repo reaches the liveness lookup (#10235) ----------
+# Evidence exists only in target/other; a lookup that drops --repo borrows the
+# checkout's (empty) evidence and reclaims a live remote claim.
+reset
+set_claim loom:reviewing "$(ago 40)"
+out="$(LOOM_TEST_EXTRA_LIVENESS_REPO=target/other LOOM_TEST_EXTRA_LIVENESS="$(ago 5)" "$TARGET_SCRIPT" check --repo target/other --number 6513 --label loom:reviewing)"
+assert_eq "target/other" "$(cat "$STUB_DIR/liveness-repo")" "T22a: claim-liveness is called with the explicit --repo"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T22b: target-repo activity keeps the claim fresh"
+out="$(LOOM_TEST_EXTRA_LIVENESS_REPO=checkout/repo LOOM_TEST_EXTRA_LIVENESS="$(ago 5)" "$TARGET_SCRIPT" check --repo target/other --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T22c: the checkout repo's activity is not borrowed"
+
+# --- T23: a live PR lease outranks the stale clocks (#11947) ----------------
+# Streak at the cap and claim older than the floor: the bounded fallback fires
+# unless the holder's lease is live.
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg s "$(ago 2)" --arg sm "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" \
+    '[{id:701,created_at:$s,body:("Judge pass: standing down.\n" + $sm)}]' | set_comments
+for st in held-peer held-self; do
+    out="$(LOOM_TEST_LEASE_STATE=$st "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+    assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T23a: a $st lease downgrades stale-bounded-fallback to fresh"
+done
+assert_eq "judge" "$(cat "$STUB_DIR/lease-role")" "T23b: loom:reviewing maps to --role judge"
+for st in free unknown; do
+    out="$(LOOM_TEST_LEASE_STATE=$st "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+    assert_eq "stale-bounded-fallback" "$(field "$out" CLAIM_STATE)" "T23c: a $st lease leaves the bounded fallback unchanged"
+done
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale-bounded-fallback" "$(field "$out" CLAIM_STATE)" "T23d: a binary without lease pr check leaves the state unchanged"
+# The plain idle-clock `stale` path is downgraded too, and the other lanes map.
+reset
+set_claim loom:reviewing "$(ago 40)"
+out="$(LOOM_TEST_LEASE_STATE=held-peer "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T23e: a live lease downgrades plain stale to fresh"
+set_labels "loom:treating"; set_claim loom:treating "$(ago 90)"
+out="$(LOOM_TEST_LEASE_STATE=held-peer "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:treating)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T23f: a live doctor lease downgrades a stale loom:treating claim"
+assert_eq "doctor" "$(cat "$STUB_DIR/lease-role")" "T23g: loom:treating maps to --role doctor"
+set_labels "loom:custom"; set_claim loom:custom "$(ago 90)"
+rm -f "$STUB_DIR/lease-role"
+out="$(LOOM_TEST_LEASE_STATE=held-peer "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:custom)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T23h: a label with no role mapping is never downgraded"
+assert_eq "false" "$([[ -e "$STUB_DIR/lease-role" ]] && echo true || echo false)" "T23i: no lease lookup for an unmapped label"
+
+# --- Summary ---
+echo ""
+echo "────────────────────────────────"
+echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
+
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    exit 1
+fi
+exit 0

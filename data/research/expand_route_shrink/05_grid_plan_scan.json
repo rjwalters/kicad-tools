@@ -1,0 +1,3834 @@
+{
+  "rows": [
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.0,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          70.0,
+          90.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 3932679,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.04,
+          "cells": 14847
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18468
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.05,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.05,
+        "scale_y": 1.05,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          73.5,
+          94.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.05/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.05/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 551250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 8856279,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 63917
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.1,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.1,
+        "scale_y": 1.1,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          77.0,
+          99.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.1/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.1/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 605000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 4239955,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.04,
+          "cells": 25149
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.15,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.15,
+        "scale_y": 1.15,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          80.5,
+          103.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.15/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.15/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 661250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 4388452,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.2,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.2,
+        "scale_y": 1.2,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          84.0,
+          108.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.2/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.2/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 720000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 9382926,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.04,
+          "cells": 14847
+        },
+        "C1": {
+          "pitch_mm": 0.065,
+          "cells": 10912
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 63917
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.25,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.25,
+        "scale_y": 1.25,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          87.5,
+          112.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.25/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.25/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 781250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 9601586,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.3,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.3,
+        "scale_y": 1.3,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          91.0,
+          117.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.3/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.3/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 845000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 4840014,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.04,
+          "cells": 25149
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.35,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.35,
+        "scale_y": 1.35,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          94.5,
+          121.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.35/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.35/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 911250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 9988909,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.4,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.4,
+        "scale_y": 1.4,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          98.0,
+          126.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.4/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.4/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 980000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 10160179,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.065,
+          "cells": 7936
+        },
+        "D3": {
+          "pitch_mm": 0.04,
+          "cells": 14847
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.45,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.45,
+        "scale_y": 1.45,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          101.5,
+          130.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.45/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.45/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 1051250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 5551221,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "uniform",
+      "scale": 1.5,
+      "scale_report": {
+        "cluster_rule": null,
+        "scale_x": 1.5,
+        "scale_y": 1.5,
+        "mode": "uniform",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 42,
+        "clustered_footprints": 0,
+        "outline_mm": [
+          105.0,
+          135.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.5/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-uniform-1.5/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 1125000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 5792108,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1978251
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.04,
+          "cells": 25149
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.05,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.05,
+        "scale_y": 1.05,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          73.5,
+          94.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.05/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.05/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 551250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 8905820,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18468
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 63917
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.1,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.1,
+        "scale_y": 1.1,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          77.0,
+          99.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.1/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.1/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 605000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 4239320,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.065,
+          "cells": 15934
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.04,
+          "cells": 25149
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.15,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.15,
+        "scale_y": 1.15,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          80.5,
+          103.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.15/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.15/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 661250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 9213265,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.2,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.2,
+        "scale_y": 1.2,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          84.0,
+          108.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.2/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.2/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 720000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 4596822,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.04,
+          "cells": 14847
+        },
+        "C1": {
+          "pitch_mm": 0.065,
+          "cells": 10912
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 63917
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.25,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.25,
+        "scale_y": 1.25,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          87.5,
+          112.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.25/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.25/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 781250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 9596006,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.3,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.3,
+        "scale_y": 1.3,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          91.0,
+          117.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.3/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.3/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 845000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 5567343,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.0125,
+          "cells": 775884
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.04,
+          "cells": 25149
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.35,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.35,
+        "scale_y": 1.35,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          94.5,
+          121.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.35/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.35/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 911250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 5197783,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.4,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.4,
+        "scale_y": 1.4,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          98.0,
+          126.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.4/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.4/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 980000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 5368495,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.05,
+          "cells": 48555
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.065,
+          "cells": 7936
+        },
+        "D3": {
+          "pitch_mm": 0.04,
+          "cells": 14847
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.45,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.45,
+        "scale_y": 1.45,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          101.5,
+          130.5
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.45/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.45/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 1051250",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 10382896,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1976590
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C7": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C8": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.025,
+          "cells": 64078
+        },
+        "R2": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R5": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    },
+    {
+      "board": "05",
+      "mode": "rigid",
+      "scale": 1.5,
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.5,
+        "scale_y": 1.5,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          105.0,
+          135.0
+        ]
+      },
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.5/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/probe/plan-05-rigid-1.5/unused.kicad_pcb --dry-run --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --max-cells 1125000",
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 10577933,
+      "fine_zones": {
+        "U1": {
+          "pitch_mm": 0.04,
+          "cells": 95481
+        },
+        "U2": {
+          "pitch_mm": 0.005,
+          "cells": 4845540
+        },
+        "U3": {
+          "pitch_mm": 0.005,
+          "cells": 1978251
+        },
+        "J1": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "J2": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "J3": {
+          "pitch_mm": 0.0635,
+          "cells": 16569
+        },
+        "J4": {
+          "pitch_mm": 0.065,
+          "cells": 14140
+        },
+        "J5": {
+          "pitch_mm": 0.065,
+          "cells": 6262
+        },
+        "RV1": {
+          "pitch_mm": 0.065,
+          "cells": 8680
+        },
+        "F1": {
+          "pitch_mm": 0.065,
+          "cells": 6510
+        },
+        "D1": {
+          "pitch_mm": 0.0635,
+          "cells": 7938
+        },
+        "D2": {
+          "pitch_mm": 0.05,
+          "cells": 13527
+        },
+        "D3": {
+          "pitch_mm": 0.025,
+          "cells": 37996
+        },
+        "C1": {
+          "pitch_mm": 0.05,
+          "cells": 18549
+        },
+        "C2": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C3": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C4": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C5": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C6": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C9": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C10": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C11": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C12": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C13": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C14": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C15": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "C16": {
+          "pitch_mm": 0.0635,
+          "cells": 5859
+        },
+        "R1": {
+          "pitch_mm": 0.04,
+          "cells": 25149
+        },
+        "R3": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R4": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R6": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R7": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R8": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R9": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R10": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R11": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R12": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        },
+        "R13": {
+          "pitch_mm": 0.065,
+          "cells": 5580
+        }
+      }
+    }
+  ]
+}

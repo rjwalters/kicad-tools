@@ -1,0 +1,387 @@
+"""
+DatasheetManager - orchestrates datasheet search and download across multiple sources.
+
+Provides a unified interface for searching, downloading, and caching datasheets
+from various suppliers.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .cache import DatasheetCache
+from .exceptions import DatasheetDownloadError, DatasheetSearchError
+from .models import Datasheet, DatasheetResult, DatasheetSearchResult
+from .sources import DatasheetSource, LCSCDatasheetSource, OctopartDatasheetSource
+from .utils import sanitize_filename_component
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
+
+
+def _missing_dependency_message(import_errors: dict[str, str]) -> str:
+    """Build a single install-guidance message from per-source ImportErrors.
+
+    Every configured datasheet source failed because an optional dependency is
+    missing. The per-source messages are effectively identical (they come from
+    the same ``@requires_requests`` guard), so collapse them into one clear
+    line when they agree, and fall back to listing each source otherwise.
+    """
+    unique = set(import_errors.values())
+    if len(unique) == 1:
+        # All sources reported the same missing dependency.
+        return next(iter(unique))
+    detail = "; ".join(f"{source}: {msg}" for source, msg in import_errors.items())
+    return f"Datasheet operations require an optional dependency that is not installed: {detail}"
+
+
+class DatasheetManager:
+    """
+    Unified manager for datasheet search and download.
+
+    Searches multiple sources (LCSC, Octopart, etc.) and manages a local cache
+    of downloaded datasheets.
+
+    Example::
+
+        manager = DatasheetManager()
+
+        # Search for datasheets
+        results = manager.search("STM32F103C8T6")
+        for result in results:
+            print(f"{result.part_number}: {result.manufacturer}")
+            print(f"  URL: {result.datasheet_url}")
+            print(f"  Source: {result.source}")
+
+        # Download a datasheet
+        datasheet = manager.download(results[0])
+        print(f"Downloaded to: {datasheet.local_path}")
+
+        # Download by part number directly
+        datasheet = manager.download_by_part("STM32F103C8T6")
+
+        # List cached datasheets
+        for ds in manager.list_cached():
+            print(f"{ds.part_number}: {ds.local_path}")
+
+        # Check if cached
+        if manager.is_cached("STM32F103C8T6"):
+            datasheet = manager.get_cached("STM32F103C8T6")
+    """
+
+    def __init__(
+        self,
+        cache_dir: Path | None = None,
+        sources: list[DatasheetSource] | None = None,
+        octopart_api_key: str | None = None,
+        timeout: float = 30.0,
+    ):
+        """
+        Initialize the DatasheetManager.
+
+        Args:
+            cache_dir: Directory for cached datasheets (default: ~/.cache/kicad-tools/datasheets)
+            sources: List of DatasheetSource instances to use (default: LCSC + Octopart)
+            octopart_api_key: API key for Octopart (optional, can be set via OCTOPART_API_KEY env)
+            timeout: Request timeout in seconds
+        """
+        self.cache = DatasheetCache(cache_dir)
+        self.timeout = timeout
+
+        # Get Octopart API key from env if not provided
+        if octopart_api_key is None:
+            octopart_api_key = os.environ.get("OCTOPART_API_KEY")
+
+        # Initialize default sources if not provided
+        if sources is None:
+            self.sources: list[DatasheetSource] = [
+                LCSCDatasheetSource(timeout=timeout),
+                OctopartDatasheetSource(api_key=octopart_api_key, timeout=timeout),
+            ]
+        else:
+            self.sources = sources
+
+    def search(self, part_number: str) -> DatasheetSearchResult:
+        """
+        Search all sources for datasheets matching the part number.
+
+        Args:
+            part_number: Part number or search query
+
+        Returns:
+            DatasheetSearchResult with results from all sources
+        """
+        all_results = []
+        errors = {}
+        import_errors: dict[str, str] = {}
+
+        for source in self.sources:
+            try:
+                results = source.search(part_number)
+                all_results.extend(results)
+                logger.debug(f"Source {source.name}: found {len(results)} results")
+            except ImportError as e:
+                # A missing optional dependency (e.g. ``requests`` guarded by
+                # ``@requires_requests``). Track separately from ordinary
+                # search failures so the caller can surface install guidance
+                # instead of a misleading "no datasheet found".
+                logger.warning(f"Source {source.name} failed: {e}")
+                errors[source.name] = str(e)
+                import_errors[source.name] = str(e)
+            except Exception as e:
+                logger.warning(f"Source {source.name} failed: {e}")
+                errors[source.name] = str(e)
+
+        # Sort by confidence (highest first)
+        all_results.sort(key=lambda r: r.confidence, reverse=True)
+
+        # Deduplicate by URL (keep highest confidence)
+        seen_urls = set()
+        unique_results = []
+        for result in all_results:
+            if result.datasheet_url not in seen_urls:
+                seen_urls.add(result.datasheet_url)
+                unique_results.append(result)
+
+        return DatasheetSearchResult(
+            query=part_number,
+            results=unique_results,
+            errors=errors,
+            import_errors=import_errors,
+        )
+
+    def download(
+        self,
+        result: DatasheetResult,
+        output_dir: Path | None = None,
+        force: bool = False,
+    ) -> Datasheet:
+        """
+        Download a datasheet.
+
+        Args:
+            result: The DatasheetResult to download
+            output_dir: Directory to save to (default: cache directory)
+            force: Force download even if cached
+
+        Returns:
+            Datasheet object with local path
+
+        Raises:
+            DatasheetDownloadError: If download fails
+        """
+        # Check cache first
+        if not force and self.is_cached(result.part_number):
+            cached = self.get_cached(result.part_number)
+            if cached:
+                logger.info(f"Using cached datasheet for {result.part_number}")
+                return cached
+
+        # Determine output path
+        if output_dir:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            # Sanitize the resolved part number before using it as a filename:
+            # source-resolved names commonly contain '/' (e.g. Microchip
+            # "MCP6001UT-I/OT"), which would otherwise silently create a
+            # subdirectory, and a hostile/buggy source could return a
+            # traversal-shaped name that escapes output_dir.
+            safe_name = sanitize_filename_component(result.part_number)
+            output_path = output_dir / f"{safe_name}.pdf"
+            # Belt-and-suspenders: confirm the constructed path stays inside
+            # output_dir. Redundant given the allowlist sanitizer above, but
+            # guards against a future regression that loosens it.
+            resolved = output_path.resolve()
+            output_dir_resolved = output_dir.resolve()
+            if output_dir_resolved not in resolved.parents and resolved != output_dir_resolved:
+                raise DatasheetDownloadError(
+                    f"Refusing to write outside output directory: {output_path}"
+                )
+        else:
+            output_path = self.cache.get_datasheet_path(result.part_number)
+
+        # Find the right source for downloading
+        source = self._get_source(result.source)
+        if source is None:
+            # Use a generic download
+            source = self.sources[0] if self.sources else LCSCDatasheetSource()
+
+        try:
+            downloaded_path = source.download(result, output_path)
+
+            # Get file size
+            file_size = downloaded_path.stat().st_size
+
+            # Create Datasheet object
+            datasheet = Datasheet(
+                part_number=result.part_number,
+                manufacturer=result.manufacturer,
+                local_path=downloaded_path,
+                source_url=result.datasheet_url,
+                source=result.source,
+                downloaded_at=datetime.now(),
+                file_size=file_size,
+            )
+
+            # Cache if downloaded to cache directory
+            if output_dir is None:
+                self.cache.put(datasheet)
+
+            return datasheet
+
+        except Exception as e:
+            raise DatasheetDownloadError(
+                f"Failed to download datasheet for {result.part_number}: {e}"
+            ) from e
+
+    def download_by_part(
+        self,
+        part_number: str,
+        output_dir: Path | None = None,
+        force: bool = False,
+    ) -> Datasheet:
+        """
+        Search for and download a datasheet by part number.
+
+        Searches all sources and downloads the best match.
+
+        Args:
+            part_number: Part number to search for
+            output_dir: Directory to save to (default: cache directory)
+            force: Force download even if cached
+
+        Returns:
+            Datasheet object with local path
+
+        Raises:
+            DatasheetSearchError: If no datasheet found
+            DatasheetDownloadError: If download fails
+        """
+        # Check cache first
+        if not force and self.is_cached(part_number):
+            cached = self.get_cached(part_number)
+            if cached:
+                logger.info(f"Using cached datasheet for {part_number}")
+                return cached
+
+        # Search for the datasheet
+        search_result = self.search(part_number)
+
+        if not search_result.has_results:
+            # Distinguish "no results because nothing matched" from "no results
+            # because every configured source is missing an optional dependency".
+            # In the latter case the real problem is a missing install, not a
+            # lookup miss, so surface install guidance instead of the misleading
+            # "No datasheet found" (issue #4139).
+            if search_result.all_failures_are_import_errors:
+                raise ImportError(_missing_dependency_message(search_result.import_errors))
+            raise DatasheetSearchError(f"No datasheet found for '{part_number}'")
+
+        # Try each candidate in confidence order, falling through to the next
+        # whenever a download fails (e.g. a source returns an HTML wrapper page
+        # instead of a PDF, or a transient network error). Only raise once every
+        # candidate has been exhausted, aggregating a per-candidate reason so the
+        # caller can see why each source failed rather than just the last error.
+        failures: dict[str, str] = {}
+        for index, result in enumerate(search_result.results):
+            try:
+                return self.download(result, output_dir=output_dir, force=force)
+            except DatasheetDownloadError as e:
+                # Key by source; disambiguate multiple candidates from the same
+                # source so one failure does not overwrite another's reason.
+                key = result.source
+                if key in failures:
+                    key = f"{result.source}#{index}"
+                failures[key] = str(e)
+                logger.warning(
+                    f"Download candidate {index} ({result.source}) failed for '{part_number}': {e}"
+                )
+
+        # Every candidate failed — surface all per-source reasons, not just the last.
+        reasons = "; ".join(f"{source}: {reason}" for source, reason in failures.items())
+        raise DatasheetDownloadError(
+            f"Failed to download datasheet for '{part_number}' from any source. "
+            f"Tried {len(search_result.results)} candidate(s): {reasons}"
+        )
+
+    def is_cached(self, part_number: str) -> bool:
+        """
+        Check if a datasheet is cached.
+
+        Args:
+            part_number: Part number to check
+
+        Returns:
+            True if cached and not expired
+        """
+        return self.cache.is_cached(part_number)
+
+    def get_cached(self, part_number: str) -> Datasheet | None:
+        """
+        Get a cached datasheet.
+
+        Args:
+            part_number: Part number to look up
+
+        Returns:
+            Datasheet if cached, None otherwise
+        """
+        return self.cache.get(part_number)
+
+    def list_cached(self) -> list[Datasheet]:
+        """
+        List all cached datasheets.
+
+        Returns:
+            List of cached Datasheet objects
+        """
+        return self.cache.list()
+
+    def clear_cache(self, older_than_days: int | None = None) -> int:
+        """
+        Clear cached datasheets.
+
+        Args:
+            older_than_days: If provided, only clear entries older than this
+
+        Returns:
+            Number of entries removed
+        """
+        if older_than_days is not None:
+            return self.cache.clear_older_than(older_than_days)
+        return self.cache.clear()
+
+    def cache_stats(self) -> dict:
+        """
+        Get cache statistics.
+
+        Returns:
+            Dict with cache stats
+        """
+        return self.cache.stats()
+
+    def _get_source(self, source_name: str) -> DatasheetSource | None:
+        """Get a source by name."""
+        for source in self.sources:
+            if source.name == source_name:
+                return source
+        return None
+
+    def close(self) -> None:
+        """Close all source connections."""
+        for source in self.sources:
+            if hasattr(source, "close"):
+                source.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False

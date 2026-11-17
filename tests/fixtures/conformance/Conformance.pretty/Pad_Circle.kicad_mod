@@ -1,0 +1,12 @@
+(footprint "Pad_Circle"
+	(version 20240108)
+	(generator "kicad-tools-conformance")
+	(layer "F.Cu")
+	(descr "Conformance oracle probe pad: circular SMD pad, 1.0 mm diameter (Epic #5509 Phase 1a)")
+	(attr smd)
+	(pad "1" smd circle
+		(at 0 0)
+		(size 1.0 1.0)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+	)
+)

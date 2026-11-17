@@ -1,0 +1,185 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# Charlieplexed LED Grid Demo
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "Charlieplex LED Grid"
+  revision: "B"
+  created: 2025-01-08
+  author: "kicad-tools"
+  description: |
+    3x3 LED matrix using charlieplexing technique to drive 9 LEDs
+    with only 4 GPIO pins. Demonstrates autorouting on a dense
+    interconnected topology.
+  artifacts:
+    schematic: "output/charlieplex_3x3.kicad_sch"
+    pcb: "output/charlieplex_3x3.kicad_pcb"
+    pcb_routed: "output/charlieplex_3x3_routed.kicad_pcb"
+
+intent:
+  summary: |
+    A compact LED display module using charlieplexing to minimize
+    GPIO usage. 9 LEDs arranged in a 3x3 grid controlled by 4 GPIO
+    lines with current-limiting resistors. Ideal for status indicators
+    or simple animations.
+
+  use_cases:
+    - Status indicator array
+    - Simple LED animation display
+    - Autorouter stress test (dense topology)
+    - Educational charlieplex example
+
+  interfaces:
+    - name: GPIO_CONTROL
+      type: gpio
+      description: "4-wire charlieplex control interface"
+      pins: ["LINE_A", "LINE_B", "LINE_C", "LINE_D"]
+
+    - name: POWER
+      type: power_rail
+      description: "Logic power supply"
+      voltage: "3.3-5.0V regulated"
+      current_max: "100mA"
+
+  constraints:
+    - "4 GPIO pins to control 9 LEDs"
+    - "Matched current-limiting resistors"
+    - "Dense routing topology is intentionally challenging"
+    - "2-layer PCB"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        min: "3.3V"
+        max: "5.0V"
+      current:
+        max: "100mA"
+    outputs:
+      - rail: "LED current"
+        current_max: "4.6mA per LED at 5V"
+
+  mechanical:
+    dimensions:
+      width: "50mm"
+      height: "55mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 2
+    min_trace: "0.2mm"
+    min_space: "0.2mm"
+    assembly: mixed
+
+  compliance:
+    rohs: true
+
+suggestions:
+  components:
+    mcu:
+      preferred: ["ATtiny85-20PU"]
+      rationale: "Minimal MCU with 4+ GPIO pins"
+    resistors:
+      preferred: ["330ohm 0805"]
+      rationale: "Two 330-ohm resistors limit each selected red LED to about 4.5mA at 5V"
+    leds:
+      preferred: ["0805 SMD LED"]
+      rationale: "Compact, widely available"
+
+  layout:
+    - "LEDs in 3x3 grid pattern"
+    - "Resistors between MCU and LED matrix"
+    - "MCU below LED grid, decoupling close to its supply pin"
+    - "Expect some vias due to dense topology"
+    - "Consider bottom layer for crossing traces"
+
+  notes:
+    - "This is intentionally a challenging routing problem"
+    - "Deterministic negotiated routing plus reviewed escape corrections"
+    - "Some nets may require manual routing on 2-layer"
+
+bom_entries:
+  - ref: U1
+    part: ATTINY85-20PU
+    lcsc: C965497
+  - ref: R1-R4
+    part: 0805W8F3300T5E
+    lcsc: C17630
+  - ref: D1-D9
+    part: 17-21SURC/S530-A2/TR8
+    lcsc: C131244
+
+  - ref: R5
+    part: 0805W8F1002T5E
+    lcsc: C17414
+  - ref: C1
+    part: CC0805KRX7R9BB104
+    lcsc: C49678
+  - ref: C2
+    part: CL21A475KAQNNNE
+    lcsc: C1779
+  - ref: J1
+    part: ZX-PZ2.54-1-2PZZ
+    lcsc: C7501260
+  - ref: J2
+    part: 2.54-2*3P
+    lcsc: C65114
+
+decisions:
+  - date: 2026-09-09
+    phase: schematic
+    topic: "Working MCU and programming interface"
+    choice: "ATtiny85-20PU with internal 1MHz clock and AVR ISP"
+    rationale: "Four charlieplex GPIOs, dedicated reset/SCK, regulated 3.3-5V input, decoupling and reset pullup; native PDIP footprint and verified procurement IDs."
+  - date: 2025-01-08
+    phase: concept
+    topic: "LED Drive Method"
+    choice: "Charlieplexing"
+    rationale: "Drives 9 LEDs with only 4 GPIO pins (N*(N-1) LEDs from N pins)"
+    alternatives: ["Direct drive (9 pins)", "Shift register (3 pins + data)"]
+
+  - date: 2025-01-08
+    phase: concept
+    topic: "Grid Size"
+    choice: "3x3 (9 LEDs)"
+    rationale: "Demonstrates technique while keeping routing manageable"
+    alternatives: ["4x4 (12 LEDs)", "2x2 (2 LEDs)"]
+
+  - date: 2025-01-08
+    phase: layout
+    topic: "Routing Strategy"
+    choice: "Monte Carlo with 10 trials"
+    rationale: "Dense topology benefits from multiple routing attempts"
+    alternatives: ["Basic A*", "Negotiated congestion"]
+
+progress:
+  phase: production
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define LED drive method (charlieplex)"
+        - "[x] Calculate resistor values"
+        - "[x] Determine grid size (3x3)"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] MCU symbol with GPIO"
+        - "[x] 4x current-limiting resistors"
+        - "[x] 9x LED matrix"
+        - "[x] Net assignments for charlieplex"
+    layout:
+      status: completed
+      checklist:
+        - "[x] Component placement (grid layout)"
+        - "[x] Run autorouter demo"
+        - "[x] Deterministic route with reviewed escape corrections"
+        - "[x] Native DRC, ERC and label/copper LVS verification"
+    production:
+      status: completed
+      checklist:
+        - "[x] Manufacturing files generated"

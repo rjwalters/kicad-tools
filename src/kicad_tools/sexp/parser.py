@@ -1,0 +1,1897 @@
+#!/usr/bin/env python3
+"""
+KiCad S-expression Parser and Generator
+
+A robust parser for KiCad schematic and PCB files that supports:
+- Full round-trip editing (parse → modify → serialize)
+- XPath-like queries for finding elements
+- Proper handling of strings, numbers, and nested structures
+
+Performance optimizations in this module:
+- Uses __slots__ on SExp for reduced memory and faster attribute access
+- Optimized Parser with minimal function call overhead
+- Pre-compiled character sets for fast whitespace/delimiter detection
+
+Usage:
+    from kicad_tools.sexp import SExp, parse_file, parse_string
+
+    # Parse a schematic
+    doc = parse_file("project.kicad_sch")
+
+    # Find elements
+    symbols = doc.find_all("symbol")
+    dac = doc.find("symbol", lib_id="Audio:PCM5122PW")
+
+    # Modify
+    dac["property", "Value"].value = "PCM5122"
+
+    # Write back
+    doc.write("project.kicad_sch")
+"""
+
+from __future__ import annotations
+
+import gc
+import re
+import warnings
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+
+def escape_string(value: str) -> str:
+    r"""Escape ``value`` for use inside a KiCad double-quoted string.
+
+    Mirrors KiCad's ``OUTPUTFORMATTER::Quotes``: backslash, double quote,
+    LF and CR become ``\\``, ``\"``, ``\n`` and ``\r``.  The result has
+    no surrounding quotes; see :func:`quote_string`.
+
+    KiCad reads its files line by line, so a raw LF -- or a CR that a later
+    universal-newline writer turns into one -- inside a quoted string can
+    make it drop a hierarchical sub-sheet without an error (issue #7648).
+    This is the one escaper every writer that emits a quoted KiCad string by
+    hand should call.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+
+
+def quote_string(value: str) -> str:
+    r"""Return ``value`` as a KiCad double-quoted string literal.
+
+    ``quote_string('Lib:FP"x')`` == ``'"Lib:FP\\"x"'``.  Parsing the result
+    with :func:`parse_string` gives back exactly ``value``.
+    """
+    return f'"{escape_string(value)}"'
+
+
+class SExp:
+    """
+    S-expression node representing a KiCad element.
+
+    Can be either:
+    - An atom (string, number, or symbol)
+    - A list starting with a name followed by children
+
+    Examples:
+        (wire (pts (xy 10 20) (xy 30 40)))
+        → SExp(name="wire", children=[SExp(name="pts", ...)])
+
+        "Hello World"
+        → SExp(name=None, value="Hello World")
+
+        123.45
+        → SExp(name=None, value=123.45)
+
+    Uses __slots__ for memory efficiency and faster attribute access.
+
+    Position tracking:
+        When parsed with track_positions=True, nodes include _line and _column
+        attributes (1-indexed) pointing to their start position in the source file.
+    """
+
+    __slots__ = (
+        "name",
+        "children",
+        "value",
+        "_inline",
+        "_original_str",
+        "_source_text",
+        "_source_canonical",
+        "_originally_quoted",
+        "_originally_bare",
+        "_line",
+        "_column",
+        # ``(start, end)`` offsets of this node in the parsed source text.
+        # Set only on the direct children of a parsed document's root (a
+        # board's footprints, zones, segments, ...); ``None`` elsewhere.  Read
+        # it with :func:`source_span`.  Lets text-level consumers slice a
+        # top-level item exactly where the parser found it (Issue #6873)
+        # instead of re-finding it with a regex that cannot see strings.
+        "_source_span",
+    )
+
+    def __init__(
+        self,
+        name: str | None = None,
+        children: list[SExp] | None = None,
+        value: str | int | float | None = None,
+        _inline: bool = False,
+        _original_str: str | None = None,
+        _originally_quoted: bool = False,
+        _originally_bare: bool = False,
+        _line: int = 0,
+        _column: int = 0,
+    ):
+        if name is not None and value is not None:
+            raise ValueError("SExp cannot have both name and value")
+        self.name = name
+        self.children = children if children is not None else []
+        self.value = value
+        self._inline = _inline
+        self._source_text: str | None = None
+        self._source_canonical: str | None = None
+        self._original_str = _original_str
+        # Tracks whether a string atom was parsed from a quoted token. When True,
+        # the serializer preserves the quoted form even if the textual value
+        # would otherwise look numeric (e.g. (generator_version "9.0")). Mirrors
+        # the role of _original_str on numeric atoms. Programmatically
+        # constructed atoms default to False so existing keyword/round-trip
+        # behavior is unchanged.
+        self._originally_quoted = _originally_quoted
+        # Tracks whether a string atom was parsed from a *bare* (unquoted) token.
+        # When True, the serializer preserves the bare form as long as the value
+        # does not *structurally* require quoting (whitespace, parens, quote
+        # chars, empty). This is the symmetric counterpart to _originally_quoted:
+        # it lets bare KiCad enum symbols that are absent from the unquoted
+        # keyword allowlist (e.g. `not_allowed`, `chamfer_rect`) round-trip bare
+        # rather than being wrongly quoted (issue #4185). Programmatically
+        # constructed atoms default to False so they still go through the
+        # allowlist heuristic in _needs_quoting().
+        self._originally_bare = _originally_bare
+        self._line = _line
+        self._column = _column
+        self._source_span: tuple[int, int] | None = None
+
+    @property
+    def line(self) -> int:
+        """Line number (1-indexed) where this element starts. 0 if not tracked."""
+        return self._line
+
+    @property
+    def column(self) -> int:
+        """Column number (1-indexed) where this element starts. 0 if not tracked."""
+        return self._column
+
+    @property
+    def has_position(self) -> bool:
+        """Check if this node has position information."""
+        return self._line > 0 and self._column > 0
+
+    @property
+    def is_atom(self) -> bool:
+        """True if this is a leaf node (string, number, symbol)."""
+        return self.name is None and not self.children
+
+    @property
+    def is_list(self) -> bool:
+        """True if this is a list node."""
+        return self.name is not None or bool(self.children)
+
+    def __getitem__(self, key: str | int | tuple) -> SExp:
+        """
+        Access children by name or index.
+
+        Examples:
+            node["property"]           # First child named "property"
+            node["property", "Value"]  # Property with specific attribute
+            node[0]                    # First child
+        """
+        if isinstance(key, int):
+            return self.children[key]
+
+        if isinstance(key, tuple):
+            # Multi-level query: node["property", "Value"]
+            result = self
+            for k in key:
+                result = result[k]
+            return result
+
+        # String key - find first child with matching name
+        for child in self.children:
+            if child.name == key:
+                return child
+
+        # Build helpful error message with available child names
+        child_names = [c.name for c in self.children if c.name]
+        unique_names = sorted(set(child_names))
+
+        if unique_names:
+            # Truncate if too many
+            if len(unique_names) > 10:
+                shown = unique_names[:10]
+                suffix = f", ... and {len(unique_names) - 10} more"
+            else:
+                shown = unique_names
+                suffix = ""
+            available = f"Available: {', '.join(shown)}{suffix}"
+        else:
+            available = "No named children"
+
+        node_desc = f"'{self.name}'" if self.name else "root"
+        raise KeyError(f"No child named '{key}' in {node_desc}. {available}")
+
+    def get(self, key: str, default: Any = None) -> SExp | None:
+        """Get child by name, returning default if not found."""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def find(self, name: str, **attrs) -> SExp | None:
+        """
+        Find first descendant matching name and attributes.
+
+        Note: This searches descendants only, not self.
+
+        Example:
+            doc.find("symbol", lib_id="Audio:PCM5122PW")
+        """
+        # Search descendants only (not self).  The walk is the same pre-order
+        # DFS ``iter_all()`` performs, open-coded over an explicit stack so a
+        # query does not pay for one generator frame per tree level per node
+        # (see iter_all's note).  ``stack`` holds the not-yet-visited nodes in
+        # reverse visit order, so ``pop()`` yields children[0] before its
+        # siblings and a node's whole subtree before the next sibling.
+        stack = self.children[::-1]
+        pop = stack.pop
+        if not attrs:
+            while stack:
+                node = pop()
+                if node.name == name:
+                    return node
+                children = node.children
+                if children:
+                    stack.extend(children[::-1])
+            return None
+        items = list(attrs.items())
+        match_attr = self._match_attr
+        while stack:
+            node = pop()
+            if node.name == name:
+                if all(match_attr(node, k, v) for k, v in items):
+                    return node
+            children = node.children
+            if children:
+                stack.extend(children[::-1])
+        return None
+
+    def find_all(self, name: str, **attrs) -> list[SExp]:
+        """Find all descendants matching name and attributes.
+
+        Note: This searches descendants only, not self. To include self,
+        use iter_all() directly.
+        """
+        results: list[SExp] = []
+        # Search descendants only (not self) - same explicit-stack pre-order
+        # DFS as find(); see the comment there.
+        stack = self.children[::-1]
+        pop = stack.pop
+        if not attrs:
+            append = results.append
+            while stack:
+                node = pop()
+                if node.name == name:
+                    append(node)
+                children = node.children
+                if children:
+                    stack.extend(children[::-1])
+            return results
+        items = list(attrs.items())
+        match_attr = self._match_attr
+        while stack:
+            node = pop()
+            if node.name == name:
+                if all(match_attr(node, k, v) for k, v in items):
+                    results.append(node)
+            children = node.children
+            if children:
+                stack.extend(children[::-1])
+        return results
+
+    def _match_attr(self, node: SExp, attr: str, value: Any) -> bool:
+        """Check if node has attribute matching value."""
+        child = node.get(attr)
+        if child is None:
+            # Check if it's stored as a direct child value
+            return any(c.is_atom and c.value == value for c in node.children)
+
+        # Check child's first atom value
+        if child.children and child.children[0].is_atom:
+            return child.children[0].value == value
+        return False
+
+    def iter_all(self) -> Iterator[SExp]:
+        """Iterate over this node and all descendants (pre-order).
+
+        Open-coded over an explicit stack rather than ``yield from
+        child.iter_all()``: the recursive form creates one generator frame
+        per node and re-yields every node once per tree level above it, so a
+        deep document pays O(depth) interpreter resumes per node instead of
+        O(1).  The emitted sequence is identical -- ``stack`` holds the
+        not-yet-visited nodes in reverse visit order, so ``pop()`` returns
+        ``children[0]`` and its whole subtree before ``children[1]``.
+        """
+        stack = [self]
+        pop = stack.pop
+        while stack:
+            node = pop()
+            yield node
+            children = node.children
+            if children:
+                stack.extend(children[::-1])
+
+    def append(self, child: SExp) -> SExp:
+        """Add a child node."""
+        self.children.append(child)
+        return child
+
+    def insert(self, index: int, child: SExp) -> SExp:
+        """Insert a child node at a specific index.
+
+        Args:
+            index: Position to insert at (0-indexed). Negative indices count
+                   from the end, like Python lists.
+            child: The SExp node to insert.
+
+        Returns:
+            The inserted child node.
+
+        Example:
+            # Insert (at 50 30 0) at position 3
+            footprint.insert(3, at_node)
+        """
+        self.children.insert(index, child)
+        return child
+
+    def insert_after(self, name: str, child: SExp) -> SExp:
+        """Insert a child node after the first child with the given name.
+
+        Args:
+            name: Name of the child to insert after.
+            child: The SExp node to insert.
+
+        Returns:
+            The inserted child node.
+
+        Raises:
+            KeyError: If no child with the given name exists.
+
+        Example:
+            # Insert (at 50 30 0) after (layer "F.Cu")
+            footprint.insert_after("layer", at_node)
+        """
+        for i, c in enumerate(self.children):
+            if c.name == name:
+                self.children.insert(i + 1, child)
+                return child
+        raise KeyError(f"No child named '{name}' to insert after")
+
+    def insert_before(self, name: str, child: SExp) -> SExp:
+        """Insert a child node before the first child with the given name.
+
+        Args:
+            name: Name of the child to insert before.
+            child: The SExp node to insert.
+
+        Returns:
+            The inserted child node.
+
+        Raises:
+            KeyError: If no child with the given name exists.
+
+        Example:
+            # Insert (at 50 30 0) before (property "Reference" ...)
+            footprint.insert_before("property", at_node)
+        """
+        for i, c in enumerate(self.children):
+            if c.name == name:
+                self.children.insert(i, child)
+                return child
+        raise KeyError(f"No child named '{name}' to insert before")
+
+    def remove(self, child: SExp) -> bool:
+        """Remove a child node."""
+        try:
+            self.children.remove(child)
+            return True
+        except ValueError:
+            return False
+
+    def get_atoms(self) -> list[str | int | float]:
+        """Get all atom values from direct children."""
+        return [c.value for c in self.children if c.is_atom]
+
+    def get_first_atom(self) -> str | int | float | None:
+        """Get the first atom value from children."""
+        for c in self.children:
+            if c.is_atom:
+                return c.value
+        return None
+
+    def set_atom(self, index: int, value: str | int | float):
+        """Set the atom value at given index."""
+        atom_idx = 0
+        for i, c in enumerate(self.children):
+            if c.is_atom:
+                if atom_idx == index:
+                    self.children[i] = SExp(value=value)
+                    return
+                atom_idx += 1
+        raise IndexError(f"No atom at index {index}")
+
+    def to_string(
+        self, indent: int = 0, compact: bool = False, *, preserve_source: bool = False
+    ) -> str:
+        """
+        Serialize to S-expression string matching KiCad format.
+
+        Args:
+            indent: Current indentation level
+            compact: If True, minimize whitespace
+            preserve_source: Retain untouched copper arc text for PCB saves.
+                Default serialization remains canonical for semantic comparisons.
+        """
+        if (
+            preserve_source
+            and not compact
+            and self._source_text is not None
+            and self.to_string(compact=True) == self._source_canonical
+        ):
+            return "\t" * indent + self._source_text
+        if self.is_atom:
+            return self._format_atom()
+
+        if not self.name and not self.children:
+            return "()"
+
+        # KiCad uses tab indentation
+        tab = "\t"
+        tabs = tab * indent
+
+        # Check if should render inline
+        if compact or self._should_inline():
+            parts = [self.name] if self.name else []
+            parts.extend(c.to_string(compact=True) for c in self.children)
+            return "(" + " ".join(parts) + ")"
+
+        # Multi-line formatting matching KiCad style
+        lines = []
+
+        # Opening with name (names are never quoted in KiCad format)
+        if self.name:
+            lines.append(f"{tabs}({self.name}")
+        else:
+            lines.append(f"{tabs}(")
+
+        # Determine if this node forces structured children on separate lines
+        force_structured_on_lines = self.name in _FORCE_STRUCTURED_ON_LINES
+
+        # Track if we've started putting things on new lines
+        started_new_lines = False
+
+        for _i, child in enumerate(self.children):
+            if child.is_atom:
+                if indent == 0 or started_new_lines:
+                    # Already on new lines, continue that way
+                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
+                    started_new_lines = True
+                else:
+                    # Atoms go on same line as parent opener
+                    lines[-1] += " " + child.to_string(compact=True)
+            elif child._should_inline():
+                if indent == 0:
+                    # Root level: each child on own line
+                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
+                    started_new_lines = True
+                elif force_structured_on_lines or started_new_lines:
+                    # Structured nodes get their own lines
+                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
+                    started_new_lines = True
+                else:
+                    # Inline children on same line
+                    lines[-1] += " " + child.to_string(compact=True)
+            else:
+                # Complex children always on new lines
+                child_str = child.to_string(indent=indent + 1, preserve_source=preserve_source)
+                lines.append(child_str)
+                started_new_lines = True
+
+        # Closing paren
+        last_line = lines[-1]
+        if last_line.rstrip().endswith(")") or indent == 0:
+            # Previous child ended with ), or root level - put closing on new line
+            lines.append(f"{tabs})")
+        else:
+            # Atoms on same line, close inline
+            lines[-1] += ")"
+
+        return "\n".join(lines)
+
+    def _should_inline(self) -> bool:
+        """Determine if this node should be rendered inline."""
+        if not self.children:
+            return True
+
+        # Never inline top-level or major structural elements
+        if self.name in _NEVER_INLINE:
+            return False
+
+        # Simple nodes with only atoms (and short enough)
+        if all(c.is_atom for c in self.children):
+            total_len = len(self.name or "") + sum(
+                len(self._format_value(c.value)) + 1 for c in self.children
+            )
+            return total_len < 60
+
+        # Known inline elements in KiCad
+        inline_names = {
+            "xy",
+            "at",
+            "size",
+            "stroke",
+            "width",
+            "type",
+            "color",
+            "diameter",
+            "length",
+            "thickness",
+            "hide",
+            "name",
+            "number",
+            "uuid",
+            "justify",
+            "start",
+            "end",
+            "mid",
+            "pts",
+            "exclude_from_sim",
+            "in_bom",
+            "on_board",
+            "dnp",
+            "fields_autoplaced",
+            "pin_numbers",
+            "pin_names",
+            "offset",
+        }
+        if self.name in inline_names:
+            # But only if children are simple
+            if all(c.is_atom or c._should_inline() for c in self.children):
+                inline_str = (
+                    "("
+                    + self.name
+                    + " "
+                    + " ".join(c.to_string(compact=True) for c in self.children)
+                    + ")"
+                )
+                return len(inline_str) < 80
+            return False
+
+        return False
+
+    def _format_value(self, value) -> str:
+        """Format a value for length calculation.
+
+        Note: This is only used by _should_inline() for length budgeting on the
+        parent SExp's atom children, where the per-atom _originally_quoted flag
+        is not in scope. It produces a slight under-estimate for strings that
+        carry the quoted flag but otherwise look unquoted; that only affects
+        whether a node renders inline vs. multi-line, never the byte content.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            if self._needs_quoting(value):
+                return f'"{value}"'
+            return value
+        return str(value)
+
+    def _format_atom(self) -> str:
+        """Format an atom value."""
+        if self.value is None:
+            return ""
+        if isinstance(self.value, str):
+            # Quote when the value was originally parsed quoted, or when its
+            # textual form requires quoting. The originally-quoted flag
+            # preserves the type distinction between (field "9.0") and
+            # (field 9.0) on round-trip — KiCad strict-typed string fields
+            # like generator_version would otherwise be silently downgraded.
+            #
+            # Symmetric bare handling (issue #4185): an atom parsed as a *bare*
+            # symbol must stay bare unless it *structurally* requires quoting
+            # (whitespace, parens, quote chars, empty). This preserves KiCad enum
+            # symbols like `not_allowed`/`chamfer_rect` that are absent from the
+            # unquoted-keyword allowlist and would otherwise be wrongly quoted by
+            # the "quote everything else" fallback in _needs_quoting(). Values
+            # that structurally require quotes are still always quoted, for
+            # correctness. _originally_quoted always wins (a value parsed quoted
+            # stays quoted), so the two flags never conflict.
+            if self._originally_bare and not self._must_quote(self.value):
+                needs_quote = False
+            else:
+                needs_quote = self._originally_quoted or self._needs_quoting(self.value)
+            if needs_quote:
+                # \t is escaped too (historical; KiCad's Quotes leaves it).
+                escaped = escape_string(self.value).replace("\t", "\\t")
+                return f'"{escaped}"'
+            return self.value
+        # For numbers, use original string if available (for round-trip preservation)
+        if self._original_str is not None:
+            return self._original_str
+        if isinstance(self.value, float):
+            # Format floats without unnecessary decimals
+            if self.value == int(self.value):
+                return str(int(self.value))
+            return f"{self.value:.6g}"
+        return str(self.value)
+
+    @staticmethod
+    def _must_quote(s: str) -> bool:
+        """Whether a string atom *structurally* requires quoting.
+
+        These are values that cannot be represented as a bare S-expression
+        token at all — an empty string, or one containing whitespace, parens,
+        a double-quote character, or a backslash. Such values must always be
+        quoted for correctness, regardless of parse-time bare/quoted state.
+        This is the narrow "genuinely requires quotes" test used by the
+        symmetric bare handling in _format_atom() (issue #4185); it is
+        intentionally distinct from the KiCad-keyword allowlist heuristic in
+        _needs_quoting().
+
+        Backslash is included (issue #4213, defense-in-depth follow-on to
+        #4185): a bare token containing a raw backslash is routed into the
+        quoting branch of _format_atom(), whose unconditional
+        ``.replace("\\", "\\\\")`` step doubles it correctly so the emitted
+        quoted form round-trips byte-exact.
+        """
+        if not s:
+            return True
+        return any(c in s for c in ' \t\n\r"()\\')
+
+    @staticmethod
+    def _is_valid_name(s: str) -> bool:
+        """Check if string is a valid unquoted S-expression name/identifier."""
+        if not s:
+            return False
+        # Names can't start with a digit or dash (would look like number)
+        if s[0].isdigit() or s[0] == "-":
+            return False
+        # Names can't contain special chars that need quoting
+        if any(c in s for c in ' \t\n\r"()'):
+            return False
+        # Names can contain _ : / and other identifier-like chars
+        return True
+
+    def _needs_quoting(self, s: str) -> bool:
+        """Check if string value needs to be quoted when serialized."""
+        if not s:
+            return True
+
+        # Known unquoted keywords in KiCad format
+        unquoted_keywords = {
+            # Boolean-like
+            "yes",
+            "no",
+            "true",
+            "false",
+            # Visibility
+            "hide",
+            "show",
+            # Fill types
+            "none",
+            "outline",
+            "background",
+            "solid",
+            # Stroke types
+            "default",
+            "dash",
+            "dash_dot",
+            "dash_dot_dot",
+            "dot",
+            # Justify
+            "left",
+            "right",
+            "center",
+            "top",
+            "bottom",
+            "mirror",
+            "front",
+            "back",
+            # Pin types
+            "input",
+            "output",
+            "bidirectional",
+            "tri_state",
+            "passive",
+            "free",
+            "unspecified",
+            "power_in",
+            "power_out",
+            "open_collector",
+            "open_emitter",
+            "no_connect",
+            "line",
+            "inverted",
+            "clock",
+            "inverted_clock",
+            "input_low",
+            "clock_low",
+            "output_low",
+            "edge_clock_high",
+            "non_logic",
+            # Layer type keywords in PCB
+            "signal",
+            "power",
+            "user",
+            "mixed",
+            "jumper",
+            # Pad types
+            "thru_hole",
+            "smd",
+            "connect",
+            "np_thru_hole",
+            # Pad shapes
+            "rect",
+            "oval",
+            "circle",
+            "roundrect",
+            "trapezoid",
+            "custom",
+            # Pad chamfer corners (issue #4393). KiCad emits these as bare
+            # symbols inside a pad's (chamfer ...) node, e.g.
+            # (chamfer top_left bottom_right). They are absent from this
+            # allowlist, so a *programmatically constructed* corner atom
+            # (SExp(value="top_left"), which carries no parse-time
+            # _originally_bare flag) would otherwise be quoted by the
+            # "quote everything else" fallback below — a non-canonical form.
+            # Same rationale as the not_allowed/chamfer_rect enum tokens.
+            "top_left",
+            "top_right",
+            "bottom_left",
+            "bottom_right",
+            # fp_text types
+            "reference",
+            "value",
+            # Zone connection types
+            "thermal_reliefs",
+            "full",
+            # Zone connect_pads modes (e.g. (connect_pads thru_hole_only ...))
+            "thru_hole_only",
+            # Zone fill modes
+            "hatch",
+            "hatched",
+            # Zone hatch types
+            "edge",
+            # Via types
+            "blind",
+            # Issue #6485: without this a constructed ``via_type="buried"``
+            # serialised as the quoted string ``(via "buried" ...)``, which
+            # KiCad 10 refuses to load.
+            "buried",
+            "micro",
+            "through",
+            # Arc/curve modes
+            "arc",
+            "start",
+            "mid",
+            "end",
+            # Text effects
+            "italic",
+            "bold",
+            # Module/footprint attributes
+            "through_hole",
+            "virtual",
+            "exclude_from_pos_files",
+            "exclude_from_bom",
+            "board_only",
+            "dnp",
+            # Net class
+            "clearance",
+            "trace_width",
+            "via_dia",
+            "via_drill",
+            "uvia_dia",
+            "uvia_drill",
+            "diff_pair_width",
+            "diff_pair_gap",
+            # Differential pair declarations (Issue #2558, Epic #2556 Phase 1B)
+            "diff_pair_template",
+            "diff_pair",
+            "positive",
+            "negative",
+            # Scope keywords (power symbol scope)
+            "global",
+            "local",
+            # Symbol types
+            "symbols",
+            # Mirror/axis values
+            "x",
+            "y",
+            "xy",
+            # Keepout / rule-area disposition enums (Issue #4430, #4185)
+            # KiCad 10 requires these as bare symbols, e.g. (tracks allowed),
+            # (copperpour not_allowed). Quoting them is a hard parse error.
+            "allowed",
+            "not_allowed",
+            # Other
+            "allow_missing_courtyard",
+            "allow_soldermask_bridges",
+        }
+
+        if s in unquoted_keywords:
+            return False
+
+        # Don't quote hex numbers
+        if s.startswith("0x") or s.startswith("0X"):
+            return False
+
+        # Don't quote numeric values (integers and floats including negatives)
+        try:
+            float(s)
+            return False
+        except ValueError:
+            pass
+
+        # Quote everything else - KiCad uses quoted strings liberally
+        return True
+
+    def __repr__(self) -> str:
+        if self.is_atom:
+            return f"SExp(value={self.value!r})"
+        if self.name:
+            return f"SExp(name={self.name!r}, children=[{len(self.children)} items])"
+        return f"SExp(children=[{len(self.children)} items])"
+
+    # =========================================================================
+    # Backward compatibility with core/sexp.py API
+    # These properties and methods provide compatibility with the older API
+    # that used 'tag' and 'values' instead of 'name' and 'children'.
+    # =========================================================================
+
+    @property
+    def tag(self) -> str | None:
+        """Alias for 'name' - provides backward compatibility with core/sexp.py."""
+        return self.name
+
+    @property
+    def values(self) -> list:
+        """
+        Return children in the format used by core/sexp.py.
+
+        In the old API, values was a mixed list of primitives (str, int, float)
+        and SExp nodes. This property returns children in that format for
+        backward compatibility.
+        """
+        result = []
+        for child in self.children:
+            if child.is_atom:
+                result.append(child.value)
+            else:
+                result.append(child)
+        return result
+
+    def get_value(self, index: int = 0) -> str | int | float | SExp | None:
+        """Get a value by index (0 = first value after tag).
+
+        For atoms, returns the primitive value. For non-atoms, returns the SExp.
+        Provides backward compatibility with core/sexp.py.
+        """
+        if 0 <= index < len(self.children):
+            child = self.children[index]
+            if child.is_atom:
+                return child.value
+            return child
+        return None
+
+    def get_string(self, index: int = 0) -> str | None:
+        """Get a string value by index."""
+        val = self.get_value(index)
+        return str(val) if val is not None else None
+
+    def get_int(self, index: int = 0) -> int | None:
+        """Get an integer value by index."""
+        val = self.get_value(index)
+        if isinstance(val, int):
+            return val
+        if isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError:
+                return None
+        return None
+
+    def get_float(self, index: int = 0) -> float | None:
+        """Get a float value by index."""
+        val = self.get_value(index)
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str):
+            try:
+                return float(val)
+            except ValueError:
+                return None
+        return None
+
+    def iter_children(self) -> Iterator[SExp]:
+        """Iterate over child SExp nodes (skipping atoms)."""
+        for child in self.children:
+            if not child.is_atom:
+                yield child
+
+    def has_tag(self, tag: str) -> bool:
+        """Check if any direct child has the given tag/name."""
+        return self.find_child(tag) is not None
+
+    def find_child(self, tag: str) -> SExp | None:
+        """Find the first direct child with the given tag/name.
+
+        Unlike find(), this only searches direct children, not descendants.
+        Provides backward compatibility with core/sexp.py's find() behavior.
+        """
+        for child in self.children:
+            if child.name == tag:
+                return child
+        return None
+
+    def find_children(self, tag: str) -> list[SExp]:
+        """Find all direct children with the given tag/name.
+
+        Unlike find_all(), this only searches direct children, not descendants.
+        Provides backward compatibility with core/sexp.py's find_all() behavior.
+        """
+        return [child for child in self.children if child.name == tag]
+
+    def add(self, value: SExp | str | int | float) -> SExp:
+        """Add a value and return self for chaining.
+
+        Provides backward compatibility with core/sexp.py's add() method.
+        """
+        if isinstance(value, SExp):
+            self.children.append(value)
+        else:
+            self.children.append(SExp(value=value))
+        return self
+
+    def set_value(self, index: int, value: str | int | float) -> None:
+        """Set a value at the given index.
+
+        Provides backward compatibility with core/sexp.py's set_value() method.
+        """
+        while len(self.children) <= index:
+            self.children.append(SExp(value=""))
+        self.children[index] = SExp(value=value)
+
+    def remove_child(self, tag: str) -> bool:
+        """Remove the first child with the given tag/name. Returns True if found.
+
+        Provides backward compatibility with core/sexp.py's remove_child() method.
+        """
+        for i, child in enumerate(self.children):
+            if child.name == tag:
+                del self.children[i]
+                return True
+        return False
+
+    # Convenience constructors
+    @classmethod
+    def atom(cls, value: str | int | float) -> SExp:
+        """Create an atom node."""
+        return cls(value=value)
+
+    @classmethod
+    def quoted_atom(cls, value: str) -> SExp:
+        """Create a string atom that always serializes quoted.
+
+        Use this for KiCad strict-typed string fields whose values may
+        textually look numeric (e.g. pad numbers like "1", schematic
+        ``generator_version`` like "9.0", pin numbers, etc.). Without the
+        quoted-string flag, the serializer's textual heuristic would emit
+        these as bare numerics, which kicad-cli rejects on load.
+
+        For value strings that already need quoting under the textual
+        heuristic (containing spaces, dots, etc.) this is equivalent to
+        ``SExp.atom(value)`` -- the flag just guarantees quoting in cases
+        where the value alone would not.
+        """
+        node = cls(value=value)
+        node._originally_quoted = True
+        return node
+
+    @classmethod
+    def list(cls, name: str, *children: SExp | str | int | float) -> SExp:
+        """Create a list node."""
+        node = cls(name=name)
+        for child in children:
+            if isinstance(child, SExp):
+                node.children.append(child)
+            else:
+                node.children.append(cls(value=child))
+        return node
+
+    def to_source_position(
+        self,
+        file_path: Path,
+        element_type: str = "",
+        element_ref: str = "",
+        position_mm: tuple[float, float] | None = None,
+        layer: str | None = None,
+    ):
+        """Create a SourcePosition from this node's location.
+
+        Requires the node to have been parsed with track_positions=True.
+
+        Args:
+            file_path: Path to the KiCad file (not stored on node)
+            element_type: Type of element (e.g., "symbol", "track")
+            element_ref: Reference designator (e.g., "U1", "net-GND")
+            position_mm: Optional board coordinates as (x, y)
+            layer: Optional layer name (e.g., "F.Cu")
+
+        Returns:
+            SourcePosition instance, or None if no position info available
+
+        Example::
+
+            doc = Document.load("board.kicad_pcb", track_positions=True)
+            symbol = doc.find("symbol")
+            if symbol.has_position:
+                pos = symbol.to_source_position(
+                    doc.path,
+                    element_type="symbol",
+                    element_ref="U1",
+                )
+        """
+        from kicad_tools.exceptions import SourcePosition
+
+        if not self.has_position:
+            return None
+
+        return SourcePosition(
+            file_path=file_path,
+            line=self._line,
+            column=self._column,
+            element_type=element_type or self.name or "",
+            element_ref=element_ref,
+            position_mm=position_mm,
+            layer=layer,
+        )
+
+
+# Pre-compiled character sets for faster parsing
+_WHITESPACE = frozenset(" \t\n\r")
+_ATOM_TERMINATORS = frozenset(" \t\n\r()")
+_COMMENT_CHARS = frozenset("#;")
+_ESCAPE_MAP = {"n": "\n", "t": "\t", "r": "\r"}
+
+# Issue #5617: single-pass tokenizer for ``Parser._parse_fast``.  Each match is
+# the whitespace/comment run the recursive parser skips before an expression
+# (the same ``_WHITESPACE`` / ``_COMMENT_CHARS`` sets; a comment runs up to,
+# not including, its newline), followed by exactly one token:
+#
+#   1 ``(``   2 ``)``   3 a quoted string with no backslash (its body)
+#   4 a bare atom: up to the next ``_ATOM_TERMINATORS`` char; a ``"`` may
+#     appear inside but not first, exactly as in ``_parse_atom``
+#   5 end of input   6 any other character (an escaped/unterminated string)
+#
+# Groups 5 and 6 make the alternation total, so every attempt matches at the
+# position the previous match ended: ``finditer`` never skips input and the
+# greedy skip prefix is never backtracked into.  Groups 5/6 are where the fast
+# path hands the text to the recursive parser.
+_TOKEN_RE = re.compile(
+    r"[ \t\n\r]*(?:[#;][^\n]*[ \t\n\r]*)*"
+    r'(?:(\()|(\))|"([^"\\]*)"|([^ \t\n\r()"#;][^ \t\n\r()]*)|(\Z)|(.))',
+    re.DOTALL,
+)
+_TRAILING_RE = re.compile(r"[ \t\n\r]*(?:[#;][^\n]*[ \t\n\r]*)*\Z")
+
+
+def _bare_atom(token: str) -> SExp:
+    """The node for an unquoted, non-head atom token.
+
+    Shared by :meth:`Parser._parse_atom` and :meth:`Parser._parse_fast` so the
+    two parse paths cannot disagree about numbers versus bare symbols.
+    """
+    # Try to parse as number, but preserve original string for round-trip
+    # Check for likely number patterns first to avoid exception overhead
+    first_char = token[0]
+    if first_char.isdigit() or (first_char == "-" and len(token) > 1):
+        try:
+            if "." in token or "e" in token or "E" in token:
+                node = SExp(value=float(token))
+            else:
+                node = SExp(value=int(token))
+            node._original_str = token
+            return node
+        except ValueError:
+            pass
+    # A bare (unquoted) string token: record that it was parsed bare so the
+    # serializer can keep it bare on round-trip rather than re-quoting it via
+    # the keyword allowlist heuristic (issue #4185).
+    return SExp(value=token, _originally_bare=True)
+
+
+def _head_atom_list(token: str) -> SExp:
+    """The list node whose first element is the bare atom ``token``.
+
+    Mirrors the head-token branch of :meth:`Parser._parse_list`.
+    """
+    if token and not token[0].isdigit() and token[0] != "-":
+        # Valid name - create node directly with name
+        return SExp(name=token)
+    first_char = token[0]
+    if first_char.isdigit() or (first_char == "-" and len(token) > 1):
+        # Numeric - use as name (for layer definitions like (0 "F.Cu"))
+        return SExp(name=token)
+    # Something else - make anonymous list with this as first child
+    return SExp(children=[SExp(value=token)])
+
+
+def _retain_arc_source(node: SExp, text: str, start: int, end: int) -> None:
+    """Keep a copper arc's lexical text for byte-exact round-trip."""
+    # Copper arcs must survive analysis-only load/save byte-for-byte.
+    # Retain their lexical node text, including whitespace/comments; the
+    # canonical snapshot above the serializer guards against replaying stale
+    # text after a descendant is edited (e.g. PCB.page_fit()).
+    if node.name == "arc" and node.find("width") is not None and node.find("layer") is not None:
+        node._source_text = text[start:end]
+        node._source_canonical = node.to_string(compact=True)
+
+
+# =============================================================================
+# Element classification constants for serialization formatting
+#
+# These sets control how S-expressions are formatted when serialized:
+# - _STRUCTURAL_ELEMENTS: Common elements shared between formatting rules
+# - _FORCE_STRUCTURED_ON_LINES: Elements whose children go on separate lines
+# - _NEVER_INLINE: Elements that should never be rendered inline
+# =============================================================================
+
+# Base set of structural elements common to both formatting rules
+_STRUCTURAL_ELEMENTS = frozenset(
+    {
+        # Top-level containers
+        "kicad_sch",
+        "kicad_pcb",
+        "lib_symbols",
+        "symbol",
+        "footprint",
+        "title_block",
+        "sheet",
+        "sheet_instances",
+        "instances",
+        "project",
+        # Common structural elements
+        "effects",
+        "font",
+        "property",
+        "wire",
+        "junction",
+        "label",
+        "hierarchical_label",
+        "stroke",
+        # PCB-specific structural elements
+        "general",
+        "layers",
+        "layer",
+        "stackup",
+        "setup",
+        "pcbplotparams",
+        "net",
+        "gr_rect",
+        "gr_circle",
+        "gr_line",
+        "gr_text",
+        "zone",
+        "segment",
+        "via",
+        "pad",
+        "fp_text",
+        "fp_line",
+        "fp_circle",
+    }
+)
+
+# Elements that force structured children on separate lines (used in to_string())
+# Includes all structural elements plus graphic primitives that need line breaks
+_FORCE_STRUCTURED_ON_LINES = _STRUCTURAL_ELEMENTS | frozenset(
+    {
+        "gr_arc",
+        "gr_poly",
+    }
+)
+
+# Elements that should never be rendered inline (used in _should_inline())
+# Includes all structural elements plus symbol/schematic primitives
+_NEVER_INLINE = _STRUCTURAL_ELEMENTS | frozenset(
+    {
+        "path",
+        "pin",
+        "rectangle",
+        "fill",
+        "polyline",
+        "arc",
+        "circle",
+        "text",
+        "global_label",
+        "no_connect",
+    }
+)
+
+
+class Parser:
+    """S-expression parser for KiCad files.
+
+    Optimized for performance with:
+    - Pre-compiled character sets for O(1) membership tests
+    - Reduced function call overhead in hot paths
+    - Efficient string building for quoted strings
+
+    Position tracking:
+        When track_positions=True, parsed nodes include line and column
+        information for error reporting and source mapping.
+    """
+
+    __slots__ = ("text", "pos", "length", "_track_positions", "_line_starts", "_depth")
+
+    def __init__(self, text: str, track_positions: bool = False):
+        self.text = text
+        self.pos = 0
+        # Lists currently open in the recursive parser; the document root's
+        # direct children are parsed at depth 1 (see ``_source_span``).
+        self._depth = 0
+        self.length = len(text)
+        self._track_positions = track_positions
+        # Pre-compute line start positions for efficient line/column lookup
+        if track_positions:
+            self._line_starts = [0]
+            for i, char in enumerate(text):
+                if char == "\n":
+                    self._line_starts.append(i + 1)
+        else:
+            self._line_starts = []
+
+    def _get_position(self, pos: int) -> tuple[int, int]:
+        """Convert byte position to (line, column), both 1-indexed."""
+        if not self._track_positions:
+            return (0, 0)
+
+        # Binary search to find the line
+        line_starts = self._line_starts
+        lo, hi = 0, len(line_starts)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if line_starts[mid] <= pos:
+                lo = mid + 1
+            else:
+                hi = mid
+        line = lo  # 1-indexed line number
+        column = pos - line_starts[line - 1] + 1  # 1-indexed column
+        return (line, column)
+
+    def parse(self) -> SExp:
+        """Parse the entire document.
+
+        The cyclic garbage collector is paused for the duration (Issue
+        #5617).  A routed board is ~200k freshly allocated nodes and lists,
+        and each allocation-triggered collection re-traverses the growing,
+        still-live tree -- about a third of the parse time on board 06.  The
+        parser creates no reference cycles, so a pause frees nothing it would
+        have freed; the previous enabled/disabled state is restored on exit,
+        including on ``ParseError``.
+        """
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            return self._parse_document()
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+    def _parse_document(self) -> SExp:
+        """Parse the entire document (collector state managed by :meth:`parse`)."""
+        if not self._track_positions:
+            root = self._parse_fast()
+            if root is not None:
+                self.pos = self.length
+                return root
+            # Not a well-formed list document the fast path accepts (escaped
+            # or unterminated string, atom root, trailing content, ...): the
+            # recursive parser below decides, and raises its usual errors.
+            self.pos = 0
+        self._skip_whitespace()
+        result = self._parse_expr()
+        self._skip_whitespace()
+        if self.pos < self.length:
+            raise ParseError(f"Unexpected content at position {self.pos}")
+        return result
+
+    def _parse_fast(self) -> SExp | None:
+        """Single-pass, non-recursive parse of a well-formed list document.
+
+        Issue #5617: the recursive parser spends almost all of its time on
+        per-token Python overhead -- a ``_parse_expr`` call, a separate
+        whitespace skip and a character-at-a-time scan for every one of the
+        ~370k tokens in a routed board 06.  Here ``_TOKEN_RE`` does the
+        scanning in one ``finditer`` pass and an explicit stack replaces the
+        recursion; the nodes are built by the same helpers
+        (``_head_atom_list``, ``_bare_atom``, ``_retain_arc_source``) under
+        the same head-element rules as :meth:`_parse_list`, so the tree is
+        identical.
+
+        Returns ``None`` -- never raises -- for anything outside the common
+        case: a document whose root is not a list, a string containing a
+        backslash, unbalanced parentheses, or content after the root.
+        :meth:`parse` then re-parses with the recursive parser, which
+        produces the result (or ``ParseError``) it always has.  Position
+        tracking is not supported here; :meth:`parse` does not call this when
+        it is enabled.
+        """
+        text = self.text
+        # Open lists, innermost last.  ``None`` = head element not seen yet:
+        # the node's shape depends on it (see ``_parse_list``).
+        nodes: list[SExp | None] = []
+        starts: list[int] = []
+        push_node = nodes.append
+        push_start = starts.append
+        for m in _TOKEN_RE.finditer(text):
+            kind = m.lastindex
+            if kind == 1:
+                push_node(None)
+                push_start(m.start(1))
+                continue
+            if not nodes:
+                return None
+            if kind == 2:
+                child = nodes.pop()
+                if child is None:
+                    child = SExp()  # Empty list
+                start = starts.pop()
+                if child.name == "arc":
+                    _retain_arc_source(child, text, start, m.end())
+                if len(nodes) == 1:
+                    child._source_span = (start, m.end())
+                if not nodes:
+                    if _TRAILING_RE.match(text, m.end()) is None:
+                        return None
+                    return child
+            elif kind == 4:
+                token = m.group(4)
+                if nodes[-1] is None:
+                    nodes[-1] = _head_atom_list(token)
+                    continue
+                child = _bare_atom(token)
+            elif kind == 3:
+                child = SExp(value=m.group(3))
+                child._originally_quoted = True
+            else:
+                return None
+            parent = nodes[-1]
+            if parent is None:
+                # A quoted string or a list as the head element.
+                nodes[-1] = SExp(children=[child])
+            else:
+                parent.children.append(child)
+        return None
+
+    def _parse_expr(self) -> SExp:
+        """Parse a single S-expression."""
+        # Inline whitespace skip for hot path
+        text = self.text
+        length = self.length
+        pos = self.pos
+        while pos < length and text[pos] in _WHITESPACE:
+            pos += 1
+        # Skip comments
+        while pos < length and text[pos] in _COMMENT_CHARS:
+            while pos < length and text[pos] != "\n":
+                pos += 1
+            while pos < length and text[pos] in _WHITESPACE:
+                pos += 1
+        self.pos = pos
+
+        if pos >= length:
+            raise ParseError("Unexpected end of input")
+
+        # Record start position for position tracking
+        start_pos = pos
+        char = text[pos]
+
+        if char == "(":
+            node = self._parse_list()
+        elif char == '"':
+            node = self._parse_string_node()
+        else:
+            node = self._parse_atom()
+
+        _retain_arc_source(node, text, start_pos, self.pos)
+        if self._depth == 1 and char == "(":
+            node._source_span = (start_pos, self.pos)
+
+        # Set position if tracking is enabled
+        if self._track_positions:
+            line, column = self._get_position(start_pos)
+            node._line = line
+            node._column = column
+
+        return node
+
+    def _parse_list(self) -> SExp:
+        """Parse a list (name children...)."""
+        # A ParseError abandons the parser, so the error paths need not
+        # restore ``_depth``.
+        self._depth += 1
+        text = self.text
+        length = self.length
+        self.pos += 1  # Skip opening paren
+        pos = self.pos
+
+        # Inline whitespace skip
+        while pos < length and text[pos] in _WHITESPACE:
+            pos += 1
+        while pos < length and text[pos] in _COMMENT_CHARS:
+            while pos < length and text[pos] != "\n":
+                pos += 1
+            while pos < length and text[pos] in _WHITESPACE:
+                pos += 1
+        self.pos = pos
+
+        if pos >= length:
+            raise ParseError("Unexpected end of input in list")
+
+        char = text[pos]
+        if char == ")":
+            self.pos = pos + 1
+            self._depth -= 1
+            return SExp()  # Empty list
+
+        # Optimization: Try to parse first element as simple name directly
+        # This avoids creating an intermediate SExp for the common case
+        if char != "(" and char != '"':
+            # Likely an unquoted atom - parse directly as potential name
+            start = pos
+            while pos < length and text[pos] not in _ATOM_TERMINATORS:
+                pos += 1
+            self.pos = pos
+            if pos > start:
+                node = _head_atom_list(text[start:pos])
+            else:
+                raise ParseError(f"Expected atom at position {pos}")
+        else:
+            # First element is quoted string or nested list
+            first = self._parse_expr()
+            first_value = first.value
+            if first.name is None and not first.children:  # is_atom
+                if isinstance(first_value, (int, float)):
+                    node = SExp(name=str(first_value))
+                else:
+                    node = SExp(children=[first])
+            else:
+                node = SExp(children=[first])
+
+        # Parse remaining children - use local variables for speed
+        children = node.children
+        while True:
+            # Inline whitespace skip
+            pos = self.pos
+            while pos < length and text[pos] in _WHITESPACE:
+                pos += 1
+            while pos < length and text[pos] in _COMMENT_CHARS:
+                while pos < length and text[pos] != "\n":
+                    pos += 1
+                while pos < length and text[pos] in _WHITESPACE:
+                    pos += 1
+            self.pos = pos
+
+            if pos >= length:
+                raise ParseError("Unexpected end of input, expected ')'")
+
+            if text[pos] == ")":
+                self.pos = pos + 1
+                break
+
+            children.append(self._parse_expr())
+
+        self._depth -= 1
+        return node
+
+    def _parse_string_node(self) -> SExp:
+        """Parse a quoted string and return as SExp node.
+
+        The _originally_quoted flag is set so the serializer can preserve the
+        quoted form on round-trip even when the textual value parses as a
+        number (e.g. "9.0"). This keeps strict-typed KiCad fields like
+        generator_version from being silently downgraded to bare numerics.
+        """
+        node = SExp(value=self._parse_string())
+        node._originally_quoted = True
+        return node
+
+    def _parse_string(self) -> str:
+        """Parse a quoted string."""
+        text = self.text
+        length = self.length
+        pos = self.pos + 1  # Skip opening quote
+
+        # Fast path: find if there are any escape sequences or end quote
+        # Most strings don't have escapes, so we can optimize for that case
+        start = pos
+        while pos < length:
+            char = text[pos]
+            if char == '"':
+                # No escapes found - fast path
+                self.pos = pos + 1
+                return text[start:pos]
+            elif char == "\\":
+                # Has escapes - use slower path
+                break
+            pos += 1
+
+        # Slow path with escape handling
+        result = [text[start:pos]] if pos > start else []
+        while pos < length:
+            char = text[pos]
+            if char == '"':
+                self.pos = pos + 1
+                return "".join(result)
+            elif char == "\\":
+                pos += 1
+                if pos >= length:
+                    raise ParseError("Unexpected end of input in escape sequence")
+                escaped = text[pos]
+                result.append(_ESCAPE_MAP.get(escaped, escaped))
+            else:
+                result.append(char)
+            pos += 1
+
+        raise ParseError("Unterminated string")
+
+    def _parse_atom(self) -> SExp:
+        """Parse an unquoted atom (symbol or number)."""
+        text = self.text
+        length = self.length
+        start = self.pos
+        pos = start
+
+        # Use local variable and frozenset for faster iteration
+        while pos < length and text[pos] not in _ATOM_TERMINATORS:
+            pos += 1
+
+        self.pos = pos
+
+        if pos == start:
+            raise ParseError(f"Expected atom at position {pos}")
+
+        return _bare_atom(text[start:pos])
+
+    def _skip_whitespace(self):
+        """Skip whitespace and comments."""
+        text = self.text
+        length = self.length
+        pos = self.pos
+
+        while pos < length:
+            char = text[pos]
+            if char in _WHITESPACE:
+                pos += 1
+            elif char in _COMMENT_CHARS:
+                # Skip to end of line
+                while pos < length and text[pos] != "\n":
+                    pos += 1
+            else:
+                break
+
+        self.pos = pos
+
+
+class ParseError(ValueError):
+    """Error during S-expression parsing.
+
+    Inherits from ValueError for backward compatibility with code that
+    catches ValueError for parse errors.
+    """
+
+    pass
+
+
+# Backward compatibility aliases
+SExpParser = Parser
+
+
+class SExpSerializer:
+    """Serializer for S-expressions to KiCad format.
+
+    Provides backward compatibility with core/sexp.py's SExpSerializer class.
+    """
+
+    def __init__(self, indent: str = "  ", newline_threshold: int = 1):
+        """
+        Args:
+            indent: String to use for each indentation level (ignored - uses KiCad format)
+            newline_threshold: Put children on new lines if more than this many (ignored)
+        """
+        self.indent = indent
+        self.newline_threshold = newline_threshold
+
+    def serialize(self, sexp: SExp) -> str:
+        """Serialize an SExp to string."""
+        return sexp.to_string() + "\n"
+
+
+# KiCad file extensions that trigger the file-path guard in parse_string()
+_KICAD_FILE_EXTENSIONS = frozenset(
+    {
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".kicad_sym",
+        ".kicad_mod",
+        ".kicad_pro",
+        ".kicad_dru",
+        ".kicad_wks",
+    }
+)
+
+
+def _looks_like_file_path(text: str) -> bool:
+    """Check if the input text looks like a KiCad file path rather than S-expression content.
+
+    Only triggers when the *entire* input (stripped) looks like a path, not when
+    path-like substrings appear inside valid S-expression content.
+    """
+    stripped = text.strip()
+    # Valid S-expressions start with '(' -- a bare path never does
+    if stripped.startswith("("):
+        return False
+    # Check for common KiCad file extensions
+    return any(stripped.endswith(ext) for ext in _KICAD_FILE_EXTENSIONS)
+
+
+def source_span(node: SExp) -> tuple[int, int] | None:
+    """Return ``(start, end)`` of *node* in the text it was parsed from.
+
+    Available for the direct children of a parsed document's root only
+    (Issue #6873); ``None`` for any other node, including programmatically
+    built ones.  ``text[start:end]`` is the node's exact source, from its
+    ``(`` to its matching ``)``.  The offsets refer to the string handed to
+    the parser, so slice that same string.
+    """
+    return node._source_span
+
+
+def parse_string(text: str, track_positions: bool = False) -> SExp:
+    """Parse an S-expression string.
+
+    Args:
+        text: The S-expression text to parse
+        track_positions: If True, track line/column positions for each node
+
+    Returns:
+        The parsed SExp tree
+
+    Raises:
+        ValueError: If the input looks like a file path instead of S-expression
+            content. Use ``parse_file()`` to parse files by path.
+    """
+    if _looks_like_file_path(text):
+        raise ValueError(
+            f"Input looks like a file path, not S-expression content: {text!r}. "
+            "Use parse_file() to parse a KiCad file by path."
+        )
+    return Parser(text, track_positions=track_positions).parse()
+
+
+def parse_sexp(text: str, track_positions: bool = False) -> SExp:
+    """Parse an S-expression string (deprecated).
+
+    .. deprecated::
+        Use ``parse_string()`` for S-expression text or ``parse_file()`` for
+        file paths.
+
+    Args:
+        text: The S-expression text to parse
+        track_positions: If True, track line/column positions for each node
+
+    Returns:
+        The parsed SExp tree
+    """
+    warnings.warn(
+        "parse_sexp() is deprecated. Use parse_string() for S-expression text "
+        "or parse_file() for file paths.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return parse_string(text, track_positions=track_positions)
+
+
+def serialize_sexp(sexp: SExp, indent: str = "  ", *, preserve_source: bool = False) -> str:
+    """Serialize an SExp tree to text.
+
+    Provides backward compatibility with core/sexp.py's serialize_sexp() function.
+
+    Args:
+        preserve_source: Preserve untouched copper arc text instead of normalizing it.
+        sexp: The SExp tree to serialize
+        indent: String to use for each indentation level (ignored - uses KiCad format)
+
+    Returns:
+        Serialized S-expression string
+    """
+    return sexp.to_string(preserve_source=preserve_source)
+
+
+# Pad chamfer corner tokens (issue #4393). KiCad emits these as bare symbols
+# inside a pad's (chamfer ...) node, e.g. (chamfer top_left bottom_right).
+_CHAMFER_CORNERS = frozenset({"top_left", "top_right", "bottom_left", "bottom_right"})
+
+
+def normalize_chamfer(node: SExp) -> SExp:
+    """Repair malformed pad-chamfer corner children into bare atoms in place.
+
+    Pad chamfer corners have no dedicated serializer — they flow through the
+    generic ``SExp.to_string()`` writer, so the emitted byte content depends
+    entirely on *how* each corner child was constructed:
+
+    - ``SExp(value="top_left", _originally_bare=True)`` (what the parser builds
+      from a correctly-authored ``(chamfer top_left)``) emits bare ``top_left``.
+    - ``SExp(value="top_left")`` emits bare too, now that the four corner
+      tokens are on the ``_needs_quoting()`` allowlist (issue #4393 item 1).
+    - ``SExp(name="top_left")`` — a *childless named/list* node — emits
+      ``(top_left)``. KiCad-10's ``pcb drc`` loader **segfaults (exit 139)** on
+      that parenthesized-corner form rather than reporting a parse error.
+
+    The allowlist alone does not stop the segfault form: a childless *named*
+    node is a list, not an atom, so it never reaches the quoting heuristic.
+    This helper closes that gap. For every ``chamfer`` node in the tree it
+    rewrites any childless named corner child into a bare atom
+    (``SExp(value=<corner>, _originally_bare=True)``), guaranteeing the writer
+    never *originates* — and repairing, if present — the crash form regardless
+    of how it entered the tree.
+
+    The pass is:
+
+    - **Scoped** to ``chamfer`` parents only — an unrelated childless named
+      node elsewhere in the tree (e.g. ``(fill)``) is left untouched.
+    - **Idempotent** — a chamfer already carrying bare corner atoms is a no-op.
+    - **Opt-in** — it is *not* wired into ``to_string()``/``write()``, so it
+      does not disturb the round-trip fidelity of a hand-authored malformed
+      fixture (issue #4380); callers invoke it explicitly on the write path.
+
+    Args:
+        node: The root of the tree (or subtree) to normalize. Mutated in place.
+
+    Returns:
+        The same ``node``, for convenient chaining.
+    """
+    if node.name == "chamfer":
+        for i, child in enumerate(node.children):
+            if not child.is_atom and not child.children and child.name in _CHAMFER_CORNERS:
+                node.children[i] = SExp(value=child.name, _originally_bare=True)
+    for child in node.children:
+        normalize_chamfer(child)
+    return node
+
+
+def read_text_exact(path: str | Path) -> str:
+    """Read a KiCad text file as UTF-8 *without* newline translation.
+
+    ``Path.read_text`` uses universal newlines, which turns a raw CR inside
+    a quoted string into LF -- and a raw LF inside a string makes KiCad drop
+    a hierarchical sub-sheet (issue #7648).  Reading with ``newline=""``
+    keeps every byte, so a read/modify/write cycle changes only what it
+    meant to change.
+    """
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_text_exact(path: str | Path, text: str) -> None:
+    """Write ``text`` as UTF-8 *without* newline translation.
+
+    The counterpart of :func:`read_text_exact`: no LF -> CRLF conversion on
+    Windows and no rewriting of line endings the text already carries.
+    """
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
+def parse_file(path: str | Path, track_positions: bool = False) -> SExp:
+    """Parse an S-expression file.
+
+    Args:
+        path: Path to the file to parse
+        track_positions: If True, track line/column positions for each node
+
+    Returns:
+        The parsed SExp tree
+    """
+    text = read_text_exact(path)
+    return Parser(text, track_positions=track_positions).parse()
+
+
+class Document:
+    """
+    A KiCad document (schematic or PCB) with round-trip editing support.
+
+    Usage:
+        doc = Document.load("project.kicad_sch")
+        doc.root.find("symbol", lib_id="Audio:PCM5122PW")
+        doc.save()  # or doc.save("new_file.kicad_sch")
+    """
+
+    def __init__(self, root: SExp, path: Path | None = None):
+        self.root = root
+        self.path = Path(path) if path else None
+
+    @classmethod
+    def load(cls, path: str | Path, track_positions: bool = False) -> Document:
+        """Load a document from file.
+
+        Args:
+            path: Path to the KiCad file to load
+            track_positions: If True, track line/column positions for each node
+        """
+        path = Path(path)
+        root = parse_file(path, track_positions=track_positions)
+        return cls(root, path)
+
+    def save(self, path: str | Path | None = None):
+        """Save document to file."""
+        save_path = Path(path) if path else self.path
+        if save_path is None:
+            raise ValueError("No path specified for save")
+        write_text_exact(save_path, self.root.to_string())
+
+    def find(self, name: str, **attrs) -> SExp | None:
+        """Find first element matching name and attributes."""
+        return self.root.find(name, **attrs)
+
+    def find_all(self, name: str, **attrs) -> list[SExp]:
+        """Find all elements matching name and attributes."""
+        return self.root.find_all(name, **attrs)
+
+
+if __name__ == "__main__":
+    # Test with a simple example
+    test_sexp = """
+    (kicad_sch
+        (version 20231120)
+        (generator "test")
+        (symbol
+            (lib_id "Audio:PCM5122PW")
+            (at 100 100 0)
+            (property "Reference" "U1"
+                (at 100 90 0)
+            )
+        )
+        (wire
+            (pts (xy 10 20) (xy 30 40))
+        )
+    )
+    """
+
+    print("Parsing test S-expression...")
+    doc = parse_string(test_sexp)
+
+    print(f"\nRoot: {doc}")
+    print(f"Version: {doc['version'].get_first_atom()}")
+    print(f"Generator: {doc['generator'].get_first_atom()}")
+
+    symbol = doc.find("symbol")
+    print(f"\nFound symbol: {symbol}")
+    print(f"  lib_id: {symbol['lib_id'].get_first_atom()}")
+    print(f"  at: {symbol['at'].get_atoms()}")
+
+    wire = doc.find("wire")
+    print(f"\nFound wire: {wire}")
+
+    print("\n--- Serialized back ---")
+    print(doc.to_string())

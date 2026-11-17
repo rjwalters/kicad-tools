@@ -1,0 +1,165 @@
+---
+title: "charlieplex_3x3_routed"
+subtitle: "Design Report"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-11 | jlcpcb"
+geometry: "margin=1in"
+fontsize: 11pt
+colorlinks: true
+header-includes:
+  - \usepackage{longtable}
+  - \usepackage{booktabs}
+  - \usepackage{array}
+  - \usepackage{float}
+---
+
+## Board Summary
+
+| Property | Value |
+|----------|-------|
+| Layers | 2 copper (F.Cu, B.Cu) |
+| Footprints | 22 (19 SMD, 3 THT, 0 other) |
+| Nets | 12 |
+| Traces | 207 segments |
+| Vias | 28 |
+| Board Size | 50.0 x 55.0 mm |
+
+## Design Overview
+
+### Theory of Operation
+
+ATtiny85 Charlieplex LED Grid
+
+## Assembly Notes
+
+9 polarized components
+
+- **Polarized components**: 9 -- check orientation markings
+
+## ERC Status
+
+| Metric | Count |
+|--------|-------|
+| Errors | 0 |
+| Warnings | 0 |
+
+**Status**: PASS
+
+\newpage
+
+## Schematic Overview
+
+### Schematic: charlieplex_3x3
+
+![Schematic: charlieplex_3x3](images/schematic_charlieplex_3x3.png)
+
+
+\newpage
+
+## PCB Layout
+
+![PCB Front](images/pcb_front.png)
+
+![PCB Back](images/pcb_back.png)
+
+### Copper
+
+![PCB Copper](images/pcb_copper.png)
+
+### Assembly
+
+![Assembly](images/assembly.png)
+
+
+\newpage
+
+## Copper Layers
+
+### F.Cu
+
+![F.Cu](images/layer_F_Cu.png)
+
+### B.Cu
+
+![B.Cu](images/layer_B_Cu.png)
+
+
+\newpage
+
+## Bill of Materials
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| 100nF | C_0805_2012Metric | 1 | C1 |
+| 4.7uF | C_0805_2012Metric | 1 | C2 |
+| LED | LED_0805_2012Metric | 9 | D1, D2, D3, D4, D5, D6, D7, D8, D9 |
+| AVR-ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J2 |
+| POWER | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
+| 10k | R_0805_2012Metric | 1 | R5 |
+| 330R | R_0805_2012Metric | 4 | R1, R2, R3, R4 |
+| ATtiny85-20PU | DIP-8_W7.62mm | 1 | U1 |
+
+
+\newpage
+
+## DRC Status (`--mfr jlcpcb` rules)
+
+| Metric | Count |
+|--------|-------|
+| Errors | 0 |
+| Errors: kct (`--mfr jlcpcb` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
+| Warnings | 4 |
+| Blocking | 0 |
+
+**Status**: PASS
+
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| redundant_copper_detour | 2 |
+| redundant_copper_covered | 2 |
+| silk_geometry_unmodeled | 1 |
+
+
+
+\newpage
+
+## Manufacturing Readiness
+
+**Verdict**: WARNING
+
+### Action Items
+
+- **[OPTIONAL]** Review 4 DRC warnings
+- **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
+- **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
+- **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets
+- **[OPTIONAL]** Analog net: LINE_D — audio signal; keep short, away from digital/switching nets
+
+
+\newpage
+
+## Routing Status
+
+| Metric | Value |
+|--------|-------|
+| Signal Net Completion | 100.0% (12/12) |
+| Overall Completion | 100.0% |
+| Complete Nets | 12 / 12 |
+| Incomplete Nets | 0 |
+| Unconnected Pads | 0 |
+
+
+## Cost Estimate
+
+| Metric | Per Board (estimated) |
+|--------|-------|
+| PCB Fabrication | ~0.95 USD |
+| Components (estimated) | ~0.81 USD |
+| Assembly (estimated) | ~2.06 USD |
+| **Total (estimated)** | **~3.82 USD** |
+| Batch Quantity | 5 |
+| Batch Total (estimated) | ~19.11 USD |
+

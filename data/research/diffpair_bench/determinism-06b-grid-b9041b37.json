@@ -1,0 +1,939 @@
+{
+  "label": "determinism-06b-grid",
+  "git_sha": "b9041b37",
+  "timeout_s": 600.0,
+  "rows": [
+    {
+      "board": "06b",
+      "engine": "grid",
+      "seed": 42,
+      "rep": 0,
+      "git_sha": "b9041b37",
+      "net_class_map_mode": "committed",
+      "input_sha256": "3c56b6300a6faf44cd7428f62266a3e7fb819d3dd32f4b7aa9220f6d4b615cfb",
+      "source": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+      "stripped_items": 64,
+      "pair_nets": [
+        "LVDS1_N",
+        "LVDS1_P",
+        "LVDS2_N",
+        "LVDS2_P",
+        "LVDS3_N",
+        "LVDS3_P",
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "deterministic_rescue": true,
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s42/r0/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "exit_code": 3,
+      "wall_s": 242.6,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.064,
+      "cell_estimate": 1817674,
+      "router_nets": "16/16",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "rescue_wall_clock": false,
+      "routed": "/tmp/pairs6475/06b-grid-s42/r0/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 18,
+      "nets_total": 18,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 90,
+      "connections_total": 90,
+      "via_count": 63,
+      "vias_per_connection": 0.7,
+      "wirelength_mm": 517.1,
+      "kct_check_errors": 2,
+      "kct_check_errors_total": 2,
+      "kct_check_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/pairs6475/06b-grid-s42/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 0,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 0
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {},
+      "vias_by_net": {
+        "+3V3": 25,
+        "GND": 29,
+        "IN2": 3,
+        "IN3": 1,
+        "IN4": 3,
+        "OUT2": 1,
+        "OUT4": 1
+      },
+      "zone_nets": [
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "LVDS1",
+          "nets": [
+            "LVDS1_P",
+            "LVDS1_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.013,
+            32.101
+          ],
+          "skew_mm": 0.088,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 9.794,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1844,
+          "gap_max_mm": 0.1844,
+          "coupled_trunk_mm": 27.139,
+          "continuity_pct": 84.7,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS2",
+          "nets": [
+            "LVDS2_P",
+            "LVDS2_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.433,
+            31.98
+          ],
+          "skew_mm": 0.453,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.092,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.141,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS3",
+          "nets": [
+            "LVDS3_P",
+            "LVDS3_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.154,
+            32.207
+          ],
+          "skew_mm": 0.053,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.04,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.142,
+          "continuity_pct": 84.4,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS4",
+          "nets": [
+            "LVDS4_P",
+            "LVDS4_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.009,
+            32.455
+          ],
+          "skew_mm": 0.446,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.144,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.144,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        }
+      ],
+      "pair_digest": "a76c3f5dd0069a11",
+      "nets_routed": "18/18",
+      "kct_errors_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "06b",
+      "engine": "grid",
+      "seed": 42,
+      "rep": 1,
+      "git_sha": "b9041b37",
+      "net_class_map_mode": "committed",
+      "input_sha256": "3c56b6300a6faf44cd7428f62266a3e7fb819d3dd32f4b7aa9220f6d4b615cfb",
+      "source": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+      "stripped_items": 64,
+      "pair_nets": [
+        "LVDS1_N",
+        "LVDS1_P",
+        "LVDS2_N",
+        "LVDS2_P",
+        "LVDS3_N",
+        "LVDS3_P",
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "deterministic_rescue": true,
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s42/r1/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s42/r1/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "exit_code": 3,
+      "wall_s": 235.4,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.064,
+      "cell_estimate": 1817674,
+      "router_nets": "16/16",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "rescue_wall_clock": false,
+      "routed": "/tmp/pairs6475/06b-grid-s42/r1/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 18,
+      "nets_total": 18,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 90,
+      "connections_total": 90,
+      "via_count": 63,
+      "vias_per_connection": 0.7,
+      "wirelength_mm": 517.1,
+      "kct_check_errors": 2,
+      "kct_check_errors_total": 2,
+      "kct_check_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/pairs6475/06b-grid-s42/r1/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 0,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 0
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {},
+      "vias_by_net": {
+        "+3V3": 25,
+        "GND": 29,
+        "IN2": 3,
+        "IN3": 1,
+        "IN4": 3,
+        "OUT2": 1,
+        "OUT4": 1
+      },
+      "zone_nets": [
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "LVDS1",
+          "nets": [
+            "LVDS1_P",
+            "LVDS1_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.013,
+            32.101
+          ],
+          "skew_mm": 0.088,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 9.794,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1844,
+          "gap_max_mm": 0.1844,
+          "coupled_trunk_mm": 27.139,
+          "continuity_pct": 84.7,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS2",
+          "nets": [
+            "LVDS2_P",
+            "LVDS2_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.433,
+            31.98
+          ],
+          "skew_mm": 0.453,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.092,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.141,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS3",
+          "nets": [
+            "LVDS3_P",
+            "LVDS3_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.154,
+            32.207
+          ],
+          "skew_mm": 0.053,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.04,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.142,
+          "continuity_pct": 84.4,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS4",
+          "nets": [
+            "LVDS4_P",
+            "LVDS4_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.009,
+            32.455
+          ],
+          "skew_mm": 0.446,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.144,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.144,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        }
+      ],
+      "pair_digest": "a76c3f5dd0069a11",
+      "nets_routed": "18/18",
+      "kct_errors_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "06b",
+      "engine": "grid",
+      "seed": 43,
+      "rep": 0,
+      "git_sha": "b9041b37",
+      "net_class_map_mode": "committed",
+      "input_sha256": "3c56b6300a6faf44cd7428f62266a3e7fb819d3dd32f4b7aa9220f6d4b615cfb",
+      "source": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+      "stripped_items": 64,
+      "pair_nets": [
+        "LVDS1_N",
+        "LVDS1_P",
+        "LVDS2_N",
+        "LVDS2_P",
+        "LVDS3_N",
+        "LVDS3_P",
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "deterministic_rescue": true,
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s43/r0/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s43/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 43",
+      "exit_code": 3,
+      "wall_s": 234.7,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.064,
+      "cell_estimate": 1817674,
+      "router_nets": "16/16",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "rescue_wall_clock": false,
+      "routed": "/tmp/pairs6475/06b-grid-s43/r0/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 18,
+      "nets_total": 18,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 90,
+      "connections_total": 90,
+      "via_count": 62,
+      "vias_per_connection": 0.689,
+      "wirelength_mm": 517.4,
+      "kct_check_errors": 2,
+      "kct_check_errors_total": 2,
+      "kct_check_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/pairs6475/06b-grid-s43/r0/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 0,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 0
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {},
+      "vias_by_net": {
+        "+3V3": 25,
+        "GND": 29,
+        "IN2": 2,
+        "IN3": 1,
+        "IN4": 3,
+        "OUT2": 1,
+        "OUT4": 1
+      },
+      "zone_nets": [
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "LVDS1",
+          "nets": [
+            "LVDS1_P",
+            "LVDS1_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.013,
+            32.101
+          ],
+          "skew_mm": 0.088,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 9.794,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1844,
+          "gap_max_mm": 0.1844,
+          "coupled_trunk_mm": 27.139,
+          "continuity_pct": 84.7,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS2",
+          "nets": [
+            "LVDS2_P",
+            "LVDS2_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.433,
+            31.98
+          ],
+          "skew_mm": 0.453,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.092,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.141,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS3",
+          "nets": [
+            "LVDS3_P",
+            "LVDS3_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.154,
+            32.207
+          ],
+          "skew_mm": 0.053,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.04,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.142,
+          "continuity_pct": 84.4,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS4",
+          "nets": [
+            "LVDS4_P",
+            "LVDS4_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.009,
+            32.455
+          ],
+          "skew_mm": 0.446,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.144,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.144,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        }
+      ],
+      "pair_digest": "a76c3f5dd0069a11",
+      "nets_routed": "18/18",
+      "kct_errors_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    },
+    {
+      "board": "06b",
+      "engine": "grid",
+      "seed": 43,
+      "rep": 1,
+      "git_sha": "b9041b37",
+      "net_class_map_mode": "committed",
+      "input_sha256": "3c56b6300a6faf44cd7428f62266a3e7fb819d3dd32f4b7aa9220f6d4b615cfb",
+      "source": "boards/06-diffpair-test/output/diffpair_test.kicad_pcb",
+      "stripped_items": 64,
+      "pair_nets": [
+        "LVDS1_N",
+        "LVDS1_P",
+        "LVDS2_N",
+        "LVDS2_P",
+        "LVDS3_N",
+        "LVDS3_P",
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "deterministic_rescue": true,
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s43/r1/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s43/r1/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 43",
+      "exit_code": 3,
+      "wall_s": 229.0,
+      "killed_by_harness": false,
+      "clearance_mm": 0.15,
+      "coarse_grid_mm": 0.064,
+      "cell_estimate": 1817674,
+      "router_nets": "16/16",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "rescue_wall_clock": false,
+      "routed": "/tmp/pairs6475/06b-grid-s43/r1/diffpair_test_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 18,
+      "nets_total": 18,
+      "nets_blocking_incomplete": 0,
+      "connections_routed": 90,
+      "connections_total": 90,
+      "via_count": 62,
+      "vias_per_connection": 0.689,
+      "wirelength_mm": 517.4,
+      "kct_check_errors": 2,
+      "kct_check_errors_total": 2,
+      "kct_check_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kct_check_mfr": "jlcpcb",
+      "kct_check_net_class_map": "/tmp/pairs6475/06b-grid-s43/r1/net_class_map.json",
+      "kct_check_inactive_rules": [],
+      "kicad_drc_errors": 0,
+      "kicad_drc_unconnected": 0,
+      "kicad_drc_all_track_errors": true,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 0,
+        "placement_bound": 0,
+        "budget_starved": 0,
+        "pour_discontinuous": 0
+      },
+      "signal_nets_unfinished": 0,
+      "stuck_nets": {},
+      "vias_by_net": {
+        "+3V3": 25,
+        "GND": 29,
+        "IN2": 2,
+        "IN3": 1,
+        "IN4": 3,
+        "OUT2": 1,
+        "OUT4": 1
+      },
+      "zone_nets": [
+        "+3V3",
+        "GND"
+      ],
+      "manufacturable": false,
+      "pairs": [
+        {
+          "pair": "LVDS1",
+          "nets": [
+            "LVDS1_P",
+            "LVDS1_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.013,
+            32.101
+          ],
+          "skew_mm": 0.088,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 9.794,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1844,
+          "gap_max_mm": 0.1844,
+          "coupled_trunk_mm": 27.139,
+          "continuity_pct": 84.7,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS2",
+          "nets": [
+            "LVDS2_P",
+            "LVDS2_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.433,
+            31.98
+          ],
+          "skew_mm": 0.453,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.092,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.141,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS3",
+          "nets": [
+            "LVDS3_P",
+            "LVDS3_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.154,
+            32.207
+          ],
+          "skew_mm": 0.053,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.04,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.142,
+          "continuity_pct": 84.4,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": true,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        },
+        {
+          "pair": "LVDS4",
+          "nets": [
+            "LVDS4_P",
+            "LVDS4_N"
+          ],
+          "outcome": "uncoupled:joint-A*-plateau",
+          "segment_outcomes": null,
+          "routed_mm": [
+            32.009,
+            32.455
+          ],
+          "skew_mm": 0.446,
+          "chain_skew_mm": null,
+          "uncoupled_mm": 10.144,
+          "vias_p": 0,
+          "vias_n": 0,
+          "gap_min_mm": 0.1845,
+          "gap_max_mm": 0.1845,
+          "coupled_trunk_mm": 27.144,
+          "continuity_pct": 84.3,
+          "continuity_threshold_pct": 80.0,
+          "skew_tolerance_mm": 0.1,
+          "log_threshold": {
+            "continuity_pct": 80.0,
+            "skew_mm": 0.1
+          },
+          "protocol": "LVDS",
+          "skew_source": "class:LVDS",
+          "skew_severity": "error",
+          "skew_pass": false,
+          "skew_stretch_mm": 0.5,
+          "skew_stretch_pass": true,
+          "max_uncoupled_per_terminal_mm": null,
+          "max_vias_per_net": null
+        }
+      ],
+      "pair_digest": "a76c3f5dd0069a11",
+      "nets_routed": "18/18",
+      "kct_errors_by_rule": {
+        "diffpair_length_skew": 2
+      },
+      "kicad_cli_errors_by_type": {},
+      "valid": true,
+      "invalid_reasons": []
+    }
+  ]
+}

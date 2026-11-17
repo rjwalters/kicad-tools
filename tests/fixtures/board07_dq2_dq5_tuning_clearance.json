@@ -1,0 +1,90 @@
+{
+  "source_commit": "79f5105f",
+  "description": "Captured after Board07 seed42 tuning; absent in pre-tuning and all earlier stage snapshots. Original 2400/600-second limits and two placement probes.",
+  "findings": [
+    {
+      "gap_mm": 0.10722532995731632,
+      "declared_span_covers_layer": true,
+      "segment": {
+        "x1": 135.4350161756899,
+        "y1": 122.4899945054627,
+        "x2": 136.1393389717774,
+        "y2": 123.19431730155021,
+        "width": 0.15,
+        "layer": "CopperLayer.IN2_CU",
+        "net": 6,
+        "net_name": "DQ2"
+      },
+      "via": {
+        "x": 136.41099548339844,
+        "y": 122.78400421142578,
+        "drill": 0.3,
+        "diameter": 0.6,
+        "layers": [
+          "CopperLayer.F_CU",
+          "CopperLayer.B_CU"
+        ],
+        "net": 9,
+        "net_name": "DQ5",
+        "in_pad": false,
+        "is_micro": false
+      }
+    },
+    {
+      "gap_mm": -0.24703973949806507,
+      "declared_span_covers_layer": true,
+      "segment": {
+        "x1": 136.1393389717774,
+        "y1": 123.19431730155021,
+        "x2": 136.42218168425202,
+        "y2": 122.9114745890756,
+        "width": 0.15,
+        "layer": "CopperLayer.IN2_CU",
+        "net": 6,
+        "net_name": "DQ2"
+      },
+      "via": {
+        "x": 136.41099548339844,
+        "y": 122.78400421142578,
+        "drill": 0.3,
+        "diameter": 0.6,
+        "layers": [
+          "CopperLayer.F_CU",
+          "CopperLayer.B_CU"
+        ],
+        "net": 9,
+        "net_name": "DQ5",
+        "in_pad": false,
+        "is_micro": false
+      }
+    },
+    {
+      "gap_mm": -0.292774670042693,
+      "declared_span_covers_layer": true,
+      "segment": {
+        "x1": 136.42218168425202,
+        "y1": 122.9114745890756,
+        "x2": 135.71785888816453,
+        "y2": 122.20715179298809,
+        "width": 0.15,
+        "layer": "CopperLayer.IN2_CU",
+        "net": 6,
+        "net_name": "DQ2"
+      },
+      "via": {
+        "x": 136.41099548339844,
+        "y": 122.78400421142578,
+        "drill": 0.3,
+        "diameter": 0.6,
+        "layers": [
+          "CopperLayer.F_CU",
+          "CopperLayer.B_CU"
+        ],
+        "net": 9,
+        "net_name": "DQ5",
+        "in_pad": false,
+        "is_micro": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,4249 @@
+"""Negotiated congestion routing algorithm (PathFinder-style).
+
+This module implements iterative rip-up and reroute with increasing
+congestion penalties to resolve routing conflicts.
+
+Adaptive parameter tuning (Issue #633) improves convergence by:
+- Dynamically adjusting history increment based on progress
+- Detecting oscillation patterns to escape local minima
+- Adapting present cost factor based on congestion
+- Early termination when no progress is being made
+"""
+
+from __future__ import annotations
+
+import contextlib
+import random
+import time
+from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
+from typing import TYPE_CHECKING, Callable
+
+from ..kelvin import detect_kelvin_topology
+from ..kelvin_obstacles import isolate_kelvin_branch
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from ..congestion_estimator import CongestionEstimator
+    from ..grid import RoutingGrid
+    from ..pathfinder import Router
+    from ..primitives import Pad, Route, Segment, Via
+    from ..rules import DesignRules, NetClassRouting
+
+# Issue #2795: progress callback signature for visibility into long-running
+# rip-up operations.  Callback receives a phase string and a metadata dict.
+ProgressCallback = Callable[[str, dict], None]
+
+
+# Issue #6342: why a ``targeted_ripup`` transaction ended the way it did.  The
+# method used to return a bare ``False`` for every failure mode, so a caller
+# could not tell "the victim has no path even with its blockers removed" from
+# "a displaced blocker could not re-land" or "the per-net rip-up budget left
+# nothing to rip" -- and therefore could not stop repeating the same rip.
+RIPUP_COMMITTED = "committed"
+RIPUP_BUDGET_EXHAUSTED = "budget_exhausted"
+RIPUP_VICTIM_GEOMETRIC = "victim_geometric"
+RIPUP_SIBLING_FAILED = "sibling_failed"
+RIPUP_TRADED = "traded"
+
+
+class EscapeAttempts:
+    """Deterministic reroute-attempt budget for one escape strategy (Issue #7071).
+
+    Counts per-net ``route_net_negotiated`` calls of one strategy of
+    :meth:`NegotiatedRouter.escape_local_minimum`; each strategy gets its own
+    instance (Issue #7192) so an earlier strategy cannot starve a later one.
+    Unlike the wall-clock
+    escape budget (#2415) it does not depend on host speed, so a seeded
+    ``--deterministic-budget`` route reaches the same strategies every time.
+    ``cap=None`` means unlimited (only counts).
+    """
+
+    def __init__(self, cap: int | None = None) -> None:
+        self.cap = cap
+        self.used = 0
+        # True when a strategy stopped early because the cap ran out; such a
+        # strategy is partial work and is rolled back, never kept.
+        self.cut = False
+
+    def exhausted(self) -> bool:
+        return self.cap is not None and self.used >= self.cap
+
+    def spend(self) -> None:
+        self.used += 1
+
+    def cut_if_exhausted(self, net_pads: list[Pad] | None) -> bool:
+        """Flag the strategy as cut when a routable net is left without budget.
+
+        Only a net with ``>= 2`` pads needs a reroute; a trailing 1-pad or
+        0-pad net never marks a finished strategy as partial (Issue #7192).
+        """
+        if len(net_pads or ()) >= 2 and self.exhausted():
+            self.cut = True
+            return True
+        return False
+
+
+@dataclass(frozen=True)
+class EscapeSummary:
+    """What one ``escape_local_minimum`` call did (Issue #7071)."""
+
+    strategies_tried: int
+    seconds: float
+    overflow_before: int
+    overflow_after: int
+    kept: bool
+    reroutes: int
+    reroute_cap: int | None
+
+
+@dataclass(frozen=True)
+class TargetedRipupOutcome:
+    """Structured result of one :meth:`NegotiatedRouter.targeted_ripup` call.
+
+    Issue #6342.  Truthy exactly when the transaction committed (including a
+    victim-first *trade*, see :data:`RIPUP_TRADED`), so the pre-#6342
+    ``if success:`` callers keep their meaning.
+
+    Attributes:
+        reason: One of the ``RIPUP_*`` constants.
+        failed_net: The victim the rip-up was for.
+        ripped: Blockers that were actually ripped (after the budget filter).
+        dropped: Blockers the caller named that the per-net
+            ``ripup_history`` / ``max_ripups_per_net`` budget filtered out --
+            named, but never touched.
+        failed_sibling: For :data:`RIPUP_SIBLING_FAILED` and
+            :data:`RIPUP_TRADED`, the first displaced blocker that could not
+            re-land with at least its old route count.
+        traded: For :data:`RIPUP_TRADED`, the blockers left unrouted so the
+            victim's copper could be kept.
+        cpp_retry: The first attempt failed with the ripped copper still
+            phantom-blocked on the C++ grid (an open corridor-reservation
+            window) and this is the outcome of the retry with it freed.
+    """
+
+    reason: str
+    failed_net: int
+    ripped: tuple[int, ...] = ()
+    dropped: tuple[int, ...] = ()
+    failed_sibling: int | None = None
+    traded: tuple[int, ...] = ()
+    cpp_retry: bool = False
+
+    def __bool__(self) -> bool:
+        return self.reason in (RIPUP_COMMITTED, RIPUP_TRADED)
+
+    def describe(self, net_names: dict[int, str] | None = None) -> str:
+        """One human line: ``reason`` plus the nets it concerns."""
+        names = net_names or {}
+
+        def _n(net: int) -> str:
+            return str(names.get(net, f"Net_{net}"))
+
+        parts = [self.reason]
+        if self.ripped:
+            parts.append("ripped " + ", ".join(_n(n) for n in self.ripped))
+        if self.dropped:
+            parts.append(
+                "not ripped (rip-up budget spent): " + ", ".join(_n(n) for n in self.dropped)
+            )
+        if self.failed_sibling is not None:
+            parts.append(f"{_n(self.failed_sibling)} could not re-land")
+        if self.traded:
+            parts.append("left for re-route: " + ", ".join(_n(n) for n in self.traded))
+        if self.cpp_retry:
+            parts.append("after a retry with the ripped copper freed on the C++ grid")
+        return "; ".join(parts)
+
+
+# Issue #3452: initial-pass grace-pass bounds, shared by the two
+# sequential initial passes (``core.Autorouter.route_all_negotiated`` and
+# ``two_phase.TwoPhaseRouter._route_detailed_negotiated``).  When the
+# wall-clock budget expires mid-list, the starved tail is swept in
+# escalating tiers: tier 1 gives every net a TINY per-A*-call cap so the
+# cheap majority commits in milliseconds no matter where pathological
+# searches sit in the order; tier 2 re-attempts the tier-1 failures with
+# a bigger cap from whatever budget remains.  The whole pass is bounded
+# by ``GRACE_PASS_BUDGET_S``.
+#
+# The caps are per-A*-CALL budgets, not per-net wall bounds: a failing
+# multi-edge net can legally spend several multiples of the cap
+# (cumulative-deadline RSMT edges x the pathfinder's 3x
+# ``_ESCAPE_HINT_DEADLINE_MULT`` for escape-flanked pads x relaxed-retry
+# calls -- measured ~15x on board 05's ISENSE family, where a single
+# starved ISENSE net consumed 31.2s of a 30s grace budget under a flat
+# 2.0s cap).  Tier 1's 0.3s cap keeps even that worst case to a few
+# seconds, which is why the tiny tier runs FIRST.
+GRACE_PASS_TIER_CAPS_S: tuple[float, ...] = (0.3, 2.0)
+# Total sweep bound.  Sized from the board-05 measurement: a 26-net
+# starved tail with three pathological ISENSE searches costs ~30s for
+# the first 12 tier-1 attempts under load (each failing escape-flanked
+# net legally spends ~15x the per-call cap; see above).  60s lets
+# tier 1 finish the WHOLE tail (the cheap majority) and still leaves
+# tier 2 room for second chances -- and stays small next to the ~140s
+# overrun the post-initial-pass stall-recovery path already tolerates.
+GRACE_PASS_BUDGET_S = 60.0
+# The largest (final-tier) per-call cap, re-exported for callers/tests
+# that reason about the upper bound of any single grace attempt.
+GRACE_PASS_PER_NET_S = GRACE_PASS_TIER_CAPS_S[-1]
+
+# Issue #4159: post-negotiation rescue-sweep bounds.  After the negotiated
+# batch loop converges/stalls/times out, one bounded pass re-attempts every
+# still-stranded net SOLO on the live grid (existing committed copper is
+# already present as obstacles).  The issue's own evidence is that each such
+# net routes in <1s alone, so a generous but hard wall-clock ceiling plus a
+# per-net cap keeps the whole sweep bounded even when a genuinely-impossible
+# net is in the stranded set.  The overall ceiling mirrors GRACE_PASS_BUDGET_S
+# (they are the same shape of bounded post-loop sweep); the per-net cap is
+# clamped so one pathological solo search cannot eat the whole sweep.
+POST_NEGOTIATION_SWEEP_BUDGET_S = 60.0
+POST_NEGOTIATION_SWEEP_PER_NET_S = 10.0
+
+# Issue #4724: the sweep bounds kept when the CALLER runs unbudgeted
+# (``timeout=None`` / ``per_net_timeout=None``) AND a per-net node-expansion
+# cap is active -- i.e. the deterministic-budget mode #4536 established, where
+# a wall clock must not decide anything.
+#
+# The two bounds above ARE load-bearing in that mode: a per-net search that
+# exhausts the 1,000,000-expansion cap costs ~11 s on a CI runner, so the 10 s
+# per-net cap STRADDLES it (the same straddle that made the relief rescue's
+# 10 s sub-search budget a coin flip on machine speed, #4536), and a handful of
+# stranded nets is enough for the 60 s whole-sweep ceiling to cut the tail at a
+# load-dependent net boundary.  Both decide WHICH nets get rescued -- routed
+# reach -- not merely runtime.
+#
+# These replacements are ~10x the natural times, matching
+# ``RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S``: deliberately NOT load-bearing, kept
+# only so the one path the expansion cap does not price in seconds (the
+# pure-Python A* fallback, 10-100x slower) cannot grind for many minutes inside
+# a post-loop sweep (the #3989 lesson).  Callers that DO pass a ``timeout``
+# keep the historical bounds unchanged.
+POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S = 600.0
+POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S = 120.0
+
+# Issue #3474 R1: abort threshold for a single grace attempt that grossly
+# overruns its cap.  ``route_fn`` legally spends a small multiple of the
+# per-call cap (see the ~15x note above), but a 100x+ overrun means a
+# layer below the cap is not honoring deadlines at all (the measured
+# chorus-test case: ONE 0.3s-capped attempt burned 101.7s inside
+# un-budgeted failure diagnostics, eating the entire grace budget for 0
+# routed nets).  When an attempt exceeds ``max(mult * cap, floor)`` the
+# sweep aborts immediately -- the leak will eat every subsequent attempt
+# too, so continuing is pure overhead.
+GRACE_CALL_OVERRUN_ABORT_MULT = 20.0
+GRACE_CALL_OVERRUN_ABORT_FLOOR_S = 10.0
+
+
+# Issue #3474 R1: default per-net A* budget derivation.  The pinned
+# board recipes set ``--timeout`` (stage budget) but rarely
+# ``--per-net-timeout``; with no per-net cap a single pathological
+# search (chorus-test SPI_SCK, softstart VGATE per #3485) can consume
+# the WHOLE stage budget before the stage-level check -- which only
+# runs between nets -- ever fires.  When the caller has a stage budget
+# but no explicit per-net cap, derive one as a fraction of the stage
+# budget so no single net can starve the rest of the queue.  Explicit
+# ``--per-net-timeout`` values are always respected unchanged; runs
+# without ANY budget remain unbounded (legacy behaviour).
+PER_NET_CAP_STAGE_FRACTION = 0.10
+PER_NET_CAP_FLOOR_S = 5.0
+
+
+def derive_per_net_cap(
+    per_net_timeout: float | None,
+    stage_timeout: float | None,
+) -> float | None:
+    """Return the effective per-net A* budget for a routing stage.
+
+    Issue #3474 R1 (budget integrity): bounds head-of-queue blowups so
+    no single net consumes more than ~``PER_NET_CAP_STAGE_FRACTION`` of
+    the stage budget (with a small floor so tiny stage budgets don't
+    produce useless sub-second caps).
+
+    Args:
+        per_net_timeout: Explicit per-net budget (``--per-net-timeout``).
+            Returned unchanged when set.
+        stage_timeout: The stage's wall-clock budget (``timeout`` given to
+            the routing loop).  ``None``/non-positive => no derivation.
+
+    Returns:
+        The effective per-net budget in seconds, or ``None`` when neither
+        an explicit cap nor a stage budget is configured (legacy
+        unbounded behaviour).
+    """
+    if per_net_timeout is not None:
+        return per_net_timeout
+    if stage_timeout is None or stage_timeout <= 0:
+        return None
+    return max(PER_NET_CAP_FLOOR_S, PER_NET_CAP_STAGE_FRACTION * float(stage_timeout))
+
+
+def derive_iter_per_net_cap(
+    per_net_timeout: float | None,
+    remaining_budget: float | None,
+) -> float | None:
+    """Return the per-net A* budget for one rip-up *iteration*.
+
+    Issue #3989 (rip-up-loop backstop integrity): :func:`derive_per_net_cap`
+    bounds the *initial* pass against the WHOLE stage budget, but that cap is
+    static for the life of the run.  The negotiated rip-up loop calls
+    ``_route_net_negotiated`` from several reroute sites (sequential reroute,
+    stagnation recovery, zero-overflow recovery), and the stage
+    ``check_timeout()`` only fires BETWEEN nets.  When a net drops to the
+    pure-Python A* fallback on a first-time geometric failure
+    (``FAILURE_NO_PATH`` / ``FAILURE_CLEARANCE`` -- not covered by #3956's
+    resume-exhaustion fast-path), one unbounded call can run ~200 s and
+    overshoot a 360 s backstop before the between-net check ever runs.
+
+    The fix is to derive a per-net cap from the *remaining* stage budget at
+    each iteration entry.  Early iterations get a generous cap (a fraction of
+    the plentiful remaining budget); late iterations shrink toward
+    ``PER_NET_CAP_FLOOR_S`` as the deadline approaches.  This makes the
+    backstop honest: the loop can overshoot at most by one final net's
+    bounded cap plus per-iteration overhead, never by an unbounded fallback.
+
+    An explicit ``per_net_timeout`` always binds when it is *tighter* than the
+    remaining-budget derivation, so an operator's ``--per-net-timeout`` is
+    never loosened; but as the deadline nears, the remaining-budget cap can
+    tighten below the explicit value so a late net cannot overrun the stage.
+
+    Args:
+        per_net_timeout: The effective per-net cap already in force for this
+            run (e.g. the value :func:`derive_per_net_cap` produced for the
+            initial pass, or an explicit ``--per-net-timeout``).  ``None`` =>
+            no standing cap.
+        remaining_budget: Seconds left in the stage budget at iteration entry
+            (``start_time + timeout - now``).  ``None`` => no stage budget
+            (legacy unbounded behaviour); non-positive => already past the
+            deadline, so clamp to the floor.
+
+    Returns:
+        The per-net budget in seconds for this iteration, or ``None`` when
+        neither a standing cap nor a stage budget is configured.
+    """
+    if remaining_budget is None:
+        # No stage budget: honour only whatever standing cap exists.
+        return per_net_timeout
+    # Derive a cap from the remaining budget: generous early, tight late.
+    remaining_cap = max(PER_NET_CAP_FLOOR_S, PER_NET_CAP_STAGE_FRACTION * float(remaining_budget))
+    if per_net_timeout is None:
+        return remaining_cap
+    # Both exist: take the tighter.  The remaining-budget derivation shrinks as
+    # the deadline nears, so late in the run it can bind below an explicit cap
+    # -- that is the whole point (the stage backstop must stay honest).
+    return min(per_net_timeout, remaining_cap)
+
+
+def run_initial_pass_grace(
+    grace_nets: list[int],
+    route_fn: Callable[[int, float], list],
+    commit_fn: Callable[[int, list], None],
+    per_net_timeout: float | None,
+    budget_s: float = GRACE_PASS_BUDGET_S,
+) -> tuple[int, int, int]:
+    """Bounded best-effort sweep over nets starved by an initial-pass timeout.
+
+    Issue #3452: the sequential initial passes route nets in a
+    difficulty-agnostic order and used to HARD-BREAK on the wall-clock
+    check, silently dropping every net after the break point.  On board
+    05 (4L jlcpcb, seed 42) five pathological ISENSE searches burn ~190s
+    of a 420s budget, after which the remaining 24 nets route in under
+    10 seconds -- whether the budget line lands before or after that
+    window decided 28/32 vs 6/32 at the initial pass (the #3452
+    "12/32 -> 3/32" collapse, load-modulated; the #3442 in-loop pieces
+    never even execute in the collapsing runs because ``timed_out``
+    skips the iteration loop entirely).  This sweep gives each starved
+    net a bounded attempt instead of zero.
+
+    Args:
+        grace_nets: Net ids starved by the timeout, in original order.
+        route_fn: ``(net, per_net_timeout_cap) -> routes`` -- the
+            caller's single-net router.
+        commit_fn: ``(net, routes) -> None`` -- commits successful
+            routes (grid marking + bookkeeping), caller-specific.
+        per_net_timeout: The caller's own per-net budget; tier caps are
+            clamped to it so a grace attempt never receives MORE time
+            per call than the caller's normal pass would grant.
+        budget_s: Total sweep budget in seconds (issue #3474 R1).
+            Defaults to ``GRACE_PASS_BUDGET_S``; callers that have
+            already overrun their stage deadline pass the REMAINING
+            grace fund so the sweep never extends the stage overrun
+            past the historical bound.
+
+    Returns:
+        ``(routed, attempted, skipped)``: nets successfully routed,
+        distinct nets given at least one attempt, and nets never
+        attempted because the grace budget ran out.
+
+    Notes:
+        Issue #3474 R1 adds two productivity guards:
+
+        - **Single-call overrun abort**: an attempt that exceeds
+          ``max(GRACE_CALL_OVERRUN_ABORT_MULT * cap,
+          GRACE_CALL_OVERRUN_ABORT_FLOOR_S)`` indicates a deadline leak
+          below the cap; the whole sweep aborts (every later attempt
+          would leak the same way).
+        - **No-progress tier exit**: when tier 1 attempts several nets
+          and routes none, later (more expensive) tiers are skipped --
+          the board state, not the cap size, is what's blocking.
+    """
+    start = time.monotonic()
+    remaining = list(grace_nets)
+    attempted: set[int] = set()
+    routed = 0
+    out_of_budget = False
+    aborted = False
+    for tier_idx, tier_cap in enumerate(GRACE_PASS_TIER_CAPS_S):
+        if out_of_budget or aborted or not remaining:
+            break
+        cap = min(tier_cap, per_net_timeout) if per_net_timeout else tier_cap
+        abort_threshold = max(GRACE_CALL_OVERRUN_ABORT_MULT * cap, GRACE_CALL_OVERRUN_ABORT_FLOOR_S)
+        tier_routed_before = routed
+        tier_attempts = 0
+        still_failing: list[int] = []
+        for idx, net in enumerate(remaining):
+            if time.monotonic() - start > budget_s:
+                out_of_budget = True
+                still_failing.extend(remaining[idx:])
+                break
+            attempted.add(net)
+            tier_attempts += 1
+            call_start = time.monotonic()
+            routes = route_fn(net, cap)
+            call_elapsed = time.monotonic() - call_start
+            if routes:
+                routed += 1
+                commit_fn(net, routes)
+            else:
+                still_failing.append(net)
+            if call_elapsed > abort_threshold:
+                # Deadline leak below the cap (issue #3474 R1): abort the
+                # sweep before the leak eats the rest of the budget.
+                print(
+                    f"  Grace pass aborted: single attempt took {call_elapsed:.1f}s "
+                    f"under a {cap:.1f}s cap (deadline leak below the router; "
+                    f"issue #3474)",
+                    flush=True,
+                )
+                aborted = True
+                still_failing.extend(remaining[idx + 1 :])
+                break
+        remaining = still_failing
+        # No-progress tier exit (issue #3474 R1): if this tier attempted
+        # at least 3 nets and routed none of them, escalating the cap is
+        # unlikely to help -- skip the more expensive tiers.
+        if tier_idx == 0 and tier_attempts >= 3 and routed == tier_routed_before:
+            break
+    skipped = sum(1 for n in grace_nets if n not in attempted)
+    return routed, len(attempted), skipped
+
+
+def select_seg_seg_demotion_nets(
+    overlap_pairs: list[tuple[int, int]],
+    demotable: set[int],
+) -> list[int]:
+    """Pick the minimal-ish set of nets to demote so no overlap pair survives.
+
+    Issue #3433 (demote-to-partial safety net): given the cross-net
+    copper-overlap pairs reported by
+    :meth:`NegotiatedRouter.find_segment_segment_violation_pairs`
+    (``copper_overlap_only=True``), choose which nets to strip from the
+    committed result so that no kept pair has both members still routed.
+
+    Greedy vertex cover: repeatedly demote the net that participates in
+    the most unresolved pairs (tie-break: lowest net id, for
+    determinism), until every pair has at least one demoted member.
+    Pairs where NEITHER member is demotable (e.g. both sides are
+    non-rippable escape infrastructure) are skipped -- nothing can be
+    done about them at this layer.
+
+    Shared by the post-loop safety nets in ``core.route_all_negotiated``
+    and ``two_phase.TwoPhaseRouter._detailed_negotiated``.
+
+    Args:
+        overlap_pairs: ``(net_lo, net_hi)`` tuples, ``net_lo < net_hi``.
+        demotable: Net ids eligible for demotion (committed,
+            negotiated-loop-owned nets).
+
+    Returns:
+        Sorted list of net ids to demote (may be empty).
+    """
+    pending = [(a, b) for a, b in overlap_pairs if a in demotable or b in demotable]
+    demoted: set[int] = set()
+    while pending:
+        counts: dict[int, int] = {}
+        for a, b in pending:
+            if a in demotable:
+                counts[a] = counts.get(a, 0) + 1
+            if b in demotable:
+                counts[b] = counts.get(b, 0) + 1
+        # Highest pair-participation first; lowest net id on ties.
+        victim = min(counts, key=lambda n: (-counts[n], n))
+        demoted.add(victim)
+        pending = [p for p in pending if victim not in p]
+    return sorted(demoted)
+
+
+def demote_seg_seg_finalize(
+    net_routes: dict[int, list[Route]],
+    neg_router: NegotiatedRouter,
+    grid: RoutingGrid,
+    self_routes: list[Route],
+    *,
+    trace_clearance: float,
+    extra_routes: list[Route] | None = None,
+    copper_overlap_only: bool = False,
+    exempt_pairs: set[tuple[int, int]] | None = None,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Detect + demote nets whose committed copper is a cross-net seg-seg short.
+
+    Issue #4208 (Unit 2): the single shared seg-seg finalize gate used by
+    BOTH :meth:`core.Autorouter._demote_seg_seg_overlap_nets` and
+    :meth:`two_phase.TwoPhaseRouter._detailed_negotiated`, replacing the
+    two hand-synced copies that previously drifted apart (the rescue gate
+    was never widened to the Unit-1 full threshold; this consolidation
+    prevents that class of drift).
+
+    Runs :meth:`NegotiatedRouter.find_segment_segment_violation_pairs`
+    over the committed ``net_routes`` (plus non-rippable ``extra_routes``
+    as foreign obstacles), selects the greedy vertex-cover victim set over
+    the demotable (committed) nets, and demotes each victim in place:
+    every route is unmarked from ``grid`` (usage + envelope) and removed
+    from ``self_routes``, and ``net_routes[victim]`` is reset to ``[]``.
+
+    The M3 escape-infra case is surfaced separately: pairs where BOTH
+    sides are non-rippable escape stubs are collected via
+    ``report_non_rippable_pairs=True`` but are NOT demotable (neither net
+    is in ``demotable``), so they are returned to the caller as a
+    routing-quality signal rather than silently shipped as a short.
+
+    Args:
+        net_routes: Mapping of net id -> committed routes (mutated:
+            demoted nets reset to ``[]``).
+        neg_router: Negotiated router owning the pair-detection engine.
+        grid: The routing grid the victims' copper is unmarked from.
+        self_routes: The owner's ``self.routes`` list (mutated: victim
+            routes removed).
+        trace_clearance: Manufacturer minimum copper-to-copper clearance.
+        extra_routes: Non-rippable escape-phase routes joined into the
+            foreign universe.
+        copper_overlap_only: When ``False`` (the finalize default) use the
+            FULL DRC SHORT threshold; when ``True`` use the polygon-overlap
+            threshold (the in-loop / pre-repair position).
+        exempt_pairs: Ordered ``(min_net, max_net)`` id pairs whose
+            sub-clearance proximity is legitimate BY DESIGN and already
+            adjudicated elsewhere -- concretely, coupled differential
+            pairs whose copper honors the per-class intra-pair clearance
+            floor (issue #4270; the caller verifies the floor before
+            exempting).  Violation pairs in this set are dropped before
+            victim selection so the wide finalize threshold cannot demote
+            a legitimately-coupled pair as a cross-net short.
+
+    Returns:
+        ``(victims, non_rippable_pairs)`` where ``victims`` is the sorted
+        list of demoted net ids (empty in the common clean case) and
+        ``non_rippable_pairs`` is the sorted list of both-non-rippable
+        crossing pairs the greedy cover could not resolve (M3 signal;
+        empty in the common case).
+    """
+    all_pairs = neg_router.find_segment_segment_violation_pairs(
+        net_routes,
+        trace_clearance=trace_clearance,
+        extra_routes=extra_routes,
+        copper_overlap_only=copper_overlap_only,
+        report_non_rippable_pairs=True,
+    )
+    if exempt_pairs:
+        all_pairs = [pair for pair in all_pairs if pair not in exempt_pairs]
+    if not all_pairs:
+        return [], []
+
+    demotable = {net for net, routes in net_routes.items() if routes}
+    # M3: pairs where neither side is demotable (both non-rippable escape
+    # infra) survive the greedy cover; surface them as a signal.
+    non_rippable_pairs = [
+        pair for pair in all_pairs if pair[0] not in demotable and pair[1] not in demotable
+    ]
+    victims = select_seg_seg_demotion_nets(all_pairs, demotable)
+    if not victims:
+        return [], non_rippable_pairs
+
+    for net in victims:
+        for route in net_routes.get(net, []):
+            grid.unmark_route_usage(route)
+            grid.unmark_route(route)
+            if route in self_routes:
+                self_routes.remove(route)
+        net_routes[net] = []
+    return victims, non_rippable_pairs
+
+
+# =========================================================================
+# Adaptive Parameter Functions (Issue #633)
+# =========================================================================
+
+
+def calculate_history_increment(
+    iteration: int,
+    overflow_history: list[int],
+    base_increment: float = 0.5,
+) -> float:
+    """Calculate adaptive history increment based on convergence progress.
+
+    Args:
+        iteration: Current iteration number (0-indexed)
+        overflow_history: List of overflow values from previous iterations
+        base_increment: Base history increment value (default: 0.5)
+
+    Returns:
+        Adjusted history increment value
+
+    The increment is increased when:
+    - Overflow is increasing (need more penalty to discourage congested areas)
+    - Overflow is stagnant (stuck at local minimum, need stronger push)
+
+    The increment is decreased when:
+    - Close to convergence (gentle adjustments to avoid overshooting)
+    """
+    if len(overflow_history) < 2:
+        return base_increment
+
+    current = overflow_history[-1]
+    previous = overflow_history[-2]
+
+    # If overflow is increasing, be more aggressive with penalties
+    if current > previous:
+        return base_increment * 1.5
+
+    # If overflow is stagnant (same value), try stronger penalty
+    if current == previous:
+        # Check for repeated stagnation
+        stagnant_count = 1
+        for i in range(len(overflow_history) - 2, max(0, len(overflow_history) - 5) - 1, -1):
+            if overflow_history[i] == current:
+                stagnant_count += 1
+            else:
+                break
+        # Increase increment based on how long we've been stuck
+        return base_increment * (1.0 + 0.5 * stagnant_count)
+
+    # If overflow is decreasing and close to zero, be gentler
+    if current < 5:
+        return base_increment * 0.5
+
+    # Normal progress - use base increment
+    return base_increment
+
+
+def detect_oscillation(overflow_history: list[int], window: int = 4) -> bool:
+    """Detect if the router is oscillating between states.
+
+    Args:
+        overflow_history: List of overflow values from previous iterations
+        window: Number of recent iterations to check (default: 4)
+
+    Returns:
+        True if oscillation is detected, False otherwise
+
+    Detects:
+    - A-B-A-B patterns (alternating between two values)
+    - Complete stagnation (all same value for window iterations)
+    - Bounded oscillation (only when the window does NOT contain a new
+      global minimum, since a new minimum means the router is still
+      making progress -- Issue #1823)
+    """
+    if len(overflow_history) < window:
+        return False
+
+    recent = overflow_history[-window:]
+
+    # Issue #2262: If the most recent overflow is zero the router has
+    # converged -- never report oscillation in this state.
+    if recent[-1] == 0:
+        return False
+
+    # Issue #1823: If the recent window contains a new global minimum,
+    # the router is still making progress -- do not declare oscillation.
+    # For example, [21, 21, 8, 21] has overflow 8 as a new best, which
+    # means the router found a better configuration even if it bounced back.
+    best_overall = min(overflow_history)
+    window_min = min(recent)
+    window_has_new_minimum = (
+        window_min <= best_overall and window_min < min(overflow_history[:-window])
+        if len(overflow_history) > window
+        else False
+    )
+
+    if window_has_new_minimum:
+        return False
+
+    # Check for exact A-B-A-B repetition pattern
+    if window >= 4 and recent[0] == recent[2] and recent[1] == recent[3]:
+        return True
+
+    # Check for complete stagnation (all same value)
+    # Zero-overflow stagnation is convergence, not oscillation (#2262)
+    if len(set(recent)) == 1 and recent[0] > 0:
+        return True
+
+    # Check for bounded oscillation (values stay within small range)
+    if window >= 4:
+        unique_vals = set(recent)
+        if len(unique_vals) <= 2 and min(recent) > 0:
+            return True
+
+    return False
+
+
+def _is_monotonically_diverging(overflow_history: list[int], window: int = 3) -> bool:
+    """Detect monotonically increasing overflow above the best-seen value.
+
+    This catches diverging sequences like [90, 96, 88, 130, 148, 155] where
+    the last ``window`` values are all strictly increasing and all above the
+    overall best (minimum) value.  Standard oscillation detection misses this
+    pattern because it looks for A-B-A-B cycles, and the half-split worsening
+    check is defeated by an early dip that lands in the second half.
+
+    Args:
+        overflow_history: List of overflow values from previous iterations.
+        window: Number of trailing values to inspect (default: 3).
+
+    Returns:
+        True if the last ``window`` values form a strictly increasing
+        sequence that is entirely above the historical minimum.
+    """
+    if len(overflow_history) < window + 1:
+        return False
+
+    recent = overflow_history[-window:]
+    best_seen = min(overflow_history)
+
+    # All recent values must be strictly above the best seen
+    if not all(v > best_seen for v in recent):
+        return False
+
+    # The recent window must be strictly increasing
+    return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
+
+
+def should_terminate_early(
+    overflow_history: list[int],
+    iteration: int,
+    min_iterations: int = 5,
+    unrouted_count: int = 0,
+) -> bool:
+    """Decide if further iterations are futile and should terminate early.
+
+    Args:
+        overflow_history: List of overflow values from previous iterations
+        iteration: Current iteration number
+        min_iterations: Minimum iterations before considering early termination
+        unrouted_count: Number of nets still unrouted. When overflow is 0 but
+            unrouted nets remain, the router should continue to give
+            neighborhood rip-up a chance to resolve them.
+
+    Returns:
+        True if should terminate early, False otherwise
+
+    Terminates when:
+    - No improvement in last 5 iterations (or 3 when overflow is low)
+    - Monotonic divergence detected (overflow climbing away from best)
+    - Oscillation detected
+    - Overflow is getting worse over time
+    """
+    if iteration < min_iterations:
+        return False
+
+    # Issue #2297: When overflow is 0 but nets remain unrouted, do not
+    # terminate early -- let neighborhood rip-up attempt to resolve them.
+    if overflow_history and overflow_history[-1] == 0 and unrouted_count > 0:
+        return False
+
+    if len(overflow_history) < 5:
+        return False
+
+    # Issue #2295: Use a shorter stagnation window when overflow is low.
+    # When only a few nets cause all overflow (e.g., overflow < 5), the
+    # router often oscillates without resolving them.  A 3-iteration
+    # window saves 2 full iterations of pointless rip-up (~240s on
+    # high-pad-count boards like chorus-test-revA).
+    stagnation_window = 5
+    current_overflow = overflow_history[-1] if overflow_history else 0
+    if current_overflow > 0 and current_overflow < 5 and len(overflow_history) >= 3:
+        stagnation_window = 3
+
+    recent = overflow_history[-stagnation_window:]
+
+    # Issue #1823: Check if the recent window contains a new global minimum.
+    # If so, skip the "no improvement" stagnation check (but still allow
+    # other termination checks like monotonic divergence).
+    best_overall = min(overflow_history)
+    recent_has_new_global_min = False
+    if min(recent) == best_overall and len(overflow_history) > stagnation_window:
+        best_before_recent = min(overflow_history[:-stagnation_window])
+        if min(recent) < best_before_recent:
+            recent_has_new_global_min = True
+
+    # No improvement in last N iterations (5 normally, 3 for low overflow).
+    # When len(overflow_history) == stagnation_window there is no earlier
+    # window; use the first recorded value as baseline instead of
+    # float('inf') which would make this check unreachable and mask
+    # stale-baseline divergence.
+    # Issue #1823: Skip this check when recent window found a new global
+    # minimum -- the router is still making progress.
+    if not recent_has_new_global_min:
+        if len(overflow_history) > stagnation_window:
+            earlier = overflow_history[:-stagnation_window]
+        else:
+            earlier = overflow_history[:1]
+        if min(recent) >= min(earlier):
+            return True
+
+    # Monotonic divergence: the last N values are strictly increasing and
+    # all above the best-seen minimum.  This catches patterns like
+    # [90, 96, 88, 130, 148, 155] that slip past the half-split check
+    # because a single dip (88) in the second half keeps min(second_half)
+    # low.
+    if _is_monotonically_diverging(overflow_history, window=3):
+        return True
+
+    # Oscillating with no progress
+    # Issue #1823: Skip this check when the recent 5-iteration window
+    # contains a new global minimum -- the router recently made progress.
+    if not recent_has_new_global_min and detect_oscillation(overflow_history, window=4):
+        # Only terminate if we've tried enough and aren't improving
+        if iteration >= min_iterations and min(recent) == min(overflow_history):
+            return True
+
+    # Overflow trending upward over time
+    if len(overflow_history) >= 6:
+        first_half = overflow_history[: len(overflow_history) // 2]
+        second_half = overflow_history[len(overflow_history) // 2 :]
+        if min(second_half) > min(first_half) * 1.2:
+            # Getting worse, give up
+            return True
+
+    return False
+
+
+def detect_ripup_stagnation(
+    ripup_history: list[set[int]],
+    overflow_history: list[int],
+    *,
+    overflow_delta_threshold: float = 0.20,
+    jaccard_threshold: float = 0.8,
+) -> bool:
+    """Detect when negotiated rip-up keeps targeting the same nets without progress.
+
+    Issue #2597.  This complements :func:`should_terminate_early`, which only
+    inspects the overflow history.  On boards like chorus-test-revA the
+    overflow trajectory is *strictly decreasing* (e.g. ``[30, 12, 10]``) so
+    none of the standard stagnation checks fire — yet the rip-up cohort is
+    identical across consecutive iterations and each new iteration only
+    nibbles a few units off the overflow.  Rerouting the same six nets a
+    fourth time is overwhelmingly likely to repeat the same near-identical
+    paths and burn another ~per-net-timeout × N seconds before the wall-clock
+    timeout fires.
+
+    Stagnation is declared when **all** of the following hold:
+
+    1. There are at least two complete iterations of rip-up history
+       (``len(ripup_history) >= 2`` and ``len(overflow_history) >= 2``).
+    2. The latest two rip-up sets ``A = ripup_history[-2]`` and
+       ``B = ripup_history[-1]`` are highly similar:
+       ``B`` is a non-empty subset of ``A``, **or** the Jaccard similarity
+       ``|A ∩ B| / |A ∪ B|`` meets ``jaccard_threshold`` (default 0.8).
+    3. Overflow improved by less than ``overflow_delta_threshold`` (default
+       20 %): ``(overflow[-2] - overflow[-1]) / overflow[-2] <
+       overflow_delta_threshold``.  A regression (overflow[-1] > overflow[-2])
+       also counts as "less than threshold".
+    4. The current overflow is still positive — at ``overflow == 0`` the
+       router has converged and there is nothing to detect.
+
+    Args:
+        ripup_history: List of rip-up cohorts (one ``set[int]`` per
+            negotiated outer iteration).  ``ripup_history[k]`` is the set
+            of net IDs ripped up at the start of iteration ``k+1``.
+        overflow_history: List of total overflow values (one per iteration,
+            including the initial pass at index 0).  Must be at least the
+            same length as ``ripup_history`` minus one initial-pass entry.
+        overflow_delta_threshold: Minimum fractional improvement in overflow
+            required to *avoid* a stagnation declaration.  Default 0.20
+            (20 %).  Lower values are stricter (declare stagnation sooner).
+        jaccard_threshold: Minimum Jaccard similarity between consecutive
+            rip-up sets required to declare stagnation.  Default 0.8.  A
+            strict subset relationship also satisfies this criterion
+            regardless of the threshold.
+
+    Returns:
+        ``True`` if the negotiated outer loop should break out and let the
+        existing best-state restore in ``two_phase.py`` hand back the
+        previous (lower-overflow) iteration; ``False`` otherwise.
+
+    Examples:
+        >>> # chorus-test pattern: same 6 nets ripped up twice, overflow
+        >>> # 30 -> 12 -> 10 (16 % improvement on iter 2)
+        >>> detect_ripup_stagnation(
+        ...     ripup_history=[{1, 2, 3, 4, 5, 6}, {1, 2, 3, 4, 5, 6}],
+        ...     overflow_history=[30, 12, 10],
+        ... )
+        True
+
+        >>> # Cohort churned -- different nets, no stagnation
+        >>> detect_ripup_stagnation(
+        ...     ripup_history=[{1, 2, 3}, {7, 8, 9}],
+        ...     overflow_history=[30, 12, 10],
+        ... )
+        False
+
+        >>> # Same cohort but >= 20 % overflow improvement
+        >>> detect_ripup_stagnation(
+        ...     ripup_history=[{1, 2, 3}, {1, 2, 3}],
+        ...     overflow_history=[30, 12, 5],
+        ... )
+        False
+    """
+    # Criterion 1: need two complete rip-up + overflow iterations to compare.
+    if len(ripup_history) < 2 or len(overflow_history) < 2:
+        return False
+
+    prev_ripup = ripup_history[-2]
+    curr_ripup = ripup_history[-1]
+    prev_overflow = overflow_history[-2]
+    curr_overflow = overflow_history[-1]
+
+    # Criterion 4: skip when converged (no work left to detect).
+    if curr_overflow <= 0:
+        return False
+
+    # Empty cohorts indicate the iteration ripped up nothing -- not the
+    # stagnation pattern this detector targets.
+    if not prev_ripup or not curr_ripup:
+        return False
+
+    # Criterion 2: high overlap between consecutive rip-up cohorts.
+    # Subset relationship (curr ⊆ prev) is always sufficient; otherwise
+    # require Jaccard similarity >= threshold.
+    if curr_ripup <= prev_ripup:
+        cohort_stable = True
+    else:
+        intersection = len(curr_ripup & prev_ripup)
+        union = len(curr_ripup | prev_ripup)
+        jaccard = intersection / union if union else 0.0
+        cohort_stable = jaccard >= jaccard_threshold
+
+    if not cohort_stable:
+        return False
+
+    # Criterion 3: insufficient overflow improvement on this iteration.
+    # If overflow regressed or held steady, treat that as 0 % improvement.
+    if prev_overflow <= 0:
+        # Cannot compute a fractional delta from a non-positive baseline;
+        # fall back to "no improvement on a positive current overflow".
+        return True
+
+    improvement = (prev_overflow - curr_overflow) / prev_overflow
+    return improvement < overflow_delta_threshold
+
+
+def calculate_present_cost(
+    iteration: int,
+    total_iterations: int,
+    overflow_ratio: float,
+    base_cost: float = 0.5,
+    *,
+    exponential: bool = False,
+    pres_fac_mult: float = 1.3,
+    pres_fac_cap: float = 50.0,
+) -> float:
+    """Calculate adaptive present cost factor based on iteration and congestion.
+
+    Args:
+        iteration: Current iteration number (0-indexed)
+        total_iterations: Maximum number of iterations
+        overflow_ratio: Current overflow / total cells (congestion metric)
+        base_cost: Base present cost value (default: 0.5)
+        exponential: If True, use exponential escalation (OrthoRoute-style)
+            instead of linear ramp.  Exponential pressure more aggressively
+            forces nets away from congested areas in later iterations.
+            Issue #2333.
+        pres_fac_mult: Multiplicative factor applied per iteration in
+            exponential mode.  Default 1.3 (30% increase per iteration).
+        pres_fac_cap: Maximum present cost factor in exponential mode
+            to prevent overshooting.  Default 50.0.
+
+    Returns:
+        Adjusted present cost factor
+
+    The cost increases:
+    - As iterations progress (more pressure over time)
+    - When congestion is high (need to discourage contested resources)
+    """
+    if exponential:
+        # OrthoRoute-style: base * mult^iteration, capped to prevent runaway
+        raw = base_cost * (pres_fac_mult**iteration)
+        return min(raw, pres_fac_cap)
+
+    # Linear mode (original behaviour)
+    # Increase pressure as iterations progress (gradual ramp)
+    progress_factor = 1.0 + (iteration / max(total_iterations, 1))
+
+    # Higher cost when more congested
+    congestion_factor = 1.0 + min(overflow_ratio * 2, 2.0)  # Cap at 3x
+
+    return base_cost * progress_factor * congestion_factor
+
+
+def calculate_congestion_tuned_params(
+    overflow_ratio: float,
+    base_pres_fac_mult: float = 1.3,
+    base_history_increment: float = 0.5,
+) -> tuple[float, float]:
+    """Derive present-cost multiplier and history increment from congestion ratio.
+
+    OrthoRoute-inspired auto-tuning: instead of using fixed parameters,
+    scale them based on the actual congestion level so that convergence
+    is less dependent on board characteristics.
+
+    Args:
+        overflow_ratio: Fraction of overused edges (overused / total cells).
+        base_pres_fac_mult: Base exponential multiplier (default: 1.3).
+        base_history_increment: Base history increment (default: 0.5).
+
+    Returns:
+        Tuple of (adjusted_pres_fac_mult, adjusted_history_increment).
+
+    Issue #2333.
+    """
+    # When congestion is high (>10%), escalate more aggressively
+    # When congestion is low (<1%), reduce escalation to fine-tune
+    if overflow_ratio > 0.10:
+        scale = 1.0 + min(overflow_ratio, 0.5)  # cap at 1.5x
+    elif overflow_ratio < 0.01:
+        scale = 0.7
+    else:
+        scale = 1.0
+
+    adjusted_mult = 1.0 + (base_pres_fac_mult - 1.0) * scale
+    adjusted_hist = base_history_increment * scale
+
+    return adjusted_mult, adjusted_hist
+
+
+# Resolution used when grouping vias by (x, y) for cross-route same-net
+# deduplication.  Vias whose coordinates round to the same key (to the
+# nearest micron) are treated as the same physical placement.
+_VIA_DEDUP_RESOLUTION_MM = 0.001
+
+
+def _dedupe_sibling_route_vias(
+    routes: list[Route],
+    *,
+    resolution_mm: float = _VIA_DEDUP_RESOLUTION_MM,
+) -> int:
+    """Drop duplicate same-net vias across sibling Route objects (Issue #2481).
+
+    A multi-pin net routed via RSMT decomposition emits one ``Route``
+    object per Steiner edge, each carrying its own ``vias`` list.  When
+    two RSMT edges meet at a Steiner tap and both edges require a layer
+    transition there, they each insert a via at the same (x, y).  These
+    duplicates survive into the post-route validator, where each pair of
+    sibling vias against any cross-net via produces a separate
+    via-vs-via violation -- inflating the reported defect count and, for
+    the C++ side, polluting ``stored_vias_`` with redundant entries.
+
+    This function keeps the first via per (rounded x, rounded y) across
+    *all* the supplied sibling routes, expands its layer span to cover
+    every duplicate, and removes the duplicates from their owning route.
+    Segments are not touched: they already terminate at the Steiner tap
+    coordinate, which still has a via after this dedup.
+
+    Args:
+        routes: List of sibling ``Route`` objects produced for a single
+            net.  Mutated in place.
+        resolution_mm: Coordinate rounding for the dedup key.  Defaults
+            to 1 micron, well below the routing grid resolution.
+
+    Returns:
+        The number of duplicate vias removed across all routes.
+    """
+    if len(routes) < 2:
+        return 0
+
+    from kicad_tools.core.types import copper_span
+
+    inv_res = 1.0 / resolution_mm
+    seen: dict[tuple[int, int], Via] = {}
+    removed = 0
+
+    for route in routes:
+        if not route.vias:
+            continue
+        keep_indices: list[int] = []
+        for idx, via in enumerate(route.vias):
+            key = (
+                int(round(via.x * inv_res)),
+                int(round(via.y * inv_res)),
+            )
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = via
+                keep_indices.append(idx)
+            else:
+                # Expand the surviving via's layer range to cover this
+                # duplicate's layer range, in case the two edges had
+                # different layer pairs at the same tap (mid-layer
+                # buried via on one edge, full-stack on the other).
+                # Issue #6099: physical stack order, not enum value.
+                top, bottom = copper_span(*existing.layers, *via.layers)
+                if top != existing.layers[0] or bottom != existing.layers[1]:
+                    existing.layers = (top, bottom)
+                removed += 1
+
+        if len(keep_indices) != len(route.vias):
+            route.vias = [route.vias[k] for k in keep_indices]
+
+    return removed
+
+
+class NegotiatedRouter:
+    """PathFinder-style negotiated congestion router.
+
+    Routes all nets with temporary resource sharing allowed,
+    then iteratively rips up and reroutes conflicting nets
+    with increasing congestion penalties until convergence.
+    """
+
+    def __init__(
+        self,
+        grid: RoutingGrid,
+        router: Router,
+        rules: DesignRules,
+        net_class_map: dict[str, NetClassRouting],
+        congestion_estimator: CongestionEstimator | None = None,
+        congestion_weight: float = 0.5,
+    ):
+        """Initialize the negotiated router.
+
+        Args:
+            grid: The routing grid
+            router: The pathfinding router
+            rules: Design rules
+            net_class_map: Net class routing rules
+            congestion_estimator: Optional RUDY congestion estimator.  When
+                provided, Steiner tree construction blends Manhattan distance
+                with tile demand so that multi-terminal nets prefer
+                less-congested paths.
+            congestion_weight: Multiplier applied to the tile demand when
+                computing the congestion-aware edge cost.  The weight is
+                scaled internally by tile area so that demand (mm) and
+                Manhattan distance (mm) are comparable.  A value of 0
+                disables congestion influence.  Default is 0.5.
+        """
+        self.grid = grid
+        self.router = router
+        self.rules = rules
+        self.net_class_map = net_class_map
+        self.congestion_estimator = congestion_estimator
+        self.congestion_weight = congestion_weight
+
+        # Issue #2476: Set of (failed_net_id, blocking_via_net_id) pairs
+        # collected from the C++ pathfinder's structured failure
+        # diagnostics during route_net_negotiated().  The negotiated outer
+        # loop drains this via :meth:`get_and_clear_via_blocking_nets` to
+        # target rip-up at the specific net whose stored via blocked
+        # progress, rather than blanket retry.
+        self._last_via_blocking_nets: set[tuple[int, int]] = set()
+
+        # Issue #2769: Set of net ids whose RSMT edge loop was aborted
+        # because the cumulative per_net_timeout budget was exhausted
+        # mid-loop.  Distinct from per-edge BLOCKED_PATH or VIA_BLOCKED
+        # failures -- these nets ran out of wall-clock budget while still
+        # progressing.  Drained by the outer loop via
+        # :meth:`get_and_clear_timeout_failures` so audit logs can
+        # differentiate "couldn't find path" from "ran out of net budget".
+        self._last_timeout_failures: set[int] = set()
+
+        # Issue #3002 (PR #3006 perf): single-slot memo for
+        # :meth:`find_nets_with_segment_via_violations`.  Stores
+        # ``(cache_key, result)``; the hook is called up to 4 times per
+        # negotiated iteration (top-of-iter snapshot, mid-iter
+        # re-validate, end-of-iter capture, restore comparator) and
+        # consecutive calls within the same iteration share the same
+        # ``net_routes`` state -- so cache hits eliminate 3 of every 4
+        # full walks.  Slot is invalidated implicitly by passing a new
+        # cache_key on the next call.
+        self._seg_via_violations_cache: tuple[object, list[int]] | None = None
+
+        # Issue #3020: single-slot memo for
+        # :meth:`find_nets_with_via_segment_violations` -- the symmetric
+        # sibling of the segment-vs-via hook above.  Same cadence (up
+        # to 4 same-iteration calls), same invalidation semantics
+        # (implicit on cache_key change).
+        self._via_seg_violations_cache: tuple[object, list[int]] | None = None
+
+        # Issue #3433: single-slot memo for
+        # :meth:`find_nets_with_segment_segment_violations` -- the
+        # third quadrant of the clearance matrix (segment vs foreign
+        # segment).  Same cadence as the two sibling caches above (up
+        # to 4 same-iteration calls), same invalidation semantics
+        # (implicit on cache_key change).
+        self._seg_seg_violations_cache: tuple[object, list[int]] | None = None
+
+        # Issue #6342: the structured outcome of the most recent
+        # :meth:`targeted_ripup` call (``None`` before the first one).  The
+        # method still returns a plain ``bool`` so existing callers keep their
+        # meaning; callers that need to know *why* a rip-up failed read this.
+        self.last_ripup_outcome: TargetedRipupOutcome | None = None
+        # Issue #7071: details of the most recent ``escape_local_minimum``.
+        self.last_escape_summary: EscapeSummary | None = None
+
+    def route_net_negotiated(
+        self,
+        pad_objs: list[Pad],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        failure_callback: callable | None = None,
+    ) -> list[Route]:
+        """Route a single net in negotiated mode.
+
+        Args:
+            pad_objs: List of Pad objects to connect
+            present_cost_factor: Multiplier for present sharing cost
+            mark_route_callback: Callback to mark a route on the grid.  May
+                return ``False`` to REFUSE the commit (Issue #5891, Epic
+                #5508 Phase 2: the commit-time pad-access invariant refuses a
+                candidate whose copper would strand another unrouted pad).  A
+                refusal is handled exactly like a failed search: the route is
+                not added to this net's result list and ``failure_callback``
+                fires, so the negotiated loop's existing targeted rip-up gets
+                the connection as a target.  Any other return value -- notably
+                ``None``, which every pre-#5891 callback returns -- counts as a
+                successful commit, so an unchanged callback behaves exactly as
+                before.
+            per_net_timeout: Optional wall-clock timeout in seconds that
+                brackets THIS WHOLE NET (Issue #1605, fixed in Issue #2769).
+                For multi-pin nets the budget is shared across all RSMT
+                edges: edges run sequentially against a cumulative
+                ``time.monotonic()`` deadline, and each edge receives the
+                REMAINING budget.  Once exhausted, the remaining edges are
+                short-circuited as ``_FAILURE_TIMEOUT`` (drainable via
+                :meth:`get_and_clear_timeout_failures`).  For 2-pin nets
+                the budget caps the single A* search.
+            failure_callback: Optional callback to record routing failures.
+                Called with (source_pad, target_pad) when routing fails
+                (Issue #2425).  Also fired for edges short-circuited by
+                cumulative-timeout exhaustion (Issue #2769) so the
+                rip-up/retry layer in Issue #2476 sees them.
+
+        Returns:
+            List of routes created.  Partial nets are preserved: routes
+            produced before a cumulative-timeout abort are NOT discarded
+            (Issue #2769 acceptance criterion).
+
+        Notes:
+            Issue #2476: After every failed sub-route (RSMT edge or 2-pin
+            connection), this method consults
+            ``self.router.get_last_failure_info()`` and, when the C++
+            pathfinder reports a ``FAILURE_VIA_VIA_BLOCKED`` diagnostic,
+            records the offending stored-via net in
+            ``self._last_via_blocking_nets``.  The negotiated outer loop
+            uses that list (via :meth:`get_and_clear_via_blocking_nets`) to
+            target rip-up at the specific blockers rather than blanket
+            retry.
+
+            Issue #2769: Cumulative-timeout aborts (whole-net budget
+            exhausted) are tracked separately in
+            ``self._last_timeout_failures`` so audit logs can differentiate
+            "ran out of net budget" from "no path / via-blocked".
+        """
+        if len(pad_objs) < 2:
+            return []
+
+        routes: list[Route] = []
+
+        if len(pad_objs) > 2:
+            # RSMT-based routing with negotiated mode
+            from .steiner import (
+                build_rsmt,
+                make_blocked_cell_predicate,
+                relocate_blocked_point,
+            )
+
+            # Build congestion-aware cost function for Steiner tree
+            # construction when a RUDY estimator is available.
+            congestion_fn = None
+            if self.congestion_estimator is not None and self.congestion_weight > 0:
+                est = self.congestion_estimator
+                tile_area = est.grid.tile_w * est.grid.tile_h
+                # Scale weight by tile area so demand and Manhattan
+                # distance are in comparable units (mm).
+                scaled_weight = self.congestion_weight * tile_area
+
+                def congestion_fn(x1: float, y1: float, x2: float, y2: float) -> float:
+                    manhattan = abs(x1 - x2) + abs(y1 - y2)
+                    mid_x = (x1 + x2) / 2
+                    mid_y = (y1 + y2) / 2
+                    col, row = est.grid.tile_at(mid_x, mid_y)
+                    demand = est.get_tile_demand(row, col)
+                    return manhattan + scaled_weight * demand
+
+            # PR #3481 fix: snap synthetic Steiner branch points onto
+            # the routing grid — off-grid virtual pads have no sub-grid
+            # rescue (no ``ref``) and fail ``pin_access`` with
+            # ``PADS_OFF_GRID: steiner@(...)``.
+            #
+            # Issue #3471: additionally relocate branch points that land
+            # on cells blocked on EVERY routable layer (net-0 obstacles /
+            # foreign-net copper).  A blocked virtual pad has no rescue
+            # path: every incident A* edge fails and the whole net is
+            # classified ``blocked_path`` even on an empty board (board
+            # 05's ISENSE_A+ Steiner point landed on a MOSFET TH leg).
+            # ``relocate_blocked_point`` ring-scans for the nearest free
+            # cell; on any grid-API mismatch the cell is treated as free
+            # so legacy behaviour is preserved byte-for-byte.
+            # The blocked-cell predicate (margin math + per-layer
+            # occupancy scan) is shared with the MSTRouter path via
+            # ``make_blocked_cell_predicate`` -- see its docstring for
+            # the margin rationale.  ``None`` (fixture/mock grids
+            # without occupancy APIs) preserves legacy snapping
+            # behaviour byte-for-byte.
+            _point_blocked = make_blocked_cell_predicate(self.grid, self.rules, pad_objs[0].net)
+
+            def _snap_to_grid(x: float, y: float) -> tuple[float, float]:
+                gx, gy = self.grid.world_to_grid(x, y)
+                if _point_blocked is not None:
+                    gx, gy = relocate_blocked_point(gx, gy, _point_blocked)
+                return self.grid.grid_to_world(gx, gy)
+
+            kelvin = detect_kelvin_topology(pad_objs)
+            if kelvin is not None:
+                rsmt_edges = kelvin.edges
+            else:
+                pad_objs, rsmt_edges = build_rsmt(
+                    pad_objs, congestion_fn=congestion_fn, snap_fn=_snap_to_grid
+                )
+
+            # Issue #2306: Incremental Steiner target-set expansion.
+            # After routing each RSMT edge, collect the grid cells along
+            # the routed path.  Subsequent edges can terminate A* early
+            # when they reach any cell of the existing net tree, avoiding
+            # full-grid searches for high-fanout nets like GNDD.
+            # Cost-sorted RSMT edges can build a forest, not one tree. A
+            # shortcut is valid only into the target's connected component.
+            # Membership is established by an exact-target route, or a route
+            # from a new source into an already established target component.
+            tree_parent = list(range(len(pad_objs)))
+            tree_cells: dict[int, set[tuple[int, int, int]]] = {}
+
+            def tree_root(node: int) -> int:
+                while tree_parent[node] != node:
+                    tree_parent[node] = tree_parent[tree_parent[node]]
+                    node = tree_parent[node]
+                return node
+
+            # Issue #2769: ``per_net_timeout`` brackets the WHOLE net, not
+            # each RSMT edge.  Compute a single cumulative deadline before
+            # the loop and pass each edge the REMAINING budget so that:
+            #   - the last edge sees per_net_timeout >= remaining          (<=
+            #     per_net_timeout for an individual A* search invariant), and
+            #   - sum of all edge wall-times <= per_net_timeout             (<=
+            #     per_net_timeout for the whole-net invariant).
+            # When the budget is exhausted mid-loop we short-circuit the
+            # remaining edges, record them as timeout failures (distinct
+            # from BLOCKED_PATH / VIA_VIA_BLOCKED), and ``continue`` so each
+            # skipped edge still surfaces via ``failure_callback`` for the
+            # rip-up / retry layer (Issue #2476).
+            net_deadline = (
+                time.monotonic() + per_net_timeout if per_net_timeout is not None else None
+            )
+
+            for i, j in rsmt_edges:
+                source_pad = pad_objs[i]
+                target_pad = pad_objs[j]
+
+                if net_deadline is not None:
+                    remaining = net_deadline - time.monotonic()
+                    if remaining <= 0:
+                        # Cumulative net-budget exhausted before this edge
+                        # could be attempted.  Classify as _FAILURE_TIMEOUT
+                        # (Issue #2610) so audit logs can differentiate this
+                        # from a genuine BLOCKED_PATH, and ``continue`` so
+                        # every skipped edge is still surfaced to the
+                        # rip-up/retry layer via ``failure_callback``.
+                        self._last_timeout_failures.add(source_pad.net)
+                        if failure_callback is not None:
+                            failure_callback(source_pad, target_pad)
+                        continue
+                    edge_timeout: float | None = remaining
+                else:
+                    edge_timeout = None
+
+                source_root, target_root = tree_root(i), tree_root(j)
+                search_start, search_end = source_pad, target_pad
+                # Preserve the RSMT edge's search direction. When only the
+                # source is connected, route to the exact new target rather
+                # than reversing native A* or returning to the source tree.
+                # An established target component still offers safe shortcuts.
+                goal_cells = (
+                    tree_cells.get(target_root)
+                    if source_root != target_root and kelvin is None
+                    else None
+                )
+                isolation = (
+                    isolate_kelvin_branch(
+                        self.grid,
+                        pad_objs,
+                        pad_objs[kelvin.root_index],
+                        target_pad,
+                        trace_width=(
+                            self.net_class_map[source_pad.net_name].trace_width
+                            if source_pad.net_name in self.net_class_map
+                            else self.rules.trace_width
+                        ),
+                    )
+                    if kelvin is not None
+                    else contextlib.nullcontext()
+                )
+                with isolation:
+                    route = self.router.route(
+                        search_start,
+                        search_end,
+                        negotiated_mode=True,
+                        present_cost_factor=present_cost_factor,
+                        per_net_timeout=edge_timeout,
+                        extra_goal_cells=goal_cells,
+                    )
+                # Issue #2934: ``Route`` is a dataclass and therefore always
+                # truthy regardless of segment count.  Defensive check for
+                # an empty Route here in addition to the upstream rejection
+                # in ``_reconstruct_route``: if either guard slips
+                # (e.g., a future C++ backend path returns an empty Route),
+                # this branch still records the failure and fires
+                # ``failure_callback`` rather than silently dropping a
+                # missing-connectivity sub-route into the result list.
+                # Issue #5891: ``mark_route_callback`` may REFUSE the commit
+                # (pad-access invariant).  A refusal is a failed connection,
+                # not a silent drop -- fall through to the failure branch so
+                # ``failure_callback`` fires and the copper is never counted as
+                # committed.
+                committed: Route | None = None
+                if route is not None and (route.segments or route.vias):
+                    if mark_route_callback(route) is not False:
+                        committed = route
+                if committed is not None:
+                    routes.append(committed)
+                    from .steiner import pin_steiner_arrival_layers
+
+                    pin_steiner_arrival_layers(pad_objs, (i, j), committed)
+                    # Collect grid cells from the routed segments so later
+                    # edges can terminate early upon reaching this tree.
+                    joined_cells = tree_cells.setdefault(target_root, set())
+                    if source_root != target_root:
+                        joined_cells.update(tree_cells.pop(source_root, set()))
+                        tree_parent[source_root] = target_root
+                    self._collect_route_cells(committed, joined_cells)
+                else:
+                    # Issue #2476: Capture structured via-blocked failure
+                    # diagnostics from the cpp pathfinder so the negotiated
+                    # outer loop can target rip-up at the specific blocker.
+                    self._record_via_blocked_failure(source_pad.net)
+                    if failure_callback is not None:
+                        failure_callback(source_pad, target_pad)
+
+            # Issue #2481: Dedupe vias at the same (x, y) location across
+            # the multi-edge RSMT sub-routes for this net.  Two RSMT edges
+            # that meet at a Steiner tap on the same layer pair would each
+            # insert a via at that tap, producing duplicate same-net vias
+            # that the post-route DRC counts as triple-pair violations.
+            # We keep the first occurrence per (rounded) (x, y) and drop
+            # the rest from sibling sub-routes.
+            _dedupe_sibling_route_vias(routes)
+        else:
+            # 2-pin net
+            route = self.router.route(
+                pad_objs[0],
+                pad_objs[1],
+                negotiated_mode=True,
+                present_cost_factor=present_cost_factor,
+                per_net_timeout=per_net_timeout,
+            )
+            # Issue #2934: Defensive check for empty Routes; see comment on
+            # the multi-edge RSMT path above for the rationale.
+            # Issue #5891: a ``False`` from the callback is a refused commit
+            # (pad-access invariant) and takes the same path as a failed search.
+            accepted: Route | None = None
+            if route is not None and (route.segments or route.vias):
+                if mark_route_callback(route) is not False:
+                    accepted = route
+            if accepted is not None:
+                routes.append(accepted)
+            else:
+                import os as _os
+
+                if _os.environ.get("KCT_RELIEF_DEBUG"):
+                    print(
+                        f"    [relief-debug] 2-pin route fail net={pad_objs[0].net}: "
+                        f"route={'None' if route is None else 'EMPTY'} "
+                        f"start=({pad_objs[0].x:.2f},{pad_objs[0].y:.2f}) "
+                        f"end=({pad_objs[1].x:.2f},{pad_objs[1].y:.2f})",
+                        flush=True,
+                    )
+                # Issue #2476: Capture cpp-side via-blocked diagnostic.
+                self._record_via_blocked_failure(pad_objs[0].net)
+                if failure_callback is not None:
+                    failure_callback(pad_objs[0], pad_objs[1])
+
+        return routes
+
+    # =========================================================================
+    # Via-blocked failure tracking (Issue #2476)
+    # =========================================================================
+
+    # Failure-reason constants mirroring router_cpp.FAILURE_*.
+    # Hard-coded here so the Python module imports cleanly even when the C++
+    # extension is unavailable; values must match ``cpp/include/types.hpp``.
+    _FAILURE_NONE = 0
+    _FAILURE_NO_PATH = 1
+    _FAILURE_ITERATION_LIMIT = 2
+    # Issue #2610: per-net wall-clock deadline (--per-net-timeout) was hit.
+    _FAILURE_TIMEOUT = 3
+    _FAILURE_VIA_VIA_BLOCKED = 5
+    # Issue #4507 (epic #4431 Phase 2): the A* open set drained while
+    # search-time pairwise (HV-isolation) widening refused expansions.  Carries
+    # the offending foreign-domain net in ``blocking_via_net``, exactly like
+    # the via-vs-via case, so the same targeted rip-up applies.  (6 is reserved
+    # by the mirrored ``violation_type`` vocabulary for drill spacing.)
+    _FAILURE_PAIRWISE_BLOCKED = 7
+
+    # Issue #2610: Human-readable labels for log differentiation.  Used by
+    # describe_failure_reason() to emit "DAC_CLK aborted at iteration cap
+    # (N iterations)" vs "DAC_CLK timed out at wall-clock deadline" vs
+    # "DAC_CLK BLOCKED_PATH (open set drained)" rather than bucketing all
+    # three into a generic BLOCKED_PATH log line.
+    _FAILURE_REASON_LABELS = {
+        _FAILURE_NONE: "none",
+        _FAILURE_NO_PATH: "blocked_path",
+        _FAILURE_ITERATION_LIMIT: "iteration_cap",
+        _FAILURE_TIMEOUT: "wall_clock_timeout",
+        _FAILURE_VIA_VIA_BLOCKED: "via_via_blocked",
+        _FAILURE_PAIRWISE_BLOCKED: "pairwise_blocked",
+    }
+
+    @classmethod
+    def describe_failure_reason(cls, info: dict | None) -> str:
+        """Return a short label for the failure-info dict's ``failure_reason``.
+
+        Issue #2610: Router logs use this to distinguish iteration-cap aborts
+        from wall-clock timeouts from genuine BLOCKED_PATH, so users can tell
+        whether to bump ``--per-net-timeout``, raise ``--max-search-iterations``,
+        or accept that the net is geometrically unroutable.
+
+        Args:
+            info: Dict returned by ``CppPathfinder.get_last_failure_info()``,
+                or ``None``.
+
+        Returns:
+            One of: ``"none"``, ``"blocked_path"``, ``"iteration_cap"``,
+            ``"wall_clock_timeout"``, ``"via_via_blocked"``,
+            ``"pairwise_blocked"``, ``"unknown"``.
+        """
+        if not info:
+            return "none"
+        reason = int(info.get("failure_reason") or 0)
+        return cls._FAILURE_REASON_LABELS.get(reason, "unknown")
+
+    # Failure reasons that name an actionable blocking net in
+    # ``blocking_via_net`` and therefore feed :meth:`via_blocked_ripup`.
+    _BLOCKER_FAILURE_REASONS = frozenset({_FAILURE_VIA_VIA_BLOCKED, _FAILURE_PAIRWISE_BLOCKED})
+
+    def _record_via_blocked_failure(self, failed_net: int) -> None:
+        """Capture a blocker-naming failure from the most recent route() call.
+
+        Issue #2476: When a sub-route fails, ask the underlying router for
+        structured failure diagnostics.  If the C++ pathfinder reports
+        ``FAILURE_VIA_VIA_BLOCKED`` along with a non-zero
+        ``blocking_via_net``, record the (failed_net, blocking_net) pair so
+        the negotiated outer loop can rip up the specific blocker rather
+        than blanket retry.
+
+        Issue #4507 (epic #4431 Phase 2): ``FAILURE_PAIRWISE_BLOCKED`` is
+        accepted on the same footing.  There the blocker is the foreign-domain
+        (HV<->LV) net whose copper made the widened pairwise clearance
+        unsatisfiable -- the search-time refusal that previously produced a
+        bare ``NO_PATH``, so an HV net that was merely *crowded* by a
+        low-voltage neighbour fell through to blanket retry and thrashed the
+        negotiator.  Ripping up the named neighbour and routing the HV net
+        first is exactly the move that resolves it.
+
+        This is a no-op when:
+        - The router is the Python pathfinder (returns ``None``).
+        - The failure was an unrelated grid-cell rejection (no actionable
+          diagnostic).
+        - The blocking net id is 0 (no geometric/pairwise blocker named).
+
+        Args:
+            failed_net: Net id of the net whose route failed.
+        """
+        get_info = getattr(self.router, "get_last_failure_info", None)
+        if get_info is None:
+            return
+        info = get_info()
+        if not info:
+            return
+        # Issue #6369: remember each net's last search-failure code on the
+        # shared pathfinder so the saved board's ``net-status --why`` can tell
+        # a geometric give-up from a spent budget.
+        store = getattr(self.router, "search_failures_by_net", None)
+        if isinstance(store, dict) and info.get("failure_reason"):
+            store[int(failed_net)] = int(info["failure_reason"])
+        if info.get("failure_reason") not in self._BLOCKER_FAILURE_REASONS:
+            return
+        blocking_net = int(info.get("blocking_via_net") or 0)
+        if blocking_net == 0 or blocking_net == failed_net:
+            return
+        self._last_via_blocking_nets.add((failed_net, blocking_net))
+
+    def get_and_clear_via_blocking_nets(self) -> set[tuple[int, int]]:
+        """Drain and return the set of (failed_net, blocking_net) pairs.
+
+        Issue #2476: Each pair indicates that ``failed_net``'s A* search
+        was rejected by ``blocking_net``'s stored via.  The negotiated
+        outer loop rips up ``blocking_net`` and then retries
+        ``failed_net``.  After draining, the internal set is cleared so
+        subsequent iterations only see fresh diagnostics.
+
+        Returns:
+            A set of ``(failed_net, blocking_net)`` tuples.  Empty if no
+            via-blocked failures have been recorded since the last drain.
+        """
+        result = self._last_via_blocking_nets
+        self._last_via_blocking_nets = set()
+        return result
+
+    def get_and_clear_timeout_failures(self) -> set[int]:
+        """Drain and return the set of net ids that hit a cumulative
+        per-net timeout during the most recent ``route_net_negotiated``
+        invocation(s).
+
+        Issue #2769: When the cumulative ``per_net_timeout`` budget is
+        exhausted mid-RSMT-loop, the remaining edges are short-circuited
+        and the net id is recorded here so the negotiated outer loop can
+        distinguish "ran out of net budget" from "found no path" in audit
+        logs.  After draining, the internal set is cleared so subsequent
+        iterations only see fresh diagnostics.
+
+        Returns:
+            A set of net ids.  Empty if no cumulative-timeout failures
+            have been recorded since the last drain.
+        """
+        result = self._last_timeout_failures
+        self._last_timeout_failures = set()
+        return result
+
+    def _collect_route_cells(
+        self,
+        route: Route,
+        cell_set: set[tuple[int, int, int]],
+    ) -> None:
+        """Add grid cells covered by a route to *cell_set*.
+
+        For each segment, walk grid cells between the two endpoints and
+        insert ``(gx, gy, layer_index)`` tuples.  Via locations are added
+        only on routable layers within their copper span.
+
+        Issue #2306: Used by incremental Steiner routing to build the
+        target-set for subsequent RSMT-edge A* searches.
+        """
+        for seg in route.segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+
+            steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
+            for s in range(steps + 1):
+                t = s / steps
+                gx = int(gx1 + t * (gx2 - gx1))
+                gy = int(gy1 + t * (gy2 - gy1))
+                cell_set.add((gx, gy, layer_idx))
+
+        # Blind/buried vias cannot provide a tree contact outside their span.
+        routable = self.grid.get_routable_indices()
+        for via in route.vias:
+            gx, gy = self.grid.world_to_grid(via.x, via.y)
+            # Issue #6502: the drilled barrel, not the logical transition.
+            first, last = sorted(
+                self.grid.layer_to_index(layer.value) for layer in via.drilled_layers
+            )
+            for li in routable:
+                if first <= li <= last:
+                    cell_set.add((gx, gy, li))
+
+    def find_nets_through_overused_cells(
+        self,
+        net_routes: dict[int, list[Route]],
+        overused_cells: list[tuple[int, int, int, int]],
+    ) -> list[int]:
+        """Find nets with routes passing through overused cells.
+
+        Args:
+            net_routes: Dictionary of net_id -> list of routes
+            overused_cells: List of (gx, gy, layer, overflow) tuples
+
+        Returns:
+            List of net IDs that need rerouting
+        """
+        overused_set = {(x, y, layer) for x, y, layer, _ in overused_cells}
+        nets_to_reroute: list[int] = []
+
+        for net, routes in net_routes.items():
+            needs_reroute = False
+            for route in routes:
+                for seg in route.segments:
+                    # Check if segment passes through overused cell
+                    gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                    gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                    layer = seg.layer.value
+
+                    # Sample points along segment
+                    steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
+                    for i in range(steps + 1):
+                        t = i / steps
+                        gx = int(gx1 + t * (gx2 - gx1))
+                        gy = int(gy1 + t * (gy2 - gy1))
+                        if (gx, gy, layer) in overused_set:
+                            needs_reroute = True
+                            break
+                    if needs_reroute:
+                        break
+                if needs_reroute:
+                    break
+
+            if needs_reroute:
+                nets_to_reroute.append(net)
+
+        return nets_to_reroute
+
+    def find_nets_in_foreign_budgets(
+        self,
+        net_routes: dict[int, list[Route]],
+        pad_channel_budgets: list,
+        stranded_nets: set[int],
+        skip_nets: set[int] | None = None,
+    ) -> list[int]:
+        """Find nets squatting in foreign budgets whose source-net is stranded.
+
+        Issue #3235 (direction 1, "extend ``find_nets_through_overused_cells``
+        to also fire on nets occupying high-budget cells even if those cells
+        aren't 'overused' in the current iteration"):  The negotiated rip-up
+        loop only picks rerouting candidates from cells whose
+        ``usage_count > 1``.  But on softstart-style east-edge clusters, a
+        squatter can park in a foreign pad-channel budget without ever
+        triggering ``usage_count > 1`` (the cell is only used by the squatter
+        plus the budget metadata; the actual source-net is STUCK, so it never
+        commits a route there).  PR #3231's builder demonstrated that the
+        squatter signal is real (Iter 1: net 20 overlap=30, etc.) but that
+        applying it as a reorder hint to the existing dict-insertion rip-up
+        order regresses softstart 8/10 to 7/10 in both ASC and DESC variants.
+
+        Negative-results note (from the #3235 spike): using this method as an
+        AUGMENTATION (additional violators appended to the cohort) did not
+        lift softstart's reach in measurements at PYTHONHASHSEED=42; the
+        augmented cohort triggered the existing rip-up-set Jaccard stagnation
+        detector with an unchanged set across consecutive iterations, and the
+        rollback restored iter 1's pre-augmentation state.  The infrastructure
+        is preserved so future spike attempts can wire it into the rip-up
+        loop with a tighter gate (e.g. excluding partial-routed nets from the
+        squatter set, gating on the stagnation detector's Jaccard
+        threshold so the cohort grows monotonically).  See `two_phase.py:709`
+        for the intended hook point.
+
+        Args:
+            net_routes: Dict of net_id -> committed routes (segments + vias).
+            pad_channel_budgets: List of ``PadChannelBudget`` objects with
+                ``gx1/gy1/gx2/gy2/layer/source_net`` attributes (Issue #3143
+                geometry).  Empty list yields an empty result.
+            stranded_nets: Set of net IDs that have failed to commit a route
+                in the current iteration.  Only budgets whose
+                ``source_net`` is in this set produce augmentation.
+            skip_nets: Optional set of net IDs to skip from the squatter
+                output (typically partial-routed nets the caller does not
+                want to rip up again, or nets already in the rip-up cohort).
+
+        Returns:
+            List of net IDs that route through foreign budgets belonging to
+            stranded source-nets.  Excludes any net in ``skip_nets`` and any
+            net equal to the budget's ``source_net`` (a net cannot squat in
+            its own budget).
+        """
+        if not pad_channel_budgets or not stranded_nets:
+            return []
+
+        skip = skip_nets or set()
+
+        # Filter to budgets whose source-net is currently stranded.  Each
+        # surviving budget represents a contested channel; routes that pass
+        # through it (other than the source-net's own route) are blocking
+        # the source-net.
+        relevant_rects: list[tuple[int, int, int, int, int, int]] = []
+        for b in pad_channel_budgets:
+            try:
+                src = int(b.source_net)
+            except (AttributeError, TypeError):
+                continue
+            if src not in stranded_nets:
+                continue
+            try:
+                relevant_rects.append(
+                    (
+                        int(b.gx1),
+                        int(b.gy1),
+                        int(b.gx2),
+                        int(b.gy2),
+                        int(getattr(b, "layer", -1)),
+                        src,
+                    )
+                )
+            except (AttributeError, TypeError):
+                continue
+
+        if not relevant_rects:
+            return []
+
+        squatters: list[int] = []
+        seen: set[int] = set()
+
+        for net_id, routes in net_routes.items():
+            if net_id in seen or net_id in skip:
+                continue
+            for route in routes:
+                hit = False
+                for seg in route.segments:
+                    try:
+                        gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                        gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                    except (AttributeError, TypeError):
+                        continue
+                    try:
+                        seg_layer_idx = self.grid.layer_to_index(seg.layer.value)
+                    except (AttributeError, TypeError, KeyError):
+                        seg_layer_idx = seg.layer.value
+                    # Sample a few points along the segment to cheaply
+                    # detect rectangle overlap (matches the discretisation
+                    # used by ``score_foreign_budget_overlap``).
+                    steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
+                    for i in range(steps + 1):
+                        t = i / steps
+                        gx = int(gx1 + t * (gx2 - gx1))
+                        gy = int(gy1 + t * (gy2 - gy1))
+                        for rx1, ry1, rx2, ry2, rlayer, src in relevant_rects:
+                            if src == net_id:
+                                continue
+                            if rlayer != -1 and rlayer != seg_layer_idx:
+                                continue
+                            if rx1 <= gx <= rx2 and ry1 <= gy <= ry2:
+                                hit = True
+                                break
+                        if hit:
+                            break
+                    if hit:
+                        break
+                if hit:
+                    squatters.append(net_id)
+                    seen.add(net_id)
+                    break
+
+        return squatters
+
+    def find_nets_with_segment_via_violations(
+        self,
+        net_routes: dict[int, list[Route]],
+        trace_clearance: float,
+        cache_key: object | None = None,
+        extra_routes: list[Route] | None = None,
+    ) -> list[int]:
+        """Find nets whose committed segments clip foreign-net vias.
+
+        Issue #3002: After each negotiated iteration, walk every
+        committed segment against every foreign-net via and use the
+        shared :func:`segment_clears_foreign_via` predicate (STANDARD
+        threshold) to flag violations.  This converts the
+        post-commit clearance validator from advisory (post-route DRC
+        report only) to LIVE -- the rip-up loop feeds violators back
+        into ``nets_to_reroute`` so the next iteration re-routes them
+        against the up-to-date foreign-via geometry.
+
+        Issue #3077 (``extra_routes``): the negotiated rip-up loop in
+        ``core.py`` and ``two_phase.py`` only tracks main-router
+        committed routes in ``net_routes``; escape-phase routes
+        (added to ``self.routes`` by :meth:`Autorouter.generate_escape_routes`
+        and :meth:`Autorouter._run_subgrid_prepass`) are not present
+        in ``net_routes`` and therefore their vias were invisible to
+        this hook.  Concretely, the lateral via-escape helper added
+        in PR #3070 places off-pad vias for boxed-in fine-pitch pads
+        (e.g. board-04 OSC_OUT lateral via at ``(125.7875, 121.75)``)
+        whose halos extend into the escape corridors of adjacent
+        pins.  The main router subsequently committed BOOT0 / SWDIO
+        / SWCLK / SWO segments that overlap those halos because the
+        post-iteration re-validation hook never saw the escape vias.
+
+        ``extra_routes`` accepts a list of Route objects whose vias
+        contribute to the foreign-via universe but whose nets are
+        NOT walked as segment owners (they are non-rippable
+        infrastructure).  The segment owners surfaced for re-route
+        remain restricted to ``net_routes`` so the existing rip-up
+        semantics are preserved.
+
+        Concrete failure this catches (board-04, PCB (143.8, 119.7) on
+        B.Cu): net A's SWDIO segment commits in iteration N BEFORE net
+        B's BOOT0 via lands later in the SAME iteration.  The pre-
+        commit validator at the time of SWDIO's commit doesn't see
+        BOOT0's via because it isn't in ``grid.routes`` yet.  Post-
+        iteration this hook walks all committed segments against ALL
+        committed vias (including the new BOOT0) and surfaces SWDIO
+        for re-routing.
+
+        Note: only the SEGMENT's net is added to the reroute list (not
+        the via's net).  A clearance violation between net A's segment
+        and net B's via is generally fixable by rerouting net A on a
+        different path; the via's position is constrained by the pad
+        it escapes, so ripping up net B usually doesn't help.
+
+        Issue #3002 (PR #3006 perf follow-up): the hook is called up
+        to 4 times per negotiated iteration (top-of-iter, mid-iter
+        re-validate, end-of-iter capture, restore comparator).  The
+        naive O(N x S x V) walk on board-07 (31 multi-pad signal nets
+        with many vias x 15 iterations) was the dominant cost in CI's
+        ``Match-Group Routing Regression`` job -- climbed from 8m41s
+        on main to 10m02s+ on this PR.  Three layers of optimization
+        below bring the same workload back under budget without
+        changing the empirical answer:
+
+        1. **Per-call layer bucketing**: vias are partitioned by their
+           ``[layer_lo, layer_hi]`` span once at the top of the
+           function so the inner loop only consults vias that could
+           ever match the segment's layer.  On a 2-layer board this
+           halves the work; on a 4-layer board it's a 4x reduction.
+
+        2. **Segment-bbox prefilter**: each via's reachability radius
+           is ``via.diameter/2 + max(seg.width)/2 + trace_clearance``;
+           if the via centre is outside the segment's bbox expanded
+           by that radius we can skip the exact distance computation.
+
+        3. **Per-iteration memo** (``cache_key``): callers that hit
+           the hook multiple times per iteration (e.g. top-of-iter
+           snapshot + end-of-iter capture + mid-iter re-validate)
+           pass a ``cache_key`` (any hashable identifier for the
+           iteration's state, typically ``(iteration, id(net_routes),
+           total_route_count)``).  Identical keys reuse the prior
+           result -- if ``net_routes`` has not mutated since the last
+           call the violation set cannot have changed.
+
+        Args:
+            net_routes: Dictionary of ``net_id -> list of Route``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm (``DesignRules.trace_clearance``).
+            cache_key: Optional hashable identifier for memoization
+                across consecutive same-iteration calls.  Default
+                ``None`` disables the cache.
+            extra_routes: Optional list of Route objects whose vias
+                contribute to the foreign-via universe but whose
+                nets are NOT eligible for inclusion in the violator
+                set (Issue #3077).  Use this to inject escape-phase
+                routes (whose vias live in ``self.routes`` but not in
+                ``net_routes``) so the post-iteration hook sees the
+                complete foreign-via context.  Same-net filtering
+                still applies (segment net == via net is skipped).
+
+        Returns:
+            List of net IDs whose segments violate clearance against
+            a foreign-net via.  Duplicates are removed.
+        """
+        # Issue #3002 (PR #3006 perf): per-iteration memo.  Callers
+        # in the negotiated loop pass a ``cache_key`` that captures
+        # iteration index + route count; identical keys reuse the
+        # result because ``net_routes`` cannot have mutated.
+        # Issue #3077: incorporate an ``extra_routes`` discriminator
+        # into the effective cache key so a prior call WITHOUT
+        # ``extra_routes`` (cache_key="X") does not return a stale
+        # result for a subsequent call WITH ``extra_routes`` under
+        # the same nominal key.  We fingerprint by the tuple of
+        # ``id(r)`` values for each member -- ``id()`` is stable
+        # within a process so two callers that pass the same Route
+        # objects (typical case: both compute ``extra_routes`` from
+        # the same ``self.routes``) hit the cache.  A caller that
+        # mutates ``self.routes`` between calls produces a different
+        # fingerprint and gets a fresh walk.
+        effective_cache_key: object | None
+        if cache_key is not None:
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
+            else:
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
+            cached = self._seg_via_violations_cache
+            if cached is not None and cached[0] == effective_cache_key:
+                return list(cached[1])
+        else:
+            effective_cache_key = None
+
+        # Import here to avoid a top-level circular dependency between
+        # algorithms.negotiated -> via_clearance -> primitives.
+        from ..clearance_resolver import trace_via_clearance_mm
+        from ..via_clearance import segment_clears_foreign_via
+
+        # Issue #6272: a segment-vs-foreign-via pair is held to the shared
+        # trace/via floor, the same one the via-vs-segment sibling uses.
+        trace_clearance = trace_via_clearance_mm(trace_clearance, self.rules.via_clearance)
+
+        # Issue #3002 (PR #3006 perf): bucket vias by their layer span
+        # so the segment-vs-via inner loop only consults vias whose
+        # ``layers[0]..[1]`` range overlaps the segment's layer.  On a
+        # 2-layer board this halves the work; on a 4-layer board it
+        # is a 4x reduction.
+        #
+        # ``vias_on_layer[L]`` is the list of ``(net, via)`` tuples
+        # whose layer span includes layer L.  Layers are keyed by
+        # ``CopperLayer.stack_order`` (plain ints in physical order; Issue
+        # #6099 -- enum values are not physical order past In4.Cu).
+        vias_on_layer: dict[int, list[tuple[int, Via]]] = {}
+        total_vias = 0
+        for net_id, routes in net_routes.items():
+            for route in routes:
+                for via in route.vias:
+                    total_vias += 1
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
+                    for layer_val in range(v_lo, v_hi + 1):
+                        vias_on_layer.setdefault(layer_val, []).append((net_id, via))
+
+        # Issue #3077: Fold in vias from ``extra_routes`` (typically
+        # escape-phase routes) so segment-vs-foreign-via detection
+        # accounts for off-pad lateral / in-pad rescue vias whose
+        # halos can collide with main-router segments.  The via's
+        # owner net (``route.net``) is still used for same-net
+        # filtering downstream, so a main-router segment that
+        # happens to belong to the escape route's owner net is
+        # correctly skipped.
+        if extra_routes:
+            for route in extra_routes:
+                for via in route.vias:
+                    total_vias += 1
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
+                    for layer_val in range(v_lo, v_hi + 1):
+                        vias_on_layer.setdefault(layer_val, []).append((route.net, via))
+
+        # Fast path: no vias at all -> no violations possible.
+        if total_vias == 0:
+            if effective_cache_key is not None:
+                self._seg_via_violations_cache = (effective_cache_key, [])
+            return []
+
+        violators: set[int] = set()
+        for net, routes in net_routes.items():
+            net_done = False
+            for route in routes:
+                if net_done:
+                    break
+                for seg in route.segments:
+                    layer_vias = vias_on_layer.get(seg.layer.stack_order)
+                    if not layer_vias:
+                        continue  # No foreign via on this segment's layer.
+
+                    # Issue #3002 (PR #3006 perf): segment bbox
+                    # prefilter.  The exact distance check
+                    # (``point_to_segment_distance``) is the inner
+                    # loop's hot spot; bbox-rejecting vias outside
+                    # the reachability envelope skips the sqrt for
+                    # the common case.  ``required`` upper-bounds the
+                    # threshold for ANY via at this segment because
+                    # vias share the project's via stack and traces
+                    # are typically a single width per segment; we
+                    # over-approximate with the largest plausible via
+                    # diameter in the per-segment loop to keep the
+                    # branch tight.
+                    seg_min_x = min(seg.x1, seg.x2)
+                    seg_max_x = max(seg.x1, seg.x2)
+                    seg_min_y = min(seg.y1, seg.y2)
+                    seg_max_y = max(seg.y1, seg.y2)
+                    half_seg_w = seg.width / 2
+
+                    for via_net, via in layer_vias:
+                        if via_net == net:
+                            continue  # Same-net via -- skipped by convention.
+
+                        # Bbox prefilter: required clearance envelope
+                        # is at most via_radius + half_seg_w +
+                        # trace_clearance.  If the via centre is
+                        # outside the segment bbox expanded by this
+                        # envelope we can skip the exact predicate.
+                        envelope = via.diameter / 2 + half_seg_w + trace_clearance
+                        if (
+                            via.x < seg_min_x - envelope
+                            or via.x > seg_max_x + envelope
+                            or via.y < seg_min_y - envelope
+                            or via.y > seg_max_y + envelope
+                        ):
+                            continue
+
+                        if not segment_clears_foreign_via(
+                            seg,
+                            via,
+                            trace_clearance,
+                            hard_intersection_only=False,
+                        ):
+                            violators.add(net)
+                            net_done = True
+                            break  # One violation per net is enough.
+                    if net_done:
+                        break
+
+        result = list(violators)
+        if effective_cache_key is not None:
+            self._seg_via_violations_cache = (effective_cache_key, result)
+        return result
+
+    def find_nets_with_via_segment_violations(
+        self,
+        net_routes: dict[int, list[Route]],
+        trace_clearance: float,
+        cache_key: object | None = None,
+        extra_routes: list[Route] | None = None,
+    ) -> list[int]:
+        """Find nets whose committed vias clip foreign-net segments.
+
+        Issue #3020: Symmetric sibling of
+        :meth:`find_nets_with_segment_via_violations` (PR #3006).  Where
+        the segment-vs-via hook walks every committed segment against
+        every foreign-net via, this hook walks every committed VIA
+        against every foreign-net SEGMENT (including permanent escape
+        segments in ``_escape_pad_overrides``-protected routes) using
+        the shared :func:`via_clears_foreign_segment` predicate
+        (STANDARD threshold) and feeds violators back into
+        ``nets_to_reroute`` so the next iteration retries the via's
+        parent net against the up-to-date foreign-segment universe.
+
+        Issue #3077 (``extra_routes``): mirrors the segment-vs-via
+        hook's extra-routes parameter.  Escape-phase routes live in
+        ``self.routes`` but not in ``net_routes``; supplying them as
+        ``extra_routes`` extends the foreign-segment universe so a
+        main-router via that clips an escape-phase stub is correctly
+        surfaced.  Vias INSIDE ``extra_routes`` are not walked as
+        violators (escape vias are non-rippable infrastructure).
+
+        Concrete failure this catches (board-04, PCB (143.8, 119.7) on
+        B.Cu): SWDIO's F.Cu/B.Cu escape segment is committed by the
+        escape phase BEFORE the main router places BOOT0's layer-
+        transition via on B.Cu.  PR #3006's segment-vs-foreign-via
+        gate sees the segment's view at the moment THE SEGMENT
+        commits, but BOOT0's via has not yet been placed -- the gate
+        passes.  PR #3019's escape-phase two-pass commit sees the
+        escape universe at the moment THE ESCAPE commits, but
+        BOOT0's main-router via lives outside the escape phase
+        entirely -- it never sees the escape universe.  Post-
+        iteration this hook walks every via against every foreign
+        segment and surfaces BOOT0 for re-routing.
+
+        Net-attribution rule (per PR #3019 judge's invariant): the
+        VIA's net is added to the reroute list, NOT the segment's
+        net.  Escape segments are permanent infrastructure
+        (``_escape_pad_overrides`` makes them non-rippable -- see
+        ``core.py:10123-10145``); ripping the segment's net would
+        regress completion without fixing the violation, and the
+        next escape pass would re-emit the same segment.  The fix
+        MUST defer / reroute the via -- A* will then pick a
+        different layer-transition point that clears the segment.
+
+        Issue #3020 perf parity with PR #3006: the hook is called up
+        to 4 times per negotiated iteration at the same call sites as
+        the segment-vs-via hook (top-of-iter snapshot, mid-iter re-
+        validate, end-of-iter capture, restore comparator).  The same
+        three perf layers apply:
+
+        1. **Per-call segment bucketing**: segments are partitioned
+           by their layer into ``segs_on_layer[L]`` once at the top of
+           the function so the inner loop only consults segments on a
+           layer the via's span covers.  Mirrors the via-bucket
+           strategy in :meth:`find_nets_with_segment_via_violations`.
+
+        2. **Via-bbox prefilter**: for each segment, its reachability
+           envelope is ``max_via_radius + seg.width/2 +
+           trace_clearance``; if the via centre is outside the
+           segment's bbox expanded by that envelope the exact
+           predicate is skipped.
+
+        3. **Per-iteration memo** (``cache_key``): identical keys
+           reuse the prior result -- if ``net_routes`` has not mutated
+           since the last call the violation set cannot have changed.
+
+        Args:
+            net_routes: Dictionary of ``net_id -> list of Route``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm (``DesignRules.trace_clearance``).
+            cache_key: Optional hashable identifier for memoization
+                across consecutive same-iteration calls.  Default
+                ``None`` disables the cache.
+            extra_routes: Optional list of Route objects whose
+                segments contribute to the foreign-segment universe
+                but whose nets are NOT eligible for the violator set
+                (Issue #3077).  Use for escape-phase routes that live
+                outside ``net_routes`` (typically the lateral-via /
+                in-pad rescue helpers in ``escape.py``).
+
+        Returns:
+            List of net IDs whose vias violate clearance against a
+            foreign-net segment.  Duplicates are removed.
+        """
+        # Issue #3020: per-iteration memo (cache_key parity with the
+        # segment-vs-via hook above).
+        # Issue #3077: incorporate ``extra_routes`` into the effective
+        # cache key via a per-route ``id()`` fingerprint.  See the
+        # matching block in :meth:`find_nets_with_segment_via_violations`
+        # for the rationale (cache hits when the same Route objects are
+        # supplied across consecutive calls).
+        effective_cache_key: object | None
+        if cache_key is not None:
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
+            else:
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
+            cached = self._via_seg_violations_cache
+            if cached is not None and cached[0] == effective_cache_key:
+                return list(cached[1])
+        else:
+            effective_cache_key = None
+
+        # Import here to avoid a top-level circular dependency between
+        # algorithms.negotiated -> via_clearance -> primitives.
+        from ..clearance_resolver import trace_via_clearance_mm
+        from ..via_clearance import via_clears_foreign_segment
+
+        # Issue #6272: the shared trace/via floor (see the segment-vs-via
+        # sibling above) -- independent of which copper was placed first.
+        trace_clearance = trace_via_clearance_mm(trace_clearance, self.rules.via_clearance)
+
+        # Issue #3020: bucket segments by layer so the via-vs-segment
+        # inner loop only consults segments on a layer the via's span
+        # covers.  Mirror of the via-bucket strategy in
+        # :meth:`find_nets_with_segment_via_violations`.
+        segs_on_layer: dict[int, list[tuple[int, Segment]]] = {}
+        total_segs = 0
+        for net_id, routes in net_routes.items():
+            for route in routes:
+                for seg in route.segments:
+                    total_segs += 1
+                    segs_on_layer.setdefault(seg.layer.stack_order, []).append((net_id, seg))
+
+        # Issue #3077: extend the foreign-segment universe with
+        # ``extra_routes`` (typically escape-phase routes).  Their
+        # segments participate in the universe but their nets are
+        # not walked for vias (escape vias are non-rippable; see
+        # ``_escape_pad_overrides`` policy at ``core.py:10123-10145``).
+        if extra_routes:
+            for route in extra_routes:
+                for seg in route.segments:
+                    total_segs += 1
+                    segs_on_layer.setdefault(seg.layer.stack_order, []).append((route.net, seg))
+
+        # Fast path: no segments at all -> no violations possible.
+        if total_segs == 0:
+            if effective_cache_key is not None:
+                self._via_seg_violations_cache = (effective_cache_key, [])
+            return []
+
+        violators: set[int] = set()
+        for net, routes in net_routes.items():
+            net_done = False
+            for route in routes:
+                if net_done:
+                    break
+                for via in route.vias:
+                    # Iterate every layer the via spans -- a through-hole
+                    # via on a 4-layer board can clip segments on any of
+                    # the four layers it crosses.
+                    # Issue #6502: the drilled barrel, not the logical transition.
+                    d_lo, d_hi = via.drilled_layers
+                    v_lo = min(d_lo.stack_order, d_hi.stack_order)
+                    v_hi = max(d_lo.stack_order, d_hi.stack_order)
+                    via_radius = via.diameter / 2
+
+                    for layer_val in range(v_lo, v_hi + 1):
+                        layer_segs = segs_on_layer.get(layer_val)
+                        if not layer_segs:
+                            continue
+
+                        for seg_net, seg in layer_segs:
+                            if seg_net == net:
+                                continue  # Same-net segment -- skipped.
+
+                            # Via-bbox prefilter: envelope is
+                            # via_radius + half_seg_width +
+                            # trace_clearance.  If the via centre is
+                            # outside the segment bbox expanded by
+                            # this envelope, skip the exact predicate.
+                            seg_min_x = min(seg.x1, seg.x2)
+                            seg_max_x = max(seg.x1, seg.x2)
+                            seg_min_y = min(seg.y1, seg.y2)
+                            seg_max_y = max(seg.y1, seg.y2)
+                            envelope = via_radius + seg.width / 2 + trace_clearance
+                            if (
+                                via.x < seg_min_x - envelope
+                                or via.x > seg_max_x + envelope
+                                or via.y < seg_min_y - envelope
+                                or via.y > seg_max_y + envelope
+                            ):
+                                continue
+
+                            if not via_clears_foreign_segment(
+                                via,
+                                seg,
+                                trace_clearance,
+                                hard_intersection_only=False,
+                            ):
+                                # Per PR #3019 judge's invariant: the
+                                # VIA's net is the one we surface for
+                                # re-routing (NOT the segment's net).
+                                violators.add(net)
+                                net_done = True
+                                break
+                        if net_done:
+                            break
+                    if net_done:
+                        break
+
+        result = list(violators)
+        if effective_cache_key is not None:
+            self._via_seg_violations_cache = (effective_cache_key, result)
+        return result
+
+    def find_segment_segment_violation_pairs(
+        self,
+        net_routes: dict[int, list[Route]],
+        trace_clearance: float,
+        extra_routes: list[Route] | None = None,
+        copper_overlap_only: bool = False,
+        report_non_rippable_pairs: bool = False,
+    ) -> list[tuple[int, int]]:
+        """Find cross-net same-layer segment pairs that violate clearance.
+
+        Issue #3433: the raw pair-detection engine behind
+        :meth:`find_nets_with_segment_segment_violations` and the
+        post-loop demote-to-partial safety net in ``core.py``.
+
+        Walks every committed segment against every foreign-net
+        same-layer segment and flags pairs whose centerline distance is
+        below the copper-aware threshold:
+
+        * default mode (``copper_overlap_only=False``): threshold is
+          ``(w_a + w_b) / 2 + trace_clearance`` -- any DRC clearance
+          violation (matches ``kct check``'s
+          ``clearance_segment_segment`` class, e.g. the board-04
+          SWCLK/SWO 0.106 mm near-misses).
+        * ``copper_overlap_only=True``: threshold is ``(w_a + w_b) / 2``
+          -- the copper polygons physically intersect (negative
+          edge-to-edge actual, e.g. the board-04 -0.200 mm full
+          overlaps).  Used by the demote-to-partial safety net, which
+          must only fire for unmanufacturable geometry, never for
+          nudgeable near-misses.
+
+        ``extra_routes`` segments (escape-phase infrastructure, see
+        Issue #3077) participate in the foreign universe: a pair where
+        exactly one side is an extra-route segment is reported with
+        both net ids, but a pair where BOTH sides are extra-route
+        segments is skipped (escape infra is non-rippable; nothing the
+        negotiated loop can do about it here).
+
+        Issue #4208 (Unit 2 -- M3): the both-non-rippable skip means a
+        genuine cross-net crossing between two escape stubs (both
+        ``rippable=False``) never enters the ``pairs`` set, so it is
+        invisible to the demote/rescue consumers and ships as a silent
+        short.  ``report_non_rippable_pairs=True`` includes such pairs
+        in the result so the unified finalize gate can SURFACE them as a
+        routing-quality failure (there is no demotable victim -- the net
+        is honestly reported unrouted rather than committed as a short).
+        The greedy vertex cover naturally skips them (neither member is
+        in the ``demotable`` set), so callers that do not want the
+        signal leave the flag at its ``False`` default and observe no
+        behaviour change.
+
+        Performance: segments are bucketed per layer, sorted by
+        ``min_x`` and swept -- the inner loop breaks as soon as the
+        partner's ``min_x`` exceeds the current segment's reach
+        envelope, so the typical cost is near-linear in segment count
+        rather than quadratic.
+
+        Args:
+            net_routes: Dictionary of ``net_id -> list of Route``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm (``DesignRules.trace_clearance``).
+            extra_routes: Optional escape-phase routes whose segments
+                join the foreign universe but are not rippable.
+            copper_overlap_only: When True, only report pairs whose
+                copper physically overlaps (see above).
+            report_non_rippable_pairs: When True, also report pairs
+                where BOTH sides are non-rippable escape infra (Issue
+                #4208 / M3); default False preserves the historical
+                skip.
+
+        Returns:
+            Sorted list of unique ``(net_lo, net_hi)`` tuples with
+            ``net_lo < net_hi``.
+        """
+        # Import here to avoid a top-level circular dependency
+        # (algorithms.negotiated -> geometry -> core.geometry).
+        from ..geometry import segment_to_segment_distance
+
+        # Bucket segments by layer; track rippability so extra-route
+        # vs extra-route pairs can be skipped.
+        # Entry: (net_id, seg, rippable)
+        segs_on_layer: dict[int, list[tuple[int, Segment, bool]]] = {}
+        max_half_width = 0.0
+        for net_id, routes in net_routes.items():
+            for route in routes:
+                for seg in route.segments:
+                    segs_on_layer.setdefault(seg.layer.value, []).append((net_id, seg, True))
+                    if seg.width / 2 > max_half_width:
+                        max_half_width = seg.width / 2
+        if extra_routes:
+            for route in extra_routes:
+                for seg in route.segments:
+                    segs_on_layer.setdefault(seg.layer.value, []).append((route.net, seg, False))
+                    if seg.width / 2 > max_half_width:
+                        max_half_width = seg.width / 2
+
+        # Float-noise guard: geometry exactly AT the required clearance
+        # must not be flagged (grid-snapped routes routinely land at
+        # exactly trace_width + trace_clearance pitch).
+        eps = 1e-6
+
+        pairs: set[tuple[int, int]] = set()
+        for layer_entries in segs_on_layer.values():
+            if len(layer_entries) < 2:
+                continue
+            # Sweep preparation: sort by min_x; precompute bboxes.
+            prepared = []
+            for net_id, seg, rippable in layer_entries:
+                prepared.append(
+                    (
+                        min(seg.x1, seg.x2),  # 0: min_x (sort key)
+                        max(seg.x1, seg.x2),  # 1: max_x
+                        min(seg.y1, seg.y2),  # 2: min_y
+                        max(seg.y1, seg.y2),  # 3: max_y
+                        seg.width / 2,  # 4: half width
+                        net_id,  # 5
+                        seg,  # 6
+                        rippable,  # 7
+                    )
+                )
+            prepared.sort(key=lambda e: e[0])
+
+            for i, a in enumerate(prepared):
+                # Largest possible reach of segment ``a`` against ANY
+                # partner on this layer: its half-width + the largest
+                # half-width present + clearance.
+                reach = a[1] + a[4] + max_half_width + trace_clearance
+                for j in range(i + 1, len(prepared)):
+                    b = prepared[j]
+                    if b[0] > reach:
+                        break  # Sorted by min_x -- no later partner can hit.
+                    if a[5] == b[5]:
+                        continue  # Same net.
+                    if not a[7] and not b[7] and not report_non_rippable_pairs:
+                        continue  # Both non-rippable escape infra (M3 skip).
+                    pair_key = (a[5], b[5]) if a[5] < b[5] else (b[5], a[5])
+                    if pair_key in pairs:
+                        continue
+                    required = a[4] + b[4]
+                    if not copper_overlap_only:
+                        required += trace_clearance
+                    # y-bbox prefilter before the exact distance.
+                    if b[2] > a[3] + required or b[3] < a[2] - required:
+                        continue
+                    sa, sb = a[6], b[6]
+                    dist = segment_to_segment_distance(
+                        sa.x1,
+                        sa.y1,
+                        sa.x2,
+                        sa.y2,
+                        sb.x1,
+                        sb.y1,
+                        sb.x2,
+                        sb.y2,
+                    )
+                    if dist < required - eps:
+                        pairs.add(pair_key)
+
+        return sorted(pairs)
+
+    def find_nets_with_segment_segment_violations(
+        self,
+        net_routes: dict[int, list[Route]],
+        trace_clearance: float,
+        cache_key: object | None = None,
+        extra_routes: list[Route] | None = None,
+    ) -> list[int]:
+        """Find nets whose committed segments clip foreign-net segments.
+
+        Issue #3433: third quadrant of the clearance matrix, completing
+        the lex-tuple blind spot.  The negotiated loop's best-iteration
+        comparator (``IterationMetrics``) previously counted only
+        seg-via (#3002) and via-seg (#3020) violators -- an iteration
+        with four SWCLK/SWO full overlaps scored identically to a
+        DRC-clean one, so ``routed_count`` dominance let the
+        overlapping snapshot win the post-loop restore and physically
+        overlapping copper reached the saved board (board-04
+        ``clearance_segment_segment`` actuals down to -0.200 mm).
+
+        Unlike the via hooks, BOTH nets of a violating pair are
+        surfaced: two overlapping traces are rippable peers -- either
+        re-route can clear the conflict, and feeding both back into
+        ``nets_to_reroute`` lets the congestion machinery pick.
+
+        Args:
+            net_routes: Dictionary of ``net_id -> list of Route``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm (``DesignRules.trace_clearance``).
+            cache_key: Optional hashable identifier for memoization
+                across consecutive same-iteration calls (same protocol
+                as the sibling hooks).
+            extra_routes: Optional escape-phase routes whose segments
+                join the foreign universe but whose nets are NOT
+                eligible for the violator set (Issue #3077 parity).
+
+        Returns:
+            Sorted list of net IDs (members of ``net_routes``) involved
+            in at least one cross-net same-layer clearance violation.
+        """
+        effective_cache_key: object | None
+        if cache_key is not None:
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
+            else:
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
+            cached = self._seg_seg_violations_cache
+            if cached is not None and cached[0] == effective_cache_key:
+                return list(cached[1])
+        else:
+            effective_cache_key = None
+
+        pairs = self.find_segment_segment_violation_pairs(
+            net_routes,
+            trace_clearance=trace_clearance,
+            extra_routes=extra_routes,
+            copper_overlap_only=False,
+        )
+
+        # Only nets the negotiated loop owns (present in net_routes)
+        # are eligible violators -- extra-route nets are reported in
+        # pair form but are non-rippable here.
+        violators: set[int] = set()
+        for net_a, net_b in pairs:
+            if net_a in net_routes:
+                violators.add(net_a)
+            if net_b in net_routes:
+                violators.add(net_b)
+
+        result = sorted(violators)
+        if effective_cache_key is not None:
+            self._seg_seg_violations_cache = (effective_cache_key, result)
+        return result
+
+    def rip_up_nets(
+        self,
+        nets: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+    ) -> None:
+        """Rip up routes for specified nets.
+
+        Args:
+            nets: Net IDs to rip up
+            net_routes: Dictionary of net_id -> list of routes
+            routes_list: Master list of all routes
+        """
+        for net in nets:
+            for route in net_routes.get(net, []):
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                if route in routes_list:
+                    routes_list.remove(route)
+            net_routes[net] = []
+
+    def via_blocked_ripup(
+        self,
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 3,
+        per_net_timeout: float | None = None,
+    ) -> tuple[int, int]:
+        """Targeted rip-up driven by C++ via-vs-via failure diagnostics.
+
+        Issue #2476: When the C++ A* search refuses every via candidate
+        because of a stored-via clearance violation, it surfaces the
+        offending stored-via net via ``RouteResult.blocking_via_net``.
+        Issue #4507 feeds the same channel from ``FAILURE_PAIRWISE_BLOCKED``
+        (the cross-domain HV blocker), so this method now also resolves
+        "HV net crowded by a low-voltage neighbour" failures.
+        This method drains those (failed_net, blocking_net) pairs from
+        :meth:`get_and_clear_via_blocking_nets`, rips up each blocking
+        net, and routes the failed net first.  Displaced blockers are
+        rerouted afterwards.
+
+        Compared to :meth:`targeted_ripup`, the blocker set comes from a
+        precise geometric diagnostic rather than a Bresenham line scan or
+        relaxed A*, so we avoid the false "no direct blockers found" path
+        that previously punted to a blanket retry on board 02.
+
+        Args:
+            net_routes: Dictionary of net_id -> list of routes.
+            routes_list: Master list of all routes.
+            pads_by_net: Dictionary of net_id -> list of pads.
+            present_cost_factor: Current congestion cost factor.
+            mark_route_callback: Callback to mark routes on the grid.
+            ripup_history: Optional dict tracking per-net rip-up counts.
+            max_ripups_per_net: Maximum rip-ups per net to prevent loops.
+            per_net_timeout: Optional wall-clock timeout per A* search.
+
+        Returns:
+            Tuple of ``(resolved_count, attempted_count)`` -- how many
+            failed nets routed successfully after the rip-up, out of how
+            many distinct via-blocked failures were observed.
+        """
+        if ripup_history is None:
+            ripup_history = {}
+
+        pairs = self.get_and_clear_via_blocking_nets()
+        if not pairs:
+            return (0, 0)
+
+        # Group blockers per failed net.  A single failed net may have
+        # accumulated multiple distinct blocking-via observations across
+        # its RSMT edges.
+        blockers_by_failed: dict[int, set[int]] = {}
+        for failed_net, blocking_net in pairs:
+            blockers_by_failed.setdefault(failed_net, set()).add(blocking_net)
+
+        resolved = 0
+        attempted = 0
+
+        for failed_net, blocking_nets in blockers_by_failed.items():
+            attempted += 1
+
+            # Filter blockers by ripup budget.
+            nets_to_ripup: set[int] = set()
+            for net in blocking_nets:
+                if ripup_history.get(net, 0) < max_ripups_per_net:
+                    nets_to_ripup.add(net)
+                    ripup_history[net] = ripup_history.get(net, 0) + 1
+
+            if not nets_to_ripup:
+                # All blockers have hit their rip-up budget; skip this net
+                # so we don't churn endlessly on the same conflict.
+                continue
+
+            # Rip up the specific blockers identified by the cpp search.
+            self.rip_up_nets(list(nets_to_ripup), net_routes, routes_list)
+
+            # Route the failed net first (priority over displaced nets).
+            failed_pads = pads_by_net.get(failed_net, [])
+            failed_net_success = False
+            if failed_pads and len(failed_pads) >= 2:
+                routes = self.route_net_negotiated(
+                    failed_pads,
+                    present_cost_factor,
+                    mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if routes:
+                    net_routes[failed_net] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+                    failed_net_success = True
+
+            # Re-route the displaced blockers.  Their routing may now use
+            # different via positions that no longer collide with the
+            # newly-routed failed net.
+            for net in nets_to_ripup:
+                net_pads = pads_by_net.get(net, [])
+                if net_pads and len(net_pads) >= 2:
+                    routes = self.route_net_negotiated(
+                        net_pads,
+                        present_cost_factor,
+                        mark_route_callback,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    if routes:
+                        net_routes[net] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+
+            if failed_net_success:
+                resolved += 1
+
+        return (resolved, attempted)
+
+    def targeted_ripup(
+        self,
+        failed_net: int,
+        blocking_nets: set[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 3,
+        per_net_timeout: float | None = None,
+        progress_callback: ProgressCallback | None = None,
+        net_names: dict[int, str] | None = None,
+        allow_trade: bool = False,
+    ) -> bool:
+        """Perform targeted rip-up of blocking nets and re-route.
+
+        Instead of ripping up all conflicting nets, this method only rips up
+        the specific nets that are blocking the failed net's path, then
+        re-routes the failed net first (giving it priority) followed by
+        the displaced nets.
+
+        Args:
+            failed_net: Net ID that failed to route
+            blocking_nets: Set of net IDs blocking the failed net's path
+            net_routes: Dictionary of net_id -> list of routes
+            routes_list: Master list of all routes
+            pads_by_net: Dictionary of net_id -> list of pads for that net
+            present_cost_factor: Current congestion cost factor
+            mark_route_callback: Callback to mark routes on the grid
+            ripup_history: Optional dict tracking ripup count per net
+            max_ripups_per_net: Maximum times a net can be ripped up (prevents loops)
+            per_net_timeout: Optional wall-clock timeout in seconds for each
+                A* search (Issue #1605)
+            progress_callback: Optional callback invoked before each
+                ``route_net_negotiated`` call (failed net + each sibling).
+                Receives ``(phase_label, info_dict)`` where ``info_dict``
+                contains ``phase`` ("failed_net" or "sibling"), ``net``
+                (net id), ``net_name`` (resolved via ``net_names``), ``index``
+                (1-indexed position), ``total`` (failed net + siblings count),
+                and ``elapsed`` (seconds since this call started).  Issue #2795:
+                used by ``_attempt_blocked_component_ripup_negotiated`` to
+                surface progress during what would otherwise be a silent
+                multi-minute operation.
+            net_names: Optional net-id-to-name mapping used to resolve human
+                readable net names for the ``progress_callback`` payload.
+                Falls back to ``Net_<id>`` when missing or absent.
+            allow_trade: Issue #6342.  When ``True`` and the victim
+                (``failed_net``) re-routes fully but a displaced blocker
+                cannot re-land, keep the victim's copper instead of rolling
+                the whole transaction back: the blockers that could not
+                re-land are left unrouted for the caller's ordinary
+                failed-net recovery, which then routes them *around* the
+                victim.  The outcome is :data:`RIPUP_TRADED`.  Only a caller
+                that protects the victim from being ripped again for the same
+                blockers (and that keeps a best-state snapshot, so a losing
+                trade cannot survive to the end of the run) should opt in.
+                Default ``False`` is the pre-#6342 all-or-nothing rule.
+
+            The structured reason for the result is recorded on
+            :attr:`last_ripup_outcome` (a :class:`TargetedRipupOutcome`).
+
+            Issue #6342: when the victim fails while a corridor-reservation
+            window is open (the ripped blockers' C++-grid unmark was only
+            queued), the transaction is retried once with its own rip-ups
+            mirrored to the C++ grid immediately; see the method body.
+
+        Returns:
+            True if re-routing succeeded for all affected nets, False otherwise.
+
+            Issue #3470: this method is now a TRANSACTION.  Before any
+            rip-up, the current routes of the failed net and every sibling
+            are snapshotted.  The transaction commits only when (a) the
+            failed net re-routes FULLY (zero edge failures -- a partial
+            reroute is stranded-stub copper, the board-05
+            ISENSE_A-/ISENSE_B- overlap failure mode) and (b) every
+            displaced sibling re-routes with at least as many routes as it
+            had before.  On any other outcome the exact original Route
+            objects are re-marked on the grid and ``False`` is returned --
+            a failed rip-up never leaves the board worse than it found it.
+
+            Sibling-degradation proxy (known limitation): criterion (b)
+            compares ROUTE COUNTS only.  A sibling can re-land with an
+            equal route count but worse geometry (longer detour,
+            DRC-adjacent copper, extra vias) and the transaction will
+            still commit.  Route count is a deliberate tradeoff: it
+            catches the catastrophic failure mode (a sibling losing
+            connectivity outright, the board-05 HALL/GATE collateral)
+            without paying for a full per-transaction DRC pass, which
+            would multiply rip-up wall-clock by the DRC cost on every
+            attempt.  If geometric degradation ever becomes the binding
+            failure mode, tighten (b) to compare total routed length or
+            run an incremental DRC over the sibling's bounding box.
+
+            Issue #2814 (superseded in mechanism, preserved in intent):
+            when the failed net's A* search cannot fully route even with
+            all sibling routes removed from the grid, the blocker is
+            geometric (pad-clearance keepouts, board-edge limits, fixed
+            escape routes, component bodies) rather than sibling traces.
+            We fast-fail by restoring the snapshot verbatim (exact
+            geometry, zero A* time -- strictly better than the previous
+            10s-probe fresh reroute, which routinely failed and stranded
+            previously-routed siblings) and return ``False`` so the caller
+            can escalate to a different strategy.
+        """
+        if ripup_history is None:
+            ripup_history = {}
+        history: dict[int, int] = ripup_history
+
+        def _attempt() -> bool:
+            return self._targeted_ripup_txn(
+                failed_net,
+                blocking_nets,
+                net_routes,
+                routes_list,
+                pads_by_net,
+                present_cost_factor,
+                mark_route_callback,
+                ripup_history=history,
+                max_ripups_per_net=max_ripups_per_net,
+                per_net_timeout=per_net_timeout,
+                progress_callback=progress_callback,
+                net_names=net_names,
+                allow_trade=allow_trade,
+            )
+
+        history_before = {net: ripup_history.get(net) for net in blocking_nets}
+        queue_start = self._pending_cpp_unmarks()
+        success = _attempt()
+        if success or not self._cpp_rip_is_deferred():
+            return success
+        outcome = self.last_ripup_outcome
+        if outcome is None or outcome.reason != RIPUP_VICTIM_GEOMETRIC or not outcome.ripped:
+            return success
+
+        # Issue #6363: the first attempt's rollback discarded the victim's
+        # partial reroute, but inside the window that unmark was only queued,
+        # so the partial copper was still on the C++ grid -- foreign-hard for
+        # every blocker the retry re-lands.  Apply exactly those queued
+        # unmarks now.  The ripped-and-restored copper's queued unmarks (the
+        # #3438 corridor reservation) stay queued.
+        flush = getattr(self.grid, "flush_discarded_cpp_unmarks", None)
+        if callable(flush):
+            flush(queue_start)
+
+        # Issue #6342: inside an open corridor-reservation window
+        # (``RoutingGrid.begin_cpp_unmark_deferral``) a rip-up only QUEUES the
+        # C++-grid unmark, so the blockers this transaction just ripped stayed
+        # phantom-blocked on the grid the C++ A* searches, and the victim was
+        # rerouted against copper that was no longer there.  When that is how
+        # the victim failed, retry the transaction once with its own rip-ups
+        # mirrored to the C++ grid immediately.  The first attempt rolled back
+        # verbatim, so the retry starts from the same state; its rip-up budget
+        # charge replaces the first attempt's rather than adding to it.  A
+        # victim that succeeded the first time keeps exactly the pre-#6342
+        # behaviour (the reservation still protects the blockers' corridors).
+        for net, count in history_before.items():
+            if count is None:
+                ripup_history.pop(net, None)
+            else:
+                ripup_history[net] = count
+        with self.grid.cpp_unmark_immediate():
+            success = _attempt()
+        if self.last_ripup_outcome is not None:
+            self.last_ripup_outcome = dataclass_replace(self.last_ripup_outcome, cpp_retry=True)
+        return success
+
+    def _pending_cpp_unmarks(self) -> int:
+        """Queued C++ unmarks in the open window (0 without one)."""
+        count = getattr(self.grid, "pending_cpp_unmark_count", None)
+        return int(count()) if callable(count) else 0
+
+    def _cpp_rip_is_deferred(self) -> bool:
+        """True when a rip-up's C++-grid unmark would be queued, not applied.
+
+        That is: a paired C++ grid exists, a corridor-reservation window is
+        open, and the grid can suspend it (``cpp_unmark_immediate``).
+        """
+        grid = self.grid
+        return (
+            getattr(grid, "_cpp_grid", None) is not None
+            and bool(getattr(grid, "_cpp_unmark_deferred", False))
+            and callable(getattr(grid, "cpp_unmark_immediate", None))
+        )
+
+    def _restore_route_snapshot(
+        self,
+        nets: Iterable[int],
+        original_routes: dict[int, list[Route]],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        mark_route_callback: Callable,
+    ) -> None:
+        """Restore ``nets`` to the exact routes in ``original_routes``.
+
+        Shared by the targeted rip-up transaction (#3470) and the
+        oscillation-escape strategies (#7071).  Whatever is currently
+        placed for ``nets`` is unmarked, then the original ``Route``
+        objects are re-marked verbatim (same objects, so callers that
+        fingerprint by ``id()`` correctly see "no new routes").
+        """
+        nets = list(nets)
+        # Remove anything placed during the attempt.
+        for net in nets:
+            for route in list(net_routes.get(net, [])):
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                if route in routes_list:
+                    routes_list.remove(route)
+            net_routes[net] = []
+        # Re-mark the original routes verbatim.
+        for net in nets:
+            restored = list(original_routes.get(net, []))
+            net_routes[net] = restored
+            for route in restored:
+                mark_route_callback(route)
+                self.grid.mark_route_usage(route)
+                if route not in routes_list:
+                    routes_list.append(route)
+
+    def _targeted_ripup_txn(
+        self,
+        failed_net: int,
+        blocking_nets: set[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: Callable,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 3,
+        per_net_timeout: float | None = None,
+        progress_callback: ProgressCallback | None = None,
+        net_names: dict[int, str] | None = None,
+        allow_trade: bool = False,
+    ) -> bool:
+        """The :meth:`targeted_ripup` transaction body (see there)."""
+        if ripup_history is None:
+            ripup_history = {}
+
+        # Filter out nets that have been ripped up too many times
+        # This prevents infinite loops where nets keep displacing each other
+        nets_to_ripup: set[int] = set()
+        dropped: set[int] = set()
+        for net in blocking_nets:
+            if ripup_history.get(net, 0) < max_ripups_per_net:
+                nets_to_ripup.add(net)
+                ripup_history[net] = ripup_history.get(net, 0) + 1
+            else:
+                dropped.add(net)
+        ripped_t = tuple(sorted(nets_to_ripup))
+        dropped_t = tuple(sorted(dropped))
+
+        def _record(
+            reason: str,
+            failed_sibling: int | None = None,
+            traded: tuple[int, ...] = (),
+        ) -> None:
+            self.last_ripup_outcome = TargetedRipupOutcome(
+                reason=reason,
+                failed_net=failed_net,
+                ripped=ripped_t,
+                dropped=dropped_t,
+                failed_sibling=failed_sibling,
+                traded=traded,
+            )
+
+        if not nets_to_ripup:
+            # All blocking nets have reached their ripup limit
+            # Fall back to normal routing with high congestion cost
+            _record(RIPUP_BUDGET_EXHAUSTED)
+            return False
+
+        # Issue #3470: snapshot the pre-rip-up state for the failed net and
+        # every sibling we are about to displace.  The rip-up below is a
+        # TRANSACTION: it commits only when the failed net routes FULLY
+        # (zero edge failures) and no displaced sibling ends up with fewer
+        # routes than it had before.  On any other outcome the exact
+        # original Route objects are re-marked on the grid -- a failed
+        # rip-up must never leave partial stub copper for the failed net
+        # (the board-05 ISENSE_A-/ISENSE_B- overlap-stub failure mode) or
+        # strand a previously-routed sibling (the pnt=30 HALL/GATE
+        # collateral-damage failure mode).
+        snapshot_nets = set(nets_to_ripup) | {failed_net}
+        original_routes: dict[int, list[Route]] = {
+            net: list(net_routes.get(net, [])) for net in snapshot_nets
+        }
+
+        def _rollback_to_snapshot() -> None:
+            """Restore the exact pre-rip-up routing state for all nets."""
+            self._restore_route_snapshot(
+                snapshot_nets, original_routes, net_routes, routes_list, mark_route_callback
+            )
+
+        # Rip up the blocking nets.  Also rip any stale (partial) routes
+        # the FAILED net is still holding so its reroute starts from a
+        # clean slate -- previously callers did this pre-rip outside the
+        # transaction, which is exactly how a non-converging rip-up
+        # destroyed the failed net's pre-existing partial connectivity
+        # (Issue #3470).
+        self.rip_up_nets(list(nets_to_ripup), net_routes, routes_list)
+        if original_routes.get(failed_net):
+            self.rip_up_nets([failed_net], net_routes, routes_list)
+
+        # Issue #2795: emit progress before each long-running A* invocation.
+        # Total work units = 1 (failed net) + N siblings, so index runs 1..total.
+        total_steps = 1 + len(nets_to_ripup)
+        start_time = time.time()
+
+        def _emit_progress(phase: str, net_id: int, index: int) -> None:
+            if progress_callback is None:
+                return
+            if net_names is not None:
+                resolved_name = net_names.get(net_id, f"Net_{net_id}")
+            else:
+                resolved_name = f"Net_{net_id}"
+            # Never let a buggy progress callback abort the rip-up.
+            with contextlib.suppress(Exception):
+                progress_callback(
+                    "ripup_phase",
+                    {
+                        "phase": phase,
+                        "net": net_id,
+                        "net_name": resolved_name,
+                        "index": index,
+                        "total": total_steps,
+                        "elapsed": time.time() - start_time,
+                    },
+                )
+
+        # Re-route the failed net first (it now has priority with cleared
+        # path).  Issue #3470: track per-edge failures via the failure
+        # callback so a PARTIAL reroute (some RSMT edges placed, others
+        # failed/timed out) is treated as non-convergence -- a partial
+        # route is exactly the stranded-stub copper this transaction must
+        # never commit.
+        failed_pads = pads_by_net.get(failed_net, [])
+        failed_edge_failures = 0
+
+        def _count_failed_edge(_source: Pad, _target: Pad) -> None:
+            nonlocal failed_edge_failures
+            failed_edge_failures += 1
+
+        failed_net_success = False  # Issue #858: Track if failed net was routed
+        if failed_pads and len(failed_pads) >= 2:
+            _emit_progress("failed_net", failed_net, 1)
+            routes = self.route_net_negotiated(
+                failed_pads,
+                present_cost_factor,
+                mark_route_callback,
+                per_net_timeout=per_net_timeout,
+                failure_callback=_count_failed_edge,
+            )
+            if routes:
+                net_routes[failed_net] = routes
+                for route in routes:
+                    self.grid.mark_route_usage(route)
+                    routes_list.append(route)
+                # Issue #3470: only a FULL reroute counts as success.
+                failed_net_success = failed_edge_failures == 0
+
+        # Issue #2814 / #3470: fail fast when the failed net's A* cannot
+        # fully route even with the sibling routes cleared from the grid.
+        # The blocker is geometric (pad-clearance keepouts, board-edge
+        # limits, fixed escape routes, component bodies) rather than
+        # sibling copper, so re-routing every sibling at full
+        # ``per_net_timeout`` cannot help.  Issue #3470 replaces the old
+        # "restore siblings via fresh A* at a 10s probe timeout" repair
+        # (which routinely failed and stranded previously-routed siblings,
+        # board-05 HALL/GATE collateral) with an EXACT restore of the
+        # snapshotted pre-rip-up routes: zero A* time, zero collateral.
+        if not failed_net_success:
+            _rollback_to_snapshot()
+            _record(RIPUP_VICTIM_GEOMETRIC)
+            return False  # geometric blocker -- caller should escalate
+
+        # Re-route the displaced nets
+        success = failed_net_success  # Issue #858: Start with failed net success
+        # Issue #6342: with ``allow_trade`` a blocker that cannot re-land is
+        # left unrouted rather than rolling the victim back.
+        first_failed_sibling: int | None = None
+        traded: list[int] = []
+        # Sort for deterministic progress ordering (set iteration is unordered).
+        sibling_order = sorted(nets_to_ripup)
+        for sibling_index, net in enumerate(sibling_order, start=2):
+            net_pads = pads_by_net.get(net, [])
+            if net_pads and len(net_pads) >= 2:
+                _emit_progress("sibling", net, sibling_index)
+                routes = self.route_net_negotiated(
+                    net_pads,
+                    present_cost_factor,
+                    mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if routes and len(routes) >= len(original_routes.get(net, [])):
+                    net_routes[net] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+                else:
+                    # Issue #3470: the displaced sibling failed to re-route
+                    # (or came back with FEWER routes than it had before the
+                    # rip-up -- a degradation).  Commit nothing: roll the
+                    # whole transaction back so the board state is exactly
+                    # what it was before this rip-up attempt.  The wall
+                    # clock spent is lost but the routing state is not.
+                    if first_failed_sibling is None:
+                        first_failed_sibling = net
+                    if allow_trade:
+                        # Issue #6342: keep the victim.  Whatever partial
+                        # copper the blocker found is discarded (a partial
+                        # route is stranded-stub copper, #3470) and the net
+                        # is left with no routes for the caller's ordinary
+                        # failed-net recovery to route around the victim.
+                        if routes:
+                            for route in routes:
+                                self.grid.unmark_route(route)
+                        net_routes[net] = []
+                        traded.append(net)
+                        continue
+                    if routes:
+                        # Stage the degraded routes so the rollback removes
+                        # them from the grid/routes_list uniformly.
+                        net_routes[net] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+                    _rollback_to_snapshot()
+                    _record(RIPUP_SIBLING_FAILED, failed_sibling=net)
+                    return False
+
+        if traded:
+            _record(RIPUP_TRADED, failed_sibling=first_failed_sibling, traded=tuple(traded))
+        else:
+            _record(RIPUP_COMMITTED)
+        return success
+
+    def find_blocking_nets_for_connection(
+        self,
+        source_pad: Pad,
+        target_pad: Pad,
+    ) -> set[int]:
+        """Find nets blocking a specific connection.
+
+        Uses the pathfinder's find_blocking_nets method to identify
+        which nets are blocking the direct path between two pads.
+
+        Args:
+            source_pad: Starting pad
+            target_pad: Ending pad
+
+        Returns:
+            Set of net IDs blocking the path
+        """
+        return self.router.find_blocking_nets(source_pad, target_pad)
+
+    def find_blocking_nets_relaxed(
+        self,
+        failed_nets: list[int],
+        pads_by_net: dict[int, list[Pad]],
+        per_net_timeout: float | None = None,
+    ) -> dict[int, int]:
+        """Identify true blockers using relaxed A* (Issue #2274).
+
+        For each unrouted net, temporarily unblocks all routed-net cells
+        and runs A* to find a viable path.  Cells along that relaxed path
+        that were originally occupied by routed nets reveal the *true*
+        blockers.
+
+        Args:
+            failed_nets: List of net IDs that failed to route.
+            pads_by_net: Mapping of net ID to its pads.
+            per_net_timeout: Optional timeout per relaxed A* search.
+
+        Returns:
+            Dict mapping blocking net ID to the number of stuck nets it
+            blocks (score).  Higher score = blocks more stuck nets.
+        """
+        blocker_scores: dict[int, int] = {}
+
+        # Issue #6009: the unblocker lifts committed routes off the Python
+        # grid, the paired C++ grid AND the route R-trees (the old plane-only
+        # clear left the latter two holding every trace, so the relaxed search
+        # found nothing on either backend).  Attribution reads ``copper_net``
+        # -- cells the lift actually freed -- so a pad's or keepout's own
+        # net-tagged halo next to the relaxed path is not mistaken for a
+        # rip-up-able blocker.
+        with self.grid.temporarily_unblock_routed_nets(self.router) as unblocker:
+            saved_net = unblocker.copper_net
+            saved_blocked = saved_net != 0
+
+            for net_id in failed_nets:
+                pads = pads_by_net.get(net_id, [])
+                if len(pads) < 2:
+                    continue
+
+                # Try finding a relaxed path for the first pair of pads
+                net_blockers: set[int] = set()
+                for j in range(len(pads) - 1):
+                    blockers = self.router.find_blocking_nets_relaxed(
+                        pads[j],
+                        pads[j + 1],
+                        saved_blocked,
+                        saved_net,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    net_blockers.update(blockers)
+
+                for blocker in net_blockers:
+                    blocker_scores[blocker] = blocker_scores.get(blocker, 0) + 1
+
+        return blocker_scores
+
+    def score_foreign_budget_overlap(
+        self,
+        candidate_nets: list[int],
+        net_routes: dict[int, list[Route]],
+        pad_channel_budgets: list,
+    ) -> dict[int, int]:
+        """Score nets by how many cells of their committed routes lie in
+        *foreign* pad-channel-budget rectangles (Issue #3230).
+
+        A per-pad channel budget (#3143) tags a rectangular escape-channel
+        region with a soft per-cell penalty.  Each budget has a
+        ``source_net`` — the net for which that channel is reserved.
+        Cells of a route belonging to ``net != budget.source_net`` that
+        fall inside the rectangle indicate the route is *parked in
+        someone else's escape strip*, contributing to the stalemate
+        observed on softstart where stuck nets cannot escape their pad
+        cluster because foreign nets are camping in their channels.
+
+        Selecting such a net for rip-up frees the channel for its
+        rightful source-net, which is exactly the lever the issue
+        describes.  This signal is consumed by :meth:`neighborhood_ripup`
+        as a TIE-BREAK between candidates already ranked by
+        :meth:`find_blocking_nets_relaxed`'s stuck-nets count — a
+        minimally-invasive change that preserves the existing primary
+        ordering on non-softstart boards while letting the budget hint
+        do work when counts tie.
+
+        Args:
+            candidate_nets: Net IDs to score (typically the keys of the
+                blocker_scores dict from ``find_blocking_nets_relaxed``).
+            net_routes: Dict of net_id -> committed routes (segments).
+            pad_channel_budgets: List of ``PadChannelBudget`` objects
+                with ``gx1/gy1/gx2/gy2/layer/source_net`` attributes.
+                Empty list yields all-zero scores (no signal available).
+
+        Returns:
+            Dict mapping net_id -> integer cell-overlap count.  Higher
+            score = camping in more foreign escape channels.
+        """
+        if not pad_channel_budgets or not candidate_nets:
+            return dict.fromkeys(candidate_nets, 0)
+
+        # Pre-extract budget rectangles into plain tuples to avoid
+        # attribute lookups in the inner loop.  Layer = -1 means "all
+        # layers" (matches the C++ side's convention -- see
+        # router.core.Router._build_pad_channel_budgets where the field
+        # is set to -1 unconditionally).
+        budget_rects: list[tuple[int, int, int, int, int, int]] = []
+        for b in pad_channel_budgets:
+            try:
+                budget_rects.append(
+                    (
+                        int(b.gx1),
+                        int(b.gy1),
+                        int(b.gx2),
+                        int(b.gy2),
+                        int(getattr(b, "layer", -1)),
+                        int(b.source_net),
+                    )
+                )
+            except (AttributeError, TypeError):
+                continue
+
+        if not budget_rects:
+            return dict.fromkeys(candidate_nets, 0)
+
+        scores: dict[int, int] = dict.fromkeys(candidate_nets, 0)
+
+        for net_id in candidate_nets:
+            routes = net_routes.get(net_id, [])
+            if not routes:
+                continue
+
+            cell_count = 0
+            for route in routes:
+                for seg in route.segments:
+                    # Convert segment endpoints to grid coordinates and
+                    # walk a coarse-sampled set of midpoint cells.  Full
+                    # Bresenham would be more accurate but the budget
+                    # rectangles are O(10-30 cells) in extent and the
+                    # candidate list is bounded by the rip-up max_attempts
+                    # (default 3), so coarse sampling at endpoints +
+                    # midpoint already discriminates "parked inside" from
+                    # "just clipping a corner".
+                    try:
+                        gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                        gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                    except (AttributeError, TypeError):
+                        continue
+
+                    try:
+                        seg_layer_idx = self.grid.layer_to_index(seg.layer.value)
+                    except (AttributeError, TypeError, ValueError):
+                        seg_layer_idx = -1
+
+                    # Sample three cells: both endpoints and the midpoint.
+                    sample_cells = (
+                        (int(gx1), int(gy1)),
+                        ((int(gx1) + int(gx2)) // 2, (int(gy1) + int(gy2)) // 2),
+                        (int(gx2), int(gy2)),
+                    )
+                    for sx, sy in sample_cells:
+                        for bgx1, bgy1, bgx2, bgy2, b_layer, b_src in budget_rects:
+                            # Skip budgets owned by this net -- the
+                            # rip-up should NOT penalise a net for
+                            # occupying its OWN escape strip.
+                            if b_src == net_id:
+                                continue
+                            # Layer match: -1 means any layer.
+                            if b_layer != -1 and seg_layer_idx != -1 and b_layer != seg_layer_idx:
+                                continue
+                            if bgx1 <= sx <= bgx2 and bgy1 <= sy <= bgy2:
+                                cell_count += 1
+                                # A single budget hit per sample cell is
+                                # enough; further budgets on the same
+                                # cell would double-count.  Break inner.
+                                break
+
+            scores[net_id] = cell_count
+
+        return scores
+
+    def neighborhood_ripup(
+        self,
+        failed_nets: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        stall_count: int = 0,
+        per_net_timeout: float | None = None,
+        max_attempts: int = 3,
+        initial_radius_factor: float = 1.0,
+        escalation_factor: float = 2.0,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 5,
+        joint_resolve: bool = False,
+    ) -> tuple[bool, int]:
+        """Perform neighborhood rip-up for stuck nets (Issue #2274).
+
+        When negotiated routing stalls with 0 conflicts but unrouted nets
+        remain, this method:
+        1. Uses relaxed A* to identify true blocking nets
+        2. Scores blockers by how many stuck nets they block
+        3. Rips up highest-scoring blockers and their neighborhood
+        4. Routes the stuck net first, then re-routes displaced nets
+
+        The rip-up radius escalates on repeated stalls.
+
+        Args:
+            failed_nets: Nets that failed to route.
+            net_routes: Dict of net_id -> list of routes.
+            routes_list: Master route list.
+            pads_by_net: Dict of net_id -> list of pads.
+            present_cost_factor: Current congestion cost factor.
+            mark_route_callback: Callback to mark routes on the grid.
+            stall_count: How many consecutive stalls have occurred.
+            per_net_timeout: Optional per-net A* timeout.
+            max_attempts: Maximum rip-up attempts per call.
+            initial_radius_factor: Initial bounding-box expansion factor.
+            escalation_factor: Multiplier applied to radius on each stall.
+            ripup_history: Optional dict tracking per-net rip-up counts.
+            max_ripups_per_net: Maximum rip-ups per net to prevent loops.
+            joint_resolve: When True (Issue #3864, M2), the displaced
+                pocket nets are re-solved JOINTLY via
+                :meth:`region_resolve` -- a bounded inner negotiated loop
+                with a net-positive rollback guard -- instead of the
+                legacy sequential one-at-a-time reroute.  This escapes the
+                1:1-trade congestion minimum.  Off by default; opt in via
+                the ``KCT_JOINT_REGION_RESOLVE`` env flag wired in
+                ``core.py``.  When the joint re-solve rolls back (no strict
+                gain) we fall through to the legacy sequential reroute so
+                behaviour is never worse than the flag-off path.
+
+        Returns:
+            Tuple of (improved, new_routed_count) where improved is True if
+            more nets were routed than before.
+        """
+        if ripup_history is None:
+            ripup_history = {}
+
+        def _count_routed() -> int:
+            """Count nets that have at least one route."""
+            return sum(1 for routes in net_routes.values() if routes)
+
+        initial_routed = _count_routed()
+        radius_factor = initial_radius_factor * (escalation_factor**stall_count)
+        attempts = 0
+
+        # Step 1: Find true blockers via relaxed A*
+        blocker_scores = self.find_blocking_nets_relaxed(
+            failed_nets,
+            pads_by_net,
+            per_net_timeout=per_net_timeout,
+        )
+
+        if not blocker_scores:
+            # No relaxed path found for any stuck net -- truly unroutable
+            return False, _count_routed()
+
+        # Issue #3230: Pull the per-pad channel budget list from the
+        # underlying pathfinder (C++ backend exposes this as
+        # ``_pad_channel_budgets``; Python backend lacks it -- both
+        # tolerated via ``getattr`` returning ``[]``).  The budget signal
+        # is used below as a strict TIE-BREAK after the primary
+        # stuck-nets count, so non-softstart boards whose blocker counts
+        # don't tie see identical ordering and zero behaviour change.
+        # When ``KCT_DISABLE_PAD_BUDGETS=1`` was set at the pre-pass, the
+        # backend's budget list will be empty and ``foreign_overlap``
+        # below collapses to all-zero -- this is the A/B knob (AC #5).
+        pad_channel_budgets = getattr(self.router, "_pad_channel_budgets", []) or []
+        foreign_overlap = self.score_foreign_budget_overlap(
+            list(blocker_scores.keys()),
+            net_routes,
+            pad_channel_budgets,
+        )
+
+        # Sort blockers by (count desc, foreign_budget_overlap desc).
+        # The primary key is unchanged from pre-#3230 behaviour.  The
+        # secondary key is a tie-break: when two blockers obstruct the
+        # same number of stuck nets, prefer the one parked in more
+        # foreign escape channels (it's the more disruptive squatter).
+        # Deterministic third key (-net id) preserves PYTHONHASHSEED
+        # determinism in case both prior keys tie.
+        sorted_blockers = sorted(
+            blocker_scores.items(),
+            key=lambda x: (-x[1], -foreign_overlap.get(x[0], 0), -x[0]),
+        )
+
+        for blocker_net, score in sorted_blockers:
+            if attempts >= max_attempts:
+                break
+
+            # Check ripup budget
+            if ripup_history.get(blocker_net, 0) >= max_ripups_per_net:
+                continue
+
+            attempts += 1
+            ripup_history[blocker_net] = ripup_history.get(blocker_net, 0) + 1
+
+            # Compute bounding box around the blocker's route and expand by radius
+            blocker_routes = net_routes.get(blocker_net, [])
+            if not blocker_routes:
+                continue
+
+            # Get bounding box of blocker net's routes
+            min_gx = float("inf")
+            min_gy = float("inf")
+            max_gx = float("-inf")
+            max_gy = float("-inf")
+            for route in blocker_routes:
+                for seg in route.segments:
+                    gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                    gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                    min_gx = min(min_gx, gx1, gx2)
+                    min_gy = min(min_gy, gy1, gy2)
+                    max_gx = max(max_gx, gx1, gx2)
+                    max_gy = max(max_gy, gy1, gy2)
+
+            # Expand bounding box by radius
+            bbox_w = max_gx - min_gx + 1
+            bbox_h = max_gy - min_gy + 1
+            expand = int(max(bbox_w, bbox_h) * radius_factor)
+            bb_x1 = int(min_gx) - expand
+            bb_y1 = int(min_gy) - expand
+            bb_x2 = int(max_gx) + expand
+            bb_y2 = int(max_gy) + expand
+
+            # Find all routed nets passing through the expanded bounding box
+            neighborhood_nets: set[int] = {blocker_net}
+            for net_id, routes in net_routes.items():
+                if net_id in neighborhood_nets:
+                    continue
+                for route in routes:
+                    found = False
+                    for seg in route.segments:
+                        gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                        gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                        # Check if segment intersects the bounding box
+                        if (
+                            max(gx1, gx2) >= bb_x1
+                            and min(gx1, gx2) <= bb_x2
+                            and max(gy1, gy2) >= bb_y1
+                            and min(gy1, gy2) <= bb_y2
+                        ):
+                            neighborhood_nets.add(net_id)
+                            found = True
+                            break
+                    if found:
+                        break
+
+            # Identify which failed nets could benefit from this rip-up
+            affected_failed = [
+                n for n in failed_nets if n not in net_routes or not net_routes.get(n)
+            ]
+
+            # Issue #3864 (M2): JOINT local re-solve of the pocket.  Rip
+            # ALL pocket nets (blocker + neighbourhood + the stuck failed
+            # nets) and re-solve them together via region_resolve's bounded
+            # inner negotiated loop, guarded by a net-positive rollback.
+            # On a strict gain we accept and report improvement directly;
+            # on rollback (no strict gain) region_resolve has already
+            # restored the exact pre-rip-up state, so we fall through to
+            # the legacy sequential reroute below -- behaviour is never
+            # worse than the flag-off path.
+            if joint_resolve:
+                pocket = list(neighborhood_nets) + [
+                    fn for fn in affected_failed if fn not in neighborhood_nets
+                ]
+                jr_improved, _ = self.region_resolve(
+                    pocket_nets=pocket,
+                    net_routes=net_routes,
+                    routes_list=routes_list,
+                    pads_by_net=pads_by_net,
+                    present_cost_factor=present_cost_factor,
+                    mark_route_callback=mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if jr_improved:
+                    current_routed = _count_routed()
+                    if current_routed > initial_routed:
+                        return True, current_routed
+                    # Strict gain without a net-count gain (a swap that
+                    # finishes one net while another stays routed-partial):
+                    # still a real improvement, report it.
+                    return True, current_routed
+                # Rolled back; fall through to legacy sequential reroute.
+
+            # Rip up the neighborhood
+            self.rip_up_nets(list(neighborhood_nets), net_routes, routes_list)
+
+            # Route the failed nets first (priority)
+            for fn in affected_failed:
+                fn_pads = pads_by_net.get(fn, [])
+                if fn_pads and len(fn_pads) >= 2:
+                    routes = self.route_net_negotiated(
+                        fn_pads,
+                        present_cost_factor,
+                        mark_route_callback,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    if routes:
+                        net_routes[fn] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+
+            # Re-route the displaced nets
+            for net_id in neighborhood_nets:
+                if net_id in net_routes and net_routes[net_id]:
+                    continue  # Already re-routed as a failed net
+                net_pads = pads_by_net.get(net_id, [])
+                if net_pads and len(net_pads) >= 2:
+                    routes = self.route_net_negotiated(
+                        net_pads,
+                        present_cost_factor,
+                        mark_route_callback,
+                        per_net_timeout=per_net_timeout,
+                    )
+                    if routes:
+                        net_routes[net_id] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+
+            # Check if we improved
+            current_routed = _count_routed()
+            if current_routed > initial_routed:
+                return True, current_routed
+
+        final_routed = _count_routed()
+        return final_routed > initial_routed, final_routed
+
+    def _route_net_counting_failures(
+        self,
+        net_pads: list[Pad],
+        present_cost_factor: float,
+        mark_route_callback: Callable,
+        per_net_timeout: float | None,
+    ) -> tuple[list[Route], bool]:
+        """Route one net, returning ``(routes, fully_connected)``.
+
+        ``fully_connected`` is ``True`` only when ``route_net_negotiated``
+        placed copper for EVERY RSMT edge (zero ``failure_callback``
+        invocations) -- the same strict-completeness predicate
+        :meth:`targeted_ripup` uses at line ~2451.  A partial reroute
+        (some edges placed, others timed-out/blocked) returns
+        ``fully_connected=False`` so the joint-resolve guard never credits
+        a strand as a strict completion.
+        """
+        edge_failures = 0
+
+        def _count_failed_edge(_source: Pad, _target: Pad) -> None:
+            nonlocal edge_failures
+            edge_failures += 1
+
+        routes = self.route_net_negotiated(
+            net_pads,
+            present_cost_factor,
+            mark_route_callback,
+            per_net_timeout=per_net_timeout,
+            failure_callback=_count_failed_edge,
+        )
+        fully_connected = bool(routes) and edge_failures == 0
+        return routes, fully_connected
+
+    def region_resolve(
+        self,
+        pocket_nets: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: Callable,
+        per_net_timeout: float | None = None,
+        inner_passes: int = 4,
+        present_cost_escalation: float = 1.8,
+        max_pocket_nets: int = 8,
+        wall_budget_s: float | None = 90.0,
+    ) -> tuple[bool, int]:
+        """Jointly re-solve a congested pocket (Issue #3864, M2).
+
+        This is the JOINT local re-solve that escapes the 1:1-trade
+        congestion minimum.  :meth:`neighborhood_ripup` already locates
+        the congested pocket and its member nets, but then re-routes the
+        displaced nets SEQUENTIALLY one-at-a-time -- so it re-derives the
+        same 1:1 pad trade and reports no improvement.  ``region_resolve``
+        replaces that sequential reroute with a **bounded inner negotiated
+        loop** over just the pocket nets: it rips ALL pocket nets, then
+        runs several escalating-present-cost passes that route the pocket
+        nets *against each other* (the surrounding committed copper is the
+        fixed boundary).  Because the inner loop negotiates the whole
+        pocket simultaneously, a strict net can yield and re-route while a
+        near-complete net finishes -- the 2-net swap / 3-net rotation that
+        no single-net sequential reroute can find.
+
+        This is the CHEAP "variant (a)" the architect recommends in #3862:
+        a bounded inner negotiated loop reusing the existing per-net
+        machinery -- NO new C++ simultaneous solver.
+
+        SAFETY -- net-positive rollback guard.  The pocket's strict
+        (fully-connected) net count is snapshotted before the rip-up.  The
+        joint re-solve is committed ONLY if the strict count among the
+        pocket nets STRICTLY INCREASES; on any other outcome (equal, worse,
+        or a partial-strand trade) the exact pre-rip-up Route objects are
+        re-marked verbatim and ``False`` is returned.  Regression is
+        impossible by construction: a pocket can never end with fewer
+        strict nets than it started.
+
+        Args:
+            pocket_nets: Net IDs forming the congested pocket to re-solve.
+            net_routes: Dict of net_id -> list of routes (mutated in place).
+            routes_list: Master route list (mutated in place).
+            pads_by_net: Dict of net_id -> list of pads.
+            present_cost_factor: Base congestion cost factor.
+            mark_route_callback: Callback to mark routes on the grid.
+            per_net_timeout: Optional per-net A* timeout (seconds).
+            inner_passes: Number of escalating inner negotiated passes.
+            present_cost_escalation: Per-pass multiplier on present cost,
+                so later passes penalise sharing more aggressively and
+                drive the pocket nets onto disjoint tracks.
+            max_pocket_nets: Hard cap on the pocket size.  A joint solve of
+                more than this many nets is too expensive (the inner loop
+                is O(inner_passes x pocket x per-net-A*)), and large pockets
+                are dominated by placement-bound nets the joint re-solve
+                cannot help anyway.  Oversized pockets are skipped (no-op).
+            wall_budget_s: Hard wall-clock budget for the whole joint
+                re-solve (seconds).  When exceeded mid-pass we stop, and
+                accept the result ONLY if a strict gain was already
+                achieved; otherwise we roll back.  This guards the
+                worst-case where every pocket net falls to the slow
+                Python-A* fallback and a single pass would otherwise run
+                for many minutes.  ``None`` disables the budget (tests).
+
+        Returns:
+            ``(improved, strict_after)`` where ``improved`` is ``True`` iff
+            the joint re-solve was committed (strict count strictly
+            increased).  When rolled back, ``strict_after`` is the
+            unchanged pre-rip-up strict count.
+        """
+        # Routable multi-pad nets only -- single-pad / missing-pad nets
+        # are trivially complete and contribute nothing to negotiate.
+        candidates = [
+            n
+            for n in dict.fromkeys(pocket_nets)  # dedupe, preserve order
+            if len(pads_by_net.get(n, [])) >= 2
+        ]
+        if len(candidates) < 2:
+            # A pocket of <2 routable nets cannot have a swap/rotation to
+            # find; sequential reroute is already optimal there.
+            return False, 0
+        if len(candidates) > max_pocket_nets:
+            # Too large to solve jointly within a sane budget; the
+            # sequential fallback handles it (and large pockets are
+            # placement-bound, M3's domain, not congestion swaps).
+            return False, 0
+
+        start_time = time.time()
+
+        def _budget_exhausted() -> bool:
+            return wall_budget_s is not None and (time.time() - start_time) >= wall_budget_s
+
+        def _strict_count() -> int:
+            """Pocket nets that are currently fully connected.
+
+            A net is credited strict when it has at least as many routes
+            as it had at snapshot time AND was placed without an edge
+            failure during this transaction.  For nets untouched since
+            snapshot we fall back to "has routes" (their connectivity is
+            whatever it was), which keeps the BEFORE count honest.
+            """
+            return sum(1 for n in candidates if strict_flags.get(n, bool(net_routes.get(n))))
+
+        # Snapshot exact pre-rip-up state for verbatim rollback.
+        original_routes: dict[int, list[Route]] = {
+            n: list(net_routes.get(n, [])) for n in candidates
+        }
+        # BEFORE strict baseline: a net counts as strict iff it currently
+        # has copper.  (Partial nets in the rescue cohort have stubs
+        # stripped before entry, so "has routes" == "was strict" here; for
+        # the in-loop neighbourhood path a partial holds routes but the
+        # guard below only ever COMMITS on a strict increase, so a false
+        # "before strict" can only make the bar harder, never easier.)
+        strict_flags: dict[int, bool] = {n: bool(original_routes.get(n)) for n in candidates}
+        strict_before = _strict_count()
+
+        def _rollback() -> None:
+            for n in candidates:
+                for route in list(net_routes.get(n, [])):
+                    self.grid.unmark_route_usage(route)
+                    self.grid.unmark_route(route)
+                    if route in routes_list:
+                        routes_list.remove(route)
+                net_routes[n] = []
+            for n in candidates:
+                restored = list(original_routes.get(n, []))
+                net_routes[n] = restored
+                for route in restored:
+                    mark_route_callback(route)
+                    self.grid.mark_route_usage(route)
+                    if route not in routes_list:
+                        routes_list.append(route)
+
+        # Rip the entire pocket so the inner loop has full freedom.
+        self.rip_up_nets(candidates, net_routes, routes_list)
+
+        # Bounded inner negotiated loop: each pass routes every pocket net
+        # against the others' freshly-placed copper at an escalating
+        # present-cost.  We re-order each pass (rotate) so no single net
+        # permanently owns first-routed priority -- the rotation is the
+        # cheap analogue of the joint solve (it lets a different net be the
+        # one that yields each pass).
+        for pass_index in range(max(1, inner_passes)):
+            if _budget_exhausted():
+                break
+            pass_factor = present_cost_factor * (present_cost_escalation**pass_index)
+            # Deterministic rotation: pass p starts the order at offset p.
+            order = (
+                candidates[pass_index % len(candidates) :]
+                + candidates[: pass_index % len(candidates)]
+            )
+
+            # Rip the pocket clean at the start of every pass after the
+            # first so each pass is a full joint re-derivation, not an
+            # incremental patch on the prior pass's tracks.
+            if pass_index > 0:
+                self.rip_up_nets(candidates, net_routes, routes_list)
+
+            for net_id in order:
+                if _budget_exhausted():
+                    break
+                net_pads = pads_by_net.get(net_id, [])
+                routes, fully = self._route_net_counting_failures(
+                    net_pads,
+                    pass_factor,
+                    mark_route_callback,
+                    per_net_timeout,
+                )
+                strict_flags[net_id] = fully
+                if routes:
+                    net_routes[net_id] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+                else:
+                    net_routes[net_id] = []
+
+            strict_now = _strict_count()
+            if strict_now > strict_before:
+                # Net-positive: commit immediately (earliest acceptance
+                # keeps the wall budget down and avoids a later pass
+                # eroding the win).
+                return True, strict_now
+
+        # No pass beat the baseline (or the wall budget expired mid-pass)
+        # -- restore verbatim.  Regression impossible by construction.
+        _rollback()
+        return False, strict_before
+
+    def escape_local_minimum(
+        self,
+        overflow_history: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        net_order: list[int],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        strategy_index: int = 0,
+        per_net_timeout: float | None = None,
+        escape_budget: float | None = None,
+        reroute_cap: int | None = None,
+    ) -> tuple[bool, int, int]:
+        """Try escape strategies when router is stuck oscillating.
+
+        When the negotiated router is stuck cycling between states without
+        making progress (detected via detect_oscillation), this method
+        tries strategies starting from strategy_index, cycling through all
+        remaining strategies until one succeeds or all are exhausted.
+
+        Args:
+            overflow_history: List of overflow values from previous iterations
+            net_routes: Dictionary of net_id -> list of routes
+            routes_list: Master list of all routes
+            pads_by_net: Dictionary of net_id -> list of pads
+            net_order: List of net IDs in routing priority order
+            present_cost_factor: Current congestion cost factor
+            mark_route_callback: Callback to mark routes on the grid
+            strategy_index: Index of strategy to start from (cycles through available)
+            per_net_timeout: Wall-clock timeout in seconds for each per-net A*
+                search within escape strategies (Issue #2415)
+            escape_budget: Wall-clock budget in seconds for the entire escape
+                attempt across all strategies (Issue #2415). None means no limit.
+            reroute_cap: Deterministic cap on per-net reroute attempts per
+                strategy (Issue #7071, per-strategy since #7192); the full
+                reorder gets ``max(cap, routable nets)``. None means no limit.
+
+        Each strategy is a transaction (Issue #7071): when it does not
+        succeed, the routes and grid usage it changed are restored, so the
+        next strategy starts from the state the escape was called with.
+
+        Returns:
+            Tuple of (success, overflow, strategies_tried) where success
+            indicates if overflow improved and strategies_tried is how many
+            were attempted.  ``overflow`` is always the live grid overflow
+            after the last commit or rollback.  The call's details are left
+            in :attr:`last_escape_summary`.
+        """
+        strategies = [
+            self._escape_shuffle_order,
+            self._escape_reverse_order,
+            self._escape_random_subset,
+            self._escape_full_reorder,
+        ]
+
+        num_strategies = len(strategies)
+        strategies_tried = 0
+        escape_start = time.time()
+        total_reroutes = 0
+        caps_used: list[int] = []
+        # Issue #7192: C++ unmarks queued before this escape; a rolled-back
+        # strategy's discarded copper is flushed from there on.
+        queue_start = self._pending_cpp_unmarks()
+        overflow_before = self.grid.get_total_overflow()
+        original_routes = {net: list(routes) for net, routes in net_routes.items()}
+        original_list = list(routes_list)
+
+        def _rollback() -> None:
+            changed = [
+                net
+                for net in set(net_routes) | set(original_routes)
+                if net_routes.get(net) != original_routes.get(net, [])
+            ]
+            self._restore_route_snapshot(
+                changed, original_routes, net_routes, routes_list, mark_route_callback
+            )
+            for net in [n for n in net_routes if n not in original_routes]:
+                del net_routes[net]
+            routes_list[:] = original_list
+            # Issue #7192: inside an open corridor-reservation window the
+            # unmarks above were only queued, leaving the failed strategy's
+            # copper on the C++ grid for the next strategy to route around.
+            # Restored routes are back in ``grid.routes`` and stay queued.
+            flush = getattr(self.grid, "flush_discarded_cpp_unmarks", None)
+            if callable(flush):
+                flush(queue_start)
+
+        def _finish(success: bool) -> tuple[bool, int, int]:
+            live_overflow = self.grid.get_total_overflow()
+            self.last_escape_summary = EscapeSummary(
+                strategies_tried=strategies_tried,
+                seconds=time.time() - escape_start,
+                overflow_before=overflow_before,
+                overflow_after=live_overflow,
+                kept=success,
+                reroutes=total_reroutes,
+                reroute_cap=max(caps_used) if caps_used else reroute_cap,
+            )
+            return success, live_overflow, strategies_tried
+
+        for i in range(num_strategies):
+            # Check escape budget before starting each strategy
+            if escape_budget is not None:
+                if time.time() - escape_start >= escape_budget:
+                    break
+
+            idx = (strategy_index + i) % num_strategies
+            strategy = strategies[idx]
+            strategies_tried += 1
+
+            # Issue #7192: one allowance per strategy.  A full reorder
+            # reroutes every net, so a cap below its scope would always cut
+            # it short (and discard it); size it to cover the scope.
+            strategy_cap = reroute_cap
+            if strategy_cap is not None and strategy == self._escape_full_reorder:
+                routable = sum(1 for n in net_routes if len(pads_by_net.get(n, ())) >= 2)
+                strategy_cap = max(strategy_cap, routable)
+            attempts = EscapeAttempts(strategy_cap)
+            if strategy_cap is not None:
+                caps_used.append(strategy_cap)
+
+            success, _new_overflow = strategy(
+                overflow_history=overflow_history,
+                net_routes=net_routes,
+                routes_list=routes_list,
+                pads_by_net=pads_by_net,
+                net_order=net_order,
+                present_cost_factor=present_cost_factor,
+                mark_route_callback=mark_route_callback,
+                per_net_timeout=per_net_timeout,
+                escape_budget_start=escape_start,
+                escape_budget=escape_budget,
+                attempts=attempts,
+            )
+            total_reroutes += attempts.used
+
+            if success and not attempts.cut:
+                return _finish(True)
+
+            # Failed (or cut short by the reroute cap): put everything back
+            # so the next strategy starts from the real state.
+            _rollback()
+
+        # All strategies exhausted (or budget expired) without success
+        return _finish(False)
+
+    def _escape_shuffle_order(
+        self,
+        overflow_history: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        net_order: list[int],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
+    ) -> tuple[bool, int]:
+        """Escape strategy: shuffle the net order randomly.
+
+        Sometimes a different routing order can escape local minima by
+        giving different nets priority.
+        """
+        # Get the conflicting nets
+        overused = self.grid.find_overused_cells()
+        nets_to_reroute = self.find_nets_through_overused_cells(net_routes, overused)
+
+        if not nets_to_reroute:
+            return False, overflow_history[-1] if overflow_history else 0
+
+        # Shuffle the order of conflicting nets.
+        # Issue #2589: uses the global ``random`` module.  This is the
+        # primary source of run-to-run nondeterminism in the negotiated
+        # router; ``kct route --seed N`` seeds the global RNG at startup
+        # so this shuffle becomes deterministic for the same input.
+        shuffled = nets_to_reroute.copy()
+        random.shuffle(shuffled)
+
+        # Rip up all conflicting nets
+        self.rip_up_nets(shuffled, net_routes, routes_list)
+
+        # Re-route in shuffled order with higher cost
+        # Track successful re-routes to detect if any net was lost
+        boosted_cost = present_cost_factor * 1.5
+        rerouted_count = 0
+        expected_count = 0
+        for net in shuffled:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
+            net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
+            if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
+                expected_count += 1
+                routes = self.route_net_negotiated(
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if routes:
+                    net_routes[net] = routes
+                    rerouted_count += 1
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+
+        new_overflow = self.grid.get_total_overflow()
+        best_overflow = min(overflow_history) if overflow_history else float("inf")
+
+        # Accept escape if overflow improved and at least some nets survived
+        # (Issue #762: require rerouted_count > 0 to avoid false success on total loss)
+        # (Issue #1638: relaxed from requiring ALL nets to allow partial progress)
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
+
+    def _escape_reverse_order(
+        self,
+        overflow_history: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        net_order: list[int],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
+    ) -> tuple[bool, int]:
+        """Escape strategy: reverse the net order.
+
+        Routing in reverse order gives previously low-priority nets
+        first access to routing resources.
+        """
+        overused = self.grid.find_overused_cells()
+        nets_to_reroute = self.find_nets_through_overused_cells(net_routes, overused)
+
+        if not nets_to_reroute:
+            return False, overflow_history[-1] if overflow_history else 0
+
+        # Reverse the order
+        reversed_order = list(reversed(nets_to_reroute))
+
+        # Rip up all conflicting nets
+        self.rip_up_nets(reversed_order, net_routes, routes_list)
+
+        # Re-route in reversed order
+        # Track successful re-routes to detect if any net was lost
+        boosted_cost = present_cost_factor * 1.5
+        rerouted_count = 0
+        expected_count = 0
+        for net in reversed_order:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
+            net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
+            if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
+                expected_count += 1
+                routes = self.route_net_negotiated(
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if routes:
+                    net_routes[net] = routes
+                    rerouted_count += 1
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+
+        new_overflow = self.grid.get_total_overflow()
+        best_overflow = min(overflow_history) if overflow_history else float("inf")
+
+        # Accept escape if overflow improved and at least some nets survived
+        # (Issue #762: require rerouted_count > 0 to avoid false success on total loss)
+        # (Issue #1638: relaxed from requiring ALL nets to allow partial progress)
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
+
+    def _escape_random_subset(
+        self,
+        overflow_history: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        net_order: list[int],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
+    ) -> tuple[bool, int]:
+        """Escape strategy: rip up and reroute a random subset of nets.
+
+        By ripping up only a subset of conflicting nets, we may find
+        a different combination that works.
+        """
+        overused = self.grid.find_overused_cells()
+        nets_to_reroute = self.find_nets_through_overused_cells(net_routes, overused)
+
+        if not nets_to_reroute:
+            return False, overflow_history[-1] if overflow_history else 0
+
+        # Select random subset (50-75% of conflicting nets).
+        # Issue #2589: uses the global ``random`` module; deterministic
+        # when the CLI seeds it via ``kct route --seed N``.
+        subset_size = max(1, len(nets_to_reroute) * 2 // 3)
+        subset = random.sample(nets_to_reroute, min(subset_size, len(nets_to_reroute)))
+
+        # Rip up subset
+        self.rip_up_nets(subset, net_routes, routes_list)
+
+        # Re-route with much higher cost to force different paths
+        # Track successful re-routes to detect if any net was lost
+        boosted_cost = present_cost_factor * 2.0
+        rerouted_count = 0
+        expected_count = 0
+        for net in subset:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
+            net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
+            if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
+                expected_count += 1
+                routes = self.route_net_negotiated(
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if routes:
+                    net_routes[net] = routes
+                    rerouted_count += 1
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+
+        new_overflow = self.grid.get_total_overflow()
+        best_overflow = min(overflow_history) if overflow_history else float("inf")
+
+        # Accept escape if overflow improved and at least some nets survived
+        # (Issue #762: require rerouted_count > 0 to avoid false success on total loss)
+        # (Issue #1638: relaxed from requiring ALL nets to allow partial progress)
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
+
+    def _escape_full_reorder(
+        self,
+        overflow_history: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        net_order: list[int],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        per_net_timeout: float | None = None,
+        escape_budget_start: float | None = None,
+        escape_budget: float | None = None,
+        attempts: EscapeAttempts | None = None,
+    ) -> tuple[bool, int]:
+        """Escape strategy: rip up ALL nets and reroute in alternative order.
+
+        Issue #1823: The existing escape strategies only perturb nets passing
+        through overused cells.  If the root ordering places net A before net B,
+        and A's path blocks B's only viable route without itself being in an
+        overused cell, none of the first three strategies will fix this.
+
+        This strategy rips up every routed net and reroutes them all in a
+        completely different order (reversed net_order).  It is more expensive
+        but can escape ordering-dependent local minima.
+        """
+        all_nets = list(net_routes.keys())
+        if not all_nets:
+            return False, overflow_history[-1] if overflow_history else 0
+
+        # Rip up ALL routed nets
+        self.rip_up_nets(all_nets, net_routes, routes_list)
+
+        # Build alternative order: reverse of the priority net_order,
+        # then append any nets not in net_order.
+        net_set = set(all_nets)
+        ordered = [n for n in reversed(net_order) if n in net_set]
+        remaining = [n for n in all_nets if n not in set(net_order)]
+        # Issue #2589: uses the global ``random`` module; deterministic
+        # when the CLI seeds it via ``kct route --seed N``.
+        random.shuffle(remaining)
+        reorder = ordered + remaining
+
+        # Reroute all nets in the alternative order with boosted cost
+        boosted_cost = present_cost_factor * 1.5
+        rerouted_count = 0
+        for net in reorder:
+            # Check escape budget before each net (Issue #2415)
+            if escape_budget is not None and escape_budget_start is not None:
+                if time.time() - escape_budget_start >= escape_budget:
+                    break
+            net_pads = pads_by_net.get(net, [])
+            if attempts is not None and attempts.cut_if_exhausted(net_pads):
+                break
+            if net_pads and len(net_pads) >= 2:
+                if attempts is not None:
+                    attempts.spend()
+                routes = self.route_net_negotiated(
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if routes:
+                    net_routes[net] = routes
+                    rerouted_count += 1
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+
+        new_overflow = self.grid.get_total_overflow()
+        best_overflow = min(overflow_history) if overflow_history else float("inf")
+
+        # Accept if overflow improved and at least some nets survived
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow

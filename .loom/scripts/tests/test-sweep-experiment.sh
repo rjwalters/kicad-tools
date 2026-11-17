@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# test-sweep-experiment.sh - Unit tests for the sweep model-cost experiment
+# instrumentation (issue #3725).
+#
+# The sweep skill shells out to `sweep-experiment.sh`, a thin stub that execs
+# `loom-daemon sweep-experiment` (issue #4275 ported the implementation from the
+# former Python `sweep_experiment` module to native Rust; the Python package was
+# deleted outright in #4557). These tests drive that exact
+# subcommand, resolving the binary the same way `lib/script-helper.sh` does, so
+# they exercise the real dispatch surface rather than a stand-in. The stub file
+# itself is covered by `bash -n` + `shellcheck` in CI.
+#
+# Usage:
+#   bash defaults/scripts/tests/test-sweep-experiment.sh
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# lib/ is shipped alongside this test file (scripts/tests and scripts/lib are
+# siblings in both the defaults/ source tree and the installed
+# .loom/scripts/ tree), so resolve it self-relatively rather than hardcoding
+# the defaults/ source-tree path. See issue #6194 / #6241.
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/../lib/locate-daemon-bin.sh"
+DAEMON_BIN="$(loom_locate_daemon_bin "$REPO_ROOT")"
+if [[ -z "$DAEMON_BIN" ]]; then
+  echo "SKIP: no loom-daemon binary found (build it with \`cargo build --manifest-path loom-daemon/Cargo.toml\` or set LOOM_DAEMON_BIN)" >&2
+  exit 0
+fi
+
+SE() { "$DAEMON_BIN" sweep-experiment "$@"; }
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
+TESTS_RUN=0; TESTS_PASSED=0; TESTS_FAILED=0
+
+pass() { TESTS_RUN=$((TESTS_RUN+1)); TESTS_PASSED=$((TESTS_PASSED+1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
+fail() { TESTS_RUN=$((TESTS_RUN+1)); TESTS_FAILED=$((TESTS_FAILED+1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+assert_eq()      { if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (got '$1' want '$2')"; fi; }
+assert_contains(){ if [[ "$1" == *"$2"* ]]; then pass "$3"; else fail "$3 (missing '$2' in: $1)"; fi; }
+assert_file()    { if [[ -f "$1" ]]; then pass "$2"; else fail "$2 (missing: $1)"; fi; }
+
+echo "Using loom-daemon: $DAEMON_BIN"
+
+echo "Case 1: tri-state resolution (env-over-config, default off, malformed -> off)"
+assert_eq "$(SE resolve-mode --config /nonexistent 2>/dev/null)" "off" "default is off"
+assert_eq "$(LOOM_MODEL_EXPERIMENT=observe SE resolve-mode --config /nonexistent 2>/dev/null)" "observe" "env observe"
+assert_eq "$(LOOM_MODEL_EXPERIMENT=bogus SE resolve-mode --config /nonexistent 2>/dev/null)" "off" "malformed env -> off"
+echo ""
+
+echo "Case 2: canary guardrail — experiment downgrades to observe on non-canary"
+OUT="$(LOOM_MODEL_EXPERIMENT=experiment SE resolve-mode --config /nonexistent 2>&1)"
+assert_contains "$OUT" "observe" "non-canary experiment downgraded to observe"
+assert_contains "$OUT" "NON-CANARY" "loud warning names the guardrail"
+assert_eq "$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 SE resolve-mode --config /nonexistent 2>/dev/null)" "experiment" "canary confirmed -> experiment honored"
+echo ""
+
+echo "Case 3: deterministic arm assignment keyed on the issue number alone"
+A1="$(SE assign-arm --issue 100)"
+A2="$(SE assign-arm --issue 100)"
+assert_eq "$A1" "$A2" "same issue is resume-stable"
+assert_eq "$A1" "A opus" "issue 100 -> A opus (even parity)"
+assert_eq "$(SE assign-arm --issue 101)" "B sonnet" "issue 101 -> B sonnet (odd parity)"
+echo ""
+
+echo "Case 3b: N configurable arms + budget-fraction cap (#9122)"
+CFG="$(mktemp -d "${TMPDIR:-/tmp}/se-cfg.XXXXXX")"
+cat > "$CFG/arms.json" <<'EOF'
+{"sweep": {"modelExperimentArms": [
+  {"id": "OPUS",   "model": "opus",   "weight": 1},
+  {"id": "SONNET", "model": "sonnet", "weight": 1},
+  {"id": "HAIKU",  "model": "haiku",  "weight": 8}
+]}}
+EOF
+N1="$(SE assign-arm --issue 100 --config "$CFG/arms.json")"
+N2="$(SE assign-arm --issue 100 --config "$CFG/arms.json")"
+assert_eq "$N1" "$N2" "3-arm assignment is resume-stable"
+case "$N1" in
+  "OPUS opus"|"SONNET sonnet"|"HAIKU haiku") pass "3-arm assignment names a configured arm ($N1)" ;;
+  *) fail "3-arm assignment names a configured arm (got '$N1')" ;;
+esac
+# The heavy arm must dominate: weight 8/10 over a 200-issue sample.
+HAIKU_N=0
+for i in $(seq 1 200); do
+  [[ "$(SE assign-arm --issue "$i" --config "$CFG/arms.json")" == HAIKU* ]] && HAIKU_N=$((HAIKU_N+1))
+done
+if (( HAIKU_N > 130 && HAIKU_N < 190 )); then
+  pass "weighted assignment converges on the 8/10 arm ($HAIKU_N/200)"
+else
+  fail "weighted assignment converges on the 8/10 arm (got $HAIKU_N/200)"
+fi
+
+# A fable arm and a non-Claude-runtime arm are BOTH refused loudly, and the run
+# falls through to the built-in A/B pair (never a hard failure).
+cat > "$CFG/fable.json" <<'EOF'
+{"sweep": {"modelExperimentArms": [{"id":"A","model":"opus"},{"id":"F","model":"fable"}]}}
+EOF
+OUT="$(SE assign-arm --issue 100 --config "$CFG/fable.json" 2>&1)"
+assert_contains "$OUT" "No-Fable bound" "a fable arm is refused by name"
+assert_contains "$OUT" "A opus" "a rejected roster falls through to the A/B pair"
+cat > "$CFG/glm.json" <<'EOF'
+{"sweep": {"modelExperimentArms": [{"id":"A","model":"opus"},{"id":"GLM","model":"glm-5.3","runtime":"opencode"}]}}
+EOF
+OUT="$(SE assign-arm --issue 100 --config "$CFG/glm.json" 2>&1)"
+assert_contains "$OUT" "Claude-only" "a non-Claude runtime arm is refused, not silently ignored"
+assert_contains "$OUT" "A opus" "the non-Claude roster falls through to the A/B pair"
+
+# Budget fraction: 1.0 (the default) is today's always-forced behavior; 0.0
+# samples every issue out (`none -`, no arm, no forced model).
+assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=1.0 SE assign-arm --issue 100 --config /nonexistent)" \
+  "A opus" "budget fraction 1.0 reproduces the unconfigured default"
+assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=0 SE assign-arm --issue 100 --config /nonexistent)" \
+  "none -" "budget fraction 0 samples the issue out (null arm)"
+OUT="$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=bogus SE assign-arm --issue 100 --config /nonexistent 2>&1)"
+assert_contains "$OUT" "A opus" "a malformed budget fraction falls back to 1.0"
+BAN="$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=0 \
+  SE banner --issue 100 --config /nonexistent 2>/dev/null)"
+assert_contains "$BAN" "NOT IN EXPERIMENT" "the banner names a budget-sampled-out issue"
+rm -rf "$CFG"
+echo ""
+
+echo "Case 4: startup banner names mode + arm"
+BAN="$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 SE banner --issue 100 --config /nonexistent 2>/dev/null)"
+assert_contains "$BAN" "mode=EXPERIMENT" "banner names experiment mode"
+assert_contains "$BAN" "ARM A" "banner names the assigned arm"
+echo ""
+
+echo "Case 5: record append + harvest with transcript join (exact cost)"
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/se-test.XXXXXX")"
+STATS="$ROOT/stats.jsonl"
+SESS="$ROOT/archive/myrepo/2026-07-22/UUID1"
+mkdir -p "$SESS/UUID1/subagents"
+printf '%s\n' '{"message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1000,"cache_read_input_tokens":2000}}}' \
+  > "$SESS/UUID1/subagents/agent-bld1.jsonl"
+cat > "$SESS/index.json" <<EOF
+{"schema":"loom.transcript-index/v1","session_uuid":"UUID1","repo":"myrepo","agents":[{"agent_id":"agent-bld1","role":"loom-builder","transcript":"subagents/agent-bld1.jsonl"}]}
+EOF
+SE record --quiet --stats-file "$STATS" --issue 100 --mode experiment --arm A --model opus --story-points 5 --phase builder --role builder --agent-id agent-bld1 --attempt 1
+SE record --quiet --stats-file "$STATS" --issue 100 --mode experiment --arm A --phase judge --role judge --verdict pass --attempt 1
+SE record --quiet --stats-file "$STATS" --issue 100 --mode experiment --arm A --phase merge --role merge
+assert_file "$STATS" "stats JSONL created"
+NLINES="$(wc -l < "$STATS" | tr -d ' ')"
+assert_eq "$NLINES" "3" "three JSONL records appended"
+FIRST="$(head -1 "$STATS")"
+assert_contains "$FIRST" '"story_points":5' "record carries story_points"
+case "$FIRST" in *'"complexity"'*) fail "record has no complexity key";; *) pass "record has no complexity key";; esac
+# GNU `stat -c` first, BSD/macOS `stat -f '%Lp'` second. The reverse order is
+# WRONG on Linux: GNU `stat -f` means "show FILESYSTEM status" and *succeeds*,
+# so the `||` fallback never fires and the comparison sees a block-count dump
+# instead of a mode. (Pre-existing bug, fixed alongside the #4275 repoint.)
+FMODE="$(stat -c '%a' "$STATS" 2>/dev/null || stat -f '%Lp' "$STATS")"
+assert_eq "$FMODE" "600" "stats file is 0600"
+HARV="$(SE harvest --stats-file "$STATS" --archive-dir "$ROOT/archive" --format json 2>/dev/null)"
+assert_contains "$HARV" '"transcript": 1' "harvest joined 1 transcript (exact cost)"
+assert_contains "$HARV" '"first_attempt_pass_rate": 1.0' "arm A first-attempt pass rate 100%"
+assert_contains "$HARV" '"merge_rate": 1.0' "arm A merge rate 100%"
+# exact cost 0.007425 from the single usage block (Opus 4.8 at the #8060-verified rate)
+assert_contains "$HARV" '0.007425' "exact cache-aware cost from transcript usage"
+rm -rf "$ROOT"
+echo ""
+
+echo "Case 6: harvest on empty/missing store does not crash"
+OUT="$(SE harvest --stats-file "/nonexistent-$$.jsonl" 2>&1)"; RC=$?
+assert_eq "$RC" "0" "harvest exits 0 on missing store"
+assert_contains "$OUT" "records: 0" "harvest reports zero records"
+echo ""
+
+echo "════════════════════════════════════════════"
+echo "  Total: $TESTS_RUN  Passed: $TESTS_PASSED  Failed: $TESTS_FAILED"
+echo "════════════════════════════════════════════"
+[[ "$TESTS_FAILED" -eq 0 ]]

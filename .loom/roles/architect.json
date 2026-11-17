@@ -1,0 +1,9 @@
+{
+  "name": "System Architect",
+  "description": "Identifies improvement opportunities and creates proposals",
+  "suggestedModel": "opus",
+  "suggestedWorkerType": "claude",
+  "toolPolicy": {
+    "allowedCapabilities": []
+  }
+}

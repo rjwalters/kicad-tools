@@ -1,0 +1,2482 @@
+"""
+Manufacturing readiness auditor for KiCad PCB designs.
+
+Runs comprehensive checks to verify a design is ready for manufacturing.
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
+
+logger = logging.getLogger(__name__)
+
+
+class AuditVerdict(Enum):
+    """Overall audit verdict."""
+
+    READY = "ready"  # All checks pass, ready for manufacturing
+    WARNING = "warning"  # Minor issues, review recommended
+    NOT_READY = "not_ready"  # Critical issues, must fix
+
+
+@dataclass
+class ERCStatus:
+    """ERC check results."""
+
+    error_count: int = 0
+    warning_count: int = 0
+    blocking_error_count: int = 0  # Only electrical errors that block readiness
+    passed: bool = True
+    skipped: bool = False
+    details: str = ""
+    report_path: Path | None = None
+    # True when ERC was requested and a schematic exists, but kicad-cli could
+    # not be found or timed out, so the schematic was never checked (issue
+    # #7083).  Distinct from ``skipped`` (user opt-out / nothing to check):
+    # a could-not-verify ERC caps the verdict at WARNING and renders NOT RUN.
+    could_not_verify: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "error_count": self.error_count,
+            "warning_count": self.warning_count,
+            "blocking_error_count": self.blocking_error_count,
+            "passed": self.passed,
+            "skipped": self.skipped,
+            "could_not_verify": self.could_not_verify,
+            "details": self.details,
+        }
+
+
+@dataclass
+class DRCStatus:
+    """DRC check results.
+
+    ``geometric_drc_ran`` records whether the native ``kicad-cli pcb drc``
+    engine actually executed and produced a report (issue #3817).  It is
+    *distinct* from ``passed``: a board can be ``passed=True`` per the
+    internal ``--mfr`` rule engine while the geometric engine did not run
+    (kicad-cli absent / timed out / crashed), in which case the verdict is
+    **not authoritative** -- the internal engine is structurally blind to
+    several KiCad violation classes (shorts, ``copper_edge_clearance``,
+    ``solder_mask_bridge``, ``silk_*`` overlaps).  Defaults to ``False`` so
+    an un-reconciled status is never silently treated as authoritative.
+    """
+
+    error_count: int = 0
+    warning_count: int = 0
+    blocking_count: int = 0  # Violations that block manufacturing
+    passed: bool = True
+    details: str = ""
+    report_path: Path | None = None
+    violations_by_type: dict[str, int] = field(default_factory=dict)
+    # True only when kicad-cli geometric DRC actually ran and produced a
+    # report.  When False, a ``passed=True`` verdict is NOT authoritative.
+    geometric_drc_ran: bool = False
+    # Human-readable note describing why geometric DRC did not run (skip
+    # path) -- mirrors GeometricDRCResult.note.  None when it ran cleanly.
+    geometric_drc_note: str | None = None
+    # Findings suppressed by the waivers sidecar (issue #8130).  They are
+    # excluded from error/warning/blocking counts but stay visible here:
+    # {rule_id: {"count": n, "reasons": [...], "issues": [...]}}.
+    waived_count: int = 0
+    waived_by_rule: dict[str, dict] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        result = {
+            "error_count": self.error_count,
+            "warning_count": self.warning_count,
+            "blocking_count": self.blocking_count,
+            "passed": self.passed,
+            "details": self.details,
+            "geometric_drc_ran": self.geometric_drc_ran,
+            "geometric_drc_note": self.geometric_drc_note,
+        }
+        if self.violations_by_type:
+            result["violations_by_type"] = dict(self.violations_by_type)
+        if self.waived_count:
+            result["waived_count"] = self.waived_count
+            result["waived_by_rule"] = {k: dict(v) for k, v in self.waived_by_rule.items()}
+        return result
+
+
+@dataclass
+class SyncStatus:
+    """Schematic <-> PCB synchronization check results.
+
+    Captures all four axes of drift between schematic and PCB:
+    - schematic_only_count: refs in schematic but missing from PCB
+      (unbuildable BOM - hard fail).
+    - pcb_only_count: refs on PCB but missing from schematic
+      (orphan footprints - warning).
+    - value_mismatch_count: same ref in both with different values.
+    - footprint_mismatch_count: same ref with different footprints.
+
+    See ``kicad_tools.sync.reconciler.SyncAnalysis`` for the underlying
+    source of truth.
+    """
+
+    schematic_only_count: int = 0
+    pcb_only_count: int = 0
+    value_mismatch_count: int = 0
+    footprint_mismatch_count: int = 0
+    passed: bool = True
+    skipped: bool = False
+    details: str = ""
+    # True when the Reconciler crashed (e.g. an unparseable schematic), so
+    # drift was never measured (issue #7083).  Caps the verdict at WARNING.
+    could_not_verify: bool = False
+    # Up to ~10 example refs per axis (for surfacing in reports). Kept
+    # small so JSON manifest does not balloon for boards with hundreds
+    # of mismatches.
+    schematic_only_refs: list[str] = field(default_factory=list)
+    pcb_only_refs: list[str] = field(default_factory=list)
+    value_mismatch_refs: list[str] = field(default_factory=list)
+    footprint_mismatch_refs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "schematic_only_count": self.schematic_only_count,
+            "pcb_only_count": self.pcb_only_count,
+            "value_mismatch_count": self.value_mismatch_count,
+            "footprint_mismatch_count": self.footprint_mismatch_count,
+            "passed": self.passed,
+            "skipped": self.skipped,
+            "could_not_verify": self.could_not_verify,
+            "details": self.details,
+            "schematic_only_refs": list(self.schematic_only_refs),
+            "pcb_only_refs": list(self.pcb_only_refs),
+            "value_mismatch_refs": list(self.value_mismatch_refs),
+            "footprint_mismatch_refs": list(self.footprint_mismatch_refs),
+        }
+
+
+@dataclass
+class ConnectivityStatus:
+    """Net connectivity check results."""
+
+    total_nets: int = 0
+    connected_nets: int = 0
+    incomplete_nets: int = 0
+    zone_connected_nets: int = 0
+    pour_net_names: list[str] = field(default_factory=list)
+    completion_percent: float = 100.0
+    unconnected_pads: int = 0
+    has_zones: bool = False
+    passed: bool = True
+    details: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "total_nets": self.total_nets,
+            "connected_nets": self.connected_nets,
+            "incomplete_nets": self.incomplete_nets,
+            "zone_connected_nets": self.zone_connected_nets,
+            "pour_net_names": self.pour_net_names,
+            "completion_percent": self.completion_percent,
+            "unconnected_pads": self.unconnected_pads,
+            "has_zones": self.has_zones,
+            "passed": self.passed,
+            "details": self.details,
+        }
+
+
+@dataclass
+class ManufacturerCompatibility:
+    """Manufacturer design rule compatibility."""
+
+    manufacturer: str = ""
+    min_trace_width: tuple[float, float, bool] = (0, 0, True)  # (actual, limit, pass)
+    min_clearance: tuple[float, float, bool] = (0, 0, True)
+    min_via_drill: tuple[float, float, bool] = (0, 0, True)
+    min_annular_ring: tuple[float, float, bool] = (0, 0, True)
+    board_size: tuple[tuple[float, float], tuple[float, float], bool] = (
+        (0, 0),
+        (0, 0),
+        True,
+    )
+    layer_count: tuple[int, list[int], bool] = (0, [], True)
+    passed: bool = True
+    details: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "manufacturer": self.manufacturer,
+            "min_trace_width_mm": {
+                "actual": self.min_trace_width[0],
+                "limit": self.min_trace_width[1],
+                "pass": self.min_trace_width[2],
+            },
+            "min_clearance_mm": {
+                "actual": self.min_clearance[0],
+                "limit": self.min_clearance[1],
+                "pass": self.min_clearance[2],
+            },
+            "min_via_drill_mm": {
+                "actual": self.min_via_drill[0],
+                "limit": self.min_via_drill[1],
+                "pass": self.min_via_drill[2],
+            },
+            "min_annular_ring_mm": {
+                "actual": self.min_annular_ring[0],
+                "limit": self.min_annular_ring[1],
+                "pass": self.min_annular_ring[2],
+            },
+            "board_size_mm": {
+                "actual": list(self.board_size[0]),
+                "max": list(self.board_size[1]),
+                "pass": self.board_size[2],
+            },
+            "layer_count": {
+                "actual": self.layer_count[0],
+                "supported": self.layer_count[1],
+                "pass": self.layer_count[2],
+            },
+            "passed": self.passed,
+        }
+
+
+@dataclass
+class IsolationStatus:
+    """HV creepage/clearance isolation check results (Issue #4333, phase 3).
+
+    Wraps the phase-1/phase-2 creepage engine
+    (:func:`kicad_tools.creepage.engine.resolve_hv_nets` +
+    :func:`~kicad_tools.creepage.engine.compute_creepage_census`).  The audit
+    does NOT reimplement any geometry or standard-table math -- it consumes the
+    engine's :class:`~kicad_tools.creepage.engine.CreepageReport` verbatim.
+
+    Gating semantics (folded into :attr:`AuditResult.verdict`):
+
+    * ``checked=True and passed=False`` -- a resolved HV pair is below its
+      governing creepage/clearance bound -> ``NOT_READY`` (the manufacturing
+      gate fails with a non-zero exit).
+    * ``hv_present=True and threshold_supplied=False`` -- HV nets exist but no
+      ``--hv-min`` / ``--hv-standard`` was supplied, so the path cannot be
+      gated -> ``WARNING`` (never silently green).
+    * ``could_not_verify=True`` -- shapely is unavailable or a standard-table
+      lookup failed; HV present but not evaluated -> ``WARNING`` (fail-loud,
+      never a hard crash of the whole audit).
+    * ``mains_suspected_unclassified=True`` (issue #4354) -- HV-net resolution
+      returned EMPTY, but the board carries mains-named copper (or a mains-level
+      working voltage was supplied), so the HV path was never evaluated ->
+      ``NOT_READY`` (hard fail).  This is the direct analog of the LVS
+      zero-bound-pad vacuity guard (#4011): a mains board with an un-evaluated
+      HV path must not ship.
+    * ``hv_present=False`` and NOT mains-suspected -- no HV-class nets on a
+      genuinely low-voltage board; inert, no verdict change.
+    """
+
+    # Whether HV nets were present AND a threshold source was supplied AND the
+    # census was evaluated (the only state that can hard-gate the verdict).
+    checked: bool = False
+    # HV-class nets were resolved on the board (independent of thresholding).
+    hv_present: bool = False
+    # A threshold source (--hv-min or --hv-standard) was supplied.
+    threshold_supplied: bool = False
+    # HV present but could not be evaluated (shapely absent / lookup error).
+    could_not_verify: bool = False
+    # Zero HV nets resolved on a board that looks like mains/HV (issue #4354).
+    # Hard-gates the verdict to NOT_READY -- an un-evaluated HV path is a
+    # safety-gate false pass, never a silent skip.
+    mains_suspected_unclassified: bool = False
+    # Net names that tripped the mains/HV suspicion (for the report + provenance).
+    mains_suspect_nets: list[str] = field(default_factory=list)
+    # Mains-*named* nets the board's net-class map explicitly declares NOT
+    # mains/HV (``non_hv_nets``, issue #8278): ``{net: reason}``.  They are
+    # exempt from the vacuity guard only, and always reported -- never silent.
+    declared_non_hv_nets: dict[str, str] = field(default_factory=dict)
+    passed: bool = True
+    hv_nets: list[str] = field(default_factory=list)
+    pair_count: int = 0
+    min_creepage_mm: float | None = None
+    min_clearance_mm: float | None = None
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    standard: str | None = None
+    standard_edition: str | None = None
+    # Insulation type the standard-derived requirement assumed (issue #7082);
+    # None when no --hv-standard was supplied.
+    insulation: str | None = None
+    failing_pairs: list[dict] = field(default_factory=list)
+    details: str = ""
+    # Full engine census dict (CreepageReport.to_dict()) -- kept verbatim so
+    # JSON provenance matches ``kct creepage --format json``.
+    report: dict = field(default_factory=dict)
+    # Voltage-map census mode (issue #8570): ``passed`` is the waiver-aware
+    # ``gate_passed`` and these record what was waived.  Listed, never dropped.
+    voltage_map_used: bool = False
+    waived_count: int = 0
+    waived_pairs: list[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "checked": self.checked,
+            "voltage_map_used": self.voltage_map_used,
+            "waived_count": self.waived_count,
+            "waived_pairs": [dict(p) for p in self.waived_pairs],
+            "hv_present": self.hv_present,
+            "threshold_supplied": self.threshold_supplied,
+            "could_not_verify": self.could_not_verify,
+            "mains_suspected_unclassified": self.mains_suspected_unclassified,
+            "mains_suspect_nets": list(self.mains_suspect_nets),
+            "declared_non_hv_nets": dict(self.declared_non_hv_nets),
+            "passed": self.passed,
+            "hv_nets": list(self.hv_nets),
+            "pair_count": self.pair_count,
+            "min_creepage_mm": self.min_creepage_mm,
+            "min_clearance_mm": self.min_clearance_mm,
+            "required_creepage_mm": self.required_creepage_mm,
+            "required_clearance_mm": self.required_clearance_mm,
+            "standard": self.standard,
+            "standard_edition": self.standard_edition,
+            "insulation": self.insulation,
+            "failing_pairs": [dict(p) for p in self.failing_pairs],
+            "details": self.details,
+            "report": self.report,
+        }
+
+
+def check_isolation(
+    pcb: PCB,
+    pcb_path: Path | None,
+    *,
+    hv_net_class: str = "HV",
+    net_class_map_path: str | Path | None = None,
+    hv_min_mm: float | None = None,
+    hv_standard: str | None = None,
+    hv_working_voltage: float | None = None,
+    hv_pollution_degree: int | None = None,
+    hv_material_group: str = "IIIa",
+    hv_overvoltage_category: str = "II",
+    hv_insulation: str = "basic",
+    voltage_map_path: str | Path | None = None,
+    waive_same_footprint: bool = False,
+    waive_attach_zone: bool = False,
+    census_threshold: float = 30.0,
+) -> IsolationStatus:
+    """Standalone HV creepage/clearance isolation check (issue #4333, phase 3).
+
+    Reuses the phase-1/phase-2 creepage engine end-to-end -- HV-net
+    resolution (:func:`resolve_hv_nets`), the surface-path census
+    (:func:`compute_creepage_census`), and (in standard mode) the IEC
+    table derivation (:meth:`CreepageStandard.required_creepage` /
+    ``required_clearance``).  No geometry or table math is reimplemented.
+
+    Extracted from :meth:`ManufacturingAudit._check_isolation` (issue #5807)
+    so a second caller -- the ``kct readiness`` HV gate -- can run the exact
+    same audit machinery ``kct audit --hv-standard`` uses, rather than
+    re-deriving (or worse, trusting free text for) a verdict.
+
+    The returned status gates a verdict: a resolved below-standard pair ->
+    hard FAIL; HV present but not gateable (no threshold / shapely absent /
+    lookup error) -> WARNING; no HV nets -> inert (``checked=False``).
+
+    ``hv_insulation`` (``basic`` / ``supplementary`` / ``reinforced``, default
+    ``basic``) selects the insulation rule for the derived creepage and
+    clearance (issue #7082).
+
+    ``voltage_map_path`` (issue #8570) switches to the ``kct creepage
+    --voltage-map`` engine: the requirement is derived per pair from |V_a - V_b|
+    (needs ``hv_standard`` + ``hv_pollution_degree``; ``hv_working_voltage`` is
+    optional) and ``waive_same_footprint`` / ``waive_attach_zone`` apply the
+    census waivers.  The verdict then keys off the waiver-aware ``gate_passed``;
+    without a voltage map or waivers it keys off the raw ``passed`` exactly as
+    before.
+    """
+    status = IsolationStatus(standard=hv_standard)
+    if hv_standard is not None:
+        status.insulation = hv_insulation
+
+    voltage_map = None
+    edge_voltage = 0.0
+    pair_bounds: dict = {}
+    if voltage_map_path is not None:
+        import json
+
+        from kicad_tools.creepage.engine import (
+            pair_bounds_from_dict,
+            voltage_map_from_dict,
+        )
+
+        if hv_standard is None or hv_pollution_degree is None:
+            status.could_not_verify = True
+            status.hv_present = True
+            status.details = (
+                "voltage map supplied but --hv-standard and --hv-pollution-degree "
+                "are both required to derive per-pair requirements -- isolation NOT verified."
+            )
+            return status
+        try:
+            raw = json.loads(Path(voltage_map_path).read_text())
+            voltage_map, edge_voltage = voltage_map_from_dict(raw)
+            pair_bounds = pair_bounds_from_dict(raw)
+        except (OSError, ValueError, TypeError) as e:
+            status.could_not_verify = True
+            status.hv_present = True
+            status.details = f"voltage map could not be loaded: {e}"
+            return status
+    status.voltage_map_used = voltage_map is not None
+
+    # Parse the net-class-map sidecar with the SAME block ``kct check``'s
+    # DRC rules use so HV selection agrees with the diff-pair DRC rules
+    # (issue #2684).  Canonical loader (issue #4683): the board path resolves
+    # layer-name tokens like "B.Cu" so the HV ISOLATION SAFETY GATE cannot
+    # silently run without its HV classes on a sidecar that `kct route`
+    # accepts.
+    resolved_net_class_map = None
+    declared_non_hv: dict[str, str] = {}
+    if net_class_map_path is not None:
+        try:
+            from kicad_tools.creepage.engine import non_hv_nets_from_path
+            from kicad_tools.router.rules import net_class_map_from_path
+
+            resolved_net_class_map = net_class_map_from_path(
+                Path(net_class_map_path), pcb_path=pcb_path
+            )
+            declared_non_hv = non_hv_nets_from_path(net_class_map_path)
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning(
+                "Isolation check: failed to load net-class-map from %s: %s",
+                net_class_map_path,
+                e,
+            )
+
+    from kicad_tools.creepage.engine import resolve_hv_nets
+
+    try:
+        hv_nets = resolve_hv_nets(
+            pcb,
+            hv_net_class,
+            resolved_net_class_map,
+            voltage_map=voltage_map,
+            edge_voltage=edge_voltage,
+            census_threshold=census_threshold if voltage_map is not None else None,
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        # Never let HV-net resolution crash the whole audit.
+        logger.warning("Isolation check: HV-net resolution failed: %s", e)
+        status.could_not_verify = True
+        status.hv_present = True
+        status.details = f"HV-net resolution failed: {e}"
+        return status
+
+    if not hv_nets:
+        # Vacuity guard (issue #4354): an empty HV group is only legitimately
+        # "inert" on a genuinely low-voltage board.  When the board carries
+        # mains-named copper OR a mains-level working voltage was supplied,
+        # the HV insulation path was never evaluated -- a safety-gate false
+        # pass.  Hard-fail the verdict (mirrors the LVS zero-bound guard,
+        # #4011) rather than silently reporting READY.
+        from kicad_tools.creepage.engine import (
+            SELV_WORKING_VOLTAGE_V,
+            _norm_net_key,
+            mains_suspect_nets,
+        )
+
+        # Explicit per-board "not mains/HV" declarations (issue #8278) exempt
+        # a mains-NAMED net from this name-based guard -- recorded, never
+        # silent.  A mains-level working voltage still trips the guard.
+        declared = {_norm_net_key(k): (k, v) for k, v in declared_non_hv.items()}
+        suspects = []
+        for name in mains_suspect_nets(pcb):
+            hit = declared.get(_norm_net_key(name))
+            if hit is not None:
+                status.declared_non_hv_nets[name] = hit[1]
+            else:
+                suspects.append(name)
+        wv = hv_working_voltage
+        high_working_voltage = wv is not None and float(wv) >= SELV_WORKING_VOLTAGE_V
+        if suspects or high_working_voltage:
+            status.mains_suspected_unclassified = True
+            status.mains_suspect_nets = suspects
+            reasons = []
+            if suspects:
+                shown = ", ".join(suspects[:8])
+                more = "" if len(suspects) <= 8 else f" (+{len(suspects) - 8} more)"
+                reasons.append(f"mains-named nets present ({shown}{more})")
+            if high_working_voltage and wv is not None:
+                reasons.append(
+                    f"working voltage {float(wv):g} V >= {SELV_WORKING_VOLTAGE_V:g} V SELV boundary"
+                )
+            status.details = (
+                f"0 '{hv_net_class}' nets resolved but the board looks "
+                f"like mains/HV ({'; '.join(reasons)}) -- the HV insulation "
+                "path was NOT evaluated.  Map the mains nets to the HV class "
+                "(--net-class-map) or set --hv-net-class; a mains-NAMED net that "
+                "is not mains (e.g. a 24 V FUSED rail) can be declared in the "
+                "map's non_hv_nets block with a reason.  NOT_READY."
+            )
+            return status
+        # No HV-class nets on a genuinely low-voltage board -> inert.
+        status.details = f"No '{hv_net_class}' nets found -- HV/isolation audit skipped."
+        if status.declared_non_hv_nets:
+            status.details += " Mains-named net(s) declared non-HV by the net-class map: " + (
+                "; ".join(f"{k} ({v})" for k, v in sorted(status.declared_non_hv_nets.items()))
+            )
+        return status
+
+    status.hv_present = True
+    status.hv_nets = [hv_nets[num] for num in sorted(hv_nets)]
+
+    threshold_supplied = hv_min_mm is not None or hv_standard is not None
+    status.threshold_supplied = threshold_supplied
+
+    # Shapely is required for the surface-path census.  Guard it fail-loud
+    # (mirrors the connectivity could-not-verify policy) so a missing core
+    # dependency degrades to WARNING rather than crashing the audit.
+    from kicad_tools._shapely import has_shapely
+
+    if not has_shapely():
+        status.could_not_verify = True
+        status.details = (
+            "HV nets present but creepage analysis requires shapely "
+            "(not importable) -- isolation NOT verified."
+        )
+        return status
+
+    # Derive the required creepage/clearance from an IEC standard table when
+    # requested (phase-2), mirroring the ``kct creepage`` wiring exactly.
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    creepage_prov: dict | None = None
+    clearance_prov: dict | None = None
+    std = None
+    if hv_standard is not None:
+        from kicad_tools.creepage.standards import (
+            StandardLookupError,
+            get_standard,
+        )
+
+        if hv_pollution_degree is None or (voltage_map is None and hv_working_voltage is None):
+            status.could_not_verify = True
+            status.details = (
+                "HV standard supplied but --hv-working-voltage and "
+                "--hv-pollution-degree are both required -- isolation NOT verified."
+            )
+            return status
+        try:
+            std = get_standard(hv_standard)
+            if voltage_map is None:
+                assert hv_working_voltage is not None
+                required_creepage_mm, creepage_prov = std.required_creepage(
+                    float(hv_working_voltage),
+                    int(hv_pollution_degree),
+                    hv_material_group,
+                    hv_insulation,
+                )
+                # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at
+                # the steady-state peak, PD floor) -- issue #7057.
+                required_clearance_mm, clearance_prov = std.required_clearance(
+                    float(hv_working_voltage),
+                    int(hv_pollution_degree),
+                    hv_overvoltage_category,
+                    hv_insulation,
+                )
+            status.standard_edition = std.edition
+        except StandardLookupError as e:
+            # Safety-critical: fail LOUD, never emit a guessed number.
+            status.could_not_verify = True
+            status.details = f"standard-table lookup failed: {e}"
+            return status
+
+    from kicad_tools.creepage.engine import apply_census_waivers, compute_creepage_census
+
+    # Attach-zone waiver (#8028): same zone builder ``kct creepage`` uses.
+    attach_zones = None
+    if waive_attach_zone:
+        from kicad_tools.router.pairwise_clearance import build_attach_zones
+
+        attach_zones = build_attach_zones(pcb.footprints)
+
+    try:
+        report = compute_creepage_census(
+            pcb,
+            hv_nets,
+            hv_min_mm,
+            net_class=hv_net_class,
+            board=str(pcb_path) if pcb_path is not None else "",
+            required_creepage_mm=required_creepage_mm,
+            required_clearance_mm=required_clearance_mm,
+            standard=hv_standard,
+            standard_edition=status.standard_edition,
+            working_voltage=None if voltage_map is not None else hv_working_voltage,
+            pollution_degree=hv_pollution_degree,
+            material_group=(hv_material_group if hv_standard is not None else None),
+            creepage_provenance=creepage_prov,
+            clearance_provenance=clearance_prov,
+            voltage_map=voltage_map,
+            standard_obj=std if voltage_map is not None else None,
+            edge_voltage=edge_voltage,
+            overvoltage_category=hv_overvoltage_category,
+            insulation=hv_insulation,
+            attach_zones=attach_zones,
+            pair_bounds=pair_bounds or None,
+        )
+        apply_census_waivers(report, waive_same_footprint=waive_same_footprint)
+    except Exception as e:
+        # A genuine census crash must NOT be coerced into a clean PASS.
+        logger.warning("Isolation check: creepage census failed: %s", e)
+        status.could_not_verify = True
+        status.details = f"creepage census could not run: {e}"
+        return status
+
+    status.report = report.to_dict()
+    status.pair_count = len(report.pairs)
+    status.required_creepage_mm = required_creepage_mm
+    status.required_clearance_mm = required_clearance_mm
+    if report.pairs:
+        status.min_creepage_mm = min(p.creepage_mm for p in report.pairs)
+        status.min_clearance_mm = min(p.clearance_mm for p in report.pairs)
+
+    if threshold_supplied:
+        # Fully gated: the verdict can hard-fail on this result.
+        status.checked = True
+        waiver_aware = voltage_map is not None or waive_same_footprint or waive_attach_zone
+        status.passed = report.gate_passed if waiver_aware else report.passed
+        status.waived_count = sum(1 for p in report.pairs if p.waived)
+        status.waived_pairs = [
+            {
+                "net_a": p.net_a,
+                "net_b": p.net_b,
+                "kind": p.kind,
+                "relationship": p.relationship,
+                "creepage_mm": round(p.creepage_mm, 4),
+                "clearance_mm": round(p.clearance_mm, 4),
+            }
+            for p in report.pairs
+            if p.waived
+        ]
+        status.failing_pairs = [
+            {
+                "net_a": p.net_a,
+                "net_b": p.net_b,
+                "kind": p.kind,
+                "creepage_mm": round(p.creepage_mm, 4),
+                "clearance_mm": round(p.clearance_mm, 4),
+                "margin_mm": round(p.margin_mm, 4),
+                "required_creepage_mm": (
+                    round(p.governing_creepage_mm, 4) if p.governing_creepage_mm else None
+                ),
+                "required_clearance_mm": (
+                    round(p.required_clearance_mm, 4)
+                    if p.required_clearance_mm is not None
+                    else None
+                ),
+            }
+            for p in report.pairs
+            if not p.passed and not (waiver_aware and p.waived)
+        ]
+        if status.passed:
+            status.details = (
+                f"All {status.pair_count} HV pair(s) clear the required creepage/clearance."
+                if not status.waived_count
+                else f"All non-waived HV pair(s) clear the required creepage/clearance "
+                f"({status.waived_count} of {status.pair_count} WAIVED)."
+            )
+        else:
+            status.details = (
+                f"{len(status.failing_pairs)}/{status.pair_count} HV pair(s) "
+                "below the required creepage/clearance."
+            )
+    else:
+        # HV present, census rendered informationally, but no requirement
+        # was supplied -> cannot gate (verdict downgrades to WARNING).
+        status.details = (
+            "HV nets present but no isolation requirement specified "
+            "(--hv-min / --hv-standard) -- cannot gate."
+        )
+
+    return status
+
+
+@dataclass
+class LayerUtilization:
+    """PCB layer utilization statistics."""
+
+    layer_count: int = 0
+    utilization: dict[str, float] = field(default_factory=dict)  # layer_name -> percent
+
+    def to_dict(self) -> dict:
+        return {
+            "layer_count": self.layer_count,
+            "utilization": self.utilization,
+        }
+
+
+@dataclass
+class CostEstimate:
+    """Manufacturing cost estimate."""
+
+    pcb_cost: float = 0.0
+    component_cost: float | None = None
+    assembly_cost: float | None = None
+    total_cost: float = 0.0
+    quantity: int = 5
+    currency: str = "USD"
+    assembly_mode: str | None = None  # "none" when assembly is excluded
+
+    def to_dict(self) -> dict:
+        return {
+            "pcb_cost": self.pcb_cost,
+            "component_cost": self.component_cost,
+            "assembly_cost": self.assembly_cost,
+            "total_cost": self.total_cost,
+            "quantity": self.quantity,
+            "currency": self.currency,
+            "assembly_mode": self.assembly_mode,
+        }
+
+
+@dataclass
+class ActionItem:
+    """Suggested action to fix an issue."""
+
+    priority: int  # 1 = critical, 2 = important, 3 = optional
+    description: str
+    command: str | None = None  # Optional CLI command to fix
+
+    def to_dict(self) -> dict:
+        return {
+            "priority": self.priority,
+            "description": self.description,
+            "command": self.command,
+        }
+
+
+@dataclass
+class AuditResult:
+    """Complete manufacturing audit result."""
+
+    # Source info
+    project_name: str = ""
+    schematic_path: Path | None = None
+    pcb_path: Path | None = None
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    # Check results
+    erc: ERCStatus = field(default_factory=ERCStatus)
+    drc: DRCStatus = field(default_factory=DRCStatus)
+    sync: SyncStatus = field(default_factory=SyncStatus)
+    connectivity: ConnectivityStatus = field(default_factory=ConnectivityStatus)
+    compatibility: ManufacturerCompatibility = field(default_factory=ManufacturerCompatibility)
+    isolation: IsolationStatus = field(default_factory=IsolationStatus)
+    layers: LayerUtilization = field(default_factory=LayerUtilization)
+    cost: CostEstimate = field(default_factory=CostEstimate)
+
+    # Action items
+    action_items: list[ActionItem] = field(default_factory=list)
+
+    @property
+    def verdict(self) -> AuditVerdict:
+        """Determine overall verdict based on check results."""
+        # Critical failures — these always block READY
+        if self.erc.blocking_error_count > 0:
+            return AuditVerdict.NOT_READY
+        if self.drc.blocking_count > 0:
+            return AuditVerdict.NOT_READY
+        if not self.compatibility.passed:
+            return AuditVerdict.NOT_READY
+
+        # HV / isolation hard fail (issue #4333): a resolved HV pair below its
+        # governing creepage/clearance bound is a manufacturing-blocking defect
+        # -- fold it into NOT_READY so ``kct audit`` exits 2 (the gate FAILs).
+        if self.isolation.checked and not self.isolation.passed:
+            return AuditVerdict.NOT_READY
+
+        # HV / isolation vacuity hard fail (issue #4354): HV-net resolution
+        # returned EMPTY on a board that looks like mains/HV -- the insulation
+        # path was never evaluated.  Treat it exactly like the LVS zero-bound
+        # vacuity guard (#4011): un-evaluated safety evidence is a hard FAIL,
+        # NOT a silent skip.
+        if self.isolation.mains_suspected_unclassified:
+            return AuditVerdict.NOT_READY
+
+        # Schematic refs missing from PCB == unbuildable BOM == hard fail.
+        # The CPL/BOM that gets shipped to the fab will reference parts
+        # that have no pads on the board, so the assembly cannot succeed.
+        if self.sync.schematic_only_count > 0:
+            return AuditVerdict.NOT_READY
+
+        # Connectivity: advisory when core checks pass and board has zones.
+        # Zone fills cannot be verified without running KiCad's zone filler,
+        # so incomplete nets on a board with zone definitions are treated as
+        # a warning rather than a hard block.
+        if not self.connectivity.passed:
+            if self.connectivity.has_zones:
+                return AuditVerdict.WARNING
+            return AuditVerdict.NOT_READY
+
+        # Warnings
+        if self.drc.warning_count > 0 or self.erc.warning_count > 0:
+            return AuditVerdict.WARNING
+        # Sync drift other than schematic-only: value/footprint mismatches
+        # and PCB-only orphans are reviewable, not blocking.
+        if (
+            self.sync.value_mismatch_count > 0
+            or self.sync.footprint_mismatch_count > 0
+            or self.sync.pcb_only_count > 0
+        ):
+            return AuditVerdict.WARNING
+
+        # Non-authoritative DRC gate (issue #3825): a board may be clean per
+        # the internal --mfr rule engine (drc.passed, blocking_count == 0)
+        # while the geometric engine (kicad-cli pcb drc) never actually ran
+        # -- e.g. shapely ImportError or kicad-cli absent leaves
+        # geometric_drc_ran=False.  #3820 fixed the DRC *line label* but the
+        # overall verdict still returned READY, so kct audit / report.md
+        # shipped "READY FOR MANUFACTURING" for a board whose DRC was never
+        # authoritatively verified.  The internal engine is structurally
+        # blind to several KiCad violation classes (shorts, copper-edge
+        # clearance, mask bridges), so a clean-but-un-run DRC MUST NOT be
+        # READY.  Downgrade to WARNING (not NOT_READY) so backend-less CI
+        # does not regress to red, consistent with the #3820 policy.
+        if self.drc.passed and not self.drc.geometric_drc_ran:
+            return AuditVerdict.WARNING
+
+        # Un-run ERC / sync gate (issue #7083): the same #3825/#3832 policy,
+        # applied to ERC (kicad-cli not found or timed out) and to the sync
+        # drift check (Reconciler crashed).  An engine that never checked the
+        # design cannot certify it READY, but this is WARNING rather than
+        # NOT_READY so backend-less CI does not regress to red.  An explicit
+        # --skip-erc or a missing schematic sets ``skipped`` instead and is
+        # deliberately not affected.
+        if self.erc.could_not_verify or self.sync.could_not_verify:
+            return AuditVerdict.WARNING
+
+        # HV / isolation soft gate (issue #4333): HV nets are present but the
+        # path could NOT be authoritatively gated -- either no requirement was
+        # specified (no --hv-min / --hv-standard) or the census could not be
+        # evaluated (shapely absent / standard-table lookup error).  Mirror the
+        # non-authoritative-DRC policy: downgrade to WARNING so the board is
+        # never silently green on an un-evaluated HV path.
+        if self.isolation.hv_present and (
+            self.isolation.could_not_verify or not self.isolation.threshold_supplied
+        ):
+            return AuditVerdict.WARNING
+
+        return AuditVerdict.READY
+
+    @property
+    def is_ready(self) -> bool:
+        """Check if design is ready for manufacturing."""
+        return self.verdict == AuditVerdict.READY
+
+    def summary(self) -> dict:
+        """Get summary statistics."""
+        return {
+            "verdict": self.verdict.value,
+            "is_ready": self.is_ready,
+            "erc_errors": self.erc.error_count,
+            "drc_violations": self.drc.error_count + self.drc.warning_count,
+            "drc_blocking": self.drc.blocking_count,
+            "net_completion": self.connectivity.completion_percent,
+            "manufacturer_compatible": self.compatibility.passed,
+            "estimated_cost": self.cost.total_cost,
+            "action_items": len(self.action_items),
+            "sync_schematic_only": self.sync.schematic_only_count,
+            "sync_pcb_only": self.sync.pcb_only_count,
+            "sync_value_mismatches": self.sync.value_mismatch_count,
+            "sync_footprint_mismatches": self.sync.footprint_mismatch_count,
+            "isolation_checked": self.isolation.checked,
+            "isolation_passed": self.isolation.passed,
+        }
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "project_name": self.project_name,
+            "schematic_path": str(self.schematic_path) if self.schematic_path else None,
+            "pcb_path": str(self.pcb_path) if self.pcb_path else None,
+            "timestamp": self.timestamp.isoformat(),
+            "verdict": self.verdict.value,
+            "is_ready": self.is_ready,
+            "summary": self.summary(),
+            "erc": self.erc.to_dict(),
+            "drc": self.drc.to_dict(),
+            "sync": self.sync.to_dict(),
+            "connectivity": self.connectivity.to_dict(),
+            "compatibility": self.compatibility.to_dict(),
+            "isolation": self.isolation.to_dict(),
+            "layers": self.layers.to_dict(),
+            "cost": self.cost.to_dict(),
+            "action_items": [a.to_dict() for a in self.action_items],
+        }
+
+
+class ManufacturingAudit:
+    """Comprehensive manufacturing readiness audit.
+
+    Example:
+        >>> audit = ManufacturingAudit("project.kicad_pro", manufacturer="jlcpcb")
+        >>> result = audit.run()
+        >>> if result.is_ready:
+        ...     print("Ready for manufacturing!")
+        >>> else:
+        ...     for item in result.action_items:
+        ...         print(f"  {item.priority}. {item.description}")
+    """
+
+    def __init__(
+        self,
+        project_or_pcb: str | Path,
+        manufacturer: str = "jlcpcb",
+        layers: int | None = None,
+        copper_oz: float = 1.0,
+        quantity: int = 5,
+        skip_erc: bool = False,
+        no_assembly: bool = False,
+        pcb_override: Path | None = None,
+        net_class_map_path: str | Path | None = None,
+        hv_net_class: str = "HV",
+        hv_min_mm: float | None = None,
+        hv_standard: str | None = None,
+        hv_working_voltage: float | None = None,
+        hv_pollution_degree: int | None = None,
+        hv_material_group: str = "IIIa",
+        hv_overvoltage_category: str = "II",
+        hv_insulation: str = "basic",
+        schematic_path: str | Path | None = None,
+    ):
+        """Initialize the audit.
+
+        Args:
+            project_or_pcb: Path to .kicad_pro or .kicad_pcb file
+            manufacturer: Target manufacturer ID (default: jlcpcb)
+            layers: Layer count (auto-detected if None)
+            copper_oz: Copper weight in oz
+            quantity: Quantity for cost estimate
+            skip_erc: Skip ERC check (for PCB-only audits)
+            no_assembly: Skip assembly cost calculation
+            pcb_override: Explicit PCB path override (takes precedence over
+                all auto-detection including project.kct)
+            net_class_map_path: Optional path to a JSON sidecar mapping
+                net names to ``NetClassRouting`` dicts (see
+                :meth:`kicad_tools.router.rules.NetClassRouting.to_dict`).
+                When supplied, the diff-pair routing-continuity and
+                length-skew DRC rules can fire on routed boards.  Issue
+                #2684 -- mirrors the ``kct check --net-class-map`` flag.
+            hv_net_class: Net-class name treated as the HV group for the
+                creepage/isolation audit (issue #4333, default ``HV``).
+            hv_min_mm: Manual required creepage in mm (phase-1 override).
+            hv_standard: IEC standard id (``iec60664`` / ``iec62368``) to
+                derive the required creepage AND clearance (phase-2).  Requires
+                ``hv_working_voltage`` and ``hv_pollution_degree``.
+            hv_working_voltage: RMS working voltage (V) for standard derivation.
+            hv_pollution_degree: IEC pollution degree (1/2/3) for derivation.
+            hv_material_group: Insulation material group (default ``IIIa``).
+            hv_overvoltage_category: IEC 60664-1 overvoltage category
+                (``I``-``IV``, default ``II``) selecting the Table F.1 rated
+                impulse voltage for the derived clearance (issue #7057).
+            hv_insulation: Insulation type (``basic`` / ``supplementary`` /
+                ``reinforced``, default ``basic``) for the derived
+                creepage and clearance (issue #7082).
+            schematic_path: Explicit schematic for ``.kicad_pcb`` input, used
+                instead of auto-resolution (issue #7153).  Ignored for
+                ``.kicad_pro`` input.
+        """
+        self.path = Path(project_or_pcb)
+        self.manufacturer = manufacturer
+        self.layers = layers
+        self.copper_oz = copper_oz
+        self.quantity = quantity
+        self.skip_erc = skip_erc
+        self.no_assembly = no_assembly
+        self.net_class_map_path = (
+            Path(net_class_map_path) if net_class_map_path is not None else None
+        )
+        # HV / isolation (creepage) audit configuration (issue #4333).
+        self.hv_net_class = hv_net_class or "HV"
+        self.hv_min_mm = hv_min_mm
+        self.hv_standard = hv_standard
+        self.hv_working_voltage = hv_working_voltage
+        self.hv_pollution_degree = hv_pollution_degree
+        self.hv_material_group = hv_material_group
+        self.hv_overvoltage_category = hv_overvoltage_category
+        self.hv_insulation = hv_insulation
+
+        # Resolve paths
+        if self.path.suffix == ".kicad_pro":
+            self.project_path = self.path
+            if pcb_override is not None:
+                pcb_override = Path(pcb_override)
+                if not pcb_override.exists():
+                    raise ValueError(f"PCB override file not found: {pcb_override}")
+                logger.info(f"Using PCB override: {pcb_override}")
+                self.pcb_path = pcb_override
+            else:
+                self.pcb_path = self._resolve_pcb_path()
+            self.schematic_path = self._resolve_schematic_path()
+        elif self.path.suffix == ".kicad_pcb":
+            self.project_path = None
+            self.pcb_path = self.path
+            # Issue #7136: resolve the schematic the same way ``kct check``
+            # and the ``.kicad_pro`` branch do (project.kct, then the
+            # stage-stripped sibling, so ``board_routed.kicad_pcb`` finds
+            # ``board.kicad_sch``).  Do NOT force ``skip_erc`` here: a PCB
+            # input used to render ``[OK] ERC: PASS -- skipped by user
+            # request`` without ERC ever running.  ``self.skip_erc`` now
+            # reflects only the caller's ``--skip-erc`` / ``skip_erc=True``.
+            from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+            if schematic_path is not None and Path(schematic_path).exists():
+                # Issue #7153: an explicit schematic (e.g. the one the export
+                # already holds) wins over auto-resolution.
+                self.schematic_path = Path(schematic_path)
+            else:
+                self.schematic_path = resolve_schematic_for_pcb(self.path) or self.path.with_suffix(
+                    ".kicad_sch"
+                )
+        else:
+            raise ValueError(f"Expected .kicad_pro or .kicad_pcb file, got: {self.path}")
+
+        # Read assembly mode from project.kct if not explicitly overridden
+        self._assembly_mode: str | None = None
+        if not self.no_assembly:
+            self._assembly_mode = self._read_assembly_mode()
+            if self._assembly_mode == "none":
+                self.no_assembly = True
+
+        # Loaded objects (lazy)
+        self._pcb: PCB | None = None
+        self._profile = None
+
+    def _resolve_pcb_path(self) -> Path:
+        """Resolve PCB path when given a project file.
+
+        Resolution order:
+        1. Check project.kct for artifacts.pcb
+        2. When both base and *_routed exist, prefer the most recently modified
+        3. Fall back to *_routed.kicad_pcb if only routed exists
+        4. Default to <basename>.kicad_pcb
+        """
+        project_dir = self.path.parent
+        basename = self.path.stem
+
+        # 1. Try to find project.kct and use artifacts.pcb
+        kct_path = project_dir / "project.kct"
+        if not kct_path.exists():
+            # Also check parent directory (for output/ subdirectory case)
+            kct_path = project_dir.parent / "project.kct"
+
+        if kct_path.exists():
+            try:
+                from kicad_tools.spec import load_spec
+
+                spec = load_spec(kct_path)
+                if spec.project and spec.project.artifacts and spec.project.artifacts.pcb:
+                    # PCB path is relative to project.kct location
+                    pcb_path = kct_path.parent / spec.project.artifacts.pcb
+                    if pcb_path.exists():
+                        logger.debug(f"Using PCB from project.kct: {pcb_path}")
+                        return pcb_path
+            except Exception as e:
+                logger.debug(f"Failed to load project.kct: {e}")
+
+        # 2. When both base and routed exist, prefer the most recently modified
+        base_path = project_dir / f"{basename}.kicad_pcb"
+        routed_path = project_dir / f"{basename}_routed.kicad_pcb"
+
+        if base_path.exists() and routed_path.exists():
+            if base_path.stat().st_mtime >= routed_path.stat().st_mtime:
+                logger.info(f"Using base PCB (newer): {base_path}")
+                return base_path
+            else:
+                logger.info(f"Using routed PCB (newer): {routed_path}")
+                return routed_path
+        elif routed_path.exists():
+            logger.info(f"Using routed PCB: {routed_path}")
+            return routed_path
+
+        # 3. Default to <basename>.kicad_pcb
+        return self.path.with_suffix(".kicad_pcb")
+
+    def _resolve_schematic_path(self) -> Path:
+        """Resolve schematic path when given a project file.
+
+        Resolution order:
+        1. Check project.kct for artifacts.schematic
+        2. Default to <basename>.kicad_sch
+
+        Delegates the project.kct + sibling lookup to the shared
+        :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb` helper so
+        ``kct audit``, ``kct route``, and ``kct check`` agree on where the
+        schematic lives.  When the helper finds nothing, falls back to the
+        historical project-basename default so existing behaviour is preserved.
+        """
+        from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+        resolved = resolve_schematic_for_pcb(self.pcb_path)
+        if resolved is not None:
+            return resolved
+
+        # Fall back to <project-basename>.kicad_sch (historical default).
+        return self.path.with_suffix(".kicad_sch")
+
+    def _read_assembly_mode(self) -> str | None:
+        """Read manufacturing.assembly from project.kct if available.
+
+        Returns the assembly mode string (e.g., "smt", "none") or None
+        if no project.kct exists or the field is not set.
+        """
+        project_dir = self.path.parent
+        kct_path = project_dir / "project.kct"
+        if not kct_path.exists():
+            kct_path = project_dir.parent / "project.kct"
+
+        if kct_path.exists():
+            try:
+                from kicad_tools.spec import load_spec
+
+                spec = load_spec(kct_path)
+                if (
+                    spec.requirements
+                    and spec.requirements.manufacturing
+                    and spec.requirements.manufacturing.assembly
+                ):
+                    mode = spec.requirements.manufacturing.assembly
+                    logger.debug(f"Assembly mode from project.kct: {mode}")
+                    return mode
+            except Exception as e:
+                logger.debug(f"Failed to read assembly mode from project.kct: {e}")
+
+        return None
+
+    def _load_pcb(self) -> PCB:
+        """Load and cache the PCB."""
+        if self._pcb is None:
+            from kicad_tools.schema.pcb import PCB
+
+            self._pcb = PCB.load(self.pcb_path)
+        return self._pcb
+
+    def _get_profile(self):
+        """Get and cache the manufacturer profile."""
+        if self._profile is None:
+            from kicad_tools.manufacturers import get_profile
+
+            self._profile = get_profile(self.manufacturer)
+        return self._profile
+
+    def run(self) -> AuditResult:
+        """Run the complete audit.
+
+        Returns:
+            AuditResult with all check results and recommendations
+        """
+        result = AuditResult(
+            project_name=self.path.stem,
+            schematic_path=self.schematic_path if self.schematic_path.exists() else None,
+            pcb_path=self.pcb_path if self.pcb_path.exists() else None,
+        )
+
+        # Run checks
+        if self.skip_erc:
+            result.erc.skipped = True
+            result.erc.details = "ERC skipped by user request"
+        elif self.schematic_path.exists():
+            result.erc = self._check_erc()
+        else:
+            # Issue #7136: ERC was not skipped by the caller but there is no
+            # schematic to check.  That verifies nothing, so it is NOT RUN
+            # (the #7089 convention: ``could_not_verify`` caps the verdict at
+            # WARNING and renders ``[!!] ERC ...: NOT RUN``), never a PASS.
+            result.erc.could_not_verify = True
+            result.erc.passed = False
+            result.erc.skipped = False
+            result.erc.blocking_error_count = 0
+            result.erc.details = f"no schematic found for {self.pcb_path.name}"
+
+        if self.pcb_path.exists():
+            pcb = self._load_pcb()
+
+            # Auto-detect layers if not specified
+            if self.layers is None:
+                self.layers = len(pcb.copper_layers)
+
+            result.drc = self._check_drc(pcb)
+            result.connectivity = self._check_connectivity(pcb)
+            result.compatibility = self._check_compatibility(pcb)
+            result.layers = self._check_layer_utilization(pcb)
+            result.cost = self._estimate_cost(pcb)
+            result.isolation = self._check_isolation(pcb)
+
+        # Run schematic <-> PCB sync drift check before generating action
+        # items so the action-item generator can read result.sync and emit
+        # sync-related items with correct priorities.
+        if self.pcb_path.exists() and self.schematic_path.exists():
+            result.sync = self._check_sync_drift()
+        else:
+            result.sync.skipped = True
+            if not self.schematic_path.exists():
+                result.sync.details = "Sync check skipped (no schematic available)"
+            else:
+                result.sync.details = "Sync check skipped (no PCB available)"
+
+        # Generate action items from check results
+        result.action_items = self._generate_action_items(result)
+
+        return result
+
+    def _check_erc(self) -> ERCStatus:
+        """Run ERC on schematic."""
+        status = ERCStatus()
+
+        def _not_run(reason: str) -> ERCStatus:
+            # Issue #7083: ERC was requested but never checked the schematic.
+            # Not a pass (the old ``passed=True`` gave a false READY) and not
+            # a blocking failure (backend-less CI must not go red): flag it so
+            # the verdict caps at WARNING and the table/report show NOT RUN.
+            status.could_not_verify = True
+            status.passed = False
+            status.skipped = False
+            status.blocking_error_count = 0
+            status.details = reason
+            return status
+
+        try:
+            # Resolve kicad-cli the same way geometric DRC does, so ERC and
+            # DRC agree on whether it exists (issue #7083: a bare "kicad-cli"
+            # missed the default macOS install, which is not on PATH).
+            from kicad_tools.cli.runner import find_kicad_cli, kicad_cli_unavailable_reason
+
+            kicad_cli = find_kicad_cli()
+            if kicad_cli is None:
+                return _not_run(kicad_cli_unavailable_reason())
+
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+                report_path = Path(f.name)
+
+            try:
+                proc = subprocess.run(
+                    [
+                        str(kicad_cli),
+                        "sch",
+                        "erc",
+                        str(self.schematic_path),
+                        "--format",
+                        "json",
+                        "--output",
+                        str(report_path),
+                    ],
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+
+                # Issue #6724: the report file above is pre-created empty, and
+                # an empty file parses as a clean ERC.  A kicad-cli killed by a
+                # signal (e.g. the OOM killer) or one that wrote nothing did
+                # not check the schematic: fail loud via the handler below.
+                if proc.returncode < 0 or (
+                    report_path.exists() and report_path.stat().st_size == 0
+                ):
+                    from kicad_tools.drc.geometric import describe_returncode
+
+                    raise RuntimeError(
+                        describe_returncode(proc.returncode)
+                        if proc.returncode < 0
+                        else f"kicad-cli wrote an empty ERC report (exit {proc.returncode})"
+                    )
+
+                if report_path.exists():
+                    from kicad_tools.erc import ERCReport
+                    from kicad_tools.erc.violation import (
+                        ERC_BLOCKING_TYPES,
+                        ERC_NON_BLOCKING_TYPES,
+                    )
+
+                    report = ERCReport.load(report_path)
+                    status.error_count = report.error_count  # raw total for reporting
+
+                    # Split errors by blocking vs non-blocking type
+                    blocking = [v for v in report.errors if v.type in ERC_BLOCKING_TYPES]
+                    non_blocking = [v for v in report.errors if v.type in ERC_NON_BLOCKING_TYPES]
+                    unknown_errors = [
+                        v
+                        for v in report.errors
+                        if v.type not in ERC_BLOCKING_TYPES and v.type not in ERC_NON_BLOCKING_TYPES
+                    ]
+
+                    # Unknown error types default to blocking (conservative)
+                    status.blocking_error_count = len(blocking) + len(unknown_errors)
+                    # Demote non-blocking errors to warnings
+                    status.warning_count = report.warning_count + len(non_blocking)
+                    status.passed = status.blocking_error_count == 0
+
+                    if status.blocking_error_count > 0:
+                        # Get first few blocking error types for the details string
+                        by_type = report.violations_by_type()
+                        blocking_types = [
+                            t
+                            for t in by_type
+                            if t in ERC_BLOCKING_TYPES or t not in ERC_NON_BLOCKING_TYPES
+                        ][:3]
+                        status.details = ", ".join(t.value for t in blocking_types)
+                    status.report_path = report_path
+            except FileNotFoundError:
+                # kicad-cli vanished between lookup and exec.
+                return _not_run(f"kicad-cli not found at {kicad_cli}")
+            except subprocess.TimeoutExpired:
+                return _not_run("ERC timed out after 60s")
+
+        except Exception as e:
+            # A genuine ERC checker crash must NOT be coerced into a clean
+            # PASS (issue #3825, sibling of the #3817/#3820 DRC fix).  Surface
+            # it as a fail-loud could-not-verify result so the verdict gate
+            # (which reads blocking_error_count) cannot return a false READY.
+            logger.warning(f"ERC check failed: {e}")
+            status.details = f"ERC check could not run: {e}"
+            status.passed = False
+            status.error_count = max(status.error_count, 1)
+            status.blocking_error_count = max(status.blocking_error_count, 1)
+
+        return status
+
+    def _apply_waivers_sidecar(self, results, pcb: PCB) -> None:
+        """Annotate evidence and apply the board's waivers sidecar (issue #8130).
+
+        Mirrors ``kct check``: auto-discovered sidecar, malformed file warns
+        and applies nothing.
+        """
+        from kicad_tools.validate.evidence import annotate_evidence
+        from kicad_tools.validate.rules.waivers import (
+            apply_waivers,
+            discover_waivers_sidecar,
+            load_waivers,
+        )
+
+        path = discover_waivers_sidecar(self.pcb_path)
+        if path is None:
+            return
+        try:
+            waivers = load_waivers(path)
+        except (OSError, ValueError) as e:
+            logger.warning("Ignoring malformed waivers sidecar %s: %s", path, e)
+            return
+        annotate_evidence(results, pcb)
+        apply_waivers(results, waivers.for_check())
+
+    def _check_drc(self, pcb: PCB) -> DRCStatus:
+        """Run DRC on PCB."""
+        status = DRCStatus()
+
+        try:
+            import json as _json
+
+            from kicad_tools.router.rules import net_class_map_from_path
+            from kicad_tools.validate import DRCChecker
+
+            # Load optional net-class-map sidecar (Issue #2684).  When
+            # supplied, enables the diff-pair routing-continuity and
+            # length-skew rules to re-derive engagement / skew state on
+            # routed boards.  When absent, rules degrade to no-ops.
+            # Canonical loader (issue #4683): passing the board path resolves
+            # layer-name tokens like "B.Cu" against the board's actual copper
+            # count -- without it, a sidecar `kct route` accepts was silently
+            # dropped here and the diff-pair rules no-op'd without a signal.
+            net_class_map = None
+            if self.net_class_map_path is not None:
+                try:
+                    net_class_map = net_class_map_from_path(
+                        self.net_class_map_path, pcb_path=self.pcb_path
+                    )
+                except (OSError, _json.JSONDecodeError, TypeError, ValueError) as e:
+                    logger.warning(
+                        "Failed to load net-class-map from %s: %s",
+                        self.net_class_map_path,
+                        e,
+                    )
+
+            # Issue #8278: ampacity must follow the board's declared stackup
+            # copper (as ``kct check`` does via ``stackup_copper_oz``), not the
+            # profile default -- otherwise a 1 oz inner stackup is evaluated at
+            # JLCPCB's 0.5 oz inner default and the report shows spurious
+            # ampacity errors that ``kct check`` does not.
+            from kicad_tools.cli.check_cmd import stackup_copper_oz
+
+            stackup_outer, stackup_inner = stackup_copper_oz(pcb)
+
+            checker = DRCChecker(
+                pcb,
+                manufacturer=self.manufacturer,
+                layers=self.layers or 2,
+                copper_oz=self.copper_oz,
+                net_class_map=net_class_map,
+                copper_oz_outer=stackup_outer,
+                copper_oz_inner=stackup_inner,
+            )
+
+            # Match the ``kct check`` CLI's pad_grid tolerance policy
+            # (auto-derive per-board, issue #3061) so the audit -- and the
+            # manufacturing report's DRC section built from it -- cannot
+            # disagree with the documented ``kct check --mfr <profile>``
+            # gate (issue #3497).
+            results = checker.check_all(pad_grid_auto_derive=True)
+
+            # Issue #8130: honour the waivers sidecar exactly as ``kct check``
+            # does, so a waived finding cannot read as blocking here while
+            # ``kct check`` passes.  Stale evidence-bound waivers leave the
+            # finding active (same ``apply_waivers`` semantics).
+            self._apply_waivers_sidecar(results, pcb)
+
+            # Some rules (e.g. ``connectivity`` from Issue #3041) report
+            # at error severity for the standalone ``kct check`` CLI but
+            # must NOT count toward manufacturability-blocking verdicts
+            # because a sibling status field already classifies the same
+            # defect with finer-grained logic.  For ``connectivity`` the
+            # audit's own :meth:`_check_connectivity` step distinguishes
+            # zone-bridged incomplete nets (advisory WARNING) from
+            # genuinely-unrouted nets (blocking NOT_READY) based on zone
+            # presence -- a board with zones may resolve the nominal gap
+            # via zone fill on KiCad re-open.
+            #
+            # Issue #3044 lifted the per-call-site hardcoded
+            # ``rule_id == "connectivity"`` filter (originally introduced
+            # by PR #3060) into a central
+            # :attr:`DRCChecker.ADVISORY_RULE_IDS` classifier so every
+            # entry point can filter by severity instead of by literal
+            # rule_id.  All non-advisory rules still drive the blocking
+            # tally; advisory rules surface in ``violations_by_type`` for
+            # introspection but never block.
+            non_advisory_violations = [
+                v for v in results.violations if not DRCChecker.is_advisory_rule(v.rule_id)
+            ]
+            non_advisory_errors = sum(1 for v in non_advisory_violations if v.is_error)
+            non_advisory_warnings = sum(1 for v in non_advisory_violations if v.is_warning)
+
+            for v in results.violations:
+                if not v.waived:
+                    continue
+                status.waived_count += 1
+                entry = status.waived_by_rule.setdefault(
+                    v.rule_id, {"count": 0, "reasons": [], "issues": []}
+                )
+                entry["count"] += 1
+                if v.waiver_reason and v.waiver_reason not in entry["reasons"]:
+                    entry["reasons"].append(v.waiver_reason)
+                if v.waiver_issue and v.waiver_issue not in entry["issues"]:
+                    entry["issues"].append(v.waiver_issue)
+
+            status.error_count = non_advisory_errors
+            status.warning_count = non_advisory_warnings
+            status.blocking_count = non_advisory_errors  # Errors block manufacturing
+            status.passed = non_advisory_errors == 0
+
+            # Build per-type violation breakdown (all severities).  We
+            # include advisory rule_ids in the breakdown so consumers can
+            # still introspect that the rules ran -- they just do not
+            # count toward the blocking verdict.
+            by_rule: dict[str, int] = {}
+            for v in results.violations:
+                by_rule[v.rule_id] = by_rule.get(v.rule_id, 0) + 1
+            status.violations_by_type = by_rule
+
+            if non_advisory_errors > 0:
+                # Get summary of errors for the details string
+                error_rules: dict[str, int] = {}
+                for v in non_advisory_violations:
+                    if v.is_error:
+                        error_rules[v.rule_id] = error_rules.get(v.rule_id, 0) + 1
+                top_rules = sorted(error_rules.items(), key=lambda x: -x[1])[:3]
+                status.details = ", ".join(f"{r[0]} ({r[1]})" for r in top_rules)
+
+        except ImportError as e:
+            # An optional geometry backend (e.g. shapely) is not installed,
+            # so the internal rule engine could not run.  This is the same
+            # class of "could not verify" as kicad-cli being absent: per
+            # issue #3817 we must NOT report it as a hard FAIL (that would
+            # regress backend-less CI), but it is equally NOT an
+            # authoritative clean PASS.  Leave status.passed untouched and
+            # let _merge_geometric_drc / audit_cmd render the verdict as
+            # non-authoritative (geometric_drc_ran stays False).
+            logger.warning(f"DRC check could not run (optional backend absent): {e}")
+            note = f"internal DRC engine could not run: {e}"
+            status.details = f"{status.details}; {note}" if status.details else note
+
+        except Exception as e:
+            # A genuine internal DRC checker crash must NOT be reported as a
+            # clean PASS (issue #3817).  Surface it as a could-not-verify
+            # failure so the verdict is fail-loud rather than a false green.
+            logger.warning(f"DRC check failed: {e}")
+            status.details = f"DRC check could not run: {e}"
+            status.passed = False
+            status.error_count = max(status.error_count, 1)
+            status.blocking_count = max(status.blocking_count, 1)
+
+        # Merge KiCad's geometric DRC (kicad-cli pcb drc) into the same
+        # status.  The two engines catch different real defects: the --mfr
+        # rule engine above catches manufacturer-capability violations
+        # (e.g. clearance_pad_zone), while kicad-cli catches geometric
+        # defects (starved_thermal, shorts, sub-spec traces, zones_intersect)
+        # that the rule engine does not.  A board is manufacturable only
+        # when BOTH report zero errors (issue #3721).
+        self._merge_geometric_drc(status)
+
+        return status
+
+    def _merge_geometric_drc(self, status: DRCStatus) -> None:
+        """Run ``kicad-cli pcb drc`` and fold its errors into ``status``.
+
+        kicad-cli loads the sibling ``<board>.kicad_pro`` emitted by
+        ``kct export`` (issue #3720), so a ``--severity-error`` run checks
+        against the manufacturer's fab-accurate rules with
+        ``lib_footprint_mismatch`` / ``isolated_copper`` already downgraded
+        below error severity (they will not appear and so are not counted
+        as blocking).
+
+        Counts are *additive* on top of the ``--mfr`` engine's tally:
+        ``error_count`` / ``blocking_count`` grow by the kicad-cli error
+        count plus its error-severity ``unconnected_items`` (Issue #7188),
+        and each kicad-cli violation type is recorded in
+        ``violations_by_type`` under a ``kicad-cli:`` namespace so it is
+        clearly attributed to the geometric engine and never collides with
+        a ``--mfr`` rule_id.
+
+        Graceful fallback: if kicad-cli is not on PATH (e.g. CI without
+        KiCad), the report still generates -- a note is appended to
+        ``status.details`` and only the ``--mfr`` count stands.  The
+        ``status`` is mutated in place; this method never raises.
+
+        The kicad-cli invocation/parsing is delegated to the shared
+        :func:`kicad_tools.drc.run_geometric_drc` helper so that this
+        path and the ``kct route`` post-route gate cannot drift (issue
+        #3803).
+        """
+        from kicad_tools.drc import run_geometric_drc
+
+        result = run_geometric_drc(self.pcb_path)
+
+        if not result.ran:
+            # kicad-cli absent / timed out / no report / crashed: the
+            # geometric engine did NOT run, so a passing --mfr verdict is
+            # not authoritative (issue #3817).  Record that fact distinctly
+            # from passed -- do NOT flip status.passed here -- and surface
+            # the note so audit_cmd.py can render a third verdict state.
+            status.geometric_drc_ran = False
+            note = result.note
+            status.geometric_drc_note = note
+            if note == "kicad-cli not found; geometric DRC skipped":
+                # Preserve the audit-specific suffix for backward-compat.
+                note = "kicad-cli not found; geometric DRC skipped (--mfr count only)"
+            if note:
+                status.details = f"{status.details}; {note}" if status.details else note
+            return
+
+        # The geometric engine ran -- the verdict is now authoritative.
+        status.geometric_drc_ran = True
+
+        # Issue #7188: kicad-cli's error-severity ``unconnected_items`` are
+        # blocking too.  ``result.error_count`` is geometric-only (#4498), so
+        # fold them in explicitly.  run_geometric_drc refills zones first
+        # (#3969), so these opens are measured after the pour and are
+        # authoritative -- unlike the kct-native ``connectivity`` rule, which
+        # stays advisory here (#3044).
+        opens = sum(1 for v in result.unconnected_items if v.is_error)
+        fold = result.error_count + opens
+        if fold > 0:
+            status.error_count += fold
+            status.blocking_count += fold
+            status.passed = status.blocking_count == 0
+
+            # Record per-type counts under a kicad-cli namespace so the
+            # report's by-type table makes the engine explicit and the
+            # geometric types never collide with --mfr rule_ids.
+            cli_by_type = dict(result.by_type)
+            if opens:
+                cli_by_type["unconnected_items"] = cli_by_type.get("unconnected_items", 0) + opens
+            by_type = status.violations_by_type
+            for type_str, count in cli_by_type.items():
+                key = f"kicad-cli:{type_str}"
+                by_type[key] = by_type.get(key, 0) + count
+            status.violations_by_type = by_type
+
+            top = sorted(cli_by_type.items(), key=lambda x: -x[1])[:3]
+            cli_detail = "kicad-cli: " + ", ".join(f"{t} ({c})" for t, c in top)
+            status.details = f"{status.details}; {cli_detail}" if status.details else cli_detail
+
+    def _check_connectivity(self, pcb: PCB) -> ConnectivityStatus:
+        """Check net connectivity.
+
+        Includes a corruption guard: if the board has footprints but every
+        pad is assigned to net 0 (unconnected), this indicates that inline
+        net assignments were stripped (e.g. by kicad-cli).  In that case
+        the check is marked as failed with a corruption diagnostic.
+        """
+        status = ConnectivityStatus()
+
+        try:
+            # Corruption guard: detect boards where all pad net assignments
+            # have been zeroed out.  A board with footprints must have at
+            # least some pads with non-zero net numbers.
+            if pcb.footprint_count > 0:
+                total_pads = 0
+                pads_with_net = 0
+                for fp in pcb.footprints:
+                    for pad in fp.pads:
+                        total_pads += 1
+                        if pad.net_number != 0:
+                            pads_with_net += 1
+
+                if total_pads > 0 and pads_with_net == 0:
+                    logger.warning(
+                        "Data corruption detected: %d pads on %d footprints "
+                        "but all pads assigned to net 0",
+                        total_pads,
+                        pcb.footprint_count,
+                    )
+                    status.passed = False
+                    status.details = (
+                        f"Possible data corruption: {total_pads} pads across "
+                        f"{pcb.footprint_count} footprints all assigned to net 0"
+                    )
+                    return status
+
+            from kicad_tools.validate import ConnectivityValidator
+
+            validator = ConnectivityValidator(pcb)
+            result = validator.validate()
+
+            status.total_nets = result.total_nets
+            status.connected_nets = result.connected_nets
+            status.incomplete_nets = result.total_nets - result.connected_nets
+            status.unconnected_pads = result.unconnected_pad_count
+
+            if status.total_nets > 0:
+                status.completion_percent = round(
+                    100.0 * status.connected_nets / status.total_nets, 1
+                )
+            else:
+                status.completion_percent = 100.0
+
+            # Record whether the board has zone definitions.  This is used
+            # by the verdict logic to decide whether incomplete connectivity
+            # should block the READY verdict (no zones) or be advisory (has
+            # zones -- fills may resolve the gaps).
+            status.has_zones = any(z.net_number > 0 for z in pcb.zones)
+
+            # The ConnectivityValidator now performs geometric zone boundary
+            # containment checks.  Nets where all pads fall inside zone
+            # boundary polygons on matching layers are already counted as
+            # connected in result.connected_nets and reported via
+            # result.zone_connected_nets.  These are high-confidence
+            # verified connections.
+            geometrically_verified = result.zone_connected_nets
+
+            # Post-process: identify zone-connected nets among incomplete nets.
+            # Nets that still appear incomplete but have a zone definition are
+            # reclassified as zone-connected (name-based, lower confidence)
+            # and excluded from the pass/fail evaluation.
+            if not result.is_fully_routed:
+                zone_net_names = {z.net_name for z in pcb.zones if z.net_number > 0}
+                error_net_names = {issue.net_name for issue in result.errors}
+                zone_connected = error_net_names & zone_net_names
+                truly_incomplete = error_net_names - zone_connected
+
+                # Second pass: classify remaining incomplete nets as pour nets.
+                # Nets with is_pour_net=True (power/ground) are expected to be
+                # zone-filled even if no zone definition exists yet.
+                classified_pour: set[str] = set()
+                try:
+                    from kicad_tools.router.net_class import classify_and_apply_rules
+
+                    net_id_by_name = {
+                        net.name: net_id for net_id, net in pcb.nets.items() if net_id > 0
+                    }
+                    pending_ids = {
+                        net_id_by_name[n]: n for n in truly_incomplete if n in net_id_by_name
+                    }
+                    if pending_ids:
+                        rules = classify_and_apply_rules(pending_ids)
+                        classified_pour = {
+                            n for n in truly_incomplete if rules.get(n) and rules[n].is_pour_net
+                        }
+                except Exception:
+                    pass  # conservative: leave truly_incomplete unchanged
+
+                if classified_pour:
+                    truly_incomplete = truly_incomplete - classified_pour
+                    zone_connected = zone_connected | classified_pour
+                    status.pour_net_names = sorted(classified_pour)
+
+                status.zone_connected_nets = len(zone_connected) + geometrically_verified
+                status.incomplete_nets = len(truly_incomplete)
+                status.passed = len(truly_incomplete) == 0
+
+                if truly_incomplete:
+                    status.details = (
+                        f"{len(truly_incomplete)} incomplete"
+                        f" ({status.completion_percent:.0f}% routed)"
+                    )
+                    if zone_connected:
+                        status.details += (
+                            f", {len(zone_connected)} connected via zone fill (unverified)"
+                        )
+                elif zone_connected:
+                    status.details = (
+                        f"{len(zone_connected)} nets connected via zone fill (verified)"
+                    )
+            else:
+                status.passed = True
+                if geometrically_verified > 0:
+                    status.zone_connected_nets = geometrically_verified
+                    status.details = (
+                        f"{geometrically_verified} nets connected via zone fill (verified)"
+                    )
+
+        except Exception as e:
+            # A genuine connectivity checker crash must NOT be coerced into a
+            # clean PASS (issue #3825).  Mark it fail-loud as could-not-verify
+            # so the verdict cannot silently return READY when net
+            # connectivity was never actually checked.
+            logger.warning(f"Connectivity check failed: {e}")
+            status.details = f"Connectivity check could not run: {e}"
+            status.passed = False
+
+        return status
+
+    def _check_isolation(self, pcb: PCB) -> IsolationStatus:
+        """Check HV creepage/clearance isolation (issue #4333, phase 3).
+
+        Thin instance wrapper over the standalone :func:`check_isolation`
+        (issue #5807), which a second caller -- the ``kct readiness`` HV gate
+        -- also uses so both entry points run the identical audit.
+        """
+        return check_isolation(
+            pcb,
+            self.pcb_path,
+            hv_net_class=self.hv_net_class,
+            net_class_map_path=self.net_class_map_path,
+            hv_min_mm=self.hv_min_mm,
+            hv_standard=self.hv_standard,
+            hv_working_voltage=self.hv_working_voltage,
+            hv_pollution_degree=self.hv_pollution_degree,
+            hv_material_group=self.hv_material_group,
+            hv_overvoltage_category=self.hv_overvoltage_category,
+            hv_insulation=self.hv_insulation,
+        )
+
+    def _check_compatibility(self, pcb: PCB) -> ManufacturerCompatibility:
+        """Check manufacturer design rule compatibility."""
+        compat = ManufacturerCompatibility(manufacturer=self.manufacturer.upper())
+
+        try:
+            profile = self._get_profile()
+            rules = profile.get_design_rules(layers=self.layers or 2, copper_oz=self.copper_oz)
+
+            # Get PCB design minimums
+            min_trace = self._get_min_trace_width(pcb)
+            min_clearance = self._get_min_clearance(pcb)
+            min_drill = self._get_min_via_drill(pcb)
+            min_annular = self._get_min_annular_ring(pcb)
+            board_size = self._get_board_size(pcb)
+            layer_count = len(pcb.copper_layers)
+
+            # Check against rules
+            trace_pass = min_trace >= rules.min_trace_width_mm
+            compat.min_trace_width = (min_trace, rules.min_trace_width_mm, trace_pass)
+
+            clearance_pass = min_clearance >= rules.min_clearance_mm
+            compat.min_clearance = (min_clearance, rules.min_clearance_mm, clearance_pass)
+
+            drill_pass = min_drill >= rules.min_via_drill_mm
+            compat.min_via_drill = (min_drill, rules.min_via_drill_mm, drill_pass)
+
+            annular_pass = min_annular >= rules.min_annular_ring_mm
+            compat.min_annular_ring = (
+                min_annular,
+                rules.min_annular_ring_mm,
+                annular_pass,
+            )
+
+            # Board size
+            max_size = (rules.max_board_width_mm, rules.max_board_height_mm)
+            size_pass = board_size[0] <= max_size[0] and board_size[1] <= max_size[1]
+            compat.board_size = (board_size, max_size, size_pass)
+
+            # Layer count
+            layers_pass = layer_count in profile.supported_layers
+            compat.layer_count = (layer_count, profile.supported_layers, layers_pass)
+
+            # Overall pass
+            compat.passed = all(
+                [
+                    trace_pass,
+                    clearance_pass,
+                    drill_pass,
+                    annular_pass,
+                    size_pass,
+                    layers_pass,
+                ]
+            )
+
+        except Exception as e:
+            # A genuine compatibility checker crash must NOT be coerced into a
+            # clean PASS (issue #3825).  compat.passed feeds the verdict gate
+            # directly (NOT_READY when False), so a false PASS here is exactly
+            # the false-READY anti-pattern.  Fail loud as could-not-verify.
+            logger.warning(f"Compatibility check failed: {e}")
+            compat.details = f"Compatibility check could not run: {e}"
+            compat.passed = False
+
+        return compat
+
+    def _check_layer_utilization(self, pcb: PCB) -> LayerUtilization:
+        """Calculate layer utilization statistics."""
+        util = LayerUtilization(layer_count=len(pcb.copper_layers))
+
+        try:
+            # Get board area
+            board_area = self._get_board_area(pcb)
+            if board_area <= 0:
+                return util
+
+            # Calculate copper area per layer
+            for layer in pcb.copper_layers:
+                copper_area = self._calculate_copper_area(pcb, layer.name)
+                if board_area > 0:
+                    util.utilization[layer.name] = round(100.0 * copper_area / board_area, 1)
+
+        except Exception as e:
+            logger.warning(f"Layer utilization calculation failed: {e}")
+
+        return util
+
+    def _estimate_cost(self, pcb: PCB) -> CostEstimate:
+        """Estimate manufacturing cost including components and assembly.
+
+        Uses the full ``ManufacturingCostEstimator.estimate()`` method which
+        derives a synthetic BOM from PCB footprints when no schematic BOM is
+        available, providing component and assembly cost breakdowns alongside
+        PCB fabrication cost.
+
+        When ``self.no_assembly`` is True (from ``--no-assembly`` CLI flag or
+        ``manufacturing.assembly: "none"`` in project.kct), assembly cost is
+        excluded from the estimate.
+        """
+        assembly_mode = "none" if self.no_assembly else self._assembly_mode
+        estimate = CostEstimate(quantity=self.quantity, assembly_mode=assembly_mode)
+
+        try:
+            from kicad_tools.cost import ManufacturingCostEstimator
+
+            estimator = ManufacturingCostEstimator(manufacturer=self.manufacturer)
+
+            # Use the full estimator which handles PCB dimensions, component
+            # costs (from footprint-derived BOM), and assembly costs.
+            full_result = estimator.estimate(
+                pcb=pcb,
+                quantity=self.quantity,
+            )
+
+            estimate.pcb_cost = full_result.pcb.total_cost
+            estimate.component_cost = full_result.component_cost_per_unit * full_result.quantity
+
+            if self.no_assembly:
+                estimate.assembly_cost = 0.0
+                # Total excludes assembly cost
+                estimate.total_cost = (
+                    full_result.total_for_quantity - full_result.assembly.total_cost
+                )
+            else:
+                estimate.assembly_cost = full_result.assembly.total_cost
+                estimate.total_cost = full_result.total_for_quantity
+
+        except Exception as e:
+            logger.warning(f"Cost estimation failed: {e}")
+
+        return estimate
+
+    def _check_sync_drift(self) -> SyncStatus:
+        """Run schematic <-> PCB sync analysis via the Reconciler.
+
+        Reuses :class:`kicad_tools.sync.reconciler.Reconciler` rather than
+        re-implementing set logic so ``kct audit`` and ``kct sync --analyze``
+        always agree on the four sync axes (schematic-only, PCB-only, value
+        mismatch, footprint mismatch).
+
+        Returns:
+            SyncStatus populated with the four counts, example refs (up to
+            10 per axis), and a human-readable details string.
+        """
+        status = SyncStatus()
+
+        try:
+            from kicad_tools.sync.reconciler import Reconciler
+
+            reconciler = Reconciler(
+                schematic=self.schematic_path,
+                pcb=self.pcb_path,
+            )
+            analysis = reconciler.analyze()
+
+            status.schematic_only_count = len(analysis.schematic_orphans)
+            status.pcb_only_count = len(analysis.pcb_orphans)
+            status.value_mismatch_count = len(analysis.value_mismatches)
+            status.footprint_mismatch_count = len(analysis.footprint_mismatches)
+
+            status.schematic_only_refs = list(analysis.schematic_orphans[:10])
+            status.pcb_only_refs = list(analysis.pcb_orphans[:10])
+            status.value_mismatch_refs = [m["reference"] for m in analysis.value_mismatches[:10]]
+            status.footprint_mismatch_refs = [
+                m["reference"] for m in analysis.footprint_mismatches[:10]
+            ]
+
+            # passed == every axis clean
+            status.passed = (
+                status.schematic_only_count == 0
+                and status.pcb_only_count == 0
+                and status.value_mismatch_count == 0
+                and status.footprint_mismatch_count == 0
+            )
+
+            parts: list[str] = []
+            if status.schematic_only_count:
+                parts.append(f"{status.schematic_only_count} schematic-only")
+            if status.pcb_only_count:
+                parts.append(f"{status.pcb_only_count} PCB-only")
+            if status.value_mismatch_count:
+                parts.append(f"{status.value_mismatch_count} value mismatch(es)")
+            if status.footprint_mismatch_count:
+                parts.append(f"{status.footprint_mismatch_count} footprint mismatch(es)")
+            if parts:
+                status.details = "; ".join(parts)
+            else:
+                status.details = "Schematic and PCB are in sync"
+
+        except Exception as e:
+            # Issue #7083: a crashed sync check measured nothing.  It is not
+            # a quiet skip (``skipped`` means "nothing to check") -- flag it
+            # so the verdict caps at WARNING and the table shows NOT RUN.
+            logger.warning(f"Sync drift check failed: {e}")
+            status.could_not_verify = True
+            status.passed = False
+            status.skipped = False
+            status.details = f"Sync check failed: {e}"
+
+        return status
+
+    def _check_orphaned_footprints(self) -> list[ActionItem]:
+        """Legacy: orphan-footprint-only check kept for backward compatibility.
+
+        New code should consult :meth:`_check_sync_drift` which surfaces
+        all four sync axes.  This method still works against the schematic
+        BOM directly so existing tests continue to pass.
+        """
+        items: list[ActionItem] = []
+
+        try:
+            from kicad_tools.schema.bom import extract_bom
+
+            pcb = self._load_pcb()
+            bom = extract_bom(str(self.schematic_path))
+
+            # BOM references: non-virtual items (includes DNP since they
+            # should still have footprints on the PCB)
+            bom_refs = {item.reference for item in bom.items if not item.is_virtual}
+
+            # PCB footprint references
+            pcb_refs = {fp.reference for fp in pcb.footprints}
+
+            orphaned = pcb_refs - bom_refs
+            if orphaned:
+                refs = ", ".join(sorted(orphaned)[:10])
+                suffix = f" (and {len(orphaned) - 10} more)" if len(orphaned) > 10 else ""
+                items.append(
+                    ActionItem(
+                        priority=2,
+                        description=(
+                            f"{len(orphaned)} orphaned footprint(s) on PCB "
+                            f"but not in schematic: {refs}{suffix}"
+                        ),
+                    )
+                )
+
+        except Exception as e:
+            logger.debug(f"Orphaned footprint check skipped: {e}")
+
+        return items
+
+    def _generate_action_items(self, result: AuditResult) -> list[ActionItem]:
+        """Generate prioritized action items from results."""
+        items: list[ActionItem] = []
+
+        # Schematic <-> PCB sync drift.  Schematic-only refs are a hard
+        # fail (priority 1) because they produce an unbuildable BOM: the
+        # CPL/BOM shipped to the fab references parts with no pads on the
+        # board.  Value/footprint mismatches and PCB-only orphans are
+        # priority 2 (important).
+        sync = result.sync
+        if sync.could_not_verify:
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        "Schematic <-> PCB sync check could not run"
+                        + (f" ({sync.details})" if sync.details else "")
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        if sync.schematic_only_count > 0:
+            refs = ", ".join(sync.schematic_only_refs[:10])
+            suffix = (
+                f" (and {sync.schematic_only_count - 10} more)"
+                if sync.schematic_only_count > 10
+                else ""
+            )
+            items.append(
+                ActionItem(
+                    priority=1,
+                    description=(
+                        f"{sync.schematic_only_count} component(s) in schematic "
+                        f"missing from PCB -- BOM will be unbuildable: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        if sync.pcb_only_count > 0:
+            refs = ", ".join(sync.pcb_only_refs[:10])
+            suffix = f" (and {sync.pcb_only_count - 10} more)" if sync.pcb_only_count > 10 else ""
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        f"{sync.pcb_only_count} orphaned footprint(s) on PCB "
+                        f"but not in schematic: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        if sync.value_mismatch_count > 0:
+            refs = ", ".join(sync.value_mismatch_refs[:10])
+            suffix = (
+                f" (and {sync.value_mismatch_count - 10} more)"
+                if sync.value_mismatch_count > 10
+                else ""
+            )
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        f"{sync.value_mismatch_count} component(s) have different "
+                        f"values in schematic vs PCB: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        if sync.footprint_mismatch_count > 0:
+            refs = ", ".join(sync.footprint_mismatch_refs[:10])
+            suffix = (
+                f" (and {sync.footprint_mismatch_count - 10} more)"
+                if sync.footprint_mismatch_count > 10
+                else ""
+            )
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        f"{sync.footprint_mismatch_count} component(s) have different "
+                        f"footprints in schematic vs PCB: {refs}{suffix}"
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
+        # ERC requested but never ran (issue #7083)
+        if result.erc.could_not_verify:
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        "ERC could not run -- schematic not checked"
+                        + (f" ({result.erc.details})" if result.erc.details else "")
+                    ),
+                    # No schematic on disk (issue #7136): there is nothing
+                    # to hand kicad-cli, so don't suggest a command that
+                    # would fail on a missing file.
+                    command=(
+                        f"kicad-cli sch erc {self.schematic_path}"
+                        if self.schematic_path.exists()
+                        else None
+                    ),
+                )
+            )
+
+        # Blocking ERC errors (electrical issues)
+        if result.erc.blocking_error_count > 0:
+            items.append(
+                ActionItem(
+                    priority=1,
+                    description=f"Fix {result.erc.blocking_error_count} blocking ERC errors in schematic"
+                    + (f" ({result.erc.details})" if result.erc.details else ""),
+                    command=f"kicad-cli sch erc {self.schematic_path}",
+                )
+            )
+
+        # Non-blocking ERC errors (demoted to warnings)
+        non_blocking_count = result.erc.error_count - result.erc.blocking_error_count
+        if non_blocking_count > 0:
+            items.append(
+                ActionItem(
+                    priority=3,
+                    description=f"Review {non_blocking_count} non-blocking ERC warnings (library/footprint checks)",
+                    command=f"kicad-cli sch erc {self.schematic_path}",
+                )
+            )
+
+        # DRC errors
+        if result.drc.blocking_count > 0:
+            items.append(
+                ActionItem(
+                    priority=1,
+                    description=f"Fix {result.drc.blocking_count} blocking DRC violations"
+                    + (f" ({result.drc.details})" if result.drc.details else ""),
+                    command=f"kct check {self.pcb_path} --mfr {self.manufacturer}",
+                )
+            )
+
+        # Connectivity issues
+        if not result.connectivity.passed:
+            if result.connectivity.has_zones:
+                # Board has zone definitions — connectivity is advisory.
+                # Zone fills may resolve the incomplete nets once refilled
+                # (issue #7083: point at the automated refill, not KiCad).
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=(
+                            f"Refill zones to verify {result.connectivity.incomplete_nets}"
+                            " nets that appear incomplete but may be connected via zone"
+                            " fills, then re-run kct audit"
+                        ),
+                        command=f"kct zones fill {self.pcb_path}",
+                    )
+                )
+            else:
+                # No zones — incomplete nets are a hard failure.
+                items.append(
+                    ActionItem(
+                        priority=1,
+                        description=f"Complete routing: {result.connectivity.incomplete_nets} nets incomplete"
+                        + (
+                            f" ({result.connectivity.completion_percent:.0f}% complete)"
+                            if result.connectivity.completion_percent < 100
+                            else ""
+                        ),
+                        command=f"kct validate connectivity {self.pcb_path}",
+                    )
+                )
+                # Suggest stitching vias if GND net is incomplete
+                items.append(
+                    ActionItem(
+                        priority=2,
+                        description="Add stitching vias for GND/power planes",
+                        command=f"kct stitch {self.pcb_path} --net GND",
+                    )
+                )
+
+        # Zone-connected nets advisory (even when connectivity passes)
+        if result.connectivity.zone_connected_nets > 0:
+            items.append(
+                ActionItem(
+                    priority=3,
+                    description=(
+                        f"Refill zones to verify"
+                        f" {result.connectivity.zone_connected_nets} zone-connected nets,"
+                        " then re-run kct audit"
+                    ),
+                    command=f"kct zones fill {self.pcb_path}",
+                )
+            )
+
+        # Explicit non-HV declarations (issue #8278): disclosed, never silent.
+        for net_name, reason in sorted(result.isolation.declared_non_hv_nets.items()):
+            items.append(
+                ActionItem(
+                    priority=3,
+                    description=(
+                        f"Confirm mains-named net {net_name} is not mains/HV: declared "
+                        f"non-HV in the net-class map ({reason})"
+                    ),
+                    command=None,
+                )
+            )
+
+        # Pour nets without zone definitions advisory
+        if result.connectivity.pour_net_names:
+            for net_name in result.connectivity.pour_net_names:
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=(f"Add zone for {net_name} on appropriate copper layer"),
+                        command=None,
+                    )
+                )
+
+        # Manufacturer compatibility
+        if not result.compatibility.passed:
+            compat = result.compatibility
+
+            if not compat.min_trace_width[2]:
+                items.append(
+                    ActionItem(
+                        priority=1,
+                        description=f"Increase min trace width: {compat.min_trace_width[0]:.3f}mm < {compat.min_trace_width[1]:.3f}mm required",
+                    )
+                )
+
+            if not compat.min_clearance[2]:
+                items.append(
+                    ActionItem(
+                        priority=1,
+                        description=f"Increase min clearance: {compat.min_clearance[0]:.3f}mm < {compat.min_clearance[1]:.3f}mm required",
+                    )
+                )
+
+            if not compat.min_via_drill[2]:
+                items.append(
+                    ActionItem(
+                        priority=1,
+                        description=f"Increase min via drill: {compat.min_via_drill[0]:.3f}mm < {compat.min_via_drill[1]:.3f}mm required",
+                    )
+                )
+
+            if not compat.board_size[2]:
+                items.append(
+                    ActionItem(
+                        priority=1,
+                        description=f"Board too large: {compat.board_size[0][0]:.1f}x{compat.board_size[0][1]:.1f}mm > {compat.board_size[1][0]:.1f}x{compat.board_size[1][1]:.1f}mm max",
+                    )
+                )
+
+        # DRC warnings (lower priority)
+        if result.drc.warning_count > 0:
+            items.append(
+                ActionItem(
+                    priority=3,
+                    description=f"Review {result.drc.warning_count} DRC warnings",
+                    command=f"kct check {self.pcb_path} --mfr {self.manufacturer} --verbose",
+                )
+            )
+
+        # Analog component advisory
+        try:
+            pcb = self._load_pcb()
+            from kicad_tools.analysis.analog_detect import detect_analog_components
+
+            analog = detect_analog_components(pcb)
+            for component in analog:
+                # Name each detected component (reference + value + reason)
+                # so the engineer knows WHICH parts need analog layout care,
+                # not just how many. Detection logic itself is unchanged --
+                # this only surfaces the detail the detector already produced.
+                ref = component.reference or "?"
+                value = component.value.strip()
+                ref_value = f"{ref} ({value})" if value else ref
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=(
+                            f"Analog-sensitive: {ref_value} — {component.reason}"
+                            "; manual layout review recommended"
+                        ),
+                        command=None,
+                    )
+                )
+        except Exception:
+            logger.debug("Analog component detection skipped", exc_info=True)
+
+        # Analog net advisory (Phase 2, issue #3170).
+        #
+        # Mirror the per-component block above at the NET level: name each
+        # detected analog net (audio / analog supply / analog ground /
+        # analog signal) so the engineer knows WHICH nets need analog layout
+        # care, and flag an isolated analog ground whose discrete bridge
+        # (ferrite / net-tie) to digital ground is missing.  Like the
+        # component block, this degrades gracefully -- a detection failure is
+        # logged at debug and never raises.
+        try:
+            pcb = self._load_pcb()
+            from kicad_tools.analysis.analog_detect import (
+                check_analog_ground_bridge,
+                detect_analog_nets,
+            )
+
+            for net in detect_analog_nets(pcb):
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=f"Analog net: {net.name} — {net.reason}",
+                        command=None,
+                    )
+                )
+
+            for warning in check_analog_ground_bridge(pcb):
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=f"Audit: {warning}",
+                        command=None,
+                    )
+                )
+        except Exception:
+            logger.debug("Analog net detection skipped", exc_info=True)
+
+        return sorted(items, key=lambda x: x.priority)
+
+    # Helper methods for extracting PCB metrics
+
+    def _get_min_trace_width(self, pcb: PCB) -> float:
+        """Get minimum trace width in PCB."""
+        min_width = float("inf")
+        for seg in pcb.segments:
+            if seg.width < min_width:
+                min_width = seg.width
+        return min_width if min_width != float("inf") else 0.15  # Default
+
+    def _get_min_clearance(self, pcb: PCB) -> float:
+        """Get minimum clearance from design rules.
+
+        Returns the minimum clearance from PCB setup, or a JLCPCB-compliant
+        default of 0.2mm (well above 0.127mm minimum) when not available.
+        """
+        # Return from PCB setup if available
+        if hasattr(pcb, "setup") and pcb.setup:
+            return getattr(pcb.setup, "min_clearance", 0.2)
+        return 0.2  # Default - JLCPCB min is 0.127mm
+
+    def _get_min_via_drill(self, pcb: PCB) -> float:
+        """Get minimum *through/blind* via drill size.
+
+        Micro vias are excluded: they are laser-drilled and carry their own
+        (much smaller) drill floor — e.g. jlcpcb-tier1 allows 0.10 mm
+        microvia drills while requiring 0.20 mm mechanical via drills, and
+        the exported ``.kicad_pro`` models them as separate
+        ``min_via_hole`` / ``min_microvia_drill`` constraints.  Lumping
+        microvias into this minimum compared a legal 0.15 mm in-pad rescue
+        microvia against the 0.20 mm mechanical limit and produced a false
+        "Increase min via drill" CRITICAL action item (and a NOT_READY
+        verdict) on a board kicad-cli DRC passes at the same profile.
+        """
+        min_drill = float("inf")
+        for via in pcb.vias:
+            if getattr(via, "via_type", None) == "micro":
+                continue
+            if via.drill < min_drill:
+                min_drill = via.drill
+        return min_drill if min_drill != float("inf") else 0.3  # Default
+
+    def _get_min_annular_ring(self, pcb: PCB) -> float:
+        """Get minimum *through/blind* via annular ring.
+
+        Returns the minimum annular ring from actual vias, or a JLCPCB-compliant
+        default of 0.15mm (exactly at JLCPCB 2-layer minimum) when no vias exist.
+
+        Micro vias are excluded for the same reason as in
+        :meth:`_get_min_via_drill`: laser microvias carry their own annular
+        floor (the tier-1 project generator emits ``min_via_annular_width``
+        0.05 mm, which kicad-cli enforces), so comparing a legal 0.075 mm
+        microvia annular against the 0.10 mm mechanical-via limit
+        manufactured a false compatibility failure / NOT_READY verdict.
+        """
+        min_annular = float("inf")
+        for via in pcb.vias:
+            if getattr(via, "via_type", None) == "micro":
+                continue
+            annular = (via.size - via.drill) / 2
+            if annular < min_annular:
+                min_annular = annular
+        return min_annular if min_annular != float("inf") else 0.15  # Default - JLCPCB min
+
+    def _get_board_size(self, pcb: PCB) -> tuple[float, float]:
+        """Get board dimensions (width, height) in mm."""
+        if hasattr(pcb, "edge_cuts_bbox"):
+            bbox = pcb.edge_cuts_bbox
+            if bbox:
+                return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+        # Fallback: calculate from edge cuts
+        min_x = min_y = float("inf")
+        max_x = max_y = float("-inf")
+
+        for item in pcb.graphic_items:
+            if item.layer == "Edge.Cuts":
+                if hasattr(item, "start"):
+                    min_x = min(min_x, item.start[0])
+                    min_y = min(min_y, item.start[1])
+                    max_x = max(max_x, item.start[0])
+                    max_y = max(max_y, item.start[1])
+                if hasattr(item, "end"):
+                    min_x = min(min_x, item.end[0])
+                    min_y = min(min_y, item.end[1])
+                    max_x = max(max_x, item.end[0])
+                    max_y = max(max_y, item.end[1])
+
+        if min_x != float("inf"):
+            return (max_x - min_x, max_y - min_y)
+
+        return (100.0, 100.0)  # Default
+
+    def _get_board_area(self, pcb: PCB) -> float:
+        """Get board area in sq mm."""
+        width, height = self._get_board_size(pcb)
+        return width * height
+
+    def _calculate_copper_area(self, pcb: PCB, layer: str) -> float:
+        """Calculate approximate copper area on a layer."""
+        area = 0.0
+
+        # Track segments
+        for seg in pcb.segments:
+            if seg.layer == layer:
+                dx = seg.end[0] - seg.start[0]
+                dy = seg.end[1] - seg.start[1]
+                length = (dx * dx + dy * dy) ** 0.5
+                area += length * seg.width
+
+        # Pads (approximate)
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if layer in pad.layers or "*.Cu" in pad.layers:
+                    # Approximate pad area
+                    if hasattr(pad, "size"):
+                        area += pad.size[0] * pad.size[1]
+
+        # Zones (filled areas)
+        for zone in pcb.zones:
+            if zone.layer == layer and zone.filled_polygons:
+                for poly in zone.filled_polygons:
+                    # Simple polygon area calculation
+                    area += self._polygon_area(poly)
+
+        return area
+
+    def _polygon_area(self, points: list[tuple[float, float]]) -> float:
+        """Calculate polygon area using shoelace formula."""
+        n = len(points)
+        if n < 3:
+            return 0.0
+
+        area = 0.0
+        for i in range(n):
+            j = (i + 1) % n
+            area += points[i][0] * points[j][1]
+            area -= points[j][0] * points[i][1]
+
+        return abs(area) / 2.0

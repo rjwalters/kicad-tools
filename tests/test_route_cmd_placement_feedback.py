@@ -1,0 +1,1316 @@
+"""Tests for ``--placement-feedback`` CLI plumbing.
+
+Issue #2595: expose ``Autorouter.route_with_placement_feedback`` via
+``kct route --placement-feedback`` so structurally-unrouteable boards
+(e.g. chorus-test) can opt into the closed-loop placement adjuster.
+
+These tests cover:
+
+1. **Parser** -- the central CLI parser accepts the new flags and the
+   defaults are correct (default = off, byte-identical with prior behavior).
+2. **Forwarding** -- ``kct route`` hands the flags to ``route_cmd.main``
+   verbatim (issue #7017), and *does not invent* them when not set
+   (the regression invariant from the acceptance criteria: boards 01-05
+   must produce identical routes when ``--placement-feedback`` is not
+   passed).
+3. **Helpers** -- the small helper functions in route_cmd.py
+   (``_parse_ref_list``, ``_auto_detect_anchored_refs``,
+   ``_resolve_placement_feedback_anchors``, ``_placement_diff_path``)
+   behave correctly for representative inputs.
+4. **PlacementFeedbackLoop fixed_refs** -- strategies that touch any
+   anchored ref are filtered out by the loop, and strategies that
+   exceed ``max_movement`` are filtered out.
+
+These are unit tests; the end-to-end "chorus-test routes 44/46 nets"
+acceptance criterion is covered by an integration test landed
+separately (``tests/integration/test_chorus_test_routing.py``) which
+runs the full router pipeline against the actual board.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from kicad_tools.cli import main as cli_main
+from tests.route_cli import kct_route, route_args
+
+# ---------------------------------------------------------------------------
+# Parser tests
+# ---------------------------------------------------------------------------
+
+
+class TestPlacementFeedbackParser:
+    """Centralized parser accepts the new flags and the defaults are correct."""
+
+    def test_default_off(self):
+        args = route_args(["test.kicad_pcb"])
+        assert args.placement_feedback is False
+        assert args.placement_feedback_budget == 3
+        assert args.placement_feedback_max_movement == 5.0
+        assert args.placement_feedback_anchor is None
+        assert args.placement_feedback_no_anchor is None
+
+    def test_flag_enables(self):
+        args = route_args(["test.kicad_pcb", "--placement-feedback"])
+        assert args.placement_feedback is True
+
+    def test_no_flag_disables(self):
+        args = route_args(
+            [
+                "test.kicad_pcb",
+                "--placement-feedback",
+                "--no-placement-feedback",
+            ]
+        )
+        assert args.placement_feedback is False
+
+    def test_budget_parses(self):
+        args = route_args(
+            [
+                "test.kicad_pcb",
+                "--placement-feedback",
+                "--placement-feedback-budget",
+                "5",
+            ]
+        )
+        assert args.placement_feedback_budget == 5
+
+    def test_max_movement_parses(self):
+        args = route_args(
+            [
+                "test.kicad_pcb",
+                "--placement-feedback-max-movement",
+                "2.5",
+            ]
+        )
+        assert args.placement_feedback_max_movement == 2.5
+
+    def test_anchor_parses(self):
+        args = route_args(
+            [
+                "test.kicad_pcb",
+                "--placement-feedback-anchor",
+                "U5,U7,U9",
+            ]
+        )
+        assert args.placement_feedback_anchor == "U5,U7,U9"
+
+    def test_help_lists_flags(self):
+        import contextlib
+        from io import StringIO
+
+        buf = StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli_main(["route", "--help"])
+        help_text = buf.getvalue()
+        assert "--placement-feedback" in help_text
+        assert "--placement-feedback-budget" in help_text
+        assert "--placement-feedback-max-movement" in help_text
+        assert "--placement-feedback-anchor" in help_text
+        # Issue #2606: new flags surface in help text.
+        assert "--placement-feedback-stagnation-patience" in help_text
+        assert "--placement-feedback-outer-timeout" in help_text
+
+    # Issue #2606: stagnation-patience + outer-timeout flag parsing.
+
+    def test_stagnation_patience_default(self):
+        args = route_args(["test.kicad_pcb"])
+        assert args.placement_feedback_stagnation_patience == 3
+
+    def test_stagnation_patience_parses(self):
+        args = route_args(
+            [
+                "test.kicad_pcb",
+                "--placement-feedback-stagnation-patience",
+                "5",
+            ]
+        )
+        assert args.placement_feedback_stagnation_patience == 5
+
+    def test_outer_timeout_default(self):
+        args = route_args(["test.kicad_pcb"])
+        assert args.placement_feedback_outer_timeout is None
+
+    def test_outer_timeout_parses(self):
+        args = route_args(
+            [
+                "test.kicad_pcb",
+                "--placement-feedback-outer-timeout",
+                "60.0",
+            ]
+        )
+        assert args.placement_feedback_outer_timeout == 60.0
+
+
+# ---------------------------------------------------------------------------
+# Forwarding tests -- the regression invariant
+# ---------------------------------------------------------------------------
+
+
+class TestPlacementFeedbackForwarding:
+    """``kct route`` hands the placement-feedback flags to the router verbatim.
+
+    The acceptance criterion for issue #2595 explicitly requires:
+
+        > boards 01-05 must produce identical routes when
+        > --placement-feedback is not passed
+
+    Since issue #7017 ``kct route`` passes its argv straight through, so an
+    unset flag can never be injected; these tests pin that and check the
+    real route parser reads each forwarded value.
+    """
+
+    PLACEMENT_FLAGS = (
+        "--placement-feedback",
+        "--placement-feedback-budget",
+        "--placement-feedback-max-movement",
+        "--placement-feedback-anchor",
+        "--placement-feedback-no-anchor",
+        "--placement-feedback-stagnation-patience",
+        "--placement-feedback-outer-timeout",
+    )
+
+    def test_not_forwarded_when_disabled(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert not set(self.PLACEMENT_FLAGS) & set(forwarded)
+        assert args.placement_feedback is False
+        assert args.placement_feedback_stagnation_patience == 3
+        assert args.placement_feedback_outer_timeout is None
+
+    def test_forwarded_when_enabled(self):
+        forwarded, args = kct_route(["test.kicad_pcb", "--placement-feedback"])
+        assert "--placement-feedback" in forwarded
+        assert args.placement_feedback is True
+
+    @pytest.mark.parametrize(
+        ("flag", "value", "dest", "expected"),
+        [
+            ("--placement-feedback-budget", "5", "placement_feedback_budget", 5),
+            ("--placement-feedback-max-movement", "2.5", "placement_feedback_max_movement", 2.5),
+            ("--placement-feedback-anchor", "J1,U1", "placement_feedback_anchor", "J1,U1"),
+            ("--placement-feedback-no-anchor", "J2", "placement_feedback_no_anchor", "J2"),
+            (
+                "--placement-feedback-stagnation-patience",
+                "5",
+                "placement_feedback_stagnation_patience",
+                5,
+            ),
+            (
+                "--placement-feedback-outer-timeout",
+                "120",
+                "placement_feedback_outer_timeout",
+                120.0,
+            ),
+        ],
+    )
+    def test_value_flag_forwarded(self, flag, value, dest, expected):
+        forwarded, args = kct_route(["test.kicad_pcb", "--placement-feedback", flag, value])
+        assert forwarded[forwarded.index(flag) + 1] == value
+        assert getattr(args, dest) == expected
+
+
+# ---------------------------------------------------------------------------
+# Helper tests
+# ---------------------------------------------------------------------------
+
+
+class _MockFootprint:
+    """Mock footprint matching the schema interface used by the helpers."""
+
+    def __init__(self, reference: str, locked: bool = False):
+        self.reference = reference
+        self.locked = locked
+        self.position = (0.0, 0.0)
+        self.rotation = 0.0
+
+
+class _MockPCB:
+    def __init__(self, footprints):
+        self.footprints = list(footprints)
+
+
+class TestParseRefList:
+    def test_none(self):
+        from kicad_tools.cli.route_cmd import _parse_ref_list
+
+        assert _parse_ref_list(None) == set()
+
+    def test_empty(self):
+        from kicad_tools.cli.route_cmd import _parse_ref_list
+
+        assert _parse_ref_list("") == set()
+
+    def test_single(self):
+        from kicad_tools.cli.route_cmd import _parse_ref_list
+
+        assert _parse_ref_list("U5") == {"U5"}
+
+    def test_multiple(self):
+        from kicad_tools.cli.route_cmd import _parse_ref_list
+
+        assert _parse_ref_list("U5,U7,U9") == {"U5", "U7", "U9"}
+
+    def test_whitespace_stripped(self):
+        from kicad_tools.cli.route_cmd import _parse_ref_list
+
+        assert _parse_ref_list(" U5 , U7 , U9 ") == {"U5", "U7", "U9"}
+
+    def test_empty_entries_dropped(self):
+        from kicad_tools.cli.route_cmd import _parse_ref_list
+
+        assert _parse_ref_list("U5,,U7,") == {"U5", "U7"}
+
+
+class TestAutoDetectAnchoredRefs:
+    def test_connectors_anchored(self):
+        from kicad_tools.cli.route_cmd import _auto_detect_anchored_refs
+
+        pcb = _MockPCB(
+            [
+                _MockFootprint("U1"),
+                _MockFootprint("J1"),
+                _MockFootprint("J2"),
+                _MockFootprint("R1"),
+            ]
+        )
+        anchored = _auto_detect_anchored_refs(pcb)
+        assert anchored == {"J1", "J2"}
+
+    def test_headers_anchored(self):
+        """P-prefixed headers/test-points are anchored too."""
+        from kicad_tools.cli.route_cmd import _auto_detect_anchored_refs
+
+        pcb = _MockPCB([_MockFootprint("P1"), _MockFootprint("R1")])
+        anchored = _auto_detect_anchored_refs(pcb)
+        assert anchored == {"P1"}
+
+    def test_locked_anchored(self):
+        """Footprints with locked=True are anchored regardless of prefix."""
+        from kicad_tools.cli.route_cmd import _auto_detect_anchored_refs
+
+        pcb = _MockPCB([_MockFootprint("U5", locked=True), _MockFootprint("U7")])
+        anchored = _auto_detect_anchored_refs(pcb)
+        assert "U5" in anchored
+        assert "U7" not in anchored
+
+    def test_passives_movable(self):
+        """R*, C*, L*, U* (without locked) are NOT anchored."""
+        from kicad_tools.cli.route_cmd import _auto_detect_anchored_refs
+
+        pcb = _MockPCB(
+            [
+                _MockFootprint("R1"),
+                _MockFootprint("C1"),
+                _MockFootprint("L1"),
+                _MockFootprint("U1"),
+                _MockFootprint("Q1"),
+                _MockFootprint("D1"),
+                _MockFootprint("LED1"),
+            ]
+        )
+        anchored = _auto_detect_anchored_refs(pcb)
+        assert anchored == set()
+
+    def test_empty_pcb(self):
+        from kicad_tools.cli.route_cmd import _auto_detect_anchored_refs
+
+        pcb = _MockPCB([])
+        assert _auto_detect_anchored_refs(pcb) == set()
+
+
+class TestResolvePlacementFeedbackAnchors:
+    def test_fixed_copper_terminals_cannot_be_selected_for_feedback(self, tmp_path):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+        from kicad_tools.placement.routing import analyze_routing_placement
+        from kicad_tools.router.placement_delta import PlacementDelta
+        from kicad_tools.router.placement_feedback import PlacementDeltaFeedbackLoop
+        from kicad_tools.schema.pcb import PCB
+        from tests.test_routing_placement_disposition import board_text
+
+        path = tmp_path / "mixed.kicad_pcb"
+        path.write_text(board_text())
+        disposition = analyze_routing_placement(path, coupled_groups=[("BAD", "PARTNER")])
+        args = SimpleNamespace(
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor="X1,X2,X3,P1,P2",
+            _placement_disposition=disposition,
+        )
+        pcb = PCB.load(path)
+        anchors = _resolve_placement_feedback_anchors(pcb, args)
+        loop = PlacementDeltaFeedbackLoop(
+            router=SimpleNamespace(), pcb=pcb, fixed_refs=anchors, verbose=False
+        )
+        deltas = [
+            PlacementDelta(kind="rotate_align", target_ref=ref, net_name="GOOD", rotation_delta=90)
+            for ref in ("X1", "X2", "X3", "P1", "P2", "R1")
+        ]
+        skipped, reasons = [], []
+        selected = loop._select_delta(deltas, skipped, reasons)
+        assert selected is not None and selected[0].target_ref == "R1"
+        assert {delta.target_ref for delta in skipped} == {"X1", "X2", "X3", "P1", "P2"}
+        assert all("anchored" in reason for reason in reasons)
+        assert path.read_text() == board_text()
+
+    def test_combines_auto_and_user(self):
+        from kicad_tools.cli.route_cmd import (
+            _resolve_placement_feedback_anchors,
+        )
+
+        pcb = _MockPCB([_MockFootprint("J1"), _MockFootprint("U5")])
+        args = SimpleNamespace(
+            placement_feedback_anchor="U5,U7",
+            placement_feedback_no_anchor=None,
+        )
+        anchors = _resolve_placement_feedback_anchors(pcb, args)
+        assert anchors == {"J1", "U5", "U7"}
+
+    def test_no_anchor_subtracts(self):
+        from kicad_tools.cli.route_cmd import (
+            _resolve_placement_feedback_anchors,
+        )
+
+        pcb = _MockPCB([_MockFootprint("J1"), _MockFootprint("J2")])
+        args = SimpleNamespace(
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor="J2",
+        )
+        anchors = _resolve_placement_feedback_anchors(pcb, args)
+        assert anchors == {"J1"}
+
+    def test_no_anchor_overrides_user_anchor(self):
+        """If a ref appears in both --anchor and --no-anchor, --no-anchor wins."""
+        from kicad_tools.cli.route_cmd import (
+            _resolve_placement_feedback_anchors,
+        )
+
+        pcb = _MockPCB([])
+        args = SimpleNamespace(
+            placement_feedback_anchor="U5",
+            placement_feedback_no_anchor="U5",
+        )
+        anchors = _resolve_placement_feedback_anchors(pcb, args)
+        assert anchors == set()
+
+
+class TestAnchorRefValidation:
+    """Issue #4151: warn on --placement-feedback-anchor refs that match
+    no footprint on the board (same silently-inert-configuration failure
+    class as #4149)."""
+
+    def test_unknown_anchor_ref_warns(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("U1"), _MockFootprint("J1")])
+        args = SimpleNamespace(
+            placement_feedback_anchor="U1,NOTAREALREF",
+            placement_feedback_no_anchor=None,
+        )
+        anchors = _resolve_placement_feedback_anchors(pcb, args)
+        # Matched ref still anchors correctly.
+        assert "U1" in anchors
+        assert "NOTAREALREF" in anchors  # still absorbed (tolerant, non-fatal)
+        out = capsys.readouterr().out
+        assert "not found on board" in out
+        assert "NOTAREALREF" in out
+
+    def test_unknown_no_anchor_ref_warns(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("J1")])
+        args = SimpleNamespace(
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor="TYPO9",
+        )
+        _resolve_placement_feedback_anchors(pcb, args)
+        out = capsys.readouterr().out
+        assert "not found on board" in out
+        assert "TYPO9" in out
+
+    def test_all_known_refs_no_warning(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("U1"), _MockFootprint("U2")])
+        args = SimpleNamespace(
+            placement_feedback_anchor="U1",
+            placement_feedback_no_anchor="U2",
+        )
+        _resolve_placement_feedback_anchors(pcb, args)
+        out = capsys.readouterr().out
+        assert "not found on board" not in out
+
+    def test_quiet_suppresses_warning(self, capsys):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+
+        pcb = _MockPCB([_MockFootprint("U1")])
+        args = SimpleNamespace(
+            placement_feedback_anchor="GHOST1",
+            placement_feedback_no_anchor=None,
+        )
+        _resolve_placement_feedback_anchors(pcb, args, quiet=True)
+        out = capsys.readouterr().out
+        assert out == ""
+
+
+class TestPlacementDiffPath:
+    def test_explicit_output(self, tmp_path: Path):
+        from kicad_tools.cli.route_cmd import _placement_diff_path
+
+        out = tmp_path / "routed.kicad_pcb"
+        args = SimpleNamespace(output=str(out))
+        diff = _placement_diff_path(args, tmp_path / "input.kicad_pcb")
+        assert diff.name == "routed_placement_diff.json"
+        assert diff.parent == tmp_path
+
+    def test_default_output(self, tmp_path: Path):
+        from kicad_tools.cli.route_cmd import _placement_diff_path
+
+        pcb = tmp_path / "board.kicad_pcb"
+        args = SimpleNamespace(output=None)
+        diff = _placement_diff_path(args, pcb)
+        # default routed name is <stem>_routed.kicad_pcb so diff is
+        # <stem>_routed_placement_diff.json beside the routed PCB.
+        assert diff.name == "board_routed_placement_diff.json"
+        assert diff.parent == tmp_path
+
+
+# ---------------------------------------------------------------------------
+# PlacementFeedbackLoop fixed_refs / max_movement filtering
+# ---------------------------------------------------------------------------
+
+
+class TestPlacementFeedbackLoopFiltering:
+    """The loop filters out strategies that touch anchored refs or exceed
+    the movement budget BEFORE applying them."""
+
+    def _make_strategy(self, ref: str, new_xy: tuple[float, float]):
+        from kicad_tools.recovery import (
+            Action,
+            Difficulty,
+            ResolutionStrategy,
+            StrategyType,
+        )
+
+        return ResolutionStrategy(
+            type=StrategyType.MOVE_COMPONENT,
+            difficulty=Difficulty.EASY,
+            confidence=0.85,
+            actions=[
+                Action(
+                    type="move",
+                    target=ref,
+                    params={"x": new_xy[0], "y": new_xy[1]},
+                )
+            ],
+            affected_components=[ref],
+        )
+
+    def test_strategy_touches_fixed_refs(self):
+        """A strategy that moves an anchored ref is filtered out."""
+        from kicad_tools.router.placement_feedback import (
+            PlacementFeedbackLoop,
+        )
+
+        loop = PlacementFeedbackLoop.__new__(PlacementFeedbackLoop)
+        loop.pcb = None
+        loop.fixed_refs = {"J1", "U5"}
+        loop.max_movement = None
+
+        s_anchored = self._make_strategy("U5", (10.0, 10.0))
+        s_movable = self._make_strategy("U7", (10.0, 10.0))
+
+        assert loop._strategy_touches_fixed_refs(s_anchored) is True
+        assert loop._strategy_touches_fixed_refs(s_movable) is False
+
+    def test_strategy_touches_fixed_refs_via_action_target(self):
+        """Falls through to action.target when affected_components is empty."""
+        from kicad_tools.recovery import (
+            Action,
+            Difficulty,
+            ResolutionStrategy,
+            StrategyType,
+        )
+        from kicad_tools.router.placement_feedback import (
+            PlacementFeedbackLoop,
+        )
+
+        loop = PlacementFeedbackLoop.__new__(PlacementFeedbackLoop)
+        loop.pcb = None
+        loop.fixed_refs = {"J1"}
+        loop.max_movement = None
+
+        s = ResolutionStrategy(
+            type=StrategyType.MOVE_COMPONENT,
+            difficulty=Difficulty.EASY,
+            confidence=0.85,
+            actions=[
+                Action(type="move", target="J1", params={"x": 10.0, "y": 10.0}),
+            ],
+            affected_components=[],  # intentionally empty
+        )
+
+        assert loop._strategy_touches_fixed_refs(s) is True
+
+    def test_strategy_within_movement_budget_under_cap(self):
+        """A 3mm move is within a 5mm cap."""
+        from kicad_tools.router.placement_feedback import (
+            PlacementFeedbackLoop,
+        )
+
+        pcb = _MockPCB([_MockFootprint("U7")])
+        # U7 starts at (0, 0) -- move to (3, 0) is a 3mm move
+        loop = PlacementFeedbackLoop.__new__(PlacementFeedbackLoop)
+        loop.pcb = pcb
+        loop.fixed_refs = set()
+        loop.max_movement = 5.0
+
+        s = self._make_strategy("U7", (3.0, 0.0))
+        assert loop._strategy_within_movement_budget(s) is True
+
+    def test_strategy_within_movement_budget_over_cap(self):
+        """A 10mm move exceeds a 5mm cap and is rejected."""
+        from kicad_tools.router.placement_feedback import (
+            PlacementFeedbackLoop,
+        )
+
+        pcb = _MockPCB([_MockFootprint("U7")])
+        loop = PlacementFeedbackLoop.__new__(PlacementFeedbackLoop)
+        loop.pcb = pcb
+        loop.fixed_refs = set()
+        loop.max_movement = 5.0
+
+        s = self._make_strategy("U7", (10.0, 0.0))
+        assert loop._strategy_within_movement_budget(s) is False
+
+    def test_strategy_within_movement_budget_disabled(self):
+        """max_movement=None means anything goes."""
+        from kicad_tools.router.placement_feedback import (
+            PlacementFeedbackLoop,
+        )
+
+        pcb = _MockPCB([_MockFootprint("U7")])
+        loop = PlacementFeedbackLoop.__new__(PlacementFeedbackLoop)
+        loop.pcb = pcb
+        loop.fixed_refs = set()
+        loop.max_movement = None
+
+        s = self._make_strategy("U7", (1000.0, 0.0))
+        assert loop._strategy_within_movement_budget(s) is True
+
+    def test_loop_propagates_fixed_refs_and_max_movement(self):
+        """``__init__`` stores fixed_refs and max_movement on the instance."""
+        from kicad_tools.router.placement_feedback import (
+            PlacementFeedbackLoop,
+        )
+
+        # Use a stub router; we don't run the loop, just inspect state.
+        class _StubRouter:
+            pass
+
+            def get_failed_nets(self):
+                return []
+
+        loop = PlacementFeedbackLoop(
+            router=_StubRouter(),
+            pcb=None,
+            verbose=False,
+            fixed_refs={"J1", "J2", "U5"},
+            max_movement=3.0,
+        )
+        assert loop.fixed_refs == {"J1", "J2", "U5"}
+        assert loop.max_movement == 3.0
+
+
+# ---------------------------------------------------------------------------
+# PlacementDiffEntry / placement diff JSON
+# ---------------------------------------------------------------------------
+
+
+class TestPlacementDiffEntry:
+    def test_to_dict_round_trip(self):
+        from kicad_tools.router import PlacementDiffEntry
+
+        entry = PlacementDiffEntry(
+            ref="U7",
+            old_xy=(10.0, 20.0),
+            new_xy=(13.0, 24.0),
+            rotation_delta=90.0,
+        )
+        d = entry.to_dict()
+        assert d["ref"] == "U7"
+        assert d["old_xy"] == [10.0, 20.0]
+        assert d["new_xy"] == [13.0, 24.0]
+        assert d["rotation_delta"] == 90.0
+        # 3-4-5 triangle distance is 5.0
+        assert abs(d["distance_mm"] - 5.0) < 1e-6
+
+    def test_zero_distance_when_unchanged(self):
+        from kicad_tools.router import PlacementDiffEntry
+
+        entry = PlacementDiffEntry(ref="C1", old_xy=(5.0, 5.0), new_xy=(5.0, 5.0))
+        assert entry.distance_mm == 0.0
+
+    def test_exported_from_router_module(self):
+        """PlacementDiffEntry is part of the public router API."""
+        import kicad_tools.router as router_pkg
+
+        assert "PlacementDiffEntry" in router_pkg.__all__
+        assert hasattr(router_pkg, "PlacementDiffEntry")
+
+
+# ---------------------------------------------------------------------------
+# Issue #2620: inner-parser registration of stagnation-patience and
+# outer-timeout flags.
+#
+# These tests guard against the regression where the top-level parser
+# in parser.py registered the two flags but the inner argparse in
+# route_cmd.py did not, causing kct route to fail with
+# "unrecognized arguments" whenever the forwarder in commands/routing.py
+# injected the flags into sub_argv.
+# ---------------------------------------------------------------------------
+
+
+class TestInnerParserPlacementFeedbackFlags:
+    """The inner argparse in ``route_cmd.main`` must accept both flags.
+
+    Three complementary checks:
+
+    1. ``--help`` text mentions both flags (parser-level registration).
+    2. End-to-end ``main([...])`` smoke tests don't exit with argparse
+       code 2 ("unrecognized arguments").
+    3. The parsed ``Namespace`` carries the values forward with the
+       correct types and defaults.
+    """
+
+    def test_inner_help_lists_outer_timeout(self):
+        """Issue #2620: inner --help advertises the outer-timeout flag."""
+        import contextlib
+        from io import StringIO
+
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        buf = StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+            route_main(["--help"])
+        help_text = buf.getvalue()
+        assert "--placement-feedback-outer-timeout" in help_text, (
+            "inner parser help text is missing --placement-feedback-outer-timeout (Issue #2620)"
+        )
+        # Help wording mirrors parser.py:2370-2375 (Issue #2606 tag).
+        assert "Issue #2606." in help_text
+
+    def test_inner_help_lists_stagnation_patience(self):
+        """Issue #2620: inner --help advertises the stagnation-patience flag."""
+        import contextlib
+        from io import StringIO
+
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        buf = StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+            route_main(["--help"])
+        help_text = buf.getvalue()
+        assert "--placement-feedback-stagnation-patience" in help_text, (
+            "inner parser help text is missing --placement-feedback-"
+            "stagnation-patience (Issue #2620)"
+        )
+
+    def test_inner_parser_accepts_outer_timeout_no_exit_2(self, tmp_path):
+        """Regression: inner argparse must accept --placement-feedback-
+        outer-timeout (Issue #2620).  Prior to the fix this raised
+        SystemExit(2) with "unrecognized arguments".
+
+        We point at a non-existent pcb path so ``main`` returns 1
+        (file-not-found) instead of running the router.  Exit code 1
+        confirms argparse accepted the flag; the prior bug returned 2.
+        """
+        from kicad_tools.cli import route_cmd
+
+        # Path that does NOT exist on disk.
+        missing_pcb = str(tmp_path / "does_not_exist.kicad_pcb")
+
+        try:
+            rc = route_cmd.main(
+                [
+                    missing_pcb,
+                    "--dry-run",
+                    "--placement-feedback-outer-timeout",
+                    "1800",
+                ]
+            )
+        except SystemExit as exc:
+            rc = int(exc.code) if exc.code is not None else 0
+
+        assert rc != 2, (
+            "inner argparse rejected --placement-feedback-outer-timeout (Issue #2620 regression)"
+        )
+        # File-not-found is the expected next failure mode (rc=1) once
+        # argparse accepts the flag.
+        assert rc == 1, f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
+
+    def test_inner_parser_accepts_stagnation_patience_no_exit_2(self, tmp_path):
+        """Regression: inner argparse must accept --placement-feedback-
+        stagnation-patience (Issue #2620)."""
+        from kicad_tools.cli import route_cmd
+
+        missing_pcb = str(tmp_path / "does_not_exist.kicad_pcb")
+
+        try:
+            rc = route_cmd.main(
+                [
+                    missing_pcb,
+                    "--dry-run",
+                    "--placement-feedback-stagnation-patience",
+                    "5",
+                ]
+            )
+        except SystemExit as exc:
+            rc = int(exc.code) if exc.code is not None else 0
+
+        assert rc != 2, (
+            "inner argparse rejected --placement-feedback-stagnation-patience "
+            "(Issue #2620 regression)"
+        )
+        assert rc == 1, f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
+
+    def test_inner_parser_outer_timeout_value_and_type(self):
+        """Issue #2620: parsed value is a float matching the input.
+
+        Mirrors the registration done in route_cmd.main and asserts
+        argparse type-conversion semantics for both flags.  The
+        registration in route_cmd.main is the production code path;
+        this test is a focused unit test that pins the type/default
+        contract.
+        """
+        import argparse
+
+        p = argparse.ArgumentParser()
+        p.add_argument(
+            "--placement-feedback-outer-timeout",
+            type=float,
+            default=None,
+            metavar="SECONDS",
+        )
+        p.add_argument(
+            "--placement-feedback-stagnation-patience",
+            type=int,
+            default=3,
+            metavar="N",
+        )
+
+        args = p.parse_args(["--placement-feedback-outer-timeout", "1800"])
+        assert args.placement_feedback_outer_timeout == 1800.0
+        assert isinstance(args.placement_feedback_outer_timeout, float)
+        assert args.placement_feedback_stagnation_patience == 3
+        assert isinstance(args.placement_feedback_stagnation_patience, int)
+
+        args = p.parse_args(["--placement-feedback-stagnation-patience", "5"])
+        assert args.placement_feedback_stagnation_patience == 5
+        assert isinstance(args.placement_feedback_stagnation_patience, int)
+        assert args.placement_feedback_outer_timeout is None
+
+        # Defaults preserved when neither flag is passed.
+        args = p.parse_args([])
+        assert args.placement_feedback_outer_timeout is None
+        assert args.placement_feedback_stagnation_patience == 3
+
+    def test_values_reach_route_with_placement_feedback(self):
+        """Issue #2620: values flow through to
+        ``router.route_with_placement_feedback`` via
+        ``_run_placement_feedback``.  This guards against future
+        plumbing regressions where the inner parser accepts the
+        flags but they get dropped before reaching the loop."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        # Build a stub args namespace with non-default values for both
+        # flags so we can assert they reach the router.
+        args = SimpleNamespace(
+            placement_feedback_budget=3,
+            placement_feedback_max_movement=5.0,
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor=None,
+            placement_feedback_stagnation_patience=7,
+            placement_feedback_outer_timeout=42.5,
+            strategy="negotiated",
+            timeout=None,
+            per_net_timeout=None,
+            output=None,
+        )
+
+        # Stub PCB + router.  PCB.load is patched so we don't need a
+        # real file; route_with_placement_feedback is mocked so we
+        # never actually run the loop -- just intercept the kwargs.
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        router = MagicMock()
+        router.placement_disposition = None
+        router.get_failed_nets.return_value = []
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=0,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        # Verify both values reached the router with correct types.
+        call_kwargs = router.route_with_placement_feedback.call_args.kwargs
+        assert call_kwargs["stagnation_patience"] == 7
+        assert isinstance(call_kwargs["stagnation_patience"], int)
+        assert call_kwargs["outer_timeout"] == 42.5
+        assert isinstance(call_kwargs["outer_timeout"], float)
+
+
+# ---------------------------------------------------------------------------
+# Issue #4151: escalation-path wiring + -v gating
+# ---------------------------------------------------------------------------
+
+
+def _pf_args(**overrides):
+    """Args namespace sufficient for _run_placement_feedback / the
+    escalation hook helper."""
+    defaults = {
+        "placement_feedback": True,
+        "placement_feedback_budget": 3,
+        "placement_feedback_max_movement": 5.0,
+        "placement_feedback_anchor": None,
+        "placement_feedback_no_anchor": None,
+        "placement_feedback_stagnation_patience": 3,
+        "placement_feedback_outer_timeout": None,
+        "strategy": "negotiated",
+        "timeout": None,
+        "per_net_timeout": None,
+        "output": None,
+        "verbose": False,
+        "min_completion": 0.95,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _pf_result(**overrides):
+    """A minimal stand-in for RuleRelaxationResult / EscalationResult that
+    the shared hook mutates in place."""
+    defaults = {
+        "router": None,
+        "nets_routed": 10,
+        "nets_to_route": 20,
+        "completion": 0.5,
+        "success": False,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestPlacementFeedbackEscalationHook:
+    """Issue #4151: the shared hook drives placement feedback on the
+    rule-relaxation and combined-escalation dispatch paths, which
+    previously dropped ``--placement-feedback`` on the floor silently."""
+
+    def _mock_router(self, failed_nets, routes="__default__"):
+        from unittest.mock import MagicMock
+
+        router = MagicMock()
+        router.placement_disposition = None
+        router.routes = object() if routes == "__default__" else routes
+        router.get_failed_nets.return_value = list(failed_nets)
+        router.nets = {1: [object(), object()], 2: [object(), object()]}
+        router.get_statistics.return_value = {"nets_routed": 15}
+        return router
+
+    def test_runs_and_emits_summary_on_partial(self, capsys, tmp_path):
+        """Partial result with failed nets -> loop runs, one-line summary
+        (iterations / exit reason / components moved / final failed nets)
+        is emitted, and the result's completion stats are refreshed."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[5, 6])
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=2,
+            exit_reason="pf_stagnated",
+            total_components_moved=3,
+            failed_nets=[6],
+            placement_diff=[],
+        )
+        result = _pf_result(router=router)
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _maybe_run_placement_feedback_escalation(
+                result,
+                None,  # successful_result -> partial
+                tmp_path / "board.kicad_pcb",
+                _pf_args(),
+                quiet=False,
+                stall_label="rule relaxation",
+            )
+
+        out = capsys.readouterr().out
+        assert "Engaging placement-routing feedback" in out
+        assert "rule relaxation stalled" in out
+        assert "Feedback iterations: 2" in out
+        assert "Exit reason:" in out
+        assert "Components moved:   3" in out
+        assert "Final failed nets:" in out
+        # The loop actually ran (not just reported).
+        assert router.route_with_placement_feedback.called
+        # Completion stats refreshed from post-feedback router state.
+        assert result.nets_routed == 15
+        assert result.completion == 15 / 20
+
+    def test_combined_label_runs(self, capsys, tmp_path):
+        """Same hook, combined-escalation label -> loop runs."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[7])
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=1,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        result = _pf_result(router=router)
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _maybe_run_placement_feedback_escalation(
+                result,
+                None,
+                tmp_path / "board.kicad_pcb",
+                _pf_args(),
+                quiet=False,
+                stall_label="combined escalation",
+            )
+
+        out = capsys.readouterr().out
+        assert "combined escalation stalled" in out
+        assert router.route_with_placement_feedback.called
+
+    def test_disabled_line_when_no_routes(self, capsys, tmp_path):
+        """Requested but no routes produced -> explicit DISABLED line,
+        never silent."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[1], routes=None)
+        result = _pf_result(router=router)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            None,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        out = capsys.readouterr().out
+        assert "placement-feedback: DISABLED" in out
+        assert not router.route_with_placement_feedback.called
+
+    def test_silent_when_not_requested(self, capsys, tmp_path):
+        """--placement-feedback not set -> byte-identical no-op, no output."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[1])
+        result = _pf_result(router=router)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            None,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(placement_feedback=False),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        assert capsys.readouterr().out == ""
+        assert not router.route_with_placement_feedback.called
+
+    def test_silent_when_fully_succeeded(self, capsys, tmp_path):
+        """Escalation fully succeeded -> feedback not needed; no DISABLED
+        line (distinct from the not-supported state)."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[])
+        result = _pf_result(router=router)
+        successful = _pf_result(router=router, completion=1.0, success=True)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            successful,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        out = capsys.readouterr().out
+        assert "DISABLED" not in out
+        assert not router.route_with_placement_feedback.called
+
+    def test_silent_when_no_failed_nets(self, capsys, tmp_path):
+        """Partial result but zero failed nets -> nothing to improve; the
+        loop does not run and no DISABLED line prints (not-needed state)."""
+        from kicad_tools.cli.route_cmd import (
+            _maybe_run_placement_feedback_escalation,
+        )
+
+        router = self._mock_router(failed_nets=[])
+        result = _pf_result(router=router)
+
+        _maybe_run_placement_feedback_escalation(
+            result,
+            None,
+            tmp_path / "board.kicad_pcb",
+            _pf_args(),
+            quiet=False,
+            stall_label="rule relaxation",
+        )
+
+        out = capsys.readouterr().out
+        assert "DISABLED" not in out
+        assert not router.route_with_placement_feedback.called
+
+    def test_escalation_functions_call_the_hook(self):
+        """Guard against a future regression that removes the hook call
+        from either previously-silent dispatch path."""
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        for fn_name in (
+            "route_with_rule_relaxation",
+            "route_with_combined_escalation",
+            "route_with_layer_escalation",
+        ):
+            src = inspect.getsource(getattr(route_cmd, fn_name))
+            assert "_maybe_run_placement_feedback_escalation(" in src, (
+                f"{fn_name} must invoke the placement-feedback hook"
+            )
+
+
+class TestPlacementFeedbackVerboseGating:
+    """Issue #4151: per-iteration firehose is gated on -v; the always-on
+    summary line is independent of -v."""
+
+    def _run(self, verbose):
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        args = _pf_args(verbose=verbose)
+        router = MagicMock()
+        router.placement_disposition = None
+        router.get_failed_nets.return_value = [1]
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=False,
+            )
+        return router.route_with_placement_feedback.call_args.kwargs
+
+    def test_loop_verbose_false_without_v(self):
+        kwargs = self._run(verbose=False)
+        assert kwargs["verbose"] is False
+
+    def test_loop_verbose_true_with_v(self):
+        kwargs = self._run(verbose=True)
+        assert kwargs["verbose"] is True
+
+    def test_summary_present_regardless_of_v(self, capsys):
+        """The one-line summary is emitted whether or not -v is passed."""
+        self._run(verbose=False)
+        out = capsys.readouterr().out
+        assert "Feedback iterations: 1" in out
+        assert "Exit reason:" in out
+
+
+class TestDeterministicBudgetSentinelNormalization:
+    """Issue #4776: both placement-feedback helpers must forward ``None``,
+    not the literal ``0.0``, when ``--deterministic-budget`` has set the
+    ``per_net_timeout = 0.0`` "wall-clock cutoff disabled" sentinel.
+
+    These were the only two ``route_all_negotiated``-reaching call sites in
+    route_cmd.py without the ``or None`` normalization; the literal ``0.0``
+    made ``Autorouter._post_negotiation_sweep_bounds`` compute
+    ``min(0.0, 10 s)`` and silently no-op the #4159 rescue sweep on every
+    placement-feedback re-route (boards 04 and 07 in CI).
+    """
+
+    def test_run_placement_feedback_forwards_none_for_zero(self):
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        args = _pf_args(per_net_timeout=0.0)
+        router = MagicMock()
+        router.placement_disposition = None
+        router.get_failed_nets.return_value = [1]
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        kwargs = router.route_with_placement_feedback.call_args.kwargs
+        assert kwargs["per_net_timeout"] is None
+
+    def test_run_placement_feedback_keeps_a_real_per_net_timeout(self):
+        """An explicit positive ``--per-net-timeout`` is not relaxed."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        args = _pf_args(per_net_timeout=4.0)
+        router = MagicMock()
+        router.placement_disposition = None
+        router.get_failed_nets.return_value = [1]
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        assert router.route_with_placement_feedback.call_args.kwargs["per_net_timeout"] == 4.0
+
+    def _run_delta(self, per_net_timeout):
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _run_placement_delta_feedback
+
+        args = _pf_args(
+            per_net_timeout=per_net_timeout,
+            placement_delta_feedback_budget=3,
+            placement_delta_feedback_timeout=None,
+            skip_nets=None,
+        )
+        router = MagicMock()
+        router.placement_disposition = None
+        router.route_with_placement_delta_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pdf_converged",
+            applied_deltas=[],
+            failed_nets=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb):
+            _run_placement_delta_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                output_path=Path("/tmp/does_not_matter_routed.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+        return router.route_with_placement_delta_feedback.call_args.kwargs
+
+    def test_run_placement_delta_feedback_forwards_none_for_zero(self):
+        assert self._run_delta(0.0)["per_net_timeout"] is None
+
+    def test_run_placement_delta_feedback_keeps_a_real_per_net_timeout(self):
+        assert self._run_delta(4.0)["per_net_timeout"] == 4.0
+
+
+def test_delta_feedback_classifier_excludes_invalid_and_user_skipped_nets(tmp_path):
+    from unittest.mock import MagicMock
+
+    from kicad_tools.cli.route_cmd import _run_placement_delta_feedback
+    from kicad_tools.placement.routing import analyze_routing_placement
+    from tests.test_routing_placement_disposition import board_text
+
+    path = tmp_path / "mixed.kicad_pcb"
+    path.write_text(board_text())
+    disposition = analyze_routing_placement(path, coupled_groups=[("BAD", "PARTNER")])
+    args = _pf_args(skip_nets="PLANE", _placement_disposition=disposition)
+    router = MagicMock()
+    router.route_with_placement_delta_feedback.return_value = SimpleNamespace(applied_deltas=[])
+    _run_placement_delta_feedback(router, path, tmp_path / "out.kicad_pcb", args, quiet=True)
+    kwargs = router.route_with_placement_delta_feedback.call_args.kwargs
+    assert kwargs["excluded_nets"] == {"BAD", "PARTNER", "PLANE"}
+    assert kwargs["fixed_refs"] >= {"X1", "X2", "X3", "P1", "P2"}

@@ -1,0 +1,72 @@
+# I2C Interface Specifications
+# Reference: NXP I2C-bus specification and user manual UM10204
+
+interface: I2C
+spec_document: "I2C-bus specification and user manual UM10204"
+spec_url: https://www.nxp.com/docs/en/user-guide/UM10204.pdf
+
+constraints:
+  pull_up_resistors:
+    section: "7.1 Pull-up Resistors"
+    value: "1kΩ-10kΩ depending on speed and capacitance"
+    severity: error
+    explanation: |
+      I2C is an open-drain bus requiring pull-up resistors on SDA and SCL.
+      The resistor value depends on bus speed and total capacitance.
+      Too high resistance causes slow rise times; too low wastes power
+      and may exceed device sink current capability.
+    fix_templates:
+      - "For standard mode (100kHz): use 4.7kΩ to 10kΩ pull-ups"
+      - "For fast mode (400kHz): use 2.2kΩ to 4.7kΩ pull-ups"
+      - "For fast mode plus (1MHz): use 1kΩ to 2.2kΩ pull-ups"
+      - "Calculate: Rp(min) = (VCC - VOL) / IOL, Rp(max) = tr / (0.8473 × Cb)"
+
+  bus_capacitance:
+    section: "7.2 Bus Capacitance"
+    value: 400pF
+    max_value_fm: 400pF
+    severity: warning
+    explanation: |
+      Total bus capacitance (trace + device input capacitance) affects
+      rise times and maximum bus speed. Excessive capacitance requires
+      stronger pull-ups and limits maximum frequency.
+    fix_templates:
+      - "Keep total bus capacitance under {value} for fast mode"
+      - "Use shorter traces to reduce parasitic capacitance"
+      - "Minimize the number of devices on the bus"
+
+  trace_length:
+    section: "Bus layout recommendations"
+    value: 300mm
+    severity: warning
+    explanation: |
+      I2C bus length should be limited to maintain signal integrity
+      and minimize capacitance. Longer buses require lower clock speeds
+      or active bus buffers.
+    fix_templates:
+      - "Keep total I2C bus length under {value}mm"
+      - "For longer distances, use I2C bus buffers/repeaters"
+      - "Consider using differential I2C for noisy environments"
+
+  address_conflicts:
+    section: "3.1.11 Reserved Addresses"
+    severity: error
+    explanation: |
+      Each I2C device must have a unique 7-bit address on the bus.
+      Some addresses are reserved (0x00-0x07, 0x78-0x7F). Address
+      conflicts cause communication failures.
+    fix_templates:
+      - "Verify all device addresses are unique"
+      - "Use address-configurable devices where possible"
+      - "Consider I2C multiplexers for duplicate address devices"
+
+  esd_protection:
+    section: "Electrical specifications"
+    severity: warning
+    explanation: |
+      I2C lines connected to external connectors should have ESD
+      protection. The open-drain nature and external connections
+      make I2C susceptible to ESD damage.
+    fix_templates:
+      - "Add TVS diodes or ESD protection ICs near connectors"
+      - "Use devices with built-in ESD protection when available"

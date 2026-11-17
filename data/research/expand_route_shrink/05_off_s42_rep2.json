@@ -1,0 +1,123 @@
+{
+  "rows": [
+    {
+      "board": "05",
+      "scale": 1.25,
+      "mode": "rigid",
+      "grid_policy": "area",
+      "seed": 42,
+      "loadavg_start": [
+        15.05,
+        13.84,
+        14.5
+      ],
+      "scale_report": {
+        "cluster_rule": {
+          "anchor_min_pads": 6,
+          "satellite_max_pads": 2,
+          "max_gap_mm": 3.0
+        },
+        "scale_x": 1.25,
+        "scale_y": 1.25,
+        "mode": "rigid",
+        "origin": [
+          148.5,
+          105.0
+        ],
+        "footprints_moved": 42,
+        "graphics_scaled": 1,
+        "zones_scaled": 0,
+        "fills_dropped": 0,
+        "clusters": 32,
+        "clustered_footprints": 14,
+        "outline_mm": [
+          87.5,
+          112.5
+        ]
+      },
+      "input": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/off-s42-rep2/05-rigid-1.25/bldc_controller.kicad_pcb",
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/off-s42-rep2/05-rigid-1.25/bldc_controller.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/off-s42-rep2/05-rigid-1.25/bldc_controller_routed.kicad_pcb --timeout 1200 --no-cache --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --seed 42 --max-cells 781250",
+      "exit_code": 2,
+      "wall_s": 897.5,
+      "killed_by_harness": false,
+      "coarse_grid_mm": 0.065,
+      "cell_estimate": 9596006,
+      "router_nets": "28/33",
+      "hit_timeout": false,
+      "cache_hit": false,
+      "routed": "/private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/ers-6312/off-s42-rep2/05-rigid-1.25/bldc_controller_routed.kicad_pcb",
+      "artifact": "final",
+      "nets_complete": 30,
+      "nets_total": 37,
+      "nets_blocking_incomplete": 5,
+      "connections_routed": 131,
+      "connections_total": 142,
+      "via_count": 122,
+      "vias_per_connection": 0.931,
+      "wirelength_mm": 1165.9,
+      "kct_check_errors": 6,
+      "kct_check_by_rule": {
+        "connectivity": 6
+      },
+      "kicad_drc_errors": 0,
+      "kicad_drc_by_type": {},
+      "kicad_drc_note": null,
+      "stuck_counts": {
+        "escape_blocked": 0,
+        "congestion_saturated": 2,
+        "placement_bound": 1,
+        "budget_starved": 2,
+        "pour_discontinuous": 2
+      },
+      "signal_nets_unfinished": 5,
+      "stuck_nets": {
+        "GND_SENSE": "congestion_saturated",
+        "PHASE_B": "budget_starved",
+        "PHASE_C": "budget_starved",
+        "RESET": "placement_bound",
+        "nFAULT": "congestion_saturated",
+        "GND": "pour_discontinuous",
+        "VM": "pour_discontinuous"
+      },
+      "vias_by_net": {
+        "+5V": 16,
+        "AREF": 2,
+        "CPH": 2,
+        "CPL": 2,
+        "DRIVER_SLEEP": 2,
+        "EN_B": 4,
+        "EN_C": 2,
+        "FUSED": 2,
+        "GND": 24,
+        "GND_SENSE": 4,
+        "HALL_A": 2,
+        "HALL_B": 2,
+        "HALL_C": 5,
+        "IREF": 2,
+        "MISO": 2,
+        "MOSI": 4,
+        "PG_DELAY": 2,
+        "PHASE_A": 1,
+        "PWM_B": 2,
+        "RESET": 10,
+        "RUN": 4,
+        "SPEED": 2,
+        "STATUS_LED": 6,
+        "VM": 12,
+        "nTRIP": 6
+      },
+      "zone_nets": [
+        "+5V",
+        "GND",
+        "V3P3",
+        "VIN"
+      ],
+      "loadavg_end": [
+        9.06,
+        10.49,
+        12.08
+      ]
+    }
+  ],
+  "transitions": []
+}

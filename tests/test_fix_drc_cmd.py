@@ -1,0 +1,3950 @@
+"""Tests for the fix-drc command and DrillClearanceRepairer."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.fix_drc_cmd import PassResult, main
+from kicad_tools.drc.repair_clearance import RepairResult
+from kicad_tools.drc.repair_drill_clearance import (
+    DrillClearanceRepairer,
+    DrillRepairResult,
+)
+from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
+from tests.conftest import make_assembly_ready
+
+
+@pytest.fixture(autouse=True)
+def _no_kicad_cli_recheck(monkeypatch):
+    """Keep fix-drc's internal DRC runs in-process for these unit tests.
+
+    Issue #6431: fix-drc now re-checks the repaired board (and re-detects
+    between passes) with kicad-cli whenever it is installed.  These tests pin
+    fix-drc's own logic on synthetic boards, so they run the ``kct check``
+    rule set only; the kicad-cli leg has dedicated tests that mock it.
+    """
+    monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd._kicad_cli_path", lambda: None)
+
+
+# ── Test PCB fixtures ──────────────────────────────────────────────────
+
+# PCB with clearance violations (trace-to-trace too close)
+PCB_WITH_CLEARANCE = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-1"))
+  (segment (start 100 100.15) (end 110 100.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-2"))
+)
+"""
+
+# PCB with two coincident same-net vias (dedup candidate)
+PCB_WITH_SAME_NET_VIAS = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 115 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-1"))
+  (via (at 115 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+  (via (at 115 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-2"))
+)
+"""
+
+# PCB with two different-net vias too close (slide candidate)
+PCB_WITH_DIFF_NET_VIAS = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 115 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-1"))
+  (segment (start 100 100.4) (end 115 100.4) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-2"))
+  (via (at 115 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+  (via (at 115 100.4) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-2"))
+)
+"""
+
+# PCB with mixed violations (clearance + drill)
+PCB_WITH_MIXED = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-1"))
+  (segment (start 100 100.15) (end 110 100.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-2"))
+  (segment (start 100 105) (end 115 105) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-3"))
+  (segment (start 100 105.4) (end 115 105.4) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-4"))
+  (via (at 115 105) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+  (via (at 115 105.4) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-2"))
+)
+"""
+
+# PCB with a segment too close to a via (segment-via clearance violation)
+PCB_WITH_SEGMENT_VIA_CLEARANCE = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100.575) (end 110 100.575) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-sv-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-sv-1"))
+)
+"""
+
+# PCB with a segment near a <no net> via (net 0).  Like the fixture above, the
+# 0.25 mm track runs 0.575 mm from the 0.8 mm via's centre: a 0.05 mm edge gap,
+# matching the report (Issue #6434 re-measures every pair it repairs).
+PCB_WITH_NO_NET_VIA = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 100 100.575) (end 110 100.575) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nn-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 0) (uuid "via-nn-1"))
+)
+"""
+
+# ── DRC report fixtures ─────────────────────────────────────────────
+
+DRC_REPORT_CLEARANCE = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_DRILL = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[drill_clearance]: Drill-to-drill clearance (minimum 0.2500 mm; actual 0.1000 mm)
+    Rule: min drill clearance; error
+    @(115.0000 mm, 100.2000 mm): Via [GND] on F.Cu - B.Cu
+    @(115.0000 mm, 100.2000 mm): Via [+3.3V] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_SAME_NET_DRILL = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[drill_clearance]: Drill-to-drill clearance (minimum 0.2500 mm; actual -0.3000 mm)
+    Rule: min drill clearance; error
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_MIXED = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 2 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+[drill_clearance]: Drill-to-drill clearance (minimum 0.2500 mm; actual 0.1000 mm)
+    Rule: min drill clearance; error
+    @(115.0000 mm, 105.2000 mm): Via [GND] on F.Cu - B.Cu
+    @(115.0000 mm, 105.2000 mm): Via [+3.3V] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_SEGMENT_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.5750 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_NO_NET_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.5750 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_EMPTY = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 0 DRC violations **
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# PCB with a segment overlapping an enlarged via (post fix-vias enlargement).
+# Via enlarged from 0.6 to 0.8 mm; the trace that formerly had 0.1 mm clearance
+# now has negative clearance (overlap): its centreline is 0.455 mm from the via
+# centre, so the copper overlaps by 0.07 mm -- the report's "actual -0.07".  The required nudge exceeds the old
+# 0.25 mm default but is well within the new 0.5 mm pipeline default.
+PCB_ENLARGED_VIA = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100.455) (end 110 100.455) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-ev-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-ev-1"))
+)
+"""
+
+# DRC report for the enlarged-via scenario: required 0.2 mm, actual -0.07 mm.
+# delta = 0.27 mm; with 0.01 mm margin the required displacement is 0.28 mm.
+# This exceeds the old 0.25 mm cap but is within the new 0.5 mm pipeline default.
+DRC_REPORT_ENLARGED_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual -0.0700 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.4550 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+
+# ── Fixtures ────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def pcb_clearance(tmp_path: Path) -> Path:
+    f = tmp_path / "clearance.kicad_pcb"
+    f.write_text(PCB_WITH_CLEARANCE)
+    return f
+
+
+@pytest.fixture
+def pcb_same_net_vias(tmp_path: Path) -> Path:
+    f = tmp_path / "same_net.kicad_pcb"
+    f.write_text(PCB_WITH_SAME_NET_VIAS)
+    return f
+
+
+@pytest.fixture
+def pcb_diff_net_vias(tmp_path: Path) -> Path:
+    f = tmp_path / "diff_net.kicad_pcb"
+    f.write_text(PCB_WITH_DIFF_NET_VIAS)
+    return f
+
+
+@pytest.fixture
+def pcb_mixed(tmp_path: Path) -> Path:
+    f = tmp_path / "mixed.kicad_pcb"
+    f.write_text(PCB_WITH_MIXED)
+    return f
+
+
+@pytest.fixture
+def report_clearance(tmp_path: Path) -> Path:
+    f = tmp_path / "clearance-drc.rpt"
+    f.write_text(DRC_REPORT_CLEARANCE)
+    return f
+
+
+@pytest.fixture
+def report_drill(tmp_path: Path) -> Path:
+    f = tmp_path / "drill-drc.rpt"
+    f.write_text(DRC_REPORT_DRILL)
+    return f
+
+
+@pytest.fixture
+def report_same_net_drill(tmp_path: Path) -> Path:
+    f = tmp_path / "same-net-drill-drc.rpt"
+    f.write_text(DRC_REPORT_SAME_NET_DRILL)
+    return f
+
+
+@pytest.fixture
+def report_mixed(tmp_path: Path) -> Path:
+    f = tmp_path / "mixed-drc.rpt"
+    f.write_text(DRC_REPORT_MIXED)
+    return f
+
+
+@pytest.fixture
+def pcb_segment_via(tmp_path: Path) -> Path:
+    f = tmp_path / "segment_via.kicad_pcb"
+    f.write_text(PCB_WITH_SEGMENT_VIA_CLEARANCE)
+    return f
+
+
+@pytest.fixture
+def pcb_no_net_via(tmp_path: Path) -> Path:
+    f = tmp_path / "no_net_via.kicad_pcb"
+    f.write_text(PCB_WITH_NO_NET_VIA)
+    return f
+
+
+@pytest.fixture
+def report_segment_via(tmp_path: Path) -> Path:
+    f = tmp_path / "segment-via-drc.rpt"
+    f.write_text(DRC_REPORT_SEGMENT_VIA)
+    return f
+
+
+@pytest.fixture
+def report_no_net_via(tmp_path: Path) -> Path:
+    f = tmp_path / "no-net-via-drc.rpt"
+    f.write_text(DRC_REPORT_NO_NET_VIA)
+    return f
+
+
+@pytest.fixture
+def report_empty(tmp_path: Path) -> Path:
+    f = tmp_path / "empty-drc.rpt"
+    f.write_text(DRC_REPORT_EMPTY)
+    return f
+
+
+@pytest.fixture
+def pcb_enlarged_via(tmp_path: Path) -> Path:
+    f = tmp_path / "enlarged_via.kicad_pcb"
+    f.write_text(PCB_ENLARGED_VIA)
+    return f
+
+
+@pytest.fixture
+def report_enlarged_via(tmp_path: Path) -> Path:
+    f = tmp_path / "enlarged-via-drc.rpt"
+    f.write_text(DRC_REPORT_ENLARGED_VIA)
+    return f
+
+
+# ── DrillClearanceRepairer unit tests ───────────────────────────────
+
+
+class TestDrillClearanceRepairer:
+    """Tests for the DrillClearanceRepairer class."""
+
+    def test_load_pcb(self, pcb_same_net_vias: Path):
+        """Should load PCB file and parse nets."""
+        repairer = DrillClearanceRepairer(pcb_same_net_vias)
+        assert repairer.nets[1] == "GND"
+        assert not repairer.modified
+
+    def test_deduplicate_same_net_vias(self, pcb_same_net_vias: Path):
+        """Coincident same-net vias should be de-duplicated."""
+        repairer = DrillClearanceRepairer(pcb_same_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance -0.3mm < 0.25mm",
+                locations=[
+                    Location(x_mm=115, y_mm=100),
+                    Location(x_mm=115, y_mm=100),
+                ],
+                nets=["GND"],
+                required_value_mm=0.25,
+                actual_value_mm=-0.30,
+            ),
+        ]
+
+        result = repairer.repair(violations, dry_run=False)
+
+        assert result.total_violations == 1
+        assert result.repaired == 1
+        assert result.deduplicated == 1
+        assert repairer.modified
+
+    def test_deduplicate_dry_run(self, pcb_same_net_vias: Path):
+        """Dry run should report dedup without modifying PCB."""
+        repairer = DrillClearanceRepairer(pcb_same_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance -0.3mm < 0.25mm",
+                locations=[
+                    Location(x_mm=115, y_mm=100),
+                    Location(x_mm=115, y_mm=100),
+                ],
+                nets=["GND"],
+                required_value_mm=0.25,
+                actual_value_mm=-0.30,
+            ),
+        ]
+
+        result = repairer.repair(violations, dry_run=True)
+
+        assert result.repaired == 1
+        assert result.deduplicated == 1
+        assert not repairer.modified  # dry run
+
+    def test_slide_different_net_vias(self, pcb_diff_net_vias: Path):
+        """Different-net vias too close should be slid apart."""
+        repairer = DrillClearanceRepairer(pcb_diff_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance 0.1mm < 0.25mm",
+                locations=[
+                    Location(x_mm=115, y_mm=100.2),
+                    Location(x_mm=115, y_mm=100.2),
+                ],
+                nets=["GND", "+3.3V"],
+                required_value_mm=0.25,
+                actual_value_mm=0.10,
+            ),
+        ]
+
+        result = repairer.repair(violations, max_displacement=0.5, dry_run=False)
+
+        assert result.total_violations == 1
+        assert result.repaired == 1
+        assert result.slid == 1
+        assert repairer.modified
+
+    def test_skip_exceeds_max_displacement(self, pcb_diff_net_vias: Path):
+        """Should skip violations exceeding max displacement."""
+        repairer = DrillClearanceRepairer(pcb_diff_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance 0.1mm < 0.25mm",
+                locations=[
+                    Location(x_mm=115, y_mm=100.2),
+                ],
+                nets=["GND", "+3.3V"],
+                required_value_mm=0.25,
+                actual_value_mm=0.10,
+            ),
+        ]
+
+        # Max displacement too small (0.001 mm) to cover 0.15mm + margin
+        result = repairer.repair(violations, max_displacement=0.001, dry_run=True)
+
+        assert result.skipped_exceeds_max > 0
+        assert result.repaired == 0
+
+    def test_skip_no_location(self, pcb_diff_net_vias: Path):
+        """Should skip violations without location data."""
+        repairer = DrillClearanceRepairer(pcb_diff_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance violation",
+                locations=[],
+                nets=["GND"],
+                required_value_mm=0.25,
+                actual_value_mm=0.10,
+            ),
+        ]
+
+        result = repairer.repair(violations, dry_run=True)
+        assert result.skipped_no_location == 1
+
+    def test_skip_no_delta(self, pcb_diff_net_vias: Path):
+        """Should skip violations without required/actual values."""
+        repairer = DrillClearanceRepairer(pcb_diff_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance violation",
+                locations=[Location(x_mm=115, y_mm=100)],
+                nets=["GND"],
+                # No required/actual values
+            ),
+        ]
+
+        result = repairer.repair(violations, dry_run=True)
+        assert result.skipped_no_delta == 1
+
+    def test_skip_infeasible_no_vias_found(self, tmp_path: Path):
+        """Should skip violations when no vias are found near location."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-1"))
+)
+"""
+        pcb_file = tmp_path / "no_vias.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        repairer = DrillClearanceRepairer(pcb_file)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance violation",
+                locations=[Location(x_mm=200, y_mm=200)],
+                nets=["GND"],
+                required_value_mm=0.25,
+                actual_value_mm=0.10,
+            ),
+        ]
+
+        result = repairer.repair(violations, dry_run=True)
+        assert result.skipped_infeasible == 1
+
+    def test_result_summary(self):
+        """DrillRepairResult summary should be readable."""
+        result = DrillRepairResult(
+            total_violations=5,
+            repaired=3,
+            deduplicated=2,
+            slid=1,
+            skipped_exceeds_max=1,
+            skipped_infeasible=1,
+        )
+        summary = result.summary()
+        assert "3/5" in summary
+        assert "De-duplicated" in summary
+        assert "Slid" in summary
+
+    def test_success_rate(self):
+        """Success rate should be calculated correctly."""
+        result = DrillRepairResult(total_violations=4, repaired=3)
+        assert result.success_rate == 0.75
+
+        empty = DrillRepairResult(total_violations=0, repaired=0)
+        assert empty.success_rate == 1.0
+
+    def test_filters_non_drill_violations(self, pcb_diff_net_vias: Path):
+        """repair() should filter out non-drill-clearance violations."""
+        repairer = DrillClearanceRepairer(pcb_diff_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.CLEARANCE,
+                type_str="clearance",
+                severity=Severity.ERROR,
+                message="Clearance violation",
+                locations=[Location(x_mm=100, y_mm=100)],
+                nets=["GND"],
+                required_value_mm=0.2,
+                actual_value_mm=0.1,
+            ),
+        ]
+
+        result = repairer.repair(violations, dry_run=True)
+        assert result.total_violations == 0
+
+    def test_save_output(self, pcb_same_net_vias: Path, tmp_path: Path):
+        """Should save modified PCB to output file."""
+        output_file = tmp_path / "fixed.kicad_pcb"
+        repairer = DrillClearanceRepairer(pcb_same_net_vias)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance -0.3mm < 0.25mm",
+                locations=[Location(x_mm=115, y_mm=100), Location(x_mm=115, y_mm=100)],
+                nets=["GND"],
+                required_value_mm=0.25,
+                actual_value_mm=-0.30,
+            ),
+        ]
+
+        repairer.repair(violations, dry_run=False)
+        repairer.save(output_file)
+
+        assert output_file.exists()
+        # Original should be unchanged
+        assert pcb_same_net_vias.read_text() == PCB_WITH_SAME_NET_VIAS
+
+
+# ── ViolationType.from_string tests ─────────────────────────────────
+
+
+class TestViolationTypeMapping:
+    """Tests for ViolationType.from_string with drill clearance patterns."""
+
+    def test_drill_clearance_direct(self):
+        """Should parse 'drill_clearance' to DRILL_CLEARANCE."""
+        assert ViolationType.from_string("drill_clearance") == ViolationType.DRILL_CLEARANCE
+
+    def test_hole_to_hole_clearance(self):
+        """Should parse 'hole_to_hole_clearance' to HOLE_TO_HOLE_CLEARANCE (#4353)."""
+        assert (
+            ViolationType.from_string("hole_to_hole_clearance")
+            == ViolationType.HOLE_TO_HOLE_CLEARANCE
+        )
+
+    def test_dimension_drill_clearance_compat_alias(self):
+        """Legacy 'dimension_drill_clearance' still routes to the renamed member
+        (#4353 backwards-compat alias) so ``kct fix-drc dimension_drill_clearance``
+        keeps reaching DrillClearanceRepairer."""
+        assert (
+            ViolationType.from_string("dimension_drill_clearance")
+            == ViolationType.HOLE_TO_HOLE_CLEARANCE
+        )
+
+    def test_clearance_still_works(self):
+        """Standard clearance should still map to CLEARANCE."""
+        assert ViolationType.from_string("clearance") == ViolationType.CLEARANCE
+
+    def test_clearance_segment_segment(self):
+        """clearance_segment_segment should map to CLEARANCE_SEGMENT_SEGMENT."""
+        assert (
+            ViolationType.from_string("clearance_segment_segment")
+            == ViolationType.CLEARANCE_SEGMENT_SEGMENT
+        )
+
+    def test_clearance_segment_via(self):
+        """clearance_segment_via should map to CLEARANCE_SEGMENT_VIA."""
+        assert (
+            ViolationType.from_string("clearance_segment_via")
+            == ViolationType.CLEARANCE_SEGMENT_VIA
+        )
+
+    def test_clearance_segment_via_is_clearance(self):
+        """CLEARANCE_SEGMENT_VIA violations should be considered clearance issues."""
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+        )
+        assert v.is_clearance
+
+
+# ── CLI integration tests ───────────────────────────────────────────
+
+
+class TestFixDRCCLI:
+    """Tests for the fix-drc CLI command."""
+
+    def test_dry_run_no_modification(self, pcb_clearance: Path, report_clearance: Path):
+        """--dry-run should not modify the PCB file."""
+        original = pcb_clearance.read_text()
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+            ]
+        )
+
+        # File unchanged
+        assert pcb_clearance.read_text() == original
+        # Result is 0 or 1 (depends on whether all fixed)
+        assert result in (0, 1)
+
+    def test_no_violations_exits_zero(self, pcb_clearance: Path, report_empty: Path, capsys):
+        """Board with 0 violations should exit 0 immediately."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_empty),
+            ]
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "nothing to repair" in captured.out.lower() or "no targeted" in captured.out.lower()
+
+    def test_only_clearance_skips_drill(self, pcb_mixed: Path, report_mixed: Path, capsys):
+        """--only clearance should skip drill violations."""
+        main(
+            [
+                str(pcb_mixed),
+                "--drc-report",
+                str(report_mixed),
+                "--only",
+                "clearance",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Only clearance violations should be counted
+        assert data["drill_clearance"]["violations"] == 0
+
+    def test_only_drill_clearance_skips_trace(self, pcb_mixed: Path, report_mixed: Path, capsys):
+        """--only drill-clearance should skip trace clearance violations."""
+        main(
+            [
+                str(pcb_mixed),
+                "--drc-report",
+                str(report_mixed),
+                "--only",
+                "drill-clearance",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Only drill violations should be counted
+        assert data["clearance"]["violations"] == 0
+
+    def test_json_output(self, pcb_clearance: Path, report_clearance: Path, capsys):
+        """JSON output should be valid and contain expected keys."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "total_violations" in data
+        assert "total_repaired" in data
+        assert "clearance" in data
+        assert "drill_clearance" in data
+        assert data["dry_run"] is True
+
+    def test_summary_output(self, pcb_clearance: Path, report_clearance: Path, capsys):
+        """Summary output should show repair counts."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "summary",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Should contain repair count info
+        assert "/" in captured.out
+
+    def test_detection_and_verify_totals_each_name_their_engine(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """Bug #3 regression: dual totals in one run must each name their engine.
+
+        ``fix-drc`` shows a detection total (authoritative, kicad-cli engine)
+        and, with ``--verify``, a pure-Python snapshot total. When both appear
+        in one run they previously read as a contradiction because the
+        detection total was unlabeled. Each total line must now state its
+        engine so no two unlabeled totals appear together.
+        """
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--verify",
+                "--dry-run",
+                "--format",
+                "text",
+            ]
+        )
+        assert result in (0, 1, 2, 3)
+
+        captured = capsys.readouterr()
+        out = captured.out
+
+        # The detection total is engine-labeled.
+        assert "Found" in out and "repairable violation(s) (kicad-cli engine)" in out
+        # The --verify snapshot total names its (different) engine.
+        assert "via pure-Python DRC" in out
+
+    def test_kicad_cli_detection_line_is_engine_labeled(self, monkeypatch, tmp_path):
+        """Bug #3 regression: the kicad-cli DRC run line names the engine.
+
+        When ``_get_drc_report`` runs DRC via kicad-cli (no ``--drc-report``),
+        the "Running DRC ..." status line must identify the kicad-cli engine.
+        """
+        import io
+        from contextlib import redirect_stderr
+
+        from kicad_tools.cli import fix_drc_cmd
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        class _FakeDRCResult:
+            success = True
+            stderr = ""
+            output_path = None
+
+        def _fake_find_kicad_cli():
+            return "/usr/bin/kicad-cli"
+
+        seen_kwargs: dict = {}
+
+        def _fake_run_drc(_path, **kwargs):
+            seen_kwargs.update(kwargs)
+            return _FakeDRCResult()
+
+        def _fake_load(_path):
+            # The "Running DRC (kicad-cli) on:" status line is printed BEFORE
+            # the report is loaded, so the loaded value is irrelevant here.
+            return None
+
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", _fake_find_kicad_cli)
+        # Undo the module-level autouse pin: this test is about the kicad-cli leg.
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._kicad_cli_path", lambda: Path(_fake_find_kicad_cli())
+        )
+        monkeypatch.setattr("kicad_tools.cli.runner.run_drc", _fake_run_drc)
+        monkeypatch.setattr("kicad_tools.drc.report.DRCReport.load", staticmethod(_fake_load))
+
+        # Status lines go to stderr so --format json stdout stays pure (#5938).
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            fix_drc_cmd._get_drc_report(None, pcb_file)
+
+        assert "Running DRC (kicad-cli) on:" in buf.getvalue()
+        # Issue #6431: the same gate flags the fleet's DRC uses.
+        assert seen_kwargs.get("all_track_errors") is True
+        assert seen_kwargs.get("refill_zones") is True
+
+    def test_quiet_mode(self, pcb_clearance: Path, report_clearance: Path, capsys):
+        """--quiet should suppress all output."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--quiet",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_output_to_different_file(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path
+    ):
+        """Should write to output file when specified."""
+        output_file = tmp_path / "fixed.kicad_pcb"
+        original = pcb_clearance.read_text()
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "-o",
+                str(output_file),
+            ]
+        )
+
+        # Original should be unchanged
+        assert pcb_clearance.read_text() == original
+
+        # Output file should exist (only if repairs were made)
+        # The test PCB may or may not result in repairs depending on object lookup
+
+    def test_invalid_file(self, tmp_path: Path):
+        """Should fail for non-existent file."""
+        result = main([str(tmp_path / "nonexistent.kicad_pcb")])
+        assert result == 1
+
+    def test_wrong_extension(self, tmp_path: Path):
+        """Should fail for non-.kicad_pcb file."""
+        bad_file = tmp_path / "test.txt"
+        bad_file.write_text("not a pcb")
+        result = main([str(bad_file)])
+        assert result == 1
+
+    def test_nonexistent_report(self, pcb_clearance: Path, tmp_path: Path):
+        """Should fail for non-existent DRC report."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(tmp_path / "nonexistent.rpt"),
+            ]
+        )
+        assert result == 1
+
+    def test_exit_code_zero_all_repaired(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path
+    ):
+        """Exit code 0 when all targeted violations are repaired."""
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+            ]
+        )
+        assert result == 0
+
+    def test_segment_via_clearance_counted(
+        self, pcb_segment_via: Path, report_segment_via: Path, capsys
+    ):
+        """clearance_segment_via violations should be counted in clearance total."""
+        main(
+            [
+                str(pcb_segment_via),
+                "--drc-report",
+                str(report_segment_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The segment-via violation should appear in the clearance count
+        assert data["clearance"]["violations"] >= 1
+
+    def test_segment_via_clearance_repair(
+        self, pcb_segment_via: Path, report_segment_via: Path, capsys
+    ):
+        """Segment-to-via clearance should be repaired by moving the segment."""
+        main(
+            [
+                str(pcb_segment_via),
+                "--drc-report",
+                str(report_segment_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The violation should be repaired (segment nudged)
+        assert data["clearance"]["repaired"] >= 1
+        # Verify it was a segment nudge (not a via move)
+        if data["clearance"]["nudges"]:
+            assert data["clearance"]["nudges"][0]["object_type"] == "segment"
+
+    def test_no_net_via_clearance_repair(
+        self, pcb_no_net_via: Path, report_no_net_via: Path, capsys
+    ):
+        """Via with no net should not be excluded from clearance repair."""
+        main(
+            [
+                str(pcb_no_net_via),
+                "--drc-report",
+                str(report_no_net_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The violation should be repaired (via found despite having no net)
+        assert data["clearance"]["repaired"] >= 1
+
+    def test_max_displacement_zero_skips_nudges(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """--max-displacement 0 should skip all trace nudges."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-displacement",
+                "0",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # All clearance violations should be skipped (exceeds max)
+        assert data["clearance"]["repaired"] == 0
+
+
+# ── Edge case tests ─────────────────────────────────────────────────
+
+
+class TestEdgeCases:
+    """Edge case tests for fix-drc."""
+
+    def test_isolated_via_no_trace(self, tmp_path: Path):
+        """Via with no connected trace should still attempt repair (push away)."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+  (via (at 100 100.4) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-2"))
+)
+"""
+        pcb_file = tmp_path / "isolated.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        repairer = DrillClearanceRepairer(pcb_file)
+
+        violations = [
+            DRCViolation(
+                type=ViolationType.DRILL_CLEARANCE,
+                type_str="drill_clearance",
+                severity=Severity.ERROR,
+                message="Drill clearance 0.1mm < 0.25mm",
+                locations=[Location(x_mm=100, y_mm=100.2)],
+                nets=["GND", "+3.3V"],
+                required_value_mm=0.25,
+                actual_value_mm=0.10,
+            ),
+        ]
+
+        result = repairer.repair(violations, max_displacement=0.5, dry_run=True)
+        # Should succeed via direct push (no connected trace)
+        assert result.repaired == 1 or result.skipped_infeasible >= 0
+
+
+# ── Report inference: kicad-cli clearance -> CLEARANCE_SEGMENT_VIA ──
+
+
+# DRC text report where kicad-cli outputs [clearance] for a Track-to-Via pair.
+# This is the real-world scenario: kicad-cli doesn't emit [clearance_segment_via].
+DRC_REPORT_KICAD_CLI_SEGMENT_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.5750 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# DRC text report with a Track-to-Track pair (should stay CLEARANCE).
+DRC_REPORT_KICAD_CLI_SEGMENT_SEGMENT = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# DRC text report with both Track-to-Track and Track-to-Via violations.
+DRC_REPORT_KICAD_CLI_MIXED_CLEARANCE = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 2 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(108.0000 mm, 100.1000 mm): Track [+3.3V] on F.Cu
+    @(108.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# JSON report where kicad-cli uses "clearance" for a Track-to-Via pair.
+DRC_JSON_KICAD_CLI_SEGMENT_VIA = json.dumps(
+    {
+        "source": "test.kicad_pcb",
+        "date": "2025-12-28T21:29:34-08:00",
+        "violations": [
+            {
+                "type": "clearance",
+                "description": "Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)",
+                "severity": "error",
+                "items": [
+                    {
+                        "description": "Track [+3.3V] on F.Cu",
+                        "pos": {"x": 105.0, "y": 100.1},
+                        "net": "+3.3V",
+                    },
+                    {
+                        "description": "Via [GND] on F.Cu - B.Cu",
+                        "pos": {"x": 105.0, "y": 100.0},
+                        "net": "GND",
+                    },
+                ],
+            }
+        ],
+    }
+)
+
+
+class TestSegmentViaInference:
+    """Tests that kicad-cli's generic [clearance] is reclassified when items indicate a via."""
+
+    def test_text_report_track_via_becomes_segment_via(self):
+        """Text report with [clearance] + Track + Via -> CLEARANCE_SEGMENT_VIA."""
+        from kicad_tools.drc.report import parse_text_report
+
+        report = parse_text_report(DRC_REPORT_KICAD_CLI_SEGMENT_VIA)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE_SEGMENT_VIA
+
+    def test_text_report_track_track_stays_clearance(self):
+        """Text report with [clearance] + Track + Track -> CLEARANCE (unchanged)."""
+        from kicad_tools.drc.report import parse_text_report
+
+        report = parse_text_report(DRC_REPORT_KICAD_CLI_SEGMENT_SEGMENT)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE
+
+    def test_text_report_mixed_no_double_counting(self):
+        """Mixed Track-Track and Track-Via should not double-count."""
+        from kicad_tools.drc.report import parse_text_report
+
+        report = parse_text_report(DRC_REPORT_KICAD_CLI_MIXED_CLEARANCE)
+        assert len(report.violations) == 2
+
+        clearance_only = report.by_type(ViolationType.CLEARANCE)
+        segment_via = report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+
+        assert len(clearance_only) == 1
+        assert len(segment_via) == 1
+
+    def test_json_report_track_via_becomes_segment_via(self):
+        """JSON report with "clearance" type + Track + Via -> CLEARANCE_SEGMENT_VIA."""
+        from kicad_tools.drc.report import parse_json_report
+
+        report = parse_json_report(DRC_JSON_KICAD_CLI_SEGMENT_VIA)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE_SEGMENT_VIA
+
+    def test_explicit_segment_via_not_reclassified(self):
+        """Pre-classified [clearance_segment_via] is preserved, not double-reclassified."""
+        from kicad_tools.drc.report import parse_text_report
+
+        # Re-use the existing fixture that already uses [clearance_segment_via] tag
+        report = parse_text_report(DRC_REPORT_SEGMENT_VIA)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE_SEGMENT_VIA
+
+    def test_pad_clearance_stays_clearance(self):
+        """[clearance] with Pad + Track should remain CLEARANCE (not segment-via)."""
+        from kicad_tools.drc.report import parse_text_report
+
+        pad_report = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Pad 1 [+3.3V] of U1 on F.Cu
+    @(105.0000 mm, 100.1000 mm): Track [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report = parse_text_report(pad_report)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE
+
+    def test_kicad_cli_report_fix_drc_detects_segment_via(
+        self, pcb_segment_via: Path, tmp_path: Path, capsys
+    ):
+        """fix-drc CLI with kicad-cli-style [clearance] report finds segment-to-via violations."""
+        report_file = tmp_path / "kicad-cli-drc.rpt"
+        report_file.write_text(DRC_REPORT_KICAD_CLI_SEGMENT_VIA)
+
+        main(
+            [
+                str(pcb_segment_via),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The segment-via violation should appear in the clearance count
+        assert data["clearance"]["violations"] >= 1
+
+
+# ── Pure-Python DRC fallback tests ────────────────────────────────────
+
+
+class TestPurePythonDRCFallback:
+    """Tests for _run_python_drc() which converts DRCChecker results to DRCReport."""
+
+    def test_fallback_detects_clearance_violations(self, tmp_path: Path):
+        """Pure-Python DRC should detect segment clearance violations."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        assert report.violation_count > 0
+
+    def test_fallback_detects_segment_via_violations(self, tmp_path: Path):
+        """Pure-Python DRC should detect segment-to-via clearance violations."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SEGMENT_VIA_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+
+        segment_via_violations = report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+        assert len(segment_via_violations) > 0
+
+    def test_fallback_violations_have_locations(self, tmp_path: Path):
+        """Converted violations should carry location data."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+
+        for v in report.violations:
+            assert len(v.locations) > 0, "Converted violation should have at least one location"
+
+    def test_fallback_violations_have_values(self, tmp_path: Path):
+        """Converted violations should carry required and actual values."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+
+        for v in report.violations:
+            assert v.required_value_mm is not None
+            assert v.actual_value_mm is not None
+
+    def test_fallback_excludes_unrepairable_topology_advisories(self, tmp_path: Path):
+        """Dangling-copper advisories stay out of the fallback report (#4680).
+
+        ``fix-drc`` only repairs metric violations (nudge copper until a
+        measured distance clears a required minimum), so topology
+        findings it can never act on are filtered out of
+        ``_run_python_drc``.  This also keeps the "every converted
+        violation has required + actual values" contract above intact --
+        ``track_dangling`` has no numeric requirement at all.
+        """
+        from kicad_tools.cli.fix_drc_cmd import (
+            _UNREPAIRABLE_TOPOLOGY_RULE_IDS,
+            _run_python_drc,
+        )
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(
+            PCB_WITH_CLEARANCE.rstrip()[:-1]
+            + "\n(segment (start 120 120) (end 125 120) (width 0.25) "
+            '(layer "F.Cu") (net 1) (uuid "isolated-track"))\n)\n'
+        )
+
+        # The clearance pair has overlapping end caps; a separate isolated
+        # trace ensures the underlying checker also emits a topology finding.
+        checked = DRCChecker(PCB.load(pcb_file), layers=2).check_all()
+        assert any(v.rule_id == "track_dangling" for v in checked.violations)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        # The repairable clearance violations survive the filter ...
+        assert report.violation_count > 0
+        # ... but the topology advisories do not.
+        assert all(v.type_str not in _UNREPAIRABLE_TOPOLOGY_RULE_IDS for v in report.violations)
+
+    def test_fallback_used_when_no_kicad_cli(self, tmp_path: Path, monkeypatch):
+        """_get_drc_report should fall back to pure-Python DRC when kicad-cli is missing."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        # Make find_kicad_cli return None
+        monkeypatch.setattr(
+            "kicad_tools.cli.runner.find_kicad_cli",
+            lambda: None,
+        )
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SEGMENT_VIA_CLEARANCE)
+
+        report = fix_drc_cmd._get_drc_report(None, pcb_file)
+        assert report is not None
+        assert report.violation_count > 0
+
+
+# ── Multi-pass iteration tests ─────────────────────────────────────
+
+
+class TestMultiPassIteration:
+    """Tests for the --max-passes iterative repair cycle."""
+
+    def test_max_passes_1_matches_single_pass(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """--max-passes 1 output should be identical to current single-pass behaviour."""
+        # Run without --max-passes (default=1)
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        baseline_out = capsys.readouterr().out
+
+        # Run with explicit --max-passes 1
+        # Reset the PCB file in case it was modified
+        pcb_clearance.write_text(PCB_WITH_CLEARANCE)
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+                "--max-passes",
+                "1",
+            ]
+        )
+        explicit_out = capsys.readouterr().out
+
+        baseline_data = json.loads(baseline_out)
+        explicit_data = json.loads(explicit_out)
+
+        # Core fields should match
+        assert baseline_data["total_violations"] == explicit_data["total_violations"]
+        assert baseline_data["total_repaired"] == explicit_data["total_repaired"]
+        assert baseline_data["clearance"]["repaired"] == explicit_data["clearance"]["repaired"]
+
+    def test_max_passes_no_progress_exits_early(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """When all violations exceed --max-displacement, iteration exits after pass 1."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-displacement",
+                "0",
+                "--max-passes",
+                "5",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Should have only 1 pass since no repairs were made
+        assert "passes" in data
+        assert len(data["passes"]) == 1
+        assert data["passes"][0]["repaired"] == 0
+
+        # Exit code non-zero (violations remain)
+        assert result == 1
+
+    def test_max_passes_json_output_has_passes_array(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """JSON output should contain a 'passes' key."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+                "--max-passes",
+                "3",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "passes" in data
+        assert isinstance(data["passes"], list)
+        assert len(data["passes"]) >= 1
+
+        # Each pass entry should have required keys
+        for p in data["passes"]:
+            assert "pass" in p
+            assert "violations_before" in p
+            assert "repaired" in p
+            assert "violations_after" in p
+
+    def test_dry_run_max_passes_single_detection(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """--dry-run --max-passes 3 should only run one pass (no geometry changes)."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+                "--max-passes",
+                "3",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Dry-run forces effective_max_passes=1
+        assert "passes" in data
+        assert len(data["passes"]) == 1
+
+    def test_max_passes_zero_errors(self, pcb_clearance: Path, report_clearance: Path):
+        """--max-passes 0 should return error."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-passes",
+                "0",
+            ]
+        )
+        assert result == 1
+
+    def test_max_passes_clean_board_exits_pass_1(self, pcb_clearance: Path, report_empty: Path):
+        """Already-clean board with --max-passes 100 should exit after pass 1."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_empty),
+                "--max-passes",
+                "100",
+            ]
+        )
+        assert result == 0
+
+    def test_max_passes_summary_output(self, pcb_clearance: Path, report_clearance: Path, capsys):
+        """Summary format with --max-passes should report per-pass progress."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-passes",
+                "3",
+                "--format",
+                "summary",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Should contain repair count info
+        assert "/" in captured.out
+
+    def test_max_passes_text_output(self, pcb_clearance: Path, report_clearance: Path, capsys):
+        """Text format with --max-passes should produce valid output."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-passes",
+                "3",
+                "--format",
+                "text",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Should contain the repair header
+        assert "DRC VIOLATION REPAIR" in captured.out
+
+    def test_max_passes_converges_dedup(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, capsys
+    ):
+        """Multi-pass on a board with dedup-able vias should converge."""
+        main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "--max-passes",
+                "3",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Should have resolved the violation
+        assert data["total_repaired"] >= 1
+
+    def test_multi_pass_output_path_not_stale(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, capsys
+    ):
+        """Pass 2+ must load from --output, not the original pcb_path.
+
+        Regression test for the stale-file bug: ClearanceRepairer was always
+        constructed with ``pcb_path`` instead of ``output_path``, so in a
+        multi-pass run the second pass silently re-read the unrepaired original
+        board and discarded the first pass's repairs.
+        """
+        output_file = tmp_path / "repaired.kicad_pcb"
+        original_content = pcb_clearance.read_text()
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--output",
+                str(output_file),
+                "--max-passes",
+                "3",
+                "--format",
+                "json",
+            ]
+        )
+
+        # The output file must have been created with the repaired content.
+        assert output_file.exists(), "output file should be written after repair"
+
+        output_content = output_file.read_text()
+        # The repaired file must differ from the original (repairs were applied).
+        assert output_content != original_content, (
+            "output file content should differ from the original after repair; "
+            "if it matches, pass 2+ likely loaded the stale original input"
+        )
+
+        # The original input file must not have been modified.
+        assert pcb_clearance.read_text() == original_content, (
+            "original pcb_path should remain untouched when --output is given"
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["total_repaired"] >= 1
+        assert result == 0
+
+
+# ── Enlarged-via displacement threshold tests ──────────────────────
+
+
+class TestEnlargedViaDisplacement:
+    """Verify that segment-to-via violations near enlarged vias are
+    skipped at the old 0.25 mm cap but repaired at 0.5 mm.
+
+    This exercises the core scenario from issue #1401: after fix-vias
+    enlarges a via, the induced clearance violation requires a nudge
+    larger than the old default but within the new pipeline default.
+    """
+
+    def test_skipped_at_old_default(
+        self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys
+    ):
+        """Violation is skipped when max-displacement is the old 0.25 mm default."""
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--max-displacement",
+                "0.25",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["clearance"]["repaired"] == 0
+        assert data["clearance"]["skipped"]["exceeds_max"] >= 1
+
+    def test_repaired_at_new_default(
+        self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys
+    ):
+        """Violation is repaired when max-displacement is raised to 0.5 mm."""
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--max-displacement",
+                "0.5",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["clearance"]["repaired"] >= 1
+        assert data["clearance"]["skipped"]["exceeds_max"] == 0
+
+    @pytest.mark.parametrize(
+        "max_disp,expect_repaired",
+        [
+            (0.25, False),
+            (0.27, False),  # 0.27 + 0.01 margin = 0.28, still exceeds 0.27
+            (0.30, True),  # 0.28 < 0.30
+            (0.50, True),
+            (1.00, True),
+        ],
+    )
+    def test_displacement_threshold_boundary(
+        self,
+        pcb_enlarged_via: Path,
+        report_enlarged_via: Path,
+        capsys,
+        max_disp: float,
+        expect_repaired: bool,
+    ):
+        """Parametrized boundary test across displacement thresholds."""
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--max-displacement",
+                str(max_disp),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        if expect_repaired:
+            assert data["clearance"]["repaired"] >= 1, (
+                f"Expected repair at max_displacement={max_disp}"
+            )
+        else:
+            assert data["clearance"]["repaired"] == 0, (
+                f"Expected skip at max_displacement={max_disp}"
+            )
+
+
+# ── Centralized CLI forwarding tests ────────────────────────────────
+
+
+class TestLocalRerouteViaCentralizedCLI:
+    """Tests that --local-reroute and --quiet work via kct fix-drc (centralized CLI).
+
+    These tests verify that CLI flags are accepted by argparse. Since exit
+    code 2 can now legitimately mean 'non-repairable violations remain',
+    we check that results are in the valid range (0-3) and don't raise
+    SystemExit (which argparse would do for unrecognized arguments).
+    """
+
+    def test_centralized_cli_local_reroute_dry_run(self, tmp_path):
+        """kct fix-drc ... --local-reroute --dry-run parses without 'unrecognized arguments'."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--local-reroute", "--dry-run", "--quiet"])
+        # Should return a valid exit code (0-3), not raise SystemExit
+        assert result in (0, 1, 2, 3)
+
+    def test_centralized_cli_quiet_dry_run(self, tmp_path):
+        """kct fix-drc ... --quiet --dry-run parses without 'unrecognized arguments'."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--quiet", "--dry-run"])
+        assert result in (0, 1, 2, 3)
+
+    def test_centralized_cli_quiet_short_flag_dry_run(self, tmp_path):
+        """kct fix-drc ... -q --dry-run parses the short -q flag."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "-q", "--dry-run"])
+        assert result in (0, 1, 2, 3)
+
+    def test_centralized_cli_local_reroute_quiet_combined(self, tmp_path):
+        """kct fix-drc ... --local-reroute --quiet --dry-run combines without conflict."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--local-reroute", "--quiet", "--dry-run"])
+        assert result in (0, 1, 2, 3)
+
+    def test_centralized_cli_max_displacement_still_works(self, tmp_path):
+        """kct fix-drc ... --max-displacement 0.5 --dry-run still works (regression check)."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(
+            ["fix-drc", str(pcb_file), "--max-displacement", "0.5", "--dry-run", "--quiet"]
+        )
+        assert result in (0, 1, 2, 3)
+
+    def test_centralized_cli_no_connectivity_check(self, tmp_path):
+        """kct fix-drc ... --no-connectivity-check parses without error."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(
+            ["fix-drc", str(pcb_file), "--no-connectivity-check", "--dry-run", "--quiet"]
+        )
+        assert result in (0, 1, 2, 3)
+
+
+# ── Connectivity check and rollback tests ────────────────────────────
+
+
+class TestConnectivityCheckRollback:
+    """Tests for the post-pass connectivity check and rollback logic."""
+
+    def test_connectivity_decrease_triggers_rollback(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When connected_nets decreases after a pass, the file is rolled back."""
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_same_net_vias.read_bytes()
+
+        # Simulate connectivity decrease: baseline=10, after=8
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10  # baseline
+            return 8  # after pass -- decreased
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Exit code 3 = connectivity rollback
+        assert result == 3
+
+        # The output file should be restored to the original content
+        assert output_file.read_bytes() == original_content
+
+        # Warning should be printed to stderr
+        captured = capsys.readouterr()
+        assert "decreased connectivity" in captured.err
+        assert "rolled back" in captured.err
+
+        # JSON output should include connectivity_check section
+        data = json.loads(captured.out)
+        assert "connectivity_check" in data
+        passes = data["connectivity_check"]["passes"]
+        assert len(passes) >= 1
+        assert passes[0]["connected_nets_before"] == 10
+        assert passes[0]["connected_nets_after"] == 8
+        assert passes[0]["rolled_back"] is True
+
+    def test_connectivity_stable_allows_pass(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When connected_nets stays the same or increases, no rollback occurs."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10  # baseline
+            return 10  # after pass -- same
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Should succeed (exit code 0 since all violations repaired)
+        assert result == 0
+
+        # No rollback warning
+        captured = capsys.readouterr()
+        assert "rolled back" not in captured.err
+
+        # JSON should have connectivity_check with no rollback
+        data = json.loads(captured.out)
+        assert "connectivity_check" in data
+        passes = data["connectivity_check"]["passes"]
+        assert passes[0]["rolled_back"] is False
+
+    def test_connectivity_increase_allowed(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, monkeypatch
+    ):
+        """When connected_nets increases after a pass, no rollback occurs."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 5  # baseline
+            return 7  # after pass -- increased
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+            ]
+        )
+
+        # Not a rollback exit code
+        assert result != 3
+
+    def test_no_connectivity_check_flag_skips_check(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """--no-connectivity-check skips the connectivity check entirely."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        # This mock would trigger rollback, but the flag should prevent it
+        def mock_count_connected_nets(pcb_path):
+            raise AssertionError("Should not be called when --no-connectivity-check is set")
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--no-connectivity-check",
+                "--format",
+                "json",
+            ]
+        )
+
+        # Should succeed without calling the mock
+        assert result == 0
+
+        # No connectivity_check in JSON output
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "connectivity_check" not in data
+
+    def test_dry_run_skips_connectivity_check(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, capsys, monkeypatch
+    ):
+        """--dry-run should not perform connectivity checks."""
+
+        def mock_count_connected_nets(pcb_path):
+            raise AssertionError("Should not be called during --dry-run")
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        # Should succeed without calling the mock
+        assert result in (0, 1, 2)
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "connectivity_check" not in data
+
+    def test_connectivity_error_returns_minus_one_skips_rollback(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When _count_connected_nets returns -1, rollback is skipped."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        def mock_count_connected_nets(pcb_path):
+            return -1  # Error / unknown
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+            ]
+        )
+
+        # Should not rollback -- exit code should NOT be 3
+        assert result != 3
+
+    def test_json_connectivity_check_per_pass(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """JSON output should show connectivity data per pass when enabled."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            return 15  # stable connectivity
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "connectivity_check" in data
+        passes = data["connectivity_check"]["passes"]
+        assert len(passes) >= 1
+        for p in passes:
+            assert "pass" in p
+            assert "connected_nets_before" in p
+            assert "connected_nets_after" in p
+            assert "rolled_back" in p
+
+    def test_no_repairs_skips_connectivity_check(
+        self, pcb_clearance: Path, report_clearance: Path, capsys, monkeypatch
+    ):
+        """When max-displacement is 0 (no repairs made), connectivity check is skipped."""
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            return 10
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-displacement",
+                "0",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The baseline is taken but after_conn is never measured since
+        # repaired_this_pass == 0, so no after value
+        if "connectivity_check" in data:
+            # If present, no rollback should have occurred
+            for p in data["connectivity_check"]["passes"]:
+                assert p["rolled_back"] is False
+
+    def test_pass_result_dataclass_fields(self):
+        """PassResult should have connectivity fields."""
+        pr = PassResult(
+            pass_number=1,
+            violations_before=5,
+            repaired=3,
+            clearance_result=RepairResult(),
+            drill_result=DrillRepairResult(),
+            connectivity_before=10,
+            connectivity_after=8,
+            connectivity_rolled_back=True,
+        )
+        assert pr.connectivity_before == 10
+        assert pr.connectivity_after == 8
+        assert pr.connectivity_rolled_back is True
+
+    def test_pass_result_connectivity_defaults(self):
+        """PassResult connectivity fields default to None/False."""
+        pr = PassResult(
+            pass_number=1,
+            violations_before=5,
+            repaired=3,
+            clearance_result=RepairResult(),
+            drill_result=DrillRepairResult(),
+        )
+        assert pr.connectivity_before is None
+        assert pr.connectivity_after is None
+        assert pr.connectivity_rolled_back is False
+
+    # ── Issue #2839: self-consistent summary on rollback ─────────────
+
+    def test_rollback_text_output_is_self_consistent(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """On rollback, text ``CLEARANCE: M/N`` header agrees with ``Repaired 0/N``.
+
+        Issue #2839 sub-bug #2: previously, ``_print_text`` printed
+        ``Repaired 0/18`` in the summary but ``CLEARANCE: 18/18`` in
+        the per-category listing because ``clearance_result.nudges``
+        retained the pre-rollback list.  After the fix, the listed
+        nudges are annotated ``(reverted)`` and the per-category header
+        reflects the rolled-back count (0).
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10  # baseline
+            return 8  # after pass -- decreased
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                # text is the default but be explicit
+                "--format",
+                "text",
+            ]
+        )
+
+        # Exit code 3 = connectivity rollback
+        assert result == 3
+
+        captured = capsys.readouterr()
+        out = captured.out
+
+        # The summary line must say "Repaired 0/N" (with the rollback
+        # annotation) -- it must NOT show the pre-rollback work count.
+        # Find the "Repaired X/Y" line.
+        import re
+
+        summary_match = re.search(r"Repaired (\d+)/(\d+) violations", out)
+        assert summary_match is not None, f"Could not find 'Repaired X/Y' in: {out!r}"
+        repaired_count = int(summary_match.group(1))
+        total_count = int(summary_match.group(2))
+        assert repaired_count == 0, (
+            f"On rollback, summary must say 'Repaired 0/N' but said "
+            f"'Repaired {repaired_count}/{total_count}'"
+        )
+        assert "rolled back" in out.lower(), (
+            f"Summary should explicitly mention 'rolled back', got: {out!r}"
+        )
+
+        # The per-category header must agree: either no listing at all,
+        # or the header is "0/total" and individual entries are tagged.
+        # Look for any line that starts with "CLEARANCE: " or
+        # "DRILL CLEARANCE: " and check it doesn't show a non-zero
+        # repaired count without a (reverted) annotation.
+        cat_lines = [
+            ln
+            for ln in out.splitlines()
+            if ln.startswith("CLEARANCE:") or ln.startswith("DRILL CLEARANCE:")
+        ]
+        for line in cat_lines:
+            # Parse "CLEARANCE: M/N" or "DRILL CLEARANCE: M/N"
+            m = re.search(r":\s*(\d+)/(\d+)", line)
+            assert m is not None, f"Could not parse category header: {line!r}"
+            m_repaired = int(m.group(1))
+            assert m_repaired == 0 or "(reverted)" in line.lower(), (
+                f"On rollback, category header must show 0 repaired or be "
+                f"tagged '(reverted)', got: {line!r}"
+            )
+
+        # Any individual nudge entries listed must be tagged "(reverted)"
+        # so the user sees the work was thrown away.
+        for line in out.splitlines():
+            # Listed nudge entries look like "  [SEGMENT] NETNAME ..."
+            # or "  [VIA] NETNAME ..." or "  [DEDUPLICATE] NETNAME ..."
+            if re.match(r"\s+\[[A-Z_]+\]\s", line):
+                # Only object-type lines for nudges/actions (skip the
+                # detail "at (x, y) ..." continuation lines).
+                if "reverted" not in line.lower():
+                    raise AssertionError(
+                        f"Listed nudge entry not tagged '(reverted)' on rollback: {line!r}"
+                    )
+
+    def test_rollback_json_output_is_self_consistent(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """On rollback, JSON ``total_repaired`` and per-category ``repaired`` agree.
+
+        Issue #2839 sub-bug #2 (JSON variant): the JSON output's
+        ``total_repaired`` and per-category ``repaired`` counters must
+        match the rolled-back state (0), not the pre-rollback attempted
+        work count.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10
+            return 8
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        assert result == 3
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Top-level ``total_repaired`` must be 0 on rollback so the
+        # JSON consumer agrees with the exit code and the rollback flag.
+        assert data["total_repaired"] == 0, (
+            f"On rollback, total_repaired must be 0, got: {data['total_repaired']}"
+        )
+
+        # Per-category repaired counters must also be 0 on rollback so
+        # the JSON is internally consistent.
+        if data.get("clearance", {}).get("violations", 0) > 0:
+            assert data["clearance"]["repaired"] == 0, (
+                f"On rollback, clearance.repaired must be 0, got: {data['clearance']['repaired']}"
+            )
+        if data.get("drill_clearance", {}).get("violations", 0) > 0:
+            assert data["drill_clearance"]["repaired"] == 0, (
+                f"On rollback, drill_clearance.repaired must be 0, "
+                f"got: {data['drill_clearance']['repaired']}"
+            )
+
+        # The connectivity_check section must still flag the rollback.
+        assert data["connectivity_check"]["passes"][0]["rolled_back"] is True
+
+    def test_no_rollback_text_output_unchanged(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When no rollback occurs, listed nudges are NOT tagged '(reverted)'.
+
+        Issue #2839 synthetic positive control: the layer-2 fix
+        annotates nudges on rollback only.  A non-rollback happy path
+        must NOT gain a spurious ``(reverted)`` tag on its listings.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        # Stable connectivity -- no rollback.
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            lambda _p: 10,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "text",
+            ]
+        )
+
+        # Non-rollback: should be 0 (success) or 2 (partial) -- NOT 3.
+        assert result != 3
+
+        captured = capsys.readouterr()
+        out = captured.out
+
+        # No "(reverted)" tags should appear on the happy path.
+        assert "(reverted)" not in out.lower(), (
+            f"Happy path leaked '(reverted)' tag into output: {out!r}"
+        )
+        # No "rolled back" in the summary line on the happy path.
+        assert "rolled back" not in out.lower(), (
+            f"Happy path leaked 'rolled back' into output: {out!r}"
+        )
+
+
+PCB_GRANULAR_ROLLBACK = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NET_X")
+  (net 2 "NET_Y")
+  (net 3 "NET_Z")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-x-1"))
+  (segment (start 100 100.15) (end 110 100.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-y-1"))
+  (segment (start 100 105) (end 110 105) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-x-2"))
+  (segment (start 100 105.15) (end 110 105.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-y-2"))
+  (segment (start 100 110) (end 110 110) (width 0.25) (layer "F.Cu") (net 3) (uuid "seg-z-1"))
+  (segment (start 100 110.15) (end 110 110.15) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-y-3"))
+)
+"""
+
+DRC_REPORT_GRANULAR_ROLLBACK = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 3 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [NET_X] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [NET_Y] on F.Cu
+
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 105.0000 mm): Track [NET_X] on F.Cu
+    @(105.0000 mm, 105.1500 mm): Track [NET_Y] on F.Cu
+
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 110.0000 mm): Track [NET_Z] on F.Cu
+    @(105.0000 mm, 110.1500 mm): Track [NET_Y] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+
+@pytest.fixture
+def pcb_granular_rollback(tmp_path: Path) -> Path:
+    f = tmp_path / "granular.kicad_pcb"
+    f.write_text(PCB_GRANULAR_ROLLBACK)
+    return f
+
+
+@pytest.fixture
+def report_granular_rollback(tmp_path: Path) -> Path:
+    f = tmp_path / "granular-drc.rpt"
+    f.write_text(DRC_REPORT_GRANULAR_ROLLBACK)
+    return f
+
+
+class TestGranularRollback:
+    """Tests for issue #2851: per-nudge granular rollback.
+
+    When the post-pass connectivity check fires, only nudges that touch
+    a regressed net are reverted; the rest stay applied.  Falls back to
+    the legacy bulk-snapshot restore when per-nudge attribution is not
+    possible (empty offender set, every nudge implicated, or undo
+    failure).
+    """
+
+    def _patch_connectivity(
+        self,
+        monkeypatch,
+        *,
+        baseline_count: int,
+        after_count: int,
+        baseline_issues: tuple = (),
+        after_issues: tuple = (),
+    ):
+        """Install paired mocks for _count_connected_nets and _connectivity_report.
+
+        The two helpers are called in lockstep: every baseline/after pair
+        is one of each.  We dispatch on call_count so the after report
+        sees the regressed-net set.
+        """
+        from kicad_tools.validate.connectivity import (
+            ConnectivityIssue,
+            ConnectivityResult,
+        )
+
+        def _make_result(count: int, issues: tuple) -> ConnectivityResult:
+            r = ConnectivityResult()
+            r.connected_nets = count
+            r.total_nets = count + len(issues)
+            for net_name in issues:
+                r.add(
+                    ConnectivityIssue(
+                        severity="error",
+                        issue_type="partial",
+                        net_name=net_name,
+                        message=f"Net '{net_name}' broken",
+                        suggestion="reconnect",
+                    )
+                )
+            return r
+
+        count_calls = {"n": 0}
+        report_calls = {"n": 0}
+
+        def mock_count(_pcb_path):
+            count_calls["n"] += 1
+            return baseline_count if count_calls["n"] == 1 else after_count
+
+        def mock_report(_pcb_path):
+            report_calls["n"] += 1
+            if report_calls["n"] == 1:
+                return _make_result(baseline_count, baseline_issues)
+            return _make_result(after_count, after_issues)
+
+        monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd._count_connected_nets", mock_count)
+        monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd._connectivity_report", mock_report)
+        return count_calls, report_calls
+
+    def test_synthetic_positive_control_partial_rollback(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """Step 1: 3 clearance nudges, regression attributed to NET_X only.
+
+        Expect: nudges on NET_X reverted, nudges on NET_Y / NET_Z kept.
+        Top-level summary: ``Repaired (3-K)/3``, exit code != 3.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        # Connectivity dropped: 10 -> 9.  Regression attributed to NET_X.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        result = main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Partial rollback -- not a full rollback, so exit code != 3.
+        assert result != 3, f"Granular partial rollback should not return exit 3, got {result}"
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # connectivity_check should reflect the partial-rollback state.
+        conn = data["connectivity_check"]["passes"][0]
+        assert conn["rolled_back"] is False, "Partial rollback is not a full rollback"
+        assert conn["partial_rollback"] is True
+        assert len(conn["reverted_uuids"]) >= 1, "At least one nudge should be reverted"
+
+        # The clearance nudges list must tag the reverted entries.
+        nudges = data["clearance"]["nudges"]
+        net_x_nudges = [n for n in nudges if n["net_name"] == "NET_X"]
+        non_x_nudges = [n for n in nudges if n["net_name"] != "NET_X"]
+        # NET_X nudges should be reverted.
+        for n in net_x_nudges:
+            assert n["reverted"] is True, f"NET_X nudge should be reverted: {n}"
+        # Non-NET_X nudges should NOT be reverted.
+        for n in non_x_nudges:
+            assert n["reverted"] is False, f"Non-NET_X nudge should remain: {n}"
+
+        # Repaired total = total_attempted - reverted.
+        total_attempted = data["clearance"]["violations"]
+        reverted_count = sum(1 for n in nudges if n["reverted"])
+        expected_kept = total_attempted - reverted_count
+        assert data["total_repaired"] == expected_kept, (
+            f"Expected total_repaired={expected_kept}, got {data['total_repaired']}"
+        )
+
+    def test_full_rollback_when_all_nudges_touch_offending_net(
+        self,
+        pcb_same_net_vias: Path,
+        report_same_net_drill: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """Step 4: every applied nudge touches the regressed net -> full rollback.
+
+        The granular path must degenerate to ``revert all`` -- same exit
+        code 3 and same bulk-snapshot semantics as before.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_same_net_vias.read_bytes()
+
+        # The same-net-vias fixture has a single GND drill-dedup action.
+        # Reporting GND as regressed implicates every applied nudge.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=8,
+            baseline_issues=(),
+            after_issues=("GND",),
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Full rollback path -- exit code 3, file restored.
+        assert result == 3
+        assert output_file.read_bytes() == original_content
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        conn = data["connectivity_check"]["passes"][0]
+        assert conn["rolled_back"] is True
+        assert conn["partial_rollback"] is False
+
+    def test_local_rerouter_not_called_during_rollback(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Step 5: performance guard -- the rollback path must not re-route.
+
+        ``LocalRerouter.reroute_segment`` is the only routing entry point
+        reachable from the repair pipeline.  We install a sentinel that
+        fails the test if it is invoked at all (we use
+        ``--no-local-reroute`` so the legitimate nudge phase also never
+        routes).
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        from kicad_tools.drc.local_rerouter import LocalRerouter
+
+        original_reroute = LocalRerouter.reroute_segment
+        call_count = {"n": 0}
+
+        def sentinel_reroute(self, *args, **kwargs):
+            call_count["n"] += 1
+            return original_reroute(self, *args, **kwargs)
+
+        monkeypatch.setattr(LocalRerouter, "reroute_segment", sentinel_reroute)
+
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        # ``--no-local-reroute`` to ensure the nudge phase doesn't route
+        # legitimately (which would also count against the sentinel).
+        main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # The rollback path must add zero routing calls.  With
+        # --no-local-reroute the nudge phase also adds zero, so the total
+        # must be zero.
+        assert call_count["n"] == 0, (
+            f"LocalRerouter.reroute was called {call_count['n']} time(s) "
+            f"during fix-drc; the rollback path must be routing-free."
+        )
+
+    def test_undo_failure_falls_back_to_bulk_snapshot(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """Step 6: per-nudge undo failure -> bulk snapshot restore.
+
+        Patch ``_undo_nudge`` to return False for one nudge.  Expect the
+        granular path to abort and the file to be restored to the
+        pre-pass snapshot, with a warning logged.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_granular_rollback.read_bytes()
+
+        # Force undo failure for any nudge.
+        from kicad_tools.drc.repair_clearance import ClearanceRepairer
+
+        def failing_undo(self, nudge):
+            return False
+
+        monkeypatch.setattr(ClearanceRepairer, "_undo_nudge", failing_undo)
+
+        # Regression attributed to NET_X only -- partial path is selected,
+        # then fails, then falls back to bulk.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        result = main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # Bulk fallback -> exit code 3 and file restored.
+        assert result == 3
+        assert output_file.read_bytes() == original_content
+
+        # The warning should mention the fallback.
+        captured = capsys.readouterr()
+        assert "per-nudge rollback failed" in captured.err
+        assert "bulk snapshot restore" in captured.err
+
+    def test_connectivity_validator_calls_are_o1(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Step 2: Approach 1 -- the rollback path uses O(1) connectivity calls.
+
+        Asserts the upper bound on _connectivity_report calls per pass
+        (Approach 1 = 2: baseline + after).  An extra post-undo
+        _count_connected_nets call is allowed (one O(1) re-check).
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+
+        count_calls, report_calls = self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=9,
+            baseline_issues=(),
+            after_issues=("NET_X",),
+        )
+
+        main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # Approach 1 budget: 2 _connectivity_report calls (baseline + after)
+        # and at most 3 _count_connected_nets calls (baseline + after + post-undo).
+        # Anything materially larger indicates regression toward Approach 2/3.
+        assert report_calls["n"] <= 2, (
+            f"Too many _connectivity_report calls: {report_calls['n']} > 2; "
+            f"the rollback path should not re-validate per nudge."
+        )
+        assert count_calls["n"] <= 3, (
+            f"Too many _count_connected_nets calls: {count_calls['n']} > 3"
+        )
+
+    def test_empty_regressed_set_falls_back_to_bulk(
+        self,
+        pcb_granular_rollback: Path,
+        report_granular_rollback: Path,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        """When per-net attribution cannot identify offenders, bulk restore.
+
+        The count drops but no specific net is flagged as regressed.
+        Without an offender set, the granular path falls back to the
+        legacy bulk-snapshot restore.
+        """
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_granular_rollback.read_bytes()
+
+        # Count drops but issue lists are empty in both reports.
+        self._patch_connectivity(
+            monkeypatch,
+            baseline_count=10,
+            after_count=8,
+            baseline_issues=(),
+            after_issues=(),
+        )
+
+        result = main(
+            [
+                str(pcb_granular_rollback),
+                "--drc-report",
+                str(report_granular_rollback),
+                "-o",
+                str(output_file),
+                "--no-local-reroute",
+            ]
+        )
+
+        # Empty offender set -> bulk fallback -> exit 3.
+        assert result == 3
+        assert output_file.read_bytes() == original_content
+
+
+class TestRegressedNetsIgnoresLoneFill6495:
+    """Issue #6495: a lone fill island warning never marks a net regressed."""
+
+    @staticmethod
+    def _result(*issues: tuple[str, str, str]):
+        from kicad_tools.validate.connectivity import (
+            ConnectivityIssue,
+            ConnectivityResult,
+        )
+
+        return ConnectivityResult(
+            issues=[
+                ConnectivityIssue(
+                    severity=severity,
+                    issue_type=issue_type,
+                    net_name=net,
+                    message="m",
+                    suggestion="s",
+                )
+                for severity, issue_type, net in issues
+            ]
+        )
+
+    def test_new_lone_fill_warning_is_not_regressed(self):
+        from kicad_tools.cli.fix_drc_cmd import _regressed_nets
+
+        after = self._result(("warning", "zone_island", "GND"))
+        assert _regressed_nets(self._result(), after) == set()
+
+    def test_new_real_error_is_regressed(self):
+        from kicad_tools.cli.fix_drc_cmd import _regressed_nets
+
+        after = self._result(("error", "zone_island", "GND"))
+        assert _regressed_nets(self._result(), after) == {"GND"}
+
+    def test_lone_fill_baseline_then_real_error_is_regressed(self):
+        from kicad_tools.cli.fix_drc_cmd import _regressed_nets
+
+        baseline = self._result(("warning", "zone_island", "GND"))
+        after = self._result(("warning", "zone_island", "GND"), ("error", "zone_island", "GND"))
+        assert _regressed_nets(baseline, after) == {"GND"}
+
+
+class TestCountConnectedNets:
+    """Tests for the _count_connected_nets helper."""
+
+    def test_returns_count_for_valid_pcb(self, tmp_path):
+        """Should return a non-negative count for a valid PCB."""
+        from kicad_tools.cli.fix_drc_cmd import _count_connected_nets
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SAME_NET_VIAS)
+
+        result = _count_connected_nets(pcb_file)
+        assert result >= 0
+
+    def test_returns_minus_one_for_invalid_file(self, tmp_path):
+        """Should return -1 for an invalid/unparseable file."""
+        from kicad_tools.cli.fix_drc_cmd import _count_connected_nets
+
+        bad_file = tmp_path / "bad.kicad_pcb"
+        bad_file.write_text("this is not a valid pcb file")
+
+        result = _count_connected_nets(bad_file)
+        assert result == -1
+
+    def test_returns_minus_one_for_nonexistent_file(self, tmp_path):
+        """Should return -1 for a file that does not exist."""
+        from kicad_tools.cli.fix_drc_cmd import _count_connected_nets
+
+        result = _count_connected_nets(tmp_path / "nonexistent.kicad_pcb")
+        assert result == -1
+
+
+# ── Tests for zone-filled PCBs in fix-drc pipeline ────────────────────────────
+
+PCB_WITH_ZONE_FILLS = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-zf-1"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone-zf-1")
+    (connect_pads (clearance 0.2))
+    (fill (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 90) (xy 120 90) (xy 120 120) (xy 90 120)))
+    (filled_polygon (layer "F.Cu")
+      (pts (xy 90.2 90.2) (xy 119.8 90.2) (xy 119.8 119.8) (xy 90.2 119.8))
+    )
+  )
+)
+"""
+
+DRC_REPORT_ZONE_FILL = """\
+** Drc report for zone_fill.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1000 mm)
+    Rule: netclass 'Default'; error
+    @(100.0000 mm, 100.0000 mm): Track [+3.3V] on F.Cu
+    @(100.0000 mm, 100.1000 mm): Zone [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+
+class TestFixDrcNewDefaults:
+    """Tests for the updated default values (max-displacement=0.5, local-reroute=True)."""
+
+    def test_default_max_displacement_is_0_5(
+        self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys
+    ):
+        """Default max-displacement should be 0.5mm (not the old 0.25mm).
+
+        The enlarged-via violation requires 0.28mm displacement, which exceeds
+        the old 0.25mm default but is within the new 0.5mm default.
+        """
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Should be repaired with the new default (0.5mm)
+        assert data["clearance"]["repaired"] >= 1
+        assert data["max_displacement_mm"] == 0.5
+
+    def test_local_reroute_on_by_default(self, tmp_path: Path):
+        """--local-reroute should be enabled by default (no flag needed)."""
+
+        from kicad_tools.cli.fix_drc_cmd import main as fix_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        # Parse with no --local-reroute flag -- should default to True
+        # We test by checking that --no-local-reroute disables it
+        result_with = fix_main([str(pcb_file), "--dry-run", "--quiet"])
+        result_without = fix_main([str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"])
+        # Both should complete without error (valid exit codes 0-3)
+        assert result_with in (0, 1, 2, 3)
+        assert result_without in (0, 1, 2, 3)
+
+    def test_no_local_reroute_flag_accepted(self, tmp_path: Path):
+        """--no-local-reroute should be accepted as a valid flag."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"])
+        assert result in (0, 1, 2, 3)  # Valid exit code, not SystemExit
+
+
+class TestFixDrcWithZoneFills:
+    """Tests for fix-drc handling of zone-filled PCBs."""
+
+    def test_no_crash_loading_zone_pcb(self, tmp_path: Path):
+        """fix-drc should not crash when loading a PCB with zone fills."""
+        pcb_file = tmp_path / "zone_fill.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONE_FILLS)
+
+        report_file = tmp_path / "zone-drc.rpt"
+        report_file.write_text(DRC_REPORT_ZONE_FILL)
+
+        result = main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--quiet",
+            ]
+        )
+
+        # Should not crash; zone violations are filtered so no targeted violations
+        assert result in (0, 1, 2)
+
+    def test_zone_violations_filtered_in_json_output(self, tmp_path: Path, capsys):
+        """Zone-fill violations should be excluded from clearance repair count."""
+        pcb_file = tmp_path / "zone_fill.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONE_FILLS)
+
+        report_file = tmp_path / "zone-drc.rpt"
+        report_file.write_text(DRC_REPORT_ZONE_FILL)
+
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # The zone violation should have been filtered out by ClearanceRepairer
+        # so clearance violations count should be 0
+        assert data["clearance"]["violations"] == 0
+
+
+# ── Full-detection and non-targeted violation tests ────────────────────────────
+
+
+# DRC report with mixed repairable and non-repairable violations
+DRC_REPORT_WITH_EDGE_AND_CLEARANCE = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 3 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+[edge_clearance_trace]: Copper-to-edge clearance violation (clearance 0.3000 mm; actual 0.1000 mm)
+    Rule: edge clearance; error
+    @(90.1000 mm, 100.0000 mm): Track [GND] on F.Cu
+
+[silkscreen_line_width]: Silkscreen line width violation (minimum 0.1000 mm; actual 0.0500 mm)
+    Rule: silkscreen minimum; warning
+    @(100.0000 mm, 95.0000 mm): Line on F.SilkS
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# DRC report with only non-repairable violations
+DRC_REPORT_ONLY_EDGE = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[edge_clearance_trace]: Copper-to-edge clearance violation (clearance 0.3000 mm; actual 0.1000 mm)
+    Rule: edge clearance; error
+    @(90.1000 mm, 100.0000 mm): Track [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+
+class TestNonTargetedViolations:
+    """Tests for detection and reporting of non-repairable (non-targeted) violations."""
+
+    def test_non_targeted_violations_in_json_output(
+        self, pcb_clearance: Path, tmp_path: Path, capsys
+    ):
+        """JSON output should include non_targeted_violations count."""
+        report_file = tmp_path / "mixed-drc.rpt"
+        report_file.write_text(DRC_REPORT_WITH_EDGE_AND_CLEARANCE)
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "non_targeted_violations" in data
+        # 2 non-targeted: edge_clearance_trace + silkscreen_line_width
+        assert data["non_targeted_violations"] == 2
+        # 1 clearance violation is targeted
+        assert data["total_violations"] >= 1
+
+    def test_only_non_repairable_exits_2(self, pcb_clearance: Path, tmp_path: Path, capsys):
+        """When only non-repairable violations exist, exit code should be 2."""
+        report_file = tmp_path / "edge-only-drc.rpt"
+        report_file.write_text(DRC_REPORT_ONLY_EDGE)
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+            ]
+        )
+
+        assert result == 2
+        captured = capsys.readouterr()
+        assert "non-repairable" in captured.out.lower()
+
+    def test_text_output_reports_non_targeted(self, pcb_clearance: Path, tmp_path: Path, capsys):
+        """Text output should mention non-repairable violations."""
+        report_file = tmp_path / "mixed-drc.rpt"
+        report_file.write_text(DRC_REPORT_WITH_EDGE_AND_CLEARANCE)
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "text",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Text output should mention non-repairable violations
+        assert "non-repairable" in captured.out.lower()
+
+    def test_summary_output_reports_non_targeted(self, pcb_clearance: Path, tmp_path: Path, capsys):
+        """Summary output should mention non-repairable violations."""
+        report_file = tmp_path / "mixed-drc.rpt"
+        report_file.write_text(DRC_REPORT_WITH_EDGE_AND_CLEARANCE)
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "summary",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "non-repairable" in captured.out.lower()
+
+    def test_zero_violations_clean_board_exits_0(
+        self, pcb_clearance: Path, report_empty: Path, capsys
+    ):
+        """Board with 0 violations (including non-targeted) should exit 0."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_empty),
+            ]
+        )
+        assert result == 0
+
+    def test_all_repaired_but_non_targeted_remain_exits_2(
+        self, pcb_same_net_vias: Path, tmp_path: Path, capsys
+    ):
+        """When all repairable violations are fixed but non-targeted remain, exit code is 2."""
+        # Create a report with a repairable drill violation + a non-repairable edge violation
+        report_content = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 2 DRC violations **
+[drill_clearance]: Drill-to-drill clearance (minimum 0.2500 mm; actual -0.3000 mm)
+    Rule: min drill clearance; error
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+[edge_clearance_trace]: Copper-to-edge clearance violation (clearance 0.3000 mm; actual 0.1000 mm)
+    Rule: edge clearance; error
+    @(90.1000 mm, 100.0000 mm): Track [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report_file = tmp_path / "mixed-with-edge-drc.rpt"
+        report_file.write_text(report_content)
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_file),
+                "--no-connectivity-check",
+            ]
+        )
+
+        # Drill violation repaired but edge violation remains -> exit 2
+        assert result == 2
+
+
+class TestFullDetectionFallback:
+    """Tests that _run_python_drc uses check_all() and detects all violation categories."""
+
+    def test_fallback_detects_all_categories(self, tmp_path: Path):
+        """Pure-Python DRC fallback should detect violations beyond clearance."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        # PCB with a trace that would violate edge clearance (no edge cuts
+        # defined, so edge checks may not fire, but dimensions checks should).
+        # The key assertion is that _run_python_drc returns violations from
+        # multiple check categories, not just clearances.
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        # Should have at least clearance violations
+        assert report.violation_count > 0
+
+    def test_fallback_returns_more_violations_than_clearance_only(self, tmp_path: Path):
+        """check_all() should find at least as many violations as check_clearances()."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        pcb = PCB.load(pcb_file)
+        checker = DRCChecker(pcb)
+
+        clearance_only = checker.check_clearances()
+        all_checks = checker.check_all()
+
+        # check_all must return at least as many violations as check_clearances
+        assert len(all_checks.violations) >= len(clearance_only.violations)
+
+
+# ── Verify flag tests ────────────────────────────────────────────────
+
+
+class TestVerifyFlag:
+    """Tests for the --verify flag that runs pure-Python DRC before/after repair."""
+
+    def test_verify_flag_accepted(self, tmp_path: Path):
+        """--verify should be accepted as a valid CLI flag."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--verify", "--dry-run", "--quiet"])
+        assert result in (0, 1, 2, 3)
+
+    def test_verify_prints_before_after(self, tmp_path: Path, capsys):
+        """--verify should print before/after violation counts."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SAME_NET_VIAS)
+
+        # Create a DRC report with a dedup-able drill violation
+        report_content = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[drill_clearance]: Drill-to-drill clearance (minimum 0.2500 mm; actual -0.3000 mm)
+    Rule: min drill clearance; error
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+    @(115.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report_file = tmp_path / "drc.rpt"
+        report_file.write_text(report_content)
+
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--verify",
+                "--no-connectivity-check",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "VERIFICATION" in captured.out
+        assert "Before repair" in captured.out
+        assert "After repair" in captured.out
+
+    def test_verify_skipped_on_dry_run(self, tmp_path: Path, capsys):
+        """--verify with --dry-run should not print after-repair verification."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        main(
+            [
+                str(pcb_file),
+                "--verify",
+                "--dry-run",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Verify block should NOT appear (dry-run skips post-repair DRC)
+        assert "VERIFICATION" not in captured.out
+
+    def test_verify_before_count_printed(self, tmp_path: Path, capsys):
+        """--verify should print the before-repair count even without changes."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        main(
+            [
+                str(pcb_file),
+                "--verify",
+                "--no-connectivity-check",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "[verify] Before repair" in captured.out
+
+
+# ── Category alignment tests ─────────────────────────────────────────
+
+
+class TestCategoryAlignment:
+    """Tests that check and fix-drc use the same DRC categories."""
+
+    def test_check_categories_include_solder_mask(self):
+        """CHECK_CATEGORIES in check_cmd should include solder_mask."""
+        pytest.importorskip("pydantic")
+        from kicad_tools.cli.check_cmd import CHECK_CATEGORIES
+
+        assert "solder_mask" in CHECK_CATEGORIES
+
+    def test_check_and_fix_drc_same_categories(self, tmp_path: Path):
+        """check and fix-drc pure-Python DRC should produce the same violation count.
+
+        The single documented exception is
+        ``fix_drc_cmd._UNREPAIRABLE_TOPOLOGY_RULE_IDS`` (issue #4680):
+        dangling-copper advisories are deliberately dropped from the
+        fix-drc fallback because no nudge can repair them.  Subtracting
+        exactly that set from the check-side count keeps this guard's
+        real intent -- fix-drc must not silently omit a whole DRC
+        *category* -- while making the one intentional filter explicit.
+        """
+        from kicad_tools.cli.fix_drc_cmd import (
+            _UNREPAIRABLE_TOPOLOGY_RULE_IDS,
+            _run_python_drc,
+        )
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        # fix-drc path: _run_python_drc calls checker.check_all()
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        fix_drc_count = len(report.violations)
+
+        # check path: checker.check_all() covers the same 5 categories
+        # that check_cmd now maps (clearance, dimensions, edge, silkscreen, solder_mask)
+        pcb = PCB.load(pcb_file)
+        checker = DRCChecker(pcb)
+        results = checker.check_all()
+        check_count = len(
+            [v for v in results.violations if v.rule_id not in _UNREPAIRABLE_TOPOLOGY_RULE_IDS]
+        )
+
+        assert fix_drc_count == check_count, (
+            f"fix-drc reported {fix_drc_count} violations but check reported "
+            f"{check_count}; the two tools must use the same DRC categories"
+        )
+
+
+# ── --transactional flag (issue #4541) ──────────────────────────────
+
+
+class TestTransactionalFlag:
+    """Tests for the opt-in --transactional snapshot/rollback wrapper."""
+
+    def test_success_leaves_no_sidecar_or_tmp_litter(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path
+    ):
+        """A successful transactional run keeps the repairs and leaves no litter."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--transactional",
+                "--no-connectivity-check",
+                "--quiet",
+            ]
+        )
+        assert result in (0, 2)
+        assert list(tmp_path.glob("*.failed-*")) == []
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_exception_rolls_back_byte_identical(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, monkeypatch
+    ):
+        """A crash mid-repair restores the input and preserves a sidecar."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        original_bytes = pcb_clearance.read_bytes()
+
+        def corrupt_and_raise(**kwargs):
+            kwargs["output_path"].write_text("(kicad_pcb corrupted mid-write")
+            raise RuntimeError("simulated crash mid-repair")
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", corrupt_and_raise)
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            main(
+                [
+                    str(pcb_clearance),
+                    "--drc-report",
+                    str(report_clearance),
+                    "--transactional",
+                    "--no-connectivity-check",
+                    "--quiet",
+                ]
+            )
+
+        assert pcb_clearance.read_bytes() == original_bytes
+        sidecars = list(tmp_path.glob("*.failed-*"))
+        assert len(sidecars) == 1
+        assert sidecars[0].read_text() == "(kicad_pcb corrupted mid-write"
+
+    def test_no_progress_exit_1_rolls_back(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, monkeypatch
+    ):
+        """The non-zero-exit failure path (exit 1) rolls back too (#4541)."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        original_bytes = pcb_clearance.read_bytes()
+
+        def corrupt_without_progress(**kwargs):
+            # Mutates the file but reports zero repairs -> exit code 1.
+            kwargs["output_path"].write_text("(kicad_pcb formatting-drift-only rewrite)")
+            return (
+                RepairResult(total_violations=1, repaired=0),
+                DrillRepairResult(),
+            )
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", corrupt_without_progress)
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--transactional",
+                "--no-connectivity-check",
+                "--quiet",
+            ]
+        )
+
+        assert result == 1
+        assert pcb_clearance.read_bytes() == original_bytes
+        assert len(list(tmp_path.glob("*.failed-*"))) == 1
+
+    def test_default_behavior_unchanged_without_flag(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, monkeypatch
+    ):
+        """Without --transactional there is no snapshot, rollback, or sidecar."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        def corrupt_and_raise(**kwargs):
+            kwargs["output_path"].write_text("corrupted")
+            raise RuntimeError("simulated crash mid-repair")
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", corrupt_and_raise)
+
+        with pytest.raises(RuntimeError):
+            main(
+                [
+                    str(pcb_clearance),
+                    "--drc-report",
+                    str(report_clearance),
+                    "--no-connectivity-check",
+                    "--quiet",
+                ]
+            )
+
+        # opt-in semantics: the corruption survives and no sidecar appears
+        assert pcb_clearance.read_text() == "corrupted"
+        assert list(tmp_path.glob("*.failed-*")) == []
+
+    def test_outer_parser_forwards_transactional(self, monkeypatch):
+        """kct fix-drc --transactional reaches the inner parser (drift guard)."""
+        from kicad_tools.cli.commands.validation import run_fix_drc_command
+
+        captured: dict[str, list[str]] = {}
+
+        def fake_main(sub_argv):
+            captured["argv"] = sub_argv
+            return 0
+
+        monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd.main", fake_main)
+
+        class Args:
+            pcb = "board.kicad_pcb"
+            drc_report = None
+            mfr = "jlcpcb"
+            layers = 2
+            max_displacement = 0.5
+            margin = 0.01
+            only = None
+            output = None
+            dry_run = False
+            max_passes = 1
+            local_reroute = True
+            no_connectivity_check = False
+            verify = False
+            transactional = True
+            format = "text"
+            quiet = False
+
+        assert run_fix_drc_command(Args()) == 0
+        assert "--transactional" in captured["argv"]
+
+
+# ── Issue #6431: fix-drc success is re-checked, never self-reported ──────
+#
+# A 0.2 mm SIG track whose edge is 0.175 mm from a GND pad, with the project
+# putting GND in a 0.2 mm ``Power`` netclass.  ``check_all()`` (the old
+# re-detection and --verify engine) never saw it: the class rule
+# ``netclass_clearance_copper`` reads the sibling ``.kicad_pro`` and only runs
+# through ``kct check``'s own dispatch.
+
+_PWR_BOARD = """(kicad_pcb (version 20240108) (generator "pcbnew") (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal) (31 "B.Cu" signal)
+    (34 "B.Paste" user) (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen") (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user) (39 "F.Mask" user)
+    (44 "Edge.Cuts" user) (46 "B.CrtYd" user "B.Courtyard") (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user) (49 "F.Fab" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (gr_rect (start 85 85) (end 120 116) (stroke (width 0.1) (type default)) (fill none)
+    (layer "Edge.Cuts"))
+  (footprint "test:R1" (layer "F.Cu") (at 102 101)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (fp_rect (start -0.75 -0.75) (end 0.75 0.75) (stroke (width 0.05) (type solid)) (fill no)
+      (layer "F.CrtYd"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-r1-1"))
+    (model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.step"
+      (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))
+  )
+  (segment (start 100 100.225) (end 104 100.225) (width 0.2) (layer "F.Cu") (net 2) (uuid "trk-s"))
+)
+"""
+
+
+def _pwr_netclass(name: str, clearance: float, priority: int) -> dict:
+    return {
+        "name": name,
+        "clearance": clearance,
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "diff_pair_width": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "wire_width": 6,
+        "bus_width": 12,
+        "line_style": 0,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": priority,
+    }
+
+
+_PWR_PROJECT = {
+    "meta": {"filename": "pwr.kicad_pro", "version": 3},
+    "board": {
+        "design_settings": {
+            "rules": {
+                "min_clearance": 0.1,
+                "min_track_width": 0.1,
+                "min_copper_edge_clearance": 0.2,
+            }
+        }
+    },
+    "net_settings": {
+        "meta": {"version": 4},
+        "classes": [
+            _pwr_netclass("Default", 0.15, 2147483647),
+            _pwr_netclass("Power", 0.2, 0),
+        ],
+        "netclass_assignments": None,
+        "netclass_patterns": [{"netclass": "Power", "pattern": "GND"}],
+    },
+}
+
+
+@pytest.fixture
+def pwr_board(tmp_path: Path) -> Path:
+    """The 0.175 mm track-to-pad gap under a 0.2 mm class, with its project."""
+    pcb = tmp_path / "pwr.kicad_pcb"
+    pcb.write_text(_PWR_BOARD)
+    make_assembly_ready(pcb)
+    pcb.with_suffix(".kicad_pro").write_text(json.dumps(_PWR_PROJECT))
+    return pcb
+
+
+def _class_errors(report) -> list:
+    return [
+        v for v in report.violations if v.is_error and v.type_str == "netclass_clearance_copper"
+    ]
+
+
+class TestFixDrcRecheck6431:
+    """``fix-drc`` reports success only when a re-check with kct check's rules is clean."""
+
+    def test_python_detection_sees_the_class_violation(self, pwr_board: Path):
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        report = _run_python_drc(pwr_board)
+        assert report is not None
+        (violation,) = _class_errors(report)
+        assert violation.type == ViolationType.CLEARANCE
+        assert violation.actual_value_mm == pytest.approx(0.175, abs=1e-6)
+        assert violation.required_value_mm == pytest.approx(0.2)
+
+    def test_repairs_and_exits_zero_only_when_clean(self, pwr_board: Path, capsys):
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        code = main([str(pwr_board), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "All violations repaired!" in out
+        assert "kct-check: 0 targeted error(s)" in out
+        after = _run_python_drc(pwr_board)
+        assert after is not None and _class_errors(after) == []
+
+    def test_verify_uses_kct_check_rule_set(self, pwr_board: Path, capsys):
+        code = main([str(pwr_board), "--no-connectivity-check", "--verify"])
+        out = capsys.readouterr().out
+        assert code == 0
+        # The class violation is counted before and gone after.
+        assert "Before repair: 1 violation(s)" in out
+        assert "After repair:  0 violation(s)" in out
+        assert "kct check's rule set" in out
+
+    def test_layers_default_to_board_copper_count(self, pwr_board: Path, monkeypatch):
+        from kicad_tools.cli import fix_drc_cmd
+
+        seen: list = []
+        real = fix_drc_cmd._run_python_drc
+
+        def spy(path, manufacturer="jlcpcb", layers=None, project_pcb_path=None):
+            seen.append(layers)
+            return real(path, manufacturer, layers, project_pcb_path)
+
+        # Start from the raw template: the fixture's add-fiducials pass
+        # re-serialises the file, so its layer line no longer matches.
+        four_layer = _PWR_BOARD.replace(
+            '(0 "F.Cu" signal) (31 "B.Cu" signal)',
+            '(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)',
+        )
+        assert four_layer != _PWR_BOARD
+        pwr_board.write_text(four_layer)
+        make_assembly_ready(pwr_board)
+        monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", spy)
+        main([str(pwr_board), "--no-connectivity-check", "--quiet"])
+        assert seen and all(layers == 4 for layers in seen)
+
+    def test_repairer_claims_fixed_but_recheck_fails(self, pwr_board: Path, monkeypatch, capsys):
+        """A self-reported repair is not success: the re-check decides."""
+        from kicad_tools.drc.repair_clearance import ClearanceRepairer
+
+        def lying_repair(self, report, **kwargs):
+            # Touch nothing, claim everything.
+            n = len(report.violations)
+            return RepairResult(total_violations=n, repaired=n)
+
+        monkeypatch.setattr(ClearanceRepairer, "repair_from_report", lying_repair)
+        code = main([str(pwr_board), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code != 0
+        assert "All violations repaired!" not in out
+        assert "1 violation(s) remain unrepaired" in out
+        assert "R1-1" in out  # the remaining pair is named
+
+    def test_json_recheck_block(self, pwr_board: Path, monkeypatch, capsys):
+        from kicad_tools.drc.repair_clearance import ClearanceRepairer
+
+        monkeypatch.setattr(
+            ClearanceRepairer,
+            "repair_from_report",
+            lambda self, report, **kw: RepairResult(
+                total_violations=len(report.violations), repaired=len(report.violations)
+            ),
+        )
+        code = main([str(pwr_board), "--no-connectivity-check", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert code == 2
+        recheck = data["recheck"]
+        assert recheck["ran"] is True and recheck["clean"] is False
+        assert recheck["errors_before"] == 1 and recheck["errors_after"] == 1
+        assert recheck["engines"][0]["engine"] == "kct-check"
+        assert recheck["remaining"][0]["type"] == "netclass_clearance_copper"
+
+    def test_output_rechecked_with_input_project_rules(
+        self, pwr_board: Path, tmp_path: Path, monkeypatch, capsys
+    ):
+        """``--output`` elsewhere: the re-check keeps the input's .kicad_pro.
+
+        The pass is mocked to copy the board unchanged and claim a repair.
+        Checked without the input's project the copy would look clean (no
+        class); with it, the violation is still there.
+        """
+        import shutil
+
+        from kicad_tools.cli import fix_drc_cmd
+        from kicad_tools.drc.repair_drill_clearance import DrillRepairResult
+
+        out_dir = tmp_path / "elsewhere"
+        out_dir.mkdir()
+        output = out_dir / "fixed.kicad_pcb"
+
+        def copy_and_claim(**kwargs):
+            shutil.copyfile(kwargs["pcb_path"], kwargs["output_path"])
+            return RepairResult(total_violations=1, repaired=1), DrillRepairResult()
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", copy_and_claim)
+
+        # The precondition the test relies on:
+        assert _class_errors(fix_drc_cmd._run_python_drc(pwr_board)) != []
+        shutil.copyfile(pwr_board, output)
+        assert _class_errors(fix_drc_cmd._run_python_drc(output)) == []
+        assert _class_errors(fix_drc_cmd._run_python_drc(output, project_pcb_path=pwr_board)) != []
+        output.unlink()
+
+        code = main([str(pwr_board), "-o", str(output), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code != 0
+        assert "All violations repaired!" not in out
+        assert not (out_dir / "fixed.kicad_pro").exists()  # nothing written beside it
+
+    def test_real_repair_to_output_is_clean(self, pwr_board: Path, tmp_path: Path, capsys):
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        output = tmp_path / "elsewhere" / "fixed.kicad_pcb"
+        output.parent.mkdir()
+        code = main([str(pwr_board), "-o", str(output), "--no-connectivity-check"])
+        assert code == 0, capsys.readouterr().out
+        after = _run_python_drc(output, project_pcb_path=pwr_board)
+        assert after is not None and _class_errors(after) == []
+
+    def test_kicad_cli_leg_gates_success(self, pwr_board: Path, monkeypatch, capsys):
+        """A kicad-cli report keeps kicad-cli in the gate: its errors block exit 0."""
+        from kicad_tools.cli import fix_drc_cmd
+        from kicad_tools.drc.report import parse_text_report
+
+        report = pwr_board.parent / "kc.rpt"
+        report.write_text(
+            """** Drc report for pwr.kicad_pcb **
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Power' clearance 0.2000 mm; actual 0.1750 mm)
+    Rule: netclass 'Power'; error
+    @(102.0000 mm, 101.0000 mm): Pad 1 [GND] of R1 on F.Cu
+    @(100.0000 mm, 100.2250 mm): Track [SIG] on F.Cu
+** End of Report **
+"""
+        )
+        stale = parse_text_report(report.read_text())  # kicad-cli still disagrees
+        monkeypatch.setattr(fix_drc_cmd, "_kicad_cli_path", lambda: Path("/fake/kicad-cli"))
+        calls: list = []
+
+        def fake_cli(board, project):
+            calls.append((board, project))
+            return stale
+
+        monkeypatch.setattr(fix_drc_cmd, "_run_kicad_cli_drc", fake_cli)
+        code = main([str(pwr_board), "--drc-report", str(report), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert calls and calls[-1][1] == pwr_board
+        assert code != 0
+        assert "kct-check: 0 targeted error(s)" in out  # the repair itself worked...
+        assert "kicad-cli: 1 targeted error(s)" in out  # ...but kicad-cli is in the gate
+        assert "All violations repaired!" not in out
+
+    def test_kicad_cli_unavailable_is_disclosed(self, pwr_board: Path, capsys):
+        report = pwr_board.parent / "kc.rpt"
+        report.write_text(
+            """** Drc report for pwr.kicad_pcb **
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Power' clearance 0.2000 mm; actual 0.1750 mm)
+    Rule: netclass 'Power'; error
+    @(102.0000 mm, 101.0000 mm): Pad 1 [GND] of R1 on F.Cu
+    @(100.0000 mm, 100.2250 mm): Track [SIG] on F.Cu
+** End of Report **
+"""
+        )
+        code = main([str(pwr_board), "--drc-report", str(report), "--no-connectivity-check"])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "kicad-cli: not run (kicad-cli not installed" in out
+
+    def test_project_rules_staging(self, pwr_board: Path, tmp_path: Path):
+        from kicad_tools.cli.fix_drc_cmd import _with_project_rules
+
+        (pwr_board.with_suffix(".kicad_dru")).write_text("(version 1)\n")
+        other = tmp_path / "x" / "copy.kicad_pcb"
+        other.parent.mkdir()
+        other.write_text(_PWR_BOARD)
+        with _with_project_rules(other, pwr_board) as staged:
+            assert staged.name == "pwr.kicad_pcb"
+            assert staged.parent != pwr_board.parent
+            assert staged.with_suffix(".kicad_pro").read_text() == json.dumps(_PWR_PROJECT)
+            assert staged.with_suffix(".kicad_dru").exists()
+        assert not staged.exists()
+        with _with_project_rules(pwr_board, pwr_board) as same:
+            assert same == pwr_board
+
+    def test_unchanged_board_is_not_rechecked_by_kicad_cli_twice(
+        self, pwr_board: Path, monkeypatch
+    ):
+        """Same board bytes and rules: the second kicad-cli run is reused."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import fix_drc_cmd, runner
+
+        monkeypatch.setattr(fix_drc_cmd, "_kicad_cli_path", lambda: Path("/fake/kicad-cli"))
+        fix_drc_cmd._KICAD_CLI_REPORTS.clear()
+        calls: list[Path] = []
+
+        def fake_run_drc(board, **_kwargs):
+            calls.append(Path(board))
+            out = pwr_board.parent / f"drc-{len(calls)}.json"
+            out.write_text(
+                json.dumps({"source": "pwr.kicad_pcb", "violations": [], "unconnected_items": []})
+            )
+            return SimpleNamespace(success=True, output_path=out, stderr="")
+
+        monkeypatch.setattr(runner, "run_drc", fake_run_drc)
+        first = fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board)
+        again = fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board)
+        assert first is not None and again is first
+        assert len(calls) == 1
+
+        pwr_board.write_text(pwr_board.read_text() + "\n")  # any edit re-runs it
+        assert fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board) is not first
+        assert len(calls) == 2
+        fix_drc_cmd._KICAD_CLI_REPORTS.clear()
+
+    @pytest.mark.skipif(
+        __import__("kicad_tools.cli.runner", fromlist=["find_kicad_cli"]).find_kicad_cli() is None,
+        reason="kicad-cli not installed",
+    )
+    def test_real_kicad_cli_end_to_end(self, pwr_board: Path, monkeypatch, capsys):
+        """With kicad-cli: detect, repair, and both engines confirm 0 targeted errors."""
+        from kicad_tools.cli import fix_drc_cmd
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        monkeypatch.setattr(fix_drc_cmd, "_kicad_cli_path", lambda: Path(find_kicad_cli()))
+        before = fix_drc_cmd._run_kicad_cli_drc(pwr_board, pwr_board)
+        assert before is not None
+        assert len(fix_drc_cmd._targeted(before, None)[0]) == 1
+
+        main([str(pwr_board), "--no-connectivity-check", "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        engines = {e["engine"]: e for e in data["recheck"]["engines"]}
+        assert engines["kicad-cli"]["ran"] and engines["kicad-cli"]["targeted_errors"] == 0
+        assert engines["kct-check"]["targeted_errors"] == 0

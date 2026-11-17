@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-11-11T22:00:00+00:00",
+  "mode": "assembly",
+  "status": "ready",
+  "blockers": [],
+  "checks": [
+    {
+      "name": "zone_fill",
+      "status": "passed",
+      "detail": "Saved copper area agrees with an independent refill on 0 layer(s)."
+    },
+    {
+      "name": "kct_check",
+      "status": "passed",
+      "detail": "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; warning counts: none. Manifest verification is deferred to the artifacts gate."
+    },
+    {
+      "name": "native_drc",
+      "status": "passed",
+      "detail": "0 error-level findings on saved copper."
+    },
+    {
+      "name": "native_refilled_drc",
+      "status": "passed",
+      "detail": "0 error-level findings on saved copper."
+    },
+    {
+      "name": "lvs",
+      "status": "passed",
+      "detail": "LVS PASSED over 48 bound pad(s)."
+    },
+    {
+      "name": "warning_review",
+      "status": "passed",
+      "detail": "Per-rule warning table reviewed: none."
+    },
+    {
+      "name": "artifacts",
+      "status": "passed",
+      "detail": "Fresh assembly bundle of 33 file(s); SHA256 integrity and source ZIP provenance verified."
+    },
+    {
+      "name": "bom",
+      "status": "passed",
+      "detail": "8 BOM line(s) carry procurement identifiers; part check WARN: 0 of 19 assigned item(s) verified (no source); 19 unverifiable (not in parts cache or offline catalog) [unverified: U1 -> C965497, J1 -> C7501260, J2 -> C65114, C1 -> C49678, C2 -> C1779, R5 -> C17414, R1 -> C17630, R2 -> C17630 (and 11 more)]; CPL includes 3 through-hole component(s) for fab assembly."
+    },
+    {
+      "name": "firmware",
+      "status": "passed",
+      "detail": "Sources and programmed image byte-identical to the AVR GCC 7.3.0 compiled audit (214 flash bytes, 22 RAM bytes); Intel HEX record checksums verified and flash size re-measured (214 bytes). avr-gcc not installed here, so no rebuild. Physical hardware bring-up remains untested."
+    },
+    {
+      "name": "smt_drill_clearance",
+      "status": "passed",
+      "detail": "Issue #5012 actual-land overlap rule re-run (jlcpcb, 2 layers): 0 overlaps; all 11 reviewed via relocations present on their nets. Ordinary JLCPCB process."
+    },
+    {
+      "name": "native_erc",
+      "status": "passed",
+      "detail": "Fresh native KiCad ERC: 0 errors, 0 warnings."
+    }
+  ],
+  "engine": {
+    "kicad_tools_version": "0.23.0",
+    "dirty": true,
+    "manufacturer": "jlcpcb",
+    "commit": "0b4d8d9b6f184f702ed2200a5e2ab2d846ba93e3",
+    "source_digest": "39467134cc72d702b127a00eacbf871055766917f36b9dedc4c623c6418c4a19",
+    "kicad_cli_version": "10.0.6",
+    "rules_digest": "d66c153d1aab8b0d435977133b365b61d281bd932e7b641adbd9ea17aef10797"
+  },
+  "manufacturer": "jlcpcb",
+  "evidence": {
+    "zone_fill": "output/readiness/fill-consistency.json",
+    "kct_check": "output/readiness/kct-check.json",
+    "native_drc": "output/readiness/native-drc.json",
+    "native_refilled_drc": "output/readiness/refilled-native/native-drc.json",
+    "smt_drill_clearance": "output/readiness/drill-relocations.json",
+    "native_erc": "output/readiness/native-erc.json"
+  },
+  "metrics": {
+    "lvs_clean": true,
+    "lvs_mismatches": 0,
+    "drc_violations": 0,
+    "nets_routed_pct": 100.0
+  },
+  "inputs": {
+    "HARDWARE.md": "03cc0a3b9c4b58cede788dd0c066c33709a2df1a0c2c970fbc508b41da3c59cf",
+    "README.md": "69362f23c5a80015b9c371eace0b0fa57d6192465a749c03de4f66b0273b7e1c",
+    "design_spec.py": "4400d88ef6948f72165c0966c0275e7cab9f443c48574a43954ebccacad04762",
+    "finalize_routing.py": "d3de0eb6e06daeb5515fffc691c0aec71ffb55aadf49ce0011e0aba308e09178",
+    "firmware/.gitignore": "0d3273dd7acb360b87531bf7241afa3e30b97feecf6d2d9b0d231cd36b91c179",
+    "firmware/Makefile": "8f2c32f565080e8423a872dcb5c236a3a297a705a729f3d2585e0f6b21428f64",
+    "firmware/charlieplex.hex": "7956fb57f17750f476cd50460e275e6282ca35babb4b9f62f08c0eedb862c9ad",
+    "firmware/main.c": "352605415b7d26e64ed0f1e279f43645fd858809b4667382508ac001b38426cd",
+    "generate_design.py": "0cea8b52d90182d5cecb6d5b112c32243938178ba41275f87ce9e7af18bf0e6f",
+    "generate_pcb.py": "7c7da806f5d80f1bf435c29750d64999efee037b425535a70b55b2d6e90f1a7e",
+    "generate_schematic.py": "6d82ec558453329317b4d3215fcb54a0a0c5f0c2be7151cc120423056c8844b6",
+    "hardware_design.py": "ede7646febffbf1ef72d850a2e9e94975fb1db294923bf49fd1028af1e066db8",
+    "native_via_repair.py": "ccfb03ae572617e9b47d584c0d291c44d5d3f7047b3817c27e55bdbf7397912e",
+    "output/charlieplex_3x3.kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
+    "output/charlieplex_3x3.kicad_sch": "4321516c5b27778d8b810c0c9ef01f9a74959ac64d114b3338fbdc1e4e0c0451",
+    "output/charlieplex_3x3_routed.kicad_dru": "94043e6c5e8e06fbb8e5841f354070022dfc6fd6971756669c3b1ecac2d2fbe7",
+    "output/charlieplex_3x3_routed.kicad_pcb": "e1d00051c0cc281877f6e04d31f51462f7af64c4ea1f306b6332bd3a085ecaa7",
+    "output/charlieplex_3x3_routed.kicad_pro": "c342d7bef40541498c43f4adaddff31fc4da05a9a8d23f1dba4028d78eecfd01",
+    "output/fab_profile.json": "99d1c11411aaa1f342444078ef2561f2b1d05f23d748ffd779edb75e53e2bdf1",
+    "output/lvs.json": "356b61ec235c657fe133747d662656d6f96f88531c6e0e77250dee36c9dab123",
+    "output/manufacturing/HARDWARE.md": "03cc0a3b9c4b58cede788dd0c066c33709a2df1a0c2c970fbc508b41da3c59cf",
+    "output/manufacturing/README.txt": "3b1b27da0f8735e63917b53e215e2b864131348e238d8a2bd14a798c857fcd85",
+    "output/manufacturing/assembly-back.pdf": "984f5d58d989feb5450b15f43130039e16a9d132a32fd091abbb72bf98b5bb43",
+    "output/manufacturing/assembly-front.pdf": "60ab1d5837110d6de35f52bb1dea2b7febb90de6f1568326007028a89eb5c1c6",
+    "output/manufacturing/bom_jlcpcb.csv": "40cca22f95ebb76f0deabf943bc2fff9e33f6e7fe087b6491a34bc90f9a50dc3",
+    "output/manufacturing/check-report.json": "02ed5ac3ce7f8318030527de8b1b7d673e382dd6562b415bbb9ed50228d37698",
+    "output/manufacturing/cpl_jlcpcb.csv": "bab27ea04189910c0aa014a8200fdf3a9efff7da682dd9d5b30909215ebbab81",
+    "output/manufacturing/design-source.zip": "ced5151a35ea26e46e8082be33bc16dda23cf9e82c9980b158c2180199fa7176",
+    "output/manufacturing/fill-consistency.json": "8f1ceac99ec20c388680d9e5f0bae4bb3ff8080930016bdb187d81cce86d729c",
+    "output/manufacturing/firmware/Makefile": "8f2c32f565080e8423a872dcb5c236a3a297a705a729f3d2585e0f6b21428f64",
+    "output/manufacturing/firmware/charlieplex.hex": "7956fb57f17750f476cd50460e275e6282ca35babb4b9f62f08c0eedb862c9ad",
+    "output/manufacturing/firmware/main.c": "352605415b7d26e64ed0f1e279f43645fd858809b4667382508ac001b38426cd",
+    "output/manufacturing/gerbers/gerbers.zip": "82d6b7622d32c3fab4084a7cf4f11f62fc53f11e15468ea8815850ffece59333",
+    "output/manufacturing/images/assembly.png": "03d4a73e42b4dcd0979b3cf18ccc77cb22283bc7d221de10fa088a9c201cad3a",
+    "output/manufacturing/images/layer_B_Cu.png": "1aa0e6ee3914c19edc2fca57e2d37d556f3710e54febe01f5955aa3ec36baf2e",
+    "output/manufacturing/images/layer_F_Cu.png": "29b03300e12d8251ef01c45b3fec5ff169602b0fa707924bccf03c69ad139f84",
+    "output/manufacturing/images/pcb_back.png": "b07d21a0218ff34366d05001f0538db13146b3b72c99e85be3f5affdc207eda5",
+    "output/manufacturing/images/pcb_copper.png": "4caf78bdb83d765d0a30903de7c658ebfc3eedae3898b30a9c03fa3c3be28bf5",
+    "output/manufacturing/images/pcb_front.png": "86b219c63f8a2c88619d23e72c8e854fc39678dfdeff6afb687dbb967bd01149",
+    "output/manufacturing/images/schematic_charlieplex_3x3.png": "3fc41dbd279b466326dc7960c912eb589cb17d17dc511f78962842ef38772193",
+    "output/manufacturing/kct-check.json": "02ed5ac3ce7f8318030527de8b1b7d673e382dd6562b415bbb9ed50228d37698",
+    "output/manufacturing/kicad_project.zip": "4e6178daca5fd614bd38a4474607b5139ece079934ea062516b75974dfe047f1",
+    "output/manufacturing/lvs.json": "356b61ec235c657fe133747d662656d6f96f88531c6e0e77250dee36c9dab123",
+    "output/manufacturing/manifest.json": "8ea68efb287da86b9ae744e3b16e4fde1cd5dec663fff0e95ad49af78532ebf9",
+    "output/manufacturing/native-drc.json": "7a5497b70cc619a7a6573d9e02e10c743066210cefb484d6e5ce95001a524120",
+    "output/manufacturing/native-erc.json": "5e9bb098d5127b6d32aefb00e84873be4444c2b2797402e02acb76d8803519a7",
+    "output/manufacturing/project.kct": "ad81a3e98f42c046320478e23207dedcde13832d39765b062d9e0e094e539093",
+    "output/manufacturing/report.md": "383716768ecd209bcc3360a4ca16680e99d7cfd1224d0cb67cb12a63be33d7ce",
+    "output/manufacturing/report.pdf": "0b4a8a34a90d1d35ad749badf55d788e4185cc5c462a39d961997c2141b127c3",
+    "output/manufacturing/schematic.pdf": "9014c73285816e5e8be34df83d8e004ee85fc0daee1b0aba0e08875717218768",
+    "output/manufacturing.zip": "63bb16fc9c2a5015a042b61e2084f385c6f0fa2b0e05364d7b2c1b8bfc78e2c8",
+    "output/net_class_map.json": "2bdcf6380955551f1c15bb6179d6809d064cebf7646cf282f4da0c065d1c6ac1",
+    "output/readiness/drill-relocations.json": "4d3443bb222e04df9d08885db6b87941bd1709593a87db443d91736f2d30389d",
+    "output/readiness/drill-replay.txt": "440b6049e68ce3e1c4f198b75b5e5d221c0ba9ca0ab131dfa66f208b00b28239",
+    "output/readiness/fill-consistency.json": "8f1ceac99ec20c388680d9e5f0bae4bb3ff8080930016bdb187d81cce86d729c",
+    "output/readiness/fill-refilled/charlieplex_3x3.kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
+    "output/readiness/fill-refilled/charlieplex_3x3_routed.kicad_dru": "605daba617abad8a6dc6da2cadac4c6d565eace926791bcd10204a04b060eb46",
+    "output/readiness/fill-refilled/charlieplex_3x3_routed.kicad_pcb": "846435371a2df0a950d529a9fb319d6448d5c9e436429975e86088e22df33f30",
+    "output/readiness/fill-refilled/charlieplex_3x3_routed.kicad_pro": "c342d7bef40541498c43f4adaddff31fc4da05a9a8d23f1dba4028d78eecfd01",
+    "output/readiness/fill-saved/charlieplex_3x3.kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
+    "output/readiness/fill-saved/charlieplex_3x3_routed.kicad_dru": "605daba617abad8a6dc6da2cadac4c6d565eace926791bcd10204a04b060eb46",
+    "output/readiness/fill-saved/charlieplex_3x3_routed.kicad_pcb": "846435371a2df0a950d529a9fb319d6448d5c9e436429975e86088e22df33f30",
+    "output/readiness/fill-saved/charlieplex_3x3_routed.kicad_pro": "c342d7bef40541498c43f4adaddff31fc4da05a9a8d23f1dba4028d78eecfd01",
+    "output/readiness/kct-check.json": "02ed5ac3ce7f8318030527de8b1b7d673e382dd6562b415bbb9ed50228d37698",
+    "output/readiness/native-drc-raw.json": "5a2d69063faab99f14e1932807487f4af62133965ec49c0bed9e440da490bb27",
+    "output/readiness/native-drc.json": "7a5497b70cc619a7a6573d9e02e10c743066210cefb484d6e5ce95001a524120",
+    "output/readiness/native-erc.json": "5e9bb098d5127b6d32aefb00e84873be4444c2b2797402e02acb76d8803519a7",
+    "output/readiness/refilled-native/native-drc-raw.json": "5a2d69063faab99f14e1932807487f4af62133965ec49c0bed9e440da490bb27",
+    "output/readiness/refilled-native/native-drc.json": "7a5497b70cc619a7a6573d9e02e10c743066210cefb484d6e5ce95001a524120",
+    "package_release.py": "c8e07055f6f808b39eb59eb6088c8adb0dc9a68529de8bf50a3cd24aff3dc542",
+    "project.kct": "ad81a3e98f42c046320478e23207dedcde13832d39765b062d9e0e094e539093",
+    "route_demo.py": "2cf2c25a5051a0c7f95ea8a5ee82b7955aae1862c2a50ca4f2228616b5de215b",
+    "output/readiness/known-issues.json": "927f73935d73651e68be7a88d0009acfb6c39a3fa84f247ce518737da35c8328"
+  },
+  "report_sources": {
+    "output/readiness/native-drc.json": "846435371a2df0a950d529a9fb319d6448d5c9e436429975e86088e22df33f30",
+    "output/readiness/native-drc-raw.json": "846435371a2df0a950d529a9fb319d6448d5c9e436429975e86088e22df33f30"
+  },
+  "known_issues": [
+    {
+      "issue": 8399,
+      "kind": "advisory",
+      "summary": "Genuine routing detours (obstacle-avoiding) that dedupe and DRC-verified prune cannot remove; removing them needs a re-route",
+      "recorded": "2026-11-04",
+      "warnings": [
+        {
+          "rule": "redundant_copper_detour",
+          "at": [
+            132.7,
+            122.8
+          ]
+        },
+        {
+          "rule": "redundant_copper_detour",
+          "at": [
+            152.59,
+            113.5
+          ]
+        }
+      ]
+    }
+  ]
+}

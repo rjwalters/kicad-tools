@@ -1,0 +1,15 @@
+{
+  "copper_counts": [
+    3280,
+    3280
+  ],
+  "copper_equal_ignoring_uuid": true,
+  "removed_copper": 0,
+  "added_copper": 0,
+  "footprints_equal_ignoring_uuid": true,
+  "net_definitions_equal": true,
+  "pcb_sha256": {
+    "stage2/step2.kicad_pcb": "45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8",
+    "stage3/step3.kicad_pcb": "2294577a513f0711dbd13ad10071fa51aafbcd4c5cc6dc165aef2f2e977b8e97"
+  }
+}

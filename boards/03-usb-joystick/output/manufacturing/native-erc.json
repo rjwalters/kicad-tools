@@ -1,0 +1,53 @@
+{
+    "$schema": "https://schemas.kicad.org/erc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-09-15T04:23:22",
+    "ignored_checks": [
+        {
+            "description": "Global label only appears once in the schematic",
+            "key": "single_global_label"
+        },
+        {
+            "description": "Four connection points are joined together",
+            "key": "four_way_junction"
+        },
+        {
+            "description": "SPICE model issue",
+            "key": "simulation_model_issue"
+        },
+        {
+            "description": "Assigned footprint doesn't match footprint filters",
+            "key": "footprint_filter"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning",
+        "exclusion"
+    ],
+    "kicad_version": "10.0.5",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "/6b37c496-c822-4122-91ad-ca0d66bbde58",
+            "violations": [
+                {
+                    "description": "The current configuration does not include the footprint library 'Joystick'",
+                    "items": [
+                        {
+                            "description": "Symbol J3 [Conn_02x03_Odd_Even]",
+                            "pos": {
+                                "x": 1.6256,
+                                "y": 0.3302
+                            },
+                            "uuid": "c3b5781c-ad4c-4099-bdd6-3e5d72162842"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                }
+            ]
+        }
+    ],
+    "source": "usb_joystick.kicad_sch"
+}

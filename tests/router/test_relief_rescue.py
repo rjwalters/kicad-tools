@@ -1,0 +1,1566 @@
+"""Tests for the Issue #3438 relief-rescue mechanism.
+
+Background
+----------
+
+On dense pad-array bundles (board 07's full-bus-reversal DDR byte), the
+negotiated sharing-mode clauses treat foreign-net ``usage_count == 0``
+non-obstacle cells (escape stubs, route clearance halos, via halo rings)
+as HARD obstacles.  Sibling stubs and vias can therefore seal a pin's
+only exit corridor, producing an instant empty-frontier A* abort with
+ZERO overflow -- PathFinder receives no congestion signal to negotiate
+and the net is permanently stranded.
+
+Issue #3438 introduces a relief-probe mode: foreign usage-0 non-obstacle
+cells become passable at a finite per-step penalty (min-conflict
+search), the owner nets of the conflicted cells along the probe path are
+extracted (``RoutingGrid.find_relief_conflict_nets``), and a
+transactional rescue (``Autorouter._relief_rescue``) rips exactly those
+blockers, committing only a CONFLICT-FREE probe path.
+
+These tests verify:
+
+1. ``compute_expanded_blocked(relief_mode=True)`` excludes foreign
+   usage-0 non-obstacle cells from the hard bitmap while keeping net-0
+   statics and foreign obstacles hard.
+2. ``find_relief_conflict_nets`` returns the owner nets of conflicted
+   cells along a probe route (never 0 or the probing net).
+3. The Python ``Router`` relief mode charges the per-step conflict
+   penalty in ``_get_negotiated_cell_cost``.
+4. ``_sort_group_nets_by_geometry`` (geometry-aware layer-preference
+   ordering) orders by pad position, is stable under net-set changes,
+   and falls back to net-id ordering for pad-less synthetic groups.
+5. ``_relief_rescue`` is a transaction: a no-relief-path outcome rolls
+   the original routes back verbatim.
+6. The C++ backend exposes the relief/usage-parity bindings
+   (``set_relief_mode``, ``decrement_usage``, ``reset_usage``).
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+from kicad_tools.router.core import Autorouter
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.pathfinder import Router
+from kicad_tools.router.primitives import Route, Segment
+
+
+def _make_simple_router(num_nets: int = 3) -> Autorouter:
+    """Autorouter with ``num_nets`` two-pad nets on a small board."""
+    router = Autorouter(width=40.0, height=20.0)
+    for idx in range(num_nets):
+        net_id = idx + 1
+        pads = [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 4.0 + idx * 4.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": f"N{net_id}",
+            },
+            {
+                "number": "2",
+                "x": 35.0,
+                "y": 4.0 + idx * 4.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": f"N{net_id}",
+            },
+        ]
+        router.add_component(f"U{net_id}", pads)
+    return router
+
+
+class TestReliefModeBitmap:
+    """compute_expanded_blocked(relief_mode=True) semantics (defect 1)."""
+
+    def test_foreign_usage0_nonobstacle_cells_become_passable(self):
+        router = _make_simple_router()
+        g = router.grid
+        gx, gy = g.world_to_grid(20.0, 10.0)
+
+        # Foreign-net usage-0 non-obstacle cell (an escape stub / halo).
+        g._blocked[0, gy, gx] = True
+        g._is_obstacle[0, gy, gx] = False
+        g._net[0, gy, gx] = 2
+        g._usage_count[0, gy, gx] = 0
+
+        hard = g.compute_expanded_blocked(0, net=1, allow_sharing=True)
+        relief = g.compute_expanded_blocked(0, net=1, allow_sharing=True, relief_mode=True)
+
+        assert hard[0, gy, gx], "foreign usage-0 cell must be hard in normal sharing mode"
+        assert not relief[0, gy, gx], (
+            "foreign usage-0 non-obstacle cell must be passable in relief mode"
+        )
+
+    def test_net0_statics_and_foreign_obstacles_stay_hard(self):
+        router = _make_simple_router()
+        g = router.grid
+
+        # Net-0 static blockage (keepout / board obstacle).
+        zx, zy = g.world_to_grid(18.0, 10.0)
+        g._blocked[0, zy, zx] = True
+        g._is_obstacle[0, zy, zx] = False
+        g._net[0, zy, zx] = 0
+        g._usage_count[0, zy, zx] = 0
+
+        # Foreign obstacle (pad metal).
+        ox, oy = g.world_to_grid(22.0, 10.0)
+        g._blocked[0, oy, ox] = True
+        g._is_obstacle[0, oy, ox] = True
+        g._net[0, oy, ox] = 2
+        g._usage_count[0, oy, ox] = 0
+
+        relief = g.compute_expanded_blocked(0, net=1, allow_sharing=True, relief_mode=True)
+        assert relief[0, zy, zx], "net-0 static blockage must stay hard in relief mode"
+        assert relief[0, oy, ox], "foreign obstacle (pad) must stay hard in relief mode"
+
+
+class TestFindReliefConflictNets:
+    """Owner-net extraction from a probe route (rescue blocker set)."""
+
+    def test_returns_owner_nets_excluding_self_and_zero(self):
+        router = _make_simple_router()
+        g = router.grid
+
+        # Lay foreign usage-0 copper of nets 2 and 3 across the probe path.
+        for net_id, wx in ((2, 15.0), (3, 25.0)):
+            gx, gy = g.world_to_grid(wx, 10.0)
+            g._blocked[0, gy, gx] = True
+            g._is_obstacle[0, gy, gx] = False
+            g._net[0, gy, gx] = net_id
+            g._usage_count[0, gy, gx] = 0
+
+        probe = Route(
+            net=1,
+            net_name="N1",
+            segments=[
+                Segment(
+                    x1=10.0,
+                    y1=10.0,
+                    x2=30.0,
+                    y2=10.0,
+                    width=g.rules.trace_width,
+                    layer=Layer.F_CU,
+                    net=1,
+                ),
+            ],
+        )
+        victims = g.find_relief_conflict_nets(probe, 1)
+        assert victims == {2, 3}
+
+    def test_own_and_obstacle_cells_are_not_conflicts(self):
+        router = _make_simple_router()
+        g = router.grid
+
+        # Foreign cell with usage > 0: STILL a conflict.  The C++ probe
+        # runs against a grid with uniformly-zero usage (usage is tracked
+        # Python-side only), so it may cross ANY foreign copper; every
+        # crossed owner must be reported or the rescue would mislabel a
+        # conflicted probe as conflict-free and commit overlapping copper.
+        ux, uy = g.world_to_grid(15.0, 10.0)
+        g._blocked[0, uy, ux] = True
+        g._is_obstacle[0, uy, ux] = False
+        g._net[0, uy, ux] = 2
+        g._usage_count[0, uy, ux] = 1
+
+        # Own-net cell: never a conflict.
+        sx, sy = g.world_to_grid(25.0, 10.0)
+        g._blocked[0, sy, sx] = True
+        g._is_obstacle[0, sy, sx] = False
+        g._net[0, sy, sx] = 1
+        g._usage_count[0, sy, sx] = 0
+
+        # Foreign obstacle (pad metal): hard in relief mode, so a probe
+        # never crosses it -- and the extraction excludes it regardless.
+        ox, oy = g.world_to_grid(20.0, 10.0)
+        g._blocked[0, oy, ox] = True
+        g._is_obstacle[0, oy, ox] = True
+        g._net[0, oy, ox] = 3
+        g._usage_count[0, oy, ox] = 0
+
+        probe = Route(
+            net=1,
+            net_name="N1",
+            segments=[
+                Segment(
+                    x1=10.0,
+                    y1=10.0,
+                    x2=30.0,
+                    y2=10.0,
+                    width=g.rules.trace_width,
+                    layer=Layer.F_CU,
+                    net=1,
+                ),
+            ],
+        )
+        victims = g.find_relief_conflict_nets(probe, 1)
+        assert victims == {2}
+
+
+class TestPythonRouterReliefPenalty:
+    """Relief penalty in the pure-Python negotiated cost path."""
+
+    def test_set_relief_mode_toggles(self):
+        router = _make_simple_router()
+        py_router = Router(router.grid, router.rules)
+        assert py_router.relief_mode is False
+        py_router.set_relief_mode(True)
+        assert py_router.relief_mode is True
+        py_router.set_relief_mode(False)
+        assert py_router.relief_mode is False
+
+    def test_conflict_cell_charges_penalty_only_in_relief_mode(self):
+        router = _make_simple_router()
+        g = router.grid
+        py_router = Router(g, router.rules)
+        gx, gy = g.world_to_grid(20.0, 10.0)
+        g._blocked[0, gy, gx] = True
+        g._is_obstacle[0, gy, gx] = False
+        g._net[0, gy, gx] = 2
+        g._usage_count[0, gy, gx] = 0
+
+        base = py_router._get_negotiated_cell_cost(gx, gy, 0, 1.0, net=1)
+        py_router.set_relief_mode(True)
+        relief = py_router._get_negotiated_cell_cost(gx, gy, 0, 1.0, net=1)
+
+        assert relief == pytest.approx(base + Router._RELIEF_CONFLICT_PENALTY), (
+            "relief mode must add the per-step conflict penalty on a "
+            "foreign usage-0 non-obstacle cell"
+        )
+
+
+class TestGeometryAwareLayerPreferences:
+    """_sort_group_nets_by_geometry (defect: net-id-parity chaos amplifier)."""
+
+    def test_orders_by_dominant_axis_position_not_net_id(self):
+        # Pads are laid out bottom-to-top as nets 1, 2, 3 at y = 4, 8, 12.
+        router = _make_simple_router(num_nets=3)
+        # Geometry order along y: 1 (y=4), 2 (y=8), 3 (y=12).  Use a group
+        # whose id order disagrees with nothing yet -- so shuffle ids by
+        # checking a subset where id order != y order is impossible with
+        # this fixture; instead verify the dominant axis (x spread is 0,
+        # y spread is 8) picks the y ordering.
+        order = router._sort_group_nets_by_geometry({3, 1, 2})
+        assert order == [1, 2, 3]
+
+    def test_stable_under_net_set_changes(self):
+        router = _make_simple_router(num_nets=4)
+        full = router._sort_group_nets_by_geometry({1, 2, 3, 4})
+        without_one = router._sort_group_nets_by_geometry({2, 3, 4})
+        # Removing net 1 must not reorder the remaining members
+        # (positions do not move) -- the pre-#3438 sorted-id parity
+        # flipped every member's layer when the set changed.
+        assert [n for n in full if n != 1] == without_one
+
+    def test_padless_group_falls_back_to_id_order(self):
+        router = _make_simple_router(num_nets=2)
+        # Synthetic net ids with no pads (legacy unit-test groups).
+        order = router._sort_group_nets_by_geometry({42, 7, 99})
+        assert order == [7, 42, 99]
+
+
+class TestReliefRescueTransaction:
+    """_relief_rescue rollback semantics (never leaves the board worse)."""
+
+    def test_no_relief_path_rolls_back_verbatim(self):
+        router = _make_simple_router()
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        original = Route(
+            net=1,
+            net_name="N1",
+            segments=[
+                Segment(
+                    x1=5.0,
+                    y1=4.0,
+                    x2=10.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                ),
+            ],
+        )
+        router._mark_route(original)
+        router.grid.mark_route_usage(original)
+        router.routes.append(original)
+        net_routes: dict[int, list[Route]] = {1: [original]}
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+
+        with patch.object(Autorouter, "_relief_probe", return_value=([], set())):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=lambda *_: None,
+                elapsed_fn=lambda: "0s",
+            )
+
+        assert ok is False
+        assert net_routes[1] == [original], "rollback must restore the EXACT original Route objects"
+        assert original in router.routes
+
+    def test_conflict_free_probe_commits(self):
+        router = _make_simple_router()
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        probe = Route(
+            net=1,
+            net_name="N1",
+            segments=[
+                Segment(
+                    x1=5.0,
+                    y1=4.0,
+                    x2=35.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                ),
+            ],
+        )
+        net_routes: dict[int, list[Route]] = {1: []}
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+
+        with patch.object(Autorouter, "_relief_probe", return_value=([probe], set())):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=lambda *_: None,
+                elapsed_fn=lambda: "0s",
+            )
+
+        assert ok is True
+        # A conflict-free probe is re-routed in NORMAL mode before commit
+        # (so the committed copper passes geometric validation); the probe
+        # object itself is discarded when the normal re-route succeeds.
+        assert net_routes[1], "failed net must be routed after the rescue"
+        for route in net_routes[1]:
+            assert route in router.routes
+            assert route.net == 1
+
+
+class TestCorridorReservationDeferral:
+    """begin/flush_cpp_unmark_deferral (Issue #3438 cohort reroute)."""
+
+    def test_unmark_is_queued_then_flushed(self):
+        router = _make_simple_router()
+        g = router.grid
+        route = Route(
+            net=1,
+            net_name="N1",
+            segments=[
+                Segment(
+                    x1=5.0,
+                    y1=4.0,
+                    x2=20.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                ),
+            ],
+        )
+        router._mark_route(route)
+
+        g.begin_cpp_unmark_deferral()
+        g.unmark_route(route)
+        # Python grid is unmarked immediately...
+        gx, gy = g.world_to_grid(12.0, 4.0)
+        assert not g._blocked[0, gy, gx]
+        # ...and the C++ mirror is queued, not applied.
+        assert g._deferred_cpp_unmarks, "unmark must be queued during the window"
+
+        flushed = g.flush_cpp_unmark_deferral()
+        assert flushed == [route]
+        assert g._deferred_cpp_unmarks == []
+        assert getattr(g, "_cpp_unmark_deferred", False) is False
+
+    def test_flush_without_window_is_noop(self):
+        router = _make_simple_router()
+        assert router.grid.flush_cpp_unmark_deferral() == []
+
+    def test_unmark_outside_window_mirrors_immediately(self):
+        router = _make_simple_router()
+        g = router.grid
+        route = Route(
+            net=1,
+            net_name="N1",
+            segments=[
+                Segment(
+                    x1=5.0,
+                    y1=4.0,
+                    x2=20.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                ),
+            ],
+        )
+        router._mark_route(route)
+        g.unmark_route(route)
+        assert not getattr(g, "_deferred_cpp_unmarks", [])
+
+
+class TestCppReliefBindings:
+    """C++ backend exposes the relief / usage-parity surface."""
+
+    def test_bindings_present(self):
+        router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+        assert hasattr(router_cpp.Grid3D, "decrement_usage")
+        assert hasattr(router_cpp.Grid3D, "reset_usage")
+        assert hasattr(router_cpp.Pathfinder, "set_relief_mode")
+
+    def test_relief_mode_roundtrip(self):
+        router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+        grid = router_cpp.Grid3D(100, 100, 2, 0.25)
+        rules = router_cpp.DesignRules()
+        pf = router_cpp.Pathfinder(grid, rules, True)
+        assert pf.relief_mode is False
+        pf.set_relief_mode(True)
+        assert pf.relief_mode is True
+        pf.set_relief_mode(False)
+        assert pf.relief_mode is False
+
+    def test_decrement_usage_clamps_at_zero(self):
+        router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+        grid = router_cpp.Grid3D(10, 10, 2, 0.25)
+        grid.decrement_usage(5, 5, 0)  # already 0 -> stays 0 (no underflow)
+        grid.increment_usage(5, 5, 0)
+        grid.decrement_usage(5, 5, 0)
+        cell = grid.at(5, 5, 0)
+        assert cell.usage_count == 0
+
+
+def _make_diff_pair_router() -> Autorouter:
+    """Autorouter with one suffix-inferred diff pair on a small board.
+
+    Net 1 = ``TMDS_D0_P`` (the leg that routes cleanly in normal mode),
+    net 2 = ``TMDS_D0_N`` (the leg that hard-fails into ``_relief_rescue``).
+    Suffix-based detection resolves them as partners so
+    ``_diff_pair_partner_net(2) == 1`` without any explicit declaration.
+    """
+    router = Autorouter(width=40.0, height=20.0)
+    for name, net_id, y in (("TMDS_D0_P", 1, 4.0), ("TMDS_D0_N", 2, 8.0)):
+        pads = [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": y,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": name,
+            },
+            {
+                "number": "2",
+                "x": 35.0,
+                "y": y,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": name,
+            },
+        ]
+        router.add_component(name, pads)
+    return router
+
+
+def _seg_route(net: int, name: str, y: float) -> Route:
+    return Route(
+        net=net,
+        net_name=name,
+        segments=[
+            Segment(x1=5.0, y1=y, x2=35.0, y2=y, width=0.2, layer=Layer.F_CU, net=net),
+        ],
+    )
+
+
+class TestReliefRescueDiffPairAtomicTransaction:
+    """Issue #4255 (Track A / A2): a diff pair is an ATOMIC rescue unit.
+
+    The N-1 invariant these tests pin down: when one leg (``TMDS_D0_P``)
+    routes cleanly in the normal pass and its partner (``TMDS_D0_N``)
+    later hard-fails into ``_relief_rescue``, the rescue must commit BOTH
+    legs or NEITHER -- a committed "P-routed / N-stranded" state is
+    unrepresentable.  The fixtures deliberately model "P committed /
+    N rescues" (NOT "both legs fail together", which would pass without
+    proving the coupling).
+    """
+
+    def _fixture(self):
+        router = _make_diff_pair_router()
+        # Sanity: suffix detection resolves the pair both ways.
+        assert router._diff_pair_partner_net(2) == 1
+        assert router._diff_pair_partner_net(1) == 2
+
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        # P (net 1) is COMMITTED by normal routing.
+        route_p = _seg_route(1, "TMDS_D0_P", 4.0)
+        router._mark_route(route_p)
+        router.grid.mark_route_usage(route_p)
+        router.routes.append(route_p)
+        # N (net 2) has hard-failed: no committed copper.
+        net_routes: dict[int, list[Route]] = {1: [route_p], 2: []}
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        return router, neg_router, net_routes, pads_by_net, route_p
+
+    def test_partner_reland_failure_rolls_back_both_legs(self):
+        """P committed, N rescues, but P cannot re-land -> BOTH roll back.
+
+        This is the load-bearing fixture: N's conflict-free relief would
+        commit (the "one leg wins" state the pre-#4255 per-net rescue
+        produced), but because its partner P is now folded in as a
+        mandatory member of the commit gate and fails to re-land, the
+        whole transaction rolls back verbatim.  On pre-#4255 code this
+        rescue returned True with N committed and P untouched (both
+        routed) -- so asserting a verbatim rollback with N NOT committed
+        distinguishes the fix.
+        """
+        router, neg_router, net_routes, pads_by_net, route_p = self._fixture()
+        committed_n = _seg_route(2, "TMDS_D0_N", 8.0)
+        probe_n = _seg_route(2, "TMDS_D0_N", 8.0)
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            # N gets a conflict-free relief; the partner P has no relief
+            # path (its 1:1-traded corridor is now held by N).
+            if net_id == 2:
+                return ([probe_n], set())
+            return ([], set())
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **_kwargs):
+            if net_id == 2:
+                return [committed_n]
+            return []  # P (net 1) cannot re-land
+
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=2,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=lambda *_: None,
+                elapsed_fn=lambda: "0s",
+            )
+
+        assert ok is False, "one-leg-wins must be rejected -> rescue fails"
+        # Both legs restored verbatim.
+        assert net_routes[1] == [route_p], "partner P must be restored to its exact Route"
+        assert route_p in router.routes
+        assert net_routes[2] == [], "failed leg N must NOT be committed (never one leg)"
+        assert committed_n not in router.routes, "N's copper must be rolled back"
+
+    def test_partner_relands_commits_both_legs(self):
+        """P committed, N rescues, P re-lands -> BOTH commit atomically."""
+        router, neg_router, net_routes, pads_by_net, route_p = self._fixture()
+        committed_n = _seg_route(2, "TMDS_D0_N", 8.0)
+        probe_n = _seg_route(2, "TMDS_D0_N", 8.0)
+        route_p_new = _seg_route(1, "TMDS_D0_P", 5.0)
+
+        route_calls: list[int] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            if net_id == 2:
+                return ([probe_n], set())
+            return ([], set())
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **_kwargs):
+            route_calls.append(net_id)
+            if net_id == 2:
+                return [committed_n]
+            return [route_p_new]  # P re-lands into a freed lane
+
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=2,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=lambda *_: None,
+                elapsed_fn=lambda: "0s",
+            )
+
+        assert ok is True
+        # Partner was folded in: its re-land was attempted (proves it was
+        # ripped at clean-slate as a mandatory member, not left untouched).
+        assert 1 in route_calls, "partner P must be re-landed inside the transaction"
+        assert net_routes[2] == [committed_n], "failed leg N committed"
+        assert net_routes[1] == [route_p_new], "partner P re-routed and committed"
+        assert committed_n in router.routes
+        assert route_p_new in router.routes
+        assert route_p not in router.routes, "P's original copper was ripped and replaced"
+
+    def test_no_partner_path_is_byte_identical(self):
+        """A single-ended failing net takes the unchanged per-net path.
+
+        With no diff-pair partner the clean-slate rip must target exactly
+        ``[failed_net]`` (never a partner), ``snapshot_nets`` stays
+        single-net, and the commit proceeds as on pre-#4255 ``main``.
+        """
+        router = Autorouter(width=40.0, height=20.0)
+        pads = [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 4.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "SINGLE_A",
+            },
+            {
+                "number": "2",
+                "x": 35.0,
+                "y": 4.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "SINGLE_A",
+            },
+        ]
+        router.add_component("SINGLE_A", pads)
+        assert router._diff_pair_partner_net(1) is None
+
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        # A stale partial route so the clean-slate rip fires.
+        stale = _seg_route(1, "SINGLE_A", 4.0)
+        router._mark_route(stale)
+        router.grid.mark_route_usage(stale)
+        router.routes.append(stale)
+        net_routes: dict[int, list[Route]] = {1: [stale]}
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        committed = _seg_route(1, "SINGLE_A", 4.0)
+
+        with (
+            patch.object(Autorouter, "_relief_probe", return_value=([committed], set())),
+            patch.object(Autorouter, "_route_net_negotiated", return_value=[committed]),
+            patch.object(neg_router, "rip_up_nets", wraps=neg_router.rip_up_nets) as rip_spy,
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=lambda *_: None,
+                elapsed_fn=lambda: "0s",
+            )
+
+        assert ok is True
+        # Clean-slate rip is byte-identical to the pre-change single-net form.
+        assert rip_spy.call_count == 1
+        assert rip_spy.call_args.args[0] == [1], "no partner may be folded into the rip"
+        assert net_routes[1] == [committed]
+        assert committed in router.routes
+
+
+class _FakeClock:
+    """Injected ``time.time`` replacement -- advances only when told to.
+
+    Issue #4781 tests drive ``_relief_rescue``'s deadline checks with this
+    instead of wall-clock sleeps, so the proportionality abort is
+    deterministic on any machine.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestReliefRescueProportionalBound:
+    """Issue #4781: proportional per-transaction allowance.
+
+    A single rescue transaction (including its depth-1 nested rescues,
+    which SHARE the parent's allowance) may spend at most
+    ``max(RELIEF_RESCUE_TXN_FRACTION * remaining_stage_budget,
+    RELIEF_RESCUE_TXN_FLOOR_S)``, evaluated only at the existing
+    ``_past_deadline()`` check sites.  On breach the transaction rolls
+    back verbatim (the no-net-loss guarantee is untouched); with no
+    stage deadline the bound is structurally inert.
+    """
+
+    def _fixture(self, *, extra_net3_route: bool = False):
+        """Net 1 failed; net 2 (and optionally net 3) routed victims."""
+        router = _make_simple_router(num_nets=3)
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        route2 = _seg_route(2, "N2", 8.0)
+        router._mark_route(route2)
+        router.grid.mark_route_usage(route2)
+        router.routes.append(route2)
+        net_routes: dict[int, list[Route]] = {1: [], 2: [route2]}
+        route3 = None
+        if extra_net3_route:
+            route3 = _seg_route(3, "N3", 12.0)
+            router._mark_route(route3)
+            router.grid.mark_route_usage(route3)
+            router.routes.append(route3)
+            net_routes[3] = [route3]
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        return router, neg_router, net_routes, pads_by_net, route2, route3
+
+    def test_exceeding_allowance_aborts_and_restores_verbatim(self):
+        """(a) A transaction past its allowance aborts at a check site.
+
+        Stage: 1000 s remaining -> allowance = max(25% * 1000, 90) = 250 s.
+        Round 1 rips a victim and 'costs' 300 s; the round-2 check site
+        must abort on the TRANSACTION allowance (the stage deadline, 1000 s
+        away, has not passed) and restore the board verbatim.
+        """
+        router, neg_router, net_routes, pads_by_net, route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe = _seg_route(1, "N1", 4.0)
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            clock.now += 300.0  # round 1 burns past the 250 s allowance
+            return ([probe], {2})
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 1000.0,
+            )
+
+        assert ok is False
+        joined = "\n".join(msgs)
+        assert "transaction allowance exhausted" in joined, (
+            "the abort must be attributed to the #4781 allowance, not the stage deadline"
+        )
+        assert "deadline exceeded" not in joined
+        # Verbatim restore: the EXACT original Route objects, both maps.
+        assert net_routes[2] == [route2]
+        assert route2 in router.routes
+        assert net_routes[1] == []
+
+    def test_within_allowance_is_unaffected(self):
+        """(b) A transaction inside its allowance commits normally."""
+        router, neg_router, net_routes, pads_by_net, route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe_conflicted = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        committed_1 = _seg_route(1, "N1", 4.0)
+        relanded_2 = _seg_route(2, "N2", 8.0)
+        probe_calls: list[int] = []
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            probe_calls.append(net_id)
+            clock.now += 40.0  # well inside the 250 s allowance
+            if len(probe_calls) == 1:
+                return ([probe_conflicted], {2})
+            return ([probe_free], set())
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **_kwargs):
+            return [committed_1] if net_id == 1 else [relanded_2]
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 1000.0,
+            )
+
+        assert ok is True
+        assert net_routes[1] == [committed_1]
+        assert net_routes[2] == [relanded_2]
+        joined = "\n".join(msgs)
+        assert "transaction allowance exhausted" not in joined
+        assert "deadline exceeded" not in joined
+
+    def test_nested_rescue_shares_parent_allowance(self):
+        """(c) A depth-1 nested rescue inherits the PARENT's allowance.
+
+        The parent starts with 1000 s remaining (allowance 250 s) and has
+        spent 240 s when the nested rescue for its stranded victim begins.
+        If the nested rescue derived its OWN allowance it would get
+        max(25% * 760, 90) = 190 s (deadline ~ t0+430) and sail past the
+        t0+260 probe; sharing the parent's t0+250 allowance, it must abort
+        at its round-2 check site instead -- which then fails the parent's
+        commit gate and rolls the whole transaction back verbatim.
+        """
+        router, neg_router, net_routes, pads_by_net, route2, route3 = self._fixture(
+            extra_net3_route=True
+        )
+        clock = _FakeClock(start=1000.0)
+        probe_a = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        committed_1 = _seg_route(1, "N1", 4.0)
+        probe_nested = _seg_route(2, "N2", 8.0)
+        probe_calls: list[int] = []
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            probe_calls.append(net_id)
+            if len(probe_calls) == 1:
+                clock.now = 1000.0 + 240.0  # parent spends 240 s of its 250 s
+                return ([probe_a], {2})
+            if len(probe_calls) == 2:
+                return ([probe_free], set())
+            # Nested rescue's round-1 probe (net 2): crosses net 3 and
+            # pushes the SHARED allowance (t0+250) past, while staying far
+            # inside what a freshly-derived nested allowance would permit.
+            clock.now = 1000.0 + 260.0
+            return ([probe_nested], {3})
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **_kwargs):
+            if net_id == 1:
+                return [committed_1]
+            return []  # victim 2 never re-lands via plain A*
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 1000.0,
+            )
+
+        assert ok is False
+        # The nested rescue (for N2) aborted on the SHARED allowance...
+        nested_aborts = [m for m in msgs if "N2" in m and "transaction allowance exhausted" in m]
+        assert nested_aborts, (
+            f"nested rescue must abort on the parent's allowance (messages: {msgs})"
+        )
+        # ...and the whole outer transaction rolled back verbatim.
+        assert net_routes[1] == []
+        assert net_routes[2] == [route2]
+        assert net_routes[3] == [route3]
+        assert route2 in router.routes
+        assert route3 in router.routes
+        assert committed_1 not in router.routes
+
+    def test_no_deadline_arm_is_unchanged(self):
+        """(d) With no stage deadline the bound is structurally inert."""
+        router, neg_router, net_routes, pads_by_net, _route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe_conflicted = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        committed_1 = _seg_route(1, "N1", 4.0)
+        relanded_2 = _seg_route(2, "N2", 8.0)
+        probe_calls: list[int] = []
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            probe_calls.append(net_id)
+            clock.now += 10_000_000.0  # absurd elapsed time; must not matter
+            if len(probe_calls) == 1:
+                return ([probe_conflicted], {2})
+            return ([probe_free], set())
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **_kwargs):
+            return [committed_1] if net_id == 1 else [relanded_2]
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=None,
+            )
+
+        assert ok is True
+        assert net_routes[1] == [committed_1]
+        joined = "\n".join(msgs)
+        assert "transaction allowance exhausted" not in joined
+        assert "deadline exceeded" not in joined
+
+    def test_stage_deadline_wording_is_preserved(self):
+        """The historical stage-deadline abort keeps its exact wording."""
+        router, neg_router, net_routes, pads_by_net, route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe = _seg_route(1, "N1", 4.0)
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            clock.now += 60.0  # past the 50 s stage deadline, inside the 90 s floor
+            return ([probe], {2})
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 50.0,
+            )
+
+        assert ok is False
+        joined = "\n".join(msgs)
+        assert "deadline exceeded (round 2)" in joined, (
+            "when the STAGE deadline trips, the pre-#4781 wording must be kept"
+        )
+        assert "transaction allowance exhausted" not in joined
+        assert net_routes[2] == [route2]
+
+    def test_bound_evidence_lines(self):
+        """AC 4: greppable evidence line states the bound in force."""
+        router = _make_simple_router()
+        armed = router._relief_txn_bound_line(600.0)
+        assert armed.startswith("  Relief-rescue transaction bound: proportional")
+        assert "25%" in armed
+        assert "90s" in armed
+        assert "#4781" in armed
+        inert = router._relief_txn_bound_line(None)
+        assert inert.startswith("  Relief-rescue transaction bound: none")
+        assert "#4781" in inert
+
+
+@pytest.mark.parametrize("victim_fails", [False, True])
+def test_final_probe_reverses_without_adding_rounds_and_preserves_transaction(victim_fails):
+    router = _make_simple_router(4)
+    originals = {net: Route(net=net, net_name=f"N{net}") for net in (2, 3, 4)}
+    net_routes = {1: [], **{net: [route] for net, route in originals.items()}}
+    router.routes.extend(originals.values())
+    probe = Route(net=1, net_name="N1")
+    calls = []
+    reroutes = []
+
+    def probe_call(net, factor, per_net_timeout=None, reverse_search=False):
+        calls.append((reverse_search, per_net_timeout))
+        if len(calls) <= 3:
+            return [probe], {len(calls) + 1}
+        # The bounded forward search cannot find the final path.
+        return ([probe], set()) if reverse_search else ([], set())
+
+    def route_call(net, factor, per_net_timeout=None, reverse_search=False, **_kwargs):
+        reroutes.append((net, reverse_search))
+        if net == 1 or (victim_fails and net == 4):
+            return []
+        return [originals[net]]
+
+    neg = NegotiatedRouter(router.grid, router.router, router.rules, router.net_class_map)
+    with (
+        patch.object(router, "_relief_probe", side_effect=probe_call),
+        patch.object(router, "_route_net_negotiated", side_effect=route_call),
+    ):
+        result = router._relief_rescue(
+            1,
+            neg,
+            net_routes,
+            {net: [router.pads[key] for key in keys] for net, keys in router.nets.items()},
+            1.0,
+            5.0,
+            lambda *_: None,
+            lambda: "0s",
+            depth=1,
+        )
+    assert calls == [(False, 5.0)] * 3 + [(True, 5.0)]
+    assert reroutes[0] == (1, True)
+    assert all(not reverse for net, reverse in reroutes if net != 1)
+    assert result is not victim_fails
+    if victim_fails:
+        assert net_routes[1] == []
+        for net, route in originals.items():
+            assert net_routes[net] == [route]
+            assert route in router.routes
+    else:
+        assert net_routes[1] == [probe]
+        assert all(net_routes[net] for net in originals)
+
+
+@pytest.mark.parametrize("terminal_count", [2, 3])
+def test_reverse_search_changes_only_two_terminal_order(terminal_count):
+    router = _make_simple_router(1)
+    if terminal_count == 3:
+        router.add_component(
+            "J2",
+            [
+                {
+                    "number": "1",
+                    "x": 20.0,
+                    "y": 15.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "N1",
+                }
+            ],
+        )
+    expected = [router.pads[key] for key in router.nets[1]]
+    seen = []
+
+    def negotiate(_self, pads, *_args, **_kwargs):
+        seen.append(list(pads))
+        return []
+
+    with (
+        patch.object(router, "_create_intra_ic_routes", return_value=([], set())),
+        patch.object(router, "_create_block_internal_routes", return_value=([], set())),
+        patch.object(NegotiatedRouter, "route_net_negotiated", negotiate),
+    ):
+        router._route_net_negotiated(1, 1.0, reverse_search=True)
+        router._route_net_negotiated(1, 1.0)
+    assert seen[0] == (list(reversed(expected)) if terminal_count == 2 else expected)
+    assert seen[1] == expected
+    assert [router.pads[key] for key in router.nets[1]] == expected
+
+
+class _MonoClock:
+    """Injected ``time.monotonic`` -- advances only when the fake search says so."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestReliefRescueVictimCompleteness:
+    """Issue #6151: a victim counts as re-landed only when it is COMPLETE.
+
+    Board 03's ``kct route`` rescue of ``USB_CC1`` rips ``USB_D+`` (5 pads)
+    and re-lands it under the reduced 10 s sub-search budget.  Under load the
+    re-land ran out of budget mid-net and returned the edges it had committed;
+    ``if rn_routes`` accepted that as "re-landed", the transaction committed,
+    and the board finished 23/24 with ``USB_D+`` 3-of-5 pads stranded -- the
+    no-net-loss guarantee violated.  These pin the two halves of the fix.
+    """
+
+    def _fixture(self):
+        router = _make_simple_router(num_nets=2)
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        route2 = _seg_route(2, "N2", 8.0)
+        router._mark_route(route2)
+        router.grid.mark_route_usage(route2)
+        router.routes.append(route2)
+        net_routes: dict[int, list[Route]] = {1: [], 2: [route2]}
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        return router, neg_router, net_routes, pads_by_net, route2
+
+    def _probes(self):
+        probe_conflicted = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        calls: list[int] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None, **_kw):
+            if net_id != 1:
+                return [], set()  # a nested rescue for the victim finds no relief path
+            calls.append(net_id)
+            return ([probe_conflicted], {2}) if len(calls) == 1 else ([probe_free], set())
+
+        return probe_side_effect
+
+    def _rescue(self, router, neg_router, net_routes, pads_by_net, *, per_net_timeout):
+        msgs: list[str] = []
+        ok = router._relief_rescue(
+            failed_net=1,
+            neg_router=neg_router,
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            present_factor=1.0,
+            per_net_timeout=per_net_timeout,
+            flush_print_fn=msgs.append,
+            elapsed_fn=lambda: "0s",
+        )
+        return ok, msgs
+
+    def test_partial_victim_reland_is_not_counted_and_rolls_back(self):
+        """A victim re-land with a failed edge never commits the transaction.
+
+        The failure is geometric (returns instantly), so no budget retry is
+        owed: the rescue must roll back verbatim instead of trading the
+        failed net for a partial victim.
+        """
+        router, neg_router, net_routes, pads_by_net, route2 = self._fixture()
+        committed_1 = _seg_route(1, "N1", 4.0)
+        partial_2 = _seg_route(2, "N2", 8.0)
+        budgets: list[float | None] = []
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+            if net_id == 1:
+                return [committed_1]
+            budgets.append(per_net_timeout)
+            router.grid.mark_route(partial_2)
+            cb = kw.get("failure_callback")
+            assert cb is not None, "the re-land must ask for per-edge failures"
+            pads = router.nets[2]
+            cb(router.pads[pads[0]], router.pads[pads[1]])
+            return [partial_2]
+
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=self._probes()),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok, msgs = self._rescue(
+                router, neg_router, net_routes, pads_by_net, per_net_timeout=30.0
+            )
+
+        assert ok is False
+        assert any("0/1 displaced victim(s) re-landed" in m for m in msgs), msgs
+        # Verbatim restore of the victim; the partial copper never committed.
+        assert len(net_routes[2]) == 1 and net_routes[2][0] is route2
+        assert all(r is not partial_2 for r in router.routes)
+        assert net_routes[1] == []
+        # Geometric failure: never escalated past the reduced budget.
+        assert budgets and all(b == 10.0 for b in budgets), budgets
+
+    def test_budget_bound_victim_is_retried_under_its_original_budget(self):
+        """A victim that ran its reduced budget out gets ONE retry at per_net_timeout."""
+        router, neg_router, net_routes, pads_by_net, _route2 = self._fixture()
+        committed_1 = _seg_route(1, "N1", 4.0)
+        partial_2 = _seg_route(2, "N2", 8.0)
+        relanded_2 = _seg_route(2, "N2", 8.0)
+        clock = _MonoClock()
+        budgets: list[float | None] = []
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+            if net_id == 1:
+                return [committed_1]
+            budgets.append(per_net_timeout)
+            if per_net_timeout is not None and per_net_timeout < 12.0:
+                clock.now += per_net_timeout  # ran the reduced budget out
+                router.grid.mark_route(partial_2)
+                pads = router.nets[2]
+                kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+                return [partial_2]
+            clock.now += 12.0  # needs 12 s -- more than the 10 s sub-search budget
+            return [relanded_2]
+
+        with (
+            patch("time.monotonic", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=self._probes()),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok, msgs = self._rescue(
+                router, neg_router, net_routes, pads_by_net, per_net_timeout=30.0
+            )
+
+        assert ok is True, msgs
+        assert budgets == [10.0, 30.0], budgets
+        assert len(net_routes[2]) == 1 and net_routes[2][0] is relanded_2
+        assert any(r is relanded_2 for r in router.routes)
+        assert all(r is not partial_2 for r in router.routes)
+
+    def test_retry_budget_selection(self):
+        router = _make_simple_router(num_nets=1)
+        assert router._relief_reland_retry_budget(30.0, 10.0) == 30.0
+        assert router._relief_reland_retry_budget(5.0, 5.0) == 5.0
+        assert router._relief_reland_retry_budget(None, None) is None
+        # No caller wall clock and no expansion cap: nothing larger to offer.
+        assert router._relief_reland_retry_budget(None, 10.0) == 10.0
+        # --deterministic-budget: the expansion cap binds, backstop is non-binding.
+        router._per_net_iterations = 1000
+        from kicad_tools.router.core import RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S
+
+        assert router._relief_reland_retry_budget(0.0, 10.0) == RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S
+
+
+def _make_three_pad_victim_router() -> Autorouter:
+    """Net 1 (two pads, y=4) plus net 2 with THREE pads on y=8 (x=5/20/35)."""
+    router = _make_simple_router(num_nets=1)
+    router.add_component(
+        "U2",
+        [
+            {
+                "number": str(i + 1),
+                "x": x,
+                "y": 8.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "N2",
+            }
+            for i, x in enumerate((5.0, 20.0, 35.0))
+        ],
+    )
+    return router
+
+
+def _span_route(net: int, name: str, x1: float, x2: float, y: float) -> Route:
+    return Route(
+        net=net,
+        net_name=name,
+        segments=[Segment(x1=x1, y1=y, x2=x2, y2=y, width=0.2, layer=Layer.F_CU, net=net)],
+    )
+
+
+class TestReliefRescuePreviouslyPartialVictim:
+    """Issue #6151 review: a victim that was ALREADY partial is held to "no worse".
+
+    The negotiated loop keeps partial nets in ``net_routes``, so the rescue can
+    rip one as a victim.  Requiring it to come back COMPLETE would roll back a
+    rescue that pre-#6151 committed for +1 net of reach with no net lost.  The
+    gate for such a victim is "at least the connected pads it had".
+    """
+
+    def _fixture(self):
+        router = _make_three_pad_victim_router()
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        # Net 2 is partial before the rescue: pads x=5 and x=20 joined, x=35 stranded.
+        route2 = _span_route(2, "N2", 5.0, 20.0, 8.0)
+        router._mark_route(route2)
+        router.grid.mark_route_usage(route2)
+        router.routes.append(route2)
+        net_routes: dict[int, list[Route]] = {1: [], 2: [route2]}
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        state = Autorouter._relief_victim_connected_pads(2, [route2], pads_by_net)
+        assert state == (False, 2), state
+        return router, neg_router, net_routes, pads_by_net, route2
+
+    def _run(self, reland_2):
+        router, neg_router, net_routes, pads_by_net, route2 = self._fixture()
+        committed_1 = _seg_route(1, "N1", 4.0)
+        calls: list[int] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None, **_kw):
+            if net_id != 1:
+                return [], set()
+            calls.append(net_id)
+            probe = _seg_route(1, "N1", 4.0)
+            return ([probe], {2}) if len(calls) == 1 else ([probe], set())
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+            if net_id == 1:
+                return [committed_1]
+            router.grid.mark_route(reland_2)
+            pads = router.nets[2]
+            kw["failure_callback"](router.pads[pads[1]], router.pads[pads[2]])
+            return [reland_2]
+
+        msgs: list[str] = []
+        with (
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=30.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+            )
+        return ok, msgs, router, net_routes, route2, committed_1
+
+    def test_partial_victim_relanding_as_much_commits(self):
+        reland_2 = _span_route(2, "N2", 5.0, 20.0, 8.0)  # same 2 of 3 pads
+        ok, msgs, router, net_routes, _route2, committed_1 = self._run(reland_2)
+
+        assert ok is True, msgs
+        assert any("1/1 displaced victim(s) re-landed" in m for m in msgs), msgs
+        assert any("was partial before the rescue" in m for m in msgs), msgs
+        assert net_routes[1] == [committed_1]
+        assert net_routes[2] == [reland_2]
+        assert any(r is reland_2 for r in router.routes)
+
+    def test_partial_victim_relanding_fewer_pads_rolls_back(self):
+        reland_2 = _span_route(2, "N2", 5.0, 12.0, 8.0)  # stub: 1 of 3 pads
+        ok, msgs, router, net_routes, route2, _committed_1 = self._run(reland_2)
+
+        assert ok is False
+        assert any("0/1 displaced victim(s) re-landed" in m for m in msgs), msgs
+        assert len(net_routes[2]) == 1 and net_routes[2][0] is route2
+        assert all(r is not reland_2 for r in router.routes)
+        assert net_routes[1] == []
+
+
+def test_partial_normal_mode_reroute_falls_back_to_probe_path():
+    """Issue #6151: a conflict-free probe whose NORMAL-mode re-route drops an
+    edge commits the complete probe path, not the partial re-route."""
+    router = _make_simple_router(num_nets=1)
+    neg_router = NegotiatedRouter(
+        grid=router.grid,
+        router=router.router,
+        rules=router.rules,
+        net_class_map={},
+    )
+    net_routes: dict[int, list[Route]] = {1: []}
+    pads_by_net = {
+        net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+    }
+    probe = _seg_route(1, "N1", 4.0)
+    partial = _span_route(1, "N1", 5.0, 12.0, 4.0)
+
+    def route_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+        router.grid.mark_route(partial)
+        pads = router.nets[1]
+        kw["failure_callback"](router.pads[pads[0]], router.pads[pads[1]])
+        return [partial]
+
+    msgs: list[str] = []
+    with (
+        patch.object(Autorouter, "_relief_probe", return_value=([probe], set())),
+        patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+    ):
+        ok = router._relief_rescue(
+            failed_net=1,
+            neg_router=neg_router,
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            present_factor=1.0,
+            per_net_timeout=30.0,
+            flush_print_fn=msgs.append,
+            elapsed_fn=lambda: "0s",
+        )
+
+    assert ok is True, msgs
+    assert net_routes[1] == [probe]
+    assert all(r is not partial for r in router.routes)
+
+
+def _make_via_probe_router(force_python: bool, foreign_pad_y: float) -> Autorouter:
+    """Net 1 (``U1``, x=5 / x=35 at y=4) plus a foreign ``U9`` pad of net 2.
+
+    The foreign pad sits at ``(20, foreign_pad_y)`` -- directly beside the
+    via a relief probe of net 1 drops at ``(20, 4)``.
+    """
+    router = Autorouter(width=40.0, height=20.0, force_python=force_python)
+    router.add_component(
+        "U1",
+        [
+            {"number": "1", "x": 5.0, "y": 4.0, "width": 0.5, "height": 0.5, "net": 1,
+             "net_name": "N1"},
+            {"number": "2", "x": 35.0, "y": 4.0, "width": 0.5, "height": 0.5, "net": 1,
+             "net_name": "N1"},
+        ],
+    )  # fmt: skip
+    router.add_component(
+        "U9",
+        [
+            {"number": "1", "x": 20.0, "y": foreign_pad_y, "width": 0.5, "height": 0.5,
+             "net": 2, "net_name": "N2"},
+            {"number": "2", "x": 20.0, "y": 16.0, "width": 0.5, "height": 0.5,
+             "net": 2, "net_name": "N2"},
+        ],
+    )  # fmt: skip
+    return router
+
+
+def _require_backend(router: Autorouter, force_python: bool) -> None:
+    from kicad_tools.router.cpp_backend import CppPathfinder
+
+    is_cpp = isinstance(router.router, CppPathfinder)
+    if not force_python and not is_cpp:
+        pytest.skip("C++ router extension not built")
+    assert is_cpp is not force_python
+
+
+def _via_probe_route(router: Autorouter) -> Route:
+    """Net 1 probe: F.Cu to a via at (20, 4), then B.Cu to the far pad."""
+    from kicad_tools.router.primitives import Via
+
+    rules = router.rules
+    return Route(
+        net=1,
+        net_name="N1",
+        segments=[
+            Segment(x1=5.0, y1=4.0, x2=20.0, y2=4.0, width=0.2, layer=Layer.F_CU, net=1),
+            Segment(x1=20.0, y1=4.0, x2=35.0, y2=4.0, width=0.2, layer=Layer.B_CU, net=1),
+        ],
+        vias=[
+            Via(
+                x=20.0,
+                y=4.0,
+                drill=rules.via_drill,
+                diameter=rules.via_diameter,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+            )
+        ],
+    )
+
+
+def _rescue_with_failed_normal_reroute(router: Autorouter, probe: Route):
+    """Run a relief rescue whose probe is conflict-free but whose NORMAL-mode
+    re-route fails, i.e. the path that falls back to the probe copper."""
+    neg_router = NegotiatedRouter(
+        grid=router.grid,
+        router=router.router,
+        rules=router.rules,
+        net_class_map={},
+    )
+    net_routes: dict[int, list[Route]] = {1: []}
+    pads_by_net = {
+        net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+    }
+
+    def probe_side_effect(net_id, present_cost_factor, per_net_timeout=None, **kw):
+        # A real probe returns its routes still MARKED on the grid.
+        router._mark_route(probe)
+        return [probe], set()
+
+    msgs: list[str] = []
+    with (
+        patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+        patch.object(Autorouter, "_route_net_negotiated", return_value=[]),
+    ):
+        ok = router._relief_rescue(
+            failed_net=1,
+            neg_router=neg_router,
+            net_routes=net_routes,
+            pads_by_net=pads_by_net,
+            present_factor=1.0,
+            per_net_timeout=2.0,
+            flush_print_fn=msgs.append,
+            elapsed_fn=lambda: "0s",
+        )
+    return ok, net_routes, msgs
+
+
+@pytest.mark.parametrize("force_python", [False, True], ids=["cpp", "python"])
+class TestReliefProbeFallbackIsValidated:
+    """Issue #6286: the probe-path fallback must pass the commit validator.
+
+    When the normal-mode re-route of a conflict-free probe fails, the rescue
+    used to commit the relief PROBE copper -- which skips post-route
+    clearance validation by design -- so on board 05 vias landed 0.05-0.085
+    mm from foreign pads after the C++ validator had rejected the very same
+    positions.  "Conflict-free" only means the probe crossed no rippable
+    owner net; it says nothing about geometric clearance.
+    """
+
+    def test_sub_clearance_via_probe_is_rolled_back(self, force_python):
+        # Default via (0.7 mm) at y=4 -> copper edge at y=4.35; the pad's
+        # edge at 4.65 - 0.25 = 4.40 leaves a 0.05 mm gap -- board 05's
+        # measured gap, well under the 0.2 mm clearance.  Both F.Cu traces
+        # clear the pad (edge 4.10), so only the via can fail validation.
+        router = _make_via_probe_router(force_python, foreign_pad_y=4.65)
+        _require_backend(router, force_python)
+        probe = _via_probe_route(router)
+
+        ok, net_routes, msgs = _rescue_with_failed_normal_reroute(router, probe)
+
+        assert ok is False, msgs
+        assert net_routes[1] == []
+        assert probe not in router.routes
+        assert not any(r.vias for r in router.routes), "no via may be committed"
+        assert any("clearance" in m for m in msgs), msgs
+
+    def test_clean_via_probe_still_commits(self, force_python):
+        # Same probe, foreign pad far away: the fallback keeps working.
+        router = _make_via_probe_router(force_python, foreign_pad_y=10.0)
+        _require_backend(router, force_python)
+        probe = _via_probe_route(router)
+
+        ok, net_routes, msgs = _rescue_with_failed_normal_reroute(router, probe)
+
+        assert ok is True, msgs
+        assert net_routes[1] == [probe]
+        assert probe in router.routes

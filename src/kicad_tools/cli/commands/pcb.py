@@ -1,0 +1,3382 @@
+"""PCB (pcb) subcommand handlers."""
+
+import json
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+__all__ = ["run_pcb_command"]
+
+
+#: Upper bound on re-plan passes in one ``kct pcb prune`` run (#8730).
+_PRUNE_MAX_PASSES = 10
+
+
+def _sheet_reporters(
+    pcb,
+) -> tuple[float, float, Callable[[Any], list[float]], Callable[[dict[str, Any]], dict[str, Any]]]:
+    """Report renderers in the sheet frame the KiCad GUI shows (#8493, #8798).
+
+    Router and prune coordinates are board-relative; every coordinate a report
+    quotes must be sheet-absolute so pasting it into the KiCad GUI's locator
+    finds the copper. Returns ``(origin_x, origin_y, sheet_point,
+    sheet_witness)``: ``sheet_point`` shifts a ``(x, y)`` pair by the board's
+    ``board_origin`` and ``sheet_witness`` shifts a witness dict's coordinate
+    keys in place, leaving absent keys absent (never injecting ``0``).
+    """
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+
+    def sheet(point) -> list[float]:
+        return [point[0] + origin_x, point[1] + origin_y]
+
+    def sheet_witness(witness: dict[str, Any]) -> dict[str, Any]:
+        out = dict(witness)
+        for key in ("start", "end", "position"):
+            if key in out:
+                out[key] = sheet(out[key])
+        if out.get("blocking_branches"):
+            out["blocking_branches"] = [
+                {**b, "start": sheet(b["start"]), "end": sheet(b["end"])}
+                for b in out["blocking_branches"]
+            ]
+        return out
+
+    return origin_x, origin_y, sheet, sheet_witness
+
+
+def _carry_sidecars(src: Path, dst: Path) -> None:
+    """Carry the input's .kicad_pro/.kicad_dru to a ``-o`` output (#8366)."""
+    from kicad_tools.sidecars import copy_project_sidecars
+
+    copy_project_sidecars(src, dst)
+
+
+def run_pcb_command(args) -> int:
+    """Handle PCB subcommands."""
+    if not args.pcb_command:
+        print("Usage: kicad-tools pcb <command> [options] <file>")
+        print(
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, add-fiducials, move-footprint, move-via, transplant, page-fit, center-on-sheet, add-board-info, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
+        )
+        return 1
+
+    # ``diff`` takes two sides (paths or REV:path specs), not one board.
+    if args.pcb_command == "diff":
+        from ..pcb_diff import run_pcb_diff
+
+        return run_pcb_diff(
+            args.old,
+            args.new,
+            fmt=args.format,
+            nets=args.net,
+            layers=args.layer,
+            svg=args.svg,
+        )
+
+    # ``transplant`` takes two boards (SRC, DST), not one.
+    if args.pcb_command == "transplant":
+        from ..pcb_transplant import run_pcb_transplant
+
+        return run_pcb_transplant(
+            args.src,
+            args.dst,
+            nets=args.nets,
+            output=args.output,
+            dry_run=args.dry_run,
+            drc=args.drc,
+            fmt=args.format,
+        )
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        message = f"Error: File not found: {pcb_path}"
+        # This guard runs before any per-command handler, so it has to
+        # honour --format json itself (#4674) -- otherwise the one error
+        # every pcb leaf can hit is the one error that never produces a
+        # document.
+        if getattr(args, "format", None) == "json":
+            from ..format_options import emit_json
+
+            emit_json({"command": args.pcb_command, "error": message, "success": False})
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    # Handle zones command
+    if args.pcb_command == "zones":
+        return _run_zones_command(args, pcb_path)
+
+    # Handle strip command separately (doesn't use pcb_query)
+    if args.pcb_command == "strip":
+        return _run_strip_command(args, pcb_path)
+
+    # Handle reinforce command (Unit A of #4218; issue #4220)
+    if args.pcb_command == "reinforce":
+        return _run_reinforce_command(args, pcb_path)
+
+    # Handle current-paths-audit command (issue #4980)
+    if args.pcb_command == "current-paths-audit":
+        return _run_current_paths_audit_command(args, pcb_path)
+
+    # Handle dedupe command (remove exact-duplicate copper; issue #4175)
+    if args.pcb_command == "dedupe":
+        return _run_dedupe_command(args, pcb_path)
+
+    # Handle prune command (remove redundant copper; issue #8216)
+    if args.pcb_command == "prune":
+        from kicad_tools.cli.kicad_toolchain import run_pinned_if_docker
+
+        mounts = [pcb_path.parent]
+        for extra in (getattr(args, "output", None), getattr(args, "project", None)):
+            if extra:
+                mounts.append(Path(extra).parent)
+        # #8395: with KCT_KICAD_DOCKER=1 the per-edit DRC referee uses the pinned image.
+        return run_pinned_if_docker(lambda: _run_prune_command(args, pcb_path), mounts)
+
+    # Handle reannotate command separately (doesn't use pcb_query)
+    if args.pcb_command == "reannotate":
+        return _run_reannotate_command(args, pcb_path)
+
+    # Handle sync-netlist command
+    if args.pcb_command == "sync-netlist":
+        return _run_sync_netlist_command(args, pcb_path)
+
+    # Handle annotate-pintypes command (issue #5985)
+    if args.pcb_command == "annotate-pintypes":
+        return _run_annotate_pintypes_command(args, pcb_path)
+
+    # Handle add-3d-models command
+    if args.pcb_command == "add-3d-models":
+        return _run_add_3d_models_command(args, pcb_path)
+
+    # Handle add-fiducials command
+    if args.pcb_command == "add-fiducials":
+        return _run_add_fiducials_command(args, pcb_path)
+
+    # Handle remove-footprint command
+    if args.pcb_command == "remove-footprint":
+        return _run_remove_footprint_command(args, pcb_path)
+
+    # Handle move-via command
+    if args.pcb_command == "move-via":
+        return _run_move_via_command(args, pcb_path)
+
+    # Handle move-footprint command
+    if args.pcb_command == "move-footprint":
+        return _run_move_footprint_command(args, pcb_path)
+
+    # Handle page-fit command
+    if args.pcb_command == "page-fit":
+        return _run_page_fit_command(args, pcb_path)
+
+    # Handle center-on-sheet command
+    if args.pcb_command == "center-on-sheet":
+        return _run_center_on_sheet_command(args, pcb_path)
+
+    # Handle add-board-info command
+    if args.pcb_command == "add-board-info":
+        return _run_add_board_info_command(args, pcb_path)
+
+    # Handle lock-footprints / unlock-footprints commands
+    if args.pcb_command in ("lock-footprints", "unlock-footprints"):
+        return _run_lock_footprints_command(args, pcb_path)
+
+    # Handle add-zone command
+    if args.pcb_command == "add-zone":
+        return _run_add_zone_command(args, pcb_path)
+
+    # Handle snap-rotation command
+    if args.pcb_command == "snap-rotation":
+        return _run_snap_rotation_command(args, pcb_path)
+
+    # Handle edit-outline command
+    if args.pcb_command == "edit-outline":
+        return _run_edit_outline_command(args, pcb_path)
+
+    # Handle net-audit command
+    if args.pcb_command == "net-audit":
+        return _run_net_audit_command(args, pcb_path)
+
+    # Handle model-audit command (issue #7682)
+    if args.pcb_command == "model-audit":
+        return _run_model_audit_command(args, pcb_path)
+
+    # Handle export-dsn command
+    if args.pcb_command == "export-dsn":
+        return _run_export_dsn_command(args, pcb_path)
+
+    # Handle import-ses command
+    if args.pcb_command == "import-ses":
+        return _run_import_ses_command(args, pcb_path)
+
+    from ..pcb_query import main as pcb_main
+
+    if args.pcb_command == "summary":
+        sub_argv = [str(pcb_path), "summary"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return pcb_main(sub_argv) or 0
+
+    elif args.pcb_command == "footprints":
+        sub_argv = [str(pcb_path), "footprints"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if args.pattern:
+            sub_argv.extend(["--filter", args.pattern])
+        if args.sorted:
+            sub_argv.append("--sorted")
+        return pcb_main(sub_argv) or 0
+
+    elif args.pcb_command == "nets":
+        sub_argv = [str(pcb_path), "nets"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if args.pattern:
+            sub_argv.extend(["--filter", args.pattern])
+        if args.sorted:
+            sub_argv.append("--sorted")
+        if getattr(args, "check_connectivity", False):
+            sub_argv.append("--check-connectivity")
+        return pcb_main(sub_argv) or 0
+
+    elif args.pcb_command == "padmap":
+        sub_argv = [str(pcb_path), "padmap"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if getattr(args, "ref", None):
+            sub_argv.extend(["--ref", args.ref])
+        if getattr(args, "net", None):
+            sub_argv.extend(["--net", args.net])
+        return pcb_main(sub_argv) or 0
+
+    elif args.pcb_command == "traces":
+        sub_argv = [str(pcb_path), "traces"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if args.layer:
+            sub_argv.extend(["--layer", args.layer])
+        return pcb_main(sub_argv) or 0
+
+    elif args.pcb_command == "stackup":
+        sub_argv = [str(pcb_path), "stackup"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return pcb_main(sub_argv) or 0
+
+    return 1
+
+
+def _run_zones_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb zones' command."""
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    zones = pcb.zones
+    output_format = getattr(args, "format", "text")
+
+    if output_format == "json":
+        zone_data = []
+        for zone in zones:
+            # Compute bounding box from polygon points
+            bounding_box = None
+            if zone.polygon:
+                xs = [p[0] for p in zone.polygon]
+                ys = [p[1] for p in zone.polygon]
+                bounding_box = {
+                    "min_x": min(xs),
+                    "min_y": min(ys),
+                    "max_x": max(xs),
+                    "max_y": max(ys),
+                }
+            zone_data.append(
+                {
+                    "net_number": zone.net_number,
+                    "net_name": zone.net_name,
+                    "layer": zone.layer,
+                    "priority": zone.priority,
+                    "clearance": zone.clearance,
+                    "thermal_gap": zone.thermal_gap,
+                    "thermal_bridge_width": zone.thermal_bridge_width,
+                    "is_filled": zone.is_filled,
+                    "fill_type": zone.fill_type,
+                    "boundary_points": len(zone.polygon),
+                    "bounding_box": bounding_box,
+                }
+            )
+        print(json.dumps({"zones": zone_data, "count": len(zones)}, indent=2))
+    else:
+        if not zones:
+            print("No zones found in PCB.")
+            return 0
+
+        print(f"Found {len(zones)} zone(s):\n")
+        for i, zone in enumerate(zones, 1):
+            print(f"Zone {i}:")
+            print(f"  Net:       {zone.net_name or f'(net {zone.net_number})'}")
+            print(f"  Layer:     {zone.layer}")
+            print(f"  Priority:  {zone.priority}")
+            print(f"  Clearance: {zone.clearance}mm")
+            print(f"  Fill type: {zone.fill_type}")
+            print(f"  Filled:    {'Yes' if zone.is_filled else 'No'}")
+            print(f"  Boundary:  {len(zone.polygon)} points")
+            if zone.polygon:
+                xs = [p[0] for p in zone.polygon]
+                ys = [p[1] for p in zone.polygon]
+                print(
+                    f"  Bounds:    ({min(xs):.2f}, {min(ys):.2f}) to ({max(xs):.2f}, {max(ys):.2f})"
+                )
+            print()
+
+    return 0
+
+
+def _run_strip_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb strip' command."""
+    import re as _re
+
+    from kicad_tools.schema.pcb import PCB
+
+    from_report = getattr(args, "from_report", None)
+    dangling = getattr(args, "dangling", False)
+    if from_report or dangling:
+        return _run_strip_report_command(args, pcb_path)
+
+    # Parse net names if provided
+    nets = None
+    if args.nets:
+        nets = [n.strip() for n in args.nets.split(",")]
+
+    # Parse layer names if provided
+    layers = None
+    if getattr(args, "layers", None):
+        layers = [l.strip() for l in args.layers.split(",")]
+
+    # Power net options — exclude power nets by default when --layers is used
+    include_power = getattr(args, "include_power", False)
+    exclude_power = not include_power if layers else False
+    power_pattern = None
+    if getattr(args, "power_pattern", None):
+        power_pattern = _re.compile(args.power_pattern, _re.IGNORECASE)
+
+    remove_orphan_vias = getattr(args, "remove_orphan_vias", False)
+
+    # Parse and validate the optional --region bounding box.
+    region, region_err = _parse_region_arg(getattr(args, "region", None))
+    if region_err:
+        print(region_err, file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Get initial counts for reporting
+    initial_segments = len(pcb.segments)
+    initial_vias = len(pcb.vias)
+    initial_zones = len(pcb.zones)
+
+    # Perform strip operation
+    keep_zones = getattr(args, "keep_zones", True)
+    stats = pcb.strip_traces(
+        nets=nets,
+        layers=layers,
+        keep_zones=keep_zones,
+        exclude_power=exclude_power,
+        power_pattern=power_pattern,
+        remove_orphan_vias=remove_orphan_vias,
+        region=region,
+    )
+
+    # Determine output path
+    output_path = pcb_path
+    if args.output:
+        output_path = Path(args.output)
+    elif not args.dry_run:
+        # If no output specified and not dry-run, add -stripped suffix
+        output_path = pcb_path.with_stem(f"{pcb_path.stem}-stripped")
+
+    # Format output
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "nets_filtered": nets,
+        "layers_filtered": layers,
+        "region": list(region) if region else None,
+        "keep_zones": keep_zones,
+        "exclude_power": exclude_power,
+        "remove_orphan_vias": remove_orphan_vias,
+        "before": {
+            "segments": initial_segments,
+            "vias": initial_vias,
+            "zones": initial_zones,
+        },
+        "removed": stats,
+        "after": {
+            "segments": initial_segments - stats["segments"],
+            "vias": initial_vias - stats["vias"],
+            "zones": initial_zones - stats["zones"],
+        },
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        # Text format
+        print(f"PCB Strip {'(dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print()
+
+        if nets:
+            print(f"  Filtering nets: {', '.join(nets)}")
+        else:
+            print("  Stripping all nets")
+        if layers:
+            print(f"  Filtering layers: {', '.join(layers)}")
+        if region:
+            print(f"  Region: ({region[0]}, {region[1]}) to ({region[2]}, {region[3]}) mm")
+        print(f"  Exclude power nets: {exclude_power}")
+        print(f"  Keep zones: {keep_zones}")
+        if remove_orphan_vias:
+            print("  Remove orphan vias: yes")
+        print()
+
+        print("  Removed:")
+        print(f"    Segments: {stats['segments']:,}")
+        print(f"    Vias:     {stats['vias']:,}")
+        if not keep_zones:
+            print(f"    Zones:    {stats['zones']:,}")
+        if region:
+            print(f"    Segments clipped at boundary: {stats['segments_clipped']:,}")
+            print(
+                f"    Segments spanning box (both ends outside) left untouched: "
+                f"{stats['segments_boundary_skipped']:,}"
+            )
+        print()
+
+        print("  Remaining:")
+        print(f"    Segments: {result['after']['segments']:,}")
+        print(f"    Vias:     {result['after']['vias']:,}")
+        print(f"    Zones:    {result['after']['zones']:,}")
+
+    # Save unless dry-run
+    if not dry_run:
+        try:
+            pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+_STRIP_DANGLING_DRC_TYPES = frozenset({"track_dangling", "via_dangling"})
+
+
+def _verify_strip_drc(
+    pcb_path: Path,
+    pcb,
+    nets_cut=(),
+    exempt_unconnected: bool = False,
+) -> tuple[bool, str, bool]:
+    """Compare refill-zones DRC before/after.  Returns (verified, note, worse).
+
+    Cutting copper leaves stub ends, which ``strip --dangling`` removes in a
+    second step, so ``track_dangling`` / ``via_dangling`` keys are excluded
+    from the comparison only when every net on the key is in ``nets_cut``
+    (a dangling end on an untouched net is an unplanned edit and still counts
+    as worse).  ``unconnected`` growth is excluded only when
+    ``exempt_unconnected`` is set (``--from-report``: the cut intentionally
+    opens links); ``--dangling`` must not open any link.  Growth in any other
+    type still counts as worse.
+    """
+    import tempfile
+    from collections import Counter
+
+    from kicad_tools.pcb_prune import _drc_signature, _worse
+
+    with tempfile.TemporaryDirectory(prefix="kct_strip_drc_") as tmp:
+        base, trial = Path(tmp) / "base.kicad_pcb", Path(tmp) / "trial.kicad_pcb"
+        base.write_text(pcb_path.read_text())
+        for ext in (".kicad_pro", ".kicad_dru"):
+            if pcb_path.with_suffix(ext).exists():
+                for name in ("base", "trial"):
+                    (Path(tmp) / f"{name}{ext}").write_bytes(pcb_path.with_suffix(ext).read_bytes())
+        before = _drc_signature(base)
+        if before is None:
+            return False, "kicad-cli not available (or DRC failed): result is unverified", False
+        pcb.save(trial)
+        after = _drc_signature(trial)
+        if after is None:
+            return False, "kicad-cli DRC failed on the edited board", False
+        cut = set(nets_cut or ())
+
+        def _exempt(key) -> bool:
+            if key[0] == "unconnected":
+                return exempt_unconnected
+            if key[0] in _STRIP_DANGLING_DRC_TYPES:
+                return bool(key[3]) and all(n in cut for n in key[3])
+            return False
+
+        before = Counter({k: v for k, v in before.items() if not _exempt(k)})
+        after = Counter({k: v for k, v in after.items() if not _exempt(k)})
+        if _worse(after, before):
+            return True, "kicad-cli --refill-zones DRC reports NEW violations", True
+        return True, "verified with kicad-cli pcb drc --refill-zones", False
+
+
+def _run_strip_report_command(args, pcb_path: Path) -> int:
+    """'pcb strip --from-report' / '--dangling' (issue #8309)."""
+    from kicad_tools.pcb_strip_report import load_findings, plan_from_report, strip_dangling
+    from kicad_tools.schema.pcb import PCB
+
+    from_report = getattr(args, "from_report", None)
+    dangling = getattr(args, "dangling", False)
+    if from_report and dangling:
+        print("Error: --from-report and --dangling are mutually exclusive", file=sys.stderr)
+        return 2
+    for flag in ("nets", "layers", "region"):
+        if getattr(args, flag, None):
+            print(
+                f"Error: --{flag} cannot be combined with --from-report/--dangling",
+                file=sys.stderr,
+            )
+            return 2
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    output_path = pcb_path
+    if args.output:
+        output_path = Path(args.output)
+    elif not dry_run:
+        output_path = pcb_path.with_stem(f"{pcb_path.stem}-stripped")
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+    }
+    rc = 0
+    if from_report:
+        protect = {
+            n.strip() for n in (getattr(args, "protect_nets", None) or "").split(",") if n.strip()
+        }
+        try:
+            findings = load_findings(from_report)
+        except Exception as e:
+            print(f"Error reading report {from_report}: {e}", file=sys.stderr)
+            return 1
+        plan = plan_from_report(pcb, findings, protect, getattr(args, "radius", 0.0) or 0.0)
+        n_seg, n_via = len(plan.segments), len(plan.vias)
+        if not dry_run:
+            pcb.remove_segments(plan.segments)
+            pcb.remove_vias(plan.vias)
+        result.update(
+            mode="from_report",
+            findings=[r.to_dict() for r in plan.results],
+            nets_cut=plan.nets_cut,
+            removed={"segments": n_seg, "vias": n_via},
+        )
+    else:
+        res = strip_dangling(pcb, getattr(args, "keep_via_min", None))
+        n_seg, n_via = res.segments, res.vias
+        result.update(
+            mode="dangling",
+            passes=res.passes,
+            nets_cut=res.nets_cut,
+            removed={"segments": n_seg, "vias": n_via},
+            kept_vias=res.kept_vias,
+            refused=res.refused,
+            note=res.note,
+        )
+        if res.refused:
+            rc = 1
+
+    changed = bool(n_seg or n_via)
+    verified, note = False, "nothing to verify"
+    if changed and not dry_run:
+        verified, note, worse = _verify_strip_drc(
+            pcb_path,
+            pcb,
+            nets_cut=result.get("nets_cut") or (),
+            exempt_unconnected=bool(from_report),
+        )
+        if worse:
+            print(f"Refusing to write: {note}", file=sys.stderr)
+            rc = 1
+            changed = False
+        elif not verified and not getattr(args, "unverified", False):
+            print(
+                f"Refusing to write: {note}. Re-run with kicad-cli available, or pass "
+                "--unverified to write anyway.",
+                file=sys.stderr,
+            )
+            rc = 1
+            changed = False
+    result["drc_verified"] = verified
+    result["drc_note"] = note
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Strip ({result['mode']}){' (dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        print(f"  Removed: {n_seg} segment(s), {n_via} via(s)")
+        print(f"  Nets cut: {', '.join(result['nets_cut']) or '-'}")
+        for f in result.get("findings", []):
+            loc = f["location"]
+            where = f"({loc[0]:.3f}, {loc[1]:.3f})" if loc else "no location"
+            tail = ", ".join(f["removed"]) if f["status"] == "cut" else f"skipped: {f['reason']}"
+            print(f"    {f['type']} @ {where}: {tail}")
+        if result["mode"] == "dangling":
+            print(f"  Passes: {result['passes']}  Anchor vias kept: {result['kept_vias']}")
+            if result["note"]:
+                print(f"  {result['note']}")
+        print(f"  DRC: {note}")
+
+    if not dry_run and changed and rc == 0:
+        try:
+            pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
+            if output_format == "text":
+                print(f"\n  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+    return rc
+
+
+def _run_dedupe_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb dedupe' command (issue #4175).
+
+    Removes pre-existing exact-duplicate copper (segments + vias with the same
+    net/geometry/layer, differing only in uuid) from an already-bloated board.
+    In-place by default (consistent with the in-place convention established by
+    #4166/#4195); ``-o`` writes to a separate file instead.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    before_segments = len(pcb.segments)
+    before_vias = len(pcb.vias)
+
+    stats = pcb.dedupe_copper()
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+    output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "before": {"segments": before_segments, "vias": before_vias},
+        "removed": stats,
+        "after": {
+            "segments": before_segments - stats["segments"],
+            "vias": before_vias - stats["vias"],
+        },
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Dedupe {'(dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print()
+        print("  Removed exact-duplicate copper:")
+        print(f"    Segments: {stats['segments']:,}")
+        print(f"    Vias:     {stats['vias']:,}")
+        print()
+        print("  Remaining:")
+        print(f"    Segments: {result['after']['segments']:,}")
+        print(f"    Vias:     {result['after']['vias']:,}")
+
+    # Save only when something changed and not a dry-run.
+    if not dry_run and (stats["segments"] or stats["vias"]):
+        try:
+            pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+def _parse_region_arg(
+    region_arg: str | None,
+) -> tuple[tuple[float, float, float, float] | None, str | None]:
+    """Parse ``--region x1,y1,x2,y2``; returns ``(region, error_message)``."""
+    if not region_arg:
+        return None, None
+    parts = [p.strip() for p in region_arg.split(",")]
+    if len(parts) != 4:
+        return None, (
+            "Error: --region expects 'x1,y1,x2,y2' (four comma-separated "
+            f"numbers), got {region_arg!r}"
+        )
+    try:
+        x1, y1, x2, y2 = (float(p) for p in parts)
+    except ValueError:
+        return None, f"Error: --region values must be numeric, got {region_arg!r}"
+    if x1 >= x2 or y1 >= y2:
+        return None, (
+            "Error: --region must satisfy x1 < x2 and y1 < y2 "
+            f"(got x1={x1}, y1={y1}, x2={x2}, y2={y2})"
+        )
+    return (x1, y1, x2, y2), None
+
+
+def _run_prune_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb prune' command (issue #8216).
+
+    Removes copper that adds no connectivity (redundant branches, same-layer
+    loops) and snaps off-centre ends onto via/pad centres, keeping every pad
+    and zone terminal connected. Each net's edits are DRC-verified with
+    ``kicad-cli pcb drc --refill-zones`` when kicad-cli is available.
+
+    Copper that touches other same-net copper without a shared endpoint (such
+    as a redundant spur beside a via) is removed only when connectivity also
+    holds over those body-touching neighbours. Collinear grid-step runs are
+    not merged (tracked in issue #8236).
+    """
+    from kicad_tools.pcb_prune import prune_board
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+    output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    declared_nets: set[str] | None = None
+    required_widths: dict[str, dict[str, float]] = {}
+    specs = None
+    if getattr(args, "current_paths", None):
+        from kicad_tools.pcb_prune import required_widths_for
+        from kicad_tools.router.current_paths import load_current_path_specs
+        from kicad_tools.schema.pcb import PCB
+
+        try:
+            specs = load_current_path_specs(args.current_paths)
+            declared_nets = {spec.net_name for spec in specs}
+            # Issue #8368: per copper layer, at the board's stackup copper
+            # weight (outer layers external, inner layers internal).
+            board = PCB.load(pcb_path)
+            for spec in specs:
+                need = required_widths_for(board, spec.thermal_design_current().current_a)
+                have = required_widths.setdefault(spec.net_name, {})
+                for layer, width in need.items():
+                    have[layer] = max(have.get(layer, 0.0), width)
+        except Exception as e:
+            print(f"Error loading current paths: {e}", file=sys.stderr)
+            return 1
+
+    nets: list[str] | None = None
+    if getattr(args, "nets", None):
+        nets = [n.strip() for n in args.nets.split(",") if n.strip()]
+        if not nets:
+            print("Error: --nets requires at least one net name", file=sys.stderr)
+            return 1
+        try:
+            from kicad_tools.schema.pcb import PCB as _PCB
+
+            known = {n.name for n in _PCB.load(pcb_path).nets.values()}
+        except Exception as e:
+            print(f"Error loading PCB: {e}", file=sys.stderr)
+            return 1
+        unknown = sorted(set(nets) - known)
+        if unknown:
+            print(f"Error: unknown net(s) in --nets: {', '.join(unknown)}", file=sys.stderr)
+            return 1
+    region, region_err = _parse_region_arg(getattr(args, "region", None))
+    if region_err:
+        print(region_err, file=sys.stderr)
+        return 1
+
+    from dataclasses import replace as _replace
+
+    unverified = getattr(args, "unverified", False)
+    src_path = pcb_path
+    res = None
+    try:
+        # Issue #8730: one invocation iterates to a fixed point -- a pass can
+        # expose more redundant copper (a split container's piece is frozen
+        # for the rest of its own pass), so re-plan on the edited board until
+        # a pass changes nothing.  Intermediate passes go to the output file.
+        for pass_no in range(_PRUNE_MAX_PASSES):
+            pcb, step = prune_board(
+                src_path,
+                nets=nets,
+                region=region,
+                verify_drc=not getattr(args, "no_drc", False),
+                apply=not dry_run,
+                declared_nets=declared_nets,
+                wide=getattr(args, "wide", None),
+                required_widths=required_widths,
+                project=getattr(args, "project", None),
+                allow_default_rules=getattr(args, "allow_default_rules", False),
+                current_paths=specs,
+            )
+            if res is None:
+                res = step
+            else:
+                stats = dict(res.stats)
+                for key, val in step.stats.items():
+                    stats[key] = stats.get(key, 0) + val
+                res = _replace(
+                    step,
+                    plans=[*res.plans, *step.plans],
+                    accepted=[*res.accepted, *step.accepted],
+                    stats=stats,
+                )
+            step_changed = (
+                step.stats["segments_removed"]
+                or step.stats.get("vias_removed", 0)
+                or step.stats["ends_snapped"]
+            )
+            if dry_run or not step_changed or (not step.drc_verified and not unverified):
+                break
+            if pass_no + 1 == _PRUNE_MAX_PASSES:
+                break
+            pcb.save(output_path)
+            if output_path != pcb_path:
+                _carry_sidecars(pcb_path, output_path)
+            src_path = output_path
+    except Exception as e:
+        print(f"Error pruning PCB: {e}", file=sys.stderr)
+        return 1
+    assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
+
+    # Quote sheet positions like the sibling commands and kct check (#8954);
+    # the library's plans and uncut loops stay board-relative.
+    origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)
+
+    # --region takes board-relative mm while every coordinate quoted below is
+    # sheet-absolute; twin the box so the report shows both frames (#8969).
+    # scope.region keeps echoing the argument verbatim (#8954).
+    region_sheet = _sheet(region[:2]) + _sheet(region[2:]) if region else None
+
+    def _net(p) -> dict[str, Any]:
+        return {
+            "net": p.net_name or p.net_number,
+            "segments_removed": len(p.remove),
+            "vias_removed": len(p.remove_vias),
+            "ends_snapped": len(p.snaps),
+            "stubs_added": [
+                {"layer": layer, "start": _sheet(a), "end": _sheet(b), "width": w}
+                for layer, a, b, w in p.stubs
+            ],
+            **({"reject_reason": p.reject_reason} if p.reject_reason else {}),
+        }
+
+    def _sheet_uncut_loop(u: dict[str, Any]) -> dict[str, Any]:
+        """One uncut-loop entry, re-quoted at sheet positions (#8954)."""
+        out = dict(u)
+        if "witness" in out:
+            # audit_loops_left entry: re-render the text from the raw witness,
+            # then shift the witness dict itself, so text and dict agree.
+            from kicad_tools.router.current_paths import witness_text
+
+            out["segments"] = [witness_text(out["witness"], (origin_x, origin_y))]
+            out["witness"] = _sheet_witness(out["witness"])
+        elif "segment_ends" in out:
+            ends = out["segment_ends"]
+            out["segments"] = [
+                f"({e['a'][0] + origin_x}, {e['a'][1] + origin_y})->"
+                f"({e['b'][0] + origin_x}, {e['b'][1] + origin_y}) {e['layer']}"
+                for e in ends
+            ]
+            out["segment_ends"] = [
+                {"a": _sheet(e["a"]), "b": _sheet(e["b"]), "layer": e["layer"]} for e in ends
+            ]
+        return out
+
+    changed = (
+        res.stats["segments_removed"]
+        or res.stats.get("vias_removed", 0)
+        or res.stats["ends_snapped"]
+    )
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "drc_verified": res.drc_verified,
+        "drc_note": res.drc_note,
+        "removed": {
+            "segments": res.stats["segments_removed"],
+            "vias": res.stats.get("vias_removed", 0),
+        },
+        "snapped": res.stats["ends_snapped"],
+        "nets": [_net(p) for p in res.accepted],
+        "rejected_by_drc": [_net(p) for p in res.rejected],
+        "uncut_loops": [_sheet_uncut_loop(u) for u in res.uncut_loops],
+        "scope": {
+            "nets": nets,
+            "region": list(region) if region else None,
+            "region_sheet": region_sheet,
+        },
+        "region_skipped": [_net(p) for p in res.region_skipped],
+    }
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Prune {'(dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        print(f"  DRC:    {res.drc_note}")
+        if region is not None and region_sheet is not None:
+            print(
+                f"  Region: ({region[0]}, {region[1]}) to ({region[2]}, {region[3]}) mm "
+                f"(board-relative) = ({region_sheet[0]}, {region_sheet[1]}) to "
+                f"({region_sheet[2]}, {region_sheet[3]}) mm sheet-absolute"
+            )
+        print(f"  Segments removed: {res.stats['segments_removed']:,}")
+        if res.stats.get("vias_removed"):
+            print(f"  Vias removed:     {res.stats['vias_removed']:,}")
+        print(f"  Ends snapped:     {res.stats['ends_snapped']:,}")
+        for n in result["nets"]:
+            stub_note = f", +{len(n['stubs_added'])} stub" if n["stubs_added"] else ""
+            print(
+                f"    {n['net']}: -{n['segments_removed']} seg, "
+                f"{n['ends_snapped']} snapped{stub_note}"
+            )
+            for st in n["stubs_added"]:
+                print(f"      stub {st['layer']} {st['start']} -> {st['end']} w={st['width']}")
+        for n in result["rejected_by_drc"]:
+            why = n.get("reject_reason") or "edit would add DRC violations"
+            print(f"    {n['net']}: kept ({why})")
+        for n in result["region_skipped"]:
+            print(f"    {n['net']}: region_skipped (edits extend outside --region)")
+        for u in res.uncut_loops:
+            print(
+                f"    {u['net']}: loop left in place ({u.get('reason', 'all segments >= --wide')}, "
+                f"min width {u['min_width']} mm, {len(u['segments'])} segments)"
+            )
+
+    if not dry_run and changed and not res.drc_verified and not getattr(args, "unverified", False):
+        # Never write an unverified edit by default (issue #8216 review).
+        print(
+            "Refusing to write: edits were not verified with kicad-cli DRC "
+            f"({res.drc_note}). Re-run with kicad-cli available, or pass "
+            "--unverified to write anyway.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not dry_run and changed:
+        try:
+            pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
+            if output_format == "text":
+                print(f"\n  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def _print_reinforce_runs(outcome, all_runs: bool) -> None:
+    """Text per-run accounting of a ``spaced`` reinforce pass (#4319)."""
+    print()
+    print(
+        f"  Runs: {len(outcome.runs)} total -- "
+        f"{outcome.runs_fully_reinforced} fully reinforced, "
+        f"{outcome.runs_partial} partial, "
+        f"{outcome.runs_unanchored} unanchored"
+    )
+    if not all_runs and len(outcome.runs) > 1:
+        print(
+            "        (default anchors only the longest run; pass --all-runs to anchor every branch)"
+        )
+    for rs in outcome.runs:
+        if rs.fully_reinforced:
+            state = "full"
+        elif rs.partial:
+            state = "partial"
+        else:
+            state = "none"
+        print(
+            f"    run {rs.run_index}: {rs.length_mm:.1f} mm, "
+            f"{rs.segment_count} seg -- {rs.anchors_placed}/{rs.anchors_needed} "
+            f"anchored"
+            + (f", {rs.anchors_refused} refused" if rs.anchors_refused else "")
+            + f" [{state}]"
+        )
+        if rs.path_excluded_reason:
+            print(f"      excluded: {rs.path_excluded_reason}")
+
+
+def _print_reinforce_legs(outcome, origin_x: float, origin_y: float) -> None:
+    """Text per-leg (one wire each) accounting of an ``ends`` pass (#8742)."""
+    legs = outcome.legs
+    counts: dict[str, int] = {}
+    for leg in legs:
+        counts[leg.status] = counts.get(leg.status, 0) + 1
+    summary = ", ".join(f"{n} {status}" for status, n in sorted(counts.items()))
+    print()
+    print(f"  Legs (one wire each): {len(legs)} total" + (f" -- {summary}" if summary else ""))
+    for i, leg in enumerate(legs):
+        anchors = ", ".join(f"({a.x + origin_x:.2f}, {a.y + origin_y:.2f})" for a in leg.anchors)
+        print(
+            f"    leg {i} [{leg.kind}] {leg.layer} {leg.length_mm:.1f} mm -- "
+            + (
+                f"{leg.strategy} [{leg.status}]"
+                if leg.strategy != "wire"
+                else f"{len(leg.anchors)}/2 anchored [{leg.status}]"
+            )
+            + (
+                f", wire spans {leg.wire_span_mm:.1f} of {leg.length_mm:.1f} mm"
+                if leg.wire_span_mm
+                else ""
+            )
+            + (f" at {anchors}" if anchors else "")
+        )
+        if leg.paths:
+            print(f"      paths: {', '.join(leg.paths)}")
+        if leg.reason:
+            print(f"      {leg.reason}")
+        if leg.mask_status:
+            print(
+                f"      mask opening: {leg.mask_status}"
+                + (f" -- {leg.mask_reason}" if leg.mask_reason else "")
+            )
+    excluded = [rs for rs in outcome.runs if rs.path_excluded_reason]
+    for rs in excluded:
+        print(f"    excluded copper: {rs.length_mm:.1f} mm -- {rs.path_excluded_reason}")
+
+
+def _clear_entries(items, origin_x: float, origin_y: float, reason: bool = False) -> list:
+    out = []
+    for it in items:
+        e = {"x": round(it.x + origin_x, 4), "y": round(it.y + origin_y, 4)}
+        if reason:
+            e["reason"] = it.reason
+        out.append(e)
+    return out
+
+
+def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run: bool) -> None:
+    verb = "would be removed" if dry_run else "removed"
+    print(f"  Anchors cleared: {clear_outcome.removed_count} ({verb})")
+    for a in clear_outcome.removed:
+        print(f"    {verb.split()[-1]} anchor at ({a.x + origin_x:.2f}, {a.y + origin_y:.2f})")
+    for r in clear_outcome.refused:
+        print(
+            f"    kept anchor at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): refused -- {r.reason}"
+        )
+    for c in clear_outcome.copies_removed:
+        print(f"  Parallel copy on {c.layer} {verb}: {c.segments} segment(s), {c.vias} via(s)")
+    for c in clear_outcome.copies_refused:
+        print(f"  Parallel copy on {c.layer} kept: refused -- {c.reason}")
+    if clear_outcome.openings_removed:
+        print(f"  Mask openings cleared: {len(clear_outcome.openings_removed)} ({verb})")
+        for o in clear_outcome.openings_removed:
+            print(
+                f"    {o.layer} opening ({o.start[0] + origin_x:.2f}, {o.start[1] + origin_y:.2f})"
+                f" -> ({o.end[0] + origin_x:.2f}, {o.end[1] + origin_y:.2f})"
+            )
+
+
+def _load_sidecar_wires(pcb_path: Path) -> list | None:
+    """The board's wire-list sidecar records, or None when absent/unreadable (#8747)."""
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+
+    path = sidecar_path(pcb_path)
+    if not path.is_file():
+        return None
+    try:
+        return load_wires(path)
+    except (OSError, ValueError) as e:
+        print(f"Warning: ignoring unreadable {path}: {e}", file=sys.stderr)
+        return None
+
+
+def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origin_y: float) -> int:
+    """Remove the sidecar wire records whose anchors were cleared (#8747)."""
+    from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
+
+    removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
+    copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
+    if not removed and not copies:
+        return 0
+    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed, copies)
+
+
+def _cleared_anything(clear_outcome) -> bool:
+    """True when a clear pass removed an anchor or a parallel copy (#8916)."""
+    return bool(clear_outcome.removed_count or getattr(clear_outcome, "copies_removed", None))
+
+
+def _cleared_copy_entries(clear_outcome) -> list:
+    return [
+        {"layer": c.layer, "segments": c.segments, "vias": c.vias}
+        for c in getattr(clear_outcome, "copies_removed", [])
+    ]
+
+
+def _copy_entry(copy, origin_x: float, origin_y: float) -> dict | None:
+    """JSON form of a parallel copy (#8916), sheet-absolute; None when absent."""
+    if copy is None:
+        return None
+    return {
+        "layer": copy.layer,
+        "segments": [
+            {
+                "start": [round(a[0] + origin_x, 4), round(a[1] + origin_y, 4)],
+                "end": [round(b[0] + origin_x, 4), round(b[1] + origin_y, 4)],
+                "width_mm": round(w, 4),
+            }
+            for a, b, w in copy.segments
+        ],
+        "stitch_vias": [
+            [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in copy.stitch_vias
+        ],
+        "via_size_mm": round(copy.via_size_mm, 4),
+        "via_drill_mm": round(copy.via_drill_mm, 4),
+        "existing_segments": copy.existing_segments,
+        "existing_vias": copy.existing_vias,
+    }
+
+
+def _print_reinforce_copies(outcome, origin_x: float, origin_y: float) -> None:
+    """Text report of the parallel copies of a ``--strategy`` pass (#8916)."""
+    print(f"  Parallel copies: {len(outcome.copies)} placed, {len(outcome.refused_copies)} refused")
+    for c in outcome.copies:
+        vias = ", ".join(f"({x + origin_x:.2f}, {y + origin_y:.2f})" for x, y in c.stitch_vias)
+        print(
+            f"    {c.layer}: {len(c.segments)} segment(s), {len(c.stitch_vias)} stitching via(s)"
+            + (f" at {vias}" if vias else "")
+            + (
+                f" [{c.existing_segments} segment(s) already present]"
+                if c.existing_segments
+                else ""
+            )
+            + (f" [{c.existing_vias} via(s) already present]" if c.existing_vias else "")
+        )
+    for r in outcome.refused_copies:
+        print(
+            f"    refused on {r.copy_layer or r.leg_layer} at ({r.x + origin_x:.2f}, "
+            f"{r.y + origin_y:.2f}): {r.reason}"
+        )
+
+
+def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
+    return [
+        {
+            "layer": o.layer,
+            "start": [round(o.start[0] + origin_x, 4), round(o.start[1] + origin_y, 4)],
+            "end": [round(o.end[0] + origin_x, 4), round(o.end[1] + origin_y, 4)],
+        }
+        for o in openings
+    ]
+
+
+def _finish_reinforce_clear(
+    args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
+) -> int:
+    """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747)."""
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "input": str(pcb_path),
+                    "output": str(output_path)
+                    if not dry_run and _cleared_anything(clear_outcome)
+                    else None,
+                    "dry_run": dry_run,
+                    "clear": True,
+                    "net": clear_outcome.net_name,
+                    "wire_gauge_awg": clear_outcome.wire_gauge_awg,
+                    "anchor_drill_mm": round(clear_outcome.anchor_drill_mm, 4),
+                    "anchor_pad_mm": round(clear_outcome.anchor_pad_mm, 4),
+                    "anchors_cleared": clear_outcome.removed_count,
+                    "cleared": _clear_entries(clear_outcome.removed, origin_x, origin_y),
+                    "clear_refused": _clear_entries(
+                        clear_outcome.refused, origin_x, origin_y, reason=True
+                    ),
+                    "identified_by": clear_outcome.identified_by,
+                    "mask_openings_cleared": _opening_entries(
+                        clear_outcome.openings_removed, origin_x, origin_y
+                    ),
+                    "copies_cleared": _cleared_copy_entries(clear_outcome),
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"PCB Reinforce --clear{' (dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        print(f"  Net:            {clear_outcome.net_name}")
+        print(f"  Wire gauge:     {clear_outcome.wire_gauge_awg} AWG")
+        print(
+            f"  Anchor size:    drill {clear_outcome.anchor_drill_mm:.3f} mm, "
+            f"pad {clear_outcome.anchor_pad_mm:.3f} mm"
+        )
+        if (
+            not clear_outcome.removed
+            and not clear_outcome.refused
+            and not clear_outcome.copies_removed
+            and not clear_outcome.copies_refused
+        ):
+            print("  Nothing to clear: no anchor-sized same-net vias found.")
+        else:
+            _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
+        if not dry_run and _cleared_anything(clear_outcome):
+            print()
+            print("  NOTE: refill zone pours afterward (e.g. `kicad-cli pcb drc --refill-zones`).")
+
+    if not dry_run and _cleared_anything(clear_outcome):
+        try:
+            pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+        try:
+            dropped = _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
+        except (OSError, ValueError) as e:
+            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+        if dropped and output_format == "text":
+            print(f"  Sidecar:  dropped {dropped} wire record(s)")
+    return 0
+
+
+def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int:
+    """``pcb reinforce --list-wires``: print the sidecar's wires (#8744)."""
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        format_wire_list,
+        load_wires,
+        sidecar_path,
+    )
+
+    path = sidecar_path(pcb_path)
+    if not path.is_file():
+        print(f"Error: no reinforcement sidecar at {path}", file=sys.stderr)
+        return 1
+    try:
+        wires = load_wires(path)
+    except (OSError, ValueError) as e:
+        print(f"Error reading {path}: {e}", file=sys.stderr)
+        return 1
+    if net_name:
+        wires = [w for w in wires if w.get("net") == net_name]
+    if getattr(args, "format", "text") == "json":
+        print(json.dumps({"sidecar": str(path), "wires": wires}, indent=2))
+    else:
+        print(format_wire_list(wires))
+    return 0
+
+
+def _run_reinforce_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb reinforce' command (Unit A of #4218; issues #4220, #8742).
+
+    Post-route pass that walks a routed net's segments into ordered
+    polylines and emits same-net plated-PTH anchor vias sized to a wire
+    gauge: by default (``--anchor-mode ends``) exactly two per single-layer
+    wire leg, at its ends; with ``--anchor-mode spaced`` the historical row
+    every ``--spacing`` mm. Anchors that would collide with a different net
+    are refused and reported, never placed. In-place by default; ``-o``
+    writes elsewhere; ``--dry-run`` reports without writing.
+    """
+    from kicad_tools.pcb.reinforce import (
+        ReinforceError,
+        clear_anchors,
+        reinforce_net,
+        resolve_min_wire_length_mm,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    net_name = getattr(args, "net", None)
+    if getattr(args, "list_wires", False):
+        return _run_reinforce_list_wires(args, pcb_path, net_name)
+    if not net_name:
+        print("Error: --net is required", file=sys.stderr)
+        return 1
+
+    clear_only = bool(getattr(args, "clear", False))
+    replace = bool(getattr(args, "replace", False))
+    if clear_only and replace:
+        print("Error: --clear and --replace are mutually exclusive", file=sys.stderr)
+        return 1
+
+    wire_gauge = getattr(args, "wire_gauge", 16)
+    anchor_mode = getattr(args, "anchor_mode", None) or "ends"
+    end_offset = getattr(args, "end_offset", None)
+    end_offset = 1.0 if end_offset is None else end_offset
+    max_end_shift = getattr(args, "max_end_shift", None)
+    spacing_arg = getattr(args, "spacing", None)
+    spacing = 15.0 if spacing_arg is None else spacing_arg
+    if anchor_mode == "ends" and spacing_arg is not None:
+        print(
+            "Warning: --spacing only applies to --anchor-mode spaced; ignored in ends mode "
+            "(two anchors per leg, at its ends)",
+            file=sys.stderr,
+        )
+    mask_opening = getattr(args, "mask_opening", None)
+    mask_width = getattr(args, "mask_width", None)
+    strategy = getattr(args, "strategy", None) or "wire"
+    if mask_width is not None and mask_width <= 0:
+        print("Error: --mask-width must be positive", file=sys.stderr)
+        return 1
+    layer = getattr(args, "layer", None)
+    all_runs = getattr(args, "all_runs", False)
+    min_run_length = getattr(args, "min_run_length", None)
+    min_wire_length = getattr(args, "min_wire_length", None)
+    for flag, value in (
+        ("--min-run-length", min_run_length),
+        ("--min-wire-length", min_wire_length),
+    ):
+        if value is not None and value < 0:
+            print(f"Error: {flag} must not be negative", file=sys.stderr)
+            return 1
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+    output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    # Issue #4980: optional declared branch-specific current-path intent.
+    # When supplied, reinforcement gates to an allow-list -- see
+    # ``reinforce_net``'s ``current_paths`` docstring.
+    current_paths = None
+    current_paths_arg = getattr(args, "current_paths", None)
+    if current_paths_arg:
+        from kicad_tools.router.current_paths import load_current_path_specs
+
+        try:
+            current_paths = load_current_path_specs(current_paths_arg)
+        except (OSError, ValueError) as e:
+            print(f"Error loading --current-paths {current_paths_arg!r}: {e}", file=sys.stderr)
+            return 1
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Issue #8085: clearance floors from the board's own rules (the sibling
+    # .kicad_pro net classes, as ``kct check`` reads them) and, with
+    # --voltage-map, the pairwise IEC requirement ``kct route`` uses.
+    net_class_clearances: dict[str, float] = {}
+    project_path = pcb_path.with_suffix(".kicad_pro")
+    if project_path.is_file():
+        from kicad_tools.core.project_clearance import (
+            ProjectClearanceError,
+            authored_netclass_clearances,
+        )
+        from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+        project = load_project(pcb_path)
+        if project is not None:
+            try:
+                authored = authored_netclass_clearances(
+                    project, [n.name for n in pcb.nets.values() if n.name]
+                )
+            except ProjectClearanceError as e:
+                print(f"Error reading net-class clearances: {e}", file=sys.stderr)
+                return 1
+            net_class_clearances = {name: v.clearance for name, v in authored.items()}
+
+    # Issue #8494: the .kicad_dru custom rules (condition-based NetClass rules
+    # included), evaluated with kicad-cli semantics, as route-auto does.
+    board_rules = None
+    if pcb_path.with_suffix(".kicad_dru").is_file():
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        board_rules = BoardClearanceRules.from_board(pcb_path)
+        if board_rules.dru_error:
+            print(f"Warning: {board_rules.dru_error}", file=sys.stderr)
+
+    pairwise = None
+    voltage_map_arg = getattr(args, "voltage_map", None)
+    if voltage_map_arg:
+        from kicad_tools.creepage.standards import StandardLookupError
+        from kicad_tools.router.pairwise_clearance import (
+            build_pairwise_clearance_table,
+            load_pair_bounds,
+            load_signed_voltage_map,
+        )
+
+        vm_path = Path(voltage_map_arg)
+        if not vm_path.exists():
+            print(f"Error: voltage-map file not found: {vm_path}", file=sys.stderr)
+            return 1
+        try:
+            pairwise = build_pairwise_clearance_table(
+                load_signed_voltage_map(vm_path),
+                dru=0.0,  # scalar floors are applied by reinforce_net itself
+                standard_id=getattr(args, "creepage_standard", "iec60664"),
+                pollution_degree=getattr(args, "pollution_degree", 2),
+                material_group=getattr(args, "material_group", "IIIa"),
+                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                pair_bounds=load_pair_bounds(vm_path) or None,
+            )
+        except (ValueError, OSError, StandardLookupError) as e:
+            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
+            return 1
+
+    # Issue #8747: --clear / --replace first remove the net's existing anchors
+    # (in memory; nothing is written under --dry-run). --replace carries on to
+    # place new anchors and writes once.
+    clear_outcome = None
+    # Issue #8916: the records are also how a parallel re-run tells its own
+    # earlier copper from copper that predates the tool.
+    prior_wires = (
+        _load_sidecar_wires(pcb_path) if (clear_only or replace or strategy != "wire") else None
+    )
+    if clear_only or replace:
+        try:
+            clear_outcome = clear_anchors(
+                pcb,
+                net_name,
+                wire_gauge_awg=wire_gauge,
+                sidecar_wires=prior_wires,
+            )
+        except ReinforceError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        if clear_only:
+            return _finish_reinforce_clear(
+                args, pcb, pcb_path, output_path, clear_outcome, dry_run, output_format
+            )
+
+    try:
+        outcome = reinforce_net(
+            pcb,
+            net_name,
+            wire_gauge_awg=wire_gauge,
+            spacing_mm=spacing,
+            layer=layer,
+            dry_run=dry_run,
+            all_runs=all_runs,
+            min_run_length_mm=min_run_length,
+            min_wire_length_mm=min_wire_length,
+            current_paths=current_paths,
+            net_class_clearances=net_class_clearances,
+            pairwise_clearance=pairwise,
+            board_rules=board_rules,
+            anchor_mode=anchor_mode,
+            end_offset_mm=end_offset,
+            max_end_shift_mm=max_end_shift,
+            mask_opening=mask_opening,
+            mask_width_mm=mask_width,
+            strategy=strategy,
+            sidecar_wires=prior_wires,
+        )
+    except ReinforceError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Refusal anchors are board-relative internally; report sheet-absolute
+    # coordinates like ``kct check`` / kicad-cli DRC (Issue #8493).
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    # ``UnresolvedPath.reason`` is coordinate-free; its witness is rendered
+    # here in the same sheet frame as every other coordinate below (#8928).
+    from kicad_tools.router.current_paths import describe_witness
+
+    unresolved_reasons = [
+        u.reason + describe_witness(u.witness, (origin_x, origin_y))
+        for u in outcome.unresolved_paths
+    ]
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "net": outcome.net_name,
+        "layer": outcome.layer,
+        "wire_gauge_awg": outcome.wire_gauge_awg,
+        "anchor_drill_mm": round(outcome.anchor_drill_mm, 4),
+        "anchor_pad_mm": round(outcome.anchor_pad_mm, 4),
+        "spacing_mm": outcome.spacing_mm,
+        "run_segment_count": outcome.run_segment_count,
+        "run_length_mm": round(outcome.run_length_mm, 4),
+        "unhandled_runs": outcome.unhandled_runs,
+        "anchors_placed": outcome.placed_count,
+        "anchors_refused": outcome.refused_count,
+        "refused": [
+            {
+                "x": round(r.x + origin_x, 4),
+                "y": round(r.y + origin_y, 4),
+                "reason": r.reason,
+                "rule": r.rule,
+                "required_mm": round(r.required_mm, 4),
+                "actual_mm": round(r.actual_mm, 4),
+                "obstacle_net": r.obstacle_net,
+            }
+            for r in outcome.refused
+        ],
+        "voltage_map": voltage_map_arg,
+        # Additive per-run accounting (#4319): existing keys above are
+        # unchanged so current agent consumers keep working.
+        "all_runs": all_runs,
+        "min_run_length_mm": min_run_length,
+        # Issue #8915: what --min-wire-length was given (None = not given) and
+        # the minimum actually enforced for this mode after resolving the
+        # alias and the ends-mode 15.0 default.
+        "min_wire_length_mm": min_wire_length,
+        "min_wire_length_effective_mm": resolve_min_wire_length_mm(
+            min_wire_length, min_run_length, anchor_mode
+        ),
+        "runs_total": len(outcome.runs),
+        "runs_fully_reinforced": outcome.runs_fully_reinforced,
+        "runs_partial": outcome.runs_partial,
+        "runs_unanchored": outcome.runs_unanchored,
+        "runs": [
+            {
+                "run_index": rs.run_index,
+                "length_mm": round(rs.length_mm, 4),
+                "segment_count": rs.segment_count,
+                "anchors_needed": rs.anchors_needed,
+                "anchors_placed": rs.anchors_placed,
+                "anchors_refused": rs.anchors_refused,
+                "path_excluded_reason": rs.path_excluded_reason,
+            }
+            for rs in outcome.runs
+        ],
+        # Issue #4980: current-path gating.
+        "current_paths": current_paths_arg,
+        # Issue #8742: placement mode and per-leg wire accounting (additive).
+        "anchor_mode": outcome.anchor_mode,
+        "end_offset_mm": outcome.end_offset_mm,
+        "legs": [
+            {
+                "net": leg.net,
+                "layer": leg.layer,
+                "kind": leg.kind,
+                "length_mm": round(leg.length_mm, 4),
+                "width_mm": round(leg.width_mm, 4),
+                "wire_span_mm": round(leg.wire_span_mm, 4),
+                "uncovered_mm": round(leg.uncovered_mm, 4),
+                "anchors": [
+                    {
+                        "x": round(a.x + origin_x, 4),
+                        "y": round(a.y + origin_y, 4),
+                        "shift_mm": round(a.shift_mm, 4),
+                    }
+                    for a in leg.anchors
+                ],
+                "status": leg.status,
+                "reason": leg.reason,
+                "paths": leg.paths,
+                "mask_status": leg.mask_status,
+                "mask_reason": leg.mask_reason,
+                # Issue #8916: per-leg strategy and parallel copy (additive).
+                "strategy": leg.strategy,
+                "copy_status": leg.copy_status,
+                "copy_reason": leg.copy_reason,
+                "copy": _copy_entry(leg.copy, origin_x, origin_y),
+                "polyline": [
+                    [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in leg.polyline
+                ],
+            }
+            for leg in outcome.legs
+        ],
+        "unresolved_paths": [
+            {"path": u.path, "status": u.status, "reason": why}
+            for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True)
+        ],
+        # Issue #8743: solder-mask openings (additive).
+        "mask_opening": outcome.mask_opening,
+        "mask_width_mm": outcome.mask_width_mm,
+        "openings": [
+            {
+                "layer": o.layer,
+                "start": [round(o.start[0] + origin_x, 4), round(o.start[1] + origin_y, 4)],
+                "end": [round(o.end[0] + origin_x, 4), round(o.end[1] + origin_y, 4)],
+                "width_mm": round(o.width_mm, 4),
+                "existing": o.existing,
+            }
+            for o in outcome.openings
+        ],
+        "refused_openings": [
+            {
+                "copper_layer": r.copper_layer,
+                "start": [round(r.start[0] + origin_x, 4), round(r.start[1] + origin_y, 4)],
+                "end": [round(r.end[0] + origin_x, 4), round(r.end[1] + origin_y, 4)],
+                "rule": r.rule,
+                "required_mm": round(r.required_mm, 4),
+                "actual_mm": round(r.actual_mm, 4),
+                "obstacle_net": r.obstacle_net,
+            }
+            for r in outcome.refused_openings
+        ],
+        # Issue #8916: reinforcement strategy and parallel copies (additive).
+        "strategy": outcome.strategy,
+        "copies_placed": outcome.copies_placed_count,
+        "copies": [_copy_entry(c, origin_x, origin_y) for c in outcome.copies],
+        "refused_copies": [
+            {
+                "leg_layer": r.leg_layer,
+                "copy_layer": r.copy_layer,
+                "x": round(r.x + origin_x, 4),
+                "y": round(r.y + origin_y, 4),
+                "rule": r.rule,
+                "required_mm": round(r.required_mm, 4),
+                "actual_mm": round(r.actual_mm, 4),
+                "obstacle_net": r.obstacle_net,
+                "reason": r.reason,
+            }
+            for r in outcome.refused_copies
+        ],
+    }
+    if clear_outcome is not None:
+        result["replace"] = True
+        result["anchors_cleared"] = clear_outcome.removed_count
+        result["cleared"] = _clear_entries(clear_outcome.removed, origin_x, origin_y)
+        result["clear_refused"] = _clear_entries(
+            clear_outcome.refused, origin_x, origin_y, reason=True
+        )
+        result["identified_by"] = clear_outcome.identified_by
+        result["mask_openings_cleared"] = _opening_entries(
+            clear_outcome.openings_removed, origin_x, origin_y
+        )
+        result["copies_cleared"] = _cleared_copy_entries(clear_outcome)
+        if not dry_run:
+            try:
+                _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
+            except (OSError, ValueError) as e:
+                print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+                return 1
+
+    # Issue #8744: wire list sidecar (ends mode only; never on a dry run).
+    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records, write_sidecar
+
+    wire_records = build_wire_records(outcome, origin_x, origin_y)
+    result["wires"] = wire_records
+    result["wire_sidecar"] = None
+    if not dry_run and wire_records:
+        try:
+            result["wire_sidecar"] = str(write_sidecar(output_path, wire_records))
+        except (OSError, ValueError) as e:
+            print(f"Error writing reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+    elif not dry_run and outcome.anchor_mode == "spaced":
+        print(
+            "Note: spaced mode has no per-wire legs; no reinforcement sidecar written",
+            file=sys.stderr,
+        )
+
+    for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
+        print(
+            f"Warning: declared current path {u.path!r} on net {outcome.net_name!r} is "
+            f"{u.status}: {why} -- it gets no anchors",
+            file=sys.stderr,
+        )
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        label = " (dry run)" if dry_run else ""
+        print(f"PCB Reinforce{label}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print()
+        print(f"  Net:            {outcome.net_name}")
+        print(f"  Layer:          {outcome.layer}")
+        print(f"  Wire gauge:     {outcome.wire_gauge_awg} AWG")
+        print(f"  Anchor drill:   {outcome.anchor_drill_mm:.3f} mm")
+        print(f"  Anchor pad:     {outcome.anchor_pad_mm:.3f} mm")
+        if outcome.anchor_mode == "ends":
+            print(f"  Anchor mode:    ends (end offset {outcome.end_offset_mm:g} mm)")
+            print(f"  Strategy:       {outcome.strategy}")
+        else:
+            print("  Anchor mode:    spaced")
+            print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
+        # Issue #8915: show the minimum actually enforced, so the ends-mode
+        # 15.0 default is visible in the report and not just in --help.
+        effective_min = result["min_wire_length_effective_mm"]
+        if effective_min:
+            print(f"  Min wire length: {effective_min:g} mm (shorter legs get no wire)")
+        else:
+            print("  Min wire length: none (every leg is a wire candidate)")
+        if outcome.anchor_mode == "ends" and outcome.placed_count == 0 and not outcome.copies:
+            # Every attempted leg was refused or too short: nothing is anchored.
+            print("  Anchored run:   none (no leg received an anchor; see legs below)")
+        else:
+            print(
+                f"  Anchored run:   {outcome.run_segment_count} segment(s), "
+                f"{outcome.run_length_mm:.1f} mm"
+            )
+        if outcome.unhandled_runs:
+            print(
+                f"  Unhandled runs: {outcome.unhandled_runs} "
+                "(branch/disconnected run(s) on this net NOT anchored)"
+            )
+        if outcome.unresolved_paths:
+            print()
+            print("  Unresolved current paths (no anchors):")
+            for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
+                print(f"    {u.path}: {u.status} -- {why}")
+        if outcome.anchor_mode == "ends":
+            _print_reinforce_legs(outcome, origin_x, origin_y)
+        else:
+            _print_reinforce_runs(outcome, all_runs)
+        if clear_outcome is not None:
+            print()
+            _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
+        print()
+        print(f"  Anchors placed:  {outcome.placed_count}")
+        print(f"  Anchors refused: {outcome.refused_count}")
+        if outcome.strategy != "wire":
+            _print_reinforce_copies(outcome, origin_x, origin_y)
+        for r in outcome.refused:
+            detail = (
+                f" [{r.rule}: need {r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
+                + (f", vs {r.obstacle_net}" if r.obstacle_net else "")
+                + "]"
+                if r.rule
+                else ""
+            )
+            print(
+                f"    refused at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): {r.reason}{detail}"
+            )
+        if result["wire_sidecar"]:
+            print(f"  Wire list:      {result['wire_sidecar']} ({len(wire_records)} wire(s))")
+        if not dry_run and (
+            outcome.placed_count
+            or outcome.copies
+            or (clear_outcome is not None and _cleared_anything(clear_outcome))
+        ):
+            print()
+            print(
+                "  NOTE: anchors are same-net vias -- refill zone pours "
+                "afterward (e.g. `kicad-cli pcb drc --refill-zones`)."
+            )
+            if outcome.copies and not outcome.placed_count:
+                pass  # parallel copies only (#8916): no anchors, no mask openings
+            elif outcome.mask_opening:
+                new = sum(1 for o in outcome.openings if not o.existing)
+                print(
+                    f"  Mask openings:   {len(outcome.openings)} ({new} new); "
+                    f"{len(outcome.refused_openings)} leg(s) refused; anchors tenting off"
+                )
+                for o in outcome.openings:
+                    print(
+                        f"    {o.layer} ({o.start[0] + origin_x:.2f}, {o.start[1] + origin_y:.2f})"
+                        f" -> ({o.end[0] + origin_x:.2f}, {o.end[1] + origin_y:.2f})"
+                        f" width {o.width_mm:.3f} mm" + (" [already present]" if o.existing else "")
+                    )
+                for ro in outcome.refused_openings:
+                    print(
+                        f"    opening refused on {ro.copper_layer} [{ro.rule}: need "
+                        f"{ro.required_mm:.3f} mm, have {ro.actual_mm:.3f} mm"
+                        + (f", vs {ro.obstacle_net}" if ro.obstacle_net else "")
+                        + "]"
+                    )
+                if outcome.openings:
+                    print(
+                        "  NOTE: new mask openings may sit under silkscreen -- run "
+                        "`kct place-silk-refs` (references) and `kct check` "
+                        "(silk-over-mask-opening) afterward."
+                    )
+            else:
+                print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
+
+    # Save unless dry-run and at least one anchor or copy was placed (or cleared).
+    if not dry_run and (
+        outcome.placed_count
+        or outcome.copies
+        or (clear_outcome is not None and _cleared_anything(clear_outcome))
+    ):
+        try:
+            pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb current-paths-audit' command (issue #4980).
+
+    Independent post-write audit of declared branch-specific current-path
+    intent: resolves every declared path against the routed board (fails
+    closed on a broken/ambiguous endpoint mapping) and reports any routed
+    copper on a declared net that no resolved path covers. Read-only --
+    never mutates or saves the board.
+    """
+    from kicad_tools.router.current_paths import (
+        PathResolution,
+        audit_current_paths,
+        describe_witness,
+        load_current_path_specs,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    current_paths_arg = getattr(args, "current_paths", None)
+    if not current_paths_arg:
+        print("Error: --current-paths is required", file=sys.stderr)
+        return 1
+
+    try:
+        specs = load_current_path_specs(current_paths_arg)
+    except (OSError, ValueError) as e:
+        print(f"Error loading --current-paths {current_paths_arg!r}: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    audit = audit_current_paths(pcb, specs)
+    output_format = getattr(args, "format", "text")
+    # Report sheet coordinates, the frame ``kct check`` uses (#8798).
+    origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)
+
+    def _reason(resolution: PathResolution) -> str:
+        """``reason`` plus its witness, quoted at sheet positions (#8928)."""
+        return resolution.reason + describe_witness(resolution.witness, (origin_x, origin_y))
+
+    def _min_width_fields(resolution) -> dict[str, Any]:
+        """Narrowest copper of one resolved path, in sheet coordinates (#8917).
+
+        All four keys are ``null`` for an ``unresolved``/``ambiguous`` path --
+        never ``0``, which would read as "zero-width copper" rather than "not
+        measured".
+        """
+        found = resolution.min_width
+        if found is None:
+            return {
+                "min_width_mm": None,
+                "min_width_at": None,
+                "min_width_layer": None,
+                "min_width_parallel_group": None,
+            }
+        return {
+            "min_width_mm": round(found.width_mm, 4),
+            # Board coordinates come out of the resolver; the audit reports
+            # sheet coordinates, like its layer-change positions (#8798).
+            "min_width_at": _sheet(found.position),
+            "min_width_layer": found.layer,
+            "min_width_parallel_group": found.parallel_group,
+        }
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "current_paths": current_paths_arg,
+        "paths_declared": len(specs),
+        "paths_resolved": sum(1 for r in audit.resolutions if r.ok),
+        "all_resolved": audit.all_resolved,
+        "fully_covered": audit.fully_covered,
+        "resolutions": [
+            {
+                "name": r.spec.name,
+                "net": r.spec.net_name,
+                "source": r.spec.source.label(),
+                "sink": r.spec.sink.label(),
+                "continuous_a": r.spec.continuous_a,
+                "pulsed_a": r.spec.pulsed_a,
+                "duty_cycle": r.spec.duty_cycle,
+                "pulse_duration_s": r.spec.pulse_duration_s,
+                # The current the IPC-2221 width check actually runs at, and
+                # which waveform assumption produced it (#4980). Reported
+                # even when it equals ``continuous_a`` so a reader never has
+                # to re-derive it.
+                "thermal_design_a": round(r.spec.thermal_design_current().current_a, 6),
+                "thermal_basis": r.spec.thermal_design_current().basis,
+                "thermal_assumption": r.spec.thermal_design_current().assumption,
+                "fusing_checked": r.spec.pulsed_a is None or r.spec.pulse_duration_s is not None,
+                "reinforcement_eligible": r.spec.reinforcement_eligible,
+                "status": r.status,
+                "reason": _reason(r),
+                "witness": _sheet_witness(r.witness),
+                "segment_count": len(r.segments),
+                "length_mm": round(r.length_mm, 4),
+                **_min_width_fields(r),
+                "layer_changes": [
+                    {
+                        "position": _sheet(c.position),
+                        "from_layer": c.from_layer,
+                        "to_layer": c.to_layer,
+                        "via_count": c.count,
+                        "drill_mm": c.drill,
+                        "pad_diameter_mm": c.pad_diameter,
+                        "capacity_a": round(c.current_capacity_a(), 4),
+                        "vias": [
+                            {"position": _sheet(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
+                            for v in c.vias
+                        ],
+                    }
+                    for c in r.layer_changes
+                ],
+            }
+            for r in audit.resolutions
+        ],
+        "uncovered": {
+            net_name: [
+                {
+                    "layer": s.layer,
+                    "start": list(s.start),
+                    "end": list(s.end),
+                    "width": s.width,
+                }
+                for s in segments
+            ]
+            for net_name, segments in audit.uncovered.items()
+        },
+        # Same-net routed arcs / non-keepout zones-pours the declared-path
+        # graph never models (#5273). Any entry here means every declared
+        # path on that net resolves "ambiguous" -- a parallel return path
+        # this bounded model cannot rule out.
+        "unmodeled": {
+            net_name: [
+                {"kind": item.kind, "layer": item.layer, "location": list(item.location)}
+                for item in items
+            ]
+            for net_name, items in audit.unmodeled.items()
+        },
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print("Current-Path Audit")
+        print(f"  Input:          {pcb_path}")
+        print(f"  Paths declared: {len(specs)}")
+        print(f"  Paths resolved: {result['paths_resolved']}/{len(specs)}")
+        print()
+        for r in audit.resolutions:
+            print(
+                f"  {r.spec.name}: {r.spec.source.label()} -> {r.spec.sink.label()} "
+                f"on {r.spec.net_name!r} [{r.status}]"
+            )
+            if r.reason:
+                print(f"      {_reason(r)}")
+            if r.ok:
+                thermal = r.spec.thermal_design_current()
+                print(
+                    f"      {len(r.segments)} segment(s), {r.length_mm:.2f} mm, "
+                    f"sized for {thermal.description}, "
+                    f"reinforcement_eligible={r.spec.reinforcement_eligible}"
+                )
+                if thermal.assumption:
+                    print(f"      assumption: {thermal.assumption}")
+                narrowest = r.min_width
+                if narrowest is not None:
+                    nx, ny = _sheet(narrowest.position)
+                    # Say when the figure is a group's summed width, so
+                    # 2.0 mm is not misread as one trace's width (#8917).
+                    doubled = " (summed parallel group)" if narrowest.parallel_group else ""
+                    print(
+                        f"      min width {narrowest.width_mm:.3f} mm on "
+                        f"{narrowest.layer} at ({nx:.3f}, {ny:.3f}){doubled}"
+                    )
+                for c in r.layer_changes:
+                    cx, cy = _sheet(c.position)
+                    print(
+                        f"      layer change {c.from_layer}->{c.to_layer} at "
+                        f"({cx:.3f}, {cy:.3f}): {c.count} via(s), "
+                        f"drill {c.drill:.3f} mm, capacity {c.current_capacity_a():.2f} A"
+                    )
+                if r.spec.pulsed_a is not None and r.spec.pulse_duration_s is None:
+                    print("      fusing survivability NOT checked (no 'pulse_duration_s' declared)")
+        if audit.uncovered:
+            print()
+            print("  Uncovered copper (declared net, no resolved path covers it):")
+            for net_name, segments in audit.uncovered.items():
+                print(f"    {net_name}: {len(segments)} segment(s)")
+        else:
+            print()
+            print("  No uncovered copper on any net with a declared path.")
+        if audit.unmodeled:
+            print()
+            print("  Unmodeled copper (same-net arc/pour not in the declared-path graph):")
+            for net_name, items in audit.unmodeled.items():
+                print(f"    {net_name}: {len(items)} object(s)")
+                for item in items:
+                    x, y = item.location
+                    print(f"      {item.kind} on {item.layer} near ({x:.3f}, {y:.3f})")
+        else:
+            print()
+            print("  No unmodeled arcs/pours on any net with a declared path.")
+
+    return 0
+
+
+def _update_footprint_reference(pcb, old_ref: str, new_ref: str) -> bool:
+    """Update a footprint's reference designator in both parsed data and S-expression tree.
+
+    Handles both KiCad 7 (fp_text) and KiCad 8+ (property) formats.
+
+    Args:
+        pcb: PCB instance.
+        old_ref: Current reference designator.
+        new_ref: New reference designator.
+
+    Returns:
+        True if the reference was found and updated.
+    """
+    from kicad_tools.schema.pcb import _is_footprint_tag
+
+    # Find the footprint S-expression node. ``find_all`` doesn't natively
+    # support matching either footprint tag spelling, so walk descendants
+    # directly (mirrors the modern/legacy `(module ...)` handling in
+    # schema/pcb.py, issue #4892).
+    fp_sexp = None
+    candidates = (
+        node
+        for child in pcb._sexp.children
+        for node in child.iter_all()
+        if _is_footprint_tag(node.name)
+    )
+    for candidate in candidates:
+        ref = pcb._get_footprint_reference(candidate)
+        if ref == old_ref:
+            fp_sexp = candidate
+            break
+
+    if fp_sexp is None:
+        return False
+
+    # Update S-expression: KiCad 7 fp_text format
+    for fp_text in fp_sexp.find_all("fp_text"):
+        if fp_text.get_string(0) == "reference":
+            fp_text.set_atom(1, new_ref)
+            break
+
+    # Update S-expression: KiCad 8+ property format
+    for prop in fp_sexp.find_all("property"):
+        if prop.get_string(0) == "Reference":
+            prop.set_atom(1, new_ref)
+            break
+
+    # Update parsed footprint object
+    for fp in pcb._footprints:
+        if fp.reference == old_ref:
+            fp.reference = new_ref
+            # Also update the FootprintText objects
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    text.text = new_ref
+            break
+
+    return True
+
+
+def _build_rename_plan(
+    mapping: dict[str, str], existing_refs: set[str]
+) -> tuple[list[tuple[str, str, str | None]], list[str], list[str]]:
+    """Build a collision-safe rename plan from a mapping.
+
+    Detects collision chains (where a rename target is also a rename source)
+    and uses temporary intermediate references to resolve them safely.
+
+    Args:
+        mapping: Dict of old_ref -> new_ref.
+        existing_refs: Set of all reference designators currently in the PCB.
+
+    Returns:
+        Tuple of (rename_steps, warnings, errors) where:
+        - rename_steps is a list of (from_ref, to_ref, via_temp) tuples.
+          via_temp is None for direct renames, or the temp ref for chain renames.
+        - warnings is a list of warning messages.
+        - errors is a list of error messages.
+    """
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    # Validate: check that all source refs exist in the PCB
+    for old_ref in mapping:
+        if old_ref not in existing_refs:
+            errors.append(f"Source reference '{old_ref}' not found in PCB")
+
+    # Validate: check that target refs don't collide with existing refs
+    # that are NOT themselves being renamed away
+    mapping_sources = set(mapping.keys())
+    for old_ref, new_ref in mapping.items():
+        if new_ref in existing_refs and new_ref not in mapping_sources:
+            errors.append(
+                f"Target reference '{new_ref}' already exists in PCB "
+                f"and is not being renamed (collision with '{old_ref}' -> '{new_ref}')"
+            )
+
+    if errors:
+        return [], warnings, errors
+
+    # Identify which renames are part of collision chains
+    # A collision chain exists when a target ref is also a source ref
+    sources_set = set(mapping.keys())
+    targets_set = set(mapping.values())
+    conflicting = sources_set & targets_set  # refs that are both source and target
+
+    # Separate direct renames from chain renames
+    direct_renames: list[tuple[str, str, str | None]] = []
+    chain_sources: set[str] = set()
+
+    # Walk chains to find all members
+    for ref in conflicting:
+        # Trace the chain: ref is a target of some other rename
+        chain_sources.add(ref)
+
+    # Also include sources that target a conflicting ref
+    for old_ref, new_ref in mapping.items():
+        if new_ref in conflicting or old_ref in conflicting:
+            chain_sources.add(old_ref)
+
+    # Generate temp refs that don't collide with anything
+    all_refs = existing_refs | targets_set
+    temp_counter = 0
+    temp_map: dict[str, str] = {}  # old_ref -> temp_ref
+    for old_ref in sorted(chain_sources):
+        while f"_TEMP_{temp_counter}" in all_refs:
+            temp_counter += 1
+        temp_ref = f"_TEMP_{temp_counter}"
+        temp_map[old_ref] = temp_ref
+        all_refs.add(temp_ref)
+        temp_counter += 1
+
+    # Build rename steps
+    rename_steps: list[tuple[str, str, str | None]] = []
+
+    # Direct renames (not part of any chain)
+    for old_ref, new_ref in sorted(mapping.items()):
+        if old_ref not in chain_sources:
+            direct_renames.append((old_ref, new_ref, None))
+
+    rename_steps.extend(direct_renames)
+
+    # Chain renames: phase 1 (source -> temp), phase 2 (temp -> final)
+    for old_ref in sorted(chain_sources):
+        rename_steps.append((old_ref, temp_map[old_ref], None))
+
+    for old_ref in sorted(chain_sources):
+        new_ref = mapping[old_ref]
+        rename_steps.append((temp_map[old_ref], new_ref, old_ref))
+
+    return rename_steps, warnings, errors
+
+
+def _run_reannotate_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb reannotate' command."""
+    from kicad_tools.schema.pcb import PCB
+
+    # Load mapping from --map file
+    map_path = getattr(args, "map", None)
+    if not map_path:
+        print("Error: --map is required (path to JSON mapping file)", file=sys.stderr)
+        return 1
+
+    map_file = Path(map_path)
+    if not map_file.exists():
+        print(f"Error: Mapping file not found: {map_file}", file=sys.stderr)
+        return 1
+
+    try:
+        with open(map_file) as f:
+            mapping = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in mapping file: {e}", file=sys.stderr)
+        return 1
+
+    if not isinstance(mapping, dict):
+        print("Error: Mapping file must contain a JSON object (dict)", file=sys.stderr)
+        return 1
+
+    # Validate mapping values are strings
+    for key, value in mapping.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            print("Error: All keys and values in mapping must be strings", file=sys.stderr)
+            return 1
+
+    # Handle empty mapping (no-op)
+    if not mapping:
+        output_format = getattr(args, "format", "text")
+        if output_format == "json":
+            print(json.dumps({"input": str(pcb_path), "renames": [], "status": "no-op"}))
+        else:
+            print("No renames specified in mapping file.")
+        return 0
+
+    # Load PCB
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Get all existing references
+    existing_refs = {fp.reference for fp in pcb.footprints}
+
+    # Build collision-safe rename plan
+    rename_steps, warnings, errors = _build_rename_plan(mapping, existing_refs)
+
+    if errors:
+        for err in errors:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    # Build result for reporting
+    result: dict = {
+        "input": str(pcb_path),
+        "dry_run": dry_run,
+        "mapping": mapping,
+        "renames": [],
+        "warnings": warnings,
+    }
+
+    if dry_run:
+        # Report what would be done without modifying
+        for step_from, step_to, via_original in rename_steps:
+            entry: dict[str, str | None] = {"from": step_from, "to": step_to}
+            if via_original is not None:
+                entry["original_source"] = via_original
+            result["renames"].append(entry)
+
+        if output_format == "json":
+            print(json.dumps(result, indent=2))
+        else:
+            print("PCB Reannotate (dry run)")
+            print(f"  Input: {pcb_path}")
+            print()
+            print(f"  Planned renames ({len(mapping)} mappings, {len(rename_steps)} steps):")
+            for step_from, step_to, via_original in rename_steps:
+                if via_original is not None:
+                    print(f"    {step_from} -> {step_to}  (temp for {via_original})")
+                else:
+                    print(f"    {step_from} -> {step_to}")
+            if warnings:
+                print()
+                for w in warnings:
+                    print(f"  Warning: {w}")
+        return 0
+
+    # Execute renames
+    applied: list[dict[str, str | None]] = []
+    for step_from, step_to, via_original in rename_steps:
+        success = _update_footprint_reference(pcb, step_from, step_to)
+        if success:
+            entry = {"from": step_from, "to": step_to}
+            if via_original is not None:
+                entry["original_source"] = via_original
+            applied.append(entry)
+        else:
+            print(
+                f"Error: Failed to rename '{step_from}' -> '{step_to}'",
+                file=sys.stderr,
+            )
+            return 1
+
+    result["renames"] = applied
+
+    # Determine output path
+    output_path = pcb_path
+    if args.output:
+        output_path = Path(args.output)
+
+    result["output"] = str(output_path)
+
+    # Save
+    try:
+        pcb.save(output_path)
+    except Exception as e:
+        print(f"Error saving PCB: {e}", file=sys.stderr)
+        return 1
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print("PCB Reannotate")
+        print(f"  Input:  {pcb_path}")
+        print(f"  Output: {output_path}")
+        print()
+        print(f"  Applied {len(mapping)} renames ({len(rename_steps)} steps):")
+        for entry in applied:
+            from_ref = entry["from"]
+            to_ref = entry["to"]
+            orig = entry.get("original_source")
+            if orig is not None:
+                print(f"    {from_ref} -> {to_ref}  (temp for {orig})")
+            else:
+                print(f"    {from_ref} -> {to_ref}")
+        if warnings:
+            print()
+            for w in warnings:
+                print(f"  Warning: {w}")
+
+    return 0
+
+
+def _run_sync_netlist_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb sync-netlist' command."""
+    from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+    schematic = getattr(args, "schematic", None)
+    if not schematic:
+        print("Error: --schematic is required", file=sys.stderr)
+        return 1
+
+    schematic_path = Path(schematic)
+    if not schematic_path.exists():
+        print(f"Error: Schematic not found: {schematic_path}", file=sys.stderr)
+        return 1
+
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+    remove_orphans = getattr(args, "remove_orphans", False)
+    force = getattr(args, "force", False)
+    auto_rename = getattr(args, "auto_rename", False)
+    remove_orphan_nets = getattr(args, "remove_orphan_nets", False)
+    transactional = getattr(args, "transactional", False)
+
+    return run_sync_netlist(
+        schematic_path=schematic_path,
+        pcb_path=pcb_path,
+        dry_run=dry_run,
+        output_path=output_path,
+        output_format=output_format,
+        remove_orphans=remove_orphans,
+        force=force,
+        auto_rename=auto_rename,
+        remove_orphan_nets=remove_orphan_nets,
+        transactional=transactional,
+    )
+
+
+def _run_add_3d_models_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-3d-models' command."""
+    from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+    output = getattr(args, "output", None)
+    lib_path = getattr(args, "lib_path", None)
+    lcsc_models = getattr(args, "lcsc_models", None)
+    return run_add_3d_models(
+        pcb_path=pcb_path,
+        output_path=Path(output) if output else None,
+        lib_path=Path(lib_path) if lib_path else None,
+        allow_variants=not getattr(args, "exact", False),
+        lcsc_models=Path(lcsc_models) if lcsc_models else None,
+        fetch_lcsc=getattr(args, "fetch_lcsc", False),
+        dry_run=getattr(args, "dry_run", False),
+        refresh=getattr(args, "refresh", False),
+        allow_dangling=getattr(args, "allow_dangling", False),
+        output_format=getattr(args, "format", "text"),
+        lcsc_from_bom=getattr(args, "lcsc_from_bom", True),
+        bom=Path(args.bom) if getattr(args, "bom", None) else None,
+        procurement=Path(args.procurement) if getattr(args, "procurement", None) else None,
+    )
+
+
+def _run_add_fiducials_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-fiducials' command."""
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    output = getattr(args, "output", None)
+    return run_add_fiducials(
+        pcb_path=pcb_path,
+        sides=args.sides,
+        count=args.count,
+        footprint=args.footprint,
+        keepout=args.keepout,
+        edge_margin=args.edge_margin,
+        dry_run=getattr(args, "dry_run", False),
+        output_path=Path(output) if output else None,
+        output_format=getattr(args, "format", "text"),
+    )
+
+
+def _run_remove_footprint_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb remove-footprint' command."""
+    from kicad_tools.cli.pcb_remove_footprint import run_remove_footprint
+
+    ref = getattr(args, "ref", None)
+    if not ref:
+        print("Error: --ref is required", file=sys.stderr)
+        return 1
+
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    force = getattr(args, "force", False)
+    output_format = getattr(args, "format", "text")
+
+    return run_remove_footprint(
+        pcb_path=pcb_path,
+        reference=ref,
+        dry_run=dry_run,
+        output_path=output_path,
+        force=force,
+        output_format=output_format,
+    )
+
+
+def _run_move_footprint_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb move-footprint' command."""
+    from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+    ref = getattr(args, "ref", None)
+    to = getattr(args, "to", None)
+    rotation = getattr(args, "rotation", None)
+    batch_map_str = getattr(args, "batch_map", None)
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+    absolute = getattr(args, "absolute", False)
+    drag_endpoints = getattr(args, "drag_endpoints", False)
+    drag_tolerance = getattr(args, "drag_tolerance", 0.05)
+
+    # Parse batch map JSON if provided
+    batch_map = None
+    if batch_map_str is not None:
+        try:
+            batch_map = json.loads(batch_map_str)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in --map: {e}", file=sys.stderr)
+            return 1
+        if not isinstance(batch_map, dict):
+            print("Error: --map must be a JSON object", file=sys.stderr)
+            return 1
+
+    # Validate: need either --ref/--to or --map
+    if batch_map is None:
+        if not ref:
+            print("Error: --ref is required (or use --map for batch mode)", file=sys.stderr)
+            return 1
+        if not to:
+            print("Error: --to is required (or use --map for batch mode)", file=sys.stderr)
+            return 1
+
+    to_tuple = tuple(to) if to else None
+
+    return run_move_footprint(
+        pcb_path=pcb_path,
+        reference=ref,
+        to=to_tuple,
+        rotation=rotation,
+        batch_map=batch_map,
+        dry_run=dry_run,
+        output_path=output_path,
+        output_format=output_format,
+        absolute=absolute,
+        drag_endpoints=drag_endpoints,
+        drag_tolerance=drag_tolerance,
+    )
+
+
+def _run_move_via_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb move-via' command."""
+    from kicad_tools.cli.pcb_move_via import run_move_via
+
+    at = getattr(args, "at", None)
+    to = getattr(args, "to", None)
+    by = getattr(args, "by", None)
+    output = getattr(args, "output", None)
+    return run_move_via(
+        pcb_path=pcb_path,
+        at=tuple(at) if at else None,
+        to=tuple(to) if to else None,
+        by=tuple(by) if by else None,
+        net=getattr(args, "net", None),
+        uuid=getattr(args, "uuid", None),
+        tolerance=getattr(args, "tolerance", 0.05),
+        dry_run=getattr(args, "dry_run", False),
+        check=getattr(args, "check", False),
+        output_path=Path(output) if output else None,
+        output_format=getattr(args, "format", "text"),
+        absolute=getattr(args, "absolute", False),
+        manufacturer=getattr(args, "mfr", "jlcpcb"),
+        layers=getattr(args, "layers", 4),
+    )
+
+
+def _run_page_fit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb page-fit' command."""
+    from kicad_tools.cli.pcb_page_fit import run_page_fit
+
+    margin = getattr(args, "margin", 5.0)
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    return run_page_fit(
+        pcb_path=pcb_path,
+        margin=margin,
+        dry_run=dry_run,
+        output_path=output_path,
+        output_format=output_format,
+    )
+
+
+def _run_center_on_sheet_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb center-on-sheet' command."""
+    from kicad_tools.cli.pcb_center_on_sheet import run_center_on_sheet
+
+    output = getattr(args, "output", None)
+    return run_center_on_sheet(
+        pcb_path=pcb_path,
+        output_path=Path(output) if output else None,
+        paper=getattr(args, "paper", "auto"),
+        margin=getattr(args, "margin", None),
+        title_block=getattr(args, "title_block", None),
+        grid=getattr(args, "grid", None),
+        dry_run=getattr(args, "dry_run", False),
+        output_format=getattr(args, "format", "text"),
+    )
+
+
+def _run_add_board_info_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-board-info' command."""
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+
+    at = getattr(args, "at", None)
+    output = getattr(args, "output", None)
+    return run_add_board_info(
+        pcb_path=pcb_path,
+        text=args.text,
+        layer=args.layer,
+        at=(at[0], at[1]) if at else None,
+        auto=getattr(args, "auto", False),
+        order_placeholder=getattr(args, "order_placeholder", None),
+        font_size=args.font_size,
+        font_thickness=args.font_thickness,
+        dry_run=getattr(args, "dry_run", False),
+        output_path=Path(output) if output else None,
+        output_format=getattr(args, "format", "text"),
+    )
+
+
+def _run_lock_footprints_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb lock-footprints' / 'pcb unlock-footprints' commands."""
+    from kicad_tools.cli.pcb_lock_footprints import run_lock_footprints
+
+    refs_str = getattr(args, "refs", None)
+    all_perimeter = getattr(args, "all_perimeter", False)
+    perimeter_margin = getattr(args, "perimeter_margin", None)
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+    unlock = args.pcb_command == "unlock-footprints"
+
+    refs: list[str] | None = None
+    if refs_str:
+        refs = [r.strip() for r in refs_str.split(",") if r.strip()]
+        if not refs:
+            print("Error: --refs must contain at least one reference", file=sys.stderr)
+            return 1
+
+    return run_lock_footprints(
+        pcb_path=pcb_path,
+        refs=refs,
+        all_perimeter=all_perimeter,
+        perimeter_margin=perimeter_margin,
+        unlock=unlock,
+        dry_run=dry_run,
+        output_path=output_path,
+        output_format=output_format,
+    )
+
+
+def _run_add_zone_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-zone' command.
+
+    Delegates to the existing ZoneGenerator infrastructure from
+    kicad_tools.zones, adding support for --rect/--origin/--size
+    rectangular boundary specification.
+    """
+    from kicad_tools.zones import ZoneGenerator
+
+    # Validate --rect requires --origin and --size
+    use_rect = getattr(args, "rect", False)
+    origin = getattr(args, "origin", None)
+    size = getattr(args, "size", None)
+
+    if use_rect:
+        if origin is None or size is None:
+            print(
+                "Error: --rect requires both --origin X Y and --size W H",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Build rectangular boundary polygon if requested
+    boundary = None
+    if use_rect and origin is not None and size is not None:
+        x0, y0 = origin
+        w, h = size
+        if w <= 0 or h <= 0:
+            print("Error: --size width and height must be positive", file=sys.stderr)
+            return 1
+        boundary = [
+            (x0, y0),
+            (x0 + w, y0),
+            (x0 + w, y0 + h),
+            (x0, y0 + h),
+        ]
+
+    # Determine output path. No -o means overwrite the input in place,
+    # consistent with `zones add`, `zones fill`, and `optimize-placement`.
+    # ZoneGenerator.from_pcb() fully loads/parses the PCB into memory before
+    # any save(), so self-overwrite is safe. This makes a chained
+    # `pcb add-zone ... && pcb add-zone ...` accumulate zones, since each call
+    # reads its own prior output instead of the pristine input.
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else pcb_path
+
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    try:
+        gen = ZoneGenerator.from_pcb(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Map CLI flags to ZoneGenerator parameters
+    try:
+        zone = gen.add_zone(
+            net=args.net,
+            layer=args.layer,
+            priority=getattr(args, "priority", 0),
+            clearance=getattr(args, "min_clearance", 0.3),
+            thermal_gap=getattr(args, "thermal_relief_gap", 0.3),
+            thermal_bridge_width=getattr(args, "thermal_relief_width", 0.4),
+            min_thickness=getattr(args, "min_thickness", 0.25),
+            boundary=boundary,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Build result for reporting
+    result = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "zone": {
+            "net": zone.config.net,
+            "layer": zone.config.layer,
+            "priority": zone.config.priority,
+            "clearance": zone.config.clearance,
+            "thermal_gap": zone.config.thermal_gap,
+            "thermal_bridge_width": zone.config.thermal_bridge_width,
+            "boundary_points": len(zone.boundary),
+            "boundary_type": "rectangle" if use_rect else "board_outline",
+        },
+        "warnings": [w.message for w in gen.warnings],
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        label = "(dry run) " if dry_run else ""
+        print(f"PCB Add Zone {label}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print()
+        print(f"  Net:              {zone.config.net}")
+        print(f"  Layer:            {zone.config.layer}")
+        print(f"  Priority:         {zone.config.priority}")
+        print(f"  Clearance:        {zone.config.clearance}mm")
+        print(f"  Thermal gap:      {zone.config.thermal_gap}mm")
+        print(f"  Thermal width:    {zone.config.thermal_bridge_width}mm")
+        print(f"  Boundary:         {len(zone.boundary)} points", end="")
+        if use_rect:
+            print(" (rectangle)")
+        else:
+            print(" (board outline)")
+
+    # Surface overlap warnings
+    if gen.warnings:
+        if output_format == "text":
+            print(f"\n{len(gen.warnings)} overlap warning(s):")
+            for w in gen.warnings:
+                print(f"  WARNING: {w.message}", file=sys.stderr)
+
+    if dry_run:
+        return 0
+
+    # Save
+    try:
+        gen.save(output_path)
+    except Exception as e:
+        print(f"Error saving PCB: {e}", file=sys.stderr)
+        return 1
+
+    if output_format == "text":
+        print(f"\n  Saved to: {output_path}")
+
+    return 0
+
+
+def _run_snap_rotation_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb snap-rotation' command.
+
+    Normalizes footprint rotation angles to the nearest cardinal angle
+    (0, 90, 180, 270 by default).
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    grid = getattr(args, "grid", 90.0)
+    tolerance = getattr(args, "tolerance", None)
+    exclude = getattr(args, "exclude", None)
+    only = getattr(args, "only", None)
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    # Parse comma-separated reference lists
+    exclude_refs: set[str] = set()
+    if exclude:
+        exclude_refs = {r.strip() for r in exclude.split(",")}
+    only_refs: set[str] = set()
+    if only:
+        only_refs = {r.strip() for r in only.split(",")}
+
+    # Load PCB
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Snap rotations
+    changes: list[dict] = []
+    for fp in pcb.footprints:
+        ref = fp.reference
+
+        # Filter by --exclude / --only
+        if exclude_refs and ref in exclude_refs:
+            continue
+        if only_refs and ref not in only_refs:
+            continue
+
+        old_rotation = fp.rotation
+        snapped = round(old_rotation / grid) * grid % 360
+
+        # Apply tolerance filter: skip if delta exceeds tolerance
+        delta = abs(old_rotation - snapped)
+        # Handle wraparound (e.g., 359 -> 0 has delta 1, not 359)
+        if delta > 180:
+            delta = 360 - delta
+        if tolerance is not None and delta > tolerance:
+            continue
+
+        if abs(old_rotation - snapped) > 1e-6 or (
+            abs(old_rotation - 360.0) < 1e-6 and snapped == 0.0
+        ):
+            changes.append(
+                {
+                    "reference": ref,
+                    "old_rotation": old_rotation,
+                    "new_rotation": snapped,
+                }
+            )
+            if not dry_run:
+                # Pad angles are board-absolute (#3902), so they turn by the
+                # snap amount; ``fp.rotation`` turns the board-absolute text
+                # angles and embedded zones itself (Issues #6119, #6126).
+                snap_delta = snapped - old_rotation
+                for pad in fp.pads:
+                    pad.rotation = (float(pad.rotation) + snap_delta) % 360.0
+                fp.rotation = snapped
+                # When snapping to 0, remove the third child from the (at ...)
+                # node so KiCad does not serialize a stale rotation value.
+                if snapped == 0.0 and fp._sexp_node is not None:
+                    at_node = fp._sexp_node.find("at")
+                    if at_node is not None and len(at_node.children) >= 3:
+                        del at_node.children[2]
+
+    # Determine output path
+    output_path = pcb_path
+    if args.output:
+        output_path = Path(args.output)
+
+    # Build result
+    result = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "grid": grid,
+        "tolerance": tolerance,
+        "total_footprints": len(pcb.footprints),
+        "snapped": len(changes),
+        "changes": changes,
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Snap Rotation {'(dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        if not dry_run:
+            print(f"  Output: {output_path}")
+        print(f"  Grid:   {grid} degrees")
+        if tolerance is not None:
+            print(f"  Tolerance: {tolerance} degrees")
+        print()
+
+        if changes:
+            print(f"  {len(changes)} footprint(s) snapped:")
+            for c in changes:
+                print(f"    {c['reference']}: {c['old_rotation']:.1f} -> {c['new_rotation']:.1f}")
+        else:
+            print("  No footprints needed rotation adjustment.")
+
+    # Save unless dry-run
+    if not dry_run and changes:
+        try:
+            pcb.save(output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+def _run_edit_outline_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb edit-outline' command."""
+    from kicad_tools.schema.pcb import PCB
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # --list: display contours
+    if getattr(args, "list_contours", False):
+        contours = pcb.list_edge_contours()
+        if not contours:
+            if output_format == "json":
+                print(json.dumps({"contours": []}))
+            else:
+                print("No Edge.Cuts contours found.")
+            return 0
+
+        if output_format == "json":
+            data = []
+            for c in contours:
+                data.append(
+                    {
+                        "index": c.index,
+                        "elements": c.element_count,
+                        "bbox": {
+                            "min_x": round(c.bbox[0], 2),
+                            "min_y": round(c.bbox[1], 2),
+                            "max_x": round(c.bbox[2], 2),
+                            "max_y": round(c.bbox[3], 2),
+                        },
+                        "width_mm": round(c.bbox_width, 2),
+                        "height_mm": round(c.bbox_height, 2),
+                        "area_mm2": round(c.bbox_area, 2),
+                        "is_mounting_hole": c.is_mounting_hole,
+                    }
+                )
+            print(json.dumps({"contours": data}, indent=2))
+        else:
+            print(f"Found {len(contours)} Edge.Cuts contour(s):\n")
+            for c in contours:
+                label = " [mounting hole]" if c.is_mounting_hole else ""
+                print(
+                    f"  [{c.index}] {c.element_count} element(s), "
+                    f"bbox ({c.bbox[0]:.2f}, {c.bbox[1]:.2f}) - "
+                    f"({c.bbox[2]:.2f}, {c.bbox[3]:.2f}), "
+                    f"{c.bbox_width:.2f} x {c.bbox_height:.2f} mm"
+                    f"{label}"
+                )
+        return 0
+
+    # --remove-outline INDEX
+    remove_idx = getattr(args, "remove_outline", None)
+    if remove_idx is not None:
+        contours = pcb.list_edge_contours()
+        target = None
+        for c in contours:
+            if c.index == remove_idx:
+                target = c
+                break
+        if target is None:
+            print(f"Error: No contour with index {remove_idx}", file=sys.stderr)
+            return 1
+
+        if dry_run:
+            print(
+                f"Would remove contour [{remove_idx}]: "
+                f"{target.element_count} element(s), "
+                f"bbox ({target.bbox[0]:.2f}, {target.bbox[1]:.2f}) - "
+                f"({target.bbox[2]:.2f}, {target.bbox[3]:.2f})"
+            )
+            return 0
+
+        ok = pcb.remove_edge_contour(remove_idx)
+        if not ok:
+            print(f"Error: Failed to remove contour {remove_idx}", file=sys.stderr)
+            return 1
+
+        output = getattr(args, "output", None)
+        save_path = Path(output) if output else pcb_path
+        pcb.save(save_path)
+        print(
+            f"Removed contour [{remove_idx}] ({target.element_count} element(s)). Saved to {save_path}"
+        )
+        return 0
+
+    # --keep-only INDEX
+    keep_idx = getattr(args, "keep_only", None)
+    if keep_idx is not None:
+        contours = pcb.list_edge_contours()
+        target = None
+        for c in contours:
+            if c.index == keep_idx:
+                target = c
+                break
+        if target is None:
+            print(f"Error: No contour with index {keep_idx}", file=sys.stderr)
+            return 1
+
+        to_remove = [c for c in contours if c.index != keep_idx and not c.is_mounting_hole]
+
+        if dry_run:
+            print(f"Would keep contour [{keep_idx}] and remove {len(to_remove)} other outline(s).")
+            for c in to_remove:
+                print(
+                    f"  Remove [{c.index}]: {c.element_count} element(s), "
+                    f"bbox ({c.bbox[0]:.2f}, {c.bbox[1]:.2f}) - "
+                    f"({c.bbox[2]:.2f}, {c.bbox[3]:.2f})"
+                )
+            return 0
+
+        # Remove in reverse index order to keep indices stable
+        for c in sorted(to_remove, key=lambda c: c.index, reverse=True):
+            pcb.remove_edge_contour(c.index)
+
+        output = getattr(args, "output", None)
+        save_path = Path(output) if output else pcb_path
+        pcb.save(save_path)
+        print(
+            f"Kept contour [{keep_idx}], removed {len(to_remove)} outline(s). Saved to {save_path}"
+        )
+        return 0
+
+    # --set-outline rect
+    set_outline = getattr(args, "set_outline", None)
+    if set_outline == "rect":
+        origin = getattr(args, "origin", None)
+        size = getattr(args, "size", None)
+        if not origin or not size:
+            print(
+                "Error: --set-outline rect requires --origin X Y and --size W H",
+                file=sys.stderr,
+            )
+            return 1
+
+        origin_x, origin_y = origin
+        width, height = size
+
+        if dry_run:
+            contours = pcb.list_edge_contours()
+            outline_count = sum(1 for c in contours if not c.is_mounting_hole)
+            print(
+                f"Would replace {outline_count} outline contour(s) with "
+                f"rect at ({origin_x}, {origin_y}), size {width} x {height} mm"
+            )
+            return 0
+
+        removed = pcb.replace_outline(origin_x, origin_y, width, height)
+
+        output = getattr(args, "output", None)
+        save_path = Path(output) if output else pcb_path
+        pcb.save(save_path)
+        print(
+            f"Replaced {removed} outline(s) with rect at "
+            f"({origin_x}, {origin_y}), size {width} x {height} mm. "
+            f"Saved to {save_path}"
+        )
+        return 0
+
+    print(
+        "Error: No action specified. Use --list, --remove-outline, --keep-only, or --set-outline.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _run_model_audit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb model-audit' command (issue #7682)."""
+    from kicad_tools.pcb.model_audit import audit_pcb_models, resolve_pinned_model_dir
+
+    model_dir = Path(args.model_dir) if getattr(args, "model_dir", None) else None
+    not_synced = model_dir is None and args.env == "pinned" and resolve_pinned_model_dir() is None
+    try:
+        report = audit_pcb_models(pcb_path, env=args.env, model_dir=model_dir)
+    except Exception as e:
+        print(f"Error auditing PCB: {e}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        doc = report.to_dict()
+        if model_dir is None and args.env == "pinned":
+            doc["synced"] = not not_synced
+        print(json.dumps(doc, indent=2))
+        return 0
+
+    if not_synced:
+        print("pinned model set not synced (run `kct models sync`)")
+    pct = "n/a" if report.percent is None else f"{report.percent:g}%"
+    print(f"3D model coverage ({report.env}): {report.covered}/{report.total} ({pct})")
+    counts = {k: v for k, v in report.counts().items() if v}
+    print("  " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+    for entry in report.gaps:
+        print(f"  {entry.reference:<8} {entry.klass:<16} {entry.lib_id}  {entry.reason}")
+    for entry in report.suspects:
+        print(f"  {entry.reference:<8} suspect          {entry.lib_id}  {entry.suspect}")
+    return 0
+
+
+def _run_net_audit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb net-audit' command."""
+    from kicad_tools.audit.net_audit import find_stale_nets, fix_stale_nets
+    from kicad_tools.schema.pcb import PCB
+
+    output_format = getattr(args, "format", "text")
+    fix = getattr(args, "fix", False)
+    dry_run = getattr(args, "dry_run", False)
+
+    # --dry-run implies --fix (shows what would be fixed)
+    if dry_run:
+        fix = True
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    groups = find_stale_nets(pcb)
+
+    # Build result data
+    result = {
+        "input": str(pcb_path),
+        "stale_nets": len(groups),
+        "findings": [],
+    }
+
+    for group in groups:
+        finding = {
+            "stale_net": group.stale_net_name,
+            "stale_net_number": group.stale_net_number,
+            "active_net": group.active_net_name,
+            "active_net_number": group.active_net_number,
+            "active_segments": group.active_segment_count,
+            "active_vias": group.active_via_count,
+            "affected_pads": [
+                {
+                    "footprint": pad.footprint_ref,
+                    "pad": pad.pad_number,
+                    "current_net": pad.current_net,
+                }
+                for pad in group.affected_pads
+            ],
+        }
+        result["findings"].append(finding)
+
+    # Apply fix if requested
+    fixed_count = 0
+    if fix and groups:
+        if not dry_run:
+            fixed_count = fix_stale_nets(pcb, groups)
+            result["fixed_pads"] = fixed_count
+
+            # Save
+            output = getattr(args, "output", None)
+            output_path = Path(output) if output else pcb_path
+            result["output"] = str(output_path)
+            try:
+                pcb.save(output_path)
+            except Exception as e:
+                print(f"Error saving PCB: {e}", file=sys.stderr)
+                return 1
+        else:
+            # Dry-run: count what would be fixed
+            total_pads = sum(len(g.affected_pads) for g in groups)
+            result["dry_run"] = True
+            result["would_fix_pads"] = total_pads
+
+    # Output
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        if not groups:
+            print("No stale or duplicate nets found.")
+            return 0
+
+        label = " (dry run)" if dry_run else ""
+        print(f"PCB Net Audit{label}")
+        print(f"  Input: {pcb_path}")
+        print(f"  Found {len(groups)} stale net(s):\n")
+
+        for group in groups:
+            print(f"  Stale:  {group.stale_net_name} (net {group.stale_net_number})")
+            print(f"  Active: {group.active_net_name} (net {group.active_net_number})")
+            print(f"    Segments: {group.active_segment_count}, Vias: {group.active_via_count}")
+            if group.affected_pads:
+                print(f"    Affected pads ({len(group.affected_pads)}):")
+                for pad in group.affected_pads:
+                    print(f"      {pad.footprint_ref} pad {pad.pad_number}")
+            print()
+
+        if fix and not dry_run:
+            print(f"  Fixed {fixed_count} pad(s).")
+            output = getattr(args, "output", None)
+            output_path = Path(output) if output else pcb_path
+            print(f"  Saved to: {output_path}")
+        elif dry_run:
+            total_pads = sum(len(g.affected_pads) for g in groups)
+            print(f"  Would fix {total_pads} pad(s).")
+
+    # Return non-zero if stale nets found and --fix was not used
+    if groups and not fix:
+        return 1
+    return 0
+
+
+def _run_export_dsn_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb export-dsn' command."""
+    from kicad_tools.export.dsn import KiCadToDSNExporter
+
+    from ..format_options import emit_json
+
+    as_json = getattr(args, "format", "text") == "json"
+
+    output = getattr(args, "output", None)
+    if output is None:
+        output = pcb_path.with_suffix(".dsn")
+    else:
+        output = Path(output)
+
+    try:
+        exporter = KiCadToDSNExporter(str(pcb_path))
+        exporter.export(str(output))
+    except Exception as e:
+        message = f"Error exporting DSN: {e}"
+        if as_json:
+            emit_json(
+                {
+                    "command": "export-dsn",
+                    "pcb": str(pcb_path),
+                    "output": str(output),
+                    "error": message,
+                    "success": False,
+                }
+            )
+            return 1
+        print(message, file=sys.stderr)
+        return 1
+
+    if as_json:
+        emit_json(
+            {
+                "command": "export-dsn",
+                "pcb": str(pcb_path),
+                "output": str(output),
+                "layers": len(exporter.layers),
+                "nets": len(exporter.nets),
+                "components": len(exporter.footprints),
+                "omissions": exporter.omissions,
+                "success": True,
+            }
+        )
+        return 0
+
+    print(f"Exported DSN to {output}")
+    print(f"  Layers: {len(exporter.layers)}")
+    print(f"  Nets: {len(exporter.nets)}")
+    print(f"  Components: {len(exporter.footprints)}")
+    # Informational (issue #6594): board constraints the DSN cannot carry.
+    omissions = exporter.omissions
+    if omissions:
+        print(f"  Not exported ({len(omissions)}):")
+        for line in omissions:
+            print(f"    - {line}")
+    return 0
+
+
+def _run_import_ses_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb import-ses' command."""
+    from kicad_tools.export.ses import SESToKiCadImporter
+
+    from ..format_options import emit_json
+
+    as_json = getattr(args, "format", "text") == "json"
+    ses_path = Path(args.ses)
+
+    output = getattr(args, "output", None)
+    if output is not None:
+        output = Path(output)
+    dest = output or pcb_path
+
+    def fail(message: str) -> int:
+        if as_json:
+            emit_json(
+                {
+                    "command": "import-ses",
+                    "pcb": str(pcb_path),
+                    "ses": str(ses_path),
+                    "output": str(dest),
+                    "error": message,
+                    "success": False,
+                }
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    if not ses_path.exists():
+        return fail(f"Error: SES file not found: {ses_path}")
+
+    try:
+        importer = SESToKiCadImporter(str(ses_path))
+        importer.parse()
+        importer.merge_into(
+            str(pcb_path),
+            str(output) if output else None,
+            allow_stale=bool(getattr(args, "allow_stale", False)),
+        )
+    except Exception as e:
+        return fail(f"Error importing SES: {e}")
+
+    # Issue #6593: a session that imports nothing, or drops any wire/via,
+    # must not look like a clean import.  The destination is still written.
+    skipped = [str(s) for s in getattr(importer, "skipped", [])]
+    imported_wires = getattr(importer, "imported_wires", len(importer.wires))
+    imported_vias = getattr(importer, "imported_vias", len(importer.vias))
+    problems: list[str] = []
+    if skipped:
+        problems.append(f"{len(skipped)} SES element(s) skipped")
+    if imported_wires + imported_vias == 0:
+        problems.append("no wires or vias imported")
+    success = not problems
+
+    if as_json:
+        payload = {
+            "command": "import-ses",
+            "pcb": str(pcb_path),
+            "ses": str(ses_path),
+            "output": str(dest),
+            "wires": imported_wires,
+            "vias": imported_vias,
+            "ses_wires": len(importer.wires),
+            "ses_vias": len(importer.vias),
+            "skipped": skipped,
+            "revision": getattr(importer, "revision_status", "unverified"),
+            "success": success,
+        }
+        if problems:
+            payload["error"] = "; ".join(problems)
+        emit_json(payload)
+        return 0 if success else 1
+
+    print(f"Imported SES routes into {dest}")
+    print(f"  Wires: {imported_wires}/{len(importer.wires)}")
+    print(f"  Vias: {imported_vias}/{len(importer.vias)}")
+    if skipped:
+        print(f"  Skipped: {len(skipped)}")
+        for reason in skipped:
+            print(f"    - {reason}")
+    if problems:
+        print(f"Error: SES import incomplete: {'; '.join(problems)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_annotate_pintypes_command(args, pcb_path: Path) -> int:
+    """Handle ``pcb annotate-pintypes`` (issue #5985)."""
+    from kicad_tools.explain.mistakes import power_pin_nets
+    from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+    from kicad_tools.schema.pcb import PCB
+
+    sch_path = Path(args.schematic)
+    if not sch_path.exists():
+        message = f"Error: Schematic not found: {sch_path}"
+        if args.format == "json":
+            print(json.dumps({"command": "annotate-pintypes", "error": message, "success": False}))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    result = annotate_pcb_file_pintypes(pcb_path, sch_path, dry_run=args.dry_run)
+    rails = sorted(power_pin_nets(PCB.load(pcb_path))) if not args.dry_run else []
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "pcb": str(pcb_path),
+                    "schematic": str(sch_path),
+                    "dry_run": args.dry_run,
+                    "updated": result.updated,
+                    "unchanged": result.unchanged,
+                    "missing_pads": result.missing_pads,
+                    "power_pin_nets": rails,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    verb = "would update" if args.dry_run else "updated"
+    print(f"Pad pin types: {verb} {result.updated}, unchanged {result.unchanged}")
+    if result.missing_pads:
+        shown = ", ".join(result.missing_pads[:10])
+        more = f" (+{len(result.missing_pads) - 10} more)" if len(result.missing_pads) > 10 else ""
+        print(f"Schematic pins with no matching pad: {shown}{more}")
+    if not args.dry_run:
+        print(f"Power rails by pin-type evidence: {', '.join(rails) if rails else '(none)'}")
+    return 0

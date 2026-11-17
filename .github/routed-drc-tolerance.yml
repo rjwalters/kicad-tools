@@ -1,0 +1,36 @@
+# Native/current-rule release gate for the real demo designs.
+# Boards absent from tolerances must produce zero blocking errors.
+# Historical synthetic routing witnesses are not manufacturing releases.
+# Their coverage gates canonicalize regression-output/ to regression-fixture/;
+# output/ never inherits these allowances.
+# Evidence: docs/demo-readiness-2026-09-09.md and each output/readiness.json.
+# Additions require a tracking issue and explicit review of the regression.
+# Issue #7367: the board 06/07 synthetic regression fixtures
+# (boards/0{6,7}-*/regression-fixture/*_routed.kicad_pcb) have NO entry, so
+# they resolve to the strict 0 like every other key.  Their known residual
+# findings are allowed by IDENTITY, each with an open tracking issue, in
+# scripts/ci/check_diffpair_coverage.py (DIFFPAIR_FIXTURE_ALLOWED_FINDINGS)
+# and scripts/ci/check_matchgroup_coverage.py
+# (MATCHGROUP_FIXTURE_ALLOWED_FINDINGS, MATCHGROUP_ALLOWED_GROUPS).  The
+# total those gates compare to 0 counts only blocking findings outside that
+# allowance, and an entry that stops firing fails the gate as stale.  The
+# old counts (board 06: 18, ratcheted by #4019; board 07: 8, by #4007) let a
+# different finding hide behind a known one (#7270 Q3 ruling); never
+# re-add a count here for them.
+# Issue #6390 declared the router's own net classes (Power, Clock,
+# HighCurrentSignal, ...) in the routed sidecars, so `kct check` holds
+# the committed copper to them.  Releases that sat below their own
+# classes were re-derived rather than allowed: board 05's 27 were repaired
+# in #6395, and board 03's 13 x Power 0.2 mm in #6394 (its plan re-derived
+# from a class-clean lattice route); both entries are removed.
+# Board 07's active release (42 x SDRAM_* / AUX 0.175 mm, #6396) gets NO
+# entry: active releases never carry an allowance
+# (tests/test_recipe_artifact_isolation.py), so its strict-0 gate fails
+# visibly on the next PR that touches that PCB until #6396 lands.
+tolerances: {}
+
+# Preserve the fabrication processes selected by the reviewed real designs.
+manufacturers:
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: jlcpcb-tier1
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: jlcpcb-tier1
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: jlcpcb-tier1

@@ -1,0 +1,18 @@
+# Synthetic reduction of a consumer repo's short hosted jobs (2026-10-20):
+# the workflow is credential-free, and SAYS so in comments that name the
+# very privileges it does not hold. Only whole-line comments mention them.
+name: lint-workflows
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  lint:
+    # CI holds no credentials: no environment:, no id-token: write,
+    # no secrets.CLOUDFLARE_API_TOKEN, no pull_request_target.
+    # (no environment, no id-token, no secret). A short job, so it runs on a
+    # hosted runner.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/lint-workflows.sh

@@ -1,0 +1,4633 @@
+(kicad_symbol_lib (version 20231120) (generator "kicad-tools")
+(symbol
+	"J1"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "J"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "J1"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "J1_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "J1_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"J2"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "J"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "J2"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "J2_0_1"
+		(rectangle (start -5.08 5.08) (end 5.08 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "J2_1_1"
+		(pin passive line (at -7.62 3.81 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at -7.62 -1.27 0) (length 2.54)
+			(name "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at -7.62 -3.81 0) (length 2.54)
+			(name "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 3.81 180) (length 2.54)
+			(name "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 -1.27 180) (length 2.54)
+			(name "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 -3.81 180) (length 2.54)
+			(name "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"J3"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "J"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "J3"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "J3_0_1"
+		(rectangle (start -5.08 5.08) (end 5.08 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "J3_1_1"
+		(pin passive line (at -7.62 3.81 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at -7.62 -1.27 0) (length 2.54)
+			(name "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at -7.62 -3.81 0) (length 2.54)
+			(name "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 3.81 180) (length 2.54)
+			(name "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 -1.27 180) (length 2.54)
+			(name "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 -3.81 180) (length 2.54)
+			(name "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C17"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C17"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C17_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C17_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U1"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U1"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U1_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U1_1_1"
+		(pin power_in line (at -10.16 3.81 0) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "D"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at -10.16 -3.81 0) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 3.81 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "Y"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -3.81 180) (length 2.54)
+			(name "Z"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U2"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U2"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U2_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U2_1_1"
+		(pin input line (at -10.16 3.81 0) (length 2.54)
+			(name "B"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "A"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -3.81 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 3.81 180) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "R"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 -3.81 180) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C1"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C1"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C1_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C1_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C2"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C2"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C2_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C2_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C3"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C3"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C3_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C3_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C4"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C4"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C4_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C4_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R1"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R1"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R1_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R1_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R5"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R5"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R5_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R5_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U3"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U3"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U3_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U3_1_1"
+		(pin power_in line (at -10.16 3.81 0) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "D"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at -10.16 -3.81 0) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 3.81 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "Y"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -3.81 180) (length 2.54)
+			(name "Z"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U4"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U4"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U4_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U4_1_1"
+		(pin input line (at -10.16 3.81 0) (length 2.54)
+			(name "B"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "A"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -3.81 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 3.81 180) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "R"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 -3.81 180) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C5"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C5"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C5_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C5_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C6"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C6"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C6_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C6_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C7"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C7"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C7_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C7_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C8"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C8"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C8_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C8_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R2"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R2"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R2_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R2_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R6"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R6"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R6_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R6_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U5"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U5"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U5_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U5_1_1"
+		(pin power_in line (at -10.16 3.81 0) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "D"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at -10.16 -3.81 0) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 3.81 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "Y"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -3.81 180) (length 2.54)
+			(name "Z"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U6"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U6"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U6_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U6_1_1"
+		(pin input line (at -10.16 3.81 0) (length 2.54)
+			(name "B"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "A"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -3.81 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 3.81 180) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "R"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 -3.81 180) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C9"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C9"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C9_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C9_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C10"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C10"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C10_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C10_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C11"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C11"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C11_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C11_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C12"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C12"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C12_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C12_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R3"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R3"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R3_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R3_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R7"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R7"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R7_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R7_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U7"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U7"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U7_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U7_1_1"
+		(pin power_in line (at -10.16 3.81 0) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "D"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at -10.16 -3.81 0) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 3.81 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "Y"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -3.81 180) (length 2.54)
+			(name "Z"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"U8"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "U"
+		(at 0 7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "U8"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -15.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "U8_0_1"
+		(rectangle (start -7.62 5.08) (end 7.62 -5.08)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "U8_1_1"
+		(pin input line (at -10.16 3.81 0) (length 2.54)
+			(name "B"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin input line (at -10.16 1.27 0) (length 2.54)
+			(name "A"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -1.27 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "3"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at -10.16 -3.81 0) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "4"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 3.81 180) (length 2.54)
+			(name "GND"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "5"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin no_connect line (at 10.16 1.27 180) (length 2.54)
+			(name "NC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "6"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin output line (at 10.16 -1.27 180) (length 2.54)
+			(name "R"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "7"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin power_in line (at 10.16 -3.81 180) (length 2.54)
+			(name "VCC"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "8"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C13"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C13"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C13_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C13_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C14"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C14"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C14_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C14_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C15"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C15"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C15_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C15_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"C16"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "C"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "C16"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "C16_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "C16_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R4"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R4"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R4_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R4_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+)
+(symbol
+	"R8"
+	(exclude_from_sim no)
+	(in_bom yes)
+	(on_board yes)
+	(property "Reference" "R"
+		(at 0 5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Value" "R8"
+		(at 0 -5.08 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+		(at 0 -7.62 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 -10.16 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "Description" ""
+		(at 0 -12.70 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(property "ki_keywords" ""
+		(at 0 0 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(hide yes)
+		)
+	)
+	(symbol "R8_0_1"
+		(rectangle (start -5.08 2.54) (end 5.08 -2.54)
+			(stroke
+				(width 0.254)
+				(type default)
+			)
+			(fill (type background)
+			)
+		)
+	)
+	(symbol "R8_1_1"
+		(pin passive line (at -7.62 1.27 0) (length 2.54)
+			(name "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "1"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(pin passive line (at 7.62 1.27 180) (length 2.54)
+			(name "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(number "2"
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+	)
+))

@@ -1,0 +1,53 @@
+{
+  "issue": "rjwalters/kicad-tools#7518",
+  "authority": [
+    "operator ruling 2026-10-19: one-off operator-host black-box check",
+    "operator ruling 2026-10-27: attended fleet:decide round 20261024-r1, q44 option 1 (Freerouting install approved on this Mac)"
+  ],
+  "date": "2026-10-27",
+  "host": {"name": "robb-studio", "os": "macOS 27.0.1 (26A434)", "arch": "arm64"},
+  "reader": {
+    "name": "Freerouting",
+    "version": "2.5.0 (build-date 2026-10-05)",
+    "jar": "freerouting-2.5.0.jar",
+    "jar_sha256": "f6f51bb02245e8e717f9359bd260cc9c5c0b1bc0acc8b7cb2cd5b8ffeb5de3c7",
+    "jar_sha256_note": "matches GitHub's published release-asset digest"
+  },
+  "java": "java version \"25.0.4\" 2026-07-21 LTS (Oracle GraalVM 25.0.4+7.1)",
+  "kicad": {
+    "board_generator": "KiCad 10.0.7 bundled Python, pcbnew (generate_board.py)",
+    "drc": "kicad-cli 10.0.7 (host, /opt/homebrew/bin/kicad-cli) with KICAD_CONFIG_HOME holding the pinned src/kicad_tools/data/kicad-config/10.0 tables",
+    "drc_note": "CI's pinned image is kicad-cli 10.0.6; the Docker route (KCT_KICAD_DOCKER=1) was not available on this host (Docker daemon not running). The DRC here is a check, not committed native evidence."
+  },
+  "kicad_tools": {
+    "before": "22636e78a399c8aa67cdba8b96ad43ef12e7ed77 (main, unmodified exporter)",
+    "after": "22636e78a399c8aa67cdba8b96ad43ef12e7ed77 plus this PR's exporter change (back images name pad copper on the mirror layer)"
+  },
+  "commands": [
+    "python3 tests/fixtures/dsn_back_side_7518/generate_board.py $RUN   # KiCad's bundled python3",
+    "uv run kct pcb export-dsn $RUN/back_side_board.kicad_pcb -o $RUN/back_side_board.dsn",
+    "java -Duser.home=$RUN/frhome -jar freerouting-2.5.0.jar -de in.dsn -do out.ses -mp 20",
+    "uv run kct pcb import-ses $RUN/back_side_board.kicad_pcb out.ses -o routed.kicad_pcb",
+    "KICAD_CONFIG_HOME=$RUN/cfg kicad-cli pcb drc --format json --severity-all --exit-code-violations -o drc.json routed.kicad_pcb"
+  ],
+  "files": {
+    "before.dsn": "exporter at 'before': back image pins use padstack Rect[B] (shape on B.Cu)",
+    "before.ses": "Freerouting's session for before.dsn",
+    "after.dsn": "exporter at 'after': back image pins use padstack Rect[T] (shape on F.Cu)",
+    "after.ses": "Freerouting's session for after.dsn"
+  },
+  "observed": {
+    "before": {
+      "reader": "every wire ending on a back-side SMD pad (U2.1, U2.2, U3.1, U3.2) is on F.Cu; wire ends sit exactly on the KiCad pad centres; FB (front U1.1 to back U2.2) routed with no via",
+      "import": "9/9 wires, 1/1 vias",
+      "drc": "4 unconnected_items (each a F.Cu track end on a B.Cu pad of U2/U3) and 4 track_dangling warnings; no other findings",
+      "verdict": "double flip: the reader swaps a back-placed image's padstack layers"
+    },
+    "after": {
+      "reader": "every wire ending on a back-side SMD pad is on B.Cu; BB routed entirely on B.Cu; FB routed with one via; J1 (back through-hole) image and padstacks unchanged from before, still connected",
+      "import": "12/12 wires, 2/2 vias",
+      "drc": "0 unconnected_items, 0 track_dangling, no wrong-layer copper; 5 track_width errors (Freerouting wrote 0.15 mm FB segments under the 0.2 mm board minimum), unrelated to the layer question",
+      "verdict": "the two flips cancel"
+    }
+  }
+}

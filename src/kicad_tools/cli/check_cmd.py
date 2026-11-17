@@ -1,0 +1,5133 @@
+"""
+Pure Python DRC check command for KiCad PCBs.
+
+Runs design rule checks against manufacturer specifications without
+requiring kicad-cli to be installed. Suitable for CI/CD pipelines.
+
+Usage:
+    kct check board.kicad_pcb                      # Run all checks
+    kct check board.kicad_pcb --mfr jlcpcb         # With manufacturer rules
+    kct check board.kicad_pcb --format json        # JSON output for CI
+    kct check board.kicad_pcb --format sarif       # SARIF 2.1.0 for code scanning
+    kct check board.kicad_pcb --only clearance     # Run specific checks
+    kct check board.kicad_pcb --skip silkscreen    # Exclude checks
+    kct check --diff OLD.kicad_pcb NEW.kicad_pcb   # Findings introduced/resolved
+    kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb   # vs. a git revision
+    kct check board.kicad_pcb --waive KEY --waive-reason R --waive-reviewer ME
+
+Exit Codes:
+    0 - All meta sub-checks PASSED (or --drc-only: no errors)
+    1 - Command failure (file not found, parse error, etc.)
+    2 - Any sub-check FAILED, or rollup is INCOMPLETE (any sub-check
+        NOT RUN) without --allow-incomplete, or warnings found with --strict
+
+Difference from `kct drc`:
+    - kct drc: Uses kicad-cli to run DRC (requires KiCad)
+    - kct check: Pure Python DRC (no external dependencies)
+"""
+
+import argparse
+import json
+import re
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+from kicad_tools.analysis.routing_quality import (
+    FRAGMENT_LENGTH_MM,
+    STAIRCASE_STEP_MM,
+    RoutingQualityMetrics,
+    compute_routing_quality,
+    evaluate_routing_quality_thresholds,
+    routing_quality_gate_dict,
+)
+from kicad_tools.cli.check_categories import (
+    CHECK_CATEGORIES,  # noqa: F401  (re-exported, #6896)
+    DEFERRED_OPT_IN_CATEGORIES,
+)
+from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
+from kicad_tools.findings import findings_payload, from_violation_dict
+from kicad_tools.manufacturers import (
+    get_all_manufacturer_names,
+    get_manufacturer_ids,
+    get_profile,
+    resolve_pcb_fabrication_overrides,
+)
+from kicad_tools.manufacturers.fabrication_process import describe_selection
+from kicad_tools.manufacturers.resolve import (  # noqa: F401  (re-exported; shared resolver, #6169)
+    MfrResolutionSource,
+    ResolvedMfr,
+    _discover_fab_profile_sidecar,
+    _resolve_effective_check_mfr,
+)
+from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
+from kicad_tools.router.current_paths import (
+    CurrentPathSpec,
+    current_paths_sidecar_candidates,
+    discover_current_paths_sidecar,
+    load_current_path_specs,
+)
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.sidecars import net_class_map_sidecar_candidates
+from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
+from kicad_tools.validate.coverage import collapse_reasons, coverage_to_dict
+from kicad_tools.validate.rules.reinforcement_incomplete import reinforcement_waived_nets
+from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
+
+if TYPE_CHECKING:
+    from kicad_tools.erc import ERCReport
+    from kicad_tools.erc.violation import ERCViolation
+
+# Issue #3750: meta-check status set.  ``NOT RUN`` is rendered with a space
+# in human output and ``"NOT RUN"`` in JSON; we treat it as a single token
+# so callers can compare against the literal.
+SubCheckStatus = Literal["PASSED", "FAILED", "NOT RUN"]
+
+# Issue #5860: kicad-cli's ``lib_symbol_issues`` / ``footprint_link_issues``
+# ERC warnings fire identically for two very different root causes -- a
+# genuine footprint/symbol-link defect in the schematic, or this *host*
+# never having initialized its global KiCad library tables
+# (``fp-lib-table`` / ``sym-lib-table`` under KiCad's config dir -- see
+# ``scripts/ci/init_kicad_libraries.py``). Both produce the same strict-mode
+# "N warnings (strict)" failure, so a missing host setup is indistinguishable
+# from a real defect. This pattern matches kicad-cli's own wording for the
+# "host never configured this library" case so ``_erc_subcheck`` can call it
+# out with a distinct, actionable diagnostic instead.
+_LIBRARY_TABLE_UNINITIALIZED_RE = re.compile(r"does not include the (?:symbol|footprint) library")
+
+# Issue #3924 AC1: the sidecar-gated length-skew / continuity rules that
+# carry a measured ``actual_value`` (skew mm or coupled fraction) on every
+# finding -- both passing (``info``) and failing (``error``).  ``output_table``
+# collects these into a dedicated MEASUREMENT SUMMARY table so users see the
+# measured values on the default (non-``--verbose``) path, distinct from the
+# violation listing.
+_MEASUREMENT_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "match_group_length_skew",
+        "diffpair_length_skew",
+        "diffpair_routing_continuity",
+        "diffpair_uncoupled_length",
+    }
+)
+
+# Issue #4102: ``hole_to_hole_clearance`` (formerly ``dimension_drill_clearance``,
+# renamed in #4353) hole-to-hole findings carry both
+# endpoints' resolved net names in ``nets=(net1, net2)``.  A user reading the
+# report needs to separate the fab's real concern (different-net pairs, where a
+# drill-wall break creates a short) from same-net pairs.  The data is
+# already present per-finding and in ``--format json``; the report just needs to
+# surface it (net names shown unconditionally, plus an explicit same-net /
+# different-net qualifier).  This is presentational only -- severity is
+# unchanged (see #2976: same-net drill overlap is still a manufacturing defect).
+#
+# Issue #4127: the classifier uses a floating-aware check (``_is_floating_net``),
+# not naive string equality.  Every genuinely unconnected pad/via resolves to
+# the *same* ``net:0`` placeholder (net 0 is a single canonical no-net sentinel
+# in the PCB net table -- see ``PCB`` construction in schema/pcb.py), so a naive
+# ``nets[0] == nets[1]`` would mislabel two *distinct* floating pins as
+# ``same-net``.  Floating pins share no electrical identity, so any pair
+# involving a floating endpoint is ``different-net``.
+# Issue #4318: the copper-copper clearance rules carry the same
+# ``nets=(net_a, net_b)`` pair (set in ``_create_violation``,
+# ``validate/rules/clearance.py``), so an agent reading a ``clearance_segment_via``
+# report needs the same same-net / different-net split ``hole_to_hole_clearance``
+# already gets -- a different-net 0.000mm coincidence is a genuine short to
+# prioritize, while a same-net coincidence is a lower-risk (still-defective)
+# malformed-copper artifact.  The classifier (``_net_relationship`` /
+# ``_is_floating_net``) is floating-aware, so a floating (``net:0``) endpoint in a
+# segment-via pair classifies as ``different-net`` (#4127) with no extra work.
+_NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "hole_to_hole_clearance",
+        "clearance_segment_via",
+        "clearance_segment_segment",
+        "clearance_via_via",
+        "clearance_pad_via",
+        # Issue #8938: physical_copper_gap findings carry the structured
+        # ``same_net`` flag (a same-net slit is one net, so the two-name
+        # classifier below sees nothing to compare).
+        "physical_copper_gap",
+    }
+)
+
+
+def _finding_relationship(v: DRCViolation) -> str | None:
+    """Net-relationship tag for a finding header / BY RULE tally (#4102, #8938).
+
+    Rules carrying the structured :attr:`DRCViolation.same_net` flag (#8938)
+    are classified from it directly -- a same-net physical gap has a single
+    net, which the two-name :func:`_net_relationship` cannot compare.
+    """
+    if v.rule_id == "physical_copper_gap":
+        if v.same_net is None:
+            return None
+        return "same-net" if v.same_net else "different-net"
+    if v.rule_id in _NET_RELATIONSHIP_RULE_IDS:
+        return _net_relationship(v.nets)
+    return None
+
+
+def _authored_min_clearance_mm(pcb_path: str | Path) -> float | None:
+    """The board's authored minimum clearance (``.kicad_pro``), or ``None``.
+
+    Same resolver ``kct route`` records as ``_authored_min_clearance``
+    (Issue #6575).
+    """
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    try:
+        return read_declared_clearance_rules(pcb_path).project_min_clearance_mm
+    except (OSError, ValueError):
+        return None
+
+
+def _is_floating_net(net: str) -> bool:
+    """True for KiCad's unconnected/no-net sentinel as resolved by dimensions.py.
+
+    Unconnected pads/vias always carry ``net_number == 0`` (a single canonical
+    sentinel -- see ``PCB`` net-table construction, ``self._nets[0] = Net(0,
+    "")``), which resolves to the empty string or, in dimensions.py's fallback,
+    the literal placeholder ``"net:0"``.  Treat either spelling as floating so
+    this stays correct if the empty-string form ever reaches here directly
+    (e.g. a future caller that skips the ``f"net:{number}"`` fallback).
+    """
+    return net in ("", "net:0")
+
+
+def _net_relationship(nets: tuple[str, ...]) -> str | None:
+    """Classify a hole-to-hole finding's net pair as same-net / different-net.
+
+    Returns ``"same-net"`` when both endpoints resolve to the same *named,
+    non-floating* net, ``"different-net"`` when they differ, and ``None`` when
+    the finding does not carry exactly two net names (nothing to compare).
+
+    Floating/unconnected pins have no net identity to share: every one of them
+    resolves to the *same* ``net:0`` placeholder upstream (net 0 is a single
+    canonical no-net sentinel, not a per-pad unique ID -- see schema/pcb.py).
+    So any pair with a floating endpoint -- including two distinct floating pins
+    that collide on the ``net:0`` string -- is ``different-net``, never
+    ``same-net`` (issue #4127).  A plain string equality would wrongly report
+    ``net:0 == net:0`` as same-net; the floating-aware check below prevents that.
+    """
+    if len(nets) != 2:
+        return None
+    if _is_floating_net(nets[0]) or _is_floating_net(nets[1]):
+        return "different-net"
+    return "same-net" if nets[0] == nets[1] else "different-net"
+
+
+@dataclass
+class SubCheckResult:
+    """Outcome of a single :mod:`kct check` sub-check (issue #3750).
+
+    ``status`` is one of ``PASSED`` / ``FAILED`` / ``NOT RUN``.  ``detail``
+    is the one-line human-readable summary that appears in parentheses on
+    the human stanza and as the ``detail`` field in the JSON envelope.
+
+    ``data`` (issue #4616) is an optional **structured** payload merged
+    flat into ``to_dict()`` so a machine consumer gets the full findings
+    rather than the truncated prose ``detail``.  It follows the
+    OMIT-when-absent convention already used for ``meta_checks`` itself:
+    sub-checks that carry no structured payload (DRC / ERC / Manifest)
+    leave it ``None`` and serialize byte-identically to before.  LVS
+    populates it with the v1 ``lvs.json`` record shapes produced by
+    :func:`kicad_tools.lvs.build_lvs_payload`, so ``meta_checks.lvs`` is
+    parsable field-for-field by the same code that reads
+    ``boards/*/output/lvs.json``.
+    """
+
+    status: SubCheckStatus
+    detail: str
+    data: dict | None = None
+
+    def to_dict(self) -> dict:
+        out: dict = {"status": self.status, "detail": self.detail}
+        if self.data is not None:
+            out.update(self.data)
+        return out
+
+
+@dataclass
+class MetaCheckResult:
+    """Aggregated meta-check rollup (issue #3750).
+
+    Each of the four sub-checks (DRC, ERC, LVS, Manifest) has its own
+    :class:`SubCheckResult`; ``overall`` is the rollup status that drives
+    the exit code.
+    """
+
+    drc: SubCheckResult
+    erc: SubCheckResult
+    lvs: SubCheckResult
+    manifest: SubCheckResult
+    overall: Literal["PASSED", "FAILED", "INCOMPLETE"] = "PASSED"
+    # Issue #4350: True when ERC/LVS are NOT RUN specifically because no
+    # schematic could be discovered next to the PCB (as opposed to kicad-cli
+    # being unavailable).  Drives the loud "skipped LVS hard gate" warning and
+    # a machine-detectable JSON field so a skipped gate is never mistaken for a
+    # clean one.
+    schematic_missing: bool = False
+    # Issue #8949: True when a blocking coverage category (mask_to_copper,
+    # the DFM threshold table, fab DFM parity) could not complete its
+    # assessment.  ``compute_overall`` consults this so ``overall``, the
+    # printed ``Overall:`` line and the exit-code decision all read one
+    # source of truth, instead of two notions of "incomplete" that can
+    # drift.  Set from the same incompleteness the exit code already
+    # honours; never widened (an explicitly requested check that cannot run
+    # stays FAILED).
+    coverage_incomplete: bool = False
+    # Categories whose check did not complete on this run (issue #9062):
+    # every tracked category (mask_to_copper, dfm_table, fab_dfm_parity)
+    # that could not finish, named on the ``Overall:`` line and serialized
+    # as ``meta_checks.incomplete_categories`` -- the run-time counterpart
+    # of ``coverage.*.state``.  ``mask_to_copper`` is keyed on the same
+    # predicate the coverage row keys on (``assessment.coverage``, never
+    # ``assessment.passed`` -- see ``cov.mask_copper_unknown``): a mask
+    # check that completed and found a real violation did NOT fail to
+    # complete, so it is not named.  Wider than the flag: a default-applied
+    # mask assessment that did not complete with provisional ``violation``
+    # / ``uncertain`` measurements keeps the verdict FAILED (it drives
+    # ``mask_failed``), yet its category still did not complete, so it is
+    # named here while ``coverage_incomplete`` stays False.  The list is a
+    # name list, never the reason for ``overall`` -- ``compute_overall``
+    # reads only ``coverage_incomplete``.
+    incomplete_categories: tuple[str, ...] = ()
+
+    def _subs(self) -> tuple[SubCheckResult, ...]:
+        return (self.drc, self.erc, self.lvs, self.manifest)
+
+    def compute_overall(self) -> None:
+        """Roll up the four sub-statuses (+ coverage incompleteness) into ``overall``.
+
+        Rules (per issue #3750 acceptance criterion #3, extended by #8949):
+
+        * ``FAILED`` if any sub-check is ``FAILED`` -- a real failure is
+          never masked by an incomplete category.
+        * ``INCOMPLETE`` if any sub-check is ``NOT RUN`` (and none is
+          ``FAILED``), or when ``coverage_incomplete`` is set (a blocking
+          category could not complete its assessment).
+        * ``PASSED`` only when every sub-check is ``PASSED`` and no
+          blocking category was incomplete.
+
+        The rollup intentionally reports the truthful aggregate state and
+        does not collapse ``INCOMPLETE`` into ``FAILED`` under ``--strict``
+        -- the exit-code policy is the right place to make that decision
+        (``INCOMPLETE`` is non-zero by default; ``--allow-incomplete``
+        opts back in to exit 0 for boards that legitimately lack the
+        inputs for a sub-check).
+        """
+        subs = self._subs()
+        if any(s.status == "FAILED" for s in subs):
+            self.overall = "FAILED"
+        elif any(s.status == "NOT RUN" for s in subs) or self.coverage_incomplete:
+            self.overall = "INCOMPLETE"
+        else:
+            self.overall = "PASSED"
+
+    def to_dict(self) -> dict:
+        return {
+            "drc": self.drc.to_dict(),
+            "erc": self.erc.to_dict(),
+            "lvs": self.lvs.to_dict(),
+            "manifest": self.manifest.to_dict(),
+            "overall": self.overall,
+            "schematic_missing": self.schematic_missing,
+            # Issue #9062: additive key -- categories whose check did not
+            # complete on this run (may be non-empty while ``overall`` is
+            # FAILED).  The ``coverage_incomplete`` flag itself stays
+            # unserialized: machine consumers read ``overall``.
+            "incomplete_categories": list(self.incomplete_categories),
+        }
+
+
+# Issue #8949: stdout bound for distinct mask-to-copper reasons in the
+# human-readable stanza.  Wider than the coverage row's ``limit=3`` (whose
+# string lands verbatim in committed reports): the reporter's run carried
+# four distinct real causes among the repeats, and the stanza must be able
+# to show all of them plus headroom, while staying bounded.
+_MASK_STDOUT_REASON_LIMIT = 8
+
+
+# Available check categories
+
+
+def _find_pcb_file(directory: Path) -> Path | None:
+    """Find a .kicad_pcb file in the given directory.
+
+    Searches recursively and filters out routed/backup files to find
+    the primary unrouted PCB file.
+
+    Args:
+        directory: Directory to search
+
+    Returns:
+        Path to PCB file if found, None otherwise
+    """
+    pcb_files = list(directory.glob("**/*.kicad_pcb"))
+    # Filter out routed and backup files
+    pcb_files = [
+        f
+        for f in pcb_files
+        if not f.name.endswith("_routed.kicad_pcb") and not f.name.endswith("-bak.kicad_pcb")
+    ]
+    if pcb_files:
+        return pcb_files[0]
+    return None
+
+
+# Issue #4700: the ``--copper`` grammar is now shared with ``kct route`` so
+# both commands resolve the identical ``<layers>layer_<oz>oz`` manufacturer
+# design-rule key.  The implementation moved verbatim to
+# ``kicad_tools.cli.copper_weight``; this alias keeps the historical private
+# name (and its importers) working unchanged.
+_parse_copper_weight_arg = parse_copper_weight_arg
+
+
+def _net_class_map_sidecar_candidates(pcb_path: Path) -> list[Path]:
+    """Enumerate the net-class-map sidecar paths the auto-probe checks.
+
+    Split out from :func:`_discover_net_class_map_sidecar` (Issue #4601)
+    so the "rules are INACTIVE" warning can name the paths that were
+    *actually* searched instead of an invented ``output/…`` example.
+
+    Issue #4634 hoisted the probe itself into
+    :mod:`kicad_tools.sidecars` so the three sibling consumers (the two
+    CI merge gates and the ``kct export`` report surface) resolve the
+    same filenames in the same order; this remains a thin alias so both
+    call sites and the warning surface are unchanged.  See
+    :func:`kicad_tools.sidecars.net_class_map_sidecar_candidates` for
+    the probe order and the exact-stem contract.
+
+    Returns:
+        Candidate paths in probe order, de-duplicated (the
+        ``<board>/output/<pcb>`` layout makes ``pcb_dir`` and
+        ``pcb_dir.parent/output`` the same directory).
+    """
+    return net_class_map_sidecar_candidates(pcb_path)
+
+
+def _discover_net_class_map_sidecar(pcb_path: Path) -> Path | None:
+    """Probe conventional locations for a net-class-map sidecar.
+
+    Issue #3917 Defect 2: ``kct route`` writes a ``net_class_map.json``
+    sidecar next to the routed PCB (in the output directory).  ``kct
+    check`` should auto-load it so the sidecar-gated skew / continuity
+    rules fire without the user having to pass ``--net-class-map`` by
+    hand -- mirroring the existing schematic auto-discovery.
+
+    Issue #4601 widened the probe to also accept the stem-keyed
+    ``<pcb_stem>.net_class_map.json`` convention.  See
+    :func:`_net_class_map_sidecar_candidates` for the full probe order.
+
+    Returns:
+        The first existing candidate path, or ``None`` when no sidecar
+        is found.
+    """
+    for candidate in _net_class_map_sidecar_candidates(pcb_path):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _profile_supports_via_in_pad(mfr: str) -> bool:
+    """Return True when profile ``mfr`` permits via-in-pad geometry (#3920).
+
+    ``via_in_pad_supported`` is a per-tier capability flag on the profile's
+    :class:`DesignRules` (layer/copper independent), so resolving with the
+    default layer/copper key is sufficient.  An unknown profile degrades to
+    ``False``.
+    """
+    try:
+        return bool(get_profile(mfr).get_design_rules().via_in_pad_supported)
+    except (ValueError, AttributeError):  # pragma: no cover - defensive
+        return False
+
+
+def _maybe_emit_via_in_pad_tier_advisory(
+    mfr: str,
+    violations: Sequence,
+    source: MfrResolutionSource = "default",
+) -> None:
+    """Emit a non-blocking via-in-pad tier hint when it would help (#3920).
+
+    If the active profile does not support via-in-pad, the DRC results
+    contain ``via_in_pad`` findings, and at least one registered profile DOES
+    permit via-in-pad, print a loud, actionable stderr advisory naming the
+    permitting tier.  This turns a scary, unexplained ``FAILED`` into a
+    self-explaining one.
+
+    ``source`` (from :func:`_resolve_effective_check_mfr`, #4701) says *how*
+    ``mfr`` was resolved, so the final sentence can distinguish a genuinely
+    defaulted tier from one the board explicitly declared (via ``--mfr``, a
+    ``fab_profile.json`` sidecar, or ``project.kct`` ``target_fab``) --
+    otherwise a declared-but-unsupported tier would misleadingly read as
+    "Defaulting to the base tier" even though nothing was defaulted.
+
+    CRITICAL: this is advisory only.  It must NOT change the verdict or exit
+    code -- it only prints to stderr.
+    """
+    # Only advise when the active profile is known AND definitively does not
+    # support via-in-pad.  An unknown profile never reaches here in practice
+    # (DRCChecker construction rejects it), but guard defensively so we never
+    # emit a misleading hint about a profile we cannot resolve.
+    try:
+        active_supported = get_profile(mfr).get_design_rules().via_in_pad_supported
+    except (ValueError, AttributeError):
+        return
+    if active_supported:
+        return
+
+    vip_count = sum(1 for v in violations if getattr(v, "rule_id", None) == "via_in_pad")
+    if vip_count == 0:
+        return
+
+    permitting: str | None = None
+    for profile_id in get_manufacturer_ids():
+        if _profile_supports_via_in_pad(profile_id):
+            permitting = profile_id
+            break
+    if permitting is None:
+        return
+
+    # #4701: the final sentence names *how* `mfr` was resolved so a declared
+    # (non-default) tier is never reported as "defaulted".
+    if source == "project_kct":
+        tail = f"Board declares {mfr!r} (project.kct target_fab)."
+    elif source == "sidecar":
+        tail = f"Board declares {mfr!r} (fab_profile.json sidecar)."
+    elif source == "cli":
+        tail = f"Profile {mfr!r} was passed explicitly via --mfr."
+    else:
+        tail = "Defaulting to the base tier."
+
+    print(
+        f"WARNING: {vip_count} via_in_pad finding(s) at profile {mfr!r}. "
+        "Via-in-pad is a tier-gated capability: it is LEGAL at "
+        f"{permitting} (via_in_pad_supported). If this board targets a higher "
+        f"fab tier, re-run with --mfr {permitting} (or pass the intended "
+        f"--mfr). {tail}",
+        file=sys.stderr,
+    )
+
+
+def _maybe_emit_via_in_pad_process_advisory(violations: Sequence) -> None:
+    """Emit a non-blocking hint for the process-eligibility findings (#5009).
+
+    ``via_in_pad_process_missing`` / ``via_in_pad_process_ineligible`` are
+    a DIFFERENT failure mode than the tier-gate advisory above (which only
+    fires when the active profile's ``via_in_pad_supported`` is entirely
+    ``False``): here the manufacturer's general tier DOES claim via-in-pad
+    support, but either no eligible ``FabricationProcess`` is declared for
+    this layer/copper configuration, or the board's actual via geometry
+    does not meet the declared process's published requirements.  A tier
+    switch alone will not fix these -- the fix is declaring (or meeting)
+    a real process.
+
+    CRITICAL: this is advisory only.  It must NOT change the verdict or
+    exit code -- it only prints to stderr.
+    """
+    missing_count = sum(
+        1 for v in violations if getattr(v, "rule_id", None) == "via_in_pad_process_missing"
+    )
+    ineligible_count = sum(
+        1 for v in violations if getattr(v, "rule_id", None) == "via_in_pad_process_ineligible"
+    )
+    if missing_count:
+        print(
+            f"WARNING: {missing_count} via_in_pad_process_missing finding(s). "
+            "The active manufacturer tier supports via-in-pad in its general "
+            "catalog, but no eligible fabrication process is declared for this "
+            "board's layer/copper configuration (DesignRules.via_in_pad_process_id "
+            "is unset or unrecognized). See "
+            "kicad_tools.manufacturers.fabrication_process for the known process "
+            "catalog, or move the via off the pad.",
+            file=sys.stderr,
+        )
+    if ineligible_count:
+        print(
+            f"WARNING: {ineligible_count} via_in_pad_process_ineligible finding(s). "
+            "A fabrication process IS declared, but this via's drill/annular-ring "
+            "geometry, the board's layer count, or its distance to another "
+            "component's drilled hole does not meet that process's published "
+            "requirements. See the violation message for the specific reason(s), "
+            "or move the via off the pad.",
+            file=sys.stderr,
+        )
+
+
+def _emit_drift_banner(pcb_path: Path, schematic: str | None):
+    """Print the advisory schematic/PCB drift banner (non-blocking).
+
+    No-op when no schematic can be resolved or the PCB is in sync.  This is
+    advisory only and never affects the caller's exit code (issue #3154).
+
+    Returns the ``SyncAnalysis`` the banner was built from, or ``None`` when
+    no schematic could be resolved or the analysis failed, so ``main()`` can
+    record the removed-pad scan's coverage state (Issue #8942).
+
+    The banner is routed to stderr so it does not pollute the stdout JSON
+    body produced by ``--format json`` consumers (the CI gate at
+    ``scripts/ci/check_routed_drc.py`` parses stdout as a single JSON document
+    and was choking on the leading WARNING line; routing to stderr keeps the
+    advisory visible in human/log output while leaving the structured payload
+    clean).
+    """
+    from kicad_tools.sync.drift import analyze_drift, format_drift_banner
+
+    analysis, _resolved = analyze_drift(pcb_path, schematic)
+    if analysis is None:
+        return None
+    banner = format_drift_banner(analysis, pcb_path)
+    if banner:
+        print(banner, file=sys.stderr)
+    return analysis
+
+
+def _removed_pad_scan_coverage(coverage: dict, analysis) -> None:
+    """Record the removed-pad scan's coverage state (Issue #8942).
+
+    The scan rides the advisory drift analysis (``_emit_drift_banner``), so
+    its coverage is recorded here rather than as a dispatcher category: it
+    is not selectable with ``--only``/``--skip`` and emits no findings of
+    its own (``CHECK_CATEGORIES`` must not gain it).
+
+    Four states, so a blocking ``unknown`` cannot fire spuriously: no
+    schematic resolvable -> ``skipped`` (a baseline board checked outside
+    its project must never block); schematic resolved but no
+    ``update_footprint`` swaps -> ``skipped`` (nothing to scan); swaps
+    present and every replacement resolved -> ``checked``; swaps present
+    and any replacement unresolvable (or the scratch board unusable) ->
+    ``unknown``, which ``kct readiness`` turns into a named blocker
+    ("unknown is not pass", Issue #5946) while ``kct check``'s exit code
+    stays advisory (issue #3154).
+    """
+    from kicad_tools.validate import coverage as cov
+
+    if analysis is None:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_schematic")
+        return
+    swaps = [a for m in analysis.matches for a in m.actions if a.get("type") == "update_footprint"]
+    if not swaps:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_footprint_swaps")
+        return
+    if analysis.scan_gaps:
+        detail = "; ".join(f"{g['reference']}: {g['reason']}" for g in analysis.scan_gaps)
+        coverage["removed_pad_scan"] = cov.unknown(
+            "removed_pad_scan", f"unresolvable_replacement ({detail})"
+        )
+        return
+    coverage["removed_pad_scan"] = cov.checked("removed_pad_scan")
+
+
+def run_netlist_sync_gate(
+    pcb_path: Path,
+    schematic: str | None = None,
+    strict: bool = False,
+) -> int:
+    """Run the blocking schematic/PCB netlist-sync gate (issue #3154).
+
+    Reuses :class:`kicad_tools.sync.reconciler.Reconciler` (via the shared
+    drift helpers) to compare the schematic component set against the PCB
+    footprint set, then prints a full add/drop/orphan report.
+
+    Exit codes (mirroring ``kct check``'s convention):
+        0 - in sync, or only PCB-only extras / suffix-note drift without
+            --strict
+        1 - no schematic could be resolved (cannot run the gate)
+        2 - a matched component's value or footprint diverges from the
+            schematic (wrong part / wrong package placed), or a schematic
+            component is missing from the PCB (unbuildable BOM); also any
+            drift with --strict
+
+    Drift-axis policy (issue #4352):
+        schematic_orphans    -> exit 2 by default (unbuildable BOM)
+        value_mismatches     -> exit 2 by default (real, suffix notes excluded)
+        footprint_mismatches -> exit 2 by default (wrong package placed)
+        pcb_orphans          -> advisory (exit 0) unless --strict
+        value_suffix_notes   -> informational only, never affects the exit code
+
+    Value/footprint mismatches block by default because ``--netlist-sync`` is
+    documented as a *blocking* gate: a CI job wired on its exit status must
+    fail when the placed part set diverges from the schematic/BOM.  Benign
+    rating-suffix diffs ('100nF' vs '100nF 25V') are surfaced as informational
+    ``value_suffix_notes`` (issue #4351) and never counted in
+    ``value_mismatches``, so they do not trip this gate.  A recipe that wants
+    advisory-only value/footprint reporting should drop ``--netlist-sync`` and
+    rely on the plain ``kct check`` drift banner (same text, exit 0).
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file.
+        schematic: Optional explicit schematic path override.
+        strict: When True, PCB-only extras also yield exit code 2 (i.e. any
+            drift is fatal).
+    """
+    from kicad_tools.sync.drift import analyze_drift, has_drift, render_drift_report
+
+    analysis, resolved = analyze_drift(pcb_path, schematic)
+    if analysis is None or resolved is None:
+        print(
+            "Error: --netlist-sync requires a schematic, but none was found "
+            f"for {Path(pcb_path).name}.",
+            file=sys.stderr,
+        )
+        print(
+            "Hint: pass --schematic <path>.kicad_sch, or place a sibling "
+            "<basename>.kicad_sch next to the PCB.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(render_drift_report(analysis, pcb_path, resolved))
+
+    # Real component-identity drift is blocking by default (issue #4352):
+    # schematic-only (unbuildable BOM) OR a matched component whose value /
+    # footprint diverges (wrong part / wrong package placed).  Benign
+    # rating-suffix diffs are surfaced as value_suffix_notes (issue #4351)
+    # and already excluded from value_mismatches, so they never trip this.
+    if analysis.schematic_orphans or analysis.value_mismatches or analysis.footprint_mismatches:
+        return 2
+    # PCB-only extras (test points, fiducials, DNP alternates) remain advisory
+    # unless the caller opts into --strict.
+    if strict and has_drift(analysis):
+        return 2
+    return 0
+
+
+def _uninitialized_library_table_warnings(report: "ERCReport") -> list["ERCViolation"]:
+    """Return ERC warnings that look like missing host library-table entries.
+
+    kicad-cli emits ``lib_symbol_issues`` / ``footprint_link_issues`` with
+    the *exact same* wording for two different root causes: a genuine
+    footprint/symbol-link defect in the schematic, or this host's global
+    KiCad library tables (``fp-lib-table`` / ``sym-lib-table`` under
+    ``~/.config/kicad/<version>/``) never having been initialized (issue
+    #5860; see ``scripts/ci/init_kicad_libraries.py``). The ERC JSON alone
+    cannot disambiguate the two -- this only flags warnings matching
+    kicad-cli's wording for the condition, so ``_erc_subcheck`` can surface
+    a loud, actionable diagnostic instead of silently folding them into the
+    ordinary strict-mode warning count.
+    """
+    return [
+        v
+        for v in report.warnings
+        if v.type_str in ("lib_symbol_issues", "footprint_link_issues")
+        and _LIBRARY_TABLE_UNINITIALIZED_RE.search(v.description)
+    ]
+
+
+def _erc_subcheck(sch_path: Path | None, strict: bool) -> SubCheckResult:
+    """Run kicad-cli ERC against the discovered schematic (issue #3750).
+
+    Returns ``NOT RUN`` when no schematic is found.  Returns ``FAILED``
+    when kicad-cli is missing, the schematic fails to load, or the report
+    contains any errors (and, under ``strict``, any warnings).
+    """
+    if sch_path is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="no schematic discovered next to PCB",
+        )
+
+    from kicad_tools.cli.runner import find_kicad_cli, run_erc
+    from kicad_tools.erc import ERCReport
+
+    if find_kicad_cli() is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="kicad-cli not found in PATH; install KiCad 8+ to enable ERC",
+        )
+
+    cli_result = run_erc(sch_path, format="json")
+    if not cli_result.success or cli_result.output_path is None:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"kicad-cli ERC failed: {(cli_result.stderr or '').strip().splitlines()[-1] if cli_result.stderr else 'unknown error'}",
+        )
+
+    try:
+        report = ERCReport.load(cli_result.output_path)
+    except Exception as e:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"failed to parse ERC report: {e}",
+        )
+
+    err_count = report.error_count
+    warn_count = report.warning_count
+    detail = f"{err_count} error(s), {warn_count} warning(s)"
+    if err_count > 0:
+        return SubCheckResult(status="FAILED", detail=detail)
+    if strict and warn_count > 0:
+        uninitialized = _uninitialized_library_table_warnings(report)
+        if uninitialized:
+            lib_name_re = re.compile(r"library '([^']+)'")
+            libs = sorted(
+                {m.group(1) for v in uninitialized if (m := lib_name_re.search(v.description))}
+            )
+            libs_str = ", ".join(repr(lib) for lib in libs) if libs else "unnamed library"
+            return SubCheckResult(
+                status="FAILED",
+                detail=(
+                    f"{detail} (strict) -- KiCad global library tables not initialized: "
+                    f"{len(uninitialized)} of these warning(s) reference library table "
+                    f"entries missing from this host ({libs_str}), not necessarily a real "
+                    "schematic defect. Point kicad-cli at the pinned tables with "
+                    '`eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"` in this '
+                    "shell, then re-run this check (see README 'Fresh worktree checklist')."
+                ),
+            )
+        return SubCheckResult(status="FAILED", detail=detail + " (strict)")
+    return SubCheckResult(status="PASSED", detail=detail)
+
+
+def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
+    """Run live LVS (issue #3750, extended for independent copper LVS #3742).
+
+    Runs *two* complementary comparisons and fails if **either** dirties:
+
+    * **label-based** (:func:`board_lvs.compare_netlists`) — trusts each
+      pad's declared ``(net ...)`` label; catches generator/router
+      bookkeeping drift.
+    * **copper-extracted** (:func:`copper_lvs.compare_copper_netlist`) —
+      ignores pad labels entirely and diffs the *physical* copper partition
+      against the schematic; catches shorts/opens a mislabeled router would
+      hide from the label-based path (the board-00 soundness gap, #3742).
+
+    Always recomputes -- never reads ``output/lvs.json`` -- so a fresh
+    PCB edit that breaks LVS is surfaced immediately.  Returns
+    ``NOT RUN`` when no schematic is found.
+
+    Issue #4616: whenever both comparators ran, the **complete** record
+    set from *both* legs is attached to :attr:`SubCheckResult.data` using
+    the v1 ``lvs.json`` shapes (:func:`kicad_tools.lvs.build_lvs_payload`),
+    so ``meta_checks.lvs`` carries full fidelity in JSON even though
+    ``detail`` stays the bounded 3-record human summary.  This also
+    closes a data-loss bug: the old copper-dirty early return discarded
+    the already-computed label-leg mismatches entirely, so on a
+    copper-dirty board the label findings appeared in *no* output.  The
+    copper-dirty branch is now a ``detail``-selection branch, not a
+    return, and both legs are always carried.
+
+    Issue #4681: whenever either leg is dirty, ``detail`` names **both**
+    legs' outcomes so a consumer can pair the prose with the right
+    embedded array — ``mismatches`` is the label (netlist) leg,
+    ``copper_mismatches`` the copper leg (see
+    :func:`kicad_tools.lvs.build_lvs_payload`).  A label leg with zero
+    PCB net bindings reports an explicit ``vacuous`` verdict (single
+    synthetic record + ``netlist_vacuous: true``) instead of one
+    pseudo-mismatch per bound schematic pin.
+    """
+    if sch_path is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="no schematic discovered; cannot compare",
+        )
+
+    try:
+        from kicad_tools.lvs.board_lvs import compare_netlists
+
+        result = compare_netlists(sch_path, pcb_path)
+    except Exception as e:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"LVS comparator raised {type(e).__name__}: {e}",
+        )
+
+    try:
+        from kicad_tools.lvs.copper_lvs import compare_copper_netlist
+
+        copper = compare_copper_netlist(sch_path, pcb_path)
+    except Exception as e:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"copper LVS comparator raised {type(e).__name__}: {e}",
+        )
+
+    from kicad_tools.lvs.recipe import build_lvs_payload
+
+    # Stable sort orders shared by the JSON payload, the bounded ``detail``
+    # preview and the ``--verbose`` terminal expansion, so all three agree.
+    copper_records = sorted(copper.mismatches, key=lambda m: (m.kind, m.pad_a, m.pad_b))
+    label_records = sorted(result.mismatches, key=lambda m: (m.ref, m.pad))
+
+    data = build_lvs_payload(
+        replace(copper, mismatches=tuple(copper_records)),
+        replace(result, mismatches=tuple(label_records)),
+        include_schema=False,
+    )
+
+    # Issue #4681: the label leg's outcome, phrased for the ``detail``
+    # line.  A vacuous verdict (zero PCB net bindings) is spelled out so
+    # nobody reads the single synthetic ``mismatches`` record as a real
+    # per-pin finding.
+    if result.vacuous:
+        label_summary = "label: vacuous (no PCB pad carries a net binding)"
+    else:
+        label_summary = f"label: {len(label_records)} mismatch(es)"
+
+    if not copper.clean:
+        # The copper-extracted gate is the soundness-critical one: surface
+        # it first.  Show up to the first 3 records in a stable order.
+        # The label leg's count rides along (#4681) so ``detail`` names
+        # both legs and a consumer knows which array holds which findings.
+        preview = ", ".join(
+            f"{m.kind} {m.pad_a}({m.net_a})/{m.pad_b}({m.net_b})" for m in copper_records[:3]
+        )
+        suffix = "" if len(copper_records) <= 3 else f" (+{len(copper_records) - 3} more)"
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"copper: {len(copper_records)} mismatch(es): {preview}{suffix}"
+            f"; {label_summary}",
+            data=data,
+        )
+
+    if result.clean:
+        return SubCheckResult(
+            status="PASSED",
+            detail="label + copper: 0 mismatch(es)",
+            data=data,
+        )
+
+    if result.vacuous:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"{label_summary}; copper: 0 mismatch(es)",
+            data=data,
+        )
+
+    # Show up to the first 3 mismatches in stable (ref, pad) order so
+    # the detail line is bounded but informative.
+    preview = ", ".join(
+        f"{m.ref}.{m.pad} sch={m.schematic_net!r} pcb={m.pcb_net!r}" for m in label_records[:3]
+    )
+    suffix = "" if len(label_records) <= 3 else f" (+{len(label_records) - 3} more)"
+    return SubCheckResult(
+        status="FAILED",
+        detail=f"label: {len(label_records)} mismatch(es): {preview}{suffix}"
+        "; copper: 0 mismatch(es)",
+        data=data,
+    )
+
+
+# Issue #4096: the clearance rule_ids whose truthfulness depends entirely on
+# the freshness of the committed `filled_polygon` geometry.  When any of these
+# fire, the on-disk fills may be stale (board routed/refilled after the fills
+# were last saved) and the findings may be phantom.
+_ZONE_FILL_DEPENDENT_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "clearance_segment_zone",
+        "clearance_via_zone",
+        "clearance_pad_zone",
+    }
+)
+
+
+def _warn_stale_zone_fills(violations: list[DRCViolation], pcb_path: Path) -> None:
+    """Warn loudly when zone-clearance findings may reflect stale fills (issue #4096).
+
+    ``kct check`` measures segment/via/pad-to-zone clearance against the
+    committed ``filled_polygon`` geometry in the ``.kicad_pcb`` — whatever
+    KiCad last wrote to disk.  If the board was routed or refilled after those
+    fills were saved, the clearance_*_zone rules produce phantom shorts that
+    disappear once the fills are refreshed.  This advisory points the user at
+    the authoritative fix so an honest-looking wall of clearance errors is not
+    mistaken for an unmanufacturable board.  No-op when no such findings exist.
+    """
+    present = sorted({v.rule_id for v in violations if v.rule_id in _ZONE_FILL_DEPENDENT_RULE_IDS})
+    if not present:
+        return
+    print(
+        "WARNING: zone-clearance findings present "
+        f"({', '.join(present)}) — kct check measures these against the "
+        "committed zone fills in the .kicad_pcb, which may be STALE if the "
+        "board was routed or refilled after the fills were last saved. "
+        "Cross-gate / fix with:\n"
+        f"    kicad-cli pcb drc --refill-zones --save-board {pcb_path}\n"
+        "then re-run kct check, or pass --refill-zones to do this "
+        "automatically (issue #4096).",
+        file=sys.stderr,
+    )
+
+
+def _refill_zones_in_place(pcb_path: Path) -> None:
+    """Refresh the on-disk zone fills before checking, if possible (issue #4096).
+
+    Shells out to ``kicad-cli pcb drc --refill-zones --save-board`` via
+    :func:`kicad_tools.cli.runner.run_refill_zones` so the pure-Python pipeline
+    reads fills that are in sync with the copper.  This **mutates the board
+    file in place** (the ``--refill-zones`` flag documents that side effect).
+
+    Graceful degradation: a missing kicad-cli — or any refill failure — is
+    reported as a warning and the check continues against the stored fills
+    rather than aborting.  Never raises.
+    """
+    from kicad_tools.cli.runner import run_refill_zones
+
+    result = run_refill_zones(pcb_path)
+    if result.success:
+        print(
+            f"[INFO] refilled zones in place via kicad-cli: {pcb_path}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "WARNING: --refill-zones requested but the refill did not run "
+            f"({result.stderr.strip() or 'unknown error'}); continuing against "
+            "the stored (possibly stale) zone fills.  Install KiCad 8+ so "
+            "kicad-cli is on PATH to enable the pre-check refill (issue #4096).",
+            file=sys.stderr,
+        )
+
+
+def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
+    """Verify bundle integrity and its archived PCB against current bytes.
+
+    A missing bundle is NOT RUN. Existing bundles must carry SHA-256 hashes
+    and an unambiguous PCB in the hashed kicad_project.zip. Timestamps never
+    establish freshness. Broader check-input provenance (rules, sidecars,
+    schematic and results) remains the independent readiness.json contract.
+    """
+    import hashlib
+    import lzma
+    import re
+    import zipfile
+    import zlib
+
+    from kicad_tools.export import verify_manifest
+
+    candidates = [
+        pcb_path.parent / "manufacturing" / "manifest.json",
+        pcb_path.parent.parent / "manufacturing" / "manifest.json",
+    ]
+    manifest_path: Path | None = None
+    for cand in candidates:
+        if cand.exists():
+            manifest_path = cand
+            break
+
+    if manifest_path is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="no manufacturing bundle; run `kct export` first",
+        )
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        files = manifest.get("files")
+        if not isinstance(files, dict) or "kicad_project.zip" not in files:
+            raise ValueError("missing hash-bound kicad_project.zip")
+        bundle = manifest_path.parent.resolve()
+        for name, info in files.items():
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts or "\\" in name:
+                raise ValueError(f"unsafe manifest path: {name}")
+            if not (bundle / path).resolve().is_relative_to(bundle):
+                raise ValueError(f"manifest path leaves bundle: {name}")
+            if name == "manifest.json":
+                continue
+            digest = info.get("sha256") if isinstance(info, dict) else None
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"missing or invalid SHA-256: {name}")
+        archive_path = bundle / "kicad_project.zip"
+        if not archive_path.is_file():
+            raise ValueError("missing kicad_project.zip")
+        problems = verify_manifest(manifest_path)
+        if problems:
+            raise ValueError("; ".join(problems))
+        # The exporter stores the selected source PCB at the archive root.
+        # Do not accept a same-basename nested file or a duplicate ZIP member.
+        with zipfile.ZipFile(archive_path) as archive:
+            matches = [n for n in archive.namelist() if Path(n).name == pcb_path.name]
+            if matches != [pcb_path.name]:
+                raise ValueError("project archive must contain one exact source PCB member")
+            archived_digest = hashlib.sha256(archive.read(pcb_path.name)).hexdigest()
+        if archived_digest != hashlib.sha256(pcb_path.read_bytes()).hexdigest():
+            raise ValueError("routed PCB content differs from the manifest-bound project archive")
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        zipfile.BadZipFile,
+        RuntimeError,
+        zlib.error,
+        lzma.LZMAError,
+    ) as e:
+        return SubCheckResult(status="FAILED", detail=f"STALE/unverified: {e}")
+
+    return SubCheckResult(
+        status="PASSED",
+        detail="bundle SHA-256 hashes verified; archived PCB matches current content",
+    )
+
+
+def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | None:
+    """Resolve the schematic used by schematic-aware checks.
+
+    Shared by the meta sub-checks (ERC/LVS, issue #3750) and the
+    ``sch_fields`` lint category (issue #4595) so both consume the exact
+    same resolution: an explicit ``--schematic`` override wins (a missing
+    override path resolves to ``None``), otherwise sibling discovery via
+    :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb` (which
+    handles ``project.kct artifacts.schematic`` and the ``_routed``-style
+    stage-suffix strip).
+    """
+    from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+    if schematic is not None:
+        candidate = Path(schematic).resolve()
+        return candidate if candidate.exists() else None
+    return resolve_schematic_for_pcb(pcb_path)
+
+
+def run_meta_checks(
+    pcb_path: Path,
+    drc_status: SubCheckResult,
+    schematic: str | None = None,
+    strict: bool = False,
+    coverage_incomplete: bool = False,
+    incomplete_categories: tuple[str, ...] = (),
+) -> MetaCheckResult:
+    """Run the four meta sub-checks (DRC + ERC + LVS + Manifest).
+
+    DRC is supplied by the caller (it has already run as part of the
+    main check pipeline); this helper layers ERC, LVS, and manifest
+    freshness on top and rolls them up into a single
+    :class:`MetaCheckResult` (issue #3750).
+
+    Args:
+        pcb_path: Path to the routed ``.kicad_pcb`` under test.
+        drc_status: Pre-computed DRC :class:`SubCheckResult` from the
+            current invocation's DRC pipeline.  Folded in directly so the
+            meta rollup doesn't redo the DRC work.
+        schematic: Optional explicit ``.kicad_sch`` override.  When
+            omitted, schematic discovery falls back to
+            :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb`
+            (handles the ``_routed`` suffix strip used by recipes).
+        strict: When True, ERC warnings become fatal (sub-check ``FAILED``).
+            ``NOT RUN`` rollup behaviour is independent of ``strict`` --
+            the exit-code policy in :func:`main` controls whether
+            ``INCOMPLETE`` exits non-zero (the new default) or 0 (with
+            ``--allow-incomplete``).
+        coverage_incomplete: A blocking coverage category (mask_to_copper,
+            DFM table, fab DFM parity) could not complete its assessment
+            (issue #8949).  Threaded in -- not set on the returned object
+            -- because this helper calls ``compute_overall`` itself, so a
+            flag assigned afterwards would be a no-op.
+        incomplete_categories: Categories whose check did not complete on
+            this run (issue #9062); named on the ``Overall:`` line and
+            serialized as ``meta_checks.incomplete_categories``.  May be
+            wider than ``coverage_incomplete`` (see
+            :attr:`MetaCheckResult.incomplete_categories`).
+    """
+    resolved_sch = _resolve_check_schematic(schematic, pcb_path)
+
+    erc = _erc_subcheck(resolved_sch, strict)
+    lvs = _lvs_subcheck(resolved_sch, pcb_path)
+    manifest = _manifest_subcheck(pcb_path)
+
+    # Issue #4350: when discovery turned up no schematic, ERC and (critically)
+    # the LVS *manufacturing hard gate* are silently NOT RUN.  Emit a loud
+    # one-line warning to stderr so a skipped hard gate is never mistaken for a
+    # clean comparison, and record a machine-detectable flag for JSON consumers.
+    schematic_missing = resolved_sch is None
+    if schematic_missing:
+        print(
+            "WARNING: no schematic discovered next to "
+            f"{pcb_path.name}; ERC and the LVS manufacturing hard gate were "
+            "SKIPPED (not run) -- copper was NOT compared to any schematic. "
+            "Pass --schematic <path.kicad_sch> to run them.",
+            file=sys.stderr,
+        )
+
+    result = MetaCheckResult(
+        drc=drc_status,
+        erc=erc,
+        lvs=lvs,
+        manifest=manifest,
+        schematic_missing=schematic_missing,
+        coverage_incomplete=coverage_incomplete,
+        incomplete_categories=incomplete_categories,
+    )
+    result.compute_overall()
+    return result
+
+
+def _format_meta_status_line(name: str, sub: SubCheckResult) -> str:
+    """Render one human-output ``DRC: PASSED (...)`` line.
+
+    ``STALE`` is rendered in place of ``FAILED`` for the Manifest
+    sub-check when the detail starts with ``STALE:`` (issue #3750's
+    human-clarity convention).  The JSON status is still ``FAILED``.
+    """
+    # ``display_status`` is intentionally widened to ``str`` so we can
+    # substitute the human-only ``STALE`` token for the Manifest row
+    # without violating the narrow ``SubCheckStatus`` literal type that
+    # ``sub.status`` is annotated as.
+    display_status: str = sub.status
+    detail = sub.detail
+    if name == "Manifest" and sub.status == "FAILED" and detail.startswith("STALE:"):
+        display_status = "STALE"
+        # Trim the "STALE: " prefix from the detail since the status
+        # column already carries it.
+        detail = detail[len("STALE: ") :]
+    return f"{name + ':':10} {display_status:8} ({detail})"
+
+
+def _print_lvs_verbose_expansion(sub: SubCheckResult) -> None:
+    """Print every LVS mismatch beneath the ``LVS:`` line (issue #4616).
+
+    Reads the records back out of :attr:`SubCheckResult.data` -- the same
+    structured payload the JSON envelope serializes -- so the terminal
+    expansion and ``meta_checks.lvs`` are provably the same list, in the
+    same stable order, with **no** cap.  A no-op when LVS produced no
+    structured payload (``NOT RUN`` / comparator raised) or when both
+    legs are empty.
+    """
+    data = sub.data
+    if not data:
+        return
+    copper_records = data.get("copper_mismatches") or []
+    label_records = data.get("mismatches") or []
+    if not copper_records and not label_records:
+        return
+    if copper_records:
+        print(f"  copper: {len(copper_records)} mismatch(es)")
+        for m in copper_records:
+            print(f"    {m['kind']} {m['pad_a']}({m['net_a']})/{m['pad_b']}({m['net_b']})")
+    if label_records:
+        print(f"  label: {len(label_records)} mismatch(es)")
+        for m in label_records:
+            print(f"    {m['ref']}.{m['pad']} sch={m['schematic_net']!r} pcb={m['pcb_net']!r}")
+
+
+def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> None:
+    """Print the per-sub-check status block + overall rollup (issue #3750).
+
+    Output goes to stdout in a stable column layout so humans can
+    diff it across runs.  The ``Overall:`` line is the rollup that
+    matches the exit-code decision -- an invariant #8949 makes true by
+    construction, because every incompleteness the exit code honours is
+    folded into ``compute_overall`` via ``coverage_incomplete``.  When a
+    blocking category is the cause, the line names it
+    (``Overall:   INCOMPLETE (mask_to_copper)``); sub-check ``NOT RUN``
+    causes are named by their own status rows above.
+
+    ``verbose`` (issue #4616) expands the ``LVS:`` row into the complete,
+    uncapped mismatch list from both comparator legs.  The status lines
+    themselves -- including the bounded 3-record ``(+N more)`` LVS
+    summary -- are byte-identical either way; ``--verbose`` only adds
+    lines beneath the ``LVS:`` row.
+    """
+    print()
+    print(_format_meta_status_line("DRC", result.drc))
+    print(_format_meta_status_line("ERC", result.erc))
+    print(_format_meta_status_line("LVS", result.lvs))
+    if verbose:
+        _print_lvs_verbose_expansion(result.lvs)
+    print(_format_meta_status_line("Manifest", result.manifest))
+    if result.overall == "INCOMPLETE" and result.incomplete_categories:
+        print(f"{'Overall:':10} {result.overall} ({', '.join(result.incomplete_categories)})")
+    else:
+        print(f"{'Overall:':10} {result.overall}")
+
+
+def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
+    """Print the advisory routing-quality stanza (issue #4623).
+
+    Purely descriptive: these numbers never contribute to the verdict,
+    exit code, or meta rollup -- including under ``--strict``.  Printed
+    after the meta-check stanza in the default (meta) mode only; skipped
+    under ``--drc-only`` to preserve the legacy stdout contract (#3750),
+    mirroring how ``meta_checks`` is omitted.
+    """
+    pct_base = metrics.total_segments - metrics.zero_length_count
+
+    def pct(count: int) -> str:
+        return f"{100.0 * count / pct_base:.1f}%" if pct_base else "0.0%"
+
+    print()
+    print("Routing quality (advisory):")
+    print(
+        f"  Segments:     {metrics.total_segments} across "
+        f"{metrics.nets_with_copper} net(s) ({metrics.segments_per_net:.1f}/net)"
+    )
+    print(f"  Median length: {metrics.median_length_mm:.3f} mm")
+    print(
+        f"  Fragments (<{FRAGMENT_LENGTH_MM} mm): "
+        f"{metrics.fragment_count} ({pct(metrics.fragment_count)})"
+    )
+    print(
+        f"  Direction:    orthogonal {metrics.orthogonal_count} "
+        f"({pct(metrics.orthogonal_count)}) / 45-deg {metrics.diagonal_45_count} "
+        f"({pct(metrics.diagonal_45_count)}) / off-axis {metrics.off_axis_count} "
+        f"({pct(metrics.off_axis_count)})"
+    )
+    worst = metrics.worst_off_axis_layer
+    if metrics.off_axis_count and worst is not None:
+        print(
+            f"  Off-axis length: {metrics.off_axis_length_fraction:.0%} of length "
+            f"(worst layer {worst[0]} {worst[1]:.0%})"
+        )
+    print(
+        f"  Staircase steps (<{STAIRCASE_STEP_MM} mm legs): "
+        f"{metrics.staircase_step_count} ({pct(metrics.staircase_step_count)})"
+    )
+    print(f"  Zero-length:  {metrics.zero_length_count}")
+
+
+def _warn_unevaluated_ampacity(
+    declared_ampacity_targets: dict[str, float],
+    ampacity_resolution: object,
+    pcb: PCB,
+    only_set: set[str] | None,
+    skip_set: set[str],
+) -> None:
+    """Warn when a declared ``target_ampacity`` was never actually evaluated.
+
+    Issue #4321 (Tier 3).  ``AmpacityRule`` matches routed segments by net
+    name, so a declared target contributes a violation *only* when the net
+    both resolves to a real board net **and** carries at least one routed
+    segment **and** the ``ampacity`` category ran.  When none of those hold
+    the report shows 0 ampacity errors -- indistinguishable from a genuinely
+    compliant board.  This emits a loud stderr warning naming every declared
+    net whose rule never engaged, so a hand-authored ``--net-class-map`` that
+    silently fails to match cannot pass green.
+
+    Args:
+        declared_ampacity_targets: ``{user_key: target_ampacity}`` for every
+            net-class-map entry that declared a ``target_ampacity`` (keyed by
+            the *original* user key, before board-name resolution).
+        ampacity_resolution: the ``NetClassMapResolution`` returned by
+            ``resolve_net_class_map_keys`` (``resolved`` is
+            ``{board_net: user_key}``).
+        pcb: the loaded board (source of routed-segment net names).
+        only_set: optional ``--only`` whitelist of check categories.
+        skip_set: ``--skip`` set of check categories.
+    """
+    ampacity_active = (only_set is None or "ampacity" in only_set) and "ampacity" not in skip_set
+
+    # Invert {board_net: user_key} so we can look up each declared user key's
+    # resolved board net (absent => the key matched no board net or matched
+    # ambiguously, i.e. it was dropped from the resolved map).
+    resolved = getattr(ampacity_resolution, "resolved", {}) or {}
+    key_to_board = {user_key: board_net for board_net, user_key in resolved.items()}
+
+    segment_nets = {getattr(seg, "net_name", "") for seg in getattr(pcb, "segments", [])}
+    # Issue #7206 (F3): a net with a copper pour is rated by its pour neck;
+    # one that cannot be rated is reported as ``ampacity: unknown`` coverage.
+    from kicad_tools.validate.pour_ampacity import poured_nets
+
+    rated_nets = segment_nets | set(poured_nets(pcb, sorted(resolved)))
+
+    unevaluated: list[str] = []
+    for user_key in sorted(declared_ampacity_targets):
+        board_net = key_to_board.get(user_key)
+        if board_net is None:
+            # Resolution miss / ambiguous: the rule can never see this net.
+            unevaluated.append(user_key)
+        elif not ampacity_active:
+            # Net resolved but the whole category was skipped/excluded.
+            unevaluated.append(board_net)
+        elif board_net not in rated_nets:
+            # Net resolved but carries no routed segment or pour to size.
+            unevaluated.append(board_net)
+
+    # Deduplicate while preserving first-seen order.
+    unevaluated = list(dict.fromkeys(unevaluated))
+    if not unevaluated:
+        return
+
+    print(
+        "WARNING: ampacity rule declared but not evaluated for net(s): "
+        f"{', '.join(unevaluated)}. "
+        "A declared target_ampacity that matched zero routed segments is "
+        "reported as 0 ampacity errors but was never actually checked "
+        "(post-resolution key miss, unrouted net, or the ampacity category "
+        "was excluded via --skip/--only).",
+        file=sys.stderr,
+    )
+
+
+def _warn_unevaluated_routing_policy(
+    declared_keys: set[str],
+    resolution: object,
+    pcb: PCB,
+    only_set: set[str] | None,
+    skip_set: set[str],
+) -> None:
+    """Warn when a declared routing policy was never evaluated (Issue #6044).
+
+    Mirrors :func:`_warn_unevaluated_ampacity`: a net-class-map entry that
+    declares ``max_vias_per_net`` or ``length_constraint.max_length`` but
+    whose key resolves to no board net, whose net has no routed copper, or
+    whose ``routing_policy`` category was deselected produces no finding --
+    which would otherwise read the same as a compliant net.
+    """
+    active = (only_set is None or "routing_policy" in only_set) and "routing_policy" not in skip_set
+    resolved = getattr(resolution, "resolved", {}) or {}
+    key_to_board = {user_key: board_net for board_net, user_key in resolved.items()}
+    names = {n.number: n.name for n in getattr(pcb, "nets", {}).values()}
+    copper_nets: set[str] = set()
+    for item in [
+        *getattr(pcb, "segments", []),
+        *getattr(pcb, "arcs", []),
+        *getattr(pcb, "vias", []),
+    ]:
+        copper_nets.add(getattr(item, "net_name", "") or "")
+        copper_nets.add(names.get(getattr(item, "net_number", None), "") or "")
+    unresolved: list[str] = []
+    unevaluated: list[str] = []
+    for user_key in sorted(declared_keys):
+        board_net = key_to_board.get(user_key)
+        if board_net is None:
+            unresolved.append(user_key)
+        elif not active or board_net not in copper_nets:
+            unevaluated.append(board_net)
+    if unresolved:
+        print(
+            "WARNING: routing policy declared for net-class-map key(s) that match "
+            f"no board net: {', '.join(unresolved)}. Their max_vias_per_net / "
+            "max_length limits were NOT checked.",
+            file=sys.stderr,
+        )
+    unevaluated = list(dict.fromkeys(unevaluated))
+    if unevaluated:
+        print(
+            "WARNING: routing policy declared but not evaluated for net(s): "
+            f"{', '.join(unevaluated)} (unrouted net, or the routing_policy "
+            "category was excluded via --skip/--only).",
+            file=sys.stderr,
+        )
+
+
+def add_check_scope_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register ``--bbox`` / ``--refs`` / ``--nets`` (Issue #8016)."""
+    parser.add_argument(
+        "--bbox",
+        default=None,
+        metavar="X1,Y1,X2,Y2",
+        help=(
+            "Scope findings to a board-coordinate box in mm.  Checks still run "
+            "in full; findings outside the scope (union of --bbox/--refs/--nets) "
+            "are omitted.  Board-level findings are kept.  Not sign-off eligible."
+        ),
+    )
+    parser.add_argument(
+        "--refs", default=None, help="Scope findings to these references (comma-separated)"
+    )
+    parser.add_argument(
+        "--nets", default=None, help="Scope findings to these nets (comma-separated)"
+    )
+
+
+def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentParser, pcb):
+    """Build the :class:`CheckScope` from CLI args (``None`` when unscoped)."""
+    from kicad_tools.validate.scope import CheckScope
+
+    try:
+        scope = CheckScope.from_args(
+            getattr(args, "bbox", None), getattr(args, "refs", None), getattr(args, "nets", None)
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if scope is not None:
+        unknown = scope.unknown_names(
+            (fp.reference for fp in pcb.footprints), (n.name for n in pcb.nets.values())
+        )
+        if unknown:
+            print(
+                f"Warning: --refs/--nets name unknown to this board: {', '.join(unknown)}",
+                file=sys.stderr,
+            )
+    return scope
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kct check command."""
+    parser = argparse.ArgumentParser(
+        prog="kct check",
+        description="Pure Python DRC for PCBs (no kicad-cli required)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--mask-copper-config",
+        type=Path,
+        help="Explicit process policy, source-bound escape intent and native runtime JSON (kct.mask-copper-request.v1); engages mask_to_copper",
+    )
+    parser.add_argument(
+        "--fab-dfm-result",
+        dest="fab_dfm_result",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a recorded fab DFM tool result (JSON with a 'counts' object, "
+            "shape of tests/fixtures/fab_dfm_parity/jlcdfm_*.json). Given one, the "
+            "Fab DFM parity stanza and the fab_dfm_parity JSON section print kct's "
+            "per-category error/warning counts beside the recorded fab "
+            "danger/warning counts and mark fab-danger/kct-0-error categories "
+            "(issue #8940). JLCPCB-family --mfr only; malformed input is an error."
+        ),
+    )
+    parser.add_argument(
+        "--physical-copper-gap",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Opt-in physical copper slit minimum, independent of net identity (mm)",
+    )
+    parser.add_argument(
+        "pcb",
+        nargs="?",
+        default=None,
+        help=(
+            "Path to .kicad_pcb file or directory containing one (omit when using --diff OLD NEW)"
+        ),
+    )
+    parser.add_argument(
+        "--diff",
+        nargs=2,
+        metavar=("OLD", "NEW"),
+        default=None,
+        help=(
+            "Check two revisions with the same flags and report findings "
+            "introduced, resolved and changed, paired by stable finding key "
+            "(Issue #5946). Each side is a path or a git spec REV:path "
+            "(e.g. HEAD~3:boards/x/x.kicad_pcb). Exits 2 when NEW introduces "
+            "error findings (or warnings under --strict)."
+        ),
+    )
+    parser.add_argument(
+        "--waive",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Record an evidence-bound waiver for every current finding with "
+            "this stable key (the 'key' field in --format json; repeatable), "
+            "bound to the finding's current evidence_hash, then report with it "
+            "applied. Requires --waive-reason and --waive-reviewer. Written to "
+            "--waivers PATH, else the discovered sidecar, else "
+            "<board>.kct-waivers.json next to the board (Issue #5946)."
+        ),
+    )
+    parser.add_argument(
+        "--waive-reason",
+        dest="waive_reason",
+        default=None,
+        help="Justification recorded on --waive entries",
+    )
+    parser.add_argument(
+        "--waive-reviewer",
+        dest="waive_reviewer",
+        default=None,
+        help="Reviewer recorded on --waive entries",
+    )
+    parser.add_argument(
+        "--waive-issue",
+        dest="waive_issue",
+        default=None,
+        help="Optional tracking reference recorded on --waive entries",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["table", "json", "summary", "sarif"],
+        default="table",
+        help=(
+            "Output format (default: table). 'sarif' writes a SARIF 2.1.0 log "
+            "for CI code scanning (also with --diff), fingerprinted by finding "
+            "key and evidence hash (Issue #6006)"
+        ),
+    )
+    parser.add_argument(
+        "--errors-only",
+        action="store_true",
+        help="Show only errors, not warnings",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with error code 2 on warnings",
+    )
+    parser.add_argument(
+        "--3d-models",
+        dest="models_3d",
+        action="store_true",
+        help=(
+            "Run the model_coverage category (issue #7682): one advisory "
+            "warning per footprint with no or a missing 3D model, or a single "
+            "info finding when this host has no model library. Default-on "
+            "since #7685, so this flag is a no-op kept for compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--strict-connectivity",
+        dest="strict_connectivity",
+        action="store_true",
+        help=(
+            "No-op kept for script compatibility: real-geometry (strict) "
+            "connectivity is now the DEFAULT (issue #4673, matching the "
+            "kct net-status default from issue #4557). The connectivity DRC "
+            "rule decides copper unions by REAL geometric copper contact "
+            "(shapely polygon intersection), matching KiCad's connectivity "
+            "semantics (issue #4176). Use --legacy-connectivity to opt back "
+            "into the old 0.01mm endpoint-proximity model. (Distinct from "
+            "--strict, which makes warnings fatal.)"
+        ),
+    )
+    parser.add_argument(
+        "--legacy-connectivity",
+        dest="legacy_connectivity",
+        action="store_true",
+        help=(
+            "Opt the connectivity DRC rule back into the LEGACY 0.01mm "
+            "endpoint-proximity model (the pre-#4673 default). The legacy "
+            "model unions a segment endpoint with a pad/via/segment whenever "
+            "their reference points land within 0.01mm even when the actual "
+            "copper does not touch -- so it can pass a net that 'kicad-cli "
+            "pcb drc' reports as unconnected, and it reports false opens on "
+            "poured boards that the strict default correctly bonds. Takes "
+            "precedence over --strict-connectivity (a no-op) if both are "
+            "given."
+        ),
+    )
+    parser.add_argument(
+        "--refill-zones",
+        dest="refill_zones",
+        action="store_true",
+        help=(
+            "Before checking, run `kicad-cli pcb drc --refill-zones "
+            "--save-board` to bring the on-disk zone fills back in sync with "
+            "the copper (issue #4096).  WARNING: this MUTATES the board file "
+            "in place (--save-board rewrites <pcb>).  Fixes phantom "
+            "clearance_*_zone findings caused by stale committed fills.  "
+            "Requires kicad-cli (KiCad 8+); degrades gracefully with a "
+            "warning if kicad-cli is not installed (the check still runs "
+            "against the stored fills)."
+        ),
+    )
+    parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help=(
+            "Target manufacturer profile for design rules. When omitted, the "
+            "effective profile is resolved by precedence (highest first): "
+            "explicit --mfr > auto-discovered fab_profile.json sidecar (written "
+            "by `kct route`) > project.kct target_fab > jlcpcb default. This "
+            "lets a routed board judged at a higher fab tier (e.g. via-in-pad, "
+            "legal at jlcpcb-tier1) pass a bare `kct check` without a false "
+            "FAILED (issue #3920)."
+        ),
+    )
+    parser.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        default=None,
+        help="Number of copper layers (auto-detected from board if not specified)",
+    )
+    # Issue #5810: shared with the unified ``kct check`` subparser.
+    add_check_copper_argument(parser)
+    parser.add_argument(
+        "--emit-dru",
+        dest="emit_dru",
+        action="store_true",
+        help=(
+            "Emit a sibling ``<board>.kicad_dru`` from the SAME resolved "
+            "design rules this check enforced, so ``kicad-cli pcb drc`` "
+            "reasons over identical fab-tier floors (issue #4375). This is "
+            "a side effect only: it never modifies the ``.kicad_pcb`` and "
+            "never changes the check verdict/exit code. NOTE: a "
+            "``.kicad_dru`` alone does NOT give clearance parity -- "
+            "kicad-cli's copper-clearance test reads the applied Default "
+            "netclass clearance from ``.kicad_pro`` (#4097). Use "
+            "--emit-drc-constraints for full parity."
+        ),
+    )
+    parser.add_argument(
+        "--emit-drc-constraints",
+        dest="emit_drc_constraints",
+        action="store_true",
+        help=(
+            "Emit BOTH sidecars (``<board>.kicad_dru`` and "
+            "``<board>.kicad_pro``) from the SAME resolved design rules this "
+            "check enforced (issue #4375). The ``.kicad_pro`` write relaxes "
+            "the built-in minimums AND the applied Default netclass clearance "
+            "so kicad-cli's clearance test agrees by construction (#4097). "
+            "Preserves an existing ``.kicad_pro``, overwriting only the "
+            "constraint/severity/Default-netclass entries. Side effect only: "
+            "does not modify the ``.kicad_pcb`` or change the exit code. This "
+            "is the recommended flag for a kicad-cli cross-gate; "
+            "--emit-dru is its DRU-only subset. Only the floor-comparable "
+            "rule families agree -- connectivity/LVS semantics have no "
+            "``.kicad_dru`` equivalent."
+        ),
+    )
+    parser.add_argument(
+        "--only",
+        dest="only_checks",
+        help=f"Run only specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
+    )
+    parser.add_argument(
+        "--skip",
+        dest="skip_checks",
+        help=f"Skip specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
+    )
+    add_check_scope_arguments(parser)
+    parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Write JSON report to file (implies --format json for file output)",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show detailed violation information",
+    )
+    parser.add_argument(
+        "--suppress-library",
+        action="store_true",
+        help="Suppress silkscreen warnings from standard KiCad library footprints",
+    )
+    parser.add_argument(
+        "--drc-only",
+        dest="drc_only",
+        action="store_true",
+        help=(
+            "Legacy DRC-only mode (issue #3750).  Skips the ERC / LVS / "
+            "Manifest meta sub-checks and preserves the pre-#3750 stdout "
+            "and exit-code contract.  Intended for CI scripts and recipes "
+            "that depend on the historical 'kct check' semantics (e.g. "
+            "scripts/ci/check_routed_drc.py and the per-board allowlists "
+            "in .github/routed-drc-tolerance.yml)."
+        ),
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        dest="allow_incomplete",
+        action="store_true",
+        help=(
+            "Treat ``Overall: INCOMPLETE`` (any sub-check is NOT RUN) as a "
+            "passing run for exit-code purposes (issue #3750).  By default "
+            "INCOMPLETE exits non-zero so consumers that read the exit code "
+            "do not silently accept a board that was only partially verified.  "
+            "Use this for boards / recipes that legitimately lack a sub-check "
+            "input (e.g. no schematic next to the PCB, or a recipe that runs "
+            "``kct check`` before ``kct export`` produces the manifest)."
+        ),
+    )
+    parser.add_argument(
+        "--netlist-sync",
+        action="store_true",
+        help=(
+            "Run a blocking schematic/PCB netlist-sync gate (issue #3154). "
+            "Compares the schematic component set against the PCB footprint set "
+            "via the Reconciler and prints a full add/drop/orphan report. Exits "
+            "with code 2 when a schematic component is missing from the PCB "
+            "(unbuildable BOM) OR a matched component's value or footprint "
+            "diverges (wrong part / wrong package placed). Benign rating-suffix "
+            "value diffs ('100nF' vs '100nF 25V', issue #4351) are "
+            "informational and do not fail the gate. PCB-only extras stay a "
+            "warning unless --strict. Skips silently if no schematic is found."
+        ),
+    )
+    parser.add_argument(
+        "--schematic",
+        default=None,
+        help=(
+            "Explicit path to the .kicad_sch file for the netlist-sync gate / "
+            "advisory drift banner. When omitted, the schematic is "
+            "auto-discovered from project.kct or the sibling <basename>.kicad_sch."
+        ),
+    )
+    parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help=(
+            "Path to a JSON sidecar mapping net names to NetClassRouting "
+            "fields (see kicad_tools.router.rules.NetClassRouting.to_dict). "
+            "When supplied, enables the diff-pair routing_continuity and "
+            "length_skew rules to fire on routed boards; without it those "
+            "rules degrade to no-ops (Issue #2684). Auto-discovered next to "
+            "the board when this flag is omitted -- as "
+            "<board-stem>.net_class_map.json or net_class_map.json, in the "
+            "board dir then output/ then ../output/ (Issue #4601). Use "
+            "--no-net-class-map to suppress that auto-discovery."
+        ),
+    )
+    parser.add_argument(
+        "--require-routing-policy",
+        dest="require_routing_policy",
+        action="store_true",
+        help=(
+            "Make the routing_policy check fail every sensitive net class "
+            "(length_critical, noise_sensitive, length_match_group or "
+            "diffpair_partner set in the net-class map) whose routed nets "
+            "declare neither max_vias_per_net nor length_constraint.max_length "
+            "(Issue #6044). Pour nets are exempt. Requires a net-class map; "
+            "without one the command exits with a usage error. Off by default."
+        ),
+    )
+    parser.add_argument(
+        "--no-net-class-map",
+        dest="no_net_class_map",
+        action="store_true",
+        help=(
+            "Suppress net-class-map sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (the diff-pair / match-group skew rules "
+            "stay inactive). Cannot be combined with --net-class-map "
+            "(Issue #4601)."
+        ),
+    )
+    parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (see kicad_tools.router.current_paths.CurrentPathSpec, "
+            "Issue #4980). When supplied, enables the path_ampacity rule to "
+            "check each declared branch (stable RefDes.pad source/sink "
+            "endpoints) against its OWN declared current, independent of "
+            "--net-class-map's whole-net target_ampacity. Auto-discovered "
+            "next to the board when this flag is omitted -- as "
+            "<board-stem>.current_paths.json or current_paths.json, in the "
+            "board dir then output/ then ../output/ (mirrors --net-class-map, "
+            "Issue #5124). Use --no-current-paths to suppress that "
+            "auto-discovery."
+        ),
+    )
+    parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive). Cannot be "
+            "combined with --current-paths."
+        ),
+    )
+    parser.add_argument(
+        "--courtyard-waivers",
+        dest="courtyard_waivers",
+        default=None,
+        help=(
+            "Path to a .courtyard_waivers.json sidecar waiving specific "
+            "courtyard-overlap pairs (see kicad_tools.validate.rules."
+            "courtyard_waivers). When supplied, overlapping courtyard pairs "
+            "matching a waiver entry report as WAIVED instead of failing the "
+            "gate. Auto-discovered next to the board when this flag is "
+            "omitted (Issue #4137)."
+        ),
+    )
+    parser.add_argument(
+        "--waivers",
+        dest="waivers",
+        default=None,
+        help=(
+            "Path to a general waivers sidecar (schema version 2, or 3 for "
+            "evidence-bound keyed entries, Issue #5946) waiving findings for "
+            "ANY rule (see kicad_tools.validate.rules.waivers). Matched "
+            "findings report as WAIVED instead of failing the gate; an "
+            "evidence-bound entry whose evidence hash no longer matches is "
+            "STALE and does not suppress its finding. Auto-discovered next to "
+            "the board (<board>.kct-waivers.json, then .kct_waivers.json) when "
+            "this flag is omitted (Issue #4417). Waived findings keep severity "
+            "'error' in JSON so the kct audit manufacturing gate stays "
+            "blocking by default."
+        ),
+    )
+    # Issue #3061: auto-derive the pad_grid tolerance from each board's
+    # pad-offset histogram by default for the CLI.  Users can opt back into
+    # the fixed-0.05mm behaviour with --pad-grid-strict, or pin a custom
+    # value with --pad-grid-tolerance.
+    pad_grid_group = parser.add_mutually_exclusive_group()
+    pad_grid_group.add_argument(
+        "--pad-grid-strict",
+        action="store_true",
+        help=(
+            "Use the fixed 0.05mm pad_grid tolerance (PR #3057 default) "
+            "instead of auto-deriving per-board from the pad-offset "
+            "histogram (issue #3061).  Default: auto-derive."
+        ),
+    )
+    pad_grid_group.add_argument(
+        "--pad-grid-tolerance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Override the pad_grid L2 tolerance with an explicit value "
+            "in mm (e.g. ``--pad-grid-tolerance 0.02``).  Disables "
+            "auto-derivation."
+        ),
+    )
+    # Issue #4595: sch_fields schematic field-geometry lint threshold.
+    parser.add_argument(
+        "--sch-field-threshold",
+        dest="sch_field_threshold",
+        type=float,
+        default=DEFAULT_SCH_FIELD_THRESHOLD_MM,
+        metavar="MM",
+        help=(
+            "Distance in mm beyond which the sch_fields lint flags a "
+            "visible Reference/Value field as adrift from its symbol body "
+            f"(default {DEFAULT_SCH_FIELD_THRESHOLD_MM}, warning severity "
+            "only; issue #4595).  Fixed threshold -- an adaptive "
+            "per-sheet-median variant is deferred."
+        ),
+    )
+    # Issue #4651: opt-in routing-quality threshold gate over the advisory
+    # #4623 metrics.  Default None = advisory-only (today's behavior).
+    parser.add_argument(
+        "--max-fragment-fraction",
+        dest="max_fragment_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's fragment_fraction (share of copper segments "
+            f"shorter than {FRAGMENT_LENGTH_MM} mm) exceeds this ceiling "
+            "(0.0-1.0). Exceeding emits an error-severity "
+            "routing_quality_fragment_fraction violation and exits 2; a "
+            "fraction exactly equal to the ceiling passes. Default: unset "
+            "(advisory-only metrics, no gating)."
+        ),
+    )
+    parser.add_argument(
+        "--max-staircase-fraction",
+        dest="max_staircase_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #4651): fail the check when "
+            "the routed board's staircase_fraction (share of copper segments "
+            f"that are H/V staircase steps with legs shorter than "
+            f"{STAIRCASE_STEP_MM} mm) exceeds this ceiling (0.0-1.0). "
+            "Exceeding emits an error-severity "
+            "routing_quality_staircase_fraction violation and exits 2; a "
+            "fraction exactly equal to the ceiling passes. Default: unset "
+            "(advisory-only metrics, no gating)."
+        ),
+    )
+    parser.add_argument(
+        "--max-off-axis-fraction",
+        dest="max_off_axis_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #8884): fail the check when "
+            "the worst single layer's length-weighted off-axis fraction "
+            "(off-axis straight copper length / total straight copper length "
+            "on that layer) exceeds this ceiling (0.0-1.0). Exceeding emits "
+            "an error-severity routing_quality_off_axis_fraction violation "
+            "and exits 2; a fraction exactly equal to the ceiling passes. "
+            "Default: unset (advisory-only)."
+        ),
+    )
+
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(argv)
+    if args.mfr:
+        args.mfr = get_profile(args.mfr).id
+
+    # Issue #5946: ``--diff OLD NEW`` checks both revisions with the remaining
+    # flags and reports the difference instead of a single-board report.
+    if args.diff is not None:
+        if args.pcb is not None:
+            parser.error(
+                "--diff OLD NEW replaces the positional pcb argument; pass one or the other"
+            )
+        if args.waive:
+            parser.error("--waive cannot be combined with --diff")
+        from kicad_tools.cli.check_diff import run_diff, strip_driver_args
+
+        return run_diff(
+            args.diff[0],
+            args.diff[1],
+            strip_driver_args(raw_argv),
+            fmt=args.format,
+            output=args.output,
+            strict=args.strict,
+            check_main=main,
+        )
+    if args.pcb is None:
+        parser.error("the following arguments are required: pcb (or --diff OLD NEW)")
+    if args.waive and not (
+        (args.waive_reason or "").strip() and (args.waive_reviewer or "").strip()
+    ):
+        parser.error("--waive requires --waive-reason and --waive-reviewer")
+
+    # Issue #4651: validate the routing-quality ceilings up front.  The
+    # metrics are fractions in [0, 1], so anything outside that range is a
+    # usage error rather than a silently-inert gate.
+    for _flag, _value in (
+        ("--max-fragment-fraction", args.max_fragment_fraction),
+        ("--max-staircase-fraction", args.max_staircase_fraction),
+        ("--max-off-axis-fraction", args.max_off_axis_fraction),
+    ):
+        if _value is not None and not (0.0 <= _value <= 1.0):
+            print(
+                f"Error: {_flag} must be a fraction between 0.0 and 1.0, got {_value}",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Issue #4601: --no-net-class-map suppresses sidecar auto-discovery.
+    # Pairing it with an explicit --net-class-map is a usage error rather
+    # than a silent precedence puzzle.
+    if getattr(args, "no_net_class_map", False) and args.net_class_map is not None:
+        print(
+            "Error: --no-net-class-map cannot be combined with "
+            f"--net-class-map {args.net_class_map!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Issue #5124: --no-current-paths suppresses sidecar auto-discovery.
+    # Pairing it with an explicit --current-paths is a usage error, mirroring
+    # the --net-class-map / --no-net-class-map exclusivity check above.
+    if getattr(args, "no_current_paths", False) and args.current_paths is not None:
+        print(
+            "Error: --no-current-paths cannot be combined with "
+            f"--current-paths {args.current_paths!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Parse and validate filter options
+    only_set: set[str] | None = None
+    skip_set: set[str] = set()
+
+    if args.only_checks:
+        only_set = set()
+        for cat in args.only_checks.split(","):
+            cat = cat.strip().lower()
+            if cat not in CHECK_CATEGORIES:
+                print(f"Error: Unknown check category: {cat!r}", file=sys.stderr)
+                print(f"Available: {', '.join(CHECK_CATEGORIES)}", file=sys.stderr)
+                return 1
+            only_set.add(cat)
+
+    if args.skip_checks:
+        for cat in args.skip_checks.split(","):
+            cat = cat.strip().lower()
+            if cat not in CHECK_CATEGORIES:
+                print(f"Error: Unknown check category: {cat!r}", file=sys.stderr)
+                print(f"Available: {', '.join(CHECK_CATEGORIES)}", file=sys.stderr)
+                return 1
+            skip_set.add(cat)
+
+    # Issue #6044: --require-routing-policy is a gate on the routing_policy
+    # category; deselecting that category would leave it silently inert.
+    if getattr(args, "require_routing_policy", False):
+        if "routing_policy" in skip_set or (
+            only_set is not None and "routing_policy" not in only_set
+        ):
+            print(
+                "Error: --require-routing-policy needs the routing_policy check "
+                "category, which --only/--skip deselected",
+                file=sys.stderr,
+            )
+            return 1
+        if getattr(args, "no_net_class_map", False):
+            print(
+                "Error: --require-routing-policy cannot be combined with "
+                "--no-net-class-map: the policies it requires live in the "
+                "net-class map",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Load PCB - resolve to absolute path for reliable file access
+    # Handles both file paths and directory paths (like kct build)
+    input_path = Path(args.pcb).resolve()
+
+    if not input_path.exists():
+        print(f"Error: Path not found: {input_path}", file=sys.stderr)
+        return 1
+
+    if input_path.is_dir():
+        # Auto-discover PCB file in directory (consistent with kct build)
+        pcb_path = _find_pcb_file(input_path)
+        if pcb_path is None:
+            print(f"Error: No .kicad_pcb file found in directory: {input_path}", file=sys.stderr)
+            print(
+                "Hint: Specify a .kicad_pcb file directly, or ensure the directory contains one.",
+                file=sys.stderr,
+            )
+            return 1
+    elif input_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {input_path.name}", file=sys.stderr)
+        print("Hint: Provide a .kicad_pcb file or a directory containing one.", file=sys.stderr)
+        return 1
+    else:
+        pcb_path = input_path
+
+    # Netlist-sync gate (issue #3154): a dedicated, blocking schematic/PCB
+    # drift check that runs *instead of* the DRC pipeline and returns its own
+    # exit code.  Reuses the Reconciler via the shared drift helpers.
+    if getattr(args, "netlist_sync", False):
+        return run_netlist_sync_gate(
+            pcb_path,
+            schematic=getattr(args, "schematic", None),
+            strict=args.strict,
+        )
+
+    # Optional pre-check zone refill (issue #4096).  When --refill-zones is
+    # set, shell out to `kicad-cli pcb drc --refill-zones --save-board` so the
+    # on-disk fills are refreshed *before* PCB.load reads them — otherwise the
+    # pure-Python clearance rules measure copper against stale committed fills
+    # and report phantom clearance_*_zone shorts.  Degrades gracefully: a
+    # missing kicad-cli (or a failed refill) warns and continues against the
+    # stored fills rather than aborting the check.
+    if getattr(args, "refill_zones", False):
+        _refill_zones_in_place(pcb_path)
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Advisory drift banner (issue #3154): when a schematic is discovered (or
+    # passed via --schematic) and the component sets have drifted, print a
+    # one-line, non-blocking warning before running DRC.  Never affects the
+    # exit code on the default run -- the hard gate lives behind --netlist-sync.
+    # The analysis is kept for the removed-pad scan's coverage entry (Issue
+    # #8942), recorded on the coverage dict below.
+    drift_analysis = _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
+
+    # Issue #3920: resolve the effective manufacturer profile.  A routed
+    # ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct check``
+    # used to hard-default to the base ``jlcpcb`` tier and report a false
+    # FAILED on legal tier-gated geometry (e.g. via-in-pad, legal at
+    # jlcpcb-tier1).  Precedence: explicit --mfr > fab_profile.json sidecar >
+    # project.kct target_fab > jlcpcb default.  An explicit flag always wins.
+    effective_mfr, mfr_notices, mfr_source = _resolve_effective_check_mfr(args.mfr, pcb_path)
+
+    if (
+        only_set
+        and "physical_copper_gap" in only_set
+        and args.physical_copper_gap is None
+        and effective_mfr != "jlcpcb"
+    ):
+        print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
+        return 1
+    for _line in mfr_notices:
+        print(_line, file=sys.stderr)
+
+    # Auto-detect layer count from PCB if not explicitly provided
+    from .mfr import resolve_layer_count
+
+    layers = resolve_layer_count(pcb, args.layers)
+
+    # Load optional net-class-map sidecar (Issue #2684).  When supplied,
+    # the diff-pair routing-continuity and length-skew rules can re-derive
+    # engagement / skew state from the routed PCB and fire.  When omitted,
+    # the rules degrade to no-ops (AC #3: graceful-degradation contract).
+    net_class_map = None
+    # Issue #3917 Defect 2: when the user did not pass --net-class-map,
+    # auto-discover the conventional sidecar written by ``kct route`` next
+    # to the routed PCB.  An explicit flag always wins and short-circuits
+    # the probe (AC3: no double-load).
+    ncm_explicit = args.net_class_map is not None
+    # Issue #4601: --no-net-class-map suppresses the probe only (the
+    # explicit-flag combination was already rejected above).
+    ncm_suppressed = bool(getattr(args, "no_net_class_map", False))
+    ncm_candidates: list[Path] = []
+    if ncm_explicit:
+        ncm_path: Path | None = Path(args.net_class_map).resolve()
+    elif ncm_suppressed:
+        ncm_path = None
+    else:
+        ncm_candidates = _net_class_map_sidecar_candidates(pcb_path)
+        ncm_path = _discover_net_class_map_sidecar(pcb_path)
+
+    if ncm_path is not None:
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        if not ncm_path.exists():
+            # Only reachable via an explicit flag (the auto-probe returns
+            # existing files only).
+            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
+            return 1
+        ncm_load_error: str | None = None
+        net_class_map = None
+        try:
+            # Canonical loader (issue #4683): the board path resolves
+            # layer-name tokens like "B.Cu" against the board's actual
+            # copper count, matching `kct route`'s acceptance exactly.
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=pcb_path)
+        except json.JSONDecodeError as e:
+            ncm_load_error = f"parsing net-class-map JSON: {e}"
+        except (TypeError, ValueError) as e:
+            ncm_load_error = f"invalid net-class-map structure: {e}"
+
+        if ncm_load_error is not None:
+            if ncm_explicit:
+                # An explicit path that fails to load is a hard error --
+                # the user asked for it specifically.
+                print(f"Error: {ncm_load_error}", file=sys.stderr)
+                return 1
+            # An auto-discovered sidecar that fails to load degrades
+            # gracefully: warn and fall back to no-sidecar behaviour
+            # rather than crashing the whole check (Issue #3917 edge case).
+            print(
+                f"WARNING: ignoring malformed net-class-map sidecar {ncm_path}: {ncm_load_error}",
+                file=sys.stderr,
+            )
+            net_class_map = None
+        elif not ncm_explicit:
+            # Auto-loaded successfully: tell the user which file engaged
+            # the sidecar-gated rules (AC2).
+            print(
+                f"[INFO] auto-loaded net-class-map sidecar: {ncm_path}",
+                file=sys.stderr,
+            )
+
+    # Issue #3440: the skew rules (match_group_length_skew,
+    # diffpair_length_skew, diffpair_routing_continuity) degrade to
+    # silent no-ops without the --net-class-map sidecar -- "Rules
+    # checked" excludes them and the check PASSES even with 15mm of
+    # group skew on the board.  Warn LOUDLY when any of those rules is
+    # selected but cannot engage, so a recipe that forgot the sidecar
+    # doesn't sail through green.
+    if net_class_map is None:
+        _sidecar_dependent_rules = (
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length",
+        )
+        _inactive_rules = [
+            rule
+            for rule in _sidecar_dependent_rules
+            if (only_set is None or rule in only_set) and rule not in skip_set
+        ]
+        if _inactive_rules:
+            # Issue #4601: name what was actually probed instead of an
+            # invented example path that may not correspond to the layout
+            # in use.
+            _head = (
+                "WARNING: the following rules are INACTIVE without "
+                "--net-class-map and will silently pass: "
+                f"{', '.join(_inactive_rules)}."
+            )
+            if ncm_suppressed:
+                _tail = (
+                    "  Sidecar auto-discovery was disabled with "
+                    "--no-net-class-map; drop that flag or pass a sidecar "
+                    "explicitly with --net-class-map to validate "
+                    "length-match skew."
+                )
+            elif ncm_path is not None:
+                _tail = (
+                    f"  The sidecar at {ncm_path} could not be loaded (see "
+                    "the warning above); fix it or pass a different one with "
+                    "--net-class-map to validate length-match skew."
+                )
+            else:
+                _probed = "".join(f"\n  {candidate}" for candidate in ncm_candidates)
+                _tail = (
+                    f"  No sidecar was found at any of:{_probed}\n"
+                    "Pass one explicitly with --net-class-map, or place it at "
+                    "one of the paths above, to validate length-match skew."
+                )
+            print(_head + _tail, file=sys.stderr)
+
+    # Issue #6044: the routing-policy gate cannot pass without the map that
+    # declares the policies -- a usage error, not a silent pass.
+    if getattr(args, "require_routing_policy", False) and net_class_map is None:
+        print(
+            "Error: --require-routing-policy needs a net-class map, but none "
+            "was loaded. Pass one with --net-class-map or place "
+            "net_class_map.json next to the board.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Load optional courtyard-waivers sidecar (Issue #4137).  An explicit
+    # --courtyard-waivers path always wins and a malformed explicit file is a
+    # hard error; an auto-discovered sidecar that fails to parse degrades
+    # gracefully (warn + zero waivers) -- mirroring the --net-class-map
+    # contract above exactly.
+    from kicad_tools.validate.rules.courtyard_waivers import (
+        discover_courtyard_waivers_sidecar,
+        load_courtyard_waivers,
+    )
+
+    courtyard_waivers = None
+    cw_explicit = args.courtyard_waivers is not None
+    if cw_explicit:
+        cw_path: Path | None = Path(args.courtyard_waivers).resolve()
+    else:
+        cw_path = discover_courtyard_waivers_sidecar(pcb_path)
+
+    if cw_path is not None:
+        if not cw_path.exists():
+            # Only reachable via an explicit flag (the auto-probe returns
+            # existing files only).
+            print(f"Error: courtyard-waivers file not found: {cw_path}", file=sys.stderr)
+            return 1
+        try:
+            courtyard_waivers = load_courtyard_waivers(cw_path)
+        except ValueError as e:
+            if cw_explicit:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+            print(
+                f"WARNING: ignoring malformed courtyard-waivers sidecar {cw_path}: {e}",
+                file=sys.stderr,
+            )
+            courtyard_waivers = None
+        else:
+            if not cw_explicit:
+                print(
+                    f"[INFO] auto-loaded courtyard-waivers sidecar: {cw_path}",
+                    file=sys.stderr,
+                )
+
+    # Load optional general waivers sidecar (Issue #4417).  Same load/degrade
+    # contract as --courtyard-waivers above: an explicit --waivers path always
+    # wins and a malformed explicit file is a hard error; an auto-discovered
+    # .kct_waivers.json that fails to parse degrades gracefully (warn + zero
+    # waivers).  Applied centrally after check_all() (below), so it covers any
+    # rule id -- not just courtyards_overlap.
+    from kicad_tools.validate.rules.waivers import (
+        discover_waivers_sidecar,
+        load_waivers,
+        shadowed_waivers_sidecars,
+    )
+
+    general_waivers = None
+    gw_explicit = args.waivers is not None
+    if gw_explicit:
+        gw_path: Path | None = Path(args.waivers).resolve()
+    else:
+        gw_path = discover_waivers_sidecar(pcb_path)
+        if gw_path is not None:
+            for shadowed in shadowed_waivers_sidecars(pcb_path, gw_path):
+                print(
+                    f"WARNING: waivers sidecar {shadowed} is NOT applied: {gw_path} takes"
+                    " precedence and only one sidecar is loaded. Move its entries into"
+                    f" {gw_path.name} (or pass --waivers explicitly).",
+                    file=sys.stderr,
+                )
+
+    if gw_path is not None and not gw_path.exists() and gw_explicit and args.waive:
+        # Issue #6054: ``--waivers NEW --waive KEY`` creates NEW (e.g. the
+        # input board's sidecar named by ``kct route --lint-gate``) instead of
+        # refusing because there is nothing to load yet.
+        pass
+    elif gw_path is not None:
+        if not gw_path.exists():
+            print(f"Error: waivers file not found: {gw_path}", file=sys.stderr)
+            return 1
+        try:
+            general_waivers = load_waivers(gw_path)
+        except ValueError as e:
+            if gw_explicit:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+            print(
+                f"WARNING: ignoring malformed waivers sidecar {gw_path}: {e}",
+                file=sys.stderr,
+            )
+            general_waivers = None
+        else:
+            if not gw_explicit:
+                print(
+                    f"[INFO] auto-loaded waivers sidecar: {gw_path}",
+                    file=sys.stderr,
+                )
+
+    # Load optional current-paths sidecar (Issue #4980/#5124).  When
+    # supplied, path_ampacity checks each declared branch-specific
+    # current-path against its OWN declared current.  Same
+    # explicit-wins / auto-discover / degrade-gracefully-on-auto-discovered-
+    # malformed-file contract as --net-class-map above.
+    current_path_specs: list[CurrentPathSpec] = []
+    cp_explicit = args.current_paths is not None
+    cp_suppressed = bool(getattr(args, "no_current_paths", False))
+    cp_candidates: list[Path] = []
+    if cp_explicit:
+        cp_path: Path | None = Path(args.current_paths).resolve()
+    elif cp_suppressed:
+        cp_path = None
+    else:
+        cp_candidates = current_paths_sidecar_candidates(pcb_path)
+        cp_path = discover_current_paths_sidecar(pcb_path)
+
+    if cp_path is not None:
+        if not cp_path.exists():
+            # Only reachable via an explicit flag (the auto-probe returns
+            # existing files only).
+            print(f"Error: current-paths file not found: {cp_path}", file=sys.stderr)
+            return 1
+        try:
+            current_path_specs = load_current_path_specs(cp_path)
+        except (OSError, ValueError) as e:
+            if cp_explicit:
+                print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
+                return 1
+            print(
+                f"WARNING: ignoring malformed current-paths sidecar {cp_path}: {e}",
+                file=sys.stderr,
+            )
+            current_path_specs = []
+        else:
+            if not cp_explicit:
+                print(
+                    f"[INFO] auto-loaded current-paths sidecar: {cp_path}",
+                    file=sys.stderr,
+                )
+    elif not cp_suppressed and cp_candidates and (only_set is None or "path_ampacity" in only_set):
+        # No sidecar found anywhere probed -- name what was probed so a
+        # user who forgot to place one isn't left guessing (mirrors the
+        # --net-class-map "INACTIVE" warning below).
+        if "path_ampacity" not in skip_set:
+            _probed = "".join(f"\n  {candidate}" for candidate in cp_candidates)
+            print(
+                "WARNING: path_ampacity is INACTIVE without --current-paths "
+                f"and will silently pass. No sidecar was found at any of:{_probed}\n"
+                "Pass one explicitly with --current-paths, or place it at one "
+                "of the paths above, to validate declared branch current paths.",
+                file=sys.stderr,
+            )
+
+    # Issue #4321 (Tier 1/2): resolve the loaded net-class-map's user keys
+    # onto the board's actual net names *before* handing the map to
+    # DRCChecker, mirroring ``route_cmd._apply_net_class_map_sidecar``.
+    #
+    # ``kct check`` reaches ampacity via
+    # ``DRCChecker.check_ampacity`` -> ``derive_ampacity_specs(net_class_map)``
+    # -> ``AmpacityRule.check``, which matches segments by
+    # ``segment.net_name in self.specs`` -- i.e. only when the map's keys
+    # land exactly on the board's segment net names.  ``route`` resolves the
+    # map's keys onto board net names before use; ``check`` historically did
+    # NOT.  A hand-authored ``--net-class-map`` (bare keys, or keys lacking
+    # KiCad's hierarchical ``/`` sheet prefix) therefore matched ZERO
+    # segments, so ``derive_ampacity_specs`` produced specs that never fired
+    # -> 0 errors -> a silent false PASS on a dangerously under-width
+    # high-current trace.  After resolution the ampacity verdict is a pure
+    # function of ``(board segments, resolved map, DesignRules copper
+    # weights)`` and no longer depends on how the board was produced (route
+    # mode / ``.kicad_dru`` presence).  This applies to both the explicit
+    # ``--net-class-map`` path and the auto-discovered route sidecar (whose
+    # keys are already board-resolved, so re-resolution is idempotent).
+    declared_ampacity_targets: dict[str, float] = {}
+    declared_routing_policies: set[str] = set()
+    ampacity_resolution = None
+    if net_class_map is not None:
+        from kicad_tools.validate.rules.routing_policy import declares_routing_policy
+
+        for key, nc in net_class_map.items():
+            target = getattr(nc, "target_ampacity", None)
+            if target is not None:
+                declared_ampacity_targets[key] = float(target)
+            if declares_routing_policy(nc):
+                declared_routing_policies.add(key)
+        net_class_map, ampacity_resolution = resolve_net_class_map_for_board(net_class_map, pcb)
+
+    # Issue #4326: resolve the ampacity gate's copper weights (outer / inner
+    # oz).  Precedence, per layer class: an EXPLICIT ``--copper`` (keyed >
+    # scalar) > the board's DECLARED ``(setup (stackup ...))`` copper weight
+    # (Tier 1 -- the new default source of truth) > the profile default.
+    #
+    # This override is scoped to the ampacity copper weights ONLY
+    # (design_rules.outer_copper_oz / inner_copper_oz); the preset's
+    # min-trace-width / clearance rules stay governed by ``--copper`` /
+    # ``--mfr`` exactly as before, so Tier 1 cannot flip unrelated verdicts.
+    cli_copper_outer: float | None = None
+    cli_copper_inner: float | None = None
+    copper_explicit = args.copper is not None
+    if copper_explicit:
+        try:
+            cli_copper_outer, cli_copper_inner = _parse_copper_weight_arg(args.copper)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    # Preset selection still keys on the scalar/outer ``--copper`` (or the
+    # historical 1oz default) -- only the ampacity copper weights follow the
+    # declared stackup.
+    # Tier 1: derive copper weights from the board's declared stackup.
+    stackup_outer, stackup_inner = stackup_copper_oz(pcb)
+
+    # Issue #8836: the manufacturer floors (clearance, width) scale with outer
+    # copper weight, so an undeclared ``--copper`` follows the declared stackup
+    # instead of silently using the 1oz floors.
+    preset_copper_oz = (
+        cli_copper_outer
+        if cli_copper_outer is not None
+        else (stackup_outer if stackup_outer is not None else 1.0)
+    )
+
+    # Per-class resolution: explicit --copper wins, else the declared
+    # stackup, else None (leave the profile default in place).
+    resolved_copper_outer = cli_copper_outer if cli_copper_outer is not None else stackup_outer
+    resolved_copper_inner = cli_copper_inner if cli_copper_inner is not None else stackup_inner
+
+    # Tier 2: loud warning when an EXPLICIT --copper disagrees with the
+    # board's declared stackup.  Explicit --copper WINS (a deliberate
+    # operator override), but silently ignoring the board's declaration
+    # would itself be a footgun, so we always warn -- and under --strict the
+    # disagreement is fatal so an autonomous agent cannot sail past it.
+    def _copper_disagrees(cli_oz: float | None, stk_oz: float | None) -> bool:
+        return cli_oz is not None and stk_oz is not None and abs(cli_oz - stk_oz) > 1e-6
+
+    copper_disagreement = False
+    if copper_explicit:
+        if _copper_disagrees(cli_copper_outer, stackup_outer):
+            copper_disagreement = True
+            print(
+                f"WARNING: stackup declares {stackup_outer:g}oz outer but --copper "
+                f"requests {cli_copper_outer:g}oz — ampacity is evaluating at "
+                f"{cli_copper_outer:g}oz. Pass --copper {stackup_outer:g} or fix the stackup.",
+                file=sys.stderr,
+            )
+        if _copper_disagrees(cli_copper_inner, stackup_inner):
+            copper_disagreement = True
+            print(
+                f"WARNING: stackup declares {stackup_inner:g}oz inner but --copper "
+                f"requests {cli_copper_inner:g}oz — ampacity is evaluating at "
+                f"{cli_copper_inner:g}oz. Pass --copper inner={stackup_inner:g} or fix the stackup.",
+                file=sys.stderr,
+            )
+        if copper_disagreement and args.strict:
+            print(
+                "ERROR: --strict: stackup-vs---copper copper-weight disagreement is "
+                "fatal (exit 2). Reconcile --copper with the board's declared stackup.",
+                file=sys.stderr,
+            )
+
+    # Issue #8826: record the effective ampacity copper weights and where each
+    # came from, so the header / JSON report make a --copper-vs-stackup
+    # difference diagnosable.
+    copper_weights = _copper_weights_provenance(
+        resolved_copper_outer,
+        resolved_copper_inner,
+        cli_copper_outer,
+        cli_copper_inner,
+        stackup_outer,
+        stackup_inner,
+        disagreement=copper_disagreement,
+    )
+    # Issue #8836: name the outer weight the manufacturer floors were derived for.
+    copper_weights["floors_outer_oz"] = preset_copper_oz
+
+    mask_copper_request = None
+    if getattr(args, "mask_copper_config", None):
+        from kicad_tools.validate.mask_copper import MaskCopperRequest
+
+        try:
+            mask_copper_request = MaskCopperRequest.from_file(args.mask_copper_config)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            print(f"Error: invalid mask-to-copper request: {exc}", file=sys.stderr)
+            return 1
+
+    # Issue #8940: an explicitly supplied recorded fab DFM result drives the
+    # kct-vs-fab comparison in the Fab DFM parity stanza/JSON.  Malformed or
+    # unreadable input is a clear tool-level error, never a silent fall back
+    # to the uncompared stanza.
+    fab_result_counts = None
+    if getattr(args, "fab_dfm_result", None):
+        from kicad_tools.validate.fab_dfm_parity import RecordedResultError, load_recorded_result
+
+        try:
+            fab_result_counts = load_recorded_result(args.fab_dfm_result)
+        except RecordedResultError as exc:
+            print(f"Error: --fab-dfm-result: {exc}", file=sys.stderr)
+            return 1
+
+    if (
+        mask_copper_request is None
+        and getattr(args, "mfr", None)
+        and "mask_to_copper" not in skip_set
+        and (only_set is None or "mask_to_copper" in only_set)
+    ):
+        # Issue #8842: an explicit --mfr turns mask_to_copper on by default
+        # using that manufacturer's cited interim policy (None => stays opt-in).
+        from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+        mask_copper_request = default_request_for_manufacturer(effective_mfr)
+        mask_copper_default_applied = mask_copper_request is not None
+    else:
+        mask_copper_default_applied = False
+
+    if (
+        mask_copper_request is not None
+        and not mask_copper_default_applied
+        and (
+            "mask_to_copper" in skip_set
+            or (only_set is not None and "mask_to_copper" not in only_set)
+        )
+    ):
+        print(
+            "Error: explicit mask-copper config conflicts with --only/--skip selection",
+            file=sys.stderr,
+        )
+        return 1
+
+    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+    from kicad_tools.validate.coverage import _declares_ampacity
+
+    declared_spec_currents = resolve_declared_currents_for_pcb(pcb_path)
+    if declared_spec_currents and not _declares_ampacity(net_class_map):
+        print(
+            f"Note: project.kct declares {len(declared_spec_currents)} current "
+            "requirement(s) but no net class carries target_ampacity; add "
+            "`target_ampacity` to the net classes carrying it (net_class_map.json).",
+            file=sys.stderr,
+        )
+
+    # Create checker with manufacturer rules
+    try:
+        # Issue #8938: resolve the stackup's fab-view gap bands (same DFM-table
+        # lookup path as _apply_dfm_table below) for the net-agnostic copper
+        # gap pass.  None (no table / no entry) fails closed in the checker.
+        fab_view_gap_policy = None
+        if effective_mfr == "jlcpcb":
+            fab_view_gap_policy = _resolve_fab_gap_policy(
+                effective_mfr,
+                layers,
+                resolved_copper_outer,
+                resolved_copper_inner,
+                preset_copper_oz,
+                len(pcb.copper_layers),
+            )
+        checker = DRCChecker(
+            pcb,
+            manufacturer=effective_mfr,
+            layers=layers,
+            copper_oz=preset_copper_oz,
+            copper_oz_outer=resolved_copper_outer,
+            copper_oz_inner=resolved_copper_inner,
+            suppress_library=args.suppress_library,
+            net_class_map=net_class_map,
+            authored_min_clearance_mm=_authored_min_clearance_mm(pcb_path),
+            # The CLI already prints its own up-front INACTIVE warning
+            # below, so suppress the per-rule checker-level warning here to
+            # avoid duplicating it (Issue #3917 Defect 3).
+            warn_on_inactive_skew_rules=False,
+            verbose=args.verbose,
+            # Always collect the per-pair / per-group measured skew info
+            # findings so ``output_table`` can render the measurement
+            # summary at default verbosity (Issue #3924 AC1).  With no
+            # sidecar the skew rules produce no info findings, so this is a
+            # graceful no-op (AC5).
+            emit_measurements=True,
+            physical_copper_gap_mm=getattr(args, "physical_copper_gap", None),
+            # Issue #8843: net-agnostic fab view is default-on under jlcpcb.
+            fab_view=effective_mfr == "jlcpcb",
+            fab_view_copper_oz=resolved_copper_outer,
+            fab_view_gap_policy=fab_view_gap_policy,
+            courtyard_waivers=courtyard_waivers,
+            # Issue #4673: strict (real-geometry) connectivity is the
+            # default; --legacy-connectivity is the explicit opt-out and
+            # takes precedence over --strict-connectivity, which is now a
+            # compatibility no-op restating the default.
+            strict_connectivity=not getattr(args, "legacy_connectivity", False),
+            # Issue #4980/#5124: declared branch-specific current-path
+            # intent (--current-paths sidecar, auto-discovered).
+            current_path_specs=current_path_specs,
+            # Issue #8746: gauge source + reinforcement-citing ampacity waivers
+            # for reinforcement_incomplete.
+            reinforcement_wires=load_wires_if_present(pcb_path),
+            reinforcement_waived_nets=reinforcement_waived_nets(
+                general_waivers.entries if general_waivers is not None else ()
+            ),
+            # Issue #7206: spec-declared currents with no target_ampacity
+            # make ampacity coverage ``unknown`` instead of a vacuous skip.
+            declared_spec_currents=declared_spec_currents,
+            mask_copper_request=mask_copper_request,
+            # Issue #6044: routing_policy options.  Pair-net via caps are
+            # left to diffpair_uncoupled_length only when that category runs.
+            require_routing_policy=bool(getattr(args, "require_routing_policy", False)),
+            routing_policy_defer_pair_vias=(
+                (only_set is None or "diffpair_uncoupled_length" in only_set)
+                and "diffpair_uncoupled_length" not in skip_set
+            ),
+            # Issue #8839: _apply_dfm_table (below) fails closed with an
+            # ``incomplete`` verdict for fabs that have a table; other fabs
+            # keep the #8836 hard raise.
+            strict_copper=get_profile(effective_mfr).dfm_thresholds is None,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Issue #8839: floors come from the versioned, provenance-carrying DFM
+    # threshold table; a stackup with no entry fails closed (verdict
+    # ``incomplete``) instead of silently using another copper weight.
+    dfm_incomplete = _apply_dfm_table(
+        checker,
+        effective_mfr,
+        layers,
+        resolved_copper_outer,
+        resolved_copper_inner,
+        preset_copper_oz,
+        copper_weights,
+    )
+
+    # NOTE (#8839): the #5006 per-board override below runs AFTER the table, so
+    # a cited board override may lower a table floor (it is the board's own
+    # cited exception); the table is the default, not a hard minimum.
+    # Issue #5006: apply a validated, cited per-board fabrication-floor
+    # override on top of the manufacturer profile's resolved DesignRules --
+    # BEFORE any check runs and BEFORE --emit-drc-constraints below reads
+    # ``checker.design_rules`` -- so Python DRC and any emitted native
+    # sidecars agree on the SAME reviewed floor (e.g. a board whose actual,
+    # cited geometry meets JLC's published 0.45mm pad-hole floor rather than
+    # the profile's conservative 0.5mm default). Auto-discovered only (no
+    # CLI flag): a missing sidecar is a no-op; a malformed or unsafe one
+    # degrades gracefully to the profile default rather than raising, since
+    # that fallback is always safe.
+    checker.design_rules, _fab_override_msg = resolve_pcb_fabrication_overrides(
+        pcb_path, checker.design_rules, manufacturer_id=effective_mfr
+    )
+    if _fab_override_msg is not None:
+        _prefix = "WARNING: " if _fab_override_msg.startswith("ignoring") else "[INFO] "
+        print(_prefix + _fab_override_msg, file=sys.stderr)
+
+    # Resolve pad_grid tolerance policy (issue #3061).
+    # Precedence: explicit value > strict mode > auto-derive (CLI default).
+    if args.pad_grid_tolerance is not None:
+        pad_grid_threshold: float | None = args.pad_grid_tolerance
+        pad_grid_auto_derive = False
+    elif args.pad_grid_strict:
+        pad_grid_threshold = None  # Falls through to DEFAULT_PAD_GRID_TOLERANCE_MM
+        pad_grid_auto_derive = False
+    else:
+        pad_grid_threshold = None
+        pad_grid_auto_derive = True
+
+    # Issue #4595: resolve the schematic for the sch_fields lint category,
+    # via the exact resolution ERC/LVS use (explicit --schematic override,
+    # else sibling discovery).  Resolution is skipped -- and the category is
+    # therefore a silent no-op -- when the category is deselected, or under
+    # --drc-only (which pins the legacy PCB-only stdout/exit contract, so
+    # schematic-sourced findings must not appear there; documented decision).
+    # No schematic resolved => the closure emits nothing and never fails
+    # (the #4350 loud missing-schematic stderr warning covers visibility).
+    sch_fields_active = (
+        (only_set is None or "sch_fields" in only_set)
+        and "sch_fields" not in skip_set
+        and not getattr(args, "drc_only", False)
+    )
+    sch_path: Path | None = None
+    if sch_fields_active:
+        sch_path = _resolve_check_schematic(getattr(args, "schematic", None), pcb_path)
+
+    # Run selected checks
+    coverage: dict = {}
+    check_scope = _resolve_check_scope(args, parser, pcb)
+    results = run_selected_checks(
+        checker,
+        only_set,
+        skip_set,
+        pad_grid_threshold=pad_grid_threshold,
+        pad_grid_auto_derive=pad_grid_auto_derive,
+        sch_path=sch_path,
+        sch_field_threshold=args.sch_field_threshold,
+        pcb_path=pcb_path,
+        layers=layers,
+        coverage=coverage,
+        drc_only=getattr(args, "drc_only", False),
+        opt_in={"model_coverage"} if getattr(args, "models_3d", False) else frozenset(),
+    )
+
+    # Issue #8942: the removed-pad scan ran inside the advisory drift
+    # analysis above; record what it could evaluate ("unknown is not pass").
+    _removed_pad_scan_coverage(coverage, drift_analysis)
+
+    # Issue #5946: bind every finding to a hash of its local evidence (its
+    # geometry, the footprints it names and the membership of its nets).
+    # Evidence-bound waivers and ``--diff`` both key off this.
+    from kicad_tools.validate.evidence import annotate_evidence
+
+    annotate_evidence(results, pcb)
+
+    # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for
+    # the current findings with that key, then applies them below.
+    if args.waive:
+        from kicad_tools.validate.rules.waivers import write_keyed_waivers
+
+        wanted = list(dict.fromkeys(args.waive))
+        targets = [
+            v
+            for v in results.violations
+            if isinstance(v, DRCViolation) and v.key in wanted and not v.waived
+        ]
+        missing = [k for k in wanted if not any(v.key == k for v in targets)]
+        if missing:
+            listed = ", ".join(repr(k) for k in missing)
+            if not targets:
+                print(
+                    f"Error: --waive names no current finding for key(s): {listed}"
+                    ". Copy the 'key' field from `kct check --format json`.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"WARNING: --waive names no current finding for key(s): {listed}"
+                " (skipped; the other key(s) are still recorded).",
+                file=sys.stderr,
+            )
+        waive_path = (
+            gw_path
+            if gw_path is not None
+            else pcb_path.parent / f"{pcb_path.stem}.kct-waivers.json"
+        )
+        try:
+            written = write_keyed_waivers(
+                waive_path,
+                targets,
+                reason=args.waive_reason,
+                reviewer=args.waive_reviewer,
+                issue=args.waive_issue,
+            )
+            general_waivers = load_waivers(waive_path)
+        except (OSError, ValueError) as e:
+            print(f"Error: cannot record waiver(s) in {waive_path}: {e}", file=sys.stderr)
+            return 1
+        print(
+            f"[INFO] recorded {written} evidence-bound waiver(s) in {waive_path}",
+            file=sys.stderr,
+        )
+
+    # Issue #4417: apply general waivers centrally, once, AFTER all checks run.
+    # This marks matching findings waived (visible, counted separately, excluded
+    # from error_count) and appends a waiver_unused info advisory for any stale
+    # entry.  It intentionally runs on the raw results before the errors-only
+    # filter and exit-code computation below.  The courtyard rule keeps its own
+    # per-rule waiver path (Issue #4137); apply_waivers skips already-waived
+    # findings, so the two paths compose without double-waiving.
+    if general_waivers is not None:
+        from kicad_tools.validate.rules.waivers import apply_waivers
+
+        # Issue #6006: ``mistake.*`` entries belong to ``kct detect-mistakes``
+        # (same sidecar); they must not read as unused here.
+        apply_waivers(results, general_waivers.for_check())
+
+    # Issue #4321 (Tier 3): fail loud when an ampacity target was declared
+    # but never evaluated.  A declared ``target_ampacity`` that matched zero
+    # segments is indistinguishable, in the report, from "genuinely 0
+    # violations" -- yet it usually means the rule never engaged: a
+    # post-resolution key miss, an unrouted net, or the ``ampacity`` category
+    # excluded via ``--skip``/``--only``.  Emit a loud stderr warning naming
+    # the net(s) so a hand-authored map that silently fails to match cannot
+    # sail through green (mirrors the INACTIVE-skew-rules warning above).
+    if declared_ampacity_targets and ampacity_resolution is not None:
+        _warn_unevaluated_ampacity(
+            declared_ampacity_targets,
+            ampacity_resolution,
+            pcb,
+            only_set,
+            skip_set,
+        )
+
+    # Issue #6044: same contract for declared routing policies -- a policy
+    # whose key matched no board net, whose net has no copper, or whose
+    # category was deselected must not read as a pass.
+    if declared_routing_policies and ampacity_resolution is not None:
+        _warn_unevaluated_routing_policy(
+            declared_routing_policies,
+            ampacity_resolution,
+            pcb,
+            only_set,
+            skip_set,
+        )
+
+    # Issue #3920 (Layer 2): non-blocking advisory when the active profile
+    # does not permit via-in-pad yet the results contain via_in_pad findings
+    # AND a registered profile DOES permit them.  Prints a loud, actionable
+    # stderr hint naming the permitting tier, worded per how `effective_mfr`
+    # was resolved (#4701) so a declared tier is never reported as
+    # "defaulted".  This is advisory ONLY -- it must not change the verdict
+    # or exit code.
+    _maybe_emit_via_in_pad_tier_advisory(effective_mfr, results.violations, source=mfr_source)
+
+    # Issue #5009: the missing/ineligible process advisory is orthogonal to
+    # the tier-gate advisory above (it fires even when the active tier DOES
+    # claim via-in-pad support) -- see the function docstring.
+    _maybe_emit_via_in_pad_process_advisory(results.violations)
+
+    # Issue #4623 / #4651: advisory routing-quality metrics + opt-in
+    # threshold gate.  Metrics are computed in meta mode -- skipped under
+    # --drc-only to keep the legacy stdout and on-disk JSON contracts
+    # byte-identical (#3750), mirroring how ``meta_checks`` is omitted --
+    # EXCEPT when a --max-*-fraction ceiling was passed: gating is an
+    # explicit opt-in, so it engages under --drc-only too (the advisory
+    # stanza and ``routing_quality`` JSON object then appear there as
+    # well).  Without threshold flags the metrics stay advisory ONLY:
+    # they never change the verdict, exit code, or meta rollup
+    # (including under --strict); a metrics crash degrades to a stderr
+    # warning, never a failed check.  With gating requested, a metrics
+    # crash IS fatal (exit 1) -- an explicitly requested gate must never
+    # silently pass because it could not measure.
+    drc_only = getattr(args, "drc_only", False)
+    rq_gating = (
+        args.max_fragment_fraction is not None
+        or args.max_staircase_fraction is not None
+        or args.max_off_axis_fraction is not None
+    )
+    routing_quality: RoutingQualityMetrics | None = None
+    if not drc_only or rq_gating:
+        try:
+            routing_quality = compute_routing_quality(pcb)
+        except Exception as exc:
+            if rq_gating:
+                print(
+                    f"Error: routing-quality metrics unavailable ({exc}); "
+                    "cannot evaluate --max-fragment-fraction / "
+                    "--max-staircase-fraction / --max-off-axis-fraction",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"Warning: routing-quality metrics unavailable ({exc}); "
+                "continuing without the advisory stanza",
+                file=sys.stderr,
+            )
+    # Widened to dict[str, object] because the opt-in gate (below) merges
+    # in nested threshold/verdict structures alongside the scalar metrics.
+    routing_quality_dict: dict[str, object] | None = None
+    if routing_quality is not None:
+        routing_quality_dict = {**routing_quality.to_dict()}
+
+    # Issue #4651: evaluate the opt-in ceilings and convert each breach
+    # into a real error-severity violation so the gate participates in
+    # the normal verdict / exit-code path (table/JSON output, error
+    # counts, DRC sub-check status, meta rollup).  Severity is error by
+    # design: the ceiling only exists because the caller opted in, so
+    # exceeding it is a deliberate CI failure, not an advisory.  The
+    # ``routing_quality`` JSON object gains the applied thresholds and
+    # pass/fail verdict so consumers can see why the gate fired.
+    if rq_gating and routing_quality is not None and routing_quality_dict is not None:
+        rq_breaches = evaluate_routing_quality_thresholds(
+            routing_quality,
+            max_fragment_fraction=args.max_fragment_fraction,
+            max_staircase_fraction=args.max_staircase_fraction,
+            max_off_axis_fraction=args.max_off_axis_fraction,
+        )
+        for rq_breach in rq_breaches:
+            results.add(
+                DRCViolation(
+                    rule_id=rq_breach.rule_id,
+                    severity="error",
+                    message=rq_breach.message,
+                    actual_value=rq_breach.actual,
+                    required_value=rq_breach.limit,
+                )
+            )
+        routing_quality_dict = {
+            **routing_quality_dict,
+            **routing_quality_gate_dict(
+                rq_breaches,
+                max_fragment_fraction=args.max_fragment_fraction,
+                max_staircase_fraction=args.max_staircase_fraction,
+                max_off_axis_fraction=args.max_off_axis_fraction,
+            ),
+        }
+
+    # Issue #5946: findings added after the first annotation pass (the
+    # routing-quality gate, waiver advisories) get their evidence hash too.
+    annotate_evidence(results, pcb)
+    coverage_dict = coverage_to_dict(coverage)
+
+    # Apply errors-only filter
+    violations = list(results.violations)
+    if args.errors_only:
+        violations = [v for v in violations if v.is_error]
+
+    # Issue #8016: --bbox/--refs/--nets filter the findings (checks still ran
+    # over the whole board).  Applied before the verdict so ``summary`` and the
+    # exit code reflect in-scope findings only.
+    scope_record: dict | None = None
+    if check_scope is not None:
+        violations, scope_record = check_scope.apply(violations)
+
+    # Fill-freshness advisory (issue #4096).  The clearance_*_zone rules
+    # measure copper against the committed `filled_polygon` geometry, which is
+    # only trustworthy if the on-disk fills are in sync with the copper.  A
+    # board refilled/routed after its fills were last saved produces phantom
+    # clearance_segment_zone / clearance_via_zone / clearance_pad_zone shorts
+    # that vanish once the fills are refreshed.  Warn loudly whenever any of
+    # those findings are present, pointing at the authoritative refill — unless
+    # the user already asked for it via --refill-zones (in which case the fills
+    # are already fresh and any residual findings are real).
+    if not getattr(args, "refill_zones", False):
+        _warn_stale_zone_fills(results.violations, pcb_path)
+
+    # Issue #8643: missing / stock-default project rules mean kicad-cli-style
+    # DRC ran on KiCad defaults.  Advisory only; surfaced in the JSON too.
+    from kicad_tools.sidecars import project_rules_findings
+
+    project_rules = project_rules_findings(pcb_path)
+    for finding in project_rules:
+        print(f"WARNING: {finding['code']}: {finding['message']}", file=sys.stderr)
+
+    # Issue #3750 / #7260: the DRC sub-check, the meta-check rollup (ERC +
+    # LVS + manifest; skipped under --drc-only to preserve the legacy
+    # stdout/exit-code contract) and the verdict/exit code are computed by
+    # :func:`evaluate_check_verdict`, the one implementation shared with
+    # every in-process caller (the MCP ``get_drc_violations`` tool).
+    # (``drc_only`` itself is resolved earlier, before the routing-quality
+    # metrics block, #4651.)
+    #
+    # Exit code / verdict (decided before output so JSON can carry it).
+    # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
+    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
+    # Exit 0 = no errors (warnings may be present without --strict; infos
+    #   never affect exit code -- they are advisory by definition).
+    # Issue #3750: when the meta-check rollup is in play (default mode),
+    # exit 2 also when any sub-check is FAILED, and -- per AC #3 --
+    # exit 2 when the rollup is INCOMPLETE (any sub-check is NOT RUN)
+    # unless the caller opted in to ``--allow-incomplete``.
+    #
+    # Issue #4326 (Tier 2 safety backstop): under --strict, a stackup-vs-
+    # --copper copper-weight disagreement is fatal on its own (a warning
+    # already fired above), so an autonomous agent cannot sail past an
+    # ampacity evaluation that silently ignored the board's declared build.
+    check_verdict = evaluate_check_verdict(
+        pcb_path,
+        results,
+        violations,
+        schematic=getattr(args, "schematic", None),
+        strict=bool(args.strict),
+        allow_incomplete=bool(getattr(args, "allow_incomplete", False)),
+        drc_only=drc_only,
+        strict_copper_disagreement=bool(args.strict and copper_disagreement),
+        mask_copper_default=mask_copper_default_applied,
+        dfm_incomplete=dfm_incomplete,
+        manufacturer=args.mfr,
+        recorded_fab_counts=fab_result_counts,
+    )
+    fab_dfm_parity = (
+        check_verdict.fab_dfm_parity.to_dict() if check_verdict.fab_dfm_parity else None
+    )
+    meta = check_verdict.meta
+    verdict, exit_code = check_verdict.verdict, check_verdict.exit_code
+
+    # Issue #5009: resolve the active manufacturer's declared via-in-pad
+    # fabrication process (if any) into a machine-readable dict, bound to
+    # the same evidence this JSON report already carries -- generalizes
+    # boards 03/04's ad hoc ``fabrication_overrides`` block.  ``None`` when
+    # no ``via_in_pad_process_id`` is declared (the common case).
+    fabrication_process_dict = describe_selection(checker.design_rules)
+    machine_output = args.format in ("json", "sarif")
+    if results.mask_copper_assessments and not machine_output:
+        # Issue #8949: collapse the repeated reason lines (the live
+        # incomplete case repeats one line hundreds of times, burying the
+        # distinct causes) with the same shared rule the coverage row uses,
+        # at a wider stdout bound -- and print one remediation line naming
+        # what to configure.  JSON/SARIF output is untouched (the guard
+        # above); the machine report already carries the full reasons list.
+        for assessment in results.mask_copper_assessments:
+            print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
+            # Issue #8991: a ``complete`` assessment with nothing to report
+            # prints only the header; the "no reason reported" placeholder is
+            # kept for non-complete states (and for any reasons present).
+            if assessment.reasons or assessment.coverage != "complete":
+                print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
+            remediation = assessment.remediation
+            if remediation:
+                print(f"  Remediation: {remediation}")
+
+    _warn_attach_zone_suppressed(results)
+
+    # Output results
+    if args.format == "sarif":
+        output_sarif(violations, results, pcb_path, coverage=coverage_dict)
+    elif args.format == "json":
+        output_json(
+            violations,
+            results,
+            pcb_path,
+            effective_mfr,
+            layers,
+            meta=meta,
+            routing_quality=routing_quality_dict,
+            fabrication_process=fabrication_process_dict,
+            coverage=coverage_dict,
+            verdict=verdict,
+            exit_code=exit_code,
+            scope=scope_record,
+            project_rules=project_rules,
+            copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
+        )
+    elif args.format == "summary":
+        output_summary(violations, results, pcb_path)
+        if meta is not None:
+            print_meta_check_stanza(meta, args.verbose)
+        if routing_quality is not None:
+            print_routing_quality_stanza(routing_quality)
+    else:
+        if check_scope is not None:
+            print(f"Scope: {check_scope.describe()} (checks ran in full; not sign-off eligible)")
+        output_table(
+            violations,
+            results,
+            pcb_path,
+            effective_mfr,
+            layers,
+            args.verbose,
+            copper_weights=copper_weights,
+        )
+        if meta is not None:
+            print_meta_check_stanza(meta, args.verbose)
+        if routing_quality is not None:
+            print_routing_quality_stanza(routing_quality)
+    # Issue #5946: "unknown is not pass" -- name every check that could not
+    # evaluate this board.  Kept off the --drc-only legacy stdout and out of
+    # the JSON stream (the JSON carries the full ``coverage`` map).
+    if not machine_output and not drc_only:
+        print_coverage_stanza(coverage)
+        if check_verdict.fab_dfm_parity is not None:
+            from kicad_tools.validate.fab_dfm_parity import format_parity_stanza
+
+            print(format_parity_stanza(check_verdict.fab_dfm_parity))
+
+    # Write JSON report to file if --output specified
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_report(
+            violations,
+            results,
+            pcb_path,
+            effective_mfr,
+            layers,
+            output_path,
+            meta=meta,
+            routing_quality=routing_quality_dict,
+            fabrication_process=fabrication_process_dict,
+            coverage=coverage_dict,
+            verdict=verdict,
+            exit_code=exit_code,
+            scope=scope_record,
+            copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
+        )
+
+    # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
+    # resolved design rules this check enforced (``checker.design_rules``),
+    # so ``kicad-cli pcb drc`` reasons over identical fab-tier floors by
+    # construction.  Emission is a pure side effect: it must never change the
+    # verdict/exit code, and a sidecar write failure degrades to a warning
+    # rather than failing the check (mirrors ``kct mfr apply-rules``).
+    if getattr(args, "emit_dru", False) or getattr(args, "emit_drc_constraints", False):
+        _emit_drc_sidecars(
+            pcb_path,
+            checker,
+            manufacturer_id=effective_mfr,
+            layers=layers,
+            copper_oz=preset_copper_oz,
+            net_class_map=net_class_map,
+            emit_both=getattr(args, "emit_drc_constraints", False),
+        )
+
+    return exit_code
+
+
+@dataclass
+class CheckVerdict:
+    """``kct check``'s verdict for one board (Issue #7260).
+
+    ``meta`` is ``None`` under ``drc_only``; ``error_count`` /
+    ``warning_count`` are counted over the violations the verdict saw.
+    """
+
+    verdict: str
+    exit_code: int
+    meta: MetaCheckResult | None
+    error_count: int
+    warning_count: int
+    #: Issue #8845: fab DFM parity report (``--mfr jlcpcb`` only), else ``None``.
+    fab_dfm_parity: Any = None
+
+
+def evaluate_check_verdict(
+    pcb_path: Path,
+    results: DRCResults,
+    violations: Sequence[DRCViolation] | None = None,
+    *,
+    schematic: str | None = None,
+    strict: bool = False,
+    allow_incomplete: bool = False,
+    drc_only: bool = False,
+    strict_copper_disagreement: bool = False,
+    mask_copper_default: bool = False,
+    dfm_incomplete: bool = False,
+    manufacturer: str | None = None,
+    recorded_fab_counts: Mapping[str, Mapping[str, int]] | None = None,
+) -> CheckVerdict:
+    """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
+
+    Builds the DRC :class:`SubCheckResult` (PASSED iff 0 errors, every
+    mask-to-copper assessment passed, and 0 warnings under ``strict``), runs
+    the ERC + LVS + manifest meta rollup (:func:`run_meta_checks`, skipped
+    under ``drc_only``) and folds both into :func:`_check_verdict`.  Shared by
+    ``kct check`` and in-process callers (the MCP ``get_drc_violations`` tool)
+    so a board gets one verdict regardless of interface.
+
+    Args:
+        pcb_path: The board under check (schematic discovery starts here).
+        results: The (waiver-applied) DRC results.
+        violations: The violations the verdict counts; defaults to
+            ``results.violations`` (``kct check --errors-only`` passes its
+            filtered list).
+        schematic: Explicit ``.kicad_sch`` for the meta rollup.
+        strict: Warnings are fatal (and ERC warnings fail ERC).
+        allow_incomplete: An ``incomplete`` verdict exits 0.
+        drc_only: Skip the meta rollup.
+        strict_copper_disagreement: ``--strict`` with a stackup-vs-``--copper``
+            disagreement (always a fail).
+        mask_copper_default: The mask_to_copper request was applied by default
+            (Issue #8842); a run that could not execute is ``incomplete``.
+        dfm_incomplete: The stackup has no DFM-table entry (Issue #8839); a
+            would-be ``pass`` becomes ``incomplete``.
+        manufacturer: Manufacturer id; for the JLCPCB family a danger-capable
+            ``not_covered`` fab DFM parity row (Issue #8845) makes an otherwise
+            passing verdict ``incomplete``.
+        recorded_fab_counts: Recorded fab DFM result ``counts`` (Issue #8940;
+            ``--fab-dfm-result``).  When given, the parity report carries the
+            per-category kct-vs-fab count comparison (findings are attributed
+            by each row's ``count_rule_ids`` using the same ``is_error`` /
+            ``is_warning`` predicates as *error_count* / *warning_count*).
+    """
+    counted = list(results.violations) if violations is None else list(violations)
+    error_count = sum(1 for v in counted if v.is_error)
+    warning_count = sum(1 for v in counted if v.is_warning)
+    # Issue #8842: a default-applied (not explicitly requested) mask_to_copper
+    # that could not run (no native geometry) is "incomplete", not a failure,
+    # so ``--allow-incomplete`` keeps working; real findings still fail.
+    mask_failed = [
+        a
+        for a in results.mask_copper_assessments
+        if not a.passed
+        and not (
+            mask_copper_default
+            and not any(m.disposition in ("violation", "uncertain") for m in a.measurements)
+        )
+    ]
+    mask_incomplete = (
+        mask_copper_default
+        and any(not a.passed for a in results.mask_copper_assessments)
+        and not mask_failed
+    )
+    drc_passed = error_count == 0 and not mask_failed and not (warning_count > 0 and strict)
+    drc_sub = SubCheckResult(
+        status="PASSED" if drc_passed else "FAILED",
+        detail=(
+            f"{results.rules_checked} rules checked, "
+            f"{error_count} error(s), {warning_count} warning(s)"
+        ),
+    )
+    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
+
+    parity = evaluate_parity(manufacturer, findings=counted, recorded_counts=recorded_fab_counts)
+    meta: MetaCheckResult | None = None
+    if not drc_only:
+        # Issue #8949: ONE notion of "incomplete".  Every incompleteness the
+        # exit code already honours (a default-applied mask coverage check
+        # that could not run, a stackup with no DFM-table entry, a
+        # danger-capable fab DFM parity row) is folded into the meta rollup
+        # through one flag, so ``meta.overall``, the printed ``Overall:``
+        # line and the exit code cannot disagree.  Never widened: an
+        # explicitly requested mask check that cannot run is ``mask_failed``
+        # above and keeps reporting FAILED.  ``compute_overall`` ranks
+        # FAILED first, so a failed board still reads FAILED.
+        #
+        # Issue #9062: ``incomplete_categories`` -- serialized as
+        # ``meta_checks.incomplete_categories`` -- is deliberately WIDER
+        # than that flag.  It names every category whose check did not
+        # complete on this run, keyed on the SAME predicate the coverage
+        # row keys on (``assessment.coverage``, never ``assessment.passed``
+        # -- see ``cov.mask_copper_unknown``), so a default-applied mask
+        # assessment that did not complete is named even when its
+        # provisional ``violation``/``uncertain`` measurements send it to
+        # ``mask_failed`` (verdict FAILED) instead of ``mask_incomplete``
+        # and ``coverage.mask_to_copper`` reads ``unknown``.  A mask check
+        # that completed and found a real violation is ``passed=False`` but
+        # ``coverage == "complete"``: the check DID complete, so it is not
+        # named (the coverage row reads ``checked`` too).
+        # ``coverage_incomplete`` keeps the narrower #8949 set so the
+        # rollup, the ``Overall:`` line and the exit code do not move
+        # (``compute_overall`` ranks FAILED first anyway, so the wider list
+        # never changes the printed line either).
+        incomplete_categories: list[str] = []
+        if mask_copper_default and any(
+            a.coverage != "complete" for a in results.mask_copper_assessments
+        ):
+            incomplete_categories.append("mask_to_copper")
+        if dfm_incomplete:
+            incomplete_categories.append("dfm_table")
+        if parity is not None and parity.incomplete:
+            incomplete_categories.append("fab_dfm_parity")
+        meta = run_meta_checks(
+            Path(pcb_path),
+            drc_status=drc_sub,
+            schematic=schematic,
+            strict=strict,
+            coverage_incomplete=bool(
+                mask_incomplete or dfm_incomplete or (parity is not None and parity.incomplete)
+            ),
+            incomplete_categories=tuple(incomplete_categories),
+        )
+    verdict, exit_code = _check_verdict(
+        mask_copper_failed=bool(mask_failed),
+        strict_copper_disagreement=strict_copper_disagreement,
+        drc_only=drc_only,
+        error_count=error_count,
+        warning_count=warning_count,
+        strict=strict,
+        allow_incomplete=allow_incomplete,
+        meta=meta,
+    )
+    if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
+        # Reachable only under ``drc_only`` since #8949: without the meta
+        # rollup there is no ``Overall:`` line to keep honest (the branch is
+        # dead on the meta path -- a "pass" verdict there implies no
+        # incompleteness), but the exit code must still honour the
+        # incompleteness.
+        from ._gate import gate_exit_code
+
+        exit_code, verdict = gate_exit_code(
+            0, 0, incomplete=True, allow_incomplete=allow_incomplete, style="check"
+        )
+    return CheckVerdict(
+        verdict=verdict,
+        exit_code=exit_code,
+        meta=meta,
+        error_count=error_count,
+        warning_count=warning_count,
+        fab_dfm_parity=parity,
+    )
+
+
+def _check_verdict(
+    *,
+    mask_copper_failed: bool,
+    strict_copper_disagreement: bool,
+    drc_only: bool,
+    error_count: int,
+    warning_count: int,
+    strict: bool,
+    allow_incomplete: bool,
+    meta: MetaCheckResult | None,
+) -> tuple[str, int]:
+    """The one ``kct check`` verdict + process exit code (Issue #7230).
+
+    Computed before output so ``--format json`` can carry the exact code the
+    process returns.  ``verdict`` is ``pass`` / ``fail`` / ``incomplete``; under
+    ``--allow-incomplete`` an incomplete verdict still exits 0 (the verdict
+    stays honest).  Numbering is unchanged (Issue #3750): the ``"check"``
+    ladder of :func:`~kicad_tools.cli._gate.gate_exit_code`.
+
+    Issue #8949: the meta path reads incompleteness solely from
+    ``meta.overall`` -- the rollup now folds every incompleteness the exit
+    code honours (mask coverage, DFM table, fab DFM parity) via
+    ``coverage_incomplete``, so the printed ``Overall:`` line and this
+    decision cannot disagree.
+    """
+    from ._gate import gate_exit_code
+
+    if mask_copper_failed or strict_copper_disagreement:
+        exit_code, verdict = gate_exit_code(1, 0, style="check")
+    elif drc_only or meta is None:
+        exit_code, verdict = gate_exit_code(
+            error_count,
+            warning_count,
+            strict=strict,
+            style="check",
+        )
+    else:
+        # The meta rollup already folded DRC (incl. --strict warnings), ERC,
+        # LVS, the manifest and #8949's coverage incompleteness into
+        # FAILED / INCOMPLETE / PASSED.
+        exit_code, verdict = gate_exit_code(
+            1 if meta.overall == "FAILED" else 0,
+            0,
+            incomplete=meta.overall == "INCOMPLETE",
+            allow_incomplete=allow_incomplete,
+            style="check",
+        )
+    return verdict, exit_code
+
+
+def _emit_drc_sidecars(
+    pcb_path: Path,
+    checker: DRCChecker,
+    *,
+    manufacturer_id: str,
+    layers: int | None,
+    copper_oz: float | None,
+    net_class_map: dict | None,
+    emit_both: bool,
+) -> None:
+    """Emit DRC-constraint sidecars from the checker's resolved rules (#4375).
+
+    Writes ``<board>.kicad_dru`` (and, when ``emit_both``, the sibling
+    ``<board>.kicad_pro``) from ``checker.design_rules`` -- the EXACT
+    resolved :class:`DesignRules` the pure-Python check enforced, including
+    layer count and copper-weight overrides -- so ``kicad-cli pcb drc``
+    reasons over identical fab-tier floors by construction.
+
+    The resolved ``net_class_map`` (board-net -> ``NetClassRouting``) is
+    threaded through so the emitted ampacity net-scoped minimum-width rules
+    match what the checker evaluated (#4216).
+
+    This is a pure side effect: it never mutates the ``.kicad_pcb`` and must
+    not change the check verdict.  A write failure degrades to a stderr
+    warning rather than raising (mirrors ``kct mfr apply-rules``).  Written
+    paths are reported on stderr so JSON stdout stays uncorrupted.
+
+    The ``.kicad_dru`` rules are emitted inside a marker-guarded managed
+    block (Issue #4600): re-emitting replaces only the block, and content
+    outside it -- hand-written custom rules, the ``kct creepage
+    export-rules`` block (#4508) -- is preserved, never clobbered.
+    """
+    # One class per ``.name`` (not per net), shared with ``kct export`` (#8393).
+    from kicad_tools.manufacturers.project_generator import dedupe_net_classes
+
+    net_classes = dedupe_net_classes(net_class_map)
+    try:
+        if emit_both:
+            from kicad_tools.manufacturers import write_drc_constraints
+
+            written = write_drc_constraints(
+                pcb_path,
+                checker.design_rules,
+                manufacturer_id=manufacturer_id,
+                layers=layers,
+                copper_oz=copper_oz,
+                write_dru=True,
+                net_classes=net_classes,
+            )
+        else:
+            from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+            from kicad_tools.manufacturers.project_generator import (
+                PRESERVE_MODE_OFF,
+                generate_project_dru,
+                preserve_board_rules_mode,
+            )
+            from kicad_tools.manufacturers.zone_clearance_dru import zone_clearance_targets
+
+            dru_path = pcb_path.with_suffix(".kicad_dru")
+            pro_path = pcb_path.with_suffix(".kicad_pro")
+            project_data = json.loads(pro_path.read_text()) if pro_path.exists() else {}
+            # Issue #4600: merge into a marker-guarded managed block instead of
+            # a blanket overwrite, so hand-written rules and the creepage
+            # managed block (#4508) in a pre-existing file survive the emit.
+            existing_dru = dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
+            from kicad_tools.manufacturers.keepout_dru import apply_keepout_rules
+
+            # Issue #8937: zone ``connect_pads`` clearances feed the emitted
+            # block's zone arm and the loosening gate's authored baselines.
+            zone_targets = zone_clearance_targets(pcb_path) if pcb_path.exists() else []
+            authored_state = {
+                "netclasses": {
+                    str(cls.get("name")): cls.get("clearance")
+                    for cls in project_data.get("net_settings", {}).get("classes", [])
+                    if isinstance(cls.get("clearance"), (int, float))
+                    and not isinstance(cls.get("clearance"), bool)
+                },
+                "zones": [[layer, net, value] for layer, net, value in zone_targets],
+            }
+            allow_dru = (
+                ("*",) if preserve_board_rules_mode(project_data) == PRESERVE_MODE_OFF else ()
+            )
+            merged_dru = merge_dru_floors(
+                existing_dru,
+                generate_project_dru(
+                    checker.design_rules,
+                    project_data,
+                    manufacturer_id=manufacturer_id,
+                    net_classes=net_classes,
+                    zone_clearances=zone_targets,
+                ),
+                path=dru_path,
+                authored=authored_state,
+                allow=allow_dru,
+            )
+            # Issue #6039: per-rule-area keepout rules (kicad-cli < 10.0.6
+            # does not enforce rule areas without them, #7198).
+            from kicad_tools.manufacturers.project_generator import (
+                _installed_kicad_cli_version,
+            )
+
+            keepout_dru = apply_keepout_rules(
+                merged_dru, pcb_path, _installed_kicad_cli_version(), path=dru_path
+            )
+            if keepout_dru is not None:
+                merged_dru = keepout_dru
+            # Issue #6390: router net classes under KCT_PRESERVE_BOARD_RULES=0.
+            from kicad_tools.manufacturers.project_generator import apply_netclass_dru_rules
+
+            merged_dru = apply_netclass_dru_rules(merged_dru, checker.design_rules, project_data)
+            dru_path.write_text(merged_dru, encoding="utf-8")
+            written = [dru_path]
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            f"WARNING: could not emit DRC-constraint sidecar(s) next to "
+            f"{pcb_path}: {e}. The check verdict is unaffected.",
+            file=sys.stderr,
+        )
+        return
+
+    joined = ", ".join(str(p) for p in written)
+    print(f"DRC-constraint sidecars updated: {joined}", file=sys.stderr)
+
+
+def resolve_net_class_map_for_board(net_class_map: dict, pcb: PCB) -> tuple[dict, object]:
+    """Rekey a loaded net-class map onto the board's actual net names.
+
+    Issue #4321: a hand-authored map's bare keys (no hierarchical ``/``
+    prefix) must land on the board's segment net names before
+    :class:`DRCChecker` sees them.  Shared by ``kct check`` and every
+    in-process caller of its rule set (Issue #6431).
+
+    Returns:
+        ``(rekeyed_map, resolution)`` -- the resolution records which user
+        keys matched, for the unevaluated-ampacity warning.
+    """
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
+
+    board_net_names = [net.name for net in pcb.nets.values() if net.name]
+    resolution = resolve_net_class_map_keys(net_class_map.keys(), board_net_names)
+    rekeyed = {
+        board_net: net_class_map[user_key] for board_net, user_key in resolution.resolved.items()
+    }
+    return rekeyed, resolution
+
+
+def stackup_copper_oz(pcb: PCB) -> tuple[float | None, float | None]:
+    """Outer/inner copper weight (oz) from the board's declared stackup, if any."""
+    try:
+        from kicad_tools.physics.stackup import Stackup
+
+        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+    except Exception:  # noqa: BLE001 - never crash `check` on a stackup parse quirk
+        return (None, None)
+    if derived is None:
+        return (None, None)
+    return derived
+
+
+@dataclass
+class CheckRuleSet:
+    """The rule set ``kct check --mfr <mfr>`` applies to a board (Issue #6431).
+
+    Built by :func:`build_check_rule_set` without going through the CLI, so
+    another command (``kct fix-drc``) can re-check a board with exactly the
+    rules ``kct check`` would use: the resolved manufacturer and layer count,
+    the auto-discovered net-class map, current-path and waiver sidecars, the
+    stackup copper weights, the reviewed fabrication-floor override, and the
+    path-dependent rules (``netclass_clearance_copper``, ``netclass_floor``)
+    that read the project file next to ``project_pcb_path``.
+    """
+
+    checker: DRCChecker
+    project_pcb_path: Path
+    manufacturer: str
+    layers: int
+    net_class_map_path: Path | None = None
+    general_waivers: object | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+def build_check_rule_set(
+    project_pcb_path: Path,
+    *,
+    manufacturer: str | None = None,
+    layers: int | None = None,
+    pcb: PCB | None = None,
+) -> CheckRuleSet:
+    """Build ``kct check``'s default rule set for a board.
+
+    Args:
+        project_pcb_path: The board whose sidecars (``.kicad_pro``,
+            ``.kicad_dru``, ``net_class_map.json``, waivers, ...) define the
+            rules.  Every sidecar is discovered from this path.
+        manufacturer: ``--mfr``; ``None`` resolves it exactly like ``kct
+            check`` (``fab_profile.json`` > ``project.kct`` > ``jlcpcb``).
+        layers: ``--layers``; ``None`` uses the board's copper-layer count.
+        pcb: The geometry to check.  Defaults to loading
+            ``project_pcb_path``; pass another board (e.g. a repaired copy
+            written elsewhere) to check *its* copper under the project's
+            rules.
+
+    A sidecar that fails to load is skipped (with a note), as ``kct check``
+    does for auto-discovered sidecars.
+    """
+    from kicad_tools.manufacturers import resolve_pcb_fabrication_overrides
+
+    project_pcb_path = Path(project_pcb_path)
+    if pcb is None:
+        pcb = PCB.load(project_pcb_path)
+    notes: list[str] = []
+    effective_mfr, _mfr_notices, _mfr_source = _resolve_effective_check_mfr(
+        manufacturer, project_pcb_path
+    )
+    if layers is None:
+        detected = len(pcb.copper_layers)
+        layers = detected if detected > 0 else 2
+
+    net_class_map = None
+    ncm_path = _discover_net_class_map_sidecar(project_pcb_path)
+    if ncm_path is not None:
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        try:
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=project_pcb_path)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            notes.append(f"ignoring malformed net-class-map sidecar {ncm_path}: {exc}")
+            net_class_map = None
+            ncm_path = None
+    if net_class_map is not None:
+        net_class_map, _resolution = resolve_net_class_map_for_board(net_class_map, pcb)
+
+    from kicad_tools.validate.rules.courtyard_waivers import (
+        discover_courtyard_waivers_sidecar,
+        load_courtyard_waivers,
+    )
+
+    courtyard_waivers = None
+    cw_path = discover_courtyard_waivers_sidecar(project_pcb_path)
+    if cw_path is not None:
+        try:
+            courtyard_waivers = load_courtyard_waivers(cw_path)
+        except ValueError as exc:
+            notes.append(f"ignoring malformed courtyard-waivers sidecar {cw_path}: {exc}")
+
+    current_path_specs: list[CurrentPathSpec] = []
+    cp_path = discover_current_paths_sidecar(project_pcb_path)
+    if cp_path is not None:
+        try:
+            current_path_specs = load_current_path_specs(cp_path)
+        except (OSError, ValueError) as exc:
+            notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
+
+    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+
+    copper_outer, copper_inner = stackup_copper_oz(pcb)
+    checker = DRCChecker(
+        pcb,
+        manufacturer=effective_mfr,
+        layers=layers,
+        copper_oz=copper_outer if copper_outer is not None else 1.0,
+        copper_oz_outer=copper_outer,
+        copper_oz_inner=copper_inner,
+        net_class_map=net_class_map,
+        authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
+        warn_on_inactive_skew_rules=False,
+        courtyard_waivers=courtyard_waivers,
+        strict_connectivity=True,
+        current_path_specs=current_path_specs,
+        reinforcement_wires=load_wires_if_present(project_pcb_path),
+        declared_spec_currents=resolve_declared_currents_for_pcb(project_pcb_path),
+    )
+    checker.design_rules, override_msg = resolve_pcb_fabrication_overrides(
+        project_pcb_path, checker.design_rules, manufacturer_id=effective_mfr
+    )
+    if override_msg is not None:
+        notes.append(override_msg)
+
+    from kicad_tools.validate.rules.waivers import discover_waivers_sidecar, load_waivers
+
+    general_waivers = None
+    gw_path = discover_waivers_sidecar(project_pcb_path)
+    if gw_path is not None:
+        try:
+            general_waivers = load_waivers(gw_path)
+        except ValueError as exc:
+            notes.append(f"ignoring malformed waivers sidecar {gw_path}: {exc}")
+    if general_waivers is not None:
+        checker.reinforcement_waived_nets = reinforcement_waived_nets(general_waivers.entries)
+
+    return CheckRuleSet(
+        checker=checker,
+        project_pcb_path=project_pcb_path,
+        manufacturer=effective_mfr,
+        layers=layers,
+        net_class_map_path=ncm_path,
+        general_waivers=general_waivers,
+        notes=notes,
+    )
+
+
+def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
+    """Run every default ``kct check`` category under ``rule_set``.
+
+    Same dispatch as the CLI (:func:`run_selected_checks`, so the
+    path-dependent rules run), with the board's waivers applied afterwards.
+    """
+    sch_path = _resolve_check_schematic(None, rule_set.project_pcb_path)
+    results = run_selected_checks(
+        rule_set.checker,
+        None,
+        set(),
+        pad_grid_auto_derive=True,
+        sch_path=sch_path,
+        pcb_path=rule_set.project_pcb_path,
+        layers=rule_set.layers,
+    )
+    if rule_set.general_waivers is not None:
+        from kicad_tools.validate.rules.waivers import apply_waivers
+
+        apply_waivers(results, rule_set.general_waivers.for_check())  # type: ignore[attr-defined]
+    return results
+
+
+def run_selected_checks(
+    checker: DRCChecker,
+    only_set: set[str] | None,
+    skip_set: set[str],
+    pad_grid_threshold: float | None = None,
+    pad_grid_auto_derive: bool = True,
+    sch_path: Path | None = None,
+    sch_field_threshold: float = DEFAULT_SCH_FIELD_THRESHOLD_MM,
+    pcb_path: Path | None = None,
+    layers: int | None = None,
+    coverage: dict | None = None,
+    drc_only: bool = False,
+    opt_in: set[str] | frozenset[str] = frozenset(),
+) -> DRCResults:
+    """Run the selected DRC checks based on filters.
+
+    Args:
+        checker: The DRC checker pre-loaded with the PCB and rules.
+        only_set: Optional whitelist of check category names.
+        skip_set: Set of check category names to skip.
+        pad_grid_threshold: Explicit pad_grid L2 tolerance in mm, or
+            ``None`` to use the threshold-resolution policy below.
+            Issue #3061.
+        pad_grid_auto_derive: When ``True`` and ``pad_grid_threshold``
+            is ``None``, the pad_grid check derives the threshold from
+            the board's pad-offset histogram (issue #3061).  Defaults
+            to ``True`` for the CLI; ``False`` preserves the PR #3057
+            fixed-0.05mm behaviour.
+        sch_path: Resolved schematic path for the ``sch_fields``
+            field-geometry lint (issue #4595), or ``None`` when no
+            schematic is available -- the category then emits nothing
+            (the #4350 missing-schematic stderr warning already covers
+            visibility).  Must default to ``None`` so library callers
+            that only exercise PCB-scoped checks are unaffected.
+        sch_field_threshold: ``sch_field_offset`` distance threshold in
+            mm (issue #4595; strictly-greater-than comparison).
+        pcb_path: Path of the ``.kicad_pcb`` under check, used by the
+            ``doc_drift`` category (issue #4540) to locate the board
+            README and repo root, and by ``netclass_floor`` (issue #5875)
+            to locate the sibling ``.kicad_pro`` -- the PCB is never
+            re-parsed.  Must default to ``None`` so library callers that
+            only exercise PCB-object-scoped checks are unaffected; both
+            categories are then a silent no-op.
+        layers: Effective copper-layer count (the same value that
+            resolved ``checker.design_rules``, so an explicit
+            ``--layers`` is honoured).  Used only by ``netclass_floor``
+            (issue #5875) to decide whether a via-hostile netclass is
+            fab-blocking (2+ copper layers) or advisory (a 1-layer board
+            can carry no via at all).  ``None`` falls back to the PCB's
+            own copper-layer count.
+        coverage: Optional dict filled in place with one
+            :class:`kicad_tools.validate.coverage.Coverage` per category --
+            ``checked``, ``skipped:<reason>`` or ``unknown:<reason>`` (Issue
+            #5946).  Recording coverage never changes which checks run or
+            what they report.
+        drc_only: Whether ``--drc-only`` is in effect (reported as the
+            ``sch_fields`` skip reason).
+        opt_in: Categories from
+            :data:`~kicad_tools.cli.check_categories.DEFERRED_OPT_IN_CATEGORIES`
+            to run even though ``only_set`` is ``None`` (``kct check
+            --3d-models``, issue #7682).  An explicit ``--only`` naming the
+            category also runs it.
+    """
+    from kicad_tools.validate import coverage as cov
+
+    results = DRCResults()
+    cov_map: dict = coverage if coverage is not None else {}
+
+    # Build the pad_grid invocation as a thunk so the map below can
+    # remain uniform (every value is a zero-arg callable).
+    def _pad_grid_check() -> DRCResults:
+        # Issue #3941: collapse a fixed-pitch footprint's per-pad warnings
+        # into one aggregated warning per component ref by default; under
+        # ``--verbose`` (surfaced as ``checker.verbose``) emit the full
+        # per-pad detail instead.
+        return checker.check_pad_grid_alignment(
+            threshold=pad_grid_threshold,
+            auto_derive_threshold=pad_grid_auto_derive,
+            aggregate=not checker.verbose,
+        )
+
+    # Issue #4595: schematic field-geometry lint.  Dispatched as a
+    # CLI-level closure (like ``pad_grid``) because it runs on the
+    # resolved sibling schematic, not the PCB -- it is intentionally NOT
+    # a ``DRCChecker`` method and NOT part of ``CHECK_ALL_METHODS``.
+    # With no schematic resolved it is a silent no-op.
+    def _sch_fields_check() -> DRCResults:
+        if sch_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.schematic_fields import check_schematic_fields
+        from kicad_tools.validate.rules.schematic_wire_symbol import (
+            check_schematic_wire_symbol,
+        )
+
+        # Issue #7996: the wire-through-symbol cosmetic rule rides in the
+        # same category, so --only/--skip sch_fields selects both.
+        results = check_schematic_fields(sch_path, threshold_mm=sch_field_threshold)
+        results.merge(check_schematic_wire_symbol(sch_path))
+        return results
+
+    # Issue #4540: LLM-free doc-drift lint (kct:doc-pin markers vs
+    # machine ground truth).  Dispatched as a CLI-level closure (like
+    # ``pad_grid`` / ``sch_fields``) because it needs the PCB *path* to
+    # locate the board README and repo root -- it is intentionally NOT a
+    # ``DRCChecker`` method and NOT part of ``CHECK_ALL_METHODS``.  With
+    # no pcb_path it is a silent no-op; all findings are INFO severity
+    # (advisory, never blocking).
+    def _doc_drift_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.doc_drift import check_doc_drift
+
+        return check_doc_drift(pcb_path)
+
+    # Issue #5875: ``.kicad_pro`` netclass defaults vs the active ``--mfr``
+    # floors.  Dispatched as a CLI-level closure (like ``doc_drift`` /
+    # ``sch_fields``) because it needs the PCB *path* to locate the sibling
+    # ``.kicad_pro`` -- it is intentionally NOT a ``DRCChecker`` method and
+    # NOT part of ``CHECK_ALL_METHODS``.  With no pcb_path it is a silent
+    # no-op.  Reads ``checker.design_rules``, so it enforces exactly the
+    # floors the ``dimension_*`` rules enforce on routed copper.
+    def _netclass_floor_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.netclass_floor import check_netclass_floor
+
+        effective_layers = layers if layers is not None else len(checker.pcb.copper_layers)
+        return check_netclass_floor(
+            pcb_path,
+            checker.design_rules,
+            copper_layers=effective_layers,
+        )
+
+    # Issue #6249: authored ``.kicad_pro`` netclass clearances on routed copper
+    # (parity with ``kicad-cli pcb drc`` after #6243).  CLI-level closure for
+    # the same reason as ``netclass_floor``: it needs the PCB *path*.
+    def _netclass_clearance_copper_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.netclass_clearance_copper import (
+            check_netclass_clearance_copper,
+        )
+
+        # The rule reports board-relative locations; convert to sheet-absolute
+        # like every ``checker.check_*`` method (Issue #8493).
+        return checker._absolutize(
+            check_netclass_clearance_copper(pcb_path, checker.pcb, checker.design_rules)
+        )
+
+    # Issue #8435: pour-slot advisory.  CLI-level closure because the netclass
+    # clearances come from the sibling ``.kicad_pro`` (needs the PCB *path*).
+    def _pour_slot_check() -> DRCResults:
+        clearances: dict[str, float] = {}
+        if pcb_path is not None:
+            try:
+                from kicad_tools.core.project_clearance import authored_netclass_clearances
+                from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+                project = load_project(pcb_path)
+                if project is not None:
+                    names = [n.name for n in checker.pcb.nets.values() if n.name]
+                    clearances = {
+                        n: v.clearance
+                        for n, v in authored_netclass_clearances(project, names).items()
+                    }
+            except Exception:  # advisory: fall back to the zone clearance alone
+                clearances = {}
+        return checker.check_pour_slot(clearances)
+
+    # Issue #7292: ``project.kct`` requirements vs the routed board.  CLI-level
+    # closure (like ``netclass_floor``) because it needs the PCB *path* to
+    # locate ``project.kct``; NOT a ``DRCChecker`` method.
+    def _spec_conformance_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.spec_conformance import check_spec_conformance
+
+        return check_spec_conformance(checker.pcb, pcb_path, getattr(checker, "manufacturer", None))
+
+    # Issue #7682: 3D model coverage.  CLI-level closure because it needs the
+    # PCB *path*; NOT a ``DRCChecker`` method.  Resolves against the host
+    # render environment, so it splits its findings by what they depend on:
+    #
+    # * a gap caused by an absent model library (the variable is undefined or
+    #   names a missing directory -- the CI runner and the pinned toolchain
+    #   ship none; ``kct models sync`` fetches the pinned subset, #7683) is
+    #   the *environment's* gap, not the board's.
+    #   All of them collapse into ONE stderr note per library variable (not a
+    #   finding, so evidence bytes are host-independent), so a host without a
+    #   library reads "not evaluated" instead of N per-footprint defects;
+    # * every other gap -- ``no_ref`` above all, which is the same on every
+    #   host -- is a real defect of the board and stays a per-footprint
+    #   ``warning`` (advisory bucket: ``kct check --3d-models`` still
+    #   passes, only adding ``--strict`` fails).  Default-on since #7685.
+    #
+    # Issue #7743: the category's *coverage* is a fact about the board alone.
+    # A footprint whose every visible ref is library-rooted
+    # (``${KICADn_3DMODEL_DIR}``, ``${KCT_LCSC_3D_DIR}``, ...) cannot be judged
+    # host-independently, so ``model_coverage`` reads
+    # ``unknown:host_library_refs (N ...)`` on every host -- never ``checked``
+    # on one and something else on another.  N is counted from the ref text.
+    model_library_dependent: list[int] = []
+
+    def _model_coverage_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.pcb.model_audit import audit_pcb_models, host_library_dependent
+
+        results = DRCResults()
+        report = audit_pcb_models(pcb_path, env="host")
+        model_library_dependent.append(len(host_library_dependent(report.entries)))
+        for gap in report.gaps:
+            if gap.missing_root:
+                continue
+            results.add(
+                DRCViolation(
+                    rule_id="model_coverage",
+                    severity="warning",
+                    message=(
+                        f"{gap.reference} ({gap.lib_id}): {gap.klass}: {gap.reason}"
+                        + (f" [path: {gap.path}]" if gap.path else "")
+                    ),
+                    items=(gap.reference,),
+                )
+            )
+        # The environment's gap goes to stderr, never into ``results``: a
+        # serialized finding would make committed evidence (``kct readiness``
+        # receipts, ``check-report.json``) differ byte-for-byte between a host
+        # with a model library and one without -- the pinned image has none.
+        for root, entries in sorted(report.missing_roots.items()):
+            print(
+                f"NOTE: 3D coverage not evaluated for {len(entries)} footprint(s): "
+                f"no model library at ${{{root}}} on this host (run "
+                "`kct models sync` for the pinned subset; see #7683)",
+                file=sys.stderr,
+            )
+        return results
+
+    # Map of category to check method.  This dict MUST stay a superset
+    # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
+    # name in ``DRCChecker.CHECK_ALL_METHODS`` must be referenced as a
+    # value here).  The regression test in
+    # ``tests/test_check_cmd_coverage.py`` enforces the invariant for
+    # Issue #3046.
+    check_methods = {
+        "ampacity": checker.check_ampacity,
+        "path_ampacity": checker.check_path_ampacity,
+        "reinforcement_incomplete": checker.check_reinforcement_incomplete,
+        "wire_run_courtyard_overlap": checker.check_wire_run_courtyard_overlap,
+        "clearance": checker.check_clearances,
+        "physical_copper_gap": checker.check_physical_copper_gap,
+        "connectivity": checker.check_connectivity,
+        "connector_access": checker.check_connector_access,
+        "segment_zone": checker.check_segment_zone_clearances,
+        "via_zone": checker.check_via_zone_clearances,
+        "copper_sliver": checker.check_copper_slivers,
+        "courtyard_overlap": checker.check_courtyard_overlap,
+        "dangling_copper": checker.check_dangling_copper,
+        "pour_slot": _pour_slot_check,
+        "redundant_copper": checker.check_redundant_copper,
+        "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
+        "diffpair_length_skew": checker.check_diffpair_length_skew,
+        "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,
+        "diffpair_uncoupled_length": checker.check_diffpair_uncoupled_length,
+        "dimensions": checker.check_dimensions,
+        "doc_drift": _doc_drift_check,
+        "board_id": checker.check_board_id,
+        "edge": checker.check_edge_clearances,
+        "fiducials": checker.check_fiducials,
+        "sharp_trace_corner": checker.check_sharp_trace_corner,
+        "missing_plated_hole": checker.check_missing_plated_hole,
+        "impedance": checker.check_impedance,
+        "isolated_copper": checker.check_isolated_copper,
+        "match_group_length_skew": checker.check_match_group_length_skew,
+        "model_coverage": _model_coverage_check,
+        "routing_policy": checker.check_routing_policy,
+        "netclass_clearance_copper": _netclass_clearance_copper_check,
+        "netclass_floor": _netclass_floor_check,
+        "netlist": checker.check_netlist,
+        "pad_grid": _pad_grid_check,
+        "pin1_marker": checker.check_pin1_markers,
+        "placement": checker.check_footprint_placement,
+        "sch_fields": _sch_fields_check,
+        "silkscreen": checker.check_silkscreen,
+        "single_pad_net": checker.check_single_pad_nets,
+        "solder_mask": checker.check_solder_mask_pads,
+        "spec_conformance": _spec_conformance_check,
+        "mask_to_copper": checker.check_mask_to_copper,
+        "mask_negative_expansion": checker.check_mask_negative_expansion,
+        "mask_multi_segment": checker.check_mask_multi_segment,
+        "thermal_asymmetry": checker.check_thermal_asymmetry,
+        "via_in_pad": checker.check_via_in_pad,
+        "via_type": checker.check_via_type_capability,
+        "tht_smd_spacing": checker.check_tht_smd_spacing,
+        "via_under_body": checker.check_via_under_body,
+        "width_consistency": checker.check_width_consistency,
+        "zero_length_segment": checker.check_zero_length_segments,
+        "zones": checker.check_zones,
+    }
+
+    for category, method in check_methods.items():
+        if (
+            category == "mask_to_copper"
+            and only_set is None
+            and checker.mask_copper_request is None
+        ):
+            cov_map[category] = cov.skipped(category, "opt_in:--mask-copper-config")
+            continue
+
+        # width_consistency is a heuristic routing-quality audit; it is
+        # opt-in (``--only width_consistency``) so it never changes the
+        # verdict of an existing board or of gates that count warnings.
+        if category == "width_consistency" and only_set is None:
+            cov_map[category] = cov.skipped(category, "opt_in:--only")
+            continue
+
+        # Issue #7682: a category named in ``DEFERRED_OPT_IN_CATEGORIES`` is out
+        # of the default set -- the ONE place that deferral lives, so gates,
+        # ``kct readiness`` evidence, ``run_drc`` and ``--strict`` exit codes
+        # stay machine-independent with no caller naming it.  The set is empty
+        # since #7685 (``model_coverage`` is default-on).  No coverage entry
+        # for a deferred category either, so a default report stays
+        # byte-identical.
+        if category in DEFERRED_OPT_IN_CATEGORIES and only_set is None and category not in opt_in:
+            continue
+
+        # Skip if --only specified and this category not in it
+        if only_set is not None and category not in only_set:
+            cov_map[category] = cov.skipped(category, "deselected:--only")
+            continue
+
+        # Skip if this category is in --skip
+        if category in skip_set:
+            cov_map[category] = cov.skipped(category, "deselected:--skip")
+            continue
+
+        # Issue #5946: decide, before running, whether this category's inputs
+        # let it say anything about the board.  The check still runs either
+        # way, so findings are unaffected.
+        pre = cov.precheck(
+            category,
+            checker,
+            pcb_path=pcb_path,
+            sch_path=sch_path,
+            drc_only=drc_only,
+        )
+
+        # Run the check
+        category_results = method()
+        results.merge(category_results)
+        cov_map[category] = pre if pre is not None else cov.checked(category)
+        # Issue #7293: a matched diff pair with no judged segment is not
+        # "checked"; only knowable after the run.
+        unmeasured = getattr(checker, "impedance_unmeasured_pairs", None)
+        if category == "impedance" and unmeasured and pre is None:
+            names = ", ".join(f"{p}/{n}" for p, n in unmeasured)
+            cov_map[category] = cov.unknown(category, f"diff_pair_unmeasurable ({names})")
+        # Issue #7206 (F3): a declared net whose copper pour could not be
+        # rated (no fill, no current path, ...) is unknown, never a pass.
+        pour_unmeasured = getattr(checker, "ampacity_unmeasured_nets", None)
+        if category == "ampacity" and pour_unmeasured and pre is None:
+            cov_map[category] = cov.ampacity_pour_unknown(pour_unmeasured)
+        # Issue #8924: the mask assessment's own ``coverage`` is only knowable
+        # after the run, and the row defaulted to ``checked`` for an assessment
+        # the same report showed as ``incomplete``.  ``not_run`` is mapped
+        # explicitly rather than left to fall through: a *requested* check that
+        # never ran is not a pass either.  Keyed on ``coverage``, never on
+        # ``passed`` -- see ``cov.mask_copper_unknown``.
+        mask_assessment = getattr(checker, "mask_copper_assessment", None)
+        if (
+            category == "mask_to_copper"
+            and pre is None
+            and mask_assessment is not None
+            and mask_assessment.coverage != "complete"
+        ):
+            cov_map[category] = cov.mask_copper_unknown(
+                mask_assessment.coverage, mask_assessment.reasons
+            )
+        # Issue #7743: a footprint whose models resolve only through a host
+        # library variable was not judged by a host-independent report, so the
+        # category is ``unknown`` -- on every host, so evidence bytes never
+        # depend on whether a library is installed.  Non-blocking.
+        if category == "model_coverage" and pre is None and model_library_dependent:
+            n_lib = model_library_dependent[-1]
+            if n_lib:
+                cov_map[category] = cov.unknown(
+                    category,
+                    f"host_library_refs ({n_lib} footprint(s); "
+                    "per-host detail: kct pcb model-audit)",
+                )
+
+    return results
+
+
+def _print_measurement_summary(violations: list[DRCViolation]) -> None:
+    """Print a per-group / per-pair length-measurement summary table.
+
+    Issue #3924 AC1.  The sidecar-gated length-skew and routing-continuity
+    rules (:data:`_MEASUREMENT_RULE_IDS`) attach the measured value
+    (``actual_value``) and its tolerance (``required_value``) to every
+    finding they emit -- passing findings are ``info`` severity (only
+    produced when the checker was built with ``emit_measurements=True`` or
+    ``verbose=True``) and failing findings are ``error`` severity.  This
+    renders both into one compact table so a user running plain
+    ``kct check`` (no ``--verbose``) can read the achieved skew / continuity
+    values without wading through the info stream.
+
+    The table is only printed when at least one measurement finding is
+    present.  With no net-class-map sidecar the skew rules produce no
+    findings, so this is a graceful no-op (Issue #3924 AC5).
+    """
+    measurements = [v for v in violations if v.rule_id in _MEASUREMENT_RULE_IDS]
+    # Only rows that actually carry a measured value are renderable.
+    measurements = [v for v in measurements if v.actual_value is not None]
+    if not measurements:
+        return
+
+    def _subject(v: DRCViolation) -> str:
+        # Match groups carry the group name in ``items``; diff pairs carry
+        # their two net names in ``nets``.
+        if v.items:
+            return v.items[0]
+        if v.nets:
+            return "/".join(n for n in v.nets if n)
+        return v.rule_id
+
+    def _metric(v: DRCViolation) -> str:
+        rule_id = v.rule_id
+        # diffpair_routing_continuity measures a coupled *fraction*, not a
+        # length skew -- label the column accordingly.
+        if rule_id == "diffpair_routing_continuity":
+            return "continuity"
+        if rule_id == "diffpair_uncoupled_length":
+            from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+                is_per_terminal_finding,
+                is_via_count_finding,
+            )
+
+            if is_via_count_finding(v):
+                return "vias"
+            return "uncpl/term" if is_per_terminal_finding(v) else "uncoupled"
+        return "skew"
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    for v in sorted(measurements, key=lambda x: (x.rule_id, _subject(x))):
+        subject = _subject(v)
+        metric = _metric(v)
+        measured = f"{v.actual_value:.3f}" if v.actual_value is not None else "-"
+        tol = f"{v.required_value:.3f}" if v.required_value is not None else "-"
+        status = "FAIL" if v.is_error else "pass"
+        if v.rule_id == "diffpair_routing_continuity":
+            # Info-only since #6443: below the threshold is a measurement,
+            # not a failure.
+            status = "info"
+        elif v.severity == "warning":
+            status = "warn"
+        rows.append((subject, metric, measured, tol, status))
+
+    subject_w = max(len("Group/Pair"), *(len(r[0]) for r in rows))
+    metric_w = max(len("Metric"), *(len(r[1]) for r in rows))
+
+    print(f"\n{'-' * 60}")
+    print("MEASUREMENT SUMMARY (length-match / continuity):")
+    header = (
+        f"  {'Group/Pair':<{subject_w}}  {'Metric':<{metric_w}}  "
+        f"{'Measured':>10}  {'Tolerance':>10}  Status"
+    )
+    print(header)
+    for subject, metric, measured, tol, status in rows:
+        print(
+            f"  {subject:<{subject_w}}  {metric:<{metric_w}}  {measured:>10}  {tol:>10}  {status}"
+        )
+
+
+@dataclass
+class _CategoryTally:
+    """Per-severity counts + rule_id set for one reporting category (Issue #3803)."""
+
+    errors: int = 0
+    warnings: int = 0
+    infos: int = 0
+    waived: int = 0
+    rules: set[str] = field(default_factory=set)
+
+    def add(self, v: DRCViolation) -> None:
+        self.rules.add(v.rule_id)
+        if v.is_waived:
+            self.waived += 1
+        elif v.is_error:
+            self.errors += 1
+        elif v.is_info:
+            self.infos += 1
+        else:
+            self.warnings += 1
+
+    @property
+    def total(self) -> int:
+        """Active (non-waived) finding count for the bucket headline."""
+        return self.errors + self.warnings + self.infos
+
+    def detail(self) -> str:
+        parts = [f"{self.errors} errors", f"{self.warnings} warnings", f"{self.infos} infos"]
+        if self.waived:
+            parts.append(f"{self.waived} waived")
+        return ", ".join(parts)
+
+    def rule_list(self) -> str:
+        return ", ".join(sorted(self.rules)) if self.rules else "none"
+
+
+def _print_category_summary(violations: list[DRCViolation]) -> None:
+    """Print the manufacturing-vs-advisory reporting buckets (Issue #3803).
+
+    Splits the finding set into two clearly-labelled categories using the
+    single-source-of-truth :meth:`DRCChecker.category_for_rule` classifier
+    so a reader can trust the manufacturing headline to mean
+    fabrication-blocking copper defects, and not confuse it with
+    routing-intent / quality findings (connectivity completion, diff-pair
+    skew/continuity, copper slivers, ampacity, silk).
+
+    Presentation-only: this reads the same ``violations`` list already
+    counted by :func:`output_table` and does not alter the verdict, exit
+    code, or any per-severity count.
+    """
+    mfg = _CategoryTally()
+    adv = _CategoryTally()
+    for v in violations:
+        bucket = (
+            adv if DRCChecker.category_for_rule(v.rule_id) == DRCChecker.CATEGORY_ADVISORY else mfg
+        )
+        bucket.add(v)
+
+    print(f"\n{'-' * 60}")
+    print("CATEGORY SUMMARY (fabrication-blocking vs advisory -- Issue #3803):")
+    # The manufacturing headline is ALWAYS shown -- its value is precisely
+    # that a reader can trust "Manufacturing DRC: 0 blocking" on a board
+    # whose only findings are advisory-quality (the headline complaint).
+    print(f"  Manufacturing DRC: {mfg.errors} blocking  (copper/clearance/hole/edge/mask/drill)")
+    print(f"      {mfg.detail()}  [{mfg.rule_list()}]")
+    # The advisory block is shown only when there ARE advisory findings, so
+    # a manufacturing-only board does not render an empty advisory header.
+    if adv.total:
+        print(
+            f"  Advisory/quality:  {adv.total} advisory"
+            "  (connectivity, diff-pair, copper_sliver, ampacity, silk)"
+        )
+        print(f"      {adv.detail()}  [{adv.rule_list()}]")
+
+
+def _copper_weights_provenance(
+    outer: float | None,
+    inner: float | None,
+    cli_outer: float | None,
+    cli_inner: float | None,
+    stackup_outer: float | None,
+    stackup_inner: float | None,
+    *,
+    disagreement: bool,
+) -> dict:
+    """Effective ampacity copper weights with their source (Issue #8826).
+
+    ``source`` is ``flag`` (explicit ``--copper``), ``stackup`` (declared
+    board stackup) or ``profile`` (manufacturer/profile default; ``oz`` is
+    ``None`` because nothing overrides it).
+    """
+
+    def _entry(oz: float | None, cli_oz: float | None, stk_oz: float | None) -> dict:
+        if cli_oz is not None:
+            source = "flag"
+        elif stk_oz is not None:
+            source = "stackup"
+        else:
+            source = "profile"
+        return {"oz": oz, "source": source}
+
+    return {
+        "outer": _entry(outer, cli_outer, stackup_outer),
+        "inner": _entry(inner, cli_inner, stackup_inner),
+        "flag_overrides_stackup": disagreement,
+    }
+
+
+def _dfm_stackup_args(
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    n_layers_fallback: int,
+    profile,
+) -> tuple[int, float, float, bool]:
+    """Resolve the DFM table lookup key ``(n_layers, eff_outer, eff_inner, assumed)``.
+
+    The one stackup-resolution path for the DFM threshold table (#8839), shared
+    by :func:`_apply_dfm_table` (floors) and the fab-view gap-band resolution
+    (#8938), so both always agree on which entry applies.
+    """
+    n_layers = layers if layers is not None else n_layers_fallback
+    base = profile.get_design_rules(n_layers, preset_oz)
+    eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
+    assumed = outer is None or (n_layers > 2 and inner is None)
+    if n_layers <= 2:
+        eff_inner = 0.0
+    else:
+        eff_inner = inner if inner is not None else base.inner_copper_oz
+    return n_layers, eff_outer, eff_inner, assumed
+
+
+def _resolve_fab_gap_policy(
+    mfr: str,
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    n_layers_fallback: int,
+):
+    """The stackup's fab-view gap bands for ``DRCChecker(fab_view_gap_policy=...)``.
+
+    ``None`` when the fab has no table or the stackup has no entry: the gap
+    pass then fails closed (issue #8938) instead of severity-grading from
+    assumed edges -- the missing entry already drives an ``incomplete``
+    verdict via :func:`_apply_dfm_table`.
+    """
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    profile = get_profile(mfr)
+    if profile.dfm_thresholds is None:
+        return None
+    n_layers, eff_outer, eff_inner, _assumed = _dfm_stackup_args(
+        layers, outer, inner, preset_oz, n_layers_fallback, profile
+    )
+    entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
+    if entry is None:
+        return None
+    return fab_gap_policy_from_entry(entry)
+
+
+def _apply_dfm_table(
+    checker: DRCChecker,
+    mfr: str,
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    copper_weights: dict,
+) -> bool:
+    """Apply the DFM threshold table's floors to ``checker`` (Issue #8839).
+
+    Returns True when the manufacturer HAS a table but the board's stackup
+    (layers, outer oz, inner oz) has no entry -- the caller turns that into an
+    ``incomplete`` verdict.  Floors only tighten the profile's rules.
+    """
+    profile = get_profile(mfr)
+    if profile.dfm_thresholds is None:
+        copper_weights["dfm_table"] = {
+            "version": None,
+            "stackup": None,
+            "entry": None,
+            "reason": f"no table for {mfr}",
+        }
+        return False
+    n_layers, eff_outer, eff_inner, assumed = _dfm_stackup_args(
+        layers, outer, inner, preset_oz, len(checker.pcb.copper_layers), profile
+    )
+    entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
+    stackup = f"{n_layers}-layer, {eff_outer:g}oz outer / {eff_inner:g}oz inner"
+    if assumed:
+        stackup += " (assumed: no stackup/--copper weight declared)"
+    table_version = profile.dfm_thresholds.version
+    if entry is None:
+        copper_weights["dfm_table"] = {
+            "version": table_version,
+            "stackup": stackup,
+            "entry": None,
+        }
+        print(
+            f"INCOMPLETE: no {mfr} DFM threshold entry for {stackup} "
+            f"(table v{table_version}); fab floors for this stackup are unknown. "
+            "Add a sourced entry to the manufacturer YAML or use a covered stackup.",
+            file=sys.stderr,
+        )
+        return True
+    t = entry.thresholds
+    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
+    copper_weights["dfm_table"] = {
+        "version": table_version,
+        "stackup": stackup,
+        "entry": entry.key,
+        "thresholds": {
+            name: {
+                "danger_mm": th.danger_mm,
+                "warning_mm": th.warning_mm,
+                "warning_basis": (th.warning_basis or th.basis)
+                if th.warning_mm is not None
+                else None,
+                "basis": th.basis,
+                "source_url": th.source_url,
+                "retrieved": th.retrieved,
+            }
+            for name, th in t.items()
+        },
+    }
+    return False
+
+
+def _format_copper_weights(copper_weights: dict) -> str:
+    """One-line header form of :func:`_copper_weights_provenance`."""
+    parts = []
+    for cls in ("outer", "inner"):
+        entry = copper_weights[cls]
+        oz = "profile default" if entry["oz"] is None else f"{entry['oz']:g}oz"
+        parts.append(f"{cls} {oz} ({entry['source']})")
+    if copper_weights.get("floors_outer_oz") is not None:
+        parts.append(f"mfr floors for {copper_weights['floors_outer_oz']:g}oz outer")
+    return ", ".join(parts)
+
+
+def _annotate_copper_stale_cause(violation_dicts: list[dict], copper_weights: dict | None) -> None:
+    """Name a copper-flag override as the cause of stale ampacity waivers (#8826)."""
+    if not copper_weights or not copper_weights.get("flag_overrides_stackup"):
+        return
+    for d in violation_dicts:
+        if d.get("stale_waiver_cause") == "evidence_changed" and d.get("rule_id") in (
+            "ampacity",
+            "path_ampacity",
+        ):
+            d["stale_waiver_cause"] = "copper_flag_overrides_stackup"
+
+
+def output_table(
+    violations: list[DRCViolation],
+    results: DRCResults,
+    pcb_path: Path,
+    mfr: str,
+    layers: int,
+    verbose: bool = False,
+    copper_weights: dict | None = None,
+) -> None:
+    """Output violations as a formatted table."""
+    error_count = sum(1 for v in violations if v.is_error)
+    warning_count = sum(1 for v in violations if v.is_warning)
+    info_count = sum(1 for v in violations if v.is_info)
+    waived_count = sum(1 for v in violations if v.is_waived)
+
+    print(f"\n{'=' * 60}")
+    print("PURE PYTHON DRC CHECK")
+    print(f"{'=' * 60}")
+    print(f"File: {pcb_path.name}")
+    print(f"Manufacturer: {mfr.upper()}")
+    print(f"Layers: {layers}")
+    if copper_weights:
+        print(f"Copper (ampacity): {_format_copper_weights(copper_weights)}")
+        dfm = copper_weights.get("dfm_table")
+        if dfm:
+            if dfm.get("reason"):
+                print(f"DFM thresholds: {dfm['reason']}")
+            else:
+                used = dfm["entry"] or "NO ENTRY (incomplete)"
+                print(f"DFM thresholds: table v{dfm['version']}, {dfm['stackup']} -> {used}")
+    print(f"Rules checked: {results.rules_checked}")
+
+    print("\nResults:")
+    print(f"  Errors:     {error_count}")
+    print(f"  Warnings:   {warning_count}")
+    if info_count > 0:
+        print(f"  Infos:      {info_count}")
+    if waived_count > 0:
+        print(f"  Waived:     {waived_count}")
+    orphan_count = _orphan_waiver_count(results)
+    if orphan_count > 0:
+        print(f"  Orphan waivers: {orphan_count} (match no current finding)")
+    if results.suppressed_count > 0:
+        print(f"  Suppressed: {results.suppressed_count} (standard library footprints)")
+
+    if not violations:
+        print(f"\n{'=' * 60}")
+        print(
+            "DRC PASSED - No violations found"
+            if all(a.passed for a in results.mask_copper_assessments)
+            else "DRC NOT QUALIFIED - Requested mask coverage incomplete or failing"
+        )
+        return
+
+    # Issue #3803: render the manufacturing-vs-advisory category buckets so
+    # the headline distinguishes fabrication-blocking copper defects from
+    # routing-intent / quality findings.  Presentation-only -- the
+    # per-severity counts above and the PASS/FAIL verdict below are
+    # unchanged.
+    _print_category_summary(violations)
+
+    # Issue #3924 AC1: render the length-match / continuity measurement
+    # table before the violation listing so the measured values are visible
+    # even on the default (non-``--verbose``) path.  No-op when the board
+    # has no measurement findings (e.g. no net-class-map sidecar -- AC5).
+    _print_measurement_summary(violations)
+
+    # Group by rule_id summary.
+    #
+    # Issue #3924: the length-match / continuity measurement findings are
+    # info-severity rows surfaced by the dedicated MEASUREMENT SUMMARY table
+    # above.  On the default (non-``--verbose``) path we exclude them from the
+    # BY RULE breakdown -- mirroring the INFOS-listing suppression below -- so
+    # that default output stays backward-compatible for consumers that grep
+    # ``BY RULE:`` severity-agnostically (e.g. the board03 baseline test).
+    # Under ``--verbose`` they remain visible in BY RULE alongside INFOS.
+    by_rule_source = (
+        violations
+        if verbose
+        else [v for v in violations if not (v.is_info and v.rule_id in _MEASUREMENT_RULE_IDS)]
+    )
+    by_rule: dict[str, dict[str, int]] = {}
+    # Issue #4102: for net-relationship rules (hole_to_hole_clearance),
+    # additionally tally a same-net / different-net breakdown so the BY RULE
+    # summary line is immediately actionable -- directly answering the
+    # "49-finding wall" complaint without scrolling the detail list.
+    by_rule_relationship: dict[str, dict[str, int]] = {}
+    for v in by_rule_source:
+        if v.rule_id not in by_rule:
+            by_rule[v.rule_id] = {"errors": 0, "warnings": 0, "infos": 0, "waived": 0}
+        if v.is_waived:
+            by_rule[v.rule_id]["waived"] += 1
+        elif v.is_error:
+            by_rule[v.rule_id]["errors"] += 1
+        elif v.is_info:
+            by_rule[v.rule_id]["infos"] += 1
+        else:
+            by_rule[v.rule_id]["warnings"] += 1
+
+        if v.rule_id in _NET_RELATIONSHIP_RULE_IDS:
+            relationship = _finding_relationship(v)
+            if relationship is not None:
+                counts = by_rule_relationship.setdefault(
+                    v.rule_id, {"same-net": 0, "different-net": 0}
+                )
+                counts[relationship] += 1
+
+    # ``by_rule`` can be empty when the only findings are measurement info
+    # rows suppressed above (already surfaced in MEASUREMENT SUMMARY); skip the
+    # empty BY RULE header in that case.
+    if by_rule:
+        print(f"\n{'-' * 60}")
+        print("BY RULE:")
+    for rule_id, counts in sorted(
+        by_rule.items(),
+        key=lambda x: -(x[1]["errors"] + x[1]["warnings"] + x[1]["infos"] + x[1].get("waived", 0)),
+    ):
+        parts = []
+        if counts["errors"]:
+            parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
+        if counts["warnings"]:
+            parts.append(f"{counts['warnings']} warning{'s' if counts['warnings'] != 1 else ''}")
+        if counts["infos"]:
+            parts.append(f"{counts['infos']} info{'s' if counts['infos'] != 1 else ''}")
+        if counts.get("waived"):
+            parts.append(f"{counts['waived']} waived")
+        line = f"  {rule_id}: {', '.join(parts)}"
+        # Issue #4102: append the same-net / different-net breakdown for
+        # net-relationship rules, e.g.
+        #   hole_to_hole_clearance: 49 errors (32 different-net, 17 same-net)
+        rel = by_rule_relationship.get(rule_id)
+        if rel:
+            diff_n = rel["different-net"]
+            same_n = rel["same-net"]
+            line += f" ({diff_n} different-net, {same_n} same-net)"
+        print(line)
+
+    # Detailed output
+    errors = [v for v in violations if v.is_error]
+    warnings = [v for v in violations if v.is_warning]
+    infos = [v for v in violations if v.is_info]
+    waived = [v for v in violations if v.is_waived]
+
+    if errors:
+        print(f"\n{'-' * 60}")
+        print("ERRORS (must fix):")
+        for v in errors:
+            _print_violation(v, verbose)
+
+    if warnings:
+        print(f"\n{'-' * 60}")
+        print("WARNINGS (review recommended):")
+        display_warnings = warnings if verbose else warnings[:10]
+        for v in display_warnings:
+            _print_violation(v, verbose)
+        if len(warnings) > 10 and not verbose:
+            print(f"\n  ... and {len(warnings) - 10} more warnings (use --verbose)")
+
+    # Issue #3924 AC1/AC4: the per-pair / per-group measurement info findings
+    # are shown in the dedicated MEASUREMENT SUMMARY table above at every
+    # verbosity.  In the generic INFOS listing we keep them only under
+    # ``--verbose`` (preserving PR #3948's advisory-line behaviour) and
+    # suppress them on the default path to avoid duplicating the summary
+    # and flooding plain output.
+    display_infos_source = (
+        infos if verbose else [v for v in infos if v.rule_id not in _MEASUREMENT_RULE_IDS]
+    )
+    if display_infos_source:
+        print(f"\n{'-' * 60}")
+        print("INFOS (advisory only):")
+        display_infos = display_infos_source if verbose else display_infos_source[:10]
+        for v in display_infos:
+            _print_violation(v, verbose)
+        if len(display_infos_source) > 10 and not verbose:
+            print(f"\n  ... and {len(display_infos_source) - 10} more infos (use --verbose)")
+
+    # Issue #4137: waived findings are visible and counted but non-blocking.
+    # Render them in a dedicated WAIVED section so a reviewer can audit each
+    # documented exception (with its reason / tracking issue).
+    if waived:
+        # Issue #8938: state how many waived findings are the same-net class,
+        # so a deliberate class waiver is visible as a count, not just as
+        # rows in the listing below.
+        same_net_waived = sum(1 for v in waived if v.same_net)
+        print(f"\n{'-' * 60}")
+        print("WAIVED (documented exceptions, non-blocking):")
+        if same_net_waived:
+            print(
+                f"  Same-net findings waived: {same_net_waived} "
+                "(each named below with its reason and issue)"
+            )
+        for v in waived:
+            print(f"\n  [W] {v.rule_id}")
+            print(f"      {v.message}")
+            if v.waiver_reason:
+                print(f"      Waiver reason: {v.waiver_reason}")
+            if v.waiver_issue:
+                print(f"      Waiver issue: {v.waiver_issue}")
+            if verbose:
+                if v.items:
+                    print(f"      Items: {', '.join(v.items)}")
+                if v.layer:
+                    print(f"      Layer: {v.layer}")
+
+    print(f"\n{'=' * 60}")
+    if errors:
+        print("DRC FAILED - Fix errors before manufacturing")
+    elif warnings:
+        print("DRC WARNING - Review warnings")
+    else:
+        print(
+            "DRC PASSED - Advisory infos only"
+            if all(a.passed for a in results.mask_copper_assessments)
+            else "DRC NOT QUALIFIED - Requested mask coverage incomplete or failing"
+        )
+
+
+def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:
+    """Print a single violation."""
+    if v.is_error:
+        symbol = "X"
+    elif v.is_info:
+        symbol = "i"
+    else:
+        symbol = "!"
+
+    # Issue #4102: for hole-to-hole clearance findings, tag the header line
+    # with the net relationship (same-net / different-net) so a user scanning
+    # a wall of findings can immediately tell the fab's real concern
+    # (different-net drill-wall breakage -> short) from lower-risk same-net /
+    # floating pairs -- without eyeballing two net names.  Presentational only;
+    # severity is unchanged.
+    relationship = _finding_relationship(v) if v.rule_id in _NET_RELATIONSHIP_RULE_IDS else None
+    header = v.rule_id if relationship is None else f"{v.rule_id} ({relationship})"
+    print(f"\n{indent}[{symbol}] {header}")
+    print(f"{indent}    {v.message}")
+
+    # Issue #4102: show the net endpoints unconditionally for net-relationship
+    # rules (not only under --verbose), rendered as ``net1 / net2`` so the
+    # same-net / different-net qualifier above is self-evident.
+    net_shown = False
+    if relationship is not None and v.nets:
+        net_labels = [n if n else "<no net>" for n in v.nets]
+        print(f"{indent}    Nets: {' / '.join(net_labels)}")
+        net_shown = True
+
+    if verbose:
+        if v.location:
+            print(f"{indent}    -> ({v.location[0]:.2f}, {v.location[1]:.2f}) mm")
+        if v.layer:
+            print(f"{indent}    Layer: {v.layer}")
+        if v.actual_value is not None and v.required_value is not None:
+            print(f"{indent}    Actual: {v.actual_value:.3f}mm, Required: {v.required_value:.3f}mm")
+        if v.items:
+            print(f"{indent}    Items: {', '.join(v.items)}")
+        if v.nets and not net_shown:
+            net_labels = [n if n else "<no net>" for n in v.nets]
+            print(f"{indent}    Nets: {', '.join(net_labels)}")
+
+
+def _coverage_summary(coverage: dict) -> dict:
+    """Counts + names for the JSON ``summary`` (Issue #5946)."""
+    from kicad_tools.validate.coverage import blocking_unknowns
+
+    states = [entry.get("state") for entry in coverage.values() if isinstance(entry, dict)]
+    return {
+        "coverage_checked": states.count("checked"),
+        "coverage_skipped": states.count("skipped"),
+        "coverage_unknown": sorted(
+            name
+            for name, entry in coverage.items()
+            if isinstance(entry, dict) and entry.get("state") == "unknown"
+        ),
+        "coverage_blocking_unknown": blocking_unknowns(coverage),
+    }
+
+
+def print_coverage_stanza(coverage: dict) -> None:
+    """Print the coverage rollup and every ``unknown`` category (Issue #5946)."""
+    if not coverage:
+        return
+    states = [c.state for c in coverage.values()]
+    print()
+    print(
+        f"Coverage: {states.count('checked')} checked, {states.count('skipped')} skipped, "
+        f"{states.count('unknown')} unknown"
+    )
+    for name, c in sorted(coverage.items()):
+        if c.state == "unknown":
+            tag = "BLOCKING " if c.blocking else ""
+            print(f"  {tag}UNKNOWN {name}: {c.reason} (zero findings here is not a pass)")
+
+
+def portable_report_path(pcb_path: Path | str, cwd: Path | None = None) -> str:
+    """Return a host-independent form of *pcb_path* for a JSON report.
+
+    Committed board evidence used to echo the absolute host path of the
+    checked PCB (``/home/...``, ``/Users/...``, ``/private/var/...``), which
+    leaked worker layouts into the repo and made hash-bound bytes depend on
+    the machine that produced them (Issue #6532).  The rule is:
+
+    * a relative path is returned unchanged;
+    * an absolute path under the current working directory is returned
+      relative to it (POSIX separators);
+    * any other absolute path is reduced to its bare filename.
+
+    Both sides are resolved before comparing, so a symlinked tmp dir (macOS
+    ``/var`` -> ``/private/var``) still matches.  The result is never
+    absolute.
+    """
+    path = Path(pcb_path)
+    if not path.is_absolute():
+        return str(pcb_path)
+    base = Path.cwd() if cwd is None else Path(cwd)
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.name
+
+
+def _pcb_sha256_or_none(pcb_path: Path | str) -> str | None:
+    """sha256 of the checked PCB's bytes for the report's ``pcb_sha256`` key.
+
+    Issue #7190: export preflight only trusts an auto-discovered clean
+    report whose recorded hash equals the current PCB's.  ``None`` (key
+    emitted as ``null``) when the file cannot be read.
+    """
+    from kicad_tools.drc.report_binding import sha256_file
+
+    try:
+        return sha256_file(pcb_path)
+    except OSError:
+        return None
+
+
+def _attach_zone_summary(results: DRCResults) -> dict:
+    """``summary`` keys for the attach-zone exemption state (Issue #8131)."""
+    if results.attach_zone_exemption is None:
+        return {"attach_zone_exemption": "not_applicable"}
+    out: dict = {"attach_zone_exemption": results.attach_zone_exemption}
+    if results.attach_zone_exemption_reason:
+        out["attach_zone_exemption_reason"] = results.attach_zone_exemption_reason
+        out["attach_zone_unexempted"] = results.attach_zone_unexempted
+    return out
+
+
+def _warn_attach_zone_suppressed(results: DRCResults) -> None:
+    """One stderr line when a designer rule silently disabled the exemption (#8131)."""
+    if results.attach_zone_exemption != "suppressed":
+        return
+    print(
+        "Warning: attach-zone clearance exemption is NOT active "
+        f"({results.attach_zone_exemption_reason}: the board's .kicad_dru carries its own "
+        "clearance rule, so kct writes no managed attach-zone block); "
+        f"{results.attach_zone_unexempted} netclass_clearance_copper finding(s) "
+        "inside attach zones are left unexempted",
+        file=sys.stderr,
+    )
+
+
+def _orphan_waiver_count(results) -> int:
+    """Waiver entries that matched no current finding (Issue #8614).
+
+    Counts the ``waiver_unused`` advisories ``apply_waivers`` appended.
+    Orphans never fail the gate.
+    """
+    from kicad_tools.validate.rules.waivers import WAIVER_UNUSED_RULE_ID
+
+    return sum(
+        1 for v in results.violations if getattr(v, "rule_id", None) == WAIVER_UNUSED_RULE_ID
+    )
+
+
+def output_json(
+    violations: list[DRCViolation],
+    results: DRCResults,
+    pcb_path: Path,
+    mfr: str,
+    layers: int,
+    meta: MetaCheckResult | None = None,
+    routing_quality: dict | None = None,
+    fabrication_process: dict | None = None,
+    coverage: dict | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
+    scope: dict | None = None,
+    project_rules: list[dict] | None = None,
+    copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
+) -> None:
+    """Output violations as JSON.
+
+    Issue #8826: ``copper_weights`` (outer/inner oz + source) is emitted as a
+    top-level object and names a ``--copper``-vs-stackup override as the
+    ``stale_waiver_cause`` of stale ampacity waivers.
+
+    Issue #8643: ``project_rules`` (``sidecars.project_rules_findings``) is
+    always emitted as a top-level list, empty when clean.
+
+    Issue #3750: when ``meta`` is provided (default mode), the envelope
+    grows a top-level ``meta_checks`` field.  Legacy consumers that read
+    ``summary.passed`` / ``summary.errors`` / ``violations`` are
+    unaffected.  Under ``--drc-only`` the ``meta`` parameter is ``None``
+    and the field is omitted (``OMIT-when-absent`` convention).
+
+    Issue #4623: ``routing_quality`` (a ``RoutingQualityMetrics.to_dict()``
+    payload) follows the same convention -- emitted as a top-level key in
+    meta mode, omitted under ``--drc-only``.
+
+    Issue #5009: ``fabrication_process`` (from
+    ``kicad_tools.manufacturers.fabrication_process.describe_selection``)
+    is the machine-readable process-requirements artifact this issue
+    asks for -- generalizing the ad hoc ``fabrication_overrides`` block
+    boards 03/04 previously hand-wrote into their own reports.  ``None``
+    (the common case: no via_in_pad_process_id declared) omits the key
+    entirely, same OMIT-when-absent convention as the other optional
+    fields.
+    """
+    error_count = sum(1 for v in violations if v.is_error)
+    warning_count = sum(1 for v in violations if v.is_warning)
+    info_count = sum(1 for v in violations if v.is_info)
+    waived_count = sum(1 for v in violations if v.is_waived)
+
+    violation_dicts = [v.to_dict() for v in violations]
+    _annotate_copper_stale_cause(violation_dicts, copper_weights)
+
+    summary_data: dict = {
+        "errors": error_count,
+        "warnings": warning_count,
+        "infos": info_count,
+        # Issue #4137: waived findings are counted distinctly and never
+        # contribute to ``passed`` (which keys off ``errors``).
+        "waived": waived_count,
+        "rules_checked": results.rules_checked,
+        # Issue #2660 / Epic #2556 Phase 4N: per-rule check counter.
+        # The single ``rules_checked`` integer cannot tell a CI consumer
+        # WHICH rules ran -- only the aggregate.  Without this map, a
+        # diff-pair CI gate cannot distinguish "rule X ran and reported
+        # 0 violations" from "rule X did not run at all" (e.g., the rule
+        # short-circuited because no engaged pairs were detected, which
+        # would be a silent regression in detection).  Always emitted
+        # (even when empty) so downstream consumers can rely on the
+        # field being present.
+        "rules_checked_by_rule": dict(results.rules_checked_by_rule),
+        "passed": error_count == 0 and all(a.passed for a in results.mask_copper_assessments),
+    }
+    if results.suppressed_count > 0:
+        summary_data["suppressed"] = results.suppressed_count
+    # Issue #5946: stale evidence-bound waivers, and the coverage rollup.
+    # Counted on the unfiltered results so ``--errors-only`` cannot hide a
+    # stale waiver on a warning-severity finding.
+    summary_data["stale_waivers"] = sum(
+        1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
+    )
+    summary_data["orphan_waivers"] = _orphan_waiver_count(results)
+    if coverage is not None:
+        summary_data.update(_coverage_summary(coverage))
+    # Issue #8131: gates can assert the attach-zone exemption was applied.
+    summary_data.update(_attach_zone_summary(results))
+
+    data: dict = {
+        "file": portable_report_path(pcb_path),
+        "manufacturer": mfr,
+        # Issue #7190: bind the report to the PCB content it checked.
+        "pcb_sha256": _pcb_sha256_or_none(pcb_path),
+        "layers": layers,
+        "summary": summary_data,
+        "violations": violation_dicts,
+        "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
+        # Issue #8015: shared, versioned finding locators (additive).
+        **findings_payload(from_violation_dict(d) for d in violation_dicts),
+    }
+    if copper_weights is not None:
+        data["copper_weights"] = copper_weights
+    if meta is not None:
+        data["meta_checks"] = meta.to_dict()
+    if routing_quality is not None:
+        data["routing_quality"] = routing_quality
+    if fabrication_process is not None:
+        data["fabrication_process"] = fabrication_process
+    if coverage is not None:
+        data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
+    # Issue #7230: additive top-level verdict/exit_code from the same call
+    # that decides the process exit.  ``summary.passed`` stays DRC-only.
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
+    # Issue #8016: additive; omitted without --bbox/--refs/--nets.
+    if scope is not None:
+        data["scope"] = scope
+    data["project_rules"] = list(project_rules or [])
+    print(json.dumps(data, indent=2))
+
+
+def output_sarif(
+    violations: list[DRCViolation],
+    results: DRCResults,
+    pcb_path: Path,
+    coverage: dict | None = None,
+) -> None:
+    """Output the findings as a SARIF 2.1.0 log (Issue #6006).
+
+    See :mod:`kicad_tools.validate.sarif` for the severity, fingerprint and
+    location mapping.  Waived findings are included as suppressed results.
+    """
+    from kicad_tools.validate.sarif import sarif_log
+
+    summary: dict = {
+        "errors": sum(1 for v in violations if v.is_error),
+        "warnings": sum(1 for v in violations if v.is_warning),
+        "infos": sum(1 for v in violations if v.is_info),
+        "waived": sum(1 for v in violations if v.is_waived),
+        "stale_waivers": sum(
+            1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
+        ),
+        "orphan_waivers": _orphan_waiver_count(results),
+        "rules_checked": results.rules_checked,
+    }
+    if coverage is not None:
+        summary.update(_coverage_summary(coverage))
+    log = sarif_log(
+        [v.to_dict() for v in violations],
+        tool_name="kct check",
+        artifact=pcb_path,
+        run_properties={"summary": summary},
+    )
+    print(json.dumps(log, indent=2))
+
+
+def write_json_report(
+    violations: list[DRCViolation],
+    results: DRCResults,
+    pcb_path: Path,
+    mfr: str,
+    layers: int,
+    output_path: Path,
+    meta: MetaCheckResult | None = None,
+    routing_quality: dict | None = None,
+    fabrication_process: dict | None = None,
+    coverage: dict | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
+    scope: dict | None = None,
+    copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
+) -> None:
+    """Write DRC results as a JSON report file.
+
+    Issue #8826: ``copper_weights`` follows :func:`output_json`.
+
+    Issue #3750: ``meta_checks`` is added to the envelope when meta-mode
+    is active.  Omitted under ``--drc-only`` to preserve the legacy
+    on-disk schema.
+
+    Issue #4623: ``routing_quality`` follows the same OMIT-when-absent
+    convention (present in meta mode, omitted under ``--drc-only``).
+
+    Issue #5009: ``fabrication_process`` follows the same
+    OMIT-when-absent convention -- see :func:`output_json` for details.
+    """
+    error_count = sum(1 for v in violations if v.is_error)
+    warning_count = sum(1 for v in violations if v.is_warning)
+    info_count = sum(1 for v in violations if v.is_info)
+    waived_count = sum(1 for v in violations if v.is_waived)
+
+    violation_dicts = [v.to_dict() for v in violations]
+    _annotate_copper_stale_cause(violation_dicts, copper_weights)
+
+    summary_data: dict = {
+        "errors": error_count,
+        "warnings": warning_count,
+        "infos": info_count,
+        # Issue #4137: waived findings are counted distinctly and never
+        # contribute to ``passed`` (which keys off ``errors``).
+        "waived": waived_count,
+        "rules_checked": results.rules_checked,
+        # See ``output_json`` for the rationale on emitting this field
+        # alongside the aggregate ``rules_checked`` integer.  Issue
+        # #2660 / Epic #2556 Phase 4N.
+        "rules_checked_by_rule": dict(results.rules_checked_by_rule),
+        "passed": error_count == 0 and all(a.passed for a in results.mask_copper_assessments),
+    }
+    if results.suppressed_count > 0:
+        summary_data["suppressed"] = results.suppressed_count
+    # Issue #5946: stale evidence-bound waivers, and the coverage rollup.
+    # Counted on the unfiltered results so ``--errors-only`` cannot hide a
+    # stale waiver on a warning-severity finding.
+    summary_data["stale_waivers"] = sum(
+        1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
+    )
+    summary_data["orphan_waivers"] = _orphan_waiver_count(results)
+    if coverage is not None:
+        summary_data.update(_coverage_summary(coverage))
+    # Issue #8262: parity with ``output_json`` -- gates reading the ``--output``
+    # file must see the attach-zone exemption state too.
+    summary_data.update(_attach_zone_summary(results))
+
+    data: dict = {
+        "file": portable_report_path(pcb_path),
+        "manufacturer": mfr,
+        # Issue #7190: bind the report to the PCB content it checked.
+        "pcb_sha256": _pcb_sha256_or_none(pcb_path),
+        "layers": layers,
+        "summary": summary_data,
+        "violations": violation_dicts,
+        "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
+        # Issue #8015: shared, versioned finding locators (additive).
+        **findings_payload(from_violation_dict(d) for d in violation_dicts),
+    }
+    if copper_weights is not None:
+        data["copper_weights"] = copper_weights
+    if meta is not None:
+        data["meta_checks"] = meta.to_dict()
+    if routing_quality is not None:
+        data["routing_quality"] = routing_quality
+    if fabrication_process is not None:
+        data["fabrication_process"] = fabrication_process
+    if coverage is not None:
+        data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
+    # Issue #7230: additive top-level verdict/exit_code from the same call
+    # that decides the process exit.  ``summary.passed`` stays DRC-only.
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
+    # Issue #8016: additive; omitted without --bbox/--refs/--nets.
+    if scope is not None:
+        data["scope"] = scope
+    output_path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def output_summary(
+    violations: list[DRCViolation],
+    results: DRCResults,
+    pcb_path: Path,
+) -> None:
+    """Output violation summary by rule."""
+    if not violations:
+        msg = f"  {results.rules_checked} rules checked, no violations found."
+        if results.suppressed_count > 0:
+            msg += (
+                f"\n  ({results.suppressed_count} silkscreen warnings suppressed"
+                f" -- standard library footprints)"
+            )
+        print(
+            f"DRC {'PASSED' if all(a.passed for a in results.mask_copper_assessments) else 'NOT QUALIFIED'}: {pcb_path.name}"
+        )
+        print(msg)
+        return
+
+    print(f"DRC Summary: {pcb_path.name}")
+    print("=" * 50)
+
+    # Group by rule_id.
+    #
+    # Issue #4696: waived findings must land in their own bucket -- checking
+    # ``is_waived`` first, mirroring ``output_table`` (above) -- so a waived
+    # error/warning/info never inflates the ``Errors``/``Warnings``/``Infos``
+    # columns. Without this, every waived finding falls through the
+    # ``is_error``/``is_info`` cascade (both ``False`` for waived findings)
+    # into the bare ``else`` and is misreported as a warning, causing the
+    # table's TOTAL Warnings to disagree with the ``DRC:`` prose line (which
+    # is computed from ``is_warning`` and correctly excludes waived).
+    by_rule: dict[str, dict[str, int]] = {}
+    for v in violations:
+        key = v.rule_id
+        if key not in by_rule:
+            by_rule[key] = {"errors": 0, "warnings": 0, "infos": 0, "waived": 0}
+        if v.is_waived:
+            by_rule[key]["waived"] += 1
+        elif v.is_error:
+            by_rule[key]["errors"] += 1
+        elif v.is_info:
+            by_rule[key]["infos"] += 1
+        else:
+            by_rule[key]["warnings"] += 1
+
+    print(f"{'Rule ID':<30} {'Errors':<8} {'Warnings':<10} {'Infos':<8} {'Waived':<8}")
+    print("-" * 68)
+
+    for rule_id, counts in sorted(by_rule.items()):
+        print(
+            f"{rule_id:<30} {counts['errors']:<8} {counts['warnings']:<10} "
+            f"{counts['infos']:<8} {counts['waived']:<8}"
+        )
+
+    print("-" * 68)
+    total_errors = sum(c["errors"] for c in by_rule.values())
+    total_warnings = sum(c["warnings"] for c in by_rule.values())
+    total_infos = sum(c["infos"] for c in by_rule.values())
+    total_waived = sum(c["waived"] for c in by_rule.values())
+    print(
+        f"{'TOTAL':<30} {total_errors:<8} {total_warnings:<10} {total_infos:<8} {total_waived:<8}"
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

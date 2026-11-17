@@ -1,0 +1,818 @@
+/*
+ * Router C++ Core - 3D Grid
+ * Part of kicad-tools router performance optimization (Phase 4)
+ *
+ * High-performance 3D grid with contiguous memory layout for cache efficiency.
+ * Uses flat array indexing for O(1) cell access.
+ */
+
+#pragma once
+
+#include "types.hpp"
+#include <array>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <map>
+#include <set>
+#include <tuple>
+#include <optional>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+
+namespace router {
+
+class Grid3D {
+public:
+    Grid3D(int cols, int rows, int layers, float resolution,
+           float origin_x, float origin_y);
+
+    using FillRing = std::vector<std::pair<double, double>>;
+    struct FillEdge { double ax, ay, bx, by; };
+    struct FixedFill {
+        int layer;
+        double clearance;
+        std::vector<FillRing> rings;
+        double minx, miny, maxx, maxy;
+        std::vector<FillEdge> edges;
+        // One-mm bins: horizontal rows accelerate even-odd containment;
+        // two-dimensional bins accelerate exact edge-distance queries.
+        std::map<int, std::vector<size_t>> rows;
+        std::map<std::pair<int, int>, std::vector<size_t>> bins;
+    };
+    void clear_fixed_fills() { fixed_fills_.clear(); }
+    void add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings);
+    bool fixed_fill_clear(double ax, double ay, double bx, double by,
+                          int layer, double half, double reach) const;
+    bool has_fixed_fills() const { return !fixed_fills_.empty(); }
+
+    // Cell access - inline for performance
+    inline GridCell& at(int x, int y, int layer) {
+        return cells_[index(x, y, layer)];
+    }
+
+    inline const GridCell& at(int x, int y, int layer) const {
+        return cells_[index(x, y, layer)];
+    }
+
+    inline bool is_valid(int x, int y, int layer) const {
+        return x >= 0 && x < cols_ && y >= 0 && y < rows_ &&
+               layer >= 0 && layer < layers_;
+    }
+
+    inline bool is_valid_and_free(int x, int y, int layer, int net) const {
+        if (!is_valid(x, y, layer)) return false;
+        const auto& cell = at(x, y, layer);
+        if (!cell.blocked) return true;
+        // Blocked cell is passable if it's the same net
+        return cell.net == net && !cell.is_obstacle;
+    }
+
+    // Coordinate conversion
+    inline std::pair<int, int> world_to_grid(float x, float y) const {
+        int gx = static_cast<int>(std::round((x - origin_x_) / resolution_));
+        int gy = static_cast<int>(std::round((y - origin_y_) / resolution_));
+        return {std::clamp(gx, 0, cols_ - 1), std::clamp(gy, 0, rows_ - 1)};
+    }
+
+    inline std::pair<float, float> grid_to_world(int gx, int gy) const {
+        return {origin_x_ + gx * resolution_, origin_y_ + gy * resolution_};
+    }
+
+    // Bulk operations for obstacle marking.
+    //
+    // Issue #3224: ``pad_blocked`` (default ``false``) marks the cell as
+    // foreign pad copper -- the A* clearance branch in ``pathfinder.cpp``
+    // refuses to step the trace centerline into a foreign pad's metal
+    // even during pad-exit (where clearance-halo cells are otherwise
+    // allowed).  Without this bit, ``cell.pad_blocked`` defaults to
+    // ``false`` for every cell and the pad-exit exemption permits traces
+    // to step through foreign pad metal, producing the
+    // ``clearance_pad_segment`` regression on dense fine-pitch packages
+    // (board 05 / U3 QFN-56 / U10 LQFP-32).  The Python sync
+    // (``cpp_backend.py::from_routing_grid`` and
+    // ``grid.py::_sync_pad_to_cpp_grid``) sets this bit only for cells
+    // inside a pad's metal area (NOT the surrounding clearance halo),
+    // mirroring the Python grid's ``_pad_blocked[metal_slice] = True``
+    // at ``grid.py:4458``.
+    //
+    // Issue #6315: ``pad_source`` says the cell is pad copper or pad
+    // clearance (the Python pad sync); it sets ``cell.pad_cell`` unless an
+    // earlier non-pad static marking already owns the cell, and every
+    // non-pad marking (``pad_source == false``) clears it.
+    // ``shared_pad_halo`` marks a halo cell reached by pads of two different
+    // signal nets (``cell.shared_pad_halo``; only kept on a ``pad_cell``).
+    void mark_blocked(int x, int y, int layer, int net, bool is_obstacle = false,
+                      bool pad_blocked = false, bool pad_source = false,
+                      bool shared_pad_halo = false);
+    void mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
+                           bool is_obstacle = false);
+
+    // Route marking with clearance buffer using Bresenham.
+    // Issue #4079: like ``mark_via``, ``mark_segment`` NOW consults the
+    // per-cell corridor reservation owner set (``GridCell::reserved_nets``)
+    // for lateral-trace keep-out, mirroring Python ``_mark_segment``.  A
+    // cell reserved for a net set that EXCLUDES ``net`` is SKIPPED (the
+    // foreign net's trace does not claim/block it), so a foreign lateral
+    // trace cannot colonise a reserved continuation corridor.  Cells
+    // reserved for a set that INCLUDES ``net`` are ordinary blockable
+    // cells.  Fast path: when ``has_reservations_ == false`` the check is
+    // skipped, preserving byte-identical behaviour on boards without
+    // reservations.  See ``cpp/src/grid.cpp`` and
+    // ``tests/test_grid_cpp_parity.py``.
+    void mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
+                      int clearance_cells);
+    // Issue #4071: ``mark_via`` NOW consults the per-cell corridor
+    // reservation owner set (``GridCell::reserved_nets``), mirroring
+    // Python's ``RoutingGrid._mark_via`` (Issue #2677).  A cell reserved
+    // for a net set that EXCLUDES ``net`` is SKIPPED (the via halo does
+    // not claim/block it), so partner-net through-hole vias cannot
+    // colonise a reserved continuation corridor.  Cells reserved for a
+    // set that INCLUDES ``net`` are treated as ordinary blockable cells.
+    // Fast path: when no cell is reserved (``has_reservations_ == false``)
+    // the check is skipped entirely, preserving byte-identical behaviour.
+    // See ``cpp/src/grid.cpp`` and ``tests/test_grid_cpp_parity.py``.
+    void mark_via(int x, int y, int net, int radius_cells);
+
+    // Unmark route (rip-up)
+    void unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
+                        int clearance_cells);
+    void unmark_via(int x, int y, int net, int radius_cells);
+
+    // -----------------------------------------------------------------------
+    // Issue #4071: corridor-reservation API (mirrors
+    // ``RoutingGrid.reserve_corridor_cells`` / ``is_reserved_for`` /
+    // ``clear_corridor_reservations`` / ``reserved_cell_count``).
+    // -----------------------------------------------------------------------
+
+    // Reserve a single cell on ``layer`` for the given owner net set.
+    // Owner sets larger than ``RESERVED_NETS_CAP`` are truncated to the
+    // first K nets (documented ceiling; no current caller exceeds 2).
+    // Overlapping reservations REPLACE (last-writer-wins), matching the
+    // Python semantics.  A single reserved cell flips the grid-wide
+    // ``has_reservations_`` fast-path flag.
+    // Issue #4079: ``soft`` selects the keep-out strength.  ``false``
+    // (default) is a HARD reservation -- foreign vias AND lateral traces
+    // are fenced out (``is_reserved_excluding`` true).  ``true`` is a SOFT
+    // reservation -- only the A* attractor bonus applies for the owner
+    // net; foreign traces may still cross (``is_reserved_excluding``
+    // false).  See the #4079 note in ``types.hpp``.
+    void reserve_cell(int x, int y, int layer,
+                      const std::vector<int>& net_ids, bool soft = false);
+
+    // Clear every corridor reservation (owner sets + fast-path flag).
+    void clear_reservations();
+
+    // Number of cells with a non-empty owner set (instrumentation /
+    // parity tests, mirrors ``RoutingGrid.reserved_cell_count``).
+    int reserved_cell_count() const;
+
+    // True iff the cell is reserved AND ``net`` is in its owner set.
+    // Mirrors ``RoutingGrid.is_reserved_for``.  Inline for the A* cost
+    // loop and ``mark_via`` hot paths.
+    inline bool is_reserved_for(int x, int y, int layer, int net) const {
+        if (!has_reservations_) return false;
+        if (!is_valid(x, y, layer)) return false;
+        const auto& cell = at(x, y, layer);
+        for (int i = 0; i < cell.reserved_count; ++i) {
+            if (cell.reserved_nets[i] == net) return true;
+        }
+        return false;
+    }
+
+    // Issue #4079: True iff the cell is reserved for a net set that
+    // EXCLUDES ``net`` -- i.e. a foreign net whose lateral trace (or via
+    // halo) must be fenced out of the reserved corridor cell.  Returns
+    // false for an unreserved cell OR a cell reserved for a set that
+    // INCLUDES ``net`` (the owner may use its own reservation).  This is
+    // the lateral-trace keep-out primitive consulted by
+    // ``mark_segment`` and ``Pathfinder::is_trace_blocked`` (parity with
+    // the Python ``_reserved_for_nets`` "owners is not None and net not
+    // in owners" check in ``_mark_via`` / ``_mark_segment`` /
+    // ``_is_trace_blocked``).  Inline for the A* hot path.
+    inline bool is_reserved_excluding(int x, int y, int layer, int net) const {
+        if (!has_reservations_) return false;
+        if (!is_valid(x, y, layer)) return false;
+        const auto& cell = at(x, y, layer);
+        if (cell.reserved_count <= 0) return false;
+        // Issue #4079: a SOFT reservation never fences foreign traffic out
+        // -- it contributes only the A* attractor bonus for its owner net.
+        // Only HARD reservations produce a foreign keep-out.
+        if (cell.reserved_soft) return false;
+        for (int i = 0; i < cell.reserved_count; ++i) {
+            if (cell.reserved_nets[i] == net) return false;  // owner net
+        }
+        return true;  // hard-reserved, but not for this net
+    }
+
+    // True iff ANY cell is currently reserved (grid-wide fast path).
+    inline bool has_reservations() const { return has_reservations_; }
+
+    // Issue #4071: soft corridor-attractor bonus for a single cell.
+    // Returns ``bonus`` when the cell is reserved for ``net``, else 0.0.
+    // Mirrors ``RoutingGrid.get_corridor_attractor_bonus``.  Inline for
+    // the A* cost loop.
+    inline float corridor_attractor_bonus(int x, int y, int layer, int net,
+                                          float bonus) const {
+        if (!has_reservations_ || bonus <= 0.0f) return 0.0f;
+        return is_reserved_for(x, y, layer, net) ? bonus : 0.0f;
+    }
+
+    // Congestion tracking
+    float get_congestion(int x, int y, int layer) const;
+    void update_congestion(int x, int y, int layer, int delta = 1);
+
+    // DRC avoidance feedback
+    void boost_region_cost(int center_x, int center_y, int layer,
+                           int radius_cells, float amount);
+    void clear_avoidance_costs();
+
+    // Airwire-separation cost plane (Issue #8999).  ``set_airwire_cells``
+    // writes the weighted sparse plane (same count column on every layer
+    // -- a desire line is layer-less) in one call; a full
+    // clear-then-rewrite per refresh keeps the native plane a pure
+    // function of the committed set, mirroring
+    // ``kicad_tools.router.airwire_cost.refresh_airwire_cost``.
+    void clear_airwire_costs();
+    void set_airwire_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                           const std::vector<float>& costs);
+
+    // Negotiated routing support
+    void reset_usage();
+    void increment_usage(int x, int y, int layer);
+    // Issue #3438: rip-up parity.  Mirrors RoutingGrid.unmark_route_usage
+    // so the Python negotiated loop can keep the C++ usage counts in
+    // lock-step with the Python grid (previously usage was never synced,
+    // so the C++ sharing-mode clauses saw usage_count == 0 everywhere and
+    // treated ALL foreign copper as hard).  Clamps at zero.
+    void decrement_usage(int x, int y, int layer);
+    // Issue #2963: optional ``net`` parameter — when nonzero AND the
+    // cell's net matches, the ``is_obstacle`` hard-reject is skipped
+    // (the destination pad's own metal stays reachable for its own
+    // routing net post-PR #2928's first-touch obstacle marking).
+    float get_negotiated_cost(int x, int y, int layer, float present_factor,
+                              int net = 0) const;
+    void update_history_costs(float increment);
+    int get_total_overflow() const;
+
+    // Accessors
+    int cols() const { return cols_; }
+    int rows() const { return rows_; }
+    int layers() const { return layers_; }
+    float resolution() const { return resolution_; }
+    size_t total_cells() const { return cells_.size(); }
+
+    // Statistics
+    int count_blocked() const;
+    float memory_mb() const;
+
+    // -----------------------------------------------------------------------
+    // Geometric validation storage and methods (Issue #2439)
+    // Eliminates Python callback overhead for post-route clearance checks.
+    // -----------------------------------------------------------------------
+
+    // Register pads for clearance validation.
+    // clearance_override: pre-computed from rules.get_clearance_for_component()
+    // is_plane_net (Issue #2908): True when the pad's net carries plane
+    // (power/ground) topology -- used by validate_route() to skip the
+    // same-component-ref carve-out so plane pads remain validated even
+    // when the routing context excludes their component (mirrors the
+    // Python ``_is_plane_net_pad`` helper).
+    void add_pad(float x, float y, float width, float height,
+                 int net, int layer_idx, uint32_t ref_hash,
+                 float clearance_override,
+                 bool is_plane_net = false, float rotation = 0.0f,
+                 bool is_circular = false);
+
+    // Issue #6008: board-file keepout rule areas the occupancy planes cannot
+    // hold -- net-filtered track rules (``spatial_keepouts``) and every via
+    // rule.  All-nets track rules arrive as ordinary static net-0 cells via
+    // ``mark_blocked``.  Mirrors ``RoutingGrid.rule_area_trace_blocked`` /
+    // ``rule_area_via_blocked`` (``router/rule_area_grid.py``).
+    struct RuleAreaKeepout {
+        bool blocks_tracks = false;
+        bool blocks_vias = false;
+        std::vector<char> layer_on;     // per grid layer
+        int x0 = 0, y0 = 0, w = 0, h = 0;
+        std::vector<char> mask;         // h * w, row-major
+        bool has_only = false;
+        std::set<int> only;
+        std::set<int> exempt;
+
+        bool applies_to(int net) const {
+            if (has_only && only.find(net) == only.end()) return false;
+            return exempt.find(net) == exempt.end();
+        }
+        bool hits_disc(int x, int y, int radius) const {
+            const int r = radius < 0 ? 0 : radius;
+            const int lx = std::max(x - r, x0), hx = std::min(x + r, x0 + w - 1);
+            const int ly = std::max(y - r, y0), hy = std::min(y + r, y0 + h - 1);
+            if (lx > hx || ly > hy) return false;
+            const int r2 = r * r;
+            for (int cy = ly; cy <= hy; ++cy) {
+                const int dy = cy - y;
+                const char* row = &mask[static_cast<size_t>(cy - y0) * w];
+                for (int cx = lx; cx <= hx; ++cx) {
+                    const int dx = cx - x;
+                    if (dx * dx + dy * dy > r2) continue;
+                    if (row[cx - x0]) return true;
+                }
+            }
+            return false;
+        }
+    };
+    void clear_rule_area_keepouts() { rule_areas_.clear(); }
+    void add_rule_area_keepout(bool blocks_tracks, bool blocks_vias,
+                               const std::vector<int>& layers,
+                               int x0, int y0, int w, int h,
+                               const std::vector<int64_t>& cells,
+                               bool has_only,
+                               const std::vector<int>& only,
+                               const std::vector<int>& exempt) {
+        RuleAreaKeepout area;
+        area.blocks_tracks = blocks_tracks;
+        area.blocks_vias = blocks_vias;
+        area.layer_on.assign(static_cast<size_t>(layers_), 0);
+        for (int layer : layers)
+            if (layer >= 0 && layer < layers_) area.layer_on[layer] = 1;
+        area.x0 = x0; area.y0 = y0;
+        area.w = std::max(w, 0); area.h = std::max(h, 0);
+        area.mask.assign(static_cast<size_t>(area.w) * area.h, 0);
+        for (int64_t idx : cells)
+            if (idx >= 0 && static_cast<size_t>(idx) < area.mask.size()) area.mask[idx] = 1;
+        area.has_only = has_only;
+        area.only.insert(only.begin(), only.end());
+        area.exempt.insert(exempt.begin(), exempt.end());
+        rule_areas_.push_back(std::move(area));
+    }
+    size_t rule_area_keepout_count() const { return rule_areas_.size(); }
+    bool has_rule_area_keepouts() const { return !rule_areas_.empty(); }
+    bool rule_area_trace_blocked(int x, int y, int layer, int net, int radius) const {
+        for (const auto& area : rule_areas_) {
+            if (!area.blocks_tracks) continue;
+            if (layer < 0 || layer >= static_cast<int>(area.layer_on.size()) ||
+                !area.layer_on[layer]) continue;
+            if (area.applies_to(net) && area.hits_disc(x, y, radius)) return true;
+        }
+        return false;
+    }
+    // Layer-agnostic: a through-via spans the whole stack (lattice parity).
+    bool rule_area_via_blocked(int x, int y, int net, int radius) const {
+        for (const auto& area : rule_areas_) {
+            if (!area.blocks_vias) continue;
+            if (area.applies_to(net) && area.hits_disc(x, y, radius)) return true;
+        }
+        return false;
+    }
+
+    void set_component_holes_known(bool known) { component_holes_known_ = known; }
+    void clear_component_holes();
+    void add_component_hole(float x1, float y1, float x2, float y2, float radius);
+    bool component_holes_clear(float x, float y, float drill, float clearance) const;
+
+    void set_pad_via_policy(size_t index, float clearance, bool carveout_eligible);
+
+    // Register a completed route's segments for clearance validation.
+    // ``authored_floor`` (Issue #6243) is the copper's own authored minimum
+    // when its net id was neutralised; 0.0 defers to the per-net floors.
+    void add_stored_segment(float x1, float y1, float x2, float y2,
+                            float width, int layer_idx, int net,
+                            std::optional<std::tuple<int, int, int, int>> grid_endpoints = std::nullopt,
+                            float authored_floor = 0.0f);
+
+    // Register a completed route's via for clearance validation.
+    void add_stored_via(float x, float y, float drill, float diameter, int net,
+                        std::optional<std::pair<int, int>> grid_center = std::nullopt,
+                        int layer_from = 0, int layer_to = -1,
+                        float authored_floor = 0.0f);
+
+    // ---- Issue #6243: authored per-net clearance minima -------------------
+    // Project netclasses stricter than ``Default`` are designer-authored
+    // electrical minima.  Two foreign coppers must keep
+    // ``max(floor[a], floor[b])`` apart, judged by the shared clearance
+    // kernel -- the native mirror of ``router/authored_clearance.py``, held
+    // to identical verdicts by the kernel parity suite (``test_authored_floor_*``).
+    // The gate is dormant (``authored_active() == false``, every query a
+    // single null check) unless a floor or an item-level floor exists.
+    void set_net_clearance_floors(const std::vector<int>& nets,
+                                  const std::vector<double>& floors);
+    double net_clearance_floor(int net) const;
+    // ``max(floor[a], floor[b])``; 0.0 for same-net copper.
+    double authored_pair_floor(int net_a, int net_b) const;
+    // Exact pad copper for the authored gate (``clearance_shapes.pad_shape``'s
+    // inputs, in double precision) plus the pad's own item-level floor.  Call
+    // ``rebuild_authored_index`` after a batch of these.  ``shape`` / ``rratio``
+    // are the EFFECTIVE kernel inputs (``clearance_shapes.pad_kernel_params``):
+    // the file's roundrect ratio, or ``rect`` when it is unknown (#6718).
+    void set_pad_authored(size_t index, const std::string& shape, double width,
+                          double height, double rotation, double x, double y,
+                          double drill, double item_floor, double rratio);
+    void rebuild_authored_index();
+    bool authored_active() const { return authored_index_ != nullptr; }
+    // True when the candidate trace / through-via owned by ``net`` keeps every
+    // authored minimum against registered pads and stored route copper.
+    bool authored_segment_clear(double x1, double y1, double x2, double y2,
+                                double width, int layer, int net) const;
+    bool authored_via_clear(double x, double y, double diameter, int net) const;
+
+    // Global completeness is diagnostic. A cell is refinable only when all
+    // active marks covering it have registered physical geometry. Unknown
+    // overlaps remain hard even when another mark owns the visible cell.
+    // Clearing validation geometry invalidates coverage immediately.
+    bool route_geometry_complete() const;
+    bool route_cell_has_geometry(int x, int y, int layer) const;
+    // Issue #6315: route-mark coverage of a cell -- 0 when no routed copper
+    // halo covers it, the covering net when every covering mark has
+    // registered exact geometry, -1 when an unregistered mark covers it.
+    int route_coverage_at(int x, int y, int layer) const;
+    // Issue #5410: replay a Python-side halo mark onto a C++ grid that was
+    // bulk-copied from a ``RoutingGrid`` (``CppGrid.from_routing_grid``)
+    // rather than built by committing routes through ``mark_segment`` /
+    // ``mark_via``.  Coverage provenance -- not the occupancy raster, which
+    // the bulk copy already carries -- is what the copy is missing, and
+    // without it every refinable cell reads as unverified.  ``kind`` is 0 for
+    // a segment mark and 1 for a via mark, matching ``RouteHaloGeometry``'s
+    // key encoding.
+    void register_route_mark(int kind, int net, int layer, int x1, int y1,
+                             int x2, int y2, int radius, bool add);
+    // Issue #5410: ``mark_blocked`` (the bulk-copy entry point) records every
+    // cell as STATIC board geometry, because route copper normally arrives
+    // through ``mark_segment`` / ``mark_via`` instead.  A grid bulk-copied
+    // from a ``RoutingGrid`` that already carries committed routes therefore
+    // over-states static blockage on exactly the dynamic halo cells search-
+    // time refinement is allowed to re-measure.  This restores the Python
+    // grid's own static/dynamic split for such a cell.
+    void set_cell_static_blocked(int x, int y, int layer, bool value);
+    // Bulk form of the above.  The dynamic (non-static) cell set scales with
+    // committed copper, so a per-cell Python->C++ call would reintroduce
+    // exactly the marshalling cost #5240 removed from the bulk grid copy.
+    void set_cells_static_blocked(const std::vector<int>& xs,
+                                  const std::vector<int>& ys,
+                                  const std::vector<int>& layers, bool value);
+    bool route_trace_geometry_clear(const Segment& segment, float clearance,
+                                    int partner_net, float partner_clearance, float via_clearance) const;
+    // Hard constraint for negotiated traces; foreign trace copper remains soft.
+    // Issue #6272: ``clearance`` is the trace/via floor
+    // (``trace_via_clearance``); ``partner_net`` / ``partner_clearance`` only
+    // widen the candidate lookup -- a partner's barrel is never relaxed.
+    bool trace_stored_vias_clear(const Segment& segment, float clearance,
+                                 int partner_net, float partner_clearance) const;
+    // Issue #6272: ``trace_clearance`` >= 0 raises the via-vs-stored-segment
+    // floor to ``trace_via_clearance(trace_clearance, clearance)``; via-vs-via
+    // keeps ``clearance``.  The default (-1) keeps the pre-#6272 via floor.
+    bool route_via_geometry_clear(const Via& via, float clearance,
+                                  float hole_clearance, float same_net_drill_clearance,
+                                  float trace_clearance = -1.0f) const;
+    // Broad-phase candidates whose copper bounding boxes share two-mm bins
+    // with the supplied world-coordinate box. Exact geometry remains required.
+    std::pair<std::vector<size_t>, std::vector<size_t>> route_geometry_candidates(
+        float minx, float miny, float maxx, float maxy) const;
+
+    // Clear all stored validation data (pads, segments, vias).
+    void clear_validation_data();
+
+    // Clear only stored routes (segments + vias), keeping pads.
+    // Issue #2481: Used by CppGrid.invalidate_stored_routes() after a
+    // rip-up on the Python side.  ``Pathfinder::is_via_blocked_diag``
+    // (Issue #2466) consults ``stored_vias_`` to refuse via placements
+    // that would violate cross-net clearance with already-placed routes.
+    // Without this clearing path, those entries remain even when the
+    // owning route has been ripped up, leading to false rejections (and,
+    // when the surviving routes are later re-synced, double-counted
+    // vias).  Pads are intentionally left untouched: they are intrinsic
+    // board geometry and never change between sync points.
+    void clear_stored_routes();
+
+    // Validate a candidate route against all stored pads, segments, and vias.
+    // Ports the 4 Python validation methods from grid.py lines 905-1317:
+    //   - validate_segment_clearance (seg vs pads + stored segs + stored vias)
+    //   - validate_via_clearance (via vs stored segs)
+    //   - validate_via_to_via_clearance (via vs stored vias, different net)
+    //   - validate_same_net_drill_spacing (via vs stored vias, same net)
+    //
+    // exclude_net: net ID of the route being validated (same-net OK)
+    // exclude_ref_hashes: FNV-1a hashes of component refs whose
+    //                     same-component carve-out FULLY SKIPS the
+    //                     positive-clearance check (start/end pad
+    //                     components, Issue #1764).  This is the
+    //                     ``_relax_same_component_clearance`` corridor-relief
+    //                     flavour (Issue #2452): the search physically
+    //                     unblocked the overlap corridor down to a
+    //                     ``trace_width / 2`` floor, which those blocked-cell
+    //                     constructions already enforce, and the pad's
+    //                     ``clearance_override`` was never shrunk -- so
+    //                     clamping here would reject the very routes #2452
+    //                     exists to permit.
+    // clamp_ref_hashes: Issue #5166 -- FNV-1a hashes of component refs whose
+    //                     same-component carve-out CLAMPS instead of skipping.
+    //                     A ref lands here when it reaches the carve-out only
+    //                     because a configured override (per-component
+    //                     ``component_clearances`` / ``fine_pitch_clearance``
+    //                     / net-class ``escape_clearance``) resolved SMALLER
+    //                     than the default ``trace_clearance``.  That smaller
+    //                     value is an authored design rule, so it is enforced
+    //                     as a hard floor (``pad.clearance_override`` /
+    //                     ``pad.via_clearance_override``) rather than meaning
+    //                     "clearance unchecked entirely" -- pre-#5166 the
+    //                     unconditional skip accepted ANY positive gap, e.g.
+    //                     0.02mm against a pad whose rules authored 0.10mm.
+    //                     Defaults to empty, which reproduces the pre-#5166
+    //                     behaviour exactly.
+    // trace_clearance: default clearance for segments
+    // via_clearance: default clearance for vias
+    // min_drill_clearance: minimum drill-to-drill spacing (same-net)
+    // partner_net: Issue #2559 / Phase 1C -- diff-pair partner net id, or
+    //              -1 to disable the partner branch (default).  When set,
+    //              segment-vs-segment / segment-vs-via comparisons against
+    //              partner_net use intra_pair_clearance instead of
+    //              trace_clearance.  Defaults preserve pre-#2559 behavior.
+    // intra_pair_clearance: tighter clearance applied only to the partner.
+    //
+    // Issue #4510 / Epic #4431 Phase 2a: when ``set_pairwise_domains`` has
+    // installed a domain matrix, the required clearance for a pair whose
+    // BOTH nets have a known domain becomes
+    // ``max(effective_scalar, matrix[dom_a][dom_b])``.  The diff-pair
+    // partner relaxation keeps precedence (it *tightens within* a pair; the
+    // matrix *widens across* domains), and an installed attach zone
+    // (``set_attach_zones``) covering the gap point waives the widening --
+    // never the scalar floor.  Issue #4507: the zone consult is layer-scoped,
+    // keyed on the layer the compared copper shares (via-vs-via, where no
+    // single layer applies, stays layer-agnostic; the segment-vs-pad branch
+    // keys on the pad's own layer, so a through-hole pad stays agnostic too).
+    // min_hole_clearance is the component-hole floor, independent of the
+    // same-net via merge floor; negative retains the legacy caller fallback.
+    ValidationResult validate_route(
+        const std::vector<Segment>& segments,
+        const std::vector<Via>& vias,
+        int exclude_net,
+        const std::vector<uint32_t>& exclude_ref_hashes,
+        float trace_clearance,
+        float via_clearance,
+        float min_drill_clearance,
+        int partner_net = -1,
+        float intra_pair_clearance = 0.0f,
+        const std::vector<uint32_t>& clamp_ref_hashes = {},
+        float min_hole_clearance = -1.0f) const;
+
+    // -----------------------------------------------------------------------
+    // Pairwise (HV-isolation) domain clearance -- Issue #4510, Phase 2a of
+    // epic #4431.  Both setters are DORMANT by default: until one is called
+    // the validator behaves byte-identically to the pre-#4510 code path.
+    // -----------------------------------------------------------------------
+
+    // Install the per-net domain-id array plus the dense domain-pair
+    // clearance matrix (mm).
+    //
+    // net_to_domain: indexed by net id; entry is the net's domain index, or
+    //                -1 for "no domain" (the overwhelming majority of nets on
+    //                a board with a partial voltage map).  Net ids beyond the
+    //                array's length are treated as domain-less.
+    // matrix:        ``matrix[dom_a][dom_b]`` is the REQUIRED clearance (mm)
+    //                between the two domains -- a pure *widening* value, i.e.
+    //                0.0 for pairs that need no HV widening beyond the scalar
+    //                floor.  Must be square and symmetric; Python builds it
+    //                from ``PairwiseClearanceTable.required_by_pair``.
+    //
+    // Passing empty containers returns the grid to the dormant state.
+    void set_pairwise_domains(const std::vector<int>& net_to_domain,
+                              const std::vector<std::vector<float>>& matrix);
+
+    // Install the rated-footprint attach zones (Issue #4506) used to waive
+    // the pairwise widening (never the scalar floor) inside a domain-bridging
+    // footprint's necking region.  Zones are computed once per routing
+    // session on the Python side; passing an empty vector clears them.
+    void set_attach_zones(const std::vector<AttachZone>& zones);
+
+    // True once a non-empty domain matrix has been installed.
+    bool pairwise_active() const { return pairwise_active_; }
+    size_t attach_zone_count() const { return attach_zones_.size(); }
+
+    // Required pairwise clearance (mm) between two net ids.  Returns 0.0 when
+    // the matrix is dormant, when either net id is out of range, or when
+    // either net has no domain -- so ``max(scalar, this)`` is the scalar.
+    float pairwise_required_clearance(int net_a, int net_b) const;
+
+    // Issue #4511: the largest widening value in the installed domain matrix
+    // (mm), or 0.0 when dormant.  The search-time pairwise avoidance
+    // (``Pathfinder``) sizes its widened blocking kernel from this bound so
+    // it never scans further than any domain pair could ever require.  Cached
+    // by ``set_pairwise_domains`` -- an O(1) read on the A* hot path.
+    float max_pairwise_clearance() const { return max_pairwise_clearance_; }
+
+    // True when an installed attach zone contains ``(x, y)`` AND has BOTH
+    // ``net_a`` and ``net_b`` among its member net ids.
+    //
+    // Issue #4507: ``layer`` is the grid layer index the two conflicting
+    // objects share; a zone waives the pair there only when BOTH nets have pad
+    // copper on that layer (``AttachZone::net_layers``).  Pass ``-1`` -- the
+    // default -- when no single layer applies (a through-via against a
+    // through-via, or a caller with no layer context), which keeps the
+    // layer-agnostic pre-#4507 verdict.  This mirrors the ``layer=None``
+    // convention of ``AttachZone.exempts`` in ``pairwise_clearance.py`` and of
+    // ``LatticePairwise.exempt`` in ``lattice/pairwise.py``, so the three
+    // engines waive on the same layers for every comparison they all perform
+    // (segment-vs-segment, segment-vs-via, via-vs-via).
+    //
+    // The one place they cannot be compared is ``validate_route``'s
+    // segment-vs-pad branch: it passes a through-hole pad's ``layer_idx ==
+    // -1``, waiving on layers ``AttachZone.exempts`` would not, but it has no
+    // Python counterpart to disagree with -- ``route_pairwise_violation`` and
+    // ``find_pairwise_violations`` are segment-vs-segment only and never
+    // compare a segment against a pad.  That asymmetry is unchanged v18
+    // behaviour; see the comment at the ``pad_zone_layer`` assignment in
+    // ``grid.cpp``.
+    bool attach_zone_exempts(float x, float y, int net_a, int net_b,
+                             int layer = -1) const;
+
+    // Accessors for validation data sizes (for testing/debugging)
+    const std::vector<PadInfo>& pads() const { return pads_; }
+    size_t pad_count() const { return pads_.size(); }
+    size_t stored_segment_count() const { return stored_segments_.size(); }
+    size_t stored_via_count() const { return stored_vias_.size(); }
+
+    // Accessor for stored vias (Issue #2466).
+    // Used by Pathfinder::is_via_blocked to perform a geometric via-vs-via
+    // clearance check that mirrors validate_route() exactly, so the search
+    // refuses placements the post-route validator would later reject.
+    const std::vector<StoredVia>& stored_vias() const { return stored_vias_; }
+
+    // Accessor for stored segments (Epic #5509 Phase 3c, Issue #5662).
+    // The sibling of ``stored_vias()``, added for the same reason: the
+    // coupled diff-pair search's ``rail_clear`` gate has to *see* committed
+    // route copper to check it, and before this the only committed geometry
+    // it could reach was ``fixed_fills_`` -- which is why copper routed
+    // earlier in the same session was invisible to it by construction
+    // (#4507).  Read-only, like every other accessor here.
+    const std::vector<StoredSegment>& stored_segments() const { return stored_segments_; }
+
+    // Issue #5599: exact swept-edge vs foreign-pad clearance, mirroring
+    // validate_route()'s segment-vs-pad branch (rect-aware
+    // ``pad_rect_distance`` for rectangles, point-to-segment for explicit
+    // circular pads, ``pad.clearance_override`` as the required floor with
+    // ``default_clearance`` as fallback, same CLEARANCE_EPSILON_MM slack).
+    // Used by the A* neighbor filter's evidence-gated STRICT pad mode
+    // (``Pathfinder::set_search_strict_pad_kernel``) so that once a net's
+    // post-route validation has repeatedly rejected candidates, the SEARCH
+    // refuses the same steps the VALIDATOR would reject -- instead of the
+    // historical cell-center kernels, which an off-grid pad (board 04's
+    // 0.01mm QFP shift) can slip a diagonal corner-cut past.  Deliberately
+    // does NOT reproduce the validator's same-component carve-outs: strict
+    // mode is armed only for nets whose candidates the validator keeps
+    // rejecting, where conservative is the point.
+    bool edge_foreign_pad_clear(
+        float ax, float ay, float bx, float by, int layer, int net,
+        float half_width, float default_clearance) const;
+
+    // Issue #6315: exact clearance of the swept trace edge (a)->(b) of
+    // ``net`` (half width ``half_width``) against every pad of another net
+    // on ``layer``.  Same geometry as ``edge_foreign_pad_clear``, but the
+    // required clearance is the LARGER of ``clearance``, the pad's own
+    // ``clearance_override`` and the pairwise (HV) floor -- so it is never
+    // looser than the disc it replaces -- and candidates come from a
+    // spatial bucket index, so it is cheap enough for the A* inner loop.
+    // Used to resolve ``GridCell::pad_cell`` cells: a cell blocked only by
+    // pad copper/clearance is passable exactly when the real geometry is.
+    // Issue #7491 (#7401): ``only_net`` >= 0 restricts the check to that
+    // net's pads -- the coupled pose search measures its PARTNER's pads
+    // exactly with it, since the raster halo under-reads them.
+    bool pad_geometry_clear(
+        float ax, float ay, float bx, float by, int layer, int net,
+        float half_width, float clearance, int only_net = -1) const;
+
+    // Issue #7569: per-pad net-class clearance, indexed by ``add_pad`` order.
+    // ``pad_geometry_clear`` then holds a step to ``max(clearance, override,
+    // pad class)`` -- the pair rule the Python search (#6389) and DRC apply.
+    // Entries past ``pads_.size()`` are ignored; missing entries are 0.
+    void set_pad_class_clearances(const std::vector<float>& clearances);
+
+    // Issue #6375: validate_route()'s segment-vs-pad verdict for ONE pad --
+    // the single implementation both the post-route validator and the A*
+    // own-pad step gate (``Pathfinder::own_pad_step_clear``) call, so the
+    // search and the validator cannot disagree on pad shape, rotation,
+    // required clearance (``pad.clearance_override`` + pairwise widening) or
+    // the same-component carve-outs (#1764 / #2908 / #2933 / #3490 / #5166).
+    // Returns false when ``pad`` rejects ``seg``.  ``gap_out`` receives the
+    // measured edge clearance whenever the pad is measured (untouched when it
+    // is skipped: same net, other layer, or carved out).
+    bool segment_pad_clear(const Segment& seg, const PadInfo& pad, int exclude_net,
+                           const std::vector<uint32_t>& exclude_ref_hashes,
+                           const std::vector<uint32_t>& clamp_ref_hashes,
+                           float* gap_out = nullptr) const;
+
+    // Issue #6375: ``segment_pad_clear`` over every pad the #6315 bucket index
+    // can place within reach of ``seg`` -- the validator's full seg-vs-pad
+    // verdict, cheap enough for the A* inner loop.
+    bool segment_pads_clear(const Segment& seg, int exclude_net,
+                            const std::vector<uint32_t>& exclude_ref_hashes,
+                            const std::vector<uint32_t>& clamp_ref_hashes) const;
+
+    // Issue #7887: the diagnostic companion of ``segment_pads_clear`` for a
+    // step it REFUSED.  Returns the net of a foreign pad that rejects ``seg``
+    // only because of the pairwise (HV) floor -- the step clears that pad's
+    // non-pairwise requirement (``clearance_override``) -- or 0 when any pad
+    // in reach rejects the step at its non-pairwise requirement (a plain
+    // geometric refusal) or no pairwise matrix is active.  Never feeds a
+    // verdict: callers consult it only after the gate already refused.
+    int segment_pads_pairwise_blocker(const Segment& seg, int exclude_net,
+                                      const std::vector<uint32_t>& exclude_ref_hashes,
+                                      const std::vector<uint32_t>& clamp_ref_hashes) const;
+
+private:
+    inline size_t index(int x, int y, int layer) const {
+        return static_cast<size_t>(layer) * rows_ * cols_ +
+               static_cast<size_t>(y) * cols_ +
+               static_cast<size_t>(x);
+    }
+
+    std::vector<GridCell> cells_;  // Flat array for cache efficiency
+    std::vector<RuleAreaKeepout> rule_areas_;  // Issue #6008
+    // Issue #4071: grid-wide fast-path flag -- true once any cell has a
+    // non-empty reservation owner set.  ``mark_via`` and the A* cost loop
+    // skip the per-cell reservation read entirely when this is false, so
+    // boards without active reservations keep byte-identical behaviour.
+    bool has_reservations_ = false;
+    int cols_, rows_, layers_;
+    float resolution_;
+    float origin_x_, origin_y_;
+
+    // Congestion grid (coarser)
+    std::vector<int> congestion_;
+    int congestion_cols_, congestion_rows_;
+    int congestion_size_ = 8;  // Cells per congestion region
+
+    using RouteMarkKey = std::tuple<int, int, int, int, int, int, int, int>;
+    static RouteMarkKey segment_mark_key(int x1, int y1, int x2, int y2,
+                                         int layer, int net, int radius = 0);
+    static RouteMarkKey via_mark_key(int x, int y, int net, int radius = 0);
+    std::map<RouteMarkKey, size_t> active_route_marks_;
+    std::set<RouteMarkKey> registered_route_geometry_;
+    mutable bool route_coverage_dirty_ = true;
+    mutable bool route_coverage_complete_ = false;
+    mutable std::vector<int32_t> route_geometry_cells_;
+    void record_route_mark(const RouteMarkKey& key, bool add);
+
+    using GeometryBins = std::map<std::pair<int, int>, std::vector<size_t>>;
+    bool component_holes_known_ = true;
+    GeometryBins component_hole_bins_;
+    std::vector<std::array<float, 5>> component_holes_;
+    GeometryBins route_segment_bins_;
+    GeometryBins route_via_bins_;
+    static void index_route_geometry(GeometryBins& bins, size_t index,
+                                     float minx, float miny, float maxx, float maxy);
+    // The sorted, de-duplicated indices one bin set holds under a world box --
+    // each half of ``route_geometry_candidates``.  Issue #5617: callers that
+    // only consult one kind (``trace_stored_vias_clear`` reads vias alone) ask
+    // for that half instead of paying for the other's gather + sort.
+    static std::vector<size_t> gather_route_geometry(const GeometryBins& bins,
+                                                     float minx, float miny,
+                                                     float maxx, float maxy);
+
+    // Issue #6243: authored per-net minima.  ``authored_index_`` is null
+    // while the gate is dormant; otherwise it buckets every pad and stored
+    // segment/via as kernel copper (defined in grid.cpp, which owns the
+    // kernel include).  Appends keep it current; clears rebuild it.
+    struct AuthoredPadSpec {
+        bool set = false;
+        std::string shape;
+        double width = 0, height = 0, rotation = 0, x = 0, y = 0, drill = 0, floor = 0;
+        double rratio = 0.25;
+    };
+    struct AuthoredIndex;
+    std::unordered_map<int, double> net_floors_;
+    std::vector<AuthoredPadSpec> authored_pad_specs_;
+    bool authored_items_ = false;
+    std::shared_ptr<AuthoredIndex> authored_index_;
+    void authored_index_pad(size_t index);
+    void authored_index_segment(size_t index);
+    void authored_index_via(size_t index);
+
+    // Issue #6315: 1 mm bucket index over ``pads_`` for
+    // ``pad_geometry_clear`` (key: packed bucket coordinates).
+    std::unordered_map<int64_t, std::vector<uint32_t>> pad_buckets_;
+    float pad_bucket_max_override_ = 0.0f;
+    float pad_bucket_max_class_ = 0.0f;  // Issue #7569
+    void index_pad_bucket(size_t index);
+
+    // Geometric validation storage (Issue #2439)
+    std::vector<PadInfo> pads_;
+    std::vector<StoredSegment> stored_segments_;
+    std::vector<FixedFill> fixed_fills_;
+    std::vector<StoredVia> stored_vias_;
+
+    // Pairwise (HV-isolation) domain clearance storage (Issue #4510).
+    // ``pairwise_active_`` is the grid-wide fast-path flag: when false the
+    // widening branch in validate_route() is skipped entirely, so boards
+    // without a voltage map keep byte-identical behaviour and cost.
+    bool pairwise_active_ = false;
+    int domain_count_ = 0;
+    std::vector<int> net_domain_;        // net id -> domain index (-1 = none)
+    std::vector<float> domain_matrix_;   // row-major domain_count_ x domain_count_
+    std::vector<AttachZone> attach_zones_;
+    // Issue #4511: cached max widening across the installed matrix (mm); 0.0
+    // when dormant.  Consumed by the search-time widened kernel sizing.
+    float max_pairwise_clearance_ = 0.0f;
+};
+
+}  // namespace router

@@ -1,0 +1,752 @@
+---
+/**
+ * Per-board detail page (issue #3681, Epic #3674 Phase 2).
+ *
+ * One static route `/<slug>` per board discovered by the build-time loader
+ * (including `no_artifacts` stubs, so index cards never 404). Each page shows:
+ *   - a four-render 2×2 gallery (real images or labelled placeholders),
+ *   - a metrics table mapping every present `board.json` field (omit-absent),
+ *   - a downloads section linking the manufacturing package + optional extras,
+ *   - a clearly-commented placeholder for the Phase 4 interactive viewer,
+ *   - back-links to the gallery index.
+ *
+ * Image / download serving mirrors the gallery index (#3680): the prebuild
+ * `copy-renders` step stages renders and the allow-listed manufacturing files
+ * into `site/public/boards/<slug>/...`, served at `/boards/<slug>/...`.
+ */
+import { join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts";
+import { displayStatus, displayStatusLabel, knownIssueHref, boardDisplayName } from "../data/boardStatus.ts";
+import type { Board } from "../data/types.ts";
+import RenderGallery from "../components/RenderGallery.astro";
+import ReadinessProgress from "../components/ReadinessProgress.astro";
+import SiteHeader from "../components/Header.astro";
+import SiteFooter from "../components/Footer.astro";
+
+/**
+ * The primary manufacturing download. It is also referenced by
+ * `board.manufacturing_package`. Optional supplementary downloads (report.pdf /
+ * BOM / CPL) are detected per-board at build time inside `getStaticPaths` and
+ * passed through as the `extras` prop. All are staged by `copy-renders` into
+ * `public/boards/<slug>/manufacturing/` when present in the source tree.
+ */
+const PRIMARY_MFG = { file: "kicad_project.zip", label: "KiCad project (ZIP)" };
+
+export async function getStaticPaths() {
+  const boards = loadBoards();
+
+  // Map slug → absolute board source directory so we can do build-time
+  // existence checks of manufacturing files. Discovery rules match the loader
+  // exactly. (Defined inline because Astro bundles `getStaticPaths` separately
+  // from the rest of the frontmatter — module-top helpers are not in scope.)
+  // Absolute path to the `site/public/boards` staging root, used to probe each
+  // board's staged `.kicad_pcb`. `astro build`/`dev` run with cwd = `site/`, so
+  // `<cwd>/public/boards` is stable even after Vite bundles `getStaticPaths`
+  // (bundling rewrites `import.meta.url`, so we can't rely on this file's own
+  // location). This mirrors the resolution strategy in `loadBoards.ts`.
+  const stagedBoardsRoot = resolve(process.cwd(), "public", "boards");
+
+  const dirs = new Map<string, string>();
+  for (const dir of discoverBoardDirs(boardsDir())) {
+    const slug = dir.split(/[\\/]/).filter(Boolean).pop();
+    if (slug) dirs.set(slug, dir);
+  }
+
+  return boards.map((board) => {
+    const dir = dirs.get(board.slug);
+    const mfgDir = dir ? join(dir, "output", "manufacturing") : null;
+
+    // Build-time existence check: only link download files that actually exist
+    // in the source tree (and were therefore staged by copy-renders). The
+    // file/label lists are duplicated as locals here (not the module-top
+    // consts) because Astro bundles `getStaticPaths` separately.
+    const primaryFile = "kicad_project.zip";
+    const extraFiles = [
+      { file: "gerbers/gerbers.zip", label: "Gerber fabrication files (ZIP)" },
+      { file: "report.pdf", label: "Fabrication report (PDF)" },
+      { file: "bom_jlcpcb.csv", label: "Bill of materials (CSV)" },
+      { file: "manual-assembly-bom.csv", label: "Manual assembly parts (CSV)" },
+      { file: "cpl_jlcpcb.csv", label: "Component placement (CSV)" },
+      { file: "schematic.pdf", label: "Schematic (PDF)" },
+      { file: "assembly-front.pdf", label: "Front assembly drawing (PDF)" },
+      { file: "assembly-back.pdf", label: "Back assembly drawing (PDF)" },
+      { file: "README.txt", label: "Manufacturing instructions (TXT)" },
+      { file: "procurement-review.md", label: "Procurement review (Markdown)" },
+      { file: "manifest.json", label: "Artifact manifest (JSON)" },
+      { file: "check-report.json", label: "Electrical and manufacturing checks (JSON)" },
+      { file: "native-drc.json", label: "KiCad DRC report (JSON)" },
+    ];
+
+    const hasPrimary =
+      board.manufacturing_package !== undefined &&
+      mfgDir !== null &&
+      existsSync(join(mfgDir, primaryFile));
+
+    const extras = mfgDir
+      ? extraFiles.filter((e) => existsSync(join(mfgDir, e.file)))
+      : [];
+    const hasFullPackage = dir !== undefined && existsSync(join(dir, "output", "manufacturing.zip"));
+
+    // Build-time signal for the interactive viewer: the prebuild `copy-renders`
+    // step stages each board's `.kicad_pcb` (routed preferred) as
+    // `site/public/boards/<slug>/board.kicad_pcb`. Because that step runs before
+    // Astro, we can check the staged file directly here and only emit the
+    // KiCanvas embed (and its module script) for boards that actually have one.
+    // Boards without a PCB (e.g. `00-simple-led`, `no_artifacts`) fall back to
+    // the static render gallery with an "interactive view unavailable" note.
+    const stagedPcb = join(stagedBoardsRoot, board.slug, "board.kicad_pcb");
+    const hasPcb = existsSync(stagedPcb);
+
+    return {
+      params: { slug: board.slug },
+      props: { board, hasPrimary, hasFullPackage, extras, hasPcb },
+    };
+  });
+}
+
+interface DetailProps {
+  board: Board;
+  hasPrimary: boolean;
+  hasFullPackage: boolean;
+  extras: Array<{ file: string; label: string }>;
+  hasPcb: boolean;
+}
+
+const { board, hasPrimary, hasFullPackage, extras, hasPcb } = Astro.props as DetailProps;
+
+// Same-origin URL of the staged PCB (see `copy-renders.mjs`). KiCanvas fetches
+// this at runtime; served from `public/`, there are no CORS concerns on the
+// deployed static site. Only set when `hasPcb` so we never emit a broken embed.
+const pcbHref = `/boards/${board.slug}/board.kicad_pcb`;
+
+const displayName = boardDisplayName(board);
+const isBuilt = board.status !== "no_artifacts";
+
+// Displayed badge derived from BOTH status and drc_violations so a board with
+// DRC violations never reads "Ready", regardless of a stale `status` (#3717).
+const statusVariant = displayStatus(board);
+const statusLabel = displayStatusLabel(board);
+
+const mfgBase = `/boards/${board.slug}/manufacturing`;
+const hasDownloads = hasFullPackage || hasPrimary || extras.length > 0;
+
+/**
+ * Metrics rows, built in display order. Each entry is pushed only when its
+ * backing field is present — this enforces the omit-absent rule (no row ever
+ * shows "null" / "undefined" / "—"). `status` is always present.
+ */
+type Row = { label: string; value: string; warn?: boolean };
+const rows: Row[] = [];
+rows.push({ label: "Build Status", value: statusLabel, warn: statusVariant === "drc" });
+if (board.nets_routed_pct !== undefined) {
+  rows.push({ label: board.readiness?.metrics?.nets_routed_pct !== undefined ? "Nets routed" : "Export report nets routed", value: `${board.nets_routed_pct.toFixed(1)}%` });
+}
+if (board.drc_violations !== undefined) {
+  rows.push({
+    label: board.readiness?.metrics?.drc_violations !== undefined ? "DRC violations" : "Export report DRC violations",
+    value: `${board.drc_violations}`,
+    warn: board.drc_violations > 0,
+  });
+}
+if (board.layer_count !== undefined) {
+  rows.push({ label: "Layers", value: `${board.layer_count}` });
+}
+if (board.board_size_mm !== undefined) {
+  rows.push({
+    label: "Board Size",
+    value: `${board.board_size_mm.width} × ${board.board_size_mm.height} mm`,
+  });
+}
+if (board.model_coverage && typeof board.model_coverage.percent === "number") {
+  const { covered, total, percent } = board.model_coverage;
+  rows.push({ label: "3D model coverage", value: `${percent}% (${covered}/${total})` });
+}
+if (board.part_count !== undefined) {
+  rows.push({ label: "Parts", value: `${board.part_count}` });
+}
+if (board.cost?.per_board_usd !== undefined) {
+  rows.push({ label: "Cost (per board)", value: `$${board.cost.per_board_usd.toFixed(2)}` });
+}
+if (board.cost?.batch_qty !== undefined) {
+  rows.push({ label: "Batch Qty", value: `${board.cost.batch_qty} boards` });
+}
+if (board.cost?.batch_total_usd !== undefined) {
+  rows.push({ label: "Batch Total", value: `$${board.cost.batch_total_usd.toFixed(2)}` });
+}
+if (board.manifest_generated_at !== undefined) {
+  rows.push({ label: "Data Generated", value: board.manifest_generated_at });
+}
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{displayName} · kicad-tools demo gallery</title>
+    {
+      board.description && (
+        <meta name="description" content={board.description} />
+      )
+    }
+    {
+      /*
+       * KiCanvas (https://kicanvas.org, MIT) registers the <kicanvas-embed> /
+       * <kicanvas-source> custom elements on import. Vendored at
+       * `site/public/vendor/kicanvas.js` (served from same origin, no runtime
+       * CDN dependency — see site/public/vendor/README.md). Loaded only when a
+       * PCB was staged so no-artifact boards never download the ~466 KB bundle.
+       */
+      hasPcb && <script type="module" src="/vendor/kicanvas.js" />
+    }
+  </head>
+  <body>
+    <SiteHeader />
+    <main id="main-content" tabindex="-1">
+      <p class="back-top">
+        <a href="/">← Back to gallery</a>
+      </p>
+
+      <header class="detail-header">
+        <h1>{displayName}</h1>
+        <span class:list={["chip", `chip-${statusVariant}`]}>
+          {statusLabel}
+        </span>
+        {board.description && <p class="desc">{board.description}</p>}
+        {board.slug !== displayName && <p class="slug">{board.slug}</p>}
+      </header>
+
+      <section aria-label="Manufacturing readiness">
+        <h2>Manufacturing readiness</h2>
+        {board.readiness?.checked_at && <p>Checked <time datetime={board.readiness.checked_at}>{board.readiness.checked_at}</time>.</p>}
+        {board.readiness?.mode === "pcb_only" && <p>Scope: bare PCB fabrication. Component procurement and assembly are not included.</p>}
+        {board.readiness?.mode === "assembly" && <p>Scope: PCB fabrication and assembly files.</p>}
+        {board.readiness?.manufacturer && <p>Fabrication tier: <code>{board.readiness.manufacturer}</code>.</p>}
+        {board.readiness?.blockers.length ? <ul>{board.readiness.blockers.map(reason => <li>{reason}</li>)}</ul> : null}
+        {board.readiness?.known_issues?.length ? (
+          <>
+            <h3>Known issues</h3>
+            <p>Open issues recorded with this evidence. A defect keeps the board from ready; exceptions and advisories are disclosed but do not.</p>
+            <ul aria-label="Known issues">
+              {board.readiness.known_issues.map(entry => (
+                <li><a href={knownIssueHref(entry.issue)}>#{entry.issue}</a> <strong>{entry.kind}</strong>: {entry.summary} (recorded {entry.recorded})</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+        <ReadinessProgress board={board} />
+        {statusVariant !== "ready" && <p>Downloads are design artifacts and are not verified for ordering.</p>}
+      </section>
+
+      {
+        !isBuilt && (
+          <p class="not-built">
+            Complete design artifacts are not published here. Any verified
+            development checks are listed above; they do not establish a
+            manufacturing package or tested hardware.
+          </p>
+        )
+      }
+
+      <RenderGallery board={board} />
+
+      <!--
+        Phase 4 (#3690): interactive PCB viewer.
+
+        When a routed/non-routed `.kicad_pcb` was staged for this board (see
+        copy-renders.mjs → `/boards/<slug>/board.kicad_pcb`), embed KiCanvas
+        pointed at it; pan/zoom + layer controls are built in. The static
+        <RenderGallery> above stays on the page regardless. Boards with no PCB
+        (e.g. 00-simple-led, no_artifacts) render the unavailable note instead
+        of a broken viewer.
+      -->
+      <section class="viewer-section" aria-label="Interactive PCB viewer">
+        <h2>Interactive Viewer</h2>
+        <div id="pcb-viewer-placeholder">
+          {
+            hasPcb ? (
+              <Fragment>
+                <kicanvas-embed src={pcbHref} controls="full" class="pcb-viewer" />
+                {/*
+                  Phase 4 polish (#3691) + viewer-load fix (#3700): loading +
+                  error overlay.
+
+                  KiCanvas signals completion via a JS PROPERTY `embed.loaded`
+                  (set true once the PCB has parsed + rendered). It does NOT
+                  reflect a `loaded` attribute and dispatches NO "load" or error
+                  event on the <kicanvas-embed> host — so the inline script below
+                  POLLS `embed.loaded` and removes the overlay (revealing the
+                  board) as soon as it is true. A hard ~8s timeout is registered
+                  first as a safety net: on timeout it reveals the board if it
+                  loaded, otherwise it swaps to an error note pointing at the
+                  static renders.
+
+                  The overlay starts visible; the static <RenderGallery> stays on
+                  the page the whole time, so a failed viewer never leaves a blank
+                  box and the spinner can never hang indefinitely.
+                */}
+                <div class="viewer-loading" data-viewer-overlay role="status" aria-live="polite">
+                  <span class="viewer-spinner" aria-hidden="true" />
+                  <span class="viewer-loading-text">Loading interactive view…</span>
+                </div>
+              </Fragment>
+            ) : (
+              <p class="viewer-unavailable">
+                Interactive view unavailable — no PCB file for this board. The
+                static renders above show the board layout.
+              </p>
+            )
+          }
+        </div>
+      </section>
+
+      {
+        /*
+         * Drive the loading → ready / error transition for the KiCanvas embed.
+         * Raw inline JS (is:inline emits it verbatim — do NOT wrap in a {`...`}
+         * template literal, which is:inline would ship as inert text). Placed
+         * after the embed/overlay markup, so it runs once those nodes exist.
+         * Emitted only when a PCB is present so no-artifact boards stay JS-free.
+         */
+        hasPcb && (
+          <script is:inline>
+            (() => {
+  // Grab the overlay up front so the hard-timeout fallback can reference it
+  // even if everything below throws. querySelector never throws for a valid
+  // selector, returning null at worst.
+  var overlay = document.querySelector(
+    "#pcb-viewer-placeholder [data-viewer-overlay]"
+  );
+
+  var embed = null;
+  var settled = false;
+  var pollTimer = null;
+  var stopPolling = function () {
+    if (pollTimer) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+  // KiCanvas signals completion via a JS PROPERTY embed.loaded (set true once
+  // the board has parsed + rendered). It does NOT reflect a "loaded" attribute
+  // and dispatches no "load" event on the <kicanvas-embed> host, so we must
+  // read the property — earlier attribute/event checks never fired, which is
+  // why the spinner hung over an already-rendered board.
+  var isLoaded = function () {
+    return !!(embed && embed.loaded);
+  };
+  // Re-frame the camera on the board outline instead of the drawing sheet.
+  // KiCanvas's load path unconditionally calls zoom_to_page(), which fits the
+  // whole worksheet frame — boards sitting in a corner of the sheet render
+  // tiny and offset (user-visible on every board page). The board viewer
+  // exposes zoom_to_board() (fits Edge.Cuts bbox + 10%) but nothing calls it,
+  // so we do, once, when the viewer reports loaded. Best-effort: any failure
+  // leaves the stock page-fit behavior.
+  var zoomToBoard = function () {
+    try {
+      var root = embed && (embed.renderRoot || embed.shadowRoot);
+      var app = root && root.querySelector("kc-board-app");
+      var viewer = app && app.viewer;
+      if (viewer && typeof viewer.zoom_to_board === "function") {
+        viewer.zoom_to_board();
+        if (typeof viewer.draw === "function") viewer.draw();
+      }
+    } catch (e) {}
+  };
+  var hideOverlay = function () {
+    if (settled) return;
+    settled = true;
+    stopPolling();
+    zoomToBoard();
+    try {
+      if (overlay && overlay.parentNode) overlay.remove();
+    } catch (e) {}
+  };
+  var showError = function () {
+    if (settled) return;
+    settled = true;
+    stopPolling();
+    if (!overlay) return;
+    try {
+      overlay.classList.add("viewer-error");
+      overlay.innerHTML =
+        '<span class="viewer-loading-text">Interactive view unavailable — ' +
+        'see the renders below.</span>';
+    } catch (e) {
+      // CSP or DOM error: just hide the whole overlay so no spinner persists.
+      try {
+        overlay.style.display = "none";
+      } catch (e2) {}
+      if (overlay.parentNode) {
+        try {
+          overlay.remove();
+        } catch (e3) {}
+      }
+    }
+  };
+
+  // STEP 1 — Register the hard timeout FIRST, before any null-guard, early
+  // return, or KiCanvas interaction, so the spinner can never hang. If the
+  // board loaded by then, reveal it; otherwise surface the static-render note.
+  window.setTimeout(function () {
+    if (isLoaded()) hideOverlay();
+    else showError();
+  }, 8000);
+
+  // STEP 2 — Best-effort success path. Poll embed.loaded and reveal the board
+  // as soon as it flips true. Wrapped in try/catch so any failure here cannot
+  // prevent the timeout above from firing.
+  try {
+    var placeholder = document.getElementById("pcb-viewer-placeholder");
+    if (!placeholder) return;
+    embed = placeholder.querySelector("kicanvas-embed");
+    if (!embed || !overlay) return;
+
+    if (isLoaded()) {
+      hideOverlay();
+      return;
+    }
+
+    pollTimer = window.setInterval(function () {
+      if (settled) {
+        stopPolling();
+        return;
+      }
+      if (isLoaded()) hideOverlay();
+    }, 150);
+  } catch (e) {
+    // Setup failed — the timeout registered in STEP 1 will still clean up the
+    // spinner and surface the fallback note.
+  }
+})();
+          </script>
+        )
+      }
+
+      <section class="metrics" aria-label="Board metrics">
+        <h2>Metrics</h2>
+        <table>
+          <tbody>
+            {
+              rows.map((row) => (
+                <tr>
+                  <th scope="row">{row.label}</th>
+                  <td class:list={[{ warn: row.warn }]}>{row.value}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </section>
+
+      <section class="downloads" aria-label="Downloads">
+        <h2>Downloads</h2>
+        {
+          hasDownloads ? (
+            <ul class="download-list">
+              {hasFullPackage && (
+                <li><a href={`/boards/${board.slug}/manufacturing.zip`} download>Full manufacturing package (ZIP)</a></li>
+              )}
+              {hasPrimary && (
+                <li>
+                  <a
+                    href={`${mfgBase}/${PRIMARY_MFG.file}`}
+                    download
+                  >
+                    {PRIMARY_MFG.label}
+                  </a>
+                </li>
+              )}
+              {extras.map((extra) => (
+                <li>
+                  <a href={`${mfgBase}/${extra.file}`} download>
+                    {extra.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p class="no-downloads">No manufacturing package available.</p>
+          )
+        }
+      </section>
+
+      <footer class="back-bottom">
+        <a href="/">← Back to gallery</a>
+      </footer>
+    </main>
+    <SiteFooter />
+  </body>
+</html>
+
+
+
+<style>
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 1.5rem 1.25rem 4rem;
+  }
+
+  a {
+    color: var(--accent);
+  }
+
+  .back-top,
+  .back-bottom {
+    margin: 0 0 1.5rem;
+  }
+
+  .back-bottom {
+    margin: 2.5rem 0 0;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .detail-header {
+    margin-bottom: 2rem;
+  }
+
+  .detail-header h1 {
+    display: inline;
+    margin: 0;
+    font-size: clamp(1.5rem, 4vw, 2.2rem);
+    word-break: break-word;
+  }
+
+  .detail-header .desc {
+    margin: 0.75rem 0 0;
+    color: var(--muted);
+  }
+
+  .detail-header .slug {
+    margin: 0.35rem 0 0;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+  }
+
+  .chip {
+    display: inline-block;
+    margin-left: 0.6rem;
+    vertical-align: middle;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .chip-ready {
+    background: rgba(63, 174, 122, 0.9);
+    color: #04150d;
+  }
+
+  /* DRC-violation chip (#3717): a distinct red warn tone so a violating board
+     is never confused with the amber "Partial" or green "Ready" states. */
+  .chip-drc, .chip-blocked {
+    background: rgba(214, 84, 79, 0.92);
+    color: #1c0605;
+  }
+
+  .chip-partial {
+    background: rgba(224, 168, 0, 0.9);
+    color: #1a1300;
+  }
+
+  .chip-development,
+  .chip-blocked,
+  .chip-no_artifacts {
+    background: rgb(120, 134, 148);
+    color: #0c1116;
+  }
+
+  .not-built {
+    margin: 0 0 2rem;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid #788694;
+    border-radius: 8px;
+    background: var(--card-bg);
+    color: var(--muted);
+  }
+
+  .not-built code {
+    background: var(--badge-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  section {
+    margin-top: 2.25rem;
+  }
+
+  section h2 {
+    margin: 0 0 1rem;
+    font-size: 1.2rem;
+  }
+
+  /* Phase 4 (#3690) interactive viewer container. `position: relative` anchors
+     the absolutely-positioned loading/error overlay added in #3691. */
+  .viewer-section #pcb-viewer-placeholder {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--card-bg);
+  }
+
+  /* KiCanvas <kicanvas-embed> is a block custom element; give it a responsive
+     height so the canvas has room to render (it sizes to its container).
+     `touch-action: none` lets KiCanvas own all touch gestures (pan/zoom) on the
+     viewer surface without the browser hijacking them — and, paired with the
+     responsive height, keeps page scroll usable around the viewer on mobile. */
+  .pcb-viewer {
+    display: block;
+    width: 100%;
+    height: clamp(300px, 45vw, 560px);
+    touch-action: none;
+  }
+
+  @media (max-width: 480px) {
+    .pcb-viewer {
+      /* Cap height on narrow viewports so the canvas never dominates the page. */
+      height: 320px;
+    }
+  }
+
+  /* Loading / error overlay (#3691). Starts visible over the embed and is
+     removed by the inline script on the "load" event, or swapped to an error
+     message after the timeout. Sits above the canvas via z-index. */
+  .viewer-loading {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 1rem;
+    text-align: center;
+    background: var(--card-bg);
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  .viewer-loading.viewer-error {
+    color: var(--muted);
+  }
+
+  /* Safety net: when the overlay enters the error state, ensure any spinner
+     that survived the innerHTML swap (e.g. blocked by CSP or an extension's
+     MutationObserver) stops spinning and is removed from view. Pure CSS, so it
+     holds even if the script's DOM mutation is intercepted. */
+  .viewer-loading.viewer-error .viewer-spinner {
+    display: none;
+    animation: none;
+  }
+
+  .viewer-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: viewer-spin 0.8s linear infinite;
+  }
+
+  @keyframes viewer-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .viewer-spinner {
+      animation-duration: 2s;
+    }
+  }
+
+  /* Fallback note for boards with no staged `.kicad_pcb`. Mirrors the subtle
+     muted styling of the former placeholder so it reads as informational, not
+     as a broken/empty viewer. */
+  .viewer-unavailable {
+    margin: 0;
+    padding: 2.5rem 1rem;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  .metrics table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .metrics th,
+  .metrics td {
+    text-align: left;
+    padding: 0.6rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+
+  .metrics tr:last-child th,
+  .metrics tr:last-child td {
+    border-bottom: none;
+  }
+
+  .metrics th {
+    width: 40%;
+    color: var(--muted);
+    font-weight: 500;
+    background: var(--card-bg);
+  }
+
+  .metrics td {
+    font-weight: 600;
+  }
+
+  .metrics td.warn {
+    color: #e0a800;
+  }
+
+  .download-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .download-list a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card-bg);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.9rem;
+  }
+
+  .download-list a:hover,
+  .download-list a:focus-visible {
+    border-color: var(--accent);
+    outline: none;
+  }
+
+  .no-downloads {
+    margin: 0;
+    color: var(--muted);
+  }
+</style>

@@ -1,0 +1,41 @@
+{
+  "clean": false,
+  "mismatches": [
+    {
+      "kind": "open",
+      "net_a": "+3V3",
+      "net_b": "+3V3",
+      "pad_a": "C12.1",
+      "pad_b": "R12.1"
+    },
+    {
+      "kind": "open",
+      "net_a": "+3V3",
+      "net_b": "+3V3",
+      "pad_a": "R12.1",
+      "pad_b": "R17.1"
+    },
+    {
+      "kind": "open",
+      "net_a": "PMOS_SOURCE",
+      "net_b": "PMOS_SOURCE",
+      "pad_a": "C4.1",
+      "pad_b": "Q1.1"
+    },
+    {
+      "kind": "open",
+      "net_a": "PMOS_SOURCE",
+      "net_b": "PMOS_SOURCE",
+      "pad_a": "Q1.1",
+      "pad_b": "Q1.2"
+    },
+    {
+      "kind": "open",
+      "net_a": "PMOS_SOURCE",
+      "net_b": "PMOS_SOURCE",
+      "pad_a": "Q1.2",
+      "pad_b": "Q2.2"
+    }
+  ],
+  "bound_pad_count": 153
+}

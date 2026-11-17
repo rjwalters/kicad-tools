@@ -1,0 +1,399 @@
+"""Markdown rendering of external-benchmark reports (issue #4934).
+
+The JSON contract in :mod:`kicad_tools.benchmark.external.metrics` is the
+machine-readable source of truth; this module renders the same data as a
+per-board table for human review (and, later, for the kicad-tools.org
+results section, Epic #4932 Phase 3).
+
+Rendering rules that keep the published table honest:
+
+* A refused timing renders as ``refused`` with the reason in a footnote --
+  never as a blank cell that a reader could mistake for "fast".
+* A DRC engine that did not run renders as ``not run``, never ``0``.
+* Both DRC engines get their own column, because the process rule is that
+  ``kct check`` alone is not sufficient evidence of a clean board.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from .metrics import (
+    ARTIFACT_SOURCE_FALLBACK_INPUT,
+    ROUTE_OUTCOME_COMPLETED,
+    ROUTE_OUTCOME_UNKNOWN,
+    BenchmarkReport,
+)
+
+__all__ = ["render_d3_markdown", "render_markdown", "render_report_markdown"]
+
+
+def _fmt_timing(report: BenchmarkReport) -> str:
+    if report.timing.valid and report.timing.wall_clock_s is not None:
+        phase = report.timing.measured_phase
+        if phase not in (ROUTE_OUTCOME_COMPLETED, ROUTE_OUTCOME_UNKNOWN):
+            # A real elapsed time on a non-completed attempt is time-to-
+            # refusal/partial-progress, NOT a completed-routing performance
+            # number -- never let it render as a bare seconds figure (#5280).
+            return f"{report.timing.wall_clock_s:.1f} s ({phase.replace('_', ' ')})"
+        return f"{report.timing.wall_clock_s:.1f} s"
+    return "refused"
+
+
+def _fmt_outcome(report: BenchmarkReport) -> str:
+    outcome = report.route_outcome
+    if outcome is None:
+        return "unknown (legacy)"
+    return outcome.outcome.replace("_", " ")
+
+
+def _fmt_artifact(report: BenchmarkReport) -> str:
+    outcome = report.route_outcome
+    if outcome is None:
+        return "unknown"
+    return outcome.artifact_source.replace("_", " ")
+
+
+def _fmt_kct_check(report: BenchmarkReport) -> str:
+    summary = report.kct_check
+    if not summary.ran:
+        return "not run"
+    errors = summary.error_count or 0
+    warnings = summary.warning_count or 0
+    verdict = "PASS" if summary.passed else "FAIL"
+    return f"{verdict} ({errors}E / {warnings}W)"
+
+
+def _fmt_cli_drc(report: BenchmarkReport) -> str:
+    summary = report.kicad_cli_drc
+    if not summary.ran or summary.violation_count is None:
+        return "not run"
+    return str(summary.violation_count)
+
+
+def _fmt_pcbworld_cp(report: BenchmarkReport) -> str:
+    """PCBWorld's own Clean Pass -- a separate scorer, never merged with local gates."""
+    scores = report.external_scores
+    score = scores.pcbworld if scores is not None else None
+    if score is None:
+        return "n/a"
+    if not score.available or score.clean_pass is None:
+        return "unavailable"
+    verdict = "PASS" if score.clean_pass else "FAIL"
+    return verdict if score.comparable else f"{verdict} (not comparable)"
+
+
+def _fmt_diff_pairs(report: BenchmarkReport) -> str:
+    pairs = report.diff_pairs
+    if pairs is None:
+        return "n/a"
+    return f"{pairs.pairs_complete}/{pairs.pairs_total}"
+
+
+def _fmt_backend(report: BenchmarkReport) -> str:
+    backend = report.backend
+    return backend.backend if backend.available else f"{backend.backend} (unavailable)"
+
+
+def render_markdown(
+    reports: Sequence[BenchmarkReport],
+    *,
+    title: str = "External autorouter benchmark results",
+) -> str:
+    """Render one markdown table covering ``reports`` (one row per board).
+
+    Returns a document with the table, the environment-validity footnotes
+    for any refused timing, and every report's free-form notes.
+    """
+    lines: list[str] = [f"# {title}", ""]
+
+    if not reports:
+        lines.append("_No benchmark reports._")
+        return "\n".join(lines) + "\n"
+
+    # The PCBWorld CP column appears only when some report carries that
+    # scorer's block, so DeepPCB / SRJ18 tables stay unchanged.
+    with_pcbworld = any(r.external_scores and r.external_scores.pcbworld for r in reports)
+    header = (
+        "| Board | Protocol | Completion | Connections | Vias | Wirelength (mm) "
+        "| Runtime | Backend | kct check | kicad-cli DRC | Diff pairs | Outcome | Artifact |"
+    )
+    sep = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    if with_pcbworld:
+        header += " PCBWorld CP |"
+        sep += "---|"
+    lines.extend([header, sep])
+
+    for report in reports:
+        completion = report.completion
+        cells = [
+            report.board_id,
+            report.protocol,
+            f"{completion.completion_pct:.1f}%",
+            f"{completion.connections_routed} of {completion.connections_total}",
+            str(report.copper.via_count),
+            f"{report.copper.wirelength_mm:.2f}",
+            _fmt_timing(report),
+            _fmt_backend(report),
+            _fmt_kct_check(report),
+            _fmt_cli_drc(report),
+            _fmt_diff_pairs(report),
+            _fmt_outcome(report),
+            _fmt_artifact(report),
+        ]
+        if with_pcbworld:
+            cells.append(_fmt_pcbworld_cp(report))
+        lines.append("| " + " | ".join(cells) + " |")
+
+    refusals = [r for r in reports if not r.timing.valid]
+    if refusals:
+        lines.extend(["", "**Timing refusals**", ""])
+        for report in refusals:
+            reason = report.timing.refusal_reason or "no reason recorded"
+            lines.append(f"- `{report.board_id}` ({report.protocol}): {reason}")
+
+    fallback = [
+        r
+        for r in reports
+        if r.route_outcome is not None
+        and r.route_outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
+    ]
+    if fallback:
+        lines.extend(["", "**Measured artifact is fallback input, not router output**", ""])
+        for report in fallback:
+            fallback_reason = report.route_outcome.reason if report.route_outcome else None
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): "
+                f"{fallback_reason or 'no reason recorded'} "
+                "-- connectivity, copper and check measurements describe the pre-route input. Runtime measures the routing attempt."
+            )
+
+    placement_reports = [r for r in reports if r.placement_disposition is not None]
+    if placement_reports:
+        lines.extend(["", "**Placement disposition for this attempt**", ""])
+        for report in placement_reports:
+            placement = report.placement_disposition
+            assert placement is not None
+            data = placement.to_dict()
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): {data['status']}; "
+                f"{data['nets_requested']} requested, {data['nets_eligible']} eligible, "
+                f"{data['nets_completed']} completed, {data['nets_placement_blocked']} "
+                "requested placement-blocked. Physical connectivity above is measured separately."
+            )
+            for key, label in [
+                ("invalid_references", "Invalid footprint references"),
+                ("direct_invalid_nets", "Direct: placement-invalid, not attempted"),
+                ("coupled_invalid_nets", "Coupled: placement-invalid, not attempted"),
+                ("user_excluded_nets", "Intentional user exclusions"),
+                ("plane_excluded_nets", "Plane/pour exclusions"),
+                ("unrequested_nets", "Unrequested nets"),
+            ]:
+                if data[key]:
+                    lines.append(
+                        f"  {label}: " + ", ".join(f"`{name}`" for name in data[key]) + "."
+                    )
+
+    pw_unavailable = [
+        r
+        for r in reports
+        if r.external_scores
+        and r.external_scores.pcbworld
+        and (not r.external_scores.pcbworld.available or not r.external_scores.pcbworld.comparable)
+    ]
+    if pw_unavailable:
+        lines.extend(["", "**PCBWorld Clean Pass unavailable or not comparable**", ""])
+        for report in pw_unavailable:
+            assert report.external_scores and report.external_scores.pcbworld
+            score = report.external_scores.pcbworld
+            reason = score.unavailable_reason or score.comparable_reason or "no reason recorded"
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): {reason} "
+                "-- PCBWorld CP is UNKNOWN for this board, not a failure or a pass."
+            )
+
+    legacy = [r for r in reports if r.route_outcome is None]
+    if legacy:
+        lines.extend(["", "**Legacy reports (outcome/artifact provenance not tracked)**", ""])
+        for report in legacy:
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): generated before route-outcome/"
+                "artifact-provenance tracking (schema v1 pre-#5280) -- treat as unknown, "
+                "never as success."
+            )
+
+    skipped_drc = [r for r in reports if not r.kicad_cli_drc.ran]
+    if skipped_drc:
+        lines.extend(["", "**`kicad-cli pcb drc --refill-zones` did not run**", ""])
+        for report in skipped_drc:
+            note = report.kicad_cli_drc.note or "no reason recorded"
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): {note} "
+                "— this board's DRC status is UNKNOWN, not clean."
+            )
+
+    annotated = [r for r in reports if r.notes]
+    if annotated:
+        lines.extend(["", "**Notes**", ""])
+        for report in annotated:
+            for note in report.notes:
+                lines.append(f"- `{report.board_id}` ({report.protocol}): {note}")
+
+    lines.extend(["", "**Reproduction**", ""])
+    for report in reports:
+        commit = report.board_commit or "unpinned"
+        source = report.board_source or "source not recorded"
+        lines.append(
+            f"- `{report.board_id}`: {source} @ `{commit}` "
+            f"(kicad-tools `{report.tool_commit}`, protocol `{report.protocol}`)"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
+def render_report_markdown(report: BenchmarkReport) -> str:
+    """Render a single report as a one-row table (convenience wrapper)."""
+    return render_markdown([report], title=f"Benchmark: {report.board_id}")
+
+
+# --------------------------------------------------------------------------
+# PCBWorld D3 aggregate (issue #6332)
+# --------------------------------------------------------------------------
+
+
+def _fmt_rate(r: Mapping[str, Any]) -> str:
+    n = r["denominator"]
+    if not n:
+        return "n/a (0 boards)"
+    if r["rate"] is not None:
+        return f"{r['rate']:.3f} ({r['passed']}/{n})"
+    return (
+        f"unknown: {r['passed']}/{n} known pass, {r['unknown']} unknown "
+        f"-> [{r['lower']:.3f}, {r['upper']:.3f}]"
+    )
+
+
+def _fmt_dist(d: Mapping[str, Any], unit: str = "") -> str:
+    if not d.get("n"):
+        return "no data"
+    return (
+        f"n={d['n']}; min {d['min']:g}{unit} / p50 {d['p50']:g}{unit} / p90 {d['p90']:g}{unit} "
+        f"/ max {d['max']:g}{unit}; mean {d['mean']:g}{unit}"
+    )
+
+
+def _d3_section(lines: list[str], name: str, block: Mapping[str, Any]) -> None:
+    lines.extend([f"### {name} ({block['boards']} boards)", ""])
+    lines.extend(["| Metric | @1 | @5 |", "|---|---|---|"])
+    at1, at5 = block["at1"], block["at5"]
+    if "pcbworld_clean_pass" not in at5:  # @5 not measured: every @5 cell says so
+        at5 = {
+            "pcbworld_clean_pass": None,
+            "local_clean": None,
+            **{k: None for k in at1 if k not in ("pcbworld_clean_pass", "local_clean")},
+            "rule": at5["rule"],
+        }
+
+    def rate_cell(r: Mapping[str, Any] | None) -> str:
+        return "not measured" if r is None else _fmt_rate(r)
+
+    def dist_cell(d: Mapping[str, Any] | None, unit: str = "") -> str:
+        return "not measured" if d is None else _fmt_dist(d, unit)
+
+    rows = [
+        ("PCBWorld Clean Pass", _fmt_rate(at1["pcbworld_clean_pass"]),
+         rate_cell(at5["pcbworld_clean_pass"])),
+        ("Local bar (100% + kct check + kicad-cli DRC)", _fmt_rate(at1["local_clean"]),
+         rate_cell(at5["local_clean"])),
+        ("Routability (scored boards)", _fmt_dist(at1["routability"]),
+         dist_cell(at5["routability"])),
+        ("Error-level DRV (scored boards)", _fmt_dist(at1["drv_errors_only"]),
+         dist_cell(at5["drv_errors_only"])),
+        ("Vias", _fmt_dist(at1["vias"]), dist_cell(at5["vias"])),
+        ("Wirelength", _fmt_dist(at1["wirelength_mm"], " mm"),
+         dist_cell(at5["wirelength_mm"], " mm")),
+        ("Wirelength / human reference", _fmt_dist(at1["wirelength_vs_human"]),
+         dist_cell(at5["wirelength_vs_human"])),
+    ]  # fmt: skip
+    for label, a, b in rows:
+        lines.append(f"| {label} | {a} | {b} |")
+    lines.extend(
+        [
+            "",
+            f"- @5 rule: {at5['rule']}.",
+            "- Wall time over every rollout (C++ backend only): "
+            + _fmt_dist(block["wall_clock_s_all_rollouts"], " s")
+            + f"; {block['timing_refused_attempts']} attempt(s) with timing refused.",
+        ]
+    )
+    failures = block["failure_classes_at1"]
+    if failures:
+        lines.append(
+            "- Non-passing @1 boards by class: "
+            + ", ".join(f"`{k}` {v}" for k, v in failures.items())
+            + "."
+        )
+    lines.append("")
+
+
+def render_d3_markdown(results: Mapping[str, Any]) -> str:
+    """Render a committed D3 ``results.json`` (``kct-pcbworld-d3-results/1``).
+
+    Pure function of the compact data: the aggregate is recomputed from the
+    per-attempt records every time, so a re-render of committed data must
+    produce a byte-identical report.
+    """
+    from .d3 import RESULTS_SCHEMA, aggregate_d3
+
+    if results.get("schema") != RESULTS_SCHEMA:
+        raise ValueError(f"not a {RESULTS_SCHEMA} document: {results.get('schema')!r}")
+    run = results["run"]
+    agg = aggregate_d3(
+        results.get("attempts", []),
+        board_ids=results["board_ids"],
+        rollouts=int(run["rollouts"]),
+        seeds=run.get("seeds"),
+        deterministic=bool(run.get("deterministic")),
+        subsets=results.get("subsets") or {},
+    )
+    split = results.get("split", "d3")
+    lines = [
+        f"# PCBWorld {split} baseline: `kct route` (generated -- do not edit)",
+        "",
+        f"Re-rendered from `results.json` by `kct bench external --render-d3`. "
+        f"Schema `{RESULTS_SCHEMA}`.",
+        "",
+        "## Coverage",
+        "",
+        f"- Manifest boards: {agg['manifest_boards']}; declared rollouts per board: "
+        f"{agg['declared_rollouts']} (seeds {run.get('seeds')}).",
+        f"- Attempts: {agg['attempts_recorded']} recorded of {agg['attempts_expected']} "
+        f"expected; {agg['attempts_missing']} missing (explicit `missing` rows).",
+        "- Attempt status counts: "
+        + (", ".join(f"`{k}` {v}" for k, v in agg["status_counts"].items()) or "none")
+        + ".",
+        f"- Complete (every attempt has a known verdict): **{'yes' if agg['complete'] else 'no'}**.",
+        "",
+        "## Results",
+        "",
+    ]
+    _d3_section(lines, f"Full {split} test split", agg["full"])
+    for name, block in agg["subsets"].items():
+        _d3_section(lines, f"Subset `{name}`", block)
+
+    comparators = results.get("comparators") or []
+    if comparators:
+        lines.extend(["## Published comparators (not re-scored here)", ""])
+        lines.extend(["| Router | CP | Set | Source |", "|---|---|---|---|"])
+        for c in comparators:
+            lines.append(f"| {c['router']} | {c['cp']} | {c['set']} | {c['source']} |")
+        lines.append("")
+
+    prov = results.get("provenance") or {}
+    if prov:
+        lines.extend(["## Provenance", ""])
+        for key in sorted(prov):
+            lines.append(f"- `{key}`: `{prov[key]}`")
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"

@@ -1,0 +1,229 @@
+# kicad-tools Documentation
+
+**Tools for AI agents to work with KiCad projects.**
+
+kicad-tools provides standalone Python tools that enable AI agents to parse, analyze, and manipulate KiCad schematic and PCB files programmatically.
+
+---
+
+## Quick Navigation
+
+### Getting Started
+- [Installation & Quick Start](getting-started.md) - Install and run your first command
+- [Architecture Overview](architecture.md) - Understand how the modules fit together
+
+### Guides
+Step-by-step guides for common tasks:
+
+| Guide | Description |
+|-------|-------------|
+| [Schematic to PCB Workflow](guides/schematic-to-pcb-workflow.md) | Complete workflow from schematic to manufactured PCB |
+| [Schematic Analysis](guides/schematic-analysis.md) | Parse schematics, query symbols, trace nets |
+| [DRC & Validation](guides/drc-and-validation.md) | Run design rule checks with manufacturer rules |
+| [Manufacturing Export](guides/manufacturing-export.md) | Generate Gerbers, BOM, pick-and-place files |
+| [Query API](guides/query-api.md) | Fluent interface for finding components |
+| [Placement Optimization](guides/placement-optimization.md) | Optimize component placement |
+| [Routing](guides/routing.md) | Autoroute PCBs with the A* router |
+| [Differential Pairs](guides/diff-pairs/README.md) | Configure and route differential pairs per net class |
+| [Match Groups](guides/match-groups/README.md) | Length-match parallel-bus groups (DDR, MIPI, HDMI) |
+| [Hybrid Figure-of-Merit (FOM)](guides/fom.md) | Layered routability/quality scoring function |
+| [LCSC/EasyEDA 3D Models](guides/lcsc-3d-models.md) | Fetch-on-demand 3D models for LCSC parts |
+| [Parametric 3D Models](guides/parametric-3d-models.md) | Generate missing STEP bodies with `kct models generate` |
+| [Routing Benchmark Suite](guides/benchmarking.md) | Measure router quality and detect regressions |
+| [MCP Server](mcp/README.md) | Enable AI agents to interact via Model Context Protocol |
+| [Stackup Presets](guides/stackup-presets.md) | Named JLCPCB stackups and legacy migration |
+| [Physical Copper Gap](guides/physical-copper-gap.md) | Physical copper gap preflight in `kct check` |
+| [Mask-to-Copper](guides/mask-to-copper.md) | Checking mask-to-copper clearance and exposure |
+| [Mask Geometry](guides/mask-geometry.md) | Inspecting standard soldermask geometry |
+| [Netclass Diagnostics](guides/netclass-diagnostics.md) | Read-only netclass diagnostics |
+| [Footprint Arc Coordinates](guides/footprint-arc-schema.md) | How footprint arc midpoints are preserved |
+| [Analog Threshold Budgets](guides/analog-threshold-budgets.md) | Evaluate reviewed analog threshold sidecars |
+| [Drive Budget](guides/drive-budget.md) | Weak-source and gate-drive budget review |
+| [Resistor Rating](guides/resistor-rating.md) | Resistor operating budgets from a reviewed sidecar |
+| [Factory Selection](guides/factory-selection.md) | Compare factory-selected component evidence |
+| [Submission Preparation](guides/submission-preparation.md) | Offline assembly submission preparation |
+
+### Reference
+Detailed reference documentation:
+
+| Reference | Description |
+|-----------|-------------|
+| [CLI Commands](reference/cli.md) | Complete command-line reference |
+| [Machine Output](reference/machine-output.md) | The canonical `--format json` idiom: inventory, exemptions, rules |
+| [Crossing-Tail Census Report](reference/crosstail-census-report.md) | Report-only diff-pair crossover legality aggregate (`KCT_CROSSTAIL_CENSUS_REPORT`) |
+| [Escape-Capacity Forecast](reference/capacity-forecast.md) | Placement-only pre-route pad-field solvability check (`kct route --capacity-forecast`) |
+| [Python API](reference/api.md) | Module-by-module API documentation |
+| [Manufacturer Rules](reference/manufacturers.md) | JLCPCB, OSHPark, PCBWay design rules |
+| [Circuit Blocks](reference/circuit-blocks.md) | Reusable schematic building blocks |
+| [RoutingPlan Sidecar](reference/routing-plan.md) | `<output_stem>.routing_plan.json` written by every default `kct route` |
+| [Commit-Journal Sidecar](reference/commit-journal.md) | `<output_stem>.access_witness.json` pad-access witness |
+| [KiCad Lock Policy](reference/kicad-lock-policy.md) | KiCad lock-marker advisories on save |
+| [Route Opt-In Flags](reference/route-opt-in-flags.md) | When an opt-in `kct route` flag graduates or is deprecated |
+| [`board.json` Schema](board-json-schema.md) | Normalized per-board data contract (`kct board-metrics`) |
+| [External Benchmark Report Schema](benchmark-external-report-schema.md) | Per-board report contract for `kct bench external` |
+| [Agent Surfaces](agent-surfaces.md) | What each `kct` skill needs from its harness |
+| [Non-Claude Harness Pilot](non-claude-harness-pilot.md) | Run plan, checklist and gap template for the Codex CLI / opencode pilot (#7776) |
+| [Ecosystem](ecosystem.md) | Where kicad-tools sits among related projects (`kct ecosystem`) |
+
+### For Contributors
+- [Development Guide](contributing/development.md) - Setup, testing, code style
+- [Stacked PRs](contributing/stacked-prs.md) - What CI does and does not validate for PRs not based on `main`
+- [Agent Guidance](contributing/agent-guidance.md) - Single source of the contributor guidance rendered into `CLAUDE.md` and `AGENTS.md`
+- [Squad Coordination](contributing/squad.md) - Shared chatroom and goal board for agents working in this repo
+- [KiCad Image Pin](contributing/kicad-image-pin.md) - Bumping the pinned KiCad container image used by CI
+
+### Research Notes & Audits
+Point-in-time working documents — dated entries describe the tree as of their date.
+Indexes: [Research notes](research/README.md) (ecosystem evaluations, router experiments, calibration notes, audits), [Diagnostics](diagnostics/README.md) (retained investigation evidence), [Stripline 5016 investigation](investigations/stripline-5016/README.md).
+
+| Document | Description |
+|----------|-------------|
+| [Clearance Conformance (2026-09)](clearance-conformance.md) | Per-consumer disagreement with `kicad-cli pcb drc`, measured by `tests/conformance/` (Epic #5509 Phase 1) |
+| [Website Content Audit (2026-09)](website-content-audit-2026-09.md) | kicad-tools.org content/navigation/presentation audit vs. repository evidence (#5281, Epic #5278 Phase 1) |
+| [HV Pairwise Proof: softstart rev-C (2026-08)](hv-pairwise-softstart-proof.md) | #4507 T4 manual proof run on the local-only mains HV fixture |
+| [Placement Pad-Anchoring Audit (2026-08)](placement-pad-anchoring-audit.md) | Centre- vs pad-anchored placement objective terms (#4831) |
+| [OmniLayout / OmniRouting Recon (2026-08)](research/omnilayout-recon.md) | External LLM layout/routing benchmark (#4830); verdict: adapt the metric protocol, drop the data (no licence) |
+| [Corpus Benchmark Feasibility (2026-08)](research/corpus-benchmark-feasibility.md) | #4830 slice 4: which open-schematics boards can serve as capacity-predictor labels (#4799) or route-vs-human cases, plus three pilot routes |
+| [Board Fleet Parity Audit (2026-06)](board-fleet-parity-audit-2026-06.md) | Fleet-wide board status snapshot |
+| [Install Pilot: chorus](install-pilot-chorus.md) | Consumer-repo install pilot for Epic #4054 acceptance |
+| [Atopile Build System Research](research-atopile-build-system.md) | Survey of Atopile's build DAG and targets |
+| [Atopile Research Synthesis](research/atopile-research-synthesis.md) | Best Atopile ideas mapped onto kicad-tools |
+| [Faebryk Component Library](research/faebryk-component-library.md) | Atopile Faebryk component-library research (#307) |
+| [Diode `pcb` Comparison](research/diode-pcb-comparison.md) | Diode (Zener) vs kicad-tools feature comparison (2026-06) |
+| [copperhead Workflow Ideas](research/copperhead-workflow-ideas.md) | Adoptable workflow ideas from the copperhead PCB agent (#4520) |
+| [Placement GA Routability A/B](benchmarks/placement_ga_routability_ab.md) | Inner-loop routing quality vs spacing proxy in the placement GA (#2720) |
+| [Board 05 U10-17 Investigation (2026-06)](investigations/2026-06-board05-u10-17.md) | Negative-clearance pair root-cause investigation (#3236) |
+| [pcb strip live verification (#8337)](investigations/pcb-strip-live-verification-8337.md) | kicad-cli --refill-zones check of --from-report/--dangling; filed #8346, #8347 |
+| [Placement Optimizer Agent Prompt](PLACEMENT-OPTIMIZER-AGENT-PROMPT.md) | Continuation prompt for the physics-based placement optimizer |
+| [Konnect Item 1 Audit: MCP Toolsets (2026-09)](konnect-item1-toolset-economy-audit.md) | On-demand MCP toolsets for context economy (#4896, item 1 of the #4880 Konnect audit) |
+| [Konnect Item 8 Audit: Design-Rule Store (2026-09)](konnect-item8-design-rules-audit.md) | Natural-language design-rule store (#4902, item 8 of the #4880 Konnect audit) |
+| [Demo Manufacturing Readiness (2026-09-09)](demo-readiness-2026-09-09.md) | Per-board manufacturing-readiness audit of the demo boards, with hash-bound `output/readiness.json` evidence |
+| [HV Keepout Clearance Proof](hv-keepout-clearance-proof.md) | Geometry contract for `zones hv-keepout --clearance` minimum-clearance preservation (#5399) |
+| [JLCPCB Upload Protocol](jlc-upload-protocol.md) | Gerber upload/preview transport contract: explicit credentials, persisted ledger, no automatic retry on uncertain uploads |
+| [Parts Lookup Coverage](parts-lookup-coverage.md) | How `LCSCClient.lookup()` distinguishes a live no-match from a supplier outage (`LCSCUnavailableError`, `lookup_result()`) |
+| [Placement Scoring](placement-scoring.md) | The four placement-score surfaces, the three metrics behind them, and which to trust for what (#3940) |
+| [Placement-Excluded Fixed Copper](routing-fixed-copper.md) | How routing retains copper of placement-excluded nets as fixed obstacles (`placement_disposition`, `FixedFillObstacles`) |
+
+---
+
+## Module Overview
+
+Partial listing: the main sub-packages only. See `src/kicad_tools/` for the rest.
+
+```
+kicad_tools/
+├── core/          # S-expression parsing, file I/O
+├── schema/        # Data models (Schematic, PCB, Symbol)
+├── query/         # Fluent query API
+├── schematic/     # Schematic operations and circuit blocks
+├── pcb/           # PCB operations
+├── router/        # A* autorouter with diff pairs
+├── optim/         # Placement optimization
+├── drc/           # DRC report parsing (kicad-cli output), fix suggestions
+├── validate/      # Pure Python DRC checker, netlist sync (no kicad-cli)
+├── erc/           # Electrical rule checking
+├── manufacturers/ # Manufacturer design rules
+├── parts/         # LCSC parts database
+├── datasheet/     # PDF parsing, pin extraction
+├── export/        # Manufacturing export
+├── reasoning/     # LLM-driven PCB layout
+├── mcp/           # MCP server for AI agent integration
+└── cli/           # Command-line interface
+```
+
+---
+
+## Installation
+
+```bash
+pip install kicad-tools
+```
+
+Verify installation:
+```bash
+kct --help
+```
+
+---
+
+## Quick Examples
+
+### Command Line
+```bash
+# List symbols in a schematic
+kct symbols project.kicad_sch
+
+# Run DRC with JLCPCB rules
+kct drc board.kicad_pcb --mfr jlcpcb
+
+# Generate BOM as CSV
+kct bom project.kicad_sch --format csv --group
+
+# Autoroute a PCB
+kct route board.kicad_pcb --output routed.kicad_pcb
+```
+
+### Python API
+```python
+from kicad_tools import Schematic, PCB, Project
+
+# Load and query schematic
+sch = Schematic.load("project.kicad_sch")
+caps = sch.symbols.filter(value="100nF")
+
+# Load and query PCB
+pcb = PCB.load("board.kicad_pcb")
+smd = pcb.footprints.smd()
+
+# Work with complete project
+project = Project.load("project.kicad_pro")
+project.export_assembly("output/", manufacturer="jlcpcb")
+```
+
+---
+
+## Examples
+
+Complete working examples are organized into two directories:
+
+### Feature Examples ([`examples/`](https://github.com/rjwalters/kicad-tools/tree/main/examples))
+
+| Example | Description |
+|---------|-------------|
+| `01-schematic-analysis/` | Parse and analyze schematics |
+| `02-bom-generation/` | Generate bills of materials |
+| `03-drc-checking/` | Design rule checking |
+| `04-autorouter/` | Routing strategy comparisons |
+| `05-schematic-to-pcb-workflow/` | End-to-end schematic-to-manufacturing workflow |
+| `06-intelligent-placement/` | Smart component placement |
+| `07-design-feedback/` | Design feedback and rich error reporting |
+| `08-label-based-schematic/` | Build schematics from net labels |
+| `09-manufacturing-export/` | Generate manufacturing packages via the Python API |
+| `10-complete-kct-workflow/` | Complete `.kct` project to manufacturing files |
+| `patterns/` | Reusable circuit-block pattern definitions |
+| `agent-integration/` | Integration with AI agents |
+| `llm-routing/` | LLM-driven routing decisions |
+
+### Complete Board Demos ([`boards/`](https://github.com/rjwalters/kicad-tools/tree/main/boards))
+
+| Board | Complexity | Description |
+|-------|------------|-------------|
+| `00-simple-led/` | Simple | Smallest end-to-end example |
+| `01-voltage-divider/` | Simple | Minimal workflow validation |
+| `02-charlieplex-led/` | Medium | Dense topology, Monte Carlo routing |
+| `03-usb-joystick/` | Complex | Mixed signals, USB differential pairs |
+| `04-stm32-devboard/` | Complex | Programmatic schematic generation |
+| `05-bldc-motor-controller/` | Complex | Three-phase motor drive, thermal + high-current routing |
+| `06-diffpair-test/` | Medium | Differential-pair routing regression testbench |
+| `07-matchgroup-test/` | Medium | N-trace match-group routing regression testbench |
+| `08-precision-acquisition/` | — | Four-channel precision acquisition with USB streaming (planned; no PCB yet) |
+| `09-usbc-pd-power/` | — | USB-C PD sink with a 5 V / 3 A buck and I2C telemetry (in development) |
+| `synthetic-mains-complete/` | — | Synthetic mains-style fixture for `--complete` creepage verification (#8422); not a demo board |
+
+---
+
+## Version History
+
+See [CHANGELOG.md](https://github.com/rjwalters/kicad-tools/blob/main/CHANGELOG.md) for release notes.
+
+See [ROADMAP.md](https://github.com/rjwalters/kicad-tools/blob/main/ROADMAP.md) for planned features.

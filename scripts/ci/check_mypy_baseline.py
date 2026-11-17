@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+"""Mypy baseline gate for CI (issue #3512).
+
+Runs ``mypy`` over the source tree, compares the resulting errors against a
+committed baseline (``.github/mypy-baseline.txt``), and fails ONLY when there
+are NEW errors beyond the baseline.  This is the type-checking analogue of the
+DRC tolerance allowlist (``scripts/ci/check_routed_drc.py`` /
+``.github/routed-drc-tolerance.yml``): it lets the Type Check job gate against
+regressions immediately, without requiring the existing 1500+ errors to be
+fixed in one mega-PR.
+
+Why a normalized baseline rather than a raw diff
+------------------------------------------------
+Mypy reports errors as ``path:line: error: message  [code]``.  Keying on the
+*exact* ``path:line`` would treat every refactor that shifts line numbers as
+hundreds of "new" errors (and hundreds of "fixed" ones), making the gate
+useless.  Instead we normalize each error to a stable *signature*:
+
+    <path>\t<error-code>\t<normalized-message>
+
+The line number is dropped, and bare integers in the message are masked
+while equivalent diagnostic templates are canonicalized so a signature stays stable
+across unrelated edits.  We then compare *multisets* of signatures: the
+current run may contain each baseline signature at most as many times as the
+baseline does.  Any signature that appears more often than the baseline (or
+that the baseline does not contain at all) is a NEW error and fails the gate.
+
+This means:
+  * Fixing an error (signature count drops) -> gate passes (and nags to
+    tighten the baseline, mirroring the DRC drift warning).
+  * Adding a brand-new error -> gate fails.
+  * Moving code around (line numbers shift) -> gate passes.
+
+Why this gate runs COLD (no incremental cache) by default
+---------------------------------------------------------
+``run_mypy`` passes ``--no-incremental`` so a pre-existing ``.mypy_cache/``
+can never influence the verdict.  CI is structurally always-cold -- there is
+no ``actions/cache`` in ``.github/workflows/`` and the Type Check job pins
+``astral-sh/setup-uv`` with ``enable-cache: false`` -- while a local run is
+incremental by default, so the two execution models disagreed and only the
+local one was unreliable.  During the 2026-08-08/09 sweep that asymmetry cost
+two independent Judges a review cycle each (PRs #4746 and #4762): both saw a
+"NEW" error in ``src/kicad_tools/recovery/strategy.py``, a file in neither
+diff, replayed from a stale cache in a reused issue worktree.  ``.mypy_cache/``
+is gitignored, so ``git reset --hard``, a worktree reset, and ``git clean -fd``
+all leave it in place; nothing in the sweep clears it.
+
+The measured cost of going cold is ~20 s on ``src/`` (vs ~0.5 s warm), which
+CI already pays on every push.  Pass ``--incremental`` (alias ``--warm-cache``)
+to opt back into the cache for a tight burn-down loop -- but re-confirm any
+finding with a cold run before acting on it.
+
+Burn-down intent
+----------------
+The baseline is a debt ledger, not a target.  When you fix type errors, run
+``--update`` (or ``--write-baseline``) to regenerate ``.github/mypy-baseline.txt``
+in the same PR so the floor ratchets down and the fixed errors can never
+silently come back.  The end state is an empty baseline and the eventual
+removal of this wrapper in favour of a bare ``mypy`` invocation.
+
+Exit codes:
+    0 -- No new errors (job passes).  Stale-baseline entries (errors that no
+         longer occur) are surfaced as warnings but do not fail the gate.
+    1 -- Tool failure (mypy could not run, baseline unreadable, etc.).
+    2 -- New errors beyond the baseline (job fails).
+
+GitHub-Actions annotations (``::error file=...::``) are emitted for each new
+error so the PR Files-changed view surfaces the regression inline.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+DEFAULT_BASELINE = Path(".github/mypy-baseline.txt")
+DEFAULT_TARGET = "src/"
+DEFAULT_UV_LOCK = Path("uv.lock")
+
+# Mypy error lines look like:
+#   src/pkg/mod.py:248: error: Function "builtins.any" is ...  [valid-type]
+# We deliberately ignore ``note:`` lines (they are follow-ups to an error,
+# not independently gateable) and the trailing ``Found N errors`` summary.
+_ERROR_LINE_RE = re.compile(
+    r"^(?P<path>[^:]+):(?P<line>\d+):(?:\d+:)?\s+error:\s+(?P<message>.*?)\s*(?:\[(?P<code>[a-z0-9-]+)\])?$"
+)
+
+# Substrings inside an error message that are volatile across unrelated edits
+# and must be masked so a signature stays stable.
+_NUMBER_RE = re.compile(r"\b\d+\b")
+
+# Mypy 2.x renamed these templates without changing the underlying errors.
+# Match whole templates and retain their quoted payloads verbatim; replacing
+# argument/parameter globally would erase meaningful identifiers and types.
+_DEFAULT_PARAMETER_RE = re.compile(
+    r'^Incompatible default for parameter ("[^"\n]+") '
+    r'\(default has type ("[^"\n]+"), parameter has type ("[^"\n]+")\)$'
+)
+_GENERIC_ARGUMENTS_RE = re.compile(r'^Missing type arguments for generic type ("[^"\n]+")$')
+
+
+def normalize_message(message: str) -> str:
+    """Mask volatile substrings in a mypy error message.
+
+    The goal is a signature that is stable across edits that do not change the
+    *nature* of the error.  Bare integers (array sizes, argument counts,
+    line/column references mypy sometimes embeds) are masked to ``N`` because
+    they routinely shift without the error meaningfully changing.  Quoted
+    identifiers are intentionally PRESERVED -- they carry the semantic content
+    of the error (e.g. which attribute is missing) and dropping them would
+    collapse distinct errors into one signature, letting genuinely new errors
+    hide behind an existing baseline entry.
+    """
+    message = message.strip()
+    if match := _DEFAULT_PARAMETER_RE.fullmatch(message):
+        name, default_type, parameter_type = match.groups()
+        message = (
+            f"Incompatible default for argument {name} "
+            f"(default has type {default_type}, argument has type {parameter_type})"
+        )
+    elif match := _GENERIC_ARGUMENTS_RE.fullmatch(message):
+        message = f"Missing type parameters for generic type {match.group(1)}"
+    elif message == "Function is missing a type annotation for one or more parameters":
+        message = "Function is missing a type annotation for one or more arguments"
+    return _NUMBER_RE.sub("N", message)
+
+
+def signature(path: str, message: str, code: str) -> str:
+    """Build a stable, line-number-independent signature for one error.
+
+    Format: ``<path>\\t<code>\\t<normalized-message>``.  Path is included so
+    the same error class in two files counts as two distinct signatures, and
+    so a new error in file A can't be masked by a since-fixed error in file B.
+    """
+    return f"{path}\t{code}\t{normalize_message(message)}"
+
+
+def parse_mypy_output(output: str) -> Counter[str]:
+    """Parse raw mypy stdout into a multiset of error signatures.
+
+    Non-error lines (``note:`` follow-ups, the ``Found N errors`` summary,
+    blank lines) are ignored.  Returns a :class:`collections.Counter` mapping
+    each signature to the number of times it occurred, so duplicate errors in
+    the same file are counted independently.
+    """
+    counts: Counter[str] = Counter()
+    for raw_line in output.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        m = _ERROR_LINE_RE.match(line)
+        if not m:
+            continue
+        path = m.group("path")
+        message = m.group("message")
+        code = m.group("code") or ""
+        counts[signature(path, message, code)] += 1
+    return counts
+
+
+def run_mypy(target: str, *, incremental: bool = False) -> str:
+    """Run mypy over ``target`` and return its combined stdout+stderr.
+
+    Mypy exits 1 when it finds errors and 0 when clean; both are normal here.
+    A different/failed invocation (e.g. config error) is detected by the
+    caller via the absence of parseable error lines AND a non-summary tail.
+
+    ``incremental`` defaults to ``False``, which adds ``--no-incremental`` so a
+    stale ``.mypy_cache/`` cannot replay a phantom error into the gate's
+    verdict (see the module docstring: PRs #4746/#4762).  ``--no-incremental``
+    is preferred over ``--cache-dir=/dev/null``: it has the same effect on the
+    read path, is portable, and does not depend on a device node.  Pass
+    ``incremental=True`` only for a deliberate warm-cache burn-down loop.
+    """
+    argv = ["mypy"]
+    if not incremental:
+        argv.append("--no-incremental")
+    argv.append(target)
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout + proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Mypy version-drift guard (issue #4558)
+#
+# Fresh/stale local worktrees can drift from the uv.lock pin (observed: mypy
+# 1.20.2 vs locked 1.19.1), surfacing new/changed mypy diagnostics as "NEW
+# errors beyond the baseline" with no hint that the toolchain -- not the diff
+# -- changed.  CI is immune (`uv sync --frozen --extra dev`), so this guard is
+# warn-only: it never changes exit-code semantics, and it skips silently when
+# uv.lock is missing/unparseable so it can never turn a working gate into a
+# tool failure.
+# ---------------------------------------------------------------------------
+
+# The uv.lock package block looks like:
+#   [[package]]
+#   name = "mypy"
+#   version = "1.19.1"
+_UV_LOCK_MYPY_RE = re.compile(
+    r'^\[\[package\]\]\s*\nname = "mypy"\s*\nversion = "(?P<version>[^"]+)"',
+    re.MULTILINE,
+)
+
+# `mypy --version` output looks like: ``mypy 1.19.1 (compiled: yes)``
+_MYPY_VERSION_OUTPUT_RE = re.compile(r"\bmypy\s+(?P<version>\d+\.\d+(?:\.\d+)?\S*)")
+
+
+def locked_mypy_version(lock_path: Path = DEFAULT_UV_LOCK) -> str | None:
+    """Parse the pinned mypy version out of ``uv.lock``.
+
+    Returns ``None`` (guard silently skipped) when the lockfile is missing,
+    unreadable, or has no recognizable mypy package block.
+    """
+    try:
+        text = lock_path.read_text()
+    except OSError:
+        return None
+    m = _UV_LOCK_MYPY_RE.search(text)
+    return m.group("version") if m else None
+
+
+def parse_installed_mypy_version(output: str) -> str | None:
+    """Extract the version number from ``mypy --version`` output."""
+    m = _MYPY_VERSION_OUTPUT_RE.search(output)
+    return m.group("version") if m else None
+
+
+def installed_mypy_version() -> str | None:
+    """Query the version of the same PATH ``mypy`` binary :func:`run_mypy` uses.
+
+    Deliberately NOT ``importlib.metadata``: ``run_mypy`` resolves ``mypy``
+    via PATH, and a PATH binary from another env is part of the drift failure
+    mode this guard exists to name.  Returns ``None`` on any failure.
+    """
+    try:
+        proc = subprocess.run(
+            ["mypy", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return parse_installed_mypy_version(proc.stdout + proc.stderr)
+
+
+def mypy_version_drift(lock_path: Path = DEFAULT_UV_LOCK) -> tuple[str, str] | None:
+    """Return ``(locked, installed)`` when the versions differ, else ``None``.
+
+    Any unreadable side (missing lock, no mypy block, mypy not runnable)
+    yields ``None`` -- the guard must never fail the gate on its own.
+    """
+    locked = locked_mypy_version(lock_path)
+    if locked is None:
+        return None
+    installed = installed_mypy_version()
+    if installed is None:
+        return None
+    return (locked, installed) if locked != installed else None
+
+
+def emit_drift_warning(locked: str, installed: str, has_new_errors: bool) -> None:
+    """Print the (warn-only) version-drift diagnostics.
+
+    When the run also reports new-vs-baseline errors, a banner states that
+    toolchain drift -- not the diff under review -- is the likely cause.
+    """
+    if has_new_errors:
+        print("=" * 72, flush=True)
+        print(
+            "MYPY VERSION DRIFT: the NEW errors reported below are likely\n"
+            "TOOLCHAIN NOISE, not regressions in this diff. The invoked mypy\n"
+            f"is {installed} but uv.lock pins {locked}. Re-sync the env and re-run\n"
+            "before chasing individual errors:\n"
+            "    uv sync --frozen --extra dev\n"
+            "Do NOT run --update to absorb drift-induced errors into the baseline.",
+            flush=True,
+        )
+        print("=" * 72, flush=True)
+    print(
+        f"::warning::MYPY VERSION DRIFT: installed mypy {installed} != uv.lock pin "
+        f"{locked}. Local env has drifted from the lockfile; fix with "
+        f"`uv sync --frozen --extra dev`.",
+        flush=True,
+    )
+
+
+def load_baseline(baseline_path: Path) -> Counter[str]:
+    """Load the committed baseline file into a multiset of signatures.
+
+    Lines starting with ``#`` and blank lines are ignored (so the file can
+    carry a header explaining the burn-down contract).  A missing baseline is
+    treated as empty: every error then counts as new (strict mode).
+    """
+    counts: Counter[str] = Counter()
+    if not baseline_path.exists():
+        return counts
+    for raw_line in baseline_path.read_text().splitlines():
+        line = raw_line.rstrip("\n")
+        if not line or line.lstrip().startswith("#"):
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            path, code, message = parts
+            line = signature(path, message, code)
+        counts[line] += 1
+    return counts
+
+
+_BASELINE_HEADER = """\
+# Mypy baseline -- committed debt ledger for the CI Type Check gate (issue #3512).
+#
+# Each non-comment line is a NORMALIZED mypy error signature:
+#     <path>\\t<error-code>\\t<message-with-numbers-masked>
+# Line numbers are intentionally absent so the gate survives refactors that
+# shift code around.  scripts/ci/check_mypy_baseline.py compares the current
+# mypy run against this multiset and fails CI only on NEW errors.
+#
+# BURN-DOWN INTENT: this is debt, not a target.  When you fix type errors,
+# regenerate this file in the same PR:
+#     uv run python scripts/ci/check_mypy_baseline.py --update
+# so the floor ratchets down and the fixed errors cannot silently return.
+# The end state is an empty baseline and removal of the wrapper.
+#
+# DO NOT hand-edit. DO NOT add entries to silence a NEW error -- fix the type
+# error or, if it is a false positive, add a targeted ``# type: ignore[code]``
+# with a comment, which removes it from the report entirely.
+"""
+
+
+def write_baseline(baseline_path: Path, counts: Counter[str]) -> None:
+    """Write the baseline file: header + sorted signatures (one per repeat)."""
+    lines = [_BASELINE_HEADER]
+    for sig in sorted(counts.elements()):
+        lines.append(sig)
+    baseline_path.write_text("\n".join(lines) + "\n")
+
+
+def annotate_error(path: str, message: str) -> None:
+    """Emit a GitHub-Actions ``::error file=...::`` annotation."""
+    print(f"::error file={path}::{message}", flush=True)
+
+
+def diff_against_baseline(
+    current: Counter[str], baseline: Counter[str]
+) -> tuple[Counter[str], Counter[str]]:
+    """Return ``(new_errors, fixed_errors)`` multisets.
+
+    ``new_errors`` are signatures occurring MORE often in ``current`` than in
+    ``baseline`` (these fail the gate).  ``fixed_errors`` are signatures
+    occurring LESS often than the baseline allows (these are surfaced as
+    stale-baseline warnings so the ledger can be tightened).
+    """
+    new_errors = current - baseline  # Counter subtraction clamps at 0
+    fixed_errors = baseline - current
+    return new_errors, fixed_errors
+
+
+def _render_signature(sig: str) -> tuple[str, str]:
+    """Split a signature back into ``(path, human_message)`` for reporting."""
+    parts = sig.split("\t")
+    if len(parts) == 3:
+        path, code, message = parts
+        suffix = f"  [{code}]" if code else ""
+        return path, f"{message}{suffix}"
+    return "<unknown>", sig
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="check_mypy_baseline",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--baseline",
+        default=str(DEFAULT_BASELINE),
+        help=f"Path to the baseline file (default: {DEFAULT_BASELINE}).",
+    )
+    parser.add_argument(
+        "--target",
+        default=DEFAULT_TARGET,
+        help=f"Path mypy checks (default: {DEFAULT_TARGET!r}).",
+    )
+    parser.add_argument(
+        "--update",
+        "--write-baseline",
+        dest="update",
+        action="store_true",
+        help="Regenerate the baseline file from the current mypy run and exit 0. "
+        "Use this when burning down errors so the floor ratchets to the new count.",
+    )
+    parser.add_argument(
+        "--incremental",
+        "--warm-cache",
+        dest="incremental",
+        action="store_true",
+        help="Reuse mypy's incremental .mypy_cache/ instead of running cold. "
+        "OFF by default: CI never has a cache (no actions/cache; setup-uv pins "
+        "enable-cache: false), and a stale local cache has already produced "
+        "phantom 'NEW error' verdicts in files outside the diff (PRs #4746, "
+        "#4762). Use this only for a tight burn-down loop -- it trades ~20s of "
+        "runtime for a verdict CI cannot reproduce, so re-confirm any finding "
+        "with a cold run.",
+    )
+    parser.add_argument(
+        "--mypy-output",
+        default=None,
+        help="Read mypy output from this file instead of invoking mypy "
+        "(used by the test suite to feed synthetic runs).",
+    )
+    args = parser.parse_args(argv)
+
+    baseline_path = Path(args.baseline)
+
+    # Version-drift guard (issue #4558): only meaningful when we actually
+    # invoke the PATH mypy binary (synthetic --mypy-output runs did not).
+    drift: tuple[str, str] | None = None
+    if args.mypy_output is not None:
+        raw = Path(args.mypy_output).read_text()
+    else:
+        raw = run_mypy(args.target, incremental=args.incremental)
+        drift = mypy_version_drift()
+
+    current = parse_mypy_output(raw)
+
+    # Guard against a broken mypy invocation masquerading as "0 errors".
+    # If mypy emitted output but we parsed nothing AND the output does not look
+    # like a clean run, treat it as a tool failure rather than a green gate.
+    if not current and raw.strip() and "no issues found" not in raw.lower():
+        if "Found 0 errors" not in raw:
+            print("::error::mypy produced output but no parseable error lines:", flush=True)
+            print(raw, flush=True)
+            return 1
+
+    if args.update:
+        if drift is not None:
+            locked, installed = drift
+            print(
+                f"::warning::MYPY VERSION DRIFT during --update: regenerating the "
+                f"baseline with mypy {installed} while uv.lock pins {locked} bakes "
+                f"drift-induced errors into the ledger AND can drop env-agnostic "
+                f"entries (e.g. the nanobind import signatures). Run "
+                f"`uv sync --frozen --extra dev` and re-run --update instead.",
+                flush=True,
+            )
+        write_baseline(baseline_path, current)
+        print(
+            f"Wrote baseline with {sum(current.values())} error(s) "
+            f"({len(current)} unique signature(s)) to {baseline_path}.",
+            flush=True,
+        )
+        return 0
+
+    baseline = load_baseline(baseline_path)
+    new_errors, fixed_errors = diff_against_baseline(current, baseline)
+
+    if drift is not None:
+        emit_drift_warning(drift[0], drift[1], has_new_errors=bool(new_errors))
+
+    if fixed_errors:
+        n_fixed = sum(fixed_errors.values())
+        print(
+            f"::warning::{n_fixed} baseline error(s) no longer occur. Tighten "
+            f"the floor by running `uv run python {Path(__file__).name} --update` "
+            f"(or `scripts/ci/{Path(__file__).name} --update`) and committing "
+            f"the updated {baseline_path}.",
+            flush=True,
+        )
+
+    if new_errors:
+        n_new = sum(new_errors.values())
+        print(
+            f"\n{n_new} NEW mypy error(s) beyond the baseline ({baseline_path}):\n",
+            flush=True,
+        )
+        for sig in sorted(new_errors.elements()):
+            path, human = _render_signature(sig)
+            annotate_error(path, f"new type error: {human}")
+            print(f"  {path}: {human}", flush=True)
+        print(
+            f"\nType Check gate failed (exit 2). Fix the new error(s) above, or "
+            f"-- if a finding is a genuine false positive -- add a targeted "
+            f"`# type: ignore[<code>]`. Do NOT add the error to "
+            f"{baseline_path} to silence it.",
+            flush=True,
+        )
+        return 2
+
+    total = sum(current.values())
+    print(
+        f"OK: mypy reports {total} error(s), all within the baseline "
+        f"({sum(baseline.values())} allowed). No new type errors.",
+        flush=True,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

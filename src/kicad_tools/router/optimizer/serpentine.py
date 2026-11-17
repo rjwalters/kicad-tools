@@ -1,0 +1,774 @@
+"""
+Serpentine generation for length tuning.
+
+This module provides:
+- SerpentineConfig: Configuration for serpentine patterns
+- SerpentineGenerator: Generates serpentine patterns to increase trace length
+- add_serpentine: Add serpentine to a route to reach target length
+- tune_match_group: Adjust routes in a match group to equal lengths
+
+Serpentines (also called meanders) are used to increase trace length
+for timing-critical signals like DDR data buses and differential pairs.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import TYPE_CHECKING, Literal
+
+from ..primitives import Route, Segment
+from ..quantize import dogleg_points, snap_direction_8
+from .geometry import segment_length
+
+if TYPE_CHECKING:
+    from ..grid import RoutingGrid
+
+
+class SerpentineStyle(Enum):
+    """Style of serpentine pattern."""
+
+    RECTANGULAR = "rectangular"  # 90-degree corners
+    TROMBONE = "trombone"  # U-shaped loops
+    SAWTOOTH = "sawtooth"  # Angled zigzag
+
+
+@dataclass
+class SerpentineConfig:
+    """Configuration for serpentine pattern generation.
+
+    Attributes:
+        style: Pattern style (rectangular, trombone, sawtooth)
+        amplitude: Height of each serpentine wave in mm
+        min_spacing: Minimum spacing between parallel traces in mm
+        min_segment_length: Minimum segment length for serpentine insertion in mm
+        gap_factor: Multiplier for spacing (gap = min_spacing * gap_factor)
+        max_iterations: Maximum loops to add per segment
+        side: Side selector for trombone bulge orientation.
+            ``"auto"`` (default) alternates direction loop-by-loop, matching
+            the legacy DDR/bus tuner behavior.  ``"outer"`` constrains every
+            loop to a single side, the one pointed to by ``outer_normal_hint``
+            (a unit vector roughly perpendicular to the segment).  This is
+            required for differential-pair length tuning (Epic #2556 Phase 3I,
+            Issue #2648) where bulging the shorter half toward the partner
+            would violate intra-pair clearance.  ``"inner"`` is the
+            symmetric opposite -- provided for completeness but rarely used.
+        outer_normal_hint: Unit vector (rx, ry) supplied when ``side`` is
+            ``"outer"`` or ``"inner"``.  The trombone projects the segment's
+            geometric perpendicular onto this vector and picks the matching
+            half-plane; loops do NOT alternate.  When ``side`` is ``"auto"``
+            this field is ignored.
+    """
+
+    style: SerpentineStyle = SerpentineStyle.TROMBONE
+    amplitude: float = 1.0  # mm
+    min_spacing: float = 0.2  # mm (clearance)
+    min_segment_length: float = 2.0  # mm
+    gap_factor: float = 2.0
+    max_iterations: int = 20
+    # Issue #2648 (Epic #2556 Phase 3I): diff-pair-aware side selector.
+    side: Literal["auto", "outer", "inner"] = "auto"
+    outer_normal_hint: tuple[float, float] | None = None
+    # Issue #7546: 45-degree chamfer at each of a loop's four corners, as a
+    # multiple of the trace width (clamped to half the amplitude, where the
+    # leg becomes one straight 45-degree run).  ``0`` (default) is the
+    # original square U loop.  kct and pinned kicad-cli 10.0.6 read the same
+    # uncoupled length for plain bumps of any chamfer (Issue #7565 closed the
+    # square-loop divergence).  From half a trace width up a chamfered bump
+    # reads *less* uncoupled than a square one in both engines on thin
+    # traces; below that it reads more.  The skew tuner's plain-copper
+    # bumps use ``SKEW_BUMP_CHAMFER_WIDTHS`` (0.55).
+    corner_chamfer_widths: float = 0.0
+    # Issue #7546: the chamfer of the two *foot* corners, where a leg leaves
+    # and rejoins the host line, in **mm** (not trace widths).  ``None``
+    # (default) uses ``corner_chamfer_widths``, so all four corners match.
+    # With a separate value ``corner_chamfer_widths`` is the *crown* chamfer,
+    # where a leg meets the flat top.  Only the crown chamfer lets the flat
+    # top couple to the partner (pinned kicad-cli 10.0.6: it must be at least
+    # half a trace width, so it scales with the width); a foot chamfer only
+    # shortens the partner's coupled run by its own length, so the skew
+    # tuner's asymmetric bumps keep it small but never zero
+    # (``SKEW_BUMP_FOOT_CHAMFER_MM``, 0.02 mm: operator ruling Q32 wants
+    # every corner chamfered).  When crown plus foot exceed the amplitude
+    # both shrink in proportion and the leg is one 45-degree run, which has
+    # no square corner either.
+    foot_chamfer_length_mm: float | None = None
+
+    def _chamfers(self, width: float) -> tuple[float, float]:
+        """``(crown, foot)`` chamfers in mm on a ``width`` trace, unclamped."""
+        crown = max(0.0, self.corner_chamfer_widths) * width
+        foot = (
+            crown if self.foot_chamfer_length_mm is None else max(0.0, self.foot_chamfer_length_mm)
+        )
+        return crown, foot
+
+    @property
+    def chamfered(self) -> bool:
+        """Whether any corner of a loop is chamfered (Issue #7546)."""
+        crown, foot = self._chamfers(1.0)
+        return crown > 0.0 or foot > 0.0
+
+    def _clamped(self, width: float, amplitude: float | None) -> tuple[float, float]:
+        a = self.amplitude if amplitude is None else amplitude
+        crown, foot = self._chamfers(width)
+        total = crown + foot
+        if total <= 0.0:
+            return 0.0, 0.0
+        scale = min(1.0, a / total)
+        return crown * scale, foot * scale
+
+    def chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
+        """The crown (leg-to-top) chamfer (mm) of a loop of ``amplitude`` on a
+        ``width`` trace; with ``foot_chamfer_length_mm`` unset, every corner's."""
+        return self._clamped(width, amplitude)[0]
+
+    def foot_chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
+        """The foot (host-to-leg) chamfer (mm) of a loop (Issue #7546)."""
+        return self._clamped(width, amplitude)[1]
+
+    def leg_advance_mm(self, width: float, amplitude: float | None = None) -> float:
+        """How far one leg advances along the host: its two chamfers (mm)."""
+        crown, foot = self._clamped(width, amplitude)
+        return crown + foot
+
+    def loop_length_added(self, width: float, amplitude: float | None = None) -> float:
+        """Copper one loop adds over the host length it occupies (mm)."""
+        a = self.amplitude if amplitude is None else amplitude
+        s = self.leg_advance_mm(width, a)
+        if s <= 0.0:
+            return 2 * a
+        # Two legs, each chamfer + rise + chamfer, minus the 2s they advance.
+        return 2.0 * (s * math.sqrt(2.0) + (a - s)) - 2.0 * s
+
+    def loop_forward(self, width: float, amplitude: float | None = None) -> float:
+        """Host length one loop occupies, flat top and connector included (mm)."""
+        gap = self.min_spacing * self.gap_factor
+        return gap * 2 + 2.0 * self.leg_advance_mm(width, amplitude)
+
+    def amplitude_for(self, width: float, added: float) -> float:
+        """The amplitude whose loop adds ``added`` mm (inverse of loop_length_added)."""
+        crown, foot = self._chamfers(width)
+        s = crown + foot
+        if s <= 0.0:
+            return added / 2.0
+        k = 4.0 - 2.0 * math.sqrt(2.0)  # 2A - k*s for A >= s
+        a = (added + k * s) / 2.0
+        if a >= s:
+            return a
+        # Below s the leg is a single 45-degree run: adds 2A(sqrt(2) - 1).
+        return added / (2.0 * (math.sqrt(2.0) - 1.0))
+
+
+@dataclass
+class SerpentineResult:
+    """Result of serpentine generation.
+
+    Attributes:
+        success: Whether serpentine was successfully added
+        new_segments: New segments with serpentine pattern
+        length_added: Additional length added in mm
+        num_loops: Number of serpentine loops added
+        message: Status message
+    """
+
+    success: bool
+    new_segments: list[Segment] = field(default_factory=list)
+    length_added: float = 0.0
+    num_loops: int = 0
+    message: str = ""
+
+
+class SerpentineGenerator:
+    """Generates serpentine patterns for length tuning.
+
+    This class finds suitable segments in a route and inserts serpentine
+    patterns to increase the total trace length to meet constraints.
+    """
+
+    def __init__(self, config: SerpentineConfig | None = None):
+        """Initialize serpentine generator.
+
+        Args:
+            config: Configuration for serpentine generation
+        """
+        self.config = config or SerpentineConfig()
+
+    def find_best_segment(
+        self,
+        route: Route,
+        *,
+        grid: RoutingGrid | None = None,
+        reserved_net_id: int | None = None,
+        fixed_segment_ids: set[int] | None = None,
+    ) -> tuple[int, Segment] | None:
+        """Find the best segment in a route for serpentine insertion.
+
+        Prefers:
+        - Longest straight segments (more room for serpentine)
+        - Horizontal or vertical segments (easier pattern generation)
+        - Segments not near route endpoints (avoid pad connections)
+        - (Issue #4085) segments whose midpoint falls in a grid cell
+          reserved for ``reserved_net_id`` -- i.e. already-protected
+          slack space the corridor-widening step carved out for this net.
+
+        Args:
+            route: Route to analyze
+            grid: Issue #4085 (Phase 1).  Optional routing grid.  When
+                supplied together with ``reserved_net_id``, a candidate
+                segment whose midpoint cell is reserved for that net (via
+                :meth:`RoutingGrid.is_reserved_for`) receives a score
+                bonus, biasing the tuner to meander inside the slack
+                corridor the escape pass reserved for the pair.  When
+                ``None`` (default) segment selection is byte-identical to
+                the pre-#4085 purely-geometric heuristic -- every existing
+                caller (``tune_match_group``, ``apply_length_tuning``,
+                ...) is unaffected.
+            fixed_segment_ids: Segments that contribute length but cannot host a meander.
+            reserved_net_id: Issue #4085.  The net id whose reservation
+                marks the slack corridor.  Ignored when ``grid`` is
+                ``None``.
+
+        Returns:
+            Tuple of (index, segment) or None if no suitable segment found
+        """
+        if not route.segments:
+            return None
+
+        best_idx = -1
+        best_score = 0.0
+        best_segment: Segment | None = None
+
+        for i, seg in enumerate(route.segments):
+            if fixed_segment_ids and id(seg) in fixed_segment_ids:
+                continue
+            length = segment_length(seg)
+
+            # Skip segments that are too short
+            if length < self.config.min_segment_length:
+                continue
+
+            # Score based on length
+            score = length
+
+            # Prefer segments not at the start or end (near pads)
+            if i > 0 and i < len(route.segments) - 1:
+                score *= 1.2
+
+            # Prefer horizontal or vertical segments
+            dx = abs(seg.x2 - seg.x1)
+            dy = abs(seg.y2 - seg.y1)
+            if length > 0:
+                # Check if nearly horizontal or vertical
+                if dx / length > 0.95 or dy / length > 0.95:
+                    score *= 1.5
+
+            # Issue #4085: prefer segments sitting inside the net's own
+            # reserved slack corridor.  The bonus is multiplicative and
+            # applied AFTER the geometric factors so it acts as a
+            # tie-breaker-plus among otherwise-comparable segments rather
+            # than overriding a much longer, unreserved candidate outright.
+            # Inline the ``is not None`` narrowing at the call site so mypy
+            # can prove ``grid``/``reserved_net_id`` are non-optional when
+            # passed to ``_segment_in_reservation`` (see PR #4092 review).
+            if (
+                grid is not None
+                and reserved_net_id is not None
+                and self._segment_in_reservation(seg, grid, reserved_net_id)
+            ):
+                score *= 2.0
+
+            if score > best_score:
+                best_score = score
+                best_idx = i
+                best_segment = seg
+
+        if best_idx >= 0 and best_segment:
+            return (best_idx, best_segment)
+        return None
+
+    @staticmethod
+    def _segment_in_reservation(
+        seg: Segment,
+        grid: RoutingGrid,
+        net_id: int,
+    ) -> bool:
+        """Return True if ``seg``'s midpoint cell is reserved for ``net_id``.
+
+        Issue #4085 (Phase 1).  Maps the segment midpoint to a grid cell
+        and consults :meth:`RoutingGrid.is_reserved_for` on the segment's
+        own layer.  Defensive: any failure to resolve the layer or map the
+        coordinate returns ``False`` (the segment is simply treated as
+        un-reserved, falling back to the geometric heuristic).
+        """
+        mx = (seg.x1 + seg.x2) / 2.0
+        my = (seg.y1 + seg.y2) / 2.0
+        try:
+            gx, gy = grid.world_to_grid(mx, my)
+            layer_idx = grid.layer_to_index(seg.layer.value)
+        except Exception:
+            return False
+        return grid.is_reserved_for(layer_idx, gx, gy, net_id)
+
+    def generate_trombone(
+        self,
+        segment: Segment,
+        target_length_add: float,
+    ) -> SerpentineResult:
+        """Generate a trombone (U-shaped) serpentine pattern.
+
+        The trombone style creates U-shaped detours perpendicular to
+        the main trace direction.
+
+        Args:
+            segment: Original segment to replace
+            target_length_add: Additional length needed in mm
+
+        Returns:
+            SerpentineResult with new segments
+        """
+        if target_length_add <= 0:
+            return SerpentineResult(
+                success=True,
+                new_segments=[segment],
+                message="No length addition needed",
+            )
+
+        # Get segment direction and perpendicular
+        dx = segment.x2 - segment.x1
+        dy = segment.y2 - segment.y1
+        length = math.sqrt(dx * dx + dy * dy)
+
+        if length < self.config.min_segment_length:
+            return SerpentineResult(
+                success=False,
+                new_segments=[segment],
+                message=f"Segment too short ({length:.2f}mm < {self.config.min_segment_length:.2f}mm)",
+            )
+
+        # Unit vectors.  Issue #3535: the meander emitter must produce
+        # ONLY 45-aligned copper (the {0, 45, 90, 135} angle set), the
+        # same manufacturability convention enforced fleet-wide by the
+        # #3532 quantizer.  A* hands the length tuner host segments that
+        # are frequently NOT axis-aligned (rip-up/re-route staircases
+        # collapse to diagonal-but-not-exactly-45 runs).  Travelling
+        # along the host's RAW direction makes every emitted leg inherit
+        # that off-angle slope, so we snap the along-segment direction to
+        # the nearest legal routing direction and build the trombone in
+        # that snapped frame.  The perpendicular of a snapped direction
+        # is itself a legal direction (rotating a member of the 8-set by
+        # 90 degrees stays in the 8-set), so every internally-emitted leg
+        # is 45-aligned by construction.  The endpoints stay pinned, so
+        # connectivity is bit-for-bit preserved; only the closing exit
+        # leg may need a dogleg (see below).
+        ux, uy = snap_direction_8(dx, dy)  # Along segment (snapped to 8-dir)
+        px, py = -uy, ux  # Perpendicular (90 degrees CCW) -- also a legal dir
+
+        # Issue #2648: when the caller asks for a single-sided trombone
+        # (``side="outer"`` or ``"inner"``), pick the half-plane defined
+        # by ``outer_normal_hint`` and disable per-loop alternation.
+        # ``initial_direction`` becomes +1 if the perpendicular (px, py)
+        # aligns with the hint, -1 otherwise; ``alternate_direction``
+        # gates the per-loop sign flip.
+        side = self.config.side
+        hint = self.config.outer_normal_hint
+        if side in ("outer", "inner") and hint is not None:
+            hx, hy = hint
+            # Normalize the hint (tolerate non-unit input).
+            hint_mag = math.sqrt(hx * hx + hy * hy)
+            if hint_mag > 0.0:
+                hx /= hint_mag
+                hy /= hint_mag
+            dot = px * hx + py * hy
+            # "outer" -> bulge toward the hint; "inner" -> bulge away.
+            if side == "outer":
+                initial_direction = 1 if dot >= 0.0 else -1
+            else:  # "inner"
+                initial_direction = -1 if dot >= 0.0 else 1
+            alternate_direction = False
+        else:
+            initial_direction = 1
+            alternate_direction = True
+
+        # Calculate number of loops needed
+        amplitude = self.config.amplitude
+        gap = self.config.min_spacing * self.config.gap_factor
+
+        # Each trombone loop adds approximately: 2 * amplitude + gap
+        # Actually: forward travel + up + back + down = gap + amplitude + gap + amplitude
+        # Net forward: gap
+        # Added length per loop: 2 * amplitude + gap - gap = 2 * amplitude
+        # But we also need the connecting segments, so:
+        # per_loop_length = 2 * amplitude (the vertical parts)
+        # Issue #7546: corner chamfers shorten what a loop adds.
+        length_per_loop = self.config.loop_length_added(segment.width, amplitude)
+        loop_forward = self.config.loop_forward(segment.width, amplitude)
+        chamfer = self.config.chamfer_mm(segment.width, amplitude)
+        foot = self.config.foot_chamfer_mm(segment.width, amplitude)
+        num_loops = int(math.ceil(target_length_add / length_per_loop))
+        num_loops = min(num_loops, self.config.max_iterations)
+
+        if num_loops <= 0:
+            return SerpentineResult(
+                success=True,
+                new_segments=[segment],
+                message="No loops needed",
+            )
+
+        # Check if we have enough segment length for the loops
+        total_forward = num_loops * loop_forward + gap  # Entry + loops + exit
+        if total_forward > length * 0.9:  # Leave 10% margin
+            # Reduce loops to fit
+            num_loops = int((length * 0.9 - gap) / loop_forward)
+            if num_loops <= 0:
+                return SerpentineResult(
+                    success=False,
+                    new_segments=[segment],
+                    message=f"Segment too short for serpentine ({length:.2f}mm)",
+                )
+
+        # Generate serpentine segments
+        new_segments: list[Segment] = []
+        current_x = segment.x1
+        current_y = segment.y1
+
+        # Entry: move forward a bit
+        entry_len = gap
+        next_x = current_x + ux * entry_len
+        next_y = current_y + uy * entry_len
+        new_segments.append(
+            Segment(
+                x1=current_x,
+                y1=current_y,
+                x2=next_x,
+                y2=next_y,
+                width=segment.width,
+                layer=segment.layer,
+                net=segment.net,
+                net_name=segment.net_name,
+            )
+        )
+        current_x, current_y = next_x, next_y
+
+        # Alternate direction for each loop (gated by config -- Issue #2648).
+        direction = initial_direction  # Start sign (chosen per config.side)
+
+        def emit_leg(sense: int) -> None:
+            """A chamfered leg (Issue #7546): 45-degree chamfer, rise, chamfer.
+
+            ``sense`` +1 climbs away from the host line (foot chamfer first),
+            -1 returns to it (crown chamfer first).  Every piece advances
+            along the host only in its chamfers.
+            """
+            nonlocal current_x, current_y
+            rise = amplitude - foot - chamfer
+            if rise <= 1e-12:  # the chamfers span the amplitude: one 45 run
+                steps = [(foot + chamfer, foot + chamfer)]
+            elif sense > 0:
+                steps = [(foot, foot), (0.0, rise), (chamfer, chamfer)]
+            else:
+                steps = [(chamfer, chamfer), (0.0, rise), (foot, foot)]
+            for along, up in steps:
+                if along <= 0.0 and up <= 1e-12:
+                    continue
+                nx = current_x + ux * along + px * up * direction * sense
+                ny = current_y + uy * along + py * up * direction * sense
+                new_segments.append(
+                    Segment(
+                        x1=current_x,
+                        y1=current_y,
+                        x2=nx,
+                        y2=ny,
+                        width=segment.width,
+                        layer=segment.layer,
+                        net=segment.net,
+                        net_name=segment.net_name,
+                    )
+                )
+                current_x, current_y = nx, ny
+
+        for loop in range(num_loops):
+            # 1. Go perpendicular (up or down)
+            if chamfer + foot > 0.0:
+                emit_leg(+1)
+            else:
+                next_x = current_x + px * amplitude * direction
+                next_y = current_y + py * amplitude * direction
+                new_segments.append(
+                    Segment(
+                        x1=current_x,
+                        y1=current_y,
+                        x2=next_x,
+                        y2=next_y,
+                        width=segment.width,
+                        layer=segment.layer,
+                        net=segment.net,
+                        net_name=segment.net_name,
+                    )
+                )
+                current_x, current_y = next_x, next_y
+
+            # 2. Go forward (along original direction)
+            next_x = current_x + ux * gap
+            next_y = current_y + uy * gap
+            new_segments.append(
+                Segment(
+                    x1=current_x,
+                    y1=current_y,
+                    x2=next_x,
+                    y2=next_y,
+                    width=segment.width,
+                    layer=segment.layer,
+                    net=segment.net,
+                    net_name=segment.net_name,
+                )
+            )
+            current_x, current_y = next_x, next_y
+
+            # 3. Go perpendicular back (down or up)
+            if chamfer + foot > 0.0:
+                emit_leg(-1)
+            else:
+                next_x = current_x - px * amplitude * direction
+                next_y = current_y - py * amplitude * direction
+                new_segments.append(
+                    Segment(
+                        x1=current_x,
+                        y1=current_y,
+                        x2=next_x,
+                        y2=next_y,
+                        width=segment.width,
+                        layer=segment.layer,
+                        net=segment.net,
+                        net_name=segment.net_name,
+                    )
+                )
+                current_x, current_y = next_x, next_y
+
+            # 4. Go forward again (short connection to next loop)
+            if loop < num_loops - 1:
+                next_x = current_x + ux * gap
+                next_y = current_y + uy * gap
+                new_segments.append(
+                    Segment(
+                        x1=current_x,
+                        y1=current_y,
+                        x2=next_x,
+                        y2=next_y,
+                        width=segment.width,
+                        layer=segment.layer,
+                        net=segment.net,
+                        net_name=segment.net_name,
+                    )
+                )
+                current_x, current_y = next_x, next_y
+
+            # Alternate direction (gated -- Issue #2648 single-side mode
+            # keeps the same direction for every loop so the bulges all
+            # land on the same side of the original segment).
+            if alternate_direction:
+                direction *= -1
+
+        # Exit: connect back to the original segment end.  Because the
+        # loops advanced along the SNAPPED direction (not the host's raw
+        # slope), the straight chord from the last loop endpoint to the
+        # pinned end point may itself be off-angle.  Route it through the
+        # 45-quantizer (Issue #3535): an already-aligned chord stays a
+        # single segment; an off-angle chord becomes a two-leg dogleg
+        # (one exact 45-degree leg + one axis leg).  Endpoints unchanged.
+        exit_pts = dogleg_points(current_x, current_y, segment.x2, segment.y2)
+        for (sx, sy), (ex, ey) in zip(exit_pts[:-1], exit_pts[1:], strict=True):
+            if sx == ex and sy == ey:
+                continue  # skip a degenerate zero-length leg
+            new_segments.append(
+                Segment(
+                    x1=sx,
+                    y1=sy,
+                    x2=ex,
+                    y2=ey,
+                    width=segment.width,
+                    layer=segment.layer,
+                    net=segment.net,
+                    net_name=segment.net_name,
+                )
+            )
+
+        # Calculate actual length added
+        original_length = segment_length(segment)
+        new_length = sum(segment_length(s) for s in new_segments)
+        length_added = new_length - original_length
+
+        return SerpentineResult(
+            success=True,
+            new_segments=new_segments,
+            length_added=length_added,
+            num_loops=num_loops,
+            message=f"Added {num_loops} loops, {length_added:.3f}mm",
+        )
+
+    def add_serpentine(
+        self,
+        route: Route,
+        target_length: float,
+        grid: RoutingGrid | None = None,
+    ) -> tuple[Route, SerpentineResult]:
+        """Add serpentine to a route to reach target length.
+
+        Args:
+            route: Route to modify
+            target_length: Target total length in mm
+            grid: Optional routing grid for collision checking
+
+        Returns:
+            Tuple of (modified route, result)
+        """
+        from ..length import LengthTracker
+
+        current_length = LengthTracker.calculate_route_length(route)
+        length_needed = target_length - current_length
+
+        if length_needed <= 0:
+            return route, SerpentineResult(
+                success=True,
+                new_segments=route.segments.copy(),
+                message="Route already meets target length",
+            )
+
+        # Find best segment for serpentine
+        best = self.find_best_segment(route)
+        if not best:
+            return route, SerpentineResult(
+                success=False,
+                new_segments=route.segments.copy(),
+                message="No suitable segment found for serpentine",
+            )
+
+        seg_idx, segment = best
+
+        # Generate serpentine based on style
+        if self.config.style == SerpentineStyle.TROMBONE:
+            result = self.generate_trombone(segment, length_needed)
+        else:
+            # Default to trombone for now
+            result = self.generate_trombone(segment, length_needed)
+
+        if not result.success:
+            return route, result
+
+        # TODO: Add collision checking with grid if provided
+
+        # Build new route with serpentine
+        new_segments = (
+            route.segments[:seg_idx] + result.new_segments + route.segments[seg_idx + 1 :]
+        )
+
+        new_route = Route(
+            net=route.net,
+            net_name=route.net_name,
+            segments=new_segments,
+            vias=route.vias.copy(),
+        )
+
+        return new_route, result
+
+
+def add_serpentine(
+    route: Route,
+    target_length: float,
+    grid: RoutingGrid | None = None,
+    config: SerpentineConfig | None = None,
+) -> tuple[Route, SerpentineResult]:
+    """Add serpentine tuning to increase route length.
+
+    This is a convenience function that creates a SerpentineGenerator
+    and adds serpentine to reach the target length.
+
+    Args:
+        route: Route to modify
+        target_length: Target total length in mm
+        grid: Optional routing grid for collision checking
+        config: Optional serpentine configuration
+
+    Returns:
+        Tuple of (modified route, result)
+
+    Example:
+        >>> from kicad_tools.router.optimizer.serpentine import add_serpentine
+        >>> new_route, result = add_serpentine(route, target_length=50.0)
+        >>> if result.success:
+        ...     print(f"Added {result.length_added:.3f}mm with {result.num_loops} loops")
+    """
+    generator = SerpentineGenerator(config)
+    return generator.add_serpentine(route, target_length, grid)
+
+
+def tune_match_group(
+    routes: dict[int, Route],
+    group_net_ids: list[int],
+    tolerance: float = 0.5,
+    grid: RoutingGrid | None = None,
+    config: SerpentineConfig | None = None,
+) -> dict[int, tuple[Route, SerpentineResult]]:
+    """Adjust routes in a match group to equal lengths.
+
+    For match groups, we can only add length (not remove it), so the
+    target is the longest route. Shorter routes get serpentines added.
+
+    Args:
+        routes: Dictionary mapping net ID to Route
+        group_net_ids: List of net IDs in the match group
+        tolerance: Length match tolerance in mm
+        grid: Optional routing grid for collision checking
+        config: Optional serpentine configuration
+
+    Returns:
+        Dictionary mapping net ID to (modified route, result)
+
+    Example:
+        >>> results = tune_match_group(
+        ...     routes={100: route1, 101: route2, 102: route3},
+        ...     group_net_ids=[100, 101, 102],
+        ...     tolerance=0.5,
+        ... )
+        >>> for net_id, (new_route, result) in results.items():
+        ...     if result.success:
+        ...         print(f"Net {net_id}: {result.message}")
+    """
+    from ..length import LengthTracker
+
+    generator = SerpentineGenerator(config)
+    results: dict[int, tuple[Route, SerpentineResult]] = {}
+
+    # Get routes for the match group
+    group_routes = {net_id: routes[net_id] for net_id in group_net_ids if net_id in routes}
+
+    if len(group_routes) < 2:
+        return results
+
+    # Find target length (longest route, can't shorten)
+    lengths = {
+        net_id: LengthTracker.calculate_route_length(route)
+        for net_id, route in group_routes.items()
+    }
+    target_length = max(lengths.values())
+
+    # Extend shorter routes
+    for net_id, route in group_routes.items():
+        current_length = lengths[net_id]
+
+        if current_length >= target_length - tolerance:
+            # Already within tolerance
+            results[net_id] = (
+                route,
+                SerpentineResult(
+                    success=True,
+                    new_segments=route.segments.copy(),
+                    message="Already within tolerance",
+                ),
+            )
+        else:
+            # Need to add serpentine
+            new_route, result = generator.add_serpentine(route, target_length, grid)
+            results[net_id] = (new_route, result)
+
+    return results

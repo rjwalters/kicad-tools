@@ -1,0 +1,53 @@
+name: Site Drift
+
+# Issue #7664: weekly check that the live kicad-tools.org still matches this
+# repository.
+#
+# The site is published BY HAND (site/README.md "Publish and verify public
+# bytes"); CI auto-deploy was removed in #3688/#3689 to keep Cloudflare
+# credentials out of GitHub. The cost of that choice is that nothing notices
+# when nobody publishes: the site served v0.20.0 for 5.5 weeks and 3,634
+# commits, and #5318 was the same failure for Board05 copper. The #5318 checks
+# (scripts/lib/site-verify.sh) only run during a deploy, not between deploys.
+#
+# This job only READS public URLs, so it needs no Cloudflare secret and adds
+# none. It is WARN-ONLY by design, like ecosystem-drift.yml and
+# nightly-ship-ready.yml: a stale site must never block unrelated PRs, so the
+# job always exits 0, is NOT a required check, and does not run on
+# pull_request. Findings appear as ::warning:: annotations and a job summary.
+
+on:
+  schedule:
+    # 07:30 UTC Mondays, after ecosystem-drift (07:00).
+    - cron: "30 7 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Live site vs repo (warn-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `git describe` needs the release tags.
+          fetch-depth: 0
+
+      - name: Compare live site to repo
+        continue-on-error: true
+        run: |
+          python3 scripts/ci/site_drift.py > site-drift.md || true
+          cat site-drift.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always succeed (warn-only gate)
+        if: always()
+        run: |
+          echo "Site drift is warn-only: publishing is a manual step."
+          echo "See site/README.md 'Publish and verify public bytes'."

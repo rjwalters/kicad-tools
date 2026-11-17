@@ -1,0 +1,3333 @@
+# Work Log
+
+Chronological record of merged PRs and closed issues. Maintained by the Guide triage agent.
+
+---
+## Archives
+
+- [2026-09](work_log/WORK_LOG_2026-09.md)
+- [2026-08](work_log/WORK_LOG_2026-08.md)
+- [2026-07](work_log/WORK_LOG_2026-07.md)
+- [2026-06](work_log/WORK_LOG_2026-06.md)
+- [2026-05](work_log/WORK_LOG_2026-05.md)
+- [2026-04](work_log/WORK_LOG_2026-04.md)
+- [2026-02](work_log/WORK_LOG_2026-02.md)
+- [2026-01](work_log/WORK_LOG_2026-01.md)
+
+### 2026-11-16
+
+- **PR #9027**: build(deps): bump the uv-minor-patch group across 1 directory with 6 updates
+- **PR #9028**: build(deps): bump astral-sh/setup-uv from 10.3.2 to 10.3.3 in the github-actions group across 1 directory
+- **PR #9008**: chore(loom): resync installed Loom to v0.19.1302
+- **PR #9044**: fix: triageable mask_to_copper findings; incomplete runs cap severity at warning
+- **Issue #9038** (closed): mask_to_copper reports about 200 times JLCDFM's count on a consumer board, with messages that cannot be triaged
+- **PR #9046**: docs: correct board 07 finding count in 8974 changelog fragment to merged-tree delta
+- **Issue #9041** (closed): changelog.d/8974.fixed.md quotes the pre-merge 28 finding count; merged-tree delta is 23 to 0
+- **Issue #9017** (closed): Router: resolve pad_spacing detection edge and plumb it into kct route (#9011 plumbing)
+- **PR #9040**: fix: reject Gerber aperture macros named with reserved template names C/R/O/P
+- **Issue #8997** (closed): Gerber reader: a macro named C/R/O/P silently shadows the standard aperture template
+- **PR #9014**: feat: add --report-detour-ratio probe with alone-on-empty detour report
+- **Issue #9003** (closed): Router: detour-ratio report and targeted post-settle detour repair pass
+- **PR #8995**: feat: thread the same-net pad slit band into route-side via placement (#8974)
+- **Issue #8974** (closed): Route-side same-net pad slit band: thread the merged guard into the oracle weld and escape vias (#8962 producer 2)
+- **PR #9036**: fix: omit empty-reason placeholder for complete mask-to-copper stanza
+- **Issue #8991** (closed): kct check prints a spurious 'no reason reported' line under a complete mask-to-copper assessment
+- **PR #9026**: build(deps-dev): bump @types/node from 26.6.5 to 26.6.6 in /site in the npm-minor-patch group across 1 directory
+- **PR #9021**: fix(stitch): use pad-gap detection edge to match kct check on 2oz stackups
+- **Issue #9016** (closed): Stitcher passes error_edge_mm to the same-net pad-gap predicate whose contract now says detection_edge_mm
+- **PR #9024**: test: pin first-pass far-end tie clearance on cornered SMD legs
+- **PR #9022**: fix(readiness): bind the waivers sidecar into evidence inputs
+- **Issue #9006** (closed): readiness evidence does not record waiver-cleared errors, nor hash the waivers sidecar
+- **Issue #8996** (closed): Cornered SMD-ended legs: assert the far-end tie clears the far pad (and note the first-pass fix in changelog.d/8970)
+- **PR #9012**: refactor: generalise the same-net slit-band predicate to pad-vs-trace segments
+- **PR #9010**: fix: admit kct's conditional managed .kicad_dru constraints to native mask attribution
+- **PR #9004**: docs: add WeaveEngine topology-first evaluation note and registry entry
+- **PR #8989**: fix: keep recipe pour-repair via annuli out of the same-net pad slit band
+- **PR #8986**: fix: adopt SMD end-tie vias at the tie arc on record-less parallel re-runs
+- **PR #8980**: fix(validate): expand KiCad 10's %AMRoundRect aperture macro in the Gerber reader
+- **PR #8978**: fix: discover a pcbnew-capable interpreter for the native mask worker
+- **PR #8955**: fix(dru): restore authored zone clearances the fab-floor rule replaced at refill
+- **Issue #8993** (closed): Evaluate c28ba/WeaveEngine (topology-first autorouter) for router ideas
+- **Issue #8976** (closed): Same-net pad-vs-trace copper slits on boards 06/07: attribute the population, then fix or document
+- **Issue #8975** (closed): Recipe repair-pass same-net pad slits: explain the skew-tuner/pour-refill coupling before a band fix
+- **Issue #8973** (closed): mask_to_copper still rejects kct's conditional managed .kicad_dru blocks
+- **Issue #8970** (closed): Record-less parallel re-run still accretes the two end-tie vias on an SMD-ended leg
+- **Issue #8959** (closed): Gerber reader rejects KiCad 10's %AMRoundRect aperture macro
+- **Issue #8946** (closed): mask_to_copper native helper runs under a python3 with no pcbnew
+- **Issue #8937** (closed): Managed .kicad_dru fab-floor clearance rule overrides larger zone and net-class clearances
+- **PR #8977**: fix: kct check verdict reads INCOMPLETE when a blocking category cannot run, with collapsed reasons and a remediation line
+- **PR #8967**: feat: size parallel-copy tie rows from declared current and judge width-swap vias
+- **Issue #8950** (closed): pcb reinforce parallel: tie-via arrays at SMD ends, and path_ampacity judging a width-swap via between doubled stretches
+- **Issue #8949** (closed): kct check prints Overall: PASSED above BLOCKING UNKNOWN and exits 2: an incomplete blocking category must report INCOMPLETE, with collapsed reasons and a remediation line
+
+### 2026-11-15
+
+- **PR #8966**: fix: reject zero-size Gerber apertures on use, repair self-touching region contours
+- **PR #8987**: fix: attribute fab-band physical_copper_gap findings to their parity rows
+- **PR #8985**: fix: name the frame of 'kct pcb prune --region' and echo it in both frames
+- **PR #8968**: fix: admit physical_hole_clearance, text_thickness and text_height to the native rule-context allowlist
+- **Issue #8972** (closed): Fab DFM parity: trace-band physical_copper_gap findings are attributed to pad_spacing
+- **Issue #8969** (closed): kct pcb prune: report is sheet-absolute but --region input is board-relative, and its help does not say so
+- **Issue #8947** (closed): Gerber reader rejects KiCad 10's own output: zero-size region aperture and self-touching zone-fill contours abort whole layers
+- **PR #8963**: fix: keep stitch via annuli out of the same-net pad slit band
+- **PR #8965**: feat: print kct-vs-fab counts in the Fab DFM parity stanza
+- **PR #8961**: fix(pcb): quote prune's report coordinates at their sheet position
+- **PR #8964**: fix: adopt unowned stitches on record-less parallel re-runs; credit pre-existing copies in reinforcement_incomplete
+- **PR #8960**: fix: resolve project fp-lib-table footprints in removed-pad scan and report gaps as coverage
+- **PR #8956**: fix: severity-grade fab-view copper gaps from the DFM threshold table
+- **Issue #8940** (closed): Fab DFM parity stanza: print kct error/warning counts beside recorded fab danger/warning counts
+- **Issue #8951** (closed): pcb reinforce parallel: record-less re-run accretes stitching vias; fully pre-existing copy not credited by reinforcement_incomplete
+- **Issue #8954** (closed): pcb prune report quotes board-relative coordinates on a non-zero-origin board
+- **Issue #8942** (closed): readiness: "Removed-pad scan skipped" when a footprint lives in a project-local library (fp-lib-table)
+- **Issue #8938** (closed): Fab DFM parity: JLCDFM danger-level findings are kct warnings (58 fab danger items, 0 kct errors, Overall PASSED)
+
+### 2026-11-14
+
+- **PR #8953**: fix(current-paths): quote loop witnesses at their sheet position (#8928)
+- **PR #8952**: docs: record pad mask-bridge outer-layer scope in physical-copper-gap guide
+- **PR #8945**: feat(pcb): reinforce --strategy wire|parallel|auto (parallel copper for short links)
+- **PR #8944**: fix(check): correct silkscreen line-width parity row; pin line-width coverage (#8844)
+- **PR #8941**: feat(check): pair anchor vias against exposed via annuli in tht_smd_spacing
+- **PR #8934**: test: pin same-net in-opening conductor as a mask_to_copper error
+- **Issue #8932** (closed): Pin the same-net track-in-mask-opening case mask_to_copper is asked about most
+- **Issue #8931** (closed): Document the pad mask-bridge outer-layer scope in the physical-copper-gap user guide
+- **Issue #8928** (closed): reinforcement_incomplete [skipped] message quotes witness coordinates board-relative on a non-zero-origin board
+- **Issue #8925** (closed): tht_smd_spacing does not pair a plated hole against an exposed via annulus (JLCDFM counts one)
+- **Issue #8916** (closed): pcb reinforce: parallel-copper strategy for short high-current links (--strategy wire|parallel|auto)
+- **Issue #8844** (closed): Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width
+- **PR #8854**: feat: two-tier silk-to-pad bands and silk_hole_overlap rule
+- **PR #8927**: fix: repair acute two-segment trace fold-backs in router cleanup
+- **Issue #8919** (closed): Router emits two-segment acute fold-backs that sharp_trace_corner now gates
+- **PR #8926**: fix(check): judge anchor-sized vias in tht_smd_spacing; report mask_to_copper incomplete coverage
+- **Issue #8914** (closed): mask_to_copper and tht_smd_spacing report fewer findings than JLCDFM on the same board
+- **PR #8929**: fix: report coverage.mask_to_copper unknown for an incomplete assessment
+- **Issue #8924** (closed): coverage.mask_to_copper reports "checked" for an assessment whose coverage is incomplete
+- **PR #8923**: feat: default 15 mm minimum buttress-wire length in pcb reinforce ends mode
+- **Issue #8915** (closed): pcb reinforce: default minimum buttress-wire length of 15 mm (--min-wire-length)
+- **PR #8920**: fix: emit reinforcement [no_wire]/[skipped] locations board-relative
+- **Issue #8912** (closed): reinforcement_incomplete [no_wire] location has the board origin added twice
+- **PR #8922**: feat: report each resolved current path's minimum copper width
+- **Issue #8917** (closed): current-paths-audit: report each resolved path's minimum copper width
+- **PR #8921**: fix: restrict pad mask-bridge check to outer copper layers
+- **Issue #8913** (closed): physical_copper_gap reports pad mask bridges on inner layers, with the outer-layer mask expansion
+
+### 2026-11-13
+
+- **PR #8911**: build(deps): Bump astro from 7.4.2 to 7.4.7 in /site
+- **PR #8910**: build(deps): Bump opentelemetry-api from 1.45.1 to 1.45.2
+- **PR #8906**: fix: skip mask_to_copper and allow incomplete in board 03 route_demo DRC
+- **Issue #8741** (closed): pcb reinforce: anchors are spaced mid-run, no wire-end anchors, no solder-mask opening; nothing checks that a reinforced run is buildable
+- **PR #8898**: feat(bom): add --check-distributor-stock flag
+- **Issue #8893** (closed): bom: flag lines with no DigiKey/Mouser stock at build quantity (follow-up to #8892)
+- **PR #8908**: fix(cli): declare and forward kct bom stock/validation flags
+- **Issue #8907** (closed): kct bom: --check-availability, --validate, --quantity and --no-cache are not reachable through the unified CLI
+- **PR #8905**: perf(check): index the mask-to-copper pairwise scan; time-box board-03 check tests
+- **Issue #8901** (closed): Test (extended) red on main: 60 s timeouts in three check-path test files, board 02 length baseline drift
+- **PR #8904**: fix(check): refresh fab DFM parity rows for shipped rules; guard the drift
+- **Issue #8902** (closed): Fab DFM parity table is stale: rows say "no rule" for rules that have shipped
+- **PR #8899**: docs: roadmap as of 2026-11-13
+- **PR #8894**: feat(parts): add 'kct parts stock' for Mouser and DigiKey lookups
+- **Issue #8892** (closed): parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs
+- **PR #8890**: test: guard rule message coordinates against board-relative origin
+- **PR #8889**: perf(validate): batch same-polarity Gerber shapes into one unary_union
+- **PR #8887**: fix: locate reinforcement wire from mask strip and anchors on doubled-copper nets
+- **PR #8885**: feat(check): gate length-weighted per-layer off-axis copper
+- **PR #8883**: fix: avoid graphic mask openings in place-silk-refs
+- **PR #8882**: test: cover rotated/back-side footprint and unfilled-ring mask openings
+- **PR #8881**: fix: quote sheet-absolute coordinates in silk_over_mask_opening messages
+- **PR #8880**: fix: apply JLCPCB DFM table floors in get_design_rules so check, apply-rules and DRU agree
+- **PR #8877**: test: pin reinforcement_incomplete behaviour for tapped wire runs and doubled copper
+- **PR #8876**: chore(loom): resync installed Loom to v0.19.1294
+- **PR #8874**: fix(jlcpcb): use fab-published 0.15/0.16 mm 2oz clearance floors
+- **PR #8852**: feat: default-on net-agnostic fab-view spacing and THT-to-SMD rule under jlcpcb
+- **PR #8849**: feat(check): run mask_to_copper by default under --mfr jlcpcb
+- **Issue #8888** (closed): perf(check): mask_to_copper adds ~2.5x to kct check --mfr jlcpcb (Gerber union in gerber_geometry.emit)
+- **Issue #8886** (closed): Reinforcement checks skip every real wire run on a doubled-copper net; resolve the wire from its mask strip and anchors
+- **Issue #8884** (closed): kct check/readiness: no gate for off-axis (non-45°) trace share — a board with 66% of bottom-layer length off-grid went READY
+- **Issue #8879** (closed): silk_over_mask_opening quotes the mask opening position in board-relative coordinates
+- **Issue #8878** (closed): test: cover fp_* mask apertures (mirrored footprints, unfilled circle ring) in silk_over_mask_opening
+- **Issue #8866** (closed): wire_run_courtyard_overlap fires on stitched doubled copper and reinforcement_incomplete skips real wire runs
+- **Issue #8865** (closed): JLCPCB 2 oz outer clearance floor is 0.1524 mm; the fab publishes 0.15 mm, so 0.150 mm gaps fail
+- **Issue #8862** (closed): place-silk-refs: treat graphic mask openings as obstacles; board-text candidates (split from #8861)
+- **Issue #8857** (closed): DFM threshold table: single source of truth with design_rules, outer/inner spacing split, DRU parity (follow-up to PR #8850)
+- **Issue #8843** (closed): Net-agnostic fab-view spacing pass and THT-to-SMD spacing rule
+- **Issue #8842** (closed): Default-on mask_to_copper under --mfr, plus negative-expansion and multi-segment mask rules
+
+### 2026-11-12
+
+- **PR #8875**: fix(validate): use sheet-absolute coords in footprint_outside_board and zone_fill messages
+- **PR #8873**: fix(check): locate wire_run_courtyard_overlap findings on the run
+- **PR #8872**: fix(check): name per-layer key migration on unused path_ampacity waivers
+- **PR #8870**: fix(check): use sheet-absolute coordinates in redundant_copper_staircase message
+- **PR #8869**: fix(validate): model silk circles and arcs in silk checks
+- **PR #8864**: feat(check): flag silkscreen inside graphic solder-mask openings
+- **PR #8860**: feat(submit-jlcpcb): load JLCPCB_* from project .env and plumb contact block
+- **PR #8855**: feat: add JLCDFM fab parity section; uncovered danger categories make kct check incomplete
+- **PR #8853**: feat(check): add mask negative-expansion and multi-segment warnings
+- **PR #8851**: feat: record attested JLCDFM counts via tapeout-sign-off --stage fab-dfm
+- **PR #8850**: feat: add versioned per-stackup JLCPCB DFM threshold table with fail-closed lookup
+- **PR #8846**: fix(check): apply JLCPCB 2oz clearance floor from declared stackup copper
+- **Issue #8871** (closed): Rule messages for footprint_outside_board and zone_fill quote board-relative coordinates
+- **Issue #8868** (closed): redundant_copper_staircase reports board-relative coordinates; other rules use sheet coordinates
+- **Issue #8867** (closed): path_ampacity per-layer keys silently orphan existing waivers; add a stale_waiver_cause
+- **Issue #8863** (closed): Model silk circle/arc geometry in silk checks (split from #8861)
+- **Issue #8861** (closed): silk_over_copper ignores graphic solder-mask openings: silk printed on bare strips passes every gate, and no fix path
+- **Issue #8859** (closed): JLCPCB automations: read operator contact/checkout details from .env, and load .env without a wrapper
+- **Issue #8847** (closed): Soldermask rules: negative expansion and multi-segment openings
+- **Issue #8845** (closed): kct check fab-DFM parity section, incomplete verdict, and parity fixture suite
+- **Issue #8841** (closed): kct submit-jlcpcb: record fab DFM category counts in the readiness receipt
+- **Issue #8839** (closed): DFM threshold table per manufacturer, copper weight and layer class (fail closed)
+- **Issue #8836** (closed): jlcpcb rule floors ignore copper weight: 2 oz board passes with clearances below the fab's 2 oz minimum
+- **PR #8835**: Bump Repo Skills 0.25.10 -> 0.26.1
+- **PR #8833**: feat: flag short-jog staircases and let compress_staircase absorb trailing legs
+- **Issue #8831** (closed): Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free
+- **PR #8829**: feat: reinforce refuses runs under same-side courtyards
+- **Issue #8821** (closed): pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820)
+- **PR #8827**: feat: report ampacity copper weights and name copper-flag stale cause
+- **Issue #8826** (closed): kct check --copper applies the outer weight to inner layers; waivers go stale between check and readiness
+- **PR #8824**: chore(board-06): regenerate committed routed board from recipe and re-pin evidence
+- **Issue #8801** (closed): Board 06: fresh assembled-demo/build.py no longer reproduces the committed routed copper (one via moves)
+- **PR #8822**: feat: flag wire runs and end holes that collide with component courtyards
+- **PR #8819**: feat: require a fab-view sign-off before the JLCPCB cart can be saved
+- **Issue #8820** (closed): Wire-reinforced runs are not checked against same-side component courtyards
+- **Issue #8818** (closed): tapeout-sign-off is recorded before the fab gerber-viewer review it should attest to
+
+### 2026-11-11
+
+- **PR #8816**: feat(boards): add fiducials and board ID to board 02
+- **Issue #8759** (closed): Add fiducials and board ID to committed boards 00, 02, 03, 05, 06, 07
+- **PR #8814**: fix(optimize): count netclass_clearance_copper in the --drc-aware referee
+- **PR #8812**: feat(readiness): add --quantity and --inventory-covered to the bom stock gate
+- **PR #8811**: fix(readiness): refuse --output not named manufacturing before running gates
+- **PR #8810**: fix: recognise project-library fiducials by name, FID reference or tag
+- **PR #8809**: feat(router): name blocking branch pair when a same-layer ring stays ambiguous
+- **PR #8808**: fix(check): honour recorded --max-end-shift in reinforcement_incomplete end window
+- **PR #8802**: feat(boards): add fiducials and board ID to boards 00 and 06
+- **Issue #8813** (closed): optimize-traces --drc-aware keeps an edit that kct check then rejects at the class floor (0.150 mm < 0.150 mm)
+- **Issue #8807** (closed): kct readiness: no way to declare parts held in the fab's parts inventory; bom stock gate is fixed at 5 boards
+- **Issue #8806** (closed): kct readiness: --output accepts any directory, but READY is only reachable when the bundle directory is named 'manufacturing'
+- **Issue #8805** (closed): fiducials_missing: only stock 'Fiducial:*' footprints count, so a project-library fiducial reads as 0 (and readiness would add three more)
+- **Issue #8804** (closed): path_ampacity: name the blocking branch pair when a same-layer ring keeps a path ambiguous
+- **Issue #8803** (closed): reinforcement_incomplete: plumb a custom --max-end-shift into kct check
+- **PR #8800**: fix(reinforce): slide refused end anchors inward; align reinforcement_incomplete
+- **PR #8799**: fix: resolve stitched doubled copper as chained parallel groups
+- **Issue #8798** (closed): current paths: doubled copper with interior stitching vias (and a two-branch ring) is still ambiguous after #8791
+- **Issue #8797** (closed): pcb reinforce (ends mode): a refused end anchor is not slid inward, so legs end up partial; reinforcement_incomplete double-reports slid anchors and ignores mask-graphic openings
+- **PR #8795**: chore(loom): resync installed Loom to v0.19.1287
+- **PR #8792**: feat(check): add reinforcement_incomplete rule for buttress-wire legs
+- **PR #8788**: feat: add --clear/--replace to kct pcb reinforce
+- **Issue #8747** (closed): pcb reinforce: --clear / --replace to remove or migrate spaced-mode anchors (#8741 slice 5)
+- **Issue #8746** (closed): check: reinforcement_incomplete rule (two end anchors, continuous mask opening, stray anchors) (#8741 slice 4b)
+- **PR #8791**: fix: resolve doubled current-path copper as a parallel group
+- **PR #8785**: fix: report wire span and inward anchor shift for ends-mode legs
+- **PR #8783**: feat: open solder mask along reinforce wire legs with tenting-off anchors
+- **PR #8775**: fix(readiness): name the original board dir in the no-spec BOM note
+- **Issue #8790** (closed): current paths: deliberately doubled copper (same run on both outer layers) is reported as an ambiguous-path error
+- **Issue #8781** (closed): pcb reinforce ends mode: unbounded clearance march can leave both end anchors at one end of a leg, still reported full
+- **Issue #8764** (closed): readiness bom: 'no .kct spec found above <dir>' names the deleted staged candidate, not the board
+- **Issue #8743** (closed): pcb reinforce: solder-mask opening along each wire run and mask-open anchors, creepage-checked (#8741 slice 2)
+
+### 2026-11-10
+
+- **PR #8789**: test: pin --output containment path resolution and document rule in help
+- **PR #8787**: feat: write buttress-wire list sidecar from pcb reinforce
+- **PR #8786**: fix: raise ReinforceError for zero-length-only nets in ends mode
+- **PR #8784**: test: route session kicad-cli through pinned image under KCT_KICAD_DOCKER=1
+- **PR #8782**: fix: keep end anchors clear of same-net SMD pads not at the leg end
+- **PR #8778**: fix: exclude symlinked library files escaping the project from project zip
+- **PR #8777**: fix: skip prune stubs already contained in a same-net segment
+- **PR #8776**: fix(route): re-derive kept net-0 route floors after a class-map merge
+- **PR #8774**: fix(export): narrow project ZIP inventory to the board's own project files
+- **PR #8773**: docs: repo hygiene fixes and unreferenced file removals (2026-11-10)
+- **PR #8771**: fix: stop trace optimizer straightening tracks through keepout rule areas
+- **PR #8767**: feat(readiness): add --merge-lcsc-from to --generate
+- **PR #8765**: feat(boards): add fiducials and board ID to board 01, drop rule carve-out
+- **PR #8761**: fix(route): hold new copper to the wider class of preserved copper on skipped nets
+- **PR #8758**: fix: match board revision as whole token in board_id silk check
+- **PR #8757**: feat(path_ampacity): flag layer changes through undersized vias
+- **PR #8756**: feat: hint re-export when readiness bundle zip lacks project-local libraries
+- **PR #8755**: fix(router): use inverse pad rotation in current-path pad containment
+- **PR #8754**: fix(readiness): refuse --output outside the board directory before any gate
+- **PR #8751**: feat(reinforce): two end anchors per single-layer wire leg by default
+- **PR #8739**: fix: make prune clear redundant_copper_covered findings
+- **PR #8728**: fix(readiness): honour declared BOM exemptions and scope project-zip inventory to the board
+- **Issue #8780** (closed): pcb reinforce ends mode: net with only zero-length copper raises bare ValueError instead of a reinforce error
+- **Issue #8779** (closed): tests: KCT_KICAD_DOCKER=1 does not route test kicad-cli calls through the pinned image
+- **Issue #8772** (closed): pcb reinforce ends mode: end anchor can be drilled through a same-net SMD pad mid-leg
+- **Issue #8769** (closed): route: placement-disposition kept copper (net-0 routes) does not pick up a later --net-class-map floor
+- **Issue #8768** (closed): kct pcb prune adds a via/pad stub that redundant_copper_covered then flags (board 04, 0 -> 1)
+- **Issue #8766** (closed): readiness: pin --output containment against symlink/relative paths in tests; state the rule in --help
+- **Issue #8763** (closed): export/readiness: project-zip library sweep follows symlinks out of the project directory
+- **Issue #8762** (closed): readiness --generate has no LCSC merge source
+- **Issue #8760** (closed): route: new signal track crosses a tracks-not-allowed keep-out rule area
+- **Issue #8753** (closed): board_id_missing: short revisions match any silk text containing the letter
+- **Issue #8752** (closed): export: scope project-zip .kicad_pro/.kicad_sch inventory to PCB stem + hierarchy
+- **Issue #8750** (closed): current-paths: _physical_pad_covers tests non-axis-aligned pads mirrored
+- **Issue #8749** (closed): readiness --verify: say 're-export' when an older bundle's zip lacks project-local libraries
+- **Issue #8748** (closed): readiness: --output outside the board directory fails with a raw relative_to path error
+- **Issue #8745** (closed): path_ampacity / current-paths-audit: flag a high-current path that changes layer through an undersized via (#8741 slice 4a)
+- **Issue #8744** (closed): pcb reinforce: wire-list sidecar (net, layer, end anchors, length, gauge) (#8741 slice 3)
+- **Issue #8742** (closed): pcb reinforce: end-anchor mode (2 anchors per single-layer leg), made the default (#8741 slice 1)
+- **Issue #8734** (closed): redundant_copper_covered fires on a sub-0.03 mm same-layer loop that kct pcb prune reports nothing to remove for
+- **Issue #8727** (closed): kct readiness --verify blocks a clean tapeout bundle: declared BOM exemption not honoured
+- **Issue #8598** (closed): Add fiducials and board ID to committed boards (01, 04, …) on the pinned KiCad toolchain
+- **Issue #8577** (closed): route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class
+- **PR #8738**: test: allow redundant_copper_covered in board 03 DRC baseline
+- **Issue #8736** (closed): test_board03_routing_baseline: committed board 03 PCB newly reports redundant_copper_covered
+- **PR #8737**: fix(optimizer): keep staircase shortcuts off the net's own copper
+- **PR #8735**: fix: widen pin-1 marker search to courtyard and report effective radius
+- **Issue #8731** (closed): pin1_marker_missing still fires on stock HLK-PMxx footprint after #8688
+- **PR #8733**: fix: iterate kct pcb prune to a fixed point and reword covered-copper message
+- **Issue #8730** (closed): redundant_copper_covered says 'removable with kct pcb prune' but prune leaves T-joint cases; splitting the longer segment exposes spurs
+- **PR #8729**: feat(route): refuse chained pass copper that adds native-only DRC errors
+- **Issue #8717** (closed): Chained --complete DRC comparison: include native kicad-cli findings in the per-board record
+- **PR #8597**: feat(check): flag missing fiducials and board ID; add them in readiness generate
+- **Issue #8532** (closed): check rules fiducials_missing/board_id_missing and default tapeout/readiness step
+- **PR #8725**: fix: honour gr_text rotation in silk over-copper/overlap/edge checks
+- **Issue #8724** (closed): kct check silk_over_copper / silk_overlap: a board-level gr_text rotated 90 degrees is measured as if upright
+- **PR #8721**: fix(optimize-traces): roll back nets that raise any kicad-cli rule count
+- **Issue #8720** (closed): optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0
+- **PR #8630**: fix: model JLC option groups as chips and explain CDP attach with no open tab
+- **PR #8722**: test(prune): assert convergence on sub-0.1 mm in-pad segments
+- **Issue #8719** (closed): kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments)
+- **PR #8718**: fix(route): key chained-pass connectivity errors by net, not message
+- **Issue #8702** (closed): Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings
+- **PR #8715**: feat(sync): report and remove copper left on pads removed by a footprint swap
+- **Issue #8705** (closed): sync: report (and optionally remove) copper stranded by a pad-net change
+- **PR #8713**: feat: report and optionally remove copper stranded by pad-net changes in kct sync
+- **PR #8711**: chore(board-07): prune reviewed copper and re-derive authored escapes
+- **PR #8710**: fix: forward --length-match-groups to the chained completion pass
+- **PR #8709**: test: remove stale strict xfail on lattice hole-clearance test
+- **PR #8708**: feat: add circuit-review skill for schematic-vs-datasheet review
+- **PR #8707**: feat(sync): detect and fix pad-net mismatches on shared components
+- **PR #8701**: fix: write route edge clearance to .kicad_dru as a track/via-scoped rule
+- **PR #8700**: fix: forward copper-rule flags to the chained completion pass
+- **PR #8699**: fix: refuse chained completion copper that adds any blocking DRC error
+- **PR #8698**: fix: read KiCad 10 zone nets in detect_layer_stack
+- **PR #8697**: fix: drop stale path_ampacity audit record before post-route DRC early exits
+- **PR #8691**: chore(loom): resync installed Loom to v0.19.1283
+- **PR #8690**: fix: gate prune plans on the current-path audit
+- **PR #8689**: fix: widen pin-1 marker search radius to the package body edge
+- **PR #8686**: fix(router): grow lattice NPTH pad keep-out to hole clearance
+- **PR #8685**: test(router): kicad-cli hole_clearance check for an NPTH between pads
+- **Issue #8712** (closed): Follow-on from PR #8707: kct sync stranded copper and footprint-swap placement (#8703 items 3, 4)
+- **Issue #8706** (closed): main CI red: stale strict xfail on test_lattice_engine_has_no_hole_clearance_violation (XPASS after #8686)
+- **Issue #8704** (closed): Feature: a circuit-review skill/check — schematic against datasheet, before layout
+- **Issue #8703** (closed): sync: no pad-net reconciliation — rewired pins on unchanged parts are not reported or applied
+- **Issue #8695** (closed): route: chained completion pass accepts inner exit 8 without consulting its DRC beyond path_ampacity
+- **Issue #8694** (closed): route: review copper-affecting options the chained completion pass does not forward (NOT_FORWARDED_UNREVIEWED)
+- **Issue #8693** (closed): route: chained completion pass re-detects the stack under --layers auto; detect_layer_stack misses KiCad 10 zone nets
+- **Issue #8692** (closed): route: path_ampacity audit record for a board can go stale when a later post-route DRC is skipped or fails
+- **Issue #8688** (closed): pin1_marker_missing: false positive when the library marker sits at the body edge more than 2.5 mm from pad 1 (HLK-PMxx)
+- **Issue #8687** (closed): pcb prune: snap stubs close loops on current-path nets; current-paths-audit drops from resolved to ambiguous
+- **Issue #8684** (closed): bug(router): lattice engine routes tracks inside NPTH hole clearance (2 hole_clearance in kicad-cli DRC)
+- **Issue #8681** (closed): Live kicad-cli verification of NPTH hole clearance after #8677
+- **Issue #8674** (closed): route: chained --complete pass ignores --layers, --voltage-map, --edge-clearance and --current-paths
+- **Issue #8602** (closed): Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399)
+
+- **PR #8679**: fix: forward layer, HV, edge and current-path constraints to the chained completion pass
+- **PR #8682**: fix: take readiness baseline warning counts from the baseline report
+- **Issue #8673** (closed): readiness --baseline: previous_counts misreports old->new when findings were also resolved
+- **PR #8678**: fix: derive --complete links from kept-copper islands
+- **PR #8677**: fix: block NPTH holes on every copper layer in the grid router
+- **PR #8667**: feat(readiness): diff warnings against a previous revision with --baseline
+- **PR #8661**: feat(zones): add 'zones relieve' fixer and gate thermal_asymmetry at tapeout
+- **Issue #8676** (closed): route --complete: requests every link of an open net, including pads already joined by kept copper
+- **Issue #8675** (closed): route: non-plated holes (np_thru_hole pads) are not obstacles; tracks are routed across them (kicad-cli hole_clearance)
+- **Issue #8664** (closed): Sign-off never compares warnings against the previous revision: wire kct check --diff into readiness and tapeout
+- **Issue #8659** (closed): thermal_asymmetry: forced solid pad overrides are never revisited, have no fixer, and are not gated at tapeout
+- **PR #8668**: feat(check): report segments covered by a longer collinear segment
+- **PR #8662**: fix: key kept copper on name-only boards by its real net
+- **Issue #8665** (closed): check: report segment wholly covered by collinear same-net segment as redundant copper
+- **Issue #8658** (closed): route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts
+- **PR #8670**: fix(audit): keep netted MountingHoles footprints and treat NC nets as equivalent
+- **PR #8666**: fix: cut false-positive noise in detect-mistakes checks
+- **PR #8660**: fix(router): make _dilate_blocked independent of scipy
+- **Issue #8669** (closed): audit sync: a header footprint with 'MountingHoles' in its name is dropped as a mounting hole and reported schematic-only; no-connect pins reported as net mismatches
+- **Issue #8663** (closed): detect-mistakes: 208 of 209 warnings on a clean board are noise (bypass cross-product, duplicates, 90° reported as acute, supply net as crystal trace)
+- **Issue #8657** (closed): route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge
+- **PR #8655**: chore(release): v0.29.0
+- **PR #8654**: test: cover project_rules call sites in kct check and readiness report
+- **PR #8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
+- **Issue #8652** (closed): test: cover kct check stderr warning and readiness 'warnings' wiring for project_rules (follow-up to #8648)
+- **PR #8651**: fix: route-link honours project netclass clearances
+- **PR #8647**: fix: share setup/search deadline budget and bound blocked-mask dilation
+- **PR #8646**: fix: raise back-off floor above HV mask setup time so backed-off nets reach A*
+- **Issue #8650** (closed): route-link ignores project netclass clearances (only --clearance / --net-clearance / voltage-map floors); per-link DRC gate doesn't catch it
+- **Issue #8645** (closed): route: HV mask setup runs on a 1x deadline before the 3x escape hint, and compute_expanded_blocked ignores the deadline
+- **Issue #8644** (closed): route: HV mask setup may consume the #8486 5 s back-off floor, so backed-off HV nets never reach the A* search
+- **Issue #8414** (closed): Post-negotiation sweep overruns its announced 60 s bound until the global timeout
+
+### 2026-11-09
+
+- **PR #8648**: feat: warn on missing or stock-default DRC project rules
+- **PR #8642**: fix: report undetermined stack_source when board lacks stackup
+- **Issue #8643** (closed): Warn when a board is checked without its paired .kicad_pro/.kicad_dru (kicad-cli silently uses default rules)
+- **Issue #8639** (closed): optimize-traces: drop dead _infer_board_stack and restore 'undetermined' stack_source
+- **PR #8636**: feat: run dedupe, prune and optimize-traces in tapeout cleanup with trace-quality gate
+- **Issue #8633** (closed): tapeout/readiness: make trace optimization a standard step (dedupe → prune → optimize-traces) and gate redundant_copper_* instead of reporting it as advisory
+- **PR #8631**: fix: place-silk-refs avoids NPTH holes and prefers own-courtyard association
+- **Issue #8628** (closed): place-silk-refs: kicad-cli still finds silk issues at default clearance, and labels end up nearer another part than their own
+- **PR #8635**: fix: roll back optimize-traces nets that open connectivity or regress creepage
+- **Issue #8632** (closed): optimize-traces --drc-aware: reports 0 DRC errors but disconnects a mains net and introduces a creepage violation (caught by kicad-cli and kct creepage)
+- **PR #8625**: chore(deps): bump astro from 7.4.1 to 7.4.2 in /site
+- **PR #8624**: chore(deps): bump the uv-minor-patch group across 1 directory with 3 updates
+- **PR #8611**: fix(router): force NumPy grid arrays for pure-Python A*; platform-mark cupy
+- **Issue #8609** (closed): Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS
+
+### 2026-11-08
+
+- **PR #8618**: fix(router): charge HV mask setup to the Python fallback's budget; O(N) exact dilation
+- **PR #8617**: fix(waivers): warn on unmatched --waive keys and keep approval on same-digest rebind
+- **PR #8616**: perf(router): coarse copper key and sub-cap back-off for known-failing nets
+- **PR #8615**: fix(export): skip waived, oversize and designer-DRU ampacity floors
+- **Issue #8614** (closed): waivers: --waive aborts the whole batch on one unmatched key; orphan waivers unreported
+- **Issue #8612** (closed): export still appends ampacity track_width floors to the designer .kicad_dru (per-net after #8528)
+- **PR #8608**: chore(release): v0.28.1
+- **Issue #8396** (closed): route --complete commits cross-footprint copper that fails pairwise HV creepage (+16 pairs, down to 0.40 mm vs 1.6 mm) that the negotiated pass respects
+
+### 2026-11-07
+
+- **PR #8606**: chore(loom): resync installed Loom to v0.19.1275
+- **PR #8605**: test: verify --complete creepage rollback on a synthetic mains fixture
+- **PR #8601**: fix(router): bound pad-escape and sub-grid retries in the post-negotiation sweep
+- **PR #8600**: chore(release): v0.28.0
+- **Issue #8422** (closed): Live-verify --complete creepage rollback on a real mains board (follow-up to #8396)
+- **PR #8595**: chore(loom): resync installed Loom to v0.19.1273
+- **PR #8594**: fix(readiness): accept non-output bundle layout and --verify receipt in tapeout sign-off
+- **PR #8593**: fix(stitch): ignore foreign inner-layer fill as via/stub obstacle
+- **PR #8590**: fix: harden repair-creepage vanished-target, island reason, partial-repair output
+- **PR #8589**: fix(creepage): search chains of floating net-0 islands
+- **PR #8588**: fix(stitch): reject via sites and stubs inside keep-out rule areas
+- **PR #8586**: chore(loom): resync installed Loom to v0.19.1272
+- **PR #8584**: fix: relax route-link map floors in attach zones and re-check collapsed routes
+- **PR #8583**: fix(pcb): flip pads, graphics and text for back-side footprint placement
+- **PR #8582**: fix: hash readiness manifest input without the tapeout sign-off key
+- **PR #8578**: test: guard withdrawn pour welds leave no copper on name-only boards
+- **PR #8575**: feat: accept a voltage map and census waivers in kct readiness HV gate
+- **PR #8574**: fix: name missing manufacturing.zip in readiness artifacts blocker
+- **PR #8572**: fix: converge BOM Footprint and CPL Package on qualified lib:name form
+- **PR #8568**: fix: reject placement deltas that add pad/courtyard overlaps
+- **PR #8567**: fix(router): explain impedance-driven net widths in log and rationale
+- **PR #8565**: fix: write stitch/weld copper in the board's net dialect
+- **PR #8558**: feat: add repair-creepage to translate wide HV copper out of creepage shortfalls
+- **PR #8557**: fix: keep pad nets name-only on KiCad 10 boards during sync
+- **PR #8556**: feat(route-link): HV-aware floors from a voltage map, per-link --net-clearance
+- **PR #8554**: fix: model net-0 copper as floating conductors in creepage census
+- **PR #8541**: feat: add kct tapeout-sign-off and split submit-jlcpcb preflight errors
+- **PR #8536**: feat(cli): add kct pcb add-board-info silkscreen stamp
+- **PR #8535**: feat(pcb): add kct pcb add-fiducials to place global fiducials
+- **PR #8528**: fix: scope ampacity DRU rules to declaring nets and honour stackup copper
+- **Issue #8592** (closed): readiness → tapeout-sign-off handoff: hard-coded output/manufacturing path, --verify receipt location rejected, relative --readiness path not resolved
+- **Issue #8591** (closed): stitch: foreign inner-plane zone fill counted as a via-site obstacle (pads skipped on solid-plane stacks)
+- **Issue #8587** (closed): stitch: places vias and escape traces inside keep-out rule areas (items_not_allowed)
+- **Issue #8581** (closed): fix(pcb): add_footprint_from_file leaves pads/graphics on F.* when placing on B.Cu
+- **Issue #8580** (closed): readiness: tapeout sign-off rewrites manifest.json, so a signed board reads as unverified
+- **Issue #8579** (closed): creepage: floating-island chains and IEC X-rule not modelled (follow-up to #8548)
+- **Issue #8571** (closed): readiness --verify rejects a /kct:tapeout bundle: expects an undocumented manufacturing.zip outer archive and a top-level preflight[]
+- **Issue #8570** (closed): readiness hv_isolation can't take a voltage map: non-isolated mains boards false-fail
+- **Issue #8569** (closed): export/jlcpcb: BOM Footprint and CPL Package use different library-prefix forms (writer-side consistency)
+- **Issue #8566** (closed): route: placement-delta feedback keeps a U5 translate that shorts its pads to three neighbours
+- **Issue #8564** (closed): route: clock nets routed wider than their net-class width, with no logged reason
+- **Issue #8550** (closed): pcb sync-netlist writes legacy (net <code> "name") pads on KiCad 10 boards, so KiCad sees no net
+- **Issue #8548** (closed): creepage census silently ignores net-0 copper (fiducials, islands); floating conductors near HV never assessed
+- **Issue #8546** (closed): route-link: no --voltage-map/creepage flags; --net-clearance is run-global, not per link
+- **Issue #8545** (closed): No creepage-aware repair: census finds a wide-trace HV shortfall but repair-clearance only reads DRC reports
+- **Issue #8537** (closed): submit-jlcpcb preflight requires tapeout.human_signoff/board_sha256 + files{sha256,size}, but no kct producer writes them
+- **Issue #8533** (closed): kct pcb add-board-info: stamp project/rev/date silkscreen
+- **Issue #8531** (closed): kct pcb add-fiducials: place global fiducials on the board
+- **Issue #8527** (closed): export: ampacity DRU rules promote a per-net target_ampacity to a class-wide track_width floor
+
+### 2026-11-06
+
+- **PR #8562**: fix: shift board-level silk into board-relative frame in silk DRC and ref placement
+- **PR #8560**: fix: skip non-gating pour_slot warnings in match_warning_allowance
+- **PR #8555**: fix: exempt board_only footprints from sync-netlist orphan removal
+- **PR #8553**: feat: add --refs to place-silk-refs and --nets/--region to pcb prune
+- **PR #8552**: fix: exempt exclude_from_bom/board_only footprints from bom_pcb_match orphan warning
+- **PR #8544**: fix(export): use bare footprint in JLCPCB BOM and CPL, normalise in submit preflight
+- **PR #8543**: fix: fall back to anonymous LCSC stock and ungate --guided in submit-jlcpcb
+- **PR #8542**: fix: resolve fp_circle courtyards and exempt hidden fiducial refs
+- **PR #8534**: feat: add rpi-hat footprint generator and inventory J-ref connectors
+- **PR #8526**: fix: refill zones in route-link DRC gate and name offending items on rollback
+- **PR #8524**: fix: route-link emits name-only net refs and collapses staircases
+- **PR #8522**: fix: refetch stale-unverified parts stock and add availability --no-cache
+- **PR #8521**: fix: bump evidence hash version to ev3 for sheet-absolute locations
+- **PR #8520**: fix: warn when placement/DRC extension is not built and make --check hint accurate
+- **PR #8516**: chore(tooling): update Squad 0.19.24→0.19.34
+- **PR #8515**: chore(tooling): update Repo Skills 0.25.4→0.25.10
+- **PR #8514**: chore(repo-hygiene): index two unlisted docs, drop orphaned #8149 study driver
+- **PR #8513**: test: add non-zero-origin regression tests for sheet-absolute coordinates
+- **PR #8512**: chore(loom): resync installed Loom to v0.19.1270
+- **Issue #8561** (closed): Silk DRC rules miss board-level gr_text on origin-offset boards (frame mismatch)
+- **Issue #8559** (closed): board 05 readiness refresh refuses: 66 pour_slot warnings on main (also boards 04/07 dry-run replays)
+- **Issue #8551** (closed): pcb sync-netlist --remove-orphans deletes board_only footprints (fiducials, holes)
+- **Issue #8549** (closed): export preflight bom_pcb_match warns on exclude_from_bom / board_only footprints (fiducials)
+- **Issue #8547** (closed): place-silk-refs has no --refs scope (would move 8 unflagged refs to fix 1); pcb prune has no --nets/--region (board-wide only)
+- **Issue #8540** (closed): check: fp_circle courtyards unresolved (fiducial overlap silently unchecked); silk_ref_obscured fires on hidden fiducial refs
+- **Issue #8539** (closed): submit-jlcpcb stock gate: no credentials → every line 'stock unknown (transport-error)' with no explanation; no LCSC fallback; --guided/website unreachable when blocked
+- **Issue #8538** (closed): export/submit-jlcpcb: BOM Footprint is lib-qualified but CPL Package is bare; submit preflight compares literally and refuses 134/136 rows without naming one
+- **Issue #8529** (closed): Rigid Raspberry Pi HAT part: 2x20 header + four mounting holes as one generated footprint
+- **Issue #8525** (closed): route-link per-link DRC gate runs without --refill-zones: every new via on a board with inner planes is rolled back (4 phantom clearance/hole_clearance)
+- **Issue #8523** (closed): route-link writes bare numeric (net N) refs on name-only boards (2nd producer behind #8492) and un-merged 0.05 mm staircases; optimize-traces can't clean them
+- **Issue #8519** (closed): build-native --check: placement/DRC hint says 'build with: kct build-native', which only builds the router
+- **Issue #8518** (closed): parts availability: 7-day cache vs 24 h stock-verification window leaves entries permanently unverified (no --no-cache); summary miscounts low_stock
+- **Issue #8517** (closed): check: #8493 frame change altered evidence hashes without a version bump — every waiver on an origin-offset board reports evidence_changed
+- **Issue #8511** (closed): Add non-zero-origin regression tests for #8493's netclass and reinforce coordinate fix
+- **PR #8508**: fix(optimizer): drop segments a same-net route already carries
+- **Issue #8505** (closed): Optimizer chain split at interior via (#8387) emits duplicate stub segments
+- **PR #8484**: feat(submit-jlcpcb): add optional [submit] extra for the playwright driver
+- **Issue #8481** (closed): submit-jlcpcb: ship Playwright as a kicad-tools[submit] optional extra (follow-up to #8465)
+- **PR #8487**: docs(submit-jlcpcb): record the attended-driver ruling in the website guides
+- **PR #8482**: feat(submit-jlcpcb): one-driver browser lock and dry-run website refusal
+- **Issue #8465** (closed): Agent-prepared JLCPCB PCBA order up to a saved cart (/kct:submit-jlcpcb): compose the #5056 pieces and drive the website hand-off
+- **Issue #8468** (closed): feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465)
+- **PR #8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
+- **PR #8507**: fix(prune): don't queue a via/pad stub the net already has
+- **PR #8506**: test: re-pin board 02 routed length to 316.39 after #8387
+- **PR #8504**: fix(check): pour_slot reports each distinct track pair once
+- **PR #8500**: perf(router): skip re-rescuing and back off searching nets known to fail (#8486)
+- **PR #8499**: fix(optimize): leave unresolvable numeric net refs untouched on name-only boards
+- **PR #8498**: fix(reinforce): apply .kicad_dru conditional clearance rules to anchor vias
+- **PR #8497**: fix(check): report coordinates in the sheet-absolute frame
+- **PR #8496**: fix(router): drop link segments that round to zero length
+- **PR #8490**: perf(router): bound repeat Python fallbacks that failed without a proof (#8485)
+- **PR #8489**: fix(router): skip collinear fuse when the fused segment would be off-angle
+- **PR #8483**: fix(route): bound placement-delta trials by live stage budget and abandon worse trials
+- **Issue #8503** (closed): Board 03 committed-PCB DRC guard fails on new pour_slot advisory; pour_slot double-reports findings (Test (extended) red)
+- **Issue #8502** (closed): Board 02 baseline length 316.57 -> 316.39 after #8387 via-anchor chain split (Test (extended) red)
+- **Issue #8501** (closed): prune never reaches a fixed point after #8446: tilt-refused stub re-added every pass (board 05 CI red)
+- **Issue #8495** (closed): Regression of #8417 after #8418: route --complete still commits a zero-length track crossing a foreign-net track
+- **Issue #8494** (closed): pcb reinforce anchor vias ignore conditional .kicad_dru NetClass clearance rules; 2 of 15 anchors fail kicad-cli DRC
+- **Issue #8493** (closed): kct check netclass_clearance_copper (and via_in_pad message, reinforce refusals) report coordinates relative to the board origin, not absolute
+- **Issue #8492** (closed): optimize-traces rewrites GND / +3.3V copper under nonexistent net names ("Net7"/"Net8"); 798 of 861 kct check errors are phantom shorts
+- **Issue #8488** (closed): router: an emitter still produces off-angle segments (1 µm endpoint mismatch, 0.0143°) left to the legacy quantize repair after #3907
+- **Issue #8485** (closed): route perf: pure-Python A* fallback costs ~30% of a 6 h route and never rescues the nets it runs on; skip it when the C++ drain is already a proof
+- **Issue #8480** (closed): route: default-on placement-delta feedback spends the whole remaining budget on from-scratch trials that are never accepted, turning a converged route into a timeout
+
+### 2026-11-05
+
+- **PR #8470**: feat(submit-jlcpcb): add preflight, stock gate, API leg and review page workflow
+- **Issue #8466** (closed): feat(submit-jlcpcb): preflight, stock gate, API leg, dry-run and review page (part 1/3 of #8465)
+- **PR #8464**: feat: re-pitch parallel pour-slot buses jointly
+- **Issue #8460** (closed): pour-slots: re-pitch parallel-run buses as a group
+- **PR #8461**: test(prune): pin segment count and stability for tilt-refused via stubs
+- **Issue #8458** (closed): prune/optimize cleanup leaves ~4% more segments on main than at c9a45f80a (no fixed point in 3 rounds)
+- **PR #8462**: feat: jog pour-slot runs that end on same-net vias
+- **Issue #8459** (closed): pour-slots: spread via-ended inner-layer runs with a 45° jog
+- **PR #8463**: feat: make pour-slot packing opt-in and report left_alone per reason
+- **Issue #8457** (closed): optimize-traces --pour-slots: via-ended inner-layer runs and buses cannot be spread; packing counted as resolved
+- **PR #8469**: docs: record JLCPCB website-automation terms finding
+- **Issue #8467** (closed): docs: JLCPCB terms check for automated website use (part 2/3 of #8465)
+- **PR #8400**: fix: run prune/optimize-traces kicad-cli referees on pinned image under KCT_KICAD_DOCKER
+- **Issue #8395** (closed): pcb prune / optimize-traces DRC referee ignores KCT_KICAD_DOCKER and checks edits on the host kicad-cli
+- **PR #8449**: test: pin kct pcb dedupe output across PYTHONHASHSEED values
+- **Issue #8438** (closed): `pcb prune` gives different results on identical input across runs
+- **PR #8451**: test(route): cover --complete staircase collapse on a real grid
+- **Issue #8397** (closed): route/--complete emit grid-step staircases (~800–1300 sub-0.1 mm segments) and zero-length segments; dedupe and prune leave them
+- **PR #8452**: feat: add refereed pour-slot spread/pack pass to optimize-traces
+- **Issue #8440** (closed): Pour-aware spacing cleanup pass: spread or pack parallel traces over pour slots
+- **PR #8448**: fix(route): run staircase-only pass on --complete lattice links
+- **PR #8447**: chore(loom): resync installed Loom to v0.19.1264
+- **PR #8446**: fix(prune): join tilt-refused via/pad ends with an on-grid stub
+- **PR #8445**: test(prune): pin byte-identical output across PYTHONHASHSEED
+- **PR #8444**: feat(check): add pour_slot advisory for tracks too close for the zone fill
+- **PR #8443**: fix(cli): report unbuilt placement/DRC backends clearly in build-native --check
+- **PR #8442**: fix(prune): count trace overlap of a same-net via/pad shape as a loop-finding join
+- **PR #8441**: feat(optimize-traces): warn when the creepage gate is inactive
+- **PR #8432**: fix(router): skip sweep DRC pre-check once the sweep deadline is spent
+- **PR #8431**: test(router): pin partial save on deadline inside post-negotiation sweep
+- **PR #8429**: test: take fastest of 3 samples in C++ deadline audit tests
+- **PR #8428**: fix(board-06): regenerate committed board from its recipe and pin the emitted .kicad_dru
+- **PR #8426**: test: pin oracle-completion withdrawal of closers adding tracks_crossing/shorting_items
+- **PR #8423**: fix: run staircase-only compression when --timeout skips the trace optimizer
+- **PR #8421**: feat(prune): split a container at a covered track's joint before removing it
+- **PR #8420**: fix(optimize): attach pads by copper extent in connectivity guard
+- **PR #8416**: fix(router): bound post-negotiation sweep retries by per-net and sweep budgets
+- **PR #8412**: chore(loom): resync installed Loom to v0.19.1263
+- **PR #8410**: fix(router): lattice trace/via attach-zone waivers use the census verdict
+- **Issue #8439** (closed): `build-native --check` reports placement/DRC backends "not installed" with a misleading circular-import reason
+- **Issue #8437** (closed): prune: when it keeps a run on 45° and stops short of a via centre, add an on-grid stub instead
+- **Issue #8436** (closed): prune: same-net joins made only by overlap (trace body over a pad or via) hide redundant paths
+- **Issue #8435** (closed): Pour-aware spacing: parallel traces too close for the zone fill leave slots in the plane
+- **Issue #8433** (closed): optimize-traces: warn when the creepage gate is inactive because no --voltage-map was given
+- **Issue #8427** (closed): test flake: test_cpp_pathfinder_enable_records_calls fails on Test (wall-clock budget)
+- **Issue #8419** (closed): optimize-traces (post-#8389) disconnects a fine-pitch MCU pad; the would-disconnect guard does not fire; summary shows in-process '320 new errors' while kicad-cli is 0→0
+- **Issue #8417** (closed): route --complete commits a zero-length track on a foreign-net track (kicad-cli tracks_crossing short); commit check misses degenerate segments
+- **Issue #8408** (closed): router(lattice): trace/via attach-zone exemptions still probe the gap midpoint; the #8277 gate refuses what they waive
+- **Issue #8406** (closed): pcb prune: split the container at a covered track's interior joint so the covered track can be removed (#8368 follow-up)
+- **Issue #8404** (closed): Board 06: assembled-demo/build.py no longer reproduces the committed routed board (166/55 vs 214/63 segments/vias, gate exit 2)
+- **PR #8418**: fix(router): never emit zero-length link tracks; measure point segments as discs
+- **PR #8405**: fix(board-06): move assembled-demo power vias off the mask dam in finish.py
+- **PR #8394**: fix(export): keep net-class-map ampacity rules in exported .kicad_dru
+- **Issue #8393** (closed): Board 05 recipe: kct export drops the Motor power ampacity rules that kct check --emit-dru writes, so build-time DRC checks a stricter .kicad_dru than ships (follow-up to #8357)
+- **PR #8407**: fix(boards): clean redundant router copper on boards 02 and 04
+- **PR #8403**: fix(route): roll back --complete links that add pairwise HV creepage shortfalls
+- **PR #8401**: fix(router): drop zero-length copper segments in dedupe and consolidation
+- **PR #8387**: fix: cut optimizer chains at interior vias (detour shortening at through-vias)
+- **Issue #8386** (closed): optimize/prune: snap tilts tracks off 45°; detour shortening misses tents ending at a through-via
+- **PR #8415**: fix(route): keep fallback stats in timeout receipt when snapshot is unsaved
+- **Issue #8413** (closed): Route receipt loses python-fallback stats when the partial snapshot is not saved
+- **PR #8391**: fix: prune overlap-held spurs and centre their inner-layer ends
+- **Issue #8259** (closed): kct pcb prune keeps a branch whose free end only overlaps a via (spur beside a via survives)
+- **PR #8402**: fix(board-01): commit the .kicad_dru the recipe emits (#8385)
+- **PR #8392**: fix(prune): share the current-path audit's loop model (#8368)
+- **Issue #8368** (closed): pcb prune --current-paths and current-paths-audit disagree on loops
+- **PR #8409**: fix(router): measure roundrect pads in the lattice attach-zone waiver (#8327)
+- **Issue #8327** (closed): route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate
+- **PR #8389**: fix: arbitrate drc-aware rollback with kicad-cli when .kicad_dru hides rules
+
+### 2026-11-04
+
+- **Issue #8370** (closed): route: C++ A* open-set exhaustion on wide HV power nets falls back to pure-Python A* every iteration
+- **Issue #8411** (closed): Boards 00/02/04/06/07 committed .kicad_dru lag the exporter
+- **PR #8390**: fix(board-05): commit the .kicad_dru the recipe emits (#8357)
+- **Issue #8357** (closed): board 05: design.py emits #8048 attach-zone block into .kicad_dru that the committed artifact lacks (recipe not reproducible)
+- **Issue #8323** (closed): pcb prune adds a clearance error under the project's custom DRU rule despite its built-in DRC check
+- **Issue #8285** (closed): optimize-traces: connectivity check discards a different set of nets across identical runs (nondeterminism)
+- **PR #8381**: feat: add --project and refuse default-rules DRC verification
+- **Issue #8369** (closed): DRC-verified kct commands: add --project and refuse default-rules verification (split from #8366)
+- **PR #8380**: fix: referee --drc-aware at the board's own clearance
+- **PR #8378**: fix(router): key Python-fallback repeat skip on pad-pair, not net
+- **Issue #8377** (closed): router: scope #8370 repeat-fallback skip to the pad pair, not the net
+- **Issue #8367** (closed): optimize-traces --drc-aware keeps 0 of 77 nets: internal DRC
+- **PR #8373**: fix: net-relative --wide default for pcb prune and loop witness in current-paths audit
+- **PR #8374**: perf(router): skip repeat Python fallback for drained nets, record per-net fallback time
+- **PR #8372**: fix: carry project sidecars to -o outputs via shared helper
+- **PR #8371**: fix: reject bad nets individually when drc-aware rollback misses baseline
+- **Issue #8366** (closed): Board-writing commands drop the project .kicad_pro/.kicad_dru, so downstream DRC-verified stages silently check default rules
+- **Issue #8255** (closed): Release v0.28.0 blocked: three red main-CI jobs (board 05 strict stock preflight, board 02/03 baselines after #8229/#8230)
+- **PR #8363**: test: re-pin board 02 baseline to 316.57mm after atomic chamfer
+- **PR #8320**: fix(board-05): clean router copper, declare FUSED non-HV, re-issue evidence
+- **Issue #8361** (closed): Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red
+- **Issue #8358** (closed): pcb prune: decentres guard no longer pinned by any test after #8298 merge (fixture never reaches it)
+- **Issue #8308** (closed): Board 05: re-route 4 remaining track detours (+5V x2, VM, MOSI) and drop their known_issues allowance
+- **Issue #8278** (closed): Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks
+- **Issue #8267** (closed): Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails
+- **PR #8317**: feat: break declared-net copper loops (incl. via-closed) in pcb prune
+- **Issue #8313** (closed): pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them
+- **PR #8359**: fix: let prune merge collinear runs across sub-micron end gaps
+- **Issue #8356** (closed): pcb prune: collinear merge refuses a straight run when a ~0.5 um end mismatch turns its joint into a body overlap
+- **PR #8350**: fix: exempt dangling and unconnected growth from strip DRC gate
+- **Issue #8347** (closed): kct pcb strip --from-report DRC gate rejects clearance fixes because dangling warnings count as worse
+- **PR #8345**: feat: gate each kct route-link commit with per-link DRC and creepage rollback
+- **PR #8257**: ci: provision jlcparts catalog for board 05, re-pin board 02/03 baselines
+- **Issue #8314** (closed): route-link: per-link DRC + creepage gating with single-link rollback
+- **PR #8339**: perf: index blocker segments in relief measured-gap scan
+- **PR #8351**: fix: locate creepage strip findings from witness point_a/point_b
+- **PR #8348**: docs: record live kicad-cli verification of pcb strip modes
+- **PR #8340**: fix(creepage): fuse collinear trace runs before attach-zone cross terms
+- **Issue #8295** (closed): Relief freed-band diagnostic: spatially bound the measured-gap scan (follow-up to #8256)
+- **Issue #8346** (closed): kct pcb strip --from-report ignores real kct creepage witness shape (every row skipped)
+- **Issue #8337** (closed): Live-verify kct pcb strip --from-report/--dangling against real kicad-cli --refill-zones
+- **Issue #8303** (closed): census attach-zone cross terms are segmentation-dependent (no collinear fusion, unlike router #8280)
+- **PR #8342**: fix(creepage): classify same-footprint residual row by attach zone
+- **PR #8338**: test(router): pin relief rescue outcomes on the sealed centre pin
+- **PR #8335**: fix: emit 45-aligned doglegs when joining route ends to pad centres
+- **PR #8330**: fix(optimizer): layer-aware chains and same-layer branch anchors
+- **PR #8328**: fix: key pcb prune DRC referee on rule and nets, warn when project rules are missing
+- **PR #8319**: feat: add --clip-to-pads to fix-silkscreen for silk-to-pad clearance
+- **PR #8318**: feat: add kct route-link for targeted single-link routing and probe
+- **PR #8316**: feat: add kct pcb transplant for per-net copper recovery
+- **PR #8307**: feat: reject optimize-traces edits that violate pairwise creepage
+- **Issue #8332** (closed): creepage: #8232 same_footprint 'board' residual row disagrees with router kernel inside attach zones (R25/R75 softstart)
+- **Issue #8312** (closed): fix-silkscreen: clip footprint silk that violates silk-to-pad clearance
+- **Issue #8311** (closed): pcb transplant: copy named nets' copper from one board into another of the same placement
+- **Issue #8310** (closed): route --complete: target individual links (endpoints, via waypoints, layer limits) with a probe mode and per-link gating
+- **Issue #8300** (closed): optimize-traces: accept --voltage-map / creepage inputs and reject edits that violate pairwise creepage
+- **Issue #8296** (closed): Pad-centre join in _partial save emits off-angle segments and tilts merged runs (follow-up to #8270)
+- **Issue #8288** (closed): Relief rescue: complete the sealed centre-pin case or report corridor shortfall (split from #8256)
+- **PR #8334**: fix: skip prune loop removal on nets with fewer than two terminals
+- **PR #8326**: fix: cross-check optimize-traces --drc-aware against kicad-cli before/after
+- **PR #8306**: feat: add closest-point witness to kct creepage rows
+- **Issue #8333** (closed): pcb prune: loop removal deletes all copper on a single-pad net
+- **Issue #8322** (closed): optimize-traces --drc-aware reports "no regressions" while kicad-cli (project DRU) finds 1→17 clearance errors and creepage 4→33
+- **Issue #8301** (closed): kct creepage: report a location witness (closest points + items) for every pair row, including board rows
+- **PR #8329**: fix: straighten pad-entry jogs and match gate pad-touch radius to component labels
+- **PR #8315**: feat: add report-driven rip-up and dangling removal to pcb strip
+- **PR #8305**: fix: keep safe optimize edits per region, straighten pad-entry jogs, model body joins in prune
+- **PR #8304**: feat(optimize-traces): switch every pass off, match --net exactly, list touched nets
+- **Issue #8325** (closed): optimize-traces: straighten a jog just before a pad end (split from #8298 AC 2)
+- **Issue #8309** (closed): pcb strip: report-driven rip-up (remove copper named by a DRC/creepage report) and iterative dangling removal
+- **Issue #8299** (closed): optimize-traces: rewrites a net with every reported pass disabled (unflagged detour pass); --net substring match edits unrequested nets
+- **Issue #8298** (closed): optimize-traces/prune: one unsafe edit discards a net's jog fixes; pad-entry jogs; anchor-in-shape loops survive prune
+- **PR #8324**: fix: derive pcb_retune UUID seed from input board and selected nets
+- **PR #8294**: fix(creepage): measure out-of-zone copper against in-zone pads in attach-zone residual
+- **PR #8290**: feat: report measured freed width, re-occupation and rip-up reason in relief diagnostics
+- **PR #8283**: fix(route): merge _partial output, join pad centres, list partial-net stubs
+- **PR #8280**: fix: apply census attach-zone rule in the router's pairwise HV gate
+- **Issue #8321** (closed): pcb_retune: fixed UUID_SEED may write duplicate UUIDs on repeated retunes (same pattern #8302 fixed)
+- **Issue #8292** (closed): creepage: --waive-attach-zone residual clips both nets, so out-of-zone copper vs in-zone foreign copper is never measured (router flags it, census waives)
+- **Issue #8277** (closed): kct route --complete commits copper that kct creepage (same attach-zone builder) fails: router vs census disagree on pad-adjacent HV pairs
+- **Issue #8270** (closed): kct route: timeout/best-so-far checkpoint emits one segment per grid cell (98% < 0.1 mm), off-centre pad joins, unmarked partial stubs
+- **Issue #8256** (closed): Relief rescue: measure freed width, re-occupation and rip-up reason (follow-up to #8248)
+- **PR #8302**: fix: make optimize-traces UUIDs deterministic so refilled board order is reproducible
+- **Issue #8297** (closed): main red: test_connectivity_decisions_identical_across_hash_seeds fails since #8287 merged (merge race with #8289)
+
+### 2026-11-03
+
+- **PR #8289**: test: pin optimize-traces connectivity decisions across hash seeds
+- **PR #8287**: fix: refill zones after optimize-traces writes the board
+- **PR #8284**: fix: exclude spec-exempt BOM refs from the LCSC CSV merge
+- **PR #8281**: fix(audit): evaluate ampacity at the board's declared stackup copper
+- **PR #8276**: feat(optimize-traces): remove lateral jogs; check rewrites against the board's declared rules
+- **PR #8273**: fix: dedupe exact-duplicate segments emitted by optimize-traces
+- **PR #8272**: fix: merge collinear segments in checkpoint writers
+- **PR #8266**: feat(export): add --merge-lcsc-from and report the LCSC merge source
+- **PR #8265**: feat: declare non-LCSC BOM refs via spec exempt fields
+- **PR #8264**: fix: include attach-zone exemption state in kct check --output JSON
+- **PR #8263**: fix: re-point timeout.json checkpoint for relative -o
+- **PR #8253**: fix: keep optimize-traces from breaking attachments, holes and connectivity
+- **PR #8252**: feat: explain futile relief rescues and skip identical repeats
+- **PR #8251**: fix: prune keeps tracks that would strand an end or feed a copper arc
+- **Issue #8249** (closed): kct pcb prune --unverified can leave a dangling end or cut an arc-fed pad (unmodelled body/arc joins)
+- **PR #8244**: feat(optimize-traces): run detour-shortening pass with board anchors
+- **Issue #8217** (closed): new cleanup pass: shorten detours when a straight or single-bend path is clear
+- **PR #8240**: fix(pcb): keep name-only boards header-less on PCB.save
+- **Issue #8239** (closed): PCB.save adds a numbered (net N "name") table to name-only KiCad-10 boards
+- **PR #8241**: feat(prune): merge collinear segment runs into one segment
+- **Issue #8236** (closed): kct pcb prune: remove overlapping redundant spurs and merge collinear grid-step runs (rest of #8216)
+- **PR #8238**: test(optimize): dense-board kicad-cli DRC check for checked trace rewrites
+- **PR #8229**: feat: add redundant_copper check and dedupe cleanup step in readiness/tapeout
+- **PR #8227**: feat: add kct pcb prune to drop redundant copper and snap off-centre ends
+- **PR #8223**: fix: collision-check each optimize-traces rewrite against the board
+- **Issue #8218** (closed): run copper cleanup every time: a check rule plus a standard tapeout step (dedupe + optimize, kicad-cli refereed)
+- **Issue #8216** (closed): new cleanup pass: remove redundant copper (spurs, overlap-only off-centre ends, same-layer loops)
+- **PR #8230**: feat: shorten detouring trace chains to a straight or single-bend path
+- **PR #8233**: fix(creepage): emit board-level row alongside same_footprint minimum
+- **PR #8228**: fix: name net in off-angle warning and skip it on scratch DRC serializations
+- **Issue #8232** (closed): creepage: one row per net pair keyed on the minimum hides board-level approaches behind a same_footprint row (waiver unsound in shape)
+- **Issue #8219** (closed): OffAngleSegmentWarning reports 'net 0' on name-only boards and repeats each warning
+- **PR #8226**: fix: keep vias that tie pads or same-net pours during via minimisation
+- **Issue #8215** (closed): optimizer via minimization removes vias that are still needed (unconnected pour stubs)
+- **PR #8291**: chore: tool updates — Loom 0.19.1260, Repo Skills 0.25.4, squad 0.19.24
+- **Issue #8286** (closed): optimize-traces leaves a stale zone fill: kct check reports clearance_segment_zone that kicad-cli --refill-zones does not
+- **Issue #8282** (closed): Exempt BOM refs can pick up an LCSC number from the CSV merge source
+- **Issue #8271** (closed): optimize-traces: dedupe exact-duplicate segments it emits (split from #8250)
+- **Issue #8269** (closed): optimize-traces: remove lateral jogs (a short sideways step between parallel runs) by sliding the step to the next corner
+- **Issue #8262** (closed): kct check --output JSON lacks summary.attach_zone_exemption that the text output prints
+- **Issue #8261** (closed): Tapeout Gate 4 cannot declare intentionally non-LCSC BOM lines (consigned, hand-solder); bom_lcsc_values WARN always forces refusal
+- **Issue #8260** (closed): kct export: LCSC merge reads only a BOM CSV already in the output dir; undocumented in help and tapeout/readiness skills
+- **Issue #8258** (closed): kct route --timeout: timeout.json 'checkpoint' names a moved file when -o is relative; --export-failed-nets not written on timeout
+- **Issue #8250** (closed): optimize-traces still breaks connectivity on finished boards: 45° chamfer at shared vertices, keepouts/NPTH not modelled, no connectivity check
+- **Issue #8248** (closed): kct route: targeted rip-up frees the witnessed blocker but the access-loss victim still has no relief path (TO-220 centre pins under HV clearance), 0/15 rescued per iteration
+
+### 2026-11-02
+
+- **PR #8225**: fix: restore tracked renders and warn on dirty tree in deploy-site.sh
+- **PR #8224**: docs: refresh deploy-site.sh auth docs and default verify URL to kicad-tools.org
+- **PR #8212**: fix: report kept vs attempted nets and per-rule violations in optimize-traces --drc-aware
+- **Issue #8220** (closed): deploy-site.sh leaves the working tree dirty: re-renders committed board images, untracked .wrangler/
+- **Issue #8221** (closed): deploy-site.sh header and verify default are stale: custom domain is live, token auth undocumented
+- **Issue #8207** (closed): optimize-traces --drc-aware: every net rolled back on a clean HV board (0 -> 151 errors), summary still claims 84 optimized, no per-net diagnostics
+- **PR #8213**: fix: auto-match LCSC in parts availability and account for all BOM lines
+- **PR #8205**: fix: resolve net-class-map sidecar in kct report generate
+- **PR #8210**: fix(optimizer): match and emit name-only net refs in replace_segments
+- **PR #8206**: fix: fail export when the report extra is missing
+- **Issue #8208** (closed): parts availability: reports an export-auto-matched line as MISSING; '8/57 available' summary leaves most BOM lines unaccounted for
+- **Issue #8209** (closed): optimize-traces: on KiCad-10 name-only boards, replace_segments keeps the originals and appends (net 0) copper
+- **Issue #8204** (closed): report generate: does not resolve the net-class-map sidecar, so sidecar-gated DRC rules run inactive
+- **Issue #8203** (closed): export: missing 'report' extra silently skips the design report and still exits 0
+- **PR #8201**: chore(loom): resync installed Loom to v0.19.1254
+- **PR #8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
+- **PR #8197**: chore(deps-dev): Bump vitest from 5.0.4 to 5.0.5 in /site in the npm-minor-patch group across 1 directory
+- **PR #8199**: chore(deps): Bump astro from 7.3.8 to 7.4.1 in /site
+- **PR #8198**: chore(deps-dev): Bump @astrojs/check from 0.9.10 to 0.9.11 in /site
+- **PR #8196**: chore(deps): Bump the uv-minor-patch group across 1 directory with 2 updates
+
+### 2026-11-01
+
+- **PR #8186**: docs: evaluate KiPI power-integrity analyzer and add ecosystem entry
+- **Issue #8185** (closed): Evaluate KiPI (drewsum/KiPI) for power-integrity analysis: headless path, trial on a fleet board, integration shape
+- **PR #8180**: chore(loom): resync installed Loom to v0.19.1245
+- **PR #8178**: chore(loom): resync installed Loom to v0.19.1244
+- **PR #8177**: chore(repo-skills): bump Repo Skills 0.24.7 -> 0.25.1
+
+### 2026-10-31
+
+- **PR #8175**: chore(release): v0.27.0
+- **PR #8119**: chore(loom): resync installed Loom to v0.19.1236
+- **Issue #4410** (closed): board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)
+- **PR #8164**: fix: exempt same-footprint line-to-rect silk joints from silk_overlap
+- **Issue #8159** (closed): silk_overlap: intra-footprint false positives remain for fp_line vs fp_rect (follow-up to #8090)
+- **PR #8167**: fix: key kct route sidecars to the output stem and list unverified sets
+- **Issue #8156** (closed): route writes unsuffixed fab_profile.json / net_class_map.json and leaves *_unverified_* sets beside the board
+- **PR #8150**: perf: raise post-route finishing reserve to 27% of --timeout
+- **Issue #8148** (closed): route: size the post-route reserve so one oracle refill+DRC round fits at --timeout 600 (board 03: oracle stage ~144 s vs 90 s reserve)
+- **PR #8160**: fix: report nearest via-blocker and via-site-aware pin-access advice
+- **Issue #8155** (closed): route --nets: 'blocked by stored-via geometry (blocking net X)' blames a distant net; escape-limited nets fail slowly
+- **PR #8163**: fix: evaluate CSV-merged LCSC numbers in stock preflight and warn when nothing checked
+- **Issue #8154** (closed): export: bom_lcsc_stock reports OK without checking LCSC numbers merged from an existing BOM
+- **PR #8161**: fix: classify RV* references as non-resistors in value parsing
+- **Issue #8157** (closed): bom_lcsc_values: RV (varistor) references classified as resistors, so a correct MOV FAILs as 'different component type'
+- **PR #8165**: fix: check hole_clearance and hole_to_hole in pcb move-via --check
+- **Issue #8153** (closed): pcb move-via --check does not evaluate hole clearance (passes moves kicad-cli rejects)
+- **PR #8139**: refactor(ci): move board04 paid-drill dispatch out of vendored routed-DRC gate
+- **Issue #8134** (closed): install-kct.sh vendors .kct/ci/check_routed_drc.py with board04-specific paid-drill code
+
+### 2026-10-30
+
+- **PR #8169**: test: mock check_saved_fill in mocked zones fill success tests
+- **PR #8162**: fix: clear stale manifest.json in sign-off Gate 1
+- **PR #8152**: chore(research): add hybrid-parity relaxation study driver for board 03 USB_D
+- **Issue #8168** (closed): test flake: tests/test_zones_cmd.py::TestFillSuccess::test_fill_calls_run_fill_zones fails on Test job
+- **Issue #8158** (closed): tapeout: re-running into an existing bundle dir fails sign-off Gate 1 on the previous run's stale manifest.json
+- **Issue #8149** (closed): study: what bounded extra-length or skew trade would give a via-equal hybrid leg pair on board 03 USB_D (J1.A6→U2.3)? Measure, no tolerance change
+- **PR #8146**: chore(deps): Bump joserfc from 1.7.5 to 1.7.6
+- **PR #8138**: feat(pcb): add move-via command that drags attached trace endpoints
+- **Issue #8135** (closed): No CLI to move a free via (move-footprint only moves footprints)
+- **Issue #8078** (closed): board 03 bench: pour completion hits its deadline near --timeout, leaving 20 GND/VCC links unconnected
+- **PR #8144**: chore(release): v0.26.0
+- **PR #8141**: fix(drc): reject JSON input that is not a DRC report
+- **PR #8137**: fix(audit): apply waivers sidecar in audit DRC
+- **PR #8136**: fix(export): accept DIP parts on same-pin-count Diode_Bridge_DIP footprints
+- **Issue #8133** (closed): kct drc --waivers --allow-incomplete treats a non-DRC JSON file as zero findings and passes
+- **Issue #8132** (closed): LCSC discrete-footprint guard false-FAILs DIP-4 bridge rectifiers on Diode_Bridge_* footprints
+- **Issue #8130** (closed): report.md Manufacturing Readiness verdict counts ampacity findings that kct check waivers cover
+- **PR #8140**: fix(check): report when a designer DRU rule suppresses the attach-zone exemption
+- **Issue #8131** (closed): Attach-zone kct check exemption is silently inactive when designer DRU rules suppress the managed block
+- **PR #8128**: fix(export): parse pin-count-first BGA and LFCSP LCSC packages as ICs
+- **Issue #8127** (closed): parse_ic_package misses pin-count-first BGA forms ('48-TFBGA (6x8)') and LFCSP
+- **PR #8126**: fix(export): match whole LCSC IC-category phrases in discrete-footprint guard
+- **Issue #8124** (closed): LCSC discrete-footprint IC guard: bare 'Logic'/'Memory' substring can false-FAIL real diodes/caps
+- **PR #8123**: fix: flag IC parts on discrete footprints in LCSC guard and tapeout Gate 4
+- **PR #8122**: feat(export): add bom_lcsc_stock preflight check and --boards flag
+- **Issue #8121** (closed): BOM gate accepts an LCSC part whose stock is below qty x boards (0-stock C4223175 counted resolved)
+- **Issue #8113** (closed): BOM resolution gate accepts an LCSC number whose package/category contradicts the footprint (BGA MCU on a D_SMA diode)
+
+### 2026-10-29
+
+- **PR #8116**: fix(install): isolate kct-upgrade token from installer code; match multi-line pins
+- **PR #8114**: fix(parts): send X-XSRF-TOKEN so JLC lookups don't 403 after the first request
+- **PR #8081**: feat(install): PyPI source mode as install-kct.sh default (+ kct doctor, opt-in upgrade workflow)
+- **Issue #8118** (closed): Anonymous JLC parts lookups 403 after the first request of a session (missing X-XSRF-TOKEN)
+- **Issue #8115** (closed): Follow-on from PR #8110: kct-upgrade token exposure to later steps; multi-line TOML string pin match
+- **PR #8112**: fix: count the since-tag release section as documented in the changelog gap report
+- **Issue #8111** (closed): changelog: release gate reports a gap when the citing fragment was consumed by a release cut that raced the PR merge
+- **PR #8110**: fix(install): harden the PyPI pin helper (CRLF, 3.9 dry-run, token scope, escapes)
+- **Issue #8097** (closed): install-kct PyPI mode: hardening follow-ups from #8081 review (CRLF, dry-run on py3.9, persist-credentials, escaped requirements)
+- **PR #8109**: fix(changelog): per-PR check fails on uncited Part of / Closes commit trailers
+- **PR #8108**: ci: install pinned actionlint in Test job so upgrade-workflow lint test runs
+- **Issue #8098** (closed): CI: install actionlint so the vendored kct-upgrade.yml lint test runs instead of skipping
+- **PR #8106**: chore(release): v0.25.1
+- **Issue #8099** (closed): install-kct.sh: PyPI source mode as the default (+ kct doctor, opt-in upgrade workflow) — consumers track releases, lockfile pins
+- **PR #8100**: chore(ci): release gap report accepts a commit when any resolved issue is cited
+- **Issue #8077** (closed): changelog: per-PR fragment check passes 'Part of #<epic>' commits that the release gate later rejects
+- **PR #8103**: docs(site): add generated quick start and refresh homepage cards
+- **Issue #8101** (closed): site: refresh kicad-tools.org homepage for v0.25.0 (on-site quick start, generated facts, klayout-tools cross-link)
+- **PR #8094**: fix: treat a single Kelvin sense tap as non-force copper in current-path fanout check
+- **Issue #8092** (closed): current-paths-audit: Kelvin sense tap at a 2-terminal shunt endpoint (pad -> via -> sense IC) marks the path ambiguous; same-net Kelvin taps unverifiable
+- **PR #8091**: fix(validate): exempt same-footprint silk T-joints from silk_overlap
+- **Issue #8090** (closed): check: silk_overlap false positives at T-joints within one library footprint (follow-up to #4989; blocks tapeout Gate 4b)
+- **PR #8088**: fix: make pcb reinforce honor class clearance floors, voltage map and same-net holes
+- **Issue #8085** (closed): pcb reinforce: anchors ignore the DRU class floor and the pairwise HV voltage map, and land on PTH pad drills (co-located holes)
+- **PR #8084**: fix(bench): label pour completion cut by --timeout in route rows
+- **PR #8083**: chore(release): v0.25.0
+- **PR #8080**: fix(route): report pour completion cut by --timeout as its own outcome
+- **PR #8079**: chore(changelog): cite parent epics #5798 and #7690 (unblocks release gate)
+- **PR #8075**: chore(deps): Bump authlib from 1.6.12 to 1.9.1
+- **PR #8074**: ci: gate board 05 nightly on 0 warnings in both engines
+- **PR #8071**: fix(router): hold hybrid legs to the partner trunk at the intra-pair gap near the virtual site
+- **Issue #8073** (closed): board 05 nightly: gate on 0 warnings in both engines (finish #7848 AC 2)
+- **PR #8070**: fix(zones): roll back the foreign-pad carve where KiCad's fill is already clean
+- **Issue #8053** (closed): kct export rejects a zone fill written by kct zones fill ("Saved zone fill is split where a refill is not")
+
+### 2026-10-28
+
+- **PR #8067**: fix(route): keep listed nets' preserved copper as obstacle and output under --complete
+- **Issue #8066** (closed): route --complete: preserved copper on listed (incomplete) nets is not an obstacle to other listed nets, and is dropped from output once the net completes
+- **PR #8063**: fix: orient footprint text boxes in silk checker to match placer
+- **PR #8060**: feat(route): attach zones exempt router-class clearance floors in the emitted DRU, kct check and the backstop
+- **PR #8059**: test(lattice): cover the furthest-progress hybrid decline latches (#7931)
+- **PR #8058**: fix: report a split saved fill at kct zones fill and drop circular export advice
+- **PR #8057**: fix: withdraw auto-pour zones that reach none of their net's pads
+- **PR #8050**: fix(router): place fine-pitch dual-row escape vias past the pad tip
+- **Issue #8065** (closed): Fine-pitch dual-row escape vias land inside long TSSOP/SSOP pads (via-in-pad at tiers without it)
+- **Issue #8061** (closed): router: fine-pitch dual-row escape vias land inside long pads (TSSOP via_in_pad)
+- **Issue #8054** (closed): kct place-silk-refs and kct check disagree on silkscreen reference placement
+- **Issue #8051** (closed): kct route auto-skips a net with no zone as a "pour net" (+5V left unrouted)
+- **Issue #8048** (closed): route + check: attach zones exempt router-class clearance floors in both engines (emitted DRU and kct check)
+- **Issue #7931** (closed): lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate)
+- **PR #8056**: fix: gate optimize-traces --drc-aware on zone-fill shorts with fail-safe revert
+- **Issue #8052** (closed): kct optimize-traces --drc-aware introduces shorts its rollback does not catch
+- **PR #8055**: refactor(lattice): report the furthest-progress hybrid decline reason
+- **PR #8047**: fix(route): demote only the offending connection in the authored-floor backstop
+- **Issue #8029** (closed): route (lattice): post-route class-clearance backstop demotes 11 whole nets the negotiation just committed (209/212 -> 68/82)
+- **PR #8044**: feat: honour _pair_bounds device-bounded pair ΔV in voltage maps
+- **Issue #8043** (closed): voltage-map: device-bounded pair ΔV (_pair_bounds) — worst-case intervals make a TO-220 drain unroutable (300 V judged, ≤100 V physical)
+- **PR #8040**: fix: refuse .kicad_dru content KiCad silently drops and flag netclass-only cross-gates
+- **Issue #8039** (closed): kicad_dru sidecar silently ignored by KiCad 10 when hand-written content has ';' comments or regex conditions — cross-gate runs netclass-only
+- **PR #8037**: chore: point ecosystem registry at BackplaneWorks org for Backplane and KiStack
+- **Issue #8008** (closed): chore: ecosystem registry: Backplane and KiStack moved to BackplaneWorks org
+- **PR #8032**: fix(route): make oracle pour completion honour pairwise HV clearance
+- **Issue #8027** (closed): route: KiCad-oracle pour completion is pairwise-blind — GND/+3.3V vias land 0.4 mm from 150 V copper under --voltage-map
+- **PR #8031**: feat(creepage): add --waive-attach-zone census waiver matching router attach zones
+- **Issue #8028** (closed): creepage: census has no #4506 attach-zone waiver — router-legal attach copper fails the gate as board-level
+
+### 2026-10-27
+
+- **PR #8025**: fix: extend board 03 USB via-in-pad exception expiry to 2027-10-19
+- **PR #8022**: feat: add Finding locators to net-status JSON and measure_clearance
+- **Issue #8015** (closed): Stable, versioned finding format shared by finding-emitting commands (openkonnect G1)
+- **PR #8018**: feat: add kct export-formats for PDF/SVG/STEP/IPC-2581/ODB++
+- **Issue #8017** (closed): Wrap plot, 3D and alternative fabrication exports: PDF/SVG, STEP, IPC-2581, ODB++ (openkonnect G4)
+- **PR #8020**: feat: scope kct check findings with --bbox/--refs/--nets
+- **PR #8019**: feat: add shared versioned Finding locators to check/drc/detect-mistakes JSON
+- **PR #8013**: fix(router): name the binding term of the lattice negotiation deadline
+- **Issue #8016** (closed): kct check: limit a check to a region or a set of references (openkonnect G2)
+- **Issue #8012** (closed): route (lattice): banner calls --timeout the 'hard cap' but per-net-timeout x links binds first — raising --timeout is a silent no-op
+- **PR #8011**: fix(board04): move crystal block off C2/C3 row, drop wire-through waivers
+- **Issue #8005** (closed): board 04: LDO output wire runs through C2/C3 bodies in the schematic (sch_wire_through_symbol)
+- **PR #8009**: docs(ecosystem): record the no-fallback-router ruling
+- **PR #8007**: fix(dsn): name back-image pad copper on the mirror layer (#7518)
+- **Issue #7518** (closed): DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496)
+- **PR #8003**: feat: add parts_search and parts_lookup MCP tools
+- **PR #8001**: feat: add sch_wire_through_symbol advisory lint to kct check
+- **PR #7999**: feat: add kct parts alternatives for offline Basic-part substitution
+- **PR #7994**: chore: acknowledge archived upstreams in ecosystem registry
+- **Issue #7996** (closed): feat: schematic cosmetic lint and declutter suggestions
+- **Issue #7993** (closed): feat: expose parts search and lookup as kct MCP tools
+- **Issue #7992** (closed): feat: suggest Basic-library JLCPCB alternatives for Extended parts
+- **Issue #7991** (closed): feat: run Freerouting from kct as a selectable fallback router
+- **Issue #7989** (closed): Ecosystem registry: acknowledge Konnect's archive, name its successor, and make KiCAD-MCP-Server our agent-interface reference
+- **Issue #7990** (closed): Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect
+- **PR #7997**: docs: evaluate KiCAD-MCP-Server against kct mcp serve
+- **Issue #7995** (closed): feat: symbol library write and registration helpers (create/delete/rename symbol, register library)
+- **PR #8002**: feat: register generated symbol libraries in sym-lib-table
+- **Issue #8004** (closed): Ecosystem registry: add openkonnect and point Konnect's entry at it (missed scope from #7989)
+- **PR #7986**: docs(ecosystem): mark konnect as archived upstream
+- **Issue #7981** (closed): Ecosystem registry drift: upstream license/rename/archive change
+- **PR #7980**: chore(deps): Bump the github-actions group across 1 directory with 4 updates
+- **Issue #7690** (closed): Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain
+
+### 2026-10-26
+
+- **Issue #6441** (closed): Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules
+- **PR #7983**: feat(router): deprecate the grid coupled diff-pair pre-pass
+- **PR #7978**: chore(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
+- **PR #7977**: chore(deps): Bump the uv-minor-patch group across 1 directory with 2 updates
+- **PR #7969**: feat(boards): ship board 07 on the lattice pair path
+- **Issue #6448** (closed): [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired
+- **PR #7979**: chore(deps): Bump astro from 7.3.5 to 7.3.8 in /site
+- **PR #7975**: chore(loom): resync installed Loom to v0.19.1227
+- **PR #7972**: fix(router): skip pair end-stub balancing for within-tolerance skew
+- **Issue #7970** (closed): slow-tests: test_armc_route_gives_usb_d_equal_vias_with_every_gate errors at setup (ROUTING FAILED: pour pads left unconnected)
+
+### 2026-10-25
+
+- **PR #7971**: chore(loom): resync installed Loom to v0.19.1225
+- **PR #7968**: fix(router): balance lattice pair turn skew at the end stubs
+- **Issue #7966** (closed): lattice pair path: constant 0.597 mm N-short intra-pair skew on every board 07 MIPI/TMDS pair
+- **PR #7965**: docs: add non-Claude harness pilot run plan, checklist and gap template
+- **Issue #7964** (closed): [Epic #5952] Prep the non-Claude harness pilot: run plan, checklist and gap template (docs only)
+
+### 2026-10-24
+
+- **Issue #7942** (closed): #7881 remainder: lattice deadline AC3 on a real run, a bigger pairwise speedup, and per-pair equivalence tests
+- **PR #7952**: fix(router): gap tightening squeezes runs whose partner rail is split into long pieces
+- **Issue #7951** (closed): Gap tightening run discovery still narrower than the impedance rule's partner-union coupling (residual of #7913 AC-R1)
+- **PR #7956**: fix(research): mark diffpair bench rows invalid when the pour oracle was skipped
+- **Issue #7955** (closed): diffpair_bench pairs run: mark oracle_unverified rows invalid (killed kicad-cli oracle still reads valid: true)
+- **PR #7954**: refactor(router): remove DifferentialPairRules.for_type and add the Phase 6 diff-pair benchmark table
+- **PR #7950**: fix(router): prefer the coupled candidate meeting the skew budget's length form; drop 07rf class skew caps
+- **PR #7945**: test(router): check pairwise row() against per-pair required() with populated map
+- **Issue #7913** (closed): 07rf: drop the hand-set class skew caps (blocked on impedance at re-routed TMDS breakout runs)
+- **PR #7947**: fix(router): forward --allow-offboard in chained --complete and hold tail-fold lead-in gap to clearance
+- **PR #7946**: test: skip subprocess bench-harness tests on toolchain refusal
+- **PR #7941**: chore(loom): resync installed Loom to v0.19.1218
+- **Issue #7944** (closed): Subprocess bench-harness tests fail instead of skipping without a pinned kicad-cli
+- **Issue #7943** (closed): Router follow-ups from #7905/#7908/#7923 reviews: --allow-offboard in chained --complete, tail-fold lead-in gap, regression-fixture library names
+- **PR #7940**: chore(deps): Bump zod from 4.5.4 to 4.6.7 in /site
+- **PR #7939**: chore(deps-dev): Bump fast-uri from 3.1.7 to 3.1.9 in /site
+- **PR #7936**: feat(lattice): mid-trunk via-pair move for the coupled search (#7932)
+- **PR #7934**: chore(deps): Bump brotlicffi from 1.2.0.1 to 1.2.1.0
+- **Issue #7932** (closed): lattice: mid-trunk via-pair move for the coupled search (split from #6445)
+- **Issue #7908** (closed): Board 06 recipe: MIPI_CLK and USB3_TX1 exceed their ps skew budget through layer imbalance (cap blocks the ps tuner)
+- **Issue #7896** (closed): 06rf USB3_TX1 exceeds its 4.0 ps skew budget in time (28.8 ps, length-matched to 0.015 mm, legs on In2.Cu vs In1.Cu)
+- **PR #7935**: chore(deps): Bump brotli from 1.2.0 to 1.2.1
+- **PR #7933**: chore(deps): Bump undici from 8.10.2 to 8.12.3 in /site
+- **PR #7930**: fix: gap tightening squeezes runs the impedance rule judges across fragmented partners
+- **PR #7928**: chore(deps): Bump setuptools from 83.0.0 to 84.1.0
+- **PR #7927**: chore(deps): Bump fastmcp from 4.0.11 to 4.1.2
+- **PR #7926**: test: re-pin board-06 coupled witness class-map hash after #7915
+- **PR #7921**: test(router): bound board 03 arm C route by iterations, fail loudly when time-starved (#7920)
+- **PR #7915**: fix(diffpair): derived skew budget wins over hand-set generator limits (06rf, board 06; 07rf protocols)
+- **Issue #7925** (closed): slow test test_coupled_board06 pins the pre-#7915 net_class_map hash (fails on main)
+- **Issue #7920** (closed): slow-tests: board 03 arm C route test fails copper-LVS when pour-net oracle completion runs out of --timeout budget
+- **Issue #7894** (closed): Remove hand-set class skew limits from board generators; derived budget wins; prune obsolete allowances
+- **Issue #7867** (closed): router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner
+- **Issue #6446** (closed): [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs
+- **Issue #6445** (closed): [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline
+- **PR #7923**: fix: skip placement-invalid nets in route's chained --complete pass (#7922)
+- **Issue #7922** (closed): CI Test (extended) red on main since 2026-10-23: test_production_layer_winner_keeps_placement[0.1] (assert 2 == 1)
+
+### 2026-10-23
+
+- **PR #7918**: fix: judge diffpair bench skew by the ps budget kct check uses
+- **Issue #7914** (closed): diffpair bench: kct_verdict.skew still judges the legacy mm thresholds, not kct check's ps budget
+- **PR #7917**: test: grade the live 06b diffpair guard inside kicad_toolchain_session (#7916)
+- **Issue #7916** (closed): test_diffpair_bench slow test fails since #7904: grades outside kicad_toolchain_session (KiCadToolchainRequired)
+- **PR #7911**: fix(board06): route MIPI_CLK on outer layers so its legs share a layer speed
+- **PR #7910**: fix(research): krt_compare.py grades on the pinned kicad-cli (#7903)
+- **Issue #7903** (closed): krt_compare.py kicad-cli DRC bypasses the pinned evidence toolchain
+- **PR #7909**: feat(router): tune diff-pair skew to the derived ps budget (single source with kct check)
+- **Issue #7893** (closed): Router and tuners tune to the derived ps skew budget (single source with kct check)
+- **PR #7906**: fix(router): grid search names the HV clearance when it walls a pad in (#7887)
+- **Issue #7887** (closed): Grid C++ search records an HV-walled pad as no_path, not pairwise_blocked (net-status --why loses the pairwise wording)
+- **PR #7905**: fix(router): hold a tail fold's top off its own return run by the clearance
+- **Issue #7902** (closed): router: tail fold's top and return run have no same-net clearance (A floors at W; gap 0 on the #7546 fixture)
+- **PR #7904**: fix(research): run bench kicad-cli verdicts on the pinned evidence toolchain (#7901)
+- **Issue #7901** (closed): diffpair_bench.py kicad-cli verdict bypasses the pinned toolchain (KCT_KICAD_DOCKER ignored)
+- **Issue #7864** (closed): router: 06rf USB3_RX1 one-sided fan skew fails at 1× (narrowed from #7649)
+- **Issue #7546** (closed): router: give generated trombone bumps 45° legs so kct and kicad-cli agree on plain meanders (#7521 follow-up)
+
+- **PR #7900**: test(router): pin lattice deadline stop line end to end with a voltage map active
+- **Issue #7881** (closed): lattice negotiation exhausts its deadline with the pairwise clearance matrix active; no way to tell timeout from infeasible
+- **PR #7899**: fix(router): pad-aware skew tuning -- own-copper rule, escape hosts, tail fold (#7891)
+- **Issue #7891** (closed): router: pad-aware skew tuning — let the tuner see the net's own pads and host bumps on escape stubs
+- **PR #7897**: feat(check): derived skew budgets in ps and time-domain diff-pair skew in kct check
+- **Issue #7892** (closed): Derived skew budgets in ps: one helper (−30 dB phase rule) and time-domain skew in kct check
+- **PR #7895**: test(router): pin 06rf USB3_RX1 pad-end stub limits at 1x (#7864 diagnosis)
+- **PR #7890**: perf(router): per-net partner row and node_clear bbox skip for lattice pairwise predicates
+- **PR #7889**: fix(router): length-balance crossing USB-C row-to-row ties (06rf USB2_D)
+- **Issue #7869** (closed): fix(router): USB2_D lattice pair needs a longer straight run for skew tuning (06rf)
+- **PR #7888**: fix(net-status): --why honours the router's pairwise declines (lattice reasons reach the sidecar)
+- **Issue #7879** (closed): net-status --why ignores voltage/class-pair clearance, so it calls pads routable that the router declines
+- **PR #7886**: docs: derive intra-pair skew limits from a differential-phase tolerance (research + proposal)
+- **Issue #7883** (closed): Derive intra-pair skew limits from a differential-phase tolerance at the operating frequency
+- **PR #7885**: fix(router): hold the pad class clearance under a voltage map in the lattice
+- **Issue #7880** (closed): lattice commits track-to-pad copper the post-route backstop then demotes under class-pair clearance
+- **PR #7882**: test(router): pin 06rf USB3_RX1 1x skew-tuner capacity limit (#7864)
+- **Issue #7861** (closed): Replay or discard quarantined stash da00b7cf (#5617 candidate-gather benchmark work)
+- **Issue #7863** (closed): Replay or discard quarantined stash 39250ba1 (#5664 clearance-kernel parity tests)
+- **PR #7877**: feat(check): model_coverage reads unknown for host-library 3D refs; LCSC guard scans VRML
+- **Issue #7743** (closed): Follow-ups from #7736: lcsc_guard should scan .wrl/.vrml; record 3D-coverage 'not evaluated' host-independently in kct check JSON
+- **Issue #7775** (closed): [Epic #5952] AGENTS.md parity: shared contributor-guidance source rendered into CLAUDE.md and AGENTS.md, with drift test
+- **PR #7873**: fix(router): undo an inline diff-pair comb that leaves the skew no smaller
+- **Issue #7548** (closed): Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
+- **PR #7871**: fix(router): hybrid parity accepts a longer via-equal pair that removes much skew
+- **Issue #7870** (closed): fix(router): USB3_RX2 hybrid leg selection leaves 5.7 mm skew untunable (06rf)
+- **PR #7866**: fix(router): SkewLedger walks gateway pair routes in copper order (#7864)
+- **PR #7865**: docs: explain PTH annular-ring and hole-to-edge rules in DRC guide
+- **PR #7860**: fix(router): offer gateway-first pair declines the hybrid retry
+- **PR #7849**: refactor(board-05): apply silk DFM corrections during generation, not routing replay
+- **Issue #7862** (closed): Replay or discard quarantined stash b0c6a741 (#5059 native PTH rules test + docs)
+- **Issue #7858** (closed): router: board 03 USB_D[0] skips the hybrid retry on main and falls back to plain uncoupled
+- **Issue #7848** (closed): board 05: silk DFM corrections live in the routing.json replay step, so an unattended route carries 137 kct check warnings
+- **Issue #7834** (closed): board 05: CI/recipe job that routes from scratch unattended and gates on 100% nets + both DRC engines + LVS
+- **Issue #7649** (closed): router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion
+- **Issue #5550** (closed): Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004)
+- **PR #7850**: ci(board05): nightly unattended from-scratch route gate (#7834)
+- **PR #7854**: test: compare min-of-5 timings in segment-components perf guard
+- **PR #7851**: feat(router): gate skew bumps against SkewLedger sources
+- **Issue #7853** (closed): test flake: test_build_segment_components_faster_on_larger_net fails on Test job
+- **Issue #6447** (closed): [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes
+- **PR #7847**: feat(check): report chain (XNet) pair skew across series elements
+- **PR #7846**: feat(router): post-pass pair-skew invariant guard (DRC nudge + via-in-pad, retune)
+- **PR #7845**: feat(router): add SkewLedger attributing pair P/N skew to joints, vias and ties
+- **PR #7839**: fix: probe routability before labelling moderate-congestion nets PLACEMENT_BOUND
+- **PR #7838**: feat: chain a --complete pass when the grid route leaves signal nets open
+- **Issue #7832** (closed): stuck classifier: board 05 VCP labelled PLACEMENT_BOUND although --complete routes it on current copper
+- **Issue #7831** (closed): router: chain the lattice --complete pass when grid negotiation leaves signal nets open (board 05 VCP -> 37/37 clean)
+
+### 2026-10-22
+
+- **PR #7844**: docs: update stale Board 07 CI suspension comments
+- **PR #7843**: feat(router): balanced bends and distinct gateways for lattice diff pairs (#7649)
+- **PR #7842**: chore(deps): bump opentelemetry-api from 1.39.1 to 1.45.1
+- **PR #7841**: test(board03): apply the #6885 retuner to the committed board 03 artifact, with receipts (#6730)
+- **PR #7840**: fix(board07): make --step pcb write the project file; authored-index cache fix (#7716)
+- **PR #7837**: feat(board07): route the recipe's differential pairs coupled (#5333)
+- **PR #7836**: chore(research): flag route-experiment rows whose stranded-pour oracle failed
+- **PR #7835**: feat(router): reserve pour-only 2-pad stitch sites by default (board 05 36/37)
+- **PR #7830**: test: make docker prefix model-mount test hermetic
+- **PR #7828**: feat(models): parametric 3D body generation with an optional CadQuery extra (#7687)
+- **PR #7826**: docs(research): record the #7688 embedded-checksum spike outcome (blocked)
+- **PR #7824**: test(board03): pin USB_D skew inside the 0.5 mm stretch by both checkers (#6730)
+- **PR #7823**: fix: keep hole-to-hole floor when collapsing committed via hairpins
+- **PR #7822**: fix(router): chamfer skew-bump feet at 0.02 mm instead of square (#7546)
+- **PR #7821**: chore(loom): resync installed Loom to v0.19.1209
+- **PR #7820**: fix(router): close board 07 DDR_DATA_BYTE_0 and keep achieved retune targets (#7815)
+- **PR #7819**: fix: deploy-site.sh requires a running Docker and aborts on render failure
+- **PR #7816**: docs(router): state the measured reason swapped pairs skip the pose trunk (#7769)
+- **PR #7814**: feat(router): square-foot skew bumps when the four-corner chamfer ladder can't fit (#7546)
+- **PR #7813**: fix(router): straighten history detours on converged diff pairs; prefer the longer coupled gateway (#7650)
+- **PR #7812**: fix(router): keep via-hairpin collapse off own SMT lands and shortcut unmovable hairpins
+- **PR #7811**: fix: route kct render through pinned Docker kicad-cli under KCT_KICAD_DOCKER=1
+- **PR #7802**: fix: fall back to pair centreline/per-leg tuners when mirror finds no N-side host
+- **PR #7800**: ci: gate board 07 --differential-pairs routing against a ratcheting baseline
+- **Issue #7818** (closed): Board 07 --differential-pairs: MIPI_DAT1 P/N vias placed 0.462 mm hole-to-hole (< 0.5 mm)
+- **Issue #7817** (closed): deploy-site.sh: selects Docker when it's installed but not running, then publishes stale renders
+- **Issue #7815** (closed): Board 07 --differential-pairs: DDR_DATA_BYTE_0 group retune unattainable (10.9 -> 5.9 mm), which discards the MIPI/TMDS group retune
+- **Issue #7810** (closed): KCT_KICAD_DOCKER=1 kct render silently uses host kicad-cli when one is installed
+- **Issue #7808** (closed): Board07 DQS: measure the merged via-hairpin collapse and finish order-independent DQS skew (split from #7782)
+- **Issue #7805** (closed): Board-07 skew/impedance regression from mirror-miss pair fallback (PR #7802 review)
+- **Issue #7799** (closed): kct route --length-match-groups never tries pair fallbacks on coupled rails (no_suitable_segment)
+- **Issue #7795** (closed): CI never exercises board 07's --differential-pairs path, so green board 07 jobs prove nothing for coupled-routing changes
+- **Issue #7790** (closed): Board 07 coupled geometry: DQS pair retune no-op and MIPI/TMDS residual skew after retune_pcb
+- **Issue #7769** (closed): Board07 DQS polarity-swap pair: no pose candidate, coupled skew 2.0 mm untunable
+- **Issue #7767** (closed): Board07 MIPI_DAT1 coupled pair keeps 0.31 mm skew: pose search fails and inline tuner gates on 0.5 mm max_length_delta
+- **Issue #7689** (closed): Site and readiness renders use the pinned or embedded model set and fail on incomplete 3D coverage
+- **Issue #7650** (closed): board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475)
+- **PR #7807**: docs(research): measure --reserve-pour-only-passives across boards 03-07
+- **PR #7804**: fix: retune HDMI_TMDS_LANES group in board 07 recipe and drop its allowance
+- **PR #7803**: refactor: dedupe coupled skew-limit lookup and cover gate, selection and swap routing
+- **PR #7801**: fix: anchor retune insertions after the net's last block by file offset
+- **PR #7784**: fix(router): collapse via hairpins in committed coupled legs
+- **Issue #7797** (closed): diffpair_routing: dedupe the skew-limit lookup and close the test gaps from the #7771/#7772/#7773 reviews
+- **Issue #7796** (closed): retune writer appends new copper after a net's last via, not its last block, so the read-order mismatch can return
+- **Issue #7794** (closed): router: measure --reserve-pour-only-passives across boards 03-07 and confirm board 05 pad-edge via (split from #7573)
+- **Issue #7782** (closed): Board07 DQS: joint-search via hairpins make kct check skew depend on segment order
+- **Issue #7550** (closed): Board 07 synthetic fixture: 6 diff pairs + 2 match groups over skew tolerance on the seed-42 re-route (identity-allowed in check_matchgroup_coverage.py)
+- **PR #7792**: fix: measure retune copper in board-file order so over-limit pairs are tuned
+- **Issue #7798** (closed): Committed boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb is stale: it has no TMDS/MIPI nets
+- **Issue #7785** (closed): Verify pair group tuning on board 07's coupled --differential-pairs geometry
+- **Issue #7573** (closed): router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved)
+- **PR #7779**: fix(board07): retune TMDS_D1 pair skew and delete its gate allowance
+- **PR #7786**: fix: match board 07 MIPI lanes by flattening staircase legs and tuning pairs first
+- **Issue #7766** (closed): Board 07: DDR_DATA_BYTE_0 / MIPI_CSI_LANES group skew — pair members have no mirrorable N-side host for the group tuner
+- **PR #7783**: fix(router): fuse stepped joint-search pair legs before the in-router skew tune
+- **PR #7781**: test: match DDR_DATA_BYTE_0 in board 07 retune step
+- **PR #7778**: fix: gate retune skew bumps against foreign pads using the host's existing gap
+- **Issue #5784** (closed): Epic: adopt measured KiCadRoutingTools techniques (oracle completion, pose diff-pair search, N+1 rip-up)
+- **PR #7773**: fix: gate inline diff-pair length match on the enforced skew limit
+- **PR #7772**: fix(router): report explicit pose decline reason for polarity-swapped diff pairs
+- **PR #7771**: fix(router): prefer the coupled candidate that meets the pair's skew limit (#5333)
+- **PR #7770**: chore(ci): re-point board 07 MIPI/DDR group skew allowances to #7766
+- **Issue #7611** (closed): Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance
+- **Issue #7349** (closed): Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
+- **Issue #7669** (closed): bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow
+- **Issue #5798** (closed): [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
+- **Issue #7768** (closed): Match-group tuner cannot lengthen coupled diff pairs: no corresponding N-side segment (board07 flag-on)
+- **PR #7591**: feat: gate diff-pair skew bumps on excursion, jog width and source proximity
+- **Issue #7521** (closed): Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
+- **PR #7763**: feat: DRC-check retune-lengths output, remove inherited-near-miss opt-in
+- **Issue #7760** (closed): retune-lengths: run DRC after writing, then drop allow_inherited_near_miss opt-in
+- **PR #7761**: chore(loom): resync installed Loom to v0.19.1205
+- **PR #7759**: fix(router): bump-tune a coupled pair's skew when the inline comb is rejected
+- **Issue #7269** (closed): board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
+- **Issue #6858** (closed): router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
+- **PR #7757**: fix(board03): route and commit the USB MCU pair at one width (0.25 mm, 93 ohm)
+- **Issue #7256** (closed): board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275)
+- **PR #7756**: docs(router): pin dormant impedance sizing for explicit targets without a stackup
+- **Issue #7755** (closed): router: explicit target_diff_impedance leaves impedance sizing dormant on the CLI path, and the resolver sizes every pair for F.Cu
+- **PR #7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
+- **Issue #7612** (closed): Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
+- **Issue #7833** (closed): expand_route_experiment: flag rows whose route oracle stage failed (kicad-cli OOM 137 / docker unreachable) as unverified
+- **Issue #7829** (closed): test: test_docker_prefix_mounts_models_only_when_given is not hermetic (fails with a synced model cache)
+- **Issue #7716** (closed): router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s)
+- **Issue #7687** (closed): Parametric 3D model generation for standard-package gaps (CadQuery, optional extra)
+- **Issue #7619** (closed): Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew
+- **Issue #6730** (closed): boards 03/07: regenerate routed artifacts under kicad-cli-exact length (USB_D 1.246 mm, ADDR_BUS 1.0998 mm skew)
+- **Issue #5410** (closed): router: refine dynamic route halo rejection with physical clearance checks
+- **Issue #5333** (closed): Board07 coupled pre-pass exhausts all seven pair searches despite valid corridor guides
+- **Issue #5286** (closed): Board07 full recipe exports seven unexpected signal opens and clearance failures after stage-budget integration
+- **Issue #5240** (closed): CI runtime: reduce measured Test, Board06 E2E and diff-pair regression job medians
+- **Issue #5164** (closed): Stage and validate native zone refill for Board 07 via repairs before restoring CI
+- **Issue #3438** (closed): router: board 07 stuck at 28/31 — negotiated router cannot complete parallel pad-array bundles (DDR bundle ALONE routes 9/11)
+
+### 2026-10-21
+
+- **PR #7742**: feat: add kct export --spec and pass project.kct from board generators
+- **Issue #7754** (closed): Lattice coupled search: offset-aware turn spacing so the balanced 06b LVDS centerline survives finish()
+- **Issue #7741** (closed): regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle
+- **Issue #7721** (closed): router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649)
+- **PR #7751**: fix(board07): move U4 TMDS balls to the J2-facing column so TMDS_D0_N routes
+- **Issue #7557** (closed): Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673)
+- **PR #7749**: fix(boards): gate board 02 route_demo and board 05 legacy recipe on kct export
+- **Issue #7746** (closed): Gate route_demo.py (board 02) and legacy_drv8301/design.py (board 05) exports through the shared pipeline gate
+- **Issue #7186** (closed): kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement)
+- **PR #7744**: fix: gate board recipes on manufacturing export result
+- **Issue #7740** (closed): board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
+- **PR #7739**: test(board00): assert the manufacturing bundle exists before kct check
+- **PR #7736**: feat(check): default-on model_coverage with full demo-board 3D coverage
+- **Issue #7738** (closed): main: test_board_00_simple_led::test_no_connectivity_errors fails
+- **Issue #7685** (closed): Bring every demo board to 100% 3D model coverage on the pinned model set
+- **PR #7734**: ci: add host-vs-pinned render model coverage parity check
+- **PR #7726**: feat: price net signed turning in the coupled lattice pair search
+- **PR #7730**: fix: emit lattice pair legs wider than pitch to survive 4-decimal serialization
+- **Issue #7729** (closed): 06rf lattice bench: kct check reports 12 diffpair_clearance_intra on the seed-42 route (revision expected at most 4)
+- **PR #7732**: feat: gate kct render and deploy-site on 3D model coverage
+- **PR #7724**: feat: fetch pinned, sha256-verified KiCad 3D model subset (kct models sync)
+- **PR #7725**: feat(pcb): LCSC 3D models at catalog scale with per-user opt-in guards
+- **PR #7723**: fix: escape KiCad strings in sch set-footprint/set-value and S-expression writers (#7648)
+- **PR #7722**: chore(tooling): update Repo Skills 0.24.3→0.24.7
+- **PR #7720**: test(board03): pin the arm C route's USB_D via parity end to end
+- **PR #7718**: fix(board03): re-derive copper from the arm C route and retire the USB_D via-count exception
+- **Issue #7683** (closed): Pinned 3D model set for the pinned KiCad toolchain (`kicad-packages3D` by tag and digest)
+- **Issue #7624** (closed): router: recover 06rf USB3_RX1/RX2 coupling at J1 after #7517 corridor competition (Q29 tracked regression)
+- **Issue #7686** (closed): LCSC/JLCPCB model pipeline at catalog scale: BOM-driven C-numbers, content pinning, auto-registered transforms, terms-respecting fetch
+- **Issue #7666** (closed): site: gallery shows stale or raw board identity: unchecked board.json age, PCB file stems as titles, and board 07 still titled "DRAFT"
+- **Issue #7648** (closed): `sch_set_footprint` corrupts sheets (footprint used as a `re.sub` template, unescaped, universal-newline round trip); S-expression writers emit raw `\r`; `Footprint.to_sexp` escapes nothing
+- **Issue #7713** (closed): board 03: re-derive the committed copper from the arm C route and retire the #7108 USB_D via-count exception
+- **Issue #7580** (closed): router: finish diff-pair via-count parity (continuation of #7093)
+- **PR #7712**: fix(zones): skip auto-pour on boards with legacy-named copper layers
+- **PR #7707**: fix(board04): move corner-seated C10.2/C11.2 GND welds clear of SMT lands
+- **PR #7697**: chore: register 3D-model neighbours in the ecosystem registry
+- **Issue #7708** (closed): bug: pocketbeagle zero-touch route raises 'Layer In1.Cu is not available' with empty declared layers; beagleconnect_freedom ends below input connectivity
+- **Issue #7704** (closed): main red: Slow Tests — test_board_04_drill_clearance_regen fails (manufacturing-requirements.json missing in temp dir) since 2026-10-20T20:04Z
+- **Issue #7694** (closed): chore: add ecosystem registry entries for the 3D-model neighbours
+- **PR #7715**: docs(board07): audit wall-clock limits under deterministic-budget
+- **PR #7714**: fix(route): name schema-2 migration step and surface load error on total failure
+- **PR #7709**: feat: add 2026-10-21 external benchmark collection from the workflow run
+- **PR #7706**: chore(board03): re-issue kct-check evidence for the re-landed #6554 pairing
+- **PR #7695**: feat: audit 3D model coverage per footprint with shared classifier
+- **PR #7693**: feat: existence-check 3D model refs and add ensure_models for generators
+- **PR #7681**: fix(boards): drop DRAFT from board 07 titles and re-issue readiness
+- **PR #7660**: fix(router): stop counting tied iterations as progress for patience
+- **Issue #7711** (closed): route: accept or migrate schema-2 net_settings instead of aborting every layer attempt
+- **Issue #7710** (closed): board 07 match-group CI gate is load-sensitive: wall-clock budgets survive --deterministic-budget and reach sits exactly at the required 30/31
+- **Issue #7705** (closed): main red: Slow Tests — board 03 readiness --verify rewrites committed readiness-verification/kct-check.json (diff-pair figures drifted)
+- **Issue #7684** (closed): Model insertion that cannot regress: existence-checked `add-3d-models` tiers, generators own their models, and a regeneration guard
+- **Issue #7682** (closed): 3D coverage audit: count footprints, not refs, in `kct check`, `kct render` and `kct fleet status`
+- **Issue #7675** (closed): Board 07: remove DRAFT from titles and re-issue readiness
+- **Issue #7663** (closed): site: publish main to kicad-tools.org: live site is v0.20.0 from 2026-09-12
+- **Issue #7659** (closed): test flake: test_route_entry_path_goldens partial-rule_relaxation times out — follow-up to #7626
+- **PR #7701**: fix: read only top-level uuid when loading schematic hierarchy
+- **Issue #7699** (closed): schema: root sheet UUID in HierarchyBuilder._load_schematic uses recursive find("uuid"); a root without a top-level uuid picks up a nested one
+- **PR #7698**: ci: add dispatch-only external benchmark re-run workflow
+- **PR #7671**: ci: run site test/check/build/check-links on site-relevant PRs
+- **Issue #7665** (closed): ci: build and test site/ in CI: site-only PRs and Dependabot bumps merge without running vitest, astro check or the build
+- **PR #7680**: fix(readiness): stop fingerprinting board renders as evidence
+- **Issue #7678** (closed): site: deploy-site.sh re-renders committed board images, invalidating readiness evidence: 5 ship-ready boards publish as "Readiness unverified"
+- **PR #7661**: fix(schema): give every placement of a repeated sheet its full subtree (#7616)
+- **Issue #7616** (closed): Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet
+- **PR #7672**: ci: add warn-only weekly live-site drift check
+- **Issue #7664** (closed): site: detect when kicad-tools.org falls behind main (weekly drift check + release-checklist step)
+- **PR #7677**: fix: show schematic title in gallery headings and flag stale board.json
+- **PR #7692**: docs: commit the 3D model coverage research note and index it
+- **Issue #7691** (closed): docs: commit the 3D model coverage research note and index it
+- **PR #7676**: fix: refresh routing-status page context and silence companion-file loader warnings
+- **Issue #7668** (closed): site: refresh routing-status page text and bind reviewed context to the 2026-09-15 BeagleConnect run
+- **PR #7673**: feat(site): expand homepage capability cards and test README anchors
+- **PR #7674**: fix: add 404 page so missing site paths return 404 instead of the homepage
+- **PR #7653**: chore(deps): Bump certifi from 2025.11.12 to 2026.10.19
+- **PR #7658**: docs: add opt-in route flag graduation rule and entry-path warning tests
+- **Issue #7670** (closed): site: refresh homepage capabilities for v0.21–v0.24: sign-off/readiness, agent skills across harnesses, lattice diff-pair and length tuning
+- **Issue #7667** (closed): site: add a real 404 page: unknown URLs return the homepage with HTTP 200
+- **Issue #7401** (closed): router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
+- **Issue #7657** (closed): route: opt-in flag graduation doc and step-2 leftovers (follow-up to #7377)
+- **PR #7475**: fix(router): rank gateway combos that leave a neighbour's escape via site open first
+- **Issue #7491** (closed): router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
+- **Issue #7463** (closed): board 03 arm C: VBUS U2.5 left unconnected (keepout-constrained escape next to USB_D U2 pads); last gate before re-deriving board 03 under #7093
+- **Issue #7377** (closed): route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path
+- **PR #7644**: refactor(route): build route_all_negotiated kwargs once for all seven call sites
+- **PR #7643**: fix(schema): resolve sub-sheets against the containing sheet's folder (#7614)
+- **Issue #7614** (closed): `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently)
+
+### 2026-10-20
+
+- **PR #7642**: fix: share one library-flag power-symbol predicate across BOM, footprint gate, parser and fix-annotation
+- **PR #7640**: test: cut each test DRC's fp-lib-table to its board's libraries; measure conformance seeds once
+- **PR #7639**: fix: list each placement of a repeated sheet in the BOM
+- **Issue #7637** (closed): Unify schematic power-symbol predicates with BOMItem.is_power_symbol's (power)-flag rule
+- **Issue #7645** (closed): main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac
+- **PR #7646**: test(router): close the corridor under the extra-parity wall fixture
+- **PR #7651**: chore(deps): Bump vite from 8.2.1 to 8.3.4 in /site
+- **Issue #7583** (closed): board 06: impedance finding on USB2_D- once the native pad test applies per-pad classes (follow-up to #7569)
+- **PR #7601**: fix(router): measure foreign pads at true width in coupled pair legs
+- **PR #7635**: fix: accept KiCad 6 Sheet file/Sheet name spellings in all sheet walkers
+- **PR #7631**: fix(route): run stitching, failed-net export and parity summary on every tail
+- **PR #7629**: test(route): name the differing field in entry-path golden drift failures
+- **Issue #7597** (closed): lattice: verify pair legs at true width against foreign pads too (#7571 follow-up)
+- **Issue #7617** (closed): Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist)
+- **Issue #7626** (closed): test flake: test_route_entry_path_goldens partial/* drift on Test job
+- **PR #7638**: fix(bom): drop (power)-flagged symbols and filter virtual parts in every format
+- **PR #7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
+- **PR #7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias
+- **PR #7584**: fix(router): native pad test applies each pad's own net-class clearance
+- **PR #7517**: fix(router): judge lattice pad keep-outs against the true pad outline
+- **Issue #7618** (closed): router: keep coupled-pair J1 pad-to-via escape legs off the wrong-gap coupling window (06rf impedance, from PR #7517)
+- **Issue #7615** (closed): Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library
+- **Issue #7602** (closed): stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05)
+- **Issue #7569** (closed): C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule)
+- **Issue #7503** (closed): Lattice router: pad-clearance check uses a square around pads, not the true outline (board 03 VBUS, #7463)
+- **PR #7609**: fix: truncate GitHub Release body to stay under the 125k-char limit
+- **Issue #7608** (closed): release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
+- **PR #7633**: test: black-box probes of KiCad tuning-pattern partner exclusion (Q31)
+- **Issue #7632** (closed): Q31 probe: does KiCad's tuning-pattern exclusion cover the partner leg beside a skew bump?
+- **PR #7622**: test: key partial route-entry goldens by CPU architecture
+- **PR #7570**: fix(router): pose search measures partner pads; board 06 USB3_RX1 keeps its corridor (#7491)
+- **Issue #7621** (closed): test: route entry-path goldens (partial-*) drift on Linux CI; every PR Test job red since #7599
+- **PR #7620**: chore: re-point DQS and TMDS_D1 skew allowances to via-imbalance tracker
+- **Issue #7613** (closed): Board 07 fixture: DQS and TMDS_D1 diff-pair skew declined by gap tightening (declined:skew)
+- **PR #7607**: ci: raise Test job timeout to 120 min (stopgap for #5240)
+- **PR #7606**: fix: stop merge_collinear_same_width fusing collinear fold-backs
+- **PR #7596**: fix: tuner neighbour clearance honours authored net-class floors
+- **PR #7578**: fix(impedance): ignore sub-width partner overlaps as coupled runs
+- **PR #7576**: fix(router): re-route crossing lattice diff-pair extras jointly for via parity
+- **Issue #7605** (closed): merge_collinear_same_width fuses a collinear fold-back and loses copper (#7600 follow-up)
+- **Issue #7594** (closed): Match-group tuner resolves power nets to Default class instead of their mapped class (AUX)
+- **Issue #7575** (closed): kct check impedance rule judges a 0.1 mm pad-escape stub as a coupled diff-pair run
+- **PR #7582**: chore(release): v0.24.0
+- **PR #7600**: fix(board06): fuse pair-leg grid steps so the skew tuner can host a trombone
+- **PR #7599**: test(route): golden harness for kct route's four entry paths (#7377)
+- **PR #7598**: docs(router): drop the closed square-meander divergence from #7546's rationale
+- **PR #7571**: fix(router): verify lattice pair legs at their true width against other nets' copper
+- **PR #7585**: fix(board06): length-match diff pairs with the checker-limit skew tuner
+- **PR #7589**: test: run kicad-cli on tmp fixture copies; smoke hash names fixture diffs
+- **PR #7579**: feat(router): drained-frontier exit for bidirectional A*, opt-in bidirectional Python fallback (#6527)
+- **PR #7595**: chore(loom): resync installed Loom to v0.19.1196
+- **PR #7592**: fix(router): hold match-group meanders to the tuned net's own class; enable board 07 length matching
+- **PR #7590**: fix: pair diff-pair primitives by probe-end coverage, matching kicad-cli
+- **PR #7574**: fix(router): reserve plane-via sites for pour-only 2-pad parts
+- **PR #7587**: fix(router): report hybrid pair-rule failures with blockers; document lattice --seed (#7586)
+- **PR #7572**: feat(router): sourced per-class intra-pair skew limits (Q16)
+- **PR #6661**: fix(diffpair): reproduce KiCad's primitive pairing in uncoupled length
+- **PR #7581**: docs(research): audit clearance-kernel epic acceptance against existing evidence
+- **PR #7564**: feat(router): chamfered trombone corners and an honest plain fallback (#7546)
+- **PR #7568**: chore(schematic): declare paper attribute on SchematicIOMixin for mypy
+- **PR #7555**: ci: tighten board 07 known-opens set to TMDS_D0_N
+- **PR #7563**: fix(release): mint a fresh App token before each writing release phase
+- **PR #7566**: chore(tooling): update loom 0.19.1193→0.19.1194
+- **PR #7556**: ci: key the board 06/07 synthetic-fixture DRC gates by identity (#7367)
+- **PR #7562**: chore(release): keep release PR body under GitHub's 65,536-char limit
+- **PR #7551**: fix(router): via-parity pass for lattice diff-pair extra-pad attachments
+- **PR #7558**: docs(board07): record TMDS_D0_N blocking reason on the 30/31 layout
+- **PR #7461**: fix(router): re-fit match-group meander amplitude so a member never ends past the target
+- **PR #7533**: chore(release): close changelog gaps for #7402 and #7472
+- **PR #7553**: ci: tighten board 05 blocking-net gate from <= 7 to == 0
+- **Issue #7593** (closed): ci: pinned kicad-cli meander-divergence tests fail on main (test_chamfered_bumps_7546, test_uncoupled_tuning_pattern_7521)
+- **Issue #7543** (closed): router: coupled search places pair vias too close to neighbouring pairs once exact pad outlines open corridors (blocks #7517)
+- **Issue #7588** (closed): Flaky: test_mcp_tool_smoke[export_assembly] 'modified the checked-in fixtures' (release PR #7582)
+- **Issue #6527** (closed): router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it
+- **Issue #7423** (closed): Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
+- **Issue #7565** (closed): Black-box spec: KiCad diff-pair primitive pairing from kicad-cli probes only
+- **Issue #7586** (closed): router: hybrid pair-rule failure reporting + lattice --seed docs (#7580 items 2, 4)
+- **Issue #6554** (closed): diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
+- **Issue #7577** (closed): Audit clearance-kernel epic acceptance against delivered evidence
+- **Issue #7567** (closed): Type Check gate fails on main: io_mixin.py "Cannot determine type of paper" [has-type]
+- **Issue #7093** (closed): router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+- **Issue #7552** (closed): Board 07 E2E: exact known-opens set (5 nets) fails now that the recipe leaves only TMDS_D0_N open; blocks BOARD_07_CI_ENABLED
+- **Issue #7559** (closed): release-pr.yml: App token expires during the ~1h CI wait, so the gate fails with 401 after CI goes green
+- **Issue #7367** (closed): Key the board 06/07 synthetic-fixture DRC gates by identity: drop routed-drc-tolerance 18/8 and DIFFPAIR_VIOLATION_BASELINE (unblocks BOARD_07_CI_ENABLED; extends #7359)
+- **Issue #5508** (closed): Epic: pad-access invariant — no committed route may strand an unrouted pad
+- **Issue #7561** (closed): release_plan.py: release PR body exceeds GitHub's 65,536-char limit (422), so v0.24.0 PR can't open
+- **Issue #7554** (closed): Board 07 seed-42 re-route: TMDS_D0_N open (30/31)
+- **Issue #7532** (closed): Release gate: add changelog fragment for #7402 and mark #7472 internal (unblock v0.24.0)
+- **Issue #7547** (closed): CI: tighten board 05 blocking-net gate from <= 7 to 0 (or identity-keyed)
+- **PR #7544**: fix(boards): stop committing kct readiness --verify receipts
+- **PR #7542**: feat(check): leave KiCad tuning patterns out of the uncoupled measure (#7521)
+- **PR #7541**: fix: create output dir before ampacity sidecar write; update resolver no-sidecar premise (Closes #7539)
+- **PR #7540**: chore(loom): resync installed Loom to v0.19.1193
+- **PR #7538**: docs: reassess pad-access expansion and recommend deferring lattice/mesh port
+- **PR #7537**: fix(boards): make refresh_readiness a fixed point on unchanged evidence
+- **PR #7530**: fix: guard POSIX-only O_NOFOLLOW/O_DIRECTORY in JLC upload ledger
+- **PR #7516**: fix: snap schematic block ports to the grid so off-grid origins stay wired
+- **Issue #7539** (closed): main red after #7500: net_class_map.json sidecars break resolver test and board partial-route fast-fail tests (blocks v0.24.0)
+- **Issue #7536** (closed): kct readiness --verify receipts (readiness-verification/**) don't reproduce: environment-dependent provenance/BOM fields, stale on board 00
+- **Issue #7534** (closed): [Epic #5508] Reassess pad-access expansion against current failures and product value
+- **Issue #7529** (closed): JLC upload ledger uses POSIX-only os.O_DIRECTORY / O_NOFOLLOW; AttributeError on Windows (found in #7527 review)
+- **Issue #7510** (closed): Schematic blocks: ports misplaced at off-grid origins (grid-snap mismatch)
+- **Issue #7402** (closed): Schematic blocks: phantom/off-pin ports and broken defaults found by the real-symbol smoke test (#7399 follow-up)
+- **Issue #7384** (closed): Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards
+- **Issue #7026** (closed): board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
+
+### 2026-10-19
+
+- **PR #7535**: feat(router): write diff-pair skew bumps as KiCad tuning patterns (#7521)
+- **PR #7531**: chore(loom): resync installed Loom to v0.19.1191
+- **PR #7527**: fix: fsync atomic-write tmp files through a writable handle (Windows PCB.save EBADF)
+- **PR #7525**: fix(dsn): export circle, oval, rotated and custom pad copper as real shapes
+- **PR #7524**: fix: skip pad net_name unpersisted-edit check for number-only net nodes
+- **PR #7522**: docs: add diff-pair skew compensation note and enforce research index coverage
+- **PR #7515**: fix(board03): keep fresh-route tracks off C11.2's lower thermal spoke
+- **PR #7514**: fix: make JTAG header, UCC27211 driver and USB ESD blocks build with defaults
+- **PR #7513**: fix: anchor schematic block ports to real pins/wires, drop phantom aliases
+- **PR #7504**: fix: point board 03 via-in-pad exception at its open follow-up issue
+- **PR #7502**: fix(router): gap-tightening never worsens pair skew or uncoupled length
+- **PR #7500**: feat(check): declared spec currents make ampacity coverage unknown until mapped to nets
+- **PR #7494**: fix: detect versioned Windows KiCad 9/10 installs
+- **Issue #7520** (closed): docs/research: add diff-pair skew-compensation note and a README index for all research notes
+- **Issue #7519** (closed): PCB.save() falsely refuses an unedited board whose pads use nameless numbered nets (net N)
+- **Issue #7508** (closed): Schematic blocks: fix DebugHeader jtag and UCC27211 defaults, wire USB ESD TVS
+- **Issue #7507** (closed): Schematic blocks: fix phantom ports in CAN ESD, I2CPullups, gpio pull resistor, BackToBackFETPair
+- **Issue #7498** (closed): board 03: fresh native-clearance lattice plan replays LVS-clean but leaves one starved_thermal on C11.2 (GND, F.Cu)
+- **Issue #7484** (closed): DSN export: `custom` pads are written as their anchor rectangle only (primitives ignored); round, oval and rotated pads also collapse to an axis-aligned rectangle
+- **Issue #7480** (closed): Windows: `find_kicad_cli()` and `detect_kicad_library_path()` only probe KiCad 7.0/8.0 install paths, so KiCad 9 and 10 are not found
+- **Issue #7478** (closed): `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0)
+- **Issue #7206** (closed): Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness
+- **PR #7512**: fix: anchor GateDriverBlock ports to real driver pins
+- **Issue #7509** (closed): Schematic blocks: GateDriverBlock ports match no pin and add no wires
+- **PR #7511**: fix: clamp BarrelJackInput P-FET Vgs with a gate resistor and Zener
+- **Issue #7489** (closed): BarrelJackInput: 12 V default exceeds the Si2301 P-FET's gate-source rating (gate tied straight to ground)
+- **PR #7495**: fix: polygonize Edge.Cuts into a valid DSN boundary with cutout keepouts
+- **Issue #7482** (closed): DSN export: board boundary is built from Edge.Cuts `gr_line` endpoints in file order, giving a self-intersecting outline (and arcs, circles and polygons are ignored)
+- **PR #7499**: fix: write pad geometry through to the S-expression tree and refuse unpersisted edits on save
+- **Issue #7479** (closed): `Pad.size` / `Pad.drill` assignments are not written back: `PCB.save()` silently keeps the old values
+- **PR #7497**: fix: export NPTH holes as DSN image keepouts and drop non-copper pads
+- **Issue #7483** (closed): DSN export: `np_thru_hole` pads fall into the SMD branch and are written as a square pad on layer `*.Cu`; Freerouting rejects the layer, so mounting holes are no obstacle
+- **PR #7496**: fix(export): place DSN pins on their KiCad pads for rotated and back-side parts
+- **Issue #7481** (closed): DSN export: pins of ±90° footprints and of back-side footprints land in the wrong place in Freerouting (y not negated, rotation sense not converted)
+- **PR #7476**: fix: surface pair via-parity failures in kct route and align the audit with kct check
+- **Issue #7425** (closed): Surface pair via-parity failures in kct route summary/JSON; align audit pair set with kct check (#7421 follow-up, #7093 AC1)
+- **PR #7490**: fix(blocks): reverse-polarity P-FET drain on the input; VoltageDividerSense over VoltageDivider
+- **Issue #7399** (closed): Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
+- **PR #7493**: fix: number DSN structure layers by stack order
+- **Issue #7485** (closed): DSN export writes `(property (index 0))` for every layer instead of the layer's stack position
+- **PR #7501**: fix(boards): include THT rows in board 04/06 JLCPCB packages; retire board 04 manual BOM
+- **Issue #7268** (closed): Regenerate JLCPCB packages of boards 02-07 with THT rows (follow-up to #7239)
+- **PR #7457**: fix: widen board 03 usb_geometry launch window for via-in-pad launches
+- **PR #7469**: fix(check): add board 04 courtyards (Y1 moved to clear C2) and flag courtyard-less footprints as courtyard_missing
+- **Issue #7084** (closed): router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
+- **Issue #7204** (closed): DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged)
+- **PR #7486**: fix(boards): refresh board 05 report via its producer, keep reviewed net-class rules
+- **PR #7465**: fix: delete stale board 04 native-drc.json and check for unbound DRC reports
+- **PR #7439**: fix(export): place THT parts at pad-bbox centre in JLCPCB CPL
+- **Issue #7464** (closed): Stale unbound native-drc.json copies in boards/*/output/ (board 04 top-level dated 2026-09-10); delete or bind
+- **Issue #7433** (closed): JLCPCB CPL exports THT pin headers at pin 1 instead of body centre (~8.9 mm off on 1x8); affects boards 02-07 THT rows
+- **Issue #7391** (closed): Board 05: refresh report.md/pdf via its producer (still says THT parts excluded from CPL; #7241/#7383 follow-up)
+- **PR #7455**: fix(readiness): give board 04 drc_targets so refresh re-pins its native-drc.json
+- **Issue #7435** (closed): refresh_readiness: board 04 has no drc_targets, so nothing re-pins its native-drc.json
+- **PR #7473**: ci: restore import-not-found nanobind entry in mypy baseline
+- **Issue #7472** (closed): main red: mypy-baseline.txt dropped the nanobind import-not-found line, failing test_baseline_keeps_both_nanobind_signatures
+- **PR #7470**: fix: measure escape-via mask-dam distance in the pad's rotated frame
+- **Issue #7467** (closed): Router escape mask-dam gate ignores residual pad rotation
+- **PR #7462**: fix(router): equal vias for crossed lattice fallback diff-pair legs (#7093)
+- **Issue #7322** (closed): Stitcher and pour-repair/escape via placement ignore the mask-dam floor (follow-up to #7296)
+- **PR #7459**: fix: keep stitch and escape vias out of the SMD mask-dam zone
+- **PR #7452**: build(deps-dev): Bump cmake from 4.4.3 to 4.4.4
+- **PR #7451**: build(deps): Bump the uv-minor-patch group across 1 directory with 4 updates
+- **PR #7438**: refactor(boards): run board 03 readiness receipt in-process via readiness_cmd.main
+- **PR #7428**: fix(blocks): wire OpAmpBlock and multi-channel ESD array to real pins
+- **Issue #7410** (closed): Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist)
+- **PR #7454**: build(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
+- **PR #7448**: fix: compare pin-header pin count in LCSC package guard
+- **PR #7447**: test: pin board 06's reviewed PZ254V header sourcing (fix main red)
+- **PR #7443**: feat: show per-run decline reasons in gap tightening and refresh board 07 sidecar
+- **PR #7432**: fix(router): give lattice hybrid legs a via-parity (mirrored) search (#7093)
+- **PR #7308**: fix(router): refuse vias in the mask-dam zone beside SMD pads; clear boards 02/05/06
+- **Issue #7445** (closed): main red: board 06 BOM/LCSC tests fail since #7426 (PZ254V headers C492401/C492407)
+- **Issue #7220** (closed): DFM: kct check is blind to thermal asymmetry its own solid-connect repair creates (13 passives, 4 PTH pins) and to via drills at SMD pad edges
+- **Issue #7296** (closed): Router: refuse pad-edge vias (mask-dam floor) and move existing ones on boards 02/05/06 (split from #7220, PR3)
+- **Issue #7446** (closed): LCSC package guard: pin-header row x pin count is not compared (2-pin part on 8-pin header passes)
+- **PR #7430**: test(readiness): verify every committed-ready board still verifies ready
+- **PR #7434**: fix(router): keep the shortest workable gateway combo; reject pass-under polarity crossings (#7362)
+- **PR #7429**: fix(board03): keep thermal relief on the six GND pads flagged thermal_asymmetry
+- **PR #7426**: fix(boards): swap board 06 Samtec headers for LCSC-stocked PZ254V headers
+- **PR #7417**: fix: forward the export's schematic to the report ERC audit
+- **Issue #7355** (closed): kct readiness --verify doesn't honour board 04's recorded #6269 exception: blocks on 24 paid-drill via errors while the committed record says ready
+- **Issue #7441** (closed): Board 03 tier-1 route: USB_D length regressed to 19.8 mm after #7101 (usb_geometry 16 mm bound)
+- **Issue #7422** (closed): Board 06: substitute LCSC-stocked connectors for Samtec J1–J3 so JLCPCB can assemble them (#7268 Q2 ruling)
+- **Issue #7362** (closed): main regression from #7324: board 03 fresh route USB_D 16.3→19.7 mm after 0.22 mm In2.Cu net class; tier-1 common-run test red
+- **Issue #7275** (closed): board 03: fix the 6 real thermal_asymmetry findings via recipe and drop the pinned allowance
+- **Issue #7153** (closed): kct export bundle inconsistencies: JLCPCB Gerbers omit paste layers for SMT bundles; board 04 manifest says DRC OK while report says FAIL/NOT_READY; report ERC falsely 'skipped by user request'
+- **PR #7424**: refactor: stop pintype annotator writing native-drc.json evidence
+- **Issue #7409** (closed): Gate annotate_pintypes_6025.py's native-drc.json writes through repin_staged (#7358 allowlist)
+- **PR #7421**: fix(router): report every diff pair committed with unequal via counts (#7093)
+- **PR #7419**: fix: re-pin board 04 exception with its 24 error identities
+- **PR #7406**: test: ratchet board evidence producers onto the gated re-pin path
+- **Issue #7358** (closed): Evidence producers: gate-parity ratchet test, one registered re-pin path per ready board (#7353 step 4)
+- **PR #7361**: feat: honour an exact errors allowance on exception known issues in kct readiness
+- **PR #7350**: feat(router): length-aware choice among via-parity fallback leg pairs (#7093)
+- **PR #7413**: test: pin historical board 05 ERC error budget at 0
+- **PR #7408**: fix(ci): lower board 07 copper-safety DRC floor to 0
+- **PR #7396**: fix: key known_issues warning allowances by finding identity
+- **Issue #7389** (closed): Key readiness known_issues warning/error allowances by finding identity, not per-rule counts (#7359 follow-up, #7270 Q3)
+- **PR #7394**: feat: tighten diff-pair gaps in board 06/07 recipes, lower impedance caps
+- **PR #7404**: fix(blocks): build stock schematic blocks on KiCad 10 libs; add real-symbol smoke test
+- **PR #7395**: fix: clamp init netclass template values to manufacturer floors
+- **Issue #7392** (closed): kct init --design-type writes netclass values below the fab floor (oshpark/seeed Default clearance 0.15 < 0.1524 mm)
+- **PR #7400**: fix: route stock MCUBlock and OscillatorBlock copper clear of foreign pads
+- **Issue #7393** (closed): Audit MCUBlock/OscillatorBlock stock copper for foreign-pad clearance (#7062 follow-up)
+- **PR #7397**: fix(router): let a capped match-group member top up from the unused ceiling (board 07 re-measure after #7375)
+- **PR #7364**: fix(boards): share one saved-vs-refilled fill check across readiness producers
+- **Issue #7356** (closed): Evidence producers: one shared saved-vs-refilled fill-identity gate for every producer (#7353 step 2)
+- **PR #7388**: fix: rule writers keep stricter authored .kicad_pro rules (#7385)
+- **PR #7379**: refactor(geometry): delegate private point-to-segment distance copies to core (PR2 of #7224)
+- **Issue #7385** (closed): Rule files may only tighten on rewrite: kct mfr apply-rules (.kicad_pro), fab-rules apply and kct init bypass the #6191 max() policy and loosen authored rules
+- **Issue #7390** (closed): Backlog consolidation 2026-10-18: close #7199 (done), unblock #7268, clear stale building on #6554/#7153, retire #7220 with #7296
+- **Issue #7224** (closed): hermit: re-consolidate point-in-polygon (8 copies) and point-to-segment distance (2 canonical + 7 private); footprint_outside_board misjudges top/right-edge origins
+- **Issue #7062** (closed): LDOBlock internal routing shorts foreign pads and crosses itself on real SOT-23-5 geometry
+- **PR #7288**: fix: route stock LDOBlock copper clear of foreign pads
+- **Issue #7339** (closed): Board 07 seed-42 re-route: DDR_DATA_BYTE_0 match-group skew 16.7 mm (tol 0.100) exceeds MATCHGROUP_VIOLATION_BASELINE once DQ0 routes
+- **PR #7340**: ci: key board 07 match-group allowance to named groups (adds DDR_DATA_BYTE_0)
+- **Issue #7383** (closed): kct export rewrites the routed .kicad_dru and drops the managed keepout-rule block (loosens board 05 rules)
+- **PR #7387**: fix(dru): kct init merges instead of clobbering .kicad_dru; report keepout-block removal
+- **Issue #7357** (closed): Board 04: retire the three regenerate_board_04 one-off evidence scripts into a refresh_bundles BundleConfig (#7353 step 3)
+- **PR #7381**: refactor: route board 04 evidence refresh through refresh_bundles_6404
+- **Issue #7199** (closed): Committed fleet CPLs still in the pre-#7059 frame — regenerate packages + add a frame-consistency test
+- **Issue #7365** (closed): Board 02 readiness.json is stale on main: README.md edited by #7342 without re-pin
+- **PR #7371**: chore(boards): re-pin board 02 readiness evidence after README edit
+- **Issue #7359** (closed): Replace count-based CI allowances with identity-keyed exceptions (#7270 Q3 ruling): diffpair/matchgroup impedance caps, known_issues warning counts
+- **PR #7366**: fix(ci): key synthetic-board impedance allowances by net, not count
+- **PR #7386**: fix(route): one post-route pipeline for all four kct route tails (--length-match-diffpairs on the default path)
+- **Issue #7241** (closed): Boards 05 and 07: committed CPLs still in the old frame; refresh producers refuse on evidence drift (split from #7199)
+- **PR #7382**: fix(boards): put board 05 and 07 CPLs in the Gerber frame; refresh 07 routed sidecar
+- **Issue #7374** (closed): main red after #7317: board-04 tombstoning/pintype tests stale, board-04 repair deepcopy timeouts, order-dependent diffpair shadow spy
+- **PR #7378**: test: clear main's board-04 and diff-pair reds left by #7317
+- **PR #7375**: fix: visit match-group members by descending deficit
+- **Issue #7353** (closed): Consolidate board evidence producers onto one shared gate pipeline (refresh_bundles copy, 5 fill-identity impls, board-04 one-offs)
+- **PR #7363**: refactor: route refresh_bundle through refresh_readiness.repin_staged
+
+### 2026-10-18
+
+- **PR #7372**: chore(boards): regenerate 05/06/07 DRC evidence with report_sources
+- **Issue #7283** (closed): Regenerate boards 05/06/07 DRC evidence so report binding records provenance
+- **PR #7360**: feat(router): opt-in diff-pair gap tightening post-pass (--tighten-diffpair-gap)
+- **Issue #7344** (closed): Router: coupled pair trunks do not tighten to the solved intra_pair_clearance (113-125 ohm on boards 06/07)
+- **PR #7370**: test: update board 03 USB impedance test for in-band pair (#7368)
+- **Issue #7368** (closed): test: test_checker_judges_board_03_usb_pair_on_both_branches fails after board 03 USB pair narrowed to 90 ohm
+- **PR #7369**: test: drop stale board 03 Power-class and board 07 netclass allowances
+- **PR #7343**: fix(readiness): scope orphaned known-issues scan; re-save board 04 native fill
+- **Issue #7351** (closed): test_committed_pcb_drc_state (extended) fails on main: new impedance finding on unchanged board 03
+- **Issue #7337** (closed): Fleet re-verify: #7328 orphan check makes kct readiness --verify block ready boards 02/05; board 04 saved copper
+- **Issue #7312** (closed): Board 06 regression fixture: coupled USB pairs miss declared 90 ohm differential impedance (5 errors)
+- **PR #7352**: fix(boards): unpack gate_native_drc tuple in refresh_bundles_6404
+- **Issue #7348** (closed): refresh_bundles_6404.py: gate_native_drc now returns (errors, raw) since #7341; drc_violations metric becomes a tuple
+- **PR #7347**: fix: cap known impedance findings on board-07 Match-Group baseline
+- **Issue #7332** (closed): Board 07 re-route: ImpedanceRule flags MIPI_DAT1 and TMDS_D1 at 122-125 ohm on unchanged copper
+- **PR #7345**: docs: correct seven stale doc/comment claims
+- **Issue #7342** (closed): Correct 7 stale doc and comment claims left by the 2026-10-18 THT-in-CPL, assembly-tier, spec-repair, thermal-ladder and known-issue merges
+- **Issue #7323** (closed): known_issues follow-ups: refresher resolve flags, orphaned known-issues.json detection, re-pin board 03 after #7306 (#7316 follow-up)
+- **PR #7324**: fix(board03): re-size USB diff pair to 90 ohm and declare target_diff_impedance
+- **Issue #7250** (closed): kct check never compares project.kct requirements to the routed board, and records diff-pair impedance as checked without evaluating it
+- **Issue #7294** (closed): board 03: re-size USB diff pairs to 90 ohm and declare target_diff_impedance (#7250 PR-D)
+- **PR #7341**: fix: refresh_readiness writes the staged DRC report and records report_sources
+- **PR #7338**: fix: grade coupled-microstrip gap panels from strip edge to remove finite-thickness bias
+- **Issue #7164** (closed): coupled_microstrip BEM finite-thickness reads 0.5-2.5% high vs field solve
+- **PR #7334**: fix(boards): derive board 05 CPL row check from placed parts; refresh 04/05 readiness
+- **Issue #7333** (closed): main CI red (remaining): board 05 package.py asserts 36 CPL rows after #7242 THT; boards 04/05 readiness stale after #7310
+- **PR #7285**: fix: bind readiness-fallback reports to producing PCB and hash full schematic hierarchy
+- **Issue #7277** (closed): Report binding: readiness.json fallback accepts stale reports after re-run; ERC binding ignores sub-sheets (#7267 follow-up)
+- **PR #7331**: fix(board07): size the DQS pair like MIPI/HDMI and gate re-route reach
+- **Issue #7319** (closed): Board 07 fixture: #7163 field solve narrows the synthesized DQS pair to 0.175 mm, dropping DQ0 (30/31 to 29/31) and tripling Match-Group gate time
+- **PR #7328**: fix(readiness): refresher known-issue flags and orphaned known-issues.json detection
+- **PR #7326**: docs(ci): record measured gap behind Board 06 fixture impedance cap
+- **PR #7317**: fix(boards): re-fill boards 00/01/04 under the thermal-spoke ladder
+- **PR #7289**: fix(boards): gate readiness refresh on a per-board known-warning list
+- **Issue #7295** (closed): Fill repair: try narrower thermal spokes before forcing solid connections (split from #7220, PR2)
+- **Issue #7273** (closed): Board 04/05 evidence refresh refuses on main (#7220 warnings); boards 00/01/02 lack refresh configs
+- **PR #7329**: ci: gate Windows Smoke on main runs and warn on Test job time budget
+- **Issue #7327** (closed): CI: Windows Smoke never runs on main verification (== 'push' gate); Test job worst case 74.3 min vs 75 min timeout
+- **PR #7321**: fix(check): fixture folders never adopt parent board project.kct
+- **Issue #7320** (closed): main CI: Match-Group gate fails spec_conformance — fixture PCB picks up parent board's 6-layer project.kct (#7303 regression)
+- **Issue #7325** (closed): test_board_04_drill_clearance_regen fails: manufacturing-requirements.json missing from regen tmp dir (manufacturing_process.py:637)
+- **PR #7316**: feat(readiness): record known issues in readiness.json; open defects block ready
+- **Issue #7261** (closed): Ready claims omit known open defects: add readiness known_issues (via --ack-warnings sibling) surfaced by fleet status and site; drop stale board 04 status prose
+- **PR #7286**: fix: apply Hammerstad-Jensen 1980 thickness terms to microstrip Z0
+- **Issue #7076** (closed): Microstrip Z0 with copper thickness reads 1.6-3.7 % low (docstring claims 0.2 %)
+- **PR #7315**: feat(cli): one sign-off exit gate with JSON verdict/exit_code (Part B of #7230)
+- **Issue #7230** (closed): One sign-off exit-code contract: kct drc --net/--type/--category exits 0 on DRC errors, kct check JSON says passed while exiting 2, exit 2 means four things
+- **PR #7287**: feat(pcb): add waypoints and internal_pad stubs to PCBLayout.route
+- **Issue #7064** (closed): PCBLayout.route() draws a straight port-to-port line that crosses foreign pads and never reaches a pad
+- **PR #7306**: fix: judge differential-pair impedance on coupled segments
+- **Issue #7293** (closed): kct check: evaluate differential-pair impedance targets on coupled segments instead of recording impedance checked (#7250 PR-C)
+- **PR #7310**: fix(boards): accept only exact known #7220 warnings on board 04/05 gates (main CI red, #7298)
+- **Issue #7298** (closed): main CI red: #7232 thermal_asymmetry/via_at_pad_edge warnings fail board 04 gates (3 jobs + extended test) and Board 05 Routing Regression
+- **PR #7311**: fix(zones): read KiCad-saved thermal_bridge_width in starved-pad ladder
+- **Issue #7309** (closed): Regression (#7302): starved-pad repair loops forever after KiCad re-saves thermal_width as thermal_bridge_width — pads never go solid, starved_thermal ships
+- **Issue #7239** (closed): Include THT parts in JLCPCB assembly output (operator decision; JLCPCB now offers THT PCBA)
+- **PR #7242**: feat: include through-hole parts in JLCPCB CPL and BOM
+- **PR #7302**: feat: try narrower per-pad thermal spokes before forcing solid pad connections
+- **PR #7304**: feat(check): detect thin silk text, off-board silk text and obscured refdes
+- **Issue #7228** (closed): Silkscreen false-PASS: kct misses text stroke width, off-board silk and refdes under body (board 03: 6), and readiness skips text height
+- **PR #7303**: feat: add spec_conformance check comparing project.kct to the routed board
+- **Issue #7292** (closed): kct check: spec_conformance category compares project.kct requirements to the routed board (#7250 PR-B)
+- **Issue #7284** (closed): router regression from #7255: mirrored fallback leg trades unbounded skew/length for via parity (board 03 tier-1 USB_D- 15.9→20.1 mm, skew 0.54→4.57)
+- **PR #7291**: fix(router): bound the skew/length a via-parity fallback leg pair may cost
+- **Issue #7075** (closed): transmission_line.py: CPWG impedance reads 53-233 % high, and microstrip/CPWG dielectric loss is too large by a factor of eps_eff
+- **PR #7282**: fix: correct CPWG impedance and dielectric loss formulas
+- **Issue #7276** (closed): MCP export/check tools can't select fab tiers (jlcpcb-tier1) — boards 03/04 unexportable via MCP strict default (#7266 follow-up)
+- **PR #7280**: fix: accept registry manufacturer/tier ids in MCP export and DRC tools
+- **PR #7301**: test: write board-00 DRC/ERC reports in tmp_path for #7260 preflight tests (main CI red)
+- **PR #7281**: fix: measure routed intra-pair gap in ImpedanceRule instead of assuming 0.15 mm
+- **PR #7251**: fix(audit,skills): sign-off skills refuse bad boards; kct audit runs ERC on .kicad_pcb
+- **PR #7245**: fix(boards): put board 02 and 03 CPLs in the Gerber frame and add a fleet frame test
+- **Issue #7300** (closed): Main CI red: TestExportAssemblyPreflight7260 copies board-00 drc/erc reports deleted by #7190
+- **Issue #7299** (closed): main CI red: TestExportAssemblyPreflight7260 copies board-00 drc_report.json/erc_report.json that #7267 deleted
+- **Issue #7136** (closed): kct sign-off skills don't refuse bad boards: Gate 1 exits 2 on every board, kicad-cli gate exits 0 on errors, export never gets the DRC report, audit ERC never runs
+- **Issue #7079** (closed): ImpedanceRule judges every detected differential pair at a 0.15 mm gap, whatever the routed spacing
+- **PR #7279**: fix(router): post-route short check ignores input copper the writer drops
+- **Issue #7270** (closed): board 03 thermal_asymmetry: classify the findings and replace #7259's count-based allowance with a narrow one or a fix
+- **PR #7274**: test(board03): pin thermal_asymmetry allowance to the six classified pads
+- **PR #7254**: fix(boards): retune board 03 USB_D and board 07 ADDR_BUS skew in place
+- **PR #7267**: fix(export): bind auto-discovered DRC/ERC reports to board content
+- **PR #7266**: fix(mcp): route get_drc_violations and export_assembly through kct check/export gates
+- **PR #7265**: fix(boards): make board specs validate; read fab tier via load_spec
+- **Issue #7260** (closed): Consolidate MCP sign-off tools onto CLI helpers: export_assembly skips all export preflight, get_drc_violations checks every board as 4-layer
+- **Issue #7190** (closed): Fleet re-verify: no ready claim falsified, but kct export --strict-preflight passes a 6-error board on a stale committed drc_report.json; board 01 lacks kicad_tools_pwr sidecar
+- **PR #7263**: fix: invalidate routing cache on kicad_tools code and router extension changes
+- **PR #7255**: feat(router): mirrored partner-leg search for asymmetric lattice fallback legs (#7093)
+- **PR #7248**: fix: compare effective zone clearance in mfr validate
+- **Issue #7258** (closed): kct route cache key ignores router code: router changes silently replay old cached copper (needs --no-cache)
+- **Issue #7246** (closed): kct mfr validate: zone clearance should use effective clearance (board 04 false 0.100 mm errors); 7188 upgrade note layer list (#7191 follow-ups)
+- **PR #7259**: fix: unbreak main after #7220 PR1 (MFR001 lint, board 03 thermal_asymmetry)
+- **PR #7252**: fix(drc): parity NOT RUN when no schematic resolves
+- **PR #7243**: fix(export): ship JLCPCB paste Gerbers and flag DRC reports built for another mfr
+- **PR #7235**: fix(board03): move six refdes out from under their part bodies
+- **Issue #7257** (closed): test_committed_pcb_drc_state (extended tier) fails on main: #7232 thermal_asymmetry flags unchanged board 03
+- **Issue #7253** (closed): test: manufacturer-propagation lint fails on main (explain/checks/via.py:28 _no_via_in_pad_rules)
+- **Issue #7237** (closed): test flake: test_real_kicad_cli_no_schematic_is_not_run fails on Test job
+- **PR #7154**: fix: seed creepage detour from both shapes and bridge sub-X cutouts
+- **PR #7157**: feat(validate): compare component values in validate --sync; fix board 04 J1 value
+- **Issue #7058** (closed): kct creepage overstates creepage around a slot: the detour is computed between the straight-line nearest points, and narrow gaps are not bridged
+- **PR #7191**: fix(drc): one blocking-findings definition across DRC entry points
+- **PR #7244**: docs: fix six unreleased changelog upgrade fragments
+- **Issue #7188** (closed): One DRC blocking-verdict helper: kicad-drc-summary, kct mfr validate and Project.check_drc() pass boards kicad-cli fails
+- **Issue #7240** (closed): Release notes: fix 6 upgrade-fragment defects (7077 vs 7170 --mfr contradiction; missing 7198/7206 upgrade notes; 7209/7213/7230 inaccuracies)
+- **Issue #7150** (closed): board 04 J1 value SWD-6 vs SWD (schematic vs PCB) + kct validate --sync should flag value mismatches (#7147 Part B)
+- **PR #7232**: feat(check): thermal_asymmetry and via_at_pad_edge warnings; detect-mistakes reuses them (#7220)
+- **PR #7221**: fix(validate): resolve board 05 phase paths and flag zone-only ampacity nets
+- **PR #7231**: refactor(geometry): shared point_in_polygon; footprint_outside_board accepts boundary origins (PR1 of #7224)
+- **PR #7229**: fix(export): fail 008004 chips and judge LFCSP by pin pitch in assembly preflight
+- **PR #7217**: feat(export): fail preflight when stackup copper differs from the fab order
+- **Issue #7210** (closed): ampacity: path_ampacity can't resolve board 05 phase paths; zone-only nets read 'checked' vacuously (#7206 follow-ups)
+- **Issue #7227** (closed): assembly-tier preflight gaps: 008004 chips pass silently; LFCSP judged as BGA; report vs preflight bottom-side count (#7226 follow-up)
+- **Issue #7209** (closed): board 05 ampacity relies on 1 oz inner copper the fab order never requests (JLCPCB default 0.5 oz → 1186 inner segments under-width)
+- **PR #7215**: ci: print skip and xfail reasons in the pytest short summary
+- **PR #7218**: fix(pcb): keep Library:Footprint lib ID in PCB.add_footprint
+- **PR #7234**: fix(drc,validate,check): view filters never change a verdict (Part A of #7230)
+- **Issue #7214** (closed): ci: add -rs to the bulk Test step so skipped tests and reasons are visible (#7196 follow-up)
+- **Issue #7213** (closed): PCB.add_footprint drops the library nickname: fix at source, delete 3 per-board workarounds, clear board 07's 43 parity warnings
+- **PR #7226**: feat(export): enforce JLCPCB Economic/Standard PCBA tiers in preflight (#7204 part C)
+- **PR #7225**: style: ruff format board 00 generate_design.py
+- **PR #7216**: fix(boards): emit stock F.Fab body for board 00 LED so pin1 rule sees the real outline
+- **PR #7203**: fix(boards): apply JLC rotation profile and Gerber frame to board 04/06 CPLs
+- **PR #7194**: fix: flush C++ unmarks on escape rollback and give each escape strategy its own budget
+- **PR #7163**: fix(physics): solve edge-coupled Zdiff by field solve, not an empirical coupling factor
+- **Issue #7223** (closed): ci: ruff format check fails on main (boards/00-simple-led/generate_design.py)
+- **Issue #7211** (closed): Board 00 D1: pin1_marker_obscured is a courtyard-proxy artifact; emit the stock F.Fab body so the rule sees the real 5 mm LED outline
+- **Issue #7200** (closed): Boards 04/06 CPLs: frame regen also changes Rotation (JLC rotation profile missing) — needs orientation review (split from #7199)
+- **Issue #7192** (closed): router escape follow-ups: flush deferred C++ unmarks after rollback; full-reorder never kept under default cap (#7171)
+- **Issue #7060** (closed): CoupledLines overstates differential impedance of tightly coupled pairs (+17 % microstrip, +12 % stripline)
+- **PR #7196**: test: run live pcbnew oracle + 10.0.6 keepout baseline in CI; show slow-suite skips
+- **Issue #7193** (closed): test: two live-KiCad oracle tests skip in every CI job despite the tool being present (rotation pcbnew oracle, keepout 10.0.1 baseline); slow suite hides skip reasons
+- **PR #7202**: fix(drc): skip kct keepout DRU rules on KiCad >= 10.0.6
+- **Issue #7198** (closed): keepout DRU rule may double-report on KiCad 10.0.6 (native DRC now catches the #6039 gap)
+- **PR #7212**: fix(pcb,patterns): unify trace-width calculators on IPC-2221 (Part A of #7206)
+- **PR #7208**: fix(boards): add F.CrtYd courtyards to boards 00 and 01 footprints
+- **PR #7205**: fix(mcp): share one session store and make restore_checkpoint restore
+- **Issue #7121** (closed): MCP sessions: one session store for start_session/get_session_context/record_decision, and checkpoints that actually restore (#7115 Part 2)
+- **PR #7179**: feat(cli): finish lib create-symbol-lib/create-footprint-lib/generate-footprint and estimate cost --bom CSV
+- **PR #7197**: fix(board-01): ship sym-lib-table and kicad_tools_pwr symbol library
+- **Issue #7175** (closed): Finish 4 stubbed CLI capabilities advertised in kct --help: lib create-symbol-lib / create-footprint-lib / generate-footprint (deps landed, #85/#87/#88 closed) and estimate cost --bom CSV
+- **PR #7171**: perf(router): make negotiated escape strategies transactional and cap their reroutes
+- **Issue #7071** (closed): router: negotiated oscillation escape burns ~27 s (≈40% of board-02 wall) on four non-transactional strategies, then is rolled back (P1 of #7053 note, mislabelled 'perturbation pass')
+- **PR #7183**: test(dru): model post-#4600 Max Hole Size rule in legacy sidecar fixture
+- **PR #7182**: fix(preflight): check .kct-assigned parts and SO lead pitch in LCSC guard
+- **PR #7177**: test: narrow route --lint-gate contract variant and return it to required tier
+- **PR #7174**: fix(drc): fail kct drc on error-severity unconnected items
+- **PR #7172**: fix(parts): look up LCSC parts via list endpoint with exact-code match
+- **PR #7162**: fix(router): match-group tuner clears foreign preserved copper
+- **PR #7142**: test(mcp): smoke test calling every registered tool
+- **Issue #7180** (closed): Part/footprint check misses .kct-assigned parts (boards 00/01/02/06) and SOIC vs TSSOP pitch (#7166 follow-up)
+- **Issue #7178** (closed): test: TestDruManagedBlockMerge legacy sidecar tests fail on main after Max Hole Size rule
+- **Issue #7169** (closed): kct parts lookup: JLCPCB selectSmtComponentDetail returns 404; migrate anonymous detail lookup
+- **Issue #7159** (closed): Route-time match-group tuner meanders through preserved foreign-net vias (board 07: 16 kicad-cli errors with --length-match-groups)
+- **Issue #7129** (closed): test flake: format_json_stdout_contract[route --lint-gate] still times out at 100s under CI load (follow-up to #6744)
+- **Issue #7123** (closed): MCP: parametrized smoke test calling every registered tool through MCPServer.call_tool (#7115 Part 3)
+- **Issue #7096** (closed): kct drc reports DRC PASSED / exit 0 on an unrouted board: unconnected items (opens) are never counted
+- **PR #7181**: fix(drc,erc): kct drc --mfr never drops a violation; delete dead phantom wire filter
+- **PR #7176**: fix(readiness,preflight): stop calling unchecked LCSC parts verified
+- **PR #7160**: fix(router): keep a match-group member's commits when a later attempt fails
+- **PR #7133**: fix(boards): run package_release producers on pinned toolchain and refresh board 01 readiness
+- **PR #6838**: perf(router): raise flag-off coupled iteration budget to 1.4M (700k/phase) with PCIE_TX/PCIE_RX/LVDS exceptions
+- **Issue #7170** (closed): kct drc --mfr silently drops unhandled DRC types and exits 0 on kicad-cli errors; delete dead phantom wire_dangling filter
+- **Issue #7166** (closed): Part-footprint sign-off false-PASS: kct readiness ignores bom_lcsc_values, preflight counts LCSC cache misses as checked, no IC package/pin-count check
+- **Issue #6893** (closed): router: 06rf USB3_RX1 skew regresses 1.365 → 5.823 mm at the 700k flag-off coupled budget on current main (blocks #6838)
+- **Issue #6835** (closed): router: raise flag-off coupled iteration budget to 350k/phase (700k total) so Board07 couples 6/7 pairs; soften endpoint-tolerance comment (#6826 follow-up)
+- **Issue #6404** (closed): boards 00-07: refill saved zones and refresh hash-bound bundles/readiness after #6390's sidecar update
+- **PR #7137**: test: move route --lint-gate JSON-contract variant to extended tier
+- **PR #7165**: fix(export): emit CPL in the Gerber/drill frame (aux origin, Y up)
+- **Issue #7161** (closed): kct erc reports PASS (exit 0) where kicad-cli reports errors: cross-sheet global-label name-count filter drops true isolated_pin_label findings; power-pin sibling filter is inert on KiCad 10
+- **Issue #7059** (closed): kct export CPL coordinates are relative to the Edge.Cuts top-left with Y down, while the gerbers use the drill/place origin with Y up
+- **PR #7168**: fix(erc): stop kct erc dropping true isolated_pin_label findings on hierarchical designs
+- **PR #7081**: fix(cli): add optimize-traces -v help; sync cli.md/machine-output.md with parser; add docs drift test
+- **PR #7156**: fix(optim): pick largest Edge.Cuts contour as board outline
+- **Issue #7155** (closed): extract_board_outline returns an Edge.Cuts cutout (gr_rect/gr_poly) instead of the outer gr_line outline
+- **Issue #7070** (closed): docs: CLI reference gaps after #7069 (parts import, optimize-traces -v/--length-match, sch validate options, stats.per_net)
+- **PR #7152**: fix(optimize-placement): handle gr_rect/gr_poly/gr_arc outlines in no-Shapely fallback
+- **PR #7151**: fix(drc): run schematic parity on _routed boards by staging the schematic
+- **PR #7146**: docs: record tuner budget counters for board 07m SDRAM groups
+- **PR #7145**: feat(dru): enforce manufacturer max hole size in generate_dru
+- **PR #7135**: test: fail JSON contract on stale-API crashes and cover --help for every CLI node
+- **Issue #7148** (closed): kct optimize-placement no-Shapely fallback ignores gr_rect board outlines (falls back to footprints+10mm box, can place parts off-board)
+- **Issue #7147** (closed): Fleet re-eval: board 04 J1 sch/PCB value drift passes validate --sync; kct drc parity NOT RUN on every _routed fleet board
+- **Issue #7132** (closed): generate_dru does not emit a max hole size rule (max_hole_diameter_mm is display-only)
+- **Issue #7126** (closed): kct argv shims ignore leading global flags (kct -q footprint generate, kct --verbose erc <report> fail) + harden CLI smoke contract
+- **PR #7143**: fix(drc): tolerate reports lacking schematic_parity in apply_waivers_to_report
+- **PR #7140**: fix(project): merge collinear grid-step segments in Project.route()
+- **PR #7134**: fix(placement): shift hierarchical fallback outline into origin-relative frame
+- **PR #7103**: fix: rank lattice fallback pair legs by P/N via-count parity
+- **Issue #7141** (closed): main red: test_check_evidence_waivers_5946 AttributeError schematic_parity after #7077
+- **Issue #7138** (closed): Project.route() saves one segment per grid step (no collinear merge)
+- **Issue #7124** (closed): Two more placement outline fallbacks miss the board-origin shift (bottom_up_placement.py, optimize_placement_cmd.py) — latent #7106 off-board write
+- **PR #7130**: fix(cli): skip leading global options in footprint-generate and erc argv shims
+- **PR #7128**: feat: warn when a placement move clusters heat sources
+- **PR #7122**: fix(mcp): merge collinear segments in route_net before saving
+- **PR #7117**: fix: generate kct init DRU via generate_dru
+- **Issue #7120** (closed): MCP route_net writes one 0.1mm segment per grid cell (no collinear merge on saved copper)
+- **Issue #7116** (closed): kct init DRU template uses wrong constraint types (silkscreen width as silk_clearance; hole-to-edge as hole_to_hole)
+- **PR #7127**: fix(mcp): placement_suggestions, zipped Gerber count, board_view small sizes
+- **PR #7108**: fix(board03): re-derive copper from a class-clean lattice route (#6394)
+- **Issue #7045** (closed): Finish PredictiveAnalyzer._check_thermal: wire analysis/thermal.py into per-move predictive warnings
+- **Issue #7115** (closed): MCP tool smoke sweep: 5 more registered tools broken (placement_suggestions ImportError, export_gerbers zip false-failure, checkpoint/context no-ops, board_view blank) + call-every-tool test
+- **Issue #6824** (closed): board 03: fresh lattice routes fail routing_plan.usb_geometry (USB_D common run not on In2.Cu, MCU launch > 4 mm) — blocks #6394
+- **Issue #6394** (closed): board 03: 13 copper violations of the router's own Power class (0.2 mm) exposed by #6390
+- **PR #7109**: fix(optim): keep placement outline in the origin-relative component frame
+- **PR #7119**: fix(mcp): route_net saves routed nets via the real merge_routes_into_pcb API
+- **PR #7104**: docs: record tscircuit upstream defect outcomes (#5878)
+- **PR #7101**: test(router): pin board 03 tier-1 USB_D In2.Cu coupled run
+- **Issue #7106** (closed): PlacementOptimizer.from_pcb: outline in absolute frame but components origin-relative (every in-board part flagged outside)
+- **Issue #7114** (closed): MCP route_net never saves a routed net: calls merge_routes_into_pcb with a nonexistent signature (TypeError on net_map) since #505
+- **Issue #5878** (closed): File the 6 tscircuit upstream defects found by the interop gate (needs a credential with issue-write outside rjwalters/*)
+- **PR #7113**: fix(mcp): sync tools.md with server, register get_drc_violations, route_net stops overwriting input
+- **PR #7086**: fix(drc): match B.Silkscreen in silkscreen width/height rules
+- **PR #6874**: ci(board-07): move copper-safety DRC ratchet to scheduled slow-tests
+- **PR #6900**: ci: add Windows smoke job and skip RSS positivity test without resource
+- **PR #7110**: fix(optim,export): compute query_move routing impact and PnP rotation-correction count
+- **Issue #7111** (closed): MCP tools.md promises tools/params the server lacks (get_drc_violations unregistered, analyze_board renamed, route_net layer/width rejected)
+- **Issue #7078** (closed): Generated .kicad_dru silkscreen width/height rules apply to F.Silkscreen only
+- **Issue #6894** (closed): ci: add a Windows smoke job; skip test_peak_rss_bytes_positive where resource is unavailable
+- **Issue #7107** (closed): MCP responses report placeholders as measurements (query_move routing_impact, export_assembly rotation_corrections)
+- **PR #7090**: fix(drc): report when kicad-cli could not run schematic parity (#7077)
+- **PR #7100**: fix(export): safety floor and DRC preflight count opens and reject other-board reports
+- **PR #7095**: feat(creepage): add insulation-type input (basic/supplementary/reinforced), default basic
+- **PR #7102**: fix(optim): query_move before-state snapshot gives real score_delta and violations
+- **Issue #7077** (closed): kct drc reports a clean result when kicad-cli could not run the schematic parity checks
+- **Issue #7091** (closed): kct export safety floor and DRC preflight pass unrouted boards: unconnected items never read since #4498, and a report for a different PCB is trusted
+- **Issue #7082** (closed): kct creepage/audit: add an insulation-type input (basic vs reinforced, IEC 60664-1 5.2.5) to the derived clearance/creepage
+- **Issue #7099** (closed): Fix PlacementSession.query_move before-state snapshot: score_delta always 0 and violations always empty in MCP query_move/apply_move
+- **PR #7098**: fix: validators no longer read clean when they didn't check (#7094)
+- **PR #7092**: docs: measure board 07 match-group spread after per-bump meander placement
+- **PR #7089**: fix(audit): un-run ERC or crashed sync check caps verdict at WARNING
+- **PR #7055**: fix!: deprecate --batch-routing (no-op that claimed GPU acceleration) and remove the unwired GPU batch-routing kernel
+- **Issue #7094** (closed): Three validators read clean when they didn't check: kct validate --lvs --min-confidence, kct erc --sheet/--type filters, kct sch validate with ERC not run
+- **Issue #7083** (closed): kct audit reports READY FOR MANUFACTURING when ERC never ran (kicad-cli off PATH on macOS, ERC timeout) or the sync check crashed
+- **Issue #7051** (closed): Remove no-op `kct route --batch-routing` and the orphaned 1,111-line BatchPathfinder GPU kernel (flag only prints 'GPU-accelerated')
+- **PR #7087**: fix(route): warn when --region-parallel is ignored; drop speedup claims
+- **PR #7085**: fix(cost): price unlisted layer counts at next tier and charge finish fee once
+- **PR #7068**: fix(board04): use global labels for power nets to clear same_local_global_label
+- **PR #7052**: fix(pcb): rotate PCBBlock in KiCad's footprint convention at 90/270
+- **PR #7050**: feat(pcb): apply PCBLayout to a real board through the PCB model
+- **Issue #7080** (closed): Cost estimator prices unlisted layer counts as 2-layer and multiplies the per-order finish fee by quantity
+- **Issue #7072** (closed): kct route --region-parallel is a silent no-op on the escape/two-phase/other paths: warn when ignored, drop the speedup claims
+- **Issue #7063** (closed): board 04: KiCad 10.0.7 ERC reports 3 same_local_global_label warnings (power symbol vs local label)
+- **Issue #7046** (closed): PCBBlock rotation at 90/270 deg disagrees with KiCad's footprint rotation: block traces miss their pads
+- **Issue #7022** (closed): Finish pcb/exporter.py: working PCBLayout → real .kicad_pcb bridge on the PCB model
+- **PR #7054**: chore(board-03): refresh readiness evidence after #7036 (main CI red, #7042)
+- **PR #7074**: fix(creepage): key IEC 60664-1 clearance on rated impulse voltage, not working-voltage peak
+- **PR #7061**: fix(placement): honour align --tolerance, count real moves, reject bad axis/reference
+- **PR #7069**: fix: make four documented-but-dead CLI flags real or honest
+- **Issue #7042** (closed): main red: #7036 changed board-03 routing_plan.py without refreshing readiness.json
+- **Issue #7057** (closed): kct creepage --standard iec60664: required clearance is looked up in Table F.2 by peak working voltage, so mains clearance comes out 0.2 mm instead of 1.5 mm
+- **Issue #7056** (closed): kct placement align --tolerance is a no-op: align_components ignores tolerance_mm, overcounts moves, silently centres on mismatched --reference
+- **Issue #7065** (closed): Finish or make honest four CLI flags whose documented behaviour is never implemented
+- **PR #7049**: fix: Project.create builds .kicad_pcb via PCB.create (KiCad 10 failed to load the old board, #7047)
+- **PR #7066**: docs: GPU/batched routing design note (profile-first)
+- **PR #7015**: test: resolve 10 never-running tests left behind by #3133
+- **PR #7044**: docs: measure match-group meander room after #6972/#6979 and compare with KRT (#6969)
+- **Issue #7047** (closed): Project.create: build the .kicad_pcb via PCB.create instead of a drifted 70-line f-string template
+- **Issue #7053** (closed): Design: genuine GPU-accelerated / batched routing (profile first; successor to removed BatchPathfinder)
+- **Issue #7012** (closed): Resolve 10 tests that can never run: 9 skipped since #3133 closed (May), 1 self-skipping (~325 LOC dead)
+- **Issue #6969** (closed): match-group tuner: meanders find no DRC room on dense kct copper, and all-or-nothing rollback discards partial progress
+- **PR #7048**: feat: place match-group meander bumps individually when a whole trombone is rejected
+- **PR #7032**: fix: kct bom errors on missing or unparseable root schematic
+- **PR #7039**: feat: add kct route --native-zone-clearance for board-03 pour links
+- **PR #7020**: feat(router): one guarded search-radius rule for Python and C++ A*, rip-up and CoupledPathfinder (#6994)
+- **PR #7040**: fix: honour layers/include_drill/create_zip in preset Gerber export (#7023)
+- **PR #7037**: fix(cli): pass kct route argv straight to route_cmd.main; delete outer route parser and forwarding shim
+- **PR #7027**: docs: fix rejected kct commands in manufacturing export example
+- **PR #7036**: fix: store net names in board-03 routing plan and reject numeric net ids
+- **PR #7035**: refactor(router): route lattice pad-entry check through kernel_adapter (main CI red, #7024)
+- **PR #7007**: fix: replay committed coupled diff pairs on routing-cache hit
+- **Issue #7043** (closed): match-group tuner: per-bump meander placement to find room on dense copper (KRT comparison, board 07)
+- **Issue #7028** (closed): kct bom on a missing schematic prints a CSV header and exits 0 (silent failure)
+- **Issue #6994** (closed): [Epic #5509] Phase 4e slice 4: one search-radius rounding rule (guarded) for Python and C++ A*, rip-up and CoupledPathfinder
+- **Issue #7023** (closed): PCB.export_gerbers silently ignores layers/include_drill/create_zip for jlcpcb (the default), pcbway, oshpark
+- **Issue #7017** (closed): Collapse the kct route three-hop parser: pass argv straight to route_cmd (delete ~1,775-line outer parser + ~605-line forwarding shim)
+- **Issue #7025** (closed): docs: example 09 prints kct export invocations the CLI rejects (--manufacturer, gerbers/pnp subcommands)
+- **Issue #7033** (closed): board 03: routing_plan.save_plan() stores numeric (net N) refs that apply_plan() cannot resolve
+- **Issue #7024** (closed): main CI red: test_clearance_kernel_parity rejects lattice/coupled.py clearance_kernel import (from #6978)
+- **Issue #7003** (closed): router cache: a cache hit on board 06b returns different copper (230 vs 254 items) than the fresh route
+- **PR #7034**: fix: route the board-03 experiment row under jlcpcb-tier1 sidecars
+- **PR #7031**: docs: fix stale import_lcsc_part snippet in manufacturing-export example
+- **PR #7030**: fix: unify schematic wire endpoint bucketing on micron rounding
+- **Issue #7029** (closed): examples/09: help text references nonexistent kicad_tools.parts.import_lcsc_part
+- **Issue #7009** (closed): Unify kct sch wire endpoint bucketing on rounded micron
+- **PR #7021**: docs: fix stale kct command names in lcsc guide and mfg example
+- **PR #7016**: fix(router): key the routing cache on the native router build (#7014)
+- **PR #7013**: test: consolidate sch_validate S-expression builder helpers
+- **Issue #7019** (closed): docs: two references to nonexistent kct subcommands (kct pcb render, kct mfr check)
+- **Issue #7014** (closed): router cache key omits native BUILD_VERSION and PYTHONHASHSEED (stale copper after a C++ rebuild; follow-up #7003)
+- **Issue #7011** (closed): Consolidate 11 copy-pasted S-expression builder helpers across test_sch_validate_* tests (~700 LOC)
+
+### 2026-10-17
+
+- **PR #7010**: refactor: consolidate copy-pasted sch wire helpers into sch_wire_common
+- **Issue #7008** (closed): Consolidate copy-pasted wire/grid helpers across kct sch CLI modules (9x _snap, 4x _point_on_wire_midpoint, 4x _find_wires_at_point)
+- **PR #7006**: fix: hold match-group meanders to max(group, neighbour) class clearance
+- **PR #7005**: refactor: remove unused MCPTools registry (mcp/util.py)
+- **PR #7002**: fix(router): diffpair partner-via keep-outs use the trace/via floor (#6963)
+- **PR #7001**: chore(loom): resync installed Loom to v0.19.1182
+- **PR #7000**: refactor(router): remove unreferenced router helper methods (#6984)
+- **PR #6999**: refactor: remove dead SExp-tree symbol edit family from modify_schematic
+- **PR #6998**: chore: remove orphaned DRCFixer (drc/fixer.py)
+- **PR #6995**: refactor: remove orphan cli/sch_list_symbols.py duplicate
+- **PR #6993**: fix(router): run the pour stage on KiCad-10 name-only boards
+- **PR #6992**: fix(lattice): keep pair centrelines from reversing onto an end stub (#6975)
+- **PR #6991**: refactor(router): route diffpair _remark_route_cells halo through routed_halo_radius_cells (#6982)
+- **PR #6990**: refactor(retune): drop _rekey_name_only_routes; record name-only vs numbered --preserve-existing parity
+- **PR #6988**: refactor(router): one A* search-radius helper for the 21 hand-computed sites
+- **PR #6987**: feat: add opt-in bottom-up seed individual to evolutionary placement
+- **PR #6980**: ci: run boards 01-05 on main verification runs only (#5743 item 4)
+- **PR #6978**: fix(router): end lattice coupled-pair legs where they enter their pad
+- **PR #6977**: fix(router): exempt a diff pair's nets from its own gateway-envelope reservations
+- **PR #6976**: feat(readiness): produce native evidence on a pinned KiCad toolchain
+- **PR #6974**: fix(route): run --length-match-groups on the layer-escalation path
+- **PR #6973**: fix(router): load KiCad-10 name-only existing copper under its real net id
+- **PR #6972**: fix: keep DRC-clean meanders for improved match groups and honour net-class clearance
+- **PR #6971**: fix: retune-lengths tunes KiCad 10 name-only boards; split board 07 group spread by finished members
+- **PR #6967**: refactor(router): extract negotiated-loop budget selectors from Autorouter
+- **Issue #7004** (closed): Remove orphaned MCPTools registry (mcp/util.py): parallel drift with TOOL_REGISTRY, incompatible with RegistrySDKServer
+- **Issue #6997** (closed): Remove 5 never-called SExp-tree symbol editors in cli/modify_schematic.py (parallel drift with the *_text family)
+- **Issue #6996** (closed): Remove orphaned DRCFixer (drc/fixer.py): destructive repairer superseded by ClearanceRepairer, no production caller
+- **Issue #6989** (closed): auto-pour stage ignores KiCad-10 name-only boards: no pour auto-skip or plane-via reservation, so routed copper differs from the numbered twin
+- **Issue #6986** (closed): follow-up #6970: delete _rekey_name_only_routes and verify --preserve-existing parity on name-only vs numbered boards
+- **Issue #6985** (closed): Wire up or remove optim/bottom_up_placement.py: 594-line placer with no production caller (#2721 follow-ups never filed)
+- **Issue #6984** (closed): router: remove 22 unreferenced methods in pathfinder.py, grid.py, optimizer/trace.py, layers.py (incl. orphaned _batch_negotiated_costs)
+- **Issue #6983** (closed): Remove cli/sch_list_symbols.py: orphan duplicate of cli/symbols.py whose tests cover the copy instead of 'kct symbols'
+- **Issue #6982** (closed): refactor(router): route the last routed-halo site (diffpair_routing.py) through routed_halo_radius_cells (#5509, after #5858)
+- **Issue #6979** (closed): match-group tuner: replace #6972's global strictest-class clamp with per-neighbour max(class) clearance
+- **Issue #6975** (closed): lattice: trimmed pair centrelines all fail polarity-twist at the goal anchor (follow-up #6964/#6958)
+- **Issue #6970** (closed): router loader files KiCad-10 name-only copper under net 0 when loading existing routes
+- **Issue #6968** (closed): route: --length-match-groups never tunes on the default layer-escalation path (and board 07 gates it off twice more)
+- **Issue #6963** (closed): [Epic #5509] Phase 4e slice 3: diffpair partner-via keep-outs use trace_clearance, not the trace/via floor the exact gate enforces
+- **Issue #6962** (closed): Standardise KiCad footprint-library config so native DRC evidence is host-independent (board 03 gained 37 lib_footprint_issues from a missing global fp-lib-table)
+- **Issue #6960** (closed): [Epic #5509] Phase 4e slice 2: one A* search-radius helper (Python and C++ A* size the same net at different radii)
+- **Issue #6959** (closed): lattice: coupled pair legs run to pad centres, so board 03 USB_MCU_D launch is 4.328 mm against the 4.0 mm usb_geometry bound
+- **Issue #6956** (closed): lattice: board 03 USB_D[1] In2.Cu gateway is blocked by U2 via-site reservations (#6401 GND U2.2, #6697 VBUS U2.5); exempt the pair's own nets
+- **Issue #5802** (closed): router/core.py: extract the negotiated budget selectors from Autorouter into router/negotiated_budget.py (god-class slice 1; core.py is 24,738 lines)
+- **Issue #5743** (closed): ci: 54% of CI time is board jobs with zero failures — one duplicated routing pass, one binary path filter, and an inverted cadence
+- **PR #6966**: refactor(router): single routed_halo_radius_cells helper for routed-copper halos (#5858)
+- **PR #6965**: fix(lattice): space a route's own vias at the hole-to-hole floor
+- **PR #6964**: fix(lattice): trim end overshoot reversal before pair offsetting
+- **PR #6961**: ci: verify main on an hourly schedule instead of every merge
+- **PR #6955**: chore(loom): record baseline hyperparameters block in config.json
+- **PR #6953**: fix(boards): refresh board 03 readiness evidence and guard all boards' recorded hashes
+- **PR #6952**: fix: Judge follow-ups for grid_limits hint, iter_unquoted docstring, PairOutcome edge cases (#6948)
+- **PR #6951**: fix: accept manufacturer aliases in standalone --mfr parsers
+- **PR #6949**: docs: index research and diagnostics notes, add docs reachability test
+- **Issue #6958** (closed): lattice: pair-offset-degenerate fires when the fat centreline doubles back on its last edge (board 03 USB_D[0])
+- **Issue #6957** (closed): lattice: A* never checks a via against its own path's earlier vias (board 03 VBUS same-net hole_to_hole 0.266 mm)
+- **Issue #6948** (closed): cleanup: Judge follow-ups from #6877/#6886/#6890 (grid_limits memory+hint, iter_unquoted docstring, PairOutcome edge cases)
+- **Issue #6947** (closed): docs: index subfolder docs (research/, mcp/, diagnostics/) from docs/README.md and guard against drift
+- **Issue #6946** (closed): kct drc --mfr advertises aliases (jlc, osh, ...) that the inner kicad-drc parser rejects
+- **Issue #6945** (closed): board 03: readiness.json hashes stale for net_class_map.json and routed .kicad_dru since #6876
+- **Issue #5986** (closed): CI: run the main-branch suite on the newest main on a schedule instead of every merge (~935 job-min/day on main)
+- **Issue #5914** (closed): [Epic #5508] Phase 3b: coupled first-leg/departure selection against the access map
+- **Issue #5858** (closed): [Epic #5509] Phase 4e: hermit pass — delete duplicate clearance arithmetic
+- **Issue #5845** (closed): chore(loom): adopt + baseline the hyperparameters config block (loom#9698)
+- **PR #6944**: fix: scope fleet bench drift check to selected boards
+- **Issue #6941** (closed): fleet bench: run.py drift check blocks single-board runs; README board 00 row stale (follow-up #6765)
+- **Issue #6850** (closed): Live-verify #6842 gateway offer on boards 03/06b/06rf/07rf
+- **Issue #6765** (closed): DSN exporter does not represent JLCPCB fab-floor .kicad_dru rules (fastroute stays non-comparable on board 00)
+- **PR #6937**: feat(router): name the blocker in gateway pair-pad-attach declines
+- **Issue #6935** (closed): router: gateway pass-under pad-attach declines for board 03 USB_D[1] U2.4->R4.1
+- **Issue #6932** (closed): Lattice pair gateway-first decline reason is discarded; board 03 USB_D common run still on F.Cu
+- **PR #6933**: fix(router): print gateway-first decline reason when pair routes planar
+- **PR #6931**: test(board05): pin committed fully-routed, zero-short, manufacturer-check evidence
+- **PR #6910**: feat(router): lattice pairs try the gateway on a preferred layer before planar
+- **PR #6926**: refactor(router): pairplan attach and anchor-shift candidate generators (#6837 slice)
+- **Issue #6930** (closed): [Epic #4410] Phase 4: route PWM_BH/PWM_CH through the DRV8301 QFN stage and prove board-05 regen is manufacturable
+- **Issue #6883** (closed): Lattice coupled pairs never leave the pad layer for a preferred, opted-in plane layer
+- **Issue #6837** (closed): [Epic #6441] Phase 2c: extract engine-free router/pairplan/ package + structured outcomes
+- **PR #6921**: fix(router): try lattice pair gateway before planar run for non-pad preferred layers
+- **PR #6918**: feat: refuse SES import when board changed since DSN export
+- **PR #6917**: feat: add screenshot baseline save/compare with renderer-identity check
+- **PR #6907**: fix(router): gate kct optimize-traces against joining Kelvin branches (#6889)
+- **PR #6891**: feat(router): add kct retune-lengths for selected groups on a routed PCB
+- **Issue #6915** (closed): feat: bind SES import to the DSN revision it was routed from
+- **Issue #6912** (closed): feat: visual baseline record/compare for rendered schematics and boards
+- **Issue #6889** (closed): router: kct optimize-traces can merge Kelvin sense branches (gate only covers kct route's optimizer; follow-up #5398)
+- **Issue #6885** (closed): Retune selected diffpair/match groups on an existing routed PCB while preserving reviewed copper
+- **PR #6922**: feat(router): one-ended hybrid trunk + legs for declined lattice diff pairs
+- **PR #6905**: fix: rewrite relative markdown links when copying board docs into bundles
+- **Issue #6899** (closed): packaging: design-source README copies in manufacturing bundles keep relative links that break (boards 03/04/07)
+- **PR #6920**: test: guard MCP schemas against unread params and reject unknown arguments
+- **PR #6919**: fix: stop MCP export/validation tools reporting success on empty results
+- **PR #6916**: docs: classify Konnect v0.8-v0.13 ideas and refresh its registry entry
+- **PR #6909**: test: stub real routing in guide-route probe deadline test
+- **PR #6906**: docs: refresh README What's New, --format json claim and docs index
+- **PR #6904**: fix: build kct check --only/--skip help from CHECK_CATEGORIES
+- **PR #6903**: fix: accept run-DRC options on kct drc and deprecate kicad-drc --rules/--compare
+- **PR #6902**: test: assert every standalone export flag is forwarded by kct export
+- **PR #6890**: refactor(router): structured PairOutcome records in router/pairplan (#6837 slice 2c-ii)
+- **PR #6888**: fix(router): keep the trace optimizer from joining Kelvin branches (#5398)
+- **PR #6884**: feat(router): per-net-class allow_plane_layers opt-in honoured by every layer path
+- **Issue #6914** (closed): test: CI guard that MCP tool schemas advertise only parameters that are used
+- **Issue #6913** (closed): chore: audit kct mcp and kct check responses against a truth contract
+- **Issue #6911** (closed): Re-explore Konnect v0.8–v0.13 (mixelpixx): placement scoring, visual baselines, Specctra round-trip, truth contract
+- **Issue #6908** (closed): test flake: test_guide_route_probe_receives_deadline timeout and test_escape_strategy_without_install_would_intrude on CI Test job
+- **Issue #6898** (closed): cli: kct drc lacks the standalone kicad-drc's --compare / --rules
+- **Issue #6897** (closed): docs: stale README What's New (v0.21.1), unverified --format json claim, drc/ vs validate/ disagreement, 8 unindexed docs
+- **Issue #6896** (closed): cli: kct check --only help lists 4 categories but the code accepts ~39
+- **Issue #6895** (closed): test: assert every kct export flag reaches export_cmd (pass-through, not just parser parity; follow-up #6881)
+- **Issue #6876** (closed): router: per-net-class allow_plane_layers opt-in honoured by grid, C++, lattice and coupled paths (board 03 USB_D on In2.Cu)
+- **Issue #5943** (closed): Benchmark TraceMaker and fastroute vs kct route on the demo fleet under one kicad-cli referee
+- **Issue #5942** (closed): Benchmark kct route on PCBWorld D3-A/B (Clean Pass vs Freerouting 0.80/0.78, KiCadRoutingTools 0.74/0.20)
+- **Issue #5398** (closed): [Epic #4410] Complete stranded Kelvin sense nets through generic routing and batch rescue
+- **PR #6892**: chore: restore the board renders .gitignore rule dropped in #6879
+- **PR #6886**: fix(router): find S-expression tokens outside quoted strings (#6873)
+- **Issue #6873** (closed): router: (footprint/(module/(zone inside quoted strings crash load_pcb_for_routing or skip zone removal (follow-up #6740)
+- **PR #6880**: test(router): give the sub-grid keepout tests an off-grid pitch (#6878)
+- **Issue #6878** (closed): test_escape_strategy_without_install_would_intrude fails on main: subgrid route now emits no copper (control test, #6059)
+- **PR #6877**: fix(route): report the grid pitch used, cap explicit grids, surface coarsening (#6875)
+- **Issue #6875** (closed): route: record grid pitch used, add explicit-grid cell ceiling, stop silent coarsening in route-auto/route_pcb/MCP (follow-up #6741)
+- **PR #6865**: fix(router): --matrix layer hints never overwrite an authored preferred_layers
+
+### 2026-10-16
+
+- **Issue #6694** (closed): kct route: no routing-plan sidecar for the board saved on the deadline/partial-save exit
+- **Issue #6471** (closed): ci: assert-no-bot-external red daily since 10-09 -- Renovate's Dependency Dashboard (#6275) auto-labeled 'external'
+- **Issue #6333** (closed): [Parent #5942] PCBWorld Phase 3: run D3-B and publish the final comparative verdict
+- **Issue #6332** (closed): [Parent #5942] PCBWorld Phase 2: run and publish reproducible D3-A CP@1/CP@5 baseline
+- **Issue #6275** (closed): Dependency Dashboard
+- **Issue #5877** (closed): kicad-cli hangs forever on a macOS host (TCC-blocked ~/Documents scan in LoadGlobalTables), silently disabling the second DRC engine
+- **Issue #5650** (closed): Champion auto-merge fully blocked: GitHub App missing Administration permission for branch-protection GraphQL query (#8248 guard)
+- **PR #6887**: docs(research): record the measured chorus-test plan fleet-table row (#6694)
+- **PR #6882**: fix(cli): accept --stackup-id and other missing flags in unified kct export parser
+- **Issue #6881** (closed): kct export rejects --stackup-id: unified parser omits a flag export_cmd.py defines and docs document
+- **PR #6879**: docs: fix CLI examples that drifted from the kct parser; reconcile .gitignore with committed files
+- **PR #6872**: fix(router): make rss_trace import cleanly without the Unix-only resource module
+- **Issue #6739** (closed): kct route crashes on Windows: ModuleNotFoundError: No module named 'resource' (rss_trace imported unconditionally)
+- **PR #6871**: fix(route): honour an explicit --grid instead of silently coarsening it on large boards
+- **Issue #6741** (closed): kct route: explicit --grid is silently coarsened by the --max-cells budget on large boards
+- **PR #6870**: fix(router): skip quoted strings when extracting pad blocks (#6740)
+- **Issue #6740** (closed): kct route: '(pad ' inside a footprint descr string is parsed as a pad -> 'Unsupported routing geometry'
+- **PR #6868**: fix(router): diff-pair tie step honours allowed_layers and hard avoid_layers
+- **Issue #6866** (closed): router: diff-pair tie step ignores allowed_layers / plane reservation (USB_D- on In1.Cu GND plane on board 03)
+- **PR #6867**: docs: record live Board07 --differential-pairs measurement in recipe notes
+
+- **PR #6864**: fix(router): keep the better of joint and pose-centreline coupled candidates
+- **Issue #6738** (closed): ci: Board 07 End-to-End: add a dormant copper-safety (clearance/short) DRC ratchet (live once BOARD_07_CI_ENABLED returns)
+- **PR #6764**: ci(board-07): add dormant copper-safety DRC ratchet with committed floor
+- **Issue #6862** (closed): test: corridor-guard deadline test flakes under parallel suite load (test_negotiated_tail_abandons_...)
+- **PR #6863**: test(router): make the spent-deadline tail test reach the tail on every timing (#6862)
+- **Issue #6860** (closed): router: coupled search routes on a hard-avoided pad layer instead of declining like the single-ended router (follow-up #6857)
+- **PR #6861**: fix(router): coupled search declines a pair with an SMD pad on a forbidden layer
+- **Issue #6287** (closed): board 05: route PHASE_A/B/C instead of skipping them (placement-limited; 12 of 18 unconnected items)
+- **Issue #6288** (closed): board 05: pour stitching finds no legal via site for 16 pads at U3 (6 open pour links)
+- **Issue #6852** (closed): router: Board07 coupled search exhausts 20k-iteration cap on 6 of 7 pairs once --differential-pairs is enabled
+- **PR #6856**: test: replay five more Board07 coupled searches with bounded controls
+- **Issue #6836** (closed): [Epic #6441] Phase 2b: dual-row USB-C end — reach the handedness-consistent row through a pass-under gateway (06rf USB2_D)
+- **PR #6849**: fix(router): couple 06rf USB2_D through a pass-under gateway (#6836)
+- **Issue #6857** (closed): router: coupled diff-pair search ignores DesignRules.allowed_layers, committing signal on reference-plane In1.Cu (Board07 MIPI_DAT0 at 700k)
+- **PR #6859**: fix(router): coupled diff-pair search honours allowed_layers and hard avoid_layers
+- **PR #6854**: feat(router): lattice search biases toward a net class's preferred_layers
+- **Issue #6853** (closed): router: polarity-swap via move emits crossing P/N copper and writes a different path than it checks (allow_swap_via=True only)
+- **PR #6855**: refactor: remove unsound swap-via move from CoupledPathfinder
+- **Issue #6829** (closed): diffpair: undeclared-protocol USB pairs get generic 0.5 mm skew in check/report though name detection maps USB2 -> USB2_FS
+- **PR #6851**: fix(board03): route harnesses and smoke load the committed net-class map
+- **Issue #6847** (closed): router: polarity-swap via move skips via-in-pad and records partner's cell; make #6840 tests behavioural (follow-up #6846)
+- **PR #6848**: fix(diffpair): swap via move honours via-in-pad and records each rail's own drill (#6847)
+- **Issue #6842** (closed): lattice gateways: offer fan-via gateway to tap-capable trunks whose tap retry did not run or was discarded
+- **PR #6845**: fix(router): offer the gateway retry to trunks the tap chain did not serve
+- **Issue #6839** (closed): lattice: 06b LVDS1[0] U1.7->R1.1 declines pair-partner-pad — fat centerline turns inside the U1 pad row (split from #6836)
+- **PR #6843**: fix(router): retry lattice pair search after a partner-pad turn decline
+- **Issue #6840** (closed): router: coupled search clears partner vias at trace spacing, so Board07 coupled routes are rejected for P/N overlap (+ NaN in rejection log, optimizer un-couples committed pairs)
+- **PR #6846**: fix(diffpair): via-aware partner clearance in the coupled search (#6840)
+- **Issue #6834** (closed): lattice gateways (#6444 2a) follow-ups: tap-retry diagnostic restore, tap-trunk gateway gap, chain-wide via limit
+- **PR #6844**: fix(router): restore gateway diagnostics on discarded retries and count chain vias per net
+- **PR #6841**: refactor(router): extract engine-free router/pairplan package (#6837 slice 2c-i)
+- **Issue #6823** (closed): router: oracle-completion pour-link weld emits off-45° pad-to-via stubs (blocks board 03 plan capture, #6394)
+- **PR #6825**: fix(stitch): write every pad-to-via stub 45-degree-legal (#6823)
+- **Issue #6025** (closed): Annotate pad pin types on fleet boards 00-07 and regenerate their outputs
+- **PR #6827**: fix(boards): annotate pad pin types on boards 04-07 and re-pin their evidence (#6025)
+- **Issue #6444** (closed): [Epic #6441] Phase 2: pairplan layer — chains through inline parts, terminal gateways, USB-C equivalent pins (lattice consumer)
+- **PR #6833**: feat(lattice): fan-via terminal gateways for declined diff-pair segments (#6444 slice 2a)
+- **Issue #6826** (closed): router: bound coupled-search spacing tolerance in endpoint zones by pad pitch (Board07 TMDS_D1 needs 402k iterations vs 20k budget)
+- **PR #6832**: perf(router): bound coupled endpoint-zone spacing tolerance by pad pitch (#6826)
+- **Issue #6820** (closed): fix(check): net-class-map length_constraint without net_id crashes kct check; half-routed capped diff pair skipped silently
+- **PR #6830**: fix(check): clean error for length_constraint without net_id; check half-routed pair via caps
+- **Issue #6822** (closed): fix(router): mesh engine and parallel grid rebuild ignore interior Edge.Cuts keepout (follow-up #6043)
+- **PR #6831**: fix(router): mesh engine and parallel grid rebuild honour interior Edge.Cuts cutouts
+- **Issue #6043** (closed): route: block copper across interior Edge.Cuts loops even when no edge clearance resolves
+- **PR #6821**: fix(router): block copper across Edge.Cuts cuts when no edge clearance is set
+- **Issue #6815** (closed): kct fleet status reports '0 nets in PCB' schematic drift on 5 of 8 boards (false NO); boards 08/09 not surveyed
+- **PR #6817**: fix(fleet): false 0-nets-in-PCB drift on KiCad 10 boards; discover board 09; report skipped
+- **Issue #6044** (closed): check: per-net-group routing policy gate (max vias, max length, missing policy fails)
+- **PR #6818**: feat(check): routing_policy category for per-net via caps and max length (#6044)
+- **Issue #6816** (closed): router: capture Board07 TMDS_D1 coupled-search inputs and replay the exhaustion as a unit test
+- **PR #6819**: test(router): replay Board07 TMDS_D1 coupled search from a captured fixture
+- **PR #6828**: docs(research): correct fix-drc row U3 (local re-route already exists)
+- **Issue #5617** (closed): perf(router): profile and reduce the Diff-Pair regression job's re-route step (17.55 min = 96% of the job, unchanged across #5403/#5433/#5488/#5500)
+- **Issue #6382** (closed): grid router: wide nets' 45-degree escapes from U2 (board 05) cross neighbour pins' straight lanes, stranding GND_SENSE and VM
+- **Issue #6388** (closed): Tracking: boards 03/04/05 lattice runs exit 3 on open pour links (A-D: #6399-#6402); verify board outcome
+- **Issue #6378** (closed): lattice: chain-ordered diff-pair endpoints so pairs through pass-through parts (board 03 USB_D via U2) can couple
+- **Issue #6045** (closed): fix-drc: rip-up-and-reroute fallback when clearance nudging cannot clear a violation
+- **Issue #6810** (closed): 06rf: kct route exits 3 on pre-save clearance self-check that flags coupled MIPI_D0 at its own diff-pair gap (0.102 vs 0.150), while kct check and kicad-cli pass
+- **PR #6811**: chore: bump Repo Skills 0.24.1 -> 0.24.3
+- **PR #6814**: fix(router): hold coupled P/N traces to the pair gap in validate_routes
+- **Issue #6291** (closed): docs: document kct route exit code 10 (UNVERIFIED) from #6282
+- **PR #6301**: docs: document kct route exit code 10 (UNVERIFIED)
+- **Issue #6812** (closed): test: lock route_geometry via-dedupe + file-order together (follow-up #6794)
+- **PR #6813**: test: lock route_geometry via-dedupe + file-order together (#6812)
+- **Issue #6800** (closed): fleet_routers: 22 class-clearance 'losses' come from pairing the pre-route .kicad_pro with the routed .kicad_dru
+- **PR #6803**: fix(bench): treat class clearance on empty classes as not-routing in dsn_audit
+- **Issue #6788** (closed): 06rf: 3 uncoupled diff pairs over the skew limit - pair tuner overshoots on multi-loop inserts (USB3_TX2, PCIE_TX) and tries one placement only (USB3_TX1)
+- **Issue #6778** (closed): Tuner and kct check can disagree by a track stub at 3+-way junctions (kicad-cli merge order)
+- **PR #6794**: fix(router): tuners measure each net in the order kct check reads it
+- **Issue #5947** (closed): router research: evaluate TraceMaker techniques (min-cost-flow escape reservation, nogood cache, boxed-in escalation, deterministic portfolio)
+- **Issue #6807** (closed): test_partial_exit_keeps_budget_exit_promotion fails on macOS arm64 main since ~Oct 10 (green on Linux CI)
+- **PR #6808**: test(router): take the pose-search wall-clock race out of the partial-exit diff-pair test (#6807)
+- **Issue #6799** (closed): board 05: GND_SENSE U2.6–U2.7 still unconnected after #6761 escape fences (last open signal net)
+- **PR #6806**: fix(router): tie neighbouring duplicate pins on Kelvin nets (#6799)
+- **Issue #6290** (closed): board 05: MOSFET footprints use pads 1/2/3 while symbols use D/G/S (36 LVS pad-name mismatches)
+- **PR #6299**: fix(board05): MOSFET symbol pins match TO-220 pad names (#6290)
+- **Issue #6296** (closed): flaky: test_per_net_deadline_audit::test_python_deadline_scales asserts wall-clock scaling and fails under runner load
+- **PR #6302**: test: make test_python_deadline_scales robust to runner load
+- **Issue #5694** (closed): ci: self-hosted 'heavy' runner lane offline since ~10:00Z — all router regression gates queued indefinitely
+- **Issue #6805** (closed): ci: kct-check parity tests only run on the Slow Tests schedule, so PRs that move board-07 counts merge green
+- **PR #6809**: test: run kct-check parity tests in the PR Test job
+- **Issue #6802** (closed): test_kct_check_parity: 4 board-07 parity tests fail on main after length-measurement changes (#6725/#6780)
+- **PR #6804**: test: re-pin board-07 kct check parity counts to the kicad-cli length model (#6802)
+- **Issue #6795** (closed): pair tuner: add uncoupled-length guard and register the 'overshoot' reason (follow-up to #6791)
+- **PR #6797**: fix: guard diff-pair skew tuner on uncoupled length and report overshoot
+
+### 2026-10-15
+
+- **Issue #6798** (closed): fleet comparison docs: class-clearance losses are already carried on main; stop citing #6770/#6765 as the fix
+- **PR #6801**: docs(fleet_routers): correct stale #6770/#6765 class-clearance claims
+- **Issue #6761** (closed): board 05: re-route PHASE_C escape (layer/approach) or VM pour link so U2.11 connects
+- **PR #6796**: fix(router): hard escape fences keep fine-pitch neighbour exits open (#6761)
+- **Issue #6792** (closed): kicad_length: Route-form fragments double-count a THT-pad via's span when the net uses two inner layers (+0.53 mm)
+- **PR #6793**: fix(router): count a shared via's span once across Route fragments
+- **PR #6791**: fix(router): exact-fit diff-pair skew tuning with placement search
+- **Issue #6780** (closed): router: per-Route length measure treats every through-hole pad as F.Cu, so tuners mis-measure vias in back-side THT pads (follow-up to #6779)
+- **PR #6790**: fix(router): length model reads router pads' footprint side (#6780)
+- **Issue #6731** (closed): kicad_length: board 07 BOOT0 reads 0.020 mm off kicad-cli (roundrect corner pad trim)
+- **PR #6789**: test(length): pin board 07 BOOT0 net length to kicad-cli (#6731)
+- **Issue #6784** (closed): Fleet DSN gate: export copper-edge clearance and recognise implied diff_pair_gap so fastroute rows can become comparable
+- **PR #6785**: fix(dsn): carry copper-to-edge clearance via inset boundary; audit implied diff_pair_gap
+- **Issue #6786** (closed): flaky: format-json single-document test times out on 'mfr apply-rules' (50s subprocess budget) in CI
+- **PR #6787**: ci: stop gating `kicad-cli version` probes behind the native permit (#6786)
+- **Issue #6335** (closed): [Parent #5943] Measure and publish the TraceMaker/fastroute/kct fleet comparison
+- **PR #6783**: docs: publish live TraceMaker/fastroute/kct fleet comparison
+- **Issue #6703** (closed): lattice: 07rf TMDS_D0/D1 skew grows 0.6/1.6 -> 7.2/8.4 mm after #6673's +1V8 pour-continuity keep-outs - escape row B coupled instead of detouring
+- **Issue #6781** (closed): test: #6735's partner-aware fallback keep rule has no failing-on-revert unit test
+- **PR #6782**: test(router): pin the partner-aware flush keep rule with failing-on-revert tests
+- **Issue #6742** (closed): kicad-cli audit follow-up (#6724): render/SVG exports and the DRC safety floor ignore a killed kicad-cli
+- **PR #6774**: fix: fail render/SVG exports on killed kicad-cli and warn on empty DRC report
+- **Issue #6772** (closed): board06: route Power-class copper to the 0.2 mm clearance (3 netclass_clearance_copper errors)
+- **PR #6777**: ci(board06): drop the #6763 Power-clearance allowance from the diffpair gate
+- **Issue #6725** (closed): kct check and kicad-cli disagree on via drilled length (1.600 vs ~1.573 mm): 07rf DQS skew 0.000 vs 0.052 mm
+- **PR #6779**: fix(length): match kicad-cli line merging and via clipping; #6725 bench table
+- **Issue #6773** (closed): Follow-up to PR #6735: pour-neck protection, flush deadline, narrower pad floor for fallback legs
+- **PR #6735**: fix(lattice): partner-aware uncoupled diff-pair fallback legs (#6703)
+- **Issue #6775** (closed): drc: retry without --refill-zones on rejection, warn when refill is skipped, and cover kct drc + connectivity (follow-up to #6724)
+- **PR #6776**: fix(drc): retry without --refill-zones on rejection; classify kicad-cli exits by cause (#6775)
+- **Issue #6748** (closed): Board 06 pour repair: use per-pair net-class clearance and true pad shape (sibling of #6736)
+- **PR #6762**: fix(board06): hold pour-repair copper off foreign copper at the net-class clearance (#6748)
+- **Issue #6763** (closed): board 06: generated .kicad_pro omits the recipe's net classes, so kicad-cli never enforces Power clearance
+- **PR #6769**: fix(board06): declare router net classes in the routed .kicad_pro
+- **PR #6729**: fix(router): kct check and tuners measure net length exactly as kicad-cli does (#6725)
+- **Issue #6724** (closed): run_geometric_drc reports a killed kicad-cli as a clean DRC (empty pre-created report)
+- **PR #6746**: fix(drc): a killed or failed kicad-cli is never a clean DRC (#6724)
+- **Issue #6733** (closed): flaky: route --lint-gate format-json contract test times out (60s) in CI Test job
+- **Issue #6744** (closed): test_format_json_flag_variant_stdout_is_a_single_json_document flakes at its 60s timeout
+- **PR #6754**: test: give json flag-variant test a timeout above its inner subprocess guard
+- **Issue #6756** (closed): Fleet DSN gate: 10 .kicad_dru losses on board 00 after #6593/#6594 (1 expressible Power clearance, 9 fab-only rules)
+- **PR #6768**: fix(benchmarks): classify fab-only and class-scoped DRU rules in DSN audit
+- **Issue #6334** (closed): [Parent #5943] Validate a reproducible three-router fleet protocol and DSN comparability gate
+- **PR #6747**: chore(benchmarks): record live three-router smoke on board 00 and re-freeze fleet manifest
+- **Issue #6722** (closed): Flaky: test_led_matrix_32x32_is_fast wall-clock budget (1.0 s) fails under CI xdist load
+- **PR #6751**: test: replace wall-clock LED matrix perf guard with walk work counter
+- **Issue #6749** (closed): ecosystem: sweep RepoRecon's KiCad AI index (259 repos) against our registry
+- **PR #6767**: docs(ecosystem): record RepoRecon KiCad AI sweep verdicts and add diff script
+- **Issue #6766** (closed): ecosystem: offer kicad-tools as a tool under test in devbisme/ai-circuit-design-tests
+- **PR #6771**: docs: evaluate ai-circuit-design-tests bench and draft listing offer
+- **Issue #6728** (closed): Parity test: cover roundrect_rratio on the native authored-clearance gate (C++ build 56)
+- **PR #6758**: test(router): cover roundrect_rratio on the native authored-clearance gate
+- **Issue #6736** (closed): Board 07: new 'Power' clearance error (+1V2 stub vs U1.24 GND, 0.1913 < 0.2 mm) after #6713
+- **PR #6745**: fix(board07): hold pour-repair copper off foreign pads at the net-class clearance (#6736)
+- **Issue #6522** (closed): Verify #6489 board-level acceptance: board 03 P0 benchmark USB_D + board 04/05 slow manufacturability after PR #6498
+- **Issue #6750** (closed): test flake: test_bidirectional_exhausted_status times out (>60s) in CI Test job
+- **PR #6757**: test: confine bidirectional exhausted-status test to small pockets
+- **Issue #6415** (closed): grid router: charge per-pad budgets over the via/trace footprint, not just the centre cell (board 05 VM U2.11)
+- **PR #6760**: docs(router): record tip-weighted via-footprint charge experiment on board 05
+- **PR #6752**: chore(changelog): close the five v0.23.0 release-gate gaps
+- **PR #6755**: chore(release): bump version to 0.23.0
+- **Issue #6697** (closed): lattice: board 03 USB_MCU_D and USB_D U2->R4 do not couple with VBUS routed as declared (harness change since #6599; USB_MCU_D skew 3.228 mm fails kct check and kicad-cli)
+- **PR #6734**: fix(router): lattice pairs leave a sealed routed pad its escape via (board 03 VBUS U2.5) (#6697)
+- **Issue #6743** (closed): lattice: 06b couples 0/4 LVDS pairs since #6720 -- tap-chain retry gate misses pair-no-path-keepout-constrained (slow test_06b_lattice_route_couples_with_copper_on_both_nets fails)
+- **PR #6753**: fix(router): tap-chain retry accepts every exhausted pair-no-path reason (#6743)
+- **Issue #5693** (closed): Upstream the #5690 backticked-trailer fix to rjwalters/loom and retire the resync-ignore pin
+- **Issue #6714** (closed): 06rf: last 2 open pour links after #6671 — GND U2.A1 via sites blocked by signal escape; +3V3 J1.B8 no clearance-legal link
+- **PR #6737**: fix(zones): give the inner power plane to the board-wide rail (#6714)
+- **PR #6732**: perf(router): answer each via-drop site once per native search call (Part of #5617)
+- **PR #6727**: feat(router): opt-in bidirectional A* for the C++ Python fallback
+- **Issue #6675** (closed): match-group tuner declines every diff-pair member on lattice output (07rf: DDR/MIPI/TMDS groups stuck at 16.5/7.6/6.0 mm)
+- **PR #6726**: fix(router): tune diff-pair members of lattice match groups (#6675)
+- **Issue #5899** (closed): Oracle completion: close boxed-in pour pockets (board 03 residual GND island) by local rip-up
+- **Issue #5506** (closed): router(HV): attribute and resolve the /FUSED_LINE J2.1→Q2B.2 no-path-layer-constrained leg on softstart rev-C (#4507 T4)
+- **Issue #6718** (closed): kct route pre-save clearance check measures round pads as squares (false 0.006 mm violations at board 03 J1 ties)
+- **PR #6723**: fix(router): validate_routes measures round/oval/roundrect pads with the clearance kernel (#6718)
+- **Issue #6721** (closed): Rebase PR #6713 onto #6699: single pad model + 5-board before/after evidence
+- **Issue #6716** (closed): native slot gate: pytest-timeout still fires while a test is queued for a permit (credit applied only after the wait)
+- **PR #6717**: test: credit native slot-queue wait to the pytest-timeout deadline during the wait (#6716)
+- **Issue #6671** (closed): pour oracle: 06rf closes 0 of 128 GND/+3V3 links - U2 BGA welds break Power clearance and the 2-retry budget discards the whole round
+- **PR #6713**: fix(route): pour oracle keeps clean closures; exact roundrect weld clearance (#6671)
+- **PR #6715**: chore: bump Repo Skills 0.19.5 -> 0.24.1
+- **PR #6719**: perf(router): check a node's via drop once, not once per target layer (Part of #5617)
+- **PR #6720**: fix(router): lattice diff pairs keep coupling with VBUS routed (board 03) (#6697)
+- **Issue #6693** (closed): chorus-test U8 "routing-caused" shorts are input pad overlaps (stale pad angles); kct route misattributes them to routing
+- **PR #6711**: fix(route): attribute shorts against overlapping input pads to the input (#6693)
+- **PR #6707**: fix(route): write routing-plan sidecar on deadline/partial-save exit
+- **Issue #6698** (closed): lattice: launch USB-C pairs from the row facing the chain and tie the other row with generated necked stubs (board 03 USB_D uncoupled 36 -> ~10 mm; #6444 slice)
+- **PR #6712**: fix(router): launch USB-C pairs from the facing row and tie the far row (#6698)
+- **Issue #6670** (closed): lattice: 06rf USB3_RX2+/USB3_TX2- uncoupled-fallback legs pass 0.17 mm from U2 GND balls (Power 0.2 mm) and are demoted by the authored-floor backstop
+- **PR #6705**: fix(router): grow a pad array whole when lattice class shortfalls recur on it
+- **Issue #6683** (closed): kct stitch: extended-escape via clearance models rect pads as circles (board 07 U4.E3/E5 vs F3/F5 at 0.1931mm)
+- **PR #6699**: fix(stitch): shape-aware via-vs-pad clearance for rect/square pads (#6683)
+- **Issue #6664** (closed): lattice: auto-run diff-pair skew tuning on lattice output, engaged on kct check's skew limit (board 06b: 4 skew errors -> manufacturable)
+- **PR #6706**: fix(router): auto-run diff-pair skew tuning on lattice output at kct check's limit (#6664)
+- **Issue #6710** (closed): Re-run #6578 chorus plan-overflow measurement (operator host)
+- **Issue #6701** (closed): kct stitch places through vias for a net whose only pour is on the pad's own layer (board 07: all 14 +1V8 stitch vias via_dangling)
+- **PR #6709**: fix(stitch): skip pads whose net is poured only on the pad's own layer (#6701)
+- **Issue #6704** (closed): Remove remaining manual-intervention hints (recovery, stitch, netlist sync, ERC explain)
+- **PR #6708**: fix: replace remaining manual-intervention hints with kct commands
+- **Issue #6678** (closed): Via span_type follow-ups: diffpair_length via barrel length and MCP via writer ignore blind/buried
+- **PR #6690**: fix(router): blind/buried vias keep their span in diff-pair length and MCP via writer
+- **PR #6702**: feat(bench): PCBWorld D3 CP@1/CP@5 aggregation, rollouts and keyed resume (part of #6332)
+- **Issue #6508** (closed): router: Python fallback A* admits a step 0.07 mm from an off-grid foreign via; 44/44 PWM_C candidates rejected on board 05
+- **PR #6680**: fix(router): re-stamp surviving route halos after rip-up (#6508)
+- **Issue #6669** (closed): kct route: --net-class-map pour net with a non-power name (06rf VBUS_USB) gets neither a zone nor traces
+- **PR #6686**: fix(router): honour --net-class-map pour declarations in auto-pour and auto-skip (#6669)
+- **Issue #6673** (closed): lattice: TMDS single-ended legs cut U4's BGA +1V8 field on F.Cu, stranding a pour island the oracle cannot close (board 07rf 33/34)
+- **PR #6700**: fix(router): keep area-array pour clusters whole on the lattice engine
+- **Issue #6684** (closed): kct stitch: via_in_pad post-filter drops a via after later pads counted it as connectivity
+- **PR #6696**: fix(stitch): decide via_in_pad / hole-to-hole drops before recording a placement (#6684)
+- **Issue #6672** (closed): kct route: replace 'complete manually in KiCad' hints with automated next steps
+- **PR #6676**: fix(route): replace manual-KiCad completion hints with automated next steps
+- **Issue #6674** (closed): lattice: auto-run match-group length tuning on lattice output (board 07rf: ADDR_BUS 25.1 mm -> 0.002 mm, never engaged without --length-match-groups)
+- **PR #6692**: fix(router): auto-run match-group length tuning on lattice output (#6674)
+- **Issue #6666** (closed): chorus-test R2 recipe routes 0/37 nets on main (was 30/51): J2/J4 placement-invalid, U5/U8 escape collapse at 0.0508 mm grid
+- **PR #6695**: fix(route): fall back to the escape pre-phase when adaptive Phase 1 would hard-fail; expose --grid-strategy (#6666)
+- **Issue #6685** (closed): kct stitch --thermal/--blanket: sibling target nets' existing tracks/vias are not obstacles (multi-net)
+- **PR #6689**: fix(stitch): thermal/blanket honour sibling target nets' existing copper
+- **Issue #6443** (closed): [Epic #6441] Phase 1: protocol-aware pair rules — uncoupled length in mm, KiCad-native diff_pair_gap/uncoupled/skew/via_count, continuity demoted
+- **PR #6691**: chore(loom): unpin upstreamed Loom files and re-port champion files (2am#4345)
+- **Issue #6640** (closed): Source blind/buried and microvia capability for at least one HDI-capable fab profile
+- **PR #6681**: feat(mfr): source PCBWay blind/buried and microvia capability
+- **PR #6687**: chore(loom): replace retired operator labels in pinned Loom files (2am#4345)
+
+### 2026-10-14
+
+- **PR #6688**: chore(labels): stop declaring retired Loom labels in labels.yml (2am#4345)
+- **Issue #6677** (closed): Via.span_type: round-trip through access-witness sidecar; clear it when a merge widens a via to both outer layers
+- **PR #6679**: fix(router): keep Via.span_type honest across sidecar and merges
+- **Issue #6528** (closed): router: align the Python own-via spacing check with the validator's epsilon once #6520 and #6521 are both merged
+- **PR #6663**: fix(router): Python own-path via check uses the kernel epsilon (#6528)
+- **Issue #6668** (closed): kct stitch: multi-net pass ignores pre-existing sibling-target-net tracks/vias (board 07 U3 GND/+1V8 short)
+- **PR #6682**: fix(stitch): treat sibling stitch nets' existing tracks/vias as obstacles (#6668)
+- **Issue #6662** (closed): test_lattice_kelvin_physical_5444: two buried-via span tests fail on main
+- **PR #6665**: fix(router): honor KiCad blind/buried vias in Via.drilled_layers (#6662)
+- **Issue #6572** (closed): Board 07 regression recipe: 0.15mm via clearance adds one kicad-cli tracks_crossing (26 vs 25 errors)
+- **Issue #6578** (closed): Measure plan-overflow vs stuck-class on chorus-test (deferred half of #6309)
+- **PR #6667**: docs(research): record chorus-test plan-overflow vs stuck-class run (#6578)
+- **Issue #6645** (closed): flaky: test_kept_copper_vs_foreign_pad_6229 TestCliPreserveExisting hits 60s timeout on CI (≈5s locally)
+- **PR #6659**: test: stub kicad-cli discovery in kept-copper CLI tests
+- **Issue #6638** (closed): diffpair_bench: continuity_threshold_pct missing from _LIMIT_KEYS, so pair_digest changes when only a limit changes
+- **PR #6660**: chore(research): exclude continuity/skew limits from diffpair pair_digest
+- **Issue #6626** (closed): kct route: _partial and checkpoint writes skip preserved-copper dedupe (preserved + re-routed net doubled)
+- **PR #6658**: fix(route): dedupe preserved copper in _partial and checkpoint writes
+- **Issue #6625** (closed): kct route: adaptive/combined deadline or Ctrl+C during the first tier saves no _partial
+- **PR #6657**: fix(route): save _partial on first-tier deadline in adaptive/combined flows
+- **Issue #6630** (closed): Router: remaining via.layers barrel readers outside the #6502 scope (terminal_connectivity, kelvin, io, lattice, escape)
+- **PR #6655**: fix(router): read Via.drilled_layers at remaining barrel readers
+- **Issue #6644** (closed): flaky: test_drc_skipped_for_time_banner_and_exit times out waiting for native-concurrency slot
+- **PR #6652**: test: stop DRC-skipped verdict tests queueing for a native slot
+- **Issue #6615** (closed): diffpair_uncoupled_length: add the per-terminal (gather-ignore) uncoupled figure #6443 designed
+- **PR #6651**: feat(validate): per-terminal uncoupled-length figure for diff pairs (#6615)
+- **Issue #6634** (closed): router: RSMT Steiner virtual pads pin the first terminal's layer, forcing junction vias during routing
+- **PR #6654**: fix(router): make RSMT Steiner virtual pads layer-agnostic
+- **Issue #6648** (closed): kct route --analyze --dry-run still routes in memory on escalation flows (no analysis printed)
+- **PR #6650**: fix(route): --analyze --dry-run never routes, on any flow (#6648)
+- **Issue #6602** (closed): SES import: Via[i-j] fallback indexes a different layer list than dsn.py writes it from
+- **PR #6649**: fix(export): SES Via[i-j] fallback no longer yields blind/buried vias
+- **Issue #6646** (closed): board 05: 11 full-stack vias mislabelled as micro in routed PCBs (now flagged by via_type check)
+- **PR #6653**: fix(router): decline in-pad micro via when landing layer is non-adjacent
+- **Issue #6352** (closed): Experiment: min-cost-flow escape-corridor reservation for dense packages
+- **PR #6656**: feat(router): experimental min-cost-flow escape-corridor assignment (#6352)
+- **Issue #6532** (closed): Board evidence JSON records absolute host paths in "file" (boards 00, 04-07)
+- **PR #6623**: fix(check): record portable PCB paths in kct check / net-status JSON (#6532)
+- **PR #6641**: perf(geometry): inline segment_to_segment_distance leaf (Part of #5617)
+- **Issue #6526** (closed): router: Python AStarNode.via_anc self-reference turns every search's node tree into cyclic garbage
+- **PR #6639**: perf(router): Python A* via_anc no longer self-references via nodes
+- **Issue #6567** (closed): diffpair bench: run the missing seed 43, 06rf and grid 06b rows for #6443 piece (b)
+- **PR #6637**: docs(research): diffpair bench gap rows for #6443 piece (b)
+- **Issue #6563** (closed): kct route --dry-run routes for real and writes files on the layer-escalation path
+- **PR #6633**: fix(route): --dry-run prints the plan and exits before any routing or writes
+- **PR #6647**: docs(changelog): correct boards affected by #6599 auto-pour change
+- **Issue #6553** (closed): kct route: adaptive/combined/main flows' partial saves can drop --preserve-existing copper
+- **PR #6624**: fix(route): keep --preserve-existing copper in adaptive/combined/main partial saves
+- **Issue #6353** (closed): Experiment: validity-aware nogood cache for negotiated routing retries
+- **PR #6605**: feat(route): opt-in validity-aware nogood cache experiment
+- **Issue #6561** (closed): Reconcile jlcpcb mfr_limits min clearance (0.127) with per-layer .kicad_dru floors (0.1016/0.0889) (#6534 follow-up)
+- **PR #6629**: fix(router): stackup-aware fab clearance floor matches the emitted .kicad_dru (#6561)
+- **Issue #6518** (closed): kct check --mfr does not flag blind/buried vias on a fab profile that cannot build them
+- **PR #6636**: feat(check): flag blind/buried/micro vias on fab profiles that cannot build them
+- **Issue #6614** (closed): Route remaining via-layer readers through kicad_read_via_layers (#6493 follow-up)
+- **PR #6635**: fix: route the remaining via-layer readers through kicad_read_via_layers (#6614)
+- **Issue #6599** (closed): kct route auto-pour ignores --net-class-map (board 03 VBUS declared routed is poured anyway)
+- **PR #6631**: fix(route): auto-pour honours --net-class-map routed declarations
+- **Issue #6642** (closed): main red: test_dsn_audit_detects_omitted_constraints and stored-copper span2 via test fail after #6600/#6613
+- **PR #6643**: chore(research): repair DSN audit and span2 via test after #6594/#6502
+- **Issue #6560** (closed): Floor the remaining coupled-path pair-gap readers (serpentine, _pair_seg_clearance, C++ halo) (#6534 follow-up)
+- **PR #6611**: fix(route): floor the remaining coupled-path pair-gap readers (#6560)
+- **Issue #6566** (closed): mesh engine routes only 2/16 (06b) and 5/24 (03) nets; 2-pad nets come back partial
+- **PR #6604**: fix(router): mesh negotiator exempts a net's own committed copper
+- **Issue #6576** (closed): diffpair_uncoupled_length polish: upgrade-note wording on via-count warning, 'vias' metric label, pair-block header comment
+- **PR #6620**: fix: label via-count findings 'vias' and polish pair-block header (#6576)
+- **Issue #6544** (closed): Flaky: test_fine_pitch_advisories_fire_for_grid_engine fails intermittently on main
+- **PR #6618**: test(route): pin --backend in the fine-pitch grid advisory test
+- **Issue #6609** (closed): Flaky: test_analysis_is_read_only trips on a concurrent board-00 .kicad_pro.lck under xdist
+- **PR #6617**: test(net-status): scope read-only check to board 05 and ignore KiCad lock files
+- **Issue #6596** (closed): router: emits redundant single-layer junction via (via_dangling warning) on board 01 VOUT
+- **PR #6632**: fix(router): drop single-layer junction vias in cleanup_artifacts (#6596)
+- **Issue #6493** (closed): Read a keyword-less partial-span (via ...) as a through via, as KiCad does (reader half of #6485)
+- **PR #6613**: fix(pcb): read a keyword-less partial-span via as a through via, as KiCad does (#6493)
+- **Issue #6589** (closed): lattice: #6401 plane-via site keep-out ignores plane fill pullback, so board 03's VBUS U1.7 pour link stays open (blocks #6394)
+- **PR #6612**: fix(route): keep a reserved plane-via site on its pour's fill (#6589)
+- **Issue #6509** (closed): router: Python segment-vs-pad validator has no clearance epsilon; rejects exact-clearance steps the C++ validator accepts
+- **PR #6627**: fix(router): give the Python clearance validators the native 1e-4 mm slack
+- **Issue #6502** (closed): Router producers still hold a logical layer pair on non-micro vias in memory
+- **PR #6628**: fix(router): clearance, connectivity and length readers use Via.drilled_layers
+- **Issue #6594** (closed): DSN export ignores .kicad_pro net classes, .kicad_dru rules, zones and keepouts
+- **PR #6600**: fix(export): DSN export reads .kicad_pro classes, .kicad_dru floors, zones and KiCad 10 nets
+- **Issue #6533** (closed): Slow mfr-tier tests error at setup on main: _assert_deterministic matches the #6329 banner text (was: assert 7 > 7)
+- **PR #6621**: test: anchor mfr-tier deadline-fired check to the line-start marker
+- **Issue #6557** (closed): Reverted rotate_180 placement delta leaves keep-upright silk/fab text turned 180 degrees
+- **PR #6619**: fix(router): restore keep-upright text when reverting a rotate delta
+- **Issue #6582** (closed): board09 routing-investigation README: SENSE_P track coordinates don't match the .kicad_pcb files
+- **PR #6622**: docs(board09): quote SENSE_P artifact track in file coordinates
+- **Issue #6310** (closed): Probe: shrink board 03's 1.5x rigid-cluster route back to 1x and see whether USB_D+ survives
+- **PR #6579**: docs(research): shrink board 03 rigid 1.5x route to 1x under the lattice protocol, no-go (#6310)
+- **Issue #6531** (closed): route_cmd: _INPUT_COPPER_BASELINE is never cleared when staging is skipped (in-place route)
+- **PR #6616**: fix(route): record copper-loss baseline on in-place staging runs
+- **Issue #6555** (closed): board 03: committed readiness.json is stale (net_class_map.json changed) after #6443 piece (a)
+- **Issue #6608** (closed): fix(validate): mypy union-attr errors on main from #6603 (check_diffpair_clearance_intra)
+- **Issue #6610** (closed): Flaky: test_analysis_is_read_only trips on a stray boards/00 .kicad_pro.lck written by a concurrent test
+- **Issue #6593** (closed): SES import drops every wire from standard Specctra sessions (network_out nesting, resolution ignored)
+- **PR #6601**: fix(export): import standard Specctra sessions in SES importer (#6593)
+- **PR #6606**: perf(router): walk only acted-on blocked cells in GridCollisionChecker.path_is_clear (Part of #5617)
+- **PR #6607**: chore(types): fix main Type Check — narrow Optionals in diffpair intra check
+- **PR #6595**: chore(research): three-router fleet protocol and DSN comparability gate (#6334)
+- **Issue #6499** (closed): router: coupled diff-pair search accepts a goal reached on the wrong layer (SMD goal pads)
+- **PR #6597**: fix(router): coupled diff-pair search must reach SMD goal pads on their layer (#6499)
+- **Issue #6575** (closed): kct check: hold unrecognised-name pairs (X_POS/X_NEG) to the floored pair gap, not the class intra_pair_clearance
+- **PR #6603**: fix(check): hold diff pairs to the floored pair gap in diffpair_clearance_intra
+- **Issue #6329** (closed): kct route --deterministic-budget --seed: same-seed runs of board 05 differ on 4 nets, and seeds 42 and 43 can match exactly
+- **PR #6585**: fix(route): log the wall clocks that still bind under --deterministic-budget (#6329)
+- **Issue #6309** (closed): Evaluate: report over-capacity global-routing edges as a placement-spread trigger (successor to expand-route-shrink)
+- **PR #6574**: docs(research): plan overflow edges vs stuck classes, no-go on placement_nudge trigger
+- **Issue #6317** (closed): board-view: draw zone fill, DRC markers, before/after pairs and net-class colours
+- **PR #6577**: feat(board-view): zone fill, DRC markers, before/after pairs, net-class colours
+- **Issue #6391** (closed): Access witness: compute replay before grid release so closing_markings survive (follow-up to #6346)
+- **PR #6598**: fix(router): prime the access witness before the routing grid is released (#6391)
+- **Issue #6475** (closed): diffpair bench: 06b grid seed 42 is non-deterministic under --deterministic-rescue (P0 #6442 AC gap)
+- **PR #6588**: fix(route): --deterministic-rescue covers escape budget, per-iteration cap and checkpoint RNG (#6475)
+- **Issue #6366** (closed): Evolutionary router: plumb or remove the inert astar_weights / preferred_layers / strategy_flags genes
+- **PR #6590**: feat(router): plumb evolutionary astar_weights/preferred_layers, drop strategy_flags
+- **PR #6586**: feat(board03): annotate pad pin types for the Board 03 family (Part of #6025)
+- **Issue #6339** (closed): Precompute crossing and layer-assignability of nets to spot unroutable bundles before and during routing
+- **PR #6591**: feat(net-status): add --crossings pre-route bundle crossing report (#6339)
+- **Issue #6331** (closed): [Parent #5942] PCBWorld Phase 1: integrate pinned D3 acquisition, guide preparation, and dual scoring
+- **PR #6592**: feat(bench): add PCBWorld D3 suite to kct bench external (#6331)
+- **Issue #6484** (closed): Board 09 routing-investigation boards: SENSE_P track shorts U3.9 (SENSE_N), reported by kicad-cli
+- **PR #6581**: docs(board09): record SENSE_P/U3.9 short as known artifact (#6484)
+- **PR #6556**: feat(check): uncoupled-length rule, continuity to info, native pair rules (#6443 piece b)
+- **Issue #6354** (closed): Board 01 generator drifts from committed outputs: different route (15 seg/4 vias vs 21/2) and drops 3D model blocks
+- **PR #6587**: fix(board01): generator emits 3D models; regenerate routed PCB and package (#6354)
+- **Issue #6319** (closed): board-view: missing-link choice differs between frames on ties; duplicate pad numbers give same-named link ends
+- **PR #6580**: fix(board-view): frame-independent missing links and end coordinates in text (#6319)
+- **Issue #6285** (closed): Board 07: routing frame has no .kicad_pro/.kicad_dru beside it, so kct route sees none of the board's clearance rules
+- **PR #6571**: fix(board07): copy project sidecars beside the routing frame (#6285)
+- **Issue #6307** (closed): router: board 04 loses net SWO when its placement is spread to 2x (more room, fewer nets routed)
+- **PR #6573**: test(route): pin board 04 uniform-2x routes 9/9 (#6307)
+- **Issue #6330** (closed): kct route --timeout: a deadline during placement-delta feedback can leave a _partial board with snapshot_saved false and no snapshot_state
+- **PR #6583**: fix(route): publish partial-save snapshot facts before the witness write
+- **PR #6558**: perf(router): memoise the route-halo trace verdict in the pure-Python A* fallback (Part of #5617)
+- **Issue #6495** (closed): connectivity: lone-fill zone_island warnings still counted as unconnected by summary, validate output and fix-drc
+- **PR #6584**: fix(validate): stop counting lone fill islands as unconnected items (#6495)
+- **Issue #6284** (closed): Board 04: re-review reviewed escape repair at the declared 0.15 mm via rule (drop --via-clearance 0.2 pin)
+- **PR #6569**: fix(board04): drop the --via-clearance 0.2 pin (#6284)
+- **Issue #6321** (closed): kct route: a deadline during --placement-feedback saves the in-progress re-route in place of the loop's best routes
+- **PR #6549**: fix(route): placement-feedback partial save keeps the loop's best routes (#6321)
+- **Issue #6551** (closed): mesh engine + --differential-pairs may double-route pair nets like the lattice did (#6535 follow-up)
+- **PR #6565**: fix(route): mesh engine owns its diff-pair nets; reject mesh + --differential-pairs (#6551)
+- **Issue #6550** (closed): lattice tap-chain retry: score all pairs before keeping, and test the discard path (#6535 follow-up)
+- **PR #6568**: fix(route): lattice tap-chain retry scores every pair before keeping (#6550)
+- **Issue #6337** (closed): docs(research): expand-route-shrink note: classifier-count loss range is 0 to 4, not 0 to 3; list lead-in says three for four bullets
+- **PR #6564**: docs(research): fix classifier-count loss range and list lead-in in expand-route-shrink note
+- **Issue #6361** (closed): kct route: --early-stop-patience 0 cannot make the negotiated loop use its budget; the overflow-stagnation stop still ends board 05 at iteration 8 of 40
+- **PR #6570**: fix(route): make --early-stop-patience 0 disable the overflow-stagnation stop (#6361)
+- **Issue #6308** (closed): kct route --timeout: sidecar unverified_output names a copper-less board when the deadline lands in the routing stage
+- **PR #6546**: fix(route): sidecar names copper-bearing _partial after routing-stage deadline
+- **Issue #6328** (closed): kct route auto-grid: board 05's U2 fine zone flips between 0.05 mm and 0.005 mm when the part is translated
+- **PR #6562**: fix(router): solve a fine zone's pitch from all of the part's pads (#6328)
+- **Issue #6364** (closed): monte-carlo/evolutionary: best-trial restore hides an inconsistent placement restore; progress-callback cancel still waits on workers
+- **PR #6559**: fix(route): keep 'inconsistent' through best-trial restore; MC cancel returns best without waiting
+- **Issue #6325** (closed): kct route: an interrupt inside a mirror trial's application can save flipped silk/fab for that footprint in the partial board
+- **PR #6547**: fix(route): signal inside a mirror trial no longer saves flipped silk/fab
+- **PR #6548**: perf(router): prune provably-clear pads in the A* own-pad step gate (Part of #5617)
+- **Issue #6322** (closed): kct route: the default layer-escalation flow saves no partial board on a deadline, and a kept placement delta replaces the checkpoint with a copper-less board
+- **PR #6552**: fix(route): save a _partial board from the default layer-escalation flow (#6322)
+- **Issue #6478** (closed): slow-tests: mfr_tier_4l integration fixture runs ~4200 s and holds a worker ~70 min; Sunday board 05 guard leaves little headroom
+- **PR #6539**: test: bound the board 04 4L mfr-tier fixture at 5k expansions and 1100 s; print slow durations
+- **PR #6534**: fix(router): floor the coupled diff-pair gap at the authored board minimum; emit native diff_pair_gap rules (#6443 P1c)
+- **Issue #6351** (closed): kct route --nets: copper-loss guard compares against the run's own checkpoint and refuses to save
+- **PR #6511**: fix(route): copper-loss guard compares against input copper, not own checkpoint
+- **Issue #6535** (closed): lattice couples 0/4 pairs on 06b on main; #6440 head coupled 3/4 (regression since merge)
+- **PR #6542**: fix(lattice): one engine owns diff-pair copper; retry a declined trunk as a tap chain (#6535)
+- **Issue #6540** (closed): Slow Tests red on main: board 06 regression-fixture class-map hash pin stale after #6517
+- **PR #6541**: test: re-pin board 06 regression-fixture class map after #6517 (#6540)
+- **Issue #6369** (closed): kct net-status --why: carry the router's per-net search-failure reason so full-board routes are not mislabelled budget_starved
+- **PR #6538**: fix(net-status): carry router per-net search-failure reason so full-board routes are not mislabelled budget_starved
+- **Issue #6543** (closed): main red: test_via_type_keyword_6485 coupled-route via count 2 != 4 (cpp + python)
+- **PR #6545**: test(router): give the #6485 coupled fixture a legal hole-to-hole route
+- **Issue #6306** (closed): kct route refuses a 120x80 mm board with one LQFP-48: auto-grid error omits --max-cells and advises enlarging the board
+- **PR #6537**: fix(router): auto-grid refusal names concrete --max-cells value (#6306)
+- **Issue #6360** (closed): kct route --route-engine mesh ignores plane-layer reservation and net-class avoid_layers (needs through-via transitions over blocked inner layers)
+- **PR #6525**: fix(router): mesh engine honours plane-layer reservation and avoid_layers
+- **Issue #6491** (closed): net-status: status is 'complete' while open_connections is 1 when a detached track or via exists
+- **PR #6515**: fix(net-status): fail the gates on stranded copper (#6491)
+- **PR #6530**: perf(router): skip unblocked cells in optimizer grid collision walk (Part of #5617)
+- **Issue #6494** (closed): Board 03: trim J1 USB-C silk to clear Edge.Cuts (2 silk_edge_clearance warnings block readiness)
+- **PR #6529**: fix(board03): clip J1 silk back from Edge.Cuts to the silk_edge_clearance floor (#6494)
+- **Issue #6485** (closed): Keyword-less partial-span (via ...) is through in KiCad but blind in kicad-tools connectivity
+- **PR #6514**: fix(router): never write a partial-span via without its type keyword (#6485)
+- **Issue #6397** (closed): router: pure-Python A* lacks #6375 own-pad step gate; fallback burns minutes on validator-rejected pad-exit tails
+- **PR #6521**: perf(router): own-pad step gate in the bidirectional Python A* (#6397)
+- **Issue #6473** (closed): router: Python fallback A* and C++ CoupledPathfinder lack the #6464 within-path via hole-to-hole check
+- **PR #6520**: fix(router): coupled diff-pair search holds its own vias to the hole-to-hole floor (#6473)
+- **Issue #6269** (closed): Board 04: readiness.json is a stale legacy report with no producer (and U2 reference silk over pads)
+- **PR #6512**: fix(boards): re-issue board 04 readiness via gated producer; move U2 ref silk off pads
+- **PR #6517**: feat(diffpair): one protocol defaults table; board 03 USB skew at 2.5 mm (#6443)
+- **PR #6492**: fix(boards): annotate pad pin types on board 02 and regenerate its package
+- **Issue #6256** (closed): optimize-placement decoupling snap leaves 7 silkscreen warnings on board 04 (reference text not considered)
+- **PR #6503**: fix(placement): re-anchor reference text disturbed by the decoupling snap (#6256)
+- **Issue #6320** (closed): kct route: the access-witness sidecar of an interrupted placement-delta trial journals copper the saved board does not contain
+- **PR #6524**: fix(router): truncate the commit journal when a placement trial is discarded without a grid rebuild
+- **Issue #6362** (closed): kct route --route-engine lattice: negotiation round cap is hardcoded (8, 12 with pairs) and --iterations does not reach it
+- **PR #6523**: feat(route): add --lattice-iterations and log what stopped lattice negotiation
+- **Issue #6489** (closed): board 03 under the P0 pair benchmark: authored-netclass final pass demotes USB_D+/USB_D- to unrouted (0.175 mm vs 0.2 mm at a net-0 pad)
+- **PR #6498**: fix(router): re-negotiate with grown pads when class-pad repair cannot clear a slot
+- **PR #6497**: perf(sexp): single-pass parse path + GC pause for large boards (#5617)
+- **Issue #6283** (closed): kct route-auto: resolve trace/via clearance from .kicad_pro/.kicad_dru, not the .kicad_pcb alone
+- **PR #6519**: fix(route-auto): resolve trace/via clearance from .kicad_pro/.kicad_dru (#6283)
+- **Issue #6490** (closed): Connectivity: exact-abutment pads (shared edge) disagree with kicad-cli in the copper-contact model
+- **PR #6516**: fix(validate): bond abutting exact pad outlines like kicad-cli (#6490)
+- **Issue #6347** (closed): Evolutionary worker trials skip keepout rule areas (#6008 payload not installed)
+- **PR #6513**: fix(router): evolutionary trials honour keepout rule areas via shared worker builder (#6347)
+- **Issue #6324** (closed): kct route: Ctrl+C does not always stop the run (SystemExit raised in the signal handler is discarded inside a destructor)
+- **PR #6507**: fix(route): stop at the next stage boundary when an interrupt's exit is swallowed
+- **Issue #6286** (closed): Router: relief rescue commits vias below via_clearance from foreign pads (masked by the old 0.20 mm default)
+- **PR #6510**: fix(router): validate relief probe path before committing it as a fallback
+- **Issue #6327** (closed): stuck classifier: a power net with no zone is labelled pour_discontinuous (board 05 VM)
+- **PR #6506**: fix(router): stuck classifier requires a zone before calling a power net pour_discontinuous
+- **Issue #6303** (closed): bug(witness): access-witness replay judges exit stubs against the FINAL board's segment R-tree, not the replayed copper
+- **PR #6504**: fix(router): access-witness replay suspends the segment R-tree (#6303)
+- **Issue #6294** (closed): clearance_resolver: via-scoped DRU recogniser misreads parenthesised '(… || …) && X' conditions as board-wide via rules
+- **PR #6505**: fix(router): split DRU via conditions only at paren depth 0 (#6294)
+- **Issue #6486** (closed): chore(deps): pin site/ typescript back to ^6 (TS 7 from #6481 breaks npm ci against @astrojs/check)
+- **PR #6500**: chore(deps): pin site/ typescript back to ^6.0.3
+- **Issue #6338** (closed): test: test_board06_default_repeat_export_preserves_non_lcsc_spec fails when a KiCad lock file appears in boards/06-diffpair-test during the run
+- **PR #6501**: test: ignore KiCad lock files in board 06 export snapshot (#6338)
+- **Issue #6468** (closed): main CI red: flaky timing budgets (deadline_hit assert + 60s pytest-timeouts) across Test/Test (extended)
+- **PR #6496**: test: give test_json_report_schema a generous per-link budget (#6468)
+- **Issue #6429** (closed): Router coupled-routes diff pairs KiCad's isCoupledDiffPair() does not recognise (_POS/_NEG, lowercase _p/_n), so both engines flag their intra-pair gap
+- **PR #6488**: fix(drc): exempt router-coupled pairs KiCad does not recognise by name (#6429)
+- **Issue #6467** (closed): router: board 06b grid-router run with seed 42 is nondeterministic across repeated runs
+- **Issue #6313** (closed): Changelog workflow's cancel-in-progress leaves cancelled check runs on a PR head, which post-verdict.sh reads as red and refuses approval
+- **PR #6440**: fix(lattice): chain-ordered diff-pair segments through pass-through parts (board 03 USB_D)
+- **Issue #6395** (closed): board 05: 27 copper violations of the router's own net classes (Power/HighCurrentSignal/Digital) exposed by #6390
+- **Issue #6295** (closed): Finish Dependabot→Renovate migration: disable Dependabot PR generation
+- **Issue #6289** (closed): pour stitching ignores fab hole-to-hole spacing (board 05: 5 stitch vias at 0.457–0.496 mm vs 0.5 mm)
+- **Issue #6470** (closed): ConnectivityValidator.validate() matches trace endpoints to pad centres, not pad copper (false partial when a trace lands off-centre)
+- **Issue #6453** (closed): NetStatusAnalyzer misses thermal-spoke contact shallower than POUR_PAD_ERODE (fresh board 04: +3.3V 5 islands, KiCad connected)
+- **Issue #6452** (closed): NetStatusAnalyzer misses a via that bridges fill islands of two different zones (fresh board 03: false GND open)
+- **PR #6487**: fix(connectivity): one copper-contact model matching kicad-cli (#6452, #6453, #6470)
+
+### 2026-10-13
+
+- **Issue #6437** (closed): lattice class-pad repair (#6395): skip or skew-check diff-pair nets routed uncoupled; repair or report via shortfalls; log the HV skip
+- **PR #6477**: fix(lattice): hold diff-pair nets to a 0.01 mm length budget in class-pad repair, report via shortfalls, log HV skip (#6437)
+- **PR #6349**: fix(boards): annotate pad pin types on boards 00 and 01 and regenerate their packages
+- **Issue #6425** (closed): Oracle DRC gate bans every weld when the recipe's declared via is below the project minimums (board 04)
+- **PR #6480**: fix(oracle): waive declared-size closer via dimensions in the DRC gate; de-dup route DRC; board 04 drops its reservation pin (#6425)
+- **PR #6300**: fix(stitch): apply fab hole-to-hole minimum to stitch via placement
+- **Issue #5768** (closed): ci: replace stale fork Test projection with hosted measurements after #6013
+- **PR #6326**: docs(ci): measured hosted Test durations, 75m timeout, current PR CI guidance
+- **PR #6462**: perf(router): skip the dead shapely distance in RouteHaloGeometry.clear (Part of #5617)
+- **PR #6481**: chore(deps-dev): bump typescript from 5.9.3 to 7.0.2 in /site
+- **PR #6438**: fix(board05): repair 27 netclass_clearance_copper findings in committed copper (Part of #6395)
+- **PR #6454**: chore(boards): refill saved zones and refresh bundles/readiness for boards 00-02, 04, 06, 07
+- **PR #6372**: chore(deps): update dependency typescript to v7
+- **PR #6482**: chore(deps): bump fastmcp from 4.0.5 to 4.0.10 in the uv-minor-patch group across 1 directory
+- **PR #6359**: chore(deps): update dependency pandas to v3
+- **PR #6357**: chore(deps): update dependency python to 3.14
+- **Issue #6463** (closed): test: run the lattice manufacturable guard (board 04) in nightly slow tests; it is currently hidden by its env-var skip
+- **PR #6474**: test: run the lattice manufacturable guard (board 04) in nightly slow tests
+- **PR #6483**: Dependabot: render dependabot.yml from the org policy
+- **PR #6479**: Remove Renovate config: Dependabot takes over
+- **PR #6476**: Dependabot: render dependabot.yml from the org policy
+- **Issue #6442** (closed): [Epic #6441] Phase 0: diff-pair benchmark, router-produced guard, board 06 gap-error discrepancy, router/checker threshold parity
+- **PR #6461**: feat(bench): router-produced diff-pair benchmark, board 06 gap root cause, threshold parity (Phase 0, #6442)
+- **Issue #6464** (closed): grid router commits same-net signal vias below fab hole-to-hole minimum (board 05: EN_A 0.461 mm vs 0.5 mm)
+- **PR #6472**: fix(router): hold a route's own vias to the fab hole-to-hole floor (#6464)
+- **Issue #6431** (closed): kct fix-drc reports 'All violations repaired!' while kicad-cli still finds the same net-class clearance violations (board 05)
+- **Issue #6434** (closed): repair-clearance reports 38/40 'repaired' while both DRC engines still see all 40 (nudges slide along the track axis)
+- **PR #6459**: fix(drc): re-measure clearance repairs; fix-drc gates success on a re-check
+- **Issue #6428** (closed): Stitcher stub checks are layer-blind for non-reserved candidates; making them layer-aware needs a per-net oracle link gate
+- **PR #6466**: fix(oracle): per-net link gate, layer-aware stub checks, static corridor flanks (#6428)
+- **Issue #6460** (closed): net-status: strict trace-to-pad contact (_pad_polys) ignores absolute pad rotation, giving false contacts and opens
+- **PR #6469**: fix(connectivity): orient all pad copper by absolute pad rotation
+- **Issue #6363** (closed): router: extend the #6342 rip-up repeat guard to the recovery, overflow-silent and relief rescue passes; drop victim partial copper before retry
+- **PR #6465**: fix(router): guard the relief rescue against rip-up cycling (#6363)
+- **Issue #6412** (closed): Oracle closer: try nearest-island join when the plane join is withdrawn for KiCad DRC
+- **PR #6450**: fix(router): oracle closer tries the nearest-island join when its plane join is withdrawn
+- **Issue #6435** (closed): NetStatusAnalyzer splits GND on exposed-pad thermal-via footprints (board 05: 5 islands, KiCad: 0 unconnected)
+- **PR #6457**: fix(net-status): bond overlapping pad copper so exposed-pad GND is not split
+- **Issue #6455** (closed): board 07: regenerate reviewed evidence and bundle artefacts from current copper (validate.py fills without net classes) — split from #6404
+- **PR #6456**: fix(board-07): regenerate reviewed evidence and bundle from current copper; validate.py refills with net classes (#6455)
+- **Issue #6451** (closed): regression: board 04 lattice routes 6/9 (OSC_IN, OSC_OUT, SWDIO unrouted) on main after #6439 (#6427) -- was 9/9, exit 0
+- **Issue #6449** (closed): regression: board 05 lattice strands GND_SENSE at U2:6 (no-path-keepout-constrained) on main after #6430 — 33/33 → 32/33
+- **PR #6458**: fix(router): lattice pad masks grow by designer floors only — restores board 05 33/33 and board 04 9/9 (#6449, #6451)
+- **Issue #6420** (closed): research harness under-counts DRC: kct check without net-class map, diff-pair errors dropped, kicad-cli without --all-track-errors
+- **PR #6433**: fix(research): grade expand-route rows like a manual kct check (#6420)
+- **Issue #6427** (closed): Board 02 fresh route violates its own Power class: 1 kicad-cli clearance, kct route exits 3 (exposed by #6390)
+- **PR #6439**: fix(router): enforce router net-class clearances on foreign copper
+- **Issue #6396** (closed): board 07: 42 (kct) / 40 (kicad-cli) copper violations of the router's own SDRAM/AUX classes (0.175 mm) exposed by #6390
+- **PR #6436**: fix(board-07): clear the board's own 0.175 mm classes by nudging 24 vias (#6396)
+- **Issue #6413** (closed): Plane-via reservation: grid-engine oracle regression on board 04 recipe, and signal-pin stranding risk
+- **PR #6432**: fix(plane-via): never flank a signal pin with reserved sites; layer-aware stub check at reserved sites
+- **PR #6430**: fix(router): lattice holds track-vs-pad pairs to the pad's own net class
+- **Issue #6417** (closed): kct pcb diff OLD NEW: uuid + content-hash geometric board diff for reviewing routing PRs
+- **PR #6424**: feat(pcb): add kct pcb diff OLD NEW geometric board diff
+- **Issue #6389** (closed): router: pure-Python A* lacks #6315 exact pad-cell resolution, double-counts foreign pad clearance and detours through vias where C++ routes on one layer
+- **PR #6398**: fix(router): exact pad-cell resolution in the pure-Python A* (#6389)
+- **Issue #6399** (closed): pour completion: print per-link closer reasons and join stranded pour islands to the plane, not the nearest sliver (#6388 part A)
+- **PR #6403**: fix(route): print per-link closer reasons; join stranded pour islands to the plane (#6399)
+- **Issue #6390** (closed): DRC sidecars only carry fab floors: net-class clearance violations (0.15-0.18 mm vs 0.2 mm) pass both kct check and kicad-cli
+- **PR #6414**: fix(route): declare the router's net classes in routed DRC sidecars (#6390)
+- **Issue #6418** (closed): kct mcp setup --client claude-code writes ~/.claude/mcp.json, which Claude Code never reads
+- **PR #6423**: fix(mcp): register Claude Code server in ~/.claude.json, not ~/.claude/mcp.json
+- **Issue #6406** (closed): Evaluate i2cjak/Backplane (agentic KiCad/FreeCAD hub with per-tool-call design history and board diff) for ideas and integration
+- **PR #6419**: docs(ecosystem): evaluate Backplane and KiStack; register both
+- **Issue #6410** (closed): stitch: run_thermal_stitch and run_blanket_stitch have the same multi-net sibling-fill bug as #6400
+- **PR #6416**: fix(stitch): gate thermal/blanket multi-net vias on each net's own fill (#6410)
+- **Issue #6409** (closed): stitch: same-net fill gate treats KiCad fill fracture bridges as pour edges, rejecting legal welds (board 03 VCC R14.1, VBUS U1.7)
+- **PR #6421**: fix(stitch): ignore fill fracture bridges in the same-net margin test
+- **Issue #6402** (closed): auto-pour: bounding-box island for one pour net swallows another pour net's pads (board 03 VBUS covers VCC U1/C1) (#6388 part D)
+- **PR #6405**: fix(zones): carve auto-pour bbox islands off incumbent pours' pads (#6402)
+- **PR #6408**: fix(router): soft entry-lane cost for fine-pitch neighbour pins (#6382)
+- **Issue #6401** (closed): kct route: reserve a legal via site per pour-net SMD pad before signal routing, grid and lattice (#6388 part C)
+- **PR #6411**: fix(router): reserve a via site per pour-net IC pin before routing (#6401)
+- **Issue #6368** (closed): kct route: wide traces land off their pad centreline and close the neighbour pin's entry lane
+- **PR #6387**: fix(router): land traces on the pad centreline (#6368)
+- **Issue #6400** (closed): stitch: multi-net run_stitch places a via for one net inside a sibling target net's fill (#6388 part B)
+- **PR #6407**: fix(stitch): gate multi-net stitch vias on their own net's fill (#6400)
+
+### 2026-10-12
+
+- **Issue #6384** (closed): pour weld path: 5 mm neighbourhood for class clearance can miss a stricter net within stitch's escape reach (~5.3 mm)
+- **PR #6393**: fix(router): derive pour weld neighbourhood from stitch's via reach (#6384)
+- **Issue #6346** (closed): Access-witness replay fails with IndexError on lattice-engine partial routes (board 05)
+- **PR #6392**: fix(router): access-witness replay survives a released routing grid (#6346)
+- **Issue #6381** (closed): lattice: board 05 PHASE_B (U2.8 -> J2.2) declined no-path-layer-constrained -- last open net for the best engine
+- **PR #6386**: fix(router): lattice neck fallback for dead-end fine-pitch escapes; board 05 33/33 (#6381)
+- **Issue #6376** (closed): kct route: auto-layers (layer-escalation) flow skips post-save output connectivity verification
+- **PR #6385**: fix(route): verify the written board in every kct route flow (#6376)
+- **Issue #6374** (closed): pour completion (PourLinkCloser) routes at --clearance instead of net-class clearance: board 04 GND link 0.15 mm from OSC_IN where Power class needs 0.2 mm
+- **PR #6383**: fix(router): pour-link completion keeps net-class clearance (#6374)
+- **Issue #6371** (closed): kct route: board 03 reports 24/24 nets connected and 'all nets verified' while USB_D- pad J1.B7 is unconnected
+- **PR #6379**: fix(router): judge pad connectivity by layer-aware copper contact (#6371)
+- **Issue #6375** (closed): C++ pad-only clearance bypass (#6370) accepts steps the Python validator rejects (seg-pad gap 0.100 mm < 0.15 mm); board 04 routing 10 s -> 143 s via Python A* fallback
+- **PR #6380**: perf(router): hold own-pad A* steps to the validator's seg-vs-pad verdict (#6375)
+- **Issue #6373** (closed): lattice engine: board 03 USB_D pair hits pair-no-path and leaves 2 pads per net unconnected, with no uncoupled fallback
+- **PR #6377**: fix(router): lattice uncoupled fallback for declined diff pairs (#6373)
+- **Issue #6315** (closed): kct route: PHASE_C on board 05 is unroutable whenever PHASE_B is routed with it, even on an empty board
+- **PR #6370**: fix(router): resolve pad clearance cells by exact geometry so wide nets leave fine-pitch pads (#6315)
+- **Issue #6345** (closed): Monte Carlo / evolutionary trials give identical results on board 05 (net-order variation has no effect)
+- **PR #6365**: fix(router): route each Monte Carlo / evolutionary trial in its own order (#6345)
+- **Issue #6350** (closed): kct route --route-engine lattice ignores plane-layer reservation: board 05 routes 325 signal segments on In1/In2 under --layers 4
+- **PR #6367**: fix(router): lattice engine honours plane-layer reservation (#6350)
+- **Issue #5949** (closed): [Epic proposal] Agentic PCBA ladder benchmark: 10 demo boards, timed agent runs, own repo
+- **Issue #6340** (closed): kct route: a four-net fine-pitch bundle with one crossing fails alone on board 05 (escape via closes the neighbouring pin)
+- **Issue #6342** (closed): kct route: access-loss rip-up cycles on board 05 (rip blocker, blocker reseals the same pin) until no-progress stop with budget left
+- **PR #6355**: fix(router): retry a targeted rip-up against freed C++ copper and bound access-loss rip-up cycles
+- **Issue #6343** (closed): kct route --strategy monte-carlo/evolutionary: deadline writes an empty board (snapshot_saved false) after 20 minutes of trials
+- **PR #6344**: fix(router): keep the best Monte Carlo/evolutionary trial when the deadline fires
+
+### 2026-10-11
+
+- **Issue #6341** (closed): kct route --route-engine lattice: board 05 negotiation finds 56/57 connections, then route_all's outer timeout discards them and writes 0 nets
+- **PR #6348**: fix(router): serve cached lattice/mesh routes when route_all's outer timeout fires
+- **Issue #6312** (closed): Measure rigid-cluster expansion on the boards that are partial at 1x (board 05; chorus-test needs a clustering rule first)
+- **PR #6336**: docs(research): rigid-cluster expansion does not help board 05 (measured), with harness probes and committed runs
+- **Issue #6314** (closed): kct route: a deadline during placement-delta feedback saves trial copper against the original placement
+- **PR #6323**: fix(route): save the last accepted state when interrupted during placement-delta feedback
+
+### 2026-10-10
+
+- **Issue #6316** (closed): Question-specific board images for agents: net highlight, ratsnest and coordinates
+- **PR #6318**: feat(board-view): net-aware board images with ratsnest, mm axes and an MCP tool
+- **Issue #6304** (closed): Experiment: expand-route-shrink layout (route on a 2x-scaled placement, then compact back with trace repair)
+- **PR #6311**: docs(research): expand-route-shrink experiment and harness
+- **Issue #6292** (closed): perf: board 05 access-witness replay takes 143–267 s of the 900 s budget
+- **PR #6305**: perf(router): access-witness replay 215 s -> 7 s on board 05, identical verdicts (#6292)
+
+### 2026-10-09
+
+- **PR #6297**: docs(board05): record measured PHASE_A/B/C un-skip result (Refs #6287)
+- **Issue #6280** (closed): kct route: resolve via_clearance from board rules instead of the 0.20 mm default
+- **PR #6293**: fix(route): resolve via_clearance from board rules instead of the 0.20 mm default
+- **Issue #6273** (closed): Board 05 legacy Kelvin recipe exhausts its 900 s route budget before an accepted board (blocks #5398 acceptance)
+- **PR #6282**: fix(route): finish inside --timeout -- keep complete two-phase state, reserve the post-route stages (#6273)
+- **Issue #6272** (closed): router: trace-vs-via clearance depends on insertion order (port b92bf554)
+- **PR #6279**: fix(router): enforce via clearance in both copper insertion orders (#6272)
+- **Issue #6076** (closed): schematic: fleet generators emit random uuid4s, so regenerated schematics are never byte-reproducible (need seeded/deterministic UUID mode)
+- **PR #6281**: chore(boards): regenerate 00-simple-led with deterministic UUIDs (#6076)
+- **Issue #5764** (closed): Boards 00 and 03: generators emit footprints with no pin-1 / polarity silkscreen mark
+- **PR #6222**: fix(board00): emit cathode silkscreen for D1
+- **Issue #6277** (closed): kct route --no-auto-layers --format json emits no routing summary
+- **PR #6278**: fix(route): emit JSON routing summary on --no-auto-layers path (#6277)
+- **PR #6270**: chore(boards): regenerate 03-usb-joystick, 04-stm32-devboard with deterministic UUIDs (#6076)
+- **Issue #6234** (closed): optimize-placement: --route-check acceptance mode (confirm a placement with a bounded real route)
+- **PR #6276**: feat(placement): optimize-placement --route-check acceptance mode (#6234)
+- **PR #6274**: chore(deps): migrate from Dependabot to Renovate
+- **PR #5917**: chore(deps): bump astro from 7.3.3 to 7.3.5 in /site
+- **PR #5916**: chore(deps-dev): bump the site-minor-patch group in /site with 2 updates
+- **PR #6066**: chore(deps): bump smol-toml from 1.8.0 to 1.9.0 in /site
+- **PR #5918**: chore(deps): bump the python-minor-patch group with 3 updates
+- **PR #6067**: chore(deps): bump werkzeug from 3.1.8 to 3.1.9
+- **PR #6065**: chore(deps): bump sharp from 0.35.4 to 0.35.5 in /site
+- **PR #5842**: chore(deps): bump pyjwt from 2.13.0 to 2.15.0
+- **PR #6069**: chore(deps): bump fsspec from 2026.2.0 to 2026.6.0
+- **PR #6068**: chore(deps): bump source-map-js from 1.2.1 to 1.2.2 in /site
+- **PR #5888**: chore(deps): bump devalue from 5.9.2 to 5.9.4 in /site
+- **PR #6271**: feat(router): bounded inward off-pad access for trapped Kelvin terminals
+- **PR #5841**: chore(deps): bump urllib3 from 2.7.0 to 2.8.0
+- **Issue #6241** (closed): ci: pin expensive class/module-scoped slow-test fixtures to one xdist worker (--dist loadgroup)
+- **PR #6242**: ci: pin slow-test heavy-fixture classes to one xdist worker
+- **PR #6264**: fix(boards): regenerate 01-voltage-divider and 02-charlieplex-led with deterministic UUIDs; producer-built packages (#6076)
+- **PR #6266**: chore(boards): regenerate 05-bldc-motor-controller, 06-diffpair-test, 07-matchgroup-test with deterministic UUIDs (#6076)
+- **Issue #6267** (closed): tests: route-subprocess tests time out from kicad-cli queue wait and cold evolutionary cache (#6262 leftovers)
+- **PR #6268**: fix(cli): forward kct route --pop-size/--generations; queue-aware budgets for route tests (#6267)
+- **Issue #6262** (closed): main CI red: anchor-weight placement test, ProjectClearanceError on project without net_settings, duplicate-reference options6
+- **PR #6265**: fix: unbreak main CI -- unversioned net_settings, locked footprints in optimize-placement, native-queue route budget (#6262)
+- **PR #6263**: chore(boards): regenerate 09-usbc-pd-power with deterministic UUIDs (#6076)
+
+### 2026-10-08
+
+- **Issue #6258** (closed): Board 06 assembled LVDS demo: router commits OUT4/GND short (8/8 reported routed), native DRC fails
+- **PR #6261**: fix(route): keep --preserve-existing copper registered for post-route passes (#6258)
+- **Issue #6254** (closed): route-auto: run the #6243 authored-netclass finalize census and share its resolver
+- **PR #6260**: fix(route-auto): run the authored-netclass final pass (#6254)
+- **PR #6247**: fix(schematic): deterministic uuid5 UUIDs for generated schematics (#6076)
+- **Issue #6249** (closed): kct check: enforce stricter .kicad_pro netclass clearances on routed copper (parity with kicad-cli after #6243)
+- **PR #6259**: fix(check): enforce authored netclass clearance on routed copper
+- **PR #6246**: fix(router): keep pending Kelvin sense pins protected by the pad-access gate
+- **Issue #6243** (closed): router: enforce authored per-net (netclass) clearance minima through the shared clearance kernel (re-cut of #5502, part 1)
+- **PR #6252**: fix(router): enforce authored netclass clearance minima through the shared kernel
+- **Issue #6250** (closed): optimize-placement --seed current: slide-off pre-pass nudges a clean hand floorplan off-grid and breaks fine-pitch escapes
+- **PR #6257**: fix(placement): warm-start slide-off only moves real violations, on grid (#6250)
+- **Issue #6253** (closed): MCP optimize_placement tool ignores the new decoupling affinity term and snap pass (#6020 parity)
+- **PR #6255**: fix(mcp): optimize_placement shares the CLI decoupling term and snap pass
+- **Issue #6191** (closed): merge_project_rules: decide whether stricter authored clearance should win by default
+- **PR #6248**: feat(manufacturers): keep stricter authored DRC minima by default (#6191)
+- **Issue #6020** (closed): board 04 stm32-devboard: decoupling caps sit 6-14 mm from U2 VDD pins
+- **PR #6251**: feat(placement): decoupling-cap affinity pulls caps toward their IC supply pins (#6020)
+- **Issue #6237** (closed): route: preserved copper is never checked against other preserved copper in the post-route short check
+- **PR #6245**: fix(route): check kept copper against kept copper and for clearance near-misses (#6237)
+- **Issue #6172** (closed): Board 06: project.kct target_fab (jlcpcb-tier1) disagrees with the tier its recipe builds at (jlcpcb)
+- **PR #6244**: chore(board06): target base jlcpcb in project.kct, drop redundant route pin
+- **Issue #6130** (closed): perf: reuse kicad-cli pcb drc / fill-zones results across identical consecutive passes in kct route
+- **Issue #6230** (closed): router: enforce a hard wall-time deadline on the corridor-yield re-run (follow-up to #5923 / PR #6227)
+- **PR #6236**: perf(router): enforce a hard wall-time deadline on the corridor-yield re-run (#6230)
+- **Issue #6217** (closed): router: --auto-mfr-tier never escalates on board 04 after via-in-pad process eligibility (#5189); escalation guard is layer-blind
+- **PR #6228**: fix(router): layer-aware via-in-pad tier escalation; restore missed-rescue signal (#6217)
+- **Issue #6239** (closed): kct route prints 'Status: SUCCESS' before the ROUTING FAILED banner when the post-route short check fails
+- **PR #6240**: fix(route): no Status: SUCCESS before ROUTING FAILED banner
+- **Issue #6229** (closed): route: preserved-existing copper is never checked against other nets' pads in the post-route short check
+- **PR #6238**: fix(router): check preserved copper against foreign pads in post-route short check (#6229)
+- **Issue #6233** (closed): research: fold the fresh-routed placement-score corpus (7 fleet boards) into the #6232 calibration study
+- **PR #6235**: docs(research): fold the fresh-routed placement-score corpus into the #6232 study
+- **Issue #5923** (closed): Pose-centerline diff-pair default (PR #5922): board 06 +3V3 pour breaks post-legalize and Diff-Pair job runtime ~2.7x
+- **PR #6227**: perf(router): cap the corridor-yield re-run in proportion to the first main pass (#5923)
+- **Issue #5948** (closed): placement: calibrate a pre-route placement score against actual routing outcomes and use it as acceptance test
+- **PR #6232**: docs(research): calibrate pre-route placement signals vs routing outcomes (#5948)
+- **Issue #5991** (closed): ci: Slow Tests workflow red on main — 11 long-standing failures + 1 flaky (coupled board06 timeouts, mfr-tier, chorus feedback, board04 drill, board03 demo)
+- **Issue #6225** (closed): kct route exits 3 on boards 06a/06b: post-route short check flags 0.075mm header-pad overlaps that kicad-cli and kct check do not
+- **PR #6226**: fix(router): match skipped pour-net pads by name in post-route short check (#6225)
+- **Issue #6218** (closed): schematic registry silently returns the wrong symbol for KiCad 7 (space-indented) libraries
+- **PR #6223**: fix(schematic): indentation-agnostic symbol extraction in registry (#6218)
+- **Issue #5795** (closed): Regenerate board 06a rows in the KRT routing-tools comparison after the #5788 --preserve-existing fix
+- **PR #6224**: docs(research): regenerate board 06a rows in the KRT comparison after #5788
+- **Issue #5921** (closed): Epic #5508: board-05 ISENSE and board-07 U4.C2 are not access-loss instances — re-point those criteria at #5509 / the pour-escape model
+- **PR #6219**: ci: run Slow Tests in the pinned KiCad container and triage its failures (#5991)
+- **Issue #6220** (closed): Lint & Format red on main: unused `import sys` in tests/test_placement_native_fill.py (from #6213)
+- **PR #6221**: test: drop unused sys import in native-fill test (#6220)
+- **Issue #6215** (closed): investigate: KiCad 10.0.6 kicad-cli fills same-net-track pours nondeterministically; can the board-03 reproducibility test flake?
+- **PR #6216**: test: pin kicad-cli fill reproducibility to short-free copper (#6215)
+- **Issue #6115** (closed): test: fast fill-order-sensitivity fixture for board 03 (follow-up to #6052)
+- **PR #6210**: test: fast fill-order-sensitivity fixture (#6115)
+- **Issue #6213** (closed): Production fill silently yields empty multilayer zones on pcbnew < 10.0.2
+- **PR #6214**: fix(zones): fail loudly on multilayer fill with pcbnew < 10.0.2 (#6213)
+- **Issue #6101** (closed): tests: native-fill suites fail locally on KiCad 10.0.1 (CI pins 10.0.6); _fixed_fill_worker stderr is swallowed
+- **PR #6209**: fix(tests): gate multilayer native-fill tests on KiCad >= 10.0.2
+- **Issue #5762** (closed): board-03: footprint silkscreen ships at 0.12mm, below the jlcpcb-tier1 0.15mm floor (139 warnings)
+- **PR #6200**: fix(board03): widen footprint silk to jlcpcb-tier1 0.15mm floor
+- **Issue #6211** (closed): test: V-score fail-closed tests — partial-overlap case is vacuous; near-crossing check untested
+- **PR #6212**: test: V-score fail-closed tests - non-vacuous partial overlap, near-crossing coverage
+- **Issue #6193** (closed): pcb_vscore_layers: detect partial/jump V-scoring on third-party panels
+- **PR #6203**: fix: detect partial and jump V-scoring on third-party panels
+- **Issue #5767** (closed): via_under_body: IGNORECASE matches word-interior SON/LGA; same-net cluster can absorb the real EP
+- **PR #6208**: fix(validate): via_under_body LGA word-interior match and EP cluster absorption
+- **Issue #5993** (closed): test: native fleet relationship parity fails for board 05 on main (58 == 57)
+- **Issue #6201** (closed): route-auto gate: kicad-cli 10.0.2+ reads a pad's A.Layer as its footprint's layer, not the pad's -- gate under-reports on mismatched sides
+- **PR #6207**: fix(router): read a pad's A.Layer as its footprint's layer in the route-auto gate (#6201)
+- **Issue #6205** (closed): kct panel --cut vcut --mfr oshpark should warn that OSHPark does not offer V-scoring
+- **PR #6206**: feat(panel): warn when --cut vcut targets a fab without V-scoring
+- **Issue #6177** (closed): Add sourced per-fab V-score copper clearance to manufacturer profiles
+- **PR #6204**: feat: per-fab V-score copper clearance in manufacturer profiles (#6177)
+- **Issue #6198** (closed): Router: rtree-less collision fallback is untested in CI; make rtree core or add a no-rtree lane
+- **PR #6202**: build: make rtree a core dependency (#6198)
+- **Issue #6185** (closed): Board 03 kct route: USB_CC1 relief probe refused for stranding J1.A6, ends 23/24
+- **Issue #6184** (closed): Board 03 baseline test: post-optimize backstop demotes USB_D+ as a cross-net short (12/13)
+- **Issue #6151** (closed): board 03: USB_CC1 unrouted (23/24), test_board03_routing_baseline fails on main (pre-existing)
+- **PR #6197**: fix(router): no optimizer cross-net short without rtree; THT pad access spans all layers
+- **Issue #6170** (closed): test: test_preserved_copper_cpp_grid_6103 calls _py_grid_state_stamp unbound after #6152 made it an instance method
+- **Issue #6196** (closed): main CI red: board06 escape search rejects new DRU rules; route-auto gate hole_clearance disagrees on null pad layer
+- **PR #6199**: fix: unbreak main CI (board 06 escape DRU parser, route-auto pad A.Layer, #6170 test)
+
+### 2026-10-07
+
+- **Issue #6158** (closed): kct panel squares off rounded/non-rectangular board outlines
+- **PR #6194**: fix(panel): keep rounded/shaped board outlines as real arcs (#6158)
+- **Issue #6182** (closed): test(ci): lattice post-pass-gating skips_both tests still exceed 180 s in Test (extended) after #6140
+- **PR #6195**: test(router): share one lattice route across post-pass gating skip tests
+- **PR #6192**: perf(router): exact bbox skip in lattice clearance checks (#6182)
+- **Issue #6165** (closed): pcb_vscore_layers misses overshooting/KiKit score lines and unquoted layers; flags lines on the outline edge
+- **PR #6189**: fix(export): robust V-score layer detection (#6165)
+- **Issue #6180** (closed): PCB.export_drill() also plots copper Gerbers and returns gerbers.zip instead of a drill-file directory
+- **PR #6190**: fix(pcb): export_drill writes drill files only, no Gerbers or zip
+- **Issue #6171** (closed): generate_dru crashes on 2-layer profiles when a net class sets target_ampacity (inner_copper_oz=0)
+- **PR #6188**: fix(dru): skip internal ampacity rule on 2-layer profiles
+- **Issue #6169** (closed): Default --mfr from project.kct target_fab in the remaining jlcpcb-defaulted commands (export, fix-*, audit, pipeline, reason, estimate)
+- **PR #6183**: feat(cli): default --mfr from project.kct target_fab in the remaining jlcpcb-defaulted commands
+- **PR #6178**: fix(router): relief rescue counts a victim re-landed only when complete (#6151)
+- **Issue #6186** (closed): test_clearance_kernel_parity red on main: panel/vscore.py (#6176) references the clearance kernel without an allowlist entry
+- **PR #6187**: test(router): allow panel/vscore.py to reference the clearance kernel
+- **Issue #6175** (closed): main CI red: native-fill tests fail on KiCad 10.0.6 too; lint-gate SIGTERM test gets exit 130
+- **PR #6181**: fix: unbreak main CI -- native-fill identity after #6052, SIGTERM handler leak (#6175)
+- **Issue #6167** (closed): Gerber drill export passes flags kicad-cli rejects (--merge-npth, --minimal-header); OSH Park preset always fails
+- **PR #6179**: fix(export): pass real kicad-cli drill flags; OSH Park preset exports again
+- **Issue #6150** (closed): route-auto clearance gate follow-ups: severity ignore, DRU parse warning, hole-to-hole, physical_clearance
+- **PR #6160**: fix(router): route-auto gate honours severity ignore, warns on discarded DRUs, checks hole-to-hole and physical clearance
+- **Issue #6164** (closed): kct panel --cut vcut still routes 2 mm gaps and tabs between copies; V-scored panels should be butted
+- **PR #6176**: fix(panel): butt V-cut panels and score the shared edges
+- **Issue #6163** (closed): Gerber manufacturer presets' layer_rename maps are never applied (dead config)
+- **PR #6174**: fix(export): remove the never-applied Gerber layer_rename maps
+- **Issue #6166** (closed): tests: tests/test_mcp_optimize_placement.py::TestOptimizePlacement (4 tests) fail on main locally (result['success'] is False)
+- **PR #6173**: test(mcp): skip optimize_placement success tests when cmaes is absent
+- **Issue #6155** (closed): kct route: default --manufacturer from the board's project.kct target_fab (as kct check does)
+- **PR #6168**: feat(route): default --manufacturer from the board's project.kct target_fab
+- **Issue #6126** (closed): Footprint rotation leaves property/fp_text angles stale (KiCad stores them board-absolute)
+- **PR #6161**: fix(pcb): turn footprint text angles with their footprint (#6126)
+- **Issue #6156** (closed): kct export drops V-score lines: Cmts.User is never plotted to Gerbers after #6143
+- **PR #6162**: fix(export): ship V-score lines for V-cut panels; add kct panel --vcut-layer
+- **Issue #6095** (closed): pour oracle: live routes now merge the emitted project; source-project-only links fail a board that is connected under its shipped rules
+- **PR #6157**: fix(router): judge pour-oracle links under the shipped project only (#6095)
+- **Issue #6106** (closed): physical_copper_gap still keys copper by UUID; route-auto-style geometry keys (follow-up to #6088)
+- **PR #6159**: fix(check): name physical_copper_gap copper by geometry, not UUID
+- **Issue #6088** (closed): check: geometry-based finding keys for copper (track/via) findings so waivers survive re-routing
+- **PR #6091**: feat(check): key copper findings by geometry so waivers survive re-routing
+- **Issue #6143** (closed): Panel tabs produce malformed Edge.Cuts outline (invalid_outline DRC errors)
+- **PR #6154**: fix(panel): render Edge.Cuts as closed loops with tabs spliced in
+- **Issue #6133** (closed): router: proven-unreachable memo fingerprint omits corridor reservations; fixed fills/keepouts compared by identity only (follow-up to #6098)
+- **PR #6152**: fix(router): proven-unreachable memo fingerprint covers reservations and fill/keepout contents
+- **Issue #6147** (closed): kct route -o outside the board tree ignores the input's fabrication_overrides.json (phantom hole_to_hole on board 03)
+- **PR #6153**: fix(route): resolve fabrication_overrides.json from the input board when -o is elsewhere
+- **Issue #5886** (closed): Explore circuit-skills (punkfab): mine Claude Code PCB skills for gotchas, auto-keepouts, enclosure-fit gating and placement-first loop ideas
+- **PR #6047**: docs: evaluate circuit-skills (ideas only), verdict complementary
+- **Issue #5910** (closed): perf(router): cut the kicad-cli invocation count in kct route (52%/41% of wall on boards 02/03)
+- **PR #6131**: perf(route): memoise kicad-cli version probe
+- **Issue #5761** (closed): via_under_body: case-insensitive SON also matches 'Resonator' (crystal footprints selected)
+- **Issue #6119** (closed): update_footprint_position leaves footprint-embedded zones (keepouts) at the old location
+- **PR #6127**: fix(pcb): move footprint-embedded zones (keepouts) with their footprint
+- **Issue #6117** (closed): router: pure-Python A* fallback commits a via the C++ validator rejected (0.125 mm to a foreign pad, board 03 BTN1)
+- **PR #6145**: fix(router): Python fallback validates vias against foreign pads
+- **Issue #6090** (closed): kct route --lint-gate fails open on SIGTERM: --output left unjudged
+- **PR #6144**: fix(route): stage --lint-gate output so SIGTERM/SIGKILL never leave an unjudged board
+- **Issue #6148** (closed): route-auto hierarchical double-marks preserved copper on the C++ grid after #6141
+- **PR #6149**: fix(router): stop double-marking preserved copper on the C++ grid in route-auto (#6148)
+- **Issue #6139** (closed): route-auto: corridor strategies write tracks through bare NPTH holes (KiCad hole_clearance); gate them by hole clearance (follow-up to #6107)
+- **Issue #6122** (closed): route-auto foreign-copper gate: resolve per-net netclass and conditional .kicad_dru clearances (follow-up to #6107)
+- **PR #6146**: fix(route-auto): gate copper by hole clearance and per-pair clearance rules
+- **Issue #6103** (closed): router: preserved copper (load_existing_routes) never reaches the C++ grid -- C++ A* routes through it, then falls back to Python
+- **PR #6141**: fix(router): preserved copper reaches the C++ grid on load
+- **Issue #6125** (closed): Panel tiling offsets footprint-local coordinates and leaves zone/keepout polygons behind
+- **PR #6142**: fix(panel): make each panel copy a rigid motion of the source board
+- **Issue #6107** (closed): route-auto short gate misses other nets' pads, arcs and clearance: silent shorts/DRC errors still written (follow-up to #6001)
+- **PR #6118**: fix(route-auto): route around and refuse other nets' pads, arcs and clearance (#6107)
+- **Issue #6134** (closed): test(ci): lattice post-pass-gating and route-complete-report CLI tests time out in Test (extended) under load
+- **PR #6140**: test(ci): stub post-route kicad-cli in lattice/route-complete CLI tests (#6134)
+- **Issue #6137** (closed): ci: assert-no-bot-external red daily -- loom-fleet-reader-{1,2}[bot] issues mislabeled 'external' (trust pin covers only dispatch bot)
+- **PR #6138**: ci(label-external): trust loom-fleet-reader-{1,2}[bot] app accounts
+- **Issue #6129** (closed): main CI red: ruff UP031 in test_calibrate_fom.py + timeouts (6058, 5521) + board07 refill assertion
+- **Issue #6128** (closed): test: fix fleet copper-gap frame regression exceeding the CI timeout
+- **PR #6135**: test: fix main CI red -- copper-gap frame timeout, board07 refill premise, plan-gate cost
+- **Issue #6098** (closed): perf(router): C++ 'open set exhausted' still falls back to pure-Python A* on every give-up — ~5 min per unroutable net
+- **PR #6116**: perf(router): skip the Python fallback once it has proven a net unreachable
+- **Issue #6132** (closed): ci: ruff UP031 in tests/test_calibrate_fom.py:277 fails Lint & Format on main
+- **Issue #6099** (closed): router: detect_layer_stack silently treats 8+-layer boards as 2-layer (kct route, keepout resolution, route-auto hierarchical cap)
+- **PR #6110**: fix(router): build N-layer stacks instead of collapsing 8+ layers to 2
+- **Issue #6052** (closed): route: board 03 final pour fill varies run to run with identical copper (two fill signatures)
+- **PR #6109**: fix(route): canonicalize routed-board UUIDs so identical copper gives an identical fill
+- **Issue #6120** (closed): ci: Lint & Format red on main - optim_fom_cmd.py unformatted after #6114
+- **PR #6121**: style: ruff format optim_fom_cmd.py (main Lint & Format red)
+- **Issue #6124** (closed): chore(lint): main fails ruff format check in cli/optim_fom_cmd.py (from #6112)
+- **Issue #6123** (closed): main red: ruff format fails on src/kicad_tools/cli/optim_fom_cmd.py:110 (from #6112)
+- **Issue #6087** (closed): Footprint-embedded keepout rule areas are not covered by the #6039 intersectsArea DRU rules
+- **PR #6094**: fix(drc): enforce footprint-embedded keepouts in .kicad_dru and router
+- **Issue #6112** (closed): fom-debug composite collapses to ~1e-7 on most boards; :.6f text output hides it and score is not cross-board comparable
+- **PR #6114**: fix(optim): readable fom-debug score output and cross-board caveat
+- **Issue #6111** (closed): calibrate_fom.py per-board seeds use process-randomized hash(board); not reproducible without PYTHONHASHSEED
+- **PR #6113**: fix(research): stable per-board seed in calibrate_fom (no PYTHONHASHSEED dependence)
+- **Issue #6021** (closed): Re-run full FOM weight calibration on current fleet boards (default.yaml fitted on May 2026 boards)
+- **PR #6108**: feat(optim): re-calibrate FOM default weights on current fleet boards
+- **Issue #6093** (closed): test: format-json stdout contract exercises route-auto only on its error path
+- **Issue #6001** (closed): route-auto: classify unrouted connections as congested vs blocked (follow-up to #5944)
+- **PR #6105**: feat(route-auto): classify unrouted connections as congested/blocked
+- **Issue #6102** (closed): ci: update_ci_extended.py can silently move PR-required gates back into ci_extended
+- **PR #6104**: ci(tests): pr_required marker keeps merge gates out of ci_extended
+- **Issue #6085** (closed): schematic _patch_node: pin-UUID preservation guard never fires; rotate fields with symbol angle
+- **PR #6100**: fix(schematic): rotate fields with symbol, fix dead pin-UUID guard
+- **Issue #6078** (closed): pour oracle: closer's copper model reads carved saved fills while the oracle refills (GND cluster mismatch); carve fragments board-03 F.Cu GND pour
+- **PR #6097**: fix(zones): keep saved pour fills connected; check the saved fill in gates and export
+- **Issue #6019** (closed): perf(router): iterated 1-Steiner uses O(n^3) Python Prim per candidate; 44-pad net takes ~2 min (bit-exact 185x fix available)
+- **PR #6092**: perf(router): batched bit-identical 1-Steiner candidate scoring
+- **Issue #6059** (closed): route-auto: RoutingOrchestrator ignores board keepout rule areas (follow-up to #6008)
+- **PR #6096**: fix(route-auto): honour board keepout rule areas in every strategy
+- **Issue #6054** (closed): route: --lint-gate rolls back a route that introduces new kct check findings (split from #6006)
+- **PR #6084**: feat(route): --lint-gate rolls back a route that introduces new lint findings
+- **Issue #5994** (closed): test: format_json_stdout contract [route] exceeds its 50s subprocess budget locally on main
+- **PR #6089**: test(cli): speed up format-json contract route and suggest-footprint cases
+- **Issue #5992** (closed): perf(cli): cache kicad-cli probe_failed for a short TTL so a hanging kicad-cli doesn't cost ~30s per lookup
+- **PR #6086**: perf(cli): cache kicad-cli probe_failed for a short TTL
+- **Issue #6039** (closed): Emit an intersectsArea DRU rule per keepout rule area so KiCad DRC actually checks keepouts
+- **PR #6080**: fix(drc): emit an intersectsArea disallow rule per keepout rule area
+- **Issue #6058** (closed): physical_copper_gap mixes board-relative and sheet frames (arcs from raw sexp; findings never absolutized)
+- **PR #6082**: fix(check): physical_copper_gap uses one coordinate frame, reports sheet coords
+- **Issue #6057** (closed): Schematic model: edited elements still regenerate from builder defaults (justify, font, field positions)
+- **PR #6083**: fix(schematic): edited elements keep their KiCad styling (patch source node)
+- **Issue #6061** (closed): router: escape-stub generator is not keepout-rule-area aware (follow-up to #6008)
+- **PR #6081**: fix(router): keep escape stubs and vias out of keepout rule areas
+- **Issue #6023** (closed): pour oracle: align cluster model with KiCad per-net counts; try/finally restore in fill-strip
+- **PR #6079**: fix(fill): restore stripped fills on every failure path; keep oracle closer's original error
+- **Issue #5908** (closed): route: --order-method greedy|critical_first|congestion|hybrid are silent no-ops on the auto-layers / escalation paths
+- **PR #6046**: fix(route): reject --order-method greedy|critical_first|congestion|hybrid on escalation paths
+- **Issue #6009** (closed): router: relaxed blocker search (temporarily_unblock_routed_nets) finds no blockers -- C++ grid and route R-trees are not unblocked
+- **PR #6073**: fix(router): relaxed blocker search lifts routes off the C++ grid and R-trees
+- **Issue #6060** (closed): router: bus detection misses /DATA0-style (prefixed numeric-suffix) net names
+- **PR #6077**: fix(router): parse sheet-prefixed numeric bus names like /DATA0
+- **Issue #6070** (closed): schematic: lib_symbols property order in generated schematics depends on PYTHONHASHSEED (set iteration in _flatten_with_parent)
+- **PR #6074**: fix(schematic): deterministic property order when flattening extends symbols
+- **Issue #6006** (closed): check: detect-mistakes waivers, SARIF output, and route --lint-gate (follow-up to #5946)
+- **PR #6056**: feat(check): detect-mistakes evidence-bound waivers and SARIF output
+- **Issue #6071** (closed): schematic: removed elements resurrect when saving a deepcopied loaded Schematic (_source_consumed holds stale id()s)
+- **PR #6075**: fix(schematic): deepcopy/pickle of loaded Schematic no longer resurrects removed elements
+- **Issue #5911** (closed): perf(router): pour-net oracle completion loop is 34.6% of kct route wall time on board 03 (169 s)
+- **PR #6053**: perf(router): batch oracle link-route writes and run both oracle DRC projects concurrently
+- **Issue #6062** (closed): router: route_all_hierarchical (negotiated) skips keepout rule-area install (follow-up to #6008)
+- **PR #6072**: fix(router): install keepout rule areas in route_all_hierarchical
+- **Issue #6051** (closed): Schematic model load/save still drops fidelity: label alignment, text font/ID, power-symbol field positions, version, embedded_fonts
+- **PR #6064**: fix(schematic): re-emit untouched elements verbatim on load + save
+- **Issue #6055** (closed): evidence: ev2 local net evidence compares sheet-coordinate findings to board-relative pads (empty on boards with non-zero origin)
+- **PR #6063**: fix(check): put ev2 local net evidence pads in sheet coordinates
+- **Issue #6008** (closed): route: grid engine ignores board-file keepout rule areas (only lattice honours them) -- no tracking issue since #4605
+- **PR #6034**: fix(route): enforce board-file keepout rule areas in the grid engine
+- **Issue #6013** (closed): ci: fit the Test job on GitHub-hosted runners by moving its slowest tests to a non-PR job
+- **PR #6014**: ci: run Test on GitHub-hosted runners by moving its slow tail to a main-only job
+- **Issue #6004** (closed): pintype annotation: resolve references for sheets placed more than once
+- **PR #6049**: fix(pintype): resolve references per sheet placement
+- **Issue #6048** (closed): Schematic model round-trip: Arduino_Mega/Arduino_Uno templates unloadable by kicad-cli after load+save
+- **PR #6050**: fix(schematic): keep load/save output loadable by kicad-cli
+- **Issue #6005** (closed): Schematic model drops (mirror x|y): pin_position wrong for mirrored symbols
+- **PR #6038**: fix(schematic): honour (mirror x|y) on placed symbols
+- **Issue #6016** (closed): perf(pcb): _NoConnectZone.build is O(R*W*J) - seconds-to-minutes on dense sheets
+- **PR #6042**: perf(pcb): index no-connect zone flood fill (O(W) instead of O(R*W*J))
+- **Issue #6041** (closed): evidence radius: bare clearance/dimensions/width_consistency/mask_to_copper rule IDs get 5 mm, docs promise 3 mm
+- **Issue #6011** (closed): check: limit net-membership evidence to pads near the finding (waiver churn on GND/power nets)
+- **PR #6040**: feat(check): limit net-membership evidence to pads near the finding
+- **Issue #6027** (closed): Board 09 readiness still lists closed #5061 GND-connectivity blocker
+- **PR #6037**: fix(boards): compute board 09 strict-connectivity blocker instead of hardcoding closed #5061
+- **Issue #6015** (closed): check waivers: upgrade note for legacy silkscreen fp_line waivers; per-line items for silk_edge_clearance
+- **PR #6035**: fix(check): per-line items for silk_edge_clearance; re-waive hint for legacy fp_line waivers
+- **Issue #6028** (closed): detect-mistakes power-trace width: reports first (not narrowest) segment and flags no-load regulator bias pins
+- **PR #6036**: fix(explain): power-trace width reports narrowest segment, skips no-load VREG nets
+- **Issue #6032** (closed): validate --sync: root-sheet /X <-> /Sheet/X name swap is not detected
+- **PR #6033**: fix(validate): detect root-sheet /X <-> /Sheet/X net name swaps
+- **Issue #5999** (closed): validate --sync: detect name swaps between same-named nets on different sheets (/A/CLK <-> /B/CLK)
+- **PR #6031**: fix(validate): detect name swaps between same-leaf nets on different sheets
+- **Issue #6029** (closed): is_switch_node_name false positives: SWD debug pin, *_SW load-switched rails and button nets
+- **PR #6030**: fix(router): tighten is_switch_node_name false positives
+- **Issue #5998** (closed): power_pin_nets treats buck switch node (power_out SW pin) as a rail; then annotate remaining fleet boards
+- **PR #6026**: fix(explain): buck switch node is not a power rail; annotate board 09 pin types
+- **Issue #5995** (closed): explain: is_ic_footprint misses non-U active parts (oscillators, SOT-223/DPAK regulators, Sensor: library)
+- **PR #6024**: fix(explain): recognise non-U active parts in is_ic_footprint
+- **Issue #5984** (closed): Re-calibrate FOM decoupling_proximity weight after power-rail classifier change (#5939)
+- **PR #6022**: docs(optim): re-check FOM decoupling_proximity weight after #5939 classifier change; keep 0.0181
+
+### 2026-10-06
+
+- **Issue #5934** (closed): Pour-oracle completion (#5785) lands different stitches and pour copper on a byte-identical board
+- **PR #6017**: fix(route): make the pour-oracle completion reproducible on identical boards
+- **Issue #6012** (closed): test_zones_cmd::TestRunFillZones::test_no_kicad_cli_returns_failure fails on main: asserts old 'kicad-cli not found' text
+- **PR #6018**: test(zones): expect 'kicad-cli not installed' after #5932 message change
+- **Issue #5985** (closed): Generated boards carry no pad pintype, so detect-mistakes pin-type rail evidence never runs
+- **PR #6000**: feat(pcb): write schematic pin types onto generated PCB pads
+- **Issue #6010** (closed): route-auto --nets -o: later nets chain from a missing or stale output file when an earlier net wrote nothing
+- **Issue #5945** (closed): router: best-so-far checkpointing, --resume, and regressing-pass rollback for kct route / route-auto
+- **PR #6003**: feat(router): best-so-far --checkpoint, --resume and regressing-pass rollback for route / route-auto
+- **Issue #5946** (closed): check: evidence-hash-bound waivers, check --diff, and explicit 'unknown' coverage states
+- **PR #6007**: feat(check): evidence-bound waivers, check --diff, and explicit coverage states
+- **Issue #5944** (closed): router: classify each unrouted connection as congested vs blocked in kct route JSON
+- **PR #6002**: feat(router): classify each unrouted connection as congested or blocked in kct route JSON
+- **Issue #5979** (closed): test(agent-guide): close extractor blind spots in test_agent_guide_commands (fenced blocks, uv run, '...')
+- **PR #5996**: fix(agent-guide): close command-extractor blind spots; wire kct audit HV flags
+- **Issue #5981** (closed): board03: test_board_03_regression fails locally on main with kicad-cli 10.0.1 (4 annular_width DRC errors), a possible regression of #5191
+- **PR #5989**: test(board03): xfail known kicad-cli <10.0.6 J1 oval annular false positive
+- **Issue #5980** (closed): validate --sync: warn when two nets' pads are swapped wholesale (names swapped, connectivity intact)
+- **PR #5997**: fix(validate): flag wholesale net-name swaps in validate --sync
+- **Issue #5970** (closed): fix(explain): BypassCapDistanceCheck treats caps, resistors, connectors and fuses as ICs (65 of 90 bypass findings on board 03)
+- **PR #5988**: fix(explain): restrict BypassCapDistanceCheck to real ICs
+- **Issue #5935** (closed): test_route_cmd_success_output: board 00 routes with 2 DRC violations and no SUCCESS headline (fails on main)
+- **Issue #5932** (closed): fix(cli): find_kicad_cli memoises a transient probe timeout as 'kicad-cli not installed', silently skipping zone refill
+- **PR #5990**: fix(cli): never cache a kicad-cli probe timeout as 'not installed'; warn loudly on skipped zone refill
+- **PR #5987**: test(route): name the skipped zone fill when board 00 loses its SUCCESS headline
+- **Issue #5905** (closed): test(router): board02 jlcpcb-tier1 baseline test_drc_clean_at_jlcpcb_tier1 fails on main (1 error vs ceiling 0)
+- **PR #5933**: test(router): make board02 tier1 baseline robust to transient kicad-cli probe failure
+- **Issue #5939** (closed): fix(explain): is_power_net substring matching classifies USB_D+, ISENSE_A+, PG_3V3 as power rails (false decoupling errors on board 03)
+- **PR #5971**: fix(explain): classify power nets by pin type and whole-token names, not substrings
+- **Issue #5982** (closed): fix(mcp): flush libc stdio before restoring fd 1 so unflushed native printf can't trail onto the JSON-RPC stream
+- **PR #5983**: fix(mcp): flush libc stdio before restoring fd 1 so unflushed native printf can't trail onto the JSON-RPC stream
+- **Issue #5941** (closed): Ecosystem registry: add TraceMaker, fastroute, PCBWorld, kicadmium and broader-search projects; refresh circuit-skills
+- **PR #5978**: docs(ecosystem): register TraceMaker, fastroute, PCBWorld, kicadmium and broader-search projects
+- **Issue #5964** (closed): [Epic #5952] AGENTS.md parity: single-source contributor guidance rendered into CLAUDE.md and AGENTS.md (+ drift test)
+- **PR #5975**: docs: single-source contributor guidance into CLAUDE.md and AGENTS.md (#5964)
+- **Issue #5937** (closed): fix(validate): validate --sync pad-net check is a placeholder — swapped pad nets report in_sync: true
+- **PR #5974**: fix(validate): finish the validate --sync pad-net check
+- **Issue #5940** (closed): fix(explain): detect-mistakes flags all 9 LEDs on board 02 as missing series resistor (shared line resistors not recognized)
+- **PR #5972**: fix(explain): recognise shared LED series resistors via path rule
+- **Issue #5966** (closed): fix(docs): agent-guide sync step fails as written (--apply needs --confirm) + parse-test every kct invocation in the guide
+- **PR #5977**: fix(docs): agent-guide kct commands work as written; parse-test every invocation
+- **Issue #5965** (closed): fix(mcp): redirect stdio at the file-descriptor level so native/child-process output can't corrupt JSON-RPC frames
+- **PR #5968**: fix(mcp): redirect stdio at the fd level so native/child output can't corrupt frames
+- **Issue #5973** (closed): fix(loom-hook): post-worktree timeout ignores leading-zero values; TERM to the hook orphans uv
+- **PR #5976**: chore(loom): post-worktree hook follow-ups — decimal timeout, re-raise TERM/INT after killing the sync
+- **Issue #5967** (closed): chore(loom): post-worktree hook (uv sync --frozen --extra dev) never exits for background builders; bound it and find the stall
+- **PR #5969**: chore(loom): bound and instrument the post-worktree uv sync hook (#5967)
+- **Issue #5960** (closed): [Epic #5952] kct agent-guide: harness-neutral agent primer + README harness setup section
+- **PR #5963**: feat(agent-guide): harness-neutral agent primer as `kct agent-guide` + README harness section (#5960)
+- **Issue #5961** (closed): [Epic #5952] MCP stdio smoke test per client: handshake, tools/list and a tool call from each kct mcp setup launch command
+- **PR #5962**: fix(mcp): keep stdio stdout JSON-RPC-only; add per-client stdio smoke test
+- **Issue #5951** (closed): feat(agents): make kicad-tools bilingual — Codex CLI and opencode support for MCP setup, skills and usage guide
+- **PR #5959**: feat(skills): kct skills install --harness opencode (#5951)
+- **Issue #5950** (closed): feat(skills): ship /kct:* skills in the wheel with 'kct skills install' (needed for pcba-bench sandboxed toolkit track)
+- **PR #5958**: feat(skills): ship /kct:* skills in the wheel with `kct skills install`
+- **Issue #5938** (closed): fix(cli): drc, erc and detect-mistakes print progress text to stdout under --format json, breaking JSON parsing
+- **PR #5957**: fix(cli): keep --format json stdout a single JSON document (#5938)
+- **Issue #5953** (closed): [Epic #5952] kct mcp setup --client codex|opencode
+- **PR #5956**: feat(mcp): kct mcp setup --client codex|opencode (#5953)
+- **Issue #5954** (closed): [Epic #5952] Audit /kct:* skills and agent-facing text for Claude-only assumptions (+ lint test)
+- **PR #5955**: feat: make kct skills and MCP descriptions harness-neutral (#5954)
+- **Issue #5870** (closed): test_board03_pour_fill_is_reproducible flakes under concurrent CPU load
+- **PR #5936**: fix(route): add --deterministic-rescue so board-03 pour test is load-independent
+
+### 2026-10-04
+
+- **Issue #5607** (closed): boards: committed board06 output/ artifact is stale relative to the recipe (needs a KiCad-capable refresh)
+
+### 2026-10-03
+
+- **Issue #5903** (closed): find_kicad_cli() should probe before trusting a found binary, with a documented container fallback (split from #5877)
+- **PR #5931**: feat: probe find_kicad_cli() before trusting binary; opt-in container fallback
+- **Issue #5704** (closed): Manufacturing profiles: project min_silk_clearance is mapped from the solder-mask clearance, not the silkscreen floor
+- **PR #5925**: refactor(manufacturers): source .kicad_pro min_silk_clearance from a named constant
+- **PR #5930**: ci: cut board-job CI cost (diffpair to main/nightly, per-board filters, benchmark cadence)
+- **Issue #5895** (closed): [Epic #5784] Flip the pose-centerline diff-pair search on by default: fix board 06 MIPI_RST corridor regression
+- **PR #5929**: feat(router): pose-trunk corridor guard; pose-centerline diff-pair search on by default (#5895)
+- **Issue #5801** (closed): Wire up or remove orphaned BayesianOptStrategy: --strategy bayesian is unreachable despite README/ROADMAP claiming it ships
+- **PR #5928**: feat: wire --strategy bayesian into CLI and MCP (#5801)
+- **Issue #5902** (closed): fix(router): keepout-intrusion guard matches pad.ref instead of the physical component key (#5890 follow-up)
+- **PR #5927**: fix(router): match keepout-intrusion pads by physical component key
+- **Issue #5901** (closed): flake: test_partial_placement_route_modes[evolutionary] exceeds its 30s deadline on a quiet machine (the #5579 class, reopened in practice)
+- **PR #5926**: test: shrink evolutionary GA in partial-placement route modes test
+- **Issue #5701** (closed): ci: stacked PRs (base = a feature branch) get no CI at all — 'CLEAN' means 'never ran', not 'passed'
+- **PR #5924**: ci: distinguish absent checks from passing for stacked PRs
+- **PR #5922**: fix(router): pose-centerline trunks yield sealed corridors; keep the search opt-in (#5895)
+- **Issue #5712** (closed): champion-epic.md: 'Epic Passes Evaluation' comments reuse the rejection-only champion:epic-verdict marker, corrupting the unrevised-eval skip/escalate ladder
+- **Issue #5673** (closed): Halo-shape switch (#5660/PR #5668) under-blocks via drill-to-drill spacing — board02/06 DRC regressions
+
+### 2026-10-02
+
+- **Issue #5894** (closed): [Parent #5787] Step 3: flag-gated KRT-style N+1 rip-up prototype
+- **PR #5919**: feat(router): flag-gated KRT-style sequential N+1 rip-up prototype
+- **Issue #5913** (closed): [Epic #5508] Phase 3a: access-loss rip-up targeting via the witness
+- **PR #5920**: fix(router): target the copper that sealed a pad's last exit for rip-up
+- **Issue #5882** (closed): Hoist a shared arc-bounding helper for core.board_outline and router.fixed_copper
+- **PR #5915**: refactor(core): share one arc circumcircle/sweep helper
+- **Issue #5787** (closed): [Epic #5784] Phase 3: attribute kct route runtime, then crossing-aware ordering + N+1 rip-up (measure first)
+- **PR #5912**: docs(research): re-measure kct route phase profile -- kicad-cli subprocesses are 52%/41% of wall
+- **Issue #5786** (closed): [Epic #5784] Phase 2: pose-based centerline search (Dubins heuristic) for coupled diff pairs
+- **Issue #5893** (closed): [Parent #5787] Step 2: crossing-aware default net ordering experiment on boards 02/03
+- **PR #5909**: feat(router): measure crossing-aware net ordering; add --order-method crossing
+- **Issue #5891** (closed): [Epic #5508] Phase 2: commit-time pad-access invariant (default on for the grid engine)
+- **PR #5907**: feat(router): commit-time pad-access invariant, default on for the grid engine
+- **Issue #5511** (closed): Epic: netlist degrees of freedom — swappable-pin groups and acting placement feedback
+- **Issue #5904** (closed): [Epic #5511] Phase 4: Recipe diff surface + docs
+- **PR #5906**: docs(routing): document swap groups and recorded deltas (Epic #5511 Phase 4)
+- **Issue #5785** (closed): [Epic #5784] Phase 1: KiCad-oracle completion loop for pour nets + one completion verdict
+- **PR #5900**: feat(router): KiCad-oracle completion loop for pour nets + one stranded-pad verdict
+- **Issue #5890** (closed): [Epic #5511] Phase 3: classifier-driven placement feedback on the default path when infeasible
+- **PR #5898**: feat(router): act on classifier placement feedback by default when the plan is infeasible
+- **PR #5896**: feat(router): opt-in pose-based centerline search for coupled diff pairs (Dubins heuristic)
+- **Issue #5876** (closed): kct route --nets blames a 'loader bug' when the pour-net auto-skip removed the requested nets
+- **PR #5897**: fix: distinguish pour-net auto-skip conflicts from loader bugs in --nets guard
+- **PR #5892**: docs(research): per-phase kct route runtime profile for boards 02/03 (Part of #5787)
+
+### 2026-10-01
+
+- **Issue #5875** (closed): kct check --mfr does not validate .kicad_pro netclass defaults against the manufacturer floor
+- **PR #5889**: feat: validate .kicad_pro netclass defaults against the manufacturer floor
+- **PR #5887**: docs(ecosystem): register punkfab/circuit-skills as watch
+- **Issue #5857** (closed): [Epic #5509] Phase 4d: switch kct check (and resolve drc/cpp exemption) to the clearance kernel
+- **PR #5881**: fix(validate): switch kct check clearance family to the shared kernel
+- **Issue #5856** (closed): [Epic #5509] Phase 4c: switch DRC-nudge repair to the clearance kernel
+- **PR #5885**: fix(router): switch DRC-nudge repair to the shared clearance kernel
+- **Issue #5873** (closed): kct route refuses dual_gmsl_serializer_adapter: duplicate pad number with distinct unconnected nets (J5.MP)
+- **PR #5884**: fix(router): load same-numbered no-connect lands as independent terminals
+- **Issue #5872** (closed): Router short gate: production code duplicates count_shorting_violations' predicate, and the escalation audit fails open
+- **PR #5883**: refactor(router): share short predicate and make short-audit failure loud
+- **Issue #5863** (closed): kct route refuses boards with custom-shaped pads (6 of 16 real dataset-srj18 source boards)
+- **PR #5880**: fix(router): degrade unsupported pad geometry to obstacle copper instead of refusing the board
+- **Issue #5854** (closed): [Epic #5509] Phase 4a: switch optimizer (collision.py + trace.py) to the clearance kernel
+- **PR #5874**: fix(router): switch the trace optimizer's collision checkers to the clearance kernel
+- **Issue #5847** (closed): Interop gate: run tscircuit-emitted KiCad projects through kct check / LVS / kicad-cli DRC
+- **PR #5879**: feat: gate tscircuit's KiCad exports against kct check / LVS / kicad-cli DRC
+- **Issue #5864** (closed): kct route aborts with ZonePartitionError under default --auto-pour on a board with authored AGND/GND zones
+- **PR #5871**: fix: skip an unsatisfiable auto-pour net instead of aborting kct route
+- **Issue #5861** (closed): test(board-04): _FLOOR_TOLERANCE_MM comment mis-cites DRC_TOLERANCE (1e-4, not 1e-6)
+- **PR #5869**: test(board-04): fix _FLOOR_TOLERANCE_MM comment citation
+- **Issue #5862** (closed): kct route output ships shorting_items while the router self-check reports clearance_viol=0 (Arduino Nano)
+- **PR #5868**: fix: router self-check no longer excuses copper shorts as component-inherent
+- **Issue #5855** (closed): [Epic #5509] Phase 4b: switch match-group tuning to the clearance kernel
+- **PR #5867**: fix(router): match-group tuning measures clearance with the shared kernel (Epic #5509 Phase 4b)
+- **Issue #5860** (closed): Board 04's reviewed paid-drill gate reports overall FAILED from 30 strict ERC warnings (DRC leg is clean)
+- **PR #5866**: fix: distinguish uninitialized KiCad library tables from real ERC defects
+- **Issue #5848** (closed): Benchmark tscircuit autorouter vs kct route on dataset-srj18 source boards
+- **PR #5865**: bench(external): sweep all 16 srj18 boards with kct and tscircuit (#5848)
+- **Issue #5852** (closed): Board 04 fresh regen is not jlcpcb-tier1 clean: 0.150mm-drill vias fail dimension_via_drill / dimension_annular_ring
+- **PR #5859**: test(board-04): gate the fresh regen on its reviewed paid-drill process
+- **Issue #5661** (closed): [Epic #5509] Phase 3b: switch search-time physical refinement (route_halo_geometry.py + C++ A*) to the clearance kernel
+- **PR #5851**: fix(router): switch search-time halo refinement to the clearance kernel (Epic #5509 Phase 3b)
+- **PR #5853**: docs(ecosystem): pin dataset-srj18 boards and benchmark tscircuit autorouter on Arduino Nano (part of #5848)
+- **Issue #5700** (closed): Board 06 / diff-pair pours=BROKEN: exact-disc halo lets routing wall in plane-net pad J1.A4's stitch-via site
+- **Issue #5660** (closed): [Epic #5509] Phase 3a: switch halo marking (grid.py + grid.cpp) to the clearance kernel
+- **PR #5668**: feat(router): halo marking is the clearance kernel's exact dilation (#5660)
+
+### 2026-09-30
+
+- **PR #5850**: fix(router): reserve a stitch-via site per plane-net pad before routing (#5700)
+- **PR #5849**: docs(ecosystem): re-evaluate tscircuit, register its autorouter
+- **Issue #5843** (closed): Ecosystem registry: CLI silently drops unmapped categories; GitLab SPDX normalization is case-wrong
+- **PR #5846**: fix(ecosystem): guard CLI category listing and fix GitLab SPDX casing
+- **Issue #5815** (closed): label LVS: preserve sheet-qualified local net identities instead of reporting false mismatches
+- **PR #5844**: fix(lvs): walk every placement of a repeated sheet, with its own refs
+- **Issue #5839** (closed): feat: ecosystem registry — track related projects and where kicad-tools sits
+- **PR #5840**: feat(ecosystem): add tracked registry of related projects with drift detection
+- **Issue #5820** (closed): kct mcp serve should name the [mcp] extra when its dependencies are missing
+- **PR #5836**: fix: name the mcp extra when kicad_tools.mcp.server import fails
+- **Issue #5837** (closed): champion-epic.md Phase Progression's child-issue query misses title-prefix and prose-only phase issues
+- **PR #5838**: docs(loom): widen champion-epic phase queries to title-prefix children
+- **Issue #5826** (closed): Reconcile PR #5824 vs main's sheet-qualified LVS fix (b96acde2) — both have verified correctness bugs
+- **PR #5835**: fix: reconcile sheet-qualified LVS across #5809 and PR #5824 (#5826)
+- **Issue #5817** (closed): physical-gap: support filled footprint copper polygons used by standard net ties
+- **PR #5834**: fix(physical-gap): model filled and stroked footprint copper polygons
+- **Issue #5813** (closed): Feature: readiness should collect legitimate project dependencies outside the PCB directory
+- **PR #5830**: feat(readiness): collect project dependencies outside the PCB directory
+- **Issue #5818** (closed): native mask geometry: accept geometry-neutral silk_clearance rule context
+- **PR #5833**: fix: accept geometry-neutral silk_clearance in native mask rule context
+- **Issue #5810** (closed): CLI parser drift: kct check rejects mixed-copper values (--copper outer=X,inner=Y)
+- **PR #5831**: fix: kct check accepts keyed --copper outer=X,inner=Y
+- **Issue #5812** (closed): readiness: engine fingerprint records consumer repository HEAD for a dependency installed in its venv
+- **PR #5832**: fix: bind readiness engine fingerprint to kct's own provenance, not the venv's host repo
+- **Issue #5814** (closed): mask-to-copper: source guard rejects freshly loaded KiCad 10 name-only nets
+- **PR #5828**: fix: canonicalize both sides of the mask-to-copper source guard
+- **Issue #5811** (closed): check: polygonal silkscreen is silently omitted from clearance geometry
+- **PR #5829**: fix: model polygon silkscreen in the silk clearance geometry
+- **Issue #5816** (closed): readiness: unified CLI omits --generate and --verify supported by standalone runner
+- **PR #5827**: fix(cli): forward --generate/--verify to kct readiness
+- **Issue #5809** (closed): LVS: root-sheet local net names produce false label mismatches against KiCad-created PCB bindings
+- **PR #5823**: fix: sheet-qualify local net identities in label LVS (#5809)
+- **Issue #5804** (closed): Move jsonschema from core to mcp extra: only used by MCP server
+- **PR #5821**: chore(deps): move jsonschema from core dependencies to the mcp extra
+- **Issue #5807** (closed): readiness: HV isolation subcheck accepts unverified text as passing audit evidence
+- **PR #5822**: fix(readiness): bind the HV isolation gate to a measured audit, not free text
+- **Issue #5808** (closed): create-pcb: ignores project fp-lib-table and exits successfully after omitting required components
+- **PR #5819**: fix: create-pcb resolves footprints via project fp-lib-table, fails loudly on drops
+
+### 2026-09-29
+
+- **PR #5806**: chore(loom): pin #5783's lease-guard files so resync stops failing
+- **PR #5799**: docs(research): benchmark KRT on boards 04/05/07 and fix the harness timeout leak
+- **Issue #5790** (closed): research: extend KRT benchmark to boards 04/05/07 (fanout, length-matching, dense bundles) + fix reproduce command
+- **PR #5797**: fix(router): default kct route to reserve declared plane layers from signal
+- **PR #5796**: chore(claude): fix malformed ./scripts/** Bash permission rules
+- **PR #5794**: fix(router): exclude already-connected nets from --preserve-existing route set
+- **PR #5793**: chore(loom): discover_epic_children gains a title-prefix epic-child source
+- **PR #5792**: chore(loom): scope sweep-lease peer check to same-issue, add worktree co-occupancy guard
+- **Issue #5791** (closed): champion-common.md: discover_epic_children misses title-prefix-only phase issues (recurred on #5774 and #5784)
+- **Issue #5789** (closed): kct route routes signals on declared reference-plane layers by default (board 06: 22.8 mm on In1.Cu); default --reserve-plane-layers on
+- **Issue #5788** (closed): kct route --preserve-existing re-routes already-complete nets and drops their copper (board 06a: 64/64 LVDS segments lost)
+- **Issue #5783** (closed): loom: sweep-lease mechanism failed to prevent 4-way concurrent claim + worktree collision on issue #5781
+- **PR #5780**: ci(release): tag merged release SHA, GitHub Release, PyPI check (#5777)
+- **Issue #5777** (closed): [Epic #5774] Phase 3: tag merged SHA, publish via workflow_call, GitHub Release on release-PR merge
+- **Issue #5774** (closed): Epic: automated daily releases through CI
+
+### 2026-09-28
+
+- **PR #5782**: docs(research): compare and benchmark KiCadRoutingTools vs kct route (#5781)
+- **Issue #5781** (closed): research: explore drandyhaas/KiCadRoutingTools — compare, benchmark, and triage borrowable routing techniques
+- **PR #5779**: ci(release): daily automated release-PR workflow (#5776)
+- **PR #5778**: ci(changelog): changelog.d fragments, per-PR fragment check, assembly script
+- **Issue #5776** (closed): [Epic #5774] Phase 2: daily release-PR workflow (gate, bump level, one PR at a time)
+- **Issue #5775** (closed): [Epic #5774] Phase 1: changelog fragments + per-PR changelog check
+- **PR #5773**: ci: stop CPU-pinning the self-hosted kicad job containers (#5694)
+- **PR #5772**: chore(release): bump version to 0.22.0
+- **PR #5771**: fix(boards): regenerate stale committed .kicad_dru sidecars (#5059 follow-up)
+- **PR #5770**: fix: correct --deterministic-budget's --timeout backstop claim, log determinism loss
+- **PR #5769**: ci: give the fork-PR Test job a 90-minute budget
+- **PR #5766**: test(board03): drop wall-clock --timeout from frozen reach recipe (#5752)
+- **Issue #5765** (closed): --deterministic-budget + --timeout: per-attempt fair slice makes --timeout bind at timeout/N, not a safety backstop
+- **PR #5763**: fix(board03): stop the saved-plan replay from deleting footprint silkscreen
+- **PR #5760**: fix(width_consistency): join endpoints within tolerance across rounding buckets
+- **PR #5759**: feat(board04): emit pin-1 / polarity silkscreen for U1, U2, D1, J1
+- **PR #5758**: docs: note via_under_body/pin1_marker can newly fail kct check --strict
+- **PR #5757**: fix(tests): stop board-05 export test rewriting committed .kicad_dru
+- **PR #5756**: fix(via_under_body): case-insensitive default pattern; recognise split exposed pads
+- **Issue #5755** (closed): Regenerate stale committed .kicad_dru sidecars for boards 00-04, 06, 07, legacy DRV8301 (missing #5059 SMD Pad Clearance rule)
+- **PR #5754**: fix(pin1_marker): corner-mark tie-break must only group own silk
+- **PR #5753**: ci: pin kicad containers to cpuset 6-31 on the 32-CPU runner host (#5694)
+- **Issue #5752** (closed): flaky: board-03 test_reach_meets_floor / test_per_net_reach_usb_signals fail in long serial runs, pass standalone
+- **Issue #5751** (closed): docs: default-on via_under_body / pin1_marker newly fail kct check --strict — note in CHANGELOG/release notes
+- **Issue #5750** (closed): width_consistency: rounded endpoint keys can split a chain early (missed findings)
+- **Issue #5749** (closed): via_under_body: case-sensitive default footprint pattern; split exposed pads not recognized as thermal
+- **Issue #5748** (closed): pin1_marker: corner-mark tie-break also groups board-level silk (can pass a footprint with no own mark)
+- **Issue #5747** (closed): ci: Test can never finish on fork PRs (GitHub-hosted ~40 min vs 45-min timeout)
+- **Issue #5746** (closed): test suite rewrites committed board-05 .kicad_dru in place (stale DRU + kct export writes beside input) → 28 #3580 guard errors
+- **Issue #5745** (closed): Board 04 generator: emit pin-1 / polarity silkscreen marks for U1, U2, D1, J1
+- **Issue #5744** (closed): board-03: routed artifact has lost all footprint silkscreen graphics (139 → 0)
+- **PR #5739**: feat(validate): opt-in trace width-consistency audit rule
+- **PR #5737**: feat(check): pin-1 / polarity silkscreen-marker rule (pin1_marker category)
+- **PR #5736**: feat(check): via-under-package-body rule (via_under_body category)
+- **PR #5733**: chore(deps-dev): bump nanobind from 3.0.1 to 3.1.0
+- **PR #5732**: chore(deps): bump markitdown from 0.1.7 to 0.1.8 in the python-minor-patch group
+- **PR #5731**: chore(deps): bump astral-sh/setup-uv from 10.1.0 to 10.2.0 in the github-actions group
+- **PR #5730**: chore(deps): bump astro from 7.3.2 to 7.3.3 in /site
+- **PR #5729**: chore(deps-dev): bump @types/node from 26.5.1 to 26.6.2 in /site in the site-minor-patch group
+
+### 2026-09-27
+
+- **PR #5742**: fix(merge-pr): route the #8248 freshness guard's stale-checks call through the #6074/#6752 credential ladder
+- **Issue #5741** (closed): merge-pr.sh: _check_required_check_freshness's stale-checks call bypasses the #6074/#6752 permission-escalation ladder
+- **PR #5740**: fix(router): keep late keep-outs hard against route-halo refinement
+
+### 2026-09-26
+
+- **PR #5735**: test(conformance): hard-gate the route-halo refinement against kicad-cli
+- **PR #5734**: fix: give the optimizer's grid collision checker an exact narrow phase
+- **Issue #5625** (closed): router/optimizer: GridCollisionChecker and VectorCollisionChecker disagree on near-threshold copper
+
+### 2026-09-25
+
+- **PR #5728**: cleanup(router/mesh): retire merge_overlapping and segment_intersects_* helpers
+- **PR #5727**: perf(router): vectorise the coupled via predicate's raster sweeps
+- **PR #5726**: fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
+- **Issue #5724** (closed): fix(mfr): warn when the emitted SMD Pad Clearance rule is inert on the installed KiCad
+- **Issue #5720** (closed): router: the coupled Python via predicate's raster sweeps dominate what is left after #5696's memo
+- **Issue #5708** (closed): Flaky perf gate (recurrence): test_dormant_partner_optimized_not_slower fails at 1.33x on shared CI runners (threshold 1.25, #3581 closed)
+- **Issue #5685** (closed): cleanup(router/mesh): retire the three helpers Epic #5509 Phase 3e left without a production caller
+
+### 2026-09-24
+
+- **PR #5725**: test(mfr): gate native SMD Pad Clearance on a measured availability probe
+- **PR #5723**: test(drc): match native DRC findings on the bare rule name
+- **PR #5722**: test: converge kicad-cli discovery on find_kicad_cli()
+- **Issue #5721** (closed): Native SMD Pad Clearance rule does not fire on kicad-cli 10.0.1 (undeclared minimum version)
+- **PR #5719**: perf(router): memoise the coupled diff-pair halo via refinement on the pure-Python fallback
+- **PR #5718**: fix(validate): stop classifying KiCad's instance-lock warning as a failed export
+- **PR #5717**: test(perf): replace the dormant-partner timing gate with a structural assertion
+- **PR #5716**: test(mfr): scope ampacity DRU fallback to what it actually guards
+- **PR #5715**: fix(router): apply the diff-pair partner clearance waiver in the coupled halo refinement (#5711), and rerun the #5410 DQ3 prefix on current main
+- **Issue #5714** (closed): test: converge kicad-cli discovery on find_kicad_cli() — 14 shutil.which sites across 12 modules
+- **Issue #5713** (closed): test(mfr): SMD Pad Clearance rule silently absent on KiCad 10.0.1 — plus a negative assertion that passes vacuously when it is
+- **Issue #5711** (closed): Coupled halo refinement: C++ arm omits the diff-pair partner-clearance waiver the Python arm applies (212-cell over-block)
+- **Issue #5707** (closed): Flaky CI: test_native_advanced_layer_matches_independent_gerber fails on kicad-cli 'Invalid lock file' (native export returned 0)
+- **Issue #5703** (closed): Native DRC assertions match on a KiCad-version-dependent description prefix (rule '...')
+- **Issue #5702** (closed): test_mfr: ampacity DRU fallback pins a stale rule-name set, fails whenever kicad-cli is off PATH
+- **PR #5698**: perf(router): read collision-grid planes directly in the optimizer's obstacle scan
+- **Issue #5696** (closed): router: memoise the coupled diff-pair halo refinement on the pure-Python fallback
+
+### 2026-09-23
+
+- **PR #5710**: feat(drc): emit SMD pad clearance floor natively, scoped by reference
+- **PR #5709**: ci: pin KiCad CI containers by digest via workflow-level KICAD_IMAGE
+- **PR #5706**: fix(ci): exclude the vendored .agents/ surface from ruff, unblocking main
+- **PR #5705**: test(mfr): measure effective native silk-clearance, not emitted values
+- **PR #5699**: fix(router): apply the fab hole-to-hole floor to same-net via drops
+- **Issue #5697** (closed): main branch: Lint & Format CI failing again — .agents/ Loom mirror not in ruff extend-exclude
+- **PR #5695**: fix(router): refine coupled diff-pair halo rejection with physical clearance
+- **PR #5692**: fix(merge-pr): warn when a partial-increment trailer is backticked
+- **PR #5691**: perf(router): memoise the per-cell via-site predicates + drop cell_known's _CellView (phase 4 of the diff-pair re-route step)
+- **Issue #5690** (closed): Partial-increment reset (#3667) silently skipped when "Part of #N" trailer is backticked
+- **PR #5689**: docs: fix inline code spans with embedded line breaks
+- **PR #5688**: perf(sexp): walk SExp trees with an explicit stack instead of nested generators
+- **Issue #5687** (closed): README.md: three inline code spans broken by mid-span line wraps
+- **PR #5686**: perf(validate): memoise each copper element's shapely geometry in the clearance rule
+- **PR #5684**: refactor(router/mesh): take ObstacleModel.is_clear's verdicts from the clearance kernel
+- **PR #5683**: ci: qualify KiCad 10.0.6 for the native mask-to-copper gate
+- **Issue #5682** (closed): ci: pin the kicad/kicad container by digest so a Docker Hub tag move can't silently change measured native behaviour
+- **PR #5681**: docs: correct autorouter example and relocated board links
+- **PR #5680**: docs: refresh README What's New for 0.21.x and bring scripts/README current
+- **Issue #5678** (closed): ci: Test job's native mask gate hard-pins KiCad 10.0.5, fails on runners with 10.0.6
+- **PR #5677**: perf(router): fast-path copper_gap dispatch for the lattice engine's pair kinds
+- **PR #5676**: fix(router): route the coupled diff-pair search through the clearance kernel (Epic #5509 Phase 3c)
+- **Issue #5672** (closed): perf(router): kernel-backed lattice clearance predicates cost ~1.7x the pre-kernel arithmetic (Epic #5509 Phase 3d follow-up)
+- **Issue #5664** (closed): [Epic #5509] Phase 3e: switch mesh engine predicate (mesh/obstacles.py) to the clearance kernel
+- **Issue #5662** (closed): [Epic #5509] Phase 3c: switch coupled diff-pair search (coupled_pathfinder.cpp + diffpair_routing.py) to the clearance kernel
+- **Issue #5059** (closed): Manufacturing profiles: verify effective silk/pad DRC coverage and preserve custom rules
+- **Issue #4507** (closed): router Phase 2 (#4431): search-time pairwise HV avoidance + C++ validate_route domain-matrix extension — make HV boards actually converge
+
+### 2026-09-22
+
+- **PR #5679**: perf(zones): skip the post-fill remediation pass's redundant first kicad-cli refill
+- **PR #5675**: refactor(router): switch the fixed-copper predicate to the shared clearance kernel (Epic #5509 Phase 3f)
+- **PR #5674**: fix(router): surface the declared-rule undercut warning on the explicit --clearance path
+- **PR #5671**: perf(router): tombstone R-tree segment deletions instead of deleting eagerly
+- **PR #5670**: refactor(router): switch the lattice engine's clearance predicates to the shared kernel (Epic #5509 Phase 3d)
+- **PR #5669**: perf(router): memoise the per-layer route-halo via probe (phase 4 of the diff-pair re-route step)
+- **PR #5667**: feat(router): read the .kicad_pro Default netclass as a clearance floor
+- **PR #5666**: fix(router): run the plan stage on a cache-hit route too
+- **Issue #5665** (closed): [Epic #5509] Phase 3f: switch fixed-copper predicate (fixed_copper.py + grid.cpp) to the clearance kernel
+- **Issue #5663** (closed): [Epic #5509] Phase 3d: switch lattice engine predicates to the clearance kernel
+- **PR #5659**: test(conformance): add seg-zone, via-zone and copper-edge pair kinds
+- **PR #5658**: perf(router): vectorize + memoize the pure-Python A* via-clearance kernel (phase 4 of the diff-pair re-route step)
+- **PR #5657**: perf(stitch): index foreign-net tracks for the pad-aware via-placement ladders
+- **Issue #5656** (closed): router: explicit --clearance never surfaces the "undercuts a declared rule" warning the resolver builds
+- **PR #5655**: feat(router): unify clearance rule resolution behind one resolver
+- **Issue #5654** (closed): router: promote .kicad_pro netclass clearance to a resolver input once the project writer stops emitting KiCad's stock 0.20mm default
+- **PR #5653**: perf(router): whole-board wall-clock attribution for the resume-exhaustion path (diff-pair re-route step)
+- **PR #5652**: feat(router,cli): overflow report with computed relief, net-status --why consumer, --plan-gate, and the fleet precision/recall table
+- **Issue #5651** (closed): router: a routing-cache hit silently suppresses the routing-plan sidecar (plan stage lives inside route_all_negotiated)
+- **PR #5649**: perf(router): vectorize CongestionMap's cell-skip scan
+- **Issue #5645** (closed): [Epic #5509] Phase 2: rule resolver unification (DRU precedence, pair matrix, fab-tier floors, trace/via symmetry)
+- **Issue #5644** (closed): [Epic #5509] Phase 1c follow-up: zone and edge pair kinds so group 18's zone/edge rules and group 10's pour/outline branches can be measured
+- **Issue #5626** (closed): conformance: add a pad-pad pair kind so Epic #5509 group 19 (drc_cpp) can be measured
+- **Issue #5613** (closed): tests/router/test_monotone_reach.py::TestDDRByteReach fails at origin/main: DDR byte bundle routes 10/11 in ~15min, DQS_P/DQS_N unroutable
+- **Issue #5521** (closed): [Epic #5510] router/cli: overflow report with computed relief, net-status --why consumer, --plan-gate/--force, and the fleet precision/recall table
+- **Issue #5510** (closed): Epic: capacity-aware routing plan on the default path — layer assignment, hard corridors, and an infeasibility certificate
+
+### 2026-09-21
+
+- **PR #5647**: chore(release): bump version to 0.21.1
+- **PR #5646**: fix(router): engage the within-pair clearance override only when it relaxes
+- **PR #5643**: test(conformance): Epic #5509 Phase 1c -- oracle adapters for 18 of 19 consumer groups, kernel control row, CI wiring (#5515)
+- **PR #5642**: fix(router): write access-witness sidecar on deadline kill, fix verdict-shape and net0 defects
+- **PR #5641**: perf(router): reject far copper by bounding box before the exact halo distance
+- **PR #5640**: docs(diagnostics): Phase 1c access-loss witness runs on boards 05/06/07 (evidence only)
+- **Issue #5639** (closed): access-witness (1a/1b): no sidecar on deadline-terminated routes, plus two verdict-shape defects
+- **PR #5638**: test(board06): pin _path_ok's foreign drill-hole rejection (#5608 follow-up)
+- **PR #5637**: perf(stitch): index filled-polygon edges + add phase-level profiling to the diff-pair re-route step
+- **PR #5636**: feat(router): honest plan capacity — per-class pitch, plane exclusion, keepout/preserved-copper blockage (#5575)
+- **PR #5635**: fix(board06): name a foreign --step route input instead of letting it look like a regression (#5628)
+- **PR #5634**: perf(ci): raise KCT_NATIVE_MAX_CONCURRENCY from 1 to 2
+- **PR #5633**: fix(release): uv's idempotent-publish flag is --check-url, not --skip-existing
+- **PR #5632**: fix(release): idempotent PyPI publish via --skip-existing
+- **Issue #5631** (closed): board06: add dedicated regression test for _path_ok's hole-clearance rejection (#5608 follow-up)
+- **PR #5630**: fix(release): slim the sdist under PyPI's 100MB limit
+- **PR #5629**: fix(board06): enforce hole_clearance in pour-repair path acceptance (#5608)
+- **Issue #5628** (closed): board06: --step route on main now leaves +3V3 U3.1 UNREPAIRED (6 lines) and produces 0 hole_clearance errors — route outcome shifted from the #5606-era baseline
+- **PR #5627**: fix(zones): coverage-gate the queued-vs-queued overlap warning (#5618)
+- **PR #5624**: perf(ci): exclude kicad-cli --help/--version probes from the native permit gate
+- **PR #5623**: chore(release): bump version to 0.21.0
+- **PR #5622**: fix(board07): frame-independent pour-repair bounds + refill stability
+- **Issue #5618** (closed): zones: coverage-gate the queued-vs-queued overlap warning like existing-vs-new (follow-up to #5590)
+- **Issue #5616** (closed): perf(ci): recover the +4.7 min Test-job median regression from KCT_NATIVE_MAX_CONCURRENCY=1 without reintroducing the cgroup OOM
+- **Issue #5608** (closed): board06: pour-repair bridge can land 3um inside the hole_clearance floor vs a GND via
+- **Issue #5603** (closed): perf(ci): cache kicad-cli capability probes so --help launches stop taking native permits
+- **Issue #5575** (closed): [Epic #5510] router: honest plan capacity — per-class pitch, plane exclusion, keepout/preserved-copper blockage, channel fixture (#5520 PR-B)
+- **Issue #5520** (closed): [Epic #5510] router: run the plan stage on every default kct route with honest capacity (per-class pitch, plane exclusion, zone/keepout blockage, --no-routing-plan)
+- **Issue #5518** (closed): [Epic #5508] Phase 1c: access-loss witness runs on boards 05 / 06 / 07 with DQ3 as negative control (evidence only)
+- **Issue #5515** (closed): [Epic #5509] Phase 1c: oracle adapters for the remaining 14 consumer groups, kernel adapter, CI wiring, full disagreement table
+- **Issue #5507** (closed): router: preserve power-pad access for Board07 U4.C2 (+1V2)
+
+### 2026-09-20
+
+- **PR #5621**: chore(changelog): reconcile [Unreleased] since v0.20.0
+- **PR #5620**: feat(board06): reuse through-hole pads as pour-bridge termini in sub-stage D (#5606)
+- **PR #5619**: feat(router): replay commit journal into per-pad access witness
+- **PR #5615**: fix(zones): allocate new pours around pre-existing same-layer zones
+- **PR #5614**: fix(router): resume loop rejects accepted goal node + localized strict pad parity check
+- **PR #5612**: fix(ci): cache kicad-cli capability probes to cut native-launch amplification
+- **PR #5611**: feat(router): ordered commit journal + access-witness sidecar
+- **Issue #5610** (closed): [Epic #5508] Phase 1b (PR 2): access-witness replay + net-status/StuckNetDiagnosis consumers
+- **PR #5609**: fix(router): congestion-mark stagnation recovery so board06 converges without the avoidance leak
+- **Issue #5606** (closed): board06: port the through-hole pad pour-bridge reuse (#5564) into sub-stage D
+- **PR #5605**: fix(board06): reuse an existing same-net barrel for a pour bridge
+- **PR #5604**: feat(mcp): migrate to mcp 2.x SDK (FastMCP -> MCPServer) + fastmcp 4 (#5601)
+- **PR #5602**: fix(ci): board06 determinism smoke -- explicit output dir for --step route (#5597)
+- **Issue #5601** (closed): chore(mcp): migrate to fastmcp 4 / mcp 2.x (FastMCP renamed to MCPServer)
+- **PR #5600**: fix(ci): fix board 02/04 determinism-smoke flag drift + raise board-02 timeout
+- **Issue #5599** (closed): router: C++ pathfinder gives up on post-route clearance validation, falls back to slow Python A* (blocks board 02/04 routes)
+- **PR #5598**: fix(ci): delegate board06 smoke + load-independence copper hash to normalize_copper.py
+- **Issue #5597** (closed): board06_determinism_smoke.sh: generate_design.py's default output_dir (regression-output) breaks --step route without an explicit output dir
+- **PR #5596**: fix(tests): compose finite-mode route budget in test_route_artifact_receipt
+- **PR #5595**: feat(router): add pad outlines and zone polygons to the clearance kernel
+- **Issue #5594** (closed): test(router): board02 jlcpcb-tier1 baseline fails on main -- GND net partially routed, 2 of 3 pads stranded
+- **PR #5593**: fix(zones): derive generated zone UUIDs from content so pour fills are reproducible
+- **PR #5592**: feat(router): add exact-geometry clearance kernel for segments, vias and edges
+- **Issue #5591** (closed): pcb: generated boards emit pads with no (uuid ...), so KiCad invents a random one per pad on every load
+- **Issue #5590** (closed): zones: an auto-poured zone that overlaps an equal-priority zone on the same layer is starved of copper
+- **Issue #5589** (closed): feat(router): extend the clearance kernel with pad outlines and zone polygons
+- **Issue #5587** (closed): ci: board_route_determinism_smoke.sh 02 and 04 fail on a loaded host (wall-clock stage deadline / route deadline)
+- **Issue #5586** (closed): ci: two more line-based copper normalizers compare element COUNTS (board06 smoke, load-independence test)
+- **Issue #5584** (closed): flake risk: test_route_artifact_receipt's finite mode carries the same flat-30s route budget fixed in #5579
+- **Issue #5578** (closed): router: zone pour-fill island decomposition is not reproducible run-to-run (routed copper is)
+- **PR #5569**: chore(deps): bump anyio from 4.12.0 to 4.14.2
+- **Issue #5566** (closed): flake: lattice post-pass gating tests time out in native_concurrency acquire
+- **PR #5564**: fix(zones): reuse an existing through-hole pad as a pour-bridge terminus
+- **PR #5562**: chore(deps-dev): bump cmake from 4.4.2 to 4.4.3
+- **PR #5561**: chore(deps): bump the python-minor-patch group across 1 directory with 2 updates
+- **PR #5560**: chore(deps): bump actions/upload-artifact from 4 to 7
+- **PR #5559**: chore(deps): bump astral-sh/setup-uv from 10.0.1 to 10.1.0 in the github-actions group across 1 directory
+- **PR #5558**: chore(deps-dev): bump the site-minor-patch group in /site with 2 updates
+- **Issue #5551** (closed): board06: port the existing-barrel pour-bridge planner into sub-stage D
+- **Issue #5545** (closed): router: cohort-reroute converges on board06 U2.B1 stranding without the stale-penalty leak PR #5541 removes
+- **Issue #5517** (closed): [Epic #5508] Phase 1b: ordered commit journal + offline access-loss witness surfaced in `net-status --why`
+- **Issue #5514** (closed): [Epic #5509] Phase 1b: clearance kernel API in router/cpp with Python port and mandatory parity test (no consumer switched)
+- **Issue #5505** (closed): CI runtime: representative-cohort remeasurement and close-out for #5240
+- **Issue #5504** (closed): router: make per-connection avoidance cleanup the default once Board06 U2.B1 stranding is explained
+
+### 2026-09-19
+
+- **PR #5588**: docs(routing-plan): fix understated elapsed_s claim in Cost section
+- **PR #5585**: fix(ci): compare whole copper nodes, not header lines, in the route-determinism gate
+- **PR #5583**: test(ci): size the partial-placement route budget against the native-permit queue (#5579)
+- **Issue #5582** (closed): docs(routing-plan): "Cost" section understates the measured plan-stage elapsed_s by ~60x
+- **PR #5581**: feat(router): run the report-only routing plan stage on every default route (+ --no-routing-plan)
+- **Issue #5580** (closed): ci: board_route_determinism_smoke.sh normalize_copper() compares copper element COUNTS, not geometry
+- **Issue #5579** (closed): flake: test_route_partial_placement_cli deadline-exceeded failures redden the Test job on main
+- **PR #5577**: perf(board06): spatially prune the pour-repair obstacle clearance scans
+- **PR #5576**: fix(ci): credit native-slot wait back to the waiting test's pytest-timeout budget
+- **PR #5574**: fix(judge): restore draft-PR fallback exclusion reverted by installed-surface resync
+- **PR #5573**: test(ci): add evidence-sized pytest-timeout overrides to the three 60s-reaped test groups
+- **Issue #5572** (closed): CI: native-slot wait from KCT_NATIVE_MAX_CONCURRENCY=1 is charged to the waiting test's pytest-timeout budget
+- **PR #5571**: perf(router): hoist loop-invariant clearance lookups in validate_routes
+- **PR #5570**: fix(router): persist add_obstacle keepouts across grid resets
+- **Issue #5567** (closed): Flaky >60s pytest-timeout in tests/router/lattice/test_post_pass_gating.py CLI tests
+- **Issue #5557** (closed): judge-fallback-guard.sh: exclude draft PRs from fallback evaluation
+- **Issue #5556** (closed): CI: Test job flakes on a fixed 60s pytest-timeout hitting an arbitrary test (seen on main and PRs)
+- **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
+- **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
+- **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
+
+### 2026-09-18
+
+- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
+- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
+- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
+- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
+- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
+- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
+- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
+- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
+- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
+- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
+- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
+- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
+- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
+- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
+- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
+- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
+- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
+- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
+- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
+- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
+
+### 2026-09-17
+
+- **PR #5543**: fix(judge): exclude draft PRs from fallback-mode evaluation
+- **Issue #5535** (closed): judge-fallback-guard.sh does not exclude draft PRs from fallback-mode evaluation
+- **PR #5532**: test(conformance): kicad-cli clearance oracle harness + named fixtures (Epic #5509 Phase 1a)
+- **PR #5531**: perf(analysis): spatially prune net-status segment-adjacency scan
+- **PR #5528**: feat(router): emit RoutingPlan sidecar from two-phase global pass (#5519)
+- **PR #5527**: perf(router): vectorize diff-pair corridor mask dilation
+- **PR #5526**: feat(router): declared swap groups + crossing-minimising pin assignment
+- **PR #5525**: feat(router): pad access sets + Kelvin/competing-net fixture (Epic #5508 Phase 1a)
+- **Issue #5522** (closed): [Epic #5511] Declared swap groups + crossing-minimising pin assignment (report-only)
+- **Issue #5519** (closed): [Epic #5510] router: emit RoutingPlan sidecar from the existing two-phase global pass (report-only, byte-identical copper)
+- **Issue #5516** (closed): [Epic #5508] Phase 1a: `router/pad_access.py` access-set computation + 4-pad Kelvin/competing-net fixture
+
+### 2026-07-20 (evening)
+
+- **Release**: v0.19.0 — feature release centered on the **HV-isolation design loop** and **via-in-pad manufacturability**: `kct creepage --voltage-map` per-net voltage model (#4371), `kct zones hv-keepout` plane voids (#4372), HV-aware placement with creepage-keepout feasibility (#4373), the `/kct:hv-isolation-loop` orchestration skill (#4374), `kct analyze electrical-rating` advisory LED/capacitor rating lint (#4381), `kct check --emit-dru`/`--emit-drc-constraints` rule-identity sidecars (#4375), `kct fix-vias` off-pad relocation (#4363/#4376/#4377), and a `kct doctor` version-record drift check (#4349). Plus correctness fixes across creepage, netlist-sync, router, and writer subsystems. No breaking changes. Version bumped 0.18.0 → 0.19.0; tag `v0.19.0` → `publish.yml` to PyPI.
+
+## 2026-08-06 — v0.20.0 released
+
+- v0.20.0 tagged and published to PyPI: 16-issue sweep (waves 3-5) merged as a 12-PR train after the GitHub Actions outage; headliners: lattice search-time HV pairwise clearance (#4602) + keepout rule-areas (#4605), kct sch tidy (#4596) + schematic field lint (#4595), net-status strict default (#4557), .kicad_dru managed-block hardening (#4600/#4667).
+
+## 2026-09-28 — v0.22.0 release cut
+
+- v0.22.0 bump PR opened after an in-session release-prep sweep: CI runner cpuset fix for the resized heavy-lane host (#5753), pre-release fixes to the new pin1_marker/via_under_body/width_consistency rules (#5748/#5749/#5750), board-05 DRU test isolation (#5746), board-03 reach-test flake (#5752), CHANGELOG reconciled to a zero-gap report; headliners: new kct check rules, SMD pad clearance emission, unified route clearance resolver.
+
+## 2026-10-15 — v0.23.0 release cut
+
+- v0.23.0 release PR opened by hand (manual fallback in RELEASING.md; `AUTO_RELEASE` is unset, so the daily workflow only dry-runs). 451 changelog fragments assembled; release-gate gaps closed in #6752.
+
+## 2026-10-20 — v0.24.0 release cut
+
+- v0.24.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #7563, #7566, #7556, #7562, #7551, #7558, #7461, #7533, #7553, #7549, #7542, #7530, #7541, #7544, #7540, #7538, #7516, #7537, #7535, #7514, #7531, #7525, #7500, #7524, #7522, #7527, #7528, #7502, #7494, #7515, #7504, #7526, #7513, #7512, #7511, #7523, #7495, #7496, #7499, #7506, #7497, #7476, #7490, #7505, #7493, #7501, #7492, #7457, #7469, #7488, #7486, #7465, #7439, #7477, #7455, #7473, #7470, #7474, #7462, #7471, #7459, #7466, #7451, #7460, #7452, #7438, #7458, #7428, #7456, #7448, #7432, #7454, #7308, #7443, #7450, #7447, #7449, #7444, #7442, #7430, #7434, #7429, #7426, #7436, #7417, #7424, #7431, #7427, #7421, #7419, #7420, #7418, #7406, #7361, #7416, #7350, #7413, #7415, #7414, #7394, #7408, #7412, #7396, #7411, #7407, #7395, #7404, #7400, #7405, #7364, #7397, #7403, #7388, #7398, #7379, #7288, #7340, #7387, #7381, #7371, #7366, #7386, #7382, #7378, #7380, #7375, #7363, #7376, #7360, #7373, #7372, #7370, #7369, #7343, #7354, #7352, #7347, #7346, #7345, #7324, #7341, #7338, #7334, #7285, #7331, #7336, #7289, #7326, #7328, #7330, #7317, #7286, #7329, #7316, #7321, #7318, #7315, #7287, #7306, #7314, #7310, #7313, #7311, #7242, #7302, #7304, #7303, #7307, #7291, #7305, #7282, #7280, #7281, #7301, #7297, #7251, #7245, #7290, #7279, #7274, #7254, #7278, #7271, #7267, #7266, #7265, #7263, #7255, #7248, #7264, #7259, #7252, #7235, #7243, #7249, #7247, #7154, #7191, #7244, #7157, #7238, #7232, #7221, #7231, #7236, #7229, #7217, #7215, #7218, #7234, #7233, #7222, #7226, #7163, #7194, #7225, #7203, #7216, #7219, #7196, #7202, #7212, #7208, #7205, #7207, #7201, #7179, #7195, #7197, #7171, #7189, #7187, #7162, #7182, #7177, #7142, #7174, #7172, #7183, #7184, #7181, #7133, #7160, #7176, #7173, #7137, #6838, #7165, #7168, #7167, #7081, #7156, #7158, #7145, #7151, #7152, #7149, #7146, #7135, #7140, #7134, #7103, #7143, #7144, #7139, #7122, #7131, #7117, #7130, #7128, #7127, #7108, #7125, #7109, #7119, #7104, #7101, #7118, #7113, #7086, #6874, #6900, #7112, #7110, #7090, #7100, #7095, #7102, #7105, #7098, #7055, #7092, #7097, #7089, #7068, #7052, #7088, #7050, #7087, #7085, #7054, #7069, #7061, #7074, #7073, #7049, #7067, #7066, #7015, #7044, #7048, #7032, #7039, #7020, #7040, #7037, #7027, #7036, #7035, #7041, #7007, #7031, #7034, #7030, #7038, #7016, #7021, #7013, #7010, #7018, #7000, #7006, #7005, #6999, #6998, #7002, #7001, #6993, #6992, #6995, #6978, #6972, #6990, #6991, #6988, #6987, #6980, #6981, #6977, #6976, #6974, #6967, #6973, #6971, #6966, #6965, #6964, #6961, #6953, #6952, #6949, #6951, #6955, #6950, #6944, #6942, #6943, #6940, #6939, #6937, #6938, #6936, #6933, #6934, #6931, #6910, #6928, #6926, #6927, #6891, #6921, #6917, #6925, #6918, #6907, #6924, #6905, #6922, #6923, #6919, #6920, #6916, #6909, #6902, #6904, #6901, #6888, #6903, #6884, #6906, #6890, #6886, #6865, #6892, #6880, #6877, #6887, #6879, #6882, #6867, #6868, #6872, #6871, #6870, #6869, #6864, #6764, #6231, #6863, #6861, #6856, #6849, #6859, #6854, #6855, #6851, #6848, #6845, #6843, #6846, #6844, #6841, #6825, #6827, #6833, #6832, #6830, #6831, #6821, #6817, #6818, #6819, #6828, #6811, #6814, #6301, #6813, #6803, #6794, #6808, #6806, #6299, #6302, #6809, #6804, #6797, #6801, #6796, #6793, #6791, #6790, #6789, #6785, #6787, #6783, #6782, #6774, #6777, #6779, #6735, #6776, #6762, #6769, #6729, #6746, #6754, #6768, #6747, #6751, #6767, #6771, #6758, #6745, #6757, #6760, #6734.
+
+## 2026-10-29 — v0.25.0 release cut
+
+- v0.25.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8079, #8075, #8076, #8074, #8071, #8072, #8070, #8069, #8067, #8068, #8050, #8064, #8059, #8060, #8063, #8057, #8058, #8047, #8056, #8055, #8062, #8049, #8046, #8044, #8045, #8042, #8040, #8041, #8038, #8037, #8035, #8036, #8032, #8034, #8031, #8030, #8025, #8022, #8026, #8018, #8024, #8023, #8020, #8013, #8019, #8021, #8011, #8014, #8009, #8010, #8007, #8001, #7994, #7999, #8006, #8003, #7997, #8002, #7998, #8000, #7988, #7986, #7987, #7980, #7984, #7985, #7983, #7969, #7982, #7977, #7978, #7979, #7976, #7975, #7974, #7972, #7973, #7971, #7968, #7967, #7965, #7963, #7962, #7959, #7952, #7958, #7956, #7957, #7954, #7949, #7950, #7945, #7947, #7946, #7941, #7948, #7940, #7938, #7939, #7934, #7936, #7937, #7933, #7935, #7930, #7926, #7928, #7927, #7921, #7924, #7915, #7923, #7918, #7917, #7911, #7919, #7909, #7910, #7912, #7905, #7906, #7904, #7907, #7900, #7888, #7897, #7899, #7895, #7890, #7889, #7898, #7885, #7886, #7882, #7884, #7878, #7877, #7876, #7874, #7873, #7872, #7871, #7868, #7866, #7865, #7860, #7859, #7857, #7849, #7850, #7854, #7855, #7851, #7852, #7847, #7838, #7846, #7839, #7845, #7836, #7844, #7842, #7843, #7841, #7840, #7835, #7837, #7830, #7828, #7826, #7824, #7827, #7825, #7822, #7823, #7802, #7820, #7819, #7816, #7821, #7814, #7811, #7813, #7812, #7800, #7809, #7807, #7784, #7806, #7803, #7801, #7804, #7792, #7793, #7779, #7791, #7789, #7788, #7787, #7786, #7783, #7781, #7780, #7778, #7772, #7773, #7770, #7771, #7777, #7774, #7765, #7591, #7764, #7763, #7762, #7759, #7628, #7761, #7756, #7757, #7758, #7753, #7742, #7751, #7752, #7749, #7748, #7744, #7747, #7739, #7745, #7736, #7737, #7734, #7726, #7735, #7730, #7732, #7733, #7731, #7724, #7728, #7725, #7723, #7722, #7719, #7720, #7718, #7697, #7707, #7717, #7712, #7715, #7706, #7660, #7714, #7695, #7709, #7681, #7703, #7702, #7693, #7701, #7698, #7671, #7700, #7680, #7661, #7696, #7672, #7677, #7692, #7679, #7676, #7673, #7674, #7653, #7662, #7658, #7475, #7656, #7644, #7643, #7642, #7639, #7640, #7655, #7654, #7646, #7651, #7652, #7647, #7601, #7635, #7631, #7629, #7641, #7584, #7623, #7638, #7636, #7604, #7517, #7609, #7633, #7634, #7622, #7570, #7630, #7620, #7627, #7607, #7576, #7596, #7578, #7606, #7610, #7600, #7603, #7599, #7598, #7571, #7585, #7589, #7579, #7595, #7592, #7590, #7574, #7587, #7572, #6661, #7581, #7564, #7568, #7555.
+
+## 2026-10-29 — v0.25.1 release cut
+
+- v0.25.1 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8100, #8104, #8103, #8102, #8096, #8095, #8094, #8091, #8093, #8088, #8089, #8084, #8086, #8087, #8080, #8082.
+
+## 2026-10-30 — v0.26.0 release cut
+
+- v0.26.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8128, #8129, #8126, #8125, #8122, #8123, #8120, #8114, #8116, #8117, #8108, #8109, #8112, #8110, #8107, #8081.
+
+## 2026-10-31 — v0.27.0 release cut
+
+- v0.27.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8119, #8174, #8173, #8164, #8172, #8167, #8150, #8171, #8160, #8163, #8161, #8165, #8139, #8170, #8169, #8162, #8152, #8166, #8151, #8146, #8147, #8138, #8145, #8137, #8136, #8143, #8141, #8140, #8142.
+
+## 2026-11-07 — v0.28.0 release cut
+
+- v0.28.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8599, #8596, #8593, #8535, #8595, #8594, #8590, #8589, #8588, #8586, #8583, #8582, #8567, #8528, #8541, #8584, #8574, #8575, #8557, #8558, #8556, #8578, #8572, #8554, #8536, #8568, #8565, #8576, #8543, #8560, #8544, #8562, #8542, #8555, #8553, #8552, #8524, #8534, #8522, #8520, #8512, #8526, #8521, #8515, #8516, #8514, #8513, #8510, #8508, #8509, #8507, #8504, #8489, #8499, #8506, #8496, #8497, #8500, #8498, #8490, #8483, #8491, #8484, #8487, #8479, #8482, #8476, #8477, #8475, #8470, #8474, #8464, #8473, #8472, #8461, #8462, #8463, #8471, #8469, #8456, #8400, #8455, #8449, #8454, #8453, #8451, #8452, #8450, #8448, #8444, #8445, #8432, #8443, #8423, #8441, #8442, #8447, #8428, #8446, #8420, #8431, #8429, #8426, #8430, #8412, #8416, #8421, #8410, #8418, #8405, #8407, #8394, #8424, #8403, #8401, #8387, #8415, #8398, #8391, #8402, #8392, #8409, #8389, #8390, #8388, #8384, #8381, #8383, #8380, #8382, #8378, #8373, #8379, #8371, #8372, #8374, #8376, #8375, #8365, #8320, #8364, #8362, #8317, #8359, #8360, #8355, #8350, #8354, #8345, #8257, #8353, #8339, #8351, #8348, #8352, #8349, #8340, #8319, #8342, #8307, #8316, #8328, #8318, #8335, #8338, #8330, #8344, #8306, #8343, #8334, #8326, #8341, #8329, #8304, #8305, #8315, #8336, #8280, #8294, #8290, #8324, #8283, #8331, #8302, #8293, #8291, #8287, #8289, #8284, #8276, #8266, #8273, #8281, #8265, #8264, #8272, #8263, #8252, #8253, #8268, #8251, #8254, #8247, #8244, #8240, #8246, #8245, #8241, #8242, #8243, #8227, #8238, #8223, #8229, #8237, #8230, #8233, #8228, #8235, #8226, #8234, #8224, #8212, #8225, #8231, #8213, #8205, #8210, #8206, #8222, #8211, #8105, #8201, #8202, #8200, #8197, #8196, #8199, #8198, #8195, #8193, #8192, #8190, #8188, #8186, #8187, #8183, #8182, #8180, #8178, #8179, #8177, #8176.
+
+## 2026-11-08 — v0.28.1 release cut
+
+- v0.28.1 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8607, #8601, #8605, #8606.
+
+## 2026-11-09 — v0.29.0 release cut
+
+- v0.29.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8649, #8641, #8636, #8638, #8631, #8637, #8635, #8634, #8627, #8624, #8625, #8622, #8611, #8621, #8619, #8618, #8617, #8615, #8616, #8613.

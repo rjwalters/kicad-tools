@@ -1,0 +1,7561 @@
+"""
+A* pathfinding for PCB routing (pure Python fallback).
+
+NOTE: This is the pure Python implementation. A C++ backend is available
+that provides 10-100x speedup. Build it with:
+
+    kct build-native
+
+The C++ backend is used automatically when available. This module serves
+as the fallback when the C++ extension is not installed.
+
+This module provides:
+- AStarNode: Node for priority queue in A* search
+- Router: A* pathfinder with multi-layer support and congestion awareness
+
+The Router accepts a pluggable Heuristic for experimentation with
+different routing strategies. See heuristics.py for available options.
+"""
+
+import contextlib
+import heapq
+import itertools
+import math
+import os
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .pairwise_clearance import PairwiseClearanceTable
+
+import numpy as np
+
+from kicad_tools.core.types import copper_span
+
+from . import wall_deadline as _wall_deadline
+from .clearance_kernel import CLEARANCE_EPSILON_MM
+from .clearance_resolver import trace_via_clearance_mm
+from .geometry import segments_intersect as _geom_segments_intersect
+from .grid import RoutingGrid, SetupDeadlineExpired
+from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
+from .layers import Layer
+from .pad_landing import landing_cost, pad_landing_geometry
+from .primitives import Pad, Route, Segment, Via
+from .quantize import dogleg_points, is_45_aligned
+from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
+from .search_radius import search_radius_cells
+from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+
+# Issue #3135: env-gated A* neighbor-expansion trace.  Set
+# ``KICAD_ROUTER_TRACE_ASTAR=1`` to log every accept/reject decision from the
+# Python A* loop.  Mirrors the C++ instrumentation in
+# ``router/cpp/src/pathfinder.cpp`` so under-clearance investigations can use
+# the same flag regardless of which backend executed the search.  The check
+# is performed once at module load; the resulting bool is cached in
+# ``_ASTAR_TRACE_ENABLED`` for branch-predictable use in the hot loop.
+_ASTAR_TRACE_ENABLED = os.environ.get("KICAD_ROUTER_TRACE_ASTAR", "").strip() not in ("", "0")
+
+
+def _astar_trace(message: str) -> None:
+    """Emit an A* trace line to stderr when ``KICAD_ROUTER_TRACE_ASTAR`` is set.
+
+    Centralised so the hot loop only does ``if _ASTAR_TRACE_ENABLED:`` and
+    callers don't worry about flushing.  Output is unbuffered to match the
+    C++ side's ``std::fprintf(stderr, ...)`` semantics so traces from a mixed
+    Python/C++ run interleave in the order they happened.
+    """
+    sys.stderr.write(message)
+    sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
+@dataclass(frozen=True)
+class _PairwiseSearchState:
+    """Net-id-space pairwise (HV-isolation) projection for the Python A*.
+
+    Issue #4507 / Epic #4431 Phase 2b parity: the C++ search consults a
+    per-net domain array + domain-pair widening matrix at search time
+    (``Pathfinder::cross_domain_trace_blocked`` /
+    ``cross_domain_via_blocked``), but the pure-Python fallback A* had only
+    the Phase-1 *post-route* gate -- so on an HV board the fallback proposed
+    HV-through-LV paths the gate then rejected, burning its budget instead of
+    converging.  This carrier is the Python mirror of the state
+    ``Grid3D::set_pairwise_domains`` holds on the C++ side, built by the same
+    :func:`~kicad_tools.router.pairwise_clearance.build_cpp_domain_matrix`
+    projection so the two searches cannot disagree.
+
+    Attributes:
+        net_to_domain: Indexed by net id; ``-1`` = participates in no
+            widening pair (the projection's dormant convention).
+        matrix: Dense symmetric ``matrix[dom_a][dom_b]`` of *widening*
+            values (mm) WITHOUT the DRU floor -- ``<= 0`` means "scalar
+            clearance already governs this pair".
+        max_widen: Largest matrix entry (mm); sizes the widened scan kernel.
+        id_to_name: Net id -> board net name, for the (name-keyed) #4506
+            attach-zone waiver.
+    """
+
+    net_to_domain: list[int]
+    matrix: list[list[float]]
+    max_widen: float
+    id_to_name: dict[int, str]
+
+
+# Issue #4794: hard cap on ``Router._pairwise_extra_cache`` entries.  Each
+# entry is a full-grid bool bitmap, so an unbounded cache would trade a CPU
+# problem for a memory one.  The natural population is
+# ``non-dormant foreign domains x distinct pair radii`` -- single digits on
+# every board in the fleet -- so the cap only ever bites on a pathological
+# table, where it degrades to the pre-#4794 recompute-every-call behaviour
+# rather than growing without bound.
+_PAIRWISE_MASK_CACHE_MAX = 64
+
+
+# Issue #8645: the exception lives in ``grid`` so ``compute_expanded_blocked``
+# can raise it; ``_route_impl`` catches it under the historical name.
+_SetupDeadlineExpired = SetupDeadlineExpired
+
+
+def _check_setup_deadline(deadline: float | None) -> None:
+    """Raise :class:`_SetupDeadlineExpired` once ``deadline`` has passed."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _SetupDeadlineExpired
+
+
+def _separable_disc_heights(disc: np.ndarray) -> list[int] | None:
+    """Per-column half-heights of ``disc``, or ``None`` if it is not separable.
+
+    Issue #8414. :func:`_disc_dilate_exact` is exact for a ``(2r+1, 2r+1)``
+    structuring element when all of these hold:
+
+    - it is mirror-symmetric on both axes;
+    - every column ``r + a`` is one contiguous run ``[r - h(a), r + h(a)]``,
+      or is empty (``h(a) = -1``);
+    - ``h`` does not increase with ``|a|``.
+
+    The Euclidean halo disc (:func:`~kicad_tools.router.grid.halo_mask`) meets
+    all three. Anything else returns ``None``, and the caller falls back to the
+    shift-and-OR reference, so an unusual element is never approximated.
+    """
+    if disc.ndim != 2 or disc.shape[0] != disc.shape[1] or disc.shape[0] % 2 != 1:
+        return None
+    r = disc.shape[0] // 2
+    if not bool(disc[r, r]):
+        return None
+    if not (np.array_equal(disc, disc[::-1, :]) and np.array_equal(disc, disc[:, ::-1])):
+        return None
+    heights: list[int] = []
+    for a in range(r + 1):
+        column = disc[:, r + a]
+        count = int(np.count_nonzero(column))
+        h = (count - 1) // 2 if count else -1
+        if count and not bool(np.all(column[r - h : r + h + 1])):
+            return None  # set cells are not one centred run
+        if heights and h > heights[-1]:
+            return None
+        heights.append(h)
+    return heights
+
+
+def _disc_dilate_shift_or(mask: np.ndarray, disc: np.ndarray) -> np.ndarray:
+    """Reference zero-padded dilation: OR ``mask`` once per set offset of ``disc``.
+
+    This is the pre-#8414 body of ``Router._dilate_zero_padded``, unchanged. It
+    costs O(N * set offsets), which is O(N * pi * r**2) for a disc. It is kept
+    as the fallback for a structuring element :func:`_separable_disc_heights`
+    rejects, and as the oracle the exact path is tested byte-for-byte against.
+    """
+    radius = disc.shape[0] // 2
+    layers, rows, cols = mask.shape
+    padded = np.zeros((layers, rows + 2 * radius, cols + 2 * radius), dtype=np.bool_)
+    padded[:, radius : radius + rows, radius : radius + cols] = mask
+    expanded = np.zeros_like(mask)
+    kernel_size = 2 * radius + 1
+    for dy in range(kernel_size):
+        for dx in range(kernel_size):
+            if disc[dy, dx]:
+                expanded |= padded[:, dy : dy + rows, dx : dx + cols]
+    return expanded
+
+
+def _disc_dilate_exact(mask: np.ndarray, disc: np.ndarray) -> np.ndarray:
+    """Exact zero-padded dilation of a 3-D ``mask`` by ``disc`` in O(N).
+
+    Issue #8414. Byte-identical to :func:`_disc_dilate_shift_or`, and the cost
+    does not depend on the radius. This is a separable distance transform with
+    a threshold, done in NumPy with no scipy:
+
+    1. ``hd``: per row, the horizontal distance to the nearest set cell. Two
+       running max/min passes over column indices compute it exactly.
+    2. A source row ``y'`` covers target ``(x, y)`` exactly when
+       ``|y - y'| <= S(x, y')``, with ``S = h(hd)`` and ``h`` the column
+       half-heights from :func:`_separable_disc_heights`. Taking the *nearest*
+       source is enough because ``h`` does not increase with ``|dx|``.
+       ``S = -1`` (``hd > r``) covers nothing.
+    3. ``covered(y) <=> max_{y' <= y}(y' + S) >= y  or  min_{y' >= y}(y' - S) <= y``.
+       Both sides are a running max/min along the rows.
+
+    Out of bounds is EMPTY: every source is an in-grid cell, as in the
+    zero-padded reference. Falls back to the reference when ``disc`` is not
+    separable.
+    """
+    heights = _separable_disc_heights(disc)
+    if heights is None:
+        return _disc_dilate_shift_or(mask, disc)
+    r = len(heights) - 1
+    layers, rows, cols = mask.shape
+    out = np.zeros_like(mask, dtype=np.bool_)
+    big = np.int32(rows + cols + 2 * r + 8)
+    # ``lut[d]`` = vertical half-extent reachable from a source ``d`` columns away.
+    lut = np.full(r + 2, -1, dtype=np.int32)
+    lut[: r + 1] = heights
+    col_idx = np.arange(cols, dtype=np.int32)[None, :]
+    row_idx = np.arange(rows, dtype=np.int32)[:, None]
+    for layer in range(layers):
+        m = mask[layer]
+        if not m.any():
+            continue
+        left = np.maximum.accumulate(np.where(m, col_idx, -big), axis=1)
+        right = np.minimum.accumulate(np.where(m, col_idx, big)[:, ::-1], axis=1)[:, ::-1]
+        hd = np.minimum(col_idx - left, right - col_idx)
+        np.minimum(hd, r + 1, out=hd)
+        s = lut[hd]
+        down = np.maximum.accumulate(s + row_idx, axis=0) >= row_idx
+        up = np.minimum.accumulate((row_idx - s)[::-1], axis=0)[::-1] <= row_idx
+        np.logical_or(down, up, out=out[layer])
+    return out
+
+
+# Issue #6117: tolerance for the post-route via-vs-foreign-pad check in
+# ``Router._validate_route_clearance``.  Matches the C++ validator's
+# ``CLEARANCE_EPSILON_MM`` (grid.cpp) so both backends reject the same vias.
+_VIA_PAD_CLEARANCE_EPSILON_MM = 1e-4
+
+
+@dataclass(frozen=True)
+class _SegmentAdapter:
+    """Adapter exposing :class:`Segment` with the ``start_x/start_y/end_x/end_y``
+    attribute names expected by :func:`point_clear_of_copper`.
+
+    Issue #2947: The shared clearance helper consumes duck-typed track
+    segments via the ``TrackSegmentLike`` protocol; :class:`Segment` uses
+    ``x1, y1, x2, y2``.  Mirrors the identical adapter in
+    :mod:`kicad_tools.router.escape` (PR #2945 for Issue #2944).
+    """
+
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    width: float
+
+
+@dataclass(frozen=True)
+class _GridStep:
+    """Grid cell with the ``.x`` / ``.y`` shape ``_authored_step_clear`` reads (#6389)."""
+
+    x: int
+    y: int
+
+
+@dataclass
+class AStarNode:
+    """Node for A* priority queue.
+
+    Issue #3144: ``seq`` is a monotonic insertion counter used as a
+    tie-break key for nodes with identical ``(f_score, g_score)`` so
+    heap pop order is deterministic.  Without it, ``heapq`` falls
+    through to structural comparison on the next compared field;
+    previously all fields after ``f_score`` were ``compare=False``,
+    which left the heap-ordering invariant entirely dependent on push
+    order.  Under CI load (or any allocator-state dependent execution)
+    sibling f_score-equal nodes could pop in varying order,
+    propagating into different explored A* paths and ultimately
+    different DRC error counts.
+
+    Issue #3199: comparison key is now
+    ``(f_score asc, -g_score asc, seq asc)`` -- i.e. on ``f_score``
+    ties we prefer the node with HIGHER ``g_score`` (= lower
+    ``h_score`` = closer to the goal).  This is the standard
+    "greedy on ties" A* optimisation that pushes the search toward
+    the goal frontier faster.  The post-#3144 FIFO-on-seq tie-break
+    (without the ``g_score`` key) regressed softstart unaided routing
+    reach from 6/10 -> 5/10 on dense packages; the ``g_score``
+    tertiary key restores the 6/10 baseline while keeping the
+    run-to-run determinism property #3144 required (board 06 / #3144
+    and board 07 / #3146 determinism tests still pass).
+
+    Callers should pass ``seq`` explicitly (typically via
+    ``itertools.count()`` shared across the search).  The default of
+    ``0`` keeps the dataclass declaration well-formed but is unsafe
+    for production use -- two nodes sharing ``seq=0`` re-introduce
+    the ambiguity this field exists to remove.  The router callers
+    in this module pass ``seq`` explicitly; legacy tests that do not
+    are tolerated by the default.
+    """
+
+    f_score: float
+    g_score: float = field(compare=False)
+    x: int = field(compare=False)
+    y: int = field(compare=False)
+    layer: int = field(compare=False)
+    parent: Optional["AStarNode"] = field(compare=False, default=None)
+    via_from_parent: bool = field(compare=False, default=False)
+    direction: tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
+    seq: int = field(compare=False, default=0)
+    # Issue #6473: nearest via node strictly above this node on its path
+    # (``None`` when there is none); twin of the native ``AStarNode::via_anc``.
+    # Never ``self`` (issue #6526): a self-reference made every via node a
+    # reference cycle, so a search's node tree outlived it until the cyclic
+    # GC ran.  A node reached through a via is found via ``via_from_parent``.
+    via_anc: Optional["AStarNode"] = field(compare=False, default=None, repr=False)
+
+    def __lt__(self, other: "AStarNode") -> bool:
+        """Issue #3144 + #3199 tie-break.
+
+        Sort key: ``(f_score asc, -g_score asc, seq asc)``.  Lower
+        ``f_score`` pops first; on ``f_score`` ties the node with
+        HIGHER ``g_score`` pops first (= the one with smaller
+        remaining heuristic distance, closer to the goal).  ``seq``
+        is the final deterministic tie-break used when both
+        ``f_score`` and ``g_score`` are equal.
+        """
+        if self.f_score != other.f_score:
+            return self.f_score < other.f_score
+        if self.g_score != other.g_score:
+            # Higher g_score pops first -> ``self < other`` iff
+            # ``self.g_score > other.g_score``.
+            return self.g_score > other.g_score
+        return self.seq < other.seq
+
+
+class Router:
+    """A* pathfinder with multi-layer support and congestion awareness.
+
+    The heuristic parameter allows experimentation with different routing
+    strategies. Available heuristics include:
+    - ManhattanHeuristic: Simple baseline (fast, may explore more nodes)
+    - DirectionBiasHeuristic: Prefers straight paths
+    - CongestionAwareHeuristic: Avoids congested areas (default)
+    - WeightedCongestionHeuristic: Stronger congestion avoidance
+    - GreedyHeuristic: Fast but suboptimal
+    """
+
+    # Issue #6366: per-net A* heuristic-weight overrides (net id -> weight),
+    # consulted by ``route`` when the caller passes the default weight.
+    # ``Autorouter`` installs its own dict here; the empty class default is
+    # never mutated.
+    net_astar_weights: dict[int, float] = {}
+
+    # Issue #6366: this pathfinder honours ``NetClassRouting.preferred_layers``
+    # (``_get_layer_preference_cost``), so the evolutionary ``preferred_layers``
+    # gene is live on this backend.  ``CppPathfinder`` sets this False.
+    supports_layer_preferences: bool = True
+
+    # Issue #3441: the pure-Python pathfinder implements waypoint injection
+    # (#2330) -- off-grid pad positions are injected directly into the A*
+    # search graph (see ``_create_waypoint`` / ``_waypoint_grid_edges``).
+    # ``Autorouter.use_waypoint_injection`` consults this capability flag so
+    # the off-grid recovery mechanisms (sub-grid escape pre-pass + PIN_ACCESS
+    # retry, issue #1603) are only disabled when waypoints can actually run.
+    supports_waypoint_injection: bool = True
+
+    def __init__(
+        self,
+        grid: RoutingGrid,
+        rules: DesignRules,
+        net_class_map: dict[str, NetClassRouting] | None = None,
+        heuristic: Heuristic | None = None,
+        diagonal_routing: bool = True,
+    ):
+        """
+        Args:
+            grid: The routing grid
+            rules: Design rules for routing
+            net_class_map: Mapping of net names to NetClassRouting
+            heuristic: Heuristic for A* search (default: CongestionAwareHeuristic)
+            diagonal_routing: Enable 45° diagonal routing (default: True).
+                              When True, routes can use diagonal moves for shorter paths.
+                              When False, routes use only orthogonal (Manhattan) moves.
+        """
+        self.grid = grid
+        # Issue #8609: pure-Python A* must run on NumPy arrays, never MLX/CuPy.
+        grid.ensure_numpy_arrays()
+        self.rules = rules
+        from .mfr_limits import get_mfr_limits
+
+        self._allow_smd_vias = True
+        if rules.manufacturer:
+            # Unknown manufacturer -> unspecified capability is retained
+            # (permissive), matching the fallback used elsewhere for
+            # unrecognized manufacturer ids (see
+            # Router._build_manufacturer_design_rules).
+            with contextlib.suppress(ValueError):
+                self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
+        # Issue #3524: copy the default map instead of aliasing the
+        # module-level singleton -- in-place writes must stay local.
+        self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+        self.heuristic = heuristic or DEFAULT_HEURISTIC
+        self.diagonal_routing = diagonal_routing
+
+        # Issue #3438: relief-probe mode.  When True (set via
+        # ``set_relief_mode``) AND routing in negotiated mode, foreign-net
+        # usage-0 non-obstacle cells (escape stubs, route clearance halos,
+        # via halo rings) become passable at ``_RELIEF_CONFLICT_PENALTY``
+        # per conflicted step instead of hard-blocking.  Used by the
+        # negotiated outer loop's zero-overflow relief pass to extract a
+        # min-conflict blocker set for targeted rip-up; never enabled for
+        # committed routing.
+        self.relief_mode = False
+
+        # Issue #3881: optional DETERMINISTIC per-net iteration cap for the A*
+        # loops.  ``None`` (default) preserves the historical
+        # ``cols * rows * 4`` self-bound.  When the C++ backend hands a net to
+        # this Python fallback under ``--deterministic-budget`` + a tuned
+        # per-net cap, ``CppPathfinder._try_python_fallback`` sets this so the
+        # 10-100x-slower Python A* is ALSO bounded by a fixed node-expansion
+        # count (not wall-clock) -- otherwise a geometric-failure net grinds
+        # for minutes in Python and monopolises the budget exactly as the C++
+        # search would have, re-introducing the slowness the per-net cap exists
+        # to prevent.  The effective bound is ``min(cols*rows*4, override)``.
+        self._max_iterations_override: int | None = None
+
+        # Issue #6098: True when the most recent ``route()`` returned ``None``
+        # because its A* open set DRAINED -- every cell reachable under this
+        # search's passability was expanded and no goal cell was ever popped
+        # (so no goal was reached and then rejected by path validation).  That
+        # is a proof the goal is unreachable on the current grid state for
+        # these endpoints / net class / mode, independent of cost knobs
+        # (``present_cost_factor``, ``weight``): passability here is a property
+        # of the (cell, neighbour) edge and the grid, never of search order.
+        # ``False`` for a success, a timeout, an iteration-cap stop, an early
+        # pre-search return, or a drain after a rejected goal -- none of those
+        # is a proof.  ``CppPathfinder`` memoizes the proof so the negotiated
+        # loop does not re-run this 10-100x-slower search on an unchanged grid.
+        self.last_route_exhausted: bool = False
+
+        # Issue #6329: True when the most recent ``route()`` stopped because its
+        # per-net WALL-CLOCK deadline fired (not the iteration cap, not a
+        # drain).  Under ``--deterministic-budget`` the fallback is meant to be
+        # bounded by ``_max_iterations_override``; when the wall clock binds
+        # first, how far the search got depends on machine load, so the
+        # C++ backend reports it as a determinism loss.
+        # ``last_route_deadline_iterations`` is the expansion count reached.
+        self.last_route_deadline_hit: bool = False
+        self.last_route_deadline_iterations: int = 0
+
+        # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
+        # Same layer moves - orthogonal directions
+        self.neighbors_2d = [
+            (1, 0, 0, 1.0),  # Right
+            (-1, 0, 0, 1.0),  # Left
+            (0, 1, 0, 1.0),  # Down
+            (0, -1, 0, 1.0),  # Up
+        ]
+
+        # Add diagonal directions if enabled (45° routing)
+        # Diagonal moves travel √2 ≈ 1.414x the distance of orthogonal moves
+        if diagonal_routing:
+            self.neighbors_2d.extend(
+                [
+                    (1, 1, 0, 1.414),  # Down-Right
+                    (-1, 1, 0, 1.414),  # Down-Left
+                    (1, -1, 0, 1.414),  # Up-Right
+                    (-1, -1, 0, 1.414),  # Up-Left
+                ]
+            )
+
+        # Pre-calculate trace clearance radius in grid cells
+        # This is the total radius from trace centerline that must be clear:
+        # - trace_width/2: half-width of the trace copper
+        # - trace_clearance: required clearance from trace edge to obstacles
+        # This enforces clearance as a hard constraint during routing.
+        # Issue #553: Previously only checked trace_width/2, causing DRC violations
+        # when traces were placed too close to obstacles.
+        # Guarded rounding (Issue #864), see search_radius_cells.
+        self._trace_half_width_cells = search_radius_cells(
+            self.rules.trace_width / 2, self.rules.trace_clearance, self.grid.resolution
+        )
+
+        # Pre-calculate via blocking radius in grid cells
+        # Via needs diameter/2 + clearance from other objects (pads, traces, vias)
+        self._via_half_cells = search_radius_cells(
+            self.rules.via_diameter / 2, self.rules.via_clearance, self.grid.resolution
+        )
+
+        # Pre-compute via checking offsets for vectorized blocking check (Issue #966)
+        # Issue #3234: Filter to the Euclidean disc (``dx*dx + dy*dy <= r*r``)
+        # rather than the full Chebyshev square.  Sibling to PR #3232 (#3229)
+        # which switched the trace kernel from Chebyshev to Euclidean.  The
+        # DRC measures Euclidean clearance, and the legacy square kernel
+        # admitted via centers at the diagonal corners whose true Euclidean
+        # clearance fell up to ``via_half_cells * (1 - 1/sqrt(2)) ~= 0.293 *
+        # via_half_cells`` cells short of the rule -- the via-side mirror of
+        # the trace-side diagonal corner gap.  At ``via_half_cells = 2`` the
+        # disc has 13 cells vs 25 for the square (-48%); at ``via_half_cells
+        # = 3`` it has 29 vs 49 (-41%) -- so the disc kernel is a small
+        # speedup at the via-check hot path, not a slowdown.
+        via_r = self._via_half_cells
+        via_r_sq = via_r * via_r
+        via_offsets = [
+            (dx, dy)
+            for dy in range(-via_r, via_r + 1)
+            for dx in range(-via_r, via_r + 1)
+            if dx * dx + dy * dy <= via_r_sq
+        ]
+        self._via_offset_dx = np.array([dx for dx, _ in via_offsets], dtype=np.int32)
+        self._via_offset_dy = np.array([dy for _, dy in via_offsets], dtype=np.int32)
+        # Issue #5240: plain-Python mirror of the two arrays above.
+        # ``_is_via_blocked`` is one of the hottest functions in the pure-
+        # Python A* fallback (profiled via
+        # TestStagnationRecovery::test_stagnation_recovery_fires_on_oscillating_cohort,
+        # 124,953 calls / 4.9s self time on a 3-net board) and the kernel is
+        # always small (13-49 offsets for realistic via clearances) -- the
+        # same "NumPy per-call dispatch overhead dwarfs a plain loop over a
+        # tiny fixed-size sequence" pattern PR #5269 fixed for the neighbor
+        # batch costs.  A plain list of tuples lets the hot loop below avoid
+        # allocating ~7 temporary NumPy arrays per call.
+        self._via_offsets: list[tuple[int, int]] = via_offsets
+        # Issue #5617: memo table for :meth:`_via_kernel`, keyed by via radius
+        # in grid cells.  Values are ``(offsets, reach, mask)`` -- see that
+        # method for what each form is for.  The per-net-class radius override
+        # in ``_is_via_blocked`` used to rebuild its ``(2r+1)**2``
+        # comprehension on EVERY via-placement check; the constructor kernel
+        # is seeded here so the default radius is a memo hit too.
+        self._via_kernel_cache: dict[int, tuple[list[tuple[int, int]], int, np.ndarray]] = {}
+        self._via_kernel_cache[via_r] = self._build_via_kernel_entry(via_offsets)
+
+        # Layer priority cache for via checks: check most-congested layers first
+        # This enables faster rejection when via is blocked on congested layer
+        self._layer_priority: list[int] | None = None
+
+        # Via validity cache (Issue #966): caches whether via can be placed at (x, y, net)
+        # Key: (gx, gy, net), Value: True if valid, False if blocked
+        # Cache is cleared when routes are modified (invalidates blocking state)
+        self._via_cache: dict[tuple[int, int, int, int], bool] = {}
+
+        # Issue #5617: memo for the route-halo via probe that opens
+        # ``_is_via_blocked`` (``_via_halo_clear([], layer, gx, gy, net,
+        # require_geometry=False)``).  See ``_via_halo_clear_cached`` for the
+        # soundness argument; ``_via_halo_cache_token`` holds the
+        # ``RouteHaloGeometry.state_version`` the entries were computed
+        # against, so a halo rebuild drops them wholesale.  Also cleared by
+        # ``clear_via_cache`` -- the same per-route trigger the sibling
+        # ``_via_cache`` uses -- so a change to the router's own rule
+        # configuration between routes cannot be served from it either.
+        self._via_halo_cache: dict[tuple[int, int, int], bool] = {}
+        self._via_halo_cache_token: int | None = None
+        # Issue #5617: memo for the geometry verdict of ``_trace_halo_clear``
+        # (the ``halo.clear(segment, ...)`` call after the ``cell_known``
+        # guard).  Same soundness contract as ``_via_halo_cache``.
+        self._trace_halo_cache: dict[tuple, bool] = {}
+        self._trace_halo_cache_token: tuple | None = None
+
+        # Issue #5617: memos for the two SITE-level via preconditions --
+        # predicates of the candidate CELL alone, with no ``net`` / ``layer``
+        # / ``radius`` / ``allow_sharing`` dependence, yet re-evaluated once
+        # per ``_check_via_placement_cached`` call AND once per non-plane
+        # layer inside ``_is_via_blocked``.  Both are dropped by
+        # ``invalidate_pad_geometry_cache`` (hence by ``clear_via_cache``),
+        # the same trigger the sibling ``_non_th_pad_cache`` uses, AND each
+        # carries a token identifying the state it was computed against so
+        # that a mutation which bypasses that entry point (notably
+        # ``RoutingGrid.add_component_hole``) still drops it -- see
+        # ``_component_hole_clear_cached`` / ``_non_th_pad_drill_clear``
+        # for the per-memo soundness argument.
+        self._hole_site_cache: dict[tuple[int, int], bool] = {}
+        self._hole_site_cache_token: tuple[object, int, bool] | None = None
+        self._pad_drill_site_cache: dict[tuple[int, int], bool] = {}
+        self._pad_drill_cache_token: object | None = None
+        # Issue #7296: mask-dam-zone memo, tokened like ``_pad_drill_site_cache``.
+        self._pad_edge_site_cache: dict[tuple[int, int], bool] = {}
+        self._pad_edge_cache_token: object | None = None
+
+        # Issue #5617: memo for ``_is_trace_blocked``'s Euclidean-disc
+        # kernel (#3229).  ``(dist_sq, within_disc)`` is a pure function of
+        # the radius and the four CLAMPED region offsets, so it repeats for
+        # every interior cell of every A* expansion; the arrays are only ever
+        # read (``&`` / ``>`` / indexing all allocate fresh results), never
+        # mutated in place, so sharing one instance is safe.
+        self._trace_disc_cache: dict[tuple[int, int, int, int, int], tuple] = {}
+
+        # Issue #5240: vectorized geometry for the non-through-hole pad
+        # sweep in ``_check_via_placement_cached`` (the ``not
+        # self._allow_smd_vias`` branch -- the default for jlcpcb and any
+        # other manufacturer profile without via-in-pad support).  That
+        # sweep previously called ``pad_point_distance`` once per pad, in a
+        # plain Python loop, for EVERY via candidate the pure-Python A*
+        # fallback considers -- board 06's fallback path (triggered when the
+        # C++ search exhausts its resume budget) re-walks all ~200 board
+        # pads per candidate cell, recomputing each rotated pad's cos/sin
+        # from scratch every time.  ``_non_th_pad_geometry`` below caches
+        # the (x, y, half-width, half-height, cos, sin) arrays once and
+        # answers every subsequent query with one vectorized NumPy sweep --
+        # same ``pad_local_point``/``pad_point_distance`` math, evaluated in
+        # bulk instead of per-pad-per-call.  Invalidated by
+        # ``clear_via_cache`` (PR #5330 review) -- the SAME trigger the
+        # ``_via_cache`` above uses, i.e. the start of every route call and
+        # every foreign-context change -- plus the pad-count guard in
+        # ``_non_th_pad_geometry`` for pads appended mid-pass.  Pad count
+        # alone is NOT a sound key: pad geometry is mutated in place, on the
+        # same Pad objects and with no count change, by
+        # ``PlacementFeedbackLoop``.
+        self._non_th_pad_cache: tuple[int, tuple[np.ndarray, ...]] | None = None
+        # Issue #6389: 2 mm bucket index of ``grid._pads`` for the exact
+        # pad-cell resolution in ``_is_trace_blocked`` (the Python port of
+        # #6315).  Same invalidation contract as ``_non_th_pad_cache``: the
+        # pad count, plus ``invalidate_pad_geometry_cache`` for in-place moves.
+        self._pad_bucket_cache: tuple[int, dict[tuple[int, int], list[Pad]]] | None = None
+        # Issue #6389: memo of ``_pad_step_clear`` verdicts.  The disc, the
+        # centre cell and both diagonal corners of one step all ask the same
+        # question.  Dropped with the pad-geometry caches (every route start)
+        # and whenever the token in ``_pad_step_clear`` changes.
+        self._pad_step_memo: dict[tuple[int, int, int, int, int, int], bool] = {}
+        self._pad_step_memo_token: tuple | None = None
+
+        # Issue #2947: World-coord foreign-net clearance context for via
+        # placement.  The coarse-grid obstacle map consulted by
+        # ``_is_via_blocked`` can admit a via that sits within
+        # ``via_radius + obstacle_radius + clearance`` of a foreign-net pad
+        # or trace in world coordinates -- the same bug class PR #2945
+        # patched in ``EscapeRouter._can_place_via``.  When this context is
+        # populated via :meth:`set_via_foreign_context`,
+        # ``_check_via_placement_cached`` consults
+        # :func:`point_clear_of_copper` after the per-layer grid check
+        # passes.  Empty by default so behavior matches pre-#2947 when no
+        # caller wires the context up.  Cache invariant: the setter
+        # CLEARS ``_via_cache`` so subsequent checks re-evaluate against
+        # the new context (same pattern as ``add_routed_segments``).
+        # Issue #2951: stored as 5-tuples ``(x, y, width, height, net)`` so
+        # ``point_clear_of_copper`` uses rect-distance for oblong fine-pitch
+        # pads (the previous ``(x, y, max(w,h)/2, net)`` disc-bound was the
+        # last remaining via-clearance bug pattern for non-square pads).
+        self._foreign_pad_tuples: list[tuple[float, float, float, float, int]] = []
+        self._foreign_track_adapters: list[_SegmentAdapter] = []
+        # Issue #6243: ``(index, {(gx, gy, net): verdict})`` for the authored
+        # via gate; reset whenever the grid's authored index is rebuilt.
+        self._authored_via_memo: tuple[Any, dict[tuple[int, int, int], bool]] = (None, {})
+        # Issue #6243: ``(index, {(net, radius, all_layers): candidate mask})``.
+        self._authored_mask_cache: tuple[Any, dict[tuple[int, float, bool], Any]] = (None, {})
+
+        # Issue #3002: Symmetric to ``_foreign_pad_tuples`` /
+        # ``_foreign_track_adapters`` (Issue #2947), but for the OPPOSITE
+        # direction -- a NEW segment vs FOREIGN-net vias.  Populated by
+        # :meth:`set_segment_foreign_context` (sibling of
+        # :meth:`set_via_foreign_context`).  Consumed by callers that
+        # validate a candidate segment against foreign vias via
+        # :func:`segment_clears_foreign_via` before committing the
+        # segment to ``grid.routes``.  Empty by default so behavior
+        # matches pre-#3002 when no caller wires the context up.
+        self._foreign_vias: list[Via] = []
+
+        # Issue #1016: Component pitch cache for per-component clearance
+        # Computed lazily on first use
+        self._component_pitches: dict[str, float] | None = None
+
+        # Issue #1016: Pre-compute trace clearance radii for component-specific clearances
+        # Maps clearance value (mm) to grid cell radius
+        self._clearance_radii: dict[tuple[float, float], int] = {}
+        self._precompute_clearance_radii()
+
+        # Issue #1019: Via impact scoring for fine-pitch IC routing
+        # Stores unrouted net pad positions for via impact calculation
+        self._unrouted_pad_positions: list[tuple[float, float, int]] = []  # (x, y, net)
+        self._fine_pitch_pad_positions: list[tuple[float, float, str]] = []  # (x, y, ref)
+        self._via_exclusion_cells: int = 0  # Grid cells for via exclusion zone
+        self._via_impact_enabled: bool = False
+        self._init_via_impact_scoring()
+
+        # Issue #2275: Layer utilization balancing
+        # Cached per-layer fill ratios for the A* cost function.  Updated
+        # after each net routes via ``update_layer_fill_ratios()``.
+        self._layer_fill_ratios: np.ndarray = np.zeros(self.grid.num_layers, dtype=np.float64)
+
+        # Issue #1250: Crossing-aware routing
+        # Stores previously routed segments for crossing detection.
+        # Each entry is (x1, y1, x2, y2, layer_index, net_id) in grid coordinates.
+        self._routed_segments: list[tuple[int, int, int, int, int, int]] = []
+
+        # Issue #2430: Grid-based spatial index for crossing detection.
+        # Built lazily at the start of each route() call when segments exist.
+        # Replaces O(S) linear scan with O(B) bucket lookup.
+        self._crossing_grid: dict[int, dict[tuple[int, int], list[int]]] | None = None
+        self._crossing_bucket_size: int = 8
+        self._crossing_grid_cols: int = 0
+        self._crossing_grid_rows: int = 0
+
+        # Issue #2325: Via placement diagnostic counters.
+        # These track via placement attempts and rejections to help diagnose
+        # zero-via routing failures on multi-layer boards.
+        self._via_diag_attempts: int = 0
+        self._via_diag_blocked: int = 0
+        self._via_diag_zone_blocked: int = 0
+        self._via_diag_exclusion_blocked: int = 0
+        self._via_diag_eligible: int = 0
+
+        # Issue #2330: Waypoint injection for off-grid pad routing.
+        # Maps virtual (negative) grid indices to exact world coordinates.
+        # Populated per-route call; cleared at the start of each route.
+        self._waypoint_world_coords: dict[tuple[int, int], tuple[float, float]] = {}
+        # Counter for assigning unique negative waypoint indices.
+        self._waypoint_id_counter: int = 0
+
+        # Issue #2559 / Epic #2556 Phase 1C: Differential-pair within-pair
+        # clearance threading.  Net-name -> net-id reverse map populated by
+        # the autorouter (or test harness) so the pathfinder can resolve
+        # ``NetClassRouting.diffpair_partner`` (a name) to an integer net id
+        # for the per-cell partner branch in ``_is_trace_blocked``.  Empty
+        # by default -- when unset, the partner branch is dormant and
+        # behavior matches pre-#2559 (single-clearance) routing.
+        self._net_name_to_id: dict[str, int] = {}
+        self._route_halo_names: dict[int, str] = {}
+        self._route_halo_class: tuple[int, NetClassRouting | None] | None = None
+        self._attach_zones = ()
+
+        # Issue #4507 / Epic #4431 Phase 2b parity: cached search-time
+        # pairwise (HV-isolation) projection for the pure-Python A*.
+        # ``None`` = not yet computed for the current table; otherwise a
+        # ``(table_ref, state_or_None)`` pair where ``state_or_None`` is a
+        # ``_PairwiseSearchState`` (armed) or ``None`` (dormant -- no table
+        # pairs resolve onto this board's net ids).  Rebuilt lazily by
+        # ``_pairwise_search_state`` whenever the table identity changes and
+        # invalidated by ``set_net_name_to_id`` (the projection is keyed by
+        # net id).
+        self._pairwise_search_cache: tuple[object, _PairwiseSearchState | None] | None = None
+
+        # Issue #4794: dilated foreign-domain bitmaps for
+        # ``_pairwise_expanded_blocked``, keyed by ``(foreign_dom, pair_r)``
+        # -- everything else that shapes a per-domain mask is either in that
+        # key (the routed net's class width folds into ``pair_r``) or in the
+        # validity stamp below.  ``None`` values memoize "this domain has no
+        # copper on the grid right now", which is just as cache-worthy as a
+        # mask.  The stamp is ``(grid, state, occupancy_generation)``: the
+        # entries are discarded wholesale when the grid object changes, when
+        # the pairwise projection is rebuilt, or when ANY write to
+        # ``grid._blocked`` / ``grid._net`` advances the generation counter.
+        # Strong references (``is`` comparison, not ``id()``) so a recycled
+        # address can never impersonate a live object.
+        self._pairwise_extra_cache: dict[tuple[int, int], np.ndarray | None] = {}
+        self._pairwise_extra_cache_stamp: tuple[object, object, int] | None = None
+
+        # Issue #4507: memo for the per-domain "which foreign net ids widen
+        # against me" lists the soft-gradient kernel and its hot-loop band
+        # gate share.  Identity-checked against the ``_PairwiseSearchState``
+        # it was built from, so it expires with the projection above.
+        self._pairwise_widening_ids_cache: (
+            tuple[_PairwiseSearchState, dict[int, tuple[list[int], np.ndarray]]] | None
+        ) = None
+        # Cached ``(dist_sq, band_mask)`` scan window for the soft gradient,
+        # keyed by ``(hard_radius, band)`` -- pure geometry, so it survives
+        # every copper change.
+        self._pairwise_band_kernel_cache: tuple[tuple[int, int], np.ndarray, np.ndarray] | None = (
+            None
+        )
+
+        # Issue #2929: Per-A*-call wall-clock instrumentation.  When
+        # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
+        # appends a dict to ``_per_call_timings`` recording the elapsed wall
+        # time and the deadline budget used for that call.  Disabled by
+        # default to keep zero overhead on the production hot path; the
+        # autorouter / fleet-status command flips it on for audits.  Drained
+        # via :meth:`get_and_clear_per_call_timings`.
+        #
+        # Schema for each record (see :meth:`route` for population):
+        #   {
+        #     "net": int,                  # source net id
+        #     "net_name": str,
+        #     "elapsed": float,            # wall-clock seconds for THIS call
+        #     "per_net_timeout": float|None,  # deadline supplied by caller
+        #     "deadline_violated": bool,   # True if elapsed > 1.2 * timeout
+        #     "succeeded": bool,           # True iff route() returned non-None
+        #   }
+        #
+        # This is the diagnostic surface for the deadline-enforcement audit
+        # (Issue #2929 acceptance criterion 1).  Cumulative per-net wall
+        # time across rip-up retries is computed by the caller by summing
+        # records grouped by net id; a single record represents ONE A*
+        # invocation and is what ``per_net_timeout`` actually brackets.
+        self._per_call_timing_enabled: bool = False
+        self._per_call_timings: list[dict] = []
+
+    def enable_per_call_timing(self, enabled: bool = True) -> None:
+        """Enable or disable per-A*-call wall-clock instrumentation.
+
+        Issue #2929: When enabled, every ``route()`` call appends a timing
+        record to an internal list that can be drained with
+        :meth:`get_and_clear_per_call_timings`.  Disabled by default so the
+        production routing loop pays zero overhead.
+
+        Args:
+            enabled: True to start recording; False to stop and drop any
+                accumulated records.
+        """
+        self._per_call_timing_enabled = bool(enabled)
+        if not enabled:
+            self._per_call_timings = []
+
+    def get_and_clear_per_call_timings(self) -> list[dict]:
+        """Drain and return the recorded per-A*-call timing records.
+
+        Issue #2929: Each record is a dict with keys
+        ``net``, ``net_name``, ``elapsed``, ``per_net_timeout``,
+        ``deadline_violated``, and ``succeeded`` (see ``__init__`` for the
+        full schema).  After draining, the internal list is cleared so
+        subsequent audit windows only see fresh records.
+
+        Returns:
+            The list of timing records since the last drain (or since
+            instrumentation was enabled).  Empty list if instrumentation
+            is disabled or no calls have been made.
+        """
+        result = self._per_call_timings
+        self._per_call_timings = []
+        return result
+
+    # ------------------------------------------------------------------
+    # Waypoint helpers (Issue #2330)
+    # ------------------------------------------------------------------
+
+    def _is_pad_off_grid(self, pad: Pad) -> bool:
+        """Check whether a pad's center falls off the routing grid.
+
+        A pad is considered off-grid when the distance from its center to
+        the nearest grid point exceeds ``resolution / 4`` in either axis.
+        """
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+        tolerance = self.grid.resolution / 4
+        return abs(pad.x - snap_x) > tolerance or abs(pad.y - snap_y) > tolerance
+
+    def _create_waypoint(self, pad: Pad) -> tuple[int, int]:
+        """Allocate a unique virtual grid index pair for *pad*.
+
+        The returned ``(wx, wy)`` are negative integers that will never
+        collide with real grid indices (which are >= 0).  The mapping
+        from ``(wx, wy)`` to the pad's world coordinates is stored in
+        ``self._waypoint_world_coords``.
+        """
+        self._waypoint_id_counter -= 1
+        wp_id = self._waypoint_id_counter
+        # Use the same negative value for both axes — uniqueness comes
+        # from the single counter, and the pair is used as a dict key.
+        key = (wp_id, wp_id)
+        self._waypoint_world_coords[key] = (pad.x, pad.y)
+        return key
+
+    def _waypoint_grid_edges(
+        self,
+        wp_key: tuple[int, int],
+        pad: Pad,
+        net: int,
+        allow_sharing: bool = False,
+    ) -> list[tuple[int, int, float]]:
+        """Return grid-cell neighbors reachable from a waypoint node.
+
+        For each of the nearest grid cells (within a 3-cell radius of the
+        pad's grid-snapped position), compute the Euclidean edge cost from
+        the waypoint's world position to the grid cell's world position.
+        Cells that are blocked by other nets are skipped unless they fall
+        within the pad's metal area.
+
+        Returns:
+            List of ``(gx, gy, edge_cost)`` tuples.
+        """
+        wx, wy = self._waypoint_world_coords[wp_key]
+        center_gx, center_gy = self.grid.world_to_grid(wx, wy)
+        radius = 3  # search radius in grid cells
+        edges: list[tuple[int, int, float]] = []
+
+        # Precompute pad metal bounds for same-net passability check.
+        metal_bounds = self._get_pad_metal_bounds(pad)
+        mgx1, mgy1, mgx2, mgy2 = metal_bounds
+
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                gx = center_gx + dx
+                gy = center_gy + dy
+                if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+                    continue
+
+                # Check accessibility on any layer the pad can use
+                if pad.through_hole:
+                    check_layers = self.grid.get_routable_indices()
+                else:
+                    check_layers = [self.grid.layer_to_index(pad.layer.value)]
+
+                accessible = False
+                for li in check_layers:
+                    cell = self.grid.cell_at(li, gy, gx)
+                    # Inside pad metal — always accessible
+                    if mgx1 <= gx <= mgx2 and mgy1 <= gy <= mgy2:
+                        accessible = True
+                        break
+                    if not cell.blocked:
+                        accessible = True
+                        break
+                    if cell.net == net:
+                        accessible = True
+                        break
+                    # Clearance-zone cell (not actual copper) — accessible
+                    if not cell.pad_blocked:
+                        accessible = True
+                        break
+                if not accessible:
+                    continue
+
+                # Euclidean distance in world units
+                gw_x, gw_y = self.grid.grid_to_world(gx, gy)
+                dist = math.sqrt((wx - gw_x) ** 2 + (wy - gw_y) ** 2)
+                # Convert to grid-cell cost units
+                edge_cost = dist / self.grid.resolution
+                edges.append((gx, gy, edge_cost))
+
+        return edges
+
+    def _waypoint_to_world(self, x: int, y: int) -> tuple[float, float] | None:
+        """Resolve a node's grid indices to world coordinates.
+
+        If ``(x, y)`` is a waypoint (negative indices), return the stored
+        world position.  Otherwise return ``None`` (caller should use
+        ``grid_to_world``).
+        """
+        key = (x, y)
+        return self._waypoint_world_coords.get(key)
+
+    def _is_waypoint(self, x: int, y: int) -> bool:
+        """Return True if ``(x, y)`` represents a waypoint node."""
+        return x < 0 and y < 0 and (x, y) in self._waypoint_world_coords
+
+    # ------------------------------------------------------------------
+    # Escape-hint waypoints (Issue #2974)
+    # ------------------------------------------------------------------
+    #
+    # IC perimeter pads (LQFP-48 NRST/SWO/SWDIO/SWCLK on board-04) sit in
+    # a narrow channel between flanking foreign-net pins.  Pure
+    # octile/Manhattan heuristics fan out around the chip body for tens
+    # of seconds before discovering the escape direction.
+    # ``_detect_escape_hint`` is a grid-density predicate that returns
+    # the escape unit vector when the pad's geometry matches the corner-
+    # flank signature; ``_escape_hint_cells`` produces cells along that
+    # ray for seeding into the A* open set, reusing the #2330 waypoint
+    # straight-line edge cost contract (admissibility preserved).
+
+    # Wedge sampling skips the pad's own clearance ring (same-net cells
+    # at radius 1..2) and looks for foreign blockers at radius 2..6.
+    _ESCAPE_HINT_RADIUS_MIN: int = 2
+    _ESCAPE_HINT_RADIUS_MAX: int = 6
+    # Body wedge must be ~fully blocked (4 of 5 cells foreign).
+    _ESCAPE_HINT_BODY_MIN: int = 4
+    # Each perpendicular wedge must show flanking neighbour pins.
+    _ESCAPE_HINT_FLANK_MIN: int = 2
+    # Body wedge must dominate the escape wedge by this many cells.
+    _ESCAPE_HINT_ASYMMETRY: int = 2
+    # Initial walk-out step before falling back to closer/farther cells.
+    _ESCAPE_HINT_STEP: int = 3
+    # Per-net deadline multiplier applied ONLY when the predicate fires
+    # (Issue #2974 secondary fallback).  3x is enough to lift the 30s
+    # caller budget to 90s, matching the curator-recommended ceiling
+    # for perimeter-corner-flanked nets without touching the global
+    # deadline or any other net's budget.
+    _ESCAPE_HINT_DEADLINE_MULT: float = 3.0
+
+    def _cell_is_foreign_blocker(self, cell, net: int) -> bool:
+        """Return True if ``cell`` is a foreign pad/zone blocker for ``net``.
+
+        Mirrors the static-foreign-obstacle classifier at
+        pathfinder.py:1480 (``is_obstacle and cell_net != net``) so
+        :meth:`_detect_escape_hint` counts the same cells the main A*
+        loop would reject.  ``cell.net`` records the first pad that
+        claimed the cell; on overlap the second touch flips
+        ``is_obstacle = True`` (grid.py:1357), which we honour here.
+        """
+        if cell.net == net:
+            return False
+        if cell.is_zone and cell.net != 0:
+            return True
+        if cell.is_obstacle:
+            return True
+        return bool(cell.blocked and cell.pad_blocked)
+
+    def _detect_escape_hint(self, pad: Pad, layers: list[int]) -> tuple[int, int] | None:
+        """Return an escape direction ``(dx, dy)`` for a corner-flanked pad.
+
+        Samples foreign-blocker density in each cardinal direction.  A
+        pad is corner-flanked when one wedge (chip body) is densely
+        blocked, the opposite wedge (escape) is comparatively open, and
+        both perpendicular wedges show flanking blockers.  Returns the
+        escape unit vector or ``None`` if the geometry doesn't match --
+        typical for centre-of-board components, large THT pads, and
+        connectors with generous keepouts.
+        """
+        if not layers:
+            return None
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+            return None
+
+        # Pad's primary layer is representative; perimeter geometry is
+        # symmetrical across copper layers in practice.
+        layer = layers[0]
+        r_min, r_max = self._ESCAPE_HINT_RADIUS_MIN, self._ESCAPE_HINT_RADIUS_MAX
+        dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        counts: dict[tuple[int, int], int] = dict.fromkeys(dirs, 0)
+
+        for d in dirs:
+            dx, dy = d
+            for step in range(r_min, r_max + 1):
+                cx, cy = gx + dx * step, gy + dy * step
+                if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
+                    break
+                if self._cell_is_foreign_blocker(self.grid.cell_at(layer, cy, cx), pad.net):
+                    counts[d] += 1
+
+        body_dir = max(counts, key=counts.get)
+        if counts[body_dir] < self._ESCAPE_HINT_BODY_MIN:
+            return None
+        escape_dir = (-body_dir[0], -body_dir[1])
+        if counts[body_dir] - counts[escape_dir] < self._ESCAPE_HINT_ASYMMETRY:
+            return None
+        # Perpendicular wedges must show flanking neighbour pins.
+        perp_dirs = [(-body_dir[1], body_dir[0]), (body_dir[1], -body_dir[0])]
+        for pd in perp_dirs:
+            if counts[pd] < self._ESCAPE_HINT_FLANK_MIN:
+                return None
+        return escape_dir
+
+    def _escape_hint_cells(
+        self,
+        pad: Pad,
+        escape_dir: tuple[int, int],
+        net: int,
+        layers: list[int],
+    ) -> list[tuple[int, int, int, float]]:
+        """Produce ``(gx, gy, layer, edge_cost)`` seeds for an escape hint.
+
+        Walks outward from the pad along ``escape_dir`` and returns the
+        first cells that are not foreign-blocked -- the first toehold
+        A* can land on in the escape corridor.  ``edge_cost`` is the
+        Euclidean distance from the pad's world position to the cell,
+        in grid-cell units, mirroring :meth:`_waypoint_grid_edges` so
+        admissibility is preserved.  Returns an empty list when the
+        escape ray runs into a wall, in which case the route falls
+        back to the unmodified A* search.
+        """
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        dx, dy = escape_dir
+        seeds: list[tuple[int, int, int, float]] = []
+
+        # Prefer the closest clear cell along the ray.  A farther seed
+        # would inflate edge_cost and bias A* against revisiting closer
+        # alternatives if the corridor turns out to need a detour.
+        start_step = max(1, self._ESCAPE_HINT_STEP - 1)
+        for step in range(start_step, self._ESCAPE_HINT_RADIUS_MAX + 1):
+            cx, cy = gx + dx * step, gy + dy * step
+            if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
+                break
+            wcx, wcy = self.grid.grid_to_world(cx, cy)
+            edge_cost = math.sqrt((pad.x - wcx) ** 2 + (pad.y - wcy) ** 2) / self.grid.resolution
+
+            usable = False
+            for layer in layers:
+                cell = self.grid.cell_at(layer, cy, cx)
+                if self._cell_is_foreign_blocker(cell, net):
+                    continue
+                # Skip routed cells from other nets (not obstacles, but
+                # not safe to seed into).
+                if cell.blocked and cell.net not in (0, net):
+                    continue
+                seeds.append((cx, cy, layer, edge_cost))
+                usable = True
+            if usable:
+                break
+        return seeds
+
+    def add_routed_segments(self, segments: list[Segment]) -> None:
+        """Add committed route segments for crossing detection.
+
+        Issue #1250: Called after each route is committed so that subsequent
+        A* searches can penalize edges that cross these segments.
+
+        Args:
+            segments: List of Segment objects from a committed route.
+        """
+        for seg in segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+            self._routed_segments.append((gx1, gy1, gx2, gy2, layer_idx, seg.net))
+
+    def update_layer_fill_ratios(self) -> None:
+        """Refresh the cached per-layer fill ratios from the grid.
+
+        Issue #2275: Should be called after each net routes so that
+        subsequent A* searches see up-to-date layer utilization.
+        """
+        self._layer_fill_ratios = self.grid.get_layer_fill_ratios()
+
+    def clear_routed_segments(self) -> None:
+        """Clear the routed segments list.
+
+        Call this when starting a fresh routing session or when all routes
+        have been removed.
+        """
+        self._routed_segments.clear()
+        # Buckets hold indices into the cleared list; retaining them can
+        # miss relocated routes or dereference entries that no longer exist.
+        self._crossing_grid = None
+
+    def get_via_diagnostics(self) -> dict[str, int]:
+        """Return via placement diagnostic counters (Issue #2325).
+
+        Returns:
+            Dictionary with keys ``attempts``, ``blocked``, ``zone_blocked``,
+            ``exclusion_blocked``, and ``eligible`` (candidates that passed all
+            placement checks but may still be pruned by closed-set or g-score
+            dominance).
+        """
+        return {
+            "attempts": self._via_diag_attempts,
+            "blocked": self._via_diag_blocked,
+            "zone_blocked": self._via_diag_zone_blocked,
+            "exclusion_blocked": self._via_diag_exclusion_blocked,
+            "eligible": self._via_diag_eligible,
+        }
+
+    def reset_via_diagnostics(self) -> None:
+        """Reset via placement diagnostic counters to zero."""
+        self._via_diag_attempts = 0
+        self._via_diag_blocked = 0
+        self._via_diag_zone_blocked = 0
+        self._via_diag_exclusion_blocked = 0
+        self._via_diag_eligible = 0
+
+    @staticmethod
+    def _segments_intersect(
+        ax1: int,
+        ay1: int,
+        ax2: int,
+        ay2: int,
+        bx1: int,
+        by1: int,
+        bx2: int,
+        by2: int,
+    ) -> bool:
+        """Test whether two line segments intersect using cross-product sign changes.
+
+        Uses the standard computational geometry approach: two segments intersect
+        if and only if each segment straddles the line containing the other.
+
+        Args:
+            ax1, ay1, ax2, ay2: Endpoints of segment A (grid coords).
+            bx1, by1, bx2, by2: Endpoints of segment B (grid coords).
+
+        Returns:
+            True if the segments properly intersect (share an interior point).
+            Shared endpoints are NOT counted as intersections.
+        """
+        return _geom_segments_intersect(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
+
+    def _count_edge_crossings(
+        self,
+        cx: int,
+        cy: int,
+        nx: int,
+        ny: int,
+        nlayer: int,
+        current_net: int,
+    ) -> int:
+        """Count how many routed segments the candidate edge crosses.
+
+        Only counts crossings on the same layer with a different net.
+
+        Issue #2430: When a crossing grid index is available (built by
+        ``_build_crossing_grid``), uses spatial bucketing for O(B) lookup
+        instead of O(S) linear scan.
+
+        Args:
+            cx, cy: Current node grid coordinates (edge start).
+            nx, ny: Neighbor node grid coordinates (edge end).
+            nlayer: Layer index of the candidate edge.
+            current_net: Net ID of the route being searched.
+
+        Returns:
+            Number of crossing segments.
+        """
+        # Fast path: use spatial grid index when available
+        if self._crossing_grid is not None:
+            return self._count_edge_crossings_indexed(cx, cy, nx, ny, nlayer, current_net)
+
+        count = 0
+        for sx1, sy1, sx2, sy2, seg_layer, seg_net in self._routed_segments:
+            # Only same layer, different net
+            if seg_layer != nlayer or seg_net == current_net:
+                continue
+            if self._segments_intersect(cx, cy, nx, ny, sx1, sy1, sx2, sy2):
+                count += 1
+        return count
+
+    # ------------------------------------------------------------------
+    # Crossing grid spatial index (Issue #2430)
+    # ------------------------------------------------------------------
+
+    def _build_crossing_grid(self, bucket_size: int = 8) -> None:
+        """Build a grid-based spatial index for routed segments.
+
+        Partitions the grid into square buckets and stores segment indices
+        per bucket per layer.  ``_count_edge_crossings_indexed`` then only
+        checks segments whose buckets overlap the query edge's bounding box.
+
+        Args:
+            bucket_size: Side length of each bucket in grid cells.
+        """
+        self._crossing_bucket_size = bucket_size
+        cols_b = (self.grid.cols + bucket_size - 1) // bucket_size
+        rows_b = (self.grid.rows + bucket_size - 1) // bucket_size
+
+        # Dict[layer, Dict[(bx, by), List[int]]] where int = index into
+        # _routed_segments.
+        grid_idx: dict[int, dict[tuple[int, int], list[int]]] = {}
+
+        for seg_i, (sx1, sy1, sx2, sy2, seg_layer, _seg_net) in enumerate(self._routed_segments):
+            bx1 = min(sx1, sx2) // bucket_size
+            by1 = min(sy1, sy2) // bucket_size
+            bx2 = max(sx1, sx2) // bucket_size
+            by2 = max(sy1, sy2) // bucket_size
+
+            bx1 = max(0, min(bx1, cols_b - 1))
+            by1 = max(0, min(by1, rows_b - 1))
+            bx2 = max(0, min(bx2, cols_b - 1))
+            by2 = max(0, min(by2, rows_b - 1))
+
+            layer_grid = grid_idx.setdefault(seg_layer, {})
+            for by in range(by1, by2 + 1):
+                for bx in range(bx1, bx2 + 1):
+                    layer_grid.setdefault((bx, by), []).append(seg_i)
+
+        self._crossing_grid = grid_idx
+        self._crossing_grid_cols = cols_b
+        self._crossing_grid_rows = rows_b
+
+    def _count_edge_crossings_indexed(
+        self,
+        cx: int,
+        cy: int,
+        nx: int,
+        ny: int,
+        nlayer: int,
+        current_net: int,
+    ) -> int:
+        """Count edge crossings using the spatial grid index.
+
+        Same semantics as ``_count_edge_crossings`` but O(B) where B is the
+        number of segments in overlapping buckets, instead of O(S) total.
+        """
+        assert self._crossing_grid is not None
+        bs = self._crossing_bucket_size
+
+        layer_grid = self._crossing_grid.get(nlayer)
+        if layer_grid is None:
+            return 0
+
+        # Compute bounding box of the edge in bucket coordinates
+        bx1 = min(cx, nx) // bs
+        by1 = min(cy, ny) // bs
+        bx2 = max(cx, nx) // bs
+        by2 = max(cy, ny) // bs
+
+        bx1 = max(0, bx1)
+        by1 = max(0, by1)
+        bx2 = min(bx2, self._crossing_grid_cols - 1)
+        by2 = min(by2, self._crossing_grid_rows - 1)
+
+        # Collect unique segment indices from overlapping buckets
+        seen: set[int] = set()
+        count = 0
+        for by in range(by1, by2 + 1):
+            for bx in range(bx1, bx2 + 1):
+                bucket = layer_grid.get((bx, by))
+                if bucket is None:
+                    continue
+                for seg_i in bucket:
+                    if seg_i in seen:
+                        continue
+                    seen.add(seg_i)
+                    sx1, sy1, sx2, sy2, _seg_layer, seg_net = self._routed_segments[seg_i]
+                    if seg_net == current_net:
+                        continue
+                    if self._segments_intersect(cx, cy, nx, ny, sx1, sy1, sx2, sy2):
+                        count += 1
+        return count
+
+    def _init_via_impact_scoring(self) -> None:
+        """Initialize via impact scoring based on design rules.
+
+        Issue #1019: Sets up via exclusion zones and impact scoring when
+        via_exclusion_from_fine_pitch or via_impact_weight are configured.
+        """
+        # Calculate via exclusion zone in grid cells
+        if self.rules.via_exclusion_from_fine_pitch > 0:
+            self._via_exclusion_cells = max(
+                1,
+                math.ceil(
+                    round(self.rules.via_exclusion_from_fine_pitch / self.grid.resolution, 6)
+                ),
+            )
+
+        # Enable via impact scoring if weight is positive
+        self._via_impact_enabled = self.rules.via_impact_weight > 0
+
+    def set_unrouted_pads(self, unrouted_pads: list[Pad]) -> None:
+        """Set the list of unrouted pad positions for via impact scoring.
+
+        Issue #1019: Called by Autorouter before routing each net to update
+        which pads haven't been connected yet. This enables the via impact
+        scoring to consider whether a via would block access to unrouted pins.
+
+        Args:
+            unrouted_pads: List of Pad objects that haven't been routed yet.
+        """
+        self._unrouted_pad_positions = [(pad.x, pad.y, pad.net) for pad in unrouted_pads]
+
+        # Also identify fine-pitch pads for exclusion zone checking
+        self._fine_pitch_pad_positions = []
+        component_pitches = self.component_pitches
+        for pad in unrouted_pads:
+            ref = pad.component_key
+            if ref in component_pitches:
+                pitch = component_pitches[ref]
+                if pitch < self.rules.fine_pitch_threshold:
+                    self._fine_pitch_pad_positions.append((pad.x, pad.y, ref))
+
+    def set_via_foreign_context(
+        self,
+        foreign_pads: list[Pad] | None = None,
+        foreign_tracks: list[Segment] | None = None,
+    ) -> None:
+        """Set foreign-net pad / track context for world-coord via clearance.
+
+        Issue #2947: ``_check_via_placement_cached`` historically only
+        consulted the coarse-grid obstacle map via ``_is_via_blocked``.
+        A via that lands on a "free" grid cell can still sit within
+        ``via_radius + foreign_obstacle_radius + clearance`` of an
+        adjacent foreign-net pad / trace in world coordinates -- the
+        coarse grid's resolution loses this distinction.  When this
+        context is populated, the via predicate consults
+        :func:`point_clear_of_copper` after the grid check passes.
+
+        Cache-key safety: the via cache key is
+        ``(gx, gy, net, effective_radius)`` -- already net-keyed, so
+        cross-net stale positives are impossible.  Within a single
+        net, however, a positive cache entry from a stale foreign
+        context could now be wrong (a foreign track may have committed
+        since).  This setter therefore CLEARS the via cache so subsequent
+        checks re-evaluate against the new context.  Same invariant
+        ``add_routed_segments`` / ``clear_via_cache`` already maintain.
+
+        Args:
+            foreign_pads: Board pads (any net) the via must clear.
+                Same-net pads are filtered per-call so a superset is
+                fine.
+            foreign_tracks: Committed track segments (any net) the via
+                must clear.  Same-net segments are filtered per-call.
+        """
+        # Issue #2951: pass (x, y, width, height, net) 5-tuples so
+        # ``point_clear_of_copper`` uses rect-distance for oblong
+        # fine-pitch pads (mirrors the same change in
+        # ``EscapeRouter._can_place_via``).
+        pad_tuples: list[tuple[float, float, float, float, int]] = []
+        if foreign_pads:
+            for p in foreign_pads:
+                pad_tuples.append((p.x, p.y, p.width, p.height, p.net))
+
+        track_adapters: list[_SegmentAdapter] = []
+        if foreign_tracks:
+            for s in foreign_tracks:
+                track_adapters.append(
+                    _SegmentAdapter(
+                        start_x=s.x1,
+                        start_y=s.y1,
+                        end_x=s.x2,
+                        end_y=s.y2,
+                        width=s.width,
+                    )
+                )
+
+        self._foreign_pad_tuples = pad_tuples
+        self._foreign_track_adapters = track_adapters
+
+        # Foreign context affects via blocking results -- invalidate cache.
+        self.clear_via_cache()
+
+    def set_segment_foreign_context(
+        self,
+        foreign_vias: list[Via] | None = None,
+    ) -> None:
+        """Set foreign-net via context for new-segment clearance gating.
+
+        Issue #3002: Symmetric sibling of
+        :meth:`set_via_foreign_context` (PR #2952 / Issue #2947).  Where
+        ``set_via_foreign_context`` protects a NEW via from foreign
+        segments / pads, this setter protects a NEW segment from
+        foreign-net VIAs.
+
+        Background: the main router commits segments via
+        :meth:`_mark_route` (called from :meth:`route_net` and the
+        negotiated rip-up path).  Pre-commit validation flows through
+        :meth:`_validate_route_clearance`, which already walks
+        ``grid.routes`` vias via :meth:`Grid.validate_segment_clearance`
+        -- but only for vias ALREADY committed when the segment is
+        validated.  Cross-net ordering bugs slip through when net A's
+        segment commits BEFORE net B's via is placed in the same
+        negotiated iteration (the board-04 SWDIO/BOOT0 site at PCB
+        (143.8, 119.7) on B.Cu).  This setter lets the
+        :class:`Autorouter` push a richer foreign-via list -- including
+        vias that the negotiated post-iteration re-validation hook
+        (algorithms/negotiated.py) will surface -- so the predicate is
+        consulted with up-to-date geometry.
+
+        Same-net filtering is the CALLER's responsibility (mirrors the
+        boundary convention of :meth:`set_via_foreign_context`).
+
+        Cache invariant: any cached per-segment validity results would
+        be invalidated by a change in foreign-via geometry.  The router
+        does not currently cache segment-clearance lookups (the via
+        cache is the only one affected by world-coord geometry), so no
+        additional cache clear is required here.  We still invalidate
+        the via cache for symmetry with :meth:`set_via_foreign_context`
+        in case a future patch introduces a per-segment cache that is
+        keyed similarly.
+
+        Args:
+            foreign_vias: List of :class:`Via` objects whose net differs
+                from the segment's own net.  Pass ``None`` to clear the
+                context.
+        """
+        self._foreign_vias = list(foreign_vias) if foreign_vias else []
+
+        # Foreign-via geometry can affect via-cache validity indirectly
+        # (e.g. when a new via is added the via cache for nearby cells
+        # must re-evaluate against the updated geometry).  Mirrors the
+        # invariant in :meth:`set_via_foreign_context`.
+        self.clear_via_cache()
+
+    def _get_via_impact_cost(self, wx: float, wy: float, current_net: int) -> float:
+        """Calculate the impact cost of placing a via at the given position.
+
+        Issue #1019: Scores via placement based on how many unrouted net pins
+        would be blocked or have their routing options constrained.
+
+        Args:
+            wx, wy: World coordinates of the proposed via position
+            current_net: Net ID of the current route (excluded from impact)
+
+        Returns:
+            Impact cost (0 if no impact, positive value based on blocked pins)
+        """
+        if not self._via_impact_enabled:
+            return 0.0
+
+        impact = 0.0
+        via_radius = self.rules.via_diameter / 2 + self.rules.via_clearance
+
+        # Count unrouted pins that would be affected by this via
+        for px, py, net in self._unrouted_pad_positions:
+            if net == current_net:
+                continue  # Same net, not impacted
+
+            # Calculate distance from via to pad
+            dist = math.sqrt((wx - px) ** 2 + (wy - py) ** 2)
+
+            # Via blocks routing if it's within via_radius + trace_clearance + trace_width/2
+            # of the pad (prevents traces from reaching the pad)
+            blocking_dist = via_radius + self.rules.trace_clearance + self.rules.trace_width / 2
+
+            if dist < blocking_dist:
+                # Via would directly block access to this pad
+                impact += 10.0
+            elif dist < blocking_dist * 2:
+                # Via constrains routing options but doesn't fully block
+                # Impact decreases linearly with distance
+                impact += 5.0 * (1 - (dist - blocking_dist) / blocking_dist)
+
+        return impact * self.rules.via_impact_weight
+
+    def _is_via_in_exclusion_zone(self, gx: int, gy: int) -> bool:
+        """Check if a via position is within the exclusion zone of any fine-pitch pad.
+
+        Issue #1019: Prevents via placement too close to fine-pitch IC pads,
+        which would block routing to adjacent pins.
+
+        Args:
+            gx, gy: Grid coordinates of the proposed via position
+
+        Returns:
+            True if via is in exclusion zone (should be avoided), False otherwise.
+        """
+        if self._via_exclusion_cells == 0:
+            return False
+
+        if not self._fine_pitch_pad_positions:
+            return False
+
+        # Convert grid position to world coordinates
+        wx, wy = self.grid.grid_to_world(gx, gy)
+
+        exclusion_dist = self._via_exclusion_cells * self.grid.resolution
+
+        for px, py, _ref in self._fine_pitch_pad_positions:
+            dist = math.sqrt((wx - px) ** 2 + (wy - py) ** 2)
+            if dist < exclusion_dist:
+                return True
+
+        return False
+
+    def _precompute_clearance_radii(self) -> None:
+        """Pre-compute grid cell radii for all component-specific clearances.
+
+        Issue #1016: Pre-computes clearance radii for:
+        - Default trace clearance
+        - Each per-component clearance
+        - Fine-pitch clearance (if configured)
+
+        This allows efficient lookup during routing.
+        """
+        # Always include default clearance
+        clearances = {self.rules.trace_clearance}
+
+        # Add per-component clearances
+        for clearance in self.rules.component_clearances.values():
+            clearances.add(clearance)
+
+        # Add fine-pitch clearance if configured
+        if self.rules.fine_pitch_clearance is not None:
+            clearances.add(self.rules.fine_pitch_clearance)
+
+        # Collect all trace widths that may be used (global + per-net-class)
+        trace_widths = {self.rules.trace_width}
+        for nc in self.net_class_map.values():
+            trace_widths.add(nc.trace_width)
+
+        # Compute grid cell radius for each (trace_width, clearance) pair
+        for tw in trace_widths:
+            for clearance in clearances:
+                radius = search_radius_cells(tw / 2, clearance, self.grid.resolution)
+                self._clearance_radii[(tw, clearance)] = radius
+
+    def get_clearance_radius_cells(
+        self, clearance_mm: float, trace_width: float | None = None
+    ) -> int:
+        """Get the trace clearance radius in grid cells for a given clearance.
+
+        Args:
+            clearance_mm: Clearance value in mm
+            trace_width: Trace width in mm.  When ``None``, uses
+                ``rules.trace_width`` (the global default).  Issue #1674:
+                per-net-class trace widths require computing radii with
+                the actual net trace width, not just the global default.
+
+        Returns:
+            Radius in grid cells (at least 1)
+        """
+        tw = trace_width if trace_width is not None else self.rules.trace_width
+        cache_key = (tw, clearance_mm)
+
+        # Check cache first
+        if cache_key in self._clearance_radii:
+            return self._clearance_radii[cache_key]
+
+        # Compute and cache
+        radius = search_radius_cells(tw / 2, clearance_mm, self.grid.resolution)
+        self._clearance_radii[cache_key] = radius
+        return radius
+
+    @property
+    def component_pitches(self) -> dict[str, float]:
+        """Get component pin pitches for automatic fine-pitch detection.
+
+        Issue #1016: Computed lazily on first access and cached.
+        Used for per-component clearance validation.
+
+        Returns:
+            Dict mapping component reference to minimum pin pitch in mm.
+        """
+        if self._component_pitches is None:
+            self._component_pitches = self.grid.compute_component_pitches()
+        return self._component_pitches
+
+    def invalidate_component_pitch_cache(self) -> None:
+        """Invalidate the component pitch cache.
+
+        Call this if pads are added or modified after Router initialization.
+        """
+        self._component_pitches = None
+
+    def _get_net_class(self, net_name: str) -> NetClassRouting | None:
+        """Get the net class for a net name."""
+        return self.net_class_map.get(net_name)
+
+    # ------------------------------------------------------------------
+    # Diff-pair partner resolution (Issue #2559 / Epic #2556 Phase 1C)
+    # ------------------------------------------------------------------
+
+    def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
+        """Inject a net-name -> net-id reverse map for partner resolution.
+
+        Phase 1C threads ``NetClassRouting.intra_pair_clearance`` through the
+        A* search.  The clearance is configured by net-class on the source
+        net, but applies only when the *other* net is the named partner.
+        Resolving partner-name to partner-id requires a reverse map that the
+        ``Autorouter`` builds from its ``net_names`` dict.
+
+        The setter is idempotent and may be called multiple times (e.g. to
+        refresh the map when new pads are loaded).  Passing an empty dict
+        disables partner detection (everything falls back to ``clearance``).
+        """
+        self._net_name_to_id = dict(mapping)
+        self._route_halo_names = {net: name for name, net in mapping.items()}
+        self._route_halo_class = None
+        self._trace_halo_cache.clear()
+        self._trace_halo_cache_token = None
+        # Issue #4507: the search-time pairwise projection is keyed by net id
+        # through this map -- rebuild it on the next consult.
+        self._pairwise_search_cache = None
+
+    def set_attach_zones(self, zones) -> None:
+        """Install precomputed rated-footprint necking regions."""
+        self._attach_zones = tuple(zones)
+
+    def _resolve_partner_net_id(self, net_name: str) -> int | None:
+        """Look up the integer net id of the diff-pair partner of *net_name*.
+
+        Reads ``NetClassRouting.diffpair_partner`` (the authoritative
+        Phase 1B signal) and resolves the partner-name to a partner-id via
+        :attr:`_net_name_to_id`.  Returns ``None`` when:
+
+        * the source net has no net class (or the class has no
+          ``diffpair_partner`` set), or
+        * the partner-name is missing from ``_net_name_to_id`` (e.g. the
+          autorouter has not populated the reverse map yet).
+
+        ``None`` is the dormant signal for the four read sites: when partner
+        is unknown, the search uses the wider ``clearance`` for every other
+        net, matching pre-#2559 behavior.
+        """
+        net_class = self._get_net_class(net_name)
+        if net_class is None or net_class.diffpair_partner is None:
+            return None
+        return self._net_name_to_id.get(net_class.diffpair_partner)
+
+    def _get_trace_width_for_net(self, net_name: str) -> float:
+        """Get the trace width for a net based on its net class.
+
+        Looks up the net's class in the net_class_map and returns the
+        class-specific trace width. Falls back to rules.trace_width if
+        the net has no class mapping.
+
+        Args:
+            net_name: Name of the net
+
+        Returns:
+            Trace width in mm
+        """
+        net_class = self._get_net_class(net_name)
+        if net_class is not None:
+            return net_class.trace_width
+        return self.rules.trace_width
+
+    def _get_via_size_for_net(self, net_name: str) -> float:
+        """Get the via diameter for a net based on its net class (Issue #4793).
+
+        Via sibling of :meth:`_get_trace_width_for_net`, wrapping the
+        ``net_class.via_size if net_class else rules.via_diameter`` idiom used
+        inline by :meth:`route` so callers that only hold a net *name* can
+        resolve the same per-class extent.
+
+        Args:
+            net_name: Name of the net
+
+        Returns:
+            Via diameter in mm
+        """
+        net_class = self._get_net_class(net_name)
+        if net_class is not None:
+            return net_class.via_size
+        return self.rules.via_diameter
+
+    def _get_pad_metal_bounds(
+        self, pad: Pad, trace_width: float | None = None
+    ) -> tuple[int, int, int, int]:
+        """Calculate the grid coordinate bounds of a pad's metal area.
+
+        This is used to expand goal regions for off-grid pads, ensuring
+        routes can reach pads even when their centers don't align with
+        the routing grid (Issue #956).
+
+        Returns:
+            (gx_min, gy_min, gx_max, gy_max) grid coordinate bounds
+        """
+        # Calculate effective pad dimensions (same logic as grid._add_pad_unsafe)
+        if pad.through_hole:
+            if pad.width > 0 and pad.height > 0:
+                effective_width = pad.width
+                effective_height = pad.height
+            elif pad.drill > 0:
+                effective_width = pad.drill + 0.7
+                effective_height = effective_width
+            else:
+                effective_width = 1.7
+                effective_height = 1.7
+        else:
+            effective_width = pad.width
+            effective_height = pad.height
+
+        pitch = self.component_pitches.get(pad.component_key)
+        required_clearance = self.rules.get_clearance_for_component(pad.ref, pitch)
+        # Dense fine-pitch pad-edge seeds can reconstruct a tail that grazes
+        # a foreign pad. Inset those unexempted seeds and all strict-mode pads;
+        # retain standard-pitch search freedom under the exact foreign-pad
+        # validator so unrelated negotiated route choices remain stable.
+        if (
+            trace_width is not None
+            and not pad.escape_terminal
+            and (
+                self.rules.strict_pad_clearance
+                or self.grid._component_is_fine_pitch(pad.component_key, self.component_pitches)
+            )
+            and not self.grid._same_component_carveout_active(
+                pad.component_key,
+                required_clearance,
+                self.rules.trace_clearance,
+                self.component_pitches,
+            )
+        ):
+            # Physical pad-center tails emit the local neck-down width.
+            # Escape terminals already bound committed conductor copper;
+            # shrinking them again can erase every seed (Board 04, #5398).
+            # Eroding by the wider trunk can erase every legal narrow-pad seed.
+            seed_width = trace_width
+            if self.rules.should_apply_neck_down(pad.ref, pitch):
+                seed_width = self.rules.get_neck_down_width(0.0, pitch, base_width=trace_width)
+            effective_width = max(0.0, effective_width - seed_width)
+            effective_height = max(0.0, effective_height - seed_width)
+
+        # Metal area bounds in world coordinates
+        metal_x1 = pad.x - effective_width / 2
+        metal_y1 = pad.y - effective_height / 2
+        metal_x2 = pad.x + effective_width / 2
+        metal_y2 = pad.y + effective_height / 2
+
+        # Convert to grid coordinates using ceil/floor to ensure we only include
+        # cells whose CENTER is inside the metal area (Issue #996).
+        # Using round() would include cells that are merely nearby.
+        resolution = self.grid.resolution
+        origin_x = self.grid.origin_x
+        origin_y = self.grid.origin_y
+
+        gx1 = max(0, int(math.ceil((metal_x1 - origin_x) / resolution)))
+        gy1 = max(0, int(math.ceil((metal_y1 - origin_y) / resolution)))
+        gx2 = min(self.grid.cols - 1, int(math.floor((metal_x2 - origin_x) / resolution)))
+        gy2 = min(self.grid.rows - 1, int(math.floor((metal_y2 - origin_y) / resolution)))
+
+        return (gx1, gy1, gx2, gy2)
+
+    def _fixed_step_clear(self, current, nx, ny, layer, net_name, net=None):
+        # Issue #6243: the authored per-net minimum is checked on the swept
+        # step itself, before any raster relief (pad-exit, sharing, partner)
+        # can waive it.  A no-op unless some copper carries an authored floor.
+        if (
+            net is not None
+            and (
+                self.rules.net_clearance_floors
+                or getattr(self.grid, "_authored_item_floors", False) is True
+            )
+            and not self._authored_step_clear(current, nx, ny, layer, net)
+        ):
+            return False
+        if not self.grid.fixed_fills:
+            return True
+        net_class = self._get_net_class(net_name)
+        half = (net_class.trace_width if net_class else self.rules.trace_width) / 2
+        clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        if net is not None:
+            clearance = max(clearance, self.rules.authored_floor(net))
+        return self.grid.fixed_fills.segment_clear(
+            self.grid.grid_to_world(current.x, current.y),
+            self.grid.grid_to_world(nx, ny),
+            layer,
+            half,
+            clearance,
+        )
+
+    def _authored_step_clear(self, current, nx: int, ny: int, layer: int, net: int) -> bool:
+        """Does the swept trace step ``current -> (nx, ny)`` keep every authored minimum?
+
+        Issue #6243.  Builds the step's actual copper (the net's emitted trace
+        width on ``layer``) and asks the grid's kernel-backed authored gate.
+        """
+        from .authored_clearance import grid_authored_index
+
+        index = grid_authored_index(self.grid)
+        if index is None:
+            return True
+        nc = self._halo_net_class(net)
+        width = nc.trace_width if nc else self.rules.trace_width
+        mask = self._authored_candidate_mask(index, net, width / 2.0, all_layers=False)
+        rows, cols = mask.shape[1], mask.shape[2]
+        if (
+            0 <= current.y < rows
+            and 0 <= current.x < cols
+            and 0 <= ny < rows
+            and 0 <= nx < cols
+            and not mask[layer, current.y, current.x]
+            and not mask[layer, ny, nx]
+        ):
+            return True  # provably clear of every authored minimum
+        copper_layer = self._grid_layer_object(layer)
+        if copper_layer is None:
+            return False
+        x1, y1 = self.grid.grid_to_world(current.x, current.y)
+        x2, y2 = self.grid.grid_to_world(nx, ny)
+        return index.segment_clear(Segment(x1, y1, x2, y2, width, copper_layer, net), net)
+
+    def _authored_candidate_mask(self, index, net: int, radius: float, *, all_layers: bool):
+        """Cached :meth:`AuthoredCopperIndex.candidate_mask` for this grid (#6243)."""
+        cache = self._authored_mask_cache
+        if cache[0] is not index:
+            cache = (index, {})
+            self._authored_mask_cache = cache
+        key = (net, round(radius, 6), all_layers)
+        mask = cache[1].get(key)
+        if mask is None:
+            layer_values = []
+            for idx in range(self.grid.num_layers):
+                obj = self._grid_layer_object(idx)
+                layer_values.append(obj.value if obj is not None else None)
+            mask = index.candidate_mask(
+                net,
+                radius,
+                origin=(self.grid.origin_x, self.grid.origin_y),
+                resolution=self.grid.resolution,
+                shape=(self.grid.num_layers, self.grid.rows, self.grid.cols),
+                layer_values=layer_values,
+                all_layers=all_layers,
+            )
+            if all_layers:
+                mask = mask.any(axis=0)
+            cache[1][key] = mask
+        return mask
+
+    def _authored_via_clear(self, gx: int, gy: int, net: int) -> bool:
+        """Does a via for ``net`` at grid ``(gx, gy)`` keep every authored minimum?
+
+        Issue #6243.  Memoised per ``(gx, gy, net)`` against the index the
+        verdict was computed from, so a rebuilt index (new copper) re-asks.
+        """
+        if (
+            not self.rules.net_clearance_floors
+            and getattr(self.grid, "_authored_item_floors", False) is not True
+        ):
+            return True
+        from .authored_clearance import grid_authored_index
+
+        index = grid_authored_index(self.grid)
+        if index is None:
+            return True
+        memo = self._authored_via_memo
+        if memo[0] is not index:
+            memo = (index, {})
+            self._authored_via_memo = memo
+        key = (gx, gy, net)
+        hit = memo[1].get(key)
+        if hit is not None:
+            return hit
+        nc = self._halo_net_class(net)
+        diameter = nc.via_size if nc else self.rules.via_diameter
+        via_mask = self._authored_candidate_mask(index, net, diameter / 2.0, all_layers=True)
+        if 0 <= gy < via_mask.shape[0] and 0 <= gx < via_mask.shape[1] and not via_mask[gy, gx]:
+            memo[1][key] = True
+            return True
+        first = self._grid_layer_object(0)
+        last = self._grid_layer_object(self.grid.num_layers - 1)
+        if first is None or last is None:
+            return False
+        nc = self._halo_net_class(net)
+        x, y = self.grid.grid_to_world(gx, gy)
+        via = Via(
+            x,
+            y,
+            self.rules.via_drill,
+            nc.via_size if nc else self.rules.via_diameter,
+            (first, last),
+            net,
+        )
+        verdict = index.via_clear(via, net)
+        memo[1][key] = verdict
+        return verdict
+
+    def _halo_net_class(self, net: int) -> NetClassRouting | None:
+        if self._route_halo_class is not None and self._route_halo_class[0] == net:
+            return self._route_halo_class[1]
+        return self._get_net_class(self._route_halo_names.get(net, ""))
+
+    def _trace_halo_clear(self, cells, layer, gx, gy, net, from_cell=None):
+        halo = getattr(self.grid, "_route_halo", None)
+        if halo is None:
+            return False
+        if not all(halo.cell_known(x, y, layer) for x, y in cells):
+            return False
+        nc = self._halo_net_class(net)
+        # Issue #5617: the verdict below is a pure function of the step
+        # ``(from_cell -> (gx, gy))`` on ``layer`` for ``net`` (its class is
+        # in the key by identity), the halo snapshot (``state_version``) and
+        # the router's rule configuration (``clear_via_cache`` /
+        # ``set_net_name_to_id`` drop the memo).  The exhausted-resume and
+        # negotiated re-searches probe the same steps again on an unchanged
+        # grid.  ``cell_known`` above stays per-call: it depends on ``cells``.
+        rules = self.rules
+        token = (
+            id(halo),
+            halo.state_version,
+            # Rule values ``halo.clear`` reads; callers may mutate them in place.
+            rules.trace_width,
+            rules.trace_clearance,
+            rules.via_clearance,
+            rules.min_hole_to_hole,
+            rules.min_drill_clearance,
+            id(rules.pairwise_clearance),
+        )
+        if self._trace_halo_cache_token != token:
+            self._trace_halo_cache.clear()
+            self._trace_halo_cache_token = token
+        fx, fy = from_cell or (gx, gy)
+        key = (
+            layer,
+            gx,
+            gy,
+            fx,
+            fy,
+            net,
+            (id(nc), nc.trace_width, nc.clearance, nc.intra_pair_clearance) if nc else None,
+        )
+        hit = self._trace_halo_cache.get(key)
+        if hit is not None:
+            return hit
+        name = self._route_halo_names.get(net, "")
+        x1, y1 = self.grid.grid_to_world(fx, fy)
+        x2, y2 = self.grid.grid_to_world(gx, gy)
+        copper_layer = self._grid_layer_object(layer)
+        if copper_layer is None:
+            return False
+        segment = Segment(
+            x1,
+            y1,
+            x2,
+            y2,
+            nc.trace_width if nc else self.rules.trace_width,
+            copper_layer,
+            net,
+            name,
+        )
+        partner = self._resolve_partner_net_id(name)
+        gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
+        hit = halo.clear(segment, self, partner_net=partner, partner_clearance=gap)
+        if len(self._trace_halo_cache) >= self._TRACE_HALO_CACHE_MAX:
+            self._trace_halo_cache.clear()
+        self._trace_halo_cache[key] = hit
+        return hit
+
+    #: Entry cap for ``_trace_halo_cache`` (issue #5617); memory backstop only.
+    _TRACE_HALO_CACHE_MAX = 500_000
+
+    #: Issue #6389: mirrors ``PAD_EXACT_HOLE_GUARD_MM`` in the native
+    #: ``Pathfinder::pad_step_clear`` -- a step that comes this close to any
+    #: drilled hole is never resolved by the copper-only pad test.
+    _PAD_EXACT_HOLE_GUARD_MM = 0.75
+    _PAD_BUCKET_MM = 2.0
+
+    def _pads_near_step(
+        self, ax: float, ay: float, bx: float, by: float, reach: float
+    ) -> list[Pad]:
+        """Pads whose 2 mm bucket overlaps the step's bounding box + ``reach``.
+
+        Issue #6389.  Candidate pruning only: a pad in no visited bucket is
+        farther than ``reach`` from the step, so dropping it cannot change
+        :meth:`RoutingGrid.pad_step_geometry_clear`'s verdict.
+        """
+        pads = self.grid._pads
+        cached = self._pad_bucket_cache
+        if cached is None or cached[0] != len(pads):
+            buckets: dict[tuple[int, int], list[Pad]] = {}
+            size = self._PAD_BUCKET_MM
+            for pad in pads:
+                hx = hy = math.hypot(pad.width, pad.height) / 2
+                for qy in range(
+                    math.floor((pad.y - hy) / size), math.floor((pad.y + hy) / size) + 1
+                ):
+                    for qx in range(
+                        math.floor((pad.x - hx) / size), math.floor((pad.x + hx) / size) + 1
+                    ):
+                        buckets.setdefault((qx, qy), []).append(pad)
+            cached = (len(pads), buckets)
+            self._pad_bucket_cache = cached
+        buckets = cached[1]
+        size = self._PAD_BUCKET_MM
+        seen: set[int] = set()
+        result: list[Pad] = []
+        for qy in range(
+            math.floor((min(ay, by) - reach) / size), math.floor((max(ay, by) + reach) / size) + 1
+        ):
+            for qx in range(
+                math.floor((min(ax, bx) - reach) / size),
+                math.floor((max(ax, bx) + reach) / size) + 1,
+            ):
+                for pad in buckets.get((qx, qy), ()):
+                    if id(pad) not in seen:
+                        seen.add(id(pad))
+                        result.append(pad)
+        return result
+
+    def _pad_exact_clearance(self, net: int) -> float:
+        """The routing net's side of the exact pad-cell test's pair rule (Issue #6389).
+
+        ``max(own class clearance, own authored floor, board clearance)`` --
+        the native ``pad_step_clear``'s ``max(fill clearance,
+        rules.trace_clearance)``.  The pad's side is added per pad by
+        :meth:`_pad_class_clearance`.
+        """
+        nc = self._halo_net_class(net)
+        own = nc.clearance if nc else self.rules.trace_clearance
+        return max(own, self.rules.authored_floor(net), self.rules.trace_clearance)
+
+    def _pad_class_clearance(self, pad: Pad) -> float:
+        """The pad's side of the pair rule: its own net class clearance (Issue #6389).
+
+        The native search cannot see a pad's net class, so #6315 holds every
+        pad to the LARGEST class clearance on the board
+        (``search_pad_clearance_floor``).  The Python grid keeps each pad's
+        ``net_name``, so the fallback applies the exact pair rule
+        ``max(own class, pad's class)`` instead -- never below what the rule
+        requires, and not over-strict next to default-class pads.  A pad
+        without a class (an NC pad, a default-class net) contributes the
+        board clearance, which ``_pad_exact_clearance`` already includes.
+        """
+        nc = self.net_class_map.get(pad.net_name) if pad.net_name else None
+        return nc.clearance if nc else self.rules.trace_clearance
+
+    def _own_pad_cell(self, gx: int, gy: int, layer: int, net: int) -> bool:
+        """Is this a cell of the routing net's own STATIC pad geometry? (Issue #6389).
+
+        Python twin of the native ``Pathfinder::own_pad_cell`` (#6375): a
+        blocked cell owned by ``net`` that came from a static source -- pad
+        copper / clearance halo (pad provenance recorded, live or voided) or
+        a static obstacle -- never routed copper.
+        """
+        grid = self.grid
+        if not grid._blocked[layer, gy, gx] or grid._net[layer, gy, gx] != net:
+            return False
+        plane = grid._pad_provenance
+        if plane is not None and plane[layer, gy, gx] != 0:
+            return True
+        return bool(grid._is_obstacle[layer, gy, gx])
+
+    def _own_path_vias_clear(self, current: AStarNode) -> bool:
+        """May a via at ``current`` join the vias already on its path? (Issue #6473).
+
+        Python twin of the native ``Pathfinder::own_path_vias_clear`` (#6464).
+        The via checks in the expansion loops only see committed copper, so a
+        path could drop a second via closer than the fab hole-to-hole floor to
+        its own first one; :meth:`_validate_route_clearance` then rejected the
+        whole candidate.  Same floor, drill and arithmetic as
+        :meth:`RoutingGrid.validate_same_net_drill_spacing`, which measures
+        the vias :meth:`_convert_path_to_route` emits at these cell centres.
+        A via stack at one cell (F -> In1 -> B) is one drill.
+
+        The floor carries the shared ``CLEARANCE_EPSILON_MM`` slack (issue
+        #6528), like the validator and the native twin: a pair exactly on the
+        floor whose float gap rounds to ``0.4999999999999998`` is legal.
+
+        Walks ``current`` itself when it was reached through a via, then each
+        ``via_anc`` (nearest via strictly above, issue #6526) up to the root.
+        """
+        node = current if current.via_from_parent else current.via_anc
+        if node is None:
+            return True
+        rules = self.rules
+        floor = (
+            max(rules.min_drill_clearance, getattr(rules, "min_hole_to_hole", 0.0))
+            - CLEARANCE_EPSILON_MM
+        )
+        radius = rules.via_drill / 2
+        wx, wy = self.grid.grid_to_world(current.x, current.y)
+        while node is not None:
+            if node.x != current.x or node.y != current.y:
+                vx, vy = self.grid.grid_to_world(node.x, node.y)
+                if math.sqrt((wx - vx) ** 2 + (wy - vy) ** 2) - radius - radius < floor:
+                    return False
+            node = node.via_anc
+        return True
+
+    def _own_pad_gate_inputs(self, start: Pad, end: Pad) -> tuple[set[str] | None, float]:
+        """Per-search inputs of the own-pad step gate: ``(exclude_refs, width)``.
+
+        Issue #6397: one definition for both Python A* loops (the one-way
+        loop in :meth:`_route_impl` and :meth:`route_bidirectional`).  The
+        refs are the same-component carve-out set both reconstructions hand
+        the validator; the width is the narrowest one
+        :meth:`_convert_path_to_route` can emit -- the #1018 neck-down only
+        narrows -- so a gate at this width is never stricter than the
+        validator measuring the emitted copper.  Python twin of
+        ``CppPathfinder._carveout_ref_hashes`` / ``_narrowest_emit_width``.
+        """
+        refs: set[str] | None = {p.component_key for p in (start, end) if p.component_key} or None
+        base_width = self._get_trace_width_for_net(start.net_name)
+        width = base_width
+        for pad in (start, end):
+            pitch = self.component_pitches.get(pad.component_key) if pad.component_key else None
+            if self.rules.should_apply_neck_down(pad.ref, pitch):
+                width = min(
+                    width, self.rules.get_neck_down_width(0.0, pitch, base_width=base_width)
+                )
+        return refs, width
+
+    def _own_pad_step_clear(
+        self,
+        fx: int,
+        fy: int,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        width: float,
+        exclude_refs: set[str] | None,
+        memo: dict[tuple[int, int, int, int, int], bool],
+    ) -> bool:
+        """The validator's segment-vs-pad verdict on the step ``(fx,fy)->(gx,gy)``.
+
+        Issue #6389: Python port of the native #6375 own-pad step gate
+        (``Pathfinder::own_pad_step_clear``).  Asks
+        :meth:`RoutingGrid.segment_pad_clearance` -- the very pad loop
+        :meth:`RoutingGrid.validate_segment_clearance` runs -- with the
+        validator's own ``component_pitches`` / ``exclude_refs`` carve-outs
+        and the narrowest width reconstruction can emit, so the gate is
+        never stricter than the post-route validator.  ``memo`` is per search
+        (pads do not move inside one).
+        """
+        key = (layer, fx, fy, gx, gy)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        ax, ay = self.grid.grid_to_world(fx, fy)
+        bx, by = self.grid.grid_to_world(gx, gy)
+        _min, violation = self.grid.segment_pad_clearance(
+            ax,
+            ay,
+            bx,
+            by,
+            layer,
+            width / 2,
+            net,
+            self.rules.trace_clearance,
+            component_pitches=self.component_pitches,
+            exclude_refs=exclude_refs,
+            violation_only=True,
+        )
+        hit = violation is None
+        memo[key] = hit
+        return hit
+
+    def _pad_step_clear(
+        self, layer: int, gx: int, gy: int, net: int, from_cell: tuple[int, int] | None
+    ) -> bool:
+        """Memoised :meth:`_pad_step_clear_uncached` (Issue #6389).
+
+        The token covers every input that can change inside one search: the
+        grid's occupancy (routed copper, authored index), the route-halo
+        snapshot, the component-hole index and the pad list.  The net class
+        and rules are per route, and the memo is dropped at every route
+        start by :meth:`invalidate_pad_geometry_cache`.
+        """
+        grid = self.grid
+        halo = getattr(grid, "_route_halo", None)
+        holes = grid._component_hole_index
+        token = (
+            grid.occupancy_generation,
+            halo.state_version if halo is not None else None,
+            holes,
+            len(holes.holes),
+            holes.known,
+            len(grid._pads),
+        )
+        if token != self._pad_step_memo_token:
+            self._pad_step_memo.clear()
+            self._pad_step_memo_token = token
+        fx, fy = from_cell or (gx, gy)
+        key = (layer, fx, fy, gx, gy, net)
+        hit = self._pad_step_memo.get(key)
+        if hit is None:
+            hit = self._pad_step_clear_uncached(layer, gx, gy, net, from_cell)
+            if len(self._pad_step_memo) >= self._SITE_CACHE_MAX:
+                self._pad_step_memo.clear()
+            self._pad_step_memo[key] = hit
+        return hit
+
+    def _pad_step_clear_uncached(
+        self, layer: int, gx: int, gy: int, net: int, from_cell: tuple[int, int] | None
+    ) -> bool:
+        """Exact clearance of the step ``from_cell -> (gx, gy)`` (Issue #6389).
+
+        The Python port of the native ``Pathfinder::pad_step_clear`` (#6315):
+        a drilled-hole guard, every foreign pad (via the validator's own
+        segment-vs-pad primitive), the copper fills, the authored per-net
+        minima and the stored routed copper.  Any doubt answers ``False``,
+        which leaves the cell to the conservative disc.
+        """
+        if getattr(self.rules, "pairwise_clearance", None) is not None:
+            # The HV-isolation matrix widens per pair; the disc + annulus keep
+            # deciding rather than a scalar-clearance exact test.
+            return False
+        copper_layer = self._grid_layer_object(layer)
+        if copper_layer is None:
+            return False
+        fx, fy = from_cell or (gx, gy)
+        ax, ay = self.grid.grid_to_world(fx, fy)
+        bx, by = self.grid.grid_to_world(gx, gy)
+        nc = self._halo_net_class(net)
+        width = nc.trace_width if nc else self.rules.trace_width
+        half = width / 2
+        clearance = self._pad_exact_clearance(net)
+        half_len = 0.5 * math.hypot(bx - ax, by - ay)
+        if not self.grid._component_hole_index.clear(
+            0.5 * (ax + bx),
+            0.5 * (ay + by),
+            2.0 * (half + half_len),
+            clearance + self._PAD_EXACT_HOLE_GUARD_MM,
+        ):
+            return False
+        # Candidate reach: no pad can require more than the largest of the
+        # step's own clearance, any explicit per-component override (the
+        # ceiling of ``get_clearance_for_component``) and any class clearance.
+        reach = half + max(
+            [
+                clearance,
+                *(self.rules.component_clearances or {}).values(),
+                *(float(getattr(c, "clearance", 0.0) or 0.0) for c in self.net_class_map.values()),
+            ]
+        )
+        if not self.grid.pad_step_geometry_clear(
+            ax,
+            ay,
+            bx,
+            by,
+            layer,
+            net,
+            half,
+            clearance,
+            pads=self._pads_near_step(ax, ay, bx, by, reach),
+            pad_clearance=self._pad_class_clearance,
+        ):
+            return False
+        if self.grid.fixed_fills and not self.grid.fixed_fills.segment_clear(
+            (ax, ay), (bx, by), layer, half, clearance
+        ):
+            return False
+        if not self._authored_step_clear(_GridStep(fx, fy), gx, gy, layer, net):
+            return False
+        if self._foreign_vias:
+            # The validator's foreign-via context (#3002), which can hold vias
+            # not yet in ``grid.routes`` -- same floor as the validator.
+            step = Segment(ax, ay, bx, by, width, copper_layer, net)
+            floor = trace_via_clearance_mm(self.rules.trace_clearance, self.rules.via_clearance)
+            for via in self._foreign_vias:
+                if via.net != net and not segment_clears_foreign_via(
+                    step, via, trace_clearance=floor, hard_intersection_only=False
+                ):
+                    return False
+        halo = getattr(self.grid, "_route_halo", None)
+        if halo is None or not halo.marks:
+            return True
+        name = self._route_halo_names.get(net, "")
+        partner = self._resolve_partner_net_id(name)
+        gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
+        return bool(
+            halo.clear(
+                Segment(ax, ay, bx, by, width, copper_layer, net, name),
+                self,
+                partner_net=partner,
+                partner_clearance=gap,
+                require_geometry=False,
+            )
+        )
+
+    def _shared_halo_blocked(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        allow_sharing: bool,
+        radius: int | None,
+        partner_net: int | None,
+        partner_radius: int | None,
+        partner_active: bool | None,
+        from_cell: tuple[int, int],
+    ) -> bool:
+        """Is an own-net shared pad-halo cell blocked for its owner? (Issue #6389).
+
+        #6315 hands a clearance cell reached by pads of two different nets to
+        the nearer pad; it belongs to neither net alone, so the owner must
+        still pass the trace check (whose disc resolves the other pad's cells
+        exactly).  Mirrors the native one-shot / resumable
+        ``shared_pad_halo_blocked`` gate.  ``False`` for every other cell.
+        """
+        shared = self.grid._shared_pad_halo
+        if not shared or self.grid._pad_cell_key(layer, gy, gx) not in shared:
+            return False
+        plane = self.grid._pad_provenance
+        if plane is None or plane[layer, gy, gx] != RoutingGrid.PAD_PROVENANCE_PAD:
+            return False  # provenance voided: the native flag is cleared too
+        return self._is_trace_blocked(
+            gx,
+            gy,
+            layer,
+            net,
+            allow_sharing,
+            radius=radius,
+            partner_net=partner_net,
+            partner_radius=partner_radius,
+            partner_active=partner_active,
+            from_cell=from_cell,
+        )
+
+    def _pad_cells_clear(self, cells, layer, gx, gy, net, from_cell=None) -> bool:
+        """May the blocking ``cells`` of a trace step be resolved exactly? (Issue #6389).
+
+        The Python port of the native ``is_trace_blocked``'s per-cell
+        ``halo_clear`` / ``pad_clear`` pair (#6315).  Each cell is either
+        routed-copper halo (``cell_known``, resolved by
+        :meth:`_trace_halo_clear`) or a pad-only cell
+        (:meth:`RoutingGrid.pad_cell_resolvable` and not under routed copper
+        of unknown geometry), resolved once per call by
+        :meth:`_pad_step_clear`.  Any other cell -- a drilled pad's halo, a
+        stitch-via reservation, a keep-out, a zone, an obstacle, a cell in use
+        by routed copper -- keeps the disc's blocked verdict.
+        """
+        grid = self.grid
+        if grid._pad_provenance is None:
+            return False
+        halo = getattr(grid, "_route_halo", None)
+        coverage = None
+        if halo is not None and halo.marks:
+            halo._refresh()
+            coverage = halo._cells
+        known: list[tuple[int, int]] = []
+        has_pad_cell = False
+        for x, y in cells:
+            if grid._net[layer, y, x] == net:
+                return False  # callers only pass foreign cells; never resolve own
+            if grid.pad_cell_resolvable(x, y, layer):
+                if coverage is not None and coverage[layer, y, x] < 0:
+                    return False  # routed copper of unknown geometry over it
+                has_pad_cell = True
+                continue
+            if halo is not None and halo.cell_known(x, y, layer):
+                known.append((x, y))
+                continue
+            return False
+        if not has_pad_cell:
+            return False  # all routed-copper halo: ``_trace_halo_clear`` already said no
+        if known and not self._trace_halo_clear(known, layer, gx, gy, net, from_cell):
+            return False
+        return self._pad_step_clear(layer, gx, gy, net, from_cell)
+
+    def _via_halo_clear(self, cells, layer, gx, gy, net, *, require_geometry=True):
+        halo = getattr(self.grid, "_route_halo", None)
+        if halo is None:
+            return False
+        if not all(halo.cell_known(x, y, layer) for x, y in cells):
+            return False
+        name = self._route_halo_names.get(net, "")
+        nc = self._halo_net_class(net)
+        x, y = self.grid.grid_to_world(gx, gy)
+        first_layer = self._grid_layer_object(0)
+        last_layer = self._grid_layer_object(self.grid.num_layers - 1)
+        if first_layer is None or last_layer is None:
+            return False
+        via = Via(
+            x,
+            y,
+            self.rules.via_drill,
+            nc.via_size if nc else self.rules.via_diameter,
+            (first_layer, last_layer),
+            net,
+            name,
+        )
+        return halo.clear(via, self, require_geometry=require_geometry)
+
+    #: Entry cap for ``_via_halo_cache`` (issue #5617).  Purely a memory
+    #: backstop: dropping memo entries can only cost work, never change a
+    #: verdict, because every miss recomputes the same pure function.
+    _VIA_HALO_CACHE_MAX = 500_000
+
+    def _via_halo_clear_cached(self, halo, layer: int, gx: int, gy: int, net: int) -> bool:
+        """Memoised form of ``_via_halo_clear([], layer, gx, gy, net, False)``.
+
+        Issue #5617.  A py-spy profile of the Diff-Pair regression job's
+        re-route step attributed **18.2 % of phase 4** ("Routing nets...",
+        itself 66.5 % of the step) to this one probe: ``_is_via_blocked``
+        spends essentially all of its time here, and ``_check_via_placement_cached``
+        calls ``_is_via_blocked`` once per non-plane layer.  The sibling
+        ``_via_cache`` cannot absorb any of it -- that cache is bypassed
+        whenever ``allow_sharing`` is set, which is exactly the negotiated
+        mode the pure-Python fallback runs in.
+
+        Why memoising is verdict-preserving, not an approximation:
+
+        * **The probe does not depend on ``layer``.**  It passes an EMPTY
+          ``cells`` list (so ``halo.cell_known`` is never consulted) and builds
+          a ``Via`` whose layer span is always ``(layer 0, layer n-1)``.  The
+          ``layer`` argument is dead on this path, so the per-layer loop in
+          ``_check_via_placement_cached`` was recomputing one identical
+          answer once per non-plane layer.
+        * **Everything else it reads is keyed or pinned.**  The rest of the
+          inputs are ``(gx, gy)`` (world position), ``net`` (halo name, net
+          class, via size/drill) -- both in the key -- plus the router's rule
+          configuration and ``RouteHaloGeometry``'s rebuilt snapshot.  The
+          snapshot is tracked by ``halo.state_version``: a ``record()`` or any
+          grid-occupancy change forces a rebuild and bumps it, and a token
+          mismatch drops every entry here.  The rule configuration is pinned
+          by ``clear_via_cache()``, which also clears this memo and runs at
+          the start of every route / A* search and on every foreign-context
+          change.
+
+        Entries are therefore only ever served when recomputing would return
+        the same bool -- the routed output is byte-identical, which
+        ``test_router_via_halo_memo_5617.py`` pins against the uncached path.
+        """
+        token = halo.state_version
+        if self._via_halo_cache_token != token:
+            self._via_halo_cache.clear()
+            self._via_halo_cache_token = token
+        key = (gx, gy, net)
+        hit = self._via_halo_cache.get(key)
+        if hit is None:
+            hit = self._via_halo_clear([], layer, gx, gy, net, require_geometry=False)
+            if len(self._via_halo_cache) >= self._VIA_HALO_CACHE_MAX:
+                self._via_halo_cache.clear()
+            self._via_halo_cache[key] = hit
+        return hit
+
+    def _trace_disc_kernel(
+        self, radius: int, dy1: int, dy2: int, dx1: int, dx2: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Memoised ``(dist_sq, within_disc)`` for :meth:`_is_trace_blocked`.
+
+        Issue #5617.  The #3229 Euclidean-disc filter builds two small arrays
+        per call from ``np.arange``:
+
+        .. code-block:: python
+
+            dist_sq = ((ys - gy) ** 2)[:, None] + ((xs - gx) ** 2)[None, :]
+            within_disc = dist_sq <= radius * radius
+
+        Both are pure functions of ``radius`` and the region offsets
+        **relative to the centre** -- ``(y1 - gy, y2 - gy, x1 - gx,
+        x2 - gx)`` -- which is what this memo keys on.  Away from the board
+        edge those offsets are always ``(-radius, radius + 1, -radius,
+        radius + 1)``, so every interior A* expansion at a given radius
+        rebuilds one identical pair of arrays.
+
+        Returning a SHARED array is safe because both results are read-only
+        at every use site: ``within_disc`` only ever appears as an operand of
+        ``&`` or as a scalar index, and ``dist_sq`` only in ``>``.  Every one
+        of those allocates a fresh result rather than writing in place.
+        """
+        key = (radius, dy1, dy2, dx1, dx2)
+        hit = self._trace_disc_cache.get(key)
+        if hit is None:
+            dy_grid = np.arange(dy1, dy2)
+            dx_grid = np.arange(dx1, dx2)
+            dist_sq = (dy_grid * dy_grid)[:, None] + (dx_grid * dx_grid)[None, :]
+            hit = (dist_sq, dist_sq <= radius * radius)
+            if len(self._trace_disc_cache) >= self._SITE_CACHE_MAX:
+                self._trace_disc_cache.clear()
+            self._trace_disc_cache[key] = hit
+        return hit
+
+    def _is_trace_blocked(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        allow_sharing: bool = False,
+        radius: int | None = None,
+        partner_net: int | None = None,
+        partner_radius: int | None = None,
+        partner_active: bool | None = None,
+        from_cell: tuple[int, int] | None = None,
+    ) -> bool:
+        """Check if placing a trace at this position would conflict.
+
+        Unlike is_blocked which checks a single cell, this accounts for
+        trace width by checking adjacent cells the trace would occupy.
+
+        Uses vectorized NumPy operations for performance (Issue #962).
+        Pre-computed clearance masks enable single-operation blocking checks
+        instead of iterating over (2r+1)² cells per neighbor.
+
+        Args:
+            allow_sharing: If True (negotiated mode), allow routing through
+                          non-obstacle blocked cells (they'll get high cost instead)
+            radius: Override the trace half-width in grid cells. When None,
+                    uses the global ``_trace_half_width_cells`` (Issue #1674).
+            partner_net: Issue #2559 / Phase 1C -- if set (non-None and >= 0)
+                         and ``partner_radius`` is provided, cells belonging
+                         to this net are checked against the *tighter*
+                         ``partner_radius`` instead of the wider ``radius``.
+                         This implements within-pair clearance for diff pairs.
+                         When ``None``, the partner branch is dormant and
+                         behavior matches pre-#2559 routing.
+            partner_radius: Tighter half-width (in grid cells) to apply only
+                            to ``cell.net == partner_net``.  When ``None``
+                            but ``partner_net`` is set, the partner branch
+                            falls back to ``radius`` (no tightening).
+            partner_active: Issue #2715 -- pre-computed dormant/active state
+                            for the partner branch.  Callers in the A* hot
+                            path resolve this once per route and pass the
+                            cached bool here so the per-call 4-condition
+                            tuple evaluation is skipped.  When ``None``
+                            (legacy callers), the boolean is derived from
+                            ``partner_net``/``partner_radius`` for backward
+                            compatibility.
+        """
+        if radius is None:
+            radius = self._trace_half_width_cells
+
+        # Calculate region bounds
+        x1 = gx - radius
+        y1 = gy - radius
+        x2 = gx + radius + 1
+        y2 = gy + radius + 1
+
+        # Clamp region to grid bounds instead of rejecting out-of-bounds
+        # entirely (Issue #2425).  Pads near the board periphery previously
+        # had all neighbours rejected because the trace-width check region
+        # extended outside the grid, making them unroutable.
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(self.grid.cols, x2)
+        y2 = min(self.grid.rows, y2)
+        if x1 >= x2 or y1 >= y2:
+            return True  # degenerate region after clamping
+
+        # Extract array slices for the region
+        blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+
+        # Issue #3229: Euclidean-disc filter.  The DRC measures Euclidean
+        # clearance, but the rectangular region extracted above is a
+        # Chebyshev (square) bounding box.  Cells in the diagonal corners
+        # of that square -- where ``dx*dx + dy*dy > radius*radius`` --
+        # are outside the true Euclidean disc and must not contribute to
+        # the blocking decision.  Without this filter the square kernel
+        # passed candidates at the diagonal corners whose Euclidean
+        # clearance fell up to ``radius * (1 - 1/sqrt(2))`` cells short,
+        # producing 8 sub-127um ``clearance_pad_segment`` violations on
+        # board 05 with the legacy Chebyshev kernel (shortfalls 17-98um
+        # at ``res = 0.127mm``, ``radius = 2``).
+        dist_sq, within_disc = self._trace_disc_kernel(radius, y1 - gy, y2 - gy, x1 - gx, x2 - gx)
+
+        # Issue #4079: lateral-trace corridor keep-out.  A cell reserved for
+        # a net set that EXCLUDES ``net`` blocks this trace placement -- even
+        # if the cell is not otherwise ``blocked`` -- so a foreign net's A*
+        # cannot route through another net's reserved continuation corridor.
+        # This is the primary defect site: the via-only keep-out in
+        # ``_mark_via`` fenced foreign vias but not foreign lateral traces,
+        # so the A* could pick an illegal lateral path.  Fast-pathed behind
+        # ``bool(self._reserved_for_nets)`` so unreserved boards pay zero
+        # extra cost (byte-identical).  The keep-out is a HARD gate even in
+        # negotiated / relief mode (``allow_sharing``), matching
+        # ``_mark_via``'s unconditional skip -- a reserved corridor is not
+        # soft-negotiable.  Mirrors C++ ``Pathfinder::is_trace_blocked``.
+        reserved_map = self.grid._reserved_for_nets
+        if reserved_map:
+            # Issue #4079: only HARD reservations fence a foreign lateral
+            # trace out.  A SOFT reservation (attractor-only, the #2983 /
+            # #4053 byte-lane helpers on board 07's fully-reversed DDR byte,
+            # whose crossings are mandatory by construction) does NOT block
+            # -- fencing there would force the crossings to route around and
+            # short/open elsewhere.  ``_soft_reservations`` mirrors the C++
+            # ``GridCell::reserved_soft`` flag consulted by
+            # ``is_reserved_excluding``.
+            soft_reservations = self.grid._soft_reservations
+            # Only the (typically few) reserved cells that fall inside this
+            # region's Euclidean disc can contribute; iterate them directly
+            # rather than materialising a full-region mask.
+            for ry in range(y1, y2):
+                row_off = ry - y1
+                for rx in range(x1, x2):
+                    if not within_disc[row_off, rx - x1]:
+                        continue
+                    key = (layer, ry, rx)
+                    owners = reserved_map.get(key)
+                    if owners is not None and net not in owners and key not in soft_reservations:
+                        return True
+
+        # Issue #2559 / Phase 1C: Build partner-relaxation mask.
+        # When the partner branch is active, cells whose net matches
+        # partner_net are checked against partner_radius instead of radius.
+        # We OR the blocking mask with a "is partner cell outside the tight
+        # radius" suppressor so partner-blocked cells in the slack ring
+        # (>partner_radius && <=radius from gx,gy) are treated as passable.
+        #
+        # Issue #2715: When the caller provides a cached ``partner_active``
+        # bool, use it directly to skip the per-call 4-condition tuple
+        # evaluation.  This is the hot-path optimization for dormant-partner
+        # routes (the common case for non-diff-pair nets).
+        if partner_active is None:
+            partner_active = (
+                partner_net is not None
+                and partner_net >= 0
+                and partner_radius is not None
+                and partner_radius < radius
+            )
+        partner_relax_mask = None
+        if partner_active:
+            # Issue #3229: Match the Euclidean disc used elsewhere -- the
+            # partner clearance ring is the disc of radius ``partner_radius``,
+            # so cells with ``dx*dx + dy*dy > partner_radius**2`` are in
+            # the slack ring and treated as passable.
+            partner_radius_sq = partner_radius * partner_radius
+            partner_relax_mask = (net_region == partner_net) & (dist_sq > partner_radius_sq)
+
+        if allow_sharing:
+            # Negotiated mode: more complex logic
+            # Block if any cell is:
+            # 1. Blocked AND is_obstacle AND different net
+            # 2. Blocked AND NOT is_obstacle AND different net AND usage_count == 0 (static)
+            obstacle_region = self.grid._is_obstacle[layer, y1:y2, x1:x2]
+            usage_region = self.grid._usage_count[layer, y1:y2, x1:x2]
+
+            # Different net mask (includes net == 0 which are no-net obstacles)
+            different_net = net_region != net
+
+            # Case 1: Blocked obstacles with different net
+            obstacle_blocks = blocked_region & obstacle_region & different_net
+
+            # Case 2: Blocked non-obstacles with different net AND static (usage == 0)
+            # Issue #3545: statically blocked cells (pad clearance halos,
+            # keepouts) are additionally non-negotiable regardless of
+            # usage_count -- a pad cannot "negotiate away", so sharing a
+            # halo cell only produces unresolvable overflow.  Mirrors
+            # ``RoutingGrid.compute_expanded_blocked``.
+            static_usage_free = usage_region == 0
+            grid_static = getattr(self.grid, "_static_blocked", None)
+            if grid_static is not None:
+                static_usage_free = static_usage_free | grid_static[layer, y1:y2, x1:x2]
+            static_blocks = blocked_region & ~obstacle_region & different_net & static_usage_free
+
+            combined = obstacle_blocks | static_blocks
+            if partner_relax_mask is not None:
+                combined = combined & ~partner_relax_mask
+            # Issue #3229: Apply Euclidean-disc filter so the diagonal
+            # corners of the bounding square do not contribute.
+            combined = combined & within_disc
+            if bool(np.any(combined)):
+                rows, cols = np.nonzero(combined)
+                cells = [(x1 + int(x), y1 + int(y)) for y, x in zip(rows, cols, strict=True)]
+                if not self._trace_halo_clear(
+                    cells, layer, gx, gy, net, from_cell
+                ) and not self._pad_cells_clear(cells, layer, gx, gy, net, from_cell):
+                    return True
+        else:
+            # Standard mode: block if any cell is blocked AND has different net
+            # Issue #864: Same-net cells are passable (even overlapping clearance)
+            # but different-net cells and obstacles (net=0 blocked cells) must block.
+            blocked_different_net = blocked_region & (net_region != net)
+            if partner_relax_mask is not None:
+                blocked_different_net = blocked_different_net & ~partner_relax_mask
+            # Issue #3229: Apply Euclidean-disc filter so the diagonal
+            # corners of the bounding square do not contribute.
+            blocked_different_net = blocked_different_net & within_disc
+            if bool(np.any(blocked_different_net)):
+                rows, cols = np.nonzero(blocked_different_net)
+                cells = [(x1 + int(x), y1 + int(y)) for y, x in zip(rows, cols, strict=True)]
+                if not self._trace_halo_clear(
+                    cells, layer, gx, gy, net, from_cell
+                ) and not self._pad_cells_clear(cells, layer, gx, gy, net, from_cell):
+                    return True
+
+        # Issue #4507: the scalar disc is clear -- consult the cross-domain
+        # (HV-isolation) annulus, mirroring the C++
+        # ``Pathfinder::cross_domain_trace_blocked`` tail call in
+        # ``is_trace_blocked``.  No-op (single ``getattr`` + ``None`` test)
+        # unless a pairwise voltage-map table is installed AND it projects
+        # onto this board's net ids.
+        # Issue #6008: net-filtered keepout rule areas (``spatial_keepouts``)
+        # cannot live in the occupancy planes -- consult them here, mirroring
+        # the C++ ``Grid3D::rule_area_trace_blocked`` check.
+        if getattr(self.grid, "_rule_area_keepouts", None) and self.grid.rule_area_trace_blocked(
+            gx, gy, layer, net, radius
+        ):
+            return True
+        return self._cross_domain_trace_blocked(gx, gy, layer, net, radius)
+
+    def _is_foreign_pad_metal_within_radius(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        radius: int,
+    ) -> bool:
+        """Pad-exit relaxation safety check (Issue #3226).
+
+        Returns True when any cell within Euclidean ``radius`` cells of
+        ``(gx, gy, layer)`` is FOREIGN-net pad copper -- that is,
+        ``grid._pad_blocked[layer, cy, cx]`` is True AND
+        ``grid._net[layer, cy, cx] != net``.
+
+        Pure clearance-halo cells, copper-pour cells, and routed-trace
+        cells are skipped so the legitimate pad-exit step into a
+        foreign pad's clearance band remains allowed; only candidate
+        centerline placements that would put the trace edge (radius
+        cells beyond the centerline) inside foreign pad copper are
+        rejected.
+
+        Issue #3229: The kernel uses the Euclidean disc
+        (``dx*dx + dy*dy <= radius*radius``) rather than the legacy
+        Chebyshev square.  The DRC measures Euclidean clearance and
+        the legacy square kernel passed candidates at the diagonal
+        corners whose true Euclidean clearance fell up to
+        ``radius * (1 - 1/sqrt(2))`` cells short of the rule -- the
+        exact mechanism behind the 8 sub-127um ``clearance_pad_segment``
+        violations on board 05 with ``--backend cpp``.
+
+        This is the Python sibling of
+        ``Pathfinder::is_foreign_pad_metal_within_radius`` in
+        ``cpp/src/pathfinder.cpp``.  Both backends share the same
+        grid-cell-level pad-exit-relaxation guard.
+        """
+        if radius <= 0:
+            return False
+        x1 = max(0, gx - radius)
+        y1 = max(0, gy - radius)
+        x2 = min(self.grid.cols, gx + radius + 1)
+        y2 = min(self.grid.rows, gy + radius + 1)
+        if x1 >= x2 or y1 >= y2:
+            return False
+        pad_region = self.grid._pad_blocked[layer, y1:y2, x1:x2]
+        if not bool(np.any(pad_region)):
+            return False
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+        foreign_mask = pad_region & (net_region != net)
+        if not bool(np.any(foreign_mask)):
+            return False
+        # Issue #3229: Restrict the membership test to the Euclidean disc
+        # so the diagonal corners of the bounding Chebyshev square do not
+        # contribute (matches the DRC's Euclidean clearance metric).
+        ys = np.arange(y1, y2)
+        xs = np.arange(x1, x2)
+        dy = ys - gy
+        dx = xs - gx
+        dist_sq = (dy * dy)[:, None] + (dx * dx)[None, :]
+        within_disc = dist_sq <= radius * radius
+        return bool(np.any(foreign_mask & within_disc))
+
+    def _is_diagonal_corner_blocked(
+        self, gx: int, gy: int, dx: int, dy: int, layer: int, net: int, allow_sharing: bool = False
+    ) -> bool:
+        """Check if diagonal move would cut through obstacle corners.
+
+        When moving diagonally from (gx, gy) to (gx+dx, gy+dy), we must verify
+        that both adjacent orthogonal cells are clear to prevent corner-cutting:
+
+            B │ D      Moving from A to D diagonally requires
+            ──┼──      both B (gx, gy+dy) and C (gx+dx, gy) to be clear
+            A │ C
+
+        Args:
+            gx, gy: Current grid position
+            dx, dy: Diagonal direction (both must be non-zero for diagonal move)
+            layer: Current layer
+            net: Net ID for same-net checking
+            allow_sharing: If True, allow routing through non-obstacle blocked cells
+
+        Returns:
+            True if the diagonal move is blocked (would cut corner), False if clear.
+        """
+        # Only check for actual diagonal moves
+        if dx == 0 or dy == 0:
+            return False
+
+        # Check the two adjacent orthogonal cells
+        # Cell B: same x, new y
+        # Cell C: new x, same y
+        adjacent_cells = [
+            (gx, gy + dy),  # B: vertical neighbor
+            (gx + dx, gy),  # C: horizontal neighbor
+        ]
+
+        # Issue #3566 (Python parity for #3545): static blockage snapshot
+        # (None until the first ``mark_route``; before that, usage is
+        # uniformly 0 and the legacy usage clause is equivalent).
+        grid_static = getattr(self.grid, "_static_blocked", None)
+
+        for cx, cy in adjacent_cells:
+            # Check bounds
+            if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
+                return True  # Out of bounds = blocked
+
+            # This hot predicate only reads occupancy. Index the scalar
+            # planes directly instead of allocating a _CellView per neighbor.
+            if self.grid._blocked[layer, cy, cx]:
+                cell_net = int(self.grid._net[layer, cy, cx])
+                if cell_net != net and self._trace_halo_clear(
+                    [(cx, cy)], layer, gx + dx, gy + dy, net, (gx, gy)
+                ):
+                    continue
+                # Issue #6389 (port of #6315): pad-derived corner cell whose
+                # exact swept-edge geometry is clear.
+                if cell_net != net and self._pad_cells_clear(
+                    [(cx, cy)], layer, gx + dx, gy + dy, net, (gx, gy)
+                ):
+                    continue
+                if allow_sharing and not self.grid._is_obstacle[layer, cy, cx]:
+                    # Issue #3566 / #3545: statically blocked foreign
+                    # cells (pad clearance halos, keepouts) are
+                    # non-negotiable regardless of usage_count -- a pad
+                    # cannot "negotiate away", so cutting a corner
+                    # through a halo cell only produces unresolvable
+                    # overflow.  Relief probes keep their #3438
+                    # soft-crossing semantics for foreign-net cells.
+                    # Mirrors the ``cell.static_blocked && cell.net !=
+                    # net && !relief_mode_`` gate in
+                    # ``Pathfinder::is_diagonal_blocked``.
+                    if (
+                        grid_static is not None
+                        and grid_static[layer, cy, cx]
+                        and cell_net != net
+                        and not self.relief_mode
+                    ):
+                        return True
+                    # In negotiated mode, non-obstacle cells can be shared
+                    # No-net pads (cell_net == 0) must always block other nets
+                    # See issue #317: routes incorrectly allowed through no-net pads
+                    if cell_net == 0:
+                        if int(self.grid._usage_count[layer, cy, cx]) == 0:
+                            return True  # Static no-net obstacle (pad) - block
+                    elif cell_net != net:
+                        # Only allow sharing if this cell has been used by routes
+                        # (usage_count > 0). Cells with usage_count == 0 are static
+                        # obstacles like pads that should never be shared.
+                        # See issue #174: pad clearance zones must block other nets.
+                        if int(self.grid._usage_count[layer, cy, cx]) == 0:
+                            return True  # Static obstacle (pad) - block
+                        continue  # Allow with cost penalty (routed cell)
+                else:
+                    # Standard mode (same logic as _is_trace_blocked)
+                    # Issue #864: Same-net cells are passable, different nets block
+                    if cell_net == net:
+                        pass  # Same net - passable
+                    else:
+                        return True  # Different net or obstacle - blocked
+
+        return False
+
+    def _via_kernel(self, radius: int | None) -> tuple[list[tuple[int, int]], int, np.ndarray]:
+        """Return ``(offsets, reach, mask)`` for a via-clearance kernel.
+
+        Issue #1692 / #3234: a per-net-class via radius override needs the
+        Euclidean-disc offset list for ITS radius rather than the
+        constructor-built ``_via_offsets`` (see the construction comment in
+        ``__init__`` for why the kernel is a disc and not a Chebyshev square).
+
+        Issue #5617: ``_is_via_blocked`` rebuilt that ``(2r+1)**2``
+        comprehension on EVERY call with an override active -- and on board 06
+        the override is always active, because ``NetClass.via_size`` defaults
+        to 0.6 mm while the board's ``DesignRules.via_diameter`` is 0.45 mm, so
+        every net-classed net asks for radius 10 against a constructor kernel
+        of radius 9.  At that size the rebuild walks 441 candidate offsets per
+        call.  The kernel is a pure function of ``radius``, so memoize it --
+        identical offsets, identical order, computed once per distinct radius.
+
+        The three returned forms are all views of the same disc:
+
+        ``offsets``
+            The historical ``(dx, dy)`` list, in ``for dy: for dx:`` (row
+            major) order.
+        ``reach``
+            The kernel's exact ``max(|dx|, |dy|)``.  Because the disc contains
+            ``(+-reach, 0)`` and ``(0, +-reach)`` and every offset is within
+            ``[-reach, reach]`` on both axes, "some kernel cell falls outside
+            the grid" is exactly "the kernel's bounding box leaves the grid" --
+            which lets the caller replace a per-cell bounds test with one box
+            test without changing the verdict.
+        ``mask``
+            A ``(2*reach+1, 2*reach+1)`` boolean disc-membership array aligned
+            with that bounding box, so the caller can intersect the kernel with
+            a NumPy window slice instead of walking the offsets in Python.
+            ``np.nonzero`` on the intersection yields hits in row-major order
+            -- the same order the ``offsets`` walk produced.
+        """
+        key = self._via_half_cells if radius is None else radius
+        cached = self._via_kernel_cache.get(key)
+        if cached is not None:
+            return cached
+        via_r_sq = key * key
+        offsets = [
+            (dx, dy)
+            for dy in range(-key, key + 1)
+            for dx in range(-key, key + 1)
+            if dx * dx + dy * dy <= via_r_sq
+        ]
+        entry = self._build_via_kernel_entry(offsets)
+        self._via_kernel_cache[key] = entry
+        return entry
+
+    @staticmethod
+    def _build_via_kernel_entry(
+        offsets: list[tuple[int, int]],
+    ) -> tuple[list[tuple[int, int]], int, np.ndarray]:
+        """Derive ``(offsets, reach, mask)`` from a kernel's offset list."""
+        reach = max((max(abs(dx), abs(dy)) for dx, dy in offsets), default=0)
+        mask = np.zeros((2 * reach + 1, 2 * reach + 1), dtype=bool)
+        for dx, dy in offsets:
+            mask[dy + reach, dx + reach] = True
+        return offsets, reach, mask
+
+    def _is_via_blocked(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        allow_sharing: bool = False,
+        radius: int | None = None,
+    ) -> bool:
+        """Check if placing a via at this position would conflict.
+
+        Similar to _is_trace_blocked but uses the larger via clearance radius.
+        Through-hole vias must be checked on ALL layers.
+
+        Issue #966: Uses vectorized NumPy operations for ~2-3x speedup over
+        the original nested loop implementation.
+
+        Args:
+            allow_sharing: If True (negotiated mode), allow routing through
+                          non-obstacle blocked cells (they'll get high cost instead)
+            radius: Override the via half-width in grid cells. When None,
+                    uses the pre-computed ``_via_half_cells`` (Issue #1692).
+        """
+        # Issue #5617: memoised per cell -- same predicate, same arguments,
+        # evaluated once instead of once per non-plane layer.
+        if not self._component_hole_clear_cached(gx, gy):
+            return True
+        # Issue #6243: authored per-net minimum, before any raster relief.
+        if not self._authored_via_clear(gx, gy, net):
+            return True
+        halo = getattr(self.grid, "_route_halo", None)
+        geometry_complete = halo is not None and halo.complete
+        # Partial raster coverage cannot waive clearance to known copper.
+        if halo is not None and not self._via_halo_clear_cached(halo, layer, gx, gy, net):
+            return True
+        if self.grid.fixed_fills:
+            name = next(
+                (name for name, number in self._net_name_to_id.items() if number == net), ""
+            )
+            net_class = self._get_net_class(name)
+            half = (net_class.via_size if net_class else self.rules.via_diameter) / 2
+            if not self.grid.fixed_fills.via_clear(
+                self.grid.grid_to_world(gx, gy),
+                tuple(range(self.grid.num_layers)),
+                half,
+                max(self.rules.via_clearance, self.rules.authored_floor(net)),
+            ):
+                return True
+
+        # Issue #1692: Support per-net-class via radius override.
+        # When a custom radius is provided, compute offsets on the fly
+        # rather than using the pre-computed arrays (which use the global
+        # via diameter).
+        #
+        # Issue #3234: Filter the per-net override offsets to the
+        # Euclidean disc (``dx*dx + dy*dy <= radius*radius``) -- mirrors
+        # the constructor-time filter applied to ``_via_offset_dx`` /
+        # ``_via_offset_dy`` and the C++ ``via_kernel_offsets_``.  Without
+        # this filter the override path would silently revert to the
+        # legacy Chebyshev kernel, reintroducing the diagonal-corner gap
+        # for nets with custom via diameters.
+        # Issue #5617: memoized (see :meth:`_via_kernel`) instead of rebuilt
+        # per call when a per-net-class radius override is active -- which, on
+        # board 06, is every call.
+        _, via_reach, via_mask = self._via_kernel(radius)
+
+        # Issue #5240 walked the via kernel as a plain Python loop over
+        # ``_via_offsets``, replacing an older NumPy form; at the 13-49 offsets
+        # that issue measured (via_half_cells 2-4) the per-call NumPy dispatch
+        # cost dominated a tiny loop.  Issue #5617: board 06 runs the SAME loop
+        # at radius 10 -- 317 offsets, each a Python iteration plus a NumPy
+        # scalar index -- inside the pure-Python A* fallback that owns most of
+        # phase 4 of the Diff-Pair regression job.  At that size the tradeoff
+        # inverts, so the scan goes back to NumPy, in a form that keeps every
+        # verdict (and the ORDER of ``blocked_cells``) identical:
+        #
+        #   * bounds: the four per-cell comparisons collapse into ONE bounding
+        #     box test.  ``via_reach`` is the kernel's exact max |dx| / |dy|
+        #     and the disc contains ``(+-reach, 0)`` / ``(0, +-reach)``, so
+        #     "some kernel cell is out of bounds" and "the kernel's bounding
+        #     box leaves the grid" are the same predicate; both answer True.
+        #     Pinned by ``test_router_via_kernel_memo_5617.py``.
+        #   * scan: with the box in bounds, the kernel's cells are exactly the
+        #     ``mask``-selected entries of one ``(2r+1)^2`` window VIEW of
+        #     ``grid._blocked[layer]``.  ``window.any()`` rejects the common
+        #     "nothing blocked anywhere near this candidate" case in one C
+        #     pass; only when something IS blocked do we intersect with the
+        #     disc mask and materialise the hits.  ``np.nonzero`` enumerates
+        #     row major -- the same order the ``for dy: for dx:`` offset list
+        #     produced -- so downstream short-circuits see the same first cell.
+        grid = self.grid
+        if (
+            gx - via_reach < 0
+            or gy - via_reach < 0
+            or gx + via_reach >= grid.cols
+            or gy + via_reach >= grid.rows
+        ):
+            return True  # Some cells out of bounds
+        window = grid._blocked[
+            layer,
+            gy - via_reach : gy + via_reach + 1,
+            gx - via_reach : gx + via_reach + 1,
+        ]
+        blocked_cells: list[tuple[int, int]] = []
+        if window.any():
+            hit_ys, hit_xs = np.nonzero(window & via_mask)
+            if hit_ys.size:
+                x0 = gx - via_reach
+                y0 = gy - via_reach
+                blocked_cells = [
+                    (x0 + hx, y0 + hy)
+                    for hy, hx in zip(hit_ys.tolist(), hit_xs.tolist(), strict=True)
+                ]
+
+        known_cells = [
+            (cx, cy)
+            for cx, cy in blocked_cells
+            if (halo is not None and halo.cell_known(cx, cy, layer))
+        ]
+        if known_cells and not geometry_complete:
+            if not self._via_halo_clear(known_cells, layer, gx, gy, net):
+                return True
+        known_set = {(cx, cy) for cx, cy in known_cells if grid._net[layer, cy, cx] != net}
+        blocked_cells = [cell for cell in blocked_cells if cell not in known_set]
+        # Fast path: if no cells are blocked, via is not blocked
+        if not blocked_cells:
+            # Issue #6008: via-blocking keepout rule areas (C++
+            # ``Grid3D::rule_area_via_blocked`` mirror).
+            if getattr(grid, "_rule_area_keepouts", None) and grid.rule_area_via_blocked(
+                gx, gy, net, radius if radius is not None else self._via_half_cells
+            ):
+                return True
+            # Issue #4507: scalar disc clear -- consult the cross-domain
+            # (HV-isolation) annulus (C++ ``cross_domain_via_blocked`` mirror).
+            return self._cross_domain_via_blocked(
+                gx, gy, layer, net, radius if radius is not None else self._via_half_cells
+            )
+
+        # Some cells are blocked - need detailed checking
+        net_grid = grid._net
+
+        if allow_sharing:
+            # Negotiated mode: allow sharing non-obstacle cells
+            is_obstacle_grid = grid._is_obstacle
+            usage_grid = grid._usage_count
+
+            # Issue #3566 (Python parity for #3545): consult the static
+            # blockage snapshot so foreign static cells (pad clearance
+            # halos, keepouts) stay non-negotiable even at usage > 0.
+            static_grid = getattr(grid, "_static_blocked", None)
+            relief_mode = self.relief_mode
+
+            for cx, cy in blocked_cells:
+                cell_net = net_grid[layer, cy, cx]
+
+                # Issue #2963: own-net obstacle cells (destination pad
+                # metal post-PR #2928 first-touch marking) must remain
+                # passable for the routing net's own via.  Foreign-net
+                # obstacles still hard-reject.
+                if cell_net != net:
+                    if is_obstacle_grid[layer, cy, cx]:
+                        return True  # Obstacles always block (foreign net)
+
+                    # Issue #3566 / #3545: statically blocked foreign cells
+                    # (pad clearance halos, keepouts) are non-negotiable
+                    # regardless of usage_count -- a pad cannot "negotiate
+                    # away", so sharing a halo cell only produces
+                    # unresolvable overflow.  Relief probes keep their #3438
+                    # soft-crossing semantics for foreign-net cells.  Mirrors
+                    # the ``cell.static_blocked && cell.net != net &&
+                    # !relief_mode_`` gate in ``Pathfinder::is_via_blocked``.
+                    if static_grid is not None and static_grid[layer, cy, cx] and not relief_mode:
+                        return True
+
+                # No-net pads must always block
+                if cell_net == 0:
+                    if usage_grid[layer, cy, cx] == 0:
+                        return True  # Static no-net obstacle
+                elif cell_net != net:
+                    # Different net - only allow if cell was used by routes
+                    # Issue #3438: in relief-probe mode foreign usage-0
+                    # cells are passable (penalised per step) so the probe
+                    # can place vias inside sealed escape corridors.
+                    if usage_grid[layer, cy, cx] == 0 and not relief_mode:
+                        return True  # Static obstacle (pad)
+                # else: same net or routed cell - allow with cost
+        else:
+            # Standard mode: same-net passable, different nets block
+            for cx, cy in blocked_cells:
+                if net_grid[layer, cy, cx] != net:
+                    return True
+
+        # Issue #6008: via-blocking keepout rule areas.
+        if getattr(grid, "_rule_area_keepouts", None) and grid.rule_area_via_blocked(
+            gx, gy, net, radius if radius is not None else self._via_half_cells
+        ):
+            return True
+        # Issue #4507: every scalar-disc cell is passable -- consult the
+        # cross-domain (HV-isolation) annulus (C++ ``cross_domain_via_blocked``
+        # mirror).
+        return self._cross_domain_via_blocked(
+            gx, gy, layer, net, radius if radius is not None else self._via_half_cells
+        )
+
+    # ------------------------------------------------------------------
+    # Search-time pairwise (HV-isolation) avoidance (Issue #4507)
+    # ------------------------------------------------------------------
+    #
+    # Python siblings of the C++ ``Pathfinder::cross_domain_trace_blocked`` /
+    # ``cross_domain_via_blocked`` kernels (#4511).  Phase 2b armed only the
+    # C++ search; the pure-Python fallback A* kept proposing HV-through-LV
+    # paths that the Phase-1 post-route gate (``route_pairwise_violation``)
+    # then rejected -- so a net that fell back on an HV board burned its
+    # budget instead of converging (observed directly by PR #4780's
+    # convergence fixture: the layer-agnostic arm "burns its resume budget
+    # into the Python fallback and returns None").
+    #
+    # Mirror notes vs. the C++ kernels:
+    # * Same projection (``build_cpp_domain_matrix``), same annulus shape
+    #   (scalar disc is the scalar kernel's job; only the ring out to the
+    #   widest pair is scanned), same per-pair radius arithmetic, same
+    #   layer-scoped #4506 attach-zone waiver at the gap midpoint.
+    # * ``half_mm`` is the ROUTED net's class trace width / via size (#4793),
+    #   resolved from ``state.id_to_name`` -- the Python equivalent of the
+    #   per-net extents ``cpp_backend`` pushes into the C++ kernels via
+    #   ``set_search_pair_widths`` once per ``route()`` call.  Nets with no
+    #   class (or an unmapped id) fall back to the global ``rules`` widths,
+    #   which is also the C++ default when the setter has never run.
+    # * The diagonal-corner probe is NOT separately widened here: both
+    #   endpoints of a diagonal step already consult the annulus via
+    #   ``_is_trace_blocked``, and the ceil-rounded pair radius keeps the
+    #   mid-step within the requirement, so the gate cannot disagree.
+
+    def _pairwise_search_state(
+        self, table: "PairwiseClearanceTable"
+    ) -> _PairwiseSearchState | None:
+        """Project ``table`` onto net ids for the search kernels (cached).
+
+        Returns ``None`` (dormant) when the projection resolves fewer than
+        two participating nets on this board -- the same dormant signal
+        ``build_cpp_domain_matrix`` gives the C++ setter.  The cache is keyed
+        by table identity and invalidated by :meth:`set_net_name_to_id`.
+        """
+        cached = self._pairwise_search_cache
+        if cached is not None and cached[0] is table:
+            return cached[1]
+
+        from .pairwise_clearance import build_cpp_domain_matrix
+
+        projection = build_cpp_domain_matrix(table, self._net_name_to_id)
+        state: _PairwiseSearchState | None = None
+        if projection is not None:
+            max_widen = max((max(row) for row in projection.matrix), default=0.0)
+            if max_widen > 0.0:
+                state = _PairwiseSearchState(
+                    net_to_domain=projection.net_to_domain,
+                    matrix=projection.matrix,
+                    max_widen=max_widen,
+                    id_to_name={nid: name for name, nid in self._net_name_to_id.items()},
+                )
+        self._pairwise_search_cache = (table, state)
+        return state
+
+    def _cross_domain_trace_blocked(
+        self, gx: int, gy: int, layer: int, net: int, scalar_radius: int
+    ) -> bool:
+        """True when foreign cross-domain copper sits inside the widened ring.
+
+        Python mirror of ``Pathfinder::cross_domain_trace_blocked``.  Called
+        only after the scalar kernel has cleared the inner disc.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return False
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return False
+        # Issue #4793: measure the widening from the ROUTED net's class trace
+        # width (the C++ kernels read ``search_trace_half_width_mm_``, which
+        # ``cpp_backend`` sets per net) -- the global default under-widens a
+        # wide class (e.g. POWER at 0.5 mm vs a 0.2 mm default).
+        own_name = state.id_to_name.get(net, "")
+        return self._cross_domain_annulus_blocked(
+            gx,
+            gy,
+            layer,
+            net,
+            scalar_radius,
+            self._get_trace_width_for_net(own_name) / 2.0,
+            state,
+        )
+
+    def _cross_domain_via_blocked(
+        self, gx: int, gy: int, layer: int, net: int, scalar_radius: int
+    ) -> bool:
+        """Via sibling of :meth:`_cross_domain_trace_blocked` (one layer).
+
+        The C++ ``cross_domain_via_blocked`` scans every layer itself; here
+        the per-layer scan composes with ``_check_via_placement_cached``'s
+        existing all-layer loop, so coverage is identical for the layers the
+        scalar via check itself walks.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return False
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return False
+        # Issue #4793: per-net-class via size, mirroring the C++
+        # ``search_via_half_diam_mm_`` extent.
+        own_name = state.id_to_name.get(net, "")
+        return self._cross_domain_annulus_blocked(
+            gx,
+            gy,
+            layer,
+            net,
+            scalar_radius,
+            self._get_via_size_for_net(own_name) / 2.0,
+            state,
+        )
+
+    def _cross_domain_annulus_blocked(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        scalar_radius: int,
+        half_mm: float,
+        state: _PairwiseSearchState,
+    ) -> bool:
+        """Shared annulus walk behind the trace/via cross-domain kernels.
+
+        Scans the ring between ``scalar_radius`` (exclusive -- the scalar
+        kernel's job) and the widest pairwise radius (inclusive) for blocked
+        foreign copper whose domain pair requires widening, honouring the
+        layer-scoped #4506 attach-zone waiver at the approximate gap
+        midpoint.  Out-of-bounds cells are skipped (the scalar kernel owns
+        the out-of-bounds verdict), matching the C++ kernels.
+        """
+        net_to_domain = state.net_to_domain
+        dom = net_to_domain[net] if 0 <= net < len(net_to_domain) else -1
+        if dom < 0:
+            return False
+
+        res = self.grid.resolution
+        # Issue #864 rounding idiom: round before ceil so FP noise cannot
+        # add a phantom cell of widening.
+        wide_r = search_radius_cells(half_mm, state.max_widen, res)
+        if wide_r <= scalar_radius:
+            return False  # the matrix never widens beyond the scalar kernel
+
+        x1 = max(0, gx - wide_r)
+        y1 = max(0, gy - wide_r)
+        x2 = min(self.grid.cols, gx + wide_r + 1)
+        y2 = min(self.grid.rows, gy + wide_r + 1)
+        if x1 >= x2 or y1 >= y2:
+            return False
+
+        blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
+        if not bool(np.any(blocked_region)):
+            return False
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+
+        ys = np.arange(y1, y2)
+        xs = np.arange(x1, x2)
+        dy_grid = ys - gy
+        dx_grid = xs - gx
+        dist_sq = (dy_grid * dy_grid)[:, None] + (dx_grid * dx_grid)[None, :]
+        annulus = (dist_sq > scalar_radius * scalar_radius) & (dist_sq <= wide_r * wide_r)
+        # Only foreign real-net copper can trip a cross-domain rule; net 0
+        # (pour / unconnected convention) never carries a domain.
+        candidates = blocked_region & annulus & (net_region != net) & (net_region != 0)
+        if not bool(np.any(candidates)):
+            return False
+
+        from .pairwise_clearance import _attach_zone_exempts
+
+        matrix = state.matrix
+        zones = self._attach_zones
+        layer_obj = self._grid_layer_object(layer)
+        own_name = state.id_to_name.get(net, "")
+        cw = self.grid.grid_to_world(gx, gy)
+        cand_rows, cand_cols = np.nonzero(candidates)
+        for row, col in zip(cand_rows, cand_cols, strict=True):
+            foreign_net = int(net_region[row, col])
+            foreign_dom = (
+                net_to_domain[foreign_net] if 0 <= foreign_net < len(net_to_domain) else -1
+            )
+            if foreign_dom < 0:
+                continue
+            required = matrix[dom][foreign_dom]
+            if required <= 0.0:
+                continue  # same domain / no widening for this pair
+            # Widened radius for THIS specific pair (<= wide_r).  A cell in
+            # the annulus but outside this pair's requirement is fine.
+            pair_r = search_radius_cells(half_mm, required, res)
+            if int(dist_sq[row, col]) > pair_r * pair_r:
+                continue
+            if zones:
+                # Attach-zone exemption (#4506) at the approximate gap
+                # midpoint, scoped to THIS layer (#4507) -- the same consult
+                # the C++ kernels make via ``Grid3D::attach_zone_exempts``.
+                fw = self.grid.grid_to_world(x1 + int(col), y1 + int(row))
+                mid_x = (cw[0] + fw[0]) * 0.5
+                mid_y = (cw[1] + fw[1]) * 0.5
+                foreign_name = state.id_to_name.get(foreign_net, "")
+                if _attach_zone_exempts(zones, mid_x, mid_y, own_name, foreign_name, layer_obj):
+                    continue
+            return True
+        return False
+
+    def _pairwise_expanded_blocked(
+        self, net: int, scalar_radius: int, deadline: float | None = None
+    ) -> np.ndarray | None:
+        """Pairwise (HV-isolation) widening bitmap for the A* hot loop.
+
+        Issue #4507: the Python A* hot loop consults the pre-dilated
+        ``compute_expanded_blocked`` bitmap (one array lookup per neighbor,
+        #2430) rather than the per-step ``_is_trace_blocked`` kernel -- so
+        search-time avoidance must be OR-ed into that bitmap.  For every
+        foreign domain whose pair with ``net``'s domain requires widening,
+        the foreign copper is dilated by the pair's widened radius; the
+        #4506 attach-zone waiver then clears the *pairwise contribution*
+        (never the scalar base bitmap) on the layers the zone licences.
+
+        The zone clearing uses the zone bbox expanded by half the pair
+        radius: a kernel-waived candidate ``c`` (gap midpoint inside the
+        bbox, foreign copper inside the bbox) always lies within
+        ``bbox (+) pair_r/2``, so the bitmap never seals an attach entry the
+        midpoint convention would admit.  Where the bitmap is marginally
+        more permissive than the per-cell kernel, the post-route
+        ``route_pairwise_violation`` gate stays authoritative.
+
+        Issue #4794 (caching): the per-foreign-domain dilated masks are the
+        expensive part (a full-grid ``np.isin`` plus a full-grid dilation per
+        non-dormant domain, every ``route()`` call) and they depend on only
+        three things -- the foreign domain's net-id set, the pair radius, and
+        the current grid occupancy.  They are therefore memoized in
+        ``_pairwise_extra_cache`` keyed by ``(foreign_dom, pair_r)`` and
+        stamped with ``(grid, state, grid.occupancy_generation)``; ANY write
+        to ``grid._blocked``/``grid._net`` advances that counter and discards
+        the whole cache (see ``RoutingGrid.occupancy_generation``).  The
+        routed net's own class width does not need its own key component
+        because it is already folded into ``pair_r``: two classes that widen
+        to the same cell radius produce byte-identical masks, two that do not
+        land on different keys.  The #4506 attach-zone clearing is applied
+        per-call on a COPY, never baked into (or mutated into) a cached
+        entry, so a board with zones still gets a per-net-correct waiver.
+
+        Returns ``None`` when dormant (no table, no projection, or ``net``
+        participates in no widening pair) -- the caller then uses the scalar
+        bitmap unchanged, byte-identical to pre-#4507 behaviour.
+
+        Issue #8414: ``deadline`` is the calling search's wall-clock deadline
+        (``time.monotonic()`` based). It is checked before every uncached
+        foreign-domain dilation, and :class:`_SetupDeadlineExpired` is raised
+        once it has passed. The check comes before the cache write, so only
+        complete masks are ever cached.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return None
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return None
+        net_to_domain = state.net_to_domain
+        dom = net_to_domain[net] if 0 <= net < len(net_to_domain) else -1
+        if dom < 0:
+            return None
+
+        from .pairwise_clearance import _norm_net_key
+
+        res = self.grid.resolution
+        # Issue #4793: the dilation radius measures from the ROUTED net's
+        # class trace width, not the global default (same extent the C++
+        # bitmap-free kernels get from ``set_search_pair_widths``).
+        own_name = state.id_to_name.get(net, "")
+        half_mm = self._get_trace_width_for_net(own_name) / 2.0
+        own_key = _norm_net_key(own_name)
+        net_ids_by_domain: dict[int, list[int]] = {}
+        for net_id, domain in enumerate(net_to_domain):
+            if domain >= 0:
+                net_ids_by_domain.setdefault(domain, []).append(net_id)
+
+        cache = self._pairwise_mask_cache(state)
+        extra: np.ndarray | None = None
+        # True while ``extra`` still ALIASES a cache entry -- such a result is
+        # copied before it leaves this method so no caller can mutate a
+        # cached mask in place.
+        extra_aliases_cache = False
+        for foreign_dom, required in enumerate(state.matrix[dom]):
+            if foreign_dom == dom or required <= 0.0:
+                continue
+            pair_r = search_radius_cells(half_mm, required, res)
+            if pair_r <= scalar_radius:
+                continue  # the scalar dilation already covers this pair
+            foreign_ids = net_ids_by_domain.get(foreign_dom)
+            if not foreign_ids:
+                continue
+            cache_key = (foreign_dom, pair_r)
+            pair_base: np.ndarray | None
+            if cache is not None and cache_key in cache:
+                pair_base = cache[cache_key]
+            else:
+                _check_setup_deadline(deadline)  # Issue #8414
+                foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
+                # ``None`` memoizes "this domain has no copper on the grid at
+                # this generation" -- as reusable as a mask, and it is the
+                # common case early in a routing session.
+                pair_base = (
+                    self._dilate_zero_padded(foreign_mask, pair_r)
+                    if bool(np.any(foreign_mask))
+                    else None
+                )
+                if cache is not None and len(cache) < _PAIRWISE_MASK_CACHE_MAX:
+                    cache[cache_key] = pair_base
+            if pair_base is None:
+                continue
+            # The cached entry is the PRE-waiver base; the attach-zone
+            # clearing below is per-net, so it must land on a copy.
+            pair_extra = pair_base.copy() if self._attach_zones else pair_base
+            if self._attach_zones:
+                foreign_keys = {
+                    _norm_net_key(state.id_to_name.get(net_id, "")) for net_id in foreign_ids
+                }
+                half_waiver_mm = pair_r * res / 2.0
+                for zone in self._attach_zones:
+                    if own_key not in zone.net_names:
+                        continue
+                    member_keys = [key for key in foreign_keys if key in zone.net_names]
+                    if not member_keys:
+                        continue
+                    gx1, gy1 = self.grid.world_to_grid(
+                        zone.min_x - half_waiver_mm, zone.min_y - half_waiver_mm
+                    )
+                    gx2, gy2 = self.grid.world_to_grid(
+                        zone.max_x + half_waiver_mm, zone.max_y + half_waiver_mm
+                    )
+                    gx1 = max(0, gx1)
+                    gy1 = max(0, gy1)
+                    gx2 = min(self.grid.cols - 1, gx2)
+                    gy2 = min(self.grid.rows - 1, gy2)
+                    if gx1 > gx2 or gy1 > gy2:
+                        continue
+                    for layer_idx in range(self.grid.num_layers):
+                        layer_obj = self._grid_layer_object(layer_idx)
+                        if not zone.covers_layer(own_key, layer_obj):
+                            continue
+                        if not any(zone.covers_layer(key, layer_obj) for key in member_keys):
+                            continue
+                        pair_extra[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = False
+            if extra is None:
+                extra = pair_extra
+                extra_aliases_cache = pair_extra is pair_base and cache is not None
+            else:
+                extra = extra | pair_extra  # fresh array; no longer an alias
+                extra_aliases_cache = False
+        if extra is not None and extra_aliases_cache:
+            return np.array(extra, copy=True)
+        return extra
+
+    def _pairwise_mask_cache(
+        self, state: _PairwiseSearchState
+    ) -> dict[tuple[int, int], np.ndarray | None] | None:
+        """Return the live ``(foreign_dom, pair_r)`` mask cache, or ``None``.
+
+        Issue #4794.  The cache is valid only for one
+        ``(grid, pairwise projection, occupancy generation)`` triple; any
+        change to any of the three drops every entry.  Returns ``None`` --
+        caching disabled, always recompute -- when the grid does not expose
+        an ``occupancy_generation`` counter (a stand-in / stub grid in a
+        test), so an object that cannot report mutation can never serve a
+        stale mask.
+        """
+        grid = self.grid
+        generation = getattr(grid, "occupancy_generation", None)
+        if not isinstance(generation, int):
+            return None
+        stamp = self._pairwise_extra_cache_stamp
+        if stamp is None or stamp[0] is not grid or stamp[1] is not state or stamp[2] != generation:
+            self._pairwise_extra_cache = {}
+            self._pairwise_extra_cache_stamp = (grid, state, generation)
+        return self._pairwise_extra_cache
+
+    def _dilate_zero_padded(self, mask: np.ndarray, radius: int) -> np.ndarray:
+        """Euclidean-disc dilation of ``mask`` treating out-of-bounds as EMPTY.
+
+        ``RoutingGrid._dilate_blocked``'s pure-NumPy fallback pads with ones
+        (out-of-bounds = blocked), which is correct for the scalar trace
+        radius (copper must stay half-width inside the board) but wrong for
+        the pairwise widening ring: the C++ ``cross_domain_trace_blocked``
+        annulus explicitly SKIPS out-of-bounds cells ("OOB is scalar's job").
+        Ones-padding there would seal a border band ``pair_r`` cells wide --
+        far beyond the board-edge rule -- and can wall off the only compliant
+        detour.  This helper mirrors the C++ convention with zero padding.
+
+        Issue #8414: the dilation is :func:`_disc_dilate_exact`. It runs in
+        O(N), costs the same at any radius, and is byte-identical to the old
+        per-offset shift-and-OR loop (:func:`_disc_dilate_shift_or`). That
+        loop cost 1.3-15.7 s per mask on a 15.9 M-cell board. scipy's
+        ``binary_dilation`` was measured slower than the loop at that size,
+        so it is no longer tried.
+        """
+        if radius <= 1:
+            return mask
+        return _disc_dilate_exact(mask, self.grid._get_disc_kernel(radius))
+
+    # ------------------------------------------------------------------
+    # Soft cross-domain (HV) avoidance gradient (Issue #4507)
+    # ------------------------------------------------------------------
+    #
+    # Python mirror of ``Pathfinder::pairwise_avoidance_cost`` (#4511
+    # Scope 2).  The hard kernels above restore the search<->gate mirror;
+    # this bounded *soft* cost is what stops the search from hugging the
+    # hard limit: a candidate cell that clears the widened radius by a hair
+    # is legal but fragile -- the next rip-up/re-route or a
+    # ``--lattice-optimize`` nudge pushes it back under, and the negotiator
+    # thrashes.  The C++ search has priced that margin since #4511; the
+    # pure-Python fallback (#4791 armed only its hard blocking) did not, so
+    # the two engines converged on measurably different HV routes.
+    #
+    # Mirror notes vs. ``Pathfinder::pairwise_avoidance_cost``:
+    # * Same band geometry: ``[hard_radius, hard_radius + band]`` where
+    #   ``band = ceil(max_widen * 0.5 / res)`` -- half the widest pairwise
+    #   requirement of slack beyond the hard block.
+    # * Same linear decay scaled to ``cost_straight`` (strongest just
+    #   outside the hard radius, zero at the band edge), so a cell hugging
+    #   the limit costs about one extra step of detour -- enough to steer,
+    #   not enough to distort the optimum away from a clean lane.
+    # * Same "one cross-domain neighbour is enough" rule -- a candidate flanked
+    #   by a long HV run is priced once, not once per cell -- and the same
+    #   NEAREST-IN-BAND choice of which cell that is (#4848).  The price is
+    #   ``cost_straight * frac(d_min)`` where ``d_min`` is the distance to the
+    #   closest qualifying cross-domain cell in the band, so the gradient is a
+    #   monotone function of real proximity.  Ties need no rule: ``frac``
+    #   depends only on the distance, so every cell at ``d_min`` prices the
+    #   same.  Up to ROUTER_CPP_BUILD_VERSION 19 BOTH engines instead priced
+    #   the first qualifying cell in row-major scan order (a two-level break,
+    #   with the outer one conditional on a strictly positive cost so that a
+    #   cell exactly on the halo circle, ``frac == 0``, did not stop the scan).
+    #   That made the nudge scan-order dependent: foreign copper 18 cells below
+    #   a candidate and 24 cells above priced ``1/8`` off the FAR cell instead
+    #   of ``7/8`` off the near one -- a 7x under-price that contradicted this
+    #   kernel's own documented decay.  #4848 changed both engines together,
+    #   with a ``ROUTER_CPP_BUILD_VERSION`` bump so a stale ``.so`` cannot
+    #   price a different gradient than this fallback; the C++ side keeps its
+    #   early exit by walking a distance-sorted band-offset table
+    #   (``Pathfinder::pairwise_band_offsets``) instead of the bounding square,
+    #   while the mirror below takes a vectorised ``min`` over the band's
+    #   squared distances.  Divergence here is always a bug: the two engines
+    #   must agree cell-for-cell on which candidate is cheap.
+    # * ``half_mm`` is the ROUTED net's class trace width (#4793), exactly as
+    #   in the hard kernels.
+    # * NO #4506 attach-zone waiver, mirroring the C++ kernel: this is a
+    #   soft nudge, never a block, so a rated footprint's attach path stays
+    #   reachable -- it is merely priced.
+
+    def _pairwise_widening_net_ids(
+        self, state: _PairwiseSearchState, dom: int
+    ) -> tuple[list[int], np.ndarray]:
+        """Foreign net ids whose domain pair with ``dom`` requires widening.
+
+        Returns both forms the two consumers want: the id list (for the
+        once-per-route ``np.isin`` band mask) and a boolean lookup array
+        indexed by net id (for the per-cell kernel, where a fancy-index of
+        the scan window is much cheaper than ``np.isin``).  Net 0 is excluded
+        -- the pour / unconnected convention never carries a domain, mirroring
+        the C++ kernels' ``cell.net == 0`` skip.  Memoised per domain against
+        the projection identity (the projection is pure net-id data, so it
+        cannot go stale while copper moves).
+        """
+        cached = self._pairwise_widening_ids_cache
+        if cached is None or cached[0] is not state:
+            cached = (state, {})
+            self._pairwise_widening_ids_cache = cached
+        entry = cached[1].get(dom)
+        if entry is None:
+            row = state.matrix[dom] if 0 <= dom < len(state.matrix) else []
+            ids = [
+                net_id
+                for net_id, domain in enumerate(state.net_to_domain)
+                if net_id != 0 and 0 <= domain < len(row) and row[domain] > 0.0
+            ]
+            lut = np.zeros(max(1, len(state.net_to_domain)), dtype=np.bool_)
+            if ids:
+                lut[ids] = True
+            entry = (ids, lut)
+            cached[1][dom] = entry
+        return entry
+
+    def _pairwise_gradient_geometry(self, net: int) -> tuple[_PairwiseSearchState, int, int] | None:
+        """``(state, hard_radius, band)`` for ``net``, or ``None`` when dormant.
+
+        Shared by the per-cell gradient kernel and the hot-loop band gate so
+        the two can never size the band differently.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return None
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return None
+        net_to_domain = state.net_to_domain
+        dom = net_to_domain[net] if 0 <= net < len(net_to_domain) else -1
+        if dom < 0:
+            return None
+        res = self.grid.resolution
+        own_name = state.id_to_name.get(net, "")
+        half_mm = self._get_trace_width_for_net(own_name) / 2.0
+        # Issue #864 rounding idiom (round before ceil), as in the hard kernels.
+        hard_r = search_radius_cells(half_mm, state.max_widen, res)
+        band = max(1, math.ceil(round(state.max_widen * 0.5 / res, 6)))
+        return state, hard_r, band
+
+    def _pairwise_avoidance_cost(self, gx: int, gy: int, layer: int, net: int) -> float:
+        """Soft HV-avoidance cost for one candidate cell (0.0 when dormant).
+
+        Python mirror of ``Pathfinder::pairwise_avoidance_cost``; see the
+        block comment above for the mirror contract.  Returns a bounded
+        additive A* cost in ``cost_straight`` units.
+        """
+        geometry = self._pairwise_gradient_geometry(net)
+        if geometry is None:
+            return 0.0
+        state, hard_r, band = geometry
+        dom = state.net_to_domain[net]
+        foreign_ids, widen_lut = self._pairwise_widening_net_ids(state, dom)
+        if not foreign_ids:
+            return 0.0
+
+        halo_r = hard_r + band
+        x1 = max(0, gx - halo_r)
+        y1 = max(0, gy - halo_r)
+        x2 = min(self.grid.cols, gx + halo_r + 1)
+        y2 = min(self.grid.rows, gy + halo_r + 1)
+        if x1 >= x2 or y1 >= y2:
+            return 0.0
+
+        blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
+        if not bool(np.any(blocked_region)):
+            return 0.0
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+
+        # The scan window's squared-distance / band geometry depends only on
+        # the radii, so it is built once and sliced here (the window is the
+        # full kernel unless the board edge clipped it).
+        dist_full, band_full = self._pairwise_band_kernel(hard_r, band)
+        off_y = y1 - (gy - halo_r)
+        off_x = x1 - (gx - halo_r)
+        dist_sq = dist_full[off_y : off_y + (y2 - y1), off_x : off_x + (x2 - x1)]
+        band_mask = band_full[off_y : off_y + (y2 - y1), off_x : off_x + (x2 - x1)]
+
+        candidates = blocked_region & band_mask & (net_region != net)
+        if not bool(np.any(candidates)):
+            return 0.0
+
+        # Issue #4848: price the NEAREST qualifying cell, not the first in
+        # scan order (see the block comment above).  Keep the widening filter
+        # off the full window -- ``candidates`` is already sparse, so the
+        # per-net lookup only ever touches the handful of foreign cells that
+        # made it into the band.
+        candidate_nets = net_region[candidates]
+        in_range = (candidate_nets > 0) & (candidate_nets < widen_lut.size)
+        if not bool(np.any(in_range)):
+            return 0.0
+        qualifies = np.zeros(candidate_nets.shape, dtype=np.bool_)
+        # Same domain / no widening for this pair -> not a gradient source.
+        qualifies[in_range] = widen_lut[candidate_nets[in_range]]
+        if not bool(np.any(qualifies)):
+            return 0.0
+
+        nearest_sq = float(dist_sq[candidates][qualifies].min())
+        distance = math.sqrt(nearest_sq)
+        # Linear decay: strongest just outside the hard radius, zero at the
+        # band edge, scaled to ``cost_straight``.
+        frac = (halo_r - distance) / band
+        frac = min(1.0, max(0.0, frac))
+        return self.rules.cost_straight * frac
+
+    def _pairwise_band_kernel(self, hard_r: int, band: int) -> tuple[np.ndarray, np.ndarray]:
+        """Cached ``(dist_sq, band_mask)`` window for the gradient scan."""
+        cached = self._pairwise_band_kernel_cache
+        if cached is not None and cached[0] == (hard_r, band):
+            return cached[1], cached[2]
+        halo_r = hard_r + band
+        offsets = np.arange(-halo_r, halo_r + 1)
+        dist_sq = (offsets * offsets)[:, None] + (offsets * offsets)[None, :]
+        band_mask = (dist_sq > hard_r * hard_r) & (dist_sq <= halo_r * halo_r)
+        self._pairwise_band_kernel_cache = ((hard_r, band), dist_sq, band_mask)
+        return dist_sq, band_mask
+
+    def _pairwise_gradient_band(self, net: int, deadline: float | None = None) -> np.ndarray | None:
+        """Cells where :meth:`_pairwise_avoidance_cost` can be non-zero.
+
+        Issue #4507: the Python A* hot loop cannot afford a band scan per
+        neighbour, so ``_route_impl`` pre-computes this conservative superset
+        (foreign widening copper dilated by the halo radius) and consults the
+        exact kernel only for cells it flags.  ``None`` when dormant -- the
+        hot loop then adds no cost at all and stays byte-identical to
+        pre-#4507 behaviour.
+
+        Issue #8414: raises :class:`_SetupDeadlineExpired` if ``deadline`` has
+        passed before the band dilation starts.
+        """
+        geometry = self._pairwise_gradient_geometry(net)
+        if geometry is None:
+            return None
+        state, hard_r, band = geometry
+        dom = state.net_to_domain[net]
+        foreign_ids, _widen_lut = self._pairwise_widening_net_ids(state, dom)
+        if not foreign_ids:
+            return None
+        _check_setup_deadline(deadline)  # Issue #8414
+        foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
+        if not bool(np.any(foreign_mask)):
+            return None
+        # Out-of-bounds is EMPTY here for the same reason the widening ring
+        # uses it (#4791): the C++ band scan skips out-of-bounds cells.
+        return self._dilate_zero_padded(foreign_mask, hard_r + band)
+
+    def _grid_layer_object(self, layer: int) -> Layer | None:
+        """Grid layer index -> :class:`Layer` enum member (or ``None``).
+
+        The #4506 attach zones scope their waiver by KiCad layer *name*;
+        the grid's own ``_index_to_layer`` map is the translation authority
+        (the same mapping ``layer_to_index`` inverts for segments and vias).
+        ``None`` -- the layer-agnostic waiver verdict -- is returned when the
+        index is unmapped, mirroring the C++ ``layer = -1`` convention.
+        """
+        enum_value = self.grid._index_to_layer.get(layer)
+        if enum_value is None:
+            return None
+        try:
+            return Layer(enum_value)
+        except ValueError:
+            return None
+
+    # Issue #3438: per-conflicted-step penalty charged by the relief
+    # probe when crossing a foreign usage-0 non-obstacle cell.  Must stay
+    # in lock-step with ``Pathfinder::relief_conflict_penalty_`` in
+    # ``cpp/include/pathfinder.hpp`` so probe paths agree across backends.
+    _RELIEF_CONFLICT_PENALTY = 20.0
+
+    def set_relief_mode(self, enabled: bool) -> None:
+        """Enable/disable the relief-probe mode (Issue #3438).
+
+        Mirrors ``CppPathfinder.set_relief_mode``.  See the ``relief_mode``
+        attribute docstring in ``__init__`` for semantics.
+        """
+        self.relief_mode = bool(enabled)
+
+    def _get_negotiated_cell_cost(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        present_factor: float = 1.0,
+        net: int | None = None,
+    ) -> float:
+        """Get negotiated congestion cost for a cell.
+
+        Issue #2963: ``net`` plumbs the routing-net context to the
+        cost function so own-net ``is_obstacle`` cells (destination
+        pad metal marked by PR #2928's first-touch) are reachable.
+
+        Issue #3438: in relief-probe mode, foreign usage-0 non-obstacle
+        cells (passable only in relief mode) charge an additional
+        ``_RELIEF_CONFLICT_PENALTY`` so the probe is a min-conflict
+        search.  The relief probe always runs through the scalar
+        ``route()`` path, which uses this method.
+        """
+        cost = self.grid.get_negotiated_cost(gx, gy, layer, present_factor, net=net)
+        if self.relief_mode and net is not None:
+            g = self.grid
+            if g._blocked[layer, gy, gx] and not g._is_obstacle[layer, gy, gx]:
+                cell_net = g._net[layer, gy, gx]
+                if cell_net != 0 and cell_net != net and g._usage_count[layer, gy, gx] == 0:
+                    cost += self._RELIEF_CONFLICT_PENALTY
+        return cost
+
+    def _get_layer_priority(self) -> list[int]:
+        """Get layer indices sorted by congestion (most congested first).
+
+        Issue #966: When checking if a via is blocked, checking congested
+        layers first enables faster rejection since blocked cells are more
+        likely on congested layers.
+
+        Returns:
+            List of layer indices sorted by decreasing congestion level.
+        """
+        if self._layer_priority is not None:
+            return self._layer_priority
+
+        # Calculate total congestion per layer
+        congestion_per_layer = []
+        for layer_idx in range(self.grid.num_layers):
+            layer_congestion = np.sum(self.grid._congestion[layer_idx])
+            congestion_per_layer.append((layer_idx, layer_congestion))
+
+        # Sort by congestion (descending)
+        congestion_per_layer.sort(key=lambda x: x[1], reverse=True)
+
+        # Cache and return layer indices
+        self._layer_priority = [layer_idx for layer_idx, _ in congestion_per_layer]
+        return self._layer_priority
+
+    def _invalidate_layer_priority(self) -> None:
+        """Invalidate cached layer priority (call when congestion changes significantly)."""
+        self._layer_priority = None
+
+    def _non_th_pad_geometry(self) -> tuple[np.ndarray, ...]:
+        """Vectorized (x, y, half_w, half_h, cos, sin) for non-through-hole pads.
+
+        Issue #5240: backs the ``not self._allow_smd_vias`` sweep in
+        :meth:`_check_via_placement_cached` with a single NumPy pass instead
+        of a per-pad Python loop that recomputed each rotated pad's
+        cos/sin (via ``pad_point_distance`` -> ``pad_local_point``) on every
+        call.
+
+        Invalidation (PR #5330 review): the cache is dropped by
+        :meth:`clear_via_cache`, i.e. on exactly the same trigger as the
+        sibling ``_via_cache`` -- at the start of every ``route_net`` /
+        ``_astar_search`` and whenever the foreign-net context changes,
+        because "grid state may have changed".  The pad-count check below
+        is only a cheap *additional* guard for freshly appended pads
+        (``RoutingGrid.add_pad``) within a single routing pass; it is NOT
+        the invalidation contract.  Pad *count* alone is insufficient
+        because pad geometry is mutated IN PLACE, on the same ``Pad``
+        objects, without changing the count --
+        ``PlacementFeedbackLoop._apply_delta_to_router_pads`` /
+        ``_restore_router_pads`` do exactly that for
+        ``translate``/``rotate_180``/``mirror`` deltas while reusing one
+        ``Router`` instance for the whole feedback loop.
+        """
+        pads = self.grid._pads
+        cached = self._non_th_pad_cache
+        if cached is not None and cached[0] == len(pads):
+            return cached[1]
+
+        xs: list[float] = []
+        ys: list[float] = []
+        half_w: list[float] = []
+        half_h: list[float] = []
+        cos_r: list[float] = []
+        sin_r: list[float] = []
+        for pad in pads:
+            if pad.through_hole:
+                continue
+            xs.append(pad.x)
+            ys.append(pad.y)
+            half_w.append(pad.width / 2.0)
+            half_h.append(pad.height / 2.0)
+            if pad.rotation:
+                angle = math.radians(pad.rotation)
+                cos_r.append(math.cos(angle))
+                sin_r.append(math.sin(angle))
+            else:
+                # Matches pad_local_point's rotation==0 fast path exactly
+                # (no trig call, identity transform).
+                cos_r.append(1.0)
+                sin_r.append(0.0)
+
+        arrays = (
+            np.array(xs, dtype=np.float64),
+            np.array(ys, dtype=np.float64),
+            np.array(half_w, dtype=np.float64),
+            np.array(half_h, dtype=np.float64),
+            np.array(cos_r, dtype=np.float64),
+            np.array(sin_r, dtype=np.float64),
+        )
+        self._non_th_pad_cache = (len(pads), arrays)
+        return arrays
+
+    #: Entry cap for the two site memos and the disc-mask memo (issue #5617).
+    #: Purely a memory backstop: dropping entries can only cost work, never
+    #: change a verdict, because every miss recomputes the same pure function.
+    _SITE_CACHE_MAX = 500_000
+
+    def _component_hole_clear_cached(self, gx: int, gy: int) -> bool:
+        """Memoised ``grid._component_hole_index.clear`` for a via at ``(gx, gy)``.
+
+        Issue #5617.  The physical-drill floor is a predicate of the CELL
+        alone: its four arguments are ``grid_to_world(gx, gy)`` plus
+        ``rules.via_drill`` / ``rules.min_hole_to_hole``, neither of which
+        depends on ``net``, ``layer``, ``radius`` or ``allow_sharing``.  Yet
+        the A* re-evaluates it once in :meth:`_check_via_placement_cached`
+        and then once more per non-plane layer inside :meth:`_is_via_blocked`
+        -- 3-5 identical evaluations per via candidate on a four-layer board.
+
+        Soundness: the only mutable input is ``grid._component_hole_index``,
+        and it is **not** reached exclusively through
+        :meth:`invalidate_pad_geometry_cache` -- ``RoutingGrid.add_pad`` and
+        ``add_component_hole`` append to the live index in place, mid-route,
+        with no router-side hook (``test_component_hole_search.py`` pins
+        exactly that: a hole added after a positive answer must flip it).
+        So the memo carries a token instead of relying on the entry point:
+
+        * the index **object** -- ``refresh_component_holes`` and the
+          thread-safe grid rebuild both install a fresh ``refreshed()``
+          instance, and holding the reference in the token keeps the compared
+          object alive, so identity can never be recycled underneath it;
+        * ``len(index.holes)`` -- a perfect version counter for one instance,
+          because ``_index`` only ever *appends* (holes are never removed);
+        * ``index.known`` -- flipped to ``False`` by
+          ``install_component_hole_census(None)``, which turns every verdict
+          negative without touching ``holes``.
+
+        Any mismatch drops the memo wholesale.  Building and comparing that
+        token is a tuple allocation against a bin sweep of the hole index, so
+        the memo still pays for itself on the first repeat.
+        """
+        index = self.grid._component_hole_index
+        token = (index, len(index.holes), index.known)
+        if token != self._hole_site_cache_token:
+            self._hole_site_cache.clear()
+            self._hole_site_cache_token = token
+        key = (gx, gy)
+        hit = self._hole_site_cache.get(key)
+        if hit is None:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            hit = index.clear(wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole)
+            if len(self._hole_site_cache) >= self._SITE_CACHE_MAX:
+                self._hole_site_cache.clear()
+            self._hole_site_cache[key] = hit
+        return hit
+
+    def _non_th_pad_drill_clear(self, gx: int, gy: int) -> bool:
+        """Memoised non-through-hole pad-drill sweep for a via at ``(gx, gy)``.
+
+        Issue #5617.  Same shape as :meth:`_component_hole_clear_cached`: the
+        #5240 vectorised sweep reads only ``grid_to_world(gx, gy)``,
+        ``rules.via_drill`` and :meth:`_non_th_pad_geometry`, so it is a
+        predicate of the cell alone -- but because ``_via_cache`` is bypassed
+        whenever ``allow_sharing`` is set (the negotiated mode the pure-Python
+        fallback runs in), it was re-run on **every**
+        :meth:`_check_via_placement_cached` call.  A py-spy profile of the
+        Diff-Pair regression job's re-route step attributed 7.3 s of phase
+        4's 524.2 s to its six NumPy lines alone.
+
+        Soundness: the memo is valid for exactly as long as the geometry it
+        reads is, so it is tokened on the **identity of the arrays tuple**
+        :meth:`_non_th_pad_geometry` hands back.  That tuple is rebuilt
+        whenever ``_non_th_pad_cache`` misses -- on a pad-count change, and on
+        the explicit :meth:`invalidate_pad_geometry_cache` drop that PR #5330
+        introduced for in-place ``Pad`` mutation -- so a new tuple object is
+        precisely the signal that the sweep's inputs moved.  The arithmetic is
+        byte-identical to the inline form it replaces.
+        """
+        geometry = self._non_th_pad_geometry()
+        if geometry is not self._pad_drill_cache_token:
+            self._pad_drill_site_cache.clear()
+            self._pad_drill_cache_token = geometry
+        key = (gx, gy)
+        hit = self._pad_drill_site_cache.get(key)
+        if hit is None:
+            pxs, pys, half_w, half_h, cos_r, sin_r = geometry
+            hit = True
+            if pxs.size:
+                wx, wy = self.grid.grid_to_world(gx, gy)
+                drill_radius = self.rules.via_drill / 2.0
+                dx = wx - pxs
+                dy = wy - pys
+                lx = cos_r * dx - sin_r * dy
+                ly = sin_r * dx + cos_r * dy
+                ex = np.maximum(np.abs(lx) - half_w, 0.0)
+                ey = np.maximum(np.abs(ly) - half_h, 0.0)
+                hit = not bool(np.any(np.hypot(ex, ey) < drill_radius))
+            if len(self._pad_drill_site_cache) >= self._SITE_CACHE_MAX:
+                self._pad_drill_site_cache.clear()
+            self._pad_drill_site_cache[key] = hit
+        return hit
+
+    def _pad_edge_clear(self, gx: int, gy: int) -> bool:
+        """True unless a via at ``(gx, gy)`` sits in an SMD pad's mask-dam zone (#7296).
+
+        Same arithmetic as :func:`~.via_in_pad_eligibility.via_drill_at_pad_edge`
+        (the drill clears the copper but its edge is within
+        ``rules.min_via_pad_edge_gap`` of it), vectorised over every
+        non-through-hole pad like :meth:`_non_th_pad_drill_clear` and memoised
+        on the same geometry-tuple token.  Applies whether or not the fab
+        allows via-in-pad: a drill overlapping copper is that decision, not
+        this one.  Scans every SMD pad, not only other-net ones, so it errs
+        conservative against the same-net-only checker.
+        """
+        floor = float(self.rules.min_via_pad_edge_gap or 0.0)
+        if floor <= 0.0:
+            return True
+        geometry = self._non_th_pad_geometry()
+        if geometry is not self._pad_edge_cache_token:
+            self._pad_edge_site_cache.clear()
+            self._pad_edge_cache_token = geometry
+        key = (gx, gy)
+        hit = self._pad_edge_site_cache.get(key)
+        if hit is None:
+            pxs, pys, half_w, half_h, cos_r, sin_r = geometry
+            hit = True
+            if pxs.size:
+                wx, wy = self.grid.grid_to_world(gx, gy)
+                radius = self.rules.via_drill / 2.0
+                dx = wx - pxs
+                dy = wy - pys
+                lx = cos_r * dx - sin_r * dy
+                ly = sin_r * dx + cos_r * dy
+                ex = np.maximum(np.abs(lx) - half_w, 0.0)
+                ey = np.maximum(np.abs(ly) - half_h, 0.0)
+                dist = np.hypot(ex, ey)
+                hit = not bool(np.any((dist >= radius) & (dist < radius + floor)))
+            if len(self._pad_edge_site_cache) >= self._SITE_CACHE_MAX:
+                self._pad_edge_site_cache.clear()
+            self._pad_edge_site_cache[key] = hit
+        return hit
+
+    def _check_via_placement_cached(
+        self,
+        gx: int,
+        gy: int,
+        net: int,
+        allow_sharing: bool = False,
+        radius: int | None = None,
+    ) -> bool:
+        """Check if a via can be placed at (gx, gy) for the given net, using cache.
+
+        Issue #966: This method wraps via blocking checks with a cache to avoid
+        redundant computation when the same position is checked multiple times
+        during A* search.
+
+        Args:
+            gx, gy: Grid coordinates for via placement
+            net: Net ID for the route
+            allow_sharing: If True (negotiated mode), allow sharing
+            radius: Override the via half-width in grid cells (Issue #1692).
+
+        Returns:
+            True if via CAN be placed (all layers clear), False if blocked.
+        """
+        # Issue #5617: memoised per cell (see ``_component_hole_clear_cached``).
+        if not self._component_hole_clear_cached(gx, gy):
+            return False
+        # Issue #6243: authored per-net minimum, never cached as "clear" by
+        # the sharing-insensitive via cache below.
+        if not self._authored_via_clear(gx, gy, net):
+            return False
+
+        # Try cache first (only in non-sharing mode since sharing state can change)
+        # Issue #1692: Include radius in cache key so different net classes
+        # don't collide in the cache.
+        effective_radius = radius if radius is not None else self._via_half_cells
+        if not allow_sharing:
+            cache_key = (gx, gy, net, effective_radius)
+            if cache_key in self._via_cache:
+                return self._via_cache[cache_key]
+
+        # Process restrictions also apply to own-net copper and plane layers.
+        #
+        # Issue #5240 vectorized the equivalent per-pad
+        # ``pad_point_distance(pad, wx, wy) < drill_radius`` Python loop --
+        # same pad_local_point/pad_point_distance math (rotate into the pad
+        # frame, clamp to the rectangle, hypot the residual) -- for every
+        # non-through-hole pad in one NumPy sweep.  This branch is hot: it is
+        # the default for jlcpcb (no via-in-pad support) and ran once per via
+        # candidate the pure-Python A* fallback considers, because the
+        # ``_via_cache`` above is bypassed whenever ``allow_sharing`` is set.
+        # Issue #5617 memoises that sweep per cell -- it does not depend on
+        # ``net``, ``radius`` or ``allow_sharing``.
+        if not self._allow_smd_vias and not self._non_th_pad_drill_clear(gx, gy):
+            return False
+        # Issue #7296: the mask-dam zone beside an SMD pad, which applies even
+        # where via-in-pad is allowed (the drill does not touch the copper).
+        if not self._pad_edge_clear(gx, gy):
+            return False
+
+        # Check all layers using priority ordering.
+        # Issue #2325: Skip plane layers when checking via blockage.  On plane
+        # layers (GND/PWR), KiCad's zone fill creates the anti-pad or thermal
+        # relief automatically.  Checking blocking on plane layers causes false
+        # rejections from PTH pad clearance zones, which on dense boards can
+        # prevent ALL via placement.
+        for check_layer in self._get_layer_priority():
+            if self.grid.is_plane_layer(check_layer):
+                continue
+            if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing, radius=radius):
+                # Cache the negative result
+                if not allow_sharing:
+                    self._via_cache[(gx, gy, net, effective_radius)] = False
+                return False
+
+        # Issue #2947: World-coord foreign-net clearance check.  The
+        # per-layer coarse-grid check above can admit a via that sits
+        # within ``via_radius + foreign_obstacle_radius + clearance`` of
+        # an adjacent foreign-net pad / trace in world coordinates -- the
+        # grid resolution loses the sub-cell distinction.  Same bug
+        # class PR #2945 patched in ``EscapeRouter._can_place_via``.
+        # Only runs when ``set_via_foreign_context`` has populated the
+        # context lists (otherwise behavior matches pre-#2947).  A* has
+        # a fallback at both call sites (``continue`` on rejection ->
+        # next neighbor / next via position), so a hard reject here is
+        # safe -- unlike the QFP in-pad rescue path.
+        if self._foreign_pad_tuples or self._foreign_track_adapters:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            # Effective via diameter from grid radius (cells -> mm).
+            eff_diameter = 2 * effective_radius * self.grid.resolution
+            # Filter same-net obstacles (passing a superset is allowed
+            # by ``point_clear_of_copper``'s contract but the same-net
+            # filter avoids spurious rejections on the routing net).
+            # Net is at index 4 for the 5-tuple (x, y, w, h, net) shape
+            # populated by ``set_via_foreign_context`` (Issue #2951).
+            other_pads = [p for p in self._foreign_pad_tuples if p[4] != net]
+            # Track adapter does not carry net id; the caller
+            # (``Autorouter``) is responsible for excluding same-net
+            # segments before populating the context.  This matches
+            # ``EscapeRouter``'s pattern at the boundary.
+            if not point_clear_of_copper(
+                x=wx,
+                y=wy,
+                via_size=eff_diameter,
+                clearance=self.rules.via_clearance,
+                other_net_tracks=self._foreign_track_adapters,
+                other_net_pads=other_pads,
+            ):
+                if not allow_sharing:
+                    self._via_cache[(gx, gy, net, effective_radius)] = False
+                return False
+
+        # Via is valid on all layers - cache positive result
+        if not allow_sharing:
+            self._via_cache[(gx, gy, net, effective_radius)] = True
+        return True
+
+    def clear_via_cache(self) -> None:
+        """Clear the via validity cache.
+
+        Call this when grid state changes (routes added/removed) to ensure
+        cache doesn't return stale results.
+
+        PR #5330 review: this also drops the vectorized non-through-hole pad
+        geometry cache (:meth:`_non_th_pad_geometry`), so the two caches that
+        feed :meth:`_check_via_placement_cached` share one invalidation
+        contract.  Keying the pad geometry on pad count alone was unsound:
+        ``PlacementFeedbackLoop`` mutates ``Pad.x``/``Pad.y``/``Pad.rotation``
+        in place, on the same objects, without changing the count, while
+        reusing a single ``Router`` for the whole feedback loop.
+        """
+        self._via_cache.clear()
+        # Issue #5617: the route-halo via memo shares this invalidation
+        # trigger, so a rule-configuration change between routes (net-class
+        # names, attach zones, pairwise clearance table) can never be served
+        # from a stale entry -- the halo's own ``state_version`` covers
+        # geometry changes, this covers everything else ``clear`` reads.
+        self._via_halo_cache.clear()
+        self._via_halo_cache_token = None
+        self._trace_halo_cache.clear()
+        self._trace_halo_cache_token = None
+        self.invalidate_pad_geometry_cache()
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Drop the cached non-through-hole pad geometry arrays.
+
+        PR #5330 review: call this after mutating any ``Pad`` on
+        ``grid._pads`` in place (position, size, rotation, through-hole
+        flag).  :meth:`clear_via_cache` already calls it, so every
+        ``route_net`` / ``_astar_search`` start and every foreign-context
+        change is covered; this entry point exists for mutators that do not
+        (or may not) go through a route call before the next via check --
+        e.g. ``PlacementFeedbackLoop._apply_delta_to_router_pads`` and
+        ``_restore_router_pads``.
+        """
+        self._non_th_pad_cache = None
+        self._pad_bucket_cache = None  # Issue #6389
+        self._pad_step_memo.clear()
+        self._pad_step_memo_token = None
+        # Issue #5617: the two site-level via memos read exactly the state
+        # this method invalidates -- ``_non_th_pad_cache`` (the pad-drill
+        # sweep) and ``grid._component_hole_index`` (which
+        # ``refresh_component_holes`` below REPLACES).  Their own tokens
+        # would already catch both (a fresh arrays tuple, a fresh index
+        # object), so dropping them here is belt-and-braces rather than the
+        # contract -- it just makes the invalidation visible at the entry
+        # point every other pad-geometry consumer uses.
+        self._hole_site_cache.clear()
+        self._hole_site_cache_token = None
+        self._pad_drill_site_cache.clear()
+        self._pad_drill_cache_token = None
+        self.grid.refresh_component_holes()
+
+    def _get_congestion_cost(self, gx: int, gy: int, layer: int) -> float:
+        """Get additional cost based on congestion at this location."""
+        congestion = self.grid.get_congestion(gx, gy, layer)
+        if congestion > self.rules.congestion_threshold:
+            # Exponential penalty for congested areas
+            excess = congestion - self.rules.congestion_threshold
+            return self.rules.cost_congestion * (1.0 + excess * 2.0)
+        return 0.0
+
+    def _batch_congestion_costs(self, current_x: int, current_y: int, layer: int) -> list[float]:
+        """Compute congestion costs for all 2D neighbors of the current cell.
+
+        Issue #963 originally vectorized this with NumPy to reduce
+        per-neighbor function call overhead. Issue #5240 (CI runtime
+        investigation): ``self.neighbors_2d`` only ever has 4-8 entries, so
+        the NumPy path paid for ~10 temporary array allocations (bounds
+        mask, congestion-grid coordinates, valid-index lookup, congestion
+        levels, threshold mask, excess, output) plus per-call ufunc
+        dispatch overhead on every single A* node expansion just to work on
+        a handful of scalars -- profiling the pure-Python router fallback
+        (which this method is only ever called from) showed it as the
+        single hottest function in that path. A plain Python loop over the
+        same fixed-size neighbor list produces bit-identical results with
+        none of that overhead.
+
+        Args:
+            current_x: Current grid x coordinate
+            current_y: Current grid y coordinate
+            layer: Current layer index
+
+        Returns:
+            List of congestion costs indexed by neighbor offset index.
+            Out-of-bounds neighbors get cost 0 (will be filtered anyway).
+        """
+        cols = self.grid.cols
+        rows = self.grid.rows
+        congestion_size = self.grid.congestion_size
+        congestion_cols = self.grid.congestion_cols
+        congestion_rows = self.grid.congestion_rows
+        congestion_arr = self.grid._congestion
+        max_cells = congestion_size * congestion_size
+        threshold = self.rules.congestion_threshold
+        cost_congestion = self.rules.cost_congestion
+
+        costs = [0.0] * len(self.neighbors_2d)
+        # Adjacent fine-grid neighbors often share a coarse congestion region.
+        # Reuse only within this batch so later calls observe grid/rule updates.
+        last_cx = last_cy = -1
+        last_cost = 0.0
+        for i, (dx, dy, _dlayer, _cost_mult) in enumerate(self.neighbors_2d):
+            nx = current_x + dx
+            ny = current_y + dy
+            if not (0 <= nx < cols and 0 <= ny < rows):
+                continue
+
+            cx = min(nx // congestion_size, congestion_cols - 1)
+            cy = min(ny // congestion_size, congestion_rows - 1)
+            if cx == last_cx and cy == last_cy:
+                costs[i] = last_cost
+                continue
+            last_cx, last_cy = cx, cy
+            congestion_level = min(1.0, float(congestion_arr[layer, cy, cx]) / max_cells)
+            if congestion_level > threshold:
+                excess = congestion_level - threshold
+                costs[i] = cost_congestion * (1.0 + excess * 2.0)
+            last_cost = costs[i]
+
+        return costs
+
+    def _batch_turn_costs(self, current_direction: tuple[int, int]) -> list[float]:
+        """Compute turn costs for all 2D neighbors of the current direction.
+
+        Issue #963 originally vectorized this with NumPy. Issue #5240: like
+        ``_batch_congestion_costs`` above, ``self.neighbors_2d`` is a
+        4-8-element fixed list, so a plain Python loop avoids the
+        per-call NumPy array allocation/comparison overhead while producing
+        identical results (see that method's docstring for the profiling
+        context).
+
+        Args:
+            current_direction: Current direction as (dx, dy) tuple
+
+        Returns:
+            List of turn costs indexed by neighbor offset index.
+        """
+        if current_direction == (0, 0):
+            # No current direction - no turn penalty
+            return [0.0] * len(self.neighbors_2d)
+
+        cost_turn = self.rules.cost_turn
+        dx0, dy0 = current_direction
+        return [
+            0.0 if (dx == dx0 and dy == dy0) else cost_turn
+            for dx, dy, _dlayer, _cost_mult in self.neighbors_2d
+        ]
+
+    def _is_zone_cell(self, gx: int, gy: int, layer: int) -> bool:
+        """Check if a cell is part of a zone (copper pour)."""
+        if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+            return False
+        return bool(self.grid._is_zone[layer, gy, gx])
+
+    def _get_zone_net(self, gx: int, gy: int, layer: int) -> int:
+        """Get the net number of a zone cell, or 0 if not a zone."""
+        if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+            return 0
+        cell = self.grid.cell_at(layer, gy, gx)
+        if cell.is_zone:
+            return cell.net
+        return 0
+
+    def _is_zone_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
+        """Check if routing through this zone cell is blocked.
+
+        Zone cells allow routing through same-net zones but block
+        routing through other-net zones.
+
+        Args:
+            gx, gy: Grid coordinates
+            layer: Grid layer index
+            net: Net number of the route being planned
+
+        Returns:
+            True if blocked (other-net zone), False if passable
+        """
+        if not self._is_zone_cell(gx, gy, layer):
+            return False  # Not a zone, use normal blocking logic
+
+        zone_net = self._get_zone_net(gx, gy, layer)
+
+        # Same net: passable (can route through own zone copper)
+        if zone_net == net:
+            return False
+
+        # Different net: blocked (cannot route through other-net zone)
+        return True
+
+    def _get_zone_cost(self, gx: int, gy: int, layer: int, net: int) -> float:
+        """Get routing cost adjustment for zone cells.
+
+        Same-net zones have reduced cost (encourage using zone copper).
+        Different-net zones are blocked (handled elsewhere).
+
+        Args:
+            gx, gy: Grid coordinates
+            layer: Grid layer index
+            net: Net number of the route being planned
+
+        Returns:
+            Cost adjustment (0.0 for normal, negative for same-net zone)
+        """
+        if not self._is_zone_cell(gx, gy, layer):
+            return 0.0
+
+        zone_net = self._get_zone_net(gx, gy, layer)
+
+        if zone_net == net:
+            # Same net - encourage using zone copper with reduced cost
+            return self.rules.cost_zone_same_net - 1.0  # Net reduction
+        else:
+            # Different net - should be blocked, but return high cost as fallback
+            return 100.0
+
+    def _get_layer_preference_cost(self, layer: int, net_class: NetClassRouting | None) -> float:
+        """Get routing cost based on layer preferences (Issue #625).
+
+        Applies cost modifiers based on the net class's layer preferences:
+        - Preferred layers get a discount (cost multiplier 0.5)
+        - Avoided layers get a penalty (cost multiplier from net_class)
+        - Neutral layers have no adjustment
+
+        Args:
+            layer: Grid layer index
+            net_class: NetClassRouting with layer preferences
+
+        Returns:
+            Cost multiplier (< 1.0 for preferred, > 1.0 for avoided, 1.0 for neutral)
+        """
+        if net_class is None:
+            return 1.0
+
+        # Check if this is a preferred layer
+        if net_class.preferred_layers is not None:
+            if layer in net_class.preferred_layers:
+                return 0.5  # Discount for preferred layer
+
+        # Check if this is an avoided layer
+        if net_class.avoid_layers is not None:
+            if layer in net_class.avoid_layers:
+                return net_class.layer_cost_multiplier  # Penalty for avoided layer
+
+        return 1.0  # Neutral
+
+    def _hard_avoided_layers(self, net_class: NetClassRouting | None) -> frozenset[int]:
+        """Grid-layer indices to HARD-block for this net (Issue #4433).
+
+        Mirrors the C++ backend's per-net avoid-layer enforcement.  Returns
+        the subset of ``net_class.avoid_layers`` that must be enforced as a
+        hard constraint (auto-hard when the class declares ``target_ampacity``;
+        opt-in hard for the ampacity-free case via ``--strict-layers`` /
+        ``DesignRules.strict_layers``).  An empty set means "no hard block" --
+        ``avoid_layers`` keeps its historical SOFT cost bias
+        (:meth:`_get_layer_preference_cost`), preserving pre-#4433 behaviour.
+
+        Args:
+            net_class: The routing net class for the net being routed, or None.
+
+        Returns:
+            Frozen set of grid-layer indices the net must not be routed on.
+        """
+        if net_class is None:
+            return frozenset()
+        return net_class.hard_avoided_layer_indices(self.rules.strict_layers)
+
+    def _is_layer_allowed(self, layer_idx: int, net_class: NetClassRouting | None = None) -> bool:
+        """Check if routing on this layer is allowed (Issue #715).
+
+        When allowed_layers is set in DesignRules, only those layers
+        can be used for routing. This provides a hard constraint for
+        single-layer or restricted-layer routing.
+
+        Issue #6876: ``net_class``'s ``allow_plane_layers`` opt-in widens the
+        gate for the named layers only (via the shared
+        :func:`~kicad_tools.router.rules.layer_permitted` predicate).
+
+        Args:
+            layer_idx: Grid layer index
+            net_class: The routed net's class, or None (no opt-in).
+
+        Returns:
+            True if layer is allowed (or no restriction), False if blocked
+        """
+        if self.rules.allowed_layers is None:
+            return True  # No restriction
+
+        # Convert grid index to Layer enum value, then to KiCad name for comparison
+        layer_value = self.grid.index_to_layer(layer_idx)
+        layer = Layer(layer_value)
+        return layer_permitted(self.rules, net_class, layer_idx, layer.kicad_name)
+
+    def _can_place_via_in_zones(self, gx: int, gy: int, net: int) -> bool:
+        """Check if via placement is legal considering zones on all layers.
+
+        A via can be placed if:
+        - No zone on any layer, OR
+        - All zones are same-net (via connects through same-net zones), OR
+        - Via is placed where there's no zone copper
+
+        Args:
+            gx, gy: Grid coordinates
+            net: Net number of the route being planned
+
+        Returns:
+            True if via can be placed, False if blocked by other-net zone
+        """
+        for layer_idx in range(self.grid.num_layers):
+            if self._is_zone_cell(gx, gy, layer_idx):
+                zone_net = self._get_zone_net(gx, gy, layer_idx)
+                if zone_net != net:
+                    # Via would pierce an other-net zone
+                    return False
+        return True
+
+    def route(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+    ) -> Route | None:
+        """Route between two pads using congestion-aware A*.
+
+        Issue #2929: When per-A*-call timing instrumentation is enabled via
+        :meth:`enable_per_call_timing`, this wrapper records the elapsed
+        wall-clock time and whether the deadline was respected.  The actual
+        search logic lives in :meth:`_route_impl`.
+        """
+        # Issue #5923: clamp to the bounded-excursion wall deadline, if any
+        # (identity otherwise) -- same choke point as ``CppPathfinder.route``.
+        per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #6366: per-net A* weight override (evolutionary gene).
+        net_weights = getattr(self, "net_astar_weights", None)
+        if weight == 1.0 and net_weights:
+            weight = net_weights.get(start.net, weight)
+        if not self._per_call_timing_enabled:
+            return self._route_impl(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+
+        t0 = time.monotonic()
+        succeeded = False
+        try:
+            result = self._route_impl(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+            succeeded = result is not None
+            return result
+        finally:
+            elapsed = time.monotonic() - t0
+            # Issue #2929 acceptance criterion 2 specifies a 1.2x slack
+            # bound for "small fudge factor."  We add a 1s absolute floor
+            # to accommodate one final 1024-iteration batch on the Python
+            # path (the deadline is sampled every 1024 iterations; on a
+            # dense grid that batch can take ~hundreds of ms).  For
+            # production budgets (10-30s typical) the multiplicative
+            # bound dominates; for tiny budgets (sub-second) the additive
+            # floor prevents false positives from check granularity.
+            deadline_violated = (
+                per_net_timeout is not None
+                and per_net_timeout > 0
+                and elapsed > per_net_timeout * 1.2 + 1.0
+            )
+            self._per_call_timings.append(
+                {
+                    "net": start.net,
+                    "net_name": start.net_name,
+                    "elapsed": elapsed,
+                    "per_net_timeout": per_net_timeout,
+                    "deadline_violated": deadline_violated,
+                    "succeeded": succeeded,
+                }
+            )
+
+    def _route_impl(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+    ) -> Route | None:
+        """Inner A* search implementation -- see :meth:`route` for the public
+        wrapper that adds optional per-call wall-clock instrumentation.
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            net_class: Optional net class for routing parameters
+            negotiated_mode: If True, allow sharing resources with cost penalty
+            present_cost_factor: Multiplier for current sharing penalty (increases each iteration)
+            weight: A* weight factor (1.0 = optimal A*, >1.0 = faster but suboptimal)
+                    Higher values explore fewer nodes but may miss optimal paths.
+            per_net_timeout: Optional wall-clock timeout in seconds for this A* search.
+                    If exceeded, returns None (no route found within time budget).
+            extra_goal_cells: Optional set of (gx, gy, layer) grid cells that
+                    count as goals in addition to the end pad.  Used by incremental
+                    Steiner routing (Issue #2306) so that A* can terminate early
+                    when it reaches any cell of the previously-routed net tree.
+        """
+        # Issue #966: Clear via cache at start of route (grid state may have changed)
+        # Keep cache valid within this route call for same-position checks
+        self.clear_via_cache()
+
+        # Issue #6098: only a drained open set (set after the A* loop) proves
+        # unreachability; every other exit leaves this False.
+        self.last_route_exhausted = False
+        self.last_route_deadline_hit = False  # Issue #6329
+        self.last_route_deadline_iterations = 0
+
+        # Issue #8414: the per-call wall clock starts HERE, before the
+        # pre-search mask builders. On an HV board those builders (scalar
+        # dilation, pairwise widening, gradient band) cost 127 s of a 128 s
+        # fallback call whose budget was 10 s, because the deadline was only
+        # armed just before the A* loop.
+        route_start = time.monotonic()
+        # Issue #8645: a corner-flanked start gets the escape-hint multiplier
+        # for setup too, so the mask builders are not stopped at 1x on a net
+        # the search would have been given 3x. ``_detect_escape_hint`` reads
+        # only grid cells and ``start_layers``, so it runs after the layer
+        # filters, before the first mask builder (hoisted below).
+        setup_timeout = per_net_timeout
+        setup_deadline = None
+
+        # Issue #2330: Reset waypoint state for this route call
+        self._waypoint_world_coords.clear()
+        self._waypoint_id_counter = 0
+
+        # Get net class if not provided
+        if net_class is None:
+            net_class = self._get_net_class(start.net_name)
+        self._route_halo_names[start.net] = start.net_name
+        self._route_halo_class = (start.net, net_class)
+
+        # Net class cost multiplier (lower = prefer this net's route)
+        cost_mult = net_class.cost_multiplier if net_class else 1.0
+
+        # Issue #1674: Compute per-net trace clearance radius for A* search.
+        # Use the net class trace width (if available) instead of the global
+        # rules.trace_width so wider nets (e.g. POWER at 0.5mm) correctly
+        # reserve space during pathfinding, not just at segment creation.
+        net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        net_trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self.grid.resolution
+        )
+
+        # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner and
+        # compute the tighter within-pair half-width radius.  When the
+        # source net's NetClassRouting declares a ``diffpair_partner`` and
+        # the partner net id is known via ``_net_name_to_id``, the search
+        # uses ``effective_intra_pair_clearance`` as the tighter radius
+        # for cells belonging to the partner net only.  All other foreign
+        # nets continue to see the wider ``net_trace_clearance`` radius.
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+        if partner_net_id is not None and net_class is not None:
+            net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
+            net_partner_half_width_cells = search_radius_cells(
+                net_trace_width / 2, net_intra_pair_clearance, self.grid.resolution
+            )
+        else:
+            net_partner_half_width_cells = net_trace_half_width_cells
+
+        # Issue #2715: Pre-compute the partner-active flag ONCE per route.
+        # This is forwarded into ``compute_expanded_blocked`` so the dormant
+        # path (the common case for non-diff-pair nets) skips the 4-condition
+        # tuple evaluation in the grid hot path.
+        partner_active_flag = (
+            partner_net_id is not None
+            and partner_net_id >= 0
+            and net_partner_half_width_cells < net_trace_half_width_cells
+        )
+
+        # Issue #1692: Compute per-net via clearance radius.  Net classes
+        # may specify larger via_size which requires a wider blocking check.
+        net_via_size = net_class.via_size if net_class else self.rules.via_diameter
+        net_via_half_cells = search_radius_cells(
+            net_via_size / 2, self.rules.via_clearance, self.grid.resolution
+        )
+
+        # In negotiated mode, allow resource sharing
+        allow_sharing = negotiated_mode
+
+        # Convert to grid coordinates
+        start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
+        end_gx, end_gy = self.grid.world_to_grid(end.x, end.y)
+
+        # Convert Layer enum values to grid indices
+        # For PTH pads, we can start/end on any routable layer
+        routable_layers = self.grid.get_routable_indices()
+        start_layer = self.grid.layer_to_index(start.layer.value)
+        end_layer = self.grid.layer_to_index(end.layer.value)
+
+        # Get all valid start/end layers for this pad type
+        start_layers = (
+            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
+        )
+        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
+
+        # Issue #956/#977: Calculate pad metal area bounds for expanded start/goal regions
+        # When pads don't align with the routing grid, we accept reaching any cell
+        # within the pad's metal area, not just the grid-snapped center cell.
+        # Issue #977: Apply same expansion to START pad - if the grid-snapped center
+        # falls on a cell blocked by another net's clearance, we need alternate entry points.
+        start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2 = (
+            self._get_pad_metal_bounds(start, net_trace_width)
+        )
+        end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(
+            end, net_trace_width
+        )
+
+        # Issue #1618: Precompute geometry-derived pad approach bounds.
+        # The approach zone is the pad metal area expanded by a small escape margin
+        # (2 cells beyond the metal edge). This replaces the old hardcoded
+        # pad_approach_radius=6 which created an oversized clearance-free zone
+        # around every pad regardless of actual pad geometry.
+        pad_escape_margin = 2  # cells beyond pad metal edge
+
+        # Issue #6368: centreline landing cost inputs (see ``pad_landing``;
+        # mirrors the native ``PadBounds`` landing fields).
+        start_landing = pad_landing_geometry(start, self.grid)
+        end_landing = pad_landing_geometry(end, self.grid)
+        start_landing_box = (start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2)
+        end_landing_box = (end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2)
+        landing_cost_turn = float(self.rules.cost_turn)
+        landing_cost_straight = float(self.rules.cost_straight)
+
+        # Issue #6389: inputs of the own-pad step gate (Python port of the
+        # native #6375 gate, see the neighbour loop).  Same carve-out refs as
+        # ``_reconstruct_route`` hands the validator, and the narrowest width
+        # reconstruction can emit (the #1018 neck-down only narrows).
+        own_gate_refs, own_gate_width = self._own_pad_gate_inputs(start, end)
+        own_gate_memo: dict[tuple[int, int, int, int, int], bool] = {}
+        # The validator does not run on relief probes (#3438); neither does the gate.
+        own_gate_active = not self.relief_mode
+
+        start_approach_gx1 = start_metal_gx1 - pad_escape_margin
+        start_approach_gy1 = start_metal_gy1 - pad_escape_margin
+        start_approach_gx2 = start_metal_gx2 + pad_escape_margin
+        start_approach_gy2 = start_metal_gy2 + pad_escape_margin
+        end_approach_gx1 = end_metal_gx1 - pad_escape_margin
+        end_approach_gy1 = end_metal_gy1 - pad_escape_margin
+        end_approach_gx2 = end_metal_gx2 + pad_escape_margin
+        end_approach_gy2 = end_metal_gy2 + pad_escape_margin
+
+        # Filter start/end layers by allowed_layers constraint (Issue #715)
+        if self.rules.allowed_layers is not None:
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, net_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, net_class)]
+            # If no valid layers remain, routing is impossible
+            if not start_layers or not end_layers:
+                return None
+
+        # Issue #4433: hard per-net avoid_layers.  Drop avoided layers from the
+        # start/end seed sets so the A* never seeds (or terminates) on an inner
+        # plane the net must not use.  Combined with the via-loop gate below,
+        # this makes ``avoid_layers`` a HARD constraint when the net declares
+        # ``target_ampacity`` or the board opted in via ``--strict-layers``.
+        # An empty set is a no-op (soft default preserved).  A net left with no
+        # legal start/end layer fails LOUD (returns None -> unrouted report)
+        # rather than silently landing unmanufacturable copper on In1/In2.
+        hard_avoided_layers = self._hard_avoided_layers(net_class)
+        if hard_avoided_layers:
+            start_layers = [l for l in start_layers if l not in hard_avoided_layers]
+            end_layers = [l for l in end_layers if l not in hard_avoided_layers]
+            if not start_layers or not end_layers:
+                return None
+
+        # Issue #8645: decide the budget multiplier once, before any mask
+        # builder, and derive both the setup and search deadlines from it.
+        escape_dir = self._detect_escape_hint(start, start_layers)
+        if per_net_timeout is not None and per_net_timeout > 0.0 and escape_dir is not None:
+            setup_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
+        setup_deadline = route_start + setup_timeout if setup_timeout is not None else None
+
+        # A* setup
+        open_set: list[AStarNode] = []
+
+        # Issue #3144: monotonic insertion counter for deterministic
+        # tie-breaking when ``f_score`` is equal between heap entries.
+        # See ``AStarNode`` docstring for the full rationale.
+        seq_counter = itertools.count()
+
+        # Issue #2430: Use NumPy arrays for closed_set and g_scores to avoid
+        # Python dict/set overhead with 480K+ tuple keys.  Array indexing
+        # (closed_arr[layer, y, x]) is significantly faster than dict hashing.
+        closed_arr = np.zeros(
+            (self.grid.num_layers, self.grid.rows, self.grid.cols), dtype=np.bool_
+        )
+        g_scores_arr = np.full(
+            (self.grid.num_layers, self.grid.rows, self.grid.cols),
+            np.inf,
+            dtype=np.float64,
+        )
+
+        # Issue #2430: Pre-compute expanded blocked bitmap so that
+        # _is_trace_blocked becomes a single array lookup per neighbor.
+        # Issue #2559 / Phase 1C: Pass partner net id and tighter radius so
+        # within-pair edges of a diff pair get the relaxed clearance.
+        try:
+            expanded_blocked = self.grid.compute_expanded_blocked(
+                net_trace_half_width_cells,
+                start.net,
+                allow_sharing,
+                partner_net=partner_net_id,
+                partner_radius=net_partner_half_width_cells,
+                partner_active=partner_active_flag,
+                # Issue #3438: relief-probe mode -- foreign usage-0 cells are
+                # excluded from the hard bitmap (penalised per step instead).
+                relief_mode=self.relief_mode and allow_sharing,
+                # Issue #8645: checked between dilations; raises, never
+                # returns a partial mask.
+                deadline=setup_deadline,
+            )
+        except _SetupDeadlineExpired:
+            self._note_setup_deadline_stop()
+            return None
+
+        # Issue #8414: the HV pairwise builders below check the call's wall
+        # deadline before every dilation they start. On expiry the search is
+        # a deadline stop, not a drained open set, so callers (the
+        # post-negotiation sweep and ``_note_wall_bound_under_cap``) see it as
+        # one. The builders raise before caching, so no partial mask outlives
+        # the stop. A dormant (non-HV) call never checks here; its A* loop
+        # samples the same deadline every 1024 expansions, as before.
+        try:
+            pairwise_extra = self._pairwise_expanded_blocked(
+                start.net, net_trace_half_width_cells, deadline=setup_deadline
+            )
+        except _SetupDeadlineExpired:
+            self._note_setup_deadline_stop()
+            return None
+
+        # Issue #4507 / Epic #4431 Phase 2b parity: OR the pairwise
+        # (HV-isolation) widening into the hot-loop bitmap so the pure-Python
+        # A* avoids HV<->LV proximity at search time instead of discovering
+        # it at the post-route gate.  A HARD block in negotiated mode too,
+        # matching the C++ ``cross_domain_trace_blocked`` (a creepage
+        # requirement cannot "negotiate away").  ``None`` when dormant --
+        # the bitmap is then byte-identical to pre-#4507.
+        if pairwise_extra is not None:
+            expanded_blocked = expanded_blocked | pairwise_extra
+
+        # Issue #6008: net-filtered keepout rule areas are not blocked cells,
+        # so OR them into the hot-loop gate (the dilated form, so
+        # ``_is_trace_blocked`` -- which re-checks them -- is consulted), and
+        # keep the bare area cells as a hard reject that no pad-approach
+        # relaxation can waive.  ``None`` when no such area governs this net.
+        rule_area_core: np.ndarray | None = None
+        if getattr(self.grid, "_rule_area_keepouts", None):
+            rule_area_extra = self.grid.rule_area_trace_bitmap(
+                start.net, net_trace_half_width_cells
+            )
+            if rule_area_extra is not None:
+                expanded_blocked = expanded_blocked | rule_area_extra
+                rule_area_core = self.grid.rule_area_trace_bitmap(start.net, 0)
+
+        # Issue #4507: soft cross-domain (HV) avoidance gradient -- the C++
+        # ``pairwise_avoidance_cost`` mirror.  The band gate is a cheap
+        # superset bitmap (one bool lookup per neighbour); the exact kernel
+        # runs only for the handful of cells near HV copper.  ``None`` when
+        # dormant, so a board without a voltage map pays one ``is None``
+        # test per neighbour and keeps byte-identical g-scores.
+        try:
+            pairwise_band = self._pairwise_gradient_band(start.net, deadline=setup_deadline)
+        except _SetupDeadlineExpired:
+            self._note_setup_deadline_stop()
+            return None
+        # Per-call memo: the copper the gradient measures against cannot move
+        # during one A* call (the same assumption ``expanded_blocked`` makes),
+        # and a cell is typically relaxed from several parents.
+        pairwise_cost_cache: dict[tuple[int, int, int], float] = {}
+
+        # Issue #2430: Build crossing grid index if routed segments exist.
+        if self.rules.crossing_penalty > 0.0 and self._routed_segments:
+            self._build_crossing_grid()
+        else:
+            self._crossing_grid = None
+
+        # Issue #2430: Pre-compute zone blocking and zone cost arrays.
+        # Zone cells with a different net are blocked; same-net zones get
+        # a cost discount.  This replaces per-neighbor Python object access
+        # with direct NumPy lookups.
+        zone_blocked_arr = (
+            self.grid._is_zone & (self.grid._net != start.net) & (self.grid._net != 0)
+        )
+        zone_cost_arr = np.where(
+            self.grid._is_zone & (self.grid._net == start.net),
+            self.rules.cost_zone_same_net - 1.0,
+            np.where(
+                zone_blocked_arr,
+                100.0,
+                0.0,
+            ),
+        )
+
+        # Create heuristic context - for PTH end pads, use closest routable layer
+        # for heuristic estimation (the actual goal check will accept any)
+        heuristic_goal_layer = end_layers[0] if end_layers else end_layer
+        heuristic_context = HeuristicContext(
+            goal_x=end_gx,
+            goal_y=end_gy,
+            goal_layer=heuristic_goal_layer,
+            rules=self.rules,
+            cost_multiplier=cost_mult,
+            diagonal_routing=self.diagonal_routing,
+            get_congestion=self.grid.get_congestion,
+            get_congestion_cost=self._get_congestion_cost,
+        )
+
+        # Issue #977: Start nodes - add for ALL cells within start pad's metal area
+        # This handles off-grid start pads where the grid-snapped center may be blocked
+        # by another net's clearance zone. By initializing from all metal area cells,
+        # we ensure routing can begin even when some entry points are blocked.
+        for sgx in range(start_metal_gx1, start_metal_gx2 + 1):
+            for sgy in range(start_metal_gy1, start_metal_gy2 + 1):
+                for sl in start_layers:
+                    start_h = self.heuristic.estimate(sgx, sgy, sl, (0, 0), heuristic_context)
+                    start_node = AStarNode(start_h, 0, sgx, sgy, sl, seq=next(seq_counter))
+                    heapq.heappush(open_set, start_node)
+                    g_scores_arr[sl, sgy, sgx] = 0
+
+        # Issue #2330: Waypoint injection for off-grid start pad.
+        # Inject the exact pad world position as a waypoint node with edges
+        # to nearby grid cells so A* can route from the precise pad location.
+        start_wp_key: tuple[int, int] | None = None
+        if self._is_pad_off_grid(start):
+            start_wp_key = self._create_waypoint(start)
+            wp_edges = self._waypoint_grid_edges(
+                start_wp_key,
+                start,
+                start.net,
+                allow_sharing,
+            )
+            for gx, gy, edge_cost in wp_edges:
+                for sl in start_layers:
+                    wp_g = edge_cost * self.rules.cost_straight
+                    wp_h = self.heuristic.estimate(gx, gy, sl, (0, 0), heuristic_context)
+                    wp_node = AStarNode(
+                        wp_g + weight * wp_h, wp_g, gx, gy, sl, seq=next(seq_counter)
+                    )
+                    if wp_g < g_scores_arr[sl, gy, gx]:
+                        g_scores_arr[sl, gy, gx] = wp_g
+                        heapq.heappush(open_set, wp_node)
+
+        # Issue #2330: Waypoint for off-grid end pad — used in goal check.
+        end_wp_key: tuple[int, int] | None = None
+        if self._is_pad_off_grid(end):
+            end_wp_key = self._create_waypoint(end)
+            end_wp_grid_edges = self._waypoint_grid_edges(
+                end_wp_key,
+                end,
+                start.net,
+                allow_sharing,
+            )
+            # Build set of grid cells reachable from end waypoint for goal check
+            end_wp_goal_cells: set[tuple[int, int]] = {
+                (gx, gy) for gx, gy, _cost in end_wp_grid_edges
+            }
+        else:
+            end_wp_goal_cells = set()
+
+        # Issue #2974: Escape-hint seed for corner-flanked perimeter
+        # pads.  Reuses the #2330 waypoint edge-cost contract:
+        # ``g_score = euclidean(pad -> seed_cell) * cost_straight``.
+        # The seed inherits ``direction = escape_dir`` so its
+        # descendants get the turn-cost bonus for continuing outward.
+        # When ``_detect_escape_hint`` declines, the block is a no-op.
+        if escape_dir is not None:
+            for cx, cy, cl, edge_cost in self._escape_hint_cells(
+                start, escape_dir, start.net, start_layers
+            ):
+                seed_g = edge_cost * self.rules.cost_straight
+                seed_h = self.heuristic.estimate(cx, cy, cl, escape_dir, heuristic_context)
+                if seed_g < g_scores_arr[cl, cy, cx]:
+                    g_scores_arr[cl, cy, cx] = seed_g
+                    heapq.heappush(
+                        open_set,
+                        AStarNode(
+                            seed_g + weight * seed_h,
+                            seed_g,
+                            cx,
+                            cy,
+                            cl,
+                            direction=escape_dir,
+                            seq=next(seq_counter),
+                        ),
+                    )
+
+        iterations = 0
+        max_iterations = self.grid.cols * self.grid.rows * 4  # Prevent infinite loops
+        # Issue #3881: deterministic per-net iteration cap clamps the loop
+        # bound when the C++ fallback sets it (``min`` so it never RAISES the
+        # historical bound, only tightens it for a hard per-net give-up).
+        if self._max_iterations_override is not None:
+            max_iterations = min(max_iterations, self._max_iterations_override)
+
+        # Per-net wall-clock timeout (Issue #1605).
+        #
+        # Issue #2974 secondary fallback: when the start pad is corner-
+        # flanked, give A* up to ``_ESCAPE_HINT_DEADLINE_MULT`` times
+        # the caller's budget so the perimeter detour has room to
+        # converge.  This is a TARGETED extension -- it never widens
+        # the global deadline, and nets whose pads don't trip the
+        # predicate continue to honour ``per_net_timeout`` exactly.
+        # Issue #8645: the multiplier is decided once, up top (``setup_deadline``
+        # shares it), so setup and search draw on one budget.
+        effective_timeout = setup_timeout
+        # Issue #8414: measured from ``route_start`` (the top of the call), so
+        # the pre-search setup above is charged to the same budget.
+        deadline = route_start + effective_timeout if effective_timeout is not None else None
+        timeout_check_interval = 1024
+        goal_rejected = False  # Issue #6098
+
+        while open_set and iterations < max_iterations:
+            iterations += 1
+
+            # Per-net timeout check (Issue #1605)
+            if deadline is not None and iterations % timeout_check_interval == 0:
+                if time.monotonic() >= deadline:
+                    # Issue #6329: record that the WALL clock, not the
+                    # iteration cap, ended this search.
+                    self.last_route_deadline_hit = True
+                    self.last_route_deadline_iterations = iterations
+                    break
+
+            current = heapq.heappop(open_set)
+
+            if closed_arr[current.layer, current.y, current.x]:
+                continue
+            closed_arr[current.layer, current.y, current.x] = True
+
+            # Goal check - accept any cell within end pad's metal area (Issue #956)
+            # This handles off-grid pads where the center doesn't align with routing grid
+            # Issue #2330: Also accept cells reachable from the end pad's waypoint
+            is_in_end_metal = (
+                end_metal_gx1 <= current.x <= end_metal_gx2
+                and end_metal_gy1 <= current.y <= end_metal_gy2
+                and current.layer in end_layers
+            )
+            is_end_waypoint_reachable = (
+                end_wp_goal_cells
+                and (current.x, current.y) in end_wp_goal_cells
+                and current.layer in end_layers
+            )
+            if is_in_end_metal or is_end_waypoint_reachable:
+                route = self._reconstruct_route(current, start, end)
+                if route is not None:
+                    return route
+                # Geometric validation failed (Issue #750) - continue A* search
+                # This allows finding alternate paths (e.g., B.Cu when F.Cu fails)
+                # The node stays in closed_set, preventing re-exploration on this layer
+                # Issue #6098: a goal was reached and rejected -- which goal
+                # survives validation depends on search order, so a later drain
+                # is not an unreachability proof.
+                goal_rejected = True
+                continue
+
+            # Issue #2306: Incremental Steiner goal check - terminate early when
+            # reaching any cell of the previously-routed net tree.  This avoids
+            # running the full A* to the target pad when a shorter connection to
+            # the existing tree exists, dramatically reducing search time for
+            # high-fanout nets (e.g., GNDD with 7+ components).
+            if extra_goal_cells and (current.x, current.y, current.layer) in extra_goal_cells:
+                # Create a synthetic end pad at the reached grid cell so
+                # _reconstruct_route can build a valid Route object.
+                wx, wy = self.grid.grid_to_world(current.x, current.y)
+                layer_val = self.grid.index_to_layer(current.layer)
+                synthetic_end = Pad(
+                    x=wx,
+                    y=wy,
+                    width=self.rules.trace_width,
+                    height=self.rules.trace_width,
+                    net=start.net,
+                    net_name=start.net_name,
+                    layer=Layer(layer_val),
+                    ref="",
+                    pin="",
+                    through_hole=False,
+                    steiner_point=True,
+                )
+                route = self._reconstruct_route(current, start, synthetic_end)
+                if route is not None:
+                    return route
+                # Geometric validation failed - keep searching
+                goal_rejected = True  # Issue #6098: see the end-pad branch
+                continue
+
+            # Batch pre-compute costs for all neighbors (Issue #963)
+            # This reduces per-neighbor function call overhead by computing all costs
+            # in vectorized NumPy operations before the neighbor loop
+            batch_congestion_costs = self._batch_congestion_costs(
+                current.x, current.y, current.layer
+            )
+            batch_turn_costs = self._batch_turn_costs(current.direction)
+
+            # Issue #990 (hoisted): whether CURRENT node sits within a pad's
+            # metal area, so the search still allows the first step outward
+            # when every metal-area cell is blocked by adjacent nets'
+            # clearance zones. These two flags depend only on ``current``
+            # (x/y/layer), never on the per-neighbor ``nx``/``ny``/``nlayer``
+            # this loop iterates over -- ``self.neighbors_2d`` only changes
+            # (dx, dy) within the same layer (``nlayer`` below is always
+            # ``current.layer``), so re-deriving them inside the neighbor
+            # loop recomputed the identical result on every one of the 4-8
+            # neighbor iterations. Computing them once per popped node
+            # (profiled as part of this A* loop's largest single self-time
+            # cost, Issue #5240) preserves the exact same boolean value at
+            # every use site below.
+            is_exiting_start_pad = (
+                start_metal_gx1 <= current.x <= start_metal_gx2
+                and start_metal_gy1 <= current.y <= start_metal_gy2
+                and current.layer in start_layers
+            )
+            is_exiting_end_pad = (
+                end_metal_gx1 <= current.x <= end_metal_gx2
+                and end_metal_gy1 <= current.y <= end_metal_gy2
+                and current.layer in end_layers
+            )
+
+            # Explore neighbors
+            for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
+                nx, ny = current.x + dx, current.y + dy
+                nlayer = current.layer
+                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name, start.net):
+                    continue
+
+                # Check bounds and obstacles - account for trace width
+                # A trace with width W extends W/2 on each side of centerline
+                # Must check adjacent cells that trace would occupy
+                #
+                # EXCEPTION: Allow routing near pad centers if the adjacent cells
+                # belong to the SAME NET. This handles TSSOP and other fine-pitch
+                # components where pad clearance zones overlap.
+                # But we MUST still block cells from OTHER nets (like GND pads).
+                # Issue #1618: Use geometry-derived approach bounds instead of
+                # hardcoded radius. The approach zone covers the pad metal area
+                # plus a small escape margin (2 cells) to allow trace escape routing.
+                # For PTH pads, allow approach from any valid layer
+                is_start_adjacent = (
+                    start_approach_gx1 <= nx <= start_approach_gx2
+                    and start_approach_gy1 <= ny <= start_approach_gy2
+                    and nlayer in start_layers
+                )
+                is_end_adjacent = (
+                    end_approach_gx1 <= nx <= end_approach_gx2
+                    and end_approach_gy1 <= ny <= end_approach_gy2
+                    and nlayer in end_layers
+                )
+
+                # Check grid bounds first
+                if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT reason=oob"
+                        )
+                    continue
+
+                # For diagonal moves, check corner clearance to prevent cutting through obstacles
+                # This ensures we don't route diagonally through a corner where two obstacles meet
+                if dx != 0 and dy != 0:  # Diagonal move
+                    if self._is_diagonal_corner_blocked(
+                        current.x, current.y, dx, dy, nlayer, start.net, allow_sharing
+                    ):
+                        if _ASTAR_TRACE_ENABLED:
+                            _astar_trace(
+                                f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                f"reason=diagonal_corner_blocked"
+                            )
+                        continue
+
+                # Check blocked cells carefully
+                # Allow routing through blocked cells that belong to OUR net
+                # This enables THT pads to be entered/exited on any layer
+                cell = self.grid.cell_at(nlayer, ny, nx)
+                if cell.blocked:
+                    # Issue #1764: Pad reachability - if the neighbor cell falls
+                    # within either pad's metal area, allow entry regardless of blocked/net
+                    # state. This ensures start/end pads are always reachable even when
+                    # adjacent net=0 pads have marked their cells as blocked.
+                    is_in_end_metal = (
+                        end_metal_gx1 <= nx <= end_metal_gx2
+                        and end_metal_gy1 <= ny <= end_metal_gy2
+                        and nlayer in end_layers
+                    )
+                    is_in_start_metal = (
+                        start_metal_gx1 <= nx <= start_metal_gx2
+                        and start_metal_gy1 <= ny <= start_metal_gy2
+                        and nlayer in start_layers
+                    )
+                    if is_in_end_metal or is_in_start_metal:
+                        pass
+                    elif cell.net == start.net:
+                        # Same-net blocked cell (e.g., our THT pad area)
+                        # Allow routing through it - this is key for THT routing
+                        # -- unless it is a shared pad halo (#6315), which
+                        # belongs to neither net alone: its recorded owner
+                        # must clear the other pad too (Issue #6389, mirrors
+                        # the native ``shared_pad_halo_blocked`` gate).
+                        if self._shared_halo_blocked(
+                            nx,
+                            ny,
+                            nlayer,
+                            start.net,
+                            allow_sharing,
+                            net_trace_half_width_cells,
+                            partner_net_id,
+                            net_partner_half_width_cells,
+                            partner_active_flag,
+                            (current.x, current.y),
+                        ):
+                            if _ASTAR_TRACE_ENABLED:
+                                _astar_trace(
+                                    f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                    f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                    f"reason=shared_pad_halo_blocked"
+                                )
+                            continue
+                    elif cell.net == 0:
+                        # No-net blocked cell - use pre-computed expanded bitmap
+                        if expanded_blocked[nlayer, ny, nx] and self._is_trace_blocked(
+                            nx,
+                            ny,
+                            nlayer,
+                            start.net,
+                            allow_sharing,
+                            radius=net_trace_half_width_cells,
+                            partner_net=partner_net_id,
+                            partner_radius=net_partner_half_width_cells,
+                            partner_active=partner_active_flag,
+                            from_cell=(current.x, current.y),
+                        ):
+                            if _ASTAR_TRACE_ENABLED:
+                                _astar_trace(
+                                    f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                    f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                    f"reason=trace_blocked(no_net_blocked_cell)"
+                                )
+                            continue
+                    elif (
+                        self._trace_halo_clear(
+                            [(nx, ny)], nlayer, nx, ny, start.net, (current.x, current.y)
+                        )
+                        # Issue #6389 (port of #6315): a foreign pad's clearance
+                        # cell whose exact swept-edge geometry is legal.
+                        or self._pad_cells_clear(
+                            [(nx, ny)], nlayer, nx, ny, start.net, (current.x, current.y)
+                        )
+                    ) and not self._is_trace_blocked(
+                        nx,
+                        ny,
+                        nlayer,
+                        start.net,
+                        allow_sharing,
+                        radius=net_trace_half_width_cells,
+                        partner_net=partner_net_id,
+                        partner_radius=net_partner_half_width_cells,
+                        partner_active=partner_active_flag,
+                        from_cell=(current.x, current.y),
+                    ):
+                        pass
+                    else:
+                        # Different net's blocked cell
+                        # Issue #996: When exiting a pad's metal area, allow entering
+                        # clearance zones (not actual pad copper). This enables sub-grid
+                        # pad connections where the nearest grid cells are within another
+                        # net's clearance zone but not its copper. The geometric validation
+                        # during route reconstruction will catch actual DRC violations.
+                        is_clearance_only = not cell.pad_blocked  # Not actual pad copper
+                        is_pad_exit = is_exiting_start_pad or is_exiting_end_pad
+                        if is_clearance_only and is_pad_exit:
+                            # Clearance zone cell while exiting pad - allow this move
+                            # to enable the first step out of the pad, BUT only when
+                            # the trace centerline placement here does NOT bring its
+                            # ``net_trace_half_width_cells`` radius envelope within
+                            # touching distance of any FOREIGN pad metal.
+                            # Issue #3226: dense pin packages (LQFP-32 0.8mm pitch
+                            # on board 05's STM32G431 / DRV8301 row) admit a pad-exit
+                            # step into the *inner* part of an adjacent foreign pad's
+                            # halo, leaving the trace edge inside the foreign pad's
+                            # required-clearance band and producing
+                            # ``clearance_pad_segment`` DRC errors (8 sub-127um
+                            # positive + 1 -0.265mm severe at U10-17 / PWM_AH).
+                            if self._is_foreign_pad_metal_within_radius(
+                                nx, ny, nlayer, start.net, net_trace_half_width_cells
+                            ):
+                                if _ASTAR_TRACE_ENABLED:
+                                    _astar_trace(
+                                        f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                        f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                        f"reason=pad_exit_clearance_too_tight "
+                                        f"radius={net_trace_half_width_cells}"
+                                    )
+                                continue
+                        else:
+                            # Actual pad copper or not exiting a pad - block
+                            if _ASTAR_TRACE_ENABLED:
+                                _astar_trace(
+                                    f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                    f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                    f"reason=foreign_net_blocked cell.net={cell.net}"
+                                )
+                            continue
+                else:
+                    # Issue #864: Even when center cell is unblocked, check trace clearance
+                    # The trace has width and must not violate clearance to other nets
+                    # within its radius. Skip this check near pads to allow approach.
+                    # Issue #990: Also skip when exiting from within a pad's metal area.
+                    # This handles dense layouts where ALL cells in the metal area are
+                    # blocked by adjacent nets' clearance zones - we must allow the
+                    # first step outward to escape the pad.
+                    is_pad_exit_or_approach = (
+                        is_start_adjacent
+                        or is_end_adjacent
+                        or is_exiting_start_pad
+                        or is_exiting_end_pad
+                    )
+                    if not is_pad_exit_or_approach:
+                        # Issue #2430: Use pre-computed expanded blocked bitmap
+                        if expanded_blocked[nlayer, ny, nx] and self._is_trace_blocked(
+                            nx,
+                            ny,
+                            nlayer,
+                            start.net,
+                            allow_sharing,
+                            radius=net_trace_half_width_cells,
+                            partner_net=partner_net_id,
+                            partner_radius=net_partner_half_width_cells,
+                            partner_active=partner_active_flag,
+                            from_cell=(current.x, current.y),
+                        ):
+                            if _ASTAR_TRACE_ENABLED:
+                                _astar_trace(
+                                    f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                    f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                    f"reason=trace_clearance_envelope_overlap"
+                                )
+                            continue
+
+                # Issue #6389: own-pad step gate, the Python port of the native
+                # #6375 gate.  A planar step touching the routing net's own pad
+                # copper/halo outside the seed/goal metal boxes must pass the
+                # validator's own segment-vs-pad verdict.  The same-net blocked
+                # branch above admits such cells unchecked, so without this a
+                # pad exit one cell off the centreline (now free under the
+                # #6368 landing deadband) could leave the start pad's tip
+                # within clearance of a foreign pad; the validator then
+                # rejected every goal built on it and the search drained.
+                if (
+                    own_gate_active
+                    and not (
+                        start_metal_gx1 <= nx <= start_metal_gx2
+                        and start_metal_gy1 <= ny <= start_metal_gy2
+                        and nlayer in start_layers
+                    )
+                    and not (
+                        end_metal_gx1 <= nx <= end_metal_gx2
+                        and end_metal_gy1 <= ny <= end_metal_gy2
+                        and nlayer in end_layers
+                    )
+                    and (
+                        self._own_pad_cell(nx, ny, nlayer, start.net)
+                        or self._own_pad_cell(current.x, current.y, nlayer, start.net)
+                    )
+                    and not self._own_pad_step_clear(
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        nlayer,
+                        start.net,
+                        own_gate_width,
+                        own_gate_refs,
+                        own_gate_memo,
+                    )
+                ):
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                            f"reason=own_pad_step_foreign_pad_too_close"
+                        )
+                    continue
+
+                # Issue #6008: inside a net-filtered track keepout -- hard reject.
+                if rule_area_core is not None and rule_area_core[nlayer, ny, nx]:
+                    continue
+
+                # Issue #2430: Use pre-computed zone blocking array
+                if zone_blocked_arr[nlayer, ny, nx]:
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT reason=zone_blocked"
+                        )
+                    continue
+
+                if closed_arr[nlayer, ny, nx]:
+                    continue
+
+                if _ASTAR_TRACE_ENABLED:
+                    _astar_trace(
+                        f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                        f"nbr=({nx},{ny},L{nlayer}) ACCEPT "
+                        f"cell.blocked={int(cell.blocked)} cell.net={cell.net}"
+                    )
+
+                # Calculate cost - use batch pre-computed values (Issue #963)
+                new_direction = (dx, dy)
+
+                # Use batch-computed turn and congestion costs
+                turn_cost = batch_turn_costs[neighbor_idx]
+                congestion_cost = batch_congestion_costs[neighbor_idx]
+
+                # Add negotiated congestion cost if in negotiated mode
+                # Skip for cells adjacent to start/end pads (they're obstacles)
+                negotiated_cost = 0.0
+                if negotiated_mode and not (is_start_adjacent or is_end_adjacent):
+                    negotiated_cost = self._get_negotiated_cell_cost(
+                        nx, ny, nlayer, present_cost_factor, net=start.net
+                    )
+
+                # Issue #2430: Use pre-computed zone cost array
+                zone_cost = float(zone_cost_arr[nlayer, ny, nx])
+
+                # Add layer preference cost (Issue #625)
+                layer_pref_mult = self._get_layer_preference_cost(nlayer, net_class)
+
+                # Issue #1250: Crossing penalty for edges crossing routed segments
+                crossing_cost = 0.0
+                if self.rules.crossing_penalty > 0.0 and self._routed_segments:
+                    num_crossings = self._count_edge_crossings(
+                        current.x, current.y, nx, ny, nlayer, start.net
+                    )
+                    crossing_cost = self.rules.crossing_penalty * num_crossings
+
+                # Issue #2275: Layer utilization cost
+                layer_util_cost = (
+                    self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
+                )
+
+                # Issue #2288: Corridor deviation penalty from global routing
+                corridor_cost = self.grid.get_corridor_cost(nx, ny, nlayer, start.net)
+
+                # Issue #2911: Diff-pair / match-group corridor attractor.
+                # Subtract a bonus when this cell is reserved for our net so
+                # the pathfinder preferentially uses the reserved channel
+                # established by ``EscapeRouter._reserve_pair_continuation_corridor``.
+                # Clamped at the positive cost components so g_score stays
+                # non-negative (preserves A* admissibility).
+                attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                    nlayer,
+                    nx,
+                    ny,
+                    start.net,
+                    self.rules.cost_corridor_attractor,
+                )
+
+                # Issue #4507: soft cross-domain (HV) avoidance gradient
+                # (mirrors ``Pathfinder::pairwise_avoidance_cost``).  Zero
+                # unless a widening pairwise matrix is installed AND foreign
+                # HV copper sits in the thin band just beyond the hard-block
+                # radius -- steers A* to keep isolation margin before the
+                # hard block bites, so an HV board converges instead of
+                # hugging the limit and thrashing the negotiator.
+                pairwise_cost = 0.0
+                if pairwise_band is not None and pairwise_band[nlayer, ny, nx]:
+                    cache_key = (nlayer, ny, nx)
+                    cached_cost = pairwise_cost_cache.get(cache_key)
+                    if cached_cost is None:
+                        cached_cost = self._pairwise_avoidance_cost(nx, ny, nlayer, start.net)
+                        pairwise_cost_cache[cache_key] = cached_cost
+                    pairwise_cost = cached_cost
+
+                positive_step_cost = (
+                    neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
+                    + turn_cost
+                    + congestion_cost
+                    + negotiated_cost
+                    + zone_cost
+                    + crossing_cost
+                    + layer_util_cost
+                    + corridor_cost
+                    + pairwise_cost
+                )
+                if attractor_bonus > 0.0:
+                    positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
+
+                # Issue #6368: centreline landing cost on a step leaving the
+                # start pad or reaching the end pad (after the attractor
+                # clamp, as in the native loops).
+                if end_landing.long_axis >= 0 and nlayer in end_layers:
+                    positive_step_cost += landing_cost(
+                        end_landing,
+                        end_landing_box,
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        False,
+                        landing_cost_turn,
+                        landing_cost_straight,
+                    )
+                if start_landing.long_axis >= 0 and nlayer in start_layers:
+                    positive_step_cost += landing_cost(
+                        start_landing,
+                        start_landing_box,
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        True,
+                        landing_cost_turn,
+                        landing_cost_straight,
+                    )
+
+                new_g = (current.g_score + positive_step_cost) * cost_mult
+
+                if new_g < g_scores_arr[nlayer, ny, nx]:
+                    g_scores_arr[nlayer, ny, nx] = new_g
+                    h = self.heuristic.estimate(nx, ny, nlayer, new_direction, heuristic_context)
+                    f = new_g + weight * h  # Weighted A*
+
+                    neighbor_node = AStarNode(
+                        f,
+                        new_g,
+                        nx,
+                        ny,
+                        nlayer,
+                        current,
+                        False,
+                        new_direction,
+                        seq=next(seq_counter),
+                        via_anc=current if current.via_from_parent else current.via_anc,
+                    )
+                    heapq.heappush(open_set, neighbor_node)
+
+            # Try layer change (via) - use grid indices, not enum values
+            # Only consider routable layers (skip planes)
+            own_vias_clear: bool | None = None
+            for new_layer in self.grid.get_routable_indices():
+                if new_layer == current.layer:
+                    continue
+
+                # Check layer constraint (Issue #715; #6876 per-class opt-in)
+                if not self._is_layer_allowed(new_layer, net_class):
+                    continue
+
+                # Issue #4433: hard per-net avoid_layers -- refuse to via onto
+                # a layer this net must not use (ampacity-bearing or
+                # --strict-layers).  No-op when the set is empty (soft default).
+                if new_layer in hard_avoided_layers:
+                    continue
+
+                # Check if via placement is valid on ALL layers (through-hole via)
+                # Issue #966: Use cached via check with layer priority ordering
+                # Issue #1692: Pass per-net via radius for wider net classes
+                self._via_diag_attempts += 1
+                if not self._check_via_placement_cached(
+                    current.x,
+                    current.y,
+                    start.net,
+                    allow_sharing,
+                    radius=net_via_half_cells,
+                ):
+                    self._via_diag_blocked += 1
+                    continue
+
+                # Check zone blocking for via (would pierce other-net zones)
+                if not self._can_place_via_in_zones(current.x, current.y, start.net):
+                    self._via_diag_zone_blocked += 1
+                    continue
+
+                # Issue #1019: Check via exclusion zone near fine-pitch pads
+                # If via is in exclusion zone, skip this position (hard constraint)
+                if self._is_via_in_exclusion_zone(current.x, current.y):
+                    self._via_diag_exclusion_blocked += 1
+                    continue
+
+                # Issue #6473: hole-to-hole against this path's own earlier
+                # vias (the same for every target layer, so one verdict).
+                if own_vias_clear is None:
+                    own_vias_clear = self._own_path_vias_clear(current)
+                if not own_vias_clear:
+                    break
+
+                self._via_diag_eligible += 1
+
+                if closed_arr[new_layer, current.y, current.x]:
+                    continue
+
+                # Via cost + congestion at new layer
+                congestion_cost = self._get_congestion_cost(current.x, current.y, new_layer)
+
+                # Add negotiated congestion cost if in negotiated mode
+                negotiated_cost = 0.0
+                if negotiated_mode:
+                    negotiated_cost = self._get_negotiated_cell_cost(
+                        current.x, current.y, new_layer, present_cost_factor, net=start.net
+                    )
+
+                # Add layer preference cost for new layer (Issue #625)
+                layer_pref_mult = self._get_layer_preference_cost(new_layer, net_class)
+
+                # Issue #1019: Add via impact cost for blocking unrouted nets
+                wx, wy = self.grid.grid_to_world(current.x, current.y)
+                via_impact_cost = self._get_via_impact_cost(wx, wy, start.net)
+
+                # Issue #2265: Apply cost_layer_inner when transitioning
+                # to an inner layer.  On boards with > 2 layers, indices
+                # between 0 (F.Cu) and num_layers-1 (B.Cu) are inner
+                # layers and should carry the additional penalty so the
+                # pathfinder actually considers them (previously the via
+                # cost alone discouraged all layer transitions equally).
+                inner_layer_cost = 0.0
+                if self.grid.num_layers > 2 and 0 < new_layer < self.grid.num_layers - 1:
+                    inner_layer_cost = self.rules.cost_layer_inner
+
+                # Issue #2275: Layer utilization cost for target layer
+                layer_util_cost = (
+                    self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
+                )
+
+                # Issue #2288: Corridor deviation penalty from global routing
+                corridor_cost = self.grid.get_corridor_cost(
+                    current.x, current.y, new_layer, start.net
+                )
+
+                # Issue #2911: Corridor attractor bonus on the target layer.
+                # A via that lands inside the reserved corridor is the
+                # primary motion this fix is intended to encourage -- without
+                # this bonus the pathfinder has zero reason to drop a via
+                # onto an empty inner layer that "happens" to be reserved.
+                attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                    new_layer,
+                    current.x,
+                    current.y,
+                    start.net,
+                    self.rules.cost_corridor_attractor,
+                )
+
+                # Issue #2325: Cap the total incremental via cost to prevent
+                # accumulated additive penalties from making vias prohibitively
+                # expensive.  Without the cap, dense boards can accumulate
+                # inner-layer, utilization, corridor, congestion, and impact
+                # costs that exceed 20x the base movement cost, causing A* to
+                # exhaust its iteration budget before ever considering a via.
+                via_incremental = (
+                    self.rules.cost_via * layer_pref_mult
+                    + inner_layer_cost
+                    + congestion_cost
+                    + negotiated_cost
+                    + via_impact_cost
+                    + layer_util_cost
+                    + corridor_cost
+                )
+                if self.rules.via_cost_cap_factor > 0.0:
+                    via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
+                    via_incremental = min(via_incremental, via_cap)
+
+                # Issue #2911: Apply the attractor AFTER the cap so the
+                # bonus is felt even when the via cost is at the ceiling.
+                # Clamp at zero so g_scores remain non-negative.
+                if attractor_bonus > 0.0:
+                    via_incremental = max(0.0, via_incremental - attractor_bonus)
+
+                new_g = (current.g_score + via_incremental) * cost_mult
+
+                if new_g < g_scores_arr[new_layer, current.y, current.x]:
+                    g_scores_arr[new_layer, current.y, current.x] = new_g
+                    # Via doesn't change direction, use current direction
+                    h = self.heuristic.estimate(
+                        current.x, current.y, new_layer, current.direction, heuristic_context
+                    )
+                    f = new_g + weight * h  # Weighted A*
+
+                    neighbor_node = AStarNode(
+                        f,
+                        new_g,
+                        current.x,
+                        current.y,
+                        new_layer,
+                        current,
+                        True,
+                        seq=next(seq_counter),
+                        via_anc=current if current.via_from_parent else current.via_anc,
+                    )
+                    heapq.heappush(open_set, neighbor_node)
+
+        # No path found.  Issue #6098: the open set is empty only when the
+        # search drained (a timeout ``break`` or the iteration cap leaves
+        # frontier nodes behind).
+        self.last_route_exhausted = not open_set and not goal_rejected
+        return None
+
+    def _note_setup_deadline_stop(self) -> None:
+        """Record that the wall budget ran out before the A* loop (issue #8414)."""
+        self.last_route_deadline_hit = True
+        self.last_route_deadline_iterations = 0
+
+    def get_last_failure_info(self) -> dict | None:
+        """Return structured failure diagnostics from the most recent failed route().
+
+        Issue #2476: API parity with ``CppPathfinder.get_last_failure_info``.
+        The Python pathfinder does not currently expose structured via-blocked
+        failure reasons -- callers always receive ``None`` here.  The
+        negotiated strategy treats ``None`` as "no actionable diagnostic"
+        and falls back to its existing rip-up logic.
+        """
+        return None
+
+    def find_blocking_nets(
+        self,
+        start: Pad,
+        end: Pad,
+        layer: int | None = None,
+    ) -> set[int]:
+        """Find which nets block the direct path from start to end.
+
+        Uses Bresenham's line algorithm to trace the ideal direct path,
+        then identifies which net IDs are blocking cells along that path.
+        This is used for targeted rip-up in negotiated routing.
+
+        Issue #2587 / Epic #2556 Phase 1C-cont: When the source net has a
+        diff-pair partner (resolvable via :meth:`_resolve_partner_net_id`),
+        the partner net is excluded from the blocker set.  The partner's
+        copper legitimately sits close to this route at the within-pair
+        clearance; treating it as a blocker would trigger spurious rip-up
+        of the partner during negotiated routing.  Mirror of the C++
+        backend's filter at :meth:`CppPathfinder.find_blocking_nets`.
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            layer: Optional layer index (uses pad layer if not specified)
+
+        Returns:
+            Set of net IDs that block the path (excluding net 0, the source
+            net, and -- when configured -- the diff-pair partner net).
+        """
+        blocking_nets: set[int] = set()
+        source_net = start.net
+
+        # Issue #2587 / Phase 1C-cont: Resolve the diff-pair partner net id
+        # (or -1 when no partner is configured).  Cells belonging to the
+        # partner are skipped below so they are not flagged for rip-up.
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+        if partner_net_id is None:
+            partner_net_id = -1
+
+        # Convert to grid coordinates
+        start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
+        end_gx, end_gy = self.grid.world_to_grid(end.x, end.y)
+
+        if layer is None:
+            layer = self.grid.layer_to_index(start.layer.value)
+
+        # Trace a direct line from start to end using Bresenham's algorithm
+        # and collect all blocking nets along the path
+        gx1, gy1 = start_gx, start_gy
+        gx2, gy2 = end_gx, end_gy
+
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+        gx, gy = gx1, gy1
+
+        while True:
+            # Check this cell and nearby cells (accounting for trace width)
+            for check_dy in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
+                for check_dx in range(
+                    -self._trace_half_width_cells, self._trace_half_width_cells + 1
+                ):
+                    cx, cy = gx + check_dx, gy + check_dy
+                    if 0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows:
+                        cell = self.grid.cell_at(layer, cy, cx)
+                        if (
+                            cell.blocked
+                            and cell.net != source_net
+                            and cell.net != 0
+                            and cell.net != partner_net_id
+                        ):
+                            # This cell is blocked by another net's route
+                            # Check usage_count to ensure it's a routed cell, not a static obstacle
+                            if cell.usage_count > 0:
+                                blocking_nets.add(cell.net)
+
+            if gx == gx2 and gy == gy2:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+
+        return blocking_nets
+
+    def find_blocking_nets_relaxed(
+        self,
+        start: Pad,
+        end: Pad,
+        saved_blocked: "np.ndarray",
+        saved_net: "np.ndarray",
+        per_net_timeout: float | None = None,
+    ) -> set[int]:
+        """Find blocking nets using relaxed A* (Issue #2274).
+
+        Runs A* with routed-net obstacles temporarily removed (the caller
+        is responsible for invoking this inside a
+        ``grid.temporarily_unblock_routed_nets()`` context manager).  If a
+        path is found, examines the *original* blocked/net arrays to
+        determine which routed nets occupy cells along that path.
+
+        This replaces the Bresenham straight-line check for cases where the
+        only viable path is not a straight line.
+
+        Args:
+            start: Source pad.
+            end: Destination pad.
+            saved_blocked: The *original* blocked array before unblocking.
+            saved_net: The *original* net array before unblocking.
+            per_net_timeout: Optional timeout for the relaxed A* search.
+
+        Returns:
+            Set of routed-net IDs whose cells lie along the relaxed path.
+        """
+        # Run normal A* (the grid has routed nets unblocked already)
+        route = self.route(
+            start,
+            end,
+            negotiated_mode=True,
+            present_cost_factor=0.0,
+            per_net_timeout=per_net_timeout,
+        )
+        if route is None:
+            return set()
+
+        blocking: set[int] = set()
+        source_net = start.net
+
+        # Walk every cell along every segment of the relaxed path and check
+        # the *original* grid state to find which routed nets were there.
+        for seg in route.segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+
+            # Walk segment cells (Bresenham)
+            dx = abs(gx2 - gx1)
+            dy = abs(gy2 - gy1)
+            sx = 1 if gx1 < gx2 else -1
+            sy = 1 if gy1 < gy2 else -1
+            err = dx - dy
+            gx, gy = gx1, gy1
+            while True:
+                # Check this cell and clearance envelope
+                for cdy in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
+                    for cdx in range(
+                        -self._trace_half_width_cells, self._trace_half_width_cells + 1
+                    ):
+                        cx, cy = gx + cdx, gy + cdy
+                        if 0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows:
+                            was_blocked = bool(saved_blocked[layer_idx, cy, cx])
+                            orig_net = int(saved_net[layer_idx, cy, cx])
+                            if (
+                                was_blocked
+                                and orig_net != 0
+                                and orig_net != source_net
+                                and not self.grid._pad_blocked[layer_idx, cy, cx]
+                            ):
+                                blocking.add(orig_net)
+
+                if gx == gx2 and gy == gy2:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    gx += sx
+                if e2 < dx:
+                    err += dx
+                    gy += sy
+
+        # Also check via locations
+        for via in route.vias:
+            vgx, vgy = self.grid.world_to_grid(via.x, via.y)
+            for layer_idx in range(self.grid.num_layers):
+                if 0 <= vgx < self.grid.cols and 0 <= vgy < self.grid.rows:
+                    was_blocked = bool(saved_blocked[layer_idx, vgy, vgx])
+                    orig_net = int(saved_net[layer_idx, vgy, vgx])
+                    if (
+                        was_blocked
+                        and orig_net != 0
+                        and orig_net != source_net
+                        and not self.grid._pad_blocked[layer_idx, vgy, vgx]
+                    ):
+                        blocking.add(orig_net)
+
+        return blocking
+
+    def _convert_path_to_route(
+        self,
+        path: list[tuple[float, float, int, bool]],
+        route: Route,
+        start_pad: Pad,
+        end_pad: Pad,
+    ) -> None:
+        """Convert path points to route segments and vias.
+
+        This helper method handles the common logic of converting A* path points
+        into Via and Segment objects, adding them to the route. Used by both
+        unidirectional and bidirectional route reconstruction.
+
+        Issue #972: Performance optimization - merge collinear segments inline
+        during reconstruction instead of creating segment-per-cell and merging
+        later. This reduces segment count from thousands to tens per net,
+        significantly improving routing performance for large boards.
+
+        Issue #1018: Automatic trace neck-down near fine-pitch pads. When
+        min_trace_width is configured, traces taper from normal width to
+        minimum width as they approach fine-pitch pads.
+
+        Args:
+            path: List of (world_x, world_y, layer_idx, is_via) tuples
+            route: Route object to populate with segments and vias
+            start_pad: Source pad (determines starting position)
+            end_pad: Destination pad (determines final segment endpoint)
+        """
+        if len(path) < 2:
+            return
+
+        # Start from pad center on the A* start node's layer
+        # Issue #977: With expanded start regions, the A* may start on a different
+        # layer than start_pad.layer (e.g., when allowed_layers constrains routing).
+        # Use the layer from the first path node, not start_pad.layer.
+        # current_layer_idx is a grid index (0, 1, ...), not Layer enum value
+        current_layer_idx = path[0][2]  # Layer from first A* node
+
+        # Issue #972: Inline segment merging - track segment start point and direction
+        # to merge collinear cells into single segments
+        seg_start_x, seg_start_y = start_pad.x, start_pad.y
+        current_x, current_y = seg_start_x, seg_start_y
+        current_direction: tuple[float, float] | None = None  # (dx_normalized, dy_normalized)
+
+        # Issue #1018: Get pin pitches for neck-down calculation
+        start_pitch = (
+            self.component_pitches.get(start_pad.component_key) if start_pad.component_key else None
+        )
+        end_pitch = (
+            self.component_pitches.get(end_pad.component_key) if end_pad.component_key else None
+        )
+
+        # Determine if neck-down applies for each pad
+        start_needs_neckdown = self.rules.should_apply_neck_down(start_pad.ref, start_pitch)
+        end_needs_neckdown = self.rules.should_apply_neck_down(end_pad.ref, end_pitch)
+
+        # Issue #1543: Use net-class-aware trace width as the base width.
+        # Look up the net class for this net and use its trace_width if defined,
+        # falling back to the global rules.trace_width for unclassified nets.
+        base_trace_width = self._get_trace_width_for_net(start_pad.net_name)
+
+        # Issue #1692: Use per-net-class via size when creating vias.
+        _nc = self._get_net_class(start_pad.net_name)
+        net_via_diameter = _nc.via_size if _nc else self.rules.via_diameter
+
+        def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
+            """Normalize direction vector, return None if no movement."""
+            length = (dx * dx + dy * dy) ** 0.5
+            if length < 0.001:
+                return None
+            return (dx / length, dy / length)
+
+        def _same_direction(d1: tuple[float, float] | None, d2: tuple[float, float] | None) -> bool:
+            """Check if two directions are the same (within tolerance)."""
+            if d1 is None or d2 is None:
+                return False
+            # Check if normalized directions match (collinear)
+            return abs(d1[0] - d2[0]) < 0.01 and abs(d1[1] - d2[1]) < 0.01
+
+        def _distance(x1: float, y1: float, x2: float, y2: float) -> float:
+            """Calculate Euclidean distance between two points."""
+            return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+        def _calculate_segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
+            """Calculate trace width for a segment based on net class and distance to pads.
+
+            Issue #1543: Uses net-class-aware base width (e.g., POWER=0.5mm)
+            instead of the global rules.trace_width.
+
+            Issue #1018: For segments near fine-pitch pads, the width tapers
+            from the base trace width to minimum trace width. The width is
+            determined by the minimum distance from the segment endpoints
+            to either pad that needs neck-down.
+            """
+            # If no neck-down needed at either end, use net-class base width
+            if not start_needs_neckdown and not end_needs_neckdown:
+                return base_trace_width
+
+            # Calculate distances from segment endpoints to pads
+            min_width = base_trace_width
+
+            # Check start pad influence
+            # Issue #3313: pass base_trace_width as the corridor width so
+            # the taper interpolates from the (possibly impedance-driven)
+            # per-net-class width down to ``rules.min_trace_width``
+            # instead of the global ``rules.trace_width``.  Without this
+            # the ``min()`` step below would collapse a 0.387 mm
+            # impedance-resolved width back down to the 0.20 mm global
+            # default whenever the segment was far from any fine-pitch
+            # pad, defeating the impedance solver's contribution.
+            if start_needs_neckdown:
+                dist_to_start_1 = _distance(x1, y1, start_pad.x, start_pad.y)
+                dist_to_start_2 = _distance(x2, y2, start_pad.x, start_pad.y)
+                # Use minimum distance from either endpoint
+                min_dist_start = min(dist_to_start_1, dist_to_start_2)
+                width_from_start = self.rules.get_neck_down_width(
+                    min_dist_start, start_pitch, base_width=base_trace_width
+                )
+                min_width = min(min_width, width_from_start)
+
+            # Check end pad influence
+            if end_needs_neckdown:
+                dist_to_end_1 = _distance(x1, y1, end_pad.x, end_pad.y)
+                dist_to_end_2 = _distance(x2, y2, end_pad.x, end_pad.y)
+                # Use minimum distance from either endpoint
+                min_dist_end = min(dist_to_end_1, dist_to_end_2)
+                width_from_end = self.rules.get_neck_down_width(
+                    min_dist_end, end_pitch, base_width=base_trace_width
+                )
+                min_width = min(min_width, width_from_end)
+
+            return min_width
+
+        def _emit_segment(x1: float, y1: float, x2: float, y2: float, layer_idx: int) -> None:
+            """Create and add a segment if there's meaningful distance.
+
+            Issue #3532: pad tails (exact off-grid pad centre <-> grid
+            cell) may be off the 0/45/90/135 angle set -- emit an exact
+            two-leg dogleg instead of a single skewed segment.  Grid-to-
+            grid emissions are naturally 45-aligned and pass through as
+            one segment.
+            """
+            if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
+                # Issue #1018: Calculate width with neck-down support
+                from .neck_down import taper_points
+
+                centers = []
+                if start_needs_neckdown:
+                    centers.append((start_pad.x, start_pad.y))
+                if end_needs_neckdown:
+                    centers.append((end_pad.x, end_pad.y))
+                dogleg = dogleg_points(x1, y1, x2, y2)
+                points = [dogleg[0]]
+                for a, b in zip(dogleg, dogleg[1:], strict=False):
+                    points.extend(
+                        taper_points(
+                            a,
+                            b,
+                            centers,
+                            self.rules.neck_down_distance,
+                            self.rules.grid_resolution,
+                        )[1:]
+                    )
+                for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+                    width = _calculate_segment_width(sx, sy, ex, ey)
+                    if sx == ex and sy == ey:
+                        continue
+                    seg = Segment(
+                        x1=sx,
+                        y1=sy,
+                        x2=ex,
+                        y2=ey,
+                        width=width,
+                        layer=Layer(self.grid.index_to_layer(layer_idx)),
+                        net=start_pad.net,
+                        net_name=start_pad.net_name,
+                    )
+                    route.segments.append(seg)
+
+        # Issue #5013: mirrors the C++ backend fix in
+        # ``CppPathfinder._convert_result_to_route`` (cpp_backend.py).
+        # ``current_layer_idx``/``layer_idx`` below are the LOGICAL search
+        # transition (e.g. F.Cu -> In2.Cu), not the via's physical drilled
+        # span.  This Python A* pathfinder has no blind/buried process
+        # selection either (Issue #4007: ``blind_buried_supported`` is
+        # False for every current board), so every via this loop
+        # constructs is an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom.
+        # Reporting the logical pair verbatim under-reported the drilled
+        # span; DRC/connectivity code trusts ``via.layers`` as the
+        # physical barrel extent (``validate/connectivity.py``,
+        # ``validate/rules/clearance.py``).  The grid-side obstacle
+        # checks already block every layer for a placed via
+        # (``RoutingGrid._mark_via`` -- "Mark cells around a via as
+        # blocked on ALL layers"), so this normalization only corrects
+        # the reported span, not route acceptance.  Router counterpart of
+        # stitch issue #5001.
+        physical_top_layer = Layer(self.grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+
+        for _i, (wx, wy, layer_idx, is_via) in enumerate(path):
+            if is_via:
+                # Emit pending segment before via
+                _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
+
+                # Add via - the physical span always covers the full stack
+                # (see the Issue #5013 note above); the logical
+                # current/next search layers are not the drilled extent.
+                via = Via(
+                    x=current_x,
+                    y=current_y,
+                    drill=self.rules.via_drill,
+                    diameter=net_via_diameter,
+                    layers=(physical_top_layer, physical_bottom_layer),
+                    net=start_pad.net,
+                    net_name=start_pad.net_name,
+                )
+                route.vias.append(via)
+                current_layer_idx = layer_idx
+
+                # Reset segment tracking after via
+                seg_start_x, seg_start_y = current_x, current_y
+                current_direction = None
+            else:
+                # Check if we've moved
+                dx = wx - current_x
+                dy = wy - current_y
+                new_direction = _normalize_direction(dx, dy)
+
+                if new_direction is not None:
+                    # Direction changed - emit current segment and start new one
+                    if not _same_direction(current_direction, new_direction):
+                        _emit_segment(
+                            seg_start_x, seg_start_y, current_x, current_y, current_layer_idx
+                        )
+                        seg_start_x, seg_start_y = current_x, current_y
+                        current_direction = new_direction
+
+                    current_x, current_y = wx, wy
+                    current_layer_idx = layer_idx
+
+        # Emit final segment of the path
+        _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
+
+        # Final segment to end pad (if needed)
+        dx = end_pad.x - current_x
+        dy = end_pad.y - current_y
+        if abs(dx) > 0.01 or abs(dy) > 0.01:
+            # Check if final segment is collinear with last emitted segment
+            if route.segments:
+                last_seg = route.segments[-1]
+                last_dx = last_seg.x2 - last_seg.x1
+                last_dy = last_seg.y2 - last_seg.y1
+                last_dir = _normalize_direction(last_dx, last_dy)
+                end_dir = _normalize_direction(dx, dy)
+
+                if _same_direction(last_dir, end_dir) and is_45_aligned(
+                    end_pad.x - last_seg.x1, end_pad.y - last_seg.y1
+                ):
+                    # Extend last segment to end pad.  Issue #3532: only
+                    # when the EXTENDED segment stays on the 45-degree
+                    # set -- ``_same_direction``'s 0.01 component
+                    # tolerance (~0.6 deg) would otherwise let a slightly
+                    # skewed tail absorb the whole last segment.
+                    # Issue #1018: Recalculate width for the extended segment
+                    route.segments.pop()
+                    _emit_segment(last_seg.x1, last_seg.y1, end_pad.x, end_pad.y, current_layer_idx)
+                else:
+                    _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
+            else:
+                _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
+
+    def _validate_route_clearance(
+        self,
+        route: Route,
+        exclude_net: int,
+        component_pitches: dict[str, float] | None = None,
+        exclude_refs: set[str] | None = None,
+    ) -> bool:
+        """Validate route segments and vias against geometric clearance constraints.
+
+        Issue #750: Grid-based A* checking is approximate; diagonal segments can
+        cut through obstacle corners. This method validates actual geometry to
+        catch clearance violations that grid-based checking missed.
+
+        Issue #1016: Now supports per-component clearance validation via
+        component_pitches dict for automatic fine-pitch detection.
+
+        Issue #1667: Now also validates vias against other-net segments to catch
+        seg-via clearance violations where a via's annular ring is too close to
+        an existing trace.
+
+        Args:
+            route: Route to validate
+            exclude_net: Net ID to exclude from clearance checks (the route's own net)
+            component_pitches: Optional dict mapping component ref to pin pitch in mm
+            exclude_refs: Optional set of component references whose pads should be
+                         excluded from clearance checks (Issue #1764).
+
+        Returns:
+            True if route passes clearance validation, False otherwise.
+        """
+        # Final emitted geometry may differ from the search candidate after
+        # reconstruction or legalization. Component holes are physical on
+        # every net/layer; copper-sharing exceptions cannot waive their floor.
+        for via in route.vias:
+            if not self.grid._component_hole_index.clear(
+                via.x, via.y, via.drill, self.rules.min_hole_to_hole
+            ):
+                return False
+
+        for seg in route.segments:
+            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
+                seg,
+                exclude_net=exclude_net,
+                component_pitches=component_pitches,
+                exclude_refs=exclude_refs,
+            )
+            if not is_valid:
+                return False
+
+            # Issue #3002: Also validate each segment against the
+            # router-level foreign-via context populated by
+            # :meth:`Autorouter._update_router_segment_foreign_context`.
+            # ``grid.validate_segment_clearance`` already walks
+            # ``self.grid.routes`` vias, but the foreign-context list
+            # can include vias the negotiated re-validation hook has
+            # flagged that may not yet be present in ``grid.routes``
+            # (or may have just been added by the current iteration).
+            # The STANDARD threshold (hard_intersection_only=False)
+            # mirrors the main-router commit policy described in
+            # :meth:`set_segment_foreign_context`.
+            if self._foreign_vias:
+                for via in self._foreign_vias:
+                    if via.net == exclude_net:
+                        continue  # Same-net via -- skipped by convention.
+                    # Issue #6272: the trace/via floor, not the bare
+                    # trace floor -- same answer in either insertion order.
+                    if not segment_clears_foreign_via(
+                        seg,
+                        via,
+                        trace_clearance=trace_via_clearance_mm(
+                            self.rules.trace_clearance, self.rules.via_clearance
+                        ),
+                        hard_intersection_only=False,
+                    ):
+                        return False
+
+        # Issue #1667: Validate vias against other-net segments
+        for via in route.vias:
+            is_valid, _clearance, _location = self.grid.validate_via_clearance(
+                via, exclude_net=exclude_net
+            )
+            if not is_valid:
+                return False
+
+        # Issue #6117: Validate vias against foreign-net PADS.  This
+        # validator previously checked vias only against segments, vias,
+        # same-net drills and component holes -- never against pads -- so
+        # the via-pad quadrant relied entirely on the grid-quantised
+        # search-time via check.  On board 03 the C++ validator
+        # (``Grid3D::validate_route`` via-pad branch, #5182) rejected a
+        # BTN1 via 0.125 mm from BTN2's U1.19 (0.15 mm required); the
+        # pure-Python fallback then accepted and committed the SAME via.
+        # ``worst_via_pad_deficit`` is the exact Python twin of that C++
+        # branch: same component trace-clearance floor, same net-aware
+        # same-component carve-out (only "skip"-mode refs with positive
+        # clearance are exempt; "clamp" refs enforce their authored
+        # floor; plane-net pads are never exempt), and no net-0
+        # exemption.  The epsilon matches C++ ``CLEARANCE_EPSILON_MM``.
+        for via in route.vias:
+            deficit, _loc = self.grid.worst_via_pad_deficit(
+                via,
+                exclude_net=exclude_net,
+                component_pitches=component_pitches,
+                exclude_refs=exclude_refs,
+            )
+            if deficit > _VIA_PAD_CLEARANCE_EPSILON_MM:
+                return False
+
+        # Issue #1693: Validate vias against other-net vias
+        for via in route.vias:
+            is_valid, _clearance, _location = self.grid.validate_via_to_via_clearance(
+                via, exclude_net=exclude_net
+            )
+            if not is_valid:
+                return False
+
+        # Issue #1782: Validate same-net drill-to-drill spacing.  Issue #6464:
+        # including this route's OWN vias, which are not in grid.routes yet,
+        # at the fab hole-to-hole floor (the validator's default).
+        for via in route.vias:
+            is_valid, _clearance, _location = self.grid.validate_same_net_drill_spacing(
+                via, same_net=exclude_net, route_vias=route.vias
+            )
+            if not is_valid:
+                return False
+
+        # Issue #4431 (Phase 1): additive pairwise HV-isolation check.  When a
+        # voltage-map-derived pairwise clearance table is present, reject a route
+        # segment that runs closer than max(dru, IEC creepage @ |ΔV|) to foreign
+        # copper.  Absent the table (``None``) this is a no-op, preserving the
+        # scalar path byte-for-byte.  Foreign copper is the already-routed
+        # ``self.grid.routes``; the scalar seg/pad/via checks above still run.
+        pairwise = getattr(self.rules, "pairwise_clearance", None)
+        if pairwise is not None:
+            from .pairwise_clearance import route_pairwise_violation
+
+            id_to_name = {nid: name for name, nid in self._net_name_to_id.items()}
+            if (
+                route_pairwise_violation(
+                    route,
+                    exclude_net,
+                    self.grid.routes,
+                    pairwise,
+                    id_to_name=id_to_name,
+                    attach_zones=self._attach_zones,
+                )
+                is not None
+            ):
+                return False
+
+        return True
+
+    def _merge_same_net_vias(self, route: Route) -> None:
+        """Merge vias in a new route that overlap with existing same-net vias.
+
+        Issue #1782: When routing multi-pad nets via MST edges, independent
+        sub-routes can place vias at nearby positions for the same net. If
+        the drill-to-drill distance is below the merge threshold
+        (via_diameter + min_drill_clearance), merge by keeping the midpoint
+        and updating connected segment endpoints.
+
+        Args:
+            route: The route to merge vias in (modified in place).
+        """
+        import math
+
+        merge_threshold = self.rules.via_diameter + self.rules.min_drill_clearance
+
+        # Collect all existing same-net vias from already-routed routes
+        existing_vias: list[Via] = []
+        for existing_route in self.grid.routes:
+            if existing_route.net == route.net:
+                existing_vias.extend(existing_route.vias)
+
+        if not existing_vias:
+            return
+
+        # Track which vias in the new route need merging
+        vias_to_remove: set[int] = set()
+
+        for i, new_via in enumerate(route.vias):
+            for existing_via in existing_vias:
+                distance = math.sqrt(
+                    (new_via.x - existing_via.x) ** 2 + (new_via.y - existing_via.y) ** 2
+                )
+                if distance < merge_threshold and distance > 1e-6:
+                    # Merge: move the new via to the existing via's position
+                    # and update any segments that reference the old position
+                    old_x, old_y = new_via.x, new_via.y
+                    mid_x = existing_via.x
+                    mid_y = existing_via.y
+
+                    # Update segments that connect to this via
+                    for seg in route.segments:
+                        if abs(seg.x1 - old_x) < 1e-6 and abs(seg.y1 - old_y) < 1e-6:
+                            seg.x1 = mid_x
+                            seg.y1 = mid_y
+                        if abs(seg.x2 - old_x) < 1e-6 and abs(seg.y2 - old_y) < 1e-6:
+                            seg.x2 = mid_x
+                            seg.y2 = mid_y
+
+                    # Issue #1802: expand surviving via layers to cover
+                    # all layers from both vias (cross-layer-pair merge)
+                    # Issue #6099: physical stack order, not enum value.
+                    top, bottom = copper_span(*existing_via.layers, *new_via.layers)
+                    if top != existing_via.layers[0] or bottom != existing_via.layers[1]:
+                        existing_via.layers = (top, bottom)
+                        # Issue #6677: keep span_type consistent with new span.
+                        existing_via.refresh_span_type()
+
+                    # Remove the new via since we're reusing the existing one
+                    vias_to_remove.add(i)
+                    break
+
+        # Remove merged vias (iterate in reverse to keep indices valid)
+        for idx in sorted(vias_to_remove, reverse=True):
+            route.vias.pop(idx)
+
+    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
+        """Reconstruct the route from A* result with geometric validation.
+
+        Issue #750: After reconstructing the route from grid coordinates,
+        validates each segment against original obstacle geometry to catch
+        clearance violations that grid-based checking missed (particularly
+        for diagonal segments that can cut through obstacle corners).
+
+        Returns:
+            Route if valid, None if geometric clearance validation fails.
+        """
+        route = Route(net=start_pad.net, net_name=start_pad.net_name)
+
+        # Collect path points
+        path: list[tuple[float, float, int, bool]] = []
+        node: AStarNode | None = end_node
+        while node:
+            wx, wy = self.grid.grid_to_world(node.x, node.y)
+            path.append((wx, wy, node.layer, node.via_from_parent))
+            node = node.parent
+
+        path.reverse()
+
+        # Convert path to segments and vias
+        self._convert_path_to_route(path, route, start_pad, end_pad)
+
+        # Issue #2934: Reject Route objects with no segments.
+        # ``_convert_path_to_route`` silently no-ops when ``len(path) < 2``.
+        # This happens when the A* search terminates on the start cell itself,
+        # which Issue #2306's incremental-Steiner early-termination can do when
+        # ``extra_goal_cells`` already contains the start cell (e.g., a later
+        # RSMT edge whose start pad shares a grid cell with the previously
+        # routed tree).  The resulting ``Route(segments=[], vias=[])`` is
+        # geometrically empty and provides no connectivity, but callers using
+        # ``if route:`` (a truthy check) silently accept it and the connectivity
+        # validator later reports the pad as un-routed.  Return ``None`` so the
+        # caller falls back to its failure branch (e.g., recording the failure
+        # in ``routing_failures`` and firing ``failure_callback``).
+        if not route.segments and not route.vias:
+            return None
+
+        # Issue #1782: Merge vias that overlap with existing same-net vias
+        self._merge_same_net_vias(route)
+
+        # Validate layer transitions and insert any missing vias
+        route.validate_layer_transitions(
+            via_drill=self.rules.via_drill,
+            via_diameter=self.rules.via_diameter,
+        )
+
+        # Geometric clearance validation (Issue #1016: per-component clearance support)
+        # Issue #1764: Exclude pads on the same component as start/end pads from
+        # clearance checks. Adjacent pads (especially net=0 unconnected pads) on the
+        # same component should not block routing to their neighbors.
+        exclude_refs: set[str] = set()
+        if start_pad.component_key:
+            exclude_refs.add(start_pad.component_key)
+        if end_pad.component_key:
+            exclude_refs.add(end_pad.component_key)
+        # Issue #3438: relief PROBES deliberately cross foreign copper/
+        # halos -- geometric validation would reject every probe path.
+        # Probe routes are never committed, so skip validation.
+        if not self.relief_mode and not self._validate_route_clearance(
+            route,
+            start_pad.net,
+            component_pitches=self.component_pitches,
+            exclude_refs=exclude_refs if exclude_refs else None,
+        ):
+            # Route has clearance violations - reject it
+            # The caller will report "no path found" which is preferable
+            # to returning a route with DRC violations
+            return None
+
+        return route
+
+    def route_bidirectional(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+    ) -> Route | None:
+        """Route between two pads using bidirectional A* search.
+
+        Bidirectional A* runs two simultaneous searches: one from start toward
+        end, and one from end toward start. When the frontiers meet, the path
+        is reconstructed by combining both directions.
+
+        This can significantly reduce the search space for large paths, as
+        the searches meet in the middle rather than one having to traverse
+        the entire distance.
+
+        Performance benefits (Issue #964):
+        - For paths with N nodes, unidirectional searches O(N)
+        - Bidirectional searches O(√N) in best case
+        - Typically 50-75% speedup for paths >5000 nodes
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            net_class: Optional net class for routing parameters
+            negotiated_mode: If True, allow sharing resources with cost penalty
+            present_cost_factor: Multiplier for current sharing penalty
+            weight: A* weight factor (1.0 = optimal, >1.0 = faster but suboptimal)
+            per_net_timeout: Optional wall-clock budget (seconds) for this search
+                (Issue #6527).  Sampled every 1024 iterations, like ``_route_impl``;
+                on expiry ``last_route_deadline_hit`` is set and None returned.
+            extra_goal_cells: Steiner tree goal cells (Issue #6527).  The
+                bidirectional search has no multi-goal support, so a non-empty
+                set is never silently ignored: the search declines (returns
+                None without exhausting) and the caller must use the one-way
+                :meth:`route`, which honours the goals.
+
+        Returns:
+            Route if path found, None otherwise
+        """
+        # Issue #6527: status attributes mirror ``_route_impl`` (reset first so
+        # every early exit leaves them in a defined state).
+        self.last_route_exhausted = False
+        self.last_route_deadline_hit = False
+        self.last_route_deadline_iterations = 0
+
+        if extra_goal_cells:
+            return None
+
+        per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #8414: start the wall clock before any setup, as in
+        # ``_route_impl``, so seeding and escape hints are charged to the budget.
+        bidi_start = time.monotonic()
+
+        # Issue #966: Clear via cache at start of route (grid state may have changed)
+        self.clear_via_cache()
+
+        # Issue #2330: Reset waypoint state for this route call
+        self._waypoint_world_coords.clear()
+        self._waypoint_id_counter = 0
+
+        # Get net class if not provided
+        if net_class is None:
+            net_class = self._get_net_class(start.net_name)
+        self._route_halo_names[start.net] = start.net_name
+        self._route_halo_class = (start.net, net_class)
+
+        cost_mult = net_class.cost_multiplier if net_class else 1.0
+        allow_sharing = negotiated_mode
+
+        # Issue #1692: Compute per-net trace clearance radius for A* search,
+        # matching the logic in route() (lines 1156-1170).  Without this,
+        # bidirectional A* falls back to the global _trace_half_width_cells
+        # which under-reserves space for wider net classes (e.g. POWER).
+        net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        net_trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self.grid.resolution
+        )
+
+        # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner for
+        # within-pair clearance threading -- mirrors the logic in route().
+        # The bidirectional search expands neighbors via
+        # ``_expand_bidirectional_neighbors``, which now accepts a
+        # ``partner_net``/``partner_radius`` pair to forward into the
+        # ``_is_trace_blocked`` check.
+        partner_net_id = self._resolve_partner_net_id(start.net_name)
+        if partner_net_id is not None and net_class is not None:
+            net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
+            net_partner_half_width_cells = search_radius_cells(
+                net_trace_width / 2, net_intra_pair_clearance, self.grid.resolution
+            )
+        else:
+            net_partner_half_width_cells = net_trace_half_width_cells
+
+        # Issue #2715: Pre-compute the partner-active flag ONCE per route so
+        # the hot-path ``_is_trace_blocked`` call (per A* neighbor) skips
+        # the 4-condition tuple evaluation.  Mirrors the same expression
+        # that lives in ``_is_trace_blocked`` and ``compute_expanded_blocked``.
+        partner_active_flag = (
+            partner_net_id is not None
+            and partner_net_id >= 0
+            and net_partner_half_width_cells < net_trace_half_width_cells
+        )
+
+        # Issue #1692: Compute per-net via clearance radius.
+        net_via_size = net_class.via_size if net_class else self.rules.via_diameter
+        net_via_half_cells = search_radius_cells(
+            net_via_size / 2, self.rules.via_clearance, self.grid.resolution
+        )
+
+        # Convert to grid coordinates
+        start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
+        end_gx, end_gy = self.grid.world_to_grid(end.x, end.y)
+
+        # Get valid layers for each pad
+        routable_layers = self.grid.get_routable_indices()
+        start_layer = self.grid.layer_to_index(start.layer.value)
+        end_layer = self.grid.layer_to_index(end.layer.value)
+        start_layers = (
+            routable_layers if (start.through_hole or start.layer_agnostic) else [start_layer]
+        )
+        end_layers = routable_layers if (end.through_hole or end.layer_agnostic) else [end_layer]
+
+        # Apply layer constraints
+        if self.rules.allowed_layers is not None:
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, net_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, net_class)]
+            if not start_layers or not end_layers:
+                return None
+
+        # Issue #4433: hard per-net avoid_layers (see the unidirectional
+        # ``_route_impl`` for the full rationale).  Filter the seed sets so the
+        # bidirectional frontiers never start on an avoided inner plane; the
+        # via-loop gate in ``_expand_bidirectional_neighbors`` keeps them off it
+        # mid-path.  Empty set => no-op (soft default preserved).
+        if self.rules.strict_layers or (
+            net_class is not None and net_class.target_ampacity is not None
+        ):
+            bidi_hard_avoided = self._hard_avoided_layers(net_class)
+            if bidi_hard_avoided:
+                start_layers = [l for l in start_layers if l not in bidi_hard_avoided]
+                end_layers = [l for l in end_layers if l not in bidi_hard_avoided]
+                if not start_layers or not end_layers:
+                    return None
+
+        # Get pad metal bounds for goal checking (Issue #956)
+        start_metal_bounds = self._get_pad_metal_bounds(start, net_trace_width)
+        end_metal_bounds = self._get_pad_metal_bounds(end, net_trace_width)
+
+        # Heuristic contexts for both directions
+        forward_context = HeuristicContext(
+            goal_x=end_gx,
+            goal_y=end_gy,
+            goal_layer=end_layers[0] if end_layers else end_layer,
+            rules=self.rules,
+            cost_multiplier=cost_mult,
+            diagonal_routing=self.diagonal_routing,
+            get_congestion=self.grid.get_congestion,
+            get_congestion_cost=self._get_congestion_cost,
+        )
+        backward_context = HeuristicContext(
+            goal_x=start_gx,
+            goal_y=start_gy,
+            goal_layer=start_layers[0] if start_layers else start_layer,
+            rules=self.rules,
+            cost_multiplier=cost_mult,
+            diagonal_routing=self.diagonal_routing,
+            get_congestion=self.grid.get_congestion,
+            get_congestion_cost=self._get_congestion_cost,
+        )
+
+        # Issue #3144: monotonic insertion counters for deterministic
+        # tie-breaking.  Forward and backward searches each get their own
+        # counter; they push into disjoint heaps so a shared counter would
+        # introduce unnecessary cross-direction coupling.
+        forward_seq_counter = itertools.count()
+        backward_seq_counter = itertools.count()
+
+        # Initialize forward search (start -> end)
+        # Issue #977: Initialize from ALL cells within start pad's metal area
+        forward_open: list[AStarNode] = []
+        forward_closed: set[tuple[int, int, int]] = set()
+        forward_g: dict[tuple[int, int, int], float] = {}
+        forward_nodes: dict[tuple[int, int, int], AStarNode] = {}
+
+        for sgx in range(start_metal_bounds[0], start_metal_bounds[2] + 1):
+            for sgy in range(start_metal_bounds[1], start_metal_bounds[3] + 1):
+                for sl in start_layers:
+                    h = self.heuristic.estimate(sgx, sgy, sl, (0, 0), forward_context)
+                    node = AStarNode(h, 0, sgx, sgy, sl, seq=next(forward_seq_counter))
+                    heapq.heappush(forward_open, node)
+                    key = (sgx, sgy, sl)
+                    forward_g[key] = 0
+                    forward_nodes[key] = node
+
+        # Issue #2330: Waypoint injection for off-grid start pad (bidirectional)
+        if self._is_pad_off_grid(start):
+            bidir_start_wp = self._create_waypoint(start)
+            for gx, gy, edge_cost in self._waypoint_grid_edges(
+                bidir_start_wp,
+                start,
+                start.net,
+                allow_sharing,
+            ):
+                for sl in start_layers:
+                    wp_g = edge_cost * self.rules.cost_straight
+                    wp_h = self.heuristic.estimate(gx, gy, sl, (0, 0), forward_context)
+                    wp_node = AStarNode(
+                        wp_g + weight * wp_h,
+                        wp_g,
+                        gx,
+                        gy,
+                        sl,
+                        seq=next(forward_seq_counter),
+                    )
+                    fkey = (gx, gy, sl)
+                    if fkey not in forward_g or wp_g < forward_g[fkey]:
+                        forward_g[fkey] = wp_g
+                        forward_nodes[fkey] = wp_node
+                        heapq.heappush(forward_open, wp_node)
+
+        # Initialize backward search (end -> start)
+        # Issue #977: Initialize from ALL cells within end pad's metal area
+        backward_open: list[AStarNode] = []
+        backward_closed: set[tuple[int, int, int]] = set()
+        backward_g: dict[tuple[int, int, int], float] = {}
+        backward_nodes: dict[tuple[int, int, int], AStarNode] = {}
+
+        for egx in range(end_metal_bounds[0], end_metal_bounds[2] + 1):
+            for egy in range(end_metal_bounds[1], end_metal_bounds[3] + 1):
+                for el in end_layers:
+                    h = self.heuristic.estimate(egx, egy, el, (0, 0), backward_context)
+                    node = AStarNode(h, 0, egx, egy, el, seq=next(backward_seq_counter))
+                    heapq.heappush(backward_open, node)
+                    key = (egx, egy, el)
+                    backward_g[key] = 0
+                    backward_nodes[key] = node
+
+        # Issue #2330: Waypoint injection for off-grid end pad (bidirectional)
+        if self._is_pad_off_grid(end):
+            bidir_end_wp = self._create_waypoint(end)
+            for gx, gy, edge_cost in self._waypoint_grid_edges(
+                bidir_end_wp,
+                end,
+                end.net,
+                allow_sharing,
+            ):
+                for el in end_layers:
+                    wp_g = edge_cost * self.rules.cost_straight
+                    wp_h = self.heuristic.estimate(gx, gy, el, (0, 0), backward_context)
+                    wp_node = AStarNode(
+                        wp_g + weight * wp_h,
+                        wp_g,
+                        gx,
+                        gy,
+                        el,
+                        seq=next(backward_seq_counter),
+                    )
+                    bkey = (gx, gy, el)
+                    if bkey not in backward_g or wp_g < backward_g[bkey]:
+                        backward_g[bkey] = wp_g
+                        backward_nodes[bkey] = wp_node
+                        heapq.heappush(backward_open, wp_node)
+
+        # Issue #2974: Escape-hint seeds (bidirectional).  Same
+        # contract as the forward-only path above: each seed cell
+        # carries the straight-line edge cost from its pad and the
+        # ``escape_dir`` as its incoming direction.
+        forward_escape = self._detect_escape_hint(start, start_layers)
+        if forward_escape is not None:
+            for cx, cy, cl, edge_cost in self._escape_hint_cells(
+                start, forward_escape, start.net, start_layers
+            ):
+                seed_g = edge_cost * self.rules.cost_straight
+                seed_h = self.heuristic.estimate(cx, cy, cl, forward_escape, forward_context)
+                fkey = (cx, cy, cl)
+                if fkey not in forward_g or seed_g < forward_g[fkey]:
+                    seed_node = AStarNode(
+                        seed_g + weight * seed_h,
+                        seed_g,
+                        cx,
+                        cy,
+                        cl,
+                        direction=forward_escape,
+                        seq=next(forward_seq_counter),
+                    )
+                    forward_g[fkey] = seed_g
+                    forward_nodes[fkey] = seed_node
+                    heapq.heappush(forward_open, seed_node)
+
+        backward_escape = self._detect_escape_hint(end, end_layers)
+        if backward_escape is not None:
+            for cx, cy, cl, edge_cost in self._escape_hint_cells(
+                end, backward_escape, end.net, end_layers
+            ):
+                seed_g = edge_cost * self.rules.cost_straight
+                seed_h = self.heuristic.estimate(cx, cy, cl, backward_escape, backward_context)
+                bkey = (cx, cy, cl)
+                if bkey not in backward_g or seed_g < backward_g[bkey]:
+                    seed_node = AStarNode(
+                        seed_g + weight * seed_h,
+                        seed_g,
+                        cx,
+                        cy,
+                        cl,
+                        direction=backward_escape,
+                        seq=next(backward_seq_counter),
+                    )
+                    backward_g[bkey] = seed_g
+                    backward_nodes[bkey] = seed_node
+                    heapq.heappush(backward_open, seed_node)
+
+        # Issue #6397: inputs of the own-pad step gate, computed once for both
+        # frontiers (see ``_expand_bidirectional_neighbors``).  ``None`` on
+        # relief probes, as in ``_route_impl``.
+        own_gate: tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
+        own_gate = None if self.relief_mode else (*self._own_pad_gate_inputs(start, end), {})
+
+        # Best meeting point tracking
+        best_path_cost = float("inf")
+        meeting_point: tuple[int, int, int] | None = None
+
+        iterations = 0
+        max_iterations = self.grid.cols * self.grid.rows * 4
+        # Issue #3881: deterministic per-net iteration cap (bidirectional A*).
+        if self._max_iterations_override is not None:
+            max_iterations = min(max_iterations, self._max_iterations_override)
+
+        bidi_deadline = bidi_start + per_net_timeout if per_net_timeout is not None else None
+        bidi_deadline_hit = False
+
+        while (forward_open or backward_open) and iterations < max_iterations:
+            iterations += 1
+
+            # Issue #6527: per-net wall-clock deadline (same cadence as _route_impl)
+            if bidi_deadline is not None and iterations % 1024 == 0:
+                if time.monotonic() >= bidi_deadline:
+                    bidi_deadline_hit = True
+                    self.last_route_deadline_hit = True
+                    self.last_route_deadline_iterations = iterations
+                    break
+
+            # Alternate between forward and backward search
+            # Process forward step
+            if forward_open:
+                forward_node = heapq.heappop(forward_open)
+                fkey = (forward_node.x, forward_node.y, forward_node.layer)
+
+                if fkey not in forward_closed:
+                    forward_closed.add(fkey)
+                    forward_nodes[fkey] = forward_node
+
+                    # Check if backward search has reached this point
+                    if fkey in backward_closed:
+                        total_cost = forward_node.g_score + backward_g.get(fkey, float("inf"))
+                        if total_cost < best_path_cost:
+                            best_path_cost = total_cost
+                            meeting_point = fkey
+
+                    # Expand forward neighbors
+                    self._expand_bidirectional_neighbors(
+                        forward_node,
+                        forward_open,
+                        forward_closed,
+                        forward_g,
+                        forward_nodes,
+                        forward_context,
+                        start,
+                        start_layers,
+                        end_layers,
+                        start_metal_bounds,  # Issue #990: source metal bounds
+                        end_metal_bounds,
+                        allow_sharing,
+                        cost_mult,
+                        weight,
+                        trace_radius=net_trace_half_width_cells,
+                        via_radius=net_via_half_cells,
+                        partner_net=partner_net_id,
+                        partner_radius=net_partner_half_width_cells,
+                        partner_active=partner_active_flag,
+                        seq_counter=forward_seq_counter,
+                        own_gate=own_gate,
+                    )
+
+            # Process backward step
+            if backward_open:
+                backward_node = heapq.heappop(backward_open)
+                bkey = (backward_node.x, backward_node.y, backward_node.layer)
+
+                if bkey not in backward_closed:
+                    backward_closed.add(bkey)
+                    backward_nodes[bkey] = backward_node
+
+                    # Check if forward search has reached this point
+                    if bkey in forward_closed:
+                        total_cost = backward_node.g_score + forward_g.get(bkey, float("inf"))
+                        if total_cost < best_path_cost:
+                            best_path_cost = total_cost
+                            meeting_point = bkey
+
+                    # Expand backward neighbors
+                    self._expand_bidirectional_neighbors(
+                        backward_node,
+                        backward_open,
+                        backward_closed,
+                        backward_g,
+                        backward_nodes,
+                        backward_context,
+                        end,  # Backward search uses end pad as "start"
+                        end_layers,
+                        start_layers,
+                        end_metal_bounds,  # Issue #990: source metal bounds
+                        start_metal_bounds,
+                        allow_sharing,
+                        cost_mult,
+                        weight,
+                        trace_radius=net_trace_half_width_cells,
+                        via_radius=net_via_half_cells,
+                        partner_net=partner_net_id,
+                        partner_radius=net_partner_half_width_cells,
+                        partner_active=partner_active_flag,
+                        seq_counter=backward_seq_counter,
+                        own_gate=own_gate,
+                    )
+
+            # Issue #6527: one drained frontier without a meeting point ends
+            # the search.  Every cell that frontier can reach is closed, so the
+            # other frontier can only meet it by reaching one of those cells,
+            # which (steps being symmetric) would already have let the drained
+            # side reach the other pad.  Running the survivor on to its own
+            # drain or the iteration cap cost board 05's three failing
+            # PWM_C / EN_B / EN_C requests 100-120 s each (vs ~1 s with this
+            # exit, same routed copper).  ``route_auto`` retries one-way, so a
+            # search the step asymmetries (own-pad gate, pad-exit rules) would
+            # have rescued is still searched.
+            if meeting_point is None and (not forward_open or not backward_open):
+                break
+
+            # Early termination: if we have a meeting point and both queues
+            # have higher f-scores than the best path, we're done
+            if meeting_point is not None:
+                min_forward_f = forward_open[0].f_score if forward_open else float("inf")
+                min_backward_f = backward_open[0].f_score if backward_open else float("inf")
+                if min_forward_f >= best_path_cost and min_backward_f >= best_path_cost:
+                    break
+
+        # Reconstruct path if meeting point found
+        if meeting_point is not None:
+            return self._reconstruct_bidirectional_route(
+                meeting_point,
+                forward_nodes,
+                backward_nodes,
+                start,
+                end,
+            )
+
+        # Issue #6527: a drained frontier proves unreachability (#6098), as a
+        # drained open set does in ``_route_impl``; a deadline or the
+        # iteration cap does not.
+        self.last_route_exhausted = not (forward_open and backward_open) and not bidi_deadline_hit
+        return None
+
+    def _expand_bidirectional_neighbors(
+        self,
+        current: AStarNode,
+        open_set: list[AStarNode],
+        closed_set: set[tuple[int, int, int]],
+        g_scores: dict[tuple[int, int, int], float],
+        nodes: dict[tuple[int, int, int], AStarNode],
+        heuristic_context: HeuristicContext,
+        source_pad: Pad,
+        source_layers: list[int],
+        target_layers: list[int],
+        source_metal_bounds: tuple[int, int, int, int],
+        target_metal_bounds: tuple[int, int, int, int],
+        allow_sharing: bool,
+        cost_mult: float,
+        weight: float,
+        trace_radius: int | None = None,
+        via_radius: int | None = None,
+        partner_net: int | None = None,
+        partner_radius: int | None = None,
+        partner_active: bool | None = None,
+        seq_counter: "itertools.count[int] | None" = None,
+        own_gate: (
+            tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
+        ) = None,
+    ) -> None:
+        """Expand neighbors for bidirectional A* search.
+
+        This is a helper method that expands neighbors for either the forward
+        or backward search direction. It handles 2D moves and via transitions.
+
+        Args:
+            trace_radius: Per-net-class trace half-width in grid cells.
+                When None, falls back to the global ``_trace_half_width_cells``
+                (Issue #1692).
+            via_radius: Per-net-class via half-width in grid cells.
+                When None, falls back to the global ``_via_half_cells``
+                (Issue #1692).
+            partner_net: Issue #2559 / Phase 1C -- diff-pair partner net id.
+                When set, ``_is_trace_blocked`` calls below pass this id and
+                ``partner_radius`` so the partner cells are treated as
+                blockers only within the tighter intra-pair radius.
+            partner_radius: Tighter half-width for partner cells.
+            partner_active: Issue #2715 -- pre-computed dormant/active flag
+                for the partner branch.  Forwarded to ``_is_trace_blocked``
+                so the per-call 4-condition tuple evaluation is skipped on
+                the hot path.
+            own_gate: Issue #6397 -- ``(exclude_refs, width, memo)`` of the
+                own-pad step gate, from :meth:`_own_pad_gate_inputs`, shared
+                by both frontiers of one search.  ``None`` disables the gate
+                (relief probes, and legacy callers).
+        """
+        # Extract bounds (Issue #990: also need source bounds for pad exit check)
+        src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
+        tgt_gx1, tgt_gy1, tgt_gx2, tgt_gy2 = target_metal_bounds
+        source_gx, source_gy = self.grid.world_to_grid(source_pad.x, source_pad.y)
+
+        # Issue #1618: Precompute geometry-derived pad approach bounds
+        pad_escape_margin = 2  # cells beyond pad metal edge
+        src_approach_gx1 = src_gx1 - pad_escape_margin
+        src_approach_gy1 = src_gy1 - pad_escape_margin
+        src_approach_gx2 = src_gx2 + pad_escape_margin
+        src_approach_gy2 = src_gy2 + pad_escape_margin
+        tgt_approach_gx1 = tgt_gx1 - pad_escape_margin
+        tgt_approach_gy1 = tgt_gy1 - pad_escape_margin
+        tgt_approach_gx2 = tgt_gx2 + pad_escape_margin
+        tgt_approach_gy2 = tgt_gy2 + pad_escape_margin
+
+        # Explore 2D neighbors (same layer moves)
+        for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
+            nx, ny = current.x + dx, current.y + dy
+            nlayer = current.layer
+            if not self._fixed_step_clear(
+                current, nx, ny, nlayer, source_pad.net_name, source_pad.net
+            ):
+                continue
+
+            # Check bounds
+            if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
+                continue
+
+            # Check diagonal corner blocking
+            if dx != 0 and dy != 0:
+                if self._is_diagonal_corner_blocked(
+                    current.x, current.y, dx, dy, nlayer, source_pad.net, allow_sharing
+                ):
+                    continue
+
+            # Issue #1618: Use geometry-derived approach bounds instead of
+            # hardcoded pad_approach_radius=6. The approach zone covers the pad
+            # metal area plus a small escape margin.
+            is_source_adjacent = (
+                src_approach_gx1 <= nx <= src_approach_gx2
+                and src_approach_gy1 <= ny <= src_approach_gy2
+                and nlayer in source_layers
+            )
+            is_target_adjacent = (
+                tgt_approach_gx1 <= nx <= tgt_approach_gx2
+                and tgt_approach_gy1 <= ny <= tgt_approach_gy2
+                and nlayer in target_layers
+            )
+
+            # Issue #990: Check if CURRENT node is within a pad's metal area
+            # When entire metal area is blocked by clearance zones, allow first step out
+            is_exiting_source_pad = (
+                src_gx1 <= current.x <= src_gx2
+                and src_gy1 <= current.y <= src_gy2
+                and current.layer in source_layers
+            )
+            is_exiting_target_pad = (
+                tgt_gx1 <= current.x <= tgt_gx2
+                and tgt_gy1 <= current.y <= tgt_gy2
+                and current.layer in target_layers
+            )
+
+            # Check blocking
+            cell = self.grid.cell_at(nlayer, ny, nx)
+            if cell.blocked:
+                if cell.net == source_pad.net:
+                    # Same net - passable, except a shared pad halo (#6389).
+                    if self._shared_halo_blocked(
+                        nx,
+                        ny,
+                        nlayer,
+                        source_pad.net,
+                        allow_sharing,
+                        trace_radius,
+                        partner_net,
+                        partner_radius,
+                        partner_active,
+                        (current.x, current.y),
+                    ):
+                        continue
+                elif cell.net == 0:
+                    if self._is_trace_blocked(
+                        nx,
+                        ny,
+                        nlayer,
+                        source_pad.net,
+                        allow_sharing,
+                        radius=trace_radius,
+                        partner_net=partner_net,
+                        partner_radius=partner_radius,
+                        partner_active=partner_active,
+                        from_cell=(current.x, current.y),
+                    ):
+                        continue
+                elif (
+                    self._trace_halo_clear(
+                        [(nx, ny)], nlayer, nx, ny, source_pad.net, (current.x, current.y)
+                    )
+                    # Issue #6389 (port of #6315): exact-geometry pad clearance cell.
+                    or self._pad_cells_clear(
+                        [(nx, ny)], nlayer, nx, ny, source_pad.net, (current.x, current.y)
+                    )
+                ) and not self._is_trace_blocked(
+                    nx,
+                    ny,
+                    nlayer,
+                    source_pad.net,
+                    allow_sharing,
+                    radius=trace_radius,
+                    partner_net=partner_net,
+                    partner_radius=partner_radius,
+                    partner_active=partner_active,
+                    from_cell=(current.x, current.y),
+                ):
+                    pass
+                else:
+                    # Different net's blocked cell
+                    # Issue #996: When exiting a pad's metal area, allow entering
+                    # clearance zones (not actual pad copper). This enables sub-grid
+                    # pad connections where the nearest grid cells are within another
+                    # net's clearance zone but not its copper.
+                    is_clearance_only = not cell.pad_blocked
+                    is_pad_exit = is_exiting_source_pad or is_exiting_target_pad
+                    if is_clearance_only and is_pad_exit:
+                        # Clearance zone cell while exiting pad - allow this move,
+                        # but only when the trace centerline placement here does
+                        # NOT bring its radius envelope within touching distance
+                        # of any FOREIGN pad metal (Issue #3226).  See companion
+                        # comment in :meth:`route` for the dense-package failure
+                        # mode this guards against.
+                        if trace_radius is not None and self._is_foreign_pad_metal_within_radius(
+                            nx, ny, nlayer, source_pad.net, trace_radius
+                        ):
+                            continue
+                    else:
+                        continue  # Actual pad copper or not exiting a pad - block
+            else:
+                # Issue #990: Relax blocking check when exiting from pad metal area
+                is_pad_exit_or_approach = (
+                    is_source_adjacent
+                    or is_target_adjacent
+                    or is_exiting_source_pad
+                    or is_exiting_target_pad
+                )
+                if not is_pad_exit_or_approach:
+                    if self._is_trace_blocked(
+                        nx,
+                        ny,
+                        nlayer,
+                        source_pad.net,
+                        allow_sharing,
+                        radius=trace_radius,
+                        partner_net=partner_net,
+                        partner_radius=partner_radius,
+                        partner_active=partner_active,
+                        from_cell=(current.x, current.y),
+                    ):
+                        continue
+
+            # Issue #6397: own-pad step gate, as in ``_route_impl`` (#6389) and
+            # the native loops (#6375).  A planar step touching the routing
+            # net's own pad copper/halo outside both pads' metal boxes must
+            # pass the validator's own segment-vs-pad verdict; the same-net
+            # branch above admits such cells unchecked, and an unblocked
+            # neighbour reached FROM such a cell is not checked at all.
+            if (
+                own_gate is not None
+                and not (
+                    src_gx1 <= nx <= src_gx2
+                    and src_gy1 <= ny <= src_gy2
+                    and nlayer in source_layers
+                )
+                and not (
+                    tgt_gx1 <= nx <= tgt_gx2
+                    and tgt_gy1 <= ny <= tgt_gy2
+                    and nlayer in target_layers
+                )
+                and (
+                    self._own_pad_cell(nx, ny, nlayer, source_pad.net)
+                    or self._own_pad_cell(current.x, current.y, nlayer, source_pad.net)
+                )
+                and not self._own_pad_step_clear(
+                    current.x,
+                    current.y,
+                    nx,
+                    ny,
+                    nlayer,
+                    source_pad.net,
+                    own_gate[1],
+                    own_gate[0],
+                    own_gate[2],
+                )
+            ):
+                if _ASTAR_TRACE_ENABLED:
+                    _astar_trace(
+                        f"[A*/py-bidi] cur=({current.x},{current.y},L{current.layer}) "
+                        f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                        f"reason=own_pad_step_foreign_pad_too_close"
+                    )
+                continue
+
+            # Check zone blocking
+            if self._is_zone_blocked(nx, ny, nlayer, source_pad.net):
+                continue
+
+            neighbor_key = (nx, ny, nlayer)
+            if neighbor_key in closed_set:
+                continue
+
+            # Calculate cost
+            new_direction = (dx, dy)
+            turn_cost = 0.0
+            if current.direction != (0, 0) and current.direction != new_direction:
+                turn_cost = self.rules.cost_turn
+
+            congestion_cost = self._get_congestion_cost(nx, ny, nlayer)
+            negotiated_cost = 0.0
+            if allow_sharing and not (is_source_adjacent or is_target_adjacent):
+                negotiated_cost = self._get_negotiated_cell_cost(
+                    nx, ny, nlayer, 1.0, net=source_pad.net
+                )
+
+            zone_cost = self._get_zone_cost(nx, ny, nlayer, source_pad.net)
+            net_class = self._get_net_class(source_pad.net_name)
+            layer_pref_mult = self._get_layer_preference_cost(nlayer, net_class)
+
+            # Issue #1250: Crossing penalty for edges crossing routed segments
+            crossing_cost = 0.0
+            if self.rules.crossing_penalty > 0.0 and self._routed_segments:
+                num_crossings = self._count_edge_crossings(
+                    current.x, current.y, nx, ny, nlayer, source_pad.net
+                )
+                crossing_cost = self.rules.crossing_penalty * num_crossings
+
+            # Issue #2275: Layer utilization cost
+            layer_util_cost = self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
+
+            # Issue #2288: Corridor deviation penalty from global routing
+            corridor_cost = self.grid.get_corridor_cost(nx, ny, nlayer, source_pad.net)
+
+            # Issue #2911: Diff-pair / match-group corridor attractor (see
+            # forward A* expansion for full rationale).
+            attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                nlayer,
+                nx,
+                ny,
+                source_pad.net,
+                self.rules.cost_corridor_attractor,
+            )
+
+            positive_step_cost = (
+                neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
+                + turn_cost
+                + congestion_cost
+                + negotiated_cost
+                + zone_cost
+                + crossing_cost
+                + layer_util_cost
+                + corridor_cost
+            )
+            if attractor_bonus > 0.0:
+                positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
+
+            new_g = (current.g_score + positive_step_cost) * cost_mult
+
+            if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
+                g_scores[neighbor_key] = new_g
+                h = self.heuristic.estimate(nx, ny, nlayer, new_direction, heuristic_context)
+                f = new_g + weight * h
+
+                # Issue #3144: monotonic insertion tie-break.  When the
+                # legacy callers do not pass a counter, use the parent
+                # node's seq+1 as a stand-in (still strictly increasing
+                # along any expansion chain, which preserves heap
+                # determinism within a single search path).
+                neighbor_seq = next(seq_counter) if seq_counter is not None else current.seq + 1
+                neighbor_node = AStarNode(
+                    f,
+                    new_g,
+                    nx,
+                    ny,
+                    nlayer,
+                    current,
+                    False,
+                    new_direction,
+                    seq=neighbor_seq,
+                    via_anc=current if current.via_from_parent else current.via_anc,
+                )
+                heapq.heappush(open_set, neighbor_node)
+                nodes[neighbor_key] = neighbor_node
+
+        # Issue #4433: hard per-net avoid_layers -- resolved once for this
+        # expansion so the via loop below refuses to change onto an avoided
+        # inner plane.  Empty set => no-op (soft default preserved).
+        bidi_net_class = self._get_net_class(source_pad.net_name)
+        bidi_hard_avoided = self._hard_avoided_layers(bidi_net_class)
+
+        # Try layer changes (vias)
+        for new_layer in self.grid.get_routable_indices():
+            if new_layer == current.layer:
+                continue
+
+            if not self._is_layer_allowed(new_layer, bidi_net_class):
+                continue
+
+            # Issue #4433: refuse a via onto a hard-avoided layer for this net.
+            if new_layer in bidi_hard_avoided:
+                continue
+
+            # Check via blocking on all layers
+            # Issue #966: Use cached via check with layer priority ordering
+            # Issue #1692: Pass per-net via radius for wider net classes
+            self._via_diag_attempts += 1
+            if not self._check_via_placement_cached(
+                current.x,
+                current.y,
+                source_pad.net,
+                allow_sharing,
+                radius=via_radius,
+            ):
+                self._via_diag_blocked += 1
+                continue
+
+            if not self._can_place_via_in_zones(current.x, current.y, source_pad.net):
+                self._via_diag_zone_blocked += 1
+                continue
+
+            # Issue #6473: hole-to-hole against the earlier vias of this
+            # frontier's path.  A pair split across the two frontiers is only
+            # seen by the validator in ``_reconstruct_bidirectional_route``.
+            if not self._own_path_vias_clear(current):
+                break
+
+            self._via_diag_eligible += 1
+
+            neighbor_key = (current.x, current.y, new_layer)
+            if neighbor_key in closed_set:
+                continue
+
+            congestion_cost = self._get_congestion_cost(current.x, current.y, new_layer)
+            negotiated_cost = 0.0
+            if allow_sharing:
+                negotiated_cost = self._get_negotiated_cell_cost(
+                    current.x, current.y, new_layer, 1.0, net=source_pad.net
+                )
+
+            net_class = self._get_net_class(source_pad.net_name)
+            layer_pref_mult = self._get_layer_preference_cost(new_layer, net_class)
+
+            # Issue #2275: Layer utilization cost for target layer
+            layer_util_cost = self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
+
+            # Issue #2288: Corridor deviation penalty from global routing
+            corridor_cost = self.grid.get_corridor_cost(
+                current.x, current.y, new_layer, source_pad.net
+            )
+
+            # Issue #2911: Corridor attractor bonus on the target layer
+            # (see forward A* via transition for full rationale).
+            attractor_bonus = self.grid.get_corridor_attractor_bonus(
+                new_layer,
+                current.x,
+                current.y,
+                source_pad.net,
+                self.rules.cost_corridor_attractor,
+            )
+
+            # Issue #2325: Cap via incremental cost (same logic as forward A*)
+            via_incremental = (
+                self.rules.cost_via * layer_pref_mult
+                + congestion_cost
+                + negotiated_cost
+                + layer_util_cost
+                + corridor_cost
+            )
+            if self.rules.via_cost_cap_factor > 0.0:
+                via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
+                via_incremental = min(via_incremental, via_cap)
+
+            # Issue #2911: Apply the attractor AFTER the cap so the bonus
+            # is felt even when the via cost is at the ceiling.
+            if attractor_bonus > 0.0:
+                via_incremental = max(0.0, via_incremental - attractor_bonus)
+
+            new_g = (current.g_score + via_incremental) * cost_mult
+
+            if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
+                g_scores[neighbor_key] = new_g
+                h = self.heuristic.estimate(
+                    current.x, current.y, new_layer, current.direction, heuristic_context
+                )
+                f = new_g + weight * h
+
+                # Issue #3144: see same-named comment for the 2D move case.
+                neighbor_seq = next(seq_counter) if seq_counter is not None else current.seq + 1
+                neighbor_node = AStarNode(
+                    f,
+                    new_g,
+                    current.x,
+                    current.y,
+                    new_layer,
+                    current,
+                    True,
+                    seq=neighbor_seq,
+                    via_anc=current if current.via_from_parent else current.via_anc,
+                )
+                heapq.heappush(open_set, neighbor_node)
+                nodes[neighbor_key] = neighbor_node
+
+    def _reconstruct_bidirectional_route(
+        self,
+        meeting_point: tuple[int, int, int],
+        forward_nodes: dict[tuple[int, int, int], AStarNode],
+        backward_nodes: dict[tuple[int, int, int], AStarNode],
+        start_pad: Pad,
+        end_pad: Pad,
+    ) -> Route | None:
+        """Reconstruct route from bidirectional A* meeting point.
+
+        Combines the forward path (start -> meeting) and reversed backward path
+        (meeting -> end) into a complete route.
+
+        Issue #972: Uses inline segment merging for performance.
+        """
+        route = Route(net=start_pad.net, net_name=start_pad.net_name)
+
+        # Collect forward path (start -> meeting point)
+        forward_path: list[tuple[float, float, int, bool]] = []
+        forward_node = forward_nodes.get(meeting_point)
+        while forward_node:
+            wx, wy = self.grid.grid_to_world(forward_node.x, forward_node.y)
+            forward_path.append((wx, wy, forward_node.layer, forward_node.via_from_parent))
+            forward_node = forward_node.parent
+        forward_path.reverse()
+
+        # Collect backward path (end -> meeting point), then reverse
+        backward_path: list[tuple[float, float, int, bool]] = []
+        backward_node = backward_nodes.get(meeting_point)
+        # A backward-tree node's ``via_from_parent`` describes the edge to its
+        # parent (the end side).  Walking meeting -> end reverses each edge, so
+        # the flag belongs on the NEXT node emitted.  Keeping it on the node
+        # that owns it shifted every backward-half via one grid step away from
+        # the position the search actually checked (surfaced by #6243, whose
+        # authored via gate then rejected the emitted barrel).
+        incoming_via = backward_node.via_from_parent if backward_node else False
+        if backward_node:
+            backward_node = backward_node.parent  # Skip meeting point (already in forward)
+        while backward_node:
+            wx, wy = self.grid.grid_to_world(backward_node.x, backward_node.y)
+            backward_path.append((wx, wy, backward_node.layer, incoming_via))
+            incoming_via = backward_node.via_from_parent
+            backward_node = backward_node.parent
+        # backward_path is now from meeting -> end, which is what we want
+
+        # Combine paths
+        full_path = forward_path + backward_path
+
+        # Convert path to segments and vias using shared helper
+        # Issue #972: Helper includes inline segment merging optimization
+        self._convert_path_to_route(full_path, route, start_pad, end_pad)
+
+        # Issue #2934: Reject empty Routes - same rationale as the
+        # unidirectional path in ``_reconstruct_route``.
+        if not route.segments and not route.vias:
+            return None
+
+        # Validate layer transitions
+        route.validate_layer_transitions(
+            via_drill=self.rules.via_drill,
+            via_diameter=self.rules.via_diameter,
+        )
+
+        # Geometric clearance validation (Issue #1016: per-component clearance support)
+        # Issue #1764: Exclude pads on start/end component from clearance checks
+        bidir_exclude_refs: set[str] = set()
+        if start_pad.component_key:
+            bidir_exclude_refs.add(start_pad.component_key)
+        if end_pad.component_key:
+            bidir_exclude_refs.add(end_pad.component_key)
+        if not self._validate_route_clearance(
+            route,
+            start_pad.net,
+            component_pitches=self.component_pitches,
+            exclude_refs=bidir_exclude_refs if bidir_exclude_refs else None,
+        ):
+            return None
+
+        return route
+
+    def route_auto(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None = None,
+        negotiated_mode: bool = False,
+        present_cost_factor: float = 0.0,
+        weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
+        threshold: int | None = None,
+    ) -> Route | None:
+        """Route using automatic algorithm selection.
+
+        Chooses between standard A* and bidirectional A* based on:
+        - Grid size (bidirectional for large grids)
+        - Distance between pads (bidirectional for long paths)
+        - Configuration settings
+
+        Issue #6527: ``per_net_timeout`` is ONE budget shared by a failed
+        bidirectional attempt and its one-way retry (the retry receives only
+        the time remaining).  ``extra_goal_cells`` is forwarded; the
+        bidirectional search declines Steiner-goal requests so the one-way
+        search (which honours them) runs.
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            net_class: Optional net class for routing parameters
+            negotiated_mode: If True, allow sharing resources with cost penalty
+            present_cost_factor: Multiplier for current sharing penalty
+            weight: A* weight factor
+            per_net_timeout: Optional shared wall-clock budget in seconds
+            extra_goal_cells: Optional Steiner tree goal cells
+            threshold: Manhattan distance (grid cells) from which the
+                bidirectional search runs; ``None`` uses
+                ``rules.bidirectional_threshold``.  The C++ backend's Python
+                fallback passes ``rules.fallback_bidirectional_threshold``
+                (Issue #6527).
+
+        Returns:
+            Route if path found, None otherwise
+        """
+        if not self.rules.bidirectional_search:
+            return self.route(
+                start,
+                end,
+                net_class,
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
+
+        # Calculate Manhattan distance in grid cells
+        start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
+        end_gx, end_gy = self.grid.world_to_grid(end.x, end.y)
+        manhattan_dist = abs(end_gx - start_gx) + abs(end_gy - start_gy)
+
+        remaining = per_net_timeout
+        # Use bidirectional for paths exceeding threshold (and no Steiner goals)
+        if threshold is None:
+            threshold = self.rules.bidirectional_threshold
+        if manhattan_dist >= threshold and not extra_goal_cells:
+            t0 = time.monotonic()
+            result = self.route_bidirectional(
+                start,
+                end,
+                net_class,
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                per_net_timeout=per_net_timeout,
+            )
+            if result is not None:
+                return result
+            if per_net_timeout is not None:
+                remaining = per_net_timeout - (time.monotonic() - t0)
+                if remaining <= 0 or self.last_route_deadline_hit:
+                    # Budget spent in the bidirectional half: no retry.
+                    self.last_route_deadline_hit = True
+                    return None
+            # Fall back to standard A* if bidirectional fails
+
+        return self.route(
+            start,
+            end,
+            net_class,
+            negotiated_mode,
+            present_cost_factor,
+            weight,
+            per_net_timeout=remaining,
+            extra_goal_cells=extra_goal_cells,
+        )

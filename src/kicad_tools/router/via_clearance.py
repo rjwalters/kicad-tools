@@ -1,0 +1,1068 @@
+"""Shared world-coordinate via-clearance predicate (Issue #2944).
+
+This module hosts the canonical "is it safe to place a via at (x, y)?"
+geometry check used by:
+
+* :mod:`kicad_tools.cli.stitch_cmd` -- stitching power/ground planes (the
+  ``check_via_clearance`` function in that module is now a thin wrapper).
+* :class:`kicad_tools.router.escape.EscapeRouter` -- per-pad escape via
+  placement and in-pad via rescue.
+
+Historical context: prior to Issue #2944 the stitcher had a precise
+world-coord clearance check at ``cli/stitch_cmd.py:check_via_clearance``
+while the router's escape via predicates only checked coarse-grid
+obstacle cells.  The mismatch let escape-router-placed vias land
+fractions of a millimeter from foreign-net pads/traces, producing DRC
+violations the stitcher would never have produced.  The fix shape (per
+the curator on #2944) is to lift the precise check into a shared helper
+and use it from both call sites.
+
+Design notes:
+
+* The helper accepts duck-typed inputs via :class:`TrackSegmentLike` and
+  :class:`FilledPolygonLike` protocols so the existing stitcher data
+  classes (``stitch_cmd.TrackSegment`` / ``stitch_cmd.FilledPolygon``)
+  work without modification, and the router can supply its own
+  segment / polygon representations without a cross-module type
+  dependency.
+* The check is pure geometry on raw coordinates -- no PCB / SExp state
+  is required, which keeps it cheap to call from any pipeline stage.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, Protocol
+
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
+from kicad_tools.core.geometry import point_to_segment_distance
+
+# ---------------------------------------------------------------------------
+# Duck-typed protocols so the helper works with both stitcher and router
+# data classes without importing either module's concrete dataclass.
+# ---------------------------------------------------------------------------
+
+
+class TrackSegmentLike(Protocol):
+    """Structural type for a track segment used by :func:`point_clear_of_copper`.
+
+    The router's :class:`Segment` and the stitcher's
+    :class:`TrackSegment` are both compatible -- the helper only reads
+    ``start_x``, ``start_y``, ``end_x``, ``end_y`` and ``width``.
+    """
+
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    width: float
+
+
+class FilledPolygonLike(Protocol):
+    """Structural type for a zone-fill polygon used by clearance checks.
+
+    Matches ``stitch_cmd.FilledPolygon`` and any future router-side polygon
+    representation that exposes ``points`` and the bounding box used for
+    the fast pre-filter.
+    """
+
+    points: list[tuple[float, float]]
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+
+
+# ---------------------------------------------------------------------------
+# Drill hole-to-hole (drill-to-drill edge-to-edge) guard
+# ---------------------------------------------------------------------------
+
+#: Default manufacturer hole-to-hole (drill-to-drill) minimum, in mm.  Mirrors
+#: ``manufacturers.base.DesignRules.min_hole_to_hole_mm`` and the canonical fab
+#: floor used by the DRC ``hole_to_hole_clearance`` rule.
+DEFAULT_MIN_HOLE_TO_HOLE = 0.5
+
+#: Numerical tolerance for the hole-to-hole comparison, mirroring
+#: ``validate.rules.dimensions.DRC_TOLERANCE`` so the router pre-check and the
+#: DRC post-check agree on borderline geometry.
+HOLE_TO_HOLE_TOLERANCE = 1e-3
+
+#: Issue #6671: slack for the board writers' 0.01 mm coordinate rounding
+#: (:func:`kicad_tools.sexp.builders.fmt`).  Each axis moves by at most
+#: 0.005 mm, so one via moves by at most ``0.005 * sqrt(2)`` ~= 0.0071 mm.
+#: When BOTH vias of a pair are new (placed in the same pass, both still
+#: unrounded) their centres can close by twice that, ~= 0.0142 mm, on a
+#: diagonal.  0.015 covers that worst case.  (06rf: two GND welds planned
+#: 0.800 mm apart were written 0.797 mm apart, a jlcpcb
+#: ``hole_to_hole_clearance`` error of 0.497 < 0.500 mm.)  Drill spacing
+#: checks keep this much slack.
+COORD_WRITE_GUARD_MM = 0.015
+
+
+def drill_hole_to_hole_clear(
+    x: float,
+    y: float,
+    drill: float,
+    existing_drills: list[tuple[float, float, float]] | None,
+    min_hole_to_hole: float = DEFAULT_MIN_HOLE_TO_HOLE,
+) -> bool:
+    """Return True iff a drill of diameter ``drill`` at (x, y) clears every
+    existing drill by at least ``min_hole_to_hole`` edge-to-edge.
+
+    This mirrors the canonical edge-to-edge formula used by the DRC
+    ``hole_to_hole_clearance`` rule
+    (:meth:`validate.rules.dimensions.DimensionRules._check_drill_clearance`)
+    so a candidate via the router accepts here will not trip a hole-to-hole
+    DRC error later::
+
+        edge_distance = center_distance - drill_candidate / 2 - drill_existing / 2
+        violation if edge_distance + tol < min_hole_to_hole
+
+    Args:
+        x: Candidate drill center X (mm, world coordinates).
+        y: Candidate drill center Y (mm, world coordinates).
+        drill: Candidate drill diameter (mm).
+        existing_drills: Board-wide registry of existing drills (vias of ALL
+            nets + through-hole pad drills) as ``(x, y, drill_diameter)``
+            tuples.  ``None`` or empty means there is nothing to conflict
+            with and the check is a no-op (returns ``True``) -- this keeps
+            the guard back-compatible with call sites that supply no
+            registry.
+        min_hole_to_hole: Minimum edge-to-edge drill spacing (mm).  Defaults
+            to the canonical 0.5mm fab floor.
+
+    Returns:
+        True if the candidate clears every existing drill, False on any
+        sub-minimum pair.
+    """
+    if not existing_drills:
+        return True
+    cand_radius = drill / 2.0
+    # Issue #5240: this loop is on the hot path of escape-via placement,
+    # diff-pair fan-out, the post-route nudge pass and stitch-via
+    # placement -- every candidate via site pays one ``math.sqrt`` call
+    # per existing drill.  The comparison this function makes is
+    # ``center_distance < threshold`` (algebraically rearranging the
+    # documented ``edge_distance + tol < min_hole_to_hole`` violation
+    # test, where ``threshold = min_hole_to_hole - tol + cand_radius +
+    # edrill / 2``).  Both sides of that comparison are non-negative
+    # whenever ``threshold > 0``, so squaring preserves it exactly
+    # (``a < b`` iff ``a**2 < b**2`` for ``a, b >= 0``) and the ``sqrt``
+    # is never needed -- only the (already-computed) squared distance
+    # is.  When ``threshold <= 0`` no real ``center_distance >= 0`` can
+    # ever be smaller than it, so that drill can never trigger a
+    # violation regardless of position; skip it without computing a
+    # distance at all.  This is an exact reformulation, not an
+    # approximation: it returns bit-identical results to the prior
+    # ``math.sqrt``-based comparison for every input.
+    base_threshold = min_hole_to_hole - HOLE_TO_HOLE_TOLERANCE + cand_radius
+    for ex, ey, edrill in existing_drills:
+        threshold = base_threshold + edrill / 2.0
+        if threshold <= 0.0:
+            continue
+        dx = ex - x
+        dy = ey - y
+        if dx * dx + dy * dy < threshold * threshold:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
+    """Half-open ray-casting point-in-polygon test (see core.geometry)."""
+    return _core_point_in_polygon(x, y, polygon, boundary_inside=False)
+
+
+def _point_clear_of_filled_polygons(
+    px: float,
+    py: float,
+    radius: float,
+    filled_polygons: list[FilledPolygonLike],
+    clearance: float,
+) -> bool:
+    """Return True iff a circular copper object at (px, py) clears all
+    filled polygons.
+
+    Args:
+        px, py: Center of the circular copper object (e.g. via center).
+        radius: Radius of the copper object in mm.
+        filled_polygons: Other-net filled polygons to check against.
+        clearance: Required clearance from polygon copper.
+
+    Returns:
+        True if the object clears every polygon, False on any violation.
+    """
+    required = radius + clearance
+    for fp in filled_polygons:
+        # Bounding-box pre-filter
+        if (
+            px + required < fp.min_x
+            or px - required > fp.max_x
+            or py + required < fp.min_y
+            or py - required > fp.max_y
+        ):
+            continue
+
+        if _point_in_polygon(px, py, fp.points):
+            return False
+
+        n = len(fp.points)
+        for i in range(n):
+            j = (i + 1) % n
+            dist = point_to_segment_distance(
+                px, py, fp.points[i][0], fp.points[i][1], fp.points[j][0], fp.points[j][1]
+            )
+            if dist < required:
+                return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+#: Foreign-net pad tuple type.  Either:
+#:
+#: * 4-tuple ``(x, y, effective_radius, net_num)`` -- legacy "disc-bound"
+#:   shape used by the stitcher's pre-#2944 callers.  The effective radius
+#:   conservatively encodes pad geometry as ``max(width, height) / 2``.
+#: * 5-tuple ``(x, y, width, height, net_num)`` -- rect-aware shape
+#:   introduced in Issue #2951.  The helper computes axis-separated
+#:   distance to the pad rectangle (closest-point distance), avoiding the
+#:   disc-bound over-conservatism for oblong fine-pitch pads (e.g. 0.3 x
+#:   1.4mm LQFP fingers at 0.5mm pitch where the disc bound of 0.7mm
+#:   produces a 1.05mm minimum centre-to-centre vs the actual 0.35mm
+#:   rect-distance requirement).
+ForeignPadTuple = (
+    tuple[float, float, float, int]  # (x, y, radius, net)
+    | tuple[float, float, float, float, int]  # (x, y, width, height, net)
+)
+
+
+def point_clear_of_copper(
+    x: float,
+    y: float,
+    via_size: float,
+    clearance: float,
+    other_net_tracks: list[TrackSegmentLike] | None = None,
+    other_net_vias: list[tuple[float, float, float, int]] | None = None,
+    other_net_pads: list[ForeignPadTuple] | None = None,
+    same_net_vias: list[tuple[float, float]] | None = None,
+    other_net_filled_polygons: list[FilledPolygonLike] | None = None,
+    via_drill: float = 0.0,
+    other_net_drills: list[tuple[float, float, float, int]] | None = None,
+    hole_to_copper_clearance: float = 0.0,
+    min_hole_to_hole: float = 0.0,
+) -> bool:
+    """Check if a via at (x, y) clears all surrounding copper.
+
+    This is the canonical world-coordinate via-clearance predicate.
+    It checks the proposed via center against:
+
+    * Same-net vias (prevents stacking; threshold = ``via_size + clearance``).
+    * Other-net track segments (threshold = ``via_radius + seg.width/2 + clearance``).
+    * Other-net vias (threshold = ``via_radius + other_radius + clearance``).
+    * Other-net pads (threshold = ``via_radius + pad_radius + clearance`` for
+      4-tuple discs, or rect-distance >= ``via_radius + clearance`` for
+      5-tuple width/height pads -- see :data:`ForeignPadTuple`).
+    * Other-net filled polygons (zone fills).
+
+    Returns True only if every check passes.  Any single violation
+    short-circuits with False -- callers that want to know which
+    obstacle blocked the placement should use the structured-diagnostic
+    paths in :mod:`stitch_cmd` (this predicate is intentionally
+    boolean-only for cheap use on hot paths).
+
+    All distances are in millimeters and the inputs are world-coordinate
+    floats (NOT grid indices).  This is the key contract the function
+    enforces over coarse grid-cell obstacle checks: a via that clears
+    every grid cell may still violate copper clearance if the cell
+    resolution is coarser than the manufacturer's minimum clearance
+    rule.
+
+    Args:
+        x: Proposed via X (mm, world coordinates).
+        y: Proposed via Y (mm, world coordinates).
+        via_size: Via pad diameter in mm.
+        clearance: Minimum copper-to-copper clearance in mm
+            (e.g. ``manufacturer.min_via_to_track_clearance`` from the
+            manufacturer profile).
+        other_net_tracks: Foreign-net track segments (any structural
+            type with ``start_x/start_y/end_x/end_y/width``).
+        other_net_vias: Foreign-net vias as
+            ``(x, y, size_mm, net_num)`` tuples.
+        other_net_pads: Foreign-net pads.  Each element may be either a
+            4-tuple ``(x, y, effective_radius_mm, net_num)`` (legacy
+            disc-bound) or a 5-tuple
+            ``(x, y, width_mm, height_mm, net_num)`` (rect-aware --
+            preferred for oblong fine-pitch pads; see Issue #2951).
+            Mixing tuple shapes within the same list is supported.
+        same_net_vias: Existing same-net via centers as ``(x, y)``
+            tuples used to reject via stacking.
+        other_net_filled_polygons: Foreign-net filled polygons from
+            zone fills (any structural type with
+            ``points/min_x/min_y/max_x/max_y``).
+        via_drill: Drill diameter of the candidate via in mm.  When
+            ``> 0`` and ``hole_to_copper_clearance > 0``, the copper
+            checks (tracks/vias/pads) additionally enforce the KiCad
+            ``hole_clearance`` band -- the via DRILL edge must clear
+            foreign copper by ``hole_to_copper_clearance`` -- taking the
+            max of the copper-to-copper floor and the drill-to-copper
+            floor (Issue #4010, mirrors
+            :func:`kicad_tools.cli.stitch_cmd.calculate_via_position`).
+            Defaults to ``0.0`` (guard disabled) so existing callers are
+            unaffected.
+        other_net_drills: Foreign-net DRILL registry (through-hole pads
+            + vias) as ``(x, y, drill_diameter_mm, net_num)`` tuples.
+            When supplied with ``via_drill > 0`` and
+            ``min_hole_to_hole > 0``, the candidate drill must clear
+            every foreign drill edge-to-edge by ``min_hole_to_hole``
+            (fab ``hole_to_hole_clearance`` floor, Issue #3855).
+        hole_to_copper_clearance: KiCad ``hole_clearance`` band in mm
+            (typically :data:`kicad_tools.cli.stitch_cmd.KICAD_HOLE_TO_COPPER_CLEARANCE`).
+            Only consulted when ``via_drill > 0``.
+        min_hole_to_hole: Minimum drill edge-to-edge spacing in mm for
+            the ``other_net_drills`` guard.  Only consulted when
+            ``via_drill > 0`` and ``other_net_drills`` is non-empty.
+
+    Returns:
+        True if the position is clear for via placement; False if any
+        clearance threshold is violated.
+    """
+    via_radius = via_size / 2
+
+    # Hole-to-copper guard (kicad-cli ``hole_clearance``): the via DRILL
+    # edge must clear foreign copper by ``hole_to_copper_clearance`` when
+    # the drill term dominates.  Applied as an extra radius on the via
+    # candidate, mirroring ``calculate_via_position``'s ``hole_extra``.
+    # Zero (guard disabled) unless the caller opts in with a drill +
+    # clearance (Issue #4010).
+    hole_extra = 0.0
+    if via_drill > 0 and hole_to_copper_clearance > 0:
+        hole_extra = max(
+            0.0,
+            (via_drill / 2 + hole_to_copper_clearance) - (via_radius + clearance),
+        )
+
+    if same_net_vias:
+        # Issue #6289: a same-net neighbour is still a separate drilled hole,
+        # so with a drill + fab floor supplied the centre spacing must also
+        # clear ``min_hole_to_hole`` edge-to-edge (neighbours share this
+        # candidate's drill).  On a small via the copper-only
+        # ``via_size + clearance`` leaves a 0.45 mm hole gap vs 0.5 mm.
+        same_net_min_dist = via_size + clearance
+        if via_drill > 0 and min_hole_to_hole > 0:
+            same_net_min_dist = max(same_net_min_dist, min_hole_to_hole + via_drill)
+        for vx, vy in same_net_vias:
+            dist = math.sqrt((vx - x) ** 2 + (vy - y) ** 2)
+            if dist < same_net_min_dist:
+                return False
+
+    if other_net_tracks:
+        for seg in other_net_tracks:
+            dist = point_to_segment_distance(x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
+            min_dist = via_radius + seg.width / 2 + clearance + hole_extra
+            if dist < min_dist:
+                return False
+
+    if other_net_vias:
+        for ovx, ovy, ov_size, _onet in other_net_vias:
+            dist = math.sqrt((ovx - x) ** 2 + (ovy - y) ** 2)
+            min_dist = via_radius + ov_size / 2 + clearance + hole_extra
+            if dist < min_dist:
+                return False
+
+    if other_net_pads:
+        # Required clearance from any pad edge -- same for disc and rect
+        # forms below (the disc form folds the pad's effective radius
+        # into the threshold, while the rect form measures distance to
+        # the pad's edge directly).
+        required_from_edge = via_radius + clearance + hole_extra
+        for pad in other_net_pads:
+            if len(pad) == 5:
+                # Rect-aware: (x, y, width, height, net).
+                # Compute axis-separated distance from via center to the
+                # axis-aligned pad rectangle -- mirrors
+                # ``EscapeRouter._via_clears_other_pads`` (Issue #2946).
+                px, py, p_w, p_h, _pnet = pad
+                half_w = p_w / 2
+                half_h = p_h / 2
+                dx_abs = abs(x - px)
+                dy_abs = abs(y - py)
+                outside_x = max(0.0, dx_abs - half_w)
+                outside_y = max(0.0, dy_abs - half_h)
+                if outside_x == 0.0 and outside_y == 0.0:
+                    # Via center inside the foreign pad rectangle -- an
+                    # immediate violation.  (Same-net "via in pad" is
+                    # legitimate but must be filtered by the caller; the
+                    # helper does not consult the via's own net.)
+                    return False
+                rect_dist = math.sqrt(outside_x * outside_x + outside_y * outside_y)
+                if rect_dist < required_from_edge - 1e-9:
+                    return False
+            else:
+                # Disc-bound legacy: (x, y, radius, net).
+                px, py, p_radius, _pnet = pad
+                dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+                if dist < via_radius + p_radius + clearance + hole_extra:
+                    return False
+
+    # Drill hole-to-hole guard (Issue #3855): the copper checks above do
+    # not enforce the fab's drill-to-drill minimum.  A via dropped within
+    # ``min_hole_to_hole`` (drill edge-to-edge) of a foreign through-hole
+    # pad / via drill trips ``hole_to_hole_clearance`` even when copper
+    # clears.  Reuses the canonical edge-to-edge predicate.
+    if via_drill > 0 and min_hole_to_hole > 0 and other_net_drills:
+        if not drill_hole_to_hole_clear(
+            x,
+            y,
+            via_drill,
+            [(dx_, dy_, ddrill) for dx_, dy_, ddrill, _dnet in other_net_drills],
+            min_hole_to_hole=min_hole_to_hole,
+        ):
+            return False
+
+    if other_net_filled_polygons:
+        if not _point_clear_of_filled_polygons(
+            x, y, via_radius, other_net_filled_polygons, clearance
+        ):
+            return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Same-net pad slit-band predicate (Issue #8957)
+# ---------------------------------------------------------------------------
+
+
+def same_net_segment_pad_gap_acceptable(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    half_width: float,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a trace segment from ``a`` to ``b`` keeps the fab-view copper
+    gap to every same-net SMD pad out of the slit band.
+
+    Issue #8976 (generalising #8957's :func:`same_net_pad_gap_acceptable` to
+    the pad-vs-trace population): a pad's own escape trace may skirt its pad
+    only in the same two acceptable regions the via annulus is held to --
+    the constraint is two acceptable regions, not one floor:
+
+    * ``gap <= 0`` -- the trace copper touches or overlaps the pad, so the
+      two are one copper union and there is no slit;
+    * ``gap >= min_gap_mm`` -- the fab's *detection* edge for the pad
+      population, read from the resolved stackup (the ``pad_spacing`` dfm
+      entry's ``GapBand.detection_edge_mm``; 0.15 mm on the jlcpcb entries
+      these fixtures resolve).  Pass the detection edge, not
+      ``error_edge_mm``: on stackups where the fab's warning tier sits below
+      the danger tier the two differ, and enforcing the error edge would
+      leave ``[error_edge, detection_edge)`` gaps graded as warnings
+      (issue #8976, ``## Verified corrections``).
+
+    and the band ``(0, min_gap_mm)`` in between is rejected.
+
+    The gap is exact segment-vs-rectangle geometry: the copper-to-pad air
+    gap is ``max(0, centerline-to-rect distance - half_width)``, computed
+    without growing the rectangle (a grown rectangle squares off what the
+    round sweep rounds off, and would under-report a diagonal skirt's gap
+    at a pad corner).  A degenerate segment (``a == b``) measures the same
+    point-vs-box gap the via annulus form uses, so a via can reuse this
+    predicate with ``via_size / 2`` as ``half_width``.
+
+    Args:
+        a, b: Segment endpoints (mm, world coordinates).  A zero-length
+            segment (``a == b``) degenerates to the annulus form.
+        half_width: The trace's half width (mm); the annulus radius for a
+            degenerate via seat.
+        same_net_pad_bboxes: Axis-aligned SMD pad bounding boxes on the
+            segment's own net AND OWN LAYER, as ``(min_x, min_y, max_x,
+            max_y)`` (extra trailing tuple elements, as in
+            ``find_all_pad_bboxes`` output, are ignored).  Same-net pads on
+            other layers share no copper with the segment, so the caller
+            must not include them; ``None`` or empty disables the test.
+        min_gap_mm: The fab-view pad-population detection edge in mm.
+            ``<= 0`` disables the test (every position acceptable).
+
+    Returns:
+        True when the segment's gap is acceptable for every pad (union or
+        beyond the edge), False when any pad sees a gap inside the band.
+    """
+    if min_gap_mm <= 0 or not same_net_pad_bboxes:
+        return True
+    ax, ay = a
+    bx, by = b
+    for bbox in same_net_pad_bboxes:
+        if ax == bx and ay == by:
+            # Point primitive: the annulus form's arithmetic exactly.
+            dx = max(0.0, bbox[0] - ax, ax - bbox[2])
+            dy = max(0.0, bbox[1] - ay, ay - bbox[3])
+            gap = math.hypot(dx, dy) - half_width
+        else:
+            gap = _segment_box_gap_mm(ax, ay, bx, by, half_width, bbox)
+        # The two acceptable regions: unioned with the pad, or clear of the
+        # fab detection edge.  The 1e-9 slack mirrors _pad_conflict's
+        # float-noise tolerance for a gap computed as exactly ``min_gap_mm``.
+        if 1e-9 < gap < min_gap_mm - 1e-9:
+            return False
+    return True
+
+
+def _segment_box_gap_mm(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    half_width: float,
+    bbox: tuple[float, ...],
+) -> float:
+    """Exact air gap between a swept segment and one axis-aligned box.
+
+    For convex sets the sweep identity ``dist(A (+) disk_r, C) =
+    max(0, dist(A, C) - r)`` gives the copper-to-pad gap directly from the
+    centerline's distance to the (square-cornered) pad rectangle -- growing
+    the rectangle instead would square off what the round sweep rounds off
+    at the corners and under-report a diagonal skirt's gap there.  The
+    centerline-to-rectangle distance itself is exact for these convex sets:
+    0 when the centerline reaches the rectangle (Liang-Barsky slab test),
+    otherwise the minimum over the four rectangle corners' distances to the
+    segment and the two endpoints' distances to the rectangle -- the
+    closest pair of two disjoint convex sets always has a vertex/endpoint
+    on at least one side.
+    """
+    min_x, min_y, max_x, max_y = bbox[0], bbox[1], bbox[2], bbox[3]
+    # Slab clip (Liang-Barsky): does the centerline reach the rectangle?
+    t0, t1 = 0.0, 1.0
+    parallel_outside = False
+    for delta, origin, lo, hi in (
+        (bx - ax, ax, min_x, max_x),
+        (by - ay, ay, min_y, max_y),
+    ):
+        if abs(delta) < 1e-12:
+            # Parallel to this slab: it constrains nothing when the segment
+            # sits inside it; when outside, the segment can never reach the
+            # rectangle and the disjoint-set minimum below is exact.
+            if origin < lo or origin > hi:
+                parallel_outside = True
+        else:
+            ta = (lo - origin) / delta
+            tb = (hi - origin) / delta
+            if ta > tb:
+                ta, tb = tb, ta
+            t0 = max(t0, ta)
+            t1 = min(t1, tb)
+            if t0 > t1:
+                parallel_outside = True
+                break
+    if not parallel_outside:
+        return 0.0
+    best = min(
+        _point_box_distance_mm(ax, ay, min_x, min_y, max_x, max_y),
+        _point_box_distance_mm(bx, by, min_x, min_y, max_x, max_y),
+    )
+    for cx, cy in ((min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)):
+        d = point_to_segment_distance(cx, cy, ax, ay, bx, by)
+        if d < best:
+            best = d
+    return max(0.0, best - half_width)
+
+
+def _point_box_distance_mm(
+    x: float,
+    y: float,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+) -> float:
+    """Euclidean distance from a point to an axis-aligned box (0 inside)."""
+    dx = max(min_x - x, 0.0, x - max_x)
+    dy = max(min_y - y, 0.0, y - max_y)
+    return math.hypot(dx, dy)
+
+
+def same_net_pad_gap_acceptable(
+    x: float,
+    y: float,
+    via_size: float,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a via annulus at (x, y) keeps the fab-view copper gap to every
+    same-net SMD pad out of the slit band.
+
+    Issue #8957: ``stitch --avoid-pad-overlap`` keeps a via's DRILL out of
+    same-net SMD pads (#3271) but nothing constrained the via's copper
+    ANNULUS gap to the pad it escapes.  A via seated just outside its own
+    pad leaves two wedge-shaped notches of air on either side of the
+    connecting stub -- in fab view a ``physical_copper_gap`` error regardless
+    of nets (#8938): a fab sees copper, not nets.
+
+    The constraint is two acceptable regions, not one floor:
+
+    * ``gap <= 0`` -- the annulus touches or overlaps its own pad, so the
+      copper is one union and there is no slit (the drill must still clear
+      the pad bbox, which is what ``--avoid-pad-overlap`` enforces);
+    * ``gap >= min_gap_mm`` -- the fab's detection edge for the pad
+      population, read from the resolved stackup (the ``pad_spacing`` dfm
+      entry's ``GapBand.detection_edge_mm``; e.g. 0.15 mm on the jlcpcb
+      ``4layer_1oz`` and ``6layer_1oz`` entries boards 06/07 resolve).
+      Issue #8976: on a stackup whose recorded warning tier sits below the
+      danger tier (``4layer_2oz``: warning 0.13 below danger 0.15) the
+      detection edge is the *wider* of the two, and enforcing the tighter
+      ``error_edge_mm`` here would leave ``[error_edge, detection_edge)``
+      gaps graded as warnings by the fab-view checker.
+
+    and the band ``(0, min_gap_mm)`` in between is rejected -- the caller's
+    placement ladder goes on trying candidates.
+
+    Args:
+        x, y: Proposed via center (mm, world coordinates).
+        via_size: Via pad (annulus) diameter in mm.
+        same_net_pad_bboxes: Axis-aligned SMD pad bounding boxes on the
+            via's own net AND LAYER, as ``(min_x, min_y, max_x, max_y)``
+            (extra trailing tuple elements, as in ``find_all_pad_bboxes``
+            output, are ignored).  ``None`` or empty disables the test.
+        min_gap_mm: The fab-view pad-population detection edge in mm --
+            the ``pad_spacing`` dfm entry's ``GapBand.detection_edge_mm``
+            of the resolved stackup (e.g. 0.15 mm on jlcpcb ``4layer_1oz``).
+            Issue #8976: pass the detection edge, not ``error_edge_mm``, so
+            a stackup whose warning tier sits below the danger tier cannot
+            leave ``[error_edge, detection_edge)`` gaps behind as warnings.
+            ``<= 0`` disables the test (every position acceptable).
+
+    Returns:
+        True when the annulus gap is acceptable for every pad (union or
+        beyond the edge), False when any pad sees a gap inside the band.
+    """
+    if min_gap_mm <= 0 or not same_net_pad_bboxes:
+        return True
+    # Degenerate segment (a == b): the shared core's point branch computes
+    # exactly the per-bbox ``hypot - radius`` gap this function always used.
+    return same_net_segment_pad_gap_acceptable(
+        (x, y),
+        (x, y),
+        via_size / 2,
+        same_net_pad_bboxes,
+        min_gap_mm,
+    )
+
+
+def same_net_pad_gap_band_ring(
+    bbox: tuple[float, float, float, float],
+    via_size: float,
+    min_gap_mm: float,
+) -> Any:
+    """The region of via seats :func:`same_net_pad_gap_acceptable` rejects.
+
+    Issue #8974: the region form of the slit-band predicate, for rasterised
+    legality masks (:func:`kicad_tools.router.link_router.route_link`'s
+    via mask) that pre-ban the band instead of testing seats one point at
+    a time.  ``gap`` is measured to ``bbox`` exactly as the point predicate
+    measures it -- axis-aligned, ``hypot(dx, dy) - radius`` -- so ONE band
+    definition feeds both forms: a seat this ring covers is exactly a seat
+    the predicate rejects.  The predicate's 1e-9 float-noise epsilon is
+    finer than any rasteriser's cell, so the geometric boundary is the
+    shared band ``(0, min_gap_mm)``.
+
+    Args:
+        bbox: Same-net SMD pad bounding box ``(min_x, min_y, max_x, max_y)``.
+        via_size: Via pad (annulus) diameter in mm.
+        min_gap_mm: The fab-view pad-population error edge in mm.
+            ``<= 0`` yields an empty geometry (guard off).
+
+    Returns:
+        The shapely geometry of the rejected seat region.
+    """
+    from shapely.geometry import Polygon, box  # type: ignore[import-untyped]
+
+    if min_gap_mm <= 0:
+        return Polygon()
+    radius = via_size / 2
+    pad = box(*bbox)
+    # ``quad_segs=64`` keeps GEOS's arc approximation ~1e-5 mm inside the
+    # true disk, so the ring agrees with the point predicate finer than any
+    # rasterised mask can resolve (the default 8 segments sag ~1.5e-3 mm at
+    # the corners, which IS visible at mask resolution).
+    return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(
+        pad.buffer(radius, quad_segs=64)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Same-net fab-view slit band: shared edge resolution + trace-population test
+# (Issue #9150; the #8938 / #8957 / #8975 / #9007 / #9114 family)
+# ---------------------------------------------------------------------------
+
+#: A same-net gap at or below this is one copper union (touch/overlap), not a
+#: slit.  Only the open band ``(SAME_NET_BAND_UNION_EPS_MM, edge + slack)`` is
+#: rejected.
+SAME_NET_BAND_UNION_EPS_MM = 1e-6
+
+#: Added to the fab edge so a seat accepted at plan time cannot land a hair
+#: under the edge on disk: positions are written at 3 decimals (0.0005 mm per
+#: axis) on both sides of the pair (#8975).
+SAME_NET_BAND_WRITE_SLACK_MM = 1.5e-3
+
+
+def same_net_band_edges() -> tuple[float, float]:
+    """``(pad_edge_mm, trace_edge_mm)`` of the fab-view same-net slit band.
+
+    Resolved from the jlcpcb ``4layer_1oz`` profile entry the board recipes
+    grade against -- never literals, so a repair pass's acceptance bands match
+    the fab-view checker by construction (#8957, #8975).  The pad population's
+    error edge grades via-annulus-to-SMD-pad slits; the trace population's
+    grades annulus/segment pairs.  A missing profile entry yields
+    ``(0.0, 0.0)``, which disables the band rather than guessing an edge.
+    """
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    entry = get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5)
+    policy = fab_gap_policy_from_entry(entry) if entry else None
+    if policy is None:
+        return 0.0, 0.0
+    return policy.pad.error_edge_mm, policy.trace.error_edge_mm
+
+
+def same_net_trace_band_clear(
+    geom: Any,
+    same_net_copper: Any,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff ``geom`` opens no same-net slit against ``same_net_copper``.
+
+    ``geom`` is a shapely geometry (a via annulus or a segment outline) and
+    ``same_net_copper`` an iterable of shapely geometries on the same net
+    (segment outlines and via circles) that the caller already restricted to
+    the layers that matter: any layer for an annulus (it exists on every
+    layer), the path's own layer for a segment.  Overlap/touch is one copper
+    union; only the open gap band ``(0, trace_edge_mm + slack)`` is rejected.
+    ``trace_edge_mm <= 0`` disables the test.
+    """
+    if trace_edge_mm <= 0:
+        return True
+    limit = trace_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
+    return not any(
+        SAME_NET_BAND_UNION_EPS_MM < geom.distance(other) < limit for other in same_net_copper
+    )
+
+
+def same_net_band_seat_ok(
+    x: float,
+    y: float,
+    diameter: float,
+    same_net_copper: Any,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    pad_edge_mm: float,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff a via annulus at ``(x, y)`` opens no same-net fab-view slit.
+
+    The pure seat predicate every board recipe's via-placement pass shares
+    (Issue #9150, lifted from board 06's ``_same_net_band_seat_ok``, #9114).
+    The annulus exists on every layer, so same-net copper on any layer counts.
+    ``same_net_copper`` is an iterable of shapely geometries of the via's own
+    net (the via being moved excluded by the caller); pads grade on the pad
+    population's edge via :func:`same_net_pad_gap_acceptable`, everything else
+    on the trace population's via :func:`same_net_trace_band_clear`.  An edge
+    of ``0`` disables that test.
+    """
+    if not same_net_pad_gap_acceptable(x, y, diameter, same_net_pad_bboxes, pad_edge_mm):
+        return False
+    if trace_edge_mm <= 0:
+        return True
+    from shapely.geometry import Point
+
+    return same_net_trace_band_clear(
+        Point(x, y).buffer(diameter / 2), same_net_copper, trace_edge_mm
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared segment-vs-foreign-via predicate (Issue #2998 / #3002)
+# ---------------------------------------------------------------------------
+
+
+class _SegmentLike(Protocol):
+    """Structural type for a routed segment passed to
+    :func:`segment_clears_foreign_via`.
+
+    The router's :class:`Segment` is compatible -- the helper reads the
+    centerline endpoints, the per-layer placement, and the trace width.
+    Layer is exposed via the ``layer`` attribute (an enum-like with a
+    ``value`` int).
+    """
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    width: float
+    # ``layer`` exposes ``.value`` -- intentionally not typed as a
+    # concrete enum so test fixtures can mock with simple objects.
+
+
+class _ViaLike(Protocol):
+    """Structural type for a routed via passed to
+    :func:`segment_clears_foreign_via`.
+
+    Mirrors :class:`kicad_tools.router.primitives.Via` -- reads
+    centre coordinates, diameter, and the two-element ``layers`` range.
+    ``layers[0]`` and ``layers[1]`` each expose ``.value`` (an int).
+    """
+
+    x: float
+    y: float
+    diameter: float
+    # ``layers`` is a 2-tuple whose elements expose ``.value``.
+
+
+def segment_via_deficit(
+    seg: _SegmentLike,
+    via: _ViaLike,
+    trace_clearance: float,
+    hard_intersection_only: bool = False,
+) -> float:
+    """Signed clearance deficit of a segment against a foreign-net via.
+
+    Issue #4575.  The DEFICIT form of :func:`segment_clears_foreign_via`:
+    returns ``required - actual`` in mm, so ``> 0`` is a violation whose
+    magnitude is exactly how much clearance is missing and ``<= 0`` is
+    clean.  This is the same sign convention
+    :meth:`kicad_tools.router.grid.RoutingGrid.worst_via_segment_deficit`
+    and :meth:`~kicad_tools.router.grid.RoutingGrid.worst_segment_pad_deficit`
+    use, so a gate built on it can report "0.012 mm short" the way the DRC
+    finding does rather than only "bad".
+
+    Split out of the boolean predicate (which now delegates here) so a
+    caller that needs the magnitude -- the diff-pair shadow constructor's
+    segment-vs-via gate -- cannot drift from the predicate's threshold
+    arithmetic.  This is the #4571 ``_span_pad_deficit`` /
+    ``worst_segment_pad_deficit`` split applied to the via quadrant.
+
+    Layer-awareness is inherited: a via that does not span the segment's
+    layer returns ``-inf`` (infinitely clear), never a small negative that
+    a ``max()`` accumulation could mistake for a near-miss.
+
+    Same-net filtering remains the CALLER's responsibility, as it is for
+    :func:`segment_clears_foreign_via`.
+
+    Args:
+        seg: The candidate segment.  Reads ``x1/y1/x2/y2/width/layer``.
+        via: A foreign-net via to measure against.  Reads
+            ``x/y/diameter/layers``.
+        trace_clearance: Manufacturer minimum copper-to-copper clearance
+            in mm (use ``via_clearance`` for the via-vs-via-barrel
+            direction, matching ``worst_via_segment_deficit``).
+        hard_intersection_only: When True, drop ``trace_clearance`` from
+            the threshold -- the physical-overlap-only bound.
+
+    Returns:
+        ``required - dist`` where ``required = via.diameter/2 +
+        seg.width/2 (+ trace_clearance)``.
+    """
+    # Issue #6099: physical stack order, not enum value.
+    # Issue #6502: the DRILLED span.  A router ``Via`` that is not micro is a
+    # through barrel whatever logical pair its ``layers`` records; duck-typed
+    # vias without ``drilled_layers`` keep their ``layers`` as the barrel.
+    drilled: Any = getattr(via, "drilled_layers", None)
+    if drilled is None:
+        drilled = via.layers
+    v_lo = min(drilled[0].stack_order, drilled[1].stack_order)
+    v_hi = max(drilled[0].stack_order, drilled[1].stack_order)
+    if not (v_lo <= seg.layer.stack_order <= v_hi):
+        return -math.inf  # Via doesn't reach the segment's layer.
+    dist = point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
+    required = via.diameter / 2 + seg.width / 2
+    if not hard_intersection_only:
+        required += trace_clearance
+    return required - dist
+
+
+def segment_clears_foreign_via(
+    seg: _SegmentLike,
+    via: _ViaLike,
+    trace_clearance: float,
+    hard_intersection_only: bool = False,
+) -> bool:
+    """Return True iff a segment clears a foreign-net via.
+
+    Issue #2998 / #3002: Shared sibling of :func:`point_clear_of_copper`
+    for the segment-vs-via direction.  Where ``point_clear_of_copper``
+    protects a NEW via from foreign segments/pads, this predicate
+    protects a NEW segment from a foreign-net via.
+
+    Originally introduced as a private static helper inside
+    :class:`kicad_tools.router.escape.EscapeRouter` by PR #2999 (the
+    escape-commit gate for issue #2998).  Lifted to this module by PR
+    for issue #3002 so the main-router commit gate can consume the same
+    predicate without importing :mod:`escape`.
+
+    Layer-awareness: the segment occupies one copper layer; the via
+    spans a contiguous layer range, its drilled span
+    (``via.drilled_layers``, issue #6502).  A segment must clear a via only
+    when the via spans the segment's layer.
+
+    Same-net filtering is the CALLER's responsibility (mirrors the
+    ``point_clear_of_copper`` boundary convention; the caller has more
+    context to enforce diff-pair / split-net policies).
+
+    Two thresholds (parameterised by ``hard_intersection_only``):
+
+    * STANDARD (``hard_intersection_only=False``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2 + trace_clearance
+
+      Full manufacturer clearance.  Rejects both hard intersections
+      AND marginal sub-clearance violations.  This is the predicate
+      the C++ post-route validator uses at
+      ``cpp/src/grid.cpp:510-536`` (block 1c) and the predicate used
+      by :meth:`Autorouter._update_router_segment_foreign_context`
+      (Issue #3002 main-router gate).
+
+    * HARD-INTERSECTION (``hard_intersection_only=True``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2
+
+      Drops the ``trace_clearance`` term: only flags cases where
+      copper physically overlaps copper (negative edge-to-edge
+      clearance).  Used by ``EscapeRouter.apply_escape_routes`` to drop
+      only the unrecoverable-by-routing escapes; preserves the in-pad
+      rescue last-resort policy (PR #2945 / Issue #2944) for marginal
+      sub-clearance escapes whose alternate path would regress net
+      completion (e.g. board-04 NRST cluster).
+
+    Args:
+        seg: The candidate segment.  Reads ``x1/y1/x2/y2/width/layer``.
+        via: A foreign-net via to validate against.  Reads
+            ``x/y/diameter/layers``.
+        trace_clearance: Manufacturer minimum copper-to-copper
+            clearance in mm.
+        hard_intersection_only: When True, ignore ``trace_clearance``
+            in the threshold (see HARD-INTERSECTION mode above).
+
+    Returns:
+        True if the segment clears the via, False on violation.
+    """
+    # Layer overlap, distance and threshold all live in
+    # ``segment_via_deficit`` (issue #4575) so the boolean predicate and
+    # the magnitude-reporting gate can never disagree.  A via that does
+    # not span the segment's layer yields ``-inf`` there, which satisfies
+    # the comparison below exactly as the old early ``return True`` did.
+    #
+    # 1e-9 epsilon mirrors ``point_clear_of_copper``'s convention so a
+    # segment exactly at the clearance threshold is admitted.
+    return (
+        segment_via_deficit(
+            seg, via, trace_clearance, hard_intersection_only=hard_intersection_only
+        )
+        <= 1e-9
+    )
+
+
+def via_clears_foreign_segment(
+    via: _ViaLike,
+    seg: _SegmentLike,
+    trace_clearance: float,
+    hard_intersection_only: bool = False,
+) -> bool:
+    """Return True iff a via clears a foreign-net segment.
+
+    Issue #3020: Symmetric sibling of :func:`segment_clears_foreign_via`
+    for the via-vs-segment direction.  Where
+    :func:`segment_clears_foreign_via` protects a NEW segment from a
+    foreign-net via, this predicate protects a NEW via from a
+    foreign-net segment.
+
+    The geometry is symmetric -- the point-to-segment distance does not
+    care which of the two objects is "new" -- so this function uses the
+    exact same math as :func:`segment_clears_foreign_via` and is kept
+    as a thin alias for API symmetry with PR #3006.  Callers consume
+    the predicate-named-for-the-direction, which keeps the call site
+    self-documenting (the named arguments match the parties as named in
+    the call).
+
+    Concrete failure this predicate catches (board-04, PCB
+    (143.8, 119.7) on B.Cu): the BOOT0 net's main-router layer-
+    transition via lands within ``via_radius + half_seg_w +
+    trace_clearance`` of an already-committed SWDIO escape segment on
+    B.Cu.  The escape segment is permanent infrastructure (the
+    ``_escape_pad_overrides`` policy makes it non-rippable), so the
+    fix MUST be on the via side -- the VIA's net is the one returned
+    to the rip-up loop, NOT the segment's net.
+
+    Layer-awareness: the via spans a contiguous layer range, its drilled
+    span (``via.drilled_layers``, issue #6502); the segment occupies one
+    copper layer.  A
+    via must clear a segment only when the via spans the segment's
+    layer.
+
+    Same-net filtering is the CALLER's responsibility (mirrors the
+    boundary convention of :func:`segment_clears_foreign_via`).
+
+    Two thresholds (parameterised by ``hard_intersection_only``):
+
+    * STANDARD (``hard_intersection_only=False``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2 + trace_clearance
+
+      Full manufacturer clearance.  Rejects both hard intersections
+      AND marginal sub-clearance violations.  This is the predicate
+      used by :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
+      and the Autorouter's main-router re-validation hook.
+
+    * HARD-INTERSECTION (``hard_intersection_only=True``)::
+
+        dist(via_center, segment_centerline)
+          >= via.diameter/2 + seg.width/2
+
+      Drops the ``trace_clearance`` term: only flags cases where
+      copper physically overlaps copper (negative edge-to-edge
+      clearance).  Mirrors the STANDARD/HARD switch in
+      :func:`segment_clears_foreign_via`.
+
+    Args:
+        via: The candidate via.  Reads ``x/y/diameter/layers``.
+        seg: A foreign-net segment to validate against.  Reads
+            ``x1/y1/x2/y2/width/layer``.
+        trace_clearance: Manufacturer minimum copper-to-copper
+            clearance in mm.
+        hard_intersection_only: When True, ignore ``trace_clearance``
+            in the threshold (see HARD-INTERSECTION mode above).
+
+    Returns:
+        True if the via clears the segment, False on violation.
+    """
+    # The math is identical to ``segment_clears_foreign_via`` -- both
+    # operations reduce to "point-to-segment distance must exceed
+    # via_radius + half_seg_width + clearance with layer-span
+    # overlap".  Aliasing keeps the implementations bit-identical and
+    # mathematically symmetric.
+    return segment_clears_foreign_via(
+        seg,
+        via,
+        trace_clearance,
+        hard_intersection_only=hard_intersection_only,
+    )
+
+
+__all__ = [
+    "FilledPolygonLike",
+    "ForeignPadTuple",
+    "TrackSegmentLike",
+    "point_clear_of_copper",
+    "segment_clears_foreign_via",
+    "via_clears_foreign_segment",
+]

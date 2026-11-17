@@ -1,0 +1,418 @@
+name: Slow Tests
+
+on:
+  schedule:
+    # Issue #5743: twice daily (was nightly only). This job is the only one
+    # in the repo that has recently found real breakage (2 failures in 3 runs,
+    # 41-min median), so it runs more often -- but never on pull requests and
+    # never as a PR check, so it stays non-blocking for merges.
+    - cron: "0 3 * * *"
+    - cron: "0 15 * * *"
+    # Issue #6463: weekly (Sunday) run that also enables the opt-in board-05
+    # lattice manufacturable guard (KCT_LATTICE_BOARD_GUARD, ~25 min). The
+    # `Run slow tests` step keys the env var off this exact cron string.
+    - cron: "0 9 * * 0"
+  # Also on main pushes that touch code the benchmarks exercise. Docs-only
+  # merges do not trigger it. Runs are serialised (see `concurrency`) so a
+  # burst of merges collapses to one running + one pending run.
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/slow-tests.yml"
+      # Board 07 copper-safety DRC ratchet inputs (#6738).
+      - "boards/07-matchgroup-test/**"
+      - "scripts/ci/check_copper_safety_drc.py"
+      - ".github/copper-safety-drc-floor.yml"
+      # Board 07 --differential-pairs baseline ratchet inputs (#7795).
+      - "scripts/ci/check_board07_diffpair_baseline.py"
+      - ".github/board07-diffpair-baseline.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: slow-tests-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Issue #5991: the slow suite runs in the SAME pinned KiCad container as
+  # ci.yml's Test job. It used to run on bare ubuntu-latest with noble's
+  # `kicad-symbols` apt package, which is KiCad 7.0.11 and has no footprints
+  # and no kicad-cli. Two long-standing failures came from that environment,
+  # not from the code:
+  # - board 03's generate_pcb.py needs real KiCad footprints ("Required real
+  #   KiCad footprint unavailable: Package_QFP:TQFP-44_10x10mm_P0.8mm");
+  # - board 04's recipe, generated against KiCad 7 symbols, embeds the wrong
+  #   lib_symbols (Device:C_Small came out as Device:Voltmeter_DC), so its own
+  #   LVS reload died on "Library not found: board04_symbols.kicad_sym".
+  #   The board's reviewed validator also needs a native kicad-cli. (The
+  #   registry's KiCad-7 mis-parse is its own bug, #6218.)
+  # ci.yml's Test job moved into the container for the same KiCad-7-era
+  # library drift (~40 failures there).
+  #
+  # The digest stays single-sourced. ci.yml's workflow-level KICAD_IMAGE is
+  # the one literal (#5682, docs/contributing/kicad-image-pin.md). A workflow
+  # cannot read another workflow's env, so this bridge job reads the value
+  # out of ci.yml at run time and republishes it into `needs`
+  # (`container.image` cannot reference `env`; see ci.yml's kicad_pin).
+  kicad_pin:
+    name: KiCad image pin (read from ci.yml)
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/workflows/ci.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Publish ci.yml's KICAD_IMAGE into the needs context
+        id: pin
+        run: |
+          set -euo pipefail
+          images=$(sed -n 's/^  KICAD_IMAGE: *//p' .github/workflows/ci.yml)
+          if [ "$(printf '%s\n' "$images" | grep -c .)" != "1" ] \
+            || ! printf '%s' "$images" | grep -qE '^kicad/kicad@sha256:[0-9a-f]{64}$'; then
+            echo "::error::expected exactly one 'KICAD_IMAGE: kicad/kicad@sha256:<digest>' in ci.yml, found: ${images:-<none>}"
+            exit 1
+          fi
+          echo "image=${images}" >> "$GITHUB_OUTPUT"
+
+  slow-tests:
+    name: Slow / Benchmark Tests
+    needs: [kicad_pin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Mirrors ci.yml's Test job. Pin -n auto at hosted parity (4 vCPU) and
+      # bound concurrent native KiCad processes, now that kicad-cli exists
+      # here and the native-backed slow tests actually run (#5501/#5616).
+      PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
+      KCT_NATIVE_MAX_CONCURRENCY: "2"
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      # Root, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE. The 12g memory cap matches ci.yml's Test job.
+      options: --user 0:0 --memory 12g
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors ci.yml).
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        # cmake + build-essential for the C++ router backend build below.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+
+      - name: Trust the workspace for git
+        # Root over a runner-owned checkout: git refuses it as "dubious
+        # ownership" without this (mirrors ci.yml's Test job).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        # Official one-liner instead of setup-uv: avoids action-host coupling
+        # inside the container (mirrors ci.yml's Test job).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build native router extension
+        # uv sync does NOT build the C++ router extension; without it the
+        # A* loop is 10-100x slower and multi-minute routing tests blow
+        # any per-test timeout (this was most of the issue #3458 failure
+        # inventory). --check makes a silent build failure fatal here
+        # instead of surfacing as timeouts downstream.
+        run: |
+          uv run kct build-native
+          uv run kct build-native --check
+
+      - name: Run slow tests
+        # No continue-on-error here: the whole point of this job is to
+        # gate on the pytest exit code (issue #3458 -- the nightly was
+        # green with 9 failures, so every slow reach/DRC floor was
+        # advisory-only). --timeout=1200 because -m slow tests
+        # legitimately run 5-20 minutes each (routing subprocesses with
+        # internal 600-900s budgets); the old --timeout=120 could never
+        # pass them deterministically.
+        #
+        # No --cov (issue #5991). Line+branch tracing of the whole package
+        # made the CPU-bound, in-process slow tests 5x+ slower. The
+        # board-06 coupled lattice fixture needs ~205 CPU-s without
+        # coverage and was still running after 18 CPU-min with it, which
+        # is why it hit the 1200s cap. Nothing consumed this report: no
+        # fail_under threshold, no upload, only a terminal table. The cause
+        # was removed instead of raising the timeout.
+        #
+        # --dist loadgroup (PR #6228): a class-scoped fixture runs once per
+        # xdist worker that receives a test from its class, so under the
+        # default --dist load the ~10 min board-04 --auto-mfr-tier route
+        # could run on up to 4 workers.  Tests marked
+        # @pytest.mark.xdist_group(...) stay on one worker; ungrouped tests
+        # load-balance exactly as under --dist load.
+        #
+        # KCT_LATTICE_BOARD_GUARD (Issue #6463): set to 1 only on the weekly
+        # Sunday cron, which enables the ~25-min board-05 case of
+        # tests/test_lattice_boards_manufacturable_6449.py (its own
+        # pytest.mark.timeout(3000) overrides --timeout=1200 for that test).
+        # Board 04's case runs on every slow run. Both share one xdist group,
+        # so board 05 occupies one worker while the rest load-balance on the
+        # other three; against the ~41-min median that stays under 90 min.
+        # Twice-daily, push and workflow_dispatch runs leave it unset.
+        #
+        # --durations=25 (Issue #6478): a class-scoped fixture's cost shows
+        # as the "setup" line of its first test, so the next fixture that
+        # creeps toward --timeout=1200 is visible in a green run's log.  The
+        # board-04 4L --auto-mfr-tier fixture took 342-623 s at its 5k cap (it
+        # was past 4200 s at 200k after #6439), well clear of the Sunday
+        # board-05 case on another worker.
+        env:
+          KCT_LATTICE_BOARD_GUARD: ${{ github.event.schedule == '0 9 * * 0' && '1' || '' }}
+        run: uv run pytest -n auto --dist loadgroup -o addopts= --benchmark-disable --timeout=1200 --durations=25 -rs -m slow
+
+  # Issue #6738 (operator ruling 2026-10-16): the board 07 copper-safety DRC
+  # ratchet runs here, on the schedule, instead of in ci.yml. ci.yml's
+  # board-07-end-to-end job is suspended (#5097, BOARD_07_CI_ENABLED unset),
+  # so a step there never ran, and putting it in PR CI would add ~30 min to
+  # every PR. This job regenerates board 07 from its recipe the same way that
+  # job does (same pinned container, same --seed 42), runs kicad-cli DRC on
+  # the fresh routed PCB, and fails when clearance / shorting_items /
+  # tracks_crossing / hole_clearance / copper_edge_clearance errors exceed
+  # .github/copper-safety-drc-floor.yml. The floor is a ratchet: the job also
+  # fails if the floor file's last change on this ref raised it.
+  board-07-copper-safety-drc:
+    name: Board 07 copper-safety DRC ratchet
+    needs: [kicad_pin]
+    runs-on: ubuntu-latest
+    # The board 07 regen took ~27 min locally solo on the grid recipe
+    # (three negotiated passes, #4468); since #6448 it is one lattice pass
+    # (~1 min). 90 min matches ci.yml's board-07-end-to-end job.
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the floor ratchet reads the floor file as it was
+          # before its last change.
+          fetch-depth: 0
+
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build native router extension
+        run: |
+          uv run kct build-native
+          uv run kct build-native --check
+
+      - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
+        # Same invocation as ci.yml's board-07-end-to-end. PARTIAL routing is
+        # expected (5 unroutable nets, #3438), so the recipe exits non-zero;
+        # its status is tolerated and the routed PCB's existence is the gate.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board07-ci
+          mkdir -p /tmp/board07-ci
+          uv run python boards/07-matchgroup-test/generate_design.py \
+            /tmp/board07-ci --step all --seed 42 || true
+          test -f /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
+
+      - name: Read the floor before its last change (ratchet)
+        # Parent of the last first-parent commit on this ref that touched the
+        # floor file. When that commit introduced the file there is nothing
+        # to compare against, so the shrink-only check is skipped.
+        id: prev_floor
+        run: |
+          set -euo pipefail
+          floor=.github/copper-safety-drc-floor.yml
+          last=$(git log --first-parent -n1 --format=%H -- "$floor")
+          if [ -n "$last" ] && git cat-file -e "${last}^1:${floor}" 2>/dev/null; then
+            git show "${last}^1:${floor}" > /tmp/copper-safety-prev-floor.yml
+            echo "args=--previous-floor-file /tmp/copper-safety-prev-floor.yml" >> "$GITHUB_OUTPUT"
+            echo "comparing against ${floor} at ${last}^1"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+            echo "no earlier ${floor} on this ref; shrink-only check skipped"
+          fi
+
+      - name: Copper-safety DRC ratchet (kicad-cli, #6738)
+        # kicad-cli exits non-zero when it finds violations, so its status is
+        # ignored (|| true) and the checker is the gate: it fails on a
+        # missing, empty or truncated report, so a killed kicad-cli never
+        # reads as 0 errors (#6724).
+        env:
+          PREV_FLOOR_ARGS: ${{ steps.prev_floor.outputs.args }}
+        run: |
+          set -uo pipefail
+          rm -f /tmp/board07-ci/drc.json
+          kicad-cli pcb drc --format json --severity-all --refill-zones \
+            -o /tmp/board07-ci/drc.json \
+            /tmp/board07-ci/matchgroup_test_routed.kicad_pcb || true
+          # PREV_FLOOR_ARGS is empty or one flag plus a path: split on purpose.
+          # shellcheck disable=SC2086
+          uv run python scripts/ci/check_copper_safety_drc.py \
+            $PREV_FLOOR_ARGS /tmp/board07-ci/drc.json
+
+      - name: Upload DRC report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board-07-copper-safety-drc
+          path: /tmp/board07-ci/drc.json
+          if-no-files-found: ignore
+
+  board-07-diffpair-ratchet:
+    name: Board 07 --differential-pairs baseline ratchet
+    # Issue #7795: the coupled/joint-search path (router/diffpair_*,
+    # CoupledPathfinder) is reachable only with --differential-pairs, which no
+    # PR job passes. Regenerate board 07 with it (scheduled / main push only,
+    # never per PR: ~27 min regen, #6738 ruling) and gate copper-safety errors,
+    # opens and skew violations against .github/board07-diffpair-baseline.yml.
+    needs: [kicad_pin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the baseline ratchet reads the file as it was
+          # before its last change.
+          fetch-depth: 0
+
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build native router extension
+        run: |
+          uv run kct build-native
+          uv run kct build-native --check
+
+      - name: Regenerate board 07 with --differential-pairs (seed 42)
+        # Partial routing is expected, so the recipe's status is tolerated and
+        # the routed PCB's existence is the gate.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board07-dp
+          mkdir -p /tmp/board07-dp
+          uv run python boards/07-matchgroup-test/generate_design.py \
+            /tmp/board07-dp --step all --seed 42 --differential-pairs || true
+          test -f /tmp/board07-dp/matchgroup_test_routed.kicad_pcb
+
+      - name: Read the baseline before its last change (ratchet)
+        id: prev_baseline
+        run: |
+          set -euo pipefail
+          f=.github/board07-diffpair-baseline.yml
+          last=$(git log --first-parent -n1 --format=%H -- "$f")
+          if [ -n "$last" ] && git cat-file -e "${last}^1:${f}" 2>/dev/null; then
+            git show "${last}^1:${f}" > /tmp/board07-dp-prev-baseline.yml
+            echo "args=--previous-baseline-file /tmp/board07-dp-prev-baseline.yml" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+            echo "no earlier ${f} on this ref; shrink-only check skipped"
+          fi
+
+      - name: Diffpair baseline ratchet (kicad-cli, #7795)
+        # kicad-cli exits non-zero on violations (|| true); the checker is the
+        # gate and treats a missing/empty/truncated report as a tool failure
+        # (#6724).
+        env:
+          PREV_BASELINE_ARGS: ${{ steps.prev_baseline.outputs.args }}
+        run: |
+          set -uo pipefail
+          rm -f /tmp/board07-dp/drc.json
+          kicad-cli pcb drc --format json --severity-all --refill-zones \
+            -o /tmp/board07-dp/drc.json \
+            /tmp/board07-dp/matchgroup_test_routed.kicad_pcb || true
+          # PREV_BASELINE_ARGS is empty or one flag plus a path: split on purpose.
+          # shellcheck disable=SC2086
+          uv run python scripts/ci/check_board07_diffpair_baseline.py \
+            $PREV_BASELINE_ARGS /tmp/board07-dp/drc.json | tee /tmp/board07-dp/summary.txt
+          rc=${PIPESTATUS[0]}
+          {
+            echo '### Board 07 --differential-pairs'
+            echo '```'
+            cat /tmp/board07-dp/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload DRC report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board-07-diffpair-ratchet
+          path: /tmp/board07-dp/drc.json
+          if-no-files-found: ignore

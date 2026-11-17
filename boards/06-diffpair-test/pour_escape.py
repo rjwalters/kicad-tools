@@ -1,0 +1,482 @@
+"""Bounded physical escape search for pads stranded after pour repair."""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+
+from shapely.geometry import LineString, Point
+from shapely.ops import unary_union
+from shapely.prepared import prep
+
+from kicad_tools.manufacturers.attach_zone_dru import strip_attach_zone_block
+from kicad_tools.manufacturers.dru_generator import (
+    DRU_FLOORS_BLOCK_BEGIN,
+    DRU_FLOORS_BLOCK_END,
+)
+from kicad_tools.manufacturers.netclass_dru import (
+    DRU_PAIR_GAP_BLOCK_BEGIN,
+    DRU_PAIR_GAP_BLOCK_END,
+)
+
+# Rule-name families the fab-floors generator (Issue #4600) can emit that
+# this escape search folds into its physical minima: family -> (the KiCad
+# constraint keyword the family must carry, the EscapeRules field it raises).
+# A family carrying any other constraint is not the generator's rule and
+# fails closed.
+#
+# The PTH-hole families (#6196) are ``hole_clearance`` floors between a
+# plated hole and copper.  Folding them into ``hole_copper`` applies them to
+# every hole and every layer -- stricter than the rules' own scope (PTH
+# holes only; ``(layer inner)`` for the inner-copper one), so the search
+# can only refuse copper KiCad would accept, never the reverse.  The legacy
+# pre-#4999 "Solder Mask Dam" rule was an unconditional
+# ``physical_hole_clearance``, i.e. a hole-to-copper floor too.
+_FOLDED_FLOOR_FAMILIES = {
+    "Trace Width": ("track_width", "width"),
+    "Clearance": ("clearance", "clearance"),
+    "Via Drill": ("hole_size", "drill"),
+    "Via Diameter": ("via_diameter", "diameter"),
+    "Annular Ring": ("annular_width", "annulus"),
+    "PTH Hole to Track": ("hole_clearance", "hole_copper"),
+    "Inner PTH Hole to Copper": ("hole_clearance", "hole_copper"),
+    "Solder Mask Dam": ("physical_hole_clearance", "hole_copper"),
+    # Issue #6390: the routed project now declares the router's net classes,
+    # and the managed block carries one ``NetClass``-conditioned clearance
+    # rule per class.  Folding each board-wide is conservative, like the
+    # layer-scoped floors above.
+    "Reviewed clearance": ("clearance", "clearance"),
+    # Issue #8937: the managed block now restores each zone's authored
+    # ``connect_pads`` clearance as a layer-scoped, net-conditioned rule.
+    # Folding each board-wide is conservative, like the reviewed classes
+    # above: the escape path then keeps that much clearance from every
+    # copper, the zone's own net included.
+    "Zone clearance": ("clearance", "clearance"),
+}
+# Families the generator can also emit that can never constrain the copper
+# this search adds (an F.Cu track and/or a through via, away from the board
+# edge): family -> (constraint keyword, the exact condition that makes the
+# family irrelevant, or ``None`` when the constraint itself is irrelevant).
+# A condition is pinned where only the scope makes ignoring it safe -- the
+# SMD floor is pad-to-pad, the PTH ring is pad-only, the hole floor is
+# hole-to-board-edge.  Any other shape fails closed.
+_IGNORED_FLOOR_FAMILIES = {
+    "Silk to Pad": ("silk_clearance", None),
+    "SMD Pad Clearance": (
+        "clearance",
+        "A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'"
+        " && A.Net != B.Net && A.Reference != B.Reference",
+    ),
+    "PTH Annular Ring": ("annular_width", "A.Type == 'pad'"),
+    "Copper to Edge": ("edge_clearance", None),
+    "Hole to Edge": (
+        "physical_hole_clearance",
+        "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'",
+    ),
+    "Silkscreen Width": ("text_thickness", None),
+    "Silkscreen Height": ("text_height", None),
+    "Solder Mask Clearance": ("solder_mask_margin", None),
+    # Issue #7132: the manufacturer's maximum drill.  This search only adds
+    # small via drills, so an upper bound on hole size never constrains it.
+    "Max Hole Size": ("hole_size", None),
+}
+# Families whose constraint is an upper bound rather than a ``min`` floor.
+_MAX_CONSTRAINT_FAMILIES = frozenset({"Max Hole Size"})
+_DRU_RULE_RE = re.compile(
+    r'\(rule "(?P<name>[^"]+)"\n'
+    r'(?:\s*\(layer (?P<layer>"[^"]+"|\w+)\)\n)?'
+    r'(?:\s*\(condition "(?P<condition>[^"]*)"\)\n)?'
+    r"\s*\(constraint (?P<constraint>\w+) \((?P<kind>min|max) (?P<value>[0-9.]+)mm\)\)\)"
+)
+
+# Issue #6443: the router's managed diff-pair block
+# (:func:`kicad_tools.manufacturers.netclass_dru.merge_pair_gap_block`) may sit
+# next to the fab floors.  Rule-name prefix -> the exact constraint shape that
+# prefix must carry.  ``diff_pair_gap`` is a *minimum* spacing between the two
+# halves of a pair; it is folded board-wide into ``clearance`` (conservative:
+# every escape path then keeps at least that much from other-net copper,
+# the pair partner included).  ``skew``, ``diff_pair_uncoupled`` and
+# ``via_count`` are *maximum* length/count limits on the pair's own routing,
+# not copper-spacing minima, so they cannot be violated by the clearance this
+# search keeps; they are ignored.  Any other stanza in the block fails closed.
+_PAIR_BLOCK_RULES = {
+    "kct diff pair gap - ": re.compile(r"diff_pair_gap \(min (?P<value>[0-9.]+)mm\)"),
+    "kct diff pair uncoupled - ": re.compile(r"diff_pair_uncoupled \(max [0-9.]+mm\)"),
+    "kct diff pair skew - ": re.compile(r"skew \(max [0-9.]+mm\)(?: \(within_diff_pairs\))?"),
+    "kct diff pair vias - ": re.compile(r"via_count \(max \d+\)"),
+}
+_PAIR_RULE_RE = re.compile(
+    r'\(rule "(?P<name>[^"]+)"\n'
+    r'\s*\(condition "(?P<condition>[^"]*)"\)\n'
+    r"\s*\(constraint (?P<constraint>[^\n]+?)\)"
+    r"(?:\n\s*\(severity (?:warning|error|ignore)\))?\)"
+)
+
+
+def _pair_block_minima(block_inner: str) -> dict[str, float] | None:
+    """Minima from the router diff-pair block, or ``None`` on any unknown stanza."""
+    lines = [line for line in block_inner.splitlines() if not line.strip().startswith("#")]
+    inner = "\n".join(lines).strip("\n")
+    minima: dict[str, float] = {}
+    if not inner.strip():
+        return minima
+    for stanza in re.split(r"\n(?=\(rule )", inner):
+        match = _PAIR_RULE_RE.fullmatch(stanza.strip())
+        if match is None:
+            return None
+        name = match.group("name")
+        shape = next((rx for p, rx in _PAIR_BLOCK_RULES.items() if name.startswith(p)), None)
+        if shape is None:
+            return None  # unknown rule in the managed pair block -- fail closed
+        constraint = shape.fullmatch(match.group("constraint"))
+        if constraint is None:
+            return None  # the prefix's constraint shape changed -- fail closed
+        if "value" in constraint.groupdict():
+            value = float(constraint.group("value"))
+            minima["clearance"] = max(minima.get("clearance", 0.0), value)
+    return minima
+
+
+def _split_pair_block(dru_text: str) -> tuple[str, dict[str, float]] | None:
+    """Remove the router diff-pair block from ``dru_text`` and parse it.
+
+    Returns ``(remaining text, minima)``; ``None`` when the block is malformed
+    (unbalanced or repeated sentinels) or carries a stanza we do not model.
+    A file without the block passes through unchanged with no minima.
+    """
+    begins = dru_text.count(DRU_PAIR_GAP_BLOCK_BEGIN)
+    ends = dru_text.count(DRU_PAIR_GAP_BLOCK_END)
+    if begins == 0 and ends == 0:
+        return dru_text, {}
+    if begins != 1 or ends != 1:
+        return None
+    start = dru_text.index(DRU_PAIR_GAP_BLOCK_BEGIN)
+    stop = dru_text.index(DRU_PAIR_GAP_BLOCK_END)
+    if stop < start:
+        return None
+    minima = _pair_block_minima(dru_text[start + len(DRU_PAIR_GAP_BLOCK_BEGIN) : stop])
+    if minima is None:
+        return None
+    return dru_text[:start] + dru_text[stop + len(DRU_PAIR_GAP_BLOCK_END) :], minima
+
+
+def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
+    """Extract escape minima from a *pure* kct fab-floors ``.kicad_dru``.
+
+    Returns ``None`` -- not safe to auto-extract -- unless the file is
+    *exactly* the sentinel-delimited managed block
+    :func:`kicad_tools.manufacturers.dru_generator.generate_dru` writes
+    (Issue #4600), with nothing else present (hand-authored rules, the
+    creepage exporter's separate block, ...), and every stanza in it is a
+    family enumerated above carrying that family's constraint. A file
+    matching that shape is safe to fold in even though it "exists": nothing
+    is silently ignored. Anything else -- an unknown family (e.g. the
+    net-class-scoped ampacity widths), a family with an unexpected
+    constraint, condition or ``(layer ...)`` clause -- fails closed.
+
+    The one other block tolerated is the router's managed diff-pair block
+    (Issue #6443, :func:`_split_pair_block`), itself parsed strictly.
+    """
+    # The router's attach-zone block (#8048, #8029) only *relaxes* clearance for
+    # the nets attaching to a rated part, inside its courtyard.  Ignoring it
+    # keeps the search at the stricter board-wide floor -- conservative -- so it
+    # is dropped rather than failing the whole file closed (Issue #8404).
+    dru_text = strip_attach_zone_block(dru_text)
+    split = _split_pair_block(dru_text)
+    if split is None:
+        return None
+    dru_text, pair_minima = split
+    minima = _floor_block_minima(dru_text)
+    if minima is None:
+        return None
+    for field, value in pair_minima.items():
+        minima[field] = max(minima.get(field, 0.0), value)
+    return minima
+
+
+def _floor_block_minima(dru_text: str) -> dict[str, float] | None:
+    """The fab-floors half of :func:`_kct_managed_floor_minima`."""
+    body_lines = [
+        line
+        for line in dru_text.splitlines()
+        if line.strip() and not line.strip().startswith("(version")
+    ]
+    body = "\n".join(body_lines).strip()
+    if not (body.startswith(DRU_FLOORS_BLOCK_BEGIN) and body.endswith(DRU_FLOORS_BLOCK_END)):
+        return None
+    inner = body[len(DRU_FLOORS_BLOCK_BEGIN) : -len(DRU_FLOORS_BLOCK_END)].strip("\n")
+    if not inner:
+        return {}
+    minima: dict[str, float] = {}
+    for stanza in re.split(r"\n(?=\(rule )", inner):
+        match = _DRU_RULE_RE.fullmatch(stanza.strip())
+        if match is None:
+            return None  # hand-edited or unrecognized stanza -- fail closed
+        family = match.group("name").split(" - ")[0]
+        constraint = match.group("constraint")
+        if match.group("kind") != ("max" if family in _MAX_CONSTRAINT_FAMILIES else "min"):
+            return None  # a floor became a ceiling (or vice versa) -- fail closed
+        folded = _FOLDED_FLOOR_FAMILIES.get(family)
+        if folded is not None:
+            expected, field = folded
+            if constraint != expected:
+                return None
+            # A layer-scoped floor is folded board-wide: conservative.
+            minima[field] = max(minima.get(field, 0.0), float(match.group("value")))
+            continue
+        ignored = _IGNORED_FLOOR_FAMILIES.get(family)
+        if ignored is None:
+            return None  # unrecognized rule family -- fail closed
+        expected, scope = ignored
+        if constraint != expected or match.group("layer") is not None:
+            return None
+        if scope is not None and match.group("condition") != scope:
+            return None  # the scope that made it irrelevant is gone
+    return minima
+
+
+@dataclass(frozen=True)
+class EscapeRules:
+    # KiCad 10 project defaults, independently checked with native DRC. These
+    # are board-rule defaults, not assertions about a manufacturer's capability.
+    clearance: float = 0.2
+    width: float = 0.2
+    diameter: float = 0.5
+    drill: float = 0.3
+    annulus: float = 0.1
+    hole_gap: float = 0.5  # Preserve this recipe's stronger drill-spacing floor.
+    hole_copper: float = 0.25
+    # Issue #7322: the fab's solder-mask dam (``DesignRules.min_via_pad_edge_gap``,
+    # #7296). A via drill may not sit in this band just outside an SMD pad
+    # (``kct check`` ``via_at_pad_edge``). 0 disables it.
+    pad_edge_gap: float = 0.0
+
+    @classmethod
+    def from_project(cls, path: Path, *, pad_edge_gap: float = 0.0) -> EscapeRules:
+        """Strengthen defaults with project minima; reject unmodeled custom rules.
+
+        ``pad_edge_gap`` is not a project setting; the caller supplies the fab's
+        mask-dam floor.
+        """
+        dru_path = path.with_suffix(".kicad_dru")
+        dru_floor_minima: dict[str, float] = {}
+        if dru_path.exists():
+            parsed = _kct_managed_floor_minima(dru_path.read_text())
+            if parsed is None:
+                raise ValueError("Escape search cannot evaluate custom DRC rules")
+            dru_floor_minima = parsed
+        data = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(data, dict):
+            raise ValueError("Project must be an object")
+
+        def section(parent, key):
+            value = parent.get(key, {})
+            if not isinstance(value, dict):
+                raise ValueError(f"Invalid project {key} section")
+            return value
+
+        rules = section(section(section(data, "board"), "design_settings"), "rules")
+
+        def number(value):
+            if isinstance(value, bool) or not isinstance(value, (float, int)):
+                raise ValueError("Project dimensions must be finite nonnegative numbers")
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("Project dimensions must be finite nonnegative numbers")
+            return float(value)
+
+        defaults = cls()
+        mapping = {
+            "clearance": ("min_clearance",),
+            "width": ("min_track_width",),
+            "diameter": ("min_via_diameter",),
+            "drill": ("min_through_hole_diameter", "min_via_hole"),
+            "annulus": ("min_via_annular_width",),
+            "hole_gap": ("min_hole_to_hole",),
+            "hole_copper": ("hole_clearance",),
+        }
+        values = {
+            name: max(
+                [getattr(defaults, name)]
+                + [number(rules[k]) for k in keys if k in rules]
+                + ([dru_floor_minima[name]] if name in dru_floor_minima else [])
+            )
+            for name, keys in mapping.items()
+        }
+        # Taking the strongest class is conservative even when a project uses
+        # assignments/patterns this recipe does not resolve. Never silently
+        # apply only Default while overlooking a stricter assigned class.
+        classes = section(data, "net_settings").get("classes", [])
+        if not isinstance(classes, list):
+            raise ValueError("Project net classes must be a list")
+        for net_class in classes:
+            if not isinstance(net_class, dict):
+                raise ValueError("Invalid project net class")
+            if "clearance" in net_class:
+                values["clearance"] = max(values["clearance"], number(net_class["clearance"]))
+        values["diameter"] = max(values["diameter"], values["drill"] + 2 * values["annulus"])
+        if not math.isfinite(pad_edge_gap) or pad_edge_gap < 0:
+            raise ValueError("Pad-edge gap must be a finite nonnegative number")
+        values["pad_edge_gap"] = float(pad_edge_gap)
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class Escape:
+    points: tuple[tuple[float, float], ...]
+    via: bool
+    rules: EscapeRules
+
+
+def find_escape(
+    start,
+    net,
+    layer,
+    pads,
+    segments,
+    vias,
+    primary,
+    bounds,
+    rules,
+    *,
+    step=0.05,
+    node_budget=200_000,
+    via_ok=None,
+):
+    """Find a clear 45-degree path to primary copper or a legal through via.
+
+    Geometry is immutable here. The caller commits only a complete result.
+    Via entries carry their actual drill diameter, including earlier repairs.
+    A budget exhaustion returns no repair, never a partial path.
+
+    ``via_ok`` is an optional ``(x, y) -> bool`` seat predicate applied at
+    every candidate through-via node (issue #8975): the geometric blockers
+    above know foreign-net copper but not same-net fab-view grading, so the
+    caller can reject seats the ``physical_copper_gap`` band would flag
+    without this module growing a dependence on the band predicate.
+    """
+    if not math.isfinite(step) or step <= 0 or node_budget < 1:
+        raise ValueError("Escape search requires a positive grid step and node budget")
+    radius = rules.diameter / 2
+    drill_radius = rules.drill / 2
+    guard = 0.001
+    trace_blocks, via_blocks = [], []
+    for entry in pads:
+        geom, pnet, layers, hole_radius, center = entry[:5]
+        if pnet != net and layer in layers:
+            trace_blocks.append(geom)
+        via_blocks.append(geom.buffer(radius + (rules.clearance if pnet != net else 0) + guard))
+        if hole_radius:
+            via_blocks.append(
+                Point(center).buffer(drill_radius + hole_radius + rules.hole_gap + guard)
+            )
+            if pnet != net:
+                via_blocks.append(
+                    Point(center).buffer(hole_radius + radius + rules.hole_copper + guard)
+                )
+                if layer in layers:
+                    trace_blocks.append(
+                        Point(center).buffer(
+                            hole_radius + max(0, rules.hole_copper - rules.clearance)
+                        )
+                    )
+        if pnet != net:
+            via_blocks.append(geom.buffer(drill_radius + rules.hole_copper + guard))
+        # Issue #7322: keep the drill out of an SMD pad's mask-dam band. The
+        # band is ``drill/2 <= distance < drill/2 + gap`` from the copper, the
+        # region ``via_drill_at_pad_edge`` flags; the part overlapping copper is
+        # already blocked above, so the buffer is the whole zone. Through-hole
+        # pads have no mask dam to protect here.
+        is_smd = not (entry[6] if len(entry) > 6 else hole_radius)
+        if rules.pad_edge_gap > 0 and is_smd:
+            via_blocks.append(geom.buffer(drill_radius + rules.pad_edge_gap + guard))
+    for geom, snet, lay in segments:
+        if snet != net:
+            via_blocks.append(
+                geom.buffer(max(radius + rules.clearance, drill_radius + rules.hole_copper) + guard)
+            )
+            if lay == layer:
+                trace_blocks.append(geom)
+    for pt, vnet, existing_radius, existing_drill in vias:
+        via_blocks.append(pt.buffer(drill_radius + existing_drill / 2 + rules.hole_gap + guard))
+        if vnet != net:
+            via_blocks.append(
+                pt.buffer(
+                    max(
+                        existing_radius + radius + rules.clearance,
+                        existing_radius + drill_radius + rules.hole_copper,
+                        existing_drill / 2 + radius + rules.hole_copper,
+                    )
+                    + guard
+                )
+            )
+            trace_blocks.append(
+                pt.buffer(
+                    max(existing_radius, existing_drill / 2 + rules.hole_copper - rules.clearance)
+                )
+            )
+    blocked_trace = prep(
+        unary_union(trace_blocks).buffer(rules.clearance + rules.width / 2 + guard)
+    )
+    blocked_via = prep(unary_union(via_blocks))
+    front = prep(
+        unary_union([geom for geom, layers, _ in primary if layer in layers]).buffer(-0.025)
+    )
+    through = prep(
+        unary_union([geom for geom, layers, _ in primary if layers - {layer}]).buffer(
+            radius - 0.025
+        )
+    )
+    min_x, min_y, max_x, max_y = bounds
+
+    def point(node):
+        return (round(start[0] + node[0] * step, 3), round(start[1] + node[1] * step, 3))
+
+    origin = (0, 0)
+    if blocked_trace.intersects(Point(point(origin))):
+        return None
+    pending = deque([origin])
+    previous = {origin: None}
+    moves = ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1))
+    while pending:
+        current = pending.popleft()
+        xy = point(current)
+        pt = Point(xy)
+        on_front = current != origin and front.intersects(pt)
+        on_via = (
+            min_x + radius <= xy[0] <= max_x - radius
+            and min_y + radius <= xy[1] <= max_y - radius
+            and not blocked_via.intersects(pt)
+            and through.intersects(pt)
+            and (via_ok is None or via_ok(xy))
+        )
+        if on_front or on_via:
+            nodes = []
+            while current is not None:
+                nodes.append(point(current))
+                current = previous[current]
+            nodes.reverse()
+            corners = [nodes[0]]
+            for a, b, c in zip(nodes, nodes[1:], nodes[2:], strict=False):
+                if abs((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])) > 1e-8:
+                    corners.append(b)
+            if len(nodes) > 1:
+                corners.append(nodes[-1])
+            return Escape(tuple(corners), not on_front, rules)
+        for dx, dy in moves:
+            following = (current[0] + dx, current[1] + dy)
+            if following in previous:
+                continue
+            nx, ny = point(following)
+            if not (min_x <= nx <= max_x and min_y <= ny <= max_y):
+                continue
+            if blocked_trace.intersects(LineString([xy, (nx, ny)])):
+                continue
+            if len(previous) >= node_budget:
+                return None
+            previous[following] = current
+            pending.append(following)
+    return None

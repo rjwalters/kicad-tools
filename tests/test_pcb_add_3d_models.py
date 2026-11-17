@@ -1,0 +1,2126 @@
+"""Tests for (model ...) 3D reference patching (kct pcb add-3d-models).
+
+Root cause covered: board generators emit footprints without (model ...)
+nodes, so `kicad-cli pcb render` shows a bare board. The patcher copies the
+canonical model refs from the installed KiCad .kicad_mod sources into the
+.kicad_pcb as a pure text insertion (never touching copper bytes).
+"""
+
+from __future__ import annotations
+
+import difflib
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.footprints.library_path import LibraryPaths
+from kicad_tools.pcb.models3d import (
+    ResolvedModels,
+    _apply_offset_delta,
+    _apply_rotate_delta,
+    _model_node_spans,
+    _pad_anchor,
+    _pad_field_orientation,
+    add_model_refs,
+    add_model_refs_to_text,
+    extract_model_blocks,
+    iter_footprint_blocks,
+    make_library_resolver,
+)
+
+# --------------------------------------------------------------------------
+# Fixtures
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_model_dir(monkeypatch):
+    """Keep the #7684 existence check independent of the host's KiCad install.
+
+    With no discoverable model dir a ``${KICADn_3DMODEL_DIR}`` ref is
+    unverifiable (never dangling), so the pre-existing fake-library tests are
+    unaffected; the existence tests pass an explicit ``model_dir``.
+    """
+    from kicad_tools.cli import runner
+
+    for var in runner.KICAD_3DMODEL_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(runner, "find_kicad_3dmodel_dir", lambda *a, **k: None)
+
+
+MOD_WITH_MODEL = """(footprint "R_0805_2012Metric"
+\t(version 20240108)
+\t(layer "F.Cu")
+\t(descr "Resistor SMD 0805")
+\t(pad "1" smd roundrect
+\t\t(at -0.9125 0)
+\t\t(size 1.025 1.4)
+\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t)
+\t(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+\t\t(offset
+\t\t\t(xyz 0 0 0)
+\t\t)
+\t\t(scale
+\t\t\t(xyz 1 1 1)
+\t\t)
+\t\t(rotate
+\t\t\t(xyz 0 0 0)
+\t\t)
+\t)
+)
+"""
+
+MOD_WITHOUT_MODEL = """(footprint "MountingHole_3.2mm_M3"
+\t(layer "F.Cu")
+\t(pad "" np_thru_hole circle
+\t\t(at 0 0)
+\t\t(size 3.2 3.2)
+\t\t(drill 3.2)
+\t\t(layers "*.Cu" "*.Mask")
+\t)
+)
+"""
+
+PCB_TEXT = """(kicad_pcb
+\t(version 20240108)
+\t(generator "kicad_tools")
+\t(net 0 "")
+\t(net 1 "VCC")
+\t(footprint "Resistor_SMD:R_0805_2012Metric"
+\t\t(layer "F.Cu")
+\t\t(uuid "36c2dbbf-1398-4b65-b95d-148013d5564f")
+\t\t(at 112.5 108)
+\t\t(property "Reference" "R1"
+\t\t\t(at 0 -1.5 0)
+\t\t\t(layer "F.SilkS")
+\t\t)
+\t\t(pad "1" smd roundrect
+\t\t\t(at -1 0)
+\t\t\t(size 1 1.3)
+\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t\t\t(net 1 "VCC")
+\t\t)
+\t\t(embedded_fonts no)
+\t)
+\t(footprint "MountingHole:MountingHole_3.2mm_M3"
+\t\t(layer "F.Cu")
+\t\t(at 100 100)
+\t)
+\t(footprint "Custom_Lib:Not_A_Standard_Part"
+\t\t(layer "F.Cu")
+\t\t(at 90 90)
+\t)
+\t(segment
+\t\t(start 111.5 108)
+\t\t(end 105 108)
+\t\t(width 0.25)
+\t\t(layer "F.Cu")
+\t\t(net 1)
+\t)
+)
+"""
+
+
+def _make_library(tmp_path: Path) -> LibraryPaths:
+    """Build a fake installed-KiCad footprints tree."""
+    root = tmp_path / "footprints"
+    (root / "Resistor_SMD.pretty").mkdir(parents=True)
+    (root / "Resistor_SMD.pretty" / "R_0805_2012Metric.kicad_mod").write_text(MOD_WITH_MODEL)
+    (root / "MountingHole.pretty").mkdir()
+    (root / "MountingHole.pretty" / "MountingHole_3.2mm_M3.kicad_mod").write_text(MOD_WITHOUT_MODEL)
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+# --------------------------------------------------------------------------
+# Block scanning / extraction
+# --------------------------------------------------------------------------
+
+
+class TestScanning:
+    def test_iter_footprint_blocks_finds_all(self):
+        blocks = iter_footprint_blocks(PCB_TEXT)
+        assert [b.lib_id for b in blocks] == [
+            "Resistor_SMD:R_0805_2012Metric",
+            "MountingHole:MountingHole_3.2mm_M3",
+            "Custom_Lib:Not_A_Standard_Part",
+        ]
+        # Spans are balanced blocks.
+        for b in blocks:
+            assert PCB_TEXT[b.start] == "("
+            assert PCB_TEXT[b.end] == ")"
+
+    def test_footprint_token_inside_string_ignored(self):
+        text = '(kicad_pcb\n\t(gr_text "(footprint \\"fake\\"" (at 0 0))\n)\n'
+        assert iter_footprint_blocks(text) == []
+
+    def test_extract_model_blocks(self):
+        blocks = extract_model_blocks(MOD_WITH_MODEL)
+        assert len(blocks) == 1
+        assert blocks[0].startswith('(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/')
+        # Dedented: continuation lines are relative to the node.
+        assert "\n\t(offset" in blocks[0]
+        assert blocks[0].endswith("\n)")
+
+    def test_extract_model_blocks_none(self):
+        assert extract_model_blocks(MOD_WITHOUT_MODEL) == []
+
+
+# --------------------------------------------------------------------------
+# Patching semantics
+# --------------------------------------------------------------------------
+
+
+class TestPatching:
+    def test_patch_inserts_model_before_closing_paren(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, report = add_model_refs_to_text(PCB_TEXT, resolver)
+
+        assert report.patched == ["Resistor_SMD:R_0805_2012Metric"]
+        assert report.no_model_in_library == ["MountingHole:MountingHole_3.2mm_M3"]
+        assert report.unresolved == ["Custom_Lib:Not_A_Standard_Part"]
+        assert (
+            '\t\t(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/'
+            'R_0805_2012Metric.step"' in new_text
+        )
+        # Model node inserted inside the footprint block, after embedded_fonts.
+        assert new_text.index("(embedded_fonts no)") < new_text.index("(model ")
+        assert new_text.index("(model ") < new_text.index("(segment")
+
+    def test_patch_is_pure_insertion(self, tmp_path):
+        """The diff must contain only added (model ...) lines — no other bytes."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, _ = add_model_refs_to_text(PCB_TEXT, resolver)
+
+        diff = list(difflib.unified_diff(PCB_TEXT.splitlines(), new_text.splitlines(), n=0))
+        removed = [l for l in diff if l.startswith("-") and not l.startswith("---")]
+        added = [l for l in diff if l.startswith("+") and not l.startswith("+++")]
+        assert removed == []
+        assert added  # something was inserted
+        for line in added:
+            body = line[1:].strip()
+            assert body.startswith(("(model", "(offset", "(scale", "(rotate", "(xyz", ")"))
+
+    def test_patch_is_idempotent(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        once, report1 = add_model_refs_to_text(PCB_TEXT, resolver)
+        twice, report2 = add_model_refs_to_text(once, resolver)
+        assert twice == once
+        assert report2.patched == []
+        assert "Resistor_SMD:R_0805_2012Metric" in report2.already_present
+
+    def test_existing_model_untouched(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        text = PCB_TEXT.replace(
+            "\t\t(embedded_fonts no)\n",
+            '\t\t(model "custom.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+            "\t\t(embedded_fonts no)\n",
+        )
+        new_text, report = add_model_refs_to_text(text, resolver)
+        assert report.patched == []
+        assert new_text == text
+        assert new_text.count("custom.step") == 1
+
+
+# --------------------------------------------------------------------------
+# Same-library variant fallback (visual model lookup)
+# --------------------------------------------------------------------------
+
+QFN_PCB_TEXT = """(kicad_pcb
+\t(version 20240108)
+\t(footprint "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"
+\t\t(layer "F.Cu")
+\t\t(at 100 100)
+\t)
+)
+"""
+
+
+def _make_variant_library(tmp_path: Path) -> LibraryPaths:
+    root = tmp_path / "footprints"
+    lib = root / "Package_DFN_QFN.pretty"
+    lib.mkdir(parents=True)
+    model = (
+        '(footprint "{name}"\n'
+        '\t(layer "F.Cu")\n'
+        '\t(model "${{KICAD10_3DMODEL_DIR}}/Package_DFN_QFN.3dshapes/{name}.step"\n'
+        "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+        "\t)\n"
+        ")\n"
+    )
+    for name in (
+        "QFN-24-1EP_4x4mm_P0.5mm_EP2.6x2.6mm",
+        "QFN-24-1EP_4x4mm_P0.5mm_EP2.6x2.6mm_ThermalVias",
+        "QFN-24-1EP_4x4mm_P0.5mm_EP2.15x2.15mm",
+    ):
+        (lib / f"{name}.kicad_mod").write_text(model.format(name=name))
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+class TestVariantFallback:
+    def test_variant_match_used_and_reported(self, tmp_path):
+        lib = _make_variant_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(QFN_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"]
+        # Deterministic pick: non-ThermalVias variants first, then shortest name.
+        assert report.variant_matches == {
+            "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm": ("QFN-24-1EP_4x4mm_P0.5mm_EP2.6x2.6mm")
+        }
+        assert "EP2.6x2.6mm.step" in pcb.read_text()
+        assert "ThermalVias" not in pcb.read_text()
+
+    def test_exact_mode_skips_variants(self, tmp_path):
+        lib = _make_variant_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(QFN_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, allow_variants=False)
+        assert report.patched == []
+        assert report.unresolved == ["Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm"]
+        assert pcb.read_text() == QFN_PCB_TEXT
+
+    def test_variant_requires_separator_boundary(self, tmp_path):
+        """A name that merely shares a prefix (no _/- boundary) must not match."""
+        root = tmp_path / "footprints"
+        lib = root / "Package_DFN_QFN.pretty"
+        lib.mkdir(parents=True)
+        (lib / "QFN-241EP.kicad_mod").write_text('(footprint "QFN-241EP")\n')
+        paths = LibraryPaths(footprints_path=root, source="config")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(QFN_PCB_TEXT.replace("QFN-24-1EP_4x4mm_P0.5mm", "QFN-24"))
+        report = add_model_refs(pcb, library_paths=paths)
+        assert report.patched == []
+
+
+# --------------------------------------------------------------------------
+# Cross-library substitution tier (curated lib_id -> lib_id equivalents)
+# --------------------------------------------------------------------------
+
+# A synthetic lib id with no exact match and no same-library variant, but a
+# curated substitute in a *different* library.
+SUBSTITUTION_PCB_TEXT = """(kicad_pcb
+\t(version 20240108)
+\t(footprint "Connector_FFC:FFC_4P_0.5mm"
+\t\t(layer "F.Cu")
+\t\t(at 100 100)
+\t)
+)
+"""
+
+
+def _make_substitution_library(tmp_path: Path) -> LibraryPaths:
+    """Build a library where only the *substitute* library exists.
+
+    The requested ``Connector_FFC`` library is entirely absent (mirrors the
+    real upstream rename to ``Connector_FFC-FPC``), so only the cross-library
+    substitution tier can resolve it.
+    """
+    root = tmp_path / "footprints"
+    lib = root / "Connector_FFC-FPC.pretty"
+    lib.mkdir(parents=True)
+    name = "Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+    model = (
+        f'(footprint "{name}"\n'
+        '\t(layer "F.Cu")\n'
+        f'\t(model "${{KICAD10_3DMODEL_DIR}}/Connector_FFC-FPC.3dshapes/{name}.step"\n'
+        "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+        "\t)\n"
+        ")\n"
+    )
+    (lib / f"{name}.kicad_mod").write_text(model)
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+class TestCrossLibrarySubstitution:
+    def test_substitution_match_used_and_reported(self, tmp_path):
+        lib = _make_substitution_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(SUBSTITUTION_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Connector_FFC:FFC_4P_0.5mm"]
+        # Reported as a cross-library substitution, NOT a same-library variant.
+        assert report.substitution_matches == {
+            "Connector_FFC:FFC_4P_0.5mm": (
+                "Connector_FFC-FPC:Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+            )
+        }
+        assert report.variant_matches == {}
+        assert "Connector_FFC-FPC.3dshapes" in pcb.read_text()
+
+    def test_substitution_disabled_leaves_unresolved(self, tmp_path):
+        lib = _make_substitution_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(SUBSTITUTION_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, allow_substitutions=False)
+        assert report.patched == []
+        assert report.unresolved == ["Connector_FFC:FFC_4P_0.5mm"]
+        assert pcb.read_text() == SUBSTITUTION_PCB_TEXT
+
+    def test_exact_match_never_redirected_to_substitution(self, tmp_path):
+        """A lib id that resolves exactly must NOT hit the substitution tier."""
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Resistor_SMD:R_0805_2012Metric"]
+        assert report.substitution_matches == {}
+
+    def test_variant_beats_substitution(self, tmp_path):
+        """When a same-library variant exists, it wins over substitution.
+
+        Uses a lib id in the substitution table but provides a same-library
+        variant; the resolver must report a variant match, not a substitution.
+        """
+        root = tmp_path / "footprints"
+        lib = root / "Package_BGA.pretty"
+        lib.mkdir(parents=True)
+        name = "BGA-49_5.0x5.0mm_Layout7x7_P0.5mm_ExtraSuffix"
+        model = (
+            f'(footprint "{name}"\n'
+            '\t(layer "F.Cu")\n'
+            f'\t(model "${{KICAD10_3DMODEL_DIR}}/Package_BGA.3dshapes/{name}.step"\n'
+            "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+            "\t)\n"
+            ")\n"
+        )
+        (lib / f"{name}.kicad_mod").write_text(model)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            SUBSTITUTION_PCB_TEXT.replace(
+                "Connector_FFC:FFC_4P_0.5mm",
+                "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm",
+            )
+        )
+        report = add_model_refs(pcb, library_paths=paths)
+        assert report.patched == ["Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm"]
+        assert report.variant_matches == {"Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm": name}
+        assert report.substitution_matches == {}
+
+    def test_substitution_reported_in_cli_json(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_substitution_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(SUBSTITUTION_PCB_TEXT)
+        rc = run_add_3d_models(pcb, lib_path=tmp_path / "footprints", output_format="json")
+        assert rc == 0
+        import json
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["patched"] == ["Connector_FFC:FFC_4P_0.5mm"]
+        assert payload["substitution_matches"] == {
+            "Connector_FFC:FFC_4P_0.5mm": (
+                "Connector_FFC-FPC:Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+            )
+        }
+
+
+# --------------------------------------------------------------------------
+# Substitution table integrity
+# --------------------------------------------------------------------------
+
+
+class TestSubstitutionTable:
+    def test_table_covers_required_lib_ids(self):
+        from kicad_tools.pcb.model_substitutions import MODEL_SUBSTITUTIONS
+
+        required = {
+            "Connector_FFC:FFC_4P_0.5mm",
+            "Connector_FFC:FFC_6P_1.0mm",
+            "Connector_USB:USB_C_Receptacle_USB2.0",
+            "Connector_Video:HDMI_A_Receptacle",
+            "Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm",
+        }
+        assert required <= set(MODEL_SUBSTITUTIONS)
+
+    def test_substitute_lib_id_helper(self):
+        from kicad_tools.pcb.model_substitutions import substitute_lib_id
+
+        assert substitute_lib_id("Connector_FFC:FFC_4P_0.5mm") is not None
+        assert substitute_lib_id("Nonexistent:Thing") is None
+
+
+# --------------------------------------------------------------------------
+# File-level API + parseability
+# --------------------------------------------------------------------------
+
+
+class TestFileAPI:
+    def test_add_model_refs_writes_in_place(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.changed
+        assert "(model " in pcb.read_text()
+
+    def test_dry_run_leaves_file_untouched(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, dry_run=True)
+        assert report.changed
+        assert pcb.read_text() == PCB_TEXT
+
+    def test_output_path(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        out = tmp_path / "patched.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        add_model_refs(pcb, output_path=out, library_paths=lib)
+        assert pcb.read_text() == PCB_TEXT
+        assert "(model " in out.read_text()
+
+    def test_patched_pcb_still_parses_and_roundtrips_models(self, tmp_path):
+        """PCB.load/save must preserve the inserted model nodes (writer
+        round-trip): later kct rewrites must not drop the 3D refs."""
+        from kicad_tools.schema.pcb import PCB
+
+        lib = _make_library(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(PCB_TEXT)
+        add_model_refs(pcb_path, library_paths=lib)
+
+        pcb = PCB.load(pcb_path)
+        assert len(pcb.footprints) == 3
+        out = tmp_path / "resaved.kicad_pcb"
+        pcb.save(out)
+        assert out.read_text().count("(model ") == 1
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+
+class TestCLI:
+    def test_run_add_3d_models(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+
+        rc = run_add_3d_models(pcb, lib_path=tmp_path / "footprints", output_format="json")
+        assert rc == 0
+        import json
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["patched"] == ["Resistor_SMD:R_0805_2012Metric"]
+        assert payload["unresolved"] == ["Custom_Lib:Not_A_Standard_Part"]
+        assert "(model " in pcb.read_text()
+
+    def test_run_add_3d_models_missing_library(self, tmp_path, monkeypatch, capsys):
+        import kicad_tools.footprints.library_path as lp
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        monkeypatch.setattr(
+            lp,
+            "detect_kicad_library_path",
+            lambda config_override=None: lp.LibraryPaths(footprints_path=None, source="auto"),
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        rc = run_add_3d_models(pcb, output_format="text")
+        assert rc == 1
+        assert "not found" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Origin-convention offset (issue #4034)
+# --------------------------------------------------------------------------
+#
+# kct-generated footprints reuse canonical KiCad names but place pads on an
+# *origin-centered* convention, while the library footprint (and its STEP
+# model) uses pad-1-at-origin.  Copying the model with a zero offset leaves
+# the body shifted by the pad-centroid delta (half the pitch for a 2-pad
+# part).  The patcher must add ``target_centroid - source_centroid`` into the
+# model ``(offset (xyz ...))`` -- with the model-frame Y negated relative to
+# the footprint 2D frame -- so the body lands on the target's pads.
+
+# Library footprint: pad 1 at origin, pad 2 one 2.54mm pitch up in +Y
+# (KiCad's convention for a vertical 2-pin header).  Centroid = (0, 1.27).
+HEADER_LIB_MOD = """(footprint "PinHeader_1x02_P2.54mm_Vertical"
+\t(layer "F.Cu")
+\t(pad "1" thru_hole rect
+\t\t(at 0 0)
+\t\t(size 1.7 1.7)
+\t\t(drill 1)
+\t\t(layers "*.Cu" "*.Mask")
+\t)
+\t(pad "2" thru_hole oval
+\t\t(at 0 2.54)
+\t\t(size 1.7 1.7)
+\t\t(drill 1)
+\t\t(layers "*.Cu" "*.Mask")
+\t)
+\t(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical.step"
+\t\t(offset
+\t\t\t(xyz 0 0 0)
+\t\t)
+\t\t(scale
+\t\t\t(xyz 1 1 1)
+\t\t)
+\t\t(rotate
+\t\t\t(xyz 0 0 0)
+\t\t)
+\t)
+)
+"""
+
+# Board footprint reusing that lib id but origin-centered: pads at (0, -1.27)
+# and (0, +1.27).  Centroid = (0, 0).  Expected delta = (0, 0) - (0, 1.27) =
+# (0, -1.27); model-frame offset = (0 + 0, 0 - (-1.27), 0) = (0, 1.27, 0).
+HEADER_PCB_TEXT = """(kicad_pcb
+\t(version 20240108)
+\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+\t\t(layer "F.Cu")
+\t\t(at 100 100)
+\t\t(pad "1" thru_hole rect
+\t\t\t(at 0 -1.27)
+\t\t\t(size 1.7 1.7)
+\t\t\t(drill 1)
+\t\t\t(layers "*.Cu" "*.Mask")
+\t\t)
+\t\t(pad "2" thru_hole oval
+\t\t\t(at 0 1.27)
+\t\t\t(size 1.7 1.7)
+\t\t\t(drill 1)
+\t\t\t(layers "*.Cu" "*.Mask")
+\t\t)
+\t)
+)
+"""
+
+
+def _make_header_library(tmp_path: Path) -> LibraryPaths:
+    root = tmp_path / "footprints"
+    lib = root / "Connector_PinHeader_2.54mm.pretty"
+    lib.mkdir(parents=True)
+    (lib / "PinHeader_1x02_P2.54mm_Vertical.kicad_mod").write_text(HEADER_LIB_MOD)
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+class TestPadAnchorHelper:
+    def test_centroid_of_two_pads(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "1" thru_hole rect (at 0 -1.27) (size 1 1))\n'
+            '\t(pad "2" thru_hole oval (at 0 1.27) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_anchor(block) == (0.0, 0.0)
+
+    def test_centroid_ignores_pad_rotation_angle(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "1" smd rect (at 1 2 90) (size 1 1))\n'
+            '\t(pad "2" smd rect (at 3 4 270) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_anchor(block) == (2.0, 3.0)
+
+    def test_no_pads_returns_none(self):
+        assert _pad_anchor('(footprint "x"\n\t(layer "F.Cu")\n)\n') is None
+
+    def test_pad_token_in_string_ignored(self):
+        block = '(footprint "x"\n\t(property "n" "(pad ...)")\n\t(pad "1" smd rect (at 5 0))\n)\n'
+        assert _pad_anchor(block) == (5.0, 0.0)
+
+
+class TestApplyOffsetDelta:
+    MODEL = '(model "a.step"\n\t(offset\n\t\t(xyz 0 0 0)\n\t)\n\t(scale\n\t\t(xyz 1 1 1)\n\t)\n)'
+
+    def test_y_is_negated_relative_to_footprint_frame(self):
+        # footprint-local delta (0, -1.27) -> model offset (0, +1.27, 0)
+        out = _apply_offset_delta(self.MODEL, 0.0, -1.27)
+        assert "(xyz 0 1.27 0)" in out
+        # only the xyz numbers changed; scale untouched
+        assert "(xyz 1 1 1)" in out
+
+    def test_x_follows_footprint_frame(self):
+        out = _apply_offset_delta(self.MODEL, -1.27, 0.0)
+        assert "(xyz -1.27 0 0)" in out
+
+    def test_zero_delta_is_verbatim(self):
+        assert _apply_offset_delta(self.MODEL, 0.0, 0.0) == self.MODEL
+
+    def test_subnanometre_delta_is_verbatim(self):
+        # Centroid-averaging FP noise below 1nm must not perturb the block.
+        assert _apply_offset_delta(self.MODEL, 1e-9, -1e-9) == self.MODEL
+
+    def test_existing_nonzero_offset_is_added_to(self):
+        model = '(model "a.step"\n\t(offset\n\t\t(xyz 1 2 3)\n\t)\n)'
+        out = _apply_offset_delta(model, 0.5, -0.5)
+        # x: 1 + 0.5 = 1.5 ; y: 2 - (-0.5) = 2.5 ; z unchanged
+        assert "(xyz 1.5 2.5 3)" in out
+
+
+class TestOriginConventionOffset:
+    def test_centered_header_gets_half_pitch_offset(self, tmp_path):
+        """A synthetic origin-centered header resolved against a pad-1-at-
+        origin library footprint gets the centroid-delta offset written."""
+        lib = _make_header_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(HEADER_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"]
+        text = pcb.read_text()
+        # Model-frame offset: (0, 1.27, 0) (Y negated vs the (0,-1.27) delta).
+        assert "(xyz 0 1.27 0)" in text
+        # The offset node specifically must no longer read the zero default
+        # (scale/rotate legitimately keep their own 0/1 xyz nodes).
+        import re
+
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "0 1.27 0"
+
+    def test_matched_centroid_gets_zero_offset(self, tmp_path):
+        """R_0805-style part: library and board share centroid (0,0) despite
+        different pad pitch -> zero offset, verbatim insertion."""
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_TEXT)  # R1 pads at (-1,0)/(1,0); lib at (-0.9125,0)/(0.9125,0)
+        add_model_refs(pcb, library_paths=lib)
+        text = pcb.read_text()
+        # The inserted R_0805 model keeps its verbatim zero offset.
+        assert "R_0805_2012Metric.step" in text
+        assert "(xyz 0 0 0)" in text
+
+    def test_offset_is_pure_metadata_no_copper_delta(self, tmp_path):
+        """Only the newly-inserted model block bytes differ; every pad/at line
+        of the original text is preserved verbatim."""
+        lib = _make_header_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(HEADER_PCB_TEXT, make_library_resolver(lib))
+        original_lines = HEADER_PCB_TEXT.splitlines()
+        new_lines = new_text.splitlines()
+        # No original line removed or reordered: original is a subsequence.
+        it = iter(new_lines)
+        assert all(line in it for line in original_lines), "an original line moved/was dropped"
+        # Every added line is model metadata.
+        added = set(new_lines) - set(original_lines)
+        for line in added:
+            body = line.strip()
+            assert body.startswith(("(model", "(offset", "(scale", "(rotate", "(xyz", ")"))
+
+    def test_offset_applies_through_substitution_tier(self, tmp_path):
+        """The offset must be computed for cross-library substitution matches
+        too -- keyed off the *target* footprint's own centroid, since the
+        substitute is a different physical part."""
+        root = tmp_path / "footprints"
+        lib = root / "Connector_FFC-FPC.pretty"
+        lib.mkdir(parents=True)
+        # Substitute library part: pads at (0,0) and (0.5,0) -> centroid (0.25, 0).
+        sub_name = "Amphenol_F32Q-1A7x1-11004_1x04-1MP_P0.5mm_Horizontal"
+        sub_mod = (
+            f'(footprint "{sub_name}"\n'
+            '\t(pad "1" smd rect (at 0 0) (size 0.3 1))\n'
+            '\t(pad "2" smd rect (at 0.5 0) (size 0.3 1))\n'
+            f'\t(model "${{KICAD10_3DMODEL_DIR}}/Connector_FFC-FPC.3dshapes/{sub_name}.step"\n'
+            "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+            "\t)\n"
+            ")\n"
+        )
+        (lib / f"{sub_name}.kicad_mod").write_text(sub_mod)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        # Target footprint (no exact/variant match): centroid (2, 3).
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_FFC:FFC_4P_0.5mm"\n'
+            '\t\t(layer "F.Cu")\n'
+            '\t\t(pad "1" smd rect (at 1 3) (size 0.3 1))\n'
+            '\t\t(pad "2" smd rect (at 3 3) (size 0.3 1))\n'
+            "\t)\n"
+            ")\n"
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(pcb_text)
+        report = add_model_refs(pcb, library_paths=paths)
+        assert report.substitution_matches  # went through the substitution tier
+        text = pcb.read_text()
+        # delta = target(2,3) - source(0.25,0) = (1.75, 3) -> model (1.75, -3, 0)
+        assert "(xyz 1.75 -3 0)" in text
+
+
+class TestResolvedModels:
+    def test_resolver_returns_source_anchor(self, tmp_path):
+        lib = _make_header_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        resolved = resolver("Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical")
+        assert isinstance(resolved, ResolvedModels)
+        assert resolved.source_anchor == (0.0, 1.27)
+        assert len(resolved.models) == 1
+
+    def test_legacy_list_resolver_still_supported(self):
+        """A resolver returning a bare list[str] (no anchor) inserts verbatim."""
+        model = '(model "x.step"\n\t(offset\n\t\t(xyz 0 0 0)\n\t)\n)'
+
+        def resolver(lib_id: str):
+            return [model] if lib_id.endswith("PinHeader_1x02_P2.54mm_Vertical") else None
+
+        new_text, report = add_model_refs_to_text(HEADER_PCB_TEXT, resolver)
+        assert report.patched
+        # No anchor available -> zero offset applied (verbatim).
+        assert "(xyz 0 0 0)" in new_text
+
+
+# --------------------------------------------------------------------------
+# Orientation-convention rotation (issue #4448)
+# --------------------------------------------------------------------------
+#
+# Some generators bake a footprint's rotation into the *pad coordinates*
+# rather than the placement angle: board-07's 0.1" header lays its pads along
+# X while the canonical library footprint (and its STEP body) lays them along
+# Y.  Placement angle and model rotate are both 0 as written, so kicad-cli
+# renders the body 90° off from the copper.  The patcher must derive the
+# pad-field orientation from two anchor pads and bake theta = target - source
+# into the model (rotate (xyz 0 0 +theta)) -- TWO negations cancel here: the
+# model frame negates Y vs the footprint 2D frame, AND KiCad negates the
+# written (rotate ...) when it applies it at render time, so a written rz IS
+# the footprint-2D rotation it produces -- while composing the centroid offset
+# in the rotated frame.
+#
+# Issue #4583: the original #4448/#4457 implementation baked -theta.  The four
+# assertions below pinning +90-for-theta=-90 were themselves wrong and have been
+# flipped; test_one_eighty_rotation passed under BOTH signs (180 == -180 after
+# normalization), which is exactly how the defect shipped green.  See
+# `_assert_model_lands_on_target_pads` for the non-sign-invariant guard.
+
+# Library footprint: 1x09 pins running along +Y (pad 1 at origin), matching
+# the canonical KiCad PinHeader_1x09_P2.54mm_Vertical .step authoring.
+# Centroid = (0, 10.16), orientation = +90° (pad-1 -> pad-2 is +Y).
+ROT_HEADER_LIB_MOD = (
+    '(footprint "PinHeader_1x09_P2.54mm_Vertical"\n'
+    '\t(layer "F.Cu")\n'
+    + "".join(
+        f'\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+        f"\t\t(at 0 {i * 2.54:g})\n"
+        "\t\t(size 1.7 1.7)\n"
+        "\t\t(drill 1)\n"
+        '\t\t(layers "*.Cu" "*.Mask")\n'
+        "\t)\n"
+        for i in range(9)
+    )
+    + '\t(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/'
+    'PinHeader_1x09_P2.54mm_Vertical.step"\n'
+    "\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+    "\t\t(scale\n\t\t\t(xyz 1 1 1)\n\t\t)\n"
+    "\t\t(rotate\n\t\t\t(xyz 0 0 0)\n\t\t)\n"
+    "\t)\n"
+    ")\n"
+)
+
+# Board footprint reusing that lib id but with the 90° baked into pad coords:
+# pads run along X from (-10.16, 0) to (10.16, 0) (board-07 generate_addr_header
+# geometry).  Centroid = (0, 0), orientation = 0° (pad-1 -> pad-2 is +X).
+ROT_HEADER_PCB_TEXT = (
+    "(kicad_pcb\n"
+    "\t(version 20240108)\n"
+    '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+    '\t\t(layer "F.Cu")\n'
+    "\t\t(at 113.5 120)\n"
+    + "".join(
+        f'\t\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+        f"\t\t\t(at {(i - 4) * 2.54:g} 0)\n"
+        "\t\t\t(size 1.7 1.7)\n"
+        "\t\t\t(drill 1)\n"
+        '\t\t\t(layers "*.Cu" "*.Mask")\n'
+        "\t\t)\n"
+        for i in range(9)
+    )
+    + "\t)\n"
+    ")\n"
+)
+
+
+def _make_rot_header_library(tmp_path: Path) -> LibraryPaths:
+    root = tmp_path / "footprints"
+    lib = root / "Connector_PinHeader_2.54mm.pretty"
+    lib.mkdir(parents=True)
+    (lib / "PinHeader_1x09_P2.54mm_Vertical.kicad_mod").write_text(ROT_HEADER_LIB_MOD)
+    return LibraryPaths(footprints_path=root, source="config")
+
+
+class TestPadFieldOrientationHelper:
+    def _block(self, p2: tuple[float, float]) -> str:
+        return (
+            '(footprint "x"\n'
+            '\t(pad "1" thru_hole rect (at 0 0) (size 1 1))\n'
+            f'\t(pad "2" thru_hole oval (at {p2[0]:g} {p2[1]:g}) (size 1 1))\n'
+            ")\n"
+        )
+
+    def test_orientation_zero_pads_along_x(self):
+        assert _pad_field_orientation(self._block((1, 0))) == 0.0
+
+    def test_orientation_ninety_pads_along_y(self):
+        assert _pad_field_orientation(self._block((0, 1))) == 90.0
+
+    def test_orientation_one_eighty(self):
+        assert _pad_field_orientation(self._block((-1, 0))) == 180.0
+
+    def test_orientation_two_seventy_is_minus_ninety(self):
+        # atan2(-1, 0) = -90°; 270° is represented as -90 in the raw helper.
+        assert _pad_field_orientation(self._block((0, -1))) == -90.0
+
+    def test_orientation_uses_numbered_pads_not_document_order(self):
+        # Pad "2" appears before pad "1" in document order, but the pad-1 -> pad-2
+        # vector (+Y) must still drive the orientation.
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "2" thru_hole oval (at 0 2.54) (size 1 1))\n'
+            '\t(pad "1" thru_hole rect (at 0 0) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_field_orientation(block) == 90.0
+
+    def test_orientation_falls_back_to_first_two_pads_when_unnumbered(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "" thru_hole rect (at 0 0) (size 1 1))\n'
+            '\t(pad "" thru_hole oval (at 3 0) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_field_orientation(block) == 0.0
+
+    def test_orientation_none_for_single_pad(self):
+        block = '(footprint "x"\n\t(pad "1" thru_hole rect (at 0 0) (size 1 1))\n)\n'
+        assert _pad_field_orientation(block) is None
+
+    def test_orientation_none_for_no_pads(self):
+        assert _pad_field_orientation('(footprint "x"\n\t(layer "F.Cu")\n)\n') is None
+
+    def test_orientation_none_for_coincident_anchor_pads(self):
+        block = (
+            '(footprint "x"\n'
+            '\t(pad "1" thru_hole rect (at 5 5) (size 1 1))\n'
+            '\t(pad "2" thru_hole oval (at 5 5) (size 1 1))\n'
+            ")\n"
+        )
+        assert _pad_field_orientation(block) is None
+
+
+class TestApplyRotateDelta:
+    MODEL = (
+        '(model "a.step"\n'
+        "\t(offset\n\t\t(xyz 0 0 0)\n\t)\n"
+        "\t(scale\n\t\t(xyz 1 1 1)\n\t)\n"
+        "\t(rotate\n\t\t(xyz 0 0 0)\n\t)\n)"
+    )
+
+    def test_footprint_theta_maps_to_model_z_directly(self):
+        # #4583 sign pin: theta = -90 -> model-frame Z = -90 (NOT +90).  A
+        # written rz is the footprint-2D rotation it produces, because KiCad's
+        # render-time negation of (rotate ...) cancels the model frame's Y flip.
+        out = _apply_rotate_delta(self.MODEL, -90.0)
+        assert "(rotate\n\t\t(xyz 0 0 -90)" in out
+        # Only the rotate xyz changed; offset/scale untouched.
+        assert "(offset\n\t\t(xyz 0 0 0)" in out
+        assert "(scale\n\t\t(xyz 1 1 1)" in out
+
+    def test_positive_theta_maps_to_positive_model_z(self):
+        # #4583 sign pin, the other direction: theta = +90 -> model Z = +90.
+        out = _apply_rotate_delta(self.MODEL, 90.0)
+        assert "(rotate\n\t\t(xyz 0 0 90)" in out
+
+    def test_zero_theta_is_verbatim(self):
+        assert _apply_rotate_delta(self.MODEL, 0.0) == self.MODEL
+
+    def test_full_turn_theta_is_verbatim(self):
+        # 360° normalizes to 0 -> no rotation baked in.
+        assert _apply_rotate_delta(self.MODEL, 360.0) == self.MODEL
+
+    def test_existing_nonzero_rotate_is_added_to(self):
+        model = '(model "a.step"\n\t(rotate\n\t\t(xyz 0 0 45)\n\t)\n)'
+        out = _apply_rotate_delta(model, -90.0)
+        # #4583: plain addition -- rz and theta are in the same sense, so
+        # 45 + (-90) = -45 (NOT 45 - (-90) = 135).
+        assert "(xyz 0 0 -45)" in out
+
+
+def _assert_model_lands_on_target_pads(
+    patched_text: str,
+    source_centroid: tuple[float, float],
+    target_centroid: tuple[float, float],
+) -> None:
+    """Geometric end-to-end guard for the #4583 rotation sign.
+
+    Parses the inserted ``(offset ...)`` / ``(rotate ...)`` back out of the
+    patched board text, reconstructs the transform KiCad will actually apply to
+    the STEP body, and asserts it maps the *source* (library) pad centroid onto
+    the *target* (board) pad centroid to within 1 nm.
+
+    Reconstruction, in footprint-2D coordinates:
+
+    * the model frame negates Y, so a model offset ``(ox, oy, oz)`` is a
+      footprint-2D translation of ``(ox, -oy)``;
+    * a written ``rz`` **is** the footprint-2D rotation it produces (KiCad's
+      render-time negation of ``(rotate ...)`` cancels the model frame's Y
+      flip), so the applied rotation is ``R_{+rz}``.
+
+    So the body's source centroid lands at ``(ox, -oy) + R_{rz}(source)``.
+
+    This is deliberately **not** sign-invariant at +/-90 degrees: flipping the
+    sign in ``_apply_rotate_delta`` moves the reconstructed point by
+    ``2 * |R_theta * source_centroid|`` and the assertion fails.  A
+    literal-string assertion alone would not have caught #4457, and
+    ``test_one_eighty_rotation`` cannot (180 == -180 after normalization).
+    """
+    import math
+    import re
+
+    offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", patched_text)
+    rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", patched_text)
+    assert offset_xyz is not None, "no (offset (xyz ...)) in patched text"
+    assert rotate_xyz is not None, "no (rotate (xyz ...)) in patched text"
+    ox, oy, _oz = (float(v) for v in offset_xyz.group(1).split())
+    _rx, _ry, rz = (float(v) for v in rotate_xyz.group(1).split())
+
+    rad = math.radians(rz)
+    sx, sy = source_centroid
+    landed = (
+        ox + (sx * math.cos(rad) - sy * math.sin(rad)),
+        -oy + (sx * math.sin(rad) + sy * math.cos(rad)),
+    )
+    assert landed == pytest.approx(target_centroid, abs=1e-6), (
+        f"model body lands at {landed}, expected the target pad centroid "
+        f"{target_centroid} (offset={ox},{oy} rotate_z={rz})"
+    )
+
+
+class TestOrientationConventionRotation:
+    def test_pad_rotated_header_gets_ninety_degree_model_rotate(self, tmp_path):
+        """The board-07 case: library pads along Y, board pads along X.
+
+        theta = target(0°) - source(90°) = -90°; model-frame Z = +theta = -90°
+        (#4583 -- KiCad's render-time negation of (rotate ...) cancels the model
+        frame's Y flip, so a written rz *is* the footprint-2D rotation).
+        Offset is composed in the rotated frame:
+          R_{-90} * source_centroid(0, 10.16) = (10.16, 0)
+          offset_2d = target_centroid(0,0) - (10.16, 0) = (-10.16, 0)
+          model offset = (-10.16, -0, 0) = (-10.16, 0, 0)
+        """
+        lib = _make_rot_header_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(ROT_HEADER_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched == ["Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"]
+        text = pcb.read_text()
+        import re
+
+        # Sign convention pinned (#4583): -90 model-frame Z for a -90 footprint
+        # rotation.  Pre-#4583 this asserted "0 0 90" and rendered off-board.
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 -90"
+        # Centroid offset composed in the rotated frame (unchanged by #4583).
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "-10.16 0 0"
+        # ...and the reconstructed transform actually seats the body on the pads.
+        _assert_model_lands_on_target_pads(text, (0.0, 10.16), (0.0, 0.0))
+
+    def test_minus_ninety_body_lands_on_target_pads(self, tmp_path):
+        """#4583 geometric regression, theta = -90 (== 270).
+
+        Not sign-invariant: under the pre-#4583 ``rz - theta`` the body lands at
+        (-20.32, 0) instead of the target centroid (0, 0) -- exactly the 20.32 mm
+        = 2 x 10.16 mm displacement observed on board-07's J3.
+        """
+        lib = _make_rot_header_library(tmp_path)
+        new_text, report = add_model_refs_to_text(ROT_HEADER_PCB_TEXT, make_library_resolver(lib))
+        assert report.patched
+        _assert_model_lands_on_target_pads(new_text, (0.0, 10.16), (0.0, 0.0))
+
+    def test_plus_ninety_body_lands_on_target_pads(self, tmp_path):
+        """#4583 geometric regression, theta = +90 (the mirror of the above).
+
+        Board pads run along -X (pad 1 at (10.16, 0) down to pad 9 at
+        (-10.16, 0)), so target orientation = 180°, source = 90°, theta = +90°.
+        Expect (rotate (xyz 0 0 90)) and (offset (xyz 10.16 0 0)).  Asserting
+        both directions blocks a future ``abs()``-style regression that would
+        satisfy only one of them.
+        """
+        import re
+
+        lib = _make_rot_header_library(tmp_path)
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+            '\t\t(layer "F.Cu")\n'
+            + "".join(
+                f'\t\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+                f"\t\t\t(at {10.16 - i * 2.54:g} 0)\n"
+                "\t\t\t(size 1.7 1.7)\n"
+                "\t\t\t(drill 1)\n"
+                '\t\t\t(layers "*.Cu" "*.Mask")\n'
+                "\t\t)\n"
+                for i in range(9)
+            )
+            + "\t)\n"
+            ")\n"
+        )
+        new_text, report = add_model_refs_to_text(pcb_text, make_library_resolver(lib))
+        assert report.patched
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 90"
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", new_text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "10.16 0 0"
+        _assert_model_lands_on_target_pads(new_text, (0.0, 10.16), (0.0, 0.0))
+
+    def test_rotate_and_offset_are_pure_metadata(self, tmp_path):
+        """Only inserted model lines differ; no original copper line moves."""
+        lib = _make_rot_header_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(ROT_HEADER_PCB_TEXT, make_library_resolver(lib))
+        original_lines = ROT_HEADER_PCB_TEXT.splitlines()
+        new_lines = new_text.splitlines()
+        it = iter(new_lines)
+        assert all(line in it for line in original_lines), "an original line moved/was dropped"
+        added = set(new_lines) - set(original_lines)
+        for line in added:
+            body = line.strip()
+            assert body.startswith(("(model", "(offset", "(scale", "(rotate", "(xyz", ")"))
+
+    def test_co_oriented_header_keeps_zero_rotate(self, tmp_path):
+        """The #4034 origin-convention header (pads along Y in BOTH the library
+        and the board) is co-oriented: theta ~= 0, so the inserted model keeps
+        (rotate (xyz 0 0 0)) verbatim -- no regression."""
+        import re
+
+        lib = _make_header_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(HEADER_PCB_TEXT, make_library_resolver(lib))
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 0"
+        # And the origin offset is still the #4034 value (Y negated vs -1.27).
+        assert "(xyz 0 1.27 0)" in new_text
+
+    def test_co_oriented_smd_keeps_zero_rotate(self, tmp_path):
+        """An SMD 0805 part (co-oriented) keeps (rotate (xyz 0 0 0)) verbatim."""
+        import re
+
+        lib = _make_library(tmp_path)
+        new_text, _ = add_model_refs_to_text(PCB_TEXT, make_library_resolver(lib))
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 0"
+
+    def test_source_orientation_carried_on_resolved_models(self, tmp_path):
+        lib = _make_rot_header_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        resolved = resolver("Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical")
+        assert isinstance(resolved, ResolvedModels)
+        assert resolved.source_orientation == 90.0
+
+    def test_one_eighty_rotation(self, tmp_path):
+        """A header whose pads run in -Y (180° from the library +Y) gets a
+        180° model rotate and the centroid offset composed in that frame."""
+        root = tmp_path / "footprints"
+        libdir = root / "Connector_PinHeader_2.54mm.pretty"
+        libdir.mkdir(parents=True)
+        (libdir / "PinHeader_1x09_P2.54mm_Vertical.kicad_mod").write_text(ROT_HEADER_LIB_MOD)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        # Board pads run downward from (0, 20.32): pad 1 (0, 20.32) ... pad 9 (0, 0),
+        # i.e. the pad-1 -> pad-2 vector is -Y (180° from the library +Y).
+        # Centroid = (0, 10.16).
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+            '\t\t(layer "F.Cu")\n'
+            + "".join(
+                f'\t\t(pad "{i + 1}" thru_hole {"rect" if i == 0 else "oval"}\n'
+                f"\t\t\t(at 0 {20.32 - i * 2.54:g})\n"
+                "\t\t\t(size 1.7 1.7)\n"
+                "\t\t\t(drill 1)\n"
+                '\t\t\t(layers "*.Cu" "*.Mask")\n'
+                "\t\t)\n"
+                for i in range(9)
+            )
+            + "\t)\n"
+            ")\n"
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(pcb_text)
+        add_model_refs(pcb, library_paths=paths)
+        text = pcb.read_text()
+        import re
+
+        # target orient = -90 (atan2(-2.54, 0)); source = 90; theta = -180 -> 180;
+        # model-frame Z = -theta = -180 -> normalize to 180.
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 180"
+        # R_{180} * source_centroid(0, 10.16) = (0, -10.16);
+        # offset_2d = target_centroid(0, 10.16) - (0, -10.16) = (0, 20.32);
+        # model offset Y negated -> (0, -20.32, 0).
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "0 -20.32 0"
+
+    def test_single_pad_target_falls_back_to_zero_rotation(self, tmp_path):
+        """A target footprint with only one positioned pad has no derivable
+        orientation -> zero rotation, no crash."""
+        lib = _make_rot_header_library(tmp_path)
+        pcb_text = (
+            "(kicad_pcb\n"
+            '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"\n'
+            '\t\t(layer "F.Cu")\n'
+            '\t\t(pad "1" thru_hole rect\n'
+            "\t\t\t(at 0 0)\n"
+            "\t\t\t(size 1.7 1.7)\n"
+            '\t\t\t(layers "*.Cu" "*.Mask")\n'
+            "\t\t)\n"
+            "\t)\n"
+            ")\n"
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(pcb_text)
+        report = add_model_refs(pcb, library_paths=lib)
+        assert report.patched
+        import re
+
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", pcb.read_text())
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 0"
+
+
+# --------------------------------------------------------------------------
+# LCSC tier: authored per-part transforms compose with the centroid delta
+# --------------------------------------------------------------------------
+# The three installed-library tiers derive their transforms geometrically; the
+# LCSC tier cannot (there is no source .kicad_mod), so its correction is
+# authored -- in the packaged lcsc_model_transforms table or a per-board
+# sidecar (#4584).  These cases pin the *composition* end to end, through
+# add_model_refs_to_text: rotate verbatim, offset added to the pad-centroid
+# delta, model-frame Y negation, Z passthrough.
+
+
+# A multi-pad footprint whose pad centroid is deliberately NOT the origin:
+# pads at (10, 4) and (10, -4) -> centroid (10, 0)... plus a third at (10, 6)
+# so the centroid is (10, 2), nonzero in both axes.
+PCB_LCSC_OFFCENTRE = """(kicad_pcb
+\t(version 20240108)
+\t(generator "kicad_tools")
+\t(footprint "Connector_PCIE:PCIE_Mini_Edge"
+\t\t(layer "F.Cu")
+\t\t(at 193.5 92.5)
+\t\t(pad "1" smd rect
+\t\t\t(at 10 4)
+\t\t\t(size 0.5 0.6)
+\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t\t)
+\t\t(pad "2" smd rect
+\t\t\t(at 10 -4)
+\t\t\t(size 0.5 0.6)
+\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t\t)
+\t\t(pad "3" smd rect
+\t\t\t(at 10 6)
+\t\t\t(size 0.5 0.6)
+\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")
+\t\t)
+\t)
+)
+"""
+
+_FAKE_STEP = b"ISO-10303-21;\r\nHEADER;\r\nEND-ISO-10303-21;\r\n"
+
+
+def _lcsc_only_resolver(tmp_path: Path, mapping, *, cached=("C444929", "C50950")):
+    """A resolver where only the LCSC tier can hit (empty footprint library)."""
+    from kicad_tools.pcb.models3d import make_library_resolver as _mk
+
+    footprints = tmp_path / "footprints"
+    footprints.mkdir(exist_ok=True)
+    cache = tmp_path / "lcsc-cache"
+    cache.mkdir(exist_ok=True)
+    for c_number in cached:
+        (cache / f"{c_number}.step").write_bytes(_FAKE_STEP)
+    return _mk(
+        LibraryPaths(footprints_path=footprints, source="config"),
+        lcsc_mapping=mapping,
+        lcsc_cache_dir=cache,
+    )
+
+
+class TestLcscPerPartTransform:
+    LIB_ID = "Connector_PCIE:PCIE_Mini_Edge"
+
+    def test_centroid_is_off_origin_in_both_axes(self, tmp_path):
+        """Guard the fixture itself: a zero centroid would make the
+        composition assertions below vacuous."""
+        block = iter_footprint_blocks(PCB_LCSC_OFFCENTRE)[0]
+        body = PCB_LCSC_OFFCENTRE[block.start : block.end + 1]
+        assert _pad_anchor(body) == (10.0, 2.0)
+
+    def test_override_composes_with_a_nonzero_pad_centroid(self, tmp_path):
+        from kicad_tools.pcb.lcsc_models import LcscModelEntry
+
+        resolver = _lcsc_only_resolver(
+            tmp_path,
+            {
+                self.LIB_ID: LcscModelEntry(
+                    "C444929", rotate=(0.0, 0.0, -90.0), offset=(0.5, 0.25, 1.75)
+                )
+            },
+        )
+        new_text, report = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, resolver)
+        assert report.patched == [self.LIB_ID]
+        # rotate: written verbatim (the LCSC tier's derived theta is always 0).
+        assert "(xyz 0 0 -90)" in new_text
+        # offset: authored (0.5, 0.25, 1.75) + centroid delta (10, -2) in the
+        # model frame (Y negated vs the footprint 2D centroid (10, 2)); Z is
+        # never rewritten by the offset machinery.
+        assert "(xyz 10.5 -1.75 1.75)" in new_text
+
+    def test_bare_mapping_for_an_unlisted_part_is_unchanged_from_identity(self, tmp_path):
+        # C50950 carries no packaged transform, so this is the pre-#4584 path.
+        resolver = _lcsc_only_resolver(tmp_path, {self.LIB_ID: "C50950"})
+        new_text, report = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, resolver)
+        assert report.patched == [self.LIB_ID]
+        assert "(xyz 0 0 0)" in new_text  # rotate untouched
+        assert "(xyz 10 -2 0)" in new_text  # pure centroid delta
+
+    def test_bare_mapping_picks_up_the_packaged_table(self, tmp_path):
+        # The committed board-06 sidecar uses the bare-string form; the
+        # calibrated C444929 correction must still reach the emitted node.
+        resolver = _lcsc_only_resolver(tmp_path, {self.LIB_ID: "C444929"})
+        new_text, report = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, resolver)
+        assert report.patched == [self.LIB_ID]
+        assert "(xyz 0 0 -90)" in new_text
+
+    def test_theta_stays_zero_so_the_rotate_delta_cannot_double_apply(self, tmp_path):
+        """The invariant that licenses writing the override verbatim."""
+        from kicad_tools.pcb.lcsc_models import LcscModelEntry
+
+        resolver = _lcsc_only_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C444929", rotate=(0.0, 0.0, -90.0))}
+        )
+        resolved = resolver(self.LIB_ID)
+        assert isinstance(resolved, ResolvedModels)
+        assert resolved.source_orientation is None
+        # ...and the target footprint DOES have a derivable orientation, so
+        # this is a real guard, not a vacuous one.
+        block = iter_footprint_blocks(PCB_LCSC_OFFCENTRE)[0]
+        body = PCB_LCSC_OFFCENTRE[block.start : block.end + 1]
+        assert _pad_field_orientation(body) is not None
+        # The rotate delta is therefore a no-op on the authored value.
+        assert _apply_rotate_delta(resolved.models[0], 0.0) == resolved.models[0]
+
+    def test_source_anchor_stays_origin_so_rotation_and_offset_are_independent(self, tmp_path):
+        """R_theta * (0, 0) == (0, 0) for every theta, so an override rotation
+        can never perturb the centroid offset."""
+        from kicad_tools.pcb.lcsc_models import LcscModelEntry
+
+        rotated = _lcsc_only_resolver(
+            tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, -90.0))}
+        )
+        plain = _lcsc_only_resolver(tmp_path, {self.LIB_ID: "C50950"})
+        rotated_text, _ = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, rotated)
+        plain_text, _ = add_model_refs_to_text(PCB_LCSC_OFFCENTRE, plain)
+        for text in (rotated_text, plain_text):
+            assert "(xyz 10 -2 0)" in text
+
+
+# --------------------------------------------------------------------------
+# CLI surface for the split-calibration guard (issue #4636)
+# --------------------------------------------------------------------------
+
+
+class TestSplitCalibrationCliSurface:
+    """A sidecar ``rotate`` inheriting a frame-mismatched packaged ``offset``
+    must reach the operator as a nonzero exit plus the message, on both output
+    formats.  ``run_add_3d_models`` already wraps ``add_model_refs`` in a
+    catch-all, so no CLI plumbing is involved -- this pins that it stays true.
+    """
+
+    LIB_ID = "Connector_PCIE:PCIE_Mini_Edge"
+
+    def _setup(self, tmp_path, monkeypatch):
+        import json
+
+        from kicad_tools.pcb import lcsc_model_transforms
+        from kicad_tools.pcb.lcsc_model_transforms import (
+            LcscModelTransform,
+            TransformProvenance,
+        )
+        from kicad_tools.pcb.lcsc_models import DEFAULT_CACHE_ENV_VAR
+
+        monkeypatch.setitem(
+            lcsc_model_transforms.LCSC_MODEL_TRANSFORMS,
+            "C444929",
+            LcscModelTransform(
+                rotate=(0.0, 0.0, -90.0),
+                offset=(1.5, -0.25, 0.0),
+                provenance=TransformProvenance(
+                    board="boards/06-diffpair-test",
+                    refdes="J3",
+                    verified="2026-08-04",
+                    command="kct render boards/06-diffpair-test",
+                ),
+            ),
+        )
+        cache = tmp_path / "lcsc-cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "C444929.step").write_bytes(_FAKE_STEP)
+        monkeypatch.setenv(DEFAULT_CACHE_ENV_VAR, str(cache))
+        footprints = tmp_path / "footprints"
+        footprints.mkdir(exist_ok=True)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(PCB_LCSC_OFFCENTRE)
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(json.dumps({self.LIB_ID: {"lcsc": "C444929", "rotate": [0, 0, 90]}}))
+        return pcb, sidecar, footprints
+
+    def test_text_format_exits_1_and_prints_to_stderr(self, tmp_path, monkeypatch, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        pcb, sidecar, footprints = self._setup(tmp_path, monkeypatch)
+        rc = run_add_3d_models(pcb, lib_path=footprints, lcsc_models=sidecar, output_format="text")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "per-part 3D transform conflict" in err
+        assert self.LIB_ID in err
+        assert "C444929" in err
+        # The board is left untouched by a rejected merge.
+        assert pcb.read_text() == PCB_LCSC_OFFCENTRE
+
+    def test_json_format_exits_1_and_reports_the_error_key(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        pcb, sidecar, footprints = self._setup(tmp_path, monkeypatch)
+        rc = run_add_3d_models(pcb, lib_path=footprints, lcsc_models=sidecar, output_format="json")
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert "per-part 3D transform conflict" in payload["error"]
+        assert "[0, 0, 0]" in payload["error"]  # the remedy
+
+    def test_the_documented_escape_hatch_unblocks_the_run(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        pcb, sidecar, footprints = self._setup(tmp_path, monkeypatch)
+        sidecar.write_text(
+            json.dumps(
+                {self.LIB_ID: {"lcsc": "C444929", "rotate": [0, 0, 90], "offset": [0, 0, 0]}}
+            )
+        )
+        rc = run_add_3d_models(pcb, lib_path=footprints, lcsc_models=sidecar, output_format="json")
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["patched"] == [self.LIB_ID]
+
+
+# --------------------------------------------------------------------------
+# --refresh: rewrite existing (model ...) refs in place (issue #4586)
+# --------------------------------------------------------------------------
+#
+# The default path is insert-only: footprints already carrying a (model ...)
+# node are skipped, so refs generated before a resolution fix (#4045 offsets,
+# #4457/#4583 rotations, #4584 LCSC transforms) are stranded stale.  refresh
+# deletes the existing model-node spans and reuses the untouched insert path,
+# so it picks up every current fix for free.  Footprints the tiers cannot
+# re-resolve keep their node byte-for-byte (never delete what you can't
+# replace).
+
+# The pre-#4586 workaround fixture: PCB_TEXT's R1 with a stale ref (wrong
+# path + wrong offset) that only a refresh can correct.
+STALE_MODEL_NODE = (
+    '\t\t(model "stale/old_R_0805.step"\n\t\t\t(offset\n\t\t\t\t(xyz 9 9 9)\n\t\t\t)\n\t\t)\n'
+)
+
+STALE_PCB_TEXT = PCB_TEXT.replace(
+    "\t\t(embedded_fonts no)\n",
+    STALE_MODEL_NODE + "\t\t(embedded_fonts no)\n",
+)
+
+
+class TestModelNodeSpans:
+    def test_whole_line_spans_for_writer_layout(self):
+        block = iter_footprint_blocks(STALE_PCB_TEXT)[0]
+        body = STALE_PCB_TEXT[block.start : block.end + 1]
+        spans = _model_node_spans(body)
+        assert len(spans) == 1
+        start, end = spans[0]
+        # The span is exactly the stale node's whole lines: deleting it
+        # reconstructs the model-less original footprint block.
+        assert body[start:end] == STALE_MODEL_NODE
+        orig = iter_footprint_blocks(PCB_TEXT)[0]
+        assert body[:start] + body[end:] == PCB_TEXT[orig.start : orig.end + 1]
+
+    def test_tight_span_when_node_shares_a_line(self):
+        body = '(footprint "x"\n\t(attr smd) (model "a.step" (offset (xyz 0 0 0)))\n)'
+        spans = _model_node_spans(body)
+        assert len(spans) == 1
+        start, end = spans[0]
+        assert body[start:end] == '(model "a.step" (offset (xyz 0 0 0)))'
+
+    def test_model_token_inside_string_ignored(self):
+        body = '(footprint "x"\n\t(property "n" "(model fake)")\n)'
+        assert _model_node_spans(body) == []
+
+    def test_multiple_nodes(self):
+        body = (
+            '(footprint "x"\n'
+            '\t(model "a.step"\n\t\t(offset (xyz 0 0 0))\n\t)\n'
+            '\t(model "b.step"\n\t\t(offset (xyz 0 0 0))\n\t)\n'
+            ")"
+        )
+        spans = _model_node_spans(body)
+        assert len(spans) == 2
+        assert body[spans[0][0] : spans[0][1]].lstrip("\t").startswith('(model "a.step"')
+        assert body[spans[1][0] : spans[1][1]].lstrip("\t").startswith('(model "b.step"')
+
+
+class TestRefresh:
+    LIB_ID = "Resistor_SMD:R_0805_2012Metric"
+
+    def test_default_path_still_byte_identical(self, tmp_path):
+        """Without refresh, a board with existing refs is untouched (the
+        pre-#4586 contract; refresh must not perturb the default path)."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, report = add_model_refs_to_text(STALE_PCB_TEXT, resolver)
+        assert new_text == STALE_PCB_TEXT
+        assert report.already_present == [self.LIB_ID]
+        assert report.refreshed == []
+        assert report.refresh_kept == []
+        # The stale ref survives the default path verbatim.
+        assert "stale/old_R_0805.step" in new_text
+
+    def test_refresh_replaces_stale_ref(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, report = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        assert report.refreshed == [self.LIB_ID]
+        assert report.patched == []
+        # Under refresh, footprints with refs are never filed already_present.
+        assert report.already_present == []
+        # Model-less footprints keep their default-path classification.
+        assert report.no_model_in_library == ["MountingHole:MountingHole_3.2mm_M3"]
+        assert report.unresolved == ["Custom_Lib:Not_A_Standard_Part"]
+        assert report.changed
+        assert "stale/old_R_0805.step" not in new_text
+        assert new_text.count("R_0805_2012Metric.step") == 1
+
+    def test_refresh_equals_strip_then_insert(self, tmp_path):
+        """The property #4585's regen needs: refresh output is byte-identical
+        to stripping every model node and re-running the insert-only path."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        refreshed, _ = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        # STALE_PCB_TEXT stripped of its only model node IS PCB_TEXT.
+        stripped_then_inserted, _ = add_model_refs_to_text(PCB_TEXT, resolver)
+        assert refreshed == stripped_then_inserted
+
+    def test_refresh_is_idempotent(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        once, report1 = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        twice, report2 = add_model_refs_to_text(once, resolver, refresh=True)
+        assert twice == once
+        # Deterministic reporting: the second pass re-resolves and re-replaces
+        # (byte-identically), so the classification is stable run to run.
+        assert report2.refreshed == report1.refreshed == [self.LIB_ID]
+
+    def test_refresh_keeps_unresolvable_ref(self, tmp_path):
+        """A footprint whose lib id resolves to nothing keeps its existing
+        node byte-for-byte and is reported in refresh_kept."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        node = '\t\t(model "hand_authored.step"\n\t\t\t(offset (xyz 1 2 3))\n\t\t)\n'
+        text = PCB_TEXT.replace(
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n\t)\n',
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n'
+            + node
+            + "\t)\n",
+        )
+        assert "hand_authored.step" in text  # fixture guard: replace() hit
+        new_text, report = add_model_refs_to_text(text, resolver, refresh=True)
+        assert report.refresh_kept == ["Custom_Lib:Not_A_Standard_Part"]
+        assert "Custom_Lib:Not_A_Standard_Part" not in report.unresolved
+        assert node in new_text
+        assert new_text.count("hand_authored.step") == 1
+
+    def test_refresh_keeps_ref_when_library_footprint_has_no_model(self, tmp_path):
+        """Resolving to a model-less library footprint also keeps + reports."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        node = '\t\t(model "hand_authored_hole.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+        text = PCB_TEXT.replace(
+            '\t(footprint "MountingHole:MountingHole_3.2mm_M3"\n\t\t(layer "F.Cu")\n\t\t(at 100 100)\n\t)\n',
+            '\t(footprint "MountingHole:MountingHole_3.2mm_M3"\n\t\t(layer "F.Cu")\n\t\t(at 100 100)\n'
+            + node
+            + "\t)\n",
+        )
+        assert "hand_authored_hole.step" in text
+        new_text, report = add_model_refs_to_text(text, resolver, refresh=True)
+        assert report.refresh_kept == ["MountingHole:MountingHole_3.2mm_M3"]
+        assert "MountingHole:MountingHole_3.2mm_M3" not in report.no_model_in_library
+        assert node in new_text
+
+    @staticmethod
+    def _strip_model_nodes(text: str) -> str:
+        """Delete every (model ...) node span from every footprint block."""
+        out = text
+        for block in reversed(iter_footprint_blocks(text)):
+            body = text[block.start : block.end + 1]
+            for s, e in reversed(_model_node_spans(body)):
+                out = out[: block.start + s] + out[block.start + e :]
+        return out
+
+    def test_refresh_is_metadata_only(self, tmp_path):
+        """Only (model ...) node bytes change: with model nodes deleted from
+        both sides, before and after are byte-identical — copper, placement
+        (at ...), nets and the segment are untouched."""
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        new_text, _ = add_model_refs_to_text(STALE_PCB_TEXT, resolver, refresh=True)
+        assert new_text != STALE_PCB_TEXT  # the refresh did rewrite the node
+        assert self._strip_model_nodes(new_text) == self._strip_model_nodes(STALE_PCB_TEXT)
+        # And the non-model content is exactly the model-less original.
+        assert self._strip_model_nodes(new_text) == PCB_TEXT
+        # Every non-model original line survives verbatim, in order.
+        model_lines = set(STALE_MODEL_NODE.splitlines())
+        kept = [l for l in STALE_PCB_TEXT.splitlines() if l not in model_lines]
+        it = iter(new_text.splitlines())
+        assert all(line in it for line in kept), "a non-model line moved/was dropped"
+
+    def test_refresh_replaces_multiple_nodes_with_resolver_list(self, tmp_path):
+        lib = _make_library(tmp_path)
+        resolver = make_library_resolver(lib)
+        text = PCB_TEXT.replace(
+            "\t\t(embedded_fonts no)\n",
+            STALE_MODEL_NODE
+            + '\t\t(model "stale/second.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+            + "\t\t(embedded_fonts no)\n",
+        )
+        new_text, report = add_model_refs_to_text(text, resolver, refresh=True)
+        assert report.refreshed == [self.LIB_ID]
+        assert "stale/" not in new_text
+        assert new_text.count("(model ") == 1
+
+    def test_refresh_recomputes_stale_rotation(self, tmp_path):
+        """The gallery-misorientation case (#4583 pickup): a ref generated
+        before rotation baking carries (rotate (xyz 0 0 0)); refresh rewrites
+        it with the current -90 baking and the rotated-frame offset."""
+        import re
+
+        stale_node = (
+            '\t\t(model "${KICAD10_3DMODEL_DIR}/Connector_PinHeader_2.54mm.3dshapes/'
+            'PinHeader_1x09_P2.54mm_Vertical.step"\n'
+            "\t\t\t(offset\n\t\t\t\t(xyz 0 0 0)\n\t\t\t)\n"
+            "\t\t\t(scale\n\t\t\t\t(xyz 1 1 1)\n\t\t\t)\n"
+            "\t\t\t(rotate\n\t\t\t\t(xyz 0 0 0)\n\t\t\t)\n"
+            "\t\t)\n"
+        )
+        stale_text = ROT_HEADER_PCB_TEXT.replace("\t)\n)\n", stale_node + "\t)\n)\n")
+        assert stale_text != ROT_HEADER_PCB_TEXT  # fixture guard
+        lib = _make_rot_header_library(tmp_path)
+        new_text, report = add_model_refs_to_text(
+            stale_text, make_library_resolver(lib), refresh=True
+        )
+        assert report.refreshed == ["Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical"]
+        assert new_text.count("(model ") == 1
+        rotate_xyz = re.search(r"\(rotate\s*\(xyz ([^)]+)\)", new_text)
+        assert rotate_xyz is not None
+        assert rotate_xyz.group(1).strip() == "0 0 -90"
+        offset_xyz = re.search(r"\(offset\s*\(xyz ([^)]+)\)", new_text)
+        assert offset_xyz is not None
+        assert offset_xyz.group(1).strip() == "-10.16 0 0"
+        _assert_model_lands_on_target_pads(new_text, (0.0, 10.16), (0.0, 0.0))
+
+    def test_refresh_picks_up_lcsc_packaged_transform(self, tmp_path):
+        """#4584 pickup: refresh re-runs the LCSC tier, so a stale ref gains
+        the packaged per-part transform (C444929 -> rotate Z -90)."""
+        stale_node = '\t\t(model "stale/C444929.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+        stale_text = PCB_LCSC_OFFCENTRE.replace("\t)\n)\n", stale_node + "\t)\n)\n")
+        assert stale_text != PCB_LCSC_OFFCENTRE
+        resolver = _lcsc_only_resolver(tmp_path, {"Connector_PCIE:PCIE_Mini_Edge": "C444929"})
+        new_text, report = add_model_refs_to_text(stale_text, resolver, refresh=True)
+        assert report.refreshed == ["Connector_PCIE:PCIE_Mini_Edge"]
+        assert "stale/C444929.step" not in new_text
+        assert "(xyz 0 0 -90)" in new_text
+
+    def test_refresh_surfaces_lcsc_match_logs(self, tmp_path):
+        """add_model_refs filters the tier logs by applied lib ids; refreshed
+        footprints must surface there too (previously patched-only)."""
+        footprints = tmp_path / "footprints"
+        footprints.mkdir(exist_ok=True)
+        cache = tmp_path / "lcsc-cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "C444929.step").write_bytes(_FAKE_STEP)
+        stale_node = '\t\t(model "stale/C444929.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n'
+        stale_text = PCB_LCSC_OFFCENTRE.replace("\t)\n)\n", stale_node + "\t)\n)\n")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(stale_text)
+        report = add_model_refs(
+            pcb,
+            library_paths=LibraryPaths(footprints_path=footprints, source="config"),
+            lcsc_mapping={"Connector_PCIE:PCIE_Mini_Edge": "C444929"},
+            lcsc_cache_dir=cache,
+            refresh=True,
+        )
+        assert report.refreshed == ["Connector_PCIE:PCIE_Mini_Edge"]
+        assert report.lcsc_matches == {"Connector_PCIE:PCIE_Mini_Edge": "C444929"}
+
+
+class TestRefreshFileAPI:
+    def test_refresh_writes_in_place(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, refresh=True)
+        assert report.changed
+        text = pcb.read_text()
+        assert "stale/old_R_0805.step" not in text
+        assert "R_0805_2012Metric.step" in text
+
+    def test_refresh_dry_run_reports_without_writing(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        report = add_model_refs(pcb, library_paths=lib, refresh=True, dry_run=True)
+        assert report.changed
+        assert report.refreshed == ["Resistor_SMD:R_0805_2012Metric"]
+        assert pcb.read_text() == STALE_PCB_TEXT
+
+    def test_refresh_file_run_is_idempotent(self, tmp_path):
+        lib = _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        add_model_refs(pcb, library_paths=lib, refresh=True)
+        first = pcb.read_text()
+        add_model_refs(pcb, library_paths=lib, refresh=True)
+        assert pcb.read_text() == first
+
+    def test_refreshed_pcb_still_parses_and_roundtrips_models(self, tmp_path):
+        """Round-trip safety (extends the insert-path guard at
+        test_patched_pcb_still_parses_and_roundtrips_models)."""
+        from kicad_tools.schema.pcb import PCB
+
+        lib = _make_library(tmp_path)
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(STALE_PCB_TEXT)
+        add_model_refs(pcb_path, library_paths=lib, refresh=True)
+
+        pcb = PCB.load(pcb_path)
+        assert len(pcb.footprints) == 3
+        out = tmp_path / "resaved.kicad_pcb"
+        pcb.save(out)
+        assert out.read_text().count("(model ") == 1
+
+
+class TestRefreshCLI:
+    def test_json_includes_refresh_fields(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        rc = run_add_3d_models(
+            pcb, lib_path=tmp_path / "footprints", refresh=True, output_format="json"
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["refresh"] is True
+        assert payload["refreshed"] == ["Resistor_SMD:R_0805_2012Metric"]
+        assert payload["refresh_kept"] == []
+        assert payload["already_present"] == []
+
+    def test_json_default_path_reports_refresh_false(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        rc = run_add_3d_models(pcb, lib_path=tmp_path / "footprints", output_format="json")
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["refresh"] is False
+        assert payload["refreshed"] == []
+        assert payload["already_present"] == ["Resistor_SMD:R_0805_2012Metric"]
+        assert pcb.read_text() == STALE_PCB_TEXT
+
+    def test_text_output_reports_replaced_and_kept(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        kept_node = '\t\t(model "hand_authored.step"\n\t\t\t(offset (xyz 1 2 3))\n\t\t)\n'
+        text = STALE_PCB_TEXT.replace(
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n\t)\n',
+            '\t(footprint "Custom_Lib:Not_A_Standard_Part"\n\t\t(layer "F.Cu")\n\t\t(at 90 90)\n'
+            + kept_node
+            + "\t)\n",
+        )
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(text)
+        rc = run_add_3d_models(
+            pcb, lib_path=tmp_path / "footprints", refresh=True, output_format="text"
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Replaced existing model refs on 1 footprint(s):" in out
+        assert "Resistor_SMD:R_0805_2012Metric" in out
+        assert "Kept existing refs (could not re-resolve): Custom_Lib:Not_A_Standard_Part" in out
+        # The kept node is untouched on disk.
+        assert kept_node in pcb.read_text()
+
+    def test_dry_run_refresh_text_output_writes_nothing(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_add_3d_models import run_add_3d_models
+
+        _make_library(tmp_path)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(STALE_PCB_TEXT)
+        rc = run_add_3d_models(
+            pcb,
+            lib_path=tmp_path / "footprints",
+            refresh=True,
+            dry_run=True,
+            output_format="text",
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Would replace existing model refs on 1 footprint(s):" in out
+        assert pcb.read_text() == STALE_PCB_TEXT
+
+
+class TestRefreshFlagThreading:
+    """Pin the parser -> commands/pcb.py -> run_add_3d_models threading.
+
+    The forwarding uses ``getattr(args, "refresh", False)``, which silently
+    defaults if the parser argument is dropped — so the flag needs its own
+    end-to-end guard (test_cli_parser_drift.py does not cover this parser).
+    """
+
+    def _run(self, monkeypatch, argv, pcb):
+        from kicad_tools.cli import pcb_add_3d_models as runner_mod
+        from kicad_tools.cli.commands.pcb import _run_add_3d_models_command
+        from kicad_tools.cli.parser import create_parser
+
+        captured: dict = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(runner_mod, "run_add_3d_models", fake_run)
+        args = create_parser().parse_args(argv)
+        rc = _run_add_3d_models_command(args, pcb)
+        assert rc == 0
+        return args, captured
+
+    def test_refresh_flag_reaches_runner(self, tmp_path, monkeypatch):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        args, captured = self._run(
+            monkeypatch, ["pcb", "add-3d-models", str(pcb), "--refresh"], pcb
+        )
+        assert args.refresh is True
+        assert captured["refresh"] is True
+
+    def test_refresh_defaults_to_false(self, tmp_path, monkeypatch):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        args, captured = self._run(monkeypatch, ["pcb", "add-3d-models", str(pcb)], pcb)
+        assert args.refresh is False
+        assert captured["refresh"] is False
+
+
+# --------------------------------------------------------------------------
+# Existence-checked tiers (#7684 Part A)
+# --------------------------------------------------------------------------
+
+
+def _mod_with_ref(name: str, ref: str) -> str:
+    return (
+        f'(footprint "{name}"\n\t(layer "F.Cu")\n'
+        '\t(pad "1" smd rect\n\t\t(at 0 0)\n\t\t(size 1 1)\n'
+        '\t\t(layers "F.Cu" "F.Mask" "F.Paste")\n\t)\n'
+        f'\t(model "{ref}"\n\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n'
+        "\t\t(scale\n\t\t\t(xyz 1 1 1)\n\t\t)\n"
+        "\t\t(rotate\n\t\t\t(xyz 0 0 0)\n\t\t)\n\t)\n)\n"
+    )
+
+
+_PART_PCB = (
+    '(kicad_pcb\n\t(version 20240108)\n\t(footprint "Lib:Part"\n\t\t(layer "F.Cu")\n'
+    '\t\t(at 10 10)\n\t\t(property "Reference" "U1"\n\t\t\t(at 0 0 0)\n\t\t)\n'
+    '\t\t(pad "1" smd rect\n\t\t\t(at 0 0)\n\t\t\t(size 1 1)\n'
+    '\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")\n\t\t)\n\t)\n)\n'
+)
+
+
+def _dangling_setup(tmp_path: Path, *, variant_exists: bool):
+    """Library with ``Lib:Part`` whose own ref dangles, plus a ``Part_EP``
+    variant whose ref points at a real file iff *variant_exists*."""
+    models = tmp_path / "3dmodels"
+    (models / "Lib.3dshapes").mkdir(parents=True)
+    if variant_exists:
+        (models / "Lib.3dshapes" / "Part_EP.step").write_text("STEP")
+    root = tmp_path / "footprints"
+    (root / "Lib.pretty").mkdir(parents=True)
+    (root / "Lib.pretty" / "Part.kicad_mod").write_text(
+        _mod_with_ref("Part", "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/Part.step")
+    )
+    (root / "Lib.pretty" / "Part_EP.kicad_mod").write_text(
+        _mod_with_ref("Part_EP", "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/Part_EP.step")
+    )
+    return LibraryPaths(footprints_path=root, source="config"), models
+
+
+class TestExistenceChecked:
+    def test_missing_ref_falls_through_to_existing_variant(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_PART_PCB)
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+        assert "Part_EP.step" in new_text
+        assert "Lib.3dshapes/Part.step" not in new_text
+        assert report.dangling_in_library == {}
+
+    def test_no_existing_candidate_is_reported_and_left_bare(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert new_text == _PART_PCB
+        assert report.patched == []
+        assert report.no_model_in_library == []
+        assert report.dangling_in_library == {
+            "Lib:Part": "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/Part.step"
+        }
+
+    def test_allow_dangling_restores_old_insert(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        resolver = make_library_resolver(paths, model_dir=models, allow_dangling=True)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+        assert "Lib.3dshapes/Part.step" in new_text
+        assert report.dangling_in_library == {}
+
+    def test_unverifiable_without_model_dir_is_not_dangling(self, tmp_path):
+        paths, _ = _dangling_setup(tmp_path, variant_exists=False)
+        resolver = make_library_resolver(paths)  # autouse fixture: no model dir
+        _, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+
+    def test_env_var_overrides_model_dir(self, tmp_path, monkeypatch):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        monkeypatch.setenv("KICAD10_3DMODEL_DIR", str(models))
+        resolver = make_library_resolver(paths, model_dir=tmp_path / "elsewhere")
+        _, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert "Lib:Part" in report.patched  # variant exists under the env dir
+
+    def test_partially_dangling_keeps_only_existing_nodes(self, tmp_path):
+        models = tmp_path / "3dmodels"
+        (models / "Lib.3dshapes").mkdir(parents=True)
+        (models / "Lib.3dshapes" / "ok.step").write_text("STEP")
+        two = _mod_with_ref("Part", "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/missing.step").replace(
+            "\n)\n", '\n\t(model "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/ok.step"\n\t)\n)\n'
+        )
+        root = tmp_path / "footprints"
+        (root / "Lib.pretty").mkdir(parents=True)
+        (root / "Lib.pretty" / "Part.kicad_mod").write_text(two)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+        assert "ok.step" in new_text and "missing.step" not in new_text
+
+    def test_refresh_rewrites_dangling_ref_when_variant_exists(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        stale = _PART_PCB.replace("\t)\n)\n", '\t\t(model "stale/gone.step"\n\t\t)\n\t)\n)\n')
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(stale, resolver, refresh=True)
+        assert report.refreshed == ["Lib:Part"]
+        assert "stale/gone.step" not in new_text and "Part_EP.step" in new_text
+
+    def test_refresh_without_alternative_keeps_and_reports(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        stale = _PART_PCB.replace("\t)\n)\n", '\t\t(model "stale/gone.step"\n\t\t)\n\t)\n)\n')
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(stale, resolver, refresh=True)
+        assert new_text == stale
+        assert report.refresh_kept == ["Lib:Part"]
+        assert "Lib:Part" in report.dangling_in_library
+
+    def test_add_model_refs_threads_allow_dangling(self, tmp_path, monkeypatch):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        monkeypatch.setenv("KICAD10_3DMODEL_DIR", str(models))
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_PART_PCB)
+        report = add_model_refs(pcb, library_paths=paths)
+        assert report.dangling_in_library and pcb.read_text() == _PART_PCB
+        report = add_model_refs(pcb, library_paths=paths, allow_dangling=True)
+        assert report.patched == ["Lib:Part"]
+
+    def test_pure_insertion_invariant_holds(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, _ = add_model_refs_to_text(_PART_PCB, resolver)
+        removed = [
+            line
+            for line in difflib.unified_diff(
+                _PART_PCB.splitlines(), new_text.splitlines(), lineterm="", n=0
+            )
+            if line.startswith("-") and not line.startswith("---")
+        ]
+        assert removed == []
+
+
+# --------------------------------------------------------------------------
+# Generators own their models + regeneration guard (#7684 Part B)
+# --------------------------------------------------------------------------
+
+
+class TestEnsureModelsAndGuard:
+    def test_ensure_models_patches_in_place(self, tmp_path):
+        from kicad_tools.pcb.models3d import ensure_models
+
+        paths = _make_library(tmp_path)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = ensure_models(pcb, library_paths=paths)
+        assert report.patched == ["Resistor_SMD:R_0805_2012Metric"]
+        assert "R_0805_2012Metric.step" in pcb.read_text()
+
+    def test_ensure_models_without_libraries_is_noop(self, tmp_path):
+        from kicad_tools.pcb.models3d import ensure_models
+
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = ensure_models(
+            pcb, library_paths=LibraryPaths(footprints_path=tmp_path / "nope", source="config")
+        )
+        assert not report.changed and pcb.read_text() == PCB_TEXT
+
+    def test_model_coverage_counts_per_reference(self):
+        from kicad_tools.pcb.models3d import model_coverage
+
+        assert model_coverage(PCB_TEXT) == {
+            "R1": 0,
+            "MountingHole:MountingHole_3.2mm_M3#1": 0,
+            "Custom_Lib:Not_A_Standard_Part#2": 0,
+        }
+
+    def test_regeneration_guard_fails_on_synthetic_regen_dropping_a_model(self, tmp_path):
+        from kicad_tools.pcb.models3d import compare_model_coverage
+
+        committed = PCB_TEXT.replace(
+            "\t\t(embedded_fonts no)\n",
+            '\t\t(model "a.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n\t\t(embedded_fonts no)\n',
+        )
+        assert "a.step" in committed  # fixture guard
+        # Same board regenerated without the model: coverage dropped.
+        assert compare_model_coverage(committed, PCB_TEXT) == {"R1": (1, 0)}
+        # Regenerated + ensure_models restores it: guard passes.
+        pcb = tmp_path / "regen.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        add_model_refs(pcb, library_paths=_make_library(tmp_path))
+        assert compare_model_coverage(committed, pcb.read_text()) == {}
+
+    def test_scaffold_template_includes_ensure_models_step(self):
+        scaffold = (
+            Path(__file__).resolve().parents[1] / ".claude/commands/kct/board-recipe-scaffold.md"
+        ).read_text()
+        assert "ensure_models" in scaffold
+        assert "kicad_tools.pcb.models3d" in scaffold
+
+    @pytest.mark.parametrize("board", ["00-simple-led", "01-voltage-divider"])
+    def test_board_recipes_call_ensure_models(self, board):
+        recipe = Path(__file__).resolve().parents[1] / "boards" / board / "generate_design.py"
+        text = recipe.read_text()
+        assert "from kicad_tools.pcb.models3d import ensure_models" in text
+        assert text.index("ensure_models(pcb_path)") < text.index("route_pcb(pcb_path")
+
+
+def test_model_insertion_leaves_drc_json_identical(tmp_path):
+    """Model nodes are render metadata: DRC JSON is equal before and after.
+
+    Scratch-only comparison of two runs of the *same* host kicad-cli (no
+    evidence is committed from it), so it needs no pinned toolchain.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    cli = shutil.which("kicad-cli")
+    board = Path(__file__).resolve().parents[1] / "boards/00-simple-led/output"
+    src = board / "simple_led_routed.kicad_pcb"
+    if cli is None or not src.exists():
+        pytest.skip("kicad-cli or committed board 00 PCB unavailable")
+
+    models = tmp_path / "3dmodels"
+    root = tmp_path / "footprints"
+    for lib, name in [
+        ("Resistor_SMD", "R_0805_2012Metric"),
+        ("LED_THT", "LED_D5.0mm"),
+        ("Connector_PinHeader_2.54mm", "PinHeader_1x02_P2.54mm_Vertical"),
+    ]:
+        (models / f"{lib}.3dshapes").mkdir(parents=True, exist_ok=True)
+        (models / f"{lib}.3dshapes" / f"{name}.step").write_text("STEP")
+        (root / f"{lib}.pretty").mkdir(parents=True, exist_ok=True)
+        (root / f"{lib}.pretty" / f"{name}.kicad_mod").write_text(
+            _mod_with_ref(name, f"${{KICAD10_3DMODEL_DIR}}/{lib}.3dshapes/{name}.step")
+        )
+
+    before = tmp_path / "before.kicad_pcb"
+    after = tmp_path / "after.kicad_pcb"
+    # Board 00 carries its model refs since #7685; strip them so the insertion
+    # under test has something to do.
+    from kicad_tools.pcb.models3d import _model_node_spans, iter_footprint_blocks
+
+    text = src.read_text()
+    for block in reversed(iter_footprint_blocks(text)):
+        body = text[block.start : block.end + 1]
+        for a, b in reversed(_model_node_spans(body)):
+            body = body[:a] + body[b:]
+        text = text[: block.start] + body + text[block.end + 1 :]
+    before.write_text(text)
+    shutil.copy(before, after)
+    report = add_model_refs(
+        after,
+        library_paths=LibraryPaths(footprints_path=root, source="config"),
+        resolver=make_library_resolver(
+            LibraryPaths(footprints_path=root, source="config"), model_dir=models
+        ),
+    )
+    assert report.patched, "fixture guard: nothing was inserted"
+
+    def drc(pcb: Path) -> dict:
+        out = pcb.with_suffix(".json")
+        proc = subprocess.run(
+            [cli, "pcb", "drc", "--format", "json", "--output", str(out), str(pcb)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if not out.exists():
+            pytest.skip(f"kicad-cli drc produced no report: {proc.stderr[-200:]}")
+        data = json.loads(out.read_text())
+        # kicad-cli's report order is not deterministic (even for one file run
+        # twice), so compare each list as a sorted multiset.
+        return {
+            k: sorted(json.dumps(v, sort_keys=True) for v in data.get(k) or [])
+            for k in ("violations", "unconnected_items", "schematic_parity")
+        }
+
+    assert drc(before) == drc(after)

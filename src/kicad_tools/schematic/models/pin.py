@@ -1,0 +1,99 @@
+"""
+KiCad Pin Model
+
+Represents a symbol pin with position and properties.
+"""
+
+from dataclasses import dataclass
+
+from kicad_tools.sexp import SExp
+
+
+@dataclass
+class Pin:
+    """Represents a symbol pin with position and properties.
+
+    Pin coordinates in KiCad symbol definitions:
+    - (x, y) is the wire CONNECTION point (where wires attach to the pin)
+    - angle is the direction the pin graphic extends INTO the symbol body
+    - length is how far the pin graphic extends into the symbol
+
+    For example, a resistor's left pin might have:
+    - (x, y) = (-2.54, 0) - where wires connect, outside the symbol
+    - angle = 0 (extending right, toward the symbol body)
+    - length = 2.54 (reaching the symbol body edge)
+    """
+
+    name: str
+    number: str
+    x: float  # Wire connection point relative to symbol center
+    y: float
+    angle: float  # Direction pin extends INTO symbol (0=right, 90=up, 180=left, 270=down)
+    length: float
+    pin_type: str = "passive"
+    # Unit number this pin belongs to. KiCad multi-unit symbols use child symbols
+    # named ``Name_<unit>_<style>`` (e.g. ``LM393_2_1``) — each unit owns the pins
+    # declared inside its child symbol. Unit ``0`` is a special "common" unit
+    # whose pins are shared by every unit (e.g. shared package power pins). The
+    # default of ``0`` keeps single-unit symbols and legacy parsers unaffected:
+    # they look like "one common unit", so they continue to match SymbolInstance
+    # placements regardless of the instance's ``unit`` field.
+    unit: int = 0
+
+    def connection_point(self) -> tuple[float, float]:
+        """Get the wire connection point in symbol-local (library Y-up) coords.
+
+        The connection point is where wires attach to the pin.  In KiCad
+        symbol definitions (``.kicad_sym``) this is the ``(x, y)`` position
+        stored in library Y-UP coordinates -- positive Y is above the symbol
+        origin in the library drawing.
+
+        IMPORTANT: KiCad schematics use Y-DOWN screen coordinates.  Callers
+        that need an absolute schematic position must negate Y after applying
+        any rotation/mirror; see
+        :meth:`kicad_tools.schematic.models.symbol.SymbolInstance.pin_position`
+        and :meth:`kicad_tools.schema.library.LibrarySymbol.get_pin_position`
+        for the correct conversion.  Using ``connection_point()`` directly in
+        schematic space produces vertically-flipped pin positions for any
+        pin with non-zero library Y (issue #2959).
+
+        Returns:
+            (x, y) tuple of the wire connection point in library-local
+            (Y-up) coordinates.
+        """
+        return (self.x, self.y)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "Pin":
+        """Parse a pin from its S-expression node.
+
+        Expected format:
+            (pin TYPE STYLE (at X Y ANGLE) (length L) (name "N" ...) (number "N" ...))
+        """
+        # First atom after "pin" is the type
+        pin_type = node.children[0].value if node.children else "passive"
+
+        # Find (at X Y ANGLE)
+        at_node = node.get("at")
+        if at_node and len(at_node.children) >= 3:
+            x = float(at_node.children[0].value)
+            y = float(at_node.children[1].value)
+            angle = float(at_node.children[2].value)
+        else:
+            x, y, angle = 0, 0, 0
+
+        # Find (length L)
+        length_node = node.get("length")
+        length = float(length_node.children[0].value) if length_node else 2.54
+
+        # Find (name "NAME" ...)
+        name_node = node.get("name")
+        name = str(name_node.children[0].value) if name_node else ""
+
+        # Find (number "NUM" ...)
+        number_node = node.get("number")
+        number = str(number_node.children[0].value) if number_node else ""
+
+        return cls(
+            name=name, number=number, x=x, y=y, angle=angle, length=length, pin_type=pin_type
+        )

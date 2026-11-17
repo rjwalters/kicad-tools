@@ -1,0 +1,29 @@
+# Baseline for board 07 regenerated with `generate_design.py --differential-pairs`
+# (issue #7795).  Checked by scripts/ci/check_board07_diffpair_baseline.py in the
+# scheduled `board-07-diffpair-ratchet` job of .github/workflows/slow-tests.yml.
+# Ratchet only: a number may go down, never up (the job fails if this file's
+# last change on main raised one, or turned a number back into null).
+#
+# Measured on the pinned KiCad image by the `board-07-diffpair-ratchet` job,
+# workflow_dispatch run 39813315402 on head 081f26d4 (seed 42,
+# PYTHONHASHSEED=42): copper_safety 0, opens 0, skew_out_of_range 1 (DQS_P/DQS_N
+# 0.119 mm vs 0.050 mm).  The long-term targets are 0 opens and 0 skew
+# violations (#5333/#7619/#7769); the gate is the measured value.
+# Issue #5333 (main 8435ea01c, seed 42, PYTHONHASHSEED=42, pinned KiCad
+# 10.0.6 image): copper_safety 0, opens 0, skew_out_of_range 0 (DQS now
+# 0.045 mm after #7812), so skew_out_of_range is lowered to 0.
+# Issue #6448 slice 1 (main 1388d4190, seed 42, PYTHONHASHSEED=42, native
+# build 65, pinned KiCad 10.0.6 image): the recipe now routes on the lattice
+# engine (`--route-engine lattice --strategy basic`).  copper_safety 0,
+# opens 0, skew_out_of_range 0 -- unchanged; MIPI/TMDS pairs 0.000 mm, DQS
+# 0.260 mm, all inside their #7883 ps budgets and the .kicad_dru mm forms.
+# `null` would mean "not measured": the checker reports it and does not gate.
+#
+# To refresh: read the numbers from the latest run's job summary and commit the
+# lower values (skew violation text, in measured mm, is printed there too).
+# This is not a per-PR check: the regen takes ~27 min (#6738), so the job runs
+# on schedule, main push and workflow_dispatch only.
+baseline:
+  copper_safety: 0
+  opens: 0
+  skew_out_of_range: 0

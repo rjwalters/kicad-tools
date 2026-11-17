@@ -1,0 +1,24 @@
+{
+  "mcp": {
+    "other": {
+      "type": "local",
+      "command": [
+        "/usr/bin/other"
+      ],
+      "enabled": true
+    },
+    "servers": {
+      "kct": {
+        "type": "local",
+        "command": [
+          "/opt/kct/bin/kct",
+          "mcp",
+          "serve"
+        ],
+        "environment": {
+          "KCT_LOG": "debug"
+        }
+      }
+    }
+  }
+}

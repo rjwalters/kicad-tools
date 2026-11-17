@@ -1,0 +1,1047 @@
+"""Tests for routing orchestration layer."""
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from kicad_tools.router import (
+    AlternativeStrategy,
+    PerformanceStats,
+    RoutingMetrics,
+    RoutingOrchestrator,
+    RoutingResult,
+    RoutingStrategy,
+)
+from kicad_tools.router.primitives import Pad
+from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+
+def _pad(
+    x: float,
+    y: float,
+    net: int = 1,
+    net_name: str = "NET1",
+    width: float = 1.0,
+    height: float = 1.0,
+    ref: str = "U1",
+    pin: str = "1",
+) -> Pad:
+    """Helper to create Pad objects with sensible defaults."""
+    return Pad(
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        net=net,
+        net_name=net_name,
+        ref=ref,
+        pin=pin,
+    )
+
+
+@pytest.fixture
+def mock_pcb():
+    """Create a mock PCB object."""
+    pcb = MagicMock()
+    pcb.width = 65.0
+    pcb.height = 56.0
+    return pcb
+
+
+@pytest.fixture
+def design_rules():
+    """Create standard design rules."""
+    return DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.2,
+        grid_resolution=0.1,
+    )
+
+
+@pytest.fixture
+def orchestrator(mock_pcb, design_rules):
+    """Create a routing orchestrator instance."""
+    return RoutingOrchestrator(
+        pcb=mock_pcb,
+        rules=design_rules,
+        backend="cpu",
+    )
+
+
+class TestRoutingStrategy:
+    """Test routing strategy enum."""
+
+    def test_strategy_enum_values(self):
+        """Verify all strategy enum values are defined."""
+        assert RoutingStrategy.GLOBAL_WITH_REPAIR
+        assert RoutingStrategy.ESCAPE_THEN_GLOBAL
+        assert RoutingStrategy.HIERARCHICAL_DIFF_PAIR
+        assert RoutingStrategy.SUBGRID_ADAPTIVE
+        assert RoutingStrategy.VIA_CONFLICT_RESOLUTION
+        assert RoutingStrategy.FULL_PIPELINE
+
+
+class TestRoutingResult:
+    """Test routing result data structures."""
+
+    def test_routing_result_to_dict(self):
+        """Verify RoutingResult serialization to dictionary."""
+        result = RoutingResult(
+            success=True,
+            net="USB_D+",
+            strategy_used=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+            metrics=RoutingMetrics(
+                total_length_mm=15.0,
+                via_count=2,
+                layer_changes=1,
+            ),
+            performance=PerformanceStats(
+                total_time_ms=100.0,
+                gpu_utilized=False,
+                backend_type="cpu",
+            ),
+        )
+
+        data = result.to_dict()
+
+        assert data["success"] is True
+        assert data["net"] == "USB_D+"
+        assert data["strategy_used"] == "HIERARCHICAL_DIFF_PAIR"
+        assert data["metrics"]["total_length_mm"] == 15.0
+        assert data["metrics"]["via_count"] == 2
+        assert data["performance"]["total_time_ms"] == 100.0
+        assert data["performance"]["backend_type"] == "cpu"
+
+    def test_routing_result_with_alternatives(self):
+        """Verify alternative strategies are serialized correctly."""
+        result = RoutingResult(
+            success=False,
+            net="GND",
+            strategy_used=RoutingStrategy.GLOBAL_WITH_REPAIR,
+            error_message="Routing failed due to congestion",
+            alternative_strategies=[
+                AlternativeStrategy(
+                    strategy=RoutingStrategy.FULL_PIPELINE,
+                    reason="Use complete pipeline for difficult nets",
+                    estimated_cost=2.0,
+                    success_probability=0.7,
+                )
+            ],
+        )
+
+        data = result.to_dict()
+
+        assert data["success"] is False
+        assert data["error_message"] == "Routing failed due to congestion"
+        assert len(data["alternative_strategies"]) == 1
+        assert data["alternative_strategies"][0]["strategy"] == "FULL_PIPELINE"
+        assert data["alternative_strategies"][0]["success_probability"] == 0.7
+
+
+class TestRoutingOrchestrator:
+    """Test routing orchestrator functionality."""
+
+    def test_orchestrator_initialization(self, orchestrator):
+        """Verify orchestrator initializes with correct parameters."""
+        assert orchestrator.backend == "cpu"
+        assert orchestrator.corridor_width == 0.5
+        assert orchestrator.density_threshold == 0.7
+        assert orchestrator.enable_repair is True
+        assert orchestrator.enable_via_conflict_resolution is True
+
+    def test_strategy_selection_default(self, orchestrator):
+        """Verify default strategy selection for standard nets."""
+        # Create simple pads (wide spacing, not fine-pitch)
+        pads = [
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=10.0, y=0, pin="2"),
+        ]
+
+        strategy = orchestrator._select_strategy("NET1", intent=None, pads=pads)
+
+        # With wide spacing and no special conditions, should use global router
+        assert strategy == RoutingStrategy.GLOBAL_WITH_REPAIR
+
+    def test_strategy_selection_fine_pitch(self, orchestrator):
+        """Verify escape routing strategy for fine-pitch pads."""
+        # Create fine-pitch pads (0.5mm spacing, below 0.8mm threshold)
+        pads = [
+            _pad(x=0, y=0, width=0.4, height=0.4, pin="1"),
+            _pad(x=0.5, y=0, width=0.4, height=0.4, pin="2"),
+            _pad(x=1.0, y=0, width=0.4, height=0.4, pin="3"),
+        ]
+
+        strategy = orchestrator._select_strategy("NET1", intent=None, pads=pads)
+
+        # Fine-pitch pads should trigger escape routing
+        assert strategy == RoutingStrategy.ESCAPE_THEN_GLOBAL
+
+    def test_strategy_selection_differential_pair(self, orchestrator):
+        """Verify hierarchical strategy for differential pairs."""
+        # Create mock design intent for differential pair
+        intent = MagicMock()
+        intent.is_differential = True
+        intent.impedance = 90
+
+        pads = [
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=10.0, y=0, pin="2"),
+        ]
+
+        strategy = orchestrator._select_strategy("USB_D+", intent=intent, pads=pads)
+
+        # Differential pairs should use hierarchical routing
+        assert strategy == RoutingStrategy.HIERARCHICAL_DIFF_PAIR
+
+    def test_route_net_success(self, orchestrator):
+        """Verify successful routing returns proper result."""
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        result = orchestrator.route_net("NET1", pads=pads)
+
+        assert isinstance(result, RoutingResult)
+        assert result.success is True
+        assert result.net == "NET1"
+        assert result.strategy_used in RoutingStrategy
+        assert isinstance(result.metrics, RoutingMetrics)
+        assert isinstance(result.performance, PerformanceStats)
+
+    def test_route_net_with_metrics(self, orchestrator):
+        """Verify routing result includes performance metrics."""
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        result = orchestrator.route_net("NET1", pads=pads)
+
+        # Verify performance stats are populated
+        assert result.performance.total_time_ms > 0
+        assert result.performance.strategy_selection_ms >= 0
+        assert result.performance.routing_ms >= 0
+        assert result.performance.backend_type == "cpu"
+
+    def test_route_global_computes_length(self, orchestrator):
+        """Verify global routing computes length from corridor waypoints."""
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=25.0, y=5.0, pin="2"),
+        ]
+
+        result = orchestrator._route_global("NET1", pads)
+
+        assert result.success is True
+        assert result.strategy_used == RoutingStrategy.GLOBAL_WITH_REPAIR
+        # Length should be approximately the distance between pads
+        assert result.metrics.total_length_mm > 0
+
+    def test_route_global_insufficient_pads(self, orchestrator):
+        """Verify global routing fails gracefully with insufficient pads."""
+        pads = [_pad(x=5.0, y=5.0, pin="1")]
+
+        result = orchestrator._route_global("NET1", pads)
+
+        assert result.success is False
+        assert "Insufficient" in result.error_message
+
+    def test_route_escape_then_global(self, orchestrator):
+        """Verify escape-then-global routing chains both phases."""
+        pads = [
+            _pad(x=5.0, y=5.0, width=0.4, height=0.4, pin="1"),
+            _pad(x=15.0, y=5.0, width=0.4, height=0.4, pin="2"),
+        ]
+
+        result = orchestrator._route_escape_then_global("NET1", pads)
+
+        assert result.strategy_used == RoutingStrategy.ESCAPE_THEN_GLOBAL
+        # Global routing phase should still succeed even without escape grid
+        assert result.success is True
+
+    def test_route_hierarchical_with_intent(self, orchestrator):
+        """Verify hierarchical routing accepts differential pair intent."""
+        intent = MagicMock()
+        intent.is_differential = True
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="USB_D+", ref="J1", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="USB_D+", ref="U1", pin="D+"),
+        ]
+
+        result = orchestrator._route_hierarchical("USB_D+", intent, pads)
+
+        assert result.strategy_used == RoutingStrategy.HIERARCHICAL_DIFF_PAIR
+        assert isinstance(result.metrics, RoutingMetrics)
+
+    def test_has_via_conflicts_no_grid(self, orchestrator):
+        """Verify via conflict check returns False when no grid available."""
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        # mock_pcb has no grid attribute, so should return False
+        assert orchestrator._has_via_conflicts("NET1", pads) is False
+
+    def test_has_via_conflicts_no_pads(self, orchestrator):
+        """Verify via conflict check returns False with no pads."""
+        assert orchestrator._has_via_conflicts("NET1", None) is False
+        assert orchestrator._has_via_conflicts("NET1", []) is False
+
+    def test_needs_escape_routing_wide_pitch(self, orchestrator):
+        """Verify wide-pitch pads don't trigger escape routing."""
+        pads = [
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=2.0, y=0, pin="2"),
+        ]
+
+        needs_escape = orchestrator._needs_escape_routing(pads)
+        assert needs_escape is False
+
+    def test_needs_escape_routing_fine_pitch(self, orchestrator):
+        """Verify fine-pitch pads trigger escape routing."""
+        pads = [
+            _pad(x=0, y=0, width=0.4, height=0.4, pin="1"),
+            _pad(x=0.6, y=0, width=0.4, height=0.4, pin="2"),
+        ]
+
+        needs_escape = orchestrator._needs_escape_routing(pads)
+        assert needs_escape is True
+
+    def test_needs_escape_routing_per_component(self, orchestrator):
+        """Verify escape routing checks per-component, not across net endpoints.
+
+        A net connecting an MCU pin (dense QFP) to a far-away peripheral
+        pad has large inter-endpoint distance but should still trigger escape
+        routing because the MCU component is dense.
+        """
+        # Build pads from two different components on the same net:
+        # U1 is a dense QFP (many pads at fine pitch 0.5mm)
+        dense_pads = []
+        for i in range(20):
+            dense_pads.append(
+                _pad(x=i * 0.5, y=0.0, width=0.3, height=0.8, ref="U1", pin=str(i + 1))
+            )
+
+        # R1 is a far-away resistor pad (single pad on the same net)
+        far_pad = _pad(x=50.0, y=50.0, width=1.0, height=1.0, ref="R1", pin="1")
+
+        # Combined pads for a net that spans both components
+        all_pads = dense_pads + [far_pad]
+
+        # Old behavior would check inter-pad distance across all pads,
+        # which might not detect density because the far pad inflates distances.
+        # New behavior checks per-component: U1 has 20 pads at 0.5mm pitch,
+        # which is dense with trace_width=0.2, clearance=0.2 (threshold=0.8mm).
+        assert orchestrator._needs_escape_routing(all_pads) is True
+
+    def test_needs_escape_routing_no_dense_components(self, orchestrator):
+        """Verify escape routing not triggered when no component is dense."""
+        # Two components with wide pitch (2mm apart)
+        pads = [
+            _pad(x=0, y=0, ref="R1", pin="1"),
+            _pad(x=2.0, y=0, ref="R1", pin="2"),
+            _pad(x=10.0, y=0, ref="R2", pin="1"),
+            _pad(x=12.0, y=0, ref="R2", pin="2"),
+        ]
+
+        assert orchestrator._needs_escape_routing(pads) is False
+
+    def test_needs_escape_routing_empty_ref(self, orchestrator):
+        """Verify pads with empty ref are handled gracefully."""
+        pads = [
+            _pad(x=0, y=0, ref="", pin="1"),
+            _pad(x=0.5, y=0, ref="", pin="2"),
+        ]
+
+        # Empty ref pads are skipped (no component grouping possible)
+        assert orchestrator._needs_escape_routing(pads) is False
+
+    def test_check_density_sparse(self, orchestrator):
+        """Verify density calculation for sparse pads."""
+        pads = [
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=20.0, y=0, pin="2"),
+        ]
+
+        density = orchestrator._check_density(pads)
+        assert 0.0 <= density < 0.5  # Sparse area
+
+    def test_check_density_dense(self, orchestrator):
+        """Verify density calculation for dense pads."""
+        # Create many pads in small area (1x1mm)
+        pads = [
+            _pad(
+                x=0.2 * i,
+                y=0.2 * j,
+                width=0.15,
+                height=0.15,
+                ref="U1",
+                pin=f"p{i}_{j}",
+            )
+            for i in range(5)
+            for j in range(5)
+        ]
+
+        density = orchestrator._check_density(pads)
+        assert density > 0.5  # Dense area
+
+
+class TestPourNetSkip:
+    """Test that pour nets (power/ground) are auto-skipped by the orchestrator."""
+
+    def test_pour_net_gnd_skipped_with_success(self, mock_pcb, design_rules):
+        """Verify GND net with is_pour_net=True is skipped with success result."""
+        net_class_map = {
+            "GND": NetClassRouting(
+                name="Ground",
+                priority=1,
+                is_pour_net=True,
+            ),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="GND", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="GND", pin="2"),
+        ]
+
+        result = orch.route_net("GND", pads=pads)
+
+        assert result.success is True
+        assert result.net == "GND"
+        assert len(result.warnings) == 1
+        assert "pour net" in result.warnings[0].lower()
+        assert "zone fill" in result.warnings[0].lower()
+
+    def test_pour_net_gnda_skipped_with_success(self, mock_pcb, design_rules):
+        """Verify GNDA net with is_pour_net=True is skipped with success."""
+        net_class_map = {
+            "GNDA": NetClassRouting(
+                name="Ground",
+                priority=1,
+                is_pour_net=True,
+            ),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        result = orch.route_net(
+            "GNDA",
+            pads=[
+                _pad(x=0, y=0, net=2, net_name="GNDA", pin="1"),
+                _pad(x=10, y=0, net=2, net_name="GNDA", pin="2"),
+            ],
+        )
+
+        assert result.success is True
+        assert any("GNDA" in w for w in result.warnings)
+
+    def test_pour_net_power_skipped_with_warning(self, mock_pcb, design_rules):
+        """Verify power net with is_pour_net=True is skipped with zone fill warning."""
+        net_class_map = {
+            "+3.3V": NetClassRouting(
+                name="Power",
+                priority=1,
+                is_pour_net=True,
+            ),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        result = orch.route_net(
+            "+3.3V",
+            pads=[
+                _pad(x=0, y=0, net=3, net_name="+3.3V", pin="1"),
+                _pad(x=10, y=0, net=3, net_name="+3.3V", pin="2"),
+            ],
+        )
+
+        assert result.success is True
+        assert any("zone fill" in w.lower() for w in result.warnings)
+        assert any("power" in w.lower() for w in result.warnings)
+
+    def test_non_pour_net_not_skipped(self, mock_pcb, design_rules):
+        """Verify non-pour nets are routed normally (not skipped)."""
+        net_class_map = {
+            "GND": NetClassRouting(name="Ground", priority=1, is_pour_net=True),
+            "SPI_MOSI": NetClassRouting(name="Digital", priority=4, is_pour_net=False),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=4, net_name="SPI_MOSI", pin="1"),
+            _pad(x=15.0, y=5.0, net=4, net_name="SPI_MOSI", pin="2"),
+        ]
+
+        result = orch.route_net("SPI_MOSI", pads=pads)
+
+        # SPI_MOSI should be routed normally, not skipped
+        assert result.success is True
+        assert not any("pour net" in w.lower() for w in result.warnings)
+
+    def test_no_net_class_map_routes_normally(self, orchestrator):
+        """Verify orchestrator without net_class_map routes all nets normally."""
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="GND", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="GND", pin="2"),
+        ]
+
+        # Default orchestrator has no net_class_map, so GND is not recognized as pour
+        result = orchestrator.route_net("GND", pads=pads)
+
+        assert result.success is True
+        assert not any("pour net" in w.lower() for w in result.warnings)
+
+    def test_pour_net_skip_includes_performance_stats(self, mock_pcb, design_rules):
+        """Verify skipped pour nets still return performance stats."""
+        net_class_map = {
+            "GND": NetClassRouting(name="Ground", priority=1, is_pour_net=True),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        result = orch.route_net(
+            "GND",
+            pads=[
+                _pad(x=0, y=0, net=1, net_name="GND", pin="1"),
+                _pad(x=10, y=0, net=1, net_name="GND", pin="2"),
+            ],
+        )
+
+        assert result.performance is not None
+        assert result.performance.total_time_ms >= 0
+        assert result.performance.backend_type == "cpu"
+
+    def test_pour_net_with_integer_net_id_not_skipped(self, mock_pcb, design_rules):
+        """Verify integer net IDs are not looked up in net_class_map (string keys only)."""
+        net_class_map = {
+            "GND": NetClassRouting(name="Ground", priority=1, is_pour_net=True),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="GND", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="GND", pin="2"),
+        ]
+
+        # Using integer net ID - should not be looked up in string-keyed map
+        result = orch.route_net(1, pads=pads)
+
+        assert result.success is True
+        assert not any("pour net" in w.lower() for w in result.warnings)
+
+    def test_classify_and_apply_rules_integration(self, mock_pcb, design_rules):
+        """Verify classify_and_apply_rules output integrates with orchestrator."""
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        net_names = {1: "GND", 2: "GNDA", 3: "+3.3V", 4: "MCLK_DAC", 5: "SPI_MOSI"}
+        net_class_map = classify_and_apply_rules(net_names)
+
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        # GND should be skipped (is_pour_net=True from Ground class)
+        gnd_result = orch.route_net(
+            "GND",
+            pads=[
+                _pad(x=0, y=0, net=1, net_name="GND", pin="1"),
+                _pad(x=10, y=0, net=1, net_name="GND", pin="2"),
+            ],
+        )
+        assert gnd_result.success is True
+        assert any("pour net" in w.lower() for w in gnd_result.warnings)
+
+        # GNDA should be skipped (is_pour_net=True from Ground class)
+        gnda_result = orch.route_net(
+            "GNDA",
+            pads=[
+                _pad(x=0, y=0, net=2, net_name="GNDA", pin="1"),
+                _pad(x=10, y=0, net=2, net_name="GNDA", pin="2"),
+            ],
+        )
+        assert gnda_result.success is True
+        assert any("pour net" in w.lower() for w in gnda_result.warnings)
+
+        # +3.3V should be skipped (is_pour_net=True from Power class)
+        power_result = orch.route_net(
+            "+3.3V",
+            pads=[
+                _pad(x=0, y=0, net=3, net_name="+3.3V", pin="1"),
+                _pad(x=10, y=0, net=3, net_name="+3.3V", pin="2"),
+            ],
+        )
+        assert power_result.success is True
+        assert any("pour net" in w.lower() for w in power_result.warnings)
+
+        # MCLK_DAC should NOT be skipped (clock net, is_pour_net=False)
+        clk_result = orch.route_net(
+            "MCLK_DAC",
+            pads=[
+                _pad(x=0, y=0, net=4, net_name="MCLK_DAC", pin="1"),
+                _pad(x=10, y=0, net=4, net_name="MCLK_DAC", pin="2"),
+            ],
+        )
+        assert clk_result.success is True
+        assert not any("pour net" in w.lower() for w in clk_result.warnings)
+
+        # SPI_MOSI should NOT be skipped (digital signal, is_pour_net=False)
+        spi_result = orch.route_net(
+            "SPI_MOSI",
+            pads=[
+                _pad(x=0, y=0, net=5, net_name="SPI_MOSI", pin="1"),
+                _pad(x=10, y=0, net=5, net_name="SPI_MOSI", pin="2"),
+            ],
+        )
+        assert spi_result.success is True
+        assert not any("pour net" in w.lower() for w in spi_result.warnings)
+
+
+class TestRoutingMetrics:
+    """Test routing metrics data structure."""
+
+    def test_metrics_defaults(self):
+        """Verify RoutingMetrics has sensible defaults."""
+        metrics = RoutingMetrics()
+
+        assert metrics.total_length_mm == 0.0
+        assert metrics.via_count == 0
+        assert metrics.layer_changes == 0
+        assert metrics.clearance_margin_mm == 0.0
+        assert metrics.grid_points_used == 0
+        assert metrics.escape_segments == 0
+        assert metrics.repair_actions == 0
+
+
+class TestPerformanceStats:
+    """Test performance statistics data structure."""
+
+    def test_performance_stats_defaults(self):
+        """Verify PerformanceStats has sensible defaults."""
+        perf = PerformanceStats()
+
+        assert perf.total_time_ms == 0.0
+        assert perf.strategy_selection_ms == 0.0
+        assert perf.routing_ms == 0.0
+        assert perf.repair_ms == 0.0
+        assert perf.gpu_utilized is False
+        assert perf.backend_type == "cpu"
+
+
+class TestStrategyRetry:
+    """Test automatic strategy retry when primary strategy fails."""
+
+    def test_retry_succeeds_on_alternative_strategy(self, mock_pcb, design_rules):
+        """Verify orchestrator retries with alternative strategy on failure.
+
+        When the primary strategy (GLOBAL_WITH_REPAIR) fails with populated
+        alternative_strategies, the orchestrator should iterate through
+        alternatives until one succeeds.
+        """
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        # Track how many times _execute_strategy is called
+        call_count = 0
+
+        def mock_execute(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call (primary strategy) fails
+                return RoutingResult(
+                    success=False,
+                    net=net,
+                    strategy_used=strategy,
+                    error_message="Global router failed to find corridor assignment",
+                    alternative_strategies=[
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.MULTI_RESOLUTION,
+                            reason="Fine-grid retry may resolve",
+                            estimated_cost=1.5,
+                            success_probability=0.65,
+                        ),
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.FULL_PIPELINE,
+                            reason="Complete pipeline applies all techniques",
+                            estimated_cost=2.0,
+                            success_probability=0.7,
+                        ),
+                    ],
+                )
+            elif call_count == 2:
+                # Second call (first retry: MULTI_RESOLUTION) also fails
+                return RoutingResult(
+                    success=False,
+                    net=net,
+                    strategy_used=strategy,
+                    error_message="Multi-resolution also failed",
+                )
+            else:
+                # Third call (second retry: FULL_PIPELINE) succeeds
+                return RoutingResult(
+                    success=True,
+                    net=net,
+                    strategy_used=strategy,
+                    metrics=RoutingMetrics(total_length_mm=12.0, via_count=1),
+                )
+
+        orch._execute_strategy = mock_execute
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is True
+        assert call_count == 3
+        # Should note the retry path in warnings
+        assert any("retry" in w.lower() for w in result.warnings)
+        assert any("FULL_PIPELINE" in w for w in result.warnings)
+
+    def test_retry_all_alternatives_fail(self, mock_pcb, design_rules):
+        """Verify all-failed retries are noted in warnings."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        def always_fail(net, strategy, intent, pads_arg):
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message=f"{strategy.name} failed",
+                alternative_strategies=[
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.MULTI_RESOLUTION,
+                        reason="Try finer grid",
+                        estimated_cost=1.5,
+                        success_probability=0.65,
+                    ),
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.FULL_PIPELINE,
+                        reason="Try complete pipeline",
+                        estimated_cost=2.0,
+                        success_probability=0.7,
+                    ),
+                ],
+            )
+
+        orch._execute_strategy = always_fail
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        assert any("retries exhausted" in w.lower() for w in result.warnings)
+        assert any("GLOBAL_WITH_REPAIR" in w for w in result.warnings)
+
+    def test_retry_disabled_with_zero_max(self, mock_pcb, design_rules):
+        """Verify max_strategy_retries=0 disables automatic retry."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=0,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def fail_once(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message="Failed",
+                alternative_strategies=[
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.FULL_PIPELINE,
+                        reason="Try complete pipeline",
+                        estimated_cost=2.0,
+                        success_probability=0.7,
+                    ),
+                ],
+            )
+
+        orch._execute_strategy = fail_once
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        # Should only call once (no retry)
+        assert call_count == 1
+        # Should NOT have retry warnings
+        assert not any("retries exhausted" in w.lower() for w in result.warnings)
+
+    def test_retry_respects_budget_limit(self, mock_pcb, design_rules):
+        """Verify retry loop stops at max_strategy_retries even with more alternatives."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=1,  # Only try 1 alternative
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def fail_always(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message="Failed",
+                alternative_strategies=[
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.MULTI_RESOLUTION,
+                        reason="Try finer grid",
+                        estimated_cost=1.5,
+                        success_probability=0.65,
+                    ),
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.FULL_PIPELINE,
+                        reason="Try complete pipeline",
+                        estimated_cost=2.0,
+                        success_probability=0.7,
+                    ),
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+                        reason="Try hierarchical",
+                        estimated_cost=1.5,
+                        success_probability=0.6,
+                    ),
+                ],
+            )
+
+        orch._execute_strategy = fail_always
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        # Should call twice: original + 1 retry (budget=1)
+        assert call_count == 2
+
+    def test_retry_first_alternative_succeeds(self, mock_pcb, design_rules):
+        """Verify retry stops on first successful alternative."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def succeed_on_second(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return RoutingResult(
+                    success=False,
+                    net=net,
+                    strategy_used=strategy,
+                    error_message="Primary failed",
+                    alternative_strategies=[
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.MULTI_RESOLUTION,
+                            reason="Try finer grid",
+                            estimated_cost=1.5,
+                            success_probability=0.65,
+                        ),
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.FULL_PIPELINE,
+                            reason="Try complete pipeline",
+                            estimated_cost=2.0,
+                            success_probability=0.7,
+                        ),
+                    ],
+                )
+            else:
+                return RoutingResult(
+                    success=True,
+                    net=net,
+                    strategy_used=strategy,
+                    metrics=RoutingMetrics(total_length_mm=10.0),
+                )
+
+        orch._execute_strategy = succeed_on_second
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is True
+        # Should call twice: original + first retry succeeds
+        assert call_count == 2
+        # Should NOT try the second alternative
+        assert any("MULTI_RESOLUTION" in w for w in result.warnings)
+
+    def test_no_retry_when_no_alternatives(self, mock_pcb, design_rules):
+        """Verify no retry when result has empty alternative_strategies."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def fail_no_alternatives(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message="Failed with no alternatives",
+                alternative_strategies=[],
+            )
+
+        orch._execute_strategy = fail_no_alternatives
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        assert call_count == 1
+
+    def test_execute_strategy_populates_alternatives_on_failure(self, mock_pcb, design_rules):
+        """Verify _execute_strategy always populates alternatives on failure.
+
+        Strategies like _route_escape_then_global may not populate
+        alternative_strategies on their own. _execute_strategy should
+        fill them in so the retry loop has candidates.
+        """
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+        ]  # Only one pad -> will fail
+
+        result = orch._execute_strategy(
+            "NET1",
+            RoutingStrategy.ESCAPE_THEN_GLOBAL,
+            intent=None,
+            pads=pads,
+        )
+
+        assert result.success is False
+        # Should have alternatives populated even though
+        # _route_escape_then_global does not populate them itself
+        assert len(result.alternative_strategies) > 0
+        assert any(
+            alt.strategy == RoutingStrategy.FULL_PIPELINE for alt in result.alternative_strategies
+        )
+
+    def test_default_max_strategy_retries(self, mock_pcb, design_rules):
+        """Verify default max_strategy_retries is 2."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+        )
+        assert orch.max_strategy_retries == 2
+
+    def test_successful_primary_strategy_skips_retry(self, mock_pcb, design_rules):
+        """Verify no retry when primary strategy succeeds."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def counting_execute(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=True,
+                net=net,
+                strategy_used=strategy,
+                metrics=RoutingMetrics(total_length_mm=10.0),
+            )
+
+        orch._execute_strategy = counting_execute
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is True
+        assert call_count == 1  # Only primary call, no retry

@@ -1,0 +1,529 @@
+{
+  "excluded": [],
+  "fit": {
+    "acc_best_single_macro": 0.7301142623723269,
+    "acc_best_single_micro": 0.7130044843049327,
+    "acc_fit_macro": 0.6065227503015522,
+    "acc_fit_micro": 0.6659192825112108,
+    "n_pairs": 446,
+    "per_board": {
+      "charlieplex_3x3": {
+        "acc_best_single": 0.7258064516129032,
+        "acc_fit": 0.8064516129032258,
+        "best_single_signal": "placement_wirelength",
+        "n_pairs": 124
+      },
+      "diffpair_test": {
+        "acc_best_single": 0.7564102564102564,
+        "acc_fit": 0.5512820512820513,
+        "best_single_signal": "placement_wirelength",
+        "n_pairs": 78
+      },
+      "matchgroup_test": {
+        "acc_best_single": 0.7272727272727273,
+        "acc_fit": 0.0,
+        "best_single_signal": "placement_wirelength",
+        "n_pairs": 22
+      },
+      "simple_led": {
+        "acc_best_single": 1.0,
+        "acc_fit": 0.9666666666666667,
+        "best_single_signal": "placement_wirelength",
+        "n_pairs": 30
+      },
+      "stm32_devboard": {
+        "acc_best_single": 0.6891891891891891,
+        "acc_fit": 0.7567567567567568,
+        "best_single_signal": "placement_wirelength",
+        "n_pairs": 74
+      },
+      "usb_joystick": {
+        "acc_best_single": 0.6666666666666666,
+        "acc_fit": 0.6190476190476191,
+        "best_single_signal": "placement_wirelength",
+        "n_pairs": 63
+      },
+      "voltage_divider": {
+        "acc_best_single": 0.5454545454545454,
+        "acc_fit": 0.5454545454545454,
+        "best_single_signal": "placement_wirelength",
+        "n_pairs": 55
+      }
+    },
+    "weights_all_boards": {
+      "crossing_count": 1.1446025025827633,
+      "hpwl_signal": 7.2089943871946645,
+      "placement_boundary": 1.6688060098792639,
+      "placement_drc": 1.531112327528998,
+      "placement_overlap": -0.17066627730911102,
+      "placement_wirelength": 6.057190960045365,
+      "rudy_overflow": 0.0,
+      "rudy_peak": 58.93853922099172,
+      "rudy_top10_mean": -43.860864741534854,
+      "steiner_signal_length": -6.028580394614939
+    }
+  },
+  "gate": [
+    {
+      "accepted": 446,
+      "precision": 0.6659192825112108,
+      "recall": 0.6659192825112108,
+      "threshold": 0.5
+    },
+    {
+      "accepted": 350,
+      "precision": 0.72,
+      "recall": 0.5650224215246636,
+      "threshold": 0.6
+    },
+    {
+      "accepted": 256,
+      "precision": 0.7421875,
+      "recall": 0.4260089686098655,
+      "threshold": 0.7
+    },
+    {
+      "accepted": 179,
+      "precision": 0.8379888268156425,
+      "recall": 0.336322869955157,
+      "threshold": 0.8
+    },
+    {
+      "accepted": 90,
+      "precision": 0.9,
+      "recall": 0.18161434977578475,
+      "threshold": 0.9
+    }
+  ],
+  "n_boards": 8,
+  "n_completion_pairs": 305,
+  "n_pairs": 446,
+  "n_placements": 116,
+  "n_same_sigma_pairs": 73,
+  "per_board": {
+    "bldc_controller": {
+      "acc_by_signal": {
+        "crossing_count": null,
+        "hpwl_all": null,
+        "hpwl_signal": null,
+        "placement_boundary": null,
+        "placement_cost_total": null,
+        "placement_drc": null,
+        "placement_overlap": null,
+        "placement_wirelength": null,
+        "rudy_overflow": null,
+        "rudy_peak": null,
+        "rudy_top10_mean": null,
+        "steiner_signal_length": null
+      },
+      "completion_max": -1.0,
+      "completion_min": -1.0,
+      "drc_max": 0,
+      "drc_min": 0,
+      "n_checkpoint_labels": 0,
+      "n_full_completion": 0,
+      "n_pairs": 0,
+      "n_placements": 13,
+      "orig_router_seed_completions": [
+        -1.0,
+        -1.0,
+        -1.0
+      ],
+      "orig_router_seed_drc": [
+        0,
+        0,
+        0
+      ],
+      "route_seconds_median": 126.7366329159704,
+      "route_timeout": [
+        120
+      ]
+    },
+    "charlieplex_3x3": {
+      "acc_by_signal": {
+        "crossing_count": 0.5080645161290323,
+        "hpwl_all": 0.7580645161290323,
+        "hpwl_signal": 0.7016129032258065,
+        "placement_boundary": 0.625,
+        "placement_cost_total": 0.5645161290322581,
+        "placement_drc": 0.5806451612903226,
+        "placement_overlap": 0.5645161290322581,
+        "placement_wirelength": 0.7258064516129032,
+        "rudy_overflow": 0.5,
+        "rudy_peak": 0.6693548387096774,
+        "rudy_top10_mean": 0.5725806451612904,
+        "steiner_signal_length": 0.6048387096774194
+      },
+      "completion_max": 100.0,
+      "completion_min": 33.333333333333336,
+      "drc_max": 13,
+      "drc_min": 0,
+      "n_checkpoint_labels": 3,
+      "n_full_completion": 13,
+      "n_pairs": 124,
+      "n_placements": 17,
+      "orig_router_seed_completions": [
+        100.0,
+        100.0,
+        100.0
+      ],
+      "orig_router_seed_drc": [
+        0,
+        0,
+        0
+      ],
+      "route_seconds_median": 76.32649479201064,
+      "route_timeout": [
+        120
+      ]
+    },
+    "diffpair_test": {
+      "acc_by_signal": {
+        "crossing_count": 0.6025641025641025,
+        "hpwl_all": 0.7692307692307693,
+        "hpwl_signal": 0.8076923076923077,
+        "placement_boundary": 0.5,
+        "placement_cost_total": 0.7692307692307693,
+        "placement_drc": 0.7115384615384616,
+        "placement_overlap": 0.7628205128205128,
+        "placement_wirelength": 0.7564102564102564,
+        "rudy_overflow": 0.5,
+        "rudy_peak": 0.32051282051282054,
+        "rudy_top10_mean": 0.46153846153846156,
+        "steiner_signal_length": 0.8076923076923077
+      },
+      "completion_max": 100.0,
+      "completion_min": -1.0,
+      "drc_max": 58,
+      "drc_min": 0,
+      "n_checkpoint_labels": 10,
+      "n_full_completion": 4,
+      "n_pairs": 78,
+      "n_placements": 13,
+      "orig_router_seed_completions": [
+        100.0,
+        100.0,
+        100.0
+      ],
+      "orig_router_seed_drc": [
+        0,
+        0,
+        0
+      ],
+      "route_seconds_median": 125.41290075000143,
+      "route_timeout": [
+        120
+      ]
+    },
+    "matchgroup_test": {
+      "acc_by_signal": {
+        "crossing_count": 0.09090909090909091,
+        "hpwl_all": 0.09090909090909091,
+        "hpwl_signal": 0.09090909090909091,
+        "placement_boundary": 0.5,
+        "placement_cost_total": 0.3181818181818182,
+        "placement_drc": 0.6363636363636364,
+        "placement_overlap": 0.3181818181818182,
+        "placement_wirelength": 0.7272727272727273,
+        "rudy_overflow": 0.5,
+        "rudy_peak": 0.5,
+        "rudy_top10_mean": 0.8181818181818182,
+        "steiner_signal_length": 0.09090909090909091
+      },
+      "completion_max": 0.0,
+      "completion_min": -1.0,
+      "drc_max": 52,
+      "drc_min": 0,
+      "n_checkpoint_labels": 0,
+      "n_full_completion": 0,
+      "n_pairs": 22,
+      "n_placements": 13,
+      "orig_router_seed_completions": [
+        -1.0,
+        -1.0,
+        -1.0
+      ],
+      "orig_router_seed_drc": [
+        0,
+        0,
+        0
+      ],
+      "route_seconds_median": 125.38986333401408,
+      "route_timeout": [
+        120
+      ]
+    },
+    "simple_led": {
+      "acc_by_signal": {
+        "crossing_count": 0.5833333333333334,
+        "hpwl_all": 1.0,
+        "hpwl_signal": 1.0,
+        "placement_boundary": 1.0,
+        "placement_cost_total": 1.0,
+        "placement_drc": 0.5,
+        "placement_overlap": 0.5,
+        "placement_wirelength": 1.0,
+        "rudy_overflow": 0.5,
+        "rudy_peak": 0.5,
+        "rudy_top10_mean": 0.5,
+        "steiner_signal_length": 1.0
+      },
+      "completion_max": 100.0,
+      "completion_min": 0.0,
+      "drc_max": 1,
+      "drc_min": 0,
+      "n_checkpoint_labels": 0,
+      "n_full_completion": 15,
+      "n_pairs": 30,
+      "n_placements": 17,
+      "orig_router_seed_completions": [
+        100.0,
+        100.0,
+        100.0
+      ],
+      "orig_router_seed_drc": [
+        0,
+        0,
+        0
+      ],
+      "route_seconds_median": 13.911318957980257,
+      "route_timeout": [
+        45
+      ]
+    },
+    "stm32_devboard": {
+      "acc_by_signal": {
+        "crossing_count": 0.4797297297297297,
+        "hpwl_all": 0.7162162162162162,
+        "hpwl_signal": 0.5405405405405406,
+        "placement_boundary": 0.5878378378378378,
+        "placement_cost_total": 0.7297297297297297,
+        "placement_drc": 0.6081081081081081,
+        "placement_overlap": 0.6756756756756757,
+        "placement_wirelength": 0.6891891891891891,
+        "rudy_overflow": 0.5,
+        "rudy_peak": 0.44594594594594594,
+        "rudy_top10_mean": 0.36486486486486486,
+        "steiner_signal_length": 0.5405405405405406
+      },
+      "completion_max": 100.0,
+      "completion_min": 11.11111111111111,
+      "drc_max": 31,
+      "drc_min": 0,
+      "n_checkpoint_labels": 2,
+      "n_full_completion": 8,
+      "n_pairs": 74,
+      "n_placements": 13,
+      "orig_router_seed_completions": [
+        100.0,
+        100.0,
+        100.0
+      ],
+      "orig_router_seed_drc": [
+        0,
+        0,
+        0
+      ],
+      "route_seconds_median": 48.30344220803818,
+      "route_timeout": [
+        120
+      ]
+    },
+    "usb_joystick": {
+      "acc_by_signal": {
+        "crossing_count": 0.5476190476190477,
+        "hpwl_all": 0.6825396825396826,
+        "hpwl_signal": 0.6666666666666666,
+        "placement_boundary": 0.5,
+        "placement_cost_total": 0.7142857142857143,
+        "placement_drc": 0.6666666666666666,
+        "placement_overlap": 0.7142857142857143,
+        "placement_wirelength": 0.6666666666666666,
+        "rudy_overflow": 0.5,
+        "rudy_peak": 0.5714285714285714,
+        "rudy_top10_mean": 0.4603174603174603,
+        "steiner_signal_length": 0.6666666666666666
+      },
+      "completion_max": 100.0,
+      "completion_min": -1.0,
+      "drc_max": 97,
+      "drc_min": 0,
+      "n_checkpoint_labels": 7,
+      "n_full_completion": 1,
+      "n_pairs": 63,
+      "n_placements": 13,
+      "orig_router_seed_completions": [
+        95.83333333333333,
+        95.83333333333333,
+        95.83333333333333
+      ],
+      "orig_router_seed_drc": [
+        2,
+        2,
+        2
+      ],
+      "route_seconds_median": 125.42925037501846,
+      "route_timeout": [
+        120
+      ]
+    },
+    "voltage_divider": {
+      "acc_by_signal": {
+        "crossing_count": 0.5727272727272728,
+        "hpwl_all": 0.6181818181818182,
+        "hpwl_signal": 0.6545454545454545,
+        "placement_boundary": 0.5,
+        "placement_cost_total": 0.45454545454545453,
+        "placement_drc": 0.5,
+        "placement_overlap": 0.5,
+        "placement_wirelength": 0.5454545454545454,
+        "rudy_overflow": 0.5,
+        "rudy_peak": 0.6909090909090909,
+        "rudy_top10_mean": 0.7454545454545455,
+        "steiner_signal_length": 0.6545454545454545
+      },
+      "completion_max": 100.0,
+      "completion_min": 33.333333333333336,
+      "drc_max": 1,
+      "drc_min": 0,
+      "n_checkpoint_labels": 2,
+      "n_full_completion": 16,
+      "n_pairs": 55,
+      "n_placements": 17,
+      "orig_router_seed_completions": [
+        100.0,
+        100.0,
+        100.0
+      ],
+      "orig_router_seed_drc": [
+        0,
+        0,
+        0
+      ],
+      "route_seconds_median": 15.750341208011378,
+      "route_timeout": [
+        45
+      ]
+    }
+  },
+  "per_signal": {
+    "crossing_count": {
+      "acc_all_pairs": 0.5179372197309418,
+      "acc_completion_pairs": 0.5278688524590164,
+      "acc_same_sigma_pairs": 0.5616438356164384,
+      "spearman_completion_mean": -0.0021755486323482604,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.17394055782899773,
+      "spearman_drc_n_boards": 7
+    },
+    "hpwl_all": {
+      "acc_all_pairs": 0.7085201793721974,
+      "acc_completion_pairs": 0.7245901639344262,
+      "acc_same_sigma_pairs": 0.6301369863013698,
+      "spearman_completion_mean": -0.3183402964008296,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.36247352231088004,
+      "spearman_drc_n_boards": 7
+    },
+    "hpwl_signal": {
+      "acc_all_pairs": 0.672645739910314,
+      "acc_completion_pairs": 0.6754098360655738,
+      "acc_same_sigma_pairs": 0.6164383561643836,
+      "spearman_completion_mean": -0.2488436386112219,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.306629550459319,
+      "spearman_drc_n_boards": 7
+    },
+    "placement_boundary": {
+      "acc_all_pairs": 0.5829596412556054,
+      "acc_completion_pairs": 0.6196721311475409,
+      "acc_same_sigma_pairs": 0.5684931506849316,
+      "spearman_completion_mean": -0.7322410857719158,
+      "spearman_completion_n_boards": 3,
+      "spearman_drc_mean": 0.4695953027992992,
+      "spearman_drc_n_boards": 3
+    },
+    "placement_cost_total": {
+      "acc_all_pairs": 0.6524663677130045,
+      "acc_completion_pairs": 0.659016393442623,
+      "acc_same_sigma_pairs": 0.6095890410958904,
+      "spearman_completion_mean": -0.26127989362372633,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.26703983668063425,
+      "spearman_drc_n_boards": 7
+    },
+    "placement_drc": {
+      "acc_all_pairs": 0.6076233183856502,
+      "acc_completion_pairs": 0.5737704918032787,
+      "acc_same_sigma_pairs": 0.5068493150684932,
+      "spearman_completion_mean": -0.1874078480755243,
+      "spearman_completion_n_boards": 5,
+      "spearman_drc_mean": 0.246574104996087,
+      "spearman_drc_n_boards": 5
+    },
+    "placement_overlap": {
+      "acc_all_pairs": 0.6143497757847534,
+      "acc_completion_pairs": 0.5819672131147541,
+      "acc_same_sigma_pairs": 0.5958904109589042,
+      "spearman_completion_mean": -0.16804069436362087,
+      "spearman_completion_n_boards": 5,
+      "spearman_drc_mean": 0.2687205119627704,
+      "spearman_drc_n_boards": 5
+    },
+    "placement_wirelength": {
+      "acc_all_pairs": 0.7130044843049327,
+      "acc_completion_pairs": 0.760655737704918,
+      "acc_same_sigma_pairs": 0.6575342465753424,
+      "spearman_completion_mean": -0.4159057734156574,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.2217191496728639,
+      "spearman_drc_n_boards": 7
+    },
+    "rudy_overflow": {
+      "acc_all_pairs": 0.5,
+      "acc_completion_pairs": 0.5,
+      "acc_same_sigma_pairs": 0.5,
+      "spearman_completion_mean": null,
+      "spearman_completion_n_boards": 0,
+      "spearman_drc_mean": null,
+      "spearman_drc_n_boards": 0
+    },
+    "rudy_peak": {
+      "acc_all_pairs": 0.5403587443946188,
+      "acc_completion_pairs": 0.5409836065573771,
+      "acc_same_sigma_pairs": 0.5068493150684932,
+      "spearman_completion_mean": -0.04525040103087104,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.037640442361151064,
+      "spearman_drc_n_boards": 7
+    },
+    "rudy_top10_mean": {
+      "acc_all_pairs": 0.531390134529148,
+      "acc_completion_pairs": 0.5081967213114754,
+      "acc_same_sigma_pairs": 0.4383561643835616,
+      "spearman_completion_mean": -0.05024819335915439,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.1351437138149268,
+      "spearman_drc_n_boards": 7
+    },
+    "sigma (reference, not a signal)": {
+      "acc_all_pairs": 0.7544843049327354,
+      "acc_completion_pairs": 0.8114754098360656,
+      "acc_same_sigma_pairs": 0.5,
+      "spearman_completion_mean": -0.537958155954914,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.19939575487986413,
+      "spearman_drc_n_boards": 7
+    },
+    "steiner_signal_length": {
+      "acc_all_pairs": 0.6457399103139013,
+      "acc_completion_pairs": 0.6491803278688525,
+      "acc_same_sigma_pairs": 0.589041095890411,
+      "spearman_completion_mean": -0.22182352864375338,
+      "spearman_completion_n_boards": 7,
+      "spearman_drc_mean": 0.28494315632524536,
+      "spearman_drc_n_boards": 7
+    }
+  },
+  "same_sigma_fit_acc": 0.547945205479452
+}

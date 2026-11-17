@@ -1,0 +1,1213 @@
+#!/usr/bin/env python3
+"""Diff-pair "rule exercised" CI gate (Issue #2660, Epic #2556 Phase 4N).
+
+This script is the second pillar of the diff-pair CI strategy.  Its sibling
+``check_routed_drc.py`` (Issue #2546) catches regressions in *committed*
+``*_routed.kicad_pcb`` files; this script catches regressions in the
+**routing algorithm itself** by re-routing a board from scratch and
+asserting:
+
+  1. Every blocking post-route DRC finding is listed by identity in the
+     board's allowance (Issue #7367), every listed entry still fires, and
+     the count of blocking findings outside the allowance is within the
+     per-board allowlist (absent = 0, the fixture's value).
+  2. Each of the three diff-pair DRC rules was actually exercised by the
+     check (i.e., the per-rule counter is > 0).  Without this assertion
+     a regression that disables diff-pair detection (e.g., flipping
+     ``coupled_routing`` back to ``False``) would silently produce a
+     0-error report and hide the defect.
+  3. (Issue #3413 phase 5) Signal-net reach meets the board's
+     ``REQUIRED_SIGNAL_REACH`` contract.
+  4. (Issue #3509) For boards declaring ``REQUIRE_POUR_CONNECTIVITY``,
+     the recipe's copper-union pour audit passes on the re-routed
+     artifact: every pour net is one copper component and no
+     fill-enabled zone has zero filled polygons.  Previously the recipe
+     printed "POUR CONNECTIVITY: FAIL" in the job log while the gate
+     stayed green.
+
+The three rule_ids this script asserts coverage of are:
+
+  * ``diffpair_clearance_intra`` (#2560, Epic #2556 Phase 1D)
+  * ``diffpair_routing_continuity`` (#2640, Epic #2556 Phase 2G)
+  * ``diffpair_length_skew`` (#2649, Epic #2556 Phase 3J)
+
+The script is parametric over the board directory so additional boards
+(e.g., board 03 once #2589's determinism work + USB-C blockers #2513
+close) can be added cheaply.
+
+Usage::
+
+    # Re-route + check board 06 (the canonical diff-pair testbench):
+    python scripts/ci/check_diffpair_coverage.py boards/06-diffpair-test
+
+    # Check an already-routed board (skip the route step; useful for
+    # debugging the assertion logic locally):
+    python scripts/ci/check_diffpair_coverage.py boards/06-diffpair-test \
+        --skip-route
+
+Exit codes (mirror ``check_routed_drc.py``):
+
+    0 -- Gate passed (errors within tolerance AND all 3 rules exercised).
+    1 -- Tool failure (board dir missing, route step crashed, allowlist
+         parse error, etc.).
+    2 -- Gate failed: errors exceed allowlist OR at least one of the 3
+         diff-pair rules did not run.
+
+GitHub-Actions ``::error file=...::`` annotations are emitted on failure
+so the PR Files-changed view surfaces the failure inline.
+
+Reusing logic from ``check_routed_drc.py``:
+
+    * Allowlist loading (``load_allowlist``)
+    * Allowlist comparison (``check_file``)
+    * Annotation helpers (``annotate_error``)
+
+Why a separate script (not folded into ``check_routed_drc.py``):
+
+    The "rule exercised" assertion is a sibling concern from the
+    per-board error allowlist; it needs router-level context (a
+    ``net_class_map`` from the board's ``generate_design.build_net_class_map``)
+    that the committed-PCB gate intentionally does not require.
+    Keeping the two concerns in separate scripts preserves each gate's
+    minimal blast radius.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import NamedTuple
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from board_recipe_artifacts import (  # noqa: E402
+    measure_signal_reach,  # shared with check_matchgroup_coverage (#7319)
+    recipe_baseline_key,
+    recipe_output_dir,
+)
+from identity_allowance import (  # noqa: E402
+    Allowance,
+    error_identities,
+    format_stale,
+    stale_entries,
+    unallowed_findings,
+    unlisted_findings,
+)
+
+# --- shared with check_routed_drc.py ------------------------------------------
+
+DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
+
+# The three diff-pair rule_ids that MUST be exercised on a board that
+# declares engaged diff pairs (board 06 declares 9 pairs across 4
+# protocols, so all three rules should run with rules_checked_by_rule
+# entries >= 1).  See ``src/kicad_tools/drc/violation.py`` and
+# ``src/kicad_tools/validate/rules/diffpair_*.py`` for the canonical
+# rule_id strings + per-rule counter increments (Issue #2660).
+DIFFPAIR_RULE_IDS: tuple[str, ...] = (
+    "diffpair_clearance_intra",
+    "diffpair_length_skew",
+    "diffpair_routing_continuity",
+)
+
+# Repo-relative key of board 06's synthetic regression fixture.  Its re-route
+# lands in the git-ignored ``regression-output/``, which
+# ``recipe_baseline_key`` canonicalises back to this key.
+DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
+
+# Issue #7312 -- declared ``target_diff_impedance`` is now judged on coupled
+# segments (#7293).  The model is right and the fixture's copper is what
+# misses: the routed coupled gap is several times the solved
+# ``intra_pair_clearance`` in regression-fixture/net_class_map.json.  The
+# fixture is a frozen historical witness whose pairs already fail
+# skew, so the pairs never get squeezed to the solved gap; the committed
+# ``output/`` board has no impedance finding.
+#
+# Issue #7349: the recipe now runs the #7344 gap-tightening pass
+# (``Autorouter.apply_diffpair_gap_tightening``, after the optimiser / nudge /
+# overlap-repair passes).  A squeeze is committed only when the pair's
+# ``kct check`` skew stays at or below its pre-pass value.  On the
+# CI-equivalent seed-42 re-route that takes 5 ``impedance`` errors on 4 nets
+# to 3 on 3 nets (USB3_TX2+ cleared).  A ``--skip-route`` run on the
+# COMMITTED PCB reports a different set; do not key the allowance from it.
+# Issue #7296: with the single-ended mask-dam floor (``min_via_pad_edge_gap``)
+# the CI seed-42 re-route changes board 06's single-ended ordering, which moves
+# the residual impedance set to USB3_TX2- alone (USB3_RX1+/- now clear) and
+# leaves USB2_D+/USB2_D- 0.091 mm over its uncoupled-length limit (12.791 vs
+# 12.700 mm).  The floor is the intended behaviour; the USB2_D pair needs to
+# route coupled, tracked in #7401.
+# Issue #7491: USB2_D now routes coupled (the pose search measures its
+# partner's pads exactly), at 4.422 / 5.178 mm uncoupled (P / N), so that identity is
+# gone, but its skew (1.896 mm vs 1.000) is now over, so it moves to the skew
+# block below; USB3_RX1 now measures 0.411 mm skew against its 0.500 limit, so
+# its skew identity is gone too.
+# Issue #7575: the residual USB3_TX2- finding was a false positive.  Its
+# judged segment, the 21.65 mm F.Cu run (31.5, 23.15)->(53.15, 23.15), had one
+# partner piece in the coupling window: a 0.02 mm TX2+ stub inside U2.F2's own
+# pad, at a 0.335 mm gap (the TX2+ trunk is 0.975 mm away, a breakout).  The
+# coupled-length rule no longer counts it, so the impedance entry is gone and
+# the seed-42 re-route has no impedance finding.
+#
+# Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
+# count.  Until #7367 the gate let every skew/continuity finding through by
+# rule and bounded them only with ``DIFFPAIR_VIOLATION_BASELINE`` (18) and the
+# ``.github/routed-drc-tolerance.yml`` total (18), so up to 7 continuity
+# findings, or a new pair in place of a fixed one, passed both.  The pairs
+# listed here were the ones the seed-42 re-route measured over ``max_skew_mm``.
+# All 9 declared pairs started here; the recipe's final skew-tuning pass (#7548)
+# cleared four, and fusing the pair legs' grid-step segments before it (#7548)
+# cleared four more (MIPI_CLK, PCIE_RX and USB3_RX2 now measure 0.287, 0.450
+# and 0.450 mm).  USB2_D (1.896 mm after #7491 coupled it) now tunes within
+# its 1.000 mm budget on the quantized-length / end-anchored tuner (#7548), so
+# its entry is gone.  The last one, MIPI_D0 (2.320 mm), was the router's own
+# inline comb: its 0.3 mm amplitude floor turned a 0.663 mm skew into 0.986 mm
+# the other way, in off-angle teeth that quantization grew by another 1.3 mm.
+# A comb that leaves the pair no closer is now undone and the audited bump
+# tuner closes the pair at routing time (0.270 mm, #7548), so no skew pair is
+# allowed any more.
+#
+# Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
+# identities may carry the listed errors, a listed identity that stops firing
+# makes its entry stale and fails the gate, and an allowed finding does not
+# count against the (now strict 0) routed-DRC total.
+#
+# Issue #8957 / PR #8956 (#8938): the fab-view re-grading makes sub-danger
+# ``physical_copper_gap`` slits errors even same-net, and the seed-42
+# regeneration of this board carries a stable population of them (38 measured
+# on CI run 43652354983, all same-net: MIPI_CLK+ 11, +1V2 8, GND 7, +3V3 6,
+# USB2_D- 3, +1V8 2, PCIE_RX+ 1).  The board is regenerated from scratch each
+# run, so geometry-keyed items (footprint UUIDs, via coordinates) differ run
+# to run -- the entries are keyed by NET SIGNATURE (identity_allowance.py's
+# NET_IDENTITY_RULES), which two independent regenerations reproduced
+# exactly.  A new net starting to carry sub-danger slits still fails the
+# gate; a net whose slits the router stops leaving goes stale and forces its
+# entry out.
+# Issue #8975: the recipe repair pass now keeps its offset vias out of the
+# same-net slit band (#8957's predicate in ``_via_ok``), which drained the
+# pour-net population (+1V2, +3V3, +1V8) to zero -- those entries went
+# stale on the first post-fix regen (21 remain: MIPI_CLK+ 11, GND 6,
+# USB2_D- 3, PCIE_RX+ 1) and are deleted.
+# Issue #8974: the attribution for the remaining via-banded population (2
+# vias, 4 findings: PCIE_RX+ 1, USB2_D- 3, re-measured 2026-11-16 at
+# d0.25/s0.6) lands on ``cpp_backend._convert_result_to_route`` -- the C++
+# pathfinder places them, so the fix needs a DesignRules C++ mirror and is
+# split to its own child of #8962 rather than widened into #8974.  Every
+# surviving entry still fires; they are re-pointed to #8962, the parent
+# tracker (#8957's own scope ended at the merged stitcher path).
+# Issue #8994 (measured 2026-11-17, first live run of the C++ mirror): the
+# mirror lands (``DesignRules.same_net_pad_gap_band_edge_mm`` threaded into
+# ``cpp_backend``'s marshalling, refused in both A* via checks; the recipe
+# resolves the jlcpcb 4-layer edge itself) and the guard demonstrably fires
+# in the live search -- but the four findings survive, because they are NOT
+# annulus-vs-pad pairs in the mirrored predicate's model:
+#   * PCIE_RX+ (174.15, 92.25): the annulus is FACE-ALIGNED with the pad --
+#     centre distance == annulus radius, so the predicate's gap is exactly
+#     0.0 (touch == union, accepted) while the checker measures the wedge
+#     under the corner at 0.0011 mm and flags it.
+#   * USB2_D- x3: annulus-vs-own-net-TRACE slits at the trace population's
+#     0.1016 edge -- #8976's population, out of #8994's scope by its own
+#     Out-of-Scope list.
+# The entries therefore STAY until the trace-population / corner-wedge
+# guard exists; deleting them here fails the gate on the still-firing
+# identities.
+# Issue #9140 (re-measured 2026-11-17, fresh seed-42 regen judged by this
+# gate): the coupled-leg gates drained the remaining population to 15
+# blocking physical_copper_gap findings -- MIPI_CLK+ 11, GND 2, USB2_D- 1,
+# PCIE_RX+ 1 (was 21: MIPI_CLK+ 11, GND 6, USB2_D- 3, PCIE_RX+ 1).  The
+# pose/trunk and stub-tail spans have been re-verified through the
+# slit-band predicate since #9156, and the joint-search candidate plus the
+# Phase-B fine-grid repair are swept through it before commit (#9140), so
+# the LVDS1_P..4_P own-pad population the issue filed is at 0 and the
+# GND / USB2_D- remainder drained with the changed coupled-vs-fallback
+# mix.  Both sibling via populations persist, one finding each: the
+# PCIE_RX+ 0.0011 mm face-aligned corner wedge and a USB2_D- 0.0413 mm
+# annulus-vs-own-net-TRACE slit (0.1016 edge).  All four entries still
+# fire (0 unallowed, 0 stale), reach 21/21, pour audit OK.  CI's
+# regeneration remains the authority on the final counts (host-sensitive
+# board).
+DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("physical_copper_gap", "GND"): 8962,
+    ("physical_copper_gap", "MIPI_CLK+"): 8962,
+    ("physical_copper_gap", "PCIE_RX+"): 8962,
+    ("physical_copper_gap", "USB2_D-"): 8962,
+}
+
+#: Every board key that carries an identity allowance (Issue #7367).  A key
+#: absent here has no allowance at all: every blocking finding counts.
+DIFFPAIR_ALLOWANCES: dict[str, Allowance] = {
+    DIFFPAIR_FIXTURE_KEY: DIFFPAIR_FIXTURE_ALLOWED_FINDINGS,
+}
+
+
+def _is_advisory(rule: str) -> bool:
+    """``connectivity`` and friends are reported but never block (Issue #4008)."""
+    from kicad_tools.validate.checker import DRCChecker
+
+    return DRCChecker.is_advisory_rule(rule)
+
+
+def unexpected_baseline_errors(
+    key: str,
+    errors: dict[str, int],
+    identities: dict[str, set[str]] | None = None,
+) -> dict[str, int]:
+    """Blocking findings on an allowance key that no entry covers, per rule.
+
+    ``identities`` maps rule -> identities carrying an error
+    (``error_identities``).  Every blocking rule is judged by identity
+    (Issue #7367: skew and continuity are no longer let through by name);
+    without ``identities`` nothing is trusted, so every finding counts as
+    unexpected.  A key with no allowance returns ``{}``: there the strict-0
+    total already fails on any blocking finding.
+    """
+    allowance = DIFFPAIR_ALLOWANCES.get(key)
+    if allowance is None:
+        return {}
+    unexpected: dict[str, int] = {}
+    for rule, count in errors.items():
+        if not count or _is_advisory(rule):
+            continue
+        if identities is not None:
+            count = len(unlisted_findings(allowance, rule, identities.get(rule, set())))
+        if count:
+            unexpected[rule] = count
+    return unexpected
+
+
+def stale_allowances(key: str, identities: dict[str, set[str]]) -> list[tuple[str, str, int]]:
+    """Listed findings that no longer occur on the baselined board."""
+    return stale_entries(DIFFPAIR_ALLOWANCES.get(key, {}), identities)
+
+
+def unallowed_blocking(key: str, violations: list[dict]) -> list[tuple[str, str]]:
+    """Blocking findings ``key``'s allowance does not cover (Issue #7367).
+
+    This, not the raw blocking count, is what the routed-DRC total is
+    compared to: an identity-allowed finding never uses up budget.
+    """
+    return unallowed_findings(DIFFPAIR_ALLOWANCES.get(key, {}), violations, advisory=_is_advisory)
+
+
+def load_allowlist(allowlist_path: Path) -> dict[str, int]:
+    """Load the per-board DRC tolerance allowlist.
+
+    Behaviour matches ``check_routed_drc.load_allowlist`` exactly so the
+    two gates share the same YAML contract; duplicated here to keep this
+    script self-contained (the CI environment runs both as separate
+    ``python`` processes).
+    """
+    if not allowlist_path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(allowlist_path.read_text())
+    except yaml.YAMLError as e:
+        raise ValueError(f"Malformed allowlist YAML at {allowlist_path}: {e}") from e
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Allowlist {allowlist_path} must be a YAML mapping at the top level, "
+            f"got {type(data).__name__}"
+        )
+
+    tolerances = data.get("tolerances", {})
+    if not isinstance(tolerances, dict):
+        raise ValueError(
+            f"Allowlist {allowlist_path} 'tolerances' field must be a mapping, "
+            f"got {type(tolerances).__name__}"
+        )
+
+    result: dict[str, int] = {}
+    for key, value in tolerances.items():
+        if not isinstance(key, str):
+            raise ValueError(f"Allowlist {allowlist_path}: key {key!r} must be a string")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                f"Allowlist {allowlist_path}: value for {key!r} must be a "
+                f"non-negative integer, got {value!r}"
+            )
+        result[key] = value
+    return result
+
+
+def annotate_error(file: str, message: str) -> None:
+    """Emit a GitHub-Actions ``::error file=...::`` annotation."""
+    print(f"::error file={file}::{message}", flush=True)
+
+
+# --- script-specific logic ----------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Issue #5617 -- phase-level wall-clock attribution for the re-route step.
+#
+# The ``Re-route board + check diff-pair coverage`` CI step is ~96 % of its
+# job, and essentially all of that is the ``generate_design.py --step route``
+# subprocess below.  Board recipes announce their pipeline phases with a
+# numbered header (``4. Routing nets...``, ``10. Pad-aware post-route
+# stitching...``).  Before this instrumentation the only way to attribute the
+# step's cost to a phase was to diff Actions log timestamps by hand, which is
+# both laborious and unavailable for a local run.
+#
+# ``PhaseTimeline`` turns those headers into a measured breakdown that the job
+# log carries itself: each header is annotated with the elapsed time at which
+# it started, and a sorted summary table is printed once the subprocess exits.
+# It is pure observation -- no routing input, seed, or ordering is touched.
+# ---------------------------------------------------------------------------
+
+#: A board-recipe phase header: a line beginning with ``<n>.`` or ``<n><a>.``
+#: (recipes use ``6b.`` / ``9b.`` for interstitial passes) followed by a space.
+_PHASE_HEADER_RE = re.compile(r"^(\d+[a-z]?)\.\s+(\S.*)$")
+
+
+class PhaseTiming(NamedTuple):
+    """One numbered recipe phase and the wall time attributed to it."""
+
+    label: str
+    title: str
+    start: float
+    duration: float
+
+
+class PhaseTimeline:
+    """Attribute elapsed wall time to a recipe's numbered pipeline phases.
+
+    Feed the subprocess's output lines in order.  A line matching
+    :data:`_PHASE_HEADER_RE` closes the previous phase and opens a new one;
+    every other line is returned unchanged so the CI log keeps its existing
+    shape (log greps and ``::error::`` annotations are unaffected).
+
+    The clock is injectable so tests can drive a deterministic timeline
+    without sleeping.
+    """
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self._start = clock()
+        self._phases: list[PhaseTiming] = []
+        self._open: tuple[str, str, float] | None = None
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds since the timeline was created."""
+        return self._clock() - self._start
+
+    def _close_open(self, now: float) -> None:
+        if self._open is None:
+            return
+        label, title, start = self._open
+        self._phases.append(
+            PhaseTiming(label=label, title=title, start=start, duration=now - start)
+        )
+        self._open = None
+
+    def feed(self, line: str) -> str:
+        """Record ``line`` and return the text to emit for it.
+
+        Phase headers are annotated with their start offset; all other lines
+        pass through byte-for-byte.
+        """
+        now = self._clock() - self._start
+        match = _PHASE_HEADER_RE.match(line.strip())
+        if match is None:
+            return line
+        self._close_open(now)
+        label, title = match.group(1), match.group(2)
+        self._open = (label, title, now)
+        return f"[phase {label} @ {now:.1f}s] {line}"
+
+    def finish(self) -> list[PhaseTiming]:
+        """Close the final open phase and return every recorded phase."""
+        self._close_open(self._clock() - self._start)
+        return list(self._phases)
+
+    def summary_lines(self, total: float | None = None) -> list[str]:
+        """Render a slowest-first breakdown of the recorded phases."""
+        phases = self.finish()
+        if not phases:
+            return []
+        span = self.elapsed if total is None else total
+        out = ["", f"[phase-profile] re-route phase breakdown (total {span:.1f}s):"]
+        for phase in sorted(phases, key=lambda p: p.duration, reverse=True):
+            share = (phase.duration / span * 100.0) if span > 0 else 0.0
+            title = phase.title if len(phase.title) <= 64 else phase.title[:61] + "..."
+            out.append(
+                f"[phase-profile]   {phase.label:>3}. {title:<64} "
+                f"{phase.duration:8.1f}s  ({share:4.1f}%)"
+            )
+        accounted = sum(p.duration for p in phases)
+        out.append(
+            f"[phase-profile]   {'':>3}  {'(unattributed: startup + pre-phase-1)':<64} "
+            f"{max(0.0, span - accounted):8.1f}s"
+        )
+        return out
+
+
+def re_route_board(board_dir: Path, seed: int) -> bool:
+    """Re-route the board's PCB from scratch using ``generate_design.py``.
+
+    Args:
+        board_dir: Path to the board directory (e.g.,
+            ``boards/06-diffpair-test``).
+        seed: Seed for ``random.seed()`` (Issue #2589).  Required for
+            determinism so the gate produces the same artifact run-to-run.
+
+    Returns:
+        True on success (return code 0), False otherwise.
+
+    Notes:
+        Runs ``python generate_design.py --step route --seed N`` in a fresh
+        process (no inherited state).  The child's merged stdout/stderr is
+        streamed to the CI log line-by-line so the log keeps its existing
+        diagnostic value, and (Issue #5617) each numbered phase header is
+        annotated with its start offset, with a slowest-first breakdown
+        printed when the child exits.  ``PYTHONUNBUFFERED`` is forced on so
+        the child's ``print`` calls are not block-buffered by the pipe --
+        without it every phase header would surface at flush time and the
+        attribution would be meaningless.
+    """
+    script = board_dir / "generate_design.py"
+    if not script.is_file():
+        print(
+            f"::error::generate_design.py not found at {script} -- cannot re-route board.",
+            flush=True,
+        )
+        return False
+
+    cmd = [
+        sys.executable,
+        str(script),
+        str(recipe_output_dir(board_dir, prepare=True)),
+        "--step",
+        "route",
+        "--seed",
+        str(seed),
+    ]
+    print(f"\n[re-route] Running: {' '.join(cmd)}", flush=True)
+
+    child_env = dict(os.environ)
+    child_env["PYTHONUNBUFFERED"] = "1"
+
+    timeline = PhaseTimeline()
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=child_env,
+    )
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        print(timeline.feed(raw.rstrip("\n")), flush=True)
+    returncode = proc.wait()
+    total = time.monotonic() - started
+
+    for line in timeline.summary_lines(total=total):
+        print(line, flush=True)
+    print(f"[phase-profile] re-route subprocess wall time: {total:.1f}s", flush=True)
+
+    if returncode != 0:
+        print(
+            f"::error::Re-route failed for {board_dir} (exit code {returncode}).",
+            flush=True,
+        )
+        return False
+    return True
+
+
+def find_routed_pcb(board_dir: Path) -> Path | None:
+    """Locate the board's freshly-routed PCB.
+
+    Walks the isolated recipe output (or legacy fixture) looking for the canonical
+    ``*_routed.kicad_pcb`` artifact emitted by ``generate_design.py``.
+    Returns ``None`` if not found (caller emits the error).
+    """
+    out = recipe_output_dir(board_dir)
+    if not out.is_dir():
+        return None
+    candidates = list(out.glob("*_routed.kicad_pcb"))
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        print(
+            f"::warning::Multiple routed PCBs found in {out}; using first: {candidates[0]}",
+            flush=True,
+        )
+    return candidates[0]
+
+
+# ``build_net_class_map_for_board`` was promoted to the shared
+# ``net_class_map_resolver`` module (Issue #3151) so both the diff-pair
+# coverage gate and the strict ``check_routed_drc`` error-count gate derive
+# the map the same way.  Re-export it here under the original name so this
+# script's public surface (and its tests) are unchanged.  ``scripts/ci`` is
+# on ``sys.path`` because this file lives in it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from net_class_map_resolver import (  # noqa: E402
+    build_net_class_map_for_board,
+    load_board_recipe_module,
+    resolve_net_class_map_sidecar,
+)
+
+
+def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -> list[str]:
+    """Run the board recipe's copper-union pour audit on a routed PCB.
+
+    Issue #3509: the board 06 recipe runs a shapely copper-union audit
+    (``_audit_pour_nets``) at the end of its pour pipeline and prints
+    PASS/FAIL -- but until this helper the gate never consumed that
+    verdict, so a re-route whose pours failed the audit still went green
+    (PR #3506 run 27343006197: "POUR CONNECTIVITY: FAIL" in the log,
+    job passed).  Boards opt in by declaring
+    ``REQUIRE_POUR_CONNECTIVITY = True`` next to their ``POUR_NETS``
+    contract; the gate then re-runs the audit against the routed
+    artifact and fails the job on any disjoint pour net or zero-fill
+    zone.
+
+    Args:
+        recipe_mod: The board's imported ``generate_design`` module (must
+            expose ``_audit_pour_nets(pcb_path, net_names)``).
+        pcb_path: Routed PCB to audit.
+        pour_nets: The board's ``POUR_NETS`` set.
+
+    Returns:
+        List of human-readable failure strings; empty means every pour
+        net is one copper component with real fill geometry.
+
+    Raises:
+        RuntimeError: When the audit cannot run at all (missing
+            ``_audit_pour_nets``, shapely unavailable, audit crash).
+            Callers must treat this as a tool failure (exit 1), NOT a
+            pass -- a silent skip is how dead pours shipped in the
+            first place (PR #3481).
+    """
+    audit_fn = getattr(recipe_mod, "_audit_pour_nets", None)
+    if audit_fn is None:
+        raise RuntimeError(
+            "Board declares REQUIRE_POUR_CONNECTIVITY but its "
+            "generate_design module does not expose _audit_pour_nets()."
+        )
+    try:
+        audit = audit_fn(pcb_path, sorted(pour_nets))
+    except Exception as e:
+        raise RuntimeError(f"Pour-connectivity audit crashed: {e}") from e
+
+    failures: list[str] = []
+    for net in sorted(pour_nets):
+        info = audit.get(net)
+        if info is None:
+            failures.append(f"{net}: missing from audit result")
+            continue
+        n_pads = sum(len(g) for g in info["pad_groups"])
+        if not info["connected"]:
+            largest = len(info["pad_groups"][0]) if info["pad_groups"] else 0
+            failures.append(
+                f"{net}: {len(info['pad_groups'])} disjoint pad groups (largest {largest}/{n_pads})"
+            )
+        if info.get("zero_fill_zones"):
+            failures.append(
+                f"{net}: {info['zero_fill_zones']} fill-enabled zone(s) "
+                f"with ZERO filled polygons (dead pour)"
+            )
+    return failures
+
+
+def _measure_skew_data_from_pcb(
+    pcb, engaged_pairs: set[tuple[int, int]]
+) -> dict[tuple[str, str], float]:
+    """Compute per-pair length skew from segments on a routed PCB.
+
+    The :class:`~kicad_tools.validate.rules.diffpair_length_skew.DiffPairLengthSkewRule`
+    requires both ``engaged_pairs`` and a ``skew_data`` map populated
+    by the autorouter side.  When running standalone DRC on a routed
+    PCB from disk, no router context is available -- but the routed
+    segments themselves carry enough information to compute the skew.
+
+    For each engaged pair, sum the geometric segment lengths per net
+    (across all copper layers), then take the absolute difference.
+    Via drilled length is ignored (we'd need ``board_thickness_mm`` to
+    convert layer-deltas into Z-length, which is not on the PCB at
+    DRC time).  This matches the producer-side behaviour when
+    ``board_thickness_mm=None`` -- see
+    :meth:`DiffPairLengthTracker._measure_route`.
+
+    Args:
+        pcb: Loaded :class:`~kicad_tools.schema.pcb.PCB`.
+        engaged_pairs: Set of ``(min_net_id, max_net_id)`` tuples (the
+            engagement-state output from ``derive_engagement_state``).
+
+    Returns:
+        Mapping of ``(net_name_a, net_name_b)`` -> ``skew_mm``.  The
+        rule consumes this directly; keys are normalised to a sorted
+        name-tuple internally by the rule's constructor.
+    """
+    import math
+
+    if not engaged_pairs:
+        return {}
+
+    # Build net_id -> net_name map for the engaged pairs.
+    net_id_to_name: dict[int, str] = {}
+    for net in pcb.nets.values():
+        name = getattr(net, "name", None)
+        if name:
+            net_id_to_name[net.number] = name
+
+    # Sum segment lengths per net id; only for nets that appear in
+    # engaged_pairs (cheap filter -- avoids scanning every segment).
+    engaged_net_ids: set[int] = set()
+    for a, b in engaged_pairs:
+        engaged_net_ids.add(a)
+        engaged_net_ids.add(b)
+
+    lengths_by_net: dict[int, float] = dict.fromkeys(engaged_net_ids, 0.0)
+    for layer in pcb.copper_layers:
+        for seg in pcb.segments_on_layer(layer.name):
+            if seg.net_number in lengths_by_net:
+                x1, y1 = seg.start
+                x2, y2 = seg.end
+                lengths_by_net[seg.net_number] += math.hypot(x2 - x1, y2 - y1)
+
+    # Build the {(p_name, n_name): skew_mm} dict for the rule.
+    skew_data: dict[tuple[str, str], float] = {}
+    for a, b in engaged_pairs:
+        l_a = lengths_by_net.get(a, 0.0)
+        l_b = lengths_by_net.get(b, 0.0)
+        # Skip pairs where neither half is routed (both 0.0); these
+        # cannot produce a meaningful skew measurement and the rule's
+        # graceful-degradation contract says "unrouted -> omit".
+        if l_a <= 0.0 and l_b <= 0.0:
+            continue
+        name_a = net_id_to_name.get(a)
+        name_b = net_id_to_name.get(b)
+        if not name_a or not name_b:
+            continue
+        skew_data[(name_a, name_b)] = abs(l_a - l_b)
+    return skew_data
+
+
+def count_errors_via_kct_check(
+    pcb_path: Path,
+    sidecar: Path | None = None,
+    *,
+    error_violations: list[dict] | None = None,
+) -> tuple[int, dict[str, int]]:
+    """Count errors via ``kct check --mfr jlcpcb --errors-only --format json``.
+
+    Mirrors ``check_routed_drc.count_errors`` so the allowlist semantic
+    matches the sibling diff-driven CI gate exactly -- a value of 28
+    on the same routed PCB must mean the same thing across both gates.
+
+    Issue #3828: the ``sidecar`` (a ``net_class_map.json`` path) is
+    threaded into ``--net-class-map`` so the diff-pair length-skew and
+    routing-continuity rules are ACTIVE.  Without it ``kct check`` warns
+    on stderr that those rules are INACTIVE and silently passes them, so
+    the allowlist measured a count that excluded all diff-pair skew /
+    continuity errors (board 06 reported 2 instead of 20).  This mirrors
+    ``check_matchgroup_coverage.count_errors_via_kct_check``.
+
+    Also returns a ``{rule_id -> error_count}`` breakdown parsed from the
+    SAME JSON envelope, so the zero-violation assertion measures the exact
+    same numbers as the allowlist (no in-process drift / double-count).
+
+    Uses a subprocess invocation (not in-process) because:
+
+    1. The sibling gate's behaviour is what reviewers calibrate the
+       allowlist against; in-process variants risk silent drift.
+    2. The same ``kct check`` exit-code (0/2) + JSON envelope this
+       script depends on is what users see when they reproduce the
+       check locally.
+
+    Returns:
+        ``(summary_errors, {rule_id -> error-severity violation count})``.
+    """
+    cmd = [
+        "uv",
+        "run",
+        "kct",
+        "check",
+        str(pcb_path),
+        "--mfr",
+        "jlcpcb",
+        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
+        # in this gate; skipped until the #8839 threshold table lands.
+        "--skip",
+        "mask_to_copper",
+        "--errors-only",
+        "--format",
+        "json",
+    ]
+    if sidecar is not None:
+        cmd.extend(["--net-class-map", str(sidecar)])
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode == 1:
+        raise RuntimeError(
+            f"kct check failed on {pcb_path} (exit 1). stderr:\n{proc.stderr.strip()}"
+        )
+    if proc.returncode not in (0, 2):
+        raise RuntimeError(
+            f"kct check returned unexpected exit code {proc.returncode} on "
+            f"{pcb_path}. stderr:\n{proc.stderr.strip()}"
+        )
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"kct check produced invalid JSON on {pcb_path}: {e}") from e
+
+    summary = data.get("summary", {})
+    errors = summary.get("errors")
+    if not isinstance(errors, int):
+        raise RuntimeError(f"kct check JSON missing summary.errors field for {pcb_path}: {data!r}")
+
+    per_rule_errors: dict[str, int] = {}
+    for v in data.get("violations", []):
+        if not isinstance(v, dict):
+            continue
+        if v.get("severity") != "error":
+            continue
+        rid = v.get("rule_id")
+        if isinstance(rid, str):
+            per_rule_errors[rid] = per_rule_errors.get(rid, 0) + 1
+        if error_violations is not None:
+            error_violations.append(v)
+    return errors, per_rule_errors
+
+
+def compute_rule_coverage(
+    pcb_path: Path,
+    net_class_map: dict | None,
+) -> dict[str, int]:
+    """Compute per-rule check counts for the diff-pair rules.
+
+    Invokes :class:`kicad_tools.validate.DRCChecker` directly so the
+    per-rule counter is accessible without re-parsing JSON.  The
+    ``net_class_map`` is threaded through to the checker so the
+    diff-pair routing-continuity rule can derive its engaged-pairs set
+    (the same way the autorouter does).  For the length-skew rule,
+    ``skew_data`` is measured from the routed PCB itself (no router
+    context required) so AC-#4 can be satisfied without spinning up
+    the autorouter twice.
+
+    This is a SEPARATE pass from the error-count check (which uses
+    the standalone ``kct check`` for allowlist parity).  The two passes
+    serve different purposes: error-count gates regression in the
+    committed-or-re-routed PCB, while coverage gates regression in
+    the detection logic.
+
+    Args:
+        pcb_path: Path to the routed PCB.
+        net_class_map: Optional ``{net_name: NetClassRouting}`` map from
+            the board's ``build_net_class_map()``.  Required for the
+            diff-pair rules to engage.
+
+    Returns:
+        ``rules_checked_by_rule`` dict mapping rule_id -> count.
+
+    Raises:
+        RuntimeError: If the PCB cannot be loaded.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+    from kicad_tools.validate.diffpair_engagement import derive_engagement_state
+    from kicad_tools.validate.rules.diffpair_length_skew import DiffPairLengthSkewRule
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load PCB {pcb_path}: {e}") from e
+
+    detected = len(pcb.copper_layers)
+    layers = detected if detected > 0 else 2
+
+    checker = DRCChecker(
+        pcb,
+        manufacturer="jlcpcb",
+        layers=layers,
+        copper_oz=1.0,
+        net_class_map=net_class_map,
+    )
+
+    # Run all rules via the standard checker entry point.
+    results = checker.check_all()
+
+    # Phase 4N (#2660) AC #4: also exercise the diffpair_length_skew
+    # rule with skew_data MEASURED FROM THE ROUTED PCB.  The standalone
+    # checker.check_diffpair_length_skew() constructs the rule with empty
+    # skew_data (no router context), so the rule never increments its
+    # per-rule counter.  Compute skew_data here from the segment lengths
+    # and re-run the rule so the per-rule counter records the
+    # engagement -- WITHOUT requiring the autorouter to be re-spun.
+    engaged_pairs, threshold_map = derive_engagement_state(pcb, net_class_map)
+    if engaged_pairs:
+        skew_data = _measure_skew_data_from_pcb(pcb, engaged_pairs)
+        if skew_data:
+            skew_rule = DiffPairLengthSkewRule(
+                skew_data=skew_data,
+                engaged_pairs=engaged_pairs,
+                threshold_map=threshold_map,
+            )
+            skew_results = skew_rule.check(pcb, checker.design_rules)
+            results.merge(skew_results)
+
+    return dict(results.rules_checked_by_rule)
+
+
+def check_rule_coverage(
+    rules_checked_by_rule: dict[str, int],
+    required_rule_ids: tuple[str, ...] = DIFFPAIR_RULE_IDS,
+) -> list[str]:
+    """Return the list of rule_ids that did NOT run (counter < 1 or missing).
+
+    A returned list is empty iff every required rule was exercised at
+    least once.  The ordering matches ``required_rule_ids`` so error
+    messages list rules in a stable order.
+    """
+    missing: list[str] = []
+    for rule_id in required_rule_ids:
+        if rules_checked_by_rule.get(rule_id, 0) < 1:
+            missing.append(rule_id)
+    return missing
+
+
+def check_board(
+    board_dir: Path,
+    allowlist: dict[str, int],
+    seed: int,
+    skip_route: bool,
+) -> int:
+    """Run the full gate for a single board.
+
+    Returns the exit code (0 = pass, 1 = tool failure, 2 = gate failure).
+    Mirrors the exit-code convention from ``check_routed_drc.py``.
+    """
+    if not board_dir.is_dir():
+        annotate_error(str(board_dir), f"Board directory not found: {board_dir}")
+        return 1
+
+    if not skip_route:
+        if not re_route_board(board_dir, seed):
+            return 1
+    else:
+        print(f"\n[skip-route] Using existing routed PCB in {board_dir}/output/")
+
+    routed_pcb = find_routed_pcb(board_dir)
+    if routed_pcb is None:
+        annotate_error(
+            str(board_dir),
+            "No *_routed.kicad_pcb found in board output dir after re-route.",
+        )
+        return 1
+
+    # Build the net_class_map from the board's generate_design module
+    # so diff-pair detection in the DRC rules has the per-protocol
+    # net-class context (coupled_routing flags, skew_tolerance_mm, etc.).
+    try:
+        net_class_map = build_net_class_map_for_board(board_dir)
+    except Exception as e:
+        annotate_error(
+            str(board_dir),
+            f"Failed to import build_net_class_map from {board_dir}: {e}",
+        )
+        return 1
+
+    # Issue #3413 phase 5: read the board's reach contract.  Boards that
+    # declare ``REQUIRED_SIGNAL_REACH`` get a hard reach assertion;
+    # boards without it (none today in this gate's matrix) skip it.
+    required_reach: int | None = None
+    pour_nets: set[str] = set()
+    require_pour_connectivity = False
+    recipe_mod = None
+    try:
+        recipe_mod = load_board_recipe_module(board_dir)
+        if recipe_mod is not None:
+            required_reach = getattr(recipe_mod, "REQUIRED_SIGNAL_REACH", None)
+            pour_nets = set(getattr(recipe_mod, "POUR_NETS", ()) or ())
+            require_pour_connectivity = bool(
+                getattr(recipe_mod, "REQUIRE_POUR_CONNECTIVITY", False)
+            )
+    except Exception as e:
+        annotate_error(
+            str(board_dir),
+            f"Failed to read reach contract from {board_dir}: {e}",
+        )
+        return 1
+
+    # Compute the allowlist key in the same way check_routed_drc.py does:
+    # repo-relative path string.
+    lookup_key = recipe_baseline_key(routed_pcb)
+    allowed = allowlist.get(lookup_key, 0)
+
+    # Two-pass strategy (see docstrings on count_errors_via_kct_check
+    # and compute_rule_coverage for the rationale):
+    #   1. Error count via subprocess ``kct check`` -- matches the
+    #      sibling allowlist semantic exactly.  Issue #3828: now run WITH
+    #      the net-class-map sidecar so the diff-pair length-skew /
+    #      routing-continuity rules are ACTIVE and contribute to the
+    #      count (previously they were silently INACTIVE and the gate saw
+    #      a count that excluded every diff-pair skew/continuity error).
+    #   2. Rule coverage via in-process DRCChecker(..., net_class_map=...)
+    #      -- the only way to exercise the diff-pair rules whose
+    #      engagement is gated on router context.  Also returns per-rule
+    #      error-violation counts for the zero-violation assertion.
+    error_violations: list[dict] = []
+    try:
+        with resolve_net_class_map_sidecar(routed_pcb) as sidecar:
+            if sidecar is None:
+                annotate_error(
+                    str(routed_pcb),
+                    "No net_class_map sidecar could be resolved for "
+                    f"{routed_pcb}; the diff-pair length-skew / "
+                    "routing-continuity rules would silently no-op under "
+                    "kct check.  A board in this gate's matrix MUST commit "
+                    "a net_class_map.json or expose build_net_class_map(). "
+                    "Refusing to measure with the rules INACTIVE (Issue "
+                    "#3828).",
+                )
+                return 1
+            error_count, per_rule_errors = count_errors_via_kct_check(
+                routed_pcb, sidecar, error_violations=error_violations
+            )
+    except RuntimeError as e:
+        annotate_error(str(routed_pcb), f"kct check failed: {e}")
+        return 1
+    try:
+        rules_by_rule = compute_rule_coverage(routed_pcb, net_class_map)
+    except RuntimeError as e:
+        annotate_error(str(routed_pcb), f"Rule-coverage probe failed: {e}")
+        return 1
+
+    # Diagnostic only: the diff-pair error counts from the kct check JSON
+    # (the in-process coverage probe double-counts the length-skew rule via
+    # its second measured pass).  Issue #7367: they are judged by identity
+    # below, never against a count.
+    diffpair_error_violations = {rid: per_rule_errors.get(rid, 0) for rid in DIFFPAIR_RULE_IDS}
+
+    print(f"\n[diffpair-coverage] Board: {board_dir.name}")
+    print(f"[diffpair-coverage] Routed PCB: {routed_pcb}")
+    print(f"[diffpair-coverage] DRC error count: {error_count} (allowed: {allowed})")
+    print(f"[diffpair-coverage] All error rules: {per_rule_errors}")
+    print(f"[diffpair-coverage] rules_checked_by_rule: {rules_by_rule}")
+    print(f"[diffpair-coverage] diff-pair error violations: {diffpair_error_violations}")
+
+    failed = False
+
+    # Issue #3413 phase 5: reach assertion.  Without it the gate is
+    # green at ANY reach as long as the connectivity errors fit under
+    # the allowlist floor (the 18/21 regression shape from the #3413
+    # re-measure).  Reach is measured with the same NetStatusAnalyzer
+    # completeness model the connectivity DRC rule uses.
+    if required_reach is not None:
+        try:
+            complete, signal_total, incomplete_names = measure_signal_reach(routed_pcb, pour_nets)
+        except Exception as e:
+            annotate_error(str(routed_pcb), f"Reach measurement failed: {e}")
+            return 1
+        print(
+            f"[diffpair-coverage] Signal reach: {complete}/{signal_total} "
+            f"(required: {required_reach})"
+        )
+        if complete < required_reach:
+            annotate_error(
+                str(routed_pcb),
+                f"Reach regression on re-routed {routed_pcb}: only "
+                f"{complete}/{signal_total} signal nets complete "
+                f"(required {required_reach}).  Incomplete: "
+                f"{', '.join(incomplete_names)}.  See "
+                f"{board_dir.name}/generate_design.py REQUIRED_SIGNAL_REACH.",
+            )
+            failed = True
+        else:
+            print(f"[diffpair-coverage] OK: reach {complete}/{signal_total} >= {required_reach}.")
+
+    # Issue #3509: pour-connectivity assertion.  The board recipe's
+    # copper-union audit verdict was previously informational only --
+    # the recipe printed "POUR CONNECTIVITY: FAIL" while this gate stayed
+    # green.  Boards opting in via REQUIRE_POUR_CONNECTIVITY get the
+    # audit re-run here against the routed artifact; failures gate.
+    if require_pour_connectivity:
+        try:
+            pour_failures = measure_pour_connectivity(recipe_mod, routed_pcb, pour_nets)
+        except RuntimeError as e:
+            annotate_error(
+                str(routed_pcb),
+                f"Pour-connectivity audit could not run: {e}  (A skipped "
+                "audit must be a tool failure, never a silent pass.)",
+            )
+            return 1
+        if pour_failures:
+            annotate_error(
+                str(routed_pcb),
+                f"Pour-connectivity regression on re-routed {routed_pcb}: "
+                f"{'; '.join(pour_failures)}.  Every pour net must be ONE "
+                "copper component with non-empty zone fills (copper-union "
+                "audit, Issue #3509).  See the recipe's pour pipeline in "
+                f"{board_dir.name}/generate_design.py (steps 9-11); if the "
+                "fill log shows 'kicad-cli not found', the CI environment "
+                "lost its KiCad container.",
+            )
+            failed = True
+        else:
+            print(
+                f"[diffpair-coverage] OK: pour connectivity "
+                f"({len(pour_nets)} pour nets, copper-union audit)."
+            )
+
+    # AC #4: each of the three diff-pair rules must have been exercised.
+    missing = check_rule_coverage(rules_by_rule)
+    if missing:
+        msg = (
+            f"Diff-pair rule(s) NOT exercised on {routed_pcb}: "
+            f"{', '.join(missing)}.  This is a silent regression -- the rule "
+            "short-circuited because no engaged pairs were detected.  Likely "
+            "causes: ``coupled_routing`` flag flipped to False on the net "
+            "class, diff-pair suffix-inference broken, or the routed PCB has "
+            "no traces matching the declared pairs.  See "
+            "src/kicad_tools/validate/rules/diffpair_*.py for the per-rule "
+            "engagement conditions."
+        )
+        annotate_error(str(routed_pcb), msg)
+        failed = True
+    else:
+        print(f"[diffpair-coverage] OK: all {len(DIFFPAIR_RULE_IDS)} diff-pair rules exercised.")
+
+    # Issue #3828 / #7367: zero-violation assertion, by identity.  Every
+    # blocking finding -- diff-pair skew and continuity included -- is either
+    # a NAMED entry in DIFFPAIR_FIXTURE_ALLOWED_FINDINGS (with its open
+    # tracker) or a failure.  The old per-rule count (18) let a new pair, or
+    # up to 7 continuity findings, hide behind the known ones.
+    identities = error_identities(error_violations)
+    unexpected = unexpected_baseline_errors(lookup_key, per_rule_errors, identities)
+    if unexpected:
+        allowance = DIFFPAIR_ALLOWANCES.get(lookup_key, {})
+        detail = "; ".join(
+            f"{rule} on {', '.join(unlisted_findings(allowance, rule, identities.get(rule, set())))}"
+            for rule in sorted(unexpected)
+        )
+        annotate_error(
+            str(routed_pcb),
+            f"Errors outside the identity allowance: {unexpected} ({detail}).  These are "
+            "real defects measured WITH the net-class sidecar.  Fix them, or -- for an "
+            "accepted, separately-tracked defect -- list the identity with its OPEN "
+            "tracking issue in DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.  Never allow by count.",
+        )
+        failed = True
+    # An allowance entry that no longer fires fails the gate (on the full
+    # re-route and on the E2E job's regenerated bundle alike), so fixing a
+    # finding forces its entry out.  It is never just a warning.
+    stale = stale_allowances(lookup_key, identities)
+    if stale:
+        annotate_error(str(routed_pcb), f"Stale identity allowance: {format_stale(stale)}")
+        failed = True
+
+    # AC #1 (allowlist semantic), Issue #7367: the blocking findings NOT
+    # covered by the identity allowance must be <= allowed (absent = 0).
+    # Identity-allowed findings never consume this budget.
+    unallowed = unallowed_blocking(lookup_key, error_violations)
+    print(
+        f"[diffpair-coverage] Unallowed blocking findings: {len(unallowed)} "
+        f"(allowed: {allowed}) {unallowed or ''}"
+    )
+    if len(unallowed) > allowed:
+        if allowed == 0:
+            msg = (
+                f"DRC errors detected on re-routed {routed_pcb}: {len(unallowed)} "
+                f"blocking error(s) outside the identity allowance: {unallowed}.  "
+                "Boards NOT in .github/routed-drc-tolerance.yml must report 0 such "
+                "errors.  Fix the routing regression; do not add a count."
+            )
+        else:
+            msg = (
+                f"DRC regression on re-routed {routed_pcb}: {len(unallowed)} "
+                f"unallowed error(s) exceeds allowlist value {allowed} in "
+                f".github/routed-drc-tolerance.yml: {unallowed}."
+            )
+        annotate_error(str(routed_pcb), msg)
+        failed = True
+    elif allowed == 0:
+        print(
+            f"[diffpair-coverage] OK: 0 unallowed errors (strict gate; "
+            f"{error_count - len(unallowed)} identity-allowed)."
+        )
+    else:
+        print(
+            f"[diffpair-coverage] OK: {len(unallowed)} unallowed errors "
+            f"(within allowlist max {allowed})."
+        )
+
+    return 2 if failed else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="check_diffpair_coverage",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "boards",
+        nargs="+",
+        help=(
+            "One or more board directories to check (e.g., boards/06-diffpair-test).  "
+            "Each board must contain generate_design.py with --step route + --seed support."
+        ),
+    )
+    parser.add_argument(
+        "--allowlist",
+        default=str(DEFAULT_ALLOWLIST),
+        help=f"Path to the tolerance allowlist YAML (default: {DEFAULT_ALLOWLIST}).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        metavar="N",
+        help=(
+            "Seed forwarded to generate_design.py --seed for deterministic "
+            "re-routes (default: 42, matches Issue #2589 / Phase 3X.2 examples)."
+        ),
+    )
+    parser.add_argument(
+        "--skip-route",
+        action="store_true",
+        help=(
+            "Skip the re-route step and check the existing committed routed "
+            "PCB.  Useful for local debugging of the rule-coverage assertion."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        allowlist = load_allowlist(Path(args.allowlist))
+    except ValueError as e:
+        print(f"::error::{e}", flush=True)
+        return 1
+
+    overall = 0
+    for raw in args.boards:
+        board_dir = Path(raw).resolve()
+        rc = check_board(board_dir, allowlist, args.seed, args.skip_route)
+        if rc > overall:
+            overall = rc
+
+    if overall:
+        print(
+            f"\nGate failed (exit {overall}).  See ::error:: annotations "
+            "above; offending boards are also surfaced in the PR Files-changed "
+            "view.",
+            flush=True,
+        )
+    return overall
+
+
+if __name__ == "__main__":
+    sys.exit(main())

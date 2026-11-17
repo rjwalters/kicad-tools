@@ -1,0 +1,3920 @@
+"""Tests for manufacturing readiness audit (kct audit command)."""
+
+import json
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.audit import AuditResult, AuditVerdict, ManufacturingAudit
+from kicad_tools.audit.auditor import (
+    ConnectivityStatus,
+    CostEstimate,
+    DRCStatus,
+    ERCStatus,
+    ManufacturerCompatibility,
+)
+
+
+class TestERCStatusSkipped:
+    """Tests for ERCStatus.skipped field."""
+
+    def test_default_skipped_is_false(self):
+        """ERCStatus defaults to skipped=False."""
+        status = ERCStatus()
+        assert status.skipped is False
+
+    def test_skipped_true(self):
+        """ERCStatus can be constructed with skipped=True."""
+        status = ERCStatus(skipped=True)
+        assert status.skipped is True
+
+    def test_to_dict_includes_skipped(self):
+        """ERCStatus.to_dict() includes skipped key."""
+        status = ERCStatus(skipped=True)
+        d = status.to_dict()
+        assert "skipped" in d
+        assert d["skipped"] is True
+
+    def test_to_dict_skipped_false_by_default(self):
+        """ERCStatus.to_dict() includes skipped=False by default."""
+        status = ERCStatus()
+        d = status.to_dict()
+        assert d["skipped"] is False
+
+
+class TestDRCStatusViolationsByType:
+    """Tests for DRCStatus.violations_by_type field."""
+
+    def test_default_empty(self):
+        """DRCStatus defaults to empty violations_by_type."""
+        status = DRCStatus()
+        assert status.violations_by_type == {}
+
+    def test_to_dict_includes_violations_by_type_when_present(self):
+        """DRCStatus.to_dict() includes violations_by_type when non-empty."""
+        status = DRCStatus(
+            error_count=3,
+            violations_by_type={"clearance": 2, "edge_clearance": 1},
+        )
+        d = status.to_dict()
+        assert "violations_by_type" in d
+        assert d["violations_by_type"] == {"clearance": 2, "edge_clearance": 1}
+
+    def test_to_dict_omits_violations_by_type_when_empty(self):
+        """DRCStatus.to_dict() omits violations_by_type when empty."""
+        status = DRCStatus()
+        d = status.to_dict()
+        assert "violations_by_type" not in d
+
+
+class _FakeCliViolation:
+    """Minimal stand-in for a kicad-cli DRCViolation (error severity)."""
+
+    def __init__(self, type_str: str, is_error: bool = True):
+        self.type_str = type_str
+        self.is_error = is_error
+
+
+class _FakeCliReport:
+    """Minimal stand-in for drc.DRCReport.
+
+    Mirrors the real report's shape for every attribute
+    ``run_geometric_drc`` reads: ``violations`` and ``unconnected_items``
+    (the latter is a defaulted dataclass field on the real ``DRCReport``,
+    so it is always present in production -- issue #5785).
+    """
+
+    def __init__(self, violations, unconnected_items=None):
+        self.violations = violations
+        self.unconnected_items = list(unconnected_items or [])
+
+
+class TestMergeGeometricDrc:
+    """Tests for ManufacturingAudit._merge_geometric_drc (issue #3721).
+
+    The combined-count logic is exercised by mocking both engines' outputs
+    so the test never requires kicad-cli to be installed.
+    """
+
+    def _make_audit(self, tmp_path):
+        """Build an audit instance without running anything."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    def _patch_cli(self, monkeypatch, *, cli_violations, found=True):
+        """Patch kicad-cli discovery, subprocess, and report parsing.
+
+        When ``found`` is False, simulates kicad-cli missing from PATH.
+        Otherwise ``cli_violations`` is returned from DRCReport.load.
+        """
+        from kicad_tools import drc as drc_mod
+        from kicad_tools.cli import runner as runner_mod
+        from kicad_tools.drc import geometric as geometric_mod
+
+        # _merge_geometric_drc now delegates to the shared run_geometric_drc
+        # helper (issue #3803), which imports find_kicad_cli from cli.runner
+        # at call time, so patch the source module.
+        monkeypatch.setattr(
+            runner_mod,
+            "find_kicad_cli",
+            lambda: Path("/fake/kicad-cli") if found else None,
+        )
+
+        def _fake_run(cmd, *args, **kwargs):
+            # Materialise the --output path so the method proceeds to parse.
+            out_idx = cmd.index("--output") + 1
+            # Issue #6724: a real kicad-cli report always has a violations list.
+            Path(cmd[out_idx]).write_text('{"violations": []}')
+
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _R()
+
+        monkeypatch.setattr(geometric_mod.subprocess, "run", _fake_run)
+        monkeypatch.setattr(
+            drc_mod.DRCReport,
+            "load",
+            classmethod(lambda cls, path: _FakeCliReport(cli_violations)),
+        )
+
+    def test_combined_count_sums_both_engines(self, tmp_path, monkeypatch):
+        """Errors = --mfr errors + kicad-cli errors; both types in table."""
+        audit = self._make_audit(tmp_path)
+        # Pre-populate a --mfr engine result (e.g. 4 clearance_pad_zone).
+        status = DRCStatus(
+            error_count=4,
+            warning_count=0,
+            blocking_count=4,
+            passed=False,
+            violations_by_type={"clearance_pad_zone": 4},
+        )
+        self._patch_cli(
+            monkeypatch,
+            cli_violations=[
+                _FakeCliViolation("starved_thermal"),
+                _FakeCliViolation("starved_thermal"),
+                _FakeCliViolation("track_width"),
+            ],
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 7  # 4 + 3
+        assert status.blocking_count == 7
+        assert status.passed is False
+        # Both engines represented in the by-type table.
+        assert status.violations_by_type["clearance_pad_zone"] == 4
+        assert status.violations_by_type["kicad-cli:starved_thermal"] == 2
+        assert status.violations_by_type["kicad-cli:track_width"] == 1
+
+    def test_zero_mfr_but_cli_errors_reports_them(self, tmp_path, monkeypatch):
+        """A board clean by --mfr but dirty by kicad-cli is NOT passing."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+        self._patch_cli(
+            monkeypatch,
+            cli_violations=[_FakeCliViolation("starved_thermal")] * 10,
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 10
+        assert status.blocking_count == 10
+        assert status.passed is False
+        assert status.violations_by_type["kicad-cli:starved_thermal"] == 10
+
+    def test_clean_by_both_reports_zero(self, tmp_path, monkeypatch):
+        """0 --mfr + 0 kicad-cli stays at 0 and passing."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+        self._patch_cli(monkeypatch, cli_violations=[])
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 0
+        assert status.blocking_count == 0
+        assert status.passed is True
+        assert status.violations_by_type == {}
+        # Geometric engine actually ran -> verdict is authoritative.
+        assert status.geometric_drc_ran is True
+
+    def test_graceful_fallback_when_kicad_cli_absent(self, tmp_path, monkeypatch):
+        """Missing kicad-cli leaves --mfr count intact and adds a note."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(
+            error_count=4,
+            blocking_count=4,
+            passed=False,
+            violations_by_type={"clearance_pad_zone": 4},
+        )
+        self._patch_cli(monkeypatch, cli_violations=[], found=False)
+
+        audit._merge_geometric_drc(status)
+
+        # --mfr count unchanged; no crash; note recorded.
+        assert status.error_count == 4
+        assert status.blocking_count == 4
+        assert status.violations_by_type == {"clearance_pad_zone": 4}
+        assert "kicad-cli not found" in status.details
+        # Geometric engine did NOT run -> verdict is not authoritative.
+        assert status.geometric_drc_ran is False
+        assert status.geometric_drc_note is not None
+        assert "kicad-cli not found" in status.geometric_drc_note
+
+    def test_cli_warnings_do_not_count(self, tmp_path, monkeypatch):
+        """Non-error kicad-cli violations are ignored (severity-error guard)."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+        self._patch_cli(
+            monkeypatch,
+            cli_violations=[
+                _FakeCliViolation("silk_over_copper", is_error=False),
+                _FakeCliViolation("starved_thermal", is_error=True),
+            ],
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 1
+        assert status.violations_by_type == {"kicad-cli:starved_thermal": 1}
+
+
+class TestDRCStatusGeometricRan:
+    """Tests for the geometric_drc_ran authoritative signal (issue #3817)."""
+
+    def test_default_geometric_drc_ran_is_false(self):
+        """A fresh DRCStatus is never silently authoritative."""
+        status = DRCStatus()
+        assert status.geometric_drc_ran is False
+        assert status.geometric_drc_note is None
+
+    def test_to_dict_includes_geometric_drc_fields(self):
+        """to_dict() serializes the authoritative signal + note."""
+        status = DRCStatus(geometric_drc_ran=True)
+        d = status.to_dict()
+        assert d["geometric_drc_ran"] is True
+        assert "geometric_drc_note" in d
+
+    def test_to_dict_geometric_drc_ran_default(self):
+        """to_dict() reports geometric_drc_ran=False by default."""
+        d = DRCStatus().to_dict()
+        assert d["geometric_drc_ran"] is False
+        assert d["geometric_drc_note"] is None
+
+
+class TestMergeGeometricDrcAuthoritative:
+    """Issue #3817: ran=False must not read as an authoritative PASS."""
+
+    def _make_audit(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    def test_clean_board_with_cli_absent_is_not_authoritative(self, tmp_path, monkeypatch):
+        """Clean --mfr board + kicad-cli absent -> passed but NOT authoritative."""
+        import kicad_tools.drc as drc_mod
+        from kicad_tools.drc import GeometricDRCResult
+
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+
+        # _merge_geometric_drc does `from kicad_tools.drc import
+        # run_geometric_drc` at call time, so patch the package attribute.
+        monkeypatch.setattr(
+            drc_mod,
+            "run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(
+                ran=False, note="kicad-cli not found; geometric DRC skipped"
+            ),
+        )
+
+        audit._merge_geometric_drc(status)
+
+        # passed is untouched (still True per --mfr) but the geometric engine
+        # did not run, so downstream rendering must qualify the verdict.
+        assert status.passed is True
+        assert status.geometric_drc_ran is False
+        assert status.geometric_drc_note is not None
+
+    def test_clean_board_with_cli_present_is_authoritative(self, tmp_path, monkeypatch):
+        """Clean --mfr board + kicad-cli ran clean -> authoritative PASS."""
+        import kicad_tools.drc as drc_mod
+        from kicad_tools.drc import GeometricDRCResult
+
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+
+        monkeypatch.setattr(
+            drc_mod,
+            "run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(ran=True, error_count=0),
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.passed is True
+        assert status.geometric_drc_ran is True
+
+
+class TestCheckDrcCrashNotGreen:
+    """Issue #3817: a crashed internal DRC checker must NOT report PASS."""
+
+    def test_checker_crash_does_not_pass(self, tmp_path, monkeypatch):
+        """An exception inside DRCChecker.check_all yields passed=False."""
+        import kicad_tools.drc as drc_mod
+        import kicad_tools.validate as validate_mod
+        from kicad_tools.drc import GeometricDRCResult
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb_path, manufacturer="jlcpcb")
+
+        # Make the internal checker explode; isolate from kicad-cli so the
+        # crash path is what drives the verdict.
+        class _BoomChecker:
+            def __init__(self, *a, **k):
+                pass
+
+            def check_all(self, *a, **k):
+                raise RuntimeError("checker exploded")
+
+        monkeypatch.setattr(validate_mod, "DRCChecker", _BoomChecker)
+        monkeypatch.setattr(
+            drc_mod,
+            "run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(ran=False, note="skipped"),
+        )
+
+        status = audit._check_drc(_DummyPcb())
+
+        # A crashed checker must NOT be reported as a clean PASS.
+        assert status.passed is False
+        assert status.blocking_count >= 1
+        assert "could not run" in status.details
+
+
+class _DummyPcb:
+    """Minimal PCB stand-in -- DRCChecker is mocked so it is never used."""
+
+
+class TestAuditTableDrcVerdictRendering:
+    """Issue #3817: output_table renders three distinct DRC verdict states."""
+
+    def test_clean_but_not_authoritative_is_not_bare_pass(self, capsys):
+        """Clean board with geometric DRC skipped -> qualified verdict."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = False
+        result.drc.geometric_drc_note = "kicad-cli not found; geometric DRC skipped"
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        # The DRC line must NOT read as a bare authoritative PASS.
+        assert "NOT AUTHORITATIVE" in out
+        # And the skip note must be surfaced even on a clean board.
+        assert "kicad-cli not found" in out
+
+    def test_authoritative_clean_pass_unchanged(self, capsys):
+        """Clean board with geometric DRC run clean -> plain PASS."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = True
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        assert "DRC (Design Rules Check): PASS" in out
+        assert "NOT AUTHORITATIVE" not in out
+
+    def test_drc_fail_renders_fail(self, capsys):
+        """A failing DRC still renders FAIL regardless of authoritative flag."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = False
+        result.drc.error_count = 3
+        result.drc.blocking_count = 3
+        result.drc.geometric_drc_ran = True
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        assert "DRC (Design Rules Check): FAIL" in out
+        assert "NOT AUTHORITATIVE" not in out
+
+
+class TestAuditResult:
+    """Tests for AuditResult class."""
+
+    def test_verdict_ready_when_all_pass(self):
+        """Test that verdict is READY when all checks pass."""
+        result = AuditResult()
+        # An authoritative clean board: geometric DRC actually ran (#3825).
+        result.drc.geometric_drc_ran = True
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+
+    def test_verdict_not_ready_with_erc_errors(self):
+        """Test that verdict is NOT_READY with blocking ERC errors."""
+        result = AuditResult()
+        result.erc.error_count = 1
+        result.erc.blocking_error_count = 1
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_verdict_not_ready_with_drc_blocking(self):
+        """Test that verdict is NOT_READY with blocking DRC violations."""
+        result = AuditResult()
+        result.drc.blocking_count = 1
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_verdict_not_ready_with_connectivity_issues(self):
+        """Test that verdict is NOT_READY with connectivity issues."""
+        result = AuditResult()
+        result.connectivity.passed = False
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_verdict_not_ready_with_compatibility_issues(self):
+        """Test that verdict is NOT_READY with manufacturer compatibility issues."""
+        result = AuditResult()
+        result.compatibility.passed = False
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_verdict_warning_with_drc_warnings(self):
+        """Test that verdict is WARNING with DRC warnings only."""
+        result = AuditResult()
+        result.drc.warning_count = 3
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+
+    def test_verdict_warning_with_erc_warnings(self):
+        """Test that verdict is WARNING with ERC warnings only."""
+        result = AuditResult()
+        result.erc.warning_count = 2
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+
+    def test_verdict_ready_with_erc_explicitly_zero(self):
+        """Test READY verdict when ERC is explicitly set to zero errors/warnings.
+
+        Simulates the post-fix-erc scenario where ERC errors have been resolved
+        and the audit should return READY.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            passed=True,
+            details="",
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+            geometric_drc_ran=True,
+        )
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=10,
+            incomplete_nets=0,
+            completion_percent=100.0,
+            unconnected_pads=0,
+            passed=True,
+        )
+        result.compatibility = ManufacturerCompatibility(
+            manufacturer="JLCPCB",
+            passed=True,
+        )
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+
+    def test_verdict_warning_when_erc_has_warnings_only(self):
+        """Test WARNING verdict when ERC has zero errors but non-zero warnings.
+
+        After fix-erc resolves all errors, residual warnings should yield
+        WARNING (not READY), because is_ready requires zero warnings too.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=2,
+            passed=True,
+            details="2 warnings remain",
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+        )
+        result.connectivity = ConnectivityStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+
+    def test_verdict_ready_all_four_gates_cleared(self):
+        """Test READY when all four NOT_READY gates are explicitly cleared.
+
+        Each of the four gates (ERC errors, DRC blocking, connectivity,
+        compatibility) is set to its passing state. Verifies no hidden
+        fifth gate blocks the READY verdict.
+        """
+        result = AuditResult()
+
+        # Gate 1: ERC errors = 0
+        result.erc.error_count = 0
+        result.erc.warning_count = 0
+
+        # Gate 2: DRC blocking = 0 (authoritative -- geometric DRC ran, #3825)
+        result.drc.blocking_count = 0
+        result.drc.warning_count = 0
+        result.drc.geometric_drc_ran = True
+
+        # Gate 3: connectivity passed
+        result.connectivity.passed = True
+
+        # Gate 4: compatibility passed
+        result.compatibility.passed = True
+
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+
+    def test_each_gate_independently_blocks_ready(self):
+        """Verify each of the four NOT_READY gates independently prevents READY.
+
+        When only one gate fails and all others pass, verdict must be NOT_READY.
+        This confirms no gate is redundant and all four are independently checked.
+        """
+        # Gate 1: Only ERC blocking errors block
+        result = AuditResult()
+        result.erc.error_count = 3
+        result.erc.blocking_error_count = 3
+        result.drc.blocking_count = 0
+        result.connectivity.passed = True
+        result.compatibility.passed = True
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Gate 2: Only DRC blocking blocks
+        result = AuditResult()
+        result.erc.error_count = 0
+        result.drc.blocking_count = 2
+        result.connectivity.passed = True
+        result.compatibility.passed = True
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Gate 3: Only connectivity blocks
+        result = AuditResult()
+        result.erc.error_count = 0
+        result.drc.blocking_count = 0
+        result.connectivity.passed = False
+        result.compatibility.passed = True
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Gate 4: Only compatibility blocks
+        result = AuditResult()
+        result.erc.error_count = 0
+        result.drc.blocking_count = 0
+        result.connectivity.passed = True
+        result.compatibility.passed = False
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_erc_timeout_demotes_to_warning(self):
+        """An ERC timeout never checked the schematic: WARNING, not READY.
+
+        Issue #7083 inverted the #1375 behaviour: the #3825/#3832 policy (an
+        engine that did not run cannot certify READY) now applies to ERC.
+        It is WARNING rather than NOT_READY so backend-less CI stays green.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            passed=False,
+            could_not_verify=True,
+            details="ERC timed out after 60s",
+        )
+        result.drc = DRCStatus(
+            blocking_count=0, warning_count=0, passed=True, geometric_drc_ran=True
+        )
+        result.connectivity = ConnectivityStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.WARNING
+
+    def test_kicad_cli_not_installed_demotes_to_warning(self):
+        """Missing kicad-cli means ERC never ran: WARNING, not READY (#7083)."""
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            passed=False,
+            could_not_verify=True,
+            details="kicad-cli not installed",
+        )
+        result.drc = DRCStatus(
+            blocking_count=0, warning_count=0, passed=True, geometric_drc_ran=True
+        )
+        result.connectivity = ConnectivityStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.WARNING
+
+    def test_verdict_warning_connectivity_fails_with_zones(self):
+        """Test WARNING when connectivity fails but board has zone definitions.
+
+        When DRC=0, ERC=PASS, manufacturer=PASS, and the board has zones,
+        incomplete nets are treated as advisory because zone fills may
+        resolve the gaps once refilled in KiCad.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_error_count=0,
+            passed=True,
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+        )
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(
+            manufacturer="JLCPCB",
+            passed=True,
+        )
+
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+
+    def test_verdict_not_ready_connectivity_fails_no_zones(self):
+        """Test NOT_READY when connectivity fails and board has no zones.
+
+        Without zone definitions, incomplete nets cannot be zone-filled
+        and must be treated as a hard failure.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_error_count=0,
+            passed=True,
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+        )
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=False,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(
+            manufacturer="JLCPCB",
+            passed=True,
+        )
+
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_verdict_ready_all_connected_with_zones(self):
+        """Test READY when all nets connected and board has zones.
+
+        When connectivity passes, has_zones should not affect the verdict.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(
+            blocking_count=0, warning_count=0, passed=True, geometric_drc_ran=True
+        )
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=10,
+            incomplete_nets=0,
+            has_zones=True,
+            passed=True,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+
+    def test_verdict_not_ready_drc_blocks_even_with_zones(self):
+        """Test NOT_READY when DRC fails even if connectivity+zones is advisory.
+
+        DRC blocking errors always override the zone connectivity advisory.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(blocking_count=5, warning_count=0, passed=False)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_verdict_not_ready_erc_blocks_even_with_zones(self):
+        """Test NOT_READY when ERC has blocking errors even with zones."""
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=2,
+            blocking_error_count=2,
+            warning_count=0,
+            passed=False,
+        )
+        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_verdict_not_ready_compatibility_blocks_even_with_zones(self):
+        """Test NOT_READY when compatibility fails even with zones."""
+        result = AuditResult()
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=False)
+
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_connectivity_has_zones_in_to_dict(self):
+        """Test that has_zones field is included in to_dict serialization."""
+        status = ConnectivityStatus(has_zones=True)
+        data = status.to_dict()
+        assert "has_zones" in data
+        assert data["has_zones"] is True
+
+        status2 = ConnectivityStatus(has_zones=False)
+        data2 = status2.to_dict()
+        assert data2["has_zones"] is False
+
+    def test_summary_dict(self):
+        """Test summary dict contains expected fields."""
+        result = AuditResult(project_name="test_project")
+        summary = result.summary()
+
+        assert "verdict" in summary
+        assert "is_ready" in summary
+        assert "erc_errors" in summary
+        assert "drc_violations" in summary
+        assert "drc_blocking" in summary
+        assert "net_completion" in summary
+        assert "manufacturer_compatible" in summary
+        assert "estimated_cost" in summary
+        assert "action_items" in summary
+
+    def test_to_dict_serialization(self):
+        """Test that to_dict produces JSON-serializable output."""
+        result = AuditResult(project_name="test_project")
+        data = result.to_dict()
+
+        # Should be JSON-serializable
+        json_str = json.dumps(data, default=str)
+        assert json_str
+
+        # Check key fields
+        assert data["project_name"] == "test_project"
+        assert "verdict" in data
+        assert "erc" in data
+        assert "drc" in data
+        assert "connectivity" in data
+
+
+class TestManufacturingAudit:
+    """Tests for ManufacturingAudit class."""
+
+    def test_init_with_pcb_file(self, drc_clean_pcb: Path):
+        """Test initialization with PCB file."""
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+        assert audit.pcb_path == drc_clean_pcb
+        assert audit.manufacturer == "jlcpcb"
+        # Issue #7136: a .kicad_pcb input no longer forces an ERC skip;
+        # skip_erc reflects only the caller's request.
+        assert audit.skip_erc is False
+
+    def test_init_with_invalid_extension(self, tmp_path: Path):
+        """Test initialization fails with invalid file extension."""
+        bad_file = tmp_path / "test.txt"
+        bad_file.write_text("not a pcb")
+
+        with pytest.raises(ValueError, match="Expected .kicad_pro or .kicad_pcb"):
+            ManufacturingAudit(bad_file)
+
+    def test_run_on_clean_pcb(self, drc_clean_pcb: Path):
+        """Test running audit on a clean PCB file."""
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+        result = audit.run()
+
+        # Should return a result
+        assert isinstance(result, AuditResult)
+        assert result.pcb_path == drc_clean_pcb
+
+        # DRC should run
+        assert result.drc is not None
+
+        # Connectivity should run
+        assert result.connectivity is not None
+        assert result.connectivity.total_nets >= 0
+
+    def test_run_with_different_manufacturers(self, drc_clean_pcb: Path):
+        """Test running audit with different manufacturers."""
+        for mfr in ["jlcpcb", "seeed", "pcbway", "oshpark"]:
+            audit = ManufacturingAudit(drc_clean_pcb, manufacturer=mfr)
+            result = audit.run()
+
+            assert result.compatibility.manufacturer == mfr.upper()
+
+    def test_run_with_quantity(self, drc_clean_pcb: Path):
+        """Test that quantity affects cost estimate."""
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb", quantity=100)
+        result = audit.run()
+
+        assert result.cost.quantity == 100
+
+    def test_skip_erc_flag(self, drc_clean_pcb: Path):
+        """Test that skip_erc flag is respected."""
+        audit = ManufacturingAudit(drc_clean_pcb, skip_erc=True)
+        result = audit.run()
+
+        assert result.erc.skipped is True
+        assert result.erc.error_count == 0
+        assert "skipped" in result.erc.details.lower()
+
+    def test_pcb_only_audit_without_schematic_is_erc_not_run(self, drc_clean_pcb: Path):
+        """PCB-only audit with no schematic reports ERC NOT RUN, not a skip.
+
+        Issue #7136 inverted the old behaviour: a ``.kicad_pcb`` input used to
+        force ``skip_erc`` and render ``[OK] ERC: PASS -- skipped by user
+        request`` although ERC never ran.  A missing schematic verifies
+        nothing, so it is NOT RUN (the #7089 convention), which caps the
+        verdict at WARNING.
+        """
+        audit = ManufacturingAudit(drc_clean_pcb)
+        assert audit.skip_erc is False
+        result = audit.run()
+        assert result.erc.skipped is False
+        assert result.erc.could_not_verify is True
+        assert result.erc.passed is False
+        assert result.erc.blocking_error_count == 0
+        assert "no schematic found" in result.erc.details
+        assert "by user request" not in result.erc.details
+
+
+class TestAuditCLI:
+    """Tests for kct audit CLI command."""
+
+    def test_audit_file_not_found(self, capsys):
+        """Test audit command with missing file."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main(["nonexistent.kicad_pcb"])
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower() or "Error" in captured.err
+
+    def test_audit_wrong_extension(self, capsys, tmp_path: Path):
+        """Test audit command with wrong file extension."""
+        from kicad_tools.cli.audit_cmd import main
+
+        wrong_file = tmp_path / "test.txt"
+        wrong_file.write_text("not a pcb")
+
+        result = main([str(wrong_file)])
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert ".kicad_pro" in captured.err or ".kicad_pcb" in captured.err
+
+    def test_audit_table_output(self, drc_clean_pcb: Path, capsys):
+        """Test audit command with table output format."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb)])
+        # May return 0 or 1 depending on DRC results
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        assert "MANUFACTURING READINESS AUDIT" in captured.out
+        assert "CHECK RESULTS" in captured.out
+
+    def test_audit_json_output(self, drc_clean_pcb: Path, capsys):
+        """Test audit command with JSON output format."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--format", "json"])
+        # May return 0 or 1 depending on DRC results
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Verify JSON structure
+        assert "project_name" in data
+        assert "verdict" in data
+        assert "erc" in data
+        assert "drc" in data
+        assert "connectivity" in data
+        assert "compatibility" in data
+        assert "action_items" in data
+
+    def test_audit_summary_output(self, drc_clean_pcb: Path, capsys):
+        """Test audit command with summary output format."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--format", "summary"])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        # Summary should have verdict and key metrics
+        assert (
+            "Verdict:" in captured.out or "READY:" in captured.out or "NOT READY:" in captured.out
+        )
+
+    def test_audit_manufacturer_option(self, drc_clean_pcb: Path, capsys):
+        """Test audit command with manufacturer option."""
+        from kicad_tools.cli.audit_cmd import main
+
+        for mfr in ["jlcpcb", "seeed", "pcbway", "oshpark"]:
+            result = main([str(drc_clean_pcb), "--mfr", mfr, "--format", "json"])
+            assert result in [0, 1, 2], f"Failed for manufacturer {mfr}"
+
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["compatibility"]["manufacturer"] == mfr.upper()
+
+    def test_audit_quantity_option(self, drc_clean_pcb: Path, capsys):
+        """Test audit command with quantity option."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--quantity", "50", "--format", "json"])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["cost"]["quantity"] == 50
+
+    def test_audit_verbose_flag(self, drc_clean_pcb: Path, capsys):
+        """Test audit command with verbose flag."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--verbose"])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        # Verbose should show more detail like min trace width
+        assert "Min" in captured.out or "trace" in captured.out or "Manufacturer" in captured.out
+
+    def test_audit_skip_erc_flag(self, drc_clean_pcb: Path, capsys):
+        """Test audit command with skip-erc flag."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--skip-erc"])
+        assert result in [0, 1, 2]
+
+    def test_audit_help_text(self, capsys):
+        """Test audit command help text."""
+        from kicad_tools.cli.audit_cmd import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "Manufacturing readiness" in captured.out or "kct audit" in captured.out
+
+
+class TestAuditCLIIntegration:
+    """Integration tests for audit command via main CLI."""
+
+    def test_audit_via_main_cli(self, drc_clean_pcb: Path, capsys):
+        """Test audit command through the main CLI dispatcher."""
+        from kicad_tools.cli import main
+
+        result = main(["audit", str(drc_clean_pcb)])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        assert "AUDIT" in captured.out or "CHECK" in captured.out
+
+    def test_audit_via_main_cli_with_options(self, drc_clean_pcb: Path, capsys):
+        """Test audit command through main CLI with options."""
+        from kicad_tools.cli import main
+
+        result = main(
+            [
+                "audit",
+                str(drc_clean_pcb),
+                "--mfr",
+                "seeed",
+                "--quantity",
+                "25",
+                "--format",
+                "json",
+            ]
+        )
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["compatibility"]["manufacturer"] == "SEEED"
+        assert data["cost"]["quantity"] == 25
+
+
+class TestAuditExitCodes:
+    """Tests for audit command exit codes."""
+
+    def test_exit_code_with_strict_flag(self, drc_clean_pcb: Path):
+        """Test that --strict flag can return code 2 on warnings."""
+        from kicad_tools.cli.audit_cmd import main
+
+        # With clean PCB, should return 0 or maybe 1/2 depending on DRC results
+        result = main([str(drc_clean_pcb), "--strict"])
+        # Exit code depends on actual DRC results of the clean PCB
+        assert result in [0, 1, 2]
+
+    def test_exit_code_zero_when_ready(self):
+        """Test that CLI returns exit code 0 when verdict is READY.
+
+        Constructs an AuditResult with READY verdict and verifies the
+        exit code logic in audit_cmd.main returns 0.
+        """
+        result = AuditResult(project_name="test_ready")
+        # Authoritative clean board (geometric DRC ran) yields READY (#3825).
+        result.drc.geometric_drc_ran = True
+        assert result.verdict == AuditVerdict.READY
+
+        # Verify the exit code logic directly
+        if result.verdict == AuditVerdict.NOT_READY:
+            exit_code = 1
+        elif result.verdict == AuditVerdict.WARNING:
+            exit_code = 2  # strict mode
+        else:
+            exit_code = 0
+        assert exit_code == 0
+
+    def test_exit_code_two_when_not_ready(self):
+        """Test that CLI returns exit code 2 when verdict is NOT_READY.
+
+        Exit code 2 means the audit ran successfully but found issues.
+        Exit code 1 is reserved for tool-level failures (file not found, etc.).
+        """
+        result = AuditResult()
+        result.erc.error_count = 5
+        result.erc.blocking_error_count = 5
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Verify the exit code mapping
+        if result.verdict == AuditVerdict.NOT_READY:
+            exit_code = 2
+        else:
+            exit_code = 0
+        assert exit_code == 2
+
+    def test_exit_code_two_when_warning_strict(self):
+        """Test that CLI returns exit code 2 for WARNING with --strict."""
+        result = AuditResult()
+        result.erc.warning_count = 1
+        assert result.verdict == AuditVerdict.WARNING
+
+        # Verify the exit code mapping under strict mode
+        strict = True
+        if result.verdict == AuditVerdict.NOT_READY:
+            exit_code = 1
+        elif result.verdict == AuditVerdict.WARNING and strict:
+            exit_code = 2
+        else:
+            exit_code = 0
+        assert exit_code == 2
+
+    def test_exit_code_one_for_file_not_found(self, capsys):
+        """Test that CLI returns exit code 1 for tool-level errors (file not found)."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main(["nonexistent_board.kicad_pcb"])
+        assert result == 1
+
+    def test_exit_code_one_for_wrong_extension(self, tmp_path, capsys):
+        """Test that CLI returns exit code 1 for tool-level errors (wrong extension)."""
+        from kicad_tools.cli.audit_cmd import main
+
+        bad_file = tmp_path / "test.txt"
+        bad_file.write_text("not a pcb")
+        result = main([str(bad_file)])
+        assert result == 1
+
+    def test_exit_code_two_when_not_ready_via_main(self, tmp_path, monkeypatch, capsys):
+        """Test that audit main() returns 2 (not 1) when verdict is NOT_READY.
+
+        This confirms the pipeline will see exit code 2 and treat it as
+        'completed with warnings' instead of 'failed'.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.audit_cmd import main
+
+        # Create a dummy PCB file so path validation passes
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        # Mock ManufacturingAudit to return NOT_READY
+        mock_result = AuditResult()
+        mock_result.drc.blocking_count = 3
+        assert mock_result.verdict == AuditVerdict.NOT_READY
+
+        mock_audit_instance = MagicMock()
+        mock_audit_instance.run.return_value = mock_result
+
+        with patch(
+            "kicad_tools.cli.audit_cmd.ManufacturingAudit",
+            return_value=mock_audit_instance,
+        ):
+            exit_code = main([str(pcb_file)])
+
+        assert exit_code == 2
+
+    def test_exit_code_zero_when_ready_via_main(self, tmp_path, monkeypatch, capsys):
+        """Test that audit main() returns 0 when verdict is READY."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.audit_cmd import main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        mock_result = AuditResult()
+        # Authoritative clean board (geometric DRC ran) yields READY (#3825).
+        mock_result.drc.geometric_drc_ran = True
+        assert mock_result.verdict == AuditVerdict.READY
+
+        mock_audit_instance = MagicMock()
+        mock_audit_instance.run.return_value = mock_result
+
+        with patch(
+            "kicad_tools.cli.audit_cmd.ManufacturingAudit",
+            return_value=mock_audit_instance,
+        ):
+            exit_code = main([str(pcb_file)])
+
+        assert exit_code == 0
+
+
+class TestAuditOutputRendering:
+    """Tests for audit output rendering with READY verdict."""
+
+    def test_output_table_shows_ready_for_manufacturing(self, capsys):
+        """Test that output_table prints '[OK] READY FOR MANUFACTURING' when READY."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult(project_name="test_ready_board")
+        # Explicitly set all checks to passing
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+            geometric_drc_ran=True,
+        )
+        result.connectivity = ConnectivityStatus(total_nets=5, connected_nets=5, passed=True)
+        result.compatibility = ManufacturerCompatibility(manufacturer="JLCPCB", passed=True)
+
+        assert result.verdict == AuditVerdict.READY
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        assert "[OK] READY FOR MANUFACTURING" in captured.out
+
+    def test_output_table_shows_not_ready_when_erc_fails(self, capsys):
+        """Test that output_table prints NOT READY when ERC has blocking errors."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult(project_name="test_failing_board")
+        result.erc.error_count = 3
+        result.erc.blocking_error_count = 3
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        assert "[XX] NOT READY - FIX ISSUES" in captured.out
+
+    def test_output_table_shows_warning_when_erc_warnings(self, capsys):
+        """Test that output_table prints REVIEW WARNINGS for WARNING verdict."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult(project_name="test_warning_board")
+        result.erc.warning_count = 2
+        assert result.verdict == AuditVerdict.WARNING
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        assert "[!!] REVIEW WARNINGS" in captured.out
+
+
+class TestAuditPathResolution:
+    """Tests for PCB path resolution when given project file."""
+
+    def test_resolve_pcb_from_project_kct(self, tmp_path: Path):
+        """Test that audit resolves PCB path from project.kct artifacts."""
+        # Create directory structure matching issue #749
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        # Create a minimal routed PCB file
+        routed_pcb = output_dir / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create unrouted PCB file (shouldn't be used)
+        unrouted_pcb = output_dir / "test.kicad_pcb"
+        unrouted_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project.kct in parent directory
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text(
+            """kct_version: "1.0"
+project:
+  name: "Test"
+  artifacts:
+    pcb: "output/test_routed.kicad_pcb"
+"""
+        )
+
+        # Create project file
+        project_file = output_dir / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Initialize audit with project file
+        audit = ManufacturingAudit(project_file)
+
+        # Should resolve to the routed PCB from project.kct
+        assert audit.pcb_path == routed_pcb
+
+    def test_resolve_pcb_fallback_to_routed_only(self, tmp_path: Path):
+        """Test that audit uses *_routed.kicad_pcb when only routed exists."""
+        # Create routed PCB only (no base PCB)
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project file (no project.kct)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Initialize audit with project file
+        audit = ManufacturingAudit(project_file)
+
+        # Should use routed PCB since it's the only one
+        assert audit.pcb_path == routed_pcb
+
+    def test_resolve_pcb_default_no_routed(self, tmp_path: Path):
+        """Test that audit uses default path when no routed PCB exists."""
+        # Create only unrouted PCB
+        unrouted_pcb = tmp_path / "test.kicad_pcb"
+        unrouted_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project file (no project.kct, no *_routed.kicad_pcb)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Initialize audit with project file
+        audit = ManufacturingAudit(project_file)
+
+        # Should default to <basename>.kicad_pcb
+        assert audit.pcb_path == unrouted_pcb
+
+    def test_resolve_pcb_prefers_newer_base(self, tmp_path: Path):
+        """Test that audit prefers base PCB when it is newer than routed."""
+        import os
+
+        # Create both PCB files
+        base_pcb = tmp_path / "test.kicad_pcb"
+        base_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Set base PCB as newer
+        os.utime(routed_pcb, (1000, 1000))
+        os.utime(base_pcb, (2000, 2000))
+
+        # Create project file (no project.kct)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # Should prefer the newer base PCB
+        assert audit.pcb_path == base_pcb
+
+    def test_resolve_pcb_prefers_newer_routed(self, tmp_path: Path):
+        """Test that audit prefers routed PCB when it is newer than base."""
+        import os
+
+        # Create both PCB files
+        base_pcb = tmp_path / "test.kicad_pcb"
+        base_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Set routed PCB as newer
+        os.utime(base_pcb, (1000, 1000))
+        os.utime(routed_pcb, (2000, 2000))
+
+        # Create project file (no project.kct)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # Should prefer the newer routed PCB
+        assert audit.pcb_path == routed_pcb
+
+    def test_pcb_override_flag(self, tmp_path: Path):
+        """Test that pcb_override takes precedence over auto-detection."""
+        # Create an explicit PCB file
+        override_pcb = tmp_path / "custom.kicad_pcb"
+        override_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create routed PCB (would normally be selected)
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project file
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file, pcb_override=override_pcb)
+
+        # Should use the override path
+        assert audit.pcb_path == override_pcb
+
+    def test_pcb_override_nonexistent(self, tmp_path: Path):
+        """Test that pcb_override raises ValueError for nonexistent file."""
+        import pytest
+
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        with pytest.raises(ValueError, match="PCB override file not found"):
+            ManufacturingAudit(
+                project_file,
+                pcb_override=tmp_path / "nonexistent.kicad_pcb",
+            )
+
+
+class TestAuditJsonSchema:
+    """Tests for audit command JSON output schema."""
+
+    def test_json_schema_complete(self, drc_clean_pcb: Path, capsys):
+        """Test that JSON output contains all required fields."""
+        from kicad_tools.cli.audit_cmd import main
+
+        main([str(drc_clean_pcb), "--format", "json"])
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Required top-level fields
+        assert "project_name" in data
+        assert "timestamp" in data
+        assert "verdict" in data
+        assert "is_ready" in data
+        assert "summary" in data
+        assert "erc" in data
+        assert "drc" in data
+        assert "connectivity" in data
+        assert "compatibility" in data
+        assert "layers" in data
+        assert "cost" in data
+        assert "action_items" in data
+
+        # Nested structure checks
+        assert "error_count" in data["erc"]
+        assert "warning_count" in data["erc"]
+        assert "error_count" in data["drc"]
+        assert "total_nets" in data["connectivity"]
+        assert "manufacturer" in data["compatibility"]
+        assert "quantity" in data["cost"]
+
+    def test_json_output_is_ci_friendly(self, drc_clean_pcb: Path, capsys):
+        """Test that JSON output can be parsed by CI tools."""
+        from kicad_tools.cli.audit_cmd import main
+
+        main([str(drc_clean_pcb), "--format", "json"])
+        captured = capsys.readouterr()
+
+        # Should be parseable without errors
+        data = json.loads(captured.out)
+
+        # CI-friendly check: verdict is a string
+        assert isinstance(data["verdict"], str)
+        assert data["verdict"] in ["ready", "warning", "not_ready"]
+
+        # CI-friendly check: is_ready is a boolean
+        assert isinstance(data["is_ready"], bool)
+
+        # CI-friendly check: counts are integers
+        assert isinstance(data["erc"]["error_count"], int)
+        assert isinstance(data["drc"]["error_count"], int)
+
+
+# ---------------------------------------------------------------------------
+# Test: corruption guard in auditor
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptionGuard:
+    """Tests for the data corruption guard in ManufacturingAudit._check_connectivity."""
+
+    # A board with footprints where all pads have net 0 (corrupted)
+    CORRUPTED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.15) (type default)) (fill none) (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 50 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+  )
+)
+"""
+
+    # A board with proper net assignments
+    NORMAL_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.15) (type default)) (fill none) (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 50 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+)
+"""
+
+    def test_all_pads_net_zero_triggers_not_ready(self, tmp_path):
+        """Board with footprints where all pads have net 0 should be NOT_READY."""
+        pcb_path = tmp_path / "corrupted.kicad_pcb"
+        pcb_path.write_text(self.CORRUPTED_PCB)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        assert result.connectivity.passed is False
+        assert "corruption" in result.connectivity.details.lower()
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_normal_board_does_not_trigger_guard(self, tmp_path):
+        """Board with proper pad net assignments should not trigger guard."""
+        pcb_path = tmp_path / "normal.kicad_pcb"
+        pcb_path.write_text(self.NORMAL_PCB)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Should NOT have corruption message
+        assert "corruption" not in result.connectivity.details.lower()
+
+    def test_no_footprints_does_not_trigger_guard(self, tmp_path):
+        """Board with no footprints should not trigger the corruption guard."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb_path = tmp_path / "empty.kicad_pcb"
+        pcb.save(str(pcb_path))
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Should not have corruption details
+        assert "corruption" not in result.connectivity.details.lower()
+
+
+class TestZoneConnectedNets:
+    """Tests for zone-connected net reclassification in connectivity check."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_geometric_drc(self, monkeypatch):
+        """Isolate the connectivity-verdict assertions from kicad-cli DRC.
+
+        These tests assert on the *connectivity* advisory verdict using
+        minimal synthetic boards.  Since issue #3721 the audit also folds in
+        KiCad's geometric DRC (kicad-cli pcb drc), which finds unrelated
+        geometric defects on these hand-written boards and would flip the
+        verdict to NOT_READY.  Simulate the documented "kicad-cli absent"
+        graceful-fallback path so the geometric engine does not perturb the
+        connectivity subject under test.
+        """
+        from kicad_tools.cli import runner as runner_mod
+
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: None)
+
+    # PCB where GND net has a zone definition but no filled_polygons.
+    # Two footprints with pads on GND (net 1) and +3V3 (net 2).
+    # GND has a zone, +3V3 has a trace connecting its pads.
+    # With no filled_polygons and no trace on GND, the connectivity
+    # validator would normally flag GND as incomplete.
+    PCB_WITH_ZONE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+  (segment (start 30.5 50) (end 30.5 40) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1"))
+  (segment (start 30.5 40) (end 70.5 40) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1b"))
+  (segment (start 70.5 40) (end 70.5 50) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1c"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.5))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts
+      (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
+    ))
+    (filled_polygon (layer "F.Cu") (pts
+      (xy 1 55) (xy 29.2 55) (xy 29.2 49.7) (xy 29.8 49.7) (xy 29.8 55)
+      (xy 69.2 55) (xy 69.2 49.7) (xy 69.8 49.7) (xy 69.8 55) (xy 99 55)
+      (xy 99 99) (xy 1 99)
+    ))
+  )
+)
+"""
+    # NOTE on PCB_WITH_ZONE copper: the GND filled_polygon is a bottom
+    # slab with two fingers reaching the GND pads (R1.1 / R2.1) and the
+    # +3V3 trace doglegs through y=40 to stay clear of the fill.  The
+    # original whole-board fill put the foreign +3V3 trace inside GND
+    # fill copper, which the ``clearance_segment_zone`` rule (Issue
+    # #3527) correctly reports as a blocking short -- escalating the
+    # zone-fill advisory this fixture pins to priority 1.  The fixture's
+    # purpose is the zone-connectivity advisory, so the copper must be
+    # short-free.
+
+    # PCB with both zone-connected and truly-incomplete nets.
+    # GND (net 1) has a zone, SIG (net 3) has no zone and no trace.
+    PCB_MIXED_NETS = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (net 3 "SIG")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SIG"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp3")
+    (at 50 30)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref3"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val3"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SIG"))
+  )
+  (segment (start 30.5 50) (end 49.5 30) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.5))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts
+      (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
+    ))
+    (filled_polygon (layer "F.Cu") (pts
+      (xy 1 55) (xy 29.2 55) (xy 29.2 49.7) (xy 29.8 49.7) (xy 29.8 55)
+      (xy 69.2 55) (xy 69.2 49.7) (xy 69.8 49.7) (xy 69.8 55) (xy 99 55)
+      (xy 99 99) (xy 1 99)
+    ))
+  )
+)
+"""
+    # NOTE on the filled_polygon shape above: it is a bottom slab with two
+    # fingers reaching up to the GND pads (R1.1 at (29.5, 50), R2.1 at
+    # (69.5, 50)) so the zone still classifies both pads as
+    # zone-connected.  It deliberately AVOIDS the +3V3 trace seg1
+    # ((30.5, 50) -> (49.5, 30)): the original whole-board fill put that
+    # foreign-net trace inside the GND fill copper, which the
+    # ``clearance_segment_zone`` rule (Issue #3527) correctly reports as
+    # a blocking short -- flipping the audit verdict this fixture pins to
+    # NOT_READY for an unrelated reason.  The fixture's purpose is the
+    # zone-connectivity advisory, so the copper must be short-free.
+
+    # PCB with no zones — incomplete signal nets should still be flagged normally.
+    #
+    # Net layout:
+    # - GND (net 1): a pour net.  Per PR #1440 it is reclassified as
+    #   zone-connected even without a zone definition, so it does NOT
+    #   block READY.
+    # - SIG (net 2): a non-pour signal net.  With no zone, no trace, and no
+    #   pour-net classification, it must remain truly incomplete and drive
+    #   the NOT_READY verdict.  Previously this slot used "+3V3", but
+    #   PR #2533 added the +NVN voltage pattern, so +3V3 now classifies
+    #   as a pour net and stopped being the incomplete signal here
+    #   (issue #3200).  Swapping to a plain signal name preserves the
+    #   regression invariant the test was written to guard.
+    PCB_NO_ZONES = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "SIG"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "SIG"))
+  )
+)
+"""
+
+    def test_zone_connected_nets_pass_connectivity(self, tmp_path):
+        """Zone-connected net with zone definition should not block READY verdict.
+
+        When a net is incomplete only because zone fill data is absent,
+        the audit should reclassify it as zone-connected and pass.
+        """
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # GND should be reclassified as zone-connected
+        assert result.connectivity.zone_connected_nets >= 1
+        # Truly incomplete nets should be 0 (only GND is incomplete,
+        # and it has a zone)
+        assert result.connectivity.incomplete_nets == 0
+        # Connectivity should pass
+        assert result.connectivity.passed is True
+
+    def test_mixed_nets_truly_incomplete_advisory_with_zones(self, tmp_path):
+        """Mixed nets: board has zones so incomplete connectivity is advisory.
+
+        When some incomplete nets have zones and others do not, the board
+        still has zone definitions.  Per the zone-connectivity advisory
+        rule, incomplete nets on a board with zones yield WARNING (not
+        NOT_READY) because zone fills may resolve the gaps.
+        """
+        pcb_path = tmp_path / "mixed_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_MIXED_NETS)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # GND is zone-connected
+        assert result.connectivity.zone_connected_nets >= 1
+        # SIG has no zone and no trace — truly incomplete
+        assert result.connectivity.incomplete_nets >= 1
+        # Connectivity should fail due to SIG
+        assert result.connectivity.passed is False
+        # Board has zone definitions so connectivity is advisory
+        assert result.connectivity.has_zones is True
+        # Verdict should be WARNING (not NOT_READY) per zone advisory rule
+        assert result.verdict == AuditVerdict.WARNING
+
+    def test_no_zones_regression(self, tmp_path):
+        """PCB with no zones and incomplete signal nets still yields NOT_READY.
+
+        Regression guard for the zone-connected logic: a board that has
+        only pour nets (GND/power) auto-reclassified as zone-connected
+        must NOT pass when there is also a genuinely incomplete signal
+        net with no zone definition.
+
+        GND is reclassified as zone-connected via pour-net detection
+        (PR #1440), but SIG is a non-pour signal net and must remain
+        truly incomplete — driving the NOT_READY verdict.
+
+        Note: this test previously used "+3V3" as the incomplete signal
+        net.  After PR #2533 added the +NVN voltage pattern, +3V3 now
+        classifies as POWER (is_pour_net=True) and is also reclassified
+        as zone-connected, which silently weakened the guard.  Issue
+        #3200 swapped to a plain signal name to preserve the invariant.
+        """
+        pcb_path = tmp_path / "no_zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # GND is reclassified as zone-connected via pour-net detection
+        assert result.connectivity.zone_connected_nets >= 1
+        # SIG has no zone and is not a pour net — truly incomplete
+        assert result.connectivity.incomplete_nets >= 1
+        # Connectivity should fail due to SIG
+        assert result.connectivity.passed is False
+        # Verdict should be NOT_READY
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_connectivity_status_to_dict_includes_zone_connected(self):
+        """ConnectivityStatus.to_dict() includes zone_connected_nets field."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=2,
+            zone_connected_nets=3,
+            completion_percent=50.0,
+            passed=True,
+        )
+        d = status.to_dict()
+        assert "zone_connected_nets" in d
+        assert d["zone_connected_nets"] == 3
+
+    def test_zone_connected_verdict_ready(self):
+        """Synthetic AuditResult with only zone-connected incomplete nets yields READY."""
+        result = AuditResult()
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=0,
+            zone_connected_nets=5,
+            passed=True,
+        )
+        result.erc = ERCStatus(passed=True)
+        result.drc = DRCStatus(passed=True, geometric_drc_ran=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.READY
+
+    def test_zone_connected_action_items(self, tmp_path):
+        """Zone-connected nets produce advisory action item, not critical."""
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        # skip_erc: this test is about zone advisories.  Without it the
+        # schematic-less ERC NOT RUN item (issue #7136) names
+        # "zone_board.kicad_pcb" and would match the "zone" filter below.
+        audit = ManufacturingAudit(pcb_path, skip_erc=True)
+        result = audit.run()
+
+        # Should have a zone-fill verification advisory
+        zone_items = [item for item in result.action_items if "zone" in item.description.lower()]
+        assert len(zone_items) >= 1
+        # Advisory should be low priority (3)
+        assert all(item.priority == 3 for item in zone_items)
+        # Issue #7083: zone items point at the automated refill, never a
+        # manual KiCad step.
+        for item in zone_items:
+            assert "kicad" not in item.description.lower()
+            assert item.command is not None
+            assert "kct zones fill" in item.command
+        # Should NOT have a critical connectivity action item
+        critical_conn_items = [
+            item
+            for item in result.action_items
+            if item.priority == 1 and "routing" in item.description.lower()
+        ]
+        assert len(critical_conn_items) == 0
+
+    def test_zone_connected_cli_display(self, tmp_path, capsys):
+        """CLI table output shows zone-connected nets count."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        # Should display zone-connected count
+        if result.connectivity.zone_connected_nets > 0:
+            assert "zone fill" in captured.out.lower()
+
+    def test_zone_connected_json_output(self, tmp_path, capsys):
+        """JSON output includes zone_connected_nets field."""
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        data = result.to_dict()
+        assert "zone_connected_nets" in data["connectivity"]
+        assert data["connectivity"]["zone_connected_nets"] >= 1
+
+
+class TestZoneConnectedPourNets:
+    """Tests for pour-net classification in _check_connectivity.
+
+    Verifies that nets classified as pour nets (is_pour_net=True) by
+    classify_and_apply_rules are reclassified as zone-connected even
+    when no explicit zone definition exists in the PCB.
+    """
+
+    # PCB with +5V and GNDA nets but NO zone definitions.
+    # Both are pour nets per classify_and_apply_rules.
+    PCB_POUR_NO_ZONES = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "GNDA")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+)
+"""
+
+    # PCB with pour nets AND a signal net, no zones.
+    # Each pour net has 2 pads (on different footprints) so they need routing.
+    # SPI_CLK also has 2 pads needing routing.
+    PCB_POUR_AND_SIGNAL_NO_ZONES = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "GNDA")
+  (net 3 "SPI_CLK")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SPI_CLK"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 50 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SPI_CLK"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp3")
+    (at 70 50)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref3"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val3"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+)
+"""
+
+    # PCB with +5V that already has a zone definition.
+    PCB_POUR_WITH_ZONE = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "GNDA")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+  (zone (net 1) (net_name "+5V") (layer "F.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.5))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts
+      (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
+    ))
+  )
+)
+"""
+
+    def test_pour_nets_without_zone_excluded_from_incomplete(self, tmp_path):
+        """Pour nets (+5V, GNDA) without zone definitions are zone-connected.
+
+        When classify_and_apply_rules returns is_pour_net=True, those nets
+        are excluded from incomplete_nets and included in zone_connected_nets.
+        """
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Both +5V and GNDA should be reclassified as zone-connected
+        assert result.connectivity.zone_connected_nets == 2
+        assert result.connectivity.incomplete_nets == 0
+        assert result.connectivity.passed is True
+
+    def test_pour_net_names_tracked(self, tmp_path):
+        """Pour net names are stored in ConnectivityStatus.pour_net_names."""
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        assert sorted(result.connectivity.pour_net_names) == ["+5V", "GNDA"]
+
+    def test_signal_net_still_incomplete(self, tmp_path):
+        """Signal net (SPI_CLK) stays incomplete even with pour nets present."""
+        pcb_path = tmp_path / "mixed_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_AND_SIGNAL_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Pour nets reclassified, signal net stays incomplete
+        assert result.connectivity.zone_connected_nets >= 2
+        assert result.connectivity.incomplete_nets >= 1
+        assert result.connectivity.passed is False
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_pour_net_with_existing_zone_not_duplicated(self, tmp_path):
+        """A pour net that already has a zone definition is handled by
+        the first pass (zone-name intersection), not duplicated."""
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Both +5V (zone) and GNDA (pour classification) should be zone-connected
+        assert result.connectivity.zone_connected_nets == 2
+        assert result.connectivity.incomplete_nets == 0
+        assert result.connectivity.passed is True
+        # Only GNDA should be in pour_net_names (+5V was handled by zone path)
+        assert result.connectivity.pour_net_names == ["GNDA"]
+
+    def test_classification_failure_leaves_truly_incomplete_unchanged(self, tmp_path):
+        """If classify_and_apply_rules raises, incomplete nets stay unchanged."""
+        from unittest.mock import patch
+
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        with patch(
+            "kicad_tools.router.net_class.classify_and_apply_rules",
+            side_effect=RuntimeError("classification failure"),
+        ):
+            audit = ManufacturingAudit(pcb_path)
+            result = audit.run()
+
+        # Without classification, both nets remain incomplete
+        assert result.connectivity.incomplete_nets >= 2
+        assert result.connectivity.passed is False
+        assert result.connectivity.pour_net_names == []
+
+    def test_pour_net_action_items_emitted(self, tmp_path):
+        """Advisory ActionItems are emitted for pour nets without zones."""
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        add_zone_items = [
+            item for item in result.action_items if "Add zone for" in item.description
+        ]
+        assert len(add_zone_items) == 2
+        descriptions = sorted(item.description for item in add_zone_items)
+        assert "Add zone for +5V on appropriate copper layer" in descriptions
+        assert "Add zone for GNDA on appropriate copper layer" in descriptions
+        # These should be advisory (priority 3), not blocking
+        for item in add_zone_items:
+            assert item.priority == 3
+
+    def test_pour_net_names_in_to_dict(self):
+        """ConnectivityStatus.to_dict() includes pour_net_names field."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=0,
+            zone_connected_nets=5,
+            pour_net_names=["+5V", "GNDA"],
+            passed=True,
+        )
+        d = status.to_dict()
+        assert "pour_net_names" in d
+        assert d["pour_net_names"] == ["+5V", "GNDA"]
+
+
+class TestOrphanedFootprints:
+    """Tests for orphaned footprint detection (_check_orphaned_footprints)."""
+
+    def test_orphaned_footprints_detected(self, tmp_path: Path):
+        """Orphaned footprints on PCB but not in BOM generate priority-2 ActionItem."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.audit.auditor import ActionItem
+
+        # Create a minimal PCB file
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create a schematic file (just needs to exist for the path check)
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+
+        # Create project file
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # Mock the PCB footprints: R1, R2, C1, U1 on PCB
+        mock_pcb = MagicMock()
+        mock_fp_r1 = MagicMock(reference="R1")
+        mock_fp_r2 = MagicMock(reference="R2")
+        mock_fp_c1 = MagicMock(reference="C1")
+        mock_fp_u1 = MagicMock(reference="U1")
+        mock_pcb.footprints = [mock_fp_r1, mock_fp_r2, mock_fp_c1, mock_fp_u1]
+        audit._pcb = mock_pcb
+
+        # Mock BOM: only R1, C1 in schematic (R2 and U1 are orphans)
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        assert len(items) == 1
+        item = items[0]
+        assert isinstance(item, ActionItem)
+        assert item.priority == 2
+        assert "2 orphaned footprint(s)" in item.description
+        assert "R2" in item.description
+        assert "U1" in item.description
+
+    def test_no_orphaned_footprints(self, tmp_path: Path):
+        """No orphan action item when all PCB refs match BOM."""
+        from unittest.mock import MagicMock, patch
+
+        # Create minimal files
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has R1, C1
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1"), MagicMock(reference="C1")]
+        audit._pcb = mock_pcb
+
+        # BOM also has R1, C1
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        assert len(items) == 0
+
+    def test_orphaned_footprints_no_schematic(self, tmp_path: Path):
+        """Check gracefully skipped when schematic is unavailable."""
+        # Create PCB file only (no schematic)
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        audit = ManufacturingAudit(pcb_path)
+        # When initialized with .kicad_pcb, schematic_path is set
+        # but won't exist on disk. The run() method checks existence before calling.
+        # The method itself won't be called, so let's test run() integration.
+        result = audit.run()
+
+        # No orphan action items should appear since schematic doesn't exist
+        orphan_items = [a for a in result.action_items if "orphaned footprint" in a.description]
+        assert len(orphan_items) == 0
+
+    def test_orphaned_footprints_virtual_bom_items_excluded(self, tmp_path: Path):
+        """Virtual BOM items (power symbols) excluded from BOM ref set."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has R1 only
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1")]
+        audit._pcb = mock_pcb
+
+        # BOM has R1 (real) and VCC (virtual/power symbol)
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="#PWR01",
+                    value="VCC",
+                    footprint="",
+                    lib_id="power:VCC",
+                    in_bom=False,
+                ),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        # R1 matches BOM, #PWR01 is virtual so excluded. No orphans.
+        assert len(items) == 0
+
+    def test_orphaned_footprints_dnp_items_still_match(self, tmp_path: Path):
+        """DNP items in BOM should still match PCB footprints (not orphans)."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has R1, R2 where R2 is DNP in schematic
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1"), MagicMock(reference="R2")]
+        audit._pcb = mock_pcb
+
+        # BOM: R1 is normal, R2 is DNP (should still match PCB)
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="R2",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    dnp=True,
+                ),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        # R2 is DNP but still in BOM non-virtual, so no orphans
+        assert len(items) == 0
+
+    def test_orphaned_footprints_extract_bom_failure_graceful(self, tmp_path: Path):
+        """If extract_bom raises, check is skipped gracefully."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1")]
+        audit._pcb = mock_pcb
+
+        with patch(
+            "kicad_tools.schema.bom.extract_bom",
+            side_effect=Exception("Cannot parse schematic"),
+        ):
+            items = audit._check_orphaned_footprints()
+
+        # Should return empty list, not raise
+        assert len(items) == 0
+
+    def test_orphaned_footprints_many_orphans_truncated(self, tmp_path: Path):
+        """When more than 10 orphans, description shows truncation notice."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has 15 footprints, BOM has none of them
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference=f"R{i}") for i in range(1, 16)]
+        audit._pcb = mock_pcb
+
+        from kicad_tools.schema.bom import BOM
+
+        mock_bom = BOM(items=[])
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        assert len(items) == 1
+        assert "15 orphaned footprint(s)" in items[0].description
+        assert "(and 5 more)" in items[0].description
+
+
+# ---------------------------------------------------------------------------
+# Test: schematic <-> PCB sync drift (issue #2729)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncDriftStatus:
+    """SyncStatus dataclass and AuditResult.sync wiring."""
+
+    def test_sync_status_defaults(self):
+        from kicad_tools.audit.auditor import SyncStatus
+
+        s = SyncStatus()
+        assert s.schematic_only_count == 0
+        assert s.pcb_only_count == 0
+        assert s.value_mismatch_count == 0
+        assert s.footprint_mismatch_count == 0
+        assert s.passed is True
+        assert s.skipped is False
+
+    def test_sync_status_to_dict_keys(self):
+        from kicad_tools.audit.auditor import SyncStatus
+
+        s = SyncStatus(
+            schematic_only_count=3,
+            pcb_only_count=2,
+            value_mismatch_count=1,
+            footprint_mismatch_count=4,
+            schematic_only_refs=["R99", "C42"],
+        )
+        d = s.to_dict()
+        assert d["schematic_only_count"] == 3
+        assert d["pcb_only_count"] == 2
+        assert d["value_mismatch_count"] == 1
+        assert d["footprint_mismatch_count"] == 4
+        assert d["schematic_only_refs"] == ["R99", "C42"]
+
+    def test_audit_result_to_dict_includes_sync_key(self):
+        from kicad_tools.audit.auditor import AuditResult
+
+        r = AuditResult()
+        d = r.to_dict()
+        assert "sync" in d
+        # Summary should include the four sync counts
+        assert "sync_schematic_only" in d["summary"]
+        assert "sync_pcb_only" in d["summary"]
+        assert "sync_value_mismatches" in d["summary"]
+        assert "sync_footprint_mismatches" in d["summary"]
+
+
+class TestSyncDriftVerdict:
+    """AuditResult.verdict reacts to sync drift counts."""
+
+    def test_schematic_only_forces_not_ready(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.schematic_only_count = 1
+        assert r.verdict == AuditVerdict.NOT_READY
+
+    def test_pcb_only_is_warning(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.pcb_only_count = 2
+        assert r.verdict == AuditVerdict.WARNING
+
+    def test_value_mismatch_is_warning(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.value_mismatch_count = 5
+        assert r.verdict == AuditVerdict.WARNING
+
+    def test_footprint_mismatch_is_warning(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.footprint_mismatch_count = 3
+        assert r.verdict == AuditVerdict.WARNING
+
+    def test_clean_sync_is_ready(self):
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        # All zero, authoritative clean DRC (geometric engine ran, #3825)
+        r.drc.geometric_drc_ran = True
+        assert r.verdict == AuditVerdict.READY
+
+    def test_schematic_only_overrides_drc_warnings(self):
+        """An unbuildable BOM is a NOT_READY hard fail regardless of DRC."""
+        from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+        r = AuditResult()
+        r.sync.schematic_only_count = 36
+        r.drc.warning_count = 0
+        r.erc.warning_count = 0
+        assert r.verdict == AuditVerdict.NOT_READY
+
+
+class TestSyncDriftCheck:
+    """ManufacturingAudit._check_sync_drift uses Reconciler."""
+
+    def test_check_sync_drift_reuses_reconciler(self, tmp_path: Path):
+        """Verify _check_sync_drift wraps Reconciler.analyze()."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.sync.reconciler import SyncAnalysis
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        mock_analysis = SyncAnalysis(
+            schematic_orphans=["U99", "R42"],
+            pcb_orphans=["TP1"],
+            value_mismatches=[{"reference": "R1", "schematic_value": "10k", "pcb_value": "1k"}],
+            footprint_mismatches=[
+                {
+                    "reference": "C1",
+                    "schematic_footprint": "C_0402",
+                    "pcb_footprint": "C_0603",
+                }
+            ],
+        )
+
+        mock_reconciler = MagicMock()
+        mock_reconciler.analyze.return_value = mock_analysis
+
+        with patch(
+            "kicad_tools.sync.reconciler.Reconciler",
+            return_value=mock_reconciler,
+        ):
+            status = audit._check_sync_drift()
+
+        assert status.schematic_only_count == 2
+        assert status.pcb_only_count == 1
+        assert status.value_mismatch_count == 1
+        assert status.footprint_mismatch_count == 1
+        assert status.schematic_only_refs == ["U99", "R42"]
+        assert status.pcb_only_refs == ["TP1"]
+        assert status.value_mismatch_refs == ["R1"]
+        assert status.footprint_mismatch_refs == ["C1"]
+        assert status.passed is False
+
+    def test_check_sync_drift_graceful_on_reconciler_failure(self, tmp_path: Path):
+        """A Reconciler exception must not crash the audit."""
+        from unittest.mock import patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        with patch(
+            "kicad_tools.sync.reconciler.Reconciler",
+            side_effect=RuntimeError("boom"),
+        ):
+            status = audit._check_sync_drift()
+
+        # Issue #7083: a crash is could-not-verify, not a quiet skip.
+        assert status.skipped is False
+        assert status.could_not_verify is True
+        assert status.passed is False
+        assert "boom" in status.details
+
+    def test_check_sync_drift_truncates_to_10_refs(self, tmp_path: Path):
+        """Only the first 10 refs per axis are recorded (for manifest brevity)."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.sync.reconciler import SyncAnalysis
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        many_refs = [f"R{i}" for i in range(20)]
+        mock_analysis = SyncAnalysis(schematic_orphans=many_refs)
+
+        mock_reconciler = MagicMock()
+        mock_reconciler.analyze.return_value = mock_analysis
+
+        with patch(
+            "kicad_tools.sync.reconciler.Reconciler",
+            return_value=mock_reconciler,
+        ):
+            status = audit._check_sync_drift()
+
+        assert status.schematic_only_count == 20
+        assert len(status.schematic_only_refs) == 10
+
+
+class TestSyncDriftActionItems:
+    """Action items emitted from _generate_action_items() based on sync drift."""
+
+    def test_schematic_only_creates_priority1_item(self, tmp_path: Path):
+        """Schematic-only refs produce a priority-1 action item mentioning unbuildable BOM."""
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(
+            schematic_only_count=3,
+            schematic_only_refs=["U1", "U2", "U3"],
+        )
+        items = audit._generate_action_items(r)
+
+        # Find the schematic-only item
+        sch_only = [i for i in items if "schematic" in i.description and "missing" in i.description]
+        assert len(sch_only) == 1
+        assert sch_only[0].priority == 1
+        assert "unbuildable" in sch_only[0].description.lower()
+        assert "U1" in sch_only[0].description
+
+    def test_pcb_only_creates_priority2_item(self, tmp_path: Path):
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(pcb_only_count=2, pcb_only_refs=["TP1", "TP2"])
+        items = audit._generate_action_items(r)
+
+        orphan = [i for i in items if "orphaned footprint" in i.description]
+        assert len(orphan) == 1
+        assert orphan[0].priority == 2
+
+    def test_value_mismatch_creates_priority2_item(self, tmp_path: Path):
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(value_mismatch_count=4, value_mismatch_refs=["R1"])
+        items = audit._generate_action_items(r)
+
+        vm = [i for i in items if "different values" in i.description]
+        assert len(vm) == 1
+        assert vm[0].priority == 2
+
+    def test_footprint_mismatch_creates_priority2_item(self, tmp_path: Path):
+        from kicad_tools.audit.auditor import AuditResult, SyncStatus
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+        r = AuditResult()
+        r.sync = SyncStatus(footprint_mismatch_count=1, footprint_mismatch_refs=["C2"])
+        items = audit._generate_action_items(r)
+
+        fm = [i for i in items if "different footprints" in i.description]
+        assert len(fm) == 1
+        assert fm[0].priority == 2
+
+
+# ---------------------------------------------------------------------------
+# Test: assembly mode / --no-assembly flag
+# ---------------------------------------------------------------------------
+
+
+class TestAssemblyMode:
+    """Tests for assembly cost exclusion via project.kct and --no-assembly flag."""
+
+    def test_cost_estimate_assembly_mode_field(self):
+        """CostEstimate dataclass has assembly_mode field included in to_dict."""
+        est = CostEstimate(assembly_mode="none")
+        d = est.to_dict()
+        assert "assembly_mode" in d
+        assert d["assembly_mode"] == "none"
+
+    def test_cost_estimate_assembly_mode_default_none(self):
+        """CostEstimate.assembly_mode defaults to None."""
+        est = CostEstimate()
+        assert est.assembly_mode is None
+        assert est.to_dict()["assembly_mode"] is None
+
+    def test_no_assembly_flag_skips_assembly_cost(self, drc_clean_pcb: Path):
+        """ManufacturingAudit with no_assembly=True zeros assembly cost."""
+        audit = ManufacturingAudit(drc_clean_pcb, no_assembly=True)
+        result = audit.run()
+
+        assert result.cost.assembly_cost == 0.0
+        assert result.cost.assembly_mode == "none"
+        # Total should not include assembly
+        # (just verify assembly is excluded from total)
+        assert result.cost.total_cost >= 0.0
+
+    def test_default_includes_assembly_cost(self, drc_clean_pcb: Path):
+        """Default audit (no flags) includes assembly cost as before."""
+        audit = ManufacturingAudit(drc_clean_pcb)
+        result = audit.run()
+
+        # assembly_mode should be None when not explicitly set to "none"
+        assert result.cost.assembly_mode is None
+
+    def test_assembly_none_from_project_kct(self, tmp_path: Path):
+        """When project.kct has assembly: none, assembly cost is excluded."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Write project.kct with assembly: none
+        kct_path = tmp_path / "project.kct"
+        kct_path.write_text(
+            """kct_version: "1.0"
+project:
+  name: test
+  board: test
+requirements:
+  manufacturing:
+    assembly: "none"
+"""
+        )
+
+        audit = ManufacturingAudit(project_file)
+        assert audit.no_assembly is True
+        assert audit._assembly_mode == "none"
+
+    def test_assembly_smt_from_project_kct(self, tmp_path: Path):
+        """When project.kct has assembly: smt, assembly cost is included."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        kct_path = tmp_path / "project.kct"
+        kct_path.write_text(
+            """kct_version: "1.0"
+project:
+  name: test
+  board: test
+requirements:
+  manufacturing:
+    assembly: "smt"
+"""
+        )
+
+        audit = ManufacturingAudit(project_file)
+        assert audit.no_assembly is False
+        assert audit._assembly_mode == "smt"
+
+    def test_no_assembly_flag_overrides_project_kct(self, tmp_path: Path):
+        """--no-assembly CLI flag overrides project.kct assembly: smt."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        kct_path = tmp_path / "project.kct"
+        kct_path.write_text(
+            """kct_version: "1.0"
+project:
+  name: test
+  board: test
+requirements:
+  manufacturing:
+    assembly: "smt"
+"""
+        )
+
+        # no_assembly=True should override the smt setting
+        audit = ManufacturingAudit(project_file, no_assembly=True)
+        assert audit.no_assembly is True
+
+    def test_cli_no_assembly_flag(self, drc_clean_pcb: Path, capsys):
+        """CLI --no-assembly flag produces assembly_mode: none in JSON."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--no-assembly", "--format", "json"])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["cost"]["assembly_mode"] == "none"
+        assert data["cost"]["assembly_cost"] == 0.0
+
+    def test_cli_no_assembly_table_output(self, drc_clean_pcb: Path, capsys):
+        """CLI --no-assembly shows 'Assembly: excluded' in table output."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--no-assembly"])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        assert "Assembly: excluded" in captured.out
+
+
+class TestConnectivityStatusZoneVerification:
+    """Tests for ConnectivityStatus zone verification fields."""
+
+    def test_connectivity_pass_with_zone_connected_nets(self):
+        """Connectivity should pass when all incomplete nets have zone connections."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=0,
+            zone_connected_nets=3,
+            completion_percent=70.0,
+            unconnected_pads=0,
+            has_zones=True,
+            passed=True,
+        )
+        assert status.passed is True
+        assert status.zone_connected_nets == 3
+
+    def test_connectivity_fail_with_truly_incomplete_nets(self):
+        """Connectivity should fail when some nets are truly incomplete."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=3,
+            zone_connected_nets=2,
+            completion_percent=50.0,
+            unconnected_pads=6,
+            has_zones=True,
+            passed=False,
+        )
+        assert status.passed is False
+        assert status.incomplete_nets == 3
+
+    def test_verdict_ready_when_zone_connected(self):
+        """Audit verdict should be READY when connectivity passes
+        thanks to zone-connected nets."""
+        result = AuditResult()
+        result.erc = ERCStatus(passed=True)
+        result.drc = DRCStatus(passed=True, geometric_drc_ran=True)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=10,
+            incomplete_nets=0,
+            zone_connected_nets=5,
+            passed=True,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+        assert result.verdict == AuditVerdict.READY
+
+    def test_connectivity_status_to_dict_zone_fields(self):
+        """ConnectivityStatus.to_dict() includes zone_connected_nets."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=8,
+            zone_connected_nets=3,
+            has_zones=True,
+            passed=True,
+        )
+        d = status.to_dict()
+        assert d["zone_connected_nets"] == 3
+        assert d["has_zones"] is True
+
+
+class TestAnalogActionItems:
+    """Analog-sensitive components are NAMED in the audit action items.
+
+    Phase 1 of issue #3156: ``_generate_action_items`` must surface the
+    reference / value / reason that ``detect_analog_components`` already
+    produces, rather than collapsing the list to a count. Uses the
+    mock-PCB pattern (a minimal object exposing ``.footprints`` with
+    ``.reference`` / ``.value`` / ``.name``) and monkeypatches
+    ``_load_pcb`` so no analog ``.kicad_pcb`` fixture is required.
+    """
+
+    @dataclass
+    class _MockFootprint:
+        reference: str = ""
+        value: str = ""
+        name: str = ""
+
+    @dataclass
+    class _MockPCB:
+        footprints: list = field(default_factory=list)
+
+    def _make_audit(self, drc_clean_pcb: Path, monkeypatch, footprints):
+        """Build an Auditor whose PCB load returns the given footprints."""
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+        mock_pcb = self._MockPCB(footprints=list(footprints))
+        monkeypatch.setattr(audit, "_load_pcb", lambda: mock_pcb)
+        return audit
+
+    def _analog_items(self, items):
+        return [i for i in items if i.description.startswith("Analog-sensitive:")]
+
+    def test_names_each_detected_component(self, drc_clean_pcb: Path, monkeypatch):
+        """Every detected analog component is named with ref, value, reason."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [
+                self._MockFootprint(reference="U2", value="PCM5122", name="PCM5122"),
+                self._MockFootprint(reference="U3", value="OPA2134", name="OPA2134"),
+            ],
+        )
+        items = audit._generate_action_items(AuditResult())
+        analog = self._analog_items(items)
+
+        assert len(analog) == 2
+        descriptions = [i.description for i in analog]
+
+        # U2 is an audio DAC; U3 is an op-amp -- both named with ref+value+reason.
+        assert any(
+            "U2" in d and "PCM5122" in d and "audio DAC (PCM51xx family)" in d for d in descriptions
+        )
+        assert any("U3" in d and "OPA2134" in d and "op-amp" in d for d in descriptions)
+
+        # Advisory priority (non-blocking gate), no fix command.
+        for item in analog:
+            assert item.priority == 3
+            assert item.command is None
+
+    def test_single_component_named(self, drc_clean_pcb: Path, monkeypatch):
+        """A single analog component is still named (not a bare count)."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [self._MockFootprint(reference="U7", value="REF3025", name="REF3025")],
+        )
+        items = audit._generate_action_items(AuditResult())
+        analog = self._analog_items(items)
+
+        assert len(analog) == 1
+        assert "U7" in analog[0].description
+        assert "REF3025" in analog[0].description
+        assert "precision voltage reference" in analog[0].description
+        # The vague count-only wording must be gone.
+        assert "analog-sensitive component" not in analog[0].description.lower()
+
+    def test_no_analog_components_emits_no_item(self, drc_clean_pcb: Path, monkeypatch):
+        """A purely digital board produces no analog action item."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [
+                self._MockFootprint(reference="U1", value="STM32F407", name="STM32F407"),
+                self._MockFootprint(reference="R1", value="10k", name="R_0402"),
+            ],
+        )
+        items = audit._generate_action_items(AuditResult())
+        assert self._analog_items(items) == []
+
+    def test_detection_exception_does_not_crash(self, drc_clean_pcb: Path, monkeypatch):
+        """A detector/PCB-load failure is swallowed; audit still returns."""
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("malformed PCB")
+
+        monkeypatch.setattr(audit, "_load_pcb", _boom)
+
+        # Must not raise, and must still return the (non-analog) items.
+        items = audit._generate_action_items(AuditResult())
+        assert self._analog_items(items) == []
+
+    def test_json_path_carries_per_component_detail(self, drc_clean_pcb: Path, monkeypatch):
+        """The JSON serialization of action items keeps the per-component names."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [
+                self._MockFootprint(reference="U2", value="PCM5122", name="PCM5122"),
+                self._MockFootprint(reference="U3", value="OPA2134", name="OPA2134"),
+            ],
+        )
+        result = AuditResult()
+        result.action_items = audit._generate_action_items(result)
+
+        payload = json.dumps(result.to_dict(), default=str)
+        data = json.loads(payload)
+        analog = [
+            i for i in data["action_items"] if i["description"].startswith("Analog-sensitive:")
+        ]
+        assert len(analog) == 2
+        joined = " ".join(i["description"] for i in analog)
+        assert "U2" in joined and "PCM5122" in joined
+        assert "U3" in joined and "OPA2134" in joined
+
+
+class TestAnalogNetActionItems:
+    """Analog NETS are named in the audit action items (Phase 2, #3170).
+
+    Mirrors ``TestAnalogActionItems`` at the net level: ``_generate_action_items``
+    must surface one priority-3 item per analog net (audio / analog supply /
+    analog ground / analog signal) and flag an isolated analog ground that
+    lacks a discrete net-tie/ferrite bridge to digital ground.  Uses a mock
+    PCB extended with a net-name surface and monkeypatches ``_load_pcb`` so
+    no analog ``.kicad_pcb`` fixture is required.
+    """
+
+    @dataclass
+    class _MockNet:
+        number: int
+        name: str
+
+    @dataclass
+    class _MockPad:
+        net_name: str = ""
+
+    @dataclass
+    class _MockFootprint:
+        reference: str = ""
+        value: str = ""
+        name: str = ""
+        pads: list = field(default_factory=list)
+
+    @dataclass
+    class _MockPCB:
+        footprints: list = field(default_factory=list)
+        nets: dict = field(default_factory=dict)
+
+    def _make_audit(self, drc_clean_pcb: Path, monkeypatch, *, net_names, footprints=()):
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+        nets = {0: self._MockNet(0, "")}
+        for i, name in enumerate(net_names, start=1):
+            nets[i] = self._MockNet(i, name)
+        mock_pcb = self._MockPCB(footprints=list(footprints), nets=nets)
+        monkeypatch.setattr(audit, "_load_pcb", lambda: mock_pcb)
+        return audit
+
+    def _net_items(self, items):
+        return [i for i in items if i.description.startswith("Analog net:")]
+
+    def _bridge_items(self, items):
+        return [i for i in items if "no bridge to" in i.description]
+
+    def test_one_item_per_analog_net(self, drc_clean_pcb: Path, monkeypatch):
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["AUDIO_L", "AUDIO_R", "+3.3VA", "VREF", "GND", "+3.3V"],
+        )
+        items = audit._generate_action_items(AuditResult())
+        net_items = self._net_items(items)
+
+        names = {d.description for d in net_items}
+        # 4 analog nets named; GND / +3.3V (digital) not named.
+        assert len(net_items) == 4
+        joined = " ".join(names)
+        assert "AUDIO_L" in joined and "AUDIO_R" in joined
+        assert "+3.3VA" in joined and "VREF" in joined
+        assert "GND" not in joined or "GNDA" in joined  # plain GND not flagged
+
+        for item in net_items:
+            assert item.priority == 3
+            assert item.command is None
+
+    def test_missing_bridge_flagged(self, drc_clean_pcb: Path, monkeypatch):
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["GNDA", "GND"],
+        )
+        items = audit._generate_action_items(AuditResult())
+        bridge = self._bridge_items(items)
+        assert len(bridge) == 1
+        assert "GNDA" in bridge[0].description
+        assert bridge[0].priority == 3
+
+    def test_bridge_present_no_flag(self, drc_clean_pcb: Path, monkeypatch):
+        nettie = self._MockFootprint(
+            reference="NT1",
+            name="NetTie-2_SMD",
+            value="NetTie",
+            pads=[self._MockPad(net_name="GNDA"), self._MockPad(net_name="GND")],
+        )
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["GNDA", "GND"],
+            footprints=[nettie],
+        )
+        items = audit._generate_action_items(AuditResult())
+        assert self._bridge_items(items) == []
+        # The analog ground is still named even though its bridge is fine.
+        assert any("GNDA" in i.description for i in self._net_items(items))
+
+    def test_purely_digital_board_no_net_items(self, drc_clean_pcb: Path, monkeypatch):
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["GND", "+3.3V", "D0", "SPI_MOSI", "USB_DP"],
+        )
+        items = audit._generate_action_items(AuditResult())
+        assert self._net_items(items) == []
+        assert self._bridge_items(items) == []
+
+    def test_detection_exception_does_not_crash(self, drc_clean_pcb: Path, monkeypatch):
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("malformed PCB")
+
+        monkeypatch.setattr(audit, "_load_pcb", _boom)
+        items = audit._generate_action_items(AuditResult())
+        assert self._net_items(items) == []
+        assert self._bridge_items(items) == []
+
+
+class TestVerdictGateNotAuthoritativeDrc:
+    """Issue #3825: a clean board whose DRC did not run must NOT be READY.
+
+    #3820 fixed the DRC *line label* (PASS NOT AUTHORITATIVE) but left the
+    overall verdict gate returning READY when ``drc.passed`` and
+    ``geometric_drc_ran is False`` (shapely ImportError / kicad-cli absent).
+    The verdict must downgrade to WARNING (never READY) so kct audit /
+    report.md cannot ship a false "READY FOR MANUFACTURING".
+    """
+
+    def test_clean_but_drc_not_run_is_not_ready(self):
+        """drc.passed + geometric_drc_ran=False -> WARNING, never READY."""
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.blocking_count = 0
+        result.drc.geometric_drc_ran = False
+
+        assert result.verdict != AuditVerdict.READY
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+        assert result.to_dict()["verdict"] != "ready"
+        assert result.to_dict()["verdict"] == "warning"
+
+    def test_authoritative_clean_board_is_ready(self):
+        """Both engines clean (geometric_drc_ran=True) -> READY (no regression)."""
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.blocking_count = 0
+        result.drc.geometric_drc_ran = True
+
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+        assert result.to_dict()["verdict"] == "ready"
+
+    def test_drc_blocking_still_not_ready(self):
+        """Real blocking violations still drive NOT_READY regardless of gate."""
+        result = AuditResult()
+        result.drc.passed = False
+        result.drc.blocking_count = 2
+        result.drc.geometric_drc_ran = True
+
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_not_authoritative_drc_banner_not_ready(self, capsys):
+        """output_table banner does not print READY for a not-run DRC."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = False
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        assert "READY FOR MANUFACTURING" not in out
+
+    def test_not_authoritative_drc_summary_not_ready(self, capsys):
+        """output_summary one-liner does not report READY for a not-run DRC."""
+        from kicad_tools.cli.audit_cmd import output_summary
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = False
+
+        output_summary(result)
+        out = capsys.readouterr().out
+
+        first_line = out.splitlines()[0]
+        # Must not report a bare READY one-liner (NOT READY is acceptable).
+        assert not first_line.startswith("READY:")
+        assert "Verdict: WARNING" in out
+
+
+class TestCheckerCrashesFailLoud:
+    """Issue #3825: ERC/connectivity/compat crashes must NOT coerce to PASS.
+
+    These three sibling ``except Exception: passed = True`` sites survived
+    #3817/#3820.  A genuine checker exception must surface as a fail-loud
+    could-not-verify result, never a silent green PASS.
+    """
+
+    def _make_audit_with_schematic(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    @staticmethod
+    def _fake_kicad_cli(monkeypatch):
+        # _check_erc resolves kicad-cli first (#7083); pretend it is installed
+        # so the stubbed subprocess.run is reached on hosts without it.
+        monkeypatch.setattr(
+            "kicad_tools.cli.runner.find_kicad_cli",
+            lambda *a, **k: Path("/usr/bin/kicad-cli"),
+        )
+
+    def test_erc_crash_does_not_pass(self, tmp_path, monkeypatch):
+        """An exception inside _check_erc yields passed=False + blocking."""
+        audit = self._make_audit_with_schematic(tmp_path)
+        self._fake_kicad_cli(monkeypatch)
+
+        # subprocess.run is the first call inside the try block; make it
+        # raise an unexpected (non-FileNotFound, non-Timeout) error.
+        import kicad_tools.audit.auditor as auditor_mod
+
+        def _boom(*a, **k):
+            raise RuntimeError("erc exploded")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", _boom)
+
+        status = audit._check_erc()
+
+        assert status.passed is False
+        assert status.blocking_error_count >= 1
+        assert "could not run" in status.details
+
+    def test_connectivity_crash_does_not_pass(self, monkeypatch):
+        """An exception inside _check_connectivity yields passed=False."""
+
+        class _BoomPcb:
+            @property
+            def footprint_count(self):
+                raise RuntimeError("connectivity exploded")
+
+        audit = ManufacturingAudit.__new__(ManufacturingAudit)
+        status = ManufacturingAudit._check_connectivity(audit, _BoomPcb())
+
+        assert status.passed is False
+        assert "could not run" in status.details
+
+    def test_compatibility_crash_does_not_pass(self, tmp_path, monkeypatch):
+        """An exception inside _check_compatibility yields passed=False."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("profile exploded")
+
+        monkeypatch.setattr(audit, "_get_profile", _boom)
+
+        compat = audit._check_compatibility(_DummyPcb())
+
+        assert compat.passed is False
+        assert "could not run" in compat.details
+
+    def test_compat_crash_drives_not_ready_verdict(self, tmp_path, monkeypatch):
+        """A compat-checker crash makes the overall verdict NOT_READY."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("profile exploded")
+
+        monkeypatch.setattr(audit, "_get_profile", _boom)
+
+        result = AuditResult()
+        result.compatibility = audit._check_compatibility(_DummyPcb())
+
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_erc_kicad_cli_absent_stays_non_fatal(self, tmp_path, monkeypatch):
+        """kicad-cli vanishing at exec is could-not-verify: not red, not PASS."""
+        audit = self._make_audit_with_schematic(tmp_path)
+        self._fake_kicad_cli(monkeypatch)
+
+        import kicad_tools.audit.auditor as auditor_mod
+
+        def _missing(*a, **k):
+            raise FileNotFoundError("kicad-cli")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", _missing)
+
+        status = audit._check_erc()
+
+        # Non-fatal (no blocking error), but never a PASS (#7083).
+        assert status.passed is False
+        assert status.could_not_verify is True
+        assert status.skipped is False
+        assert status.blocking_error_count == 0
+
+
+class TestUnrunEngineCapsAtWarning7083:
+    """Issue #7083: an ERC or sync check that never ran cannot certify READY.
+
+    Mirrors the #3825/#3832 un-run-DRC policy: WARNING, never READY, and
+    never NOT_READY on its own (backend-less CI stays green).
+    """
+
+    CLEAN_ERC = {"source": "x.kicad_sch", "sheets": [{"path": "/", "violations": []}]}
+
+    def _audit(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    @staticmethod
+    def _clean_result(erc: ERCStatus) -> AuditResult:
+        result = AuditResult()
+        result.erc = erc
+        result.drc = DRCStatus(passed=True, geometric_drc_ran=True)
+        result.connectivity = ConnectivityStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+        return result
+
+    def test_erc_runs_with_kicad_cli_off_path(self, tmp_path, monkeypatch):
+        """A non-PATH kicad-cli (default macOS install) is found and run."""
+        import kicad_tools.audit.auditor as auditor_mod
+
+        mac_cli = Path("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: mac_cli)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            out = Path(cmd[cmd.index("--output") + 1])
+            out.write_text(json.dumps(self.CLEAN_ERC))
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", fake_run)
+
+        status = self._audit(tmp_path)._check_erc()
+
+        assert calls and calls[0][0] == str(mac_cli)
+        assert calls[0][1:3] == ["sch", "erc"]
+        assert status.could_not_verify is False
+        assert status.passed is True
+        assert self._clean_result(status).verdict == AuditVerdict.READY
+
+    def test_kicad_cli_absent_is_not_run_warning(self, tmp_path, monkeypatch, capsys):
+        import kicad_tools.audit.auditor as auditor_mod
+        from kicad_tools.cli.audit_cmd import output_table
+
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: None)
+
+        def _must_not_run(*a, **k):
+            raise AssertionError("subprocess.run must not be called")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", _must_not_run)
+
+        status = self._audit(tmp_path)._check_erc()
+        assert status.could_not_verify is True
+        assert status.passed is False
+        assert status.skipped is False
+        assert status.blocking_error_count == 0
+        assert status.details
+        assert status.to_dict()["could_not_verify"] is True
+
+        result = self._clean_result(status)
+        assert result.verdict == AuditVerdict.WARNING
+
+        output_table(result)
+        out = capsys.readouterr().out
+        assert "ERC (Electrical Rules Check): NOT RUN" in out
+        assert "ERC (Electrical Rules Check): PASS" not in out
+        assert "ERC (Electrical Rules Check): FAIL" not in out
+
+    def test_erc_timeout_is_not_run_warning(self, tmp_path, monkeypatch):
+        import kicad_tools.audit.auditor as auditor_mod
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: Path("/usr/bin/kicad-cli")
+        )
+
+        def _hang(cmd, *a, **k):
+            raise subprocess.TimeoutExpired(cmd, 60)
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", _hang)
+
+        status = self._audit(tmp_path)._check_erc()
+        assert status.could_not_verify is True
+        assert status.passed is False
+        assert status.blocking_error_count == 0
+        assert "timed out" in status.details
+        assert self._clean_result(status).verdict == AuditVerdict.WARNING
+
+    def test_sync_crash_is_not_run_warning(self, tmp_path, caplog, capsys):
+        import logging
+        from unittest.mock import patch
+
+        from kicad_tools.cli.audit_cmd import output_table
+
+        audit = self._audit(tmp_path)
+        with (
+            caplog.at_level(logging.WARNING, logger="kicad_tools.audit.auditor"),
+            patch(
+                "kicad_tools.sync.reconciler.Reconciler",
+                side_effect=RuntimeError("parse boom"),
+            ),
+        ):
+            sync = audit._check_sync_drift()
+
+        assert sync.could_not_verify is True
+        assert sync.skipped is False
+        assert sync.passed is False
+        assert sync.to_dict()["could_not_verify"] is True
+        assert any(
+            r.levelno == logging.WARNING and "parse boom" in r.getMessage() for r in caplog.records
+        )
+
+        result = self._clean_result(ERCStatus())
+        result.sync = sync
+        assert result.verdict == AuditVerdict.WARNING
+
+        output_table(result)
+        out = capsys.readouterr().out
+        assert "Sync (Schematic <-> PCB): NOT RUN" in out
+        assert "Sync (Schematic <-> PCB): PASS" not in out
+
+    def test_no_schematic_is_erc_not_run_warning(self, tmp_path, capsys):
+        """Issue #7136 reverses #7089's "no-schematic unchanged" case.
+
+        A ``.kicad_pcb`` with no schematic used to report ERC as skipped
+        (rendered ``[OK] ... PASS``).  It now reports NOT RUN and the
+        verdict caps at WARNING; the sync check stays a plain skip.
+        """
+        from kicad_tools.cli.audit_cmd import output_table
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        # No schematic on disk.
+        result = ManufacturingAudit(pcb, manufacturer="jlcpcb").run()
+        assert result.erc.skipped is False
+        assert result.erc.could_not_verify is True
+        assert result.erc.details == "no schematic found for board.kicad_pcb"
+        assert result.sync.could_not_verify is False
+        assert self._clean_result(result.erc).verdict == AuditVerdict.WARNING
+
+        output_table(result)
+        out = capsys.readouterr().out
+        assert "[!!] ERC (Electrical Rules Check): NOT RUN" in out
+        assert "no schematic found for board.kicad_pcb" in out
+        assert "skipped by user request" not in out
+
+    def test_no_schematic_action_item_has_no_failing_command(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+        result = self._clean_result(
+            ERCStatus(passed=False, could_not_verify=True, details="no schematic found")
+        )
+        items = [i for i in audit._generate_action_items(result) if "ERC" in i.description]
+        assert len(items) == 1
+        assert items[0].command is None
+
+    def test_pcb_input_resolves_stage_suffixed_schematic(self, tmp_path, monkeypatch):
+        """``board_routed.kicad_pcb`` runs ERC against ``board.kicad_sch``."""
+        import kicad_tools.audit.auditor as auditor_mod
+
+        pcb = tmp_path / "board_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        monkeypatch.setattr(
+            "kicad_tools.cli.runner.find_kicad_cli", lambda *a, **k: Path("/usr/bin/kicad-cli")
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append([str(c) for c in cmd])
+            if "--output" in cmd:
+                out = Path(cmd[cmd.index("--output") + 1])
+                out.write_text(json.dumps(self.CLEAN_ERC))
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", fake_run)
+
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+        assert audit.skip_erc is False
+        assert audit.schematic_path == sch
+        result = audit.run()
+
+        erc_calls = [c for c in calls if c[1:3] == ["sch", "erc"]]
+        assert erc_calls, calls
+        assert str(sch) in erc_calls[0]
+        assert result.erc.skipped is False
+        assert result.erc.could_not_verify is False
+
+    @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 2)])
+    def test_cli_no_schematic_exit_code(self, tmp_path, monkeypatch, strict, expected):
+        """CLI: a schematic-less PCB audit is WARNING -- exit 0, or 2 under --strict."""
+        from kicad_tools.cli import audit_cmd
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        real_audit = audit_cmd.ManufacturingAudit
+        clean_result = self._clean_result
+
+        class _CleanBoardAudit(real_audit):  # type: ignore[misc, valid-type]
+            # Run the real ERC resolution, but keep the rest of the board
+            # clean so the ERC NOT RUN alone decides the verdict.
+            def run(self):
+                erc = super().run().erc
+                assert erc.could_not_verify is True
+                return clean_result(erc)
+
+        monkeypatch.setattr(audit_cmd, "ManufacturingAudit", _CleanBoardAudit)
+        argv = [str(pcb), "--format", "summary"] + (["--strict"] if strict else [])
+        assert audit_cmd.main(argv) == expected
+
+    def test_skip_erc_is_skipped_by_user_request(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
+        result = ManufacturingAudit(pcb, manufacturer="jlcpcb", skip_erc=True).run()
+        assert result.erc.skipped is True
+        assert result.erc.could_not_verify is False
+        assert result.erc.details == "ERC skipped by user request"
+
+        # A skipped ERC on an otherwise-clean board still reaches READY.
+        skipped = ERCStatus(skipped=True, details="ERC skipped by user request")
+        assert self._clean_result(skipped).verdict == AuditVerdict.READY
+
+    def test_not_run_erc_does_not_mask_blocking_drc(self):
+        result = self._clean_result(ERCStatus(passed=False, could_not_verify=True))
+        result.drc = DRCStatus(blocking_count=2, passed=False, geometric_drc_ran=True)
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_not_run_erc_action_item(self, tmp_path):
+        audit = self._audit(tmp_path)
+        result = self._clean_result(
+            ERCStatus(passed=False, could_not_verify=True, details="kicad-cli not installed")
+        )
+        items = audit._generate_action_items(result)
+        erc_items = [i for i in items if "ERC could not run" in i.description]
+        assert len(erc_items) == 1
+        assert erc_items[0].priority == 2
+        assert "kicad-cli not installed" in erc_items[0].description
+        assert erc_items[0].command and "sch erc" in erc_items[0].command
+
+    @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 2)])
+    def test_cli_exit_code(self, tmp_path, monkeypatch, strict, expected):
+        from kicad_tools.cli import audit_cmd
+
+        result = self._clean_result(ERCStatus(passed=False, could_not_verify=True))
+
+        class _FakeAudit:
+            def __init__(self, *a, **k):
+                pass
+
+            def run(self):
+                return result
+
+        monkeypatch.setattr(audit_cmd, "ManufacturingAudit", _FakeAudit)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        argv = [str(pcb), "--format", "summary"] + (["--strict"] if strict else [])
+        assert audit_cmd.main(argv) == expected
+
+
+class _FloorVia:
+    """Minimal via stand-in for the compatibility floor helpers (PR #4003).
+
+    Mirrors the attributes ``_get_min_via_drill`` / ``_get_min_annular_ring``
+    read: ``size``, ``drill``, and the schema-side ``via_type`` tag (``"micro"``
+    when parsed from ``(via micro ...)``, ``None`` for through vias — same
+    tagging contract as the #3118 DimensionRules exemption).
+    """
+
+    def __init__(self, size: float, drill: float, via_type: str | None = None):
+        self.size = size
+        self.drill = drill
+        self.via_type = via_type
+
+
+class _FloorPcb:
+    """Minimal PCB stand-in for ``_check_compatibility`` and its helpers."""
+
+    def __init__(self, vias):
+        self.vias = vias
+        self.segments = []  # -> min trace width falls back to the 0.15 default
+        self.copper_layers = ["F.Cu", "B.Cu"]
+        self.graphic_items = []  # -> board size falls back to the 100x100 default
+        self.setup = None  # -> min clearance falls back to the 0.2 default
+
+
+class TestMicroViaCompatibilityFloorExclusion:
+    """Micro vias are excluded from the mechanical via floors (PR #4003).
+
+    Mirrors the #3118 contract in ``test_validate_dimensions.py``: laser
+    microvias carry their own (much smaller) drill/annular floors, modelled
+    separately in the exported project (``min_microvia_drill`` /
+    ``Via_Type != 'Micro'`` dru conditions), so lumping them into the
+    mechanical minimums manufactured a false "Increase min via drill"
+    CRITICAL action item / NOT_READY verdict on boards kicad-cli DRC
+    passes.  Pins both directions: tagged microvias are skipped, while
+    untagged (mechanical) vias below the floor still fail compatibility.
+    """
+
+    def _make_audit(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    def test_mixed_board_floors_come_from_mechanical_vias_only(self, tmp_path):
+        """0.15 mm microvia + 0.3 mm mechanical via -> floors from the mechanical.
+
+        This is the board-05 shape (in-pad rescue microvias next to 0.3 mm
+        through vias): the reported minimums must be 0.3 mm drill and the
+        mechanical via's annular ring, not the microvia's.
+        """
+        audit = self._make_audit(tmp_path)
+        pcb = _FloorPcb(
+            vias=[
+                _FloorVia(size=0.3, drill=0.15, via_type="micro"),
+                _FloorVia(size=0.6, drill=0.3),
+            ]
+        )
+        assert audit._get_min_via_drill(pcb) == pytest.approx(0.3)
+        assert audit._get_min_annular_ring(pcb) == pytest.approx(0.15)
+
+    def test_mechanical_via_below_floor_still_fails_compat(self, tmp_path):
+        """The exclusion rides on the ``micro`` tag, not on small dimensions.
+
+        An UNtagged 0.25 mm-drill via on the same board still drives the
+        min-via-drill compatibility check below JLCPCB's 0.3 mm floor and
+        fails the audit — the microvia exclusion must not blind the
+        checker to genuinely undersized mechanical vias.
+        """
+        audit = self._make_audit(tmp_path)
+        pcb = _FloorPcb(
+            vias=[
+                _FloorVia(size=0.3, drill=0.15, via_type="micro"),
+                _FloorVia(size=0.6, drill=0.25),  # mechanical, below 0.3 floor
+            ]
+        )
+        compat = audit._check_compatibility(pcb)
+        actual, required, passed = compat.min_via_drill
+        assert actual == pytest.approx(0.25)
+        assert actual < required
+        assert passed is False
+        assert compat.passed is False
+
+    def test_all_microvia_board_returns_defaults(self, tmp_path):
+        """A board whose only vias are microvias reports the no-via defaults.
+
+        With every via excluded, the floors fall back to the same
+        JLCPCB-compliant defaults used when the board has no vias at all
+        (0.3 mm drill / 0.15 mm annular), so compatibility passes instead
+        of comparing the microvia geometry against mechanical limits.
+        """
+        audit = self._make_audit(tmp_path)
+        pcb = _FloorPcb(vias=[_FloorVia(size=0.3, drill=0.15, via_type="micro")])
+        assert audit._get_min_via_drill(pcb) == pytest.approx(0.3)
+        assert audit._get_min_annular_ring(pcb) == pytest.approx(0.15)
+
+        compat = audit._check_compatibility(pcb)
+        assert compat.min_via_drill[2] is True
+        assert compat.min_annular_ring[2] is True

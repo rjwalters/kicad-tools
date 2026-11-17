@@ -1,0 +1,991 @@
+#!/usr/bin/env python3
+"""
+PCB Manufacturer CLI Tool.
+
+Manage manufacturer profiles, compare design rules, and configure
+KiCad projects for specific manufacturers.
+
+Usage:
+    python3 scripts/kicad/mfr.py list                    # List manufacturers
+    python3 scripts/kicad/mfr.py info jlcpcb             # Show manufacturer details
+    python3 scripts/kicad/mfr.py rules jlcpcb            # Show 2-layer rules (default)
+    python3 scripts/kicad/mfr.py rules jlcpcb --layers 4 # Show 4-layer rules
+    python3 scripts/kicad/mfr.py compare                 # Compare all manufacturers (2-layer)
+    python3 scripts/kicad/mfr.py compare --layers 4      # Compare 4-layer rules
+    python3 scripts/kicad/mfr.py export-dru jlcpcb       # Export KiCad DRC rules
+    python3 scripts/kicad/mfr.py apply-rules proj.kicad_pro jlcpcb  # Apply rules
+    python3 scripts/kicad/mfr.py validate board.kicad_pcb jlcpcb    # Validate design
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+from kicad_tools.cli.format_options import add_format_flag, emit_json
+from kicad_tools.manufacturers import (
+    compare_design_rules,
+    find_compatible_manufacturers,
+    get_profile,
+    list_manufacturers,
+)
+from kicad_tools.schema.pcb import _is_footprint_tag
+from kicad_tools.units import get_current_formatter
+
+
+def _wants_json(args) -> bool:
+    """True when the canonical ``--format json`` spelling was requested."""
+    return getattr(args, "format", "text") == "json"
+
+
+def _fail(args, message: str, *, stderr: bool = False) -> None:
+    """Report an error and exit 1.
+
+    ``message`` is the full human-readable line (printed verbatim in text
+    mode, preserving historical output); in JSON mode it becomes the
+    ``error`` field of the single JSON document on stdout.
+    """
+    if _wants_json(args):
+        emit_json({"error": message})
+    else:
+        print(message, file=sys.stderr if stderr else sys.stdout)
+    sys.exit(1)
+
+
+def _profile_payload(profile) -> dict:
+    """Full machine rendering of a manufacturer profile (mirrors cmd_info)."""
+    payload: dict = profile.to_dict()
+    if profile.assembly:
+        payload["assembly"] = {
+            "min_component_pitch_mm": profile.assembly.min_component_pitch_mm,
+            "min_bga_pitch_mm": profile.assembly.min_bga_pitch_mm,
+            "supports_double_sided": profile.assembly.supports_double_sided,
+        }
+        if profile.assembly_tiers:
+            payload["assembly"]["tiers"] = [t.to_dict() for t in profile.assembly_tiers]
+    else:
+        payload["assembly"] = None
+    if profile.parts_library:
+        lib = profile.parts_library
+        payload["parts_library"] = {
+            "name": lib.name,
+            "catalog_url": lib.catalog_url,
+            "tiers": lib.tiers,
+        }
+    else:
+        payload["parts_library"] = None
+    return payload
+
+
+def cmd_list(args):
+    """List available manufacturers."""
+    if _wants_json(args):
+        emit_json(
+            {
+                "manufacturers": [
+                    {
+                        "id": profile.id,
+                        "name": profile.name,
+                        "supports_assembly": profile.supports_assembly(),
+                        "parts_library": (
+                            profile.parts_library.name if profile.parts_library else None
+                        ),
+                    }
+                    for profile in sorted(list_manufacturers(), key=lambda p: p.id)
+                ]
+            }
+        )
+        return
+    print(f"\n{'=' * 60}")
+    print("AVAILABLE MANUFACTURERS")
+    print(f"{'=' * 60}\n")
+
+    for profile in list_manufacturers():
+        assembly = "PCBA" if profile.supports_assembly() else "PCB only"
+        parts = profile.parts_library.name if profile.parts_library else "N/A"
+        print(f"  {profile.id:<12} {profile.name:<20} [{assembly}]")
+        if profile.parts_library:
+            print(f"  {'':<12} Parts: {parts}")
+        print()
+
+    print(f"{'=' * 60}")
+    print("Use 'mfr.py info <id>' for detailed information")
+    print("Use 'mfr.py rules <id>' for design rules")
+
+
+def cmd_info(args):
+    """Show detailed manufacturer information."""
+    try:
+        profile = get_profile(args.manufacturer)
+    except ValueError as e:
+        _fail(args, f"Error: {e}")
+
+    if _wants_json(args):
+        emit_json(_profile_payload(profile))
+        return
+
+    print(f"\n{'=' * 60}")
+    print(f"{profile.name.upper()}")
+    print(f"{'=' * 60}")
+
+    print("\nBasic Info:")
+    print(f"  ID:       {profile.id}")
+    print(f"  Website:  {profile.website}")
+    print(f"  Layers:   {', '.join(str(layer) for layer in profile.supported_layers)}")
+    print(f"  Pricing:  {profile.pricing_model}")
+
+    print("\nLead Times:")
+    for key, days in profile.lead_times.items():
+        print(f"  {key.replace('_', ' ').title()}: {days} days")
+
+    if profile.supports_assembly():
+        print("\nAssembly: Supported")
+        if profile.assembly:
+            print(f"  Min component pitch: {profile.assembly.min_component_pitch_mm} mm")
+            print(f"  Min BGA pitch: {profile.assembly.min_bga_pitch_mm} mm")
+            print(f"  Double-sided: {'Yes' if profile.assembly.supports_double_sided else 'No'}")
+        for svc in profile.assembly_tiers:
+            extras = []
+            if svc.min_package:
+                extras.append(f"min package {svc.min_package}")
+            extras.append(f"IC pitch {svc.min_component_pitch_mm:g} mm")
+            extras.append(f"BGA pitch {svc.min_bga_pitch_mm:g} mm")
+            extras.append("double-sided" if svc.supports_double_sided else "single-sided")
+            if svc.min_board_size_mm:
+                w, h = svc.min_board_size_mm
+                extras.append(f"min board {w:g}x{h:g} mm")
+            print(f"  Tier {svc.display_name}: {', '.join(extras)}")
+    else:
+        print("\nAssembly: Not available")
+
+    if profile.parts_library:
+        lib = profile.parts_library
+        print(f"\nParts Library: {lib.name}")
+        if lib.catalog_url:
+            print(f"  Catalog: {lib.catalog_url}")
+        print("  Tiers:")
+        for tier, info in lib.tiers.items():
+            desc = info.get("description", "")
+            lead = info.get("lead_time_days", "?")
+            fee = info.get("setup_fee_usd", 0)
+            print(f"    {tier}: {desc}")
+            print(f"          Lead time: {lead} days, Setup: ${fee}")
+
+    print(f"\n{'=' * 60}")
+
+
+def cmd_rules(args):
+    """Show design rules for a manufacturer."""
+    try:
+        profile = get_profile(args.manufacturer)
+    except ValueError as e:
+        _fail(args, f"Error: {e}")
+
+    rules = profile.get_design_rules(args.layers, args.copper)
+
+    if _wants_json(args):
+        emit_json(
+            {
+                "manufacturer": profile.id,
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "rules": rules.to_dict(),
+            }
+        )
+        return
+
+    fmt = get_current_formatter()
+
+    print(f"\n{'=' * 60}")
+    print(f"{profile.name.upper()} - {args.layers}-LAYER {args.copper}oz RULES")
+    print(f"{'=' * 60}")
+    print(f"Units: {fmt.unit_name}")
+
+    print("\nTrace & Spacing:")
+    print(f"  Min trace width:    {fmt.format(rules.min_trace_width_mm)}")
+    print(f"  Min clearance:      {fmt.format(rules.min_clearance_mm)}")
+
+    print("\nVias:")
+    print(f"  Min via drill:      {fmt.format(rules.min_via_drill_mm)}")
+    print(f"  Min via diameter:   {fmt.format(rules.min_via_diameter_mm)}")
+    print(f"  Min annular ring:   {fmt.format(rules.min_annular_ring_mm)}")
+
+    print("\nHoles:")
+    print(f"  Min hole diameter:  {fmt.format(rules.min_hole_diameter_mm)}")
+    print(f"  Max hole diameter:  {fmt.format(rules.max_hole_diameter_mm)}")
+
+    print("\nEdge Clearance:")
+    print(f"  Copper to edge:     {fmt.format(rules.min_copper_to_edge_mm)}")
+    print(f"  Hole to edge:       {fmt.format(rules.min_hole_to_edge_mm)}")
+
+    print("\nSilkscreen:")
+    print(f"  Min line width:     {fmt.format(rules.min_silkscreen_width_mm)}")
+    print(f"  Min text height:    {fmt.format(rules.min_silkscreen_height_mm)}")
+
+    print("\nSolder Mask:")
+    print(f"  Min dam width:      {fmt.format(rules.min_solder_mask_dam_mm)}")
+
+    print("\nBoard:")
+    print(f"  Thickness:          {fmt.format(rules.board_thickness_mm)}")
+    print(f"  Outer copper:       {rules.outer_copper_oz} oz")
+    if rules.inner_copper_oz > 0:
+        print(f"  Inner copper:       {rules.inner_copper_oz} oz")
+
+    print(f"\n{'=' * 60}")
+
+
+def cmd_compare(args):
+    """Compare design rules across manufacturers."""
+    rules_by_mfr = compare_design_rules(
+        layers=args.layers,
+        copper_oz=args.copper,
+    )
+
+    if _wants_json(args):
+        manufacturers = {}
+        for mfr in sorted(rules_by_mfr):
+            profile = get_profile(mfr)
+            manufacturers[mfr] = {
+                "rules": rules_by_mfr[mfr].to_dict(),
+                "supports_assembly": profile.supports_assembly(),
+                "parts_library": (profile.parts_library.name if profile.parts_library else None),
+            }
+        emit_json(
+            {
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "manufacturers": manufacturers,
+            }
+        )
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"MANUFACTURER COMPARISON - {args.layers}-LAYER {args.copper}oz")
+    print(f"{'=' * 70}")
+
+    # Header
+    mfrs = list(rules_by_mfr.keys())
+    header = f"{'Constraint':<25}"
+    for mfr in mfrs:
+        header += f"{mfr.upper():>12}"
+    print(header)
+    print("-" * 70)
+
+    # Trace width
+    row = f"{'Trace width (mil)':<25}"
+    for mfr in mfrs:
+        row += f"{rules_by_mfr[mfr].min_trace_width_mil:>12.1f}"
+    print(row)
+
+    # Clearance
+    row = f"{'Clearance (mil)':<25}"
+    for mfr in mfrs:
+        row += f"{rules_by_mfr[mfr].min_clearance_mil:>12.1f}"
+    print(row)
+
+    # Via drill
+    row = f"{'Via drill (mm)':<25}"
+    for mfr in mfrs:
+        row += f"{rules_by_mfr[mfr].min_via_drill_mm:>12.2f}"
+    print(row)
+
+    # Via diameter
+    row = f"{'Via diameter (mm)':<25}"
+    for mfr in mfrs:
+        row += f"{rules_by_mfr[mfr].min_via_diameter_mm:>12.2f}"
+    print(row)
+
+    # Annular ring
+    row = f"{'Annular ring (mm)':<25}"
+    for mfr in mfrs:
+        row += f"{rules_by_mfr[mfr].min_annular_ring_mm:>12.2f}"
+    print(row)
+
+    # Copper to edge
+    row = f"{'Copper-to-edge (mm)':<25}"
+    for mfr in mfrs:
+        row += f"{rules_by_mfr[mfr].min_copper_to_edge_mm:>12.2f}"
+    print(row)
+
+    print("-" * 70)
+
+    # Assembly support
+    row = f"{'Assembly':<25}"
+    for mfr in mfrs:
+        profile = get_profile(mfr)
+        row += f"{'Yes':>12}" if profile.supports_assembly() else f"{'No':>12}"
+    print(row)
+
+    # Parts library
+    row = f"{'Parts Library':<25}"
+    for mfr in mfrs:
+        profile = get_profile(mfr)
+        lib = profile.parts_library.name if profile.parts_library else "None"
+        row += f"{lib[:12]:>12}"
+    print(row)
+
+    print(f"\n{'=' * 70}")
+
+
+def cmd_find(args):
+    """Find compatible manufacturers for design constraints."""
+    compatible = find_compatible_manufacturers(
+        trace_width_mm=args.trace * 0.0254,  # mil to mm
+        clearance_mm=args.clearance * 0.0254,
+        via_drill_mm=args.via,
+        layers=args.layers,
+        needs_assembly=args.assembly,
+    )
+
+    print(f"\n{'=' * 60}")
+    print("COMPATIBLE MANUFACTURERS")
+    print(f"{'=' * 60}")
+
+    print("\nDesign Constraints:")
+    print(f"  Trace width: {args.trace} mil ({args.trace * 0.0254:.3f} mm)")
+    print(f"  Clearance: {args.clearance} mil ({args.clearance * 0.0254:.3f} mm)")
+    print(f"  Via drill: {args.via} mm")
+    print(f"  Layers: {args.layers}")
+    print(f"  Assembly: {'Required' if args.assembly else 'Not required'}")
+
+    if compatible:
+        print(f"\n✓ Compatible manufacturers ({len(compatible)}):")
+        for profile in compatible:
+            print(f"  - {profile.name} ({profile.website})")
+    else:
+        print("\n✗ No compatible manufacturers found")
+        print("  Consider relaxing constraints or using different design rules")
+
+    print(f"\n{'=' * 60}")
+
+
+def cmd_export_dru(args):
+    """Export KiCad DRC rules file."""
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
+    try:
+        profile = get_profile(args.manufacturer)
+    except ValueError as e:
+        _fail(args, f"Error: {e}")
+
+    rules = profile.get_design_rules(args.layers, args.copper)
+
+    # Generate .kicad_dru content via shared generator
+    dru_content = generate_dru(rules, manufacturer_name=profile.name)
+
+    # Output to specified path or current directory
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        # Default: output to current directory with descriptive filename
+        output_path = Path(f"{profile.id}-{args.layers}layer-{args.copper:.0f}oz.kicad_dru")
+
+    # Ensure parent directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    output_path.write_text(dru_content)
+    if _wants_json(args):
+        emit_json(
+            {
+                "manufacturer": profile.id,
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "output": str(output_path),
+            }
+        )
+        return
+    print(f"DRC rules exported to: {output_path}")
+
+
+def cmd_apply_rules(args):
+    """Apply manufacturer design rules to a KiCad project or PCB file."""
+    from kicad_tools.core.project_file import (
+        load_project,
+        save_project,
+        set_manufacturer_metadata,
+    )
+    from kicad_tools.core.rule_loosening import RuleLooseningError
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.manufacturers.project_generator import (
+        build_project_rules,
+        merge_project_rules_guarded,
+    )
+
+    json_mode = _wants_json(args)
+
+    try:
+        profile = get_profile(args.manufacturer)
+    except ValueError as e:
+        _fail(args, f"Error: {e}")
+
+    rules = profile.get_design_rules(args.layers, args.copper)
+    file_path = Path(args.file)
+
+    if not file_path.exists():
+        _fail(args, f"Error: File not found: {file_path}", stderr=True)
+
+    payload = {
+        "file": str(file_path),
+        "manufacturer": profile.id,
+        "layers": args.layers,
+        "copper_oz": args.copper,
+        "dry_run": bool(args.dry_run),
+        "rules": rules.to_dict(),
+    }
+
+    if not json_mode:
+        print(f"\n{'=' * 60}")
+        print(f"APPLYING {profile.name.upper()} DESIGN RULES")
+        print(f"{'=' * 60}")
+        print(f"\nFile: {file_path}")
+        print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+
+        print("\nDesign Rules to Apply:")
+        print(
+            f"  Min clearance:     {rules.min_clearance_mm:.4f} mm "
+            f"({rules.min_clearance_mil:.1f} mil)"
+        )
+        print(
+            f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm "
+            f"({rules.min_trace_width_mil:.1f} mil)"
+        )
+        print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
+        print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
+        # The .kicad_pro built-in floor is the micro-via one (#3734/#3736):
+        # KiCad has no micro-via annular key, so standard-via annular ring is
+        # enforced by the .kicad_dru "Annular Ring" rule and kct check --mfr.
+        print(
+            f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm (standard vias; "
+            f".kicad_pro floor {build_project_rules(rules)['min_via_annular_width']:.3f} mm "
+            "for micro vias)"
+        )
+        print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
+
+    if args.dry_run:
+        if json_mode:
+            emit_json(payload)
+        else:
+            print("\n(dry run - no changes made)")
+            print(f"\n{'=' * 60}")
+        return
+
+    # Handle project files (.kicad_pro)
+    if file_path.suffix == ".kicad_pro":
+        try:
+            data = load_project(file_path)
+        except Exception as e:
+            _fail(args, f"Error loading project: {e}", stderr=True)
+
+        # Apply manufacturer rules through the one #6191 stricter-wins policy
+        # the .kicad_pcb branch below already uses (Issue #7385): a stricter
+        # authored minimum or Default-netclass value is kept, and a rewrite
+        # that would loosen an authored rule refuses.  merge_project_rules
+        # also writes the Default netclass so KiCad's clearance DRC test
+        # (which reads the applied netclass clearance, not
+        # design_settings.rules.min_clearance) enforces the manufacturer tier
+        # instead of the stock 0.20 mm Default (issue #4097).
+        try:
+            merge_report = merge_project_rules_guarded(data, rules, writer="kct mfr apply-rules")
+        except RuleLooseningError as e:
+            _fail(args, f"Error: {e}", stderr=True)
+
+        # Set manufacturer metadata
+        set_manufacturer_metadata(
+            data,
+            manufacturer_id=profile.id,
+            layers=args.layers,
+            copper_oz=args.copper,
+        )
+        payload["rule_merge"] = merge_report.to_dict()
+        if not json_mode:
+            for line in merge_report.messages():
+                print(line)
+
+        # Save
+        output_path = Path(args.output) if args.output else file_path
+        try:
+            save_project(data, output_path)
+            if not json_mode:
+                print(f"\nProject file updated: {output_path}")
+        except Exception as e:
+            _fail(args, f"Error saving project: {e}", stderr=True)
+
+        payload["updated"] = "project"
+        payload["output"] = str(output_path)
+
+    # Handle PCB files (.kicad_pcb) - update zone clearances
+    elif file_path.suffix == ".kicad_pcb":
+        try:
+            sexp = load_pcb(file_path)
+        except Exception as e:
+            _fail(args, f"Error loading PCB: {e}", stderr=True)
+
+        zones_updated = _update_zone_clearances(sexp, rules.min_clearance_mm)
+
+        if not json_mode:
+            if zones_updated > 0:
+                print(
+                    f"\nUpdated {zones_updated} zone(s) with clearance: "
+                    f"{rules.min_clearance_mm:.4f} mm"
+                )
+            else:
+                print("\nNo zones found to update.")
+
+        # Save
+        output_path = Path(args.output) if args.output else file_path
+        try:
+            save_pcb(sexp, output_path)
+            if not json_mode:
+                print(f"PCB file updated: {output_path}")
+        except Exception as e:
+            _fail(args, f"Error saving PCB: {e}", stderr=True)
+
+        payload["updated"] = "pcb"
+        payload["output"] = str(output_path)
+        payload["zones_updated"] = zones_updated
+
+        # A bare .kicad_pcb has no sibling .kicad_pro, so kicad-cli pcb drc
+        # silently falls back to KiCad factory defaults (0.20 mm track/clearance,
+        # etc.).  Create-or-merge the sibling .kicad_pro (and a companion
+        # .kicad_dru) from the manufacturer profile so both the GUI and
+        # kicad-cli enforce the intended tier, including the Default netclass
+        # clearance (issue #4097).  Non-fatal: the zone-clearance write above
+        # already succeeded, so a sidecar failure only warns.
+        from kicad_tools.manufacturers import (
+            resolve_pcb_fabrication_overrides,
+            write_drc_constraints,
+        )
+
+        # Issue #5006: retain (or reject) a validated, cited per-board
+        # fabrication-floor override the same way `kct check
+        # --emit-drc-constraints`, the manufacturing export path, and `kct
+        # route`'s sidecar emission do, so `kct mfr apply-rules` cannot
+        # silently revert a reviewed floor back to the profile's
+        # conservative default either.
+        pcb_rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+            output_path, rules, manufacturer_id=profile.id
+        )
+        if fab_override_msg is not None and not json_mode:
+            prefix = "Warning: " if fab_override_msg.startswith("ignoring") else ""
+            print(prefix + fab_override_msg)
+
+        sidecars: list[str] = []
+        try:
+            written = write_drc_constraints(
+                output_path,
+                pcb_rules,
+                manufacturer_id=profile.id,
+                layers=args.layers,
+                copper_oz=args.copper,
+            )
+            if written:
+                sidecars = [str(p) for p in written]
+                if not json_mode:
+                    print("DRC-constraint sidecars updated: " + ", ".join(sidecars))
+        except (ValueError, OSError, KeyError) as e:
+            print(
+                f"Warning: could not write DRC-constraint sidecars: {e}",
+                file=sys.stderr,
+            )
+        payload["sidecars"] = sidecars
+
+    else:
+        if json_mode:
+            emit_json({"error": f"Unsupported file type: {file_path.suffix}"})
+            sys.exit(1)
+        print(f"Error: Unsupported file type: {file_path.suffix}", file=sys.stderr)
+        print("Supported: .kicad_pro, .kicad_pcb")
+        sys.exit(1)
+
+    if json_mode:
+        emit_json(payload)
+        return
+
+    print(f"\n{'=' * 60}")
+    print(f"Manufacturer set to: {profile.name} ({profile.id})")
+    print(f"{'=' * 60}")
+
+
+def _update_zone_clearances(sexp, clearance_mm: float) -> int:
+    """Update zone clearances in a PCB S-expression.
+
+    Args:
+        sexp: PCB S-expression tree
+        clearance_mm: New clearance value in mm
+
+    Returns:
+        Number of zones updated
+    """
+    from kicad_tools.sexp import SExp
+
+    zones_updated = 0
+
+    for child in sexp.values:
+        if isinstance(child, SExp) and child.tag == "zone":
+            # Find or create connect_pads element
+            connect_pads = child.find_child("connect_pads")
+            if connect_pads:
+                # Update existing clearance
+                clearance = connect_pads.find_child("clearance")
+                if clearance:
+                    clearance.set_value(0, clearance_mm)
+                else:
+                    # Add clearance element
+                    new_clearance = SExp.list("clearance", clearance_mm)
+                    connect_pads.children.append(new_clearance)
+                zones_updated += 1
+
+    return zones_updated
+
+
+def resolve_layer_count(pcb, explicit: int | None) -> int:
+    """Effective copper-layer count: explicit value, else the board's, else 2."""
+    if explicit is not None:
+        return explicit
+    detected = len(pcb.copper_layers)
+    return detected if detected > 0 else 2
+
+
+def cmd_validate(args):
+    """Validate a PCB against manufacturer design rules with the kct DRC engine.
+
+    Issue #7188: runs :class:`~kicad_tools.validate.DRCChecker` -- the same
+    engine and pad-grid policy as ``kct check --mfr`` and
+    ``ManufacturingAudit`` (#3497) -- so geometric clearance and connectivity
+    are actually checked.  No kicad-cli is needed; ``kct drc <pcb> --mfr <m>``
+    is the kicad-cli path.  Two fab-*setting* checks the engine does not have
+    (footprint pad drill and zone ``connect_pads`` clearance) are kept from
+    the old walker, as errors.  Exit 1 on any error; warnings do not fail.
+    """
+    from kicad_tools.core.sexp_file import load_pcb
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    json_mode = _wants_json(args)
+
+    try:
+        profile = get_profile(args.manufacturer)
+    except ValueError as e:
+        _fail(args, f"Error: {e}")
+
+    file_path = Path(args.file)
+
+    if not file_path.exists():
+        _fail(args, f"Error: File not found: {file_path}", stderr=True)
+
+    if file_path.suffix != ".kicad_pcb":
+        _fail(args, f"Error: Expected .kicad_pcb file, got: {file_path.suffix}", stderr=True)
+
+    try:
+        sexp = load_pcb(file_path)
+        pcb = PCB.load(str(file_path))
+    except Exception as e:
+        _fail(args, f"Error loading PCB: {e}", stderr=True)
+
+    # Layer count: explicit --layers wins; otherwise read it from the board
+    # (same rule as ``kct check``) so 4-layer boards get 4-layer rules.
+    layers = resolve_layer_count(pcb, args.layers)
+    rules = profile.get_design_rules(layers, args.copper)
+
+    if not json_mode:
+        print(f"\n{'=' * 60}")
+        print(f"VALIDATING AGAINST {profile.name.upper()} RULES")
+        print(f"{'=' * 60}")
+        print(f"\nFile: {file_path}")
+        print(f"Configuration: {layers}-layer, {args.copper}oz copper")
+
+        print("\nDesign Rules:")
+        print(
+            f"  Min clearance:     {rules.min_clearance_mm:.4f} mm "
+            f"({rules.min_clearance_mil:.1f} mil)"
+        )
+        print(
+            f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm "
+            f"({rules.min_trace_width_mil:.1f} mil)"
+        )
+        print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
+        print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
+
+    checker = DRCChecker(
+        pcb,
+        manufacturer=args.manufacturer,
+        layers=layers,
+        copper_oz=args.copper,
+    )
+    results = checker.check_all(pad_grid_auto_derive=True)
+
+    def _finding(v) -> dict:
+        return {
+            "type": v.rule_id,
+            "detail": v.message,
+            "severity": v.severity,
+            "rule_id": v.rule_id,
+        }
+
+    errors = [_finding(v) for v in results.errors]
+    errors.extend(
+        {"type": v_type, "detail": detail, "severity": "error", "rule_id": rule_id}
+        for v_type, rule_id, detail in _fab_setting_findings(
+            sexp, rules, declared_clearance_mm=_declared_clearance_mm(file_path)
+        )
+    )
+    warnings = [_finding(v) for v in results.warnings]
+
+    if json_mode:
+        emit_json(
+            {
+                "file": str(file_path),
+                "manufacturer": profile.id,
+                "layers": layers,
+                "copper_oz": args.copper,
+                "rules": rules.to_dict(),
+                "violations": errors,
+                "warnings": warnings,
+                "ok": not errors,
+            }
+        )
+        if errors:
+            sys.exit(1)
+        return
+
+    print(f"\n{'-' * 60}")
+    mfr = profile.name.upper()
+
+    if errors:
+        print(f"\nERRORS FOUND: {len(errors)}")
+        print()
+        for finding in errors:
+            print(f"  [{finding['rule_id']}] {finding['detail']}")
+    else:
+        print(f"\nNo errors from the kct DRC engine for {mfr} ({layers}-layer).")
+
+    if warnings:
+        print(
+            f"\nWarnings: {len(warnings)} (run `kct check {file_path} --mfr {profile.id}` to list)"
+        )
+
+    print(f"\nFor kicad-cli's own DRC: kct drc {file_path} --mfr {profile.id}")
+    print(f"\n{'=' * 60}")
+    if errors:
+        sys.exit(1)
+
+
+#: ``(type, rule_id)`` of the residual fab-setting findings (Issue #7188).
+_HOLE_SIZE = ("HOLE_SIZE", "fab_pad_drill_min")
+_ZONE_CLEARANCE = ("ZONE_CLEARANCE", "fab_zone_clearance_setting")
+
+
+def _declared_clearance_mm(pcb_path) -> float | None:
+    """Largest unconditional clearance the board's own files declare (Issue #7246).
+
+    Takes the max of the ``.kicad_dru``, project minimum and netclass
+    clearances; ``None`` when no sidecar declares one.
+    """
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    declared = read_declared_clearance_rules(pcb_path)
+    values = [
+        v
+        for v in (
+            declared.dru_mm,
+            declared.project_min_clearance_mm,
+            declared.net_class_clearance_mm,
+            declared.board_net_class_mm,
+        )
+        if v is not None
+    ]
+    return max(values) if values else None
+
+
+def _fab_setting_findings(
+    sexp, rules, declared_clearance_mm: float | None = None
+) -> list[tuple[str, str, str]]:
+    """Fab-setting checks ``DRCChecker`` does not cover (Issue #7188).
+
+    * a footprint pad drill below ``min_hole_diameter_mm`` (both
+      ``(footprint ...)`` and legacy ``(module ...)`` tags, issue #4892);
+    * a zone ``connect_pads`` clearance *setting* below ``min_clearance_mm``
+      whose *effective* clearance is also below it: KiCad fills to the larger
+      of the setting and the rule clearance, so a larger
+      ``declared_clearance_mm`` masks a low raw setting (Issue #7246).
+
+    Trace width and via size/drill are checked by ``DRCChecker``
+    (``DimensionRules``) and are no longer duplicated here.
+
+    Args:
+        sexp: PCB S-expression tree
+        rules: DesignRules from manufacturer profile
+        declared_clearance_mm: Largest board/netclass/DRU clearance declared
+            for the board, or ``None`` when none is known.
+
+    Returns:
+        List of ``(type, rule_id, detail)`` tuples; every one is an error.
+    """
+    from kicad_tools.sexp import SExp
+
+    findings: list[tuple[str, str, str]] = []
+
+    # Check zone clearance settings
+    for child in sexp.values:
+        if isinstance(child, SExp) and child.tag == "zone":
+            # Keepout zones (e.g. "Remove isolated pour fragment" cutouts)
+            # are not pours: their connect_pads clearance is a KiCad
+            # placeholder (0) that never applies, so it is not a fab setting.
+            if child.find_child("keepout") is not None:
+                continue
+            connect_pads = child.find_child("connect_pads")
+            if connect_pads:
+                clearance = connect_pads.find_child("clearance")
+                if clearance:
+                    zone_clearance = clearance.get_float(0) or 0.0
+                    effective = max(zone_clearance, declared_clearance_mm or 0.0)
+                    if effective < rules.min_clearance_mm:
+                        net = child.find_child("net_name") or child.find_child("net")
+                        net_name = (net.get_string(0) if net else None) or "unknown"
+                        findings.append(
+                            (
+                                *_ZONE_CLEARANCE,
+                                f"Zone '{net_name}' clearance {effective:.4f}mm "
+                                f"< min {rules.min_clearance_mm:.4f}mm",
+                            )
+                        )
+
+    # Check pad drill sizes in footprints
+    for child in sexp.values:
+        if isinstance(child, SExp) and _is_footprint_tag(child.tag):
+            ref = None
+            for fp_text in child.find_children("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref = fp_text.get_string(1)
+                    break
+
+            for pad in child.find_children("pad"):
+                drill = pad.find_child("drill")
+                if drill:
+                    drill_size = drill.get_float(0) or 0.0
+                    if drill_size > 0 and drill_size < rules.min_hole_diameter_mm:
+                        findings.append(
+                            (
+                                *_HOLE_SIZE,
+                                f"{ref or 'Unknown'}: Hole {drill_size:.3f}mm "
+                                f"< min {rules.min_hole_diameter_mm:.3f}mm",
+                            )
+                        )
+
+    return findings
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="PCB Manufacturer Management Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  mfr.py list                       List all manufacturers
+  mfr.py info jlcpcb                Show JLCPCB details
+  mfr.py rules jlcpcb               Show 2-layer rules (default)
+  mfr.py rules seeed --layers 4     Seeed 4-layer rules
+  mfr.py compare                    Compare 2-layer rules (default)
+  mfr.py find --trace 5 --via 0.3   Find compatible manufacturers
+  mfr.py export-dru jlcpcb          Export KiCad DRC rules
+        """,
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # list
+    p_list = subparsers.add_parser("list", help="List manufacturers")
+    add_format_flag(p_list)
+    p_list.set_defaults(func=cmd_list)
+
+    # info
+    p_info = subparsers.add_parser("info", help="Show manufacturer info")
+    p_info.add_argument("manufacturer", help="Manufacturer ID")
+    add_format_flag(p_info)
+    p_info.set_defaults(func=cmd_info)
+
+    # rules
+    p_rules = subparsers.add_parser("rules", help="Show design rules")
+    p_rules.add_argument("manufacturer", help="Manufacturer ID")
+    p_rules.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_rules.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    # The historical inner-only "--json" boolean (append-JSON-after-prose) was
+    # a dead surface -- unreachable through kct because the outer parser never
+    # declared it.  Retired in favour of the canonical --format json (#4674).
+    add_format_flag(p_rules)
+    p_rules.set_defaults(func=cmd_rules)
+
+    # compare
+    p_compare = subparsers.add_parser("compare", help="Compare manufacturers")
+    p_compare.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    add_format_flag(p_compare)
+    p_compare.set_defaults(func=cmd_compare)
+
+    # find
+    p_find = subparsers.add_parser("find", help="Find compatible manufacturers")
+    p_find.add_argument("--trace", type=float, default=5.0, help="Min trace width (mil)")
+    p_find.add_argument("--clearance", type=float, default=5.0, help="Min clearance (mil)")
+    p_find.add_argument("--via", type=float, default=0.3, help="Min via drill (mm)")
+    p_find.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_find.add_argument("--assembly", action="store_true", help="Require assembly")
+    p_find.set_defaults(func=cmd_find)
+
+    # export-dru
+    p_dru = subparsers.add_parser("export-dru", help="Export KiCad DRC rules")
+    p_dru.add_argument("manufacturer", help="Manufacturer ID")
+    p_dru.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_dru.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    p_dru.add_argument("-o", "--output", type=Path, help="Output path")
+    add_format_flag(p_dru)
+    p_dru.set_defaults(func=cmd_export_dru)
+
+    # apply-rules
+    p_apply = subparsers.add_parser(
+        "apply-rules",
+        help="Apply manufacturer design rules to project/PCB",
+        description="Apply manufacturer design rules to a KiCad project (.kicad_pro) "
+        "or update zone clearances in a PCB file (.kicad_pcb).",
+    )
+    p_apply.add_argument("file", help="Path to .kicad_pro or .kicad_pcb file")
+    p_apply.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    p_apply.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_apply.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    p_apply.add_argument("-o", "--output", help="Output file (default: modify in place)")
+    p_apply.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    add_format_flag(p_apply)
+    p_apply.set_defaults(func=cmd_apply_rules)
+
+    # validate
+    p_validate = subparsers.add_parser(
+        "validate",
+        help="Validate PCB against manufacturer rules (kct DRC engine)",
+        description="Check a PCB against manufacturer design rules with the kct DRC "
+        "engine (clearance, connectivity, dimensions -- the same engine as "
+        "`kct check --mfr`), plus pad-drill and zone-clearance settings. No "
+        "kicad-cli needed; use `kct drc <pcb> --mfr <m>` for kicad-cli's DRC. "
+        "Exits 1 on any error; warnings do not fail.",
+    )
+    p_validate.add_argument("file", help="Path to .kicad_pcb file")
+    p_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    p_validate.add_argument(
+        "-l",
+        "--layers",
+        type=int,
+        default=None,
+        help="Layer count (default: auto-detect from board)",
+    )
+    p_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    add_format_flag(p_validate)
+    p_validate.set_defaults(func=cmd_validate)
+
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

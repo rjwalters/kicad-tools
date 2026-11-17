@@ -1,0 +1,730 @@
+"""
+Base classes for PCB manufacturer profiles.
+
+Provides dataclasses for design rules, assembly capabilities, and
+manufacturer profiles that can be used across different fabrication houses.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+# Data directory containing YAML configuration files
+_DATA_DIR = Path(__file__).parent / "data"
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file, with graceful fallback if pyyaml is not installed."""
+    try:
+        import yaml
+    except ImportError as e:
+        raise ImportError(
+            "PyYAML is required to load manufacturer configurations from YAML. "
+            "Install it with: pip install pyyaml  or  pip install kicad-tools[constraints]"
+        ) from e
+
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def load_design_rules_from_yaml(manufacturer_id: str) -> dict[str, DesignRules]:
+    """
+    Load design rules from a YAML configuration file.
+
+    Args:
+        manufacturer_id: Manufacturer identifier (e.g., "jlcpcb", "seeed")
+
+    Returns:
+        Dict mapping configuration name to DesignRules instance
+
+    Raises:
+        FileNotFoundError: If configuration file doesn't exist
+        ImportError: If pyyaml is not installed
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"No configuration file found for manufacturer: {manufacturer_id}")
+
+    data = _load_yaml(yaml_path)
+    rules = {}
+
+    for config_name, config_data in data.get("design_rules", {}).items():
+        rules[config_name] = DesignRules(**config_data)
+
+    return rules
+
+
+#: Threshold names every DFM table entry must carry (Issue #8839).
+DFM_THRESHOLD_NAMES: tuple[str, ...] = (
+    "trace_spacing",
+    "pad_spacing",
+    "annular_ring_via",
+    "annular_ring_pth",
+    "mask_bridge",
+)
+
+
+#: Max |declared - offered| oz still treated as the offered weight (0.434 -> 0.5).
+DFM_OZ_SNAP_TOLERANCE = 0.1
+
+
+@dataclass(frozen=True)
+class DfmThreshold:
+    """One DFM threshold with its provenance (Issue #8839)."""
+
+    danger_mm: float
+    source_url: str
+    retrieved: str  # ISO date
+    basis: str  # "capability_page" | "observed_jlcdfm"
+    warning_mm: float | None = None
+    warning_basis: str | None = None  # defaults to ``basis`` when None
+
+
+@dataclass(frozen=True)
+class DfmEntry:
+    """Thresholds for one (layers, outer oz, inner oz) stackup."""
+
+    key: str
+    layers: int
+    outer_oz: float
+    inner_oz: float
+    thresholds: dict[str, DfmThreshold]
+
+
+@dataclass(frozen=True)
+class DfmThresholdTable:
+    """Versioned per-stackup DFM threshold table for one manufacturer."""
+
+    version: int
+    entries: tuple[DfmEntry, ...]
+
+    def lookup(self, layers: int, outer_oz: float, inner_oz: float) -> DfmEntry | None:
+        """Lookup that snaps to the fab's offered weights, else ``None``.
+
+        A declared weight within ``DFM_OZ_SNAP_TOLERANCE`` of an offered weight
+        matches it (KiCad's stock 0.0152 mm inner copper is 0.434 oz, i.e. the
+        fab's 0.5 oz).  A weight the fab does not offer (3 oz, 2.5 oz) never
+        falls back to another weight.
+        """
+        for e in self.entries:
+            if (
+                e.layers == layers
+                and abs(e.outer_oz - outer_oz) <= DFM_OZ_SNAP_TOLERANCE
+                and abs(e.inner_oz - inner_oz) <= DFM_OZ_SNAP_TOLERANCE
+            ):
+                return e
+        return None
+
+
+def load_dfm_thresholds(manufacturer_id: str) -> DfmThresholdTable | None:
+    """Load the ``dfm_thresholds:`` section of a fab's YAML (None if absent).
+
+    Raises ``ValueError`` if an entry lacks a threshold name, a ``source_url``
+    or a ``retrieved`` date: provenance is mandatory per number.
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}.yaml"
+    if not yaml_path.exists():
+        return None
+    section = _load_yaml(yaml_path).get("dfm_thresholds")
+    if not section:
+        return None
+    entries = []
+    for key, raw in section.get("entries", {}).items():
+        ths: dict[str, DfmThreshold] = {}
+        for name in DFM_THRESHOLD_NAMES:
+            t = (raw.get("thresholds") or {}).get(name)
+            if t is None:
+                raise ValueError(f"{manufacturer_id} dfm_thresholds[{key}] missing '{name}'")
+            for req in ("source_url", "retrieved", "danger_mm", "basis"):
+                if not t.get(req):
+                    raise ValueError(
+                        f"{manufacturer_id} dfm_thresholds[{key}].{name} missing {req}"
+                    )
+            ths[name] = DfmThreshold(
+                danger_mm=float(t["danger_mm"]),
+                warning_mm=None if t.get("warning_mm") is None else float(t["warning_mm"]),
+                source_url=str(t["source_url"]),
+                retrieved=str(t["retrieved"]),
+                basis=str(t["basis"]),
+                warning_basis=t.get("warning_basis"),
+            )
+        entries.append(
+            DfmEntry(
+                key=key,
+                layers=int(raw["layers"]),
+                outer_oz=float(raw["outer_oz"]),
+                inner_oz=float(raw["inner_oz"]),
+                thresholds=ths,
+            )
+        )
+    return DfmThresholdTable(version=int(section["version"]), entries=tuple(entries))
+
+
+def load_capability_flags(manufacturer_id: str) -> dict[str, Any]:
+    """Load the profile-level ``capabilities:`` mapping from a fab's YAML.
+
+    Returns an empty dict when the file or the key is absent.
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}.yaml"
+    if not yaml_path.exists():
+        return {}
+    return dict(_load_yaml(yaml_path).get("capabilities") or {})
+
+
+@dataclass
+class FileNamingConvention:
+    """Output file naming rules for a manufacturer."""
+
+    bom_filename: str = "bom_{manufacturer}.csv"
+    pnp_filename: str = "cpl_{manufacturer}.csv"
+    gerber_zip_name: str = "gerbers.zip"
+
+
+def load_rotation_corrections(manufacturer_id: str) -> dict[str, float]:
+    """Load rotation corrections from a YAML data file.
+
+    Args:
+        manufacturer_id: Manufacturer identifier (e.g., "jlcpcb")
+
+    Returns:
+        Dict mapping footprint glob pattern to rotation offset in degrees.
+        Empty dict if no rotation corrections file exists.
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}_rotations.yaml"
+    if not yaml_path.exists():
+        return {}
+
+    data = _load_yaml(yaml_path)
+    return data.get("rotation_corrections", {})
+
+
+def match_rotation_correction(
+    footprint: str,
+    corrections: dict[str, float],
+) -> float:
+    """Find the rotation correction for a footprint using glob matching.
+
+    Patterns are matched using :func:`fnmatch.fnmatch` so that entries
+    like ``SOT-23*`` match ``SOT-23``, ``SOT-23-3``, etc.
+    Match the full identifier first so library-specific overrides retain
+    precedence. If none matches, try the package name after the library
+    separator, allowing the same preset to handle KiCad-qualified names.
+
+    Args:
+        footprint: Footprint name to match (e.g. ``SOT-23-3``)
+        corrections: Dict mapping glob pattern to rotation degrees
+
+    Returns:
+        Rotation correction in degrees, or ``0.0`` if no match.
+    """
+    for pattern, offset in corrections.items():
+        if fnmatch.fnmatch(footprint, pattern):
+            return float(offset)
+    if ":" in footprint:
+        package = footprint.split(":", 1)[1]
+        for pattern, offset in corrections.items():
+            if fnmatch.fnmatch(package, pattern):
+                return float(offset)
+    return 0.0
+
+
+class UnsupportedCopperWeightError(ValueError):
+    """The profile has no floor table entry for the requested copper weight."""
+
+
+@dataclass
+class DesignRules:
+    """PCB design constraints for a specific layer count and copper weight."""
+
+    # Trace constraints
+    min_trace_width_mm: float
+    min_clearance_mm: float
+
+    # Via constraints
+    min_via_drill_mm: float
+    min_via_diameter_mm: float
+    min_annular_ring_mm: float
+
+    # Hole constraints
+    min_hole_diameter_mm: float = 0.3
+    max_hole_diameter_mm: float = 6.3
+
+    # Edge constraints
+    min_copper_to_edge_mm: float = 0.3
+    min_hole_to_edge_mm: float = 0.5
+
+    # Copper clearance to a V-score line (Issue #6177).  Distinct from
+    # ``min_copper_to_edge_mm``, which is for routed (milled) edges: the
+    # scoring blade cuts a V on both faces and fabs ask for more room.
+    # ``None`` means the fab publishes no V-score figure; consumers fall back
+    # to :data:`kicad_tools.manufacturers.vscore.UNSOURCED_VSCORE_CLEARANCE_MM`
+    # and report the value as unsourced.  Every set value must cite the fab's
+    # published capability page in the profile YAML.
+    min_copper_to_vscore_mm: float | None = None
+
+    # Hole-to-hole (drill-to-drill) edge-to-edge spacing.  This is distinct
+    # from ``min_hole_to_edge_mm`` (hole-to-board-edge) and from
+    # ``min_clearance_mm`` (copper trace/space).  Canonical fab value is
+    # 0.5 mm (matches the explain spec and the placement collision check).
+    min_hole_to_hole_mm: float = 0.5
+
+    # Silkscreen constraints
+    min_silkscreen_width_mm: float = 0.15
+    min_silkscreen_height_mm: float = 0.8
+
+    # Solder mask
+    min_solder_mask_dam_mm: float = 0.1
+    min_solder_mask_clearance_mm: float = 0.05
+
+    # Optional process-specific clearances; None preserves legacy profiles.
+    min_silk_to_pad_clearance_mm: float | None = None
+    # Two-tier silk-to-pad bands (Issue #8844): error at/below ``danger``,
+    # warning at/below ``warning``.  None keeps the single-tier legacy
+    # behaviour driven by ``min_silk_to_pad_clearance_mm``.
+    silk_to_pad_danger_mm: float | None = None
+    silk_to_pad_warning_mm: float | None = None
+    min_smd_pad_clearance_mm: float | None = None
+    min_pth_hole_to_track_mm: float | None = None
+    min_inner_pth_hole_to_copper_mm: float | None = None
+
+    # Inner-layer copper clearance floor (Issue #8836).  ``min_clearance_mm`` is
+    # the OUTER-layer floor (it scales with outer copper weight); when inner
+    # copper is lighter the fab's inner floor is looser.  ``None`` means the
+    # same floor applies to every copper layer.
+    min_inner_clearance_mm: float | None = None
+
+    # Pad constraints
+    min_pad_size_mm: float = 0.25
+
+    # Board specifications
+    board_thickness_mm: float = 1.6
+    outer_copper_oz: float = 1.0
+    inner_copper_oz: float = 0.5
+
+    # Maximum board dimensions (defaults based on common manufacturer limits)
+    max_board_width_mm: float = 400.0
+    max_board_height_mm: float = 500.0
+
+    # Capability flags
+    #
+    # ``via_in_pad_supported`` mirrors the router's
+    # ``MfrLimits.via_in_pad_supported`` (see
+    # ``src/kicad_tools/router/mfr_limits.py``).  When ``False``, the
+    # validate-side ``via_in_pad`` DRC rule flags any via whose drill
+    # circle is fully contained within an SMD pad on the same net.
+    # When ``True``, the manufacturer offers epoxy-filled and plated-over
+    # via-in-pad processing (e.g., JLCPCB Capability Plus / Tier 1,
+    # PCBWay), so the rule is suppressed.
+    #
+    # NOTE: KiCad's ``.kicad_dru`` format has no native via-in-pad rule,
+    # so ``dru_generator.py`` does NOT translate this field.  Enforcement
+    # lives entirely in the pure-Python ``DRCChecker.check_via_in_pad``.
+    via_in_pad_supported: bool = False
+
+    # Issue #5009: ``via_in_pad_supported`` is a bare capability flag --
+    # it says the manufacturer offers via-in-pad *somewhere* in its
+    # catalog, with no attached drill range, layer-count floor, annular
+    # ring floor, or filled/capped requirement.  ``via_in_pad_process_id``
+    # is a key into
+    # ``kicad_tools.manufacturers.fabrication_process.FABRICATION_PROCESSES``
+    # naming the SPECIFIC, orderable process this layer/copper
+    # configuration is eligible for (e.g. ``"jlcpcb-tier1-pofv-4l"`` for
+    # JLCPCB Capability Plus's 4+ layer Plated-Over Filled Via process).
+    # ``None`` means no real published process is modeled for this
+    # configuration -- this is deliberately the case for JLCPCB Capability
+    # Plus's 2-layer configs even though ``via_in_pad_supported`` is
+    # ``True`` there (Capability Plus is a 2-layer-orderable tier, but its
+    # via-in-pad-specific POFV process itself requires 4+ layers).  The
+    # ``via_in_pad`` DRC rule treats "supported but no process id" as a
+    # DISTINCT failure from "not supported": a bare capability flag with
+    # no attached process must not suppress a via-in-pad finding.
+    via_in_pad_process_id: str | None = None
+
+    # Issue #6518: via-type capabilities.  ``blind_buried_vias_supported``
+    # covers ``(via blind ...)`` and ``(via buried ...)`` (sequential
+    # lamination / controlled-depth drilling); ``micro_vias_supported``
+    # covers ``(via micro ...)`` (laser-drilled HDI microvias).  The
+    # ``via_type_unsupported`` DRC rule
+    # (:mod:`kicad_tools.validate.rules.via_type_capability`) errors on every
+    # via whose type the profile lacks.  Default ``False`` fails closed: set
+    # ``true`` in a profile YAML only with a cited, dated source from the
+    # fab's published capability page.
+    blind_buried_vias_supported: bool = False
+    micro_vias_supported: bool = False
+
+    # Plated component pads can require wider rings than vias. None keeps
+    # existing profiles' shared annular-ring behavior.
+    min_pth_annular_ring_mm: float | None = None
+
+    def __post_init__(self) -> None:
+        """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
+
+        The inner floor models lighter inner copper, so it is never stricter
+        than the outer floor.  The project DRU generator's skip predicates
+        (the class arm and ``_zone_clearance_floor``) rely on that ordering:
+        with an inverted profile they would treat an outer-layer authored
+        clearance as redundant while no rule protects it.  Checking here,
+        rather than in the YAML loader, also covers ``dataclasses.replace``
+        and hand-built profiles.
+        """
+        inner = self.min_inner_clearance_mm
+        if inner is not None and inner > self.min_clearance_mm:
+            raise ValueError(
+                f"min_inner_clearance_mm ({inner}) must not exceed "
+                f"min_clearance_mm ({self.min_clearance_mm}): the inner-layer "
+                "floor is the looser one (lighter inner copper)"
+            )
+
+    @property
+    def min_trace_width_mil(self) -> float:
+        """Trace width in mils (thousandths of an inch)."""
+        return self.min_trace_width_mm / 0.0254
+
+    @property
+    def min_clearance_mil(self) -> float:
+        """Clearance in mils."""
+        return self.min_clearance_mm / 0.0254
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "min_trace_width_mm": self.min_trace_width_mm,
+            "min_clearance_mm": self.min_clearance_mm,
+            "min_via_drill_mm": self.min_via_drill_mm,
+            "min_via_diameter_mm": self.min_via_diameter_mm,
+            "min_annular_ring_mm": self.min_annular_ring_mm,
+            "min_pth_annular_ring_mm": self.min_pth_annular_ring_mm,
+            "min_hole_diameter_mm": self.min_hole_diameter_mm,
+            "max_hole_diameter_mm": self.max_hole_diameter_mm,
+            "min_copper_to_edge_mm": self.min_copper_to_edge_mm,
+            "min_hole_to_edge_mm": self.min_hole_to_edge_mm,
+            "min_hole_to_hole_mm": self.min_hole_to_hole_mm,
+            "min_silkscreen_width_mm": self.min_silkscreen_width_mm,
+            "min_silkscreen_height_mm": self.min_silkscreen_height_mm,
+            "min_solder_mask_dam_mm": self.min_solder_mask_dam_mm,
+            "min_solder_mask_clearance_mm": self.min_solder_mask_clearance_mm,
+            "min_pad_size_mm": self.min_pad_size_mm,
+            "min_silk_to_pad_clearance_mm": self.min_silk_to_pad_clearance_mm,
+            "silk_to_pad_danger_mm": self.silk_to_pad_danger_mm,
+            "silk_to_pad_warning_mm": self.silk_to_pad_warning_mm,
+            "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
+            "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
+            "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
+            "min_inner_clearance_mm": self.min_inner_clearance_mm,
+            "board_thickness_mm": self.board_thickness_mm,
+            "outer_copper_oz": self.outer_copper_oz,
+            "inner_copper_oz": self.inner_copper_oz,
+            "max_board_width_mm": self.max_board_width_mm,
+            "max_board_height_mm": self.max_board_height_mm,
+            "via_in_pad_supported": self.via_in_pad_supported,
+            "via_in_pad_process_id": self.via_in_pad_process_id,
+            "blind_buried_vias_supported": self.blind_buried_vias_supported,
+            "micro_vias_supported": self.micro_vias_supported,
+        }
+
+
+@dataclass
+class AssemblyCapabilities:
+    """PCBA assembly constraints."""
+
+    # Component constraints
+    min_component_pitch_mm: float = 0.4
+    min_bga_pitch_mm: float = 0.5
+    max_component_height_mm: float = 25.0
+
+    # Supported package types
+    supported_packages: list[str] = field(
+        default_factory=lambda: [
+            "0201",
+            "0402",
+            "0603",
+            "0805",
+            "1206",
+            "1210",
+            "SOT-23",
+            "SOT-223",
+            "SOT-363",
+            "SOIC-8",
+            "SOIC-14",
+            "SOIC-16",
+            "TSSOP-14",
+            "TSSOP-16",
+            "TSSOP-20",
+            "TSSOP-28",
+            "QFN",
+            "QFP",
+            "LQFP",
+            "BGA",
+        ]
+    )
+
+    # Assembly type
+    supports_double_sided: bool = True
+    supports_bga: bool = True
+    supports_fine_pitch: bool = True  # < 0.5mm pitch
+
+    # Service-tier fields (Issue #7204).  A fab that sells several PCBA
+    # services with different limits (JLCPCB Economic vs Standard) lists one
+    # ``AssemblyCapabilities`` per service in
+    # ``ManufacturerProfile.assembly_tiers``; these fields describe what
+    # distinguishes a tier.  All default to "no published limit".
+    tier_name: str | None = None
+    # Smallest chip package the service places, as an imperial size code
+    # (e.g. ``"0402"``).  ``None`` = no published minimum.
+    min_package: str | None = None
+    # Smallest single PCB (width, height) the service accepts unpanelized.
+    min_board_size_mm: tuple[float, float] | None = None
+    # Whether the service requires edge rails and fiducials.
+    requires_rails_and_fiducials: bool = False
+    # Minimum build time in working days (``None`` = not published).
+    min_build_days: int | None = None
+
+    @property
+    def display_name(self) -> str:
+        """Human label for messages: the tier name, or a generic label."""
+        return self.tier_name or "PCBA"
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "min_component_pitch_mm": self.min_component_pitch_mm,
+            "min_bga_pitch_mm": self.min_bga_pitch_mm,
+            "max_component_height_mm": self.max_component_height_mm,
+            "supported_packages": self.supported_packages,
+            "supports_double_sided": self.supports_double_sided,
+            "supports_bga": self.supports_bga,
+            "supports_fine_pitch": self.supports_fine_pitch,
+            "tier_name": self.tier_name,
+            "min_package": self.min_package,
+            "min_board_size_mm": (list(self.min_board_size_mm) if self.min_board_size_mm else None),
+            "requires_rails_and_fiducials": self.requires_rails_and_fiducials,
+            "min_build_days": self.min_build_days,
+        }
+
+
+@dataclass
+class PartsLibrary:
+    """Parts library information for a manufacturer."""
+
+    name: str  # "LCSC", "OPL", etc.
+    search_url_template: str  # URL with {part_number} placeholder
+    catalog_url: str | None = None
+
+    # Library tiers
+    tiers: dict[str, dict] = field(default_factory=dict)
+    # e.g., {"basic": {"lead_time_days": 3, "setup_fee": 0},
+    #        "extended": {"lead_time_days": 7, "setup_fee": 3}}
+
+    def get_search_url(self, part_number: str) -> str:
+        """Get search URL for a part number."""
+        return self.search_url_template.format(part_number=part_number)
+
+
+@dataclass
+class ManufacturerProfile:
+    """Complete manufacturer profile with all capabilities."""
+
+    # Basic info
+    id: str  # "jlcpcb", "seeed", etc.
+    name: str  # "JLCPCB", "Seeed Fusion", etc.
+    website: str
+
+    # Design rules keyed by configuration
+    # e.g., "2layer_1oz", "4layer_1oz", "4layer_2oz"
+    design_rules: dict[str, DesignRules]
+
+    # Assembly capabilities (None if PCB-only).  For a fab with several PCBA
+    # service tiers this is the capability *superset* (the most capable tier),
+    # so ``supports_assembly()`` and ``kct mfr`` stay truthful.
+    assembly: AssemblyCapabilities | None = None
+
+    # PCBA service tiers, cheapest first (Issue #7204).  Empty when the fab
+    # publishes a single assembly service: checks then use ``assembly``
+    # alone and never invent tiers.
+    assembly_tiers: list[AssemblyCapabilities] = field(default_factory=list)
+
+    # Parts library (None if no standard library)
+    parts_library: PartsLibrary | None = None
+
+    # Lead times in working days
+    lead_times: dict[str, int] = field(
+        default_factory=lambda: {
+            "pcb_standard": 5,
+            "pcb_expedited": 2,
+            "pcba_standard": 7,
+            "pcba_extended": 20,
+        }
+    )
+
+    # BOM format for this manufacturer
+    bom_format: str = "generic"
+
+    # Supported layer counts
+    supported_layers: list[int] = field(default_factory=lambda: [1, 2, 4, 6])
+
+    # Pricing model
+    pricing_model: str = "per_pcb"  # "per_pcb", "per_sqin", etc.
+
+    # Export settings: rotation corrections per footprint pattern
+    rotation_corrections: dict[str, float] = field(default_factory=dict)
+
+    # Export format IDs (keys into BOM_FORMATTERS / PNP_FORMATTERS registries)
+    pnp_format_id: str | None = None
+
+    # Gerber preset ID (key into MANUFACTURER_PRESETS in export/gerber.py)
+    gerber_preset_id: str | None = None
+
+    # File naming convention for export outputs
+    file_naming: FileNamingConvention = field(default_factory=FileNamingConvention)
+
+    # Whether the fab offers V-scoring at all (Issue #6205).  ``False`` only
+    # when the fab's own docs say so (cited in the YAML); ``None`` means
+    # unknown, which is never treated as "unsupported".
+    supports_vscore: bool | None = None
+
+    # Versioned per-stackup DFM threshold table with per-number provenance
+    # (Issue #8839).  ``None`` => this fab has no table (checks unchanged).
+    dfm_thresholds: DfmThresholdTable | None = None
+
+    def get_dfm_entry(self, layers: int, outer_oz: float, inner_oz: float) -> DfmEntry | None:
+        """Strict DFM-table lookup; ``None`` for an uncovered stackup (fail closed)."""
+        if self.dfm_thresholds is None:
+            return None
+        return self.dfm_thresholds.lookup(layers, outer_oz, inner_oz)
+
+    def _base_design_rules(
+        self, layers: int = 4, copper_oz: float = 1.0, *, strict: bool = False
+    ) -> DesignRules:
+        """Profile design rules for a configuration, before DFM-table floors.
+
+        With ``strict=True`` (used by ``kct check`` / ``kct readiness``), a
+        heavier-than-1oz outer weight with no profile entry raises
+        :class:`UnsupportedCopperWeightError` instead of silently falling back
+        to the 1 oz floors (Issue #8836).
+        """
+        # Try exact match first
+        key = f"{layers}layer_{copper_oz:.0f}oz"
+        if key in self.design_rules:
+            return self.design_rules[key]
+
+        # Never silently substitute a LIGHTER copper weight's floors for a
+        # heavier board (Issue #8836): 2 oz floors are looser-to-tighter than
+        # 1 oz, so a 1 oz fallback would pass boards the fab rejects.
+        if strict and copper_oz > 1.0 + 1e-6:
+            have = sorted({k for k in self.design_rules if k.startswith(f"{layers}layer_")})
+            raise UnsupportedCopperWeightError(
+                f"{self.name}: no design-rule floors for {layers}-layer boards with "
+                f"{copper_oz:g} oz outer copper (profile has: {', '.join(have) or 'none'}). "
+                "Add a profile entry with a cited source instead of using 1 oz floors."
+            )
+
+        # Try without copper weight
+        key = f"{layers}layer_1oz"
+        if key in self.design_rules:
+            return self.design_rules[key]
+
+        # Fall back to most conservative (2-layer)
+        if "2layer_1oz" in self.design_rules:
+            return self.design_rules["2layer_1oz"]
+
+        # Return first available
+        return list(self.design_rules.values())[0]
+
+    def apply_dfm_floors(self, rules: DesignRules, entry: DfmEntry | None) -> DesignRules:
+        """Tighten ``rules`` with a DFM-table entry's danger floors (Issue #8857).
+
+        The single merge path: ``kct check``, ``kct mfr apply-rules``,
+        ``kct export`` and the generated ``.kicad_dru`` all go through it, so
+        they enforce the same floors.  Floors only tighten (``max``).  Outer
+        and inner spacing stay separate: only ``min_clearance_mm`` (outer) is
+        touched, never ``min_inner_clearance_mm``.
+        """
+        if entry is None:
+            return rules
+        from dataclasses import replace
+
+        t = entry.thresholds
+        return replace(
+            rules,
+            min_clearance_mm=max(rules.min_clearance_mm, t["trace_spacing"].danger_mm),
+            min_smd_pad_clearance_mm=max(
+                rules.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm
+            ),
+            min_annular_ring_mm=max(rules.min_annular_ring_mm, t["annular_ring_via"].danger_mm),
+            min_pth_annular_ring_mm=max(
+                rules.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm
+            ),
+            min_solder_mask_dam_mm=max(rules.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
+        )
+
+    def get_design_rules(
+        self, layers: int = 4, copper_oz: float = 1.0, *, strict: bool = False
+    ) -> DesignRules:
+        """Effective design rules: profile rules tightened by the DFM table.
+
+        With ``strict=True`` (fabs without a table), a heavier-than-1oz outer
+        weight with no profile entry raises
+        :class:`UnsupportedCopperWeightError` (Issue #8836).  When the fab has
+        a ``dfm_thresholds`` entry for the resolved stackup its floors are
+        applied here (Issue #8857), so every consumer sees the same numbers.
+        """
+        rules = self._base_design_rules(layers, copper_oz, strict=strict)
+        if self.dfm_thresholds is None:
+            return rules
+        inner = float(rules.inner_copper_oz) if layers > 2 else 0.0
+        entry = self.get_dfm_entry(layers, float(rules.outer_copper_oz), inner)
+        return self.apply_dfm_floors(rules, entry)
+
+    def copper_options(self, layers: int) -> list[tuple[float, float]]:
+        """Distinct ``(outer_oz, inner_oz)`` builds the profile offers for a layer count.
+
+        Derived from the ``<N>layer_*`` design-rule entries so the stackup-vs-order
+        preflight check (issue #7209) compares against what the fab provides.
+        """
+        prefix = f"{layers}layer_"
+        options: list[tuple[float, float]] = []
+        for key, rules in self.design_rules.items():
+            if key.startswith(prefix):
+                opt = (float(rules.outer_copper_oz), float(rules.inner_copper_oz))
+                if opt not in options:
+                    options.append(opt)
+        return options
+
+    def get_part_search_url(self, part_number: str) -> str | None:
+        """Get URL to search for a part in manufacturer's library."""
+        if self.parts_library:
+            return self.parts_library.get_search_url(part_number)
+        return None
+
+    def supports_assembly(self) -> bool:
+        """Check if manufacturer offers PCBA services."""
+        return self.assembly is not None
+
+    def get_assembly_tiers(self) -> list[AssemblyCapabilities]:
+        """PCBA service tiers, cheapest first.
+
+        Returns ``assembly_tiers`` when the fab publishes several services,
+        else ``[assembly]`` for a single-service fab, else ``[]`` (PCB-only).
+        """
+        if self.assembly_tiers:
+            return list(self.assembly_tiers)
+        if self.assembly is not None:
+            return [self.assembly]
+        return []
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "website": self.website,
+            "supported_layers": self.supported_layers,
+            "bom_format": self.bom_format,
+            "pricing_model": self.pricing_model,
+            "lead_times": self.lead_times,
+            "supports_assembly": self.supports_assembly(),
+            "has_parts_library": self.parts_library is not None,
+        }

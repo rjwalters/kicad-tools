@@ -1,0 +1,2106 @@
+"""
+Manufacturing package generator.
+
+Creates complete manufacturing packages including BOM, CPL, Gerbers,
+KiCad project ZIP, and a manifest with SHA256 checksums.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import zipfile
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+import kicad_tools
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.exceptions import KiCadToolsError
+from kicad_tools.parts.lcsc import LCSCDependencyMissingError
+from kicad_tools.sexp import parse_file
+
+from .assembly import AssemblyConfig, AssemblyPackage, AssemblyPackageResult
+from .preflight import (
+    PreflightChecker,
+    PreflightConfig,
+    PreflightResult,
+    report_source_mismatch,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ManufacturingConfig(AssemblyConfig):
+    """Configuration for manufacturing package generation."""
+
+    # Report settings
+    include_report: bool = True
+
+    # KiCad project ZIP settings
+    include_project_zip: bool = True
+    project_zip_name: str = "kicad_project.zip"
+
+    # Manifest settings
+    stackup_id: str | None = None
+    include_manifest: bool = True
+    manifest_name: str = "manifest.json"
+
+    # Pre-flight validation settings
+    preflight: PreflightConfig | None = None
+
+    # When True, preflight FAIL results block export (early return, no files).
+    # When False (default), preflight failures are recorded as warnings but
+    # export proceeds to generate output files.
+    strict_preflight: bool = False
+
+    # When True (default), the export refuses to proceed when the BOM
+    # contains references with no matching PCB footprint -- the package
+    # would be unbuildable because the fab cannot place components that
+    # are not on the board.  This gates only the ``bom_pcb_match``
+    # preflight check independently of ``strict_preflight``; users who
+    # explicitly want to ship a partial package can opt out via
+    # ``--allow-unbuildable-bom`` (which sets this to False).
+    block_on_unbuildable_bom: bool = True
+
+    # When True (default), flatten the latest vN/ report directory into a
+    # ``report/`` subdirectory and remove all vN/ directories from the output.
+    # When False, versioned directories are preserved as-is.
+    latest_report_only: bool = True
+
+    # When True, preserve intermediate report build files (markdown, figures,
+    # JSON data snapshots) in a .build/report/ subdirectory.  Default False
+    # means only report.pdf (or report.md) is kept at the package root.
+    keep_build_artifacts: bool = False
+
+    # When True (default), generate a README.txt explaining the output files.
+    include_readme: bool = True
+
+    # When True (default), emit a sibling ``<board>.kicad_pro`` (and
+    # ``.kicad_dru``) next to the source PCB populated from the target
+    # manufacturer profile, so ``kicad-cli pcb drc`` loads the fab's
+    # relaxed built-in minimums instead of KiCad's stricter defaults.
+    emit_drc_constraints: bool = True
+
+    # When True (default), the emitted ``.kicad_dru`` carries per-net ampacity
+    # ``track_width`` floors from the net-class-map sidecar.  False
+    # (``--no-ampacity-rules``) emits none (#8612).
+    emit_ampacity_rules: bool = True
+
+
+@dataclass
+class ManufacturingResult:
+    """Result of manufacturing package generation."""
+
+    output_dir: Path
+    assembly_result: AssemblyPackageResult | None = None
+    report_path: Path | None = None
+    report_md_path: Path | None = None
+    project_zip_path: Path | None = None
+    stackup_path: Path | None = None
+    manifest_path: Path | None = None
+    readme_path: Path | None = None
+    image_paths: list[Path] = field(default_factory=list)
+    # Sibling DRC-constraint sources (.kicad_pro / .kicad_dru) written next
+    # to the source board so kicad-cli loads the manufacturer profile.
+    drc_constraint_paths: list[Path] = field(default_factory=list)
+    preflight_results: list[PreflightResult] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    # Issue #5009: the selected manufacturer profile's declared
+    # via-in-pad ``FabricationProcess`` (see
+    # ``kicad_tools.manufacturers.fabrication_process.describe_selection``),
+    # resolved for this board's actual layer/copper configuration.  ``None``
+    # when the profile declares no eligible process for this configuration
+    # (the common case -- most manufacturer profiles never set
+    # ``via_in_pad_process_id``).  Bound into ``manifest.json`` and
+    # ``README.txt`` so the machine-readable requirements and their
+    # human-readable ordering instructions travel with the bundle rather
+    # than requiring per-board hand-typed prose.
+    fabrication_process: dict | None = None
+    # Issue #7209: outer/inner copper weight the order requests, derived from the
+    # board stackup (see ``preflight.resolve_ordered_copper``).
+    ordered_copper: dict | None = None
+
+    @property
+    def success(self) -> bool:
+        """Check if generation was successful (no errors)."""
+        return len(self.errors) == 0
+
+    def bundle_relpath(self, path: Path) -> str:
+        """Return ``path`` relative to the bundle root, for display.
+
+        The Gerber archive lives at ``gerbers/gerbers.zip``; printing only
+        ``path.name`` told the reader to look for a top-level
+        ``gerbers.zip`` that does not exist (issue #7153).  Falls back to
+        the bare file name for a path outside :attr:`output_dir`.
+        """
+        try:
+            return Path(path).resolve().relative_to(Path(self.output_dir).resolve()).as_posix()
+        except ValueError:
+            return Path(path).name
+
+    @property
+    def all_files(self) -> list[Path]:
+        """Return list of all generated files."""
+        files: list[Path] = []
+        if self.assembly_result:
+            if self.assembly_result.bom_path:
+                files.append(self.assembly_result.bom_path)
+            if self.assembly_result.pnp_path:
+                files.append(self.assembly_result.pnp_path)
+            if self.assembly_result.gerber_path:
+                files.append(self.assembly_result.gerber_path)
+        if self.report_path:
+            files.append(self.report_path)
+        if self.report_md_path:
+            files.append(self.report_md_path)
+        files.extend(self.image_paths)
+        if self.project_zip_path:
+            files.append(self.project_zip_path)
+        if self.readme_path:
+            files.append(self.readme_path)
+        if self.stackup_path:
+            files.append(self.stackup_path)
+        if self.manifest_path:
+            files.append(self.manifest_path)
+        return files
+
+    def __str__(self) -> str:
+        lines = [f"Manufacturing Package: {self.output_dir}"]
+        if self.assembly_result:
+            if self.assembly_result.bom_path:
+                lines.append(f"  BOM: {self.assembly_result.bom_path.name}")
+            if self.assembly_result.pnp_path:
+                lines.append(f"  CPL: {self.assembly_result.pnp_path.name}")
+            if self.assembly_result.gerber_path:
+                lines.append(f"  Gerbers: {self.bundle_relpath(self.assembly_result.gerber_path)}")
+        if self.report_path:
+            lines.append(f"  Report: {self.report_path.name}")
+        if self.image_paths:
+            lines.append(f"  Images: {len(self.image_paths)} file(s)")
+        if self.project_zip_path:
+            lines.append(f"  Project ZIP: {self.project_zip_path.name}")
+        if self.readme_path:
+            lines.append(f"  README: {self.readme_path.name}")
+        if self.manifest_path:
+            lines.append(f"  Manifest: {self.manifest_path.name}")
+        if self.errors:
+            lines.append(f"  Errors: {len(self.errors)}")
+            for err in self.errors:
+                lines.append(f"    - {err}")
+        return "\n".join(lines)
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute SHA256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_manifest(manifest_path: str | Path) -> list[str]:
+    """Verify a manufacturing bundle's manifest.json against files on disk.
+
+    Recomputes the SHA256 checksum and size of every file listed in the
+    manifest and compares them to the recorded values.  Files are looked
+    up as ``bundle_dir / key``, which resolves every entry of a manifest
+    written by a current kicad-tools (keys are bundle-relative POSIX
+    paths, e.g. ``gerbers/gerbers.zip``).  Entries that aren't found
+    there fall back to a recursive search, purely for backward
+    compatibility with **legacy** manifests that recorded bare filenames
+    even for artifacts living in subdirectories (issue #4590).
+
+    The manifest itself is excluded from verification (its hash can't
+    contain itself).
+
+    Args:
+        manifest_path: Path to a ``manifest.json`` file.
+
+    Returns:
+        A list of human-readable mismatch descriptions.  Empty list
+        means every listed file exists and matches its recorded
+        checksum and size.
+
+    This is the integrity check behind issue #3529: ``kct export`` used
+    to write BOM/CPL CSVs with CRLF line endings and hash that content,
+    while git normalization stored LF -- so a fresh checkout failed
+    ``sha256sum`` verification against the manifest.
+    """
+    manifest_path = Path(manifest_path)
+    bundle_dir = manifest_path.parent
+    manifest = json.loads(manifest_path.read_text())
+
+    problems: list[str] = []
+    for name, info in manifest.get("files", {}).items():
+        if name == manifest_path.name:
+            continue
+        fpath = bundle_dir / name
+        if not fpath.exists():
+            # LEGACY-ONLY fallback (issue #4590): manifests written
+            # before the bundle-relative key fix stored bare filenames
+            # for artifacts that live in subdirectories of the bundle
+            # (e.g. "gerbers.zip" for gerbers/gerbers.zip).  Current
+            # manifests always resolve via bundle_dir / name above; keep
+            # this path so already-shipped bundles still verify without
+            # being regenerated.
+            candidates = sorted(bundle_dir.rglob(name))
+            if not candidates:
+                problems.append(f"{name}: listed in manifest but not found on disk")
+                continue
+            fpath = candidates[0]
+
+        actual_sha = _sha256_file(fpath)
+        actual_size = fpath.stat().st_size
+        expected_sha = info.get("sha256")
+        expected_size = info.get("size")
+        if expected_sha is not None and actual_sha != expected_sha:
+            problems.append(f"{name}: sha256 mismatch (manifest {expected_sha}, disk {actual_sha})")
+        if expected_size is not None and actual_size != expected_size:
+            problems.append(f"{name}: size mismatch (manifest {expected_size}, disk {actual_size})")
+
+    return problems
+
+
+def _project_symbol_files(project_dir: Path) -> list[Path]:
+    """Collect portable symbol-table dependencies before writing an archive.
+
+    Keep lexical paths for archive names, but resolve symlinks when checking
+    containment. Never expand host environment variables or copy global libraries.
+    """
+    table_path = project_dir / "sym-lib-table"
+    if not table_path.exists() and not table_path.is_symlink():
+        return []
+    root = project_dir.resolve()
+    if not table_path.resolve().is_relative_to(root):
+        raise ValueError("Nonportable sym-lib-table: table resolves outside the project")
+    try:
+        table = parse_file(table_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot read sym-lib-table: {exc}") from exc
+    if table.name != "sym_lib_table":
+        raise ValueError("Malformed sym-lib-table: expected sym_lib_table root")
+
+    files = [table_path]
+    for lib in table.find_all("lib"):
+        name_node = lib.get("name")
+        name = name_node.get_first_atom() if name_node else "<unnamed>"
+        uri_node = lib.get("uri")
+        uri = uri_node.get_first_atom() if uri_node else None
+        type_node = lib.get("type")
+        if type_node is None or type_node.get_first_atom() != "KiCad":
+            raise ValueError(f"Nonportable symbol library {name!r}: expected KiCad library type")
+        if not isinstance(uri, str) or not uri:
+            raise ValueError(f"Malformed sym-lib-table: library {name!r} has no URI")
+        relative_uri = uri.removeprefix("${KIPRJMOD}/")
+        relative = Path(relative_uri)
+        if (
+            "$" in relative_uri
+            or "\\" in relative_uri
+            or ":" in relative_uri
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.suffix != ".kicad_sym"
+        ):
+            raise ValueError(f"Nonportable symbol library {name!r}: {uri!r}")
+        target = project_dir / relative
+        if not target.resolve().is_relative_to(root):
+            raise ValueError(
+                f"Nonportable symbol library {name!r}: {uri!r} resolves outside project"
+            )
+        if not target.is_file():
+            raise FileNotFoundError(f"Missing project symbol library {name!r}: {uri!r}")
+        files.append(target)
+    return files
+
+
+def project_library_members(directory: Path, boundary: Path) -> list[Path]:
+    """Files under a library directory that stay inside *boundary* (#8763).
+
+    Shared by the project-zip exporter and ``kct readiness`` so both agree on
+    which library members ship.  A member (or a symlinked directory holding it)
+    whose real path leaves *boundary* is excluded with a warning naming it;
+    in-boundary symlinks are kept.  Broken links and symlink loops are skipped.
+    """
+    boundary = boundary.resolve()
+    members: list[Path] = []
+    for member in sorted(directory.rglob("*")):
+        try:
+            if not member.is_file():
+                continue
+            inside = member.resolve().is_relative_to(boundary)
+        except (OSError, RuntimeError):  # symlink loop / unreadable
+            logger.warning("Excluding unresolvable library member from project zip: %s", member)
+            continue
+        if inside:
+            members.append(member)
+        else:
+            logger.warning(
+                "Excluding library member resolving outside the project: %s -> %s",
+                member,
+                member.resolve(),
+            )
+    return members
+
+
+def _project_footprint_files(project_dir: Path) -> list[Path]:
+    """Project-local footprint library inventory (#8727).
+
+    ``fp-lib-table``, ``*.pretty`` / ``footprints`` / ``symbols`` directories and
+    the in-project ``${KIPRJMOD}`` (or relative) libraries the table references.
+    This mirrors the footprint half of ``kct readiness``'s dependency inventory
+    so ``kct export`` writes every file readiness requires of
+    ``kicad_project.zip``.  References leaving *project_dir* are skipped here
+    (archive names are project-relative); readiness collects those itself in
+    ``readiness_cmd._normalize_project_archive`` (Issue #8752).
+    """
+    root = project_dir.resolve()
+    files: set[Path] = set()
+    table = project_dir / "fp-lib-table"
+    if table.is_file():
+        files.add(table)
+    for directory in project_dir.iterdir():
+        if directory.is_dir() and (
+            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
+        ):
+            files.update(project_library_members(directory, root))
+    if table.is_file():
+        for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text(errors="replace")):
+            if "${KIPRJMOD}" in uri:
+                dependency = Path(uri.replace("${KIPRJMOD}", str(root)))
+            elif not Path(uri).is_absolute() and "$" not in uri:
+                dependency = root / uri
+            else:
+                continue  # installed KiCad libraries are not project files
+            dependency = Path(os.path.normpath(dependency))
+            if not dependency.exists() or not dependency.resolve().is_relative_to(root):
+                continue
+            if dependency.is_dir():
+                files.update(project_library_members(dependency, root))
+            else:
+                files.add(dependency)
+    return sorted(files)
+
+
+def _create_project_zip(
+    pcb_path: Path,
+    output_dir: Path,
+    zip_name: str = "kicad_project.zip",
+    schematic_path: Path | None = None,
+) -> Path:
+    """Create a ZIP containing the KiCad project files.
+
+    Project inventory matches ``kct readiness`` (Issue #8752): only the
+    ``.kicad_pro`` named like the PCB and the root schematic's sub-sheet
+    hierarchy; sibling boards' project files and ``*_backup_*`` are excluded.
+    Libraries outside the PCB directory (``${KIPRJMOD}/../``) are not
+    collected here: ``readiness_cmd._normalize_project_archive`` owns them.
+
+    Includes only the specific PCB being exported and its sibling .kicad_dru,
+    plus .kicad_sch and .kicad_pro files and project-local symbol-table dependencies.
+    Other .kicad_pcb variants (intermediate builds,
+    working copies, etc.) and backup files are excluded to keep the
+    manufacturing package clean.
+    """
+    # Resolve once: table-derived members are built from the resolved root, so
+    # every member (and its archive name) must share that spelling.  An
+    # unresolved/relative/symlinked project_dir (e.g. macOS /var -> /private/var
+    # TMPDIR) otherwise breaks ``relative_to`` below.
+    project_dir = pcb_path.parent.resolve()
+    pcb_path = project_dir / pcb_path.name
+    zip_path = output_dir / zip_name
+
+    # Always include the specific PCB being exported
+    project_files: list[Path] = []
+    if pcb_path.exists():
+        project_files.append(pcb_path)
+        # Keep the rules KiCad loads for this exact (possibly renamed) board.
+        # Their bytes are bound by the project ZIP's manufacturing manifest hash;
+        # source-side paths must not become nonportable manifest entries.
+        dru_path = pcb_path.with_suffix(".kicad_dru")
+        if dru_path.is_file():
+            project_files.append(dru_path)
+
+    # Project file of this board only (sibling variants are not dependencies)
+    project_files.extend(
+        f
+        for f in project_dir.iterdir()
+        if f.is_file() and f.suffix == ".kicad_pro" and f.stem == pcb_path.stem
+    )
+
+    # Schematics: the root's hierarchy.  An explicit root wins; an absent or
+    # ambiguous root contributes no schematics (never "zip everything").
+    from kicad_tools.report.utils import find_schematic, walk_schematic_hierarchy
+
+    root_sch = Path(schematic_path) if schematic_path else find_schematic(pcb_path)
+    if root_sch is not None and root_sch.is_file():
+        walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(project_dir))
+        project_files.extend(walked.sheets)
+        for sheet in walked.outside:
+            logger.warning("Sub-sheet outside the project directory not bundled: %s", sheet)
+    else:
+        logger.warning(
+            "No unambiguous root schematic for %s; project ZIP contains no schematics "
+            "(pass --sch to include them)",
+            pcb_path.name,
+        )
+
+    if not project_files:
+        raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
+
+    project_files.extend(_project_symbol_files(project_dir))
+    project_files.extend(_project_footprint_files(project_dir))
+    project_files = sorted(set(project_files))
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in project_files:
+            zf.write(f, f.relative_to(project_dir).as_posix())
+
+    logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
+    return zip_path
+
+
+def _build_manifest(
+    result: ManufacturingResult,
+    pcb_path: Path,
+    manufacturer: str,
+) -> dict:
+    """Build the manifest dictionary with SHA256 checksums.
+
+    Files are keyed by their **bundle-relative POSIX path** (relative to
+    ``result.output_dir``), so a consumer can resolve every entry with a
+    plain ``bundle_dir / key`` -- including artifacts that live in
+    subdirectories such as ``gerbers/gerbers.zip`` and ``images/*.png``
+    (issue #4590).  ``as_posix()`` keeps the key platform-independent so
+    the manifest is byte-identical across hosts (cf. #3529).
+    """
+    files_info: dict[str, dict] = {}
+    bundle_root = result.output_dir.resolve()
+    for fpath in result.all_files:
+        if fpath.exists():
+            try:
+                key = fpath.resolve().relative_to(bundle_root).as_posix()
+            except ValueError:
+                # Artifact outside the bundle (shouldn't happen for
+                # all_files) -- degrade to the basename rather than
+                # dropping the entry.
+                key = fpath.name
+            files_info[key] = {
+                "sha256": _sha256_file(fpath),
+                "size": fpath.stat().st_size,
+            }
+
+    manifest = {
+        "version": "1.0",
+        "kicad_tools_version": kicad_tools.__version__,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "manufacturer": manufacturer,
+        "files": files_info,
+        "board": {
+            "name": pcb_path.stem,
+            "pcb_file": pcb_path.name,
+        },
+    }
+
+    # Include preflight results if available
+    if result.preflight_results:
+        manifest["preflight"] = [pr.to_dict() for pr in result.preflight_results]
+
+    # Issue #5009: bind the selected via-in-pad fabrication process (if
+    # any) into the manifest as a machine-readable artifact, generalizing
+    # the ad hoc ``fabrication_overrides`` blocks boards 03/04 previously
+    # hand-wrote into their own reports.
+    if result.fabrication_process is not None:
+        manifest["fabrication_process"] = result.fabrication_process
+
+    if result.ordered_copper is not None:
+        manifest["ordered_copper"] = result.ordered_copper
+
+    return manifest
+
+
+class ManufacturingPackage:
+    """
+    Generate a complete manufacturing package for PCB production.
+
+    Orchestrates BOM, CPL, Gerber, report, KiCad project ZIP, and
+    manifest generation into a single output directory.
+
+    Example::
+
+        pkg = ManufacturingPackage(
+            pcb_path="board.kicad_pcb",
+            manufacturer="jlcpcb",
+        )
+        result = pkg.export("manufacturing/")
+        print(result)
+    """
+
+    def __init__(
+        self,
+        pcb_path: str | Path,
+        schematic_path: str | Path | None = None,
+        manufacturer: str = "jlcpcb",
+        config: ManufacturingConfig | None = None,
+    ):
+        self.pcb_path = Path(pcb_path)
+        self.schematic_path = Path(schematic_path) if schematic_path else None
+        self.manufacturer = manufacturer.lower()
+        self.config = config or ManufacturingConfig()
+
+    def export(
+        self,
+        output_dir: str | Path | None = None,
+        *,
+        dry_run: bool = False,
+    ) -> ManufacturingResult:
+        """Generate the full manufacturing package.
+
+        Args:
+            output_dir: Output directory (overrides config).
+            dry_run: If True, report what would be generated without
+                     actually writing files.
+
+        Returns:
+            ManufacturingResult with paths and any errors.
+        """
+        out_dir = Path(output_dir) if output_dir else self.config.output_dir
+        result = ManufacturingResult(output_dir=out_dir)
+
+        selected_stackup_source_hash: str | None = None
+        if self.config.stackup_id:
+            from .stackup import stackup_ordering_record
+
+            try:
+                if self.manufacturer not in {"jlcpcb", "jlcpcb-tier1"}:
+                    raise ValueError("JLCPCB construction requires a JLCPCB manufacturer")
+                initial_record = stackup_ordering_record(self.pcb_path, self.config.stackup_id)
+                selected_stackup_source_hash = initial_record["pcb_sha256"]
+            except (OSError, ValueError, KiCadToolsError) as exc:
+                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                return result
+
+        if dry_run:
+            return self._dry_run(out_dir, result)
+
+        # Step 0-floor: Connectivity safety floor.  Read any pre-existing DRC
+        # report for hard shorts / connectivity errors *regardless* of
+        # skip_preflight (skip_all).  Shipping a shorted board is never safe,
+        # so this hard gate fires even when the rest of preflight is skipped
+        # -- and it runs before any output files are written.  It performs no
+        # kicad-cli invocation (it only parses a report already on disk), so
+        # it adds no dependency and cannot slow a clean board's export.
+        self._check_drc_safety_floor(result)
+        if not result.success:
+            return result
+
+        # Pre-construct the assembly package so we surface fatal input
+        # errors (e.g. a schematic-sourced BOM with no discoverable
+        # .kicad_sch) *before* preflight runs or we create any output
+        # files.  This guarantees that a schematic-missing failure
+        # leaves nothing on disk -- avoiding the "5/8 files written,
+        # exit code 1, partial package" gap.
+        try:
+            AssemblyPackage(
+                pcb_path=self.pcb_path,
+                schematic_path=self.schematic_path,
+                manufacturer=self.manufacturer,
+                config=self.config,
+            )
+        except KiCadFileNotFoundError as e:
+            result.errors.append(f"Assembly generation failed: {e}")
+            logger.error(f"Assembly generation failed: {e}")
+            return result
+
+        # Step 0a: Emit DRC-constraint sources next to the source board so
+        # that kicad-cli pcb drc (run here in preflight, in CI, or by the
+        # gallery render pipeline) loads the manufacturer profile's relaxed
+        # built-in minimums instead of KiCad's stricter hard-coded defaults.
+        # Written before preflight so the constraints exist even when a
+        # strict-preflight failure aborts the rest of the pipeline.
+        if self.config.emit_drc_constraints:
+            self._write_drc_constraints(result)
+
+        # Step 0b (issue #5009): resolve the selected manufacturer profile's
+        # declared via-in-pad fabrication process (if any) for this board's
+        # actual layer/copper configuration, so the manifest and README
+        # steps below can bind it into the bundle.
+        self._resolve_fabrication_process(result)
+        self._resolve_ordered_copper(result)
+
+        # Step 0: Pre-flight validation
+        preflight_cfg = self.config.preflight
+        if preflight_cfg is None or not preflight_cfg.skip_all:
+            preflight_results = self._run_preflight()
+            result.preflight_results = preflight_results
+
+            # The bom_pcb_match check returns FAIL when the BOM references
+            # parts with no matching PCB footprint -- an unbuildable
+            # package.  This is a targeted block that fires even when
+            # ``strict_preflight`` is False, because it's the only check
+            # whose failure mode is "the fab literally cannot make this".
+            unbuildable_bom_failure: PreflightResult | None = None
+            if self.config.block_on_unbuildable_bom:
+                for pr in preflight_results:
+                    if pr.name == "bom_pcb_match" and pr.status == "FAIL":
+                        # Only treat as unbuildable if the schematic-only
+                        # axis is involved (refs in BOM not on PCB).  PCB
+                        # orphans are only a WARN, so we won't get here for
+                        # them.
+                        unbuildable_bom_failure = pr
+                        break
+
+            if PreflightChecker.has_failures(preflight_results):
+                # Collect failure messages
+                for pr in preflight_results:
+                    if pr.status == "FAIL":
+                        msg = f"Preflight FAIL [{pr.name}]: {pr.message}"
+                        if pr.details:
+                            msg += f" ({pr.details})"
+                        # bom_pcb_match failures escalate to errors when
+                        # block_on_unbuildable_bom is set; other preflight
+                        # failures behave per strict_preflight.
+                        is_unbuildable = (
+                            unbuildable_bom_failure is not None and pr is unbuildable_bom_failure
+                        )
+                        if self.config.strict_preflight or is_unbuildable:
+                            result.errors.append(msg)
+                        else:
+                            result.warnings.append(msg)
+
+                # Block export on strict mode OR on unbuildable BOM
+                if self.config.strict_preflight or unbuildable_bom_failure is not None:
+                    return result
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 1: BOM + CPL + Gerbers via AssemblyPackage.  When this
+        # returns False the stage aborted before writing any artefacts
+        # (e.g. schematic missing for a schematic-sourced BOM), so we
+        # skip the rest of the pipeline to avoid producing a partial
+        # package on disk.
+        assembly_ok = self._generate_assembly(out_dir, result)
+        if not assembly_ok:
+            return result
+
+        # Step 1.5: Reconcile the recorded ``bom_fields`` preflight result
+        # against the LCSC enrichment that only just ran (Step 1).  Preflight
+        # inspects a raw BOM before any network/cache lookup, so its
+        # "missing LCSC part number" clause is a prediction that
+        # ``--auto-lcsc`` may have already invalidated (issue #4591).
+        self._reconcile_preflight_lcsc(result)
+
+        # Step 2: Report (optional)
+        if self.config.include_report:
+            self._generate_report(out_dir, result)
+
+        # Step 2.5: Flatten report into report/ when latest_report_only is set
+        if self.config.latest_report_only:
+            self._flatten_latest_report(out_dir, result)
+
+        # Step 3: KiCad project ZIP (optional)
+        if self.config.include_project_zip:
+            self._generate_project_zip(out_dir, result)
+
+        # Step 3.5: README.txt (optional)
+        if self.config.include_readme:
+            self._generate_readme(out_dir, result)
+
+        # Record the actual source again after generation, before hashing the bundle.
+        if self.config.stackup_id:
+            from .stackup import stackup_ordering_record
+
+            try:
+                record = stackup_ordering_record(self.pcb_path, self.config.stackup_id)
+                if record["pcb_sha256"] != selected_stackup_source_hash:
+                    raise ValueError("PCB changed during manufacturing export")
+            except (OSError, ValueError, KiCadToolsError) as exc:
+                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                return result
+            result.stackup_path = out_dir / "stackup-ordering.json"
+            result.stackup_path.write_text(json.dumps(record, indent=2) + "\n")
+
+        # Step 4: Manifest (always last -- needs checksums of other files)
+        if self.config.include_manifest:
+            self._generate_manifest(out_dir, result)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    # Substring that identifies the LCSC clause emitted by
+    # ``PreflightChecker._check_bom_fields``.
+    _LCSC_CLAUSE_MARKER = "missing LCSC part number"
+
+    # Substrings that identify the non-LCSC problem clauses.  Anything in
+    # ``details`` that matches neither these nor the LCSC marker is an
+    # informational note and is preserved verbatim.
+    _BOM_FIELD_ISSUE_MARKERS = ("missing footprint", "missing value")
+
+    def _reconcile_preflight_lcsc(self, result: ManufacturingResult) -> None:
+        """Update the recorded ``bom_fields`` result with post-enrichment LCSC state.
+
+        ``PreflightChecker`` runs before any file is written (Step 0), which
+        is deliberate: ``strict_preflight`` and ``block_on_unbuildable_bom``
+        must be able to abort with nothing on disk.  The consequence is that
+        ``_check_bom_fields`` sees a *raw* BOM: for the ``--auto-lcsc`` path
+        it cannot know which items :func:`enrich_bom_lcsc` will resolve,
+        because that requires parts-API / cache I/O which preflight must not
+        perform.  (The spec-overlay path is predicted statically by
+        ``PreflightChecker._spec_lcsc_refs`` -- issues #3926 / #3932.)
+
+        So the LCSC clause is reconciled here, after Step 1 has actually run
+        the enrichment, and before the manifest is serialized.  Both the
+        manifest (``_build_manifest`` reads ``result.preflight_results``) and
+        the CLI summary render the updated entry with no changes at either
+        consumer.
+
+        Safety rules:
+
+        * A ``FAIL`` is **never** downgraded -- a ``bom_fields`` FAIL comes
+          from missing footprints, which enrichment cannot fix.
+        * Non-LCSC clauses (missing footprint / missing value) and
+          informational notes are preserved verbatim.
+        * No enrichment report (``--no-auto-lcsc``, non-JLCPCB family,
+          enrichment error) or no preflight results (``--skip-preflight``)
+          makes this a no-op.
+        """
+        if not result.preflight_results:
+            return
+        if result.assembly_result is None:
+            return
+
+        report = result.assembly_result.lcsc_enrichment
+        if report is None:
+            return
+
+        entry = next((pr for pr in result.preflight_results if pr.name == "bom_fields"), None)
+        if entry is None or entry.status == "FAIL":
+            return
+
+        clauses = [c.strip() for c in entry.details.split(";")] if entry.details else []
+        lcsc_clauses = [c for c in clauses if self._LCSC_CLAUSE_MARKER in c]
+        if not lcsc_clauses:
+            # Nothing predicted about LCSC -- leave the entry untouched.
+            return
+
+        other_clauses = [c for c in clauses if self._LCSC_CLAUSE_MARKER not in c]
+        remaining_issues = [
+            c for c in other_clauses if any(marker in c for marker in self._BOM_FIELD_ISSUE_MARKERS)
+        ]
+        notes = [c for c in other_clauses if c not in remaining_issues]
+
+        unmatched_entries = report.unmatched_entries
+        spec_unresolved_entries = report.spec_unresolved_entries
+        if unmatched_entries:
+            refs = [ref for e in unmatched_entries for ref in e.references]
+            shown = ", ".join(sorted(refs)[:10])
+            suffix = f" (and {len(refs) - 10} more)" if len(refs) > 10 else ""
+            remaining_issues.append(
+                f"{len(unmatched_entries)} component group(s) still missing LCSC "
+                f"part number after enrichment: {shown}{suffix}"
+            )
+        if spec_unresolved_entries:
+            # Explicit MPN/supplier sourcing (issue #4995): never auto-matched
+            # in the first place, so this is a deliberate "manually sourced"
+            # gap, not a search failure -- surfaced with its own wording so a
+            # reviewer can tell the two apart at a glance.
+            refs = [ref for e in spec_unresolved_entries for ref in e.references]
+            shown = ", ".join(sorted(refs)[:10])
+            suffix = f" (and {len(refs) - 10} more)" if len(refs) > 10 else ""
+            remaining_issues.append(
+                f"{len(spec_unresolved_entries)} component group(s) explicitly "
+                f"sourced outside LCSC (spec/CSV MPN set, no LCSC assigned) -- "
+                f"verify supplier manually: {shown}{suffix}"
+            )
+        if not unmatched_entries and not spec_unresolved_entries:
+            resolved = report.auto_matched + report.cache_matched
+            if resolved:
+                notes.append(f"{resolved} group(s) received LCSC from enrichment")
+
+        if remaining_issues:
+            entry.status = "WARN"
+            entry.message = f"BOM field issues: {len(remaining_issues)} problem(s)"
+        else:
+            entry.status = "OK"
+            entry.message = "All BOM items have required fields (LCSC resolved by enrichment)"
+
+        entry.details = "; ".join(remaining_issues + notes)
+
+    def _check_drc_safety_floor(self, result: ManufacturingResult) -> None:
+        """Hard-abort export on net shorts / connectivity errors.
+
+        Reads any pre-existing DRC report next to the source PCB (or the
+        explicit ``drc_report_path`` from the preflight config) and appends
+        an error to ``result`` when it contains error-severity net shorts
+        (SHORTING_ITEMS) or unconnected items (opens, read through
+        ``DRCReport.connectivity_items()``; issue #7091).  A report recorded
+        for a different PCB is treated like a missing report (warning only),
+        except under ``--strict-preflight`` where it blocks export.  Because
+        ``ManufacturingResult.success`` is ``len(errors) == 0``, appending an error causes ``export()`` to
+        return a non-success result and skip writing output files.
+
+        This gate runs even when ``preflight.skip_all`` (``--skip-preflight``)
+        is True -- that flag skips BOM/ERC/LCSC/cosmetic checks but must not
+        suppress the hard safety floor.  The only way to bypass it is the
+        explicit ``skip_drc_floor`` escape hatch (``--skip-drc-floor``), for
+        known-safe workarounds.
+
+        No kicad-cli is invoked; if no report exists, or it cannot be parsed,
+        the floor does nothing (prefer a false-negative over breaking boards
+        that never ran kicad-cli DRC).
+        """
+        preflight_cfg = self.config.preflight
+        if preflight_cfg is not None and preflight_cfg.skip_drc_floor:
+            msg = (
+                "DRC connectivity safety floor DISABLED via --skip-drc-floor; "
+                "export will proceed even if the board has net shorts. "
+                "This is unsafe unless you have independently verified the board."
+            )
+            logger.warning(msg)
+            result.warnings.append(msg)
+            return
+
+        # Resolve the report path: explicit config path wins, else look for a
+        # report sitting next to the source PCB (JSON preferred over text).
+        report_path: Path | None = None
+        explicit = preflight_cfg.drc_report_path if preflight_cfg else None
+        if explicit is not None:
+            candidate = Path(explicit)
+            if candidate.exists():
+                report_path = candidate
+        else:
+            for name in ("drc_report.json", "drc_report.txt"):
+                candidate = self.pcb_path.parent / name
+                if candidate.exists():
+                    report_path = candidate
+                    break
+
+        if report_path is None:
+            return
+
+        try:
+            if report_path.stat().st_size == 0:
+                # DRC was attempted but wrote nothing -- most likely kicad-cli
+                # was killed (e.g. OOM) before it produced a report. An empty
+                # file parses as 0 violations, so it must not read as clean.
+                logger.warning(
+                    f"DRC report {report_path.name} is empty (0 bytes); kicad-cli "
+                    "was likely killed before writing it. The safety floor cannot "
+                    "verify connectivity -- re-run DRC."
+                )
+                return
+        except OSError:
+            pass
+
+        try:
+            from ..drc.report import DRCReport
+            from ..drc.violation import ViolationType
+
+            report = DRCReport.load(report_path)
+            # Shorts arrive through the geometric ``violations`` collection.
+            shorts = [v for v in report.errors if v.type == ViolationType.SHORTING_ITEMS]
+            # Opens: since #4498 KiCad's ``unconnected_items`` live in a
+            # separate collection that ``report.errors`` never contains, so
+            # read them through the connectivity accessor (issue #7091).
+            # Only error-severity (non-waived) items block.
+            opens = report.connectivity_errors()
+        except Exception as e:
+            # If we can't read the report, don't block -- prefer a
+            # false-negative over breaking boards that never ran DRC.
+            logger.warning(f"DRC safety floor could not read {report_path}: {e}")
+            return
+
+        # Issue #7091: a report generated for a different PCB (e.g. the
+        # ``*_routed`` sibling's report sitting next to the unrouted board)
+        # is no evidence for this board.  Treat it like a missing report:
+        # warn, but do not block (same false-negative policy as above).
+        other = report_source_mismatch(report.pcb_name, self.pcb_path)
+        if other is not None:
+            msg = (
+                f"DRC report {report_path.name} is for {other}, not "
+                f"{self.pcb_path.name}; the safety floor cannot verify this "
+                "board's connectivity -- re-run DRC on it."
+            )
+            if self.config.strict_preflight:
+                msg = f"Safety floor (strict): {msg}"
+                result.errors.append(msg)
+                logger.error(msg)
+            else:
+                logger.warning(msg)
+                result.warnings.append(msg)
+            return
+
+        # Issue #7190: note a report that is not bound to the PCB's current
+        # content (mtimes are meaningless after a git checkout, so this uses
+        # the report's recorded pcb_sha256 / readiness co-binding instead).
+        # Log only: the floor still blocks on a stale FAIL (staleness in the
+        # blocking direction is the safe side); this explains a potentially
+        # spurious block.  Preflight's ``_check_drc`` keeps an unbound report
+        # from ever *passing* the board.
+        if explicit is None:
+            from ..drc.report_binding import BindingStatus, binding_status
+
+            binding = binding_status(report_path, self.pcb_path, report.pcb_sha256)
+            if binding is not BindingStatus.BOUND:
+                logger.warning(
+                    f"DRC report {report_path.name} is not bound to the PCB's current "
+                    f"content ({binding.value}); safety-floor verdict may be stale."
+                )
+
+        if shorts or opens:
+            total = len(shorts) + len(opens)
+            msg = (
+                f"Safety floor: {total} connectivity error(s) "
+                f"({len(shorts)} net short(s), {len(opens)} unconnected item(s)) "
+                f"in DRC report ({report_path.name}); export blocked. Fix the "
+                "shorts/opens, or pass --skip-drc-floor to override (only for "
+                "known-safe workarounds)."
+            )
+            result.errors.append(msg)
+            logger.error(msg)
+
+    def _run_preflight(self) -> list[PreflightResult]:
+        """Run pre-flight validation checks."""
+        preflight_cfg = self.config.preflight or PreflightConfig()
+        if self.config.strict_preflight and not preflight_cfg.strict_report_source:
+            preflight_cfg = dataclasses.replace(preflight_cfg, strict_report_source=True)
+
+        # Pass explicit THT exclusion setting when the user provided a PnP config
+        exclude_tht = None
+        if self.config.pnp_config is not None:
+            exclude_tht = self.config.pnp_config.exclude_tht
+
+        checker = PreflightChecker(
+            pcb_path=self.pcb_path,
+            schematic_path=self.schematic_path,
+            manufacturer=self.manufacturer,
+            output_dir=self.config.output_dir,
+            config=preflight_cfg,
+            exclude_tht=exclude_tht,
+            bom_source=self.config.bom_source,
+            merge_lcsc=self.config.merge_lcsc,
+            merge_lcsc_from=self.config.merge_lcsc_from,
+        )
+        return checker.run_all()
+
+    def _detect_layer_config(self) -> tuple[int, float]:
+        """Determine (copper-layer count, copper weight) for the board.
+
+        The layer count is read from the PCB so the DRC rules selected
+        from the manufacturer profile match the board (a 4-layer board
+        uses finer via/drill minimums than a 2-layer board).  Copper
+        weight is not encoded in the board file, so it defaults to 1oz.
+
+        Returns:
+            ``(layers, copper_oz)`` -- falls back to ``(2, 1.0)`` when the
+            board cannot be parsed.
+        """
+        try:
+            from ..schema.pcb import PCB
+
+            pcb = PCB.load(str(self.pcb_path))
+            layers = len(pcb.copper_layers)
+            if layers < 1:
+                layers = 2
+        except Exception as e:
+            logger.debug("Could not detect layer count from %s: %s", self.pcb_path, e)
+            layers = 2
+        return layers, 1.0
+
+    def _write_drc_constraints(self, result: ManufacturingResult) -> None:
+        """Emit sibling .kicad_pro / .kicad_dru from the manufacturer profile.
+
+        Populates the project file's ``board.design_settings.rules`` block
+        (and a companion .kicad_dru) from the target manufacturer profile
+        so that ``kicad-cli pcb drc`` checks the board against the fab's
+        actual capabilities rather than KiCad's stricter built-in defaults.
+
+        The sidecars are written next to the *input* board
+        (``self.pcb_path``), **not** into ``--output``.  This is deliberate:
+        ``kicad-cli pcb drc`` only loads a ``.kicad_dru`` / ``.kicad_pro``
+        that sits beside the ``.kicad_pcb`` it checks, and the callers that
+        need these rules (preflight DRC here, CI, the gallery render
+        pipeline, a user re-running DRC in KiCad) all operate on the source
+        board in place.  Consequence (issue #5746): ``kct export`` mutates
+        the input directory, so tests that export a *committed* board must
+        stage a scratch copy first (see ``tests/test_board_05_export.py``)
+        or the #3580 committed-artifact guard will fire whenever the
+        generated rules change.
+        """
+        try:
+            from ..manufacturers import (
+                get_profile,
+                resolve_pcb_fabrication_overrides,
+                write_drc_constraints,
+            )
+
+            profile = get_profile(self.manufacturer)
+        except Exception as e:
+            logger.warning(
+                "Skipping DRC-constraint emission (profile '%s' unavailable): %s",
+                self.manufacturer,
+                e,
+            )
+            result.warnings.append(
+                f"Could not emit DRC constraints for manufacturer '{self.manufacturer}': {e}"
+            )
+            return
+
+        layers, copper_oz = self._detect_layer_config()
+        rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+
+        # Issue #5006: retain (or reject) a validated, cited per-board
+        # fabrication-floor override the same way `kct check
+        # --emit-drc-constraints` does, so the packaged sidecars agree with
+        # a reviewed project floor instead of silently reverting it to the
+        # profile's conservative default.
+        rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+            self.pcb_path, rules, manufacturer_id=profile.id
+        )
+        if fab_override_msg is not None:
+            if fab_override_msg.startswith("ignoring"):
+                logger.warning(fab_override_msg)
+                result.warnings.append(fab_override_msg)
+            else:
+                logger.info(fab_override_msg)
+
+        rules = self._apply_stackup_copper(rules)
+        dru_path = Path(self.pcb_path).with_suffix(".kicad_dru")
+        try:
+            dru_text_before = dru_path.read_text(encoding="utf-8")
+        except OSError:
+            dru_text_before = None
+        dru_before = self._ampacity_block(dru_path)
+
+        max_width_mm: float | None = None
+        net_classes = None
+        if not self.config.emit_ampacity_rules:
+            logger.info("Ampacity rules disabled (--no-ampacity-rules)")
+        else:
+            from ..manufacturers.attach_zone_dru import has_designer_clearance_rule
+
+            if has_designer_clearance_rule(dru_text_before):
+                result.warnings.append(
+                    f"Skipped ampacity rules: {dru_path.name} carries the designer's own "
+                    "clearance rules and was not extended with track_width floors."
+                )
+            else:
+                net_classes = self._load_net_classes(result)
+                net_classes = self._drop_waived_ampacity_nets(net_classes, result)
+                max_width_mm = self._largest_board_dimension()
+                if net_classes and max_width_mm is not None:
+                    self._warn_oversize_ampacity(net_classes, rules, max_width_mm, result)
+
+        try:
+            written = write_drc_constraints(
+                self.pcb_path,
+                rules,
+                manufacturer_id=profile.id,
+                layers=layers,
+                copper_oz=copper_oz,
+                net_classes=net_classes,
+                max_ampacity_width_mm=max_width_mm,
+            )
+        except OSError as e:
+            logger.warning("Could not write DRC-constraint files: %s", e)
+            result.warnings.append(f"Could not write DRC constraints: {e}")
+            return
+
+        result.drc_constraint_paths = written
+
+        # #8527: the sign-off DRC ran against the committed DRU; flag a changed
+        # ampacity block so nobody ships a DRU that was never DRC'd.
+        dru_after = self._ampacity_block(dru_path)
+        if dru_before != dru_after:
+            msg = (
+                f"Export changed the ampacity rules in {dru_path.name}; the "
+                "sign-off DRC did not run against them. Re-run "
+                "`kicad-cli pcb drc` against the shipped .kicad_dru."
+            )
+            logger.warning(msg)
+            result.warnings.append(msg)
+
+        # #8612: the designer owns this file; say so whenever export rewrote it.
+        try:
+            dru_text_after = dru_path.read_text(encoding="utf-8")
+        except OSError:
+            dru_text_after = None
+        if (
+            dru_text_before is not None
+            and dru_text_after is not None
+            and dru_text_after != dru_text_before
+        ):
+            note = f"Export modified {dru_path.name} (generated DRC rules)."
+            logger.info(note)
+            result.warnings.append(note)
+
+    def _largest_board_dimension(self) -> float | None:
+        """Largest Edge.Cuts extent in mm, or None when it cannot be determined."""
+        try:
+            from ..core.board_outline import board_outline_bounds
+            from ..schema.pcb import PCB
+
+            bounds = board_outline_bounds(PCB.load(str(self.pcb_path))._sexp)
+        except Exception as e:  # noqa: BLE001 - best effort
+            logger.debug("Could not read board outline for DRU: %s", e)
+            return None
+        if bounds is None:
+            return None
+        x0, y0, x1, y1 = bounds
+        return max(x1 - x0, y1 - y0)
+
+    @staticmethod
+    def _warn_oversize_ampacity(net_classes, rules, max_width_mm, result) -> None:
+        """Warn for each ampacity minimum wider than the board (skipped by generate_dru)."""
+        from ..physics.ampacity import width_for_current
+
+        for nc in net_classes:
+            if nc.target_ampacity is None:
+                continue
+            layers = [("external", rules.outer_copper_oz)]
+            if rules.inner_copper_oz > 0:
+                layers.append(("internal", rules.inner_copper_oz))
+            for layer, oz in layers:
+                width = width_for_current(nc.target_ampacity, copper_weight_oz=oz, layer=layer)
+                if width > max_width_mm:
+                    msg = (
+                        f"Skipped ampacity rule '{nc.name} {nc.target_ampacity:g}A, {layer}': "
+                        f"minimum {width:.1f} mm exceeds the board's largest dimension "
+                        f"({max_width_mm:.1f} mm) and can never be met."
+                    )
+                    logger.warning(msg)
+                    result.warnings.append(msg)
+
+    def _drop_waived_ampacity_nets(self, net_classes, result: ManufacturingResult):
+        """Drop nets whose ampacity is waived or current-path reinforced (#8612).
+
+        A malformed sidecar is warned about and the floors are kept.
+        """
+        if not net_classes:
+            return net_classes
+        from dataclasses import replace
+
+        exempt: set[str] = set()
+        pcb_path = Path(self.pcb_path)
+        try:
+            from ..validate.rules.waivers import discover_waivers_sidecar, load_waivers
+
+            wpath = discover_waivers_sidecar(pcb_path)
+            if wpath is not None:
+                for entry in load_waivers(wpath).entries:
+                    if entry.rule not in ("ampacity", "path_ampacity"):
+                        continue
+                    nets = set(entry.nets)
+                    if entry.key:
+                        parts = entry.key.split("|")
+                        if len(parts) > 2:
+                            nets.update(n for n in parts[2].split(",") if n)
+                    exempt |= nets
+        except Exception as e:  # noqa: BLE001
+            msg = f"ignoring unreadable waivers sidecar for ampacity rules: {e}"
+            logger.warning(msg)
+            result.warnings.append(msg)
+        try:
+            from ..router.current_paths import (
+                discover_current_paths_sidecar,
+                load_current_path_specs,
+            )
+
+            cpath = discover_current_paths_sidecar(pcb_path)
+            if cpath is not None:
+                exempt |= {spec.net_name for spec in load_current_path_specs(cpath)}
+        except Exception as e:  # noqa: BLE001
+            msg = f"ignoring unreadable current-paths sidecar for ampacity rules: {e}"
+            logger.warning(msg)
+            result.warnings.append(msg)
+        if not exempt:
+            return net_classes
+
+        kept = []
+        for nc in net_classes:
+            scope = tuple(getattr(nc, "net_scope", ()) or ())
+            if not scope:
+                kept.append(nc)
+                continue
+            remaining = tuple(n for n in scope if n not in exempt)
+            if remaining:
+                kept.append(replace(nc, net_scope=remaining))
+        return kept
+
+    @staticmethod
+    def _ampacity_block(dru_path: Path) -> list[str]:
+        """Return the ampacity rule blocks of a ``.kicad_dru`` (empty if none).
+
+        The regex assumes each rule spans exactly three lines (name, condition,
+        constraint), matching ``generate_dru`` in ``dru_generator.py``; change
+        them together.
+        """
+        try:
+            text = dru_path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        return ManufacturingPackage._ampacity_block_text(text)
+
+    @staticmethod
+    def _ampacity_block_text(text: str) -> list[str]:
+        return re.findall(r'\(rule "Ampacity Min Width[^"]*"[^\n]*\n[^\n]*\n[^\n]*', text)
+
+    def _apply_stackup_copper(self, rules):
+        """Use the board's declared stackup copper weights for ampacity rules (#8527).
+
+        The profile lookup keys on a hard-coded 1 oz, so a declared 2 oz outer
+        stackup would otherwise produce 1 oz ampacity widths.  Only overrides
+        what the board declares; undeclared stays at the profile value.
+        """
+        try:
+            from dataclasses import replace as _replace
+
+            from ..physics.stackup import Stackup
+            from ..schema.pcb import PCB
+
+            # Read the declared stackup directly (as ``kct check`` does): the
+            # fab-profile-matched lookup returns nothing for layer counts the
+            # profile has no copper option for, silently reverting to 1 oz.
+            derived = Stackup.from_pcb(PCB.load(str(self.pcb_path))).outer_inner_copper_oz()
+            outer, inner = derived if derived is not None else (None, None)
+            updates = {}
+            if outer:
+                updates["outer_copper_oz"] = float(outer)
+            if inner and rules.inner_copper_oz > 0:
+                updates["inner_copper_oz"] = float(inner)
+            return _replace(rules, **updates) if updates else rules
+        except Exception as e:  # noqa: BLE001 - best effort; keep profile weights
+            logger.debug("Could not read stackup copper for DRU: %s", e)
+            return rules
+
+    def _load_net_classes(self, result: ManufacturingResult) -> list | None:
+        """Load the board's net-class-map sidecar as deduped classes (#8393).
+
+        Mirrors ``kct check --emit-dru`` (same probe order, same loader,
+        same dedup) so the exported ``.kicad_dru`` keeps the ampacity
+        ``track_width`` floors that build-time DRC checked.  Returns
+        ``None`` when there is no sidecar or it is malformed (warned).
+        """
+        from ..cli.check_cmd import (
+            _discover_net_class_map_sidecar,
+            resolve_net_class_map_for_board,
+        )
+        from ..manufacturers.project_generator import dedupe_net_classes
+
+        ncm_path = _discover_net_class_map_sidecar(Path(self.pcb_path))
+        if ncm_path is None:
+            return None
+        try:
+            from ..router.rules import net_class_map_from_path
+            from ..schema.pcb import PCB
+
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self.pcb_path)
+            net_class_map, _ = resolve_net_class_map_for_board(
+                net_class_map, PCB.load(str(self.pcb_path))
+            )
+        except Exception as e:
+            msg = f"ignoring malformed net-class-map sidecar {ncm_path}: {e}"
+            logger.warning(msg)
+            result.warnings.append(msg)
+            return None
+        return dedupe_net_classes(net_class_map)
+
+    def _resolve_ordered_copper(self, result: ManufacturingResult) -> None:
+        """Record the outer/inner copper weight the order requests (#7209).
+
+        Taken from the board stackup (matched against the fab profile), not a
+        constant.  Best-effort: failures leave ``result.ordered_copper`` unset.
+        """
+        try:
+            from ..schema.pcb import PCB
+            from .preflight import resolve_ordered_copper
+
+            info = resolve_ordered_copper(PCB.load(str(self.pcb_path)), self.manufacturer)
+            if info["ordered_outer_oz"] is not None:
+                if self.manufacturer.startswith("jlcpcb"):
+                    info["source"] = "https://jlcpcb.com/help/article/jlcpcb-copper-weight"
+                    info["source_verified"] = "2026-10-18"
+                result.ordered_copper = info
+        except Exception as e:
+            logger.debug("Could not resolve ordered copper: %s", e)
+
+    def _resolve_fabrication_process(self, result: ManufacturingResult) -> None:
+        """Resolve the profile's declared via-in-pad process for this board (#5009).
+
+        Mirrors :meth:`_write_drc_constraints`'s profile/layer-config
+        resolution, but reads ``DesignRules.via_in_pad_process_id`` and
+        looks it up in the shared
+        :data:`~kicad_tools.manufacturers.fabrication_process.FABRICATION_PROCESSES`
+        registry via ``describe_selection``.  Sets ``result.fabrication_process``
+        to the resolved machine-readable dict (with derived
+        ``ordering_instructions``), or leaves it ``None`` when the profile
+        declares no eligible process for this layer/copper configuration --
+        the common case, since most manufacturer profiles never set
+        ``via_in_pad_process_id``.  Failures are swallowed (debug-logged
+        only): this is an additive, best-effort enrichment step that must
+        never block or degrade the rest of export.
+        """
+        try:
+            from ..manufacturers import get_profile
+            from ..manufacturers.fabrication_process import describe_selection
+
+            profile = get_profile(self.manufacturer)
+            layers, copper_oz = self._detect_layer_config()
+            rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+            result.fabrication_process = describe_selection(rules)
+        except Exception as e:
+            logger.debug(
+                "Could not resolve fabrication process for manufacturer '%s': %s",
+                self.manufacturer,
+                e,
+            )
+
+    def _dry_run(self, out_dir: Path, result: ManufacturingResult) -> ManufacturingResult:
+        """Populate result with what *would* be generated."""
+        bom_name = self.config.bom_filename.format(manufacturer=self.manufacturer)
+        pnp_name = self.config.pnp_filename.format(manufacturer=self.manufacturer)
+
+        result.assembly_result = AssemblyPackageResult(
+            output_dir=out_dir,
+            bom_path=out_dir / bom_name if self.config.include_bom else None,
+            pnp_path=out_dir / pnp_name if self.config.include_pnp else None,
+            gerber_path=(
+                out_dir / self.config.gerbers_subdir / "gerbers.zip"
+                if self.config.include_gerbers
+                else None
+            ),
+        )
+        if self.config.include_report:
+            try:
+                from ..report.renderers import pdf_renderer_available
+
+                if pdf_renderer_available() is not None:
+                    result.report_path = out_dir / "report.pdf"
+                else:
+                    result.report_path = out_dir / "report.md"
+            except ImportError:
+                result.report_path = out_dir / "report.md"
+        if self.config.include_project_zip:
+            result.project_zip_path = out_dir / self.config.project_zip_name
+        if self.config.include_manifest:
+            result.manifest_path = out_dir / self.config.manifest_name
+        return result
+
+    def _generate_assembly(self, out_dir: Path, result: ManufacturingResult) -> bool:
+        """Run BOM + CPL + Gerber generation.
+
+        Returns:
+            ``True`` when the assembly stage was attempted successfully
+            (whether or not its individual artefacts succeeded), ``False``
+            when the stage aborted before producing any files -- in which
+            case the caller should skip subsequent stages (Report, Project
+            ZIP, Manifest) so we don't leave a partial package on disk.
+        """
+        try:
+            assembly = AssemblyPackage(
+                pcb_path=self.pcb_path,
+                schematic_path=self.schematic_path,
+                manufacturer=self.manufacturer,
+                config=self.config,  # ManufacturingConfig extends AssemblyConfig
+            )
+        except KiCadFileNotFoundError as e:
+            # Construction failed (e.g. schematic missing for a
+            # schematic-sourced BOM).  No artefacts have been written.
+            # Bail out hard so we don't produce a partial package.
+            result.errors.append(f"Assembly generation failed: {e}")
+            logger.error(f"Assembly generation failed: {e}")
+            return False
+        except Exception as e:
+            result.errors.append(f"Assembly generation failed: {e}")
+            logger.error(f"Assembly generation failed: {e}")
+            return False
+
+        try:
+            result.assembly_result = assembly.export(out_dir)
+            if result.assembly_result.errors:
+                result.errors.extend(result.assembly_result.errors)
+        except LCSCDependencyMissingError as e:
+            # The optional ``parts`` extra is missing, so --auto-lcsc could
+            # not populate any LCSC part numbers.  This is raised out of BOM
+            # generation BEFORE the BOM CSV (the first artefact) is written,
+            # so nothing is on disk yet.  Abort the whole pipeline so we
+            # never finalize a manifest/bundle whose BOM has an empty
+            # ``LCSC Part #`` column; ``kct export`` then exits non-zero with
+            # this actionable install hint (issue #4104).
+            result.errors.append(str(e))
+            logger.error("LCSC auto-matching requires the 'parts' extra: %s", e)
+            return False
+        except Exception as e:
+            result.errors.append(f"Assembly generation failed: {e}")
+            logger.error(f"Assembly generation failed: {e}")
+            return True  # files may already have been written
+
+        return True
+
+    def _generate_report(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Generate a Markdown design report."""
+        try:
+            from ..report.collector import ReportDataCollector
+            from ..report.generator import ReportGenerator
+            from ..report.models import ReportData
+            from ..report.net_class_map import resolve_committed_net_class_map
+            from ..report.utils import find_schematic
+        except ImportError as exc:
+            # The optional ``report`` extra is missing.  Record a hard error
+            # (not just a log line) so ``kct export`` exits non-zero instead
+            # of silently shipping a bundle without report.md / images/
+            # (issue #8203, mirrors #4104).  The rest of the bundle is still
+            # produced; ``--no-report`` skips this step entirely.
+            missing = exc.name or str(exc)
+            msg = (
+                f"Report generation failed: required dependency '{missing}' "
+                "is not installed. Install it with: pip install "
+                "'kicad-tools[report]' (or pass --no-report to skip the report)."
+            )
+            result.errors.append(msg)
+            logger.error(msg)
+            return
+
+        try:
+            # Pre-determine the version directory so collected data and report
+            # land in the same vN/ directory.
+            version_dir = ReportGenerator.next_version_dir(out_dir)
+            data_dir = version_dir / "data"
+
+            # Resolve a committed net_class_map.json sidecar (Part B of
+            # #4008). Without it the report's DRC section runs the three
+            # sidecar-gated rule families (diffpair_length_skew,
+            # diffpair_routing_continuity, match_group_length_skew) as no-ops
+            # and would print "Errors 0 / PASS" on boards that actually have
+            # blocking diff-pair / match-group errors (e.g. board 07 has 9).
+            # Boards without a committed sidecar resolve to None and keep the
+            # documented graceful no-op behavior.
+            net_class_map_path = resolve_committed_net_class_map(self.pcb_path)
+
+            # Collect design data snapshots
+            collector = ReportDataCollector(
+                pcb_path=self.pcb_path,
+                manufacturer=self.manufacturer,
+                net_class_map_path=net_class_map_path,
+                schematic_path=self.schematic_path or find_schematic(self.pcb_path),
+            )
+            collector.collect_all(data_dir)
+
+            # Load collected JSON snapshots into ReportData kwargs
+            data_kwargs = self._load_report_data_dir(data_dir)
+
+            # Generate figures (PCB renders + schematic screenshots)
+            figures_data = self._generate_figures(version_dir, result)
+            if figures_data:
+                data_kwargs.update(figures_data)
+
+            # Hand-solder (THT) set excluded from the SMT CPL (issue #3539):
+            # surface the exact refs the assembler must hand-place.
+            tht_components = self._tht_component_groups(result)
+            if tht_components:
+                data_kwargs["tht_components"] = tht_components
+
+            project_name = self.pcb_path.stem
+            data = ReportData(
+                project_name=project_name,
+                revision=data_kwargs.pop("revision", "1"),
+                date=data_kwargs.pop(
+                    "date",
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                ),
+                manufacturer=self.manufacturer,
+                **data_kwargs,
+            )
+
+            generator = ReportGenerator()
+            report_path = generator.generate(data, out_dir, version_dir=version_dir)
+            result.report_path = report_path
+            logger.info(f"Generated report: {result.report_path}")
+
+            # Attempt to render Markdown to HTML then PDF
+            self._render_report_pdf(report_path, version_dir, result)
+        except Exception as e:
+            result.errors.append(f"Report generation failed: {e}")
+            logger.error(f"Report generation failed: {e}")
+
+    @staticmethod
+    def _warn_figures_skipped(result: ManufacturingResult, reason: str) -> None:
+        """Record a *loud* warning that the bundle will ship without figures.
+
+        Figure generation degrading silently is how committed bundles ended
+        up without per-layer renders / assembly views (issue #3583): the
+        skip reason only went to the module logger, which `kct export`
+        does not surface.  Recording it on ``result.warnings`` makes the
+        CLI print it and JSON output include it.
+        """
+        msg = (
+            f"Report figures skipped: {reason}. "
+            "The bundle will NOT include images/ (per-copper-layer renders, "
+            "front/back assembly views, schematic sheets). "
+            "Figure generation needs kicad-cli (KiCad 8+) and cairosvg "
+            "(pip install 'kicad-tools[screenshot]', or `uv sync` in a dev checkout)."
+        )
+        result.warnings.append(msg)
+        logger.warning(msg)
+
+    def _generate_figures(self, version_dir: Path, result: ManufacturingResult) -> dict | None:
+        """Generate PCB and schematic figures for the report.
+
+        Returns a dict with ``pcb_figures`` and/or ``schematic_sheets``
+        keys suitable for merging into ReportData kwargs, or ``None``
+        if figure generation is unavailable or fails.
+
+        Every skip path records a warning on *result* (issue #3583) so
+        missing figures are visible in the export output instead of the
+        bundle silently shipping without its images/ directory.
+        """
+        try:
+            from ..report.figures import ReportFigureGenerator
+            from ..report.utils import find_schematic
+        except ImportError as exc:
+            self._warn_figures_skipped(result, f"dependency not available ({exc})")
+            return None
+
+        sch_path = self.schematic_path
+        if sch_path is None:
+            sch_path = find_schematic(self.pcb_path)
+        if sch_path is None:
+            self._warn_figures_skipped(
+                result,
+                f"no schematic found next to {self.pcb_path.name} (use --sch to specify one)",
+            )
+            return None
+
+        figures_dir = version_dir / "figures"
+        try:
+            fig_gen = ReportFigureGenerator()
+            entries = fig_gen.generate_all(self.pcb_path, sch_path, figures_dir)
+        except (RuntimeError, OSError) as exc:
+            self._warn_figures_skipped(result, str(exc))
+            return None
+
+        if not entries:
+            self._warn_figures_skipped(result, "figure generator produced no images")
+            return None
+
+        # Convert FigureEntry list to ReportData-compatible dicts
+        type_to_key = {
+            "pcb_front": "front",
+            "pcb_back": "back",
+            "pcb_copper": "copper",
+            "assembly": "assembly",
+        }
+        result: dict = {}
+
+        pcb_figs: dict[str, str] = {}
+        for entry in entries:
+            key = type_to_key.get(entry.figure_type)
+            if key is not None:
+                pcb_figs[key] = f"figures/{entry.filename}"
+        if pcb_figs:
+            result["pcb_figures"] = pcb_figs
+
+        # Per-copper-layer renders (issue #3497): one image per copper
+        # layer, in stackup order.
+        layer_figs = [
+            {
+                "name": entry.caption.removeprefix("Copper Layer "),
+                "figure_path": f"figures/{entry.filename}",
+            }
+            for entry in entries
+            if entry.figure_type == "pcb_layer"
+        ]
+        if layer_figs:
+            result["pcb_layer_figures"] = layer_figs
+
+        sch_sheets = [
+            {"name": entry.caption, "figure_path": f"figures/{entry.filename}"}
+            for entry in entries
+            if entry.figure_type == "schematic"
+        ]
+        if sch_sheets:
+            result["schematic_sheets"] = sch_sheets
+
+        logger.info(
+            f"Generated {len(entries)} figure(s): {len(pcb_figs)} PCB, "
+            f"{len(layer_figs)} per-layer, {len(sch_sheets)} schematic"
+        )
+        return result or None
+
+    @staticmethod
+    def _render_report_pdf(
+        report_path: Path,
+        version_dir: Path,
+        result: ManufacturingResult,
+    ) -> None:
+        """Render the Markdown report to PDF.
+
+        Tries weasyprint (HTML→PDF) first, then pandoc+TeX as fallback.
+        Degrades gracefully: if neither is available, a warning is logged
+        and only the ``.md`` file remains.
+        """
+        try:
+            from ..report.renderers import pdf_renderer_available
+        except (ImportError, OSError):
+            # OSError can surface here on hosts where the renderers module
+            # eagerly probes a native library (libgobject/pango/cairo) at
+            # import time. Treat it the same as a missing package: degrade
+            # to Markdown-only and keep the manufacturing bundle successful.
+            logger.warning(
+                "PDF report rendering skipped: install 'kicad-tools[report]' for PDF output"
+            )
+            return
+
+        renderer = pdf_renderer_available()
+        if renderer is None:
+            logger.warning(
+                "PDF report rendering skipped: install weasyprint or pandoc+TeX for PDF output"
+            )
+            return
+
+        pdf_path = report_path.with_suffix(".pdf")
+        figures_dir = version_dir / "figures"
+
+        try:
+            if renderer == "weasyprint":
+                from ..report.renderers import render_html, render_pdf
+
+                md_content = report_path.read_text(encoding="utf-8")
+                html_content = render_html(
+                    md_content,
+                    figures_dir=figures_dir if figures_dir.is_dir() else None,
+                )
+                render_pdf(html_content, pdf_path)
+            else:
+                from ..report.renderers import render_pdf_pandoc
+
+                render_pdf_pandoc(report_path, pdf_path)
+
+            result.report_path = pdf_path
+            logger.info(f"Generated PDF report via {renderer}: {pdf_path}")
+        except Exception as exc:
+            logger.warning(f"PDF report rendering via {renderer} failed: {exc}")
+            return
+
+        # Bundle-integrity check (issue #4023): when the report references
+        # figures and those figures exist on disk, the generated PDF must
+        # embed at least one image object. A figure-less PDF here means the
+        # renderer silently dropped every image (e.g. pandoc resolving
+        # relative paths against the wrong cwd) — surface it loudly instead
+        # of shipping a broken bundle. This guard runs for BOTH the
+        # weasyprint and pandoc code paths.
+        ManufacturingPackage._verify_report_pdf_images(pdf_path, report_path, figures_dir)
+
+    @staticmethod
+    def _verify_report_pdf_images(
+        pdf_path: Path,
+        report_path: Path,
+        figures_dir: Path,
+    ) -> None:
+        """Warn loudly if a figure-referencing report produced a figure-less PDF.
+
+        Only fires when the Markdown references images AND the figures
+        directory is non-empty; a report that legitimately has no figures
+        (empty/absent figures dir, or no ``![...]`` references) is not a
+        violation.
+        """
+        from ..report.renderers import count_pdf_images
+
+        # No figures on disk → nothing to embed → not a violation.
+        if not figures_dir.is_dir():
+            return
+        if not any(figures_dir.glob("*.png")):
+            return
+
+        # No image references in the Markdown → not a violation.
+        try:
+            md_content = report_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if "![" not in md_content:
+            return
+
+        image_count = count_pdf_images(pdf_path)
+        if image_count < 1:
+            logger.warning(
+                "PDF report integrity check FAILED: %s embeds 0 images despite "
+                "%d figure(s) in %s and image references in the report. Figures "
+                "were silently dropped during rendering — the bundle is missing "
+                "its visuals.",
+                pdf_path,
+                len(list(figures_dir.glob("*.png"))),
+                figures_dir,
+            )
+
+    @staticmethod
+    def _load_report_data_dir(data_dir: Path) -> dict:
+        """Load JSON snapshot files from *data_dir* into ReportData kwargs.
+
+        Mirrors the logic in ``cli/report_cmd.py:_load_data_dir`` but is
+        self-contained so the manufacturing exporter has no dependency on the
+        CLI layer.
+        """
+        import json as _json
+
+        mappings = {
+            "board_summary.json": "board_stats",
+            "bom.json": "bom_groups",
+            "drc_summary.json": "drc",
+            "erc_summary.json": "erc",
+            "audit.json": "audit",
+            "net_status.json": "net_status",
+            "cost.json": "cost",
+            "analog_components.json": "analog_components",
+            "narrative.json": "_narrative",
+            "stackup.json": "stackup",
+            "off_board.json": "off_board",
+        }
+
+        result: dict = {}
+        for filename, field_name in mappings.items():
+            json_path = data_dir / filename
+            if json_path.exists():
+                with open(json_path, encoding="utf-8") as f:
+                    raw = _json.load(f)
+                # Unwrap the envelope written by ReportDataCollector
+                data = raw.get("data") if isinstance(raw, dict) else raw
+                if data is None:
+                    continue
+                result[field_name] = data
+
+        # BOM: collector nests group list under ``groups`` key;
+        # ReportData.bom_groups expects a plain list[dict].
+        if "bom_groups" in result and isinstance(result["bom_groups"], dict):
+            result["bom_groups"] = result["bom_groups"].get("groups", [])
+
+        # Analog components: collector nests list under ``components``;
+        # ReportData.analog_components expects a plain list[dict].
+        if "analog_components" in result and isinstance(result["analog_components"], dict):
+            result["analog_components"] = result["analog_components"].get("components", [])
+
+        # Narrative: the collector writes a single dict with sub-keys;
+        # unpack into individual ReportData fields.
+        if "_narrative" in result and isinstance(result["_narrative"], dict):
+            narrative = result.pop("_narrative")
+            for key in (
+                "design_narrative",
+                "functional_blocks",
+                "interfaces",
+                "power_architecture",
+                "assembly_notes",
+            ):
+                val = narrative.get(key)
+                if val is not None:
+                    result[key] = val
+        else:
+            result.pop("_narrative", None)
+
+        return result
+
+    def _flatten_latest_report(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Promote the latest report to the package root and clean up.
+
+        When ``config.latest_report_only`` is ``True``, this post-processing
+        step copies the latest ``vN/`` contents into a temporary staging area,
+        promotes ``report.pdf`` (or ``report.md`` if PDF is unavailable) to
+        the package root, and removes all ``vN/`` directories.
+
+        Report figures (per-layer renders, assembly view, schematic
+        sheets) are promoted to an ``images/`` subdirectory so the
+        package ships the visuals alongside ``report.md`` (issue #3497),
+        and the markdown's relative ``figures/`` references are rewritten
+        to ``images/`` so they resolve inside the package.
+
+        If ``config.keep_build_artifacts`` is ``True``, intermediate files
+        (markdown source, figures, data, metadata) are preserved in a
+        ``.build/report/`` subdirectory.  Otherwise they are discarded.
+        """
+        try:
+            from ..report.generator import ReportGenerator
+        except ImportError:
+            return
+
+        latest = ReportGenerator.latest_version_dir(out_dir)
+        if latest is None:
+            # No versioned directories (e.g. --no-report was also set)
+            return
+
+        # Stage the latest version contents in a temporary directory
+        report_staging = out_dir / "report"
+        if report_staging.exists():
+            shutil.rmtree(report_staging)
+        shutil.copytree(latest, report_staging)
+
+        # Remove all vN/ directories from the output
+        for child in list(out_dir.iterdir()):
+            if child.is_dir() and re.fullmatch(r"v\d+", child.name):
+                shutil.rmtree(child)
+
+        # Promote the report file (PDF preferred, MD fallback) to package root
+        staged_pdf = report_staging / "report.pdf"
+        staged_md = report_staging / "report.md"
+
+        if staged_pdf.exists():
+            promoted = out_dir / "report.pdf"
+            shutil.copy2(staged_pdf, promoted)
+            result.report_path = promoted
+            # Also preserve the markdown source alongside the PDF
+            if staged_md.exists():
+                promoted_md = out_dir / "report.md"
+                shutil.copy2(staged_md, promoted_md)
+                result.report_md_path = promoted_md
+        elif staged_md.exists():
+            promoted = out_dir / "report.md"
+            shutil.copy2(staged_md, promoted)
+            result.report_path = promoted
+
+        # Promote report figures to images/ at the package root so the
+        # bundle ships per-layer + assembly renders (issue #3497).
+        self._promote_report_images(out_dir, report_staging, result)
+
+        # Handle build artifacts
+        if self.config.keep_build_artifacts:
+            build_dir = out_dir / ".build" / "report"
+            if build_dir.exists():
+                shutil.rmtree(build_dir)
+            build_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(report_staging), str(build_dir))
+            logger.info(f"Preserved build artifacts in {build_dir}")
+        else:
+            shutil.rmtree(report_staging)
+
+        logger.info(f"Promoted report to {result.report_path}")
+
+    @staticmethod
+    def _promote_report_images(
+        out_dir: Path,
+        report_staging: Path,
+        result: ManufacturingResult,
+    ) -> None:
+        """Copy staged report figures into ``<out_dir>/images/``.
+
+        The report generator writes figures (per-copper-layer renders,
+        front/back/assembly views, schematic sheets) into the versioned
+        report's ``figures/`` subdirectory.  This step promotes those PNGs
+        to a package-root ``images/`` directory, rewrites the promoted
+        ``report.md``'s relative ``figures/`` image references to
+        ``images/``, and records the image paths on *result* so the
+        manifest includes their checksums (issue #3497).
+
+        When the staged report has no figures (e.g. figure generation
+        was skipped because kicad-cli/cairosvg are missing), any
+        pre-existing ``images/`` directory from an earlier export is
+        REMOVED rather than left behind: stale renders that no longer
+        match the gerbers are worse than absent ones, and silently
+        keeping them is how the softstart bundle shipped pre-repair
+        visuals (issue #3583).
+        """
+        images_dir = out_dir / "images"
+        staged_figures = report_staging / "figures"
+        pngs = (
+            sorted(p for p in staged_figures.iterdir() if p.suffix.lower() == ".png")
+            if staged_figures.is_dir()
+            else []
+        )
+        if not pngs:
+            if images_dir.is_dir():
+                shutil.rmtree(images_dir)
+                msg = (
+                    "Removed stale images/ from a previous export: this run "
+                    "generated no report figures, and stale renders must not "
+                    "ship alongside regenerated gerbers"
+                )
+                result.warnings.append(msg)
+                logger.warning(msg)
+            return
+
+        if images_dir.exists():
+            shutil.rmtree(images_dir)
+        images_dir.mkdir(parents=True)
+
+        for png in pngs:
+            dest = images_dir / png.name
+            shutil.copy2(png, dest)
+            result.image_paths.append(dest)
+
+        # Rewrite relative figure references in the promoted markdown so
+        # they resolve against the package layout (figures/ -> images/).
+        promoted_md = out_dir / "report.md"
+        if promoted_md.exists():
+            text = promoted_md.read_text(encoding="utf-8")
+            rewritten = text.replace("](figures/", "](images/")
+            if rewritten != text:
+                promoted_md.write_text(rewritten, encoding="utf-8")
+
+        logger.info(f"Promoted {len(pngs)} report image(s) to {images_dir}")
+
+    @staticmethod
+    def _tht_component_groups(result: ManufacturingResult) -> list[dict]:
+        """Group the CPL's excluded THT components for the report.
+
+        Returns BOM-style rows ``[{value, footprint, qty, refs}]`` built
+        from ``assembly_result.tht_excluded`` (issue #3539), or an empty
+        list when no THT parts were excluded (SMD-only board, or
+        ``exclude_tht=False``).
+        """
+        if result.assembly_result is None or not result.assembly_result.tht_excluded:
+            return []
+
+        from .pnp import group_tht_exclusions
+
+        return group_tht_exclusions(result.assembly_result.tht_excluded)
+
+    def _generate_readme(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Generate a README.txt describing the manufacturing package contents."""
+        lines = [
+            f"Manufacturing Package for {self.pcb_path.stem}",
+            "=" * 50,
+            "",
+            f"Manufacturer: {self.manufacturer}",
+            f"Generated by: kicad-tools {kicad_tools.__version__}",
+            f"Generated at: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            "",
+            "Contents:",
+            "---------",
+        ]
+
+        file_descriptions = {
+            "bom": ("BOM (Bill of Materials)", "Component list for PCB assembly ordering"),
+            "pnp": (
+                "CPL (Component Placement List)",
+                "Pick-and-place coordinates for SMT/THT assembly",
+            ),
+            "gerber": (
+                "Gerber files",
+                (
+                    "PCB fabrication data (copper layers, silkscreen, solder mask,"
+                    " solder paste (stencil) where the preset plots it, drill)"
+                ),
+            ),
+            "report": ("Design report", "Manufacturing readiness report with DRC/ERC results"),
+            "images": (
+                "Report images",
+                "Board renders: per-copper-layer, front/back, assembly view, schematic sheets",
+            ),
+            "project_zip": (
+                "KiCad project archive",
+                "Source KiCad project files (.kicad_pcb, .kicad_sch, .kicad_pro)",
+            ),
+            "manifest": ("Manifest", "SHA256 checksums for all output files"),
+        }
+
+        if result.assembly_result:
+            if result.assembly_result.bom_path:
+                desc = file_descriptions["bom"]
+                lines.append(f"  {result.assembly_result.bom_path.name}")
+                lines.append(f"    {desc[0]}: {desc[1]}")
+                lines.append("")
+            if result.assembly_result.pnp_path:
+                desc = file_descriptions["pnp"]
+                lines.append(f"  {result.assembly_result.pnp_path.name}")
+                lines.append(f"    {desc[0]}: {desc[1]}")
+                tht_excluded = result.assembly_result.tht_excluded
+                if tht_excluded:
+                    refs = ", ".join(p.reference for p in tht_excluded)
+                    lines.append(
+                        f"    Note: {len(tht_excluded)} through-hole component(s) are"
+                        " excluded from this file and must be hand-soldered"
+                        f" after SMT assembly: {refs}"
+                    )
+                lines.append("")
+            if result.assembly_result.gerber_path:
+                desc = file_descriptions["gerber"]
+                lines.append(f"  {result.bundle_relpath(result.assembly_result.gerber_path)}")
+                lines.append(f"    {desc[0]}: {desc[1]}")
+                lines.append("")
+
+        if result.report_path:
+            desc = file_descriptions["report"]
+            lines.append(f"  {result.report_path.name}")
+            lines.append(f"    {desc[0]}: {desc[1]}")
+            lines.append("")
+
+        if result.image_paths:
+            desc = file_descriptions["images"]
+            lines.append(f"  images/ ({len(result.image_paths)} files)")
+            lines.append(f"    {desc[0]}: {desc[1]}")
+            lines.append("")
+
+        if result.project_zip_path:
+            desc = file_descriptions["project_zip"]
+            lines.append(f"  {result.project_zip_path.name}")
+            lines.append(f"    {desc[0]}: {desc[1]}")
+            lines.append("")
+
+        desc = file_descriptions["manifest"]
+        lines.append("  manifest.json")
+        lines.append(f"    {desc[0]}: {desc[1]}")
+        lines.append("")
+
+        # Issue #5009: surface machine-derived factory ordering instructions
+        # when this board's manufacturer profile declares a via-in-pad
+        # process eligible for its layer/copper configuration -- generalizes
+        # the hand-typed README prose boards/03-usb-joystick previously
+        # wrote for its four-layer POFV contract into text derived from the
+        # shared FabricationProcess registry.
+        if result.fabrication_process:
+            lines.append("Fabrication process requirements:")
+            lines.append("-" * 34)
+            instructions = result.fabrication_process.get("ordering_instructions")
+            if instructions:
+                lines.append(f"  {instructions}")
+            else:
+                lines.append(f"  Process: {result.fabrication_process.get('name', '(unnamed)')}")
+            lines.append("")
+
+        if result.ordered_copper:
+            oc = result.ordered_copper
+            lines.append("Copper weight to order:")
+            lines.append("-" * 23)
+            lines.append(
+                f"  Outer {oc['ordered_outer_oz']:g} oz / inner {oc['ordered_inner_oz']:g} oz "
+                f"({oc['layers']} layers; board stackup: {oc['status']})"
+            )
+            if oc.get("source"):
+                lines.append(f"  Source: {oc['source']} (verified {oc['source_verified']})")
+            lines.append("")
+
+        readme_path = out_dir / "README.txt"
+        readme_path.write_text("\n".join(lines), encoding="utf-8")
+        result.readme_path = readme_path
+        logger.info(f"Generated README: {readme_path}")
+
+    def _generate_project_zip(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Create ZIP of KiCad project files."""
+        try:
+            result.project_zip_path = _create_project_zip(
+                self.pcb_path,
+                out_dir,
+                self.config.project_zip_name,
+                schematic_path=self.schematic_path,
+            )
+        except Exception as e:
+            result.errors.append(f"Project ZIP creation failed: {e}")
+            logger.error(f"Project ZIP creation failed: {e}")
+
+    def _generate_manifest(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Write manifest.json with SHA256 checksums."""
+        try:
+            manifest = _build_manifest(result, self.pcb_path, self.manufacturer)
+            manifest_path = out_dir / self.config.manifest_name
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+            result.manifest_path = manifest_path
+            logger.info(f"Generated manifest: {manifest_path}")
+        except Exception as e:
+            result.errors.append(f"Manifest generation failed: {e}")
+            logger.error(f"Manifest generation failed: {e}")
